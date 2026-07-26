@@ -577,7 +577,6 @@ class TestThreadHistory:
                 "body": "* final",
                 "m.new_content": {
                     "body": "Final answer",
-                    "msgtype": "m.text",
                     "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread_root"},
                     "io.mindroom.stream_status": "completed",
                 },
@@ -640,7 +639,6 @@ class TestThreadHistory:
                 "body": "* hello",
                 "m.new_content": {
                     "body": "hello\n\n⏳ Preparing isolated worker...",
-                    "msgtype": "m.text",
                     "io.mindroom.visible_body": "hello",
                     "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread_root"},
                     "io.mindroom.stream_status": "completed",
@@ -942,7 +940,6 @@ class TestThreadHistory:
                 "body": "* Thinking...",
                 "m.new_content": {
                     "body": "Final answer",
-                    "msgtype": "m.text",
                     "m.relates_to": {
                         "rel_type": "m.thread",
                         "event_id": "$thread_root",
@@ -1556,7 +1553,6 @@ class TestThreadHistory:
                 "body": "* partial",
                 "m.new_content": {
                     "body": "Partial answer",
-                    "msgtype": "m.text",
                     "m.relates_to": {
                         "rel_type": "m.thread",
                         "event_id": "$thread_root",
@@ -1577,7 +1573,6 @@ class TestThreadHistory:
                 "body": "* final",
                 "m.new_content": {
                     "body": "Final answer",
-                    "msgtype": "m.text",
                     "m.relates_to": {
                         "rel_type": "m.thread",
                         "event_id": "$thread_root",
@@ -1625,7 +1620,7 @@ class TestThreadHistory:
                 },
             },
         )
-        edit_event = self._make_text_event(
+        malformed_edit = self._make_text_event(
             event_id="$edit1",
             sender="@agent:localhost",
             body="* replacement",
@@ -1634,7 +1629,6 @@ class TestThreadHistory:
                 "body": "* replacement",
                 "m.new_content": {
                     "body": "Updated answer",
-                    "msgtype": "m.text",
                 },
                 "m.relates_to": {
                     "rel_type": "m.replace",
@@ -1644,7 +1638,7 @@ class TestThreadHistory:
         )
 
         response = MagicMock(spec=nio.RoomMessagesResponse)
-        response.chunk = [edit_event, thread_message, root_event]
+        response.chunk = [malformed_edit, thread_message, root_event]
         response.end = None
         client.room_messages.return_value = response
 
@@ -1739,8 +1733,8 @@ class TestThreadHistory:
         mock_extract_edit_body.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_fetch_thread_history_edit_only_event_fails_closed(self) -> None:
-        """Do not synthesize an unverifiable original from an edit payload."""
+    async def test_fetch_thread_history_edit_only_event_still_visible(self) -> None:
+        """Synthesize a history entry when only edit events are returned."""
         client = AsyncMock()
         root_event = self._make_text_event(
             event_id="$thread_root",
@@ -1759,7 +1753,6 @@ class TestThreadHistory:
                 "body": "* final",
                 "m.new_content": {
                     "body": "Final answer",
-                    "msgtype": "m.text",
                     "m.relates_to": {
                         "rel_type": "m.thread",
                         "event_id": "$thread_root",
@@ -1781,7 +1774,8 @@ class TestThreadHistory:
         )
         history = resolution.messages
 
-        assert [message.event_id for message in history] == ["$thread_root"]
+        assert [message.event_id for message in history] == ["$thread_root", "$missing_original"]
+        assert history[1].body == "Final answer"
 
     @pytest.mark.asyncio
     async def test_fetch_thread_history_does_not_stop_after_edit_only_page(self) -> None:
@@ -1797,7 +1791,6 @@ class TestThreadHistory:
                 "body": "* final",
                 "m.new_content": {
                     "body": "Final answer",
-                    "msgtype": "m.text",
                     "m.relates_to": {
                         "rel_type": "m.thread",
                         "event_id": "$thread_root",

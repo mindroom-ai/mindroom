@@ -717,7 +717,6 @@ class TestThreadHistoryStreamStatus:
                 "body": "* Final answer",
                 "m.new_content": {
                     "body": "Final answer",
-                    "msgtype": "m.text",
                     STREAM_STATUS_KEY: STREAM_STATUS_COMPLETED,
                     "m.relates_to": {
                         "rel_type": "m.thread",

@@ -15,7 +15,6 @@ from .event_cache_events import (
     event_redaction_candidate_ids,
     event_thread_rows,
     filter_redacted_events,
-    is_valid_cached_edit,
     redaction_removal_event_ids,
     serialize_cacheable_events,
 )
@@ -179,8 +178,8 @@ async def _load_latest_edit_row(
 ) -> CachedEventRow | None:
     sender_predicate = "" if sender is None else "AND events.event_json::jsonb ->> 'sender' = %s"
     parameters = (namespace, room_id, original_event_id, *((sender,) if sender is not None else ()))
-    cursor = db.cursor(name="mindroom_latest_edit")
-    await cursor.execute(
+    row = await fetchone(
+        db,
         f"""
         SELECT events.event_json, events.cached_at
         FROM mindroom_event_cache_event_edits AS edits
@@ -192,21 +191,17 @@ async def _load_latest_edit_row(
             AND edits.room_id = %s
             AND edits.original_event_id = %s
             {sender_predicate}
-        ORDER BY edits.origin_server_ts DESC, edits.edit_event_id DESC
+        ORDER BY edits.origin_server_ts DESC, events.write_seq DESC
+        LIMIT 1
         """,  # noqa: S608
         parameters,
     )
-    try:
-        while (row := await cursor.fetchone()) is not None:
-            event = json.loads(row[0])
-            if is_valid_cached_edit(event):
-                return CachedEventRow(
-                    event=event,
-                    cached_at=None if row[1] is None else float(row[1]),
-                )
+    if row is None:
         return None
-    finally:
-        await cursor.close()
+    return CachedEventRow(
+        event=json.loads(row[0]),
+        cached_at=None if row[1] is None else float(row[1]),
+    )
 
 
 async def load_mxc_text(

@@ -50,7 +50,7 @@ from mindroom.matrix.client_thread_history import (
     thread_history_refresh_mode,
     untrusted_cached_thread_ids,
 )
-from mindroom.matrix.event_info import EventInfo, project_message_replacement_content
+from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.media import (
     is_encrypted_media_event_source,
     parse_matrix_media_event_source,
@@ -281,17 +281,10 @@ async def _apply_cached_latest_edit(
 
     event_info = EventInfo.from_event(event_source)
     event_id = event_source.get("event_id")
-    original_sender = event_source.get("sender")
-    if (
-        event_info.is_edit
-        or not isinstance(event_id, str)
-        or not event_id
-        or not isinstance(original_sender, str)
-        or not original_sender
-    ):
+    if event_info.is_edit or not isinstance(event_id, str) or not event_id:
         return event_source
 
-    latest_edit_source = await event_cache.get_latest_edit(room_id, event_id, sender=original_sender)
+    latest_edit_source = await event_cache.get_latest_edit(room_id, event_id)
     if latest_edit_source is None:
         return event_source
 
@@ -307,13 +300,20 @@ async def _apply_cached_latest_edit(
         return event_source
 
     original_content = event_source.get("content", {})
-    projected_content = project_message_replacement_content(
-        original_content if isinstance(original_content, dict) else {},
-        edited_content,
+    merged_content = (
+        {key: value for key, value in original_content.items() if isinstance(key, str)}
+        if isinstance(original_content, dict)
+        else {}
     )
+    merged_content.update(edited_content)
+    merged_content.setdefault("body", edited_body)
 
     updated_event_source = {key: value for key, value in event_source.items() if isinstance(key, str)}
-    updated_event_source["content"] = projected_content
+    updated_event_source["content"] = merged_content
+
+    latest_edit_timestamp = latest_edit_source.get("origin_server_ts")
+    if isinstance(latest_edit_timestamp, int) and not isinstance(latest_edit_timestamp, bool):
+        updated_event_source["origin_server_ts"] = latest_edit_timestamp
     return updated_event_source
 
 

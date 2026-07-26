@@ -66,7 +66,6 @@ from mindroom.matrix.cache.thread_cache_invalidation import (
     mark_thread_stale_fail_closed,
 )
 from mindroom.matrix.client_visible_messages import (
-    LatestThreadEdits,
     ResolvedVisibleMessage,
     apply_latest_edits_to_messages,
     record_latest_thread_edit,
@@ -486,7 +485,7 @@ async def _resolve_thread_history_from_event_sources_timed(
         if (parsed_event := _parse_room_message_event(event_source)) is not None
     ]
     messages_by_event_id: dict[str, ResolvedVisibleMessage] = {}
-    latest_edits_by_original_event_id: LatestThreadEdits = {}
+    latest_edits_by_original_event_id: dict[str, tuple[nio.RoomMessageText | nio.RoomMessageNotice, str | None]] = {}
     sidecar_hydration_started = time.perf_counter()
     hydration_sources = _sidecar_hydration_sources(event_sources, hydrate_sidecars=hydrate_sidecars)
     hydration_batch = await prepare_sidecar_hydration_batch(
@@ -533,6 +532,7 @@ async def _resolve_thread_history_from_event_sources_timed(
         client,
         messages_by_event_id=messages_by_event_id,
         latest_edits_by_original_event_id=latest_edits_by_original_event_id,
+        required_thread_id=thread_id,
         event_cache=event_cache,
         room_id=room_id,
         expected_membership_epoch=expected_membership_epoch,
@@ -1785,7 +1785,7 @@ def _is_opaque_thread_affecting_event_source(event_source: Mapping[str, Any]) ->
 def _record_scanned_room_message_source(
     event: nio.Event,
     *,
-    latest_edits_by_original_event_id: LatestThreadEdits,
+    latest_edits_by_original_event_id: dict[str, tuple[nio.RoomMessageText | nio.RoomMessageNotice, str | None]],
     scanned_message_sources: dict[str, dict[str, Any]],
 ) -> str | None:
     """Record one scanned room-message source and return the recorded event ID."""
@@ -1900,7 +1900,7 @@ async def _group_scanned_sources_by_thread(
     room_id: str,
     thread_root_ids: Collection[str],
     scanned_message_sources: dict[str, dict[str, Any]],
-    latest_edits_by_original_event_id: LatestThreadEdits,
+    latest_edits_by_original_event_id: dict[str, tuple[nio.RoomMessageText | nio.RoomMessageNotice, str | None]],
 ) -> tuple[dict[str, list[dict[str, Any]]], frozenset[str]]:
     """Bucket room-scan sources per requested thread and report unresolved opaque relations."""
     grouped: dict[str, dict[str, dict[str, Any]]] = {
@@ -1936,14 +1936,14 @@ async def _group_scanned_sources_by_thread(
     )
 
     edits_by_root: dict[str, list[dict[str, Any]]] = {}
-    for (original_event_id, _edit_sender), edit_event in latest_edits_by_original_event_id.items():
-        if original_event_id not in scanned_message_sources:
-            continue
-        original_root_id = resolved_thread_ids.get(original_event_id)
-        if original_root_id is None and original_event_id in grouped:
-            original_root_id = original_event_id
-        if original_root_id in grouped:
-            edits_by_root.setdefault(original_root_id, []).append(_event_source_for_cache(edit_event))
+    for original_event_id, (edit_event, edit_thread_id) in latest_edits_by_original_event_id.items():
+        target_roots = {
+            root_id
+            for root_id in (original_event_id, resolved_thread_ids.get(original_event_id), edit_thread_id)
+            if root_id in grouped
+        }
+        for root_id in target_roots:
+            edits_by_root.setdefault(root_id, []).append(_event_source_for_cache(edit_event))
 
     grouped_sources = {
         root_id: sort_thread_event_sources_root_first(
@@ -1966,7 +1966,7 @@ async def _bulk_scan_thread_event_sources(
     if max_scan_pages is not None and max_scan_pages < 1:
         msg = "max_scan_pages must be at least 1"
         raise ValueError(msg)
-    latest_edits_by_original_event_id: LatestThreadEdits = {}
+    latest_edits_by_original_event_id: dict[str, tuple[nio.RoomMessageText | nio.RoomMessageNotice, str | None]] = {}
     scanned_message_sources: dict[str, dict[str, Any]] = {}
     remaining_root_ids = set(thread_root_ids)
     from_token: str | None = None
