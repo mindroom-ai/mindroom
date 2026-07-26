@@ -817,7 +817,6 @@ class MatrixConversationCache(ConversationCacheProtocol):
             thread_id,
             self.runtime.event_cache,
             allow_stale_fallback=False,
-            cache_write_guard_started_at=time.time(),
             trusted_sender_ids=self._trusted_sender_ids(),
             caller_label=caller_label,
             coordinator_queue_wait_ms=coordinator_queue_wait_ms,
@@ -893,7 +892,9 @@ class MatrixConversationCache(ConversationCacheProtocol):
                 thread_id,
                 repair,
                 coordination_scope=principal_id,
-                result_is_usable=self._thread_repair_result_is_usable,
+                hydrate_sidecars=wants_full_history,
+                allow_stale_fallback=allows_stale_fallback,
+                result_arms_backoff=lambda result: not self._thread_repair_result_is_usable(result),
             )
             result = repair_run.value
             if not repair_run.joined:

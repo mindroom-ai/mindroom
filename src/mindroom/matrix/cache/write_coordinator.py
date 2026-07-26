@@ -637,15 +637,6 @@ class EventCacheWriteCoordinator:
             coordination_scope=coordination_scope,
         )
 
-    @staticmethod
-    def _thread_repair_key(
-        room_id: str,
-        thread_id: str,
-        *,
-        coordination_scope: str,
-    ) -> tuple[str, str, str]:
-        return coordination_scope, room_id, thread_id
-
     async def run_thread_repair[T](
         self,
         room_id: str,
@@ -653,16 +644,13 @@ class EventCacheWriteCoordinator:
         repair_coro_factory: Callable[[], Awaitable[T]],
         *,
         coordination_scope: str,
-        result_is_usable: Callable[[T], bool],
+        hydrate_sidecars: bool,
+        allow_stale_fallback: bool,
+        result_arms_backoff: Callable[[T], bool],
     ) -> ThreadRepairRunResult[T]:
         """Join or start one principal-scoped repair under the same-thread barrier."""
-        key = self._thread_repair_key(
-            room_id,
-            thread_id,
-            coordination_scope=coordination_scope,
-        )
         return await self._thread_repairs.run(
-            key,
+            (coordination_scope, room_id, thread_id, hydrate_sidecars, allow_stale_fallback),
             schedule=lambda repair: typing.cast(
                 "asyncio.Task[T]",
                 self.queue_thread_update(
@@ -676,7 +664,7 @@ class EventCacheWriteCoordinator:
                 ),
             ),
             repair=repair_coro_factory,
-            result_is_usable=result_is_usable,
+            result_arms_backoff=result_arms_backoff,
         )
 
     def retain_thread_repair_delta(
@@ -689,11 +677,7 @@ class EventCacheWriteCoordinator:
     ) -> None:
         """Retain one certified delta until append or repair includes it."""
         self._thread_repairs.retain_delta(
-            self._thread_repair_key(
-                room_id,
-                thread_id,
-                coordination_scope=coordination_scope,
-            ),
+            (coordination_scope, room_id, thread_id),
             event_source,
         )
 
@@ -706,11 +690,7 @@ class EventCacheWriteCoordinator:
     ) -> tuple[dict[str, Any], ...]:
         """Return retained deltas for one principal-scoped repair."""
         return self._thread_repairs.pending_deltas(
-            self._thread_repair_key(
-                room_id,
-                thread_id,
-                coordination_scope=coordination_scope,
-            ),
+            (coordination_scope, room_id, thread_id),
         )
 
     def acknowledge_thread_repair_deltas(
@@ -723,13 +703,13 @@ class EventCacheWriteCoordinator:
     ) -> None:
         """Forget retained deltas after a successful append."""
         self._thread_repairs.acknowledge_deltas(
-            self._thread_repair_key(
-                room_id,
-                thread_id,
-                coordination_scope=coordination_scope,
-            ),
+            (coordination_scope, room_id, thread_id),
             event_ids,
         )
+
+    def clear_thread_repair_room(self, room_id: str, *, coordination_scope: str) -> None:
+        """Drop retained repair state at one authoritative membership departure."""
+        self._thread_repairs.clear_room(coordination_scope, room_id)
 
     async def wait_for_thread_idle(
         self,

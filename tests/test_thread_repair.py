@@ -92,7 +92,9 @@ async def test_twenty_missing_thread_callers_share_one_repair_and_converge(  # n
                 thread_id,
                 repair,
                 coordination_scope=principal_id,
-                result_is_usable=lambda outcome: outcome.usable,
+                hydrate_sidecars=True,
+                allow_stale_fallback=False,
+                result_arms_backoff=lambda outcome: not outcome.usable,
             )
             coordinator.acknowledge_thread_repair_deltas(
                 room_id,
@@ -156,7 +158,9 @@ async def test_repairs_are_principal_scoped_and_unrelated_threads_run_concurrent
             thread_id,
             repair,
             coordination_scope=principal_id,
-            result_is_usable=lambda _result: True,
+            hydrate_sidecars=True,
+            allow_stale_fallback=False,
+            result_arms_backoff=lambda _result: False,
         )
         return repair_run.value
 
@@ -184,7 +188,7 @@ async def test_cancelled_waiter_does_not_cancel_repair_or_leak_ownership() -> No
     repair_started = asyncio.Event()
     release = asyncio.Event()
     repair_count = 0
-    key = ("@agent:localhost", "!room:localhost", "$thread")
+    key = ("@agent:localhost", "!room:localhost", "$thread", True, False)
 
     async def repair() -> str:
         nonlocal repair_count
@@ -198,7 +202,7 @@ async def test_cancelled_waiter_does_not_cancel_repair_or_leak_ownership() -> No
             key,
             schedule=_schedule,
             repair=repair,
-            result_is_usable=lambda _result: True,
+            result_arms_backoff=lambda _result: False,
         ),
     )
     await repair_started.wait()
@@ -207,7 +211,7 @@ async def test_cancelled_waiter_does_not_cancel_repair_or_leak_ownership() -> No
             key,
             schedule=_schedule,
             repair=repair,
-            result_is_usable=lambda _result: True,
+            result_arms_backoff=lambda _result: False,
         ),
     )
     owner.cancel()
@@ -219,7 +223,7 @@ async def test_cancelled_waiter_does_not_cancel_repair_or_leak_ownership() -> No
         key,
         schedule=_schedule,
         repair=repair,
-        result_is_usable=lambda _result: True,
+        result_arms_backoff=lambda _result: False,
     )
 
     assert joined.value == "usable"
@@ -269,7 +273,9 @@ async def test_repair_bypasses_cancelled_room_fence_without_crossing_same_thread
             "$thread",
             repair,
             coordination_scope="@agent:localhost",
-            result_is_usable=lambda _result: True,
+            hydrate_sidecars=True,
+            allow_stale_fallback=False,
+            result_arms_backoff=lambda _result: False,
         ),
     )
 
@@ -290,21 +296,21 @@ async def test_failing_repair_enters_bounded_backoff_without_hot_retry() -> None
     now = 10.0
     registry = ThreadRepairRegistry(failure_backoff_seconds=2.0, clock=lambda: now)
     repair = AsyncMock(side_effect=RuntimeError("homeserver unavailable"))
-    key = ("@agent:localhost", "!room:localhost", "$thread")
+    key = ("@agent:localhost", "!room:localhost", "$thread", True, False)
 
     with pytest.raises(RuntimeError, match="homeserver unavailable"):
         await registry.run(
             key,
             schedule=_schedule,
             repair=repair,
-            result_is_usable=lambda _result: True,
+            result_arms_backoff=lambda _result: False,
         )
     with pytest.raises(ThreadRepairBackoffError) as error:
         await registry.run(
             key,
             schedule=_schedule,
             repair=repair,
-            result_is_usable=lambda _result: True,
+            result_arms_backoff=lambda _result: False,
         )
 
     assert error.value.retry_after_seconds == 2.0
@@ -326,20 +332,20 @@ async def test_unusable_repair_outcome_enters_backoff_without_reusing_history(
     now = 10.0
     registry = ThreadRepairRegistry(failure_backoff_seconds=2.0, clock=lambda: now)
     repair = AsyncMock(return_value=outcome)
-    key = ("@agent:localhost", "!room:localhost", "$thread")
+    key = ("@agent:localhost", "!room:localhost", "$thread", True, False)
 
     first = await registry.run(
         key,
         schedule=_schedule,
         repair=repair,
-        result_is_usable=lambda result: result.usable,
+        result_arms_backoff=lambda result: not result.usable,
     )
     with pytest.raises(ThreadRepairBackoffError):
         await registry.run(
             key,
             schedule=_schedule,
             repair=repair,
-            result_is_usable=lambda result: result.usable,
+            result_arms_backoff=lambda result: not result.usable,
         )
 
     assert first.value is outcome
@@ -350,12 +356,65 @@ async def test_unusable_repair_outcome_enters_backoff_without_reusing_history(
         key,
         schedule=_schedule,
         repair=repair,
-        result_is_usable=lambda result: result.usable,
+        result_arms_backoff=lambda result: not result.usable,
     )
 
     assert second.value is outcome
     assert second.joined is False
     assert repair.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_failure_backoff_doubles_to_cap_and_resets_after_success() -> None:
+    """Consecutive repair failures should back off exponentially until one succeeds."""
+    now = 10.0
+    registry = ThreadRepairRegistry(
+        failure_backoff_seconds=1.0,
+        max_failure_backoff_seconds=4.0,
+        clock=lambda: now,
+    )
+    key = ("@agent:localhost", "!room:localhost", "$thread", True, False)
+    repair = AsyncMock(
+        side_effect=[
+            ThreadCacheReplaceOutcome.HARD_FAILURE,
+            ThreadCacheReplaceOutcome.HARD_FAILURE,
+            ThreadCacheReplaceOutcome.HARD_FAILURE,
+            ThreadCacheReplaceOutcome.STORED,
+        ],
+    )
+
+    for expected_delay in (1.0, 2.0, 4.0):
+        await registry.run(
+            key,
+            schedule=_schedule,
+            repair=repair,
+            result_arms_backoff=lambda result: not result.usable,
+        )
+        assert registry.retry_after_seconds(key) == expected_delay
+        now += expected_delay
+
+    await registry.run(
+        key,
+        schedule=_schedule,
+        repair=repair,
+        result_arms_backoff=lambda result: not result.usable,
+    )
+
+    assert registry.retry_after_seconds(key) == 0.0
+
+
+def test_clear_room_drops_only_matching_retained_deltas() -> None:
+    """Membership departure should clear only retained deltas for that principal and room."""
+    registry = ThreadRepairRegistry()
+    departed = ("@agent:localhost", "!departed:localhost", "$thread")
+    kept = ("@agent:localhost", "!kept:localhost", "$thread")
+    registry.retain_delta(departed, _event("$departed", 1000, thread_id="$thread"))
+    registry.retain_delta(kept, _event("$kept", 2000, thread_id="$thread"))
+
+    registry.clear_room("@agent:localhost", "!departed:localhost")
+
+    assert registry.pending_deltas(departed) == ()
+    assert [source["event_id"] for source in registry.pending_deltas(kept)] == ["$kept"]
 
 
 def test_retained_deltas_expire_once_any_new_scan_would_observe_them() -> None:
@@ -376,7 +435,8 @@ async def test_retained_delta_survives_a_scan_that_outlives_the_retention_window
     """A scan started before the event must still replay it, however long pagination takes."""
     now = 100.0
     registry = ThreadRepairRegistry(delta_retention_seconds=30.0, clock=lambda: now)
-    key = ("@agent:localhost", "!room:localhost", "$thread")
+    delta_key = ("@agent:localhost", "!room:localhost", "$thread")
+    flight_key = (*delta_key, True, False)
     scan_started = asyncio.Event()
     release_scan = asyncio.Event()
     replayed_event_ids: list[str] = []
@@ -384,20 +444,20 @@ async def test_retained_delta_survives_a_scan_that_outlives_the_retention_window
     async def repair() -> str:
         scan_started.set()
         await release_scan.wait()
-        replayed_event_ids.extend(str(source["event_id"]) for source in registry.pending_deltas(key))
+        replayed_event_ids.extend(str(source["event_id"]) for source in registry.pending_deltas(delta_key))
         return "stored"
 
     flight = asyncio.create_task(
         registry.run(
-            key,
+            flight_key,
             schedule=_schedule,
             repair=repair,
-            result_is_usable=lambda _result: True,
+            result_arms_backoff=lambda _result: False,
         ),
     )
     try:
         await scan_started.wait()
-        registry.retain_delta(key, _event("$live", 2000, thread_id="$thread"))
+        registry.retain_delta(delta_key, _event("$live", 2000, thread_id="$thread"))
         # Advance beyond retention while the older scan still owns this key.
         now = 200.0
     finally:
@@ -406,4 +466,4 @@ async def test_retained_delta_survives_a_scan_that_outlives_the_retention_window
 
     assert replayed_event_ids == ["$live"]
     now = 300.0
-    assert registry.pending_deltas(key) == ()
+    assert registry.pending_deltas(delta_key) == ()
