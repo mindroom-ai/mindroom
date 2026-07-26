@@ -2530,8 +2530,9 @@ async def test_unchanged_publish_retries_orphan_cleanup_after_delete_failure(
         nonlocal attempts
         if self.collection_name == orphan and attempts == 0:
             attempts += 1
-            message = "temporary delete failure"
-            raise OSError(message)
+            # How Agno actually reports a failed delete: it swallows the
+            # provider error and returns False rather than raising.
+            return False
         return original_delete(self)
 
     monkeypatch.setattr(_FakeVectorDb, "delete", _fail_once)
@@ -2628,3 +2629,38 @@ async def test_oversized_file_still_indexes_and_publishes(
     assert state.indexed_count == 4
     stored = sorted(record.metadata["source_path"] for record in _FakeVectorDb.store[state.collection])
     assert "huge.md" in stored
+
+
+def test_overlapping_chunks_skip_prefetch_entirely(tmp_path: Path) -> None:
+    """Overlap re-emits the same bytes, so file size stops bounding chunk memory.
+
+    At chunk_size=128 with overlap=127 a 4 KB file yields thousands of chunks
+    totalling far more than the source, which no pre-read size check can bound.
+    """
+    docs_path = tmp_path / "docs"
+    docs_path.mkdir()
+    source = docs_path / "overlapped.md"
+    source.write_text("x" * 4_000, encoding="utf-8")
+    config = _config(tmp_path, docs_path, chunk_size=128)
+    config.knowledge_bases["docs"].chunk_overlap = 127
+
+    assert _manager(config)._chunk_texts_for_batch([source]) == []
+
+
+@pytest.mark.asyncio
+async def test_overlapping_chunks_still_index_and_publish(tmp_path: Path, embedder: _RecordingEmbedder) -> None:
+    """Skipping prefetch for overlapping chunks must not skip indexing."""
+    docs_path = tmp_path / "docs"
+    docs_path.mkdir()
+    (docs_path / "overlapped.md").write_text("y" * 600, encoding="utf-8")
+    config = _config(tmp_path, docs_path, chunk_size=128)
+    config.knowledge_bases["docs"].chunk_overlap = 64
+    runtime_paths = runtime_paths_for(config)
+
+    assert await _manager(config).reindex_all() == 1
+
+    assert [batch for batch in embedder.batch_requests if len(batch) > 1] == [], "prefetch ran despite overlap"
+    state = _published_state(config, runtime_paths)
+    assert state is not None
+    assert state.status == "complete"
+    assert state.indexed_count == 1

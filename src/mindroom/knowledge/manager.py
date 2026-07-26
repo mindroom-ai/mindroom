@@ -1398,6 +1398,13 @@ class KnowledgeManager:
         the normal per-file path, so the only cost of the bound is speed,
         never correctness.
         """
+        if self.config.get_knowledge_base_config(self.base_id).chunk_overlap:
+            # Overlapping chunks re-emit the same bytes many times over, so a
+            # file's size on disk stops bounding the text its chunks occupy:
+            # 4 KB at chunk_size=128/overlap=127 materializes ~484 KB. There is
+            # no cheap pre-read bound for that, so prefetch is skipped entirely
+            # and the per-file path indexes normally.
+            return []
         chunk_texts: list[str] = []
         remaining = _MAX_PREFETCH_TEXT_BYTES
         skipped = 0
@@ -1692,9 +1699,10 @@ class KnowledgeManager:
                 base_id=self.base_id,
                 collection=checkpoint.collection,
             )
-            if not await self._delete_candidate_collection(checkpoint.collection):
-                msg = "Failed to discard incompatible knowledge candidate"
-                raise RuntimeError(msg)
+            # A failed delete must not block indexing: an incompatible candidate
+            # is never published or resumed, and the superseded-collection sweep
+            # below reclaims it on this same run, or on a later one.
+            await self._delete_candidate_collection(checkpoint.collection)
             await asyncio.to_thread(delete_candidate_checkpoint, self._base_storage_path)
             checkpoint = None
 
@@ -1797,8 +1805,19 @@ class KnowledgeManager:
         )
 
     async def _delete_candidate_collection(self, collection_name: str) -> bool:
+        """Delete one candidate collection, reporting whether it is really gone.
+
+        Agno's ``ChromaDb.delete`` swallows the provider error and returns
+        ``False`` rather than raising, so catching exceptions alone would
+        report every real failure as a success. A ``False`` result is also
+        returned when the collection simply was not there, which is the
+        outcome we want, so the two are told apart by probing existence.
+        """
+        vector_db = self._build_vector_db(collection_name)
         try:
-            await asyncio.to_thread(self._build_vector_db(collection_name).delete)
+            deleted = await asyncio.to_thread(vector_db.delete)
+            if not deleted:
+                deleted = not await asyncio.to_thread(vector_db.exists)
         except Exception:
             logger.warning(
                 "Failed to delete knowledge candidate collection",
@@ -1807,7 +1826,13 @@ class KnowledgeManager:
                 exc_info=True,
             )
             return False
-        return True
+        if not deleted:
+            logger.warning(
+                "Vector store did not delete knowledge candidate collection",
+                base_id=self.base_id,
+                collection=collection_name,
+            )
+        return deleted
 
     async def _file_signatures_for(self, files: Sequence[Path]) -> dict[str, tuple[_FileSignature, Path]]:
         """Return current signatures for the listed files, skipping vanished ones."""
