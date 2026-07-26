@@ -160,6 +160,8 @@ It can affect team file memory when the resolution determines the configured pat
 The default `memory/**/*.md` searches dated memory files and excludes `MEMORY.md`.
 Set `include_entrypoint: true` only if you also want `MEMORY.md` returned by search.
 MindRoom already preloads `MEMORY.md` into the prompt, so the default avoids duplicate retrieval.
+That preload is introduced by a header naming the file's absolute path and stating that it is inlined automatically every turn, so the agent does not re-read it to recall its own memory.
+`max_entrypoint_lines` caps how much of the file is inlined; when it truncates, the preload ends with a marker reporting the included and total line counts, the active cap, and the path to read for the omitted lines.
 Semantic mode applies to the agent's own file-memory scope.
 Team-visible file memory is still keyword searched.
 

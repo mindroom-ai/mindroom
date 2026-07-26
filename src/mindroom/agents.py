@@ -118,11 +118,17 @@ class _CultureAgentSettings:
 
 @dataclass
 class _AdditionalContextChunk:
-    """Chunk of preload context with truncation priority metadata."""
+    """Chunk of preload context with truncation priority metadata.
+
+    ``omitted_chars`` records what the preload cap removed from this chunk so
+    the rendered section can tell the model which file was cut and by how much,
+    instead of letting a dropped file vanish without a trace.
+    """
 
     kind: str
     title: str
     body: str
+    omitted_chars: int = 0
 
 
 @dataclass(frozen=True)
@@ -279,21 +285,30 @@ def _read_context_file(resolved_path: Path) -> str:
     return resolved_path.read_text(encoding="utf-8").strip()
 
 
-def _render_context_chunks(section_heading: str, chunks: list[_AdditionalContextChunk]) -> str:
-    """Render context chunks into a markdown section."""
-    rendered = [f"### {chunk.title}\n{chunk.body.strip()}" for chunk in chunks if chunk.body.strip()]
-    if not rendered:
-        return ""
-    return f"{section_heading}\n" + "\n\n".join(rendered) + "\n\n"
+@dataclass(frozen=True)
+class _PreloadContextRenderer:
+    """Render preload context chunks and mark per-file what the cap removed."""
 
+    section_heading: str
+    chunk_marker_template: str
 
-def _render_additional_context(
-    personality_chunks: list[_AdditionalContextChunk],
-    *,
-    section_heading: str,
-) -> str:
-    """Render full additional context from personality chunks."""
-    return _render_context_chunks(section_heading, personality_chunks)
+    def render(self, chunks: list[_AdditionalContextChunk]) -> str:
+        """Render every chunk that still carries content or an omission marker."""
+        rendered = [block for chunk in chunks if (block := self._render_chunk(chunk))]
+        if not rendered:
+            return ""
+        return f"{self.section_heading}\n" + "\n\n".join(rendered) + "\n\n"
+
+    def _render_chunk(self, chunk: _AdditionalContextChunk) -> str:
+        body = chunk.body.strip()
+        if not chunk.omitted_chars:
+            return f"### {chunk.title}\n{body}" if body else ""
+        marker = render_prompt_template(
+            self.chunk_marker_template,
+            title=chunk.title,
+            omitted_chars=chunk.omitted_chars,
+        )
+        return f"### {chunk.title}\n{body}\n{marker}" if body else f"### {chunk.title}\n{marker}"
 
 
 def _build_preload_truncation_groups(
@@ -308,20 +323,18 @@ def _drop_whole_chunks(
     personality_chunks: list[_AdditionalContextChunk],
     max_preload_chars: int,
     *,
-    section_heading: str,
+    renderer: _PreloadContextRenderer,
 ) -> int:
     """Drop entire chunk bodies (least critical first) until under the cap."""
     omitted = 0
     for group in groups:
         for chunk in group:
-            if (
-                len(_render_additional_context(personality_chunks, section_heading=section_heading))
-                <= max_preload_chars
-            ):
+            if len(renderer.render(personality_chunks)) <= max_preload_chars:
                 return omitted
             if not chunk.body:
                 continue
             omitted += len(chunk.body)
+            chunk.omitted_chars += len(chunk.body)
             chunk.body = ""
     return omitted
 
@@ -331,21 +344,20 @@ def _trim_chunk_tails(
     personality_chunks: list[_AdditionalContextChunk],
     max_preload_chars: int,
     *,
-    section_heading: str,
+    renderer: _PreloadContextRenderer,
 ) -> int:
     """Trim from the *end* of chunks to preserve headers/identity at the top."""
     omitted = 0
     for group in groups:
         for chunk in group:
-            overflow = (
-                len(_render_additional_context(personality_chunks, section_heading=section_heading)) - max_preload_chars
-            )
+            overflow = len(renderer.render(personality_chunks)) - max_preload_chars
             if overflow <= 0:
                 return omitted
             if not chunk.body:
                 continue
             remove_count = min(overflow, len(chunk.body))
             chunk.body = chunk.body[: len(chunk.body) - remove_count].rstrip()
+            chunk.omitted_chars += remove_count
             omitted += remove_count
     return omitted
 
@@ -356,31 +368,46 @@ def _apply_preload_cap(
     *,
     section_heading: str,
     truncation_marker_template: str,
+    chunk_marker_template: str,
 ) -> tuple[str, int]:
     """Apply hard preload cap with deterministic truncation priority.
 
     Truncation order is by file list order.
     First drops whole chunks, then trims from the *end* of remaining chunks.
+    Every touched file keeps a marker naming it and the chars it lost, so a
+    dropped context file is visible to the model instead of silently missing.
     """
-    rendered = _render_additional_context(personality_chunks, section_heading=section_heading)
+    renderer = _PreloadContextRenderer(
+        section_heading=section_heading,
+        chunk_marker_template=chunk_marker_template,
+    )
+    rendered = renderer.render(personality_chunks)
     if len(rendered) <= max_preload_chars:
         return rendered, 0
+
+    # Trim against a budget that already reserves room for the summary marker,
+    # so the hard-cap clamp below does not slice away the omission markers.
+    marker_upper_bound = render_prompt_template(
+        truncation_marker_template,
+        omitted_chars=sum(len(chunk.body) for chunk in personality_chunks),
+    )
+    trim_budget = max(0, max_preload_chars - len(f"\n\n{marker_upper_bound}\n\n"))
 
     groups = _build_preload_truncation_groups(personality_chunks)
     omitted_chars = _drop_whole_chunks(
         groups,
         personality_chunks,
-        max_preload_chars,
-        section_heading=section_heading,
+        trim_budget,
+        renderer=renderer,
     )
     omitted_chars += _trim_chunk_tails(
         groups,
         personality_chunks,
-        max_preload_chars,
-        section_heading=section_heading,
+        trim_budget,
+        renderer=renderer,
     )
 
-    rendered = _render_additional_context(personality_chunks, section_heading=section_heading)
+    rendered = renderer.render(personality_chunks)
     if omitted_chars <= 0:
         return rendered, 0
 
@@ -390,8 +417,17 @@ def _apply_preload_cap(
     if budget <= 0:
         return marker_block[:max_preload_chars], omitted_chars
     if len(rendered) > budget:
-        rendered = rendered[len(rendered) - budget :]
+        rendered = _clamp_rendered_context(rendered, budget, heading_prefix=f"{section_heading}\n")
     return rendered.rstrip("\n") + marker_block, omitted_chars
+
+
+def _clamp_rendered_context(rendered: str, budget: int, *, heading_prefix: str) -> str:
+    """Force rendered context under ``budget``, keeping the heading and the most critical tail."""
+    body_budget = budget - len(heading_prefix)
+    if not rendered.startswith(heading_prefix) or body_budget <= 0:
+        return rendered[len(rendered) - budget :]
+    body = rendered[len(heading_prefix) :]
+    return heading_prefix + body[len(body) - body_budget :]
 
 
 @timed("system_prompt_assembly.agent_create.additional_context")
@@ -402,6 +438,7 @@ def _build_additional_context(
     *,
     personality_section_heading: str,
     truncation_marker_template: str,
+    chunk_marker_template: str,
     workspace_context_files: tuple[Path, ...] = (),
     storage_path: Path,
     runtime_paths: constants.RuntimePaths,
@@ -428,6 +465,7 @@ def _build_additional_context(
         max_preload_chars,
         section_heading=personality_section_heading,
         truncation_marker_template=truncation_marker_template,
+        chunk_marker_template=chunk_marker_template,
     )
     if omitted_chars > 0:
         logger.warning(
@@ -1479,6 +1517,7 @@ def _build_agent_role_context(
             config.defaults.max_preload_chars,
             personality_section_heading=config.get_prompt("PERSONALITY_CONTEXT_SECTION_HEADING"),
             truncation_marker_template=config.get_prompt("CONTEXT_TRUNCATION_MARKER_TEMPLATE"),
+            chunk_marker_template=config.get_prompt("CONTEXT_CHUNK_OMITTED_MARKER_TEMPLATE"),
             workspace_context_files=workspace.context_files if workspace is not None else (),
             storage_path=runtime_paths.storage_root,
             runtime_paths=runtime_paths,

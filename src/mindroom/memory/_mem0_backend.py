@@ -26,6 +26,7 @@ from ._policy import (
 from ._prompting import build_memory_messages
 from ._shared import (
     MEM0_REPLICA_KEY,
+    MemoryEntrypointContext,
     MemoryNotFoundError,
     MemoryResult,
     MemorySearchOutcome,
@@ -686,7 +687,7 @@ class Mem0MemoryBackend:
         config: Config,
         *,
         execution_identity: ToolExecutionIdentity | None = None,
-    ) -> str:
+    ) -> MemoryEntrypointContext:
         """Return no stable entrypoint context; mem0 has no curated `MEMORY.md`."""
         del agent_name, storage_path, config, execution_identity
-        return ""
+        return MemoryEntrypointContext()

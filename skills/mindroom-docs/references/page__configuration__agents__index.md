@@ -218,6 +218,10 @@ Learning data is persisted under `agents/<name>/learning/<agent>.db`, so it surv
 When the effective memory backend is `file`, the agent's canonical file memory root is that same workspace directory.
 Absolute paths and `..` traversal are rejected.
 
+The `Personality Context` section states that these files are already inlined, so the agent does not spend a turn re-reading them.
+When the rendered section exceeds `defaults.max_preload_chars`, MindRoom trims earlier files first and leaves a per-file marker naming the file and the number of omitted characters, followed by a summary marker for the section.
+A dropped file therefore still appears by name, so the agent can read it from the workspace when it needs the omitted part.
+
 ## Per-Agent Tool Configuration
 
 Tools can be plain strings or single-key dicts with inline config overrides.

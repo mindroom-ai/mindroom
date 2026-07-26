@@ -1567,6 +1567,7 @@ depends_on = [
     "mindroom.memory._file_backend",
     "mindroom.memory._prompting",
     "mindroom.memory._shared",
+    "mindroom.prompt_templates",
     "mindroom.timing",
 ]
 visibility = ["mindroom.memory", "mindroom.memory.auto_flush"]
@@ -1646,6 +1647,7 @@ visibility = [
     "mindroom.agents",
     "mindroom.config.main",
     "mindroom.memory._prompting",
+    "mindroom.memory.functions",
 ]
 
 [[modules]]

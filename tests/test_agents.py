@@ -2418,27 +2418,70 @@ def test_agent_preload_cap_truncates_context_files_in_order(
     mock_storage: MagicMock,  # noqa: ARG001
     tmp_path: Path,
 ) -> None:
-    """Preload cap should drop earlier context files before later ones."""
+    """Preload cap should drop earlier context files before later ones, and say which it dropped."""
     config = _test_config()
     authored_defaults = config.defaults.model_dump(mode="python")
-    authored_defaults["max_preload_chars"] = 420
+    authored_defaults["max_preload_chars"] = 1300
     config.defaults = DefaultsConfig(**authored_defaults)
 
     workspace = agent_workspace_root_path(tmp_path, "general")
     workspace.mkdir(parents=True, exist_ok=True)
     first_path = workspace / "FIRST.md"
     second_path = workspace / "SECOND.md"
-    first_path.write_text("FIRST_START " + "A" * 220 + " FIRST_END", encoding="utf-8")
-    second_path.write_text("SECOND_START " + "B" * 220 + " SECOND_END", encoding="utf-8")
+    first_path.write_text("FIRST_START " + "A" * 600 + " FIRST_END", encoding="utf-8")
+    second_path.write_text("SECOND_START " + "B" * 600 + " SECOND_END", encoding="utf-8")
 
     config.agents["general"].context_files = ["FIRST.md", "SECOND.md"]
 
     agent = _create_agent_for_test("general", config=_bind_runtime_paths(config, _runtime_paths(tmp_path)))
 
-    assert "[Content truncated - " in agent.role
-    assert "### FIRST.md" not in agent.role
+    assert "[Context files exceeded the preload budget - " in agent.role
+    assert "FIRST_START" not in agent.role
     assert "### SECOND.md" in agent.role
     assert "SECOND_START" in agent.role
+
+
+@patch("mindroom.agent_storage.SqliteDb")
+def test_agent_preload_cap_names_the_dropped_context_file(
+    mock_storage: MagicMock,  # noqa: ARG001
+    tmp_path: Path,
+) -> None:
+    """A dropped context file must stay visible as a named omission marker."""
+    config = _test_config()
+    authored_defaults = config.defaults.model_dump(mode="python")
+    authored_defaults["max_preload_chars"] = 1300
+    config.defaults = DefaultsConfig(**authored_defaults)
+
+    workspace = agent_workspace_root_path(tmp_path, "general")
+    workspace.mkdir(parents=True, exist_ok=True)
+    (workspace / "FIRST.md").write_text("FIRST_START " + "A" * 600 + " FIRST_END", encoding="utf-8")
+    (workspace / "SECOND.md").write_text("SECOND_START " + "B" * 600 + " SECOND_END", encoding="utf-8")
+
+    config.agents["general"].context_files = ["FIRST.md", "SECOND.md"]
+
+    agent = _create_agent_for_test("general", config=_bind_runtime_paths(config, _runtime_paths(tmp_path)))
+
+    assert "### FIRST.md" in agent.role
+    assert "[FIRST.md truncated here - 622 chars omitted." in agent.role
+
+
+@patch("mindroom.agent_storage.SqliteDb")
+def test_agent_context_section_states_files_are_preloaded(
+    mock_storage: MagicMock,  # noqa: ARG001
+    tmp_path: Path,
+) -> None:
+    """The context section must tell the model these files are already inlined."""
+    config = _test_config()
+    workspace = agent_workspace_root_path(tmp_path, "general")
+    workspace.mkdir(parents=True, exist_ok=True)
+    (workspace / "SOUL.md").write_text("Core personality directive.", encoding="utf-8")
+
+    config.agents["general"].context_files = ["SOUL.md"]
+
+    agent = _create_agent_for_test("general", config=_bind_runtime_paths(config, _runtime_paths(tmp_path)))
+
+    assert "inlined here automatically every turn" in agent.role
+    assert "Do not re-read them" in agent.role
 
 
 @patch("mindroom.agent_storage.SqliteDb")

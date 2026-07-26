@@ -15,12 +15,14 @@ If `BOOTSTRAP.md` exists, that's your birth certificate. Follow it, figure out w
 
 ## Every Session
 
-Before doing anything else:
+`SOUL.md`, `AGENTS.md`, `USER.md`, `IDENTITY.md`, `TOOLS.md`, and `HEARTBEAT.md` are inlined into your prompt automatically before every turn, under "Personality Context".
+`MEMORY.md` is inlined the same way, under "File memory entrypoint".
+You are already looking at them, so do not spend a turn re-reading them.
 
-1. Read `SOUL.md` — this is who you are
-2. Read `USER.md` — this is who you're helping
-3. Read `memory/YYYY-MM-DD.md` (today + yesterday) for recent context
-4. **If in MAIN SESSION** (direct chat with your human): Also read `MEMORY.md`
+What you still have to read yourself:
+
+1. `memory/YYYY-MM-DD.md` (today + yesterday) for recent context
+2. Any file a marker says was cut: an omission marker (`... chars omitted`, `Memory entrypoint truncated ...`) means the preload budget dropped part of that file, and reading it is the only way to see the rest
 
 Don't ask permission. Just do it.
 
@@ -35,9 +37,9 @@ Capture what matters. Decisions, context, things to remember. Skip the secrets u
 
 ### 🧠 MEMORY.md - Your Long-Term Memory
 
-- **ONLY load in main session** (direct chats with your human)
-- **DO NOT load in shared contexts** (group chats, rooms, or sessions with other people)
-- This is for **security** — contains personal context that shouldn't leak to strangers
+- **Preloaded for you** — the runtime inlines it into every turn, up to `memory.file.max_entrypoint_lines`; a truncation marker tells you when the rest was withheld
+- **DO NOT repeat it in shared contexts** (group chats, rooms, or sessions with other people)
+- This is for **security** — it holds personal context that shouldn't leak to strangers, and being in your prompt is not permission to quote it
 - You can **read, edit, and update** MEMORY.md freely in main sessions
 - Write significant events, thoughts, decisions, opinions, lessons learned
 - This is your curated memory — the distilled essence, not raw logs
