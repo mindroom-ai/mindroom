@@ -1,13 +1,13 @@
 # Thread edit integrity gate status
 
-Updated 2026-07-25 after correcting the exact-`3e0575aa7` review and CI blockers.
+Updated 2026-07-25 after correcting the exact-`861eea90b` root-promotion review blocker.
 
 ## Exact target
 
 - PR: `mindroom-ai/mindroom#1641`
 - Branch: `fix/thread-edit-integrity`
-- Latest production commit: `0f439bd2a9a9d2d8fa7e3a30ef42f4c8b4e38766`
-- Current base and merge base: `c1f812a1e15b3c6be05f0cf2720b44431d844087`
+- Latest production commit: `ce2c8e391108da90f2e8c5b6085f7231e9ad4e95`
+- Current base and merge base: `f6190d4c2457381e63f40f99fb27e794ae8667b8`
 - Current branch and PR head contain only the crash-handoff successor after the latest production commit.
 - The production, test, and documentation corrections are pushed.
 - Tracked working tree is clean.
@@ -29,6 +29,7 @@ Updated 2026-07-25 after correcting the exact-`3e0575aa7` review and CI blockers
 - `27a57ffd0` also covers the trusted-automation rich-reply fallback and corrects cache documentation that still described removed read-time payload/index guards and recent-event cursors.
 - `e14938185` proves current rich-reply root status before accepting inherited indexes, gives batch projection the same current-root semantics, and preserves mutation-time inherited-index proof.
 - `0f439bd2a` rejects invalid successful point lookups and legacy wrong-room cache rows in snapshot and replay consumers while retaining edits as non-visible snapshot ancestry nodes.
+- `ce2c8e391` transactionally invalidates a rich reply's old parent snapshot when its first explicit child promotes it to a thread root.
 
 ## Reconciled review status
 
@@ -42,8 +43,10 @@ Updated 2026-07-25 after correcting the exact-`3e0575aa7` review and CI blockers
 - One fresh exact-`d91751bc1` reviewer independently found the same stale cache-documentation contract; the other approved with no finding.
 - Two exact-`3e0575aa7` native reviewers reproduced stale inherited root precedence, missing batch root promotion, invalid successful lookup fallback, wrong-room replay/snapshot reads, and replacement-node snapshot ancestry.
 - Every exact-`3e0575aa7` finding is corrected in `e14938185` and `0f439bd2a`; those old review verdicts and CI results are now stale.
+- The fresh exact-`861eea90b` native review found one further blocker: durable root promotion rewrote the rich reply's index but left its old parent snapshot certified.
+- The claim failed four regression variants before implementation and passes after `ce2c8e391`; the reviewer found no second blocker.
 - The withdrawn edit-index timestamp-poison claim remains excluded because it required direct inconsistent SQL writes outside production paths.
-- Production source against current `main` is `+1517/-1132`, net `+385`.
+- Production source against current `main` is `+1601/-1138`, net `+463`.
 
 ## Validation already completed
 
@@ -57,14 +60,15 @@ Updated 2026-07-25 after correcting the exact-`3e0575aa7` review and CI blockers
 - The complete eight-file rich-root, membership, tag, mode, mutation, sync, write-coordination, and coalescing selection passes after the mid-walk correction.
 - The exact five GitHub pytest failures on `3e0575aa7` now pass with corrected production-shaped root-proof and cross-room fixtures.
 - The seven affected owning files pass together, including SQLite and PostgreSQL snapshot regressions for legacy wrong-room rows and reply-to-edit ancestry.
+- Root-promotion invalidation failed before implementation and now passes all four SQLite/PostgreSQL point-store/thread-append variants.
+- The `304` focused event-cache, cache-semantics, mutation, and membership tests pass after the fix and after merging current `main`.
 - Changed-file pre-commit passes, including Ruff, formatting, `ty`, Vulture, Tach, module privacy, and generated documentation checks.
 - Ruff, format, `ty`, Vulture, Tach, module privacy, and normal commit hooks pass.
 - Git author was verified as `Bas Nijholt <bas@nijho.lt>` before every new commit.
 
 ## Pending exact-head gates
 
-- GitHub pytest is red only on stale head `3e0575aa7`; every other completed check there was green.
-- Fresh CI must complete on the live crash-handoff successor head.
+- Fresh CI must complete on the current crash-handoff successor head.
 - A fresh independent native Codex correctness review is required on that exact head.
 - Exact-head PostgreSQL owning and stress selections are required.
 - Exact-head full pytest is required.
