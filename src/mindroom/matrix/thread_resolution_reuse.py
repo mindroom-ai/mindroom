@@ -173,7 +173,7 @@ def _suffix_is_safely_appendable(
             or not event_id
             or event_id in snapshot.known_event_ids
             or event_id in suffix_event_ids
-            or not event_info_proves_thread_membership(event_info, event_id, thread_id)
+            or not (event_info.is_edit or event_info_proves_thread_membership(event_info, event_id, thread_id))
         ):
             return False
         suffix_event_ids.add(event_id)

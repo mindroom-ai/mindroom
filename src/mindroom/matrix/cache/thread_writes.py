@@ -390,7 +390,7 @@ class ThreadOutboundWritePolicy:
         stream_status: object,
     ) -> tuple[str | None, str | None, str | None]:
         """Resolve explicit or reserved thread scope before entering a write queue."""
-        explicit_thread_id = event_info.thread_id or event_info.thread_id_from_edit
+        explicit_thread_id = event_info.thread_id
         raw_reservation_event_id = event_info.original_event_id if event_info.is_edit else event_id
         reservation_event_id = raw_reservation_event_id if isinstance(raw_reservation_event_id, str) else None
         needs_reservation_scope = reservation_event_id is not None and (

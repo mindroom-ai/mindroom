@@ -362,7 +362,7 @@ class ThreadMutationResolver:
         resolution_context: MutationResolutionContext | None = None,
     ) -> MutationThreadImpact:
         """Resolve how one message mutation should affect thread cache state."""
-        explicit_thread_id = event_info.thread_id or event_info.thread_id_from_edit
+        explicit_thread_id = event_info.thread_id
         if explicit_thread_id is not None:
             return MutationThreadImpact.threaded(explicit_thread_id)
         try:

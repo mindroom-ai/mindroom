@@ -11,7 +11,6 @@ Invariants enforced here (every resolver in the repo must go through this module
 
 1. An event is THREADED if and only if one of the following holds:
    it carries a native ``m.thread`` relation (``EventInfo.thread_id``);
-   it is a live edit whose ``m.new_content`` carries an ``m.thread`` relation (``thread_id_from_edit``);
    a relation walk from it reaches an event satisfying either of the above;
    or the walk terminates at a relation-free event that is proven to have at least one real threaded child,
    in which case that terminal event is itself the thread root.
@@ -171,7 +170,7 @@ def event_info_proves_thread_membership(event_info: EventInfo, event_id: str, th
     """Return whether local event facts alone prove membership in one thread."""
     if event_id == thread_id:
         return event_info.can_be_thread_root
-    return bool(thread_id) and thread_id in {event_info.thread_id, event_info.thread_id_from_edit}
+    return bool(thread_id) and event_info.thread_id == thread_id
 
 
 class ThreadRoomScanRootNotFoundError(RuntimeError):
@@ -251,7 +250,7 @@ async def resolve_event_thread_membership(
     allow_current_root: bool = False,
 ) -> ThreadResolution:
     """Return canonical thread membership for one event."""
-    explicit_thread_id = event_info.thread_id or event_info.thread_id_from_edit
+    explicit_thread_id = event_info.thread_id
     if explicit_thread_id is not None:
         return ThreadResolution.threaded(explicit_thread_id)
     related_event_id = event_info.next_related_event_id("")
@@ -304,7 +303,7 @@ async def resolve_related_event_thread_membership(
             )
             break
 
-        thread_id = related_event_info.thread_id or related_event_info.thread_id_from_edit
+        thread_id = related_event_info.thread_id
         if thread_id is not None:
             resolution = ThreadResolution.threaded(thread_id)
             break

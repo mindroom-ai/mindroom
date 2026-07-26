@@ -399,13 +399,6 @@ async def resolve_thread_ids_for_event_infos(
             event_info = event_infos.get(event_id)
             if event_info is None:
                 continue
-            if event_info.is_edit:
-                original_event_id = event_info.original_event_id
-                if original_event_id is None or (thread_id := resolved.get(original_event_id)) is None:
-                    continue
-                resolved[event_id] = thread_id
-                progress_made = True
-                continue
             resolution = await resolve_event_thread_membership(
                 room_id,
                 event_info,

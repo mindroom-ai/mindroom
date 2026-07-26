@@ -92,7 +92,7 @@ async def _cached_event_is_in_thread(
 ) -> bool:
     """Return whether raw event metadata or the cache index proves thread membership."""
     event_info = EventInfo.from_event(event_source)
-    if thread_id in {event_info.thread_id, event_info.thread_id_from_edit}:
+    if event_info.thread_id == thread_id:
         return True
     if get_thread_id_for_event is None:
         return False

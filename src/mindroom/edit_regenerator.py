@@ -131,7 +131,7 @@ class EditRegenerator:
         )
         turn_record = self.deps.turn_store.load_turn(
             room=room,
-            thread_id=context.thread_id or event_info.thread_id or event_info.thread_id_from_edit,
+            thread_id=context.thread_id or event_info.thread_id,
             original_event_id=original_event_id,
             requester_user_id=requester_user_id,
         )
@@ -139,7 +139,7 @@ class EditRegenerator:
             await self.deps.wait_for_turn_settled((original_event_id,))
             turn_record = self.deps.turn_store.load_turn(
                 room=room,
-                thread_id=context.thread_id or event_info.thread_id or event_info.thread_id_from_edit,
+                thread_id=context.thread_id or event_info.thread_id,
                 original_event_id=original_event_id,
                 requester_user_id=requester_user_id,
             )

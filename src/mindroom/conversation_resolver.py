@@ -748,7 +748,7 @@ class ConversationResolver:
             resolved_thread_id = None
         else:
             event_info = EventInfo.from_event(resolved_event_source)
-            resolved_thread_id = event_info.thread_id or event_info.thread_id_from_edit
+            resolved_thread_id = event_info.thread_id
         context = MessageContext(
             am_i_mentioned=am_i_mentioned,
             is_thread=resolved_thread_id is not None,

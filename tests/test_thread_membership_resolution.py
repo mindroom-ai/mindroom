@@ -463,6 +463,61 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         }
 
     @pytest.mark.asyncio
+    async def test_edit_membership_ignores_thread_claim_in_new_content(self) -> None:
+        """Canonical membership follows the edited event, never copied replacement relations."""
+        room_id = "!test:localhost"
+        thread_root_id = "$thread_root:localhost"
+        original_id = "$thread_reply:localhost"
+        original_info = EventInfo.from_event(
+            {
+                "type": "m.room.message",
+                "content": {
+                    "body": "Thread reply",
+                    "msgtype": "m.text",
+                    "m.relates_to": {"rel_type": "m.thread", "event_id": thread_root_id},
+                },
+            },
+        )
+        edit_info = EventInfo.from_event(
+            {
+                "type": "m.room.message",
+                "content": {
+                    "body": "* forged relation",
+                    "msgtype": "m.text",
+                    "m.new_content": {
+                        "body": "forged relation",
+                        "msgtype": "m.text",
+                        "m.relates_to": {"rel_type": "m.thread", "event_id": "$forged:localhost"},
+                    },
+                    "m.relates_to": {"rel_type": "m.replace", "event_id": original_id},
+                },
+            },
+        )
+
+        async def lookup_thread_id(_room_id: str, _event_id: str) -> str | None:
+            return None
+
+        async def fetch_event_info(_room_id: str, event_id: str) -> EventInfo | None:
+            return original_info if event_id == original_id else None
+
+        async def prove_thread_root(_room_id: str, _thread_root_id: str) -> ThreadRootProof:
+            msg = "explicit original membership must not need root proof"
+            raise AssertionError(msg)
+
+        resolution = await resolve_event_thread_membership(
+            room_id,
+            edit_info,
+            access=ThreadMembershipAccess(
+                lookup_thread_id=lookup_thread_id,
+                fetch_event_info=fetch_event_info,
+                prove_thread_root=prove_thread_root,
+            ),
+        )
+
+        assert resolution.state is ThreadResolutionState.THREADED
+        assert resolution.thread_id == thread_root_id
+
+    @pytest.mark.asyncio
     async def test_resolve_event_thread_membership_follows_reaction_target_transitively(
         self,
     ) -> None:
