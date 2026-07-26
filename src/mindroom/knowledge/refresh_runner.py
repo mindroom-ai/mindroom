@@ -859,6 +859,9 @@ async def _publish_unchanged_index(
             last_error=error,
         )
     await asyncio.to_thread(mark_published_index_refresh_succeeded, key)
+    # This path returns before any candidate is opened, so it is the only place
+    # that can retire candidate state left by an interrupted forced rebuild.
+    await manager.discard_superseded_candidate(published_collection=updated_state.collection)
     return KnowledgeRefreshResult(
         key=key,
         indexed_count=updated_state.indexed_count or 0,

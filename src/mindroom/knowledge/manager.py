@@ -29,7 +29,11 @@ from mindroom.constants import (
     resolve_config_relative_path,
 )
 from mindroom.credentials import get_runtime_shared_credentials_manager
-from mindroom.embedding_errors import classified_embedder_error, embedder_failure_is_transient
+from mindroom.embedding_errors import (
+    classified_embedder_error,
+    embedder_failure_is_transient,
+    is_embedder_auth_failure_detail,
+)
 from mindroom.embedding_factory import create_configured_embedder
 from mindroom.knowledge.candidate_checkpoint import (
     CandidateCheckpoint,
@@ -108,6 +112,10 @@ _FileSignature = FileSignature
 #: tasks and peak memory independently of corpus size; the provider request
 #: bounds are applied separately when the batch's chunks are planned.
 _INDEX_FILES_PER_BATCH = 64
+#: Chunk text held in memory for one prefetch pass. File count alone does not
+#: bound memory: 64 large files can materialize far more text (and far more
+#: cached vectors) than 64 small ones.
+_MAX_PREFETCH_TEXT_BYTES = 8_000_000
 #: Source files whose signatures are computed per thread hop, so a huge corpus
 #: still yields to the event loop and to cancellation while it is scanned.
 _SIGNATURE_SCAN_CHUNK = 512
@@ -121,6 +129,9 @@ _MAX_CANDIDATE_RECONCILE_ROUNDS = 4
 _CANDIDATE_JOURNAL_COMPACT_ENTRIES = 5_000
 _PROGRESS_LOG_INTERVAL_FILES = 500
 _PROGRESS_LOG_INTERVAL_SECONDS = 30.0
+#: Consecutive classified embedder rejections, with no success in between,
+#: taken as proof the fault is global rather than specific to a few files.
+_GLOBAL_EMBEDDER_FAILURE_STREAK = 20
 _EMBEDDING_RETRY_POLICY = EmbeddingRetryPolicy()
 #: Indirection point so fault-injection tests can drive backoff without waiting.
 _EMBEDDING_RETRY_SLEEP: Callable[[float], Awaitable[None]] = asyncio.sleep
@@ -228,7 +239,6 @@ class _CandidateProgress:
     completed: int = 0
     failed: int = 0
     retrying: int = 0
-    embedding_requests: int = 0
     #: Files this pass actually embedded, as opposed to reused from the candidate.
     indexed_this_run: int = 0
     started_at: float = field(default_factory=time.monotonic)
@@ -244,12 +254,7 @@ class _CandidateProgress:
         """Return wall-clock seconds since this refresh started working."""
         return max(time.monotonic() - self.started_at, 0.0)
 
-    def _throughput(self) -> float:
-        elapsed = self.elapsed_seconds()
-        return self.indexed_this_run / elapsed if elapsed > 0 else 0.0
-
     def _fields(self) -> dict[str, object]:
-        throughput = self._throughput()
         return {
             "base_id": self.base_id,
             "collection": self.collection,
@@ -261,12 +266,7 @@ class _CandidateProgress:
             "pending": self.pending,
             "failed": self.failed,
             "retrying": self.retrying,
-            "embedding_requests": self.embedding_requests,
             "elapsed_seconds": round(self.elapsed_seconds(), 3),
-            "files_per_second": round(throughput, 3),
-            # Approximate: assumes the remaining files cost what the indexed
-            # ones did, which a mixed corpus will not honor exactly.
-            "approximate_eta_seconds": (round(self.pending / throughput, 1) if throughput > 0 else None),
         }
 
     def maybe_log(self) -> None:
@@ -301,6 +301,18 @@ class _PermanentEmbeddingError(Exception):
 
 def _raise_cancelled() -> NoReturn:
     raise asyncio.CancelledError
+
+
+def _content_identity(signature: _FileSignature) -> tuple[int, str]:
+    """Return the part of a signature that describes content, not bookkeeping.
+
+    Git checkouts, clones and archive restores rewrite mtimes without touching
+    bytes. Treating a new mtime as a content change would delete and re-embed
+    work the digest proves is still valid, which is exactly what resume exists
+    to avoid.
+    """
+    _source_mtime_ns, source_size, source_digest = signature
+    return source_size, source_digest
 
 
 def _iter_file_batches(files: Sequence[Path], batch_size: int) -> Iterator[list[Path]]:
@@ -547,6 +559,8 @@ class KnowledgeManager:
     _persisted_collection_missing_on_init: bool = field(default=False, init=False, repr=False)
     _max_concurrent_file_indexes: int = field(init=False, repr=False)
     _embedding_retry_count: int = field(default=0, init=False, repr=False)
+    _embedder_failure_streak: int = field(default=0, init=False, repr=False)
+    _global_embedder_failure: str | None = field(default=None, init=False, repr=False)
 
     def __post_init__(self) -> None:
         """Initialize filesystem paths and the underlying vector database."""
@@ -1255,10 +1269,10 @@ class KnowledgeManager:
                 on_retry=self._record_embedding_retry,
             )
         except Exception as exc:
+            classified = classified_embedder_error(exc)
             if self._last_file_index_error is None:
-                self._last_file_index_error = classified_embedder_error(exc) or (
-                    f"knowledge indexing failed ({type(exc).__name__})"
-                )
+                self._last_file_index_error = classified or f"knowledge indexing failed ({type(exc).__name__})"
+            self._record_embedder_rejection(classified)
             logger.exception("Failed to index knowledge file", base_id=self.base_id, path=str(resolved_path))
             return False
 
@@ -1281,6 +1295,7 @@ class KnowledgeManager:
             async with self._state_lock:
                 self._indexed_files.add(relative_path)
                 self._indexed_signatures[relative_path] = (source_mtime_ns, source_size, source_digest)
+        self._note_embedder_success()
         # DEBUG, not INFO: a large corpus is 10^5 of these lines per refresh.
         # Operators get periodic aggregate progress instead.
         logger.debug("Indexed knowledge file", base_id=self.base_id, path=relative_path)
@@ -1320,6 +1335,26 @@ class KnowledgeManager:
     def _record_embedding_retry(self) -> None:
         self._embedding_retry_count += 1
 
+    def _record_embedder_rejection(self, classified: str | None) -> None:
+        """Track evidence that the embedder is rejecting everything, not one file.
+
+        Providers without a batch surface, and files read by a non-text reader,
+        never reach the batch-prefetch stop, so without this the same doomed
+        request is issued once per remaining file.
+        """
+        if classified is None:
+            self._embedder_failure_streak = 0
+            return
+        self._embedder_failure_streak += 1
+        if is_embedder_auth_failure_detail(classified):
+            # A rejected credential is global by construction; one file is proof enough.
+            self._global_embedder_failure = classified
+        elif self._embedder_failure_streak >= _GLOBAL_EMBEDDER_FAILURE_STREAK:
+            self._global_embedder_failure = classified
+
+    def _note_embedder_success(self) -> None:
+        self._embedder_failure_streak = 0
+
     def _chunk_texts_for_prefetch(self, resolved_path: Path) -> tuple[str, ...]:
         """Return the chunk texts Agno will embed for one file, or ``()``.
 
@@ -1348,17 +1383,31 @@ class KnowledgeManager:
         return tuple(document.content for document in documents if document.content)
 
     def _chunk_texts_for_batch(self, files: Sequence[Path]) -> list[str]:
-        """Return every chunk text one batch will embed, in batch order."""
+        """Return chunk texts to prefetch, stopping at the memory budget.
+
+        Files past the budget are simply not prefetched; their chunks are
+        embedded by the normal per-file path, so the only cost of the bound is
+        speed, never correctness.
+        """
         chunk_texts: list[str] = []
+        budget = _MAX_PREFETCH_TEXT_BYTES
         for resolved_path in files:
-            chunk_texts.extend(self._chunk_texts_for_prefetch(resolved_path))
+            for text in self._chunk_texts_for_prefetch(resolved_path):
+                chunk_texts.append(text)
+                budget -= len(text.encode("utf-8"))
+            if budget <= 0:
+                logger.debug(
+                    "Stopped embedding prefetch at the memory budget",
+                    base_id=self.base_id,
+                    chunks=len(chunk_texts),
+                )
+                break
         return chunk_texts
 
     async def _prefetch_batch_embeddings(
         self,
         embedder: BatchPrefetchEmbedder,
         files: Sequence[Path],
-        progress: _CandidateProgress | None,
     ) -> None:
         """Embed one batch's chunks in as few provider requests as limits allow."""
         if not embedder.supports_batching():
@@ -1407,8 +1456,6 @@ class KnowledgeManager:
                     exc_info=True,
                 )
                 break
-        if progress is not None:
-            progress.embedding_requests = embedder.provider_request_count
 
     async def _reindex_files_locked(
         self,
@@ -1421,7 +1468,6 @@ class KnowledgeManager:
         embedder: BatchPrefetchEmbedder | None = None,
         on_file_result: Callable[[Path], Awaitable[None]] | None = None,
         on_batch_complete: Callable[[Sequence[Path]], Awaitable[None]] | None = None,
-        progress: _CandidateProgress | None = None,
     ) -> int:
         """Reindex resolved files in bounded batches while holding the operation lock.
 
@@ -1437,7 +1483,7 @@ class KnowledgeManager:
         for batch in _iter_file_batches(files, _INDEX_FILES_PER_BATCH):
             if embedder is not None:
                 try:
-                    await self._prefetch_batch_embeddings(embedder, batch, progress)
+                    await self._prefetch_batch_embeddings(embedder, batch)
                 except _PermanentEmbeddingError:
                     return indexed_count
             indexed_count += await self._index_file_batch(
@@ -1448,6 +1494,13 @@ class KnowledgeManager:
                 vanished_files=vanished_files,
                 on_file_result=on_file_result,
             )
+            if self._global_embedder_failure is not None:
+                logger.warning(
+                    "Stopping knowledge refresh: the embedder is rejecting every request",
+                    base_id=self.base_id,
+                    detail=self._global_embedder_failure,
+                )
+                return indexed_count
             if embedder is not None:
                 # Prefetched vectors are only useful for the batch that planned
                 # them; dropping them keeps peak memory independent of corpus size.
@@ -1503,6 +1556,8 @@ class KnowledgeManager:
         """Index one bounded batch, capping live tasks at the concurrency limit."""
 
         async def _index_one(file_path: Path) -> bool:
+            if self._global_embedder_failure is not None:
+                return False
             indexed = await self._index_file_or_skip_vanished(
                 file_path,
                 knowledge=knowledge,
@@ -1656,6 +1711,7 @@ class KnowledgeManager:
             completed=dict(checkpoint.completed),
             completed_paths=set(checkpoint.completed),
             failed=dict(checkpoint.failed),
+            journal_appends=checkpoint.replayed_journal_entries,
             resumed=resumed,
         )
         # Reconcile candidates abandoned by earlier crashed refreshes now, so
@@ -1691,6 +1747,30 @@ class KnowledgeManager:
         collection = payload.get("collection")
         return (collection if isinstance(collection, str) and collection else None), True
 
+    async def discard_superseded_candidate(self, *, published_collection: str | None) -> None:
+        """Drop candidate state that publishing an unchanged index made obsolete.
+
+        A forced rebuild interrupted part-way leaves a candidate behind. If the
+        next refresh finds the source unchanged it republishes the existing
+        index and returns before the candidate is ever opened, so nothing else
+        can reach that state: the checkpoint and its collection would otherwise
+        sit on disk indefinitely.
+        """
+        if not _semantic_indexing_enabled(self.config, self.base_id):
+            return
+        checkpoint = await asyncio.to_thread(load_candidate_checkpoint, self._base_storage_path)
+        if checkpoint is None:
+            return
+        if checkpoint.collection != published_collection:
+            await self._delete_candidate_collection(checkpoint.collection)
+        await asyncio.to_thread(delete_candidate_checkpoint, self._base_storage_path)
+        logger.info(
+            "Discarded knowledge candidate superseded by an unchanged published index",
+            base_id=self.base_id,
+            collection=checkpoint.collection,
+            completed=len(checkpoint.completed),
+        )
+
     async def _delete_candidate_collection(self, collection_name: str) -> None:
         try:
             await asyncio.to_thread(self._build_vector_db(collection_name).delete)
@@ -1725,20 +1805,62 @@ class KnowledgeManager:
                 signatures[relative_path] = (signature, file_path)
         return signatures
 
+    def _delete_candidate_vectors(self, knowledge: Knowledge, relative_paths: Sequence[str]) -> None:
+        """Delete vectors for many source paths in one vector-store round trip.
+
+        Agno's ``delete_by_metadata`` wraps values in ``$eq`` and so can only
+        take one path per call, which turns a large source update into one
+        thread hop and one get+delete per file. The collection accepts ``$in``
+        directly, the same seam the vector verification query already uses.
+        """
+        vector_db = knowledge.vector_db
+        if not isinstance(vector_db, ChromaDb):
+            for relative_path in relative_paths:
+                knowledge.remove_vectors_by_metadata({_SOURCE_PATH_KEY: relative_path})
+            return
+        if not vector_db.exists():
+            return
+        collection = vector_db.client.get_collection(name=vector_db.collection_name)
+        for start in range(0, len(relative_paths), _VECTOR_VERIFY_BATCH):
+            batch = list(relative_paths[start : start + _VECTOR_VERIFY_BATCH])
+            collection.delete(where={_SOURCE_PATH_KEY: {"$in": batch}})
+
     async def _drop_candidate_paths(self, run: _CandidateRun, relative_paths: Sequence[str]) -> None:
         """Remove candidate vectors and checkpoint entries for gone or stale paths."""
+        if not relative_paths:
+            return
+        await asyncio.to_thread(self._delete_candidate_vectors, run.knowledge, relative_paths)
         for relative_path in relative_paths:
-            await asyncio.to_thread(run.knowledge.remove_vectors_by_metadata, {_SOURCE_PATH_KEY: relative_path})
             run.completed.pop(relative_path, None)
             run.completed_paths.discard(relative_path)
             run.failed.pop(relative_path, None)
             run.verified.discard(relative_path)
-        if relative_paths:
-            await asyncio.to_thread(
-                append_candidate_journal,
-                self._base_storage_path,
-                removed=tuple(relative_paths),
-            )
+        await asyncio.to_thread(
+            append_candidate_journal,
+            self._base_storage_path,
+            removed=tuple(relative_paths),
+        )
+        run.journal_appends += len(relative_paths)
+
+    async def _restamp_candidate_paths(
+        self,
+        run: _CandidateRun,
+        restamped: Sequence[tuple[str, _FileSignature]],
+    ) -> None:
+        """Adopt new mtimes for files whose content is unchanged."""
+        for relative_path, signature in restamped:
+            run.completed[relative_path] = signature
+        await asyncio.to_thread(
+            append_candidate_journal,
+            self._base_storage_path,
+            completed=tuple(restamped),
+        )
+        run.journal_appends += len(restamped)
+        logger.info(
+            "Kept knowledge candidate vectors whose content is unchanged",
+            base_id=self.base_id,
+            count=len(restamped),
+        )
 
     async def _reconcile_candidate(
         self,
@@ -1756,14 +1878,22 @@ class KnowledgeManager:
         # content changed: a changed file whose re-index later fails must not
         # leave either a stale checkpoint claim or stale vectors behind.
         gone = (run.completed_paths | set(run.failed)) - present
-        changed = {
-            relative_path
-            for relative_path in run.completed_paths & present
-            if run.completed.get(relative_path) != signatures[relative_path][0]
-        }
+        changed: set[str] = set()
+        restamped: list[tuple[str, _FileSignature]] = []
+        for relative_path in run.completed_paths & present:
+            recorded = run.completed.get(relative_path)
+            current = signatures[relative_path][0]
+            if recorded is None or _content_identity(recorded) != _content_identity(current):
+                changed.add(relative_path)
+            elif recorded != current:
+                # Same bytes, new mtime: keep the vectors and adopt the new
+                # stamp so the candidate signature can still match the source.
+                restamped.append((relative_path, current))
         removed = tuple(sorted(gone | changed))
         if removed:
             await self._drop_candidate_paths(run, removed)
+        if restamped:
+            await self._restamp_candidate_paths(run, restamped)
 
         unverified = sorted((run.completed_paths & present) - run.verified)
         missing_vectors = await self._candidate_paths_missing_vectors(run, unverified)
@@ -1848,6 +1978,8 @@ class KnowledgeManager:
             self._last_refresh_error = None
             self._last_file_index_error = None
             self._embedding_retry_count = 0
+            self._embedder_failure_streak = 0
+            self._global_embedder_failure = None
             run = await self._open_candidate_run()
             progress = _CandidateProgress(
                 base_id=self.base_id,
@@ -1924,7 +2056,6 @@ class KnowledgeManager:
                     embedder=run.embedder,
                     on_file_result=_record_file,
                     on_batch_complete=_record_batch,
-                    progress=progress,
                 )
                 progress.completed = len(run.completed_paths)
                 progress.failed = len(run.failed)

@@ -93,7 +93,6 @@ class BatchPrefetchEmbedder(Embedder):
 
     inner: Embedder = field(default_factory=Embedder)
     _cache: dict[str, list[float]] = field(default_factory=dict, init=False, repr=False)
-    _provider_request_count: int = field(default=0, init=False, repr=False)
     _batching_disabled: bool = field(default=False, init=False, repr=False)
     _observed_dimensions: int | None = field(default=None, init=False, repr=False)
 
@@ -101,11 +100,6 @@ class BatchPrefetchEmbedder(Embedder):
         """Mirror the wrapped embedder's dimensions so vector writes stay consistent."""
         self.dimensions = self.inner.dimensions
         self.batch_size = self.inner.batch_size
-
-    @property
-    def provider_request_count(self) -> int:
-        """Return how many provider requests this adapter has issued."""
-        return self._provider_request_count
 
     def supports_batching(self) -> bool:
         """Return whether the wrapped embedder can still embed a batch in one request."""
@@ -151,7 +145,6 @@ class BatchPrefetchEmbedder(Embedder):
         """
         cached = 0
         for text in pending:
-            self._provider_request_count += 1
             try:
                 self._cache[text] = self._validated(self.inner.get_embedding(text))
             except Exception as exc:
@@ -189,7 +182,6 @@ class BatchPrefetchEmbedder(Embedder):
         if not isinstance(inner, _SupportsBatchEmbedding):  # pragma: no cover - guarded by supports_batching
             return self._embed_each_into_cache(pending)
 
-        self._provider_request_count += 1
         try:
             embeddings = inner.get_embeddings_batch(list(pending))
         except Exception as exc:
@@ -227,7 +219,6 @@ class BatchPrefetchEmbedder(Embedder):
         cached = self._cache.get(text)
         if cached is not None:
             return cached
-        self._provider_request_count += 1
         # Validated here too: this is the path Agno's writer actually uses, so
         # skipping it would let an unusable vector reach the collection.
         return self._validated(self.inner.get_embedding(text))
@@ -242,7 +233,6 @@ class BatchPrefetchEmbedder(Embedder):
         cached = self._cache.get(text)
         if cached is not None:
             return cached, None
-        self._provider_request_count += 1
         embedding, usage = self.inner.get_embedding_and_usage(text)
         return self._validated(embedding), usage
 
@@ -251,7 +241,6 @@ class BatchPrefetchEmbedder(Embedder):
         cached = self._cache.get(text)
         if cached is not None:
             return cached
-        self._provider_request_count += 1
         return self._validated(await self.inner.async_get_embedding(text))
 
     async def async_get_embedding_and_usage(self, text: str) -> tuple[list[float], dict[str, Any] | None]:
@@ -259,6 +248,5 @@ class BatchPrefetchEmbedder(Embedder):
         cached = self._cache.get(text)
         if cached is not None:
             return cached, None
-        self._provider_request_count += 1
         embedding, usage = await self.inner.async_get_embedding_and_usage(text)
         return self._validated(embedding), usage

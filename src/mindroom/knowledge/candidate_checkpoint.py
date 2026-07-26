@@ -77,7 +77,11 @@ class CandidateCheckpoint:
     failed: Mapping[str, CandidateFailure] = field(default_factory=dict)
     created_at: str = ""
     updated_at: str = ""
-    schema_version: int = _CANDIDATE_CHECKPOINT_SCHEMA_VERSION
+    #: Journal entries replayed when this checkpoint was loaded. Not persisted:
+    #: it exists so a resumed run inherits the compaction bound instead of
+    #: restarting the count and letting the journal grow without limit across
+    #: repeated hard kills.
+    replayed_journal_entries: int = 0
 
     @property
     def completed_count(self) -> int:
@@ -269,9 +273,15 @@ def load_candidate_checkpoint(base_storage_path: Path) -> CandidateCheckpoint | 
 
     completed = dict(checkpoint.completed)
     failed = dict(checkpoint.failed)
-    for entry in _journal_entries(_candidate_journal_path(base_storage_path)):
+    entries = _journal_entries(_candidate_journal_path(base_storage_path))
+    for entry in entries:
         _apply_journal_entry(entry, completed, failed)
-    return replace(checkpoint, completed=completed, failed=failed)
+    return replace(
+        checkpoint,
+        completed=completed,
+        failed=failed,
+        replayed_journal_entries=len(entries),
+    )
 
 
 def save_candidate_checkpoint(base_storage_path: Path, checkpoint: CandidateCheckpoint) -> CandidateCheckpoint:
@@ -281,7 +291,7 @@ def save_candidate_checkpoint(base_storage_path: Path, checkpoint: CandidateChec
         checkpoint,
         created_at=checkpoint.created_at or now,
         updated_at=now,
-        schema_version=_CANDIDATE_CHECKPOINT_SCHEMA_VERSION,
+        replayed_journal_entries=0,
     )
     base_storage_path.mkdir(parents=True, exist_ok=True)
     write_json_atomic(_candidate_checkpoint_path(base_storage_path), _snapshot_payload(compacted))

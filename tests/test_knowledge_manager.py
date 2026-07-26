@@ -93,6 +93,15 @@ class _Collection:
         ids = [str(index) for index in range(offset, offset + len(selected))]
         return {"ids": ids, "metadatas": [dict(item["metadata"]) for item in selected]}
 
+    def delete(self, *, where: dict[str, object]) -> None:
+        key, condition = next(iter(where.items()))
+        with _VectorDb.lock:
+            _VectorDb.collections[self._name] = [
+                item
+                for item in _VectorDb.collections.get(self._name, [])
+                if not metadata_matches(item["metadata"], key, condition)
+            ]
+
 
 class _Client:
     def get_collection(self, name: str) -> _Collection:

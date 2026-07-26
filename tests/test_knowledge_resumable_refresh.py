@@ -12,6 +12,7 @@ all progress lived in process memory.
 from __future__ import annotations
 
 import asyncio
+import os
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar, Protocol
@@ -109,6 +110,14 @@ class _FakeCollection:
             "metadatas": [dict(record.metadata) for record in selected],
         }
 
+    def delete(self, *, where: dict[str, object]) -> None:
+        key, condition = next(iter(where.items()))
+        _FakeVectorDb.store[self._name] = [
+            record
+            for record in _FakeVectorDb.store.get(self._name, [])
+            if not metadata_matches(record.metadata, key, condition)
+        ]
+
 
 class _FakeClient:
     def get_collection(self, name: str) -> _FakeCollection:
@@ -195,8 +204,12 @@ class _FakeKnowledge:
         return self.vector_db.search(query=query, limit=max_results or self.max_results)
 
 
-class _RecordingEmbedder(Embedder):
-    """Embedder that records every provider request and can inject faults."""
+class _RecordingNonBatchEmbedder(Embedder):
+    """Recording embedder with no batch surface at all, like Ollama.
+
+    The absence of ``get_embeddings_batch`` is the point: a boolean flag cannot
+    model it, because the capability check tests for the method's existence.
+    """
 
     def __init__(self) -> None:
         super().__init__()
@@ -229,6 +242,19 @@ class _RecordingEmbedder(Embedder):
             if queued:
                 raise queued.pop(0)
 
+    def get_embedding(self, text: str) -> list[float]:
+        return self.get_embedding_and_usage(text)[0]
+
+    def get_embedding_and_usage(self, text: str) -> tuple[list[float], dict[str, Any] | None]:
+        self.single_requests.append(text)
+        self._maybe_fail([text])
+        self.embedded_texts.append(text)
+        return [float(len(text)), 1.0], None
+
+
+class _RecordingEmbedder(_RecordingNonBatchEmbedder):
+    """Recording embedder that also advertises multi-input support."""
+
     def get_embeddings_batch(self, texts: list[str]) -> list[list[float]]:
         if not self.supports_batch:
             msg = "batch embedding is disabled for this test"
@@ -246,14 +272,12 @@ class _RecordingEmbedder(Embedder):
         self.embedded_texts.extend(texts)
         return embeddings
 
-    def get_embedding(self, text: str) -> list[float]:
-        return self.get_embedding_and_usage(text)[0]
 
-    def get_embedding_and_usage(self, text: str) -> tuple[list[float], dict[str, Any] | None]:
-        self.single_requests.append(text)
-        self._maybe_fail([text])
-        self.embedded_texts.append(text)
-        return [float(len(text)), 1.0], None
+def _use_non_batching_embedder(monkeypatch: pytest.MonkeyPatch) -> _RecordingNonBatchEmbedder:
+    """Point the manager at a provider that cannot batch at all."""
+    plain = _RecordingNonBatchEmbedder()
+    monkeypatch.setattr(knowledge_manager_module, "create_configured_embedder", lambda *_a, **_k: plain)
+    return plain
 
 
 class _NonBatchingEmbedder(Embedder):
@@ -2008,9 +2032,9 @@ async def test_progress_and_resumable_state_stay_accurate_under_batch_fallback(
     assert summary["completed"] == 6
     assert summary["pending"] == 2
     assert summary["failed"] == 2
-    # Request accounting still reflects real provider traffic under fallback:
-    # one multi-input probe plus one request per remaining chunk.
-    assert summary["embedding_requests"] == embedder.request_count
+    # One multi-input probe, then one request per remaining chunk.
+    assert [len(batch) for batch in embedder.batch_requests if len(batch) > 1] == [8]
+    assert embedder.single_requests
 
     # The recorded state is genuinely resumable: clearing the fault publishes
     # without redoing any of the six files already completed.
@@ -2138,3 +2162,275 @@ async def test_incompatible_checkpoint_never_deletes_a_published_collection(
 
     assert published_collection in _FakeVectorDb.store, "the last good collection was deleted"
     assert run.checkpoint.collection != published_collection
+
+
+@pytest.mark.asyncio
+async def test_mtime_only_change_keeps_completed_vectors(
+    tmp_path: Path,
+    embedder: _RecordingEmbedder,
+) -> None:
+    """A checkout that rewrites mtimes must not destroy completed work.
+
+    The checkpoint's whole premise is that the content digest, not the mtime,
+    decides whether a file still counts as indexed. Comparing the full
+    signature deleted and re-embedded every byte-identical file after any
+    mtime-rewriting checkout, archive restore, or clone.
+    """
+    docs_path = tmp_path / "docs"
+    _write_corpus(docs_path, 5)
+    config = _config(tmp_path, docs_path)
+    runtime_paths = runtime_paths_for(config)
+    original_index = KnowledgeManager._index_file_locked
+
+    async def _fail_last(self: KnowledgeManager, resolved_path: Path, **kwargs: object) -> bool:
+        if resolved_path.name == "doc0004.md":
+            return False
+        return await original_index(self, resolved_path, **kwargs)
+
+    KnowledgeManager._index_file_locked = _fail_last  # type: ignore[method-assign]
+    try:
+        await _manager(config).reindex_all()
+    finally:
+        KnowledgeManager._index_file_locked = original_index  # type: ignore[method-assign]
+
+    checkpoint = load_candidate_checkpoint(_storage_path(config, runtime_paths))
+    assert checkpoint is not None
+    candidate_collection = checkpoint.collection
+    assert len(checkpoint.completed) == 4
+    vectors_before = len(_FakeVectorDb.store[candidate_collection])
+
+    # Same bytes, new mtimes: exactly what git checkout does.
+    for index in range(5):
+        path = docs_path / f"doc{index:04d}.md"
+        stat = path.stat()
+        os.utime(path, ns=(stat.st_atime_ns + 10**9, stat.st_mtime_ns + 10**9))
+    embedder.embedded_texts.clear()
+
+    assert await _manager(config).reindex_all() == 1, "only the previously failed file is indexed"
+
+    for index in range(4):
+        assert embedder.embedded_count(f"content {index}") == 0, "an mtime change re-embedded unchanged content"
+    assert len(_FakeVectorDb.store[candidate_collection]) == vectors_before + 1
+    state = _published_state(config, runtime_paths)
+    assert state is not None
+    assert state.status == "complete"
+    assert state.collection == candidate_collection
+
+
+@pytest.mark.asyncio
+async def test_globally_failing_embedder_stops_a_non_batching_refresh(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A rejected credential must stop the pass even with no batch surface.
+
+    Providers without ``get_embeddings_batch`` skip prefetch entirely, so the
+    batch-path stop never runs and every remaining file issued the same doomed
+    request.
+    """
+    docs_path = tmp_path / "docs"
+    _write_corpus(docs_path, 60)
+    config = _config(tmp_path, docs_path)
+    runtime_paths = runtime_paths_for(config)
+    embedder = _use_non_batching_embedder(monkeypatch)
+    embedder.fail_everything = EmbedderRequestError("embedder authentication failed (HTTP 401)")
+
+    manager = _manager(config)
+    await manager.reindex_all()
+
+    assert manager._last_refresh_error is not None
+    assert "embedder authentication failed (HTTP 401)" in manager._last_refresh_error
+    assert _published_state(config, runtime_paths) is None
+    assert embedder.request_count <= 4, f"issued one doomed request per file: {embedder.request_count}"
+    assert load_candidate_checkpoint(_storage_path(config, runtime_paths)) is not None
+
+
+@pytest.mark.asyncio
+async def test_repeated_non_auth_rejections_stop_the_refresh(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An invalid model rejects everything; it must not be retried per file."""
+    monkeypatch.setattr(knowledge_manager_module, "_GLOBAL_EMBEDDER_FAILURE_STREAK", 5)
+    docs_path = tmp_path / "docs"
+    _write_corpus(docs_path, 60)
+    config = _config(tmp_path, docs_path)
+    embedder = _use_non_batching_embedder(monkeypatch)
+    embedder.fail_everything = EmbedderRequestError("embedder request failed (HTTP 404)")
+
+    manager = _manager(config)
+    await manager.reindex_all()
+
+    assert embedder.request_count <= 12, f"issued one doomed request per file: {embedder.request_count}"
+    assert manager._global_embedder_failure is not None
+
+
+@pytest.mark.asyncio
+async def test_a_few_bad_files_do_not_stop_an_otherwise_healthy_refresh(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The global-failure stop must not fire for isolated per-file rejections."""
+    docs_path = tmp_path / "docs"
+    _write_corpus(docs_path, 12)
+    config = _config(tmp_path, docs_path)
+    runtime_paths = runtime_paths_for(config)
+    embedder = _use_non_batching_embedder(monkeypatch)
+    for index in (3, 7):
+        embedder.failures[f"content {index}"] = [
+            EmbedderRequestError("embedder request failed (HTTP 422)") for _ in range(5)
+        ]
+
+    manager = _manager(config)
+    await manager.reindex_all()
+
+    assert manager._global_embedder_failure is None
+    checkpoint = load_candidate_checkpoint(_storage_path(config, runtime_paths))
+    assert checkpoint is not None
+    assert set(checkpoint.failed) == {"doc0003.md", "doc0007.md"}
+    assert len(checkpoint.completed) == 10
+
+
+@pytest.mark.asyncio
+async def test_candidate_path_removal_is_batched(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Dropping many paths must not cost one vector-store round trip each."""
+    docs_path = tmp_path / "docs"
+    _write_corpus(docs_path, 40)
+    config = _config(tmp_path, docs_path)
+    runtime_paths = runtime_paths_for(config)
+    original_index = KnowledgeManager._index_file_locked
+
+    async def _fail_last(self: KnowledgeManager, resolved_path: Path, **kwargs: object) -> bool:
+        if resolved_path.name == "doc0039.md":
+            return False
+        return await original_index(self, resolved_path, **kwargs)
+
+    KnowledgeManager._index_file_locked = _fail_last  # type: ignore[method-assign]
+    try:
+        await _manager(config).reindex_all()
+    finally:
+        KnowledgeManager._index_file_locked = original_index  # type: ignore[method-assign]
+
+    # Rewrite every file's content so reconciliation must drop all 39 entries.
+    for index in range(39):
+        (docs_path / f"doc{index:04d}.md").write_text(f"rewritten {index}", encoding="utf-8")
+
+    # Count every vector-store deletion route, so a per-path loop through
+    # remove_vectors_by_metadata is caught as readily as a per-path $in call.
+    deletes = {"count": 0}
+    original_delete = _FakeCollection.delete
+    original_remove = _FakeKnowledge.remove_vectors_by_metadata
+
+    def _counting_delete(self: _FakeCollection, *, where: dict[str, object]) -> None:
+        deletes["count"] += 1
+        original_delete(self, where=where)
+
+    def _counting_remove(self: _FakeKnowledge, metadata: dict[str, Any]) -> bool:
+        deletes["count"] += 1
+        return original_remove(self, metadata)
+
+    monkeypatch.setattr(_FakeCollection, "delete", _counting_delete)
+    monkeypatch.setattr(_FakeKnowledge, "remove_vectors_by_metadata", _counting_remove)
+
+    assert await _manager(config).reindex_all() == 40
+
+    # 39 dropped paths must not cost 39 round trips; the upsert path still
+    # clears each file it rewrites, so allow one per re-indexed file plus a
+    # small number of batched deletes.
+    assert deletes["count"] <= 45, f"one delete per dropped path instead of batched: {deletes['count']}"
+    assert _published_state(config, runtime_paths) is not None
+
+
+@pytest.mark.asyncio
+async def test_journal_compaction_bound_survives_restart(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A resumed run inherits the journal it replayed, so it cannot grow forever."""
+    monkeypatch.setattr(knowledge_manager_module, "_CANDIDATE_JOURNAL_COMPACT_ENTRIES", 10)
+    docs_path = tmp_path / "docs"
+    _write_corpus(docs_path, 8)
+    config = _config(tmp_path, docs_path)
+    runtime_paths = runtime_paths_for(config)
+    storage = _storage_path(config, runtime_paths)
+    original_index = KnowledgeManager._index_file_locked
+
+    async def _fail_last(self: KnowledgeManager, resolved_path: Path, **kwargs: object) -> bool:
+        if resolved_path.name == "doc0007.md":
+            return False
+        return await original_index(self, resolved_path, **kwargs)
+
+    KnowledgeManager._index_file_locked = _fail_last  # type: ignore[method-assign]
+    try:
+        await _manager(config).reindex_all()
+        # Simulate a hard kill: journal entries exist with no compaction.
+        append_candidate_journal(storage, removed=[f"ghost{index}.md" for index in range(9)])
+
+        checkpoint = load_candidate_checkpoint(storage)
+        assert checkpoint is not None
+        assert checkpoint.replayed_journal_entries == 9
+
+        run = await _manager(config)._open_candidate_run()
+        assert run.journal_appends == 9, "a resumed run restarted the compaction count"
+    finally:
+        KnowledgeManager._index_file_locked = original_index  # type: ignore[method-assign]
+
+
+@pytest.mark.asyncio
+async def test_unchanged_publish_discards_an_orphaned_candidate(
+    tmp_path: Path,
+) -> None:
+    """An interrupted forced rebuild must not leave candidate state behind forever.
+
+    When the next scheduled refresh finds the source unchanged it republishes
+    the existing index and returns before the candidate is ever opened, so no
+    cleanup path was reachable.
+    """
+    docs_path = tmp_path / "docs"
+    _write_corpus(docs_path, 3)
+    config = _config(tmp_path, docs_path)
+    runtime_paths = runtime_paths_for(config)
+    await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+    published_collection = _published_state(config, runtime_paths).collection
+
+    # An interrupted forced rebuild: candidate state on disk, source unchanged.
+    orphan = f"{published_collection}_orphan"
+    _FakeVectorDb.store[orphan] = []
+    save_candidate_checkpoint(
+        _storage_path(config, runtime_paths),
+        CandidateCheckpoint(
+            collection=orphan,
+            settings=_manager(config)._indexing_settings,
+            completed={"doc0000.md": (1, 1, "digest")},
+        ),
+    )
+
+    result = await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+
+    assert result.index_published is True
+    assert load_candidate_checkpoint(_storage_path(config, runtime_paths)) is None, "orphan checkpoint survived"
+    assert orphan not in _FakeVectorDb.store, "orphan collection survived"
+    assert published_collection in _FakeVectorDb.store
+
+
+def test_prefetch_text_is_bounded_by_bytes_not_only_file_count(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Peak prefetch memory must not scale with how large the batch's files are."""
+    monkeypatch.setattr(knowledge_manager_module, "_MAX_PREFETCH_TEXT_BYTES", 4_000)
+    docs_path = tmp_path / "docs"
+    docs_path.mkdir()
+    files = []
+    for index in range(20):
+        path = docs_path / f"big{index}.md"
+        path.write_text("x" * 2_000, encoding="utf-8")
+        files.append(path)
+    config = _config(tmp_path, docs_path, chunk_size=100_000)
+
+    texts = _manager(config)._chunk_texts_for_batch(files)
+
+    total_bytes = sum(len(text.encode("utf-8")) for text in texts)
+    assert texts, "prefetch produced nothing at all"
+    assert total_bytes <= 4_000 + 2_000, f"prefetch held {total_bytes} bytes past its budget"
+    assert len(texts) < len(files), "every file was read despite the byte budget"
