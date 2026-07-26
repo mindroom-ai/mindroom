@@ -5,6 +5,7 @@
 - PR: `https://github.com/mindroom-ai/mindroom/pull/1641`
 - Branch: `fix/thread-edit-integrity`
 - Rejected local, remote, and GitHub head: `a0f30bc3b96cf753d63716763fa898f2746d2043`
+- Current pushed implementation head: `5cc3afb97eeeb7f895fc4a0c835aef1309606f42`
 - Current base and merge base: `858282afc77adb480fa06cd9e4057d511ff861d5`
 - Never amend, force-push, or merge.
 - Verify `Bas Nijholt <bas@nijho.lt>` before every commit.
@@ -33,6 +34,7 @@ Strict TDD evidence:
 - Nine owning cache/history/snapshot/approval/media files pass `801/801` across SQLite and PostgreSQL.
 - Ruff, formatting, Tach dependencies/interfaces, and `git diff --check` pass.
 - Current production correction is `+118/-21`, net `+97`; tests are `+274/-5`, net `+269`.
+- Commit hooks pass, including Ruff, formatting, `ty`, Vulture, Tach, and module privacy.
 
 Exact `a0f30bc3` evidence is stale for the next code head:
 
