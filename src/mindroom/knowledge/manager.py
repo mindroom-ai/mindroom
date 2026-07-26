@@ -1675,6 +1675,16 @@ class KnowledgeManager:
         # the published collection, or delete it as an incompatible candidate.
         published_collections = {name for name in (published_collection, live_collection) if name is not None}
 
+        if checkpoint is not None and not cleanup_is_safe:
+            # The checkpoint may name the live collection whose identity was
+            # lost with the unreadable metadata. Never resume or delete it:
+            # start a fresh candidate and leave every unknown collection alone.
+            logger.warning(
+                "Ignoring knowledge candidate checkpoint because published metadata is unreadable",
+                base_id=self.base_id,
+                collection=checkpoint.collection,
+            )
+            checkpoint = None
         if checkpoint is not None and checkpoint.collection in published_collections:
             # The candidate already became the published index and the process
             # died before its checkpoint was cleaned up. Writing into it again
