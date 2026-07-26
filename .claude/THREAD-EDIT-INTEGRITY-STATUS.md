@@ -30,7 +30,7 @@ The RED matrix failed 14 deterministic cases before production changes.
 Commit `e3c38f43d` centralizes final top-level-plus-bundled identity reconciliation and makes all 18 new cases pass across full resolution, room scan, generic visible resolution, SQLite, and PostgreSQL.
 The owning suites passed for `test_thread_history.py`, `test_event_cache.py`, `test_stale_stream_cleanup.py`, `test_event_cache_backends.py`, and `test_matrix_cache_interaction_contract.py`.
 Ruff, ty, Tach, pre-commit on changed files, and `git diff --check` pass.
-Production delta for this correction is net `+37` lines; the cache redaction helper moved to the shared replacement seam.
+Production delta for this correction is `+166/-66`, net `+100`; the cache redaction helper moved to the shared replacement seam.
 
 ## Final gates
 
