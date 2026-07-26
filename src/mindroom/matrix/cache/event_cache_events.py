@@ -25,8 +25,9 @@ from mindroom.matrix.sidecar_content import sidecar_mxc_url
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 
-_EDITABLE_EVENT_TYPES = frozenset({"m.room.message", "io.mindroom.tool_approval"})
-_REDACTION_DEPENDENT_EDIT_TYPES = _EDITABLE_EVENT_TYPES | {"m.room.encrypted"}
+_REPLACEMENT_RELATION_EVENT_TYPES = frozenset(
+    {"io.mindroom.tool_approval", "m.room.encrypted", "m.room.message"},
+)
 
 type _CachedEventValue = tuple[str, dict[str, Any]]
 type _CachedObservation = Literal["accept", "ignore", "conflict"]
@@ -406,7 +407,7 @@ def _direct_redaction_candidate_ids(event_id: str, event: dict[str, Any], room_i
     """Return tombstones that suppress this event rather than only its bundled preview."""
     original_event_id = EventInfo.from_event(event).original_event_id
     if (
-        event.get("type") in _REDACTION_DEPENDENT_EDIT_TYPES
+        event.get("type") in _REPLACEMENT_RELATION_EVENT_TYPES
         and event_source_is_timeline_in_room(event, room_id)
         and isinstance(original_event_id, str)
     ):
@@ -505,8 +506,8 @@ def _with_thread_root_self_rows(thread_rows: list[_EventThreadRow]) -> list[_Eve
 
 
 def _event_edit_row(room_id: str, event: SerializedCachedEvent) -> _EventEditRow | None:
-    """Return an edit-index row when one cached event is an editable replacement."""
-    if event.event.get("type") not in _EDITABLE_EVENT_TYPES or not event_source_is_timeline_in_room(
+    """Return an edit-index row when one cached event exposes a replacement relation."""
+    if event.event.get("type") not in _REPLACEMENT_RELATION_EVENT_TYPES or not event_source_is_timeline_in_room(
         event.event,
         room_id,
     ):

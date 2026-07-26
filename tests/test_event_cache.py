@@ -3649,6 +3649,57 @@ async def test_duplicate_original_bundles_quarantine_conflicting_edit_identity(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("arrival_order", [("opaque", "clear"), ("clear", "opaque")])
+@pytest.mark.parametrize("timestamps_match", [False, True])
+async def test_duplicate_original_bundles_validate_identity_before_surface_projection(
+    event_cache: ConversationEventCache,
+    *,
+    arrival_order: tuple[str, str],
+    timestamps_match: bool,
+) -> None:
+    """Encrypted-to-clear upgrades require one immutable timestamp before projection."""
+    room_id = "!room:localhost"
+    original_id = "$original:localhost"
+    edit_id = "$edit:localhost"
+    opaque_edit = _opaque_payload(edit_id, origin_server_ts=2000 if timestamps_match else 3000)
+    opaque_edit["room_id"] = room_id
+    opaque_edit["content"]["m.relates_to"] = {
+        "rel_type": "m.replace",
+        "event_id": original_id,
+    }
+    clear_edit = _clear_payload(
+        edit_id,
+        body="Canonical edit",
+        room_id=room_id,
+        edit_of=original_id,
+        origin_server_ts=2000,
+    )
+    payloads = {}
+    for name, bundled_edit in (("opaque", opaque_edit), ("clear", clear_edit)):
+        original = _clear_payload(original_id, body="Original", room_id=room_id)
+        original["unsigned"] = {"m.relations": {"m.replace": bundled_edit}}
+        payloads[name] = original
+
+    for name in arrival_order:
+        await event_cache.store_event(original_id, room_id, payloads[name])
+
+    cached = await event_cache.get_event(room_id, original_id)
+    assert cached is not None
+    latest = await event_cache.get_latest_edit(
+        room_id,
+        cached,
+        validator=valid_room_message_replacement,
+    )
+    if timestamps_match:
+        assert latest is not None
+        assert latest["event_id"] == edit_id
+        assert latest["type"] == "m.room.message"
+    else:
+        assert latest is None
+        assert await event_cache.redacted_event_ids(room_id, {edit_id}) == {edit_id}
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("arrival_order", [("valid", "malformed"), ("malformed", "valid")])
 async def test_duplicate_approval_bundles_fall_back_from_malformed_newest(
     event_cache: ConversationEventCache,
@@ -6215,10 +6266,13 @@ async def test_redaction_removes_event_thread_rows_and_blocks_late_edit_resurrec
 
 
 @pytest.mark.asyncio
-async def test_redacted_original_blocks_late_encrypted_edit(
+@pytest.mark.parametrize("edit_before_redaction", [False, True])
+async def test_redacted_original_blocks_encrypted_dependent_edit(
     event_cache: ConversationEventCache,
+    *,
+    edit_before_redaction: bool,
 ) -> None:
-    """An encrypted edit's cleartext relation must respect its original's tombstone."""
+    """An encrypted edit's cleartext relation must follow its original's tombstone lifecycle."""
     room_id = "!room:localhost"
     original_id = "$original:localhost"
     edit_id = "$encrypted-edit:localhost"
@@ -6231,11 +6285,21 @@ async def test_redacted_original_blocks_late_encrypted_edit(
     }
 
     await event_cache.store_event(original_id, room_id, original)
-    await event_cache.redact_event(room_id, original_id)
-    await event_cache.store_event(edit_id, room_id, encrypted_edit)
+    if edit_before_redaction:
+        await event_cache.store_event(edit_id, room_id, encrypted_edit)
+        assert await event_cache.get_event(room_id, edit_id) == encrypted_edit
+        assert await event_cache.redact_event(room_id, original_id)
+    else:
+        assert await event_cache.redact_event(room_id, original_id)
+        await event_cache.store_event(edit_id, room_id, encrypted_edit)
 
     assert await event_cache.get_event(room_id, edit_id) is None
     assert await event_cache.get_thread_id_for_event(room_id, edit_id) is None
+    if edit_before_redaction:
+        assert await event_cache.redacted_event_ids(room_id, {original_id, edit_id}) == {
+            original_id,
+            edit_id,
+        }
 
 
 @pytest.mark.asyncio

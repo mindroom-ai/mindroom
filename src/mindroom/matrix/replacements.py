@@ -182,13 +182,17 @@ def _with_preserved_valid_bundle(
     if validator is None:
         selected_bundle: Mapping[str, Any] | None = existing_bundle
     else:
-        valid_candidates_by_id, bundled_conflicts = _replacement_candidates_by_identity(
-            [bundled for bundled in (*existing_candidates, *candidate_candidates) if validator(bundled)],
+        candidates_by_id, bundled_conflicts = _replacement_candidates_by_identity(
+            (*existing_candidates, *candidate_candidates),
             room_id=room_id,
         )
         conflicting_event_ids.update(bundled_conflicts)
         valid_candidates = sorted(
-            (bundled for event_id, bundled in valid_candidates_by_id.items() if event_id not in bundled_conflicts),
+            (
+                bundled
+                for event_id, bundled in candidates_by_id.items()
+                if event_id not in bundled_conflicts and validator(bundled)
+            ),
             key=itemgetter("origin_server_ts", "event_id"),
             reverse=True,
         )

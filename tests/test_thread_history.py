@@ -2195,6 +2195,72 @@ class TestThreadHistory:
         ]
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("arrival_order", [("opaque", "clear"), ("clear", "opaque")])
+    @pytest.mark.parametrize("timestamps_match", [False, True])
+    async def test_duplicate_original_bundles_validate_identity_before_projection(
+        self,
+        arrival_order: tuple[str, str],
+        timestamps_match: bool,
+    ) -> None:
+        """Full resolution must reject an encrypted-to-clear timestamp contradiction."""
+        room_id = "!room:localhost"
+        root_id = "$thread_root"
+        edit_id = "$edit"
+        sender = "@alice:localhost"
+        opaque_edit = {
+            "event_id": edit_id,
+            "room_id": room_id,
+            "sender": sender,
+            "origin_server_ts": 2000 if timestamps_match else 3000,
+            "type": "m.room.encrypted",
+            "content": {
+                "algorithm": "m.megolm.v1.aes-sha2",
+                "ciphertext": "opaque",
+                "device_id": "DEVICE",
+                "session_id": "SESSION",
+                "m.relates_to": {"rel_type": "m.replace", "event_id": root_id},
+            },
+        }
+        clear_edit = {
+            "event_id": edit_id,
+            "room_id": room_id,
+            "sender": sender,
+            "origin_server_ts": 2000,
+            "type": "m.room.message",
+            "content": {
+                "body": "* Canonical edit",
+                "msgtype": "m.text",
+                "m.new_content": {"body": "Canonical edit", "msgtype": "m.text"},
+                "m.relates_to": {"rel_type": "m.replace", "event_id": root_id},
+            },
+        }
+        roots = {}
+        for name, bundled_edit in (("opaque", opaque_edit), ("clear", clear_edit)):
+            roots[name] = {
+                "event_id": root_id,
+                "room_id": room_id,
+                "sender": sender,
+                "origin_server_ts": 1000,
+                "type": "m.room.message",
+                "content": {"body": "Original", "msgtype": "m.text"},
+                "unsigned": {"m.relations": {"m.replace": bundled_edit}},
+            }
+
+        resolution = await _resolve_thread_history_from_event_sources_timed(
+            AsyncMock(),
+            room_id=room_id,
+            thread_id=root_id,
+            event_sources=[roots[name] for name in arrival_order],
+            hydrate_sidecars=False,
+            event_cache=_event_cache(),
+        )
+
+        expected = (root_id, "Canonical edit", edit_id) if timestamps_match else (root_id, "Original", root_id)
+        assert [(message.event_id, message.body, message.latest_event_id) for message in resolution.messages] == [
+            expected,
+        ]
+
+    @pytest.mark.asyncio
     async def test_thread_resolution_ignores_durably_redacted_bundled_edit(
         self,
         event_cache: ConversationEventCache,
