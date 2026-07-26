@@ -189,6 +189,39 @@ def test_sustained_limited_responses_reset_once_until_a_delta_certifies(tmp_path
     assert [decision.reset_client_token for decision in decisions] == [True, False, False, False]
 
 
+def test_callback_rejected_certification_does_not_rearm_the_replay_guard(tmp_path: Path) -> None:
+    """A decision certified but rejected for callback failure must not re-arm the replay."""
+    trust, _cache, runtime = _trust(tmp_path)
+    trust.state = SyncTrustState.CERTIFIED
+
+    first = trust.certify_response(
+        next_batch="s_partial",
+        cache_result=SyncCacheWriteResult(
+            complete=False,
+            limited_room_ids=("!room:localhost",),
+        ),
+        first_sync=False,
+    )
+    runtime.mark_callback_failed()
+    trust.certify_response(
+        next_batch="s_complete",
+        cache_result=SyncCacheWriteResult(complete=True),
+        first_sync=False,
+    )
+    final = trust.certify_response(
+        next_batch="s_partial_again",
+        cache_result=SyncCacheWriteResult(
+            complete=False,
+            limited_room_ids=("!room:localhost",),
+        ),
+        first_sync=False,
+    )
+
+    assert first.reset_client_token is True
+    assert trust.state is SyncTrustState.UNCERTAIN
+    assert final.reset_client_token is False
+
+
 @pytest.mark.asyncio
 async def test_cold_limited_initial_window_does_not_reset_again(tmp_path: Path) -> None:
     """A since-less startup window may be limited without replaying itself forever."""
