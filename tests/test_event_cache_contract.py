@@ -300,6 +300,66 @@ class TestConversationEventCacheContract:
         assert await event_cache.get_thread_cache_gap(room_id, thread_id) is None
 
     @pytest.mark.asyncio
+    async def test_room_scoped_gap_reaches_every_thread_holding_a_snapshot(
+        self,
+        event_cache: ConversationEventCache,
+    ) -> None:
+        """A room-scoped gap must mark every thread with a snapshot, and nothing outside that room.
+
+        This is the wildcard-thread marker. It is a fan-out rather than a room-level flag, so the
+        thing that can silently go wrong is scope: a thread that holds a snapshot but escapes the
+        fan-out reads as complete across a gap with no marker at all. Narrowing the statement past
+        (principal, room) is exactly that bug, so pin both directions.
+        """
+        room_id = "!gapped:localhost"
+        other_room_id = "!untouched:localhost"
+        thread_ids = ["$one:localhost", "$two:localhost", "$three:localhost"]
+        for thread_id in thread_ids:
+            await replace_thread_unconditionally(
+                event_cache,
+                room_id,
+                thread_id,
+                [_message_event(thread_id, 1)],
+            )
+        other_thread_id = "$other:localhost"
+        await replace_thread_unconditionally(
+            event_cache,
+            other_room_id,
+            other_thread_id,
+            [_message_event(other_thread_id, 1)],
+        )
+        other_principal = event_cache.for_principal("@other:localhost")
+        await replace_thread_unconditionally(
+            other_principal,
+            room_id,
+            thread_ids[0],
+            [_message_event(thread_ids[0], 1)],
+        )
+        for thread_id in thread_ids:
+            assert await event_cache.get_thread_cache_gap(room_id, thread_id) is None
+
+        await event_cache.mark_room_threads_stale(room_id, reason="limited_sync_timeline")
+
+        for thread_id in thread_ids:
+            gap = await event_cache.get_thread_cache_gap(room_id, thread_id)
+            assert gap is not None, f"{thread_id} holds a snapshot but escaped the room-scoped fan-out"
+            assert gap.gap_reason == "limited_sync_timeline"
+            assert await event_cache.get_thread_events(room_id, thread_id) is not None
+
+        assert await event_cache.get_thread_cache_gap(other_room_id, other_thread_id) is None
+        assert await other_principal.get_thread_cache_gap(room_id, thread_ids[0]) is None
+
+        # A full refetch of one thread clears only that thread's share of the room-scoped gap.
+        await replace_thread_unconditionally(
+            event_cache,
+            room_id,
+            thread_ids[0],
+            [_message_event(thread_ids[0], 1)],
+        )
+        assert await event_cache.get_thread_cache_gap(room_id, thread_ids[0]) is None
+        assert await event_cache.get_thread_cache_gap(room_id, thread_ids[1]) is not None
+
+    @pytest.mark.asyncio
     async def test_redaction_tombstones_original_edits_and_late_replays(
         self,
         event_cache: ConversationEventCache,
