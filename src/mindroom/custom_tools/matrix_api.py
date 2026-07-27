@@ -668,9 +668,10 @@ class MatrixApiTools(Toolkit):
         event_type: str,
         event_id: str,
         content: dict[str, object],
+        requires_conversation_cache_write: bool,
     ) -> None:
-        """Record a successful room-message send in the local conversation cache."""
-        if event_type != "m.room.message":
+        """Record a successful threaded room-message send in the local conversation cache."""
+        if event_type != "m.room.message" or not requires_conversation_cache_write:
             return
         context.conversation_cache.notify_outbound_message(
             room_id,
@@ -679,13 +680,13 @@ class MatrixApiTools(Toolkit):
         )
 
     @staticmethod
-    async def _redaction_thread_resolution_error(
+    async def _resolve_redaction_cache_write_requirement(
         context: ToolRuntimeContext,
         *,
         room_id: str,
         event_id: str,
-    ) -> str | None:
-        """Return a fail-closed error when redaction thread impact cannot be resolved."""
+    ) -> tuple[bool, str | None]:
+        """Return redaction bookkeeping intent plus an optional fail-closed error."""
         try:
             thread_impact = await resolve_redaction_thread_impact_for_client(
                 context.client,
@@ -700,7 +701,7 @@ class MatrixApiTools(Toolkit):
                 target_event_id=event_id,
                 error=str(exc),
             )
-            return "Failed to resolve redaction target thread mapping."
+            return False, "Failed to resolve redaction target thread mapping."
 
         if thread_impact.state is MutationThreadImpactState.UNKNOWN:
             logger.warning(
@@ -709,9 +710,9 @@ class MatrixApiTools(Toolkit):
                 target_event_id=event_id,
                 error="thread impact unknown",
             )
-            return "Failed to resolve redaction target thread mapping."
+            return False, "Failed to resolve redaction target thread mapping."
 
-        return None
+        return thread_impact.state is MutationThreadImpactState.THREADED, None
 
     async def _send_event(  # noqa: PLR0911
         self,
@@ -764,6 +765,7 @@ class MatrixApiTools(Toolkit):
                     event_type=normalized_event_type,
                     message="Failed to resolve threaded Matrix message send target.",
                 )
+            requires_conversation_cache_write = thread_impact.state is MutationThreadImpactState.THREADED
         except Exception as exc:
             logger.warning(
                 "Failed to resolve threaded send_event target for matrix_api",
@@ -830,6 +832,7 @@ class MatrixApiTools(Toolkit):
                 event_type=normalized_event_type,
                 event_id=response.event_id,
                 content=normalized_content,
+                requires_conversation_cache_write=requires_conversation_cache_write,
             )
             self._audit_write(
                 context=context,
@@ -1115,7 +1118,10 @@ class MatrixApiTools(Toolkit):
 
         assert normalized_event_id is not None
 
-        thread_resolution_error = await self._redaction_thread_resolution_error(
+        (
+            requires_conversation_cache_write,
+            thread_resolution_error,
+        ) = await self._resolve_redaction_cache_write_requirement(
             context,
             room_id=room_id,
             event_id=normalized_event_id,
@@ -1180,10 +1186,11 @@ class MatrixApiTools(Toolkit):
             )
 
         if isinstance(response, nio.RoomRedactResponse):
-            context.conversation_cache.notify_outbound_redaction(
-                room_id,
-                normalized_event_id,
-            )
+            if requires_conversation_cache_write:
+                context.conversation_cache.notify_outbound_redaction(
+                    room_id,
+                    normalized_event_id,
+                )
             self._audit_write(
                 context=context,
                 room_id=room_id,
