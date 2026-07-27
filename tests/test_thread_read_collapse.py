@@ -389,6 +389,100 @@ class TestTheSenderRuleSurvivesACrossThreadOriginal:
         assert "$author-edit" in returned_ids
 
 
+class TestSingleEventReadObeysTheSameSenderRule:
+    """``get_latest_edit`` and the collapsed thread read must not disagree about one message.
+
+    They read the same cache and are both used to render the same event. The thread read applies
+    the same-sender rule; the single-event projection used to call ``get_latest_edit`` with no
+    sender, so the newest edit from anyone won and that path served a foreign body under the
+    author's event.
+    """
+
+    @pytest.mark.asyncio
+    async def test_a_foreign_edit_is_not_served_as_the_latest_edit(
+        self,
+        event_cache: ConversationEventCache,
+    ) -> None:
+        """Asking for one event's latest edit as its author excludes everyone else's."""
+        author = "@author:localhost"
+        attacker = "@attacker:localhost"
+        await _seed_thread(
+            event_cache,
+            [
+                _message_event(_THREAD_ID, 1_000, sender=author),
+                _message_event("$victim", 2_000, sender=author, body="real", thread_id=_THREAD_ID),
+                _message_event("$author-edit", 3_000, sender=author, body="author edit", edit_of="$victim"),
+                _message_event("$forged", 9_000, sender=attacker, body="attacker text", edit_of="$victim"),
+            ],
+        )
+
+        scoped = await event_cache.get_latest_edit(_ROOM_ID, "$victim", sender=author)
+        assert scoped is not None
+        assert scoped["event_id"] == "$author-edit", "a foreign replacement was served as the latest edit"
+
+        read = await event_cache.get_thread_events(_ROOM_ID, _THREAD_ID)
+        assert read is not None
+        assert _winning_edit_ids_by_original(read)["$victim"] == scoped["event_id"], (
+            "the single-event read and the collapsed thread read disagree about this message"
+        )
+
+    @pytest.mark.asyncio
+    async def test_equal_timestamps_break_the_same_way_as_the_collapsed_read(
+        self,
+        event_cache: ConversationEventCache,
+    ) -> None:
+        """Same-timestamp edits resolve by event ID in both reads, not by insertion order."""
+        author = "@author:localhost"
+        await _seed_thread(
+            event_cache,
+            [
+                _message_event(_THREAD_ID, 1_000, sender=author),
+                _message_event("$victim", 2_000, sender=author, thread_id=_THREAD_ID),
+                # Inserted so write_seq order is the opposite of event-ID order.
+                _message_event("$zzz", 3_000, sender=author, body="zzz", edit_of="$victim"),
+                _message_event("$aaa", 3_000, sender=author, body="aaa", edit_of="$victim"),
+            ],
+        )
+
+        latest = await event_cache.get_latest_edit(_ROOM_ID, "$victim", sender=author)
+        read = await event_cache.get_thread_events(_ROOM_ID, _THREAD_ID)
+        assert latest is not None
+        assert read is not None
+
+        assert latest["event_id"] == "$zzz", "the tie broke on insertion order, not event ID"
+        assert _winning_edit_ids_by_original(read)["$victim"] == latest["event_id"]
+
+    @pytest.mark.asyncio
+    async def test_the_single_event_projection_does_not_render_a_foreign_edit(
+        self,
+        event_cache: ConversationEventCache,
+    ) -> None:
+        """The seam that actually served the foreign body, not just the cache API beneath it."""
+        from mindroom.matrix.conversation_cache import _apply_cached_latest_edit  # noqa: PLC0415
+
+        author = "@author:localhost"
+        attacker = "@attacker:localhost"
+        original = _message_event("$victim", 2_000, sender=author, body="real", thread_id=_THREAD_ID)
+        await _seed_thread(
+            event_cache,
+            [
+                _message_event(_THREAD_ID, 1_000, sender=author),
+                original,
+                _message_event("$forged", 9_000, sender=attacker, body="attacker text", edit_of="$victim"),
+            ],
+        )
+
+        projected = await _apply_cached_latest_edit(
+            dict(original),
+            room_id=_ROOM_ID,
+            client=cast("nio.AsyncClient", None),
+            event_cache=event_cache,
+            expected_membership_epoch=await event_cache.room_membership_epoch(_ROOM_ID),
+        )
+
+        assert projected["content"]["body"] == "real", "the single-event projection rendered someone else's replacement"
+
+
 class TestRawEventIdsStayVisibleToBookkeeping:
     """Collapsing hides superseded edits from the visible read, not from the database.
 

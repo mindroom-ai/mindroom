@@ -300,10 +300,15 @@ async def _apply_cached_latest_edit(
 
     event_info = EventInfo.from_event(event_source)
     event_id = event_source.get("event_id")
-    if event_info.is_edit or not isinstance(event_id, str) or not event_id:
+    sender = event_source.get("sender")
+    if event_info.is_edit or not isinstance(event_id, str) or not event_id or not isinstance(sender, str):
         return event_source
 
-    latest_edit_source = await event_cache.get_latest_edit(room_id, event_id)
+    # Scoped to this event's own sender. A replacement is only legitimate from the sender of the
+    # event it replaces, and without this the newest edit from anyone wins - so this path would
+    # serve someone else's text under the author's event, while the collapsed thread read of the
+    # same cache correctly refuses it.
+    latest_edit_source = await event_cache.get_latest_edit(room_id, event_id, sender=sender)
     if latest_edit_source is None:
         return event_source
 

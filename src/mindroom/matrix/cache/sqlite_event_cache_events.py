@@ -177,7 +177,7 @@ async def _load_latest_edit_row(
     original_event_id: str,
     sender: str | None,
 ) -> CachedEventRow | None:
-    sender_predicate = "" if sender is None else "AND json_extract(events.event_json, '$.sender') = ?"
+    sender_predicate = "" if sender is None else "AND events.sender = ?"
     parameters = (principal_id, room_id, original_event_id, *((sender,) if sender is not None else ()))
     cursor = await db.execute(
         f"""
@@ -191,7 +191,7 @@ async def _load_latest_edit_row(
           AND event_edits.room_id = ?
           AND event_edits.original_event_id = ?
           {sender_predicate}
-        ORDER BY event_edits.origin_server_ts DESC, events.write_seq DESC
+        ORDER BY event_edits.origin_server_ts DESC, event_edits.edit_event_id DESC
         LIMIT 1
         """,  # noqa: S608
         parameters,
