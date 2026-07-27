@@ -373,7 +373,7 @@ async def _assert_thread_lookup_behavior(
     root_event: dict[str, object],
     reply_event: dict[str, object],
 ) -> None:
-    await _replace_thread(cache, room_id, thread_id, [reply_event, root_event], validated_at=100.0)
+    await _replace_thread(cache, room_id, thread_id, [reply_event, root_event])
 
     cached_thread = await cache.get_thread_events(room_id, thread_id)
     assert cached_thread is not None
@@ -746,7 +746,7 @@ async def test_sqlite_opaque_history_trust_upgrade_clears_only_certified_snapsho
     seeded = SqliteEventCache(db_path)
     await seeded.initialize()
     try:
-        await _replace_thread(seeded, room_id, thread_id, [reply_event, root_event], validated_at=100.0)
+        await _replace_thread(seeded, room_id, thread_id, [reply_event, root_event])
         await seeded.store_event("$standalone", room_id, standalone_event)
         original_generation = seeded.cache_generation
         original_membership_epoch = await seeded.room_membership_epoch(room_id)
@@ -816,7 +816,7 @@ async def test_sqlite_opaque_history_trust_upgrade_rolls_back_on_cancellation(
     seeded = SqliteEventCache(db_path)
     await seeded.initialize()
     try:
-        await _replace_thread(seeded, room_id, thread_id, [root_event], validated_at=100.0)
+        await _replace_thread(seeded, room_id, thread_id, [root_event])
     finally:
         await seeded.close()
 
@@ -1280,9 +1280,9 @@ async def test_postgres_opaque_history_trust_upgrade_is_namespace_scoped_and_one
     try:
         await seeded.initialize()
         await isolated.initialize()
-        await _replace_thread(seeded, room_id, thread_id, [reply_event, root_event], validated_at=100.0)
+        await _replace_thread(seeded, room_id, thread_id, [reply_event, root_event])
         await seeded.store_event("$standalone", room_id, standalone_event)
-        await _replace_thread(isolated, room_id, thread_id, [reply_event, root_event], validated_at=100.0)
+        await _replace_thread(isolated, room_id, thread_id, [reply_event, root_event])
         original_generation = seeded.cache_generation
         isolated_generation = isolated.cache_generation
         original_membership_epoch = await seeded.room_membership_epoch(room_id)
@@ -1369,7 +1369,7 @@ async def test_postgres_opaque_history_trust_upgrade_rolls_back_on_cancellation(
     seeded = PostgresEventCache(database_url=postgres_event_cache_url, namespace=namespace)
     await seeded.initialize()
     try:
-        await _replace_thread(seeded, room_id, thread_id, [root_event], validated_at=100.0)
+        await _replace_thread(seeded, room_id, thread_id, [root_event])
         original_generation = seeded.cache_generation
     finally:
         await seeded.close()
@@ -1705,7 +1705,7 @@ async def test_postgres_event_cache_recovers_after_backend_connection_terminatio
 
     await cache.initialize()
     try:
-        await _replace_thread(cache, room_id, thread_id, [root_event], validated_at=100.0)
+        await _replace_thread(cache, room_id, thread_id, [root_event])
         assert cache._runtime.db is not None
         cursor = await cache._runtime.db.execute("SELECT pg_backend_pid()")
         row = await cursor.fetchone()
@@ -1760,7 +1760,7 @@ async def test_postgres_event_cache_flushes_pending_invalidations_before_guarded
 
     await cache.initialize()
     try:
-        await _replace_thread(cache, room_id, thread_id, [root_event], validated_at=100.0)
+        await _replace_thread(cache, room_id, thread_id, [root_event])
         cache._runtime.record_pending_thread_invalidation(
             room_id,
             thread_id,
@@ -1810,7 +1810,7 @@ async def test_postgres_event_cache_flushes_newer_thread_marker_with_pending_roo
 
     await cache.initialize()
     try:
-        await _replace_thread(cache, room_id, thread_id, [root_event], validated_at=50.0)
+        await _replace_thread(cache, room_id, thread_id, [root_event])
         cache._runtime.record_pending_room_invalidation(
             room_id,
             invalidated_at=100.0,
@@ -1888,7 +1888,7 @@ async def test_postgres_event_cache_preserves_pending_marker_recorded_during_flu
 
     await cache.initialize()
     try:
-        await _replace_thread(cache, room_id, thread_id, [root_event], validated_at=50.0)
+        await _replace_thread(cache, room_id, thread_id, [root_event])
         membership_epoch = await cache.room_membership_epoch(room_id)
         cache._runtime.record_pending_thread_invalidation(
             room_id,
@@ -1945,7 +1945,7 @@ async def test_postgres_event_cache_pending_thread_flush_does_not_downgrade_newe
                 namespace=namespace,
                 room_id=room_id,
                 thread_id=thread_id,
-                invalidated_at=200.0,
+                gap_marked_at=200.0,
                 reason="newer_durable_marker",
             )
             await db.commit()
@@ -1983,7 +1983,7 @@ async def test_postgres_event_cache_pending_room_flush_does_not_downgrade_newer_
                 db,
                 namespace=namespace,
                 room_id=room_id,
-                invalidated_at=200.0,
+                gap_marked_at=200.0,
                 reason="newer_durable_room_marker",
             )
             await db.commit()
