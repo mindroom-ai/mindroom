@@ -857,7 +857,7 @@ class SqliteEventCache:
         room_id: str,
         thread_id: str,
     ) -> list[dict[str, Any]] | None:
-        """Return cached events for one thread sorted by timestamp."""
+        """Return one thread's cached events oldest first, collapsed to one edit per message."""
         return await self._read_operation(
             room_id,
             operation="get_thread_events",

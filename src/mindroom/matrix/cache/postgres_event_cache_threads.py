@@ -12,7 +12,7 @@ from .event_cache_events import (
     serialize_cached_event,
 )
 from .event_normalization import normalize_event_source_for_cache
-from .postgres_cursor import fetchall, fetchall_mapping, fetchone
+from .postgres_cursor import fetchall, fetchone
 from .postgres_event_cache_events import (
     delete_cached_events,
     delete_event_edit_rows,
@@ -79,6 +79,13 @@ if TYPE_CHECKING:
 # outright. The sender filter is skipped exactly when there is no original to compare against,
 # which is also when ``winner_for`` stops applying it, for the same reason.
 #
+# The original is looked up room-wide, not thread-scoped. Scoping it to this thread made an
+# original cached in a sibling thread read as absent, which skipped the sender filter entirely and
+# let the newest edit across all senders win - the exact suppression the edit-side membership join
+# above exists to prevent, mirrored. An edit and the message it replaces always share a thread in
+# Matrix, so a room-wide lookup loses nothing legitimate and only ever adds a sender to compare
+# against.
+#
 # ROW_NUMBER over one pass rather than a correlated NOT EXISTS per candidate: 5.3 ms against
 # 8.7 ms on a synthetic 2,021-event thread with current table statistics. Policy stays in Python; this is
 # only "latest per group", which is what a window function is for. Splitting present-original and
@@ -140,7 +147,6 @@ WITH surviving_edits AS MATERIALIZED (
             ON original_membership.namespace = event_edits.namespace
             AND original_membership.room_id = event_edits.room_id
             AND original_membership.event_id = event_edits.original_event_id
-            AND original_membership.thread_id = %(thread_id)s
         LEFT JOIN mindroom_event_cache_events AS original_events
             ON original_events.namespace = original_membership.namespace
             AND original_events.room_id = original_membership.room_id
@@ -189,7 +195,7 @@ async def load_thread_events(
     thread_id: str,
 ) -> list[dict[str, Any]] | None:
     """Return one thread's cached events oldest first, collapsed to one edit per message."""
-    rows = await fetchall_mapping(
+    rows = await fetchall(
         db,
         _THREAD_EVENTS_SQL,
         {"namespace": namespace, "room_id": room_id, "thread_id": thread_id},

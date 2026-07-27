@@ -123,6 +123,13 @@ if TYPE_CHECKING:
 # outright. The sender filter is skipped exactly when there is no original to compare against,
 # which is also when ``winner_for`` stops applying it, for the same reason.
 #
+# The original is looked up room-wide, not thread-scoped. Scoping it to this thread made an
+# original cached in a sibling thread read as absent, which skipped the sender filter entirely and
+# let the newest edit across all senders win - the exact suppression the edit-side membership join
+# above exists to prevent, mirrored. An edit and the message it replaces always share a thread in
+# Matrix, so a room-wide lookup loses nothing legitimate and only ever adds a sender to compare
+# against.
+#
 # ROW_NUMBER over one pass rather than a correlated NOT EXISTS per candidate: 5.3 ms against
 # 8.7 ms on a synthetic 2,021-event thread with current table statistics. Policy stays in Python; this is
 # only "latest per group", which is what a window function is for. Splitting present-original and
@@ -159,7 +166,6 @@ WITH surviving_edits AS MATERIALIZED (
             ON original_membership.principal_id = event_edits.principal_id
             AND original_membership.room_id = event_edits.room_id
             AND original_membership.event_id = event_edits.original_event_id
-            AND original_membership.thread_id = :thread_id
         LEFT JOIN events AS original_events
             ON original_events.principal_id = original_membership.principal_id
             AND original_events.room_id = original_membership.room_id

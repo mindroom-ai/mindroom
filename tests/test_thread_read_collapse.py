@@ -138,6 +138,38 @@ def _latest_edit_by_original(events: list[dict[str, Any]]) -> dict[str, str]:
     return {original: winner for original, (_ts, winner) in latest.items()}
 
 
+async def _folded_messages(rows: list[dict[str, Any]]) -> list[ResolvedVisibleMessage]:
+    """Run the real fold and ordering over one read's rows, as thread history resolution does."""
+    from mindroom.matrix.client_visible_messages import apply_latest_edits_to_messages  # noqa: PLC0415
+    from mindroom.matrix.thread_projection import sort_thread_messages_root_first  # noqa: PLC0415
+
+    candidates = ThreadEditCandidates()
+    messages: dict[str, ResolvedVisibleMessage] = {}
+    for row in rows:
+        event = _nio_text_event(row)
+        info = EventInfo.from_event(row)
+        if candidates.record(event, event_info=info):
+            continue
+        messages[event.event_id] = ResolvedVisibleMessage(
+            sender=event.sender,
+            body=event.body,
+            timestamp=event.server_timestamp,
+            event_id=event.event_id,
+            content=dict(row["content"]),
+            thread_id=info.thread_id,
+            latest_event_id=event.event_id,
+        )
+    await apply_latest_edits_to_messages(
+        cast("nio.AsyncClient", None),
+        messages_by_event_id=messages,
+        edit_candidates=candidates,
+        required_thread_id=_THREAD_ID,
+    )
+    ordered = list(messages.values())
+    sort_thread_messages_root_first(ordered, thread_id=_THREAD_ID)
+    return ordered
+
+
 async def _seed_thread(
     event_cache: ConversationEventCache,
     events: list[dict[str, Any]],
@@ -267,19 +299,21 @@ class TestCollapsedReadLosesNoMessage:
         assert await event_cache.get_thread_events(_ROOM_ID, "$absent") is None
 
     @pytest.mark.asyncio
-    async def test_uniform_timestamps_read_deterministically(
+    async def test_uniform_timestamps_still_return_every_message(
         self,
         event_cache: ConversationEventCache,
     ) -> None:
-        """Equal ``origin_server_ts`` rows still resolve to a stable, repeatable read."""
+        """Rows sharing one ``origin_server_ts`` must not collapse into each other.
+
+        Reading twice and comparing was the previous assertion here, which cannot fail: two reads
+        of an unchanged database agree under any mutation.
+        """
         await _seed_thread(event_cache, _thread_event_sources(12, same_timestamp=True))
 
-        first_read = await event_cache.get_thread_events(_ROOM_ID, _THREAD_ID)
-        second_read = await event_cache.get_thread_events(_ROOM_ID, _THREAD_ID)
+        read = await event_cache.get_thread_events(_ROOM_ID, _THREAD_ID)
 
-        assert first_read is not None
-        assert first_read == second_read
-        assert len(_original_event_ids(first_read)) == 13
+        assert read is not None
+        assert len(_original_event_ids(read)) == 13
 
 
 @contextlib.contextmanager
@@ -306,6 +340,53 @@ def _count_thread_statements(event_cache: ConversationEventCache) -> Iterator[li
         yield statements
     finally:
         db.execute = original_execute  # type: ignore[method-assign]
+
+
+class TestTheSenderRuleSurvivesACrossThreadOriginal:
+    """The original is found room-wide, so its sender is always available to compare against.
+
+    Scoping the original lookup to the read's own thread made an original cached in a sibling
+    thread of the same room read as absent. The query treats an absent original as "nobody to
+    impersonate" and drops the sender filter, so the newest edit across all senders won - which
+    is the suppression the edit-side membership join exists to prevent, mirrored. Only the other
+    direction, an out-of-thread edit against an in-thread original, was covered.
+    """
+
+    @pytest.mark.asyncio
+    async def test_a_foreign_edit_cannot_win_because_the_original_sits_in_another_thread(
+        self,
+        event_cache: ConversationEventCache,
+    ) -> None:
+        """The author's own edit survives even when its original is cached elsewhere."""
+        author = "@author:localhost"
+        attacker = "@attacker:localhost"
+        # $victim lives in a sibling thread of the same room.
+        await replace_thread_unconditionally(
+            event_cache,
+            _ROOM_ID,
+            _OTHER_THREAD_ID,
+            [
+                _message_event(_OTHER_THREAD_ID, 500, sender=author),
+                _message_event("$victim", 600, sender=author, thread_id=_OTHER_THREAD_ID),
+            ],
+        )
+        await _seed_thread(
+            event_cache,
+            [
+                _message_event(_THREAD_ID, 1_000, sender=author),
+                _message_event("$author-edit", 2_500, sender=author, edit_of="$victim"),
+                _message_event("$forged", 9_000, sender=attacker, edit_of="$victim"),
+            ],
+        )
+
+        read = await event_cache.get_thread_events(_ROOM_ID, _THREAD_ID)
+        assert read is not None
+
+        returned_ids = {row["event_id"] for row in read}
+        assert "$forged" not in returned_ids, (
+            "a foreign replacement won because the original was looked up thread-scoped"
+        )
+        assert "$author-edit" in returned_ids
 
 
 class TestRawEventIdsStayVisibleToBookkeeping:
@@ -630,9 +711,9 @@ class TestForeignEditCannotStarveTheAuthorsEdit:
     ) -> None:
         """Only the original author's newest replacement survives selection.
 
-        Earlier this shipped one winner per sender and left the fold to discard the foreign ones,
-        leaving the fold to discard the foreign ones. The query now compares the edit's sender
-        against the original's, so a foreign replacement is never returned at all.
+        Earlier this shipped one winner per sender and left the fold to discard the foreign ones.
+        The query now compares the edit's sender against the original's, so a foreign
+        replacement is never returned at all.
         """
         author = "@author:localhost"
         other = "@other:localhost"
@@ -837,9 +918,18 @@ class TestAnEditDoesNotMoveItsMessage:
         read = await event_cache.get_thread_events(_ROOM_ID, _THREAD_ID)
         assert read is not None
 
-        messages = _original_event_ids(read)
-        assert messages[-3:] == ["$m9", "$m10", "$m11"]
-        assert messages.index("$m0") < messages.index("$m9"), "a late edit moved its message"
+        assert _original_event_ids(read)[-3:] == ["$m9", "$m10", "$m11"], "the query reordered"
+
+        # And the fold agrees. Asserting only the query would pass with apply_edit reverted, since
+        # the SQL orders by the original timestamp either way - the disagreement this change exists
+        # to fix is between the two, so both sides have to be run.
+        folded = await _folded_messages(read)
+        folded_ids = [message.event_id for message in folded]
+        assert folded_ids[-3:] == ["$m9", "$m10", "$m11"], "the fold moved the late-edited message"
+        assert folded_ids.index("$m0") < folded_ids.index("$m9")
+        edited = next(message for message in folded if message.event_id == "$m0")
+        assert edited.timestamp == 2_000, "an edit moved its message in the thread"
+        assert edited.edited_timestamp == 999_000, "the edit's own time was not recorded"
 
     def test_applying_an_edit_keeps_the_original_position(self) -> None:
         """apply_edit records the edit's time separately instead of moving the message."""

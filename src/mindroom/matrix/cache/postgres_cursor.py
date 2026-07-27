@@ -26,23 +26,9 @@ async def fetchone(
 async def fetchall(
     db: AsyncConnection,
     query: LiteralString,
-    params: tuple[object, ...],
+    params: tuple[object, ...] | Mapping[str, object],
 ) -> list[tuple[Any, ...]]:
-    """Execute one query, fetch all rows as tuples, and close the cursor."""
-    cursor = await db.execute(query, params)
-    try:
-        rows = await cursor.fetchall()
-        return [tuple(row) for row in rows]
-    finally:
-        await cursor.close()
-
-
-async def fetchall_mapping(
-    db: AsyncConnection,
-    query: LiteralString,
-    params: Mapping[str, object],
-) -> list[tuple[Any, ...]]:
-    """Execute one named-parameter query, fetch all rows as tuples, and close the cursor."""
+    """Execute one positional- or named-parameter query, fetch all rows, and close the cursor."""
     cursor = await db.execute(query, params)
     try:
         rows = await cursor.fetchall()

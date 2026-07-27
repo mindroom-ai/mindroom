@@ -299,15 +299,6 @@ async def _create_postgres_event_cache_schema(db: AsyncConnection) -> None:
         )
         """,
     )
-    # Pre-existing deployments keep their table; the column is added in place and the version-4
-    # migration backfills it per namespace, so no row is left at the '' default that would make
-    # every event look like it came from the same account.
-    await db.execute(
-        """
-        ALTER TABLE mindroom_event_cache_events
-        ADD COLUMN IF NOT EXISTS sender TEXT NOT NULL DEFAULT ''
-        """,
-    )
     await db.execute(
         """
         CREATE INDEX IF NOT EXISTS idx_mindroom_event_cache_events_room_origin_ts
@@ -1263,7 +1254,7 @@ class PostgresEventCache:
         room_id: str,
         thread_id: str,
     ) -> list[dict[str, Any]] | None:
-        """Return cached events for one thread sorted by timestamp."""
+        """Return one thread's cached events oldest first, collapsed to one edit per message."""
         return await self._operation(
             room_id,
             operation="get_thread_events",

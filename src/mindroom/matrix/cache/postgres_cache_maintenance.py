@@ -104,6 +104,17 @@ async def migrate_postgres_schema(
             ALTER COLUMN event_json DROP NOT NULL
             """,
         )
+    if upgrading:
+        # Only while upgrading. ALTER TABLE takes ACCESS EXCLUSIVE even when IF NOT EXISTS makes it
+        # a no-op, so running it unconditionally would briefly lock the events table on every
+        # startup, against the one connection every other principal is waiting on. A database
+        # created at the current version already has the column from CREATE TABLE.
+        await db.execute(
+            """
+            ALTER TABLE mindroom_event_cache_events
+            ADD COLUMN IF NOT EXISTS sender TEXT NOT NULL DEFAULT ''
+            """,
+        )
     await _backfill_collapsed_read_columns(db, namespace=namespace)
 
     normalized_legacy_thread_payload_rows = await rowcount(

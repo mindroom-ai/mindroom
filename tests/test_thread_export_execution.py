@@ -214,9 +214,9 @@ async def test_export_threads_prefer_cache_uses_cache_first_fetch(tmp_path: Path
 async def test_export_refuses_a_stale_cached_read_that_reports_itself_complete(tmp_path: Path) -> None:
     """Completeness and freshness are independent, and export needs both.
 
-    A stale fallback reports ``is_full_history=True`` whenever its read happened not to truncate,
-    so an export checking only completeness writes rows out as authoritative that the homeserver
-    has already moved past. Asserted through the real export so it fails if that check is dropped:
+    A stale fallback reports ``is_full_history=True`` whenever its sidecars hydrated, so an export
+    checking only completeness writes rows out as authoritative that the homeserver has already
+    moved past. Asserted through the real export so it fails if that check is dropped:
     the earlier version of this test only rebuilt two diagnostic helpers and compared them to what
     it had just constructed, which no change to export could have broken.
     """
