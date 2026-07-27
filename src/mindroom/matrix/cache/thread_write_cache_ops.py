@@ -2,23 +2,21 @@
 
 This is the application layer below the write policies in ``thread_writes``; it owns how mutations land:
 
-1. Invalidation is durable-marker-first and fails closed: ``mark_thread_stale`` and
-   ``mark_room_threads_stale`` write monotonic stale markers; when a marker cannot be written the rows
+1. Gap marking is durable-marker-first and fails closed: ``mark_thread_gap`` and
+   ``mark_room_threads_gap`` write monotonic gap markers; when a marker cannot be written the rows
    are deleted instead, and when even deletion fails (and the backend is not just temporarily
    unavailable) the cache is disabled for the rest of the runtime.
 
-2. Appends are incremental-only and atomic: ``apply_thread_mutation_append`` appends the event and
-   settles the thread's trust in one transaction. It refuses when the thread has no cached snapshot
-   rows (then only recording lookup-index rows) and marks the thread stale, so a partial snapshot is
-   never trusted, and a mutation that succeeds is never observably stale in between.
-   That transaction also carries the marker, so when it fails there is no marker either; the append
+2. Appends are incremental-only and atomic: ``apply_thread_mutation_append`` appends the event and,
+   when the append cannot land, records the gap marker in the same transaction. It refuses when the
+   thread has no cached snapshot rows (then only recording lookup-index rows), so a partial snapshot
+   is never served and a mutation that succeeds is never observably gapped in between.
+   That transaction carries the marker, so when it rolls back there is no marker either; the append
    path then writes one through the same fail-closed ladder as rule 1 rather than leaving a thread
-   trusted while it is missing the mutation.
+   readable while it is missing the mutation.
 
-3. A successful append leaves the thread trusted only under the conditions enforced by
-   ``append_keeps_thread_valid`` (see ``thread_cache_state``): a thread that was already valid stays
-   valid, a thread invalidated by an incremental mutation reason is cleared, and a room invalidated
-   at or after the last validation still outranks the append.
+3. A successful append clears nothing. An append extends a snapshot; it does not prove the snapshot
+   complete, and only a full replacement can clear a gap marker.
 """
 
 from __future__ import annotations
@@ -29,7 +27,7 @@ from typing import TYPE_CHECKING, Any
 from mindroom.background_tasks import create_background_task
 from mindroom.matrix.thread_bookkeeping import MutationThreadImpact, MutationThreadImpactState
 
-from .thread_cache_invalidation import mark_room_threads_stale_fail_closed, mark_thread_stale_fail_closed
+from .thread_cache_gap import mark_room_threads_gap_fail_closed, mark_thread_gap_fail_closed
 from .thread_cache_state import ThreadAppendOutcome
 
 if TYPE_CHECKING:
@@ -41,27 +39,21 @@ if TYPE_CHECKING:
 
 
 class ThreadMutationCacheOps:
-    """Own queueing, invalidation, and cache writes for thread mutations."""
+    """Own queueing, gap marking, and cache writes for thread mutations."""
 
     def __init__(
         self,
         *,
         logger_getter: Callable[[], structlog.stdlib.BoundLogger],
         runtime: BotRuntimeView,
-        schedule_thread_repair: Callable[[str, str], None] | None = None,
     ) -> None:
         self._logger_getter = logger_getter
         self.runtime = runtime
-        self._schedule_thread_repair = schedule_thread_repair
 
     @property
     def logger(self) -> structlog.stdlib.BoundLogger:
         """Return the facade-bound logger so collaborator rebinding stays visible."""
         return self._logger_getter()
-
-    def _schedule_repair_if_available(self, room_id: str, thread_id: str) -> None:
-        if self._schedule_thread_repair is not None:
-            self._schedule_thread_repair(room_id, thread_id)
 
     def cache_runtime_available(self) -> bool:
         """Return whether event-cache writes can safely proceed."""
@@ -267,8 +259,8 @@ class ThreadMutationCacheOps:
         reason: str,
         raise_on_failure: bool = False,
     ) -> None:
-        """Mark one cached thread stale and fail closed if the marker cannot be written."""
-        await mark_thread_stale_fail_closed(
+        """Mark a gap against one cached thread and fail closed if the marker cannot be written."""
+        await mark_thread_gap_fail_closed(
             self.runtime.event_cache,
             room_id=room_id,
             thread_id=thread_id,
@@ -284,8 +276,8 @@ class ThreadMutationCacheOps:
         reason: str,
         raise_on_failure: bool = False,
     ) -> None:
-        """Mark one room's cached threads stale and fail closed if the marker cannot be written."""
-        await mark_room_threads_stale_fail_closed(
+        """Mark a gap against one room's cached threads and fail closed if the marker cannot be written."""
+        await mark_room_threads_gap_fail_closed(
             self.runtime.event_cache,
             room_id=room_id,
             reason=reason,
@@ -305,10 +297,8 @@ class ThreadMutationCacheOps:
     ) -> bool:
         """Append one event into a cached thread fail-open and report whether a row changed.
 
-        Appending, and deciding whether the thread stays trusted afterwards, happen in one durable
-        operation. Splitting them used to leave a valid thread observably stale for the duration of
-        the append, so any read arriving in between rejected the snapshot and paid for a full
-        history scan even though the mutation was about to succeed.
+        Appending, and gap-marking when the append cannot land, happen in one durable operation.
+        Splitting them used to leave a snapshot readable while it was missing the event.
         """
         event_id = event_source.get("event_id")
         try:
@@ -328,12 +318,11 @@ class ThreadMutationCacheOps:
                 error=str(exc),
             )
             # The atomic operation rolled back, so it wrote no marker either. Without one, a thread
-            # that was trusted before this mutation stays trusted while missing the event, so the
-            # marker has to be written separately and fail closed exactly as pre-invalidation did.
+            # that was readable before this mutation stays readable while missing the event, so the
+            # marker has to be written separately and fail closed exactly as pre-marking did.
             # Cancellation rolls the transaction back the same way and is not an ``Exception``, so it
             # is caught here too.
             await self._write_append_failure_marker(room_id, thread_id, reason=append_failed_reason)
-            self._schedule_repair_if_available(room_id, thread_id)
             if raise_on_failure or isinstance(exc, asyncio.CancelledError):
                 raise
             return False
@@ -346,25 +335,9 @@ class ThreadMutationCacheOps:
                 event_id=event_id,
                 context=context,
             )
-        if not outcome.wrote_event:
-            self._schedule_repair_if_available(room_id, thread_id)
-            return False
-
-        if outcome is not ThreadAppendOutcome.APPENDED:
-            # The event landed but a marker outside the incremental allowlist still outranks it, so
-            # the snapshot is not converged and its retained delta must survive until a scan runs.
-            self._schedule_repair_if_available(room_id, thread_id)
-            return True
-
-        coordinator = self.runtime.event_cache_write_coordinator
-        if coordinator is not None and isinstance(event_id, str):
-            coordinator.acknowledge_thread_repair_deltas(
-                room_id,
-                thread_id,
-                (event_id,),
-                coordination_scope=self.runtime.event_cache.principal_id,
-            )
-        return True
+        # An append that did not land leaves the thread gap-marked, and the next read refetches
+        # it from the homeserver. Nothing is scheduled here: the marker is the whole recovery.
+        return outcome.wrote_event
 
     async def _write_append_failure_marker(self, room_id: str, thread_id: str, *, reason: str) -> None:
         """Persist the marker a rolled-back append owes, surviving the cancellation that caused it.
@@ -388,21 +361,4 @@ class ThreadMutationCacheOps:
                 name="matrix_cache_append_failure_marker",
                 owner=coordinator.failure_marker_task_owner,
             ),
-        )
-
-    def retain_thread_repair_delta(
-        self,
-        room_id: str,
-        thread_id: str,
-        event_source: dict[str, Any],
-    ) -> None:
-        """Retain one certified event before its ordered append begins."""
-        coordinator = self.runtime.event_cache_write_coordinator
-        if coordinator is None:
-            return
-        coordinator.retain_thread_repair_delta(
-            room_id,
-            thread_id,
-            event_source,
-            coordination_scope=self.runtime.event_cache.principal_id,
         )

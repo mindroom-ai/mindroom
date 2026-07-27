@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import tempfile
-import time
 from contextlib import nullcontext
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
@@ -60,7 +59,7 @@ if TYPE_CHECKING:
     from typing import Any
 
     from mindroom.matrix.cache import ThreadHistoryResult
-    from mindroom.matrix.cache.event_cache import ThreadCacheState
+    from mindroom.matrix.cache.thread_cache_state import ThreadCacheGap
 
 
 async def _wait_for_room_cache_idle(coordinator: EventCacheWriteCoordinator) -> None:
@@ -256,8 +255,8 @@ def _thread_mutation_cache_ops() -> tuple[ThreadMutationCacheOps, MagicMock, Mag
     event_cache.disable = Mock()
     event_cache.invalidate_room_threads = AsyncMock()
     event_cache.invalidate_thread = AsyncMock()
-    event_cache.mark_room_threads_stale = AsyncMock()
-    event_cache.mark_thread_stale = AsyncMock()
+    event_cache.mark_room_threads_gap = AsyncMock()
+    event_cache.mark_thread_gap = AsyncMock()
     event_cache.redact_event = AsyncMock(return_value=True)
     runtime = MagicMock()
     runtime.event_cache = event_cache
@@ -358,14 +357,20 @@ def _conversation_runtime_config() -> Config:
     )
 
 
-async def _assert_thread_read_guard_retries_when_unknown_live_mutation_races_fetch(  # noqa: PLR0915
+async def _assert_racing_unknown_live_mutation_leaves_thread_gap_marked(  # noqa: PLR0915
     tmp_path: Path,
     *,
     read_thread: Callable[[MatrixConversationCache, str, str], Coroutine[Any, Any, ThreadHistoryResult]],
     force_refetch_reason: str,
     expected_full_history: bool,
 ) -> None:
-    """Assert a blocked thread read retries before validating after a racing UNKNOWN live mutation."""
+    """Assert a gap raised mid-fetch survives the replacement that fetch installs.
+
+    An UNKNOWN live mutation arriving while a thread fetch is in flight marks a room-scoped gap the
+    fetch cannot have seen. The read still returns its homeserver history, but the replacement must
+    not clear that gap, so the *next* read refetches. This is the detect-and-refetch half of the
+    gap-marker contract: correctness comes from the surviving marker, not from retrying in-read.
+    """
     room_id = "!test:localhost"
     thread_id = "$thread:localhost"
     event_cache = SqliteEventCache(tmp_path / "event_cache.db")
@@ -391,21 +396,19 @@ async def _assert_thread_read_guard_retries_when_unknown_live_mutation_races_fet
         thread_events=[old_reply],
         next_batch="s_initial",
     )
-    cached_validated_at = time.time()
     await _replace_thread(
         event_cache,
         room_id,
         thread_id,
         [root_event.source, old_reply.source],
-        validated_at=cached_validated_at,
     )
-    await event_cache.mark_thread_stale(room_id, thread_id, reason=force_refetch_reason)
+    await event_cache.mark_thread_gap(room_id, thread_id, reason=force_refetch_reason)
     room_messages_response = client.room_messages.return_value
     fetch_started = asyncio.Event()
     release_fetch = asyncio.Event()
     room_invalidation_finished = asyncio.Event()
     thread_result: ThreadHistoryResult | None = None
-    thread_state: ThreadCacheState | None = None
+    thread_gap: ThreadCacheGap | None = None
     live_task: asyncio.Task[None] | None = None
 
     async def blocking_room_messages(*_args: object, **_kwargs: object) -> nio.RoomMessagesResponse:
@@ -422,18 +425,18 @@ async def _assert_thread_read_guard_retries_when_unknown_live_mutation_races_fet
             coordinator=coordinator,
         ),
     )
-    real_mark_room_threads_stale = event_cache.mark_room_threads_stale
+    real_mark_room_threads_gap = event_cache.mark_room_threads_gap
 
-    async def mark_room_threads_stale(room_id_arg: str, *, reason: str) -> None:
+    async def mark_room_threads_gap(room_id_arg: str, *, reason: str) -> None:
         assert room_id_arg == room_id
         assert reason == "live_thread_lookup_unavailable"
-        await real_mark_room_threads_stale(room_id_arg, reason=reason)
+        await real_mark_room_threads_gap(room_id_arg, reason=reason)
         room_invalidation_finished.set()
 
     async def resolve_unknown_impact(*_args: object, **_kwargs: object) -> MutationThreadImpact:
         return MutationThreadImpact.unknown()
 
-    event_cache.mark_room_threads_stale = AsyncMock(side_effect=mark_room_threads_stale)
+    event_cache.mark_room_threads_gap = AsyncMock(side_effect=mark_room_threads_gap)
     access._live._resolver.resolve_thread_impact_for_mutation = AsyncMock(side_effect=resolve_unknown_impact)
     unknown_event = _text_event(
         event_id="$unknown-edit:localhost",
@@ -461,7 +464,7 @@ async def _assert_thread_read_guard_retries_when_unknown_live_mutation_races_fet
         thread_result = await asyncio.wait_for(read_task, timeout=1.0)
         await asyncio.wait_for(live_task, timeout=1.0)
         await _wait_for_room_cache_idle(coordinator)
-        thread_state = await event_cache.get_thread_cache_state(room_id, thread_id)
+        thread_gap = await event_cache.get_thread_cache_gap(room_id, thread_id)
     finally:
         release_fetch.set()
         await asyncio.wait_for(
@@ -479,12 +482,13 @@ async def _assert_thread_read_guard_retries_when_unknown_live_mutation_races_fet
     assert thread_result.is_full_history is expected_full_history
     assert thread_result.diagnostics[THREAD_HISTORY_SOURCE_DIAGNOSTIC] == THREAD_HISTORY_SOURCE_HOMESERVER
     assert [message.body for message in thread_result] == ["Root", "Old reply"]
-    assert thread_state is not None
-    assert thread_state.validated_at is not None
-    assert thread_state.room_invalidated_at is not None
-    assert thread_state.room_invalidated_at < thread_state.validated_at
-    assert matrix_cache.thread_cache_rejection_reason(thread_state) is None
-    assert client.room_messages.await_count == 2
+    # The racing gap was raised after the fetch started, so the replacement that fetch installed
+    # does not cover it. The marker survives and the next read refetches.
+    assert thread_gap is not None
+    assert thread_gap.gap_reason == "live_thread_lookup_unavailable"
+    assert matrix_cache.thread_cache_rejection_reason(thread_gap) == "live_thread_lookup_unavailable"
+    # One fetch, not two: the read no longer retries in-place to re-establish trust.
+    assert client.room_messages.await_count == 1
 
 
 def _install_runtime_write_coordinator(bot: AgentBot) -> EventCacheWriteCoordinator:

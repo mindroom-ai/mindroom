@@ -22,7 +22,6 @@ from mindroom.constants import (
 from mindroom.matrix.cache import ThreadHistoryResult, thread_writes
 from mindroom.matrix.cache.outbound_thread_reservations import OutboundThreadReservations
 from mindroom.matrix.cache.thread_cache_state import ThreadAppendOutcome
-from mindroom.matrix.cache.thread_write_cache_ops import ThreadMutationCacheOps
 from mindroom.matrix.cache.write_coordinator import EventCacheWriteCoordinator
 from mindroom.matrix.conversation_cache import MatrixConversationCache
 from mindroom.matrix.event_info import EventInfo
@@ -42,7 +41,7 @@ from tests.threading_helpers import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Collection, Coroutine
+    from collections.abc import Callable, Coroutine
     from typing import Any
 
     from mindroom.bot import AgentBot
@@ -50,58 +49,6 @@ if TYPE_CHECKING:
 
 class TestThreadingBehavior(ThreadingBehaviorTestBase):
     """Threading behavior tests moved verbatim from tests/test_threading_error.py."""
-
-    @pytest.mark.asyncio
-    @pytest.mark.parametrize(
-        "append_outcome",
-        [ThreadAppendOutcome.APPENDED_STALE, RuntimeError("cache unavailable")],
-        ids=["rejected", "failed"],
-    )
-    async def test_append_that_cannot_revalidate_retains_delta_and_schedules_repair(
-        self,
-        append_outcome: ThreadAppendOutcome | RuntimeError,
-    ) -> None:
-        """A durable raw append is not converged until its snapshot becomes trusted."""
-        original_ops, logger, event_cache = _thread_mutation_cache_ops()
-        if isinstance(append_outcome, RuntimeError):
-            event_cache.apply_thread_mutation_append.side_effect = append_outcome
-        else:
-            event_cache.apply_thread_mutation_append.return_value = append_outcome
-        schedule_repair = Mock()
-        cache_ops = ThreadMutationCacheOps(
-            logger_getter=lambda: logger,
-            runtime=original_ops.runtime,
-            schedule_thread_repair=schedule_repair,
-        )
-        room_id = "!room:localhost"
-        thread_id = "$thread:localhost"
-        event_source = {
-            "event_id": "$reply:localhost",
-            "origin_server_ts": 2000,
-            "type": "m.room.message",
-            "content": {
-                "body": "Reply",
-                "m.relates_to": {"rel_type": "m.thread", "event_id": thread_id},
-            },
-        }
-        cache_ops.retain_thread_repair_delta(room_id, thread_id, event_source)
-
-        appended = await cache_ops.append_event_to_cache(
-            room_id,
-            thread_id,
-            event_source,
-            context="live",
-            append_failed_reason="live_append_failed",
-        )
-        retained = original_ops.runtime.event_cache_write_coordinator.pending_thread_repair_deltas(
-            room_id,
-            thread_id,
-            coordination_scope=event_cache.principal_id,
-        )
-
-        assert appended is not isinstance(append_outcome, RuntimeError)
-        assert [event["event_id"] for event in retained] == ["$reply:localhost"]
-        schedule_repair.assert_called_once_with(room_id, thread_id)
 
     @pytest.mark.asyncio
     async def test_get_event_queues_persistent_cache_fill_through_room_write_barrier(self) -> None:
@@ -231,13 +178,12 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
                 update_coro_factory: Callable[[], Coroutine[Any, Any, object]],
                 *,
                 name: str,
-                log_exceptions: bool = True,
                 emit_timing: bool = True,
                 coalesce_key: tuple[str, str] | None = None,
                 coalesce_log_context: dict[str, object] | None = None,
                 coordination_scope: str | None = None,
             ) -> asyncio.Task[object]:
-                del room_id, name, log_exceptions, coalesce_key, coalesce_log_context, coordination_scope
+                del room_id, name, coalesce_key, coalesce_log_context, coordination_scope
                 observed_emit_timing.append(emit_timing)
                 return asyncio.create_task(update_coro_factory())
 
@@ -264,13 +210,12 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
                 update_coro_factory: Callable[[], Coroutine[Any, Any, object]],
                 *,
                 name: str,
-                log_exceptions: bool = True,
                 emit_timing: object = "missing",
                 coalesce_key: object = "missing",
                 coalesce_log_context: object = "missing",
                 coordination_scope: object = "missing",
             ) -> asyncio.Task[object]:
-                del room_id, thread_id, name, log_exceptions
+                del room_id, thread_id, name
                 observed_options.append((emit_timing, coalesce_key, coalesce_log_context, coordination_scope))
                 return asyncio.create_task(update_coro_factory())
 
@@ -1163,13 +1108,12 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
                 update_coro_factory: Callable[[], Coroutine[Any, Any, object]],
                 *,
                 name: str,
-                log_exceptions: bool = True,
                 emit_timing: bool = False,
                 coalesce_key: tuple[str, str] | None = None,
                 coalesce_log_context: dict[str, object] | None = None,
                 coordination_scope: str | None = None,
             ) -> asyncio.Task[object]:
-                del room_id, name, log_exceptions, emit_timing, coalesce_key, coalesce_log_context, coordination_scope
+                del room_id, name, emit_timing, coalesce_key, coalesce_log_context, coordination_scope
                 return asyncio.create_task(update_coro_factory())
 
             def queue_thread_update(
@@ -1179,7 +1123,6 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
                 update_coro_factory: Callable[[], Coroutine[Any, Any, object]],
                 *,
                 name: str,
-                log_exceptions: bool = True,
                 emit_timing: bool = False,
                 coalesce_key: tuple[str, str] | None = None,
                 coalesce_log_context: dict[str, object] | None = None,
@@ -1190,32 +1133,11 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
                     room_id,
                     update_coro_factory,
                     name=name,
-                    log_exceptions=log_exceptions,
                     emit_timing=emit_timing,
                     coalesce_key=coalesce_key,
                     coalesce_log_context=coalesce_log_context,
                     coordination_scope=coordination_scope,
                 )
-
-            def retain_thread_repair_delta(
-                self,
-                room_id: str,
-                thread_id: str,
-                event_source: dict[str, Any],
-                *,
-                coordination_scope: str,
-            ) -> None:
-                del room_id, thread_id, event_source, coordination_scope
-
-            def acknowledge_thread_repair_deltas(
-                self,
-                room_id: str,
-                thread_id: str,
-                event_ids: Collection[str],
-                *,
-                coordination_scope: str,
-            ) -> None:
-                del room_id, thread_id, event_ids, coordination_scope
 
         cache_ops.runtime.event_cache_write_coordinator = _InlineCoordinator()
         resolver = MagicMock()
@@ -1251,7 +1173,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         assert event_cache.apply_thread_mutation_append.await_args.kwargs["append_failed_reason"] == (
             "live_append_failed"
         )
-        event_cache.mark_thread_stale.assert_not_awaited()
+        event_cache.mark_thread_gap.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_live_event_cache_update_recovers_after_same_room_failure(self) -> None:
@@ -1594,11 +1516,9 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             *,
             caller_label: str,
             coordinator_queue_wait_ms: float,
-            bypass_repair_backoff: bool,
         ) -> ThreadHistoryResult:
             assert caller_label == "unknown"
             assert coordinator_queue_wait_ms >= 0.0
-            assert bypass_repair_backoff is True
             fetch_started.set()
             return thread_history_result(
                 [_message(event_id="$thread-a:localhost", body="Root")],
@@ -1820,112 +1740,6 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
                 ),
                 timeout=1.0,
             )
-
-    @pytest.mark.asyncio
-    async def test_queue_thread_update_preserves_same_thread_order_across_ignored_cancelled_room_fence(  # noqa: PLR0915
-        self,
-    ) -> None:
-        """Ignoring a cancelled room fence must not let a later same-thread update jump the queue."""
-        blocker_started = asyncio.Event()
-        release_blocker = asyncio.Event()
-        first_target_started = asyncio.Event()
-        release_first_target = asyncio.Event()
-        second_target_started = asyncio.Event()
-        release_second_target = asyncio.Event()
-        coordinator = _runtime_write_coordinator()
-        run_order: list[str] = []
-
-        async def blocking_other_thread() -> None:
-            blocker_started.set()
-            await release_blocker.wait()
-
-        async def first_target_update() -> str:
-            run_order.append("first")
-            first_target_started.set()
-            await release_first_target.wait()
-            return "first"
-
-        async def second_target_update() -> str:
-            run_order.append("second")
-            second_target_started.set()
-            await release_second_target.wait()
-            return "second"
-
-        async def cancelled_room_update() -> None:
-            msg = "Cancelled room cache update should not start"
-            raise AssertionError(msg)
-
-        blocker_task = coordinator.queue_thread_update(
-            "!test:localhost",
-            "$other-thread:localhost",
-            blocking_other_thread,
-            name="matrix_cache_blocking_other_thread_update",
-            coordination_scope="test-principal",
-        )
-        await asyncio.wait_for(blocker_started.wait(), timeout=1.0)
-
-        cancelled_room_task = coordinator.queue_room_update(
-            "!test:localhost",
-            cancelled_room_update,
-            name="matrix_cache_cancelled_room_update",
-            coordination_scope="test-principal",
-        )
-        first_target_task = coordinator.queue_thread_update(
-            "!test:localhost",
-            "$target-thread:localhost",
-            first_target_update,
-            name="matrix_cache_first_target_thread_update",
-            log_exceptions=False,
-            coordination_scope="test-principal",
-        )
-        second_target_task = coordinator.queue_thread_update(
-            "!test:localhost",
-            "$target-thread:localhost",
-            second_target_update,
-            name="matrix_cache_second_target_thread_update",
-            log_exceptions=False,
-            coordination_scope="test-principal",
-            ignore_cancelled_room_fences=True,
-        )
-
-        try:
-            cancelled_room_task.cancel()
-            await asyncio.gather(cancelled_room_task, return_exceptions=True)
-
-            with pytest.raises(asyncio.TimeoutError):
-                await asyncio.wait_for(second_target_started.wait(), timeout=0.1)
-            assert first_target_started.is_set() is False
-
-            release_blocker.set()
-            await asyncio.wait_for(first_target_started.wait(), timeout=1.0)
-            assert run_order == ["first"]
-
-            with pytest.raises(asyncio.TimeoutError):
-                await asyncio.wait_for(second_target_started.wait(), timeout=0.1)
-
-            release_first_target.set()
-            await asyncio.wait_for(second_target_started.wait(), timeout=1.0)
-            release_second_target.set()
-            assert await asyncio.wait_for(first_target_task, timeout=1.0) == "first"
-            assert await asyncio.wait_for(second_target_task, timeout=1.0) == "second"
-            assert run_order == ["first", "second"]
-        finally:
-            release_blocker.set()
-            release_first_target.set()
-            release_second_target.set()
-            if not cancelled_room_task.done():
-                cancelled_room_task.cancel()
-            await asyncio.wait_for(
-                asyncio.gather(
-                    blocker_task,
-                    first_target_task,
-                    second_target_task,
-                    cancelled_room_task,
-                    return_exceptions=True,
-                ),
-                timeout=1.0,
-            )
-            await _wait_for_room_cache_idle(coordinator)
 
     @pytest.mark.asyncio
     async def test_get_thread_history_ignores_cancelled_room_fence_for_unrelated_thread(self) -> None:
@@ -2317,29 +2131,3 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
                 ),
                 timeout=1.0,
             )
-
-    @pytest.mark.asyncio
-    async def test_run_room_update_does_not_log_handled_exception_as_background_failure(self) -> None:
-        """Awaited room updates should not be logged as unhandled background task failures."""
-        owner = object()
-        coordinator = EventCacheWriteCoordinator(
-            logger=MagicMock(),
-            background_task_owner=owner,
-        )
-
-        async def failing_update() -> None:
-            msg = "boom"
-            raise RuntimeError(msg)
-
-        with patch("mindroom.background_tasks.logger.exception") as background_logger_exception:
-            with pytest.raises(RuntimeError, match="boom"):
-                await coordinator.queue_room_update(
-                    "!test:localhost",
-                    lambda: failing_update(),
-                    name="matrix_cache_test_failure",
-                    coordination_scope="test-principal",
-                    log_exceptions=False,
-                )
-            await asyncio.sleep(0)
-
-        background_logger_exception.assert_not_called()

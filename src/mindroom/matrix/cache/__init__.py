@@ -5,7 +5,7 @@ Developer note:
 - `event_normalization.py` owns storage-agnostic event payload shaping before backend writes.
 - `event_cache_events.py` owns backend-neutral serialized event values, indexes, and redaction decisions.
 - `cache_maintenance.py` owns backend-neutral maintenance reports.
-- `thread_cache_state.py` owns backend-neutral durable state values and comparison rules.
+- `thread_cache_state.py` owns backend-neutral durable gap-marker values and the two rules that govern them.
 - `agent_message_snapshot_semantics.py` owns backend-neutral latest-message selection rules.
 - `sqlite_event_cache.py` owns the SQLite implementation, runtime, locking, and schema lifecycle.
 - `postgres_event_cache.py` owns the PostgreSQL implementation, runtime, advisory locking, and schema lifecycle.
@@ -16,7 +16,6 @@ Developer note:
 - `sqlite_cache_maintenance.py` and `postgres_cache_maintenance.py` own transactional migration, invariant repair, and startup diagnostics.
 - `outbound_thread_reservations.py` owns bounded principal-, room-, and event-scoped thread claims for local response edits.
 - `thread_writes.py` owns live, outbound, and sync mutation flows; `thread_bookkeeping.py` resolves thread impact and `thread_write_cache_ops.py` applies queued cache mutations.
-- `thread_repair.py` owns principal-scoped single-flight repair ownership, failure backoff, and retained certified deltas.
 
 Package boundary:
 - `mindroom.matrix.cache` is the package-level import surface for cache-facing contracts and shared helpers used above the cache package.
@@ -27,14 +26,14 @@ Main invariants:
 - Runtime disable and room/db ordering live only in the concrete event-cache implementation.
 - Event lookup rows and thread snapshot rows are written together so lookup, edit, and thread indexes stay consistent.
 - Full event JSON has one source of truth in the event lookup table.
-- Thread invalidation is durable state first, with fail-closed deletion only when stale markers cannot be written.
+- Thread gap marking is durable state first, with fail-closed deletion only when markers cannot be written.
 """
 
 from .agent_message_snapshot import AgentMessageSnapshot
-from .event_cache import ConversationEventCache, SharedConversationEventCache, ThreadCacheState
+from .event_cache import ConversationEventCache, SharedConversationEventCache
 from .event_normalization import is_opaque_encrypted_event_source, normalize_nio_event_for_cache
-from .thread_cache_helpers import thread_cache_rejection_reason
-from .thread_cache_state import ThreadAppendOutcome, ThreadCacheReplaceOutcome
+from .thread_cache_helpers import thread_cache_gap_reason, thread_cache_rejection_reason
+from .thread_cache_state import ThreadAppendOutcome, ThreadCacheGap
 from .thread_history_result import ThreadHistoryResult, thread_history_result
 from .write_coordinator import EventCacheWriteCoordinator
 
@@ -44,11 +43,11 @@ __all__ = [
     "EventCacheWriteCoordinator",
     "SharedConversationEventCache",
     "ThreadAppendOutcome",
-    "ThreadCacheReplaceOutcome",
-    "ThreadCacheState",
+    "ThreadCacheGap",
     "ThreadHistoryResult",
     "is_opaque_encrypted_event_source",
     "normalize_nio_event_for_cache",
+    "thread_cache_gap_reason",
     "thread_cache_rejection_reason",
     "thread_history_result",
 ]

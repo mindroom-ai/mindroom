@@ -33,7 +33,7 @@ The following treatment is covered against both SQLite and PostgreSQL backends b
 | Member, name, topic, avatar, power, join-rule, history-visibility, guest-access, alias, encryption, and pin state | Retained when delivered in the joined timeline | Not visible | These families remain room-level |
 | Call invite, candidates, answer, select-answer, reject, negotiate, and hangup | Retained | Not visible | These families remain room-level |
 | RTC membership, focus, and notification events | Retained | Not visible | These families remain room-level |
-| Encrypted relation-bearing events | Retained as opaque events | Not visible until decryption supplies message content | Thread, reply, edit, and message-reference relations mark the known thread stale fail-closed; explicit relations stay point-indexed, the opaque payload never enters the snapshot, and the marker survives incremental appends until a decryption-capable refresh replaces the snapshot |
+| Encrypted relation-bearing events | Retained as opaque events | Not visible until decryption supplies message content | Thread, reply, edit, and message-reference relations gap-mark the known thread fail-closed; explicit relations stay point-indexed, the opaque payload never enters the snapshot, and the marker survives appends until a decryption-capable refresh replaces the snapshot |
 
 Relation names such as `m.reference` and `m.thread` are reused by non-message families.
 
@@ -95,40 +95,36 @@ Authoritative membership handling separately fences and purges retained history 
 
 ## Thread snapshot reads
 
-A durable thread snapshot is usable only when its state row exists, `validated_at` is set, and no thread or room invalidation is at least as new as that validation.
+A durable thread snapshot is usable when its rows are durably present and no gap marker is recorded against it.
+A gap is detected and refetched rather than prevented, so there is no validation timestamp and no trust comparison.
+Presence and the marker are separate questions, and both are asked: a never-cached thread carries no marker either, so a caller that checks only the marker treats every cold thread as a cache hit.
+
+A room-scoped gap is a wildcard-thread marker.
+It fans out across every thread in the room that already holds a `thread_state` row, and is also recorded once on `room_state`.
+The room-level copy covers the thread the fan-out cannot reach: one whose first fetch is still in flight and therefore has no row to update.
+Only a replacement reads it, so thread reads take no join.
+
+A replacement keeps whichever gap its fetch does not cover, at either scope, and clears the rest.
+Replacement is ordered by fetch start rather than arrival, because installing a snapshot deletes the events it omits: an older fetch is refused outright, and a successful append moves the same watermark forward so an in-flight scan cannot delete an event that landed while it was running.
+This ordering is wall-clock based, knowingly: `fetch_started_at` is captured before the homeserver round-trip, so clock skew between workers sharing one PostgreSQL namespace can misorder a replacement.
 
 A snapshot without its thread root or one still containing opaque `m.room.encrypted` payloads is rejected.
 
-A cache probe runs outside repair ownership, and only a rejected or absent snapshot enters an authoritative homeserver room-history scan and guarded cache refill.
+Only a rejected or absent snapshot enters an authoritative homeserver room-history scan and cache refill.
 
-Every refill runs as one principal-scoped single-flight repair keyed by principal, room, thread, sidecar hydration, and stale-fallback policy.
-Concurrent callers with the same contract share one homeserver scan, while callers with incompatible hydration or stale-fallback contracts never share an outcome.
-Cancelling a waiting caller does not cancel the shared repair.
-
-Live and outbound thread events are retained as certified deltas before their ordered append begins, replayed into the reconstructed snapshot in canonical order, and forgotten once an append or an installed snapshot is proven to contain them.
-A replayed delta never replaces authoritative same-ID fetched state, so a redacted event stays redacted.
-Retained deltas expire after 60 seconds once no matching repair is active because any later scan already observes them.
-Authoritative departure detaches active repair ownership and clears retained deltas and failure state for that principal and room before any post-rejoin repair can begin.
-Late completion of detached work cannot restore the cleared failure state.
-
-The guarded replacement classifies its result as `stored`, `existing_usable`, `retryable_conflict`, `invalidated`, `writes_unavailable`, or `hard_failure`.
-A refill performs at most two reconstruction attempts and only retries `retryable_conflict` and `invalidated`; `existing_usable` serves the winning snapshot instead.
-A refill that cannot read an `existing_usable` winner returns its already-fetched homeserver history without performing a second scan.
+Every refill fetches the thread itself.
+There is no single-flight, no admission gate and no failure backoff: concurrent readers of one gapped thread each pay their own scan rather than sharing one.
 A refill that completes without installing a snapshot still returns its homeserver history, so reads stay fail-open.
 
-A repair that raises or reports `hard_failure` enters capped exponential backoff starting at one second and capped at 30 seconds, while a usable outcome clears prior failure state.
-An uncached `writes_unavailable` or stale-cache fallback completion does not arm backoff.
-Reads without a dispatch timeout bypass a retained backoff and perform a fresh authoritative reconstruction, so a throttle protecting cache writes never stalls a turn; dispatch-safe reads return a degraded result with `thread_read_error` `cache_repair_backoff` and let their caller fall back to a strict read.
-Bypassing preserves the failure count, so background repair stays suppressed for the remaining delay.
-A degraded dispatch proof for an unproven thread candidate also retries strict proof before it may demote the event to room level.
+A degraded dispatch proof for an unproven thread candidate retries strict proof before it may demote the event to room level.
 
-Startup thread prewarm scans outside the live write coordinator so its bulk room scan cannot starve dispatch repairs.
+Startup thread prewarm scans outside the live write coordinator so its bulk room scan cannot starve dispatch reads.
 
-A refill whose reconstruction contains still-opaque encrypted evidence for the requested thread, or whose scan holds an opaque relation with unresolved thread impact, marks the thread stale and fails the read instead of certifying incomplete history.
+A refill whose reconstruction contains still-opaque encrypted evidence for the requested thread, or whose scan holds an opaque relation with unresolved thread impact, gap-marks the thread and fails the read instead of certifying incomplete history.
 
 Relation-less ciphertext and opaque annotations are excluded from that rejection because they cannot change any visible thread snapshot.
 
-The opaque-history trust upgrade clears only previously certified thread snapshots and their state, preserves point and relation indexes, rotates the durable certification generation, and records a one-time storage marker transactionally.
+The thread-history version marker clears only previously certified thread snapshots and their state, preserves point and relation indexes, rotates the durable certification generation, and records a one-time storage marker transactionally.
 
 A second unchanged read is served from cache and performs no homeserver scan.
 
@@ -137,8 +133,8 @@ The advisory read path may use a labelled stale-cache fallback when a required r
 Dispatch reads reject stale fallback and propagate the refill failure.
 
 Every completed cache or source fetch emits its own `matrix_cache_thread_history_refreshed` event with `mode`, `cache_read_ms`, `homeserver_fetch_ms`, page and event counts, `cache_reject_reason`, `thread_read_source`, degradation state, and error state.
-Refilled reads add `cache_store_outcome`, `cache_repair_attempts`, and `cache_repair_usable`; a read served by a winning concurrent snapshot reports `mode` `cache_hit_after_repair_conflict`.
-A dispatch read cut short by a coordinator timeout, fetch timeout, or repair backoff instead emits `matrix_cache_thread_read_degraded`; a repair-backoff event adds `cache_repair_backoff_seconds`.
+Refilled reads add `cache_store_written` and `cache_store_failed`, and a rejected snapshot adds `cache_gap_marked_at`, `cache_gap_age_ms`, and `cache_gap_reason`.
+A dispatch read cut short by a coordinator timeout or a fetch timeout instead emits `matrix_cache_thread_read_degraded`.
 
 ## Disposable live audit
 
@@ -164,7 +160,7 @@ The first strict read refills that isolated cache from the authenticated homeser
 
 The second read must return the same visible event IDs as the first with zero homeserver time, pages, and scanned events.
 
-The third read must use `thread_invalidated_after_validation`, omit the redacted child, and refill successfully without degradation or error.
+The third read must reject the snapshot under the gap reason the redaction recorded, omit the redacted child, and refill successfully without degradation or error.
 
 The backend-neutral owning-seam test `test_advisory_stale_fallback_is_labeled_and_dispatch_rejects_it` forces the same homeserver failure against SQLite and PostgreSQL.
 
@@ -207,7 +203,7 @@ PR-specific classification remains proven by the SQLite and PostgreSQL owning-se
 
 Opaque encrypted thread evidence is owned by this contract track and fails closed.
 
-An opaque `m.room.encrypted` child with a clear thread-affecting relation marks only its thread stale under a non-incremental reason, a later clear incremental event cannot weaken that reason, and thread-history refresh rejects reconstructions that still contain the opaque evidence.
+An opaque `m.room.encrypted` child with a clear thread-affecting relation gap-marks only its thread, no later append clears that marker, and thread-history refresh rejects reconstructions that still contain the opaque evidence.
 
 Thread snapshot replacement currently owns point-row deletion through the duplicated storage layout, which belongs to the storage normalization track.
 

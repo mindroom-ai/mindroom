@@ -1,4 +1,30 @@
-"""Backend-neutral durable thread-cache state values and decisions."""
+"""Backend-neutral durable thread-cache gap state.
+
+A cached thread snapshot is usable when its rows exist and no gap marker outranks the fetch that
+installed them. There is no validation timestamp, no reason precedence, and no incremental
+revalidation allowlist: a stale or incomplete snapshot is **detected and refetched**, not prevented.
+
+Two rules, and only two:
+
+1. A gap marker makes the snapshot unusable until a full refetch replaces it.
+   ``mark_room_threads_gap`` is the room-scoped (wildcard-thread) form. It fans the marker out
+   across every thread the room already has a ``thread_state`` row for, *and* records it once on
+   the room. The fan-out alone is not the whole room: a thread whose first fetch is still in flight
+   has no row to update, and the replacement that lands afterwards would insert a clean one. The
+   room-level copy is a watermark that only replacement reads, so reads stay free of the join.
+
+2. A replacement keeps whichever gap its fetch does not cover, at either scope. A marker predating
+   the fetch (``gap_marked_at <= fetch_started_at``) describes events the fetch did see, so it is
+   cleared; one recorded while the fetch was in flight is not covered by it and survives, and the
+   next read refetches.
+
+The wall clock is load-bearing here, and knowingly so: ``fetch_started_at`` is captured before the
+homeserver round-trip, so it cannot come from a database sequence without an extra round-trip per
+fetch. A backward clock step, or skew between two workers sharing one PostgreSQL namespace, can
+therefore let a fetch clear a gap recorded after it began. Ordering by wall clock predates the gap
+rework - the trust algebra compared the same ``time.time()`` values - and narrowing it would need a
+per-``(principal, room)`` logical clock, which is not this change.
+"""
 
 from __future__ import annotations
 
@@ -6,27 +32,21 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import TYPE_CHECKING
 
-from .event_cache import ThreadCacheState
-
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-_INCREMENTAL_THREAD_REVALIDATION_REASONS = (
-    "live_thread_mutation",
-    "sync_thread_mutation",
-    "outbound_thread_mutation",
-)
 THREAD_HISTORY_TRUST_METADATA_KEY = "thread_history_trust_version"
-THREAD_HISTORY_TRUST_VERSION = "opaque_encrypted_relations_v1"
+# Bumping this empties the durable thread tables on startup. The gap-marker rework changed what a
+# stored ``thread_state`` row means, and the cache refills from the homeserver, so old rows go.
+THREAD_HISTORY_TRUST_VERSION = "thread_gap_markers_v1"
 
 
 class ThreadAppendOutcome(StrEnum):
     """Describe what one atomic threaded-mutation append did to a cached thread."""
 
     APPENDED = "appended"
-    APPENDED_STALE = "appended_stale"
     # No rows to append into: only a full history scan can make this thread readable again. A
-    # refused append leaves the existing snapshot under a durable marker instead.
+    # refused append records a gap marker instead of extending a snapshot that does not exist.
     SNAPSHOT_MISSING = "snapshot_missing"
     APPEND_REFUSED = "append_refused"
     WRITES_UNAVAILABLE = "writes_unavailable"
@@ -34,160 +54,43 @@ class ThreadAppendOutcome(StrEnum):
     @property
     def wrote_event(self) -> bool:
         """Return whether the mutation landed in the cached snapshot."""
-        return self in {ThreadAppendOutcome.APPENDED, ThreadAppendOutcome.APPENDED_STALE}
-
-
-class ThreadCacheReplaceOutcome(StrEnum):
-    """Describe whether one guarded thread snapshot became usable."""
-
-    STORED = "stored"
-    EXISTING_USABLE = "existing_usable"
-    RETRYABLE_CONFLICT = "retryable_conflict"
-    INVALIDATED = "invalidated"
-    WRITES_UNAVAILABLE = "writes_unavailable"
-    HARD_FAILURE = "hard_failure"
-
-    @property
-    def written(self) -> bool:
-        """Return whether this operation installed the supplied snapshot."""
-        return self is ThreadCacheReplaceOutcome.STORED
-
-    @property
-    def usable(self) -> bool:
-        """Return whether a trusted snapshot exists after this operation."""
-        return self in {
-            ThreadCacheReplaceOutcome.STORED,
-            ThreadCacheReplaceOutcome.EXISTING_USABLE,
-        }
-
-    @property
-    def retryable(self) -> bool:
-        """Return whether another bounded reconstruction may still install a snapshot."""
-        return self in {
-            ThreadCacheReplaceOutcome.INVALIDATED,
-            ThreadCacheReplaceOutcome.RETRYABLE_CONFLICT,
-        }
-
-
-def incremental_thread_revalidation_reasons() -> tuple[str, ...]:
-    """Return the invalidation reasons that one successful incremental append may clear."""
-    return _INCREMENTAL_THREAD_REVALIDATION_REASONS
-
-
-def is_incremental_thread_revalidation_reason(reason: str | None) -> bool:
-    """Return whether one invalidation reason may be cleared after an incremental append."""
-    return reason in _INCREMENTAL_THREAD_REVALIDATION_REASONS
-
-
-def incoming_thread_invalidation_takes_precedence(
-    *,
-    current_invalidated_at: float,
-    current_reason: str | None,
-    incoming_invalidated_at: float,
-    incoming_reason: str,
-) -> bool:
-    """Return whether an incoming marker's reason should replace the current reason."""
-    current_is_incremental = is_incremental_thread_revalidation_reason(current_reason)
-    incoming_is_incremental = is_incremental_thread_revalidation_reason(incoming_reason)
-    if current_is_incremental != incoming_is_incremental:
-        return not incoming_is_incremental
-    return incoming_invalidated_at >= current_invalidated_at
+        return self is ThreadAppendOutcome.APPENDED
 
 
 @dataclass(frozen=True, slots=True)
-class ThreadCacheStateRow:
-    """Backend-neutral values loaded from thread and room cache-state rows."""
+class ThreadCacheGap:
+    """The durable gap marker recorded against one cached thread, if any."""
 
-    validated_at: float | None
-    invalidated_at: float | None
-    invalidation_reason: str | None
-    room_invalidated_at: float | None
-    room_invalidation_reason: str | None
-
-    def as_public_state(self) -> ThreadCacheState:
-        """Return the public cache-state value."""
-        return ThreadCacheState(
-            validated_at=self.validated_at,
-            invalidated_at=self.invalidated_at,
-            invalidation_reason=self.invalidation_reason,
-            room_invalidated_at=self.room_invalidated_at,
-            room_invalidation_reason=self.room_invalidation_reason,
-        )
+    gap_marked_at: float
+    gap_reason: str | None
 
 
-def thread_cache_state_row(values: Sequence[float | str | None] | None) -> ThreadCacheStateRow | None:
-    """Normalize one backend storage row into backend-neutral cache-state values."""
+# What a backend returns when it cannot answer whether this thread carries a gap - a disabled cache,
+# a departed room, or a SQLite reader that lost the database to a writer.
+#
+# It is a gap, not ``None``, and that is the whole point. "No gap recorded" and "could not find out"
+# are opposite answers, and collapsing them into ``None`` makes an unreadable marker mean the
+# snapshot is clean. The trust algebra failed closed here - a missing state row rejected the read
+# with ``no_cache_state`` - and the gap rework has to keep failing closed or a thread stays readable
+# through exactly the contention that was trying to mark it.
+#
+# ``gap_marked_at`` is 0.0 because this marker is never ordered against a fetch: it is not durable,
+# it never reaches ``_clear_thread_gap_covered_by_fetch``, and the only consumer is the read that
+# refuses the snapshot on the spot.
+CACHE_GAP_UNAVAILABLE = ThreadCacheGap(gap_marked_at=0.0, gap_reason="cache_gap_read_unavailable")
+
+
+def thread_cache_gap_row(values: Sequence[float | str | None] | None) -> ThreadCacheGap | None:
+    """Normalize one backend storage row into a backend-neutral gap marker."""
     if values is None:
         return None
-    if len(values) != 5:
-        msg = f"Thread cache-state row must contain exactly 5 values, got {len(values)}"
+    if len(values) != 2:
+        msg = f"Thread cache gap row must contain exactly 2 values, got {len(values)}"
         raise ValueError(msg)
-    if all(value is None for value in values):
+    gap_marked_at = values[0]
+    if gap_marked_at is None:
         return None
-    return ThreadCacheStateRow(
-        validated_at=None if values[0] is None else float(values[0]),
-        invalidated_at=None if values[1] is None else float(values[1]),
-        invalidation_reason=values[2] if isinstance(values[2], str) else None,
-        room_invalidated_at=None if values[3] is None else float(values[3]),
-        room_invalidation_reason=values[4] if isinstance(values[4], str) else None,
+    return ThreadCacheGap(
+        gap_marked_at=float(gap_marked_at),
+        gap_reason=values[1] if isinstance(values[1], str) else None,
     )
-
-
-def thread_cache_state_changed_after(
-    cache_state: ThreadCacheStateRow | None,
-    *,
-    fetch_started_at: float,
-) -> bool:
-    """Return whether thread or room cache state changed after one fetch began."""
-    if cache_state is None:
-        return False
-    return any(
-        timestamp is not None and timestamp > fetch_started_at
-        for timestamp in (cache_state.validated_at, cache_state.invalidated_at, cache_state.room_invalidated_at)
-    )
-
-
-def guarded_thread_replacement_conflict(
-    cache_state: ThreadCacheStateRow | None,
-    *,
-    fetch_started_at: float,
-    has_snapshot_rows: bool,
-) -> ThreadCacheReplaceOutcome | None:
-    """Classify state changed after one snapshot fetch, if any."""
-    if cache_state is None or not thread_cache_state_changed_after(cache_state, fetch_started_at=fetch_started_at):
-        return None
-    trusted_existing = (
-        cache_state.validated_at is not None
-        and (cache_state.invalidated_at is None or cache_state.invalidated_at < cache_state.validated_at)
-        and (cache_state.room_invalidated_at is None or cache_state.room_invalidated_at < cache_state.validated_at)
-    )
-    if trusted_existing and has_snapshot_rows:
-        return ThreadCacheReplaceOutcome.EXISTING_USABLE
-    invalidated_after_fetch = any(
-        timestamp is not None and timestamp > fetch_started_at
-        for timestamp in (cache_state.invalidated_at, cache_state.room_invalidated_at)
-    )
-    if invalidated_after_fetch:
-        return ThreadCacheReplaceOutcome.INVALIDATED
-    return ThreadCacheReplaceOutcome.RETRYABLE_CONFLICT
-
-
-def append_keeps_thread_valid(cache_state: ThreadCacheStateRow | None) -> bool:
-    """Return whether one appended mutation may leave this thread trusted.
-
-    A thread that was still valid when the mutation began was never invalidated, so there is nothing
-    to clear and nothing to expose. A room-wide marker at or after the last validation outranks an
-    append, and a thread marker is only cleared when an incremental mutation wrote it.
-    """
-    if cache_state is None or cache_state.validated_at is None:
-        return False
-    if cache_state.room_invalidated_at is not None and cache_state.room_invalidated_at >= cache_state.validated_at:
-        return False
-    if cache_state.invalidated_at is None:
-        return True
-    return is_incremental_thread_revalidation_reason(cache_state.invalidation_reason)
-
-
-def replacement_validated_at(*, fetch_started_at: float, validated_at: float | None) -> float:
-    """Clamp replacement validation to the instant its fetch began."""
-    return fetch_started_at if validated_at is None else min(validated_at, fetch_started_at)

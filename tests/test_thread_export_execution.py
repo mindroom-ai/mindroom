@@ -1298,8 +1298,8 @@ async def test_export_threads_counts_only_enumerated_rooms(tmp_path: Path) -> No
 
 
 @pytest.mark.asyncio
-async def test_prefer_cache_bulk_backfills_untrusted_threads(tmp_path: Path) -> None:
-    """Many untrusted threads should trigger one bulk warm-up and fail scan-proven-missing roots."""
+async def test_prefer_cache_bulk_backfills_threads_needing_refill(tmp_path: Path) -> None:
+    """Many threads needing a refill should trigger one bulk warm-up and fail scan-proven-missing roots."""
     config = _config(tmp_path)
     runtime_paths = runtime_paths_for(config)
     _write_matrix_state(tmp_path)
@@ -1319,7 +1319,7 @@ async def test_prefer_cache_bulk_backfills_untrusted_threads(tmp_path: Path) -> 
             new=AsyncMock(return_value=(thread_ids, False)),
         ),
         patch(
-            "mindroom.thread_export.execution.untrusted_cached_thread_ids",
+            "mindroom.thread_export.execution.thread_ids_needing_refill",
             new=AsyncMock(return_value=tuple(thread_ids)),
         ),
         patch(
@@ -1370,7 +1370,7 @@ async def test_prefer_cache_skips_bulk_when_cache_is_trusted(tmp_path: Path) -> 
             new=AsyncMock(return_value=(thread_ids, False)),
         ),
         patch(
-            "mindroom.thread_export.execution.untrusted_cached_thread_ids",
+            "mindroom.thread_export.execution.thread_ids_needing_refill",
             new=AsyncMock(return_value=()),
         ),
         patch(

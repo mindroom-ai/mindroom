@@ -157,7 +157,7 @@ async def migrate_postgres_schema(
     target_schema_version: int,
 ) -> _PostgresSchemaMigrationResult:
     """Transactionally normalize one namespace while upgrading the shared schema."""
-    if current_schema_version not in {None, 1, 2, 3, target_schema_version}:
+    if current_schema_version not in {None, 1, 2, 3, 4, target_schema_version}:
         msg = (
             "PostgreSQL Matrix event cache schema version "
             f"{current_schema_version} is not compatible with expected version {target_schema_version}"
@@ -202,15 +202,13 @@ async def migrate_postgres_schema(
                 namespace,
                 room_id,
                 thread_id,
-                validated_at,
-                invalidated_at,
-                invalidation_reason
+                gap_marked_at,
+                gap_reason
             )
             SELECT DISTINCT
                 thread_events.namespace,
                 thread_events.room_id,
                 thread_events.thread_id,
-                NULL::DOUBLE PRECISION,
                 %s,
                 'schema_migration_missing_thread_event_source'
             FROM mindroom_event_cache_thread_events AS thread_events
@@ -223,18 +221,15 @@ async def migrate_postgres_schema(
                         AND events.room_id = thread_events.room_id
                 )
             ON CONFLICT(namespace, room_id, thread_id) DO UPDATE SET
-                validated_at = NULL,
-                invalidated_at = CASE
-                    WHEN mindroom_event_cache_thread_state.invalidated_at IS NULL
-                        OR excluded.invalidated_at >= mindroom_event_cache_thread_state.invalidated_at
-                        THEN excluded.invalidated_at
-                    ELSE mindroom_event_cache_thread_state.invalidated_at
-                END,
-                invalidation_reason = CASE
-                    WHEN mindroom_event_cache_thread_state.invalidated_at IS NULL
-                        OR excluded.invalidated_at >= mindroom_event_cache_thread_state.invalidated_at
-                        THEN excluded.invalidation_reason
-                    ELSE mindroom_event_cache_thread_state.invalidation_reason
+                gap_marked_at = GREATEST(
+                    mindroom_event_cache_thread_state.gap_marked_at,
+                    excluded.gap_marked_at
+                ),
+                gap_reason = CASE
+                    WHEN mindroom_event_cache_thread_state.gap_marked_at IS NULL
+                        OR excluded.gap_marked_at >= mindroom_event_cache_thread_state.gap_marked_at
+                        THEN excluded.gap_reason
+                    ELSE mindroom_event_cache_thread_state.gap_reason
                 END
             """,
             (time.time(), namespace),
@@ -380,18 +375,20 @@ async def _collect_maintenance_report(
             """
             SELECT COUNT(*)
             FROM mindroom_event_cache_thread_state
-            WHERE namespace = %s
-                AND invalidated_at IS NOT NULL
-                AND (validated_at IS NULL OR invalidated_at >= validated_at)
+            WHERE namespace = %s AND gap_marked_at IS NOT NULL
             """,
             (namespace,),
         ),
-        stale_room_markers=await _count(
+        # A room gap that is wrongly advanced puts every thread in that room into permanent
+        # refetch, because each replacement copies the uncovered marker onto the snapshot it just
+        # installed. Nothing else would show it: the per-thread count above cannot distinguish a
+        # room fan-out from ordinary churn.
+        room_gap_markers=await _count(
             db,
             """
             SELECT COUNT(*)
             FROM mindroom_event_cache_room_state
-            WHERE namespace = %s AND invalidated_at IS NOT NULL
+            WHERE namespace = %s AND room_gap_marked_at IS NOT NULL
             """,
             (namespace,),
         ),

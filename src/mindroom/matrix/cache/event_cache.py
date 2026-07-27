@@ -2,25 +2,13 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 if TYPE_CHECKING:
     from collections.abc import Collection
 
     from .agent_message_snapshot import AgentMessageSnapshot
-    from .thread_cache_state import ThreadAppendOutcome, ThreadCacheReplaceOutcome
-
-
-@dataclass(frozen=True, slots=True)
-class ThreadCacheState:
-    """Durable freshness and invalidation metadata for one cached thread."""
-
-    validated_at: float | None
-    invalidated_at: float | None
-    invalidation_reason: str | None
-    room_invalidated_at: float | None
-    room_invalidation_reason: str | None
+    from .thread_cache_state import ThreadAppendOutcome, ThreadCacheGap
 
 
 class EventCacheBackendUnavailableError(RuntimeError):
@@ -90,16 +78,28 @@ class ConversationEventCache(Protocol):
     async def get_thread_event_ids(self, room_id: str, thread_id: str) -> set[str]:
         """Return every raw event ID this thread holds, superseded edits included.
 
-        Distinct from ``get_thread_events``, which collapses superseded edits away. Bookkeeping
-        that asks which rows are durably present must use this one, or every collapsed-away edit
-        reads as missing.
+        Distinct from ``get_thread_events``, which collapses superseded edits away and requires a
+        payload. This one answers which rows this thread durably owns, which is the question the
+        collapse security tests ask: a point-cached original with no membership row must not appear
+        here, and a superseded edit must.
+        """
+
+    async def has_thread_snapshot(self, room_id: str, thread_id: str) -> bool:
+        """Return whether any durably present snapshot rows exist for one thread.
+
+        A gap marker says a snapshot is unusable; its absence does not say a snapshot exists. Both
+        answers are needed to decide whether a thread would be served from cache, and a caller that
+        asks only about the marker treats a never-cached thread as a cache hit.
+
+        Distinct from ``get_thread_events``: this one answers existence in a single bounded probe
+        instead of loading and collapsing the whole thread to test it for emptiness.
         """
 
     async def get_recent_room_thread_ids(self, room_id: str, *, limit: int) -> list[str]:
         """Return locally known thread IDs for one room ordered by newest cached activity."""
 
-    async def get_thread_cache_state(self, room_id: str, thread_id: str) -> ThreadCacheState | None:
-        """Return durable freshness metadata for one cached thread."""
+    async def get_thread_cache_gap(self, room_id: str, thread_id: str) -> ThreadCacheGap | None:
+        """Return the durable gap marker recorded against one cached thread, if any."""
 
     async def get_event(self, room_id: str, event_id: str) -> dict[str, Any] | None:
         """Return one cached event payload by event ID."""
@@ -174,7 +174,7 @@ class ConversationEventCache(Protocol):
     ) -> bool:
         """Cache MXC plaintext only for a visible, non-tombstoned owning event."""
 
-    async def replace_thread_if_not_newer(
+    async def replace_thread(
         self,
         room_id: str,
         thread_id: str,
@@ -182,9 +182,15 @@ class ConversationEventCache(Protocol):
         *,
         expected_membership_epoch: int,
         fetch_started_at: float,
-        validated_at: float | None = None,
-    ) -> ThreadCacheReplaceOutcome:
-        """Replace a fetched snapshot and classify any guarded non-installation."""
+    ) -> bool:
+        """Install one fetched snapshot, clearing a gap marker the fetch covers.
+
+        Returns whether this call left a usable snapshot behind, which is not the same as "stored":
+        a fetch older than the installed one is skipped and still returns ``True``, because a fresher
+        snapshot is already there and the caller has nothing to retry. ``False`` means writes were
+        unavailable. A gap recorded after ``fetch_started_at`` survives the replacement at either
+        scope, so the next read refetches.
+        """
 
     async def invalidate_thread(self, room_id: str, thread_id: str) -> None:
         """Delete cached events for one thread."""
@@ -192,11 +198,11 @@ class ConversationEventCache(Protocol):
     async def invalidate_room_threads(self, room_id: str) -> None:
         """Delete every cached thread snapshot for one room."""
 
-    async def mark_thread_stale(self, room_id: str, thread_id: str, *, reason: str) -> None:
-        """Persist one durable thread invalidation marker."""
+    async def mark_thread_gap(self, room_id: str, thread_id: str, *, reason: str) -> None:
+        """Persist one durable thread gap marker."""
 
-    async def mark_room_threads_stale(self, room_id: str, *, reason: str) -> None:
-        """Persist a durable invalidate-and-refetch marker for every cached thread in one room."""
+    async def mark_room_threads_gap(self, room_id: str, *, reason: str) -> None:
+        """Persist a durable gap marker against every cached thread in one room."""
 
     async def apply_thread_mutation_append(
         self,
@@ -206,7 +212,7 @@ class ConversationEventCache(Protocol):
         *,
         append_failed_reason: str,
     ) -> ThreadAppendOutcome:
-        """Append one threaded mutation and settle this thread's trust in one transaction."""
+        """Append one threaded mutation, recording a gap marker when it cannot land."""
 
     async def get_thread_id_for_event(self, room_id: str, event_id: str) -> str | None:
         """Return the cached thread ID for one event."""

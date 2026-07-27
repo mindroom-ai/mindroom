@@ -7,6 +7,7 @@ import json
 import uuid
 from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING
+from unittest.mock import patch
 
 import aiosqlite
 import psycopg
@@ -15,7 +16,6 @@ from psycopg import sql
 from psycopg.conninfo import make_conninfo
 
 from mindroom.matrix.cache import (
-    ThreadCacheState,
     postgres_event_cache,
     sqlite_cache_maintenance,
     sqlite_event_cache,
@@ -41,8 +41,7 @@ _THREAD_ID = "$root:localhost"
 _CHILD_ID = "$child:localhost"
 _MISSING_ID = "$missing:localhost"
 _ORPHAN_ID = "$orphan:localhost"
-_FUTURE_INVALIDATED_AT = 4_000_000_000.0
-_FUTURE_VALIDATED_AT = 5_000_000_000.0
+_FUTURE_GAP_MARKED_AT = 4_000_000_000.0
 
 
 def _message_event(event_id: str, *, thread_id: str | None = None) -> dict[str, object]:
@@ -56,12 +55,6 @@ def _message_event(event_id: str, *, thread_id: str | None = None) -> dict[str, 
         "origin_server_ts": 10,
         "content": content,
     }
-
-
-def _assert_missing_source_state(state: ThreadCacheState | None) -> None:
-    assert state is not None
-    assert state.validated_at is None
-    assert state.invalidation_reason == "schema_migration_missing_thread_event_source"
 
 
 async def _prepare_sqlite_version_10(db_path: Path) -> None:
@@ -206,18 +199,16 @@ async def _prepare_postgres_version_1(database_url: str, *, namespace: str, othe
                 namespace,
                 room_id,
                 thread_id,
-                validated_at,
-                invalidated_at,
-                invalidation_reason
+                gap_marked_at,
+                gap_reason
             )
-            VALUES (%s, %s, %s, %s, %s, 'preexisting_newer_invalidation')
+            VALUES (%s, %s, %s, %s, 'preexisting_newer_gap')
             """,
             (
                 namespace,
                 _ROOM_ID,
                 _THREAD_ID,
-                _FUTURE_VALIDATED_AT,
-                _FUTURE_INVALIDATED_AT,
+                _FUTURE_GAP_MARKED_AT,
             ),
         )
         await db.commit()
@@ -324,7 +315,7 @@ async def test_sqlite_startup_report_uses_nonblocking_read_snapshot(
     initialize_secondary = asyncio.create_task(secondary.initialize())
     try:
         await asyncio.wait_for(report_started.wait(), timeout=1)
-        await primary.mark_thread_stale(_ROOM_ID, _THREAD_ID, reason="concurrent_startup_report")
+        await primary.mark_thread_gap(_ROOM_ID, _THREAD_ID, reason="concurrent_startup_report")
     finally:
         release_report.set()
         await initialize_secondary
@@ -356,7 +347,7 @@ async def test_postgres_version_1_migration_is_namespace_safe_and_repairs_orphan
         try:
             diagnostics = cache.runtime_diagnostics()
             cached_thread = await cache.get_thread_events(_ROOM_ID, _THREAD_ID)
-            stale_state = await cache.get_thread_cache_state(_ROOM_ID, _THREAD_ID)
+            stale_state = await cache.get_thread_cache_gap(_ROOM_ID, _THREAD_ID)
 
             assert diagnostics["cache_schema_migrated_from"] == 1
             assert diagnostics["cache_orphan_edit_indexes_after"] == 0
@@ -387,7 +378,7 @@ async def test_postgres_version_1_migration_is_namespace_safe_and_repairs_orphan
             cursor = await db.execute(
                 "SELECT value FROM mindroom_event_cache_metadata WHERE key = 'schema_version'",
             )
-            assert await cursor.fetchone() == ("4",)
+            assert await cursor.fetchone() == ("5",)
             await cursor.close()
         finally:
             await cache.close()
@@ -408,7 +399,7 @@ async def test_postgres_version_1_migration_is_namespace_safe_and_repairs_orphan
             assert await cursor.fetchone() is None
             await cursor.close()
             assert await other_cache.get_thread_events(_ROOM_ID, _THREAD_ID) is None
-            other_stale_state = await other_cache.get_thread_cache_state(_ROOM_ID, _THREAD_ID)
+            other_stale_state = await other_cache.get_thread_cache_gap(_ROOM_ID, _THREAD_ID)
             assert other_stale_state is None
         finally:
             await other_cache.close()
@@ -836,3 +827,42 @@ async def test_sender_backfill_batches_each_page_into_one_statement(
         updates = [statement for statement in statements if statement.lstrip().startswith("UPDATE")]
         pages = -(-row_count // _SENDER_BACKFILL_PAGE_ROWS)
         assert len(updates) == pages, f"expected one UPDATE per page ({pages}), issued {len(updates)}"
+
+
+@pytest.mark.asyncio
+async def test_startup_on_current_schema_runs_no_alter_table(postgres_event_cache_url: str) -> None:
+    """A principal starting against an already-current schema must issue no ALTER TABLE.
+
+    ALTER TABLE takes ACCESS EXCLUSIVE on its target even when every clause is a no-op, and the
+    cache tables are shared by every namespace. Running the gap migration unconditionally would let
+    one starting agent stall all cache traffic for all of them, which is why the security migration
+    is version-gated and why this one has to be too.
+    """
+    async with _isolated_postgres_database(postgres_event_cache_url) as database_url:
+        namespace = f"ns_{uuid.uuid4().hex[:8]}"
+
+        first = postgres_event_cache.PostgresEventCache(database_url=database_url, namespace=namespace)
+        await first.initialize()
+        await first.close()
+
+        statements: list[str] = []
+        original_connect = psycopg.AsyncConnection.connect
+
+        async def recording_connect(*args: object, **kwargs: object) -> psycopg.AsyncConnection:
+            db = await original_connect(*args, **kwargs)
+            original_execute = db.execute
+
+            async def recording_execute(query, params=None, **execute_kwargs):  # noqa: ANN001, ANN003, ANN202
+                statements.append(str(query))
+                return await original_execute(query, params, **execute_kwargs)
+
+            db.execute = recording_execute  # type: ignore[method-assign]
+            return db
+
+        second = postgres_event_cache.PostgresEventCache(database_url=database_url, namespace=namespace)
+        with patch.object(psycopg.AsyncConnection, "connect", recording_connect):
+            await second.initialize()
+        await second.close()
+
+        altered = [statement for statement in statements if "ALTER TABLE" in statement.upper()]
+        assert not altered, f"startup on a current schema issued {len(altered)} ALTER TABLE statements: {altered}"

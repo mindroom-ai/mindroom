@@ -514,51 +514,6 @@ class TestSingleEventReadObeysTheSameSenderRule:
         assert projected["content"]["body"] == "real", "the single-event projection rendered someone else's replacement"
 
 
-class TestRawEventIdsStayVisibleToBookkeeping:
-    """Collapsing hides superseded edits from the visible read, not from the database.
-
-    Repair bookkeeping reconciles retained deltas against "what is durably present". Answering
-    that with the collapsed read reports every superseded edit as missing, so a delta retained for
-    one - which happens whenever an append does not converge - can never reconcile and the reader
-    invalidates the thread it just served.
-    """
-
-    @pytest.mark.asyncio
-    async def test_superseded_edits_are_absent_from_the_read_but_present_in_the_id_set(
-        self,
-        event_cache: ConversationEventCache,
-    ) -> None:
-        """The two reads answer different questions, and bookkeeping needs the second."""
-        author = "@author:localhost"
-        await _seed_thread(
-            event_cache,
-            [
-                _message_event(_THREAD_ID, 1_000, sender=author),
-                _message_event("$p", 2_000, sender=author, thread_id=_THREAD_ID),
-                _message_event("$e1", 2_100, sender=author, edit_of="$p"),
-                _message_event("$e2", 2_200, sender=author, edit_of="$p"),
-                _message_event("$e3", 2_300, sender=author, edit_of="$p"),
-            ],
-        )
-
-        read = await event_cache.get_thread_events(_ROOM_ID, _THREAD_ID)
-        raw_ids = await event_cache.get_thread_event_ids(_ROOM_ID, _THREAD_ID)
-        assert read is not None
-
-        assert {row["event_id"] for row in read} == {_THREAD_ID, "$p", "$e3"}
-        assert raw_ids == {_THREAD_ID, "$p", "$e1", "$e2", "$e3"}, (
-            "bookkeeping would see the superseded edits as missing and invalidate the thread"
-        )
-
-    @pytest.mark.asyncio
-    async def test_an_unknown_thread_has_no_raw_event_ids(
-        self,
-        event_cache: ConversationEventCache,
-    ) -> None:
-        """An absent thread is an empty set, not a failure."""
-        assert await event_cache.get_thread_event_ids(_ROOM_ID, "$absent") == set()
-
-
 class TestCollapsedReadCost:
     """One query per read, no matter how large or how edit-dense the thread is."""
 
