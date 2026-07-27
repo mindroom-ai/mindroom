@@ -11,6 +11,7 @@ import nio
 import pytest
 import yaml
 
+from mindroom.matrix.cache import thread_history_result
 from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 from mindroom.thread_export import ThreadExportTarget
 from mindroom.thread_export import storage as thread_export_storage
@@ -179,7 +180,7 @@ async def test_export_threads_prefer_cache_uses_cache_first_fetch(tmp_path: Path
         ),
         patch(
             "mindroom.thread_export.execution.fetch_thread_history",
-            new=AsyncMock(return_value=history),
+            new=AsyncMock(return_value=thread_history_result(history, is_full_history=True)),
         ) as cache_fetch,
         patch(
             "mindroom.thread_export.execution.refresh_thread_history_from_source",
@@ -318,7 +319,7 @@ async def test_room_index_not_rewritten_when_unchanged(tmp_path: Path) -> None:
         ),
         patch(
             "mindroom.thread_export.execution.refresh_thread_history_from_source",
-            new=AsyncMock(return_value=history),
+            new=AsyncMock(return_value=thread_history_result(history, is_full_history=True)),
         ),
     ):
         await _export_threads_for_client(
@@ -449,7 +450,7 @@ async def test_export_threads_skips_rewrite_when_content_unchanged(tmp_path: Pat
         ),
         patch(
             "mindroom.thread_export.execution.refresh_thread_history_from_source",
-            new=AsyncMock(return_value=history),
+            new=AsyncMock(return_value=thread_history_result(history, is_full_history=True)),
         ),
     ):
         first_stats = await _export_threads_for_client(
@@ -561,7 +562,7 @@ async def test_export_threads_rewrites_when_existing_file_corrupt(tmp_path: Path
         ),
         patch(
             "mindroom.thread_export.execution.refresh_thread_history_from_source",
-            new=AsyncMock(return_value=history),
+            new=AsyncMock(return_value=thread_history_result(history, is_full_history=True)),
         ),
     ):
         stats = await _export_threads_for_client(
@@ -604,7 +605,7 @@ async def test_export_threads_rewrites_existing_file_with_invalid_utf8(tmp_path:
         ),
         patch(
             "mindroom.thread_export.execution.refresh_thread_history_from_source",
-            new=AsyncMock(return_value=history),
+            new=AsyncMock(return_value=thread_history_result(history, is_full_history=True)),
         ),
     ):
         stats = await _export_threads_for_client(
@@ -742,7 +743,7 @@ async def test_empty_complete_enumeration_preserves_existing_thread_exports(tmp_
         ),
         patch(
             "mindroom.thread_export.execution.refresh_thread_history_from_source",
-            new=AsyncMock(return_value=history),
+            new=AsyncMock(return_value=thread_history_result(history, is_full_history=True)),
         ),
     ):
         await _export_threads_for_client(
@@ -896,7 +897,7 @@ async def test_definitive_non_member_on_non_aliased_target_removes_room_export(
         ) as enumerate_threads,
         patch(
             "mindroom.thread_export.execution.refresh_thread_history_from_source",
-            new=AsyncMock(return_value=history),
+            new=AsyncMock(return_value=thread_history_result(history, is_full_history=True)),
         ),
     ):
         stats = await _export_threads_for_client(
@@ -1258,7 +1259,7 @@ async def test_prefer_cache_bulk_backfills_untrusted_threads(tmp_path: Path) -> 
         ) as bulk_refresh,
         patch(
             "mindroom.thread_export.execution.fetch_thread_history",
-            new=AsyncMock(return_value=history),
+            new=AsyncMock(return_value=thread_history_result(history, is_full_history=True)),
         ) as cache_fetch,
     ):
         stats = await _export_threads_for_client(
@@ -1309,7 +1310,7 @@ async def test_prefer_cache_skips_bulk_when_cache_is_trusted(tmp_path: Path) -> 
         ) as bulk_refresh,
         patch(
             "mindroom.thread_export.execution.fetch_thread_history",
-            new=AsyncMock(return_value=history),
+            new=AsyncMock(return_value=thread_history_result(history, is_full_history=True)),
         ) as cache_fetch,
     ):
         stats = await _export_threads_for_client(

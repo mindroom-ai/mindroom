@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 import nio
 
 from mindroom.logging_config import get_logger
+from mindroom.matrix.cache.thread_read_window import UNBOUNDED_THREAD_READ
 from mindroom.matrix.client_thread_history import (
     bulk_refresh_room_thread_histories,
     enumerate_room_thread_root_ids,
@@ -103,6 +104,10 @@ async def _joined_member_ids(client: nio.AsyncClient, room_id: str) -> frozenset
     raise RuntimeError(msg)
 
 
+class _IncompleteThreadExportError(RuntimeError):
+    """Raised when a cache-preferring export cannot prove it has the whole thread."""
+
+
 async def _fetch_thread_payload(
     client: nio.AsyncClient,
     room: ThreadExportRoom,
@@ -121,7 +126,19 @@ async def _fetch_thread_payload(
             event_cache,
             trusted_sender_ids=trusted_sender_ids,
             caller_label="thread_export",
+            # An export is the history, so the recent tail is not an acceptable answer. The
+            # default window would silently drop the oldest messages of a long thread.
+            budget=UNBOUNDED_THREAD_READ,
         )
+        # An unbounded read cannot truncate, but it can still come back degraded - a stale
+        # fallback after a failed refetch, for instance. Export must not write a file that looks
+        # complete when it is not, so an incomplete read is refused rather than silently exported.
+        if not history.is_full_history:
+            msg = (
+                f"Refusing to export thread {thread_id} from cache: the cached read is incomplete. "
+                "Re-run without --prefer-cache to fetch from the homeserver."
+            )
+            raise _IncompleteThreadExportError(msg)
     else:
         history = await refresh_thread_history_from_source(
             client,

@@ -36,6 +36,7 @@ class ResolvedVisibleMessage:
     thread_id: str | None
     latest_event_id: str
     stream_status: str | None = None
+    edited_timestamp: int | None = None
 
     @classmethod
     def from_message_data(
@@ -95,9 +96,18 @@ class ResolvedVisibleMessage:
         thread_id: str | None,
         content: dict[str, Any] | None,
     ) -> None:
-        """Apply the newest visible edit state to this message."""
+        """Apply the newest visible edit state to this message.
+
+        ``timestamp`` deliberately stays the original event's. It is the thread's ordering key, and
+        an edit is a correction to a message rather than a new position in the conversation - a
+        reply from an hour ago does not become the newest thing in the room because its author
+        fixed a typo. It also has to stay immutable for the windowed read to agree with the full
+        read: the cache selects the tail by the original ordering timestamp, so a fold that moved
+        edited messages to the end would disagree with the window about which messages the tail
+        even contains. The edit's own time is kept separately for callers that want it.
+        """
         self.body = body
-        self.timestamp = timestamp
+        self.edited_timestamp = timestamp
         self.latest_event_id = latest_event_id
         if thread_id is not None:
             self.thread_id = thread_id
@@ -126,6 +136,11 @@ class ResolvedVisibleMessage:
             "thread_id": self.thread_id,
             "latest_event_id": self.latest_event_id,
         }
+        # Position and edit time are separate facts now that an edit no longer moves the message.
+        # Emitting the edit time keeps it available to consumers that used to read it off
+        # "timestamp" before that field became the immutable ordering key.
+        if self.edited_timestamp is not None:
+            message_data["edited_timestamp"] = self.edited_timestamp
         msgtype = self.content.get("msgtype")
         if isinstance(msgtype, str) and msgtype != "m.text":
             message_data["msgtype"] = msgtype

@@ -29,7 +29,7 @@ from mindroom.matrix.cache.thread_read_window import (
     ThreadWindowCandidate,
     select_thread_window_event_ids,
 )
-from mindroom.matrix.client_visible_messages import ThreadEditCandidates
+from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage, ThreadEditCandidates
 from mindroom.matrix.event_info import EventInfo
 from tests.event_cache_test_support import replace_thread_unconditionally
 
@@ -1049,3 +1049,68 @@ class TestProductionShapedEditDensity:
 
         covered = _original_event_ids(window.events)
         assert covered == [_THREAD_ID, "$m5", "$m6", "$m7", "$m8", "$m9"]
+
+
+class TestTailAgreesAfterALateEdit:
+    """Bounded and unbounded reads must pick the same tail after an old message is edited.
+
+    The fold used to move an edited message to its edit timestamp while SQL selection ordered by
+    the original timestamp, so the two disagreed about which messages the tail even contained: the
+    full read ended ...m199, m200, m0 while the window returned m198, m199, m200. An edit is a
+    correction to a message, not a new position in the conversation, so position stays immutable
+    and both paths order the same way.
+    """
+
+    @pytest.mark.asyncio
+    async def test_editing_the_oldest_message_does_not_move_it_into_the_tail(
+        self,
+        event_cache: ConversationEventCache,
+    ) -> None:
+        """A late edit of the oldest message leaves the tail unchanged on both paths."""
+        events = _thread_event_sources(12)
+        # The oldest message is edited long after every later message was sent.
+        events.append(_message_event("$m0-late", 999_000, thread_id=_THREAD_ID, edit_of="$m0"))
+        await _seed_thread(event_cache, events)
+
+        full_read = await event_cache.get_thread_events(_ROOM_ID, _THREAD_ID)
+        bounded_read = await event_cache.get_thread_events(
+            _ROOM_ID,
+            _THREAD_ID,
+            budget=ThreadReadBudget(max_messages=3),
+        )
+        assert full_read is not None
+        assert bounded_read is not None
+
+        # The window's tail is the newest three messages by original position, not the edited one.
+        assert _original_event_ids(bounded_read) == [_THREAD_ID, "$m9", "$m10", "$m11"]
+        assert "$m0" not in _original_event_ids(bounded_read)
+
+        # And the full read agrees: the edited message keeps its original place, near the front.
+        full_messages = _original_event_ids(full_read)
+        assert full_messages[-3:] == ["$m9", "$m10", "$m11"]
+        assert full_messages.index("$m0") < full_messages.index("$m9")
+
+    def test_applying_an_edit_keeps_the_original_position(self) -> None:
+        """apply_edit records the edit's time separately instead of moving the message."""
+        message = ResolvedVisibleMessage(
+            sender="@user:localhost",
+            body="original",
+            timestamp=1_000,
+            event_id="$m0",
+            content={"body": "original", "msgtype": "m.text"},
+            thread_id=None,
+            latest_event_id="$m0",
+        )
+
+        message.apply_edit(
+            body="edited",
+            timestamp=999_000,
+            latest_event_id="$m0-late",
+            thread_id=None,
+            content={"body": "edited", "msgtype": "m.text"},
+        )
+
+        assert message.timestamp == 1_000, "an edit must not move the message in the thread"
+        assert message.edited_timestamp == 999_000
+        assert message.body == "edited"
+        assert message.latest_event_id == "$m0-late"
