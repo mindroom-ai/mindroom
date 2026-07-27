@@ -6,9 +6,9 @@ and the mutation resolver (``thread_bookkeeping``) over one shared write coordin
 Bots and tools still read the event cache directly for non-thread point lookups such as agent message
 snapshots and recent room events, but all thread reads and thread bookkeeping go through this facade.
 
-Per-turn memoization invariant: ``turn_scope`` may replay an event lookup or thread read within one
-inbound turn, but degraded or stale thread reads are never memoized, so a failed read early in a turn
-cannot poison later reads in the same turn.
+Per-turn memoization covers event lookups only. Thread reads are not memoized: the saving was one
+re-read per turn, and paying for it meant every caller reasoning about whether a degraded or stale
+read might be replayed later in the same turn.
 """
 
 from __future__ import annotations
@@ -30,7 +30,6 @@ from mindroom.matrix.cache import (
     ConversationEventCache,
     ThreadHistoryResult,
     normalize_nio_event_for_cache,
-    thread_history_result,
 )
 from mindroom.matrix.cache.thread_reads import ThreadReadMode, ThreadReadPolicy
 from mindroom.matrix.cache.thread_repair import ThreadRepairBackoffError, ThreadRepairSuppressedError
@@ -59,7 +58,6 @@ from mindroom.matrix.thread_bookkeeping import ThreadMutationResolver
 from mindroom.matrix.thread_diagnostics import (
     THREAD_HISTORY_SOURCE_CACHE,
     THREAD_HISTORY_SOURCE_DIAGNOSTIC,
-    is_thread_history_degraded,
 )
 from mindroom.matrix.thread_membership import resolve_event_thread_membership
 from mindroom.matrix.thread_room_scan import (
@@ -83,7 +81,6 @@ if TYPE_CHECKING:
 type ThreadReadResult = ThreadHistoryResult
 type EventLookupResult = nio.RoomGetEventResponse | RoomGetEventError
 type _TurnEventCacheKey = tuple[str, str, int]
-type _ThreadReadCacheKey = tuple[str, str, ThreadReadMode, int]
 
 logger = get_logger(__name__)
 
@@ -209,15 +206,6 @@ class ConversationCacheProtocol(Protocol):
         caller_label: str = "unknown",
     ) -> ThreadReadResult:
         """Resolve strict full thread history without live dispatch timeouts or stale fallback."""
-
-    async def get_fresh_strict_thread_history(
-        self,
-        room_id: str,
-        thread_id: str,
-        *,
-        caller_label: str = "unknown",
-    ) -> ThreadReadResult:
-        """Resolve strict full history without reusing the current turn's memoized read."""
 
     async def refresh_strict_thread_history_from_source(
         self,
@@ -437,9 +425,6 @@ class MatrixConversationCache(ConversationCacheProtocol):
     _turn_event_cache: ContextVar[dict[_TurnEventCacheKey, EventLookupResult] | None] = field(
         default_factory=lambda: ContextVar("mindroom_turn_event_lookup_cache", default=None),
     )
-    _turn_thread_read_cache: ContextVar[dict[_ThreadReadCacheKey, ThreadReadResult] | None] = field(
-        default_factory=lambda: ContextVar("mindroom_turn_thread_read_cache", default=None),
-    )
     _reads: ThreadReadPolicy = field(init=False, repr=False)
     _write_cache_ops: ThreadMutationCacheOps = field(init=False, repr=False)
     _outbound: ThreadOutboundWritePolicy = field(init=False, repr=False)
@@ -493,70 +478,16 @@ class MatrixConversationCache(ConversationCacheProtocol):
 
     @asynccontextmanager
     async def turn_scope(self) -> AsyncIterator[None]:
-        """Memoize event lookups and thread reads for the lifetime of one inbound turn."""
-        turn_lookup_cache = self._turn_event_cache.get()
-        turn_thread_cache = self._turn_thread_read_cache.get()
-        if turn_lookup_cache is not None and turn_thread_cache is not None:
+        """Memoize event lookups for the lifetime of one inbound turn."""
+        if self._turn_event_cache.get() is not None:
             yield
             return
 
         event_token = self._turn_event_cache.set({})
-        thread_token = self._turn_thread_read_cache.set({})
         try:
             yield
         finally:
-            self._turn_thread_read_cache.reset(thread_token)
             self._turn_event_cache.reset(event_token)
-
-    @staticmethod
-    def _copy_thread_read_result(result: ThreadReadResult) -> ThreadReadResult:
-        """Return a detached copy suitable for per-turn memoization."""
-        return thread_history_result(
-            list(result),
-            is_full_history=result.is_full_history,
-            diagnostics=result.diagnostics,
-        )
-
-    @staticmethod
-    def _thread_read_result_is_memoizable(
-        result: ThreadReadResult,
-        *,
-        mode: ThreadReadMode,
-    ) -> bool:
-        """Return whether one read is complete enough to reuse later in this turn."""
-        if is_thread_history_degraded(result):
-            return False
-        return not mode.full_history or result.is_full_history
-
-    async def _read_thread_memoized(
-        self,
-        room_id: str,
-        thread_id: str,
-        *,
-        mode: ThreadReadMode,
-        caller_label: str,
-    ) -> ThreadReadResult:
-        """Resolve one thread read through per-turn memoization."""
-        cache_key: _ThreadReadCacheKey = (
-            room_id,
-            thread_id,
-            mode,
-            self._write_cache_ops.room_departure_epoch(room_id),
-        )
-        turn_cache = self._turn_thread_read_cache.get()
-        if turn_cache is not None and cache_key in turn_cache:
-            return self._copy_thread_read_result(turn_cache[cache_key])
-
-        result = await self._reads.read_thread(
-            room_id,
-            thread_id,
-            mode=mode,
-            caller_label=caller_label,
-        )
-        if turn_cache is not None and self._thread_read_result_is_memoizable(result, mode=mode):
-            turn_cache[cache_key] = self._copy_thread_read_result(result)
-            return self._copy_thread_read_result(turn_cache[cache_key])
-        return result
 
     async def get_event(
         self,
@@ -1224,7 +1155,7 @@ class MatrixConversationCache(ConversationCacheProtocol):
         caller_label: str = "unknown",
     ) -> ThreadReadResult:
         """Resolve advisory full thread history for one conversation root."""
-        return await self._read_thread_memoized(
+        return await self._reads.read_thread(
             room_id,
             thread_id,
             mode=ThreadReadMode.ADVISORY_FULL,
@@ -1239,7 +1170,7 @@ class MatrixConversationCache(ConversationCacheProtocol):
         caller_label: str = "unknown",
     ) -> ThreadReadResult:
         """Resolve strict dispatch thread context using only fresh cache data or a homeserver refill."""
-        return await self._read_thread_memoized(
+        return await self._reads.read_thread(
             room_id,
             thread_id,
             mode=ThreadReadMode.DISPATCH_SNAPSHOT,
@@ -1254,7 +1185,7 @@ class MatrixConversationCache(ConversationCacheProtocol):
         caller_label: str = "unknown",
     ) -> ThreadReadResult:
         """Resolve strict full dispatch thread history using only fresh cache data or a homeserver refill."""
-        return await self._read_thread_memoized(
+        return await self._reads.read_thread(
             room_id,
             thread_id,
             mode=ThreadReadMode.DISPATCH_FULL,
@@ -1269,21 +1200,6 @@ class MatrixConversationCache(ConversationCacheProtocol):
         caller_label: str = "unknown",
     ) -> ThreadReadResult:
         """Resolve strict full thread history without live dispatch timeouts or stale fallback."""
-        return await self._read_thread_memoized(
-            room_id,
-            thread_id,
-            mode=ThreadReadMode.STRICT_FULL,
-            caller_label=caller_label,
-        )
-
-    async def get_fresh_strict_thread_history(
-        self,
-        room_id: str,
-        thread_id: str,
-        *,
-        caller_label: str = "unknown",
-    ) -> ThreadReadResult:
-        """Resolve strict full history without reusing the current turn's memoized read."""
         return await self._reads.read_thread(
             room_id,
             thread_id,
@@ -1344,7 +1260,6 @@ class MatrixConversationCache(ConversationCacheProtocol):
         content: dict[str, Any],
     ) -> None:
         """Schedule one locally sent message or edit for advisory cache bookkeeping."""
-        self._evict_turn_thread_reads_for_room(room_id)
         self._evict_turn_event_lookups_for_outbound_event(
             room_id,
             event_id=event_id,
@@ -1358,7 +1273,6 @@ class MatrixConversationCache(ConversationCacheProtocol):
         event_source: dict[str, Any],
     ) -> None:
         """Schedule one locally sent outbound event for advisory cache bookkeeping."""
-        self._evict_turn_thread_reads_for_room(room_id)
         event_id = event_source.get("event_id")
         self._evict_turn_event_lookups_for_outbound_event(
             room_id,
@@ -1369,7 +1283,6 @@ class MatrixConversationCache(ConversationCacheProtocol):
 
     def notify_outbound_redaction(self, room_id: str, redacted_event_id: str) -> None:
         """Schedule one locally redacted message for advisory cache bookkeeping."""
-        self._evict_turn_thread_reads_for_room(room_id)
         self._evict_turn_event_lookups_for_room(room_id)
         self._outbound.notify_outbound_redaction(room_id, redacted_event_id)
 
@@ -1380,15 +1293,6 @@ class MatrixConversationCache(ConversationCacheProtocol):
     def release_outbound_thread(self, room_id: str, event_id: str) -> None:
         """Release one outbound response thread reservation after terminal delivery."""
         self._outbound.release_thread_response(room_id, event_id)
-
-    def _evict_turn_thread_reads_for_room(self, room_id: str) -> None:
-        """Discard thread reads changed by a successful outbound mutation."""
-        turn_cache = self._turn_thread_read_cache.get()
-        if turn_cache is None:
-            return
-        for cache_key in tuple(turn_cache):
-            if cache_key[0] == room_id:
-                turn_cache.pop(cache_key)
 
     def _evict_turn_event_lookup(self, room_id: str, event_id: str) -> None:
         """Discard point-read memoization invalidated by one successful outbound mutation."""

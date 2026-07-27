@@ -1314,62 +1314,6 @@ async def test_stored_repair_releases_replayed_delta_filtered_by_redaction(tmp_p
 
 
 @pytest.mark.asyncio
-async def test_fresh_strict_history_bypasses_inherited_turn_memoization(tmp_path: Path) -> None:
-    """Background tasks should see post-delivery history despite copied ContextVars."""
-    event_cache = SqliteEventCache(tmp_path / "event_cache.db")
-    await event_cache.initialize()
-    conversation_cache = _conversation_cache_for_thread_reads(tmp_path, event_cache, client=MagicMock())
-
-    async def run_thread_repair(
-        _room_id: str,
-        _thread_id: str,
-        repair: Callable[[], Awaitable[ThreadHistoryResult]],
-        **_kwargs: object,
-    ) -> ThreadHistoryResult:
-        return await repair()
-
-    coordinator = MagicMock()
-    coordinator.wait_for_thread_idle = AsyncMock(return_value=None)
-    coordinator.pending_thread_repair_deltas.return_value = ()
-    coordinator.run_thread_repair = AsyncMock(side_effect=run_thread_repair)
-    conversation_cache.runtime.event_cache_write_coordinator = coordinator
-    before_delivery = thread_history_result(
-        [ResolvedVisibleMessage.synthetic(sender="@user:localhost", body="Question", event_id="$question")],
-        is_full_history=True,
-        diagnostics={"cache_repair_usable": True},
-    )
-    after_delivery = thread_history_result(
-        [
-            *before_delivery,
-            ResolvedVisibleMessage.synthetic(sender="@bot:localhost", body="Answer", event_id="$answer"),
-        ],
-        is_full_history=True,
-        diagnostics={"cache_repair_usable": True},
-    )
-
-    try:
-        with patch(
-            "mindroom.matrix.conversation_cache.fetch_dispatch_thread_history",
-            new=AsyncMock(side_effect=[before_delivery, after_delivery]),
-        ) as fetch:
-            async with conversation_cache.turn_scope():
-                first = await conversation_cache.get_strict_thread_history("!room:localhost", "$thread")
-                inherited = await asyncio.create_task(
-                    conversation_cache.get_strict_thread_history("!room:localhost", "$thread"),
-                )
-                fresh = await asyncio.create_task(
-                    conversation_cache.get_fresh_strict_thread_history("!room:localhost", "$thread"),
-                )
-    finally:
-        await event_cache.close()
-
-    assert [message.event_id for message in first] == ["$question"]
-    assert [message.event_id for message in inherited] == ["$question"]
-    assert [message.event_id for message in fresh] == ["$question", "$answer"]
-    assert fetch.await_count == 2
-
-
-@pytest.mark.asyncio
 async def test_strict_source_refresh_bypasses_usable_cache(
     tmp_path: Path,
 ) -> None:

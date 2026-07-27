@@ -71,16 +71,6 @@ class ThreadReadMode(Enum):
     STRICT_SOURCE_REFRESH = auto()
 
     @property
-    def full_history(self) -> bool:
-        """Return whether this mode requires fully hydrated thread history."""
-        return self in {
-            ThreadReadMode.ADVISORY_FULL,
-            ThreadReadMode.DISPATCH_FULL,
-            ThreadReadMode.STRICT_FULL,
-            ThreadReadMode.STRICT_SOURCE_REFRESH,
-        }
-
-    @property
     def dispatch_safe(self) -> bool:
         """Return whether this mode is on the live dispatch fail-open path."""
         # STRICT_FULL intentionally stays false: it may block for authoritative post-lock model context.
