@@ -14,6 +14,10 @@ The default constructor principal exists for standalone cache consumers and test
 
 An event lookup is keyed by principal, room, and event ID.
 
+A thread read returns each message with only the single edit that currently wins it, and an edit can win only against an original with the same sender, compared through the inline `sender` column rather than the payload.
+
+That comparison is an optimization rather than the authorization boundary: the fold rechecks every candidate against the payload sender, so a foreign replacement that reached the read would render the pre-edit body rather than the replacing account's text.
+
 A decrypted sidecar row is keyed by principal, room, and MXC URL, and reads additionally require a surviving reference from the requested event ID.
 
 Reference rows are derived from version 2 `io.mindroom.long_text` metadata in top-level content and `m.new_content`.
@@ -24,13 +28,7 @@ Plaintext persistence succeeds only while the owning event and its reference are
 
 Durable plaintext exists only in the principal-owned event cache; there is no runtime-wide process-local plaintext cache shared across bots.
 
-Each bot may retain one process-local resolved thread projection across turns, including resolved message bodies and the exact sidecar plaintext on which they depend.
-
-That projection is scoped to one room and thread, and reuse requires an exact durable event revision, membership epoch, trusted-sender set, and sidecar-text match.
-
-Every serve revalidates sidecar plaintext through the principal- and room-scoped surviving-reference check; any mismatch or uncertainty falls back to full resolution.
-
-Durable invalidation prevents reuse through the normal freshness gate, resolution failures discard the projection, and process shutdown removes it.
+No resolved thread projection is retained between turns; every thread read resolves from durable rows, so no resolved message body or sidecar plaintext outlives the call that produced it.
 
 Hydration without complete principal, room, event, and MXC identity may return freshly downloaded content to the current call, but it cannot read or populate the durable cache.
 

@@ -104,10 +104,6 @@ async def _joined_member_ids(client: nio.AsyncClient, room_id: str) -> frozenset
     raise RuntimeError(msg)
 
 
-class _IncompleteThreadExportError(RuntimeError):
-    """Raised when a cache-preferring export cannot prove it has the whole thread."""
-
-
 async def _fetch_thread_payload(
     client: nio.AsyncClient,
     room: ThreadExportRoom,
@@ -137,7 +133,7 @@ async def _fetch_thread_payload(
                 "or stale. "
                 "Re-run without --prefer-cache to fetch from the homeserver."
             )
-            raise _IncompleteThreadExportError(msg)
+            raise RuntimeError(msg)
     else:
         history = await refresh_thread_history_from_source(
             client,

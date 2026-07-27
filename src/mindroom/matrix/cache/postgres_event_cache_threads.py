@@ -40,68 +40,21 @@ if TYPE_CHECKING:
 
 # The edits that survive a collapsed read: one per message, from the right sender.
 #
-# A thread stores every edit ever sent. Returning them all makes the caller's fold re-derive per
-# message what one window function derives once, and hauls the whole superseded history across
-# the wire to do it.
+# This query mirrors the SQLite one. What it selects and why - the per (original, sender) rule, why
+# the sender comparison here is an optimization rather than the security boundary, why the original
+# is LEFT joined out of ``events`` alone, why ROW_NUMBER rather than a correlated NOT EXISTS, why
+# MATERIALIZED, and what a write-time prune would have to preserve - is recorded once above
+# ``_SURVIVING_EDITS_CTE``
+# in sqlite_event_cache_threads.py. Only the PostgreSQL-specific notes live here; keep it that way,
+# because the two copies had already drifted when this was last deduplicated.
 #
-# Measured in production 2026-07-27: edits are 53% of all event rows, 6.30 per edited original,
-# max 170 on one original, and one thread is 94.5% edits. Threads themselves are small - p50 9
-# rows, max 538.
-#
-# So be precise about what this buys, because two earlier revisions of this comment were not. It
-# does not reduce writes - it is a read-side query, and every edit is still stored. It does not
-# change what the fold produces either; the fold already picked one edit per message. What it buys
-# is fewer rows off disk and over the wire, and less fold work, on a median thread of nine rows -
-# paid for with a window function and four joins on every read. The correctness fixes that came
-# with it are the substantial part. The slowest production read measured 126.6 ms warm, so no
-# speedup is claimed, and the 2,021-row thread quoted here before was this repository's synthetic
-# fixture (20 messages x 100 edits), not production.
-#
-# Why the root fix is a write-time prune, and what it would have to preserve, is recorded once in
-# sqlite_event_cache_threads.py rather than duplicated here.
-#
-# "Surviving" is per (original, sender): a replacement is only legitimate from the sender of the
-# event it replaces, so keeping a single newest-overall edit lets any room member starve the fold
-# of the author's own and pin the message at its pre-edit body. Membership is joined in here rather
-# than filtered later, because ranking over edits the outer query will discard lets an
-# out-of-thread edit suppress the in-thread runner-up.
-#
-# The sender comparison here is an optimization, not the security boundary. The fold re-checks
-# every candidate against the JSON sender (``ThreadEditCandidates.winner_for``), so if this
-# filter ever admits a foreign replacement the fold still finds nothing in the author's bucket
-# and renders the pre-edit body - wrong, but not the attacker's text. Doing it in SQL keeps a
-# foreign edit from being ranked as the survivor and hiding the author's own.
-#
-# The original is LEFT joined, not required. An edit can outlive the message it replaces -
-# ``event_edits`` holds no foreign key to ``events`` - and the fold synthesizes a message from such
-# an edit rather than dropping it, carrying the editor's own sender because an original nobody has
-# seen cannot be impersonated. Requiring the original would delete those messages from the read
-# outright. The sender filter is skipped exactly when there is no original to compare against,
-# which is also when ``winner_for`` stops applying it, for the same reason.
-#
-# The original is looked up room-wide, not thread-scoped. Scoping it to this thread made an
-# original cached in a sibling thread read as absent, which skipped the sender filter entirely and
-# let the newest edit across all senders win - the exact suppression the edit-side membership join
-# above exists to prevent, mirrored. An edit and the message it replaces always share a thread in
-# Matrix, so a room-wide lookup loses nothing legitimate and only ever adds a sender to compare
-# against.
-#
-# ROW_NUMBER over one pass rather than a correlated NOT EXISTS per candidate: 5.3 ms against
-# 8.7 ms on a synthetic 2,021-event thread with current table statistics. Policy stays in Python; this is
-# only "latest per group", which is what a window function is for. Splitting present-original and
-# absent-original edits into two CTEs scans ``event_edits`` twice and timed out a 2,000-edit test
-# that one pass completes.
+# Do not rewrite the ranking as ``DISTINCT ON (original_event_id)``: that shape materialises every
+# row of the thread before it can pick winners.
 #
 # Do not re-derive this query's cost without ANALYZE. On unanalyzed tables an unseen namespace
 # estimates 1 row against thousands actual, every join degrades to a nested loop with a join filter,
 # and every shape collapses - a plain unfiltered read of the same thread included, by 77x. A
 # comparison made in that state measures the planner, not the query.
-#
-# MATERIALIZED is a hint, not a correctness requirement: measured 3.7 ms materialized against
-# 4.1 ms inlinable. It is kept only to stop the planner re-deriving the survivors per row.
-#
-# Do not rewrite the ranking as ``DISTINCT ON (original_event_id)``: that shape materialises every
-# row of the thread before it can pick winners.
 #
 # ``COLLATE "C"`` is load-bearing, not decoration. The tie-break has to agree with SQLite and
 # with the fold, and both compare event IDs by byte: SQLite TEXT comparison is always BINARY and

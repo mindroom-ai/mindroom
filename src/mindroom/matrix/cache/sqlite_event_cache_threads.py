@@ -81,7 +81,7 @@ if TYPE_CHECKING:
 # does not reduce writes - it is a read-side query, and every edit is still stored. It does not
 # change what the fold produces either; the fold already picked one edit per message. What it buys
 # is fewer rows off disk and over the wire, and less fold work, on a median thread of nine rows -
-# paid for with a window function and four joins on every read. The correctness fixes that came
+# paid for with a window function and three joins on every read. The correctness fixes that came
 # with it are the substantial part. The slowest production read measured 126.6 ms warm, so no
 # speedup is claimed, and the 2,021-row thread quoted here before was this repository's synthetic
 # fixture (20 messages x 100 edits), not production.
@@ -123,23 +123,21 @@ if TYPE_CHECKING:
 # outright. The sender filter is skipped exactly when there is no original to compare against,
 # which is also when ``winner_for`` stops applying it, for the same reason.
 #
-# The original is looked up room-wide, not thread-scoped. Scoping it to this thread made an
-# original cached in a sibling thread read as absent, which skipped the sender filter entirely and
-# let the newest edit across all senders win - the exact suppression the edit-side membership join
-# above exists to prevent, mirrored. An edit and the message it replaces always share a thread in
-# Matrix, so a room-wide lookup loses nothing legitimate and only ever adds a sender to compare
-# against.
+# The original is read out of ``events`` alone, with no thread membership required. Two narrower
+# lookups were tried first and both silently disabled the filter. Scoping it to this thread made an
+# original cached in a sibling thread read as absent. Routing it through ``thread_events`` at all
+# then did the same to any original cached by a point lookup, because ``store_event`` writes the
+# payload with no membership row - so ``original_events`` came back NULL, the sender filter was
+# skipped, and the newest edit across all senders won, which is the exact suppression this filter
+# exists to prevent (``test_a_point_cached_original_still_scopes_edits_to_its_sender``). The
+# comparison needs the payload and nothing else, so asking for more can only lose a sender it could
+# have compared against.
 #
 # ROW_NUMBER over one pass rather than a correlated NOT EXISTS per candidate: 5.3 ms against
 # 8.7 ms on a synthetic 2,021-event thread with current table statistics. Policy stays in Python; this is
 # only "latest per group", which is what a window function is for. Splitting present-original and
 # absent-original edits into two CTEs scans ``event_edits`` twice and timed out a 2,000-edit
 # PostgreSQL test that one pass completes.
-#
-# Do not re-derive this query's cost without ANALYZE. On unanalyzed tables an unseen namespace
-# estimates 1 row against thousands actual, every join degrades to a nested loop with a join filter,
-# and every shape collapses - a plain unfiltered read of the same thread included, by 77x. A
-# comparison made in that state measures the planner, not the query.
 #
 # MATERIALIZED is a hint, not a correctness requirement: measured 3.7 ms materialized against
 # 4.1 ms inlinable. It is kept only to stop the planner re-deriving the survivors per row.
