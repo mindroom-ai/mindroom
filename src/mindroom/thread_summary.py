@@ -579,8 +579,15 @@ async def send_thread_summary_event(
     conversation_cache: ConversationCacheProtocol,
     *,
     initial_enrichment_complete: bool | None = None,
+    known_latest_thread_event_id: str | None = None,
 ) -> str | None:
-    """Send a thread summary as a standard Matrix notice event."""
+    """Send a thread summary as a standard Matrix notice event.
+
+    ``known_latest_thread_event_id`` lets a caller that already knows the newest
+    event in the thread (for example the creator of a brand-new thread) supply it
+    directly, skipping the history read that would otherwise scan the homeserver
+    for a thread with no cache snapshot yet.
+    """
     normalized_summary = normalize_thread_summary_text(summary)
     if not normalized_summary:
         logger.warning(
@@ -596,20 +603,22 @@ async def send_thread_summary_event(
         if len(normalized_summary) > THREAD_SUMMARY_MAX_LENGTH
         else normalized_summary
     )
-    try:
-        latest_thread_event_id = await conversation_cache.get_latest_thread_event_id_if_needed(
-            room_id,
-            thread_id,
-            caller_label="thread_summary_send",
-        )
-    except Exception as exc:
-        logger.warning(
-            "Falling back to thread root for summary send after latest-event lookup failure",
-            room_id=room_id,
-            thread_id=thread_id,
-            error=str(exc),
-        )
-        latest_thread_event_id = None
+    latest_thread_event_id = known_latest_thread_event_id
+    if latest_thread_event_id is None:
+        try:
+            latest_thread_event_id = await conversation_cache.get_latest_thread_event_id_if_needed(
+                room_id,
+                thread_id,
+                caller_label="thread_summary_send",
+            )
+        except Exception as exc:
+            logger.warning(
+                "Falling back to thread root for summary send after latest-event lookup failure",
+                room_id=room_id,
+                thread_id=thread_id,
+                error=str(exc),
+            )
+            latest_thread_event_id = None
     summary_metadata: dict[str, object] = {
         "version": 1,
         "summary": truncated_summary,

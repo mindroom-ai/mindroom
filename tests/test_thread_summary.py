@@ -1918,6 +1918,32 @@ class TestSendSummaryEvent:
         )
         conversation_cache.notify_outbound_message.assert_called_once_with("!room:x", "$s1", content)
 
+    async def test_known_latest_thread_event_id_skips_the_history_read(self) -> None:
+        """A caller that already knows the newest thread event should not trigger a history read."""
+        client = _mock_client()
+        client.room_send = AsyncMock(return_value=nio.RoomSendResponse(event_id="$s1", room_id="!r:x"))
+        conversation_cache = AsyncMock()
+        conversation_cache.get_latest_thread_event_id_if_needed = AsyncMock(return_value="$never-read")
+        conversation_cache.notify_outbound_message = Mock()
+
+        result = await send_thread_summary_event(
+            client,
+            room_id="!room:x",
+            thread_id="$root1",
+            summary="Spawned an isolated session",
+            message_count=1,
+            model_name="manual",
+            conversation_cache=conversation_cache,
+            known_latest_thread_event_id="$root1",
+        )
+
+        assert result == "$s1"
+        conversation_cache.get_latest_thread_event_id_if_needed.assert_not_awaited()
+        relates_to = client.room_send.call_args.kwargs["content"]["m.relates_to"]
+        assert relates_to["rel_type"] == "m.thread"
+        assert relates_to["event_id"] == "$root1"
+        assert relates_to["m.in_reply_to"] == {"event_id": "$root1"}
+
     async def test_event_content_truncates_overlong_summary(self) -> None:
         """Overlong summaries should be truncated before sending to Matrix."""
         client = _mock_client()
