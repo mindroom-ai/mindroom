@@ -524,6 +524,35 @@ async def test_cancelled_checkpoint_writer_failure_preserves_caller_cancellation
 
 
 @pytest.mark.asyncio
+async def test_stop_finishes_when_retry_work_swallows_worker_cancellation(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    coordinator, _hooks, _effects = _coordinator(store)
+    retry_started = asyncio.Event()
+    never = asyncio.Event()
+
+    async def swallow_first_cancellation() -> None:
+        retry_started.set()
+        try:
+            await never.wait()
+        except asyncio.CancelledError:
+            return
+
+    with patch.object(coordinator, "retry_pending", side_effect=swallow_first_cancellation):
+        coordinator.start()
+        await asyncio.wait_for(retry_started.wait(), timeout=1.0)
+        stop = asyncio.create_task(coordinator.stop())
+        await asyncio.sleep(0.05)
+        try:
+            assert stop.done()
+        finally:
+            if not stop.done():
+                stop.cancel()
+            await stop
+
+
+@pytest.mark.asyncio
 async def test_cancelled_multi_lock_acquisition_releases_acquired_subset(tmp_path: Path) -> None:
     store = _store(tmp_path)
     coordinator, _hooks, _effects = _coordinator(store)

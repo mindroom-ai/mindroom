@@ -575,6 +575,35 @@ Based on your choice, I'll proceed accordingly."""
             },
         ]
 
+    @pytest.mark.asyncio
+    async def test_reaction_failure_does_not_starve_later_buttons(self, mock_client: AsyncMock) -> None:
+        """All buttons get an attempt before durable retry is requested."""
+        mock_client.room_send.side_effect = [
+            nio.RoomSendError(message="forbidden"),
+            nio.RoomSendResponse.from_dict(
+                {"event_id": "$second-reaction"},
+                room_id="!room:localhost",
+            ),
+        ]
+        options = [
+            {"emoji": "✅", "label": "Approve", "value": "yes"},
+            {"emoji": "❌", "label": "Reject", "value": "no"},
+        ]
+
+        with pytest.raises(RuntimeError, match="Failed to add reaction"):
+            await interactive.add_reaction_buttons(
+                mock_client,
+                "!room:localhost",
+                "$question",
+                options,
+                idempotency_key="terminal:question",
+            )
+
+        assert [call.kwargs["content"]["m.relates_to"]["key"] for call in mock_client.room_send.await_args_list] == [
+            "✅",
+            "❌",
+        ]
+
     def test_load_active_questions_defaults_null_context_fields(self) -> None:
         """Persisted explicit null context fields should load as absent metadata."""
         payload = {

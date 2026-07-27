@@ -130,14 +130,20 @@ class TerminalDeliveryCoordinator:
         self._worker = asyncio.create_task(self._run(), name="terminal_checkpoint_retry")
 
     async def stop(self) -> None:
-        """Cancel network/effect work while allowing an active disk mutation to drain."""
+        """Cancel network/effect work while allowing an active disk mutation to drain.
+
+        ``retry_pending`` shields durable writers, so one cancellation can be
+        absorbed instead of ending the loop. Waiting with ``gather`` rather than
+        awaiting the task directly means a cancelled caller can never observe
+        success while the worker is still running.
+        """
         self._stopping = True
         worker, self._worker = self._worker, None
         if worker is None:
             return
-        worker.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await worker
+        while not worker.done():
+            worker.cancel()
+            await asyncio.gather(worker, return_exceptions=True)
 
     def wake(self, *, reason: str) -> None:
         """Wake retry after Matrix readiness changes."""
@@ -491,7 +497,7 @@ class TerminalDeliveryCoordinator:
                 lock.release()
 
     async def _run(self) -> None:
-        while True:
+        while not self._stopping:
             self._wake_event.clear()
             try:
                 await self.retry_pending()
@@ -499,6 +505,10 @@ class TerminalDeliveryCoordinator:
                 raise
             except Exception:
                 self.deps.logger.exception("terminal_checkpoint_retry_failed")
+            # Retry work absorbs cancellation to drain a durable write, so the
+            # loop must re-check the stop request instead of sleeping again.
+            if self._stopping:
+                return
             with contextlib.suppress(TimeoutError):
                 await asyncio.wait_for(
                     self._wake_event.wait(),
