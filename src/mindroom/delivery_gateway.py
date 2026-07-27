@@ -538,35 +538,14 @@ class DeliveryGateway:
         client = self._client()
         config = self.deps.runtime.config
         target = request.target
-        if (
-            config.get_entity_thread_mode(
-                self.deps.agent_name,
-                self.deps.runtime_paths,
-                room_id=target.room_id,
-            )
-            == "room"
-        ):
-            content = format_message_with_mentions(
-                config,
-                self.deps.runtime_paths,
-                request.new_text,
-                reply_to_event_id=target.reply_to_event_id,
-                tool_trace=request.tool_trace,
-                extra_content=request.extra_content,
-            )
-        else:
-            # No thread relation and no latest-thread lookup: both would only populate
-            # ``m.relates_to``, and ``build_edit_event_content`` pops that off the
-            # replacement before sending, at both the top level and in ``m.new_content``.
-            # Resolving the fallback cost a ``wait_for_thread_idle`` that, under load,
-            # blocks behind the very stream this edit belongs to.
-            content = format_message_with_mentions(
-                config,
-                self.deps.runtime_paths,
-                request.new_text,
-                tool_trace=request.tool_trace,
-                extra_content=request.extra_content,
-            )
+        # The edit envelope discards any pre-existing relation before adding m.replace.
+        content = format_message_with_mentions(
+            config,
+            self.deps.runtime_paths,
+            request.new_text,
+            tool_trace=request.tool_trace,
+            extra_content=request.extra_content,
+        )
 
         failure_reason = "edit_message_result returned None"
         try:

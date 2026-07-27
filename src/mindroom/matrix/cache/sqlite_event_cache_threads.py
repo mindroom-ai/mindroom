@@ -73,36 +73,25 @@ if TYPE_CHECKING:
 # message what one window function derives once, and hauls the whole superseded history across
 # the wire to do it.
 #
-# Two real agent workloads measured 6x apart on edit density, and the homeserver is why. The
-# mindroom-tuwunel fork collapses superseded m.replace events per (target, sender) on read
-# (``collapse_superseded_edits``) and deletes them outright once they age past its edit-purge
-# minimum, 86,400 seconds by default. So a cache whose threads were re-read after that carries
-# ~1.07 edits per (original, sender) and loses under 2% of its rows here, for about 1.3x the plain
-# read, while one accumulating live sync inside the purge window runs 53% edit rows at 6.30 per
-# original, max 170, with a thread at 94.5% edits. Threads are small either way - p50 9 rows,
-# max 538. Expect the cheap case against that fork and the expensive one against a stock
-# homeserver; neither is the shape.
+# Edit density depends partly on homeserver policy. The mindroom-tuwunel fork can collapse
+# superseded m.replace events in sync responses with ``mindroom_compact_edits_enabled`` and can
+# delete aged superseded edits with ``mindroom_edit_purge_enabled``. Both flags default to false,
+# so a default-configured fork can expose the same accumulated edit history as a stock homeserver.
 #
-# That the fork groups by (target, sender) is worth saying twice. It is the same key this query
-# uses, arrived at independently, which is why grouping by original alone was a real defect rather
-# than a theoretical one. It also orders by ``event_id.cmp()``, bytewise, so the COLLATE "C" pin
-# below has to hold for this read to agree with the homeserver as well as with SQLite and the
-# fold.
+# The fork's opt-in collapse groups by (target, sender), the same key this query uses. It also
+# orders by ``event_id.cmp()``, bytewise, so the COLLATE "C" pin below has to hold for this read to
+# agree with the homeserver as well as with SQLite and the fold.
 #
 # So be precise about what this buys, because two earlier revisions of this comment were not. It
 # does not reduce writes - it is a read-side query, and every edit is still stored. It does not
 # change what the fold produces either; the fold already picked one edit per message. What it buys
-# is fewer rows off disk and over the wire, and less fold work, on a median thread of nine rows -
-# paid for with a window function and three joins on every read. The correctness fixes that came
-# with it are the substantial part. The slowest measured read was 126.6 ms warm, so no speedup
-# is claimed, and the 2,021-row thread quoted here before was this repository's synthetic
-# fixture (20 messages x 100 edits), not a real one.
+# is fewer rows off disk and over the wire, and less fold work, paid for with a window function and
+# three joins on every read. The correctness fixes that came with it are the substantial part; no
+# universal speedup is claimed because the result depends on edit density and database statistics.
 #
-# The root fix is upstream of this query - prune superseded edits at the source and there is
-# nothing to collapse - and against the mindroom-tuwunel fork it is already built, so do not plan
-# it again as an open question. Its edit-purge service deletes superseded edits once they pass the
-# minimum age above, which also settles the trade this comment used to call undecided: redacting
-# the current winning edit is contractually supposed to reveal the previous one
+# Upstream pruning is available in the fork but remains opt-in. Where edit purge is enabled,
+# deleting superseded edits after the configured minimum age settles the rollback trade at that
+# boundary: redacting the current winning edit is contractually supposed to reveal the previous one
 # (``test_redacting_latest_edit_falls_back_to_previous_cached_edit``), and past that age there is
 # no previous one left to reveal, wherever the read is served from. It was already close to
 # unreachable - redacting a MESSAGE removes the original and every dependent edit together, and
@@ -111,8 +100,8 @@ if TYPE_CHECKING:
 # redaction target there. Reaching the rollback path needs the raw API,
 # ``/redact <edit-event-id>``, or moderation tooling. Element was not checked.
 #
-# What stays genuinely open is the case this cache must still handle alone: a stock homeserver that
-# neither collapses nor purges, where every superseded edit arrives and stays.
+# This cache must still handle deployments where those opt-in controls are disabled, including a
+# default-configured fork or a stock homeserver where superseded edits arrive and stay.
 #
 # The contract to implement, if it is built: keep only the current legitimate edit per (original,
 # sender); redacting an already-pruned edit tombstones it and is otherwise a no-op; redacting the
