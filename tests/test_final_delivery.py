@@ -127,6 +127,18 @@ def test_final_delivery_outcome_cancelled_for_empty_prompt_is_not_retryable() ->
         ),
         pytest.param(
             FinalDeliveryOutcome(
+                terminal_status="error",
+                event_id="$placeholder",
+                is_visible_response=True,
+                final_visible_body="Response delivery failed.",
+                delivery_kind="edited",
+                failure_reason="delivery_failed",
+            ),
+            False,
+            id="delivered-failure-note",
+        ),
+        pytest.param(
+            FinalDeliveryOutcome(
                 terminal_status="completed",
                 event_id="$existing",
                 is_visible_response=True,

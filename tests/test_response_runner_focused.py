@@ -918,8 +918,7 @@ async def test_streaming_placeholder_only_delivery_does_not_mark_substantive_rep
     request = replace(_plain_request(_target()), pipeline_timing=timing)
 
     async def fake_stream(*_args: object, **_kwargs: object) -> AsyncIterator[str]:
-        if False:
-            yield ""
+        yield ""
 
     with (
         patch.object(DeliveryGateway, "deliver_stream", new=AsyncMock(return_value=transport)),

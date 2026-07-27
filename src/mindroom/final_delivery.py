@@ -66,7 +66,8 @@ class FinalDeliveryOutcome:  # noqa: D101
     def delivered_substantive_content(self) -> bool:
         """Return whether this outcome proves that nonblank response text reached Matrix."""
         return (
-            self.is_visible_response
+            self.terminal_status == "completed"
+            and self.is_visible_response
             and self.delivery_kind is not None
             and self.final_visible_body is not None
             and bool(self.final_visible_body.strip())
