@@ -15,6 +15,14 @@ every overflow page on SQLite, which is the cost the bound exists to avoid.
 selects one message and a pile of its own edits. Candidates are therefore originals, and each
 selected original carries its latest edit along with it.
 
+PostgreSQL exposure worth knowing: the bounded read is two joins deeper than the unbounded one,
+so it degrades further when table statistics are stale. On unanalyzed tables an unseen namespace or
+room estimates one row against thousands, every join becomes a nested loop with a join filter, and
+a bounded read measured 1367 ms against 10.5 ms once analyzed. Autovacuum closes this within its
+naptime and a freshly created database has nothing to analyze, so the practical window is the
+minute after a bulk refill. Any benchmark of this path must ANALYZE first or it measures the
+planner, not the query - the unbounded read degrades 77x under the same conditions.
+
 ``event_bytes`` measures fetch cost, not context cost. An oversized body offloaded to sidecar
 storage has a small payload and a large resolved body, which is correct here - the bound exists to
 stop hauling megabytes across the wire, and sidecar hydration is separately bounded by the message
@@ -24,7 +32,7 @@ count in the window. The token budget stays at the compaction layer; this is not
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from structlog.stdlib import BoundLogger
@@ -63,6 +71,20 @@ UNBOUNDED_THREAD_READ = ThreadReadBudget()
 
 
 @dataclass(frozen=True, slots=True)
+class ThreadWindowRead:
+    """One windowed read plus whether the window left anything out.
+
+    ``truncated`` is load-bearing beyond diagnostics: a caller that labels a truncated window as
+    full history makes completeness-dependent planning operate on a partial thread and lets the
+    model-history refresh be skipped. It has to be the real answer, not an approximation, because
+    over-claiming corrupts context while under-claiming forces an avoidable refetch every turn.
+    """
+
+    events: list[dict[str, Any]] | None
+    truncated: bool
+
+
+@dataclass(frozen=True, slots=True)
 class ThreadWindowCandidate:
     """One selectable thread message and the bytes returning it would cost."""
 
@@ -93,16 +115,17 @@ def select_thread_window_event_ids(
 ) -> ThreadWindowSelection:
     """Return the messages that fit one budget, walking a thread from its newest message back.
 
-    The newest message is always returned even when it alone exceeds the byte budget: a read that
+    The newest message is always returned even when it alone exceeds either budget: a read that
     answered with nothing would be indistinguishable from an empty thread, and the caller asked for
-    the tail. The running total only grows, so the messages that fit are always a prefix.
+    the tail. That floor applies to ``max_messages=0`` too. The running total only grows, so the
+    messages that fit are always a prefix.
     """
     selected: list[str] = []
     consumed_bytes = 0
     stopped_at_max_bytes = False
     stopped_at_max_messages = False
     for candidate in newest_first_candidates:
-        if budget.max_messages is not None and len(selected) >= budget.max_messages:
+        if selected and budget.max_messages is not None and len(selected) >= budget.max_messages:
             stopped_at_max_messages = True
             break
         next_total = consumed_bytes + candidate.window_bytes
@@ -156,6 +179,7 @@ __all__ = [
     "UNBOUNDED_THREAD_READ",
     "ThreadReadBudget",
     "ThreadWindowCandidate",
+    "ThreadWindowRead",
     "ThreadWindowSelection",
     "log_thread_window_selection",
     "select_thread_window_event_ids",

@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
-from .thread_read_window import UNBOUNDED_THREAD_READ, ThreadReadBudget
+from .thread_read_window import UNBOUNDED_THREAD_READ, ThreadReadBudget, ThreadWindowRead
 
 if TYPE_CHECKING:
     from collections.abc import Collection
@@ -89,6 +89,20 @@ class ConversationEventCache(Protocol):
 
         A bounded budget returns the newest messages that fit, each with its latest edit, plus the
         thread root. Selection never reads a payload it does not return.
+        """
+
+    async def get_thread_window(
+        self,
+        room_id: str,
+        thread_id: str,
+        *,
+        budget: ThreadReadBudget = UNBOUNDED_THREAD_READ,
+    ) -> ThreadWindowRead:
+        """Return one thread's window plus whether the budget left messages out.
+
+        Callers that label history as complete must use this rather than ``get_thread_events``:
+        a truncated window presented as full history makes completeness-dependent planning run on
+        a partial thread.
         """
 
     async def get_recent_room_thread_ids(self, room_id: str, *, limit: int) -> list[str]:

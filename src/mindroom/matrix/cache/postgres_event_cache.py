@@ -29,7 +29,7 @@ from .thread_cache_state import (
     incoming_thread_invalidation_takes_precedence,
     replacement_validated_at,
 )
-from .thread_read_window import UNBOUNDED_THREAD_READ, ThreadReadBudget
+from .thread_read_window import UNBOUNDED_THREAD_READ, ThreadReadBudget, ThreadWindowRead
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Collection
@@ -336,7 +336,7 @@ async def _create_postgres_event_cache_schema(db: AsyncConnection) -> None:
     )
     await db.execute(
         """
-        CREATE INDEX IF NOT EXISTS idx_mindroom_event_cache_event_edits_room_original_ts
+        CREATE INDEX IF NOT EXISTS idx_mindroom_event_cache_event_edits_room_original_sender_ts
         ON mindroom_event_cache_event_edits(
             namespace,
             room_id,
@@ -347,6 +347,11 @@ async def _create_postgres_event_cache_schema(db: AsyncConnection) -> None:
         )
         """,
     )
+    # A v3 database already has the old index under its old name, and CREATE INDEX IF NOT EXISTS
+    # would silently keep that definition - which lacks `sender` and so no longer covers the
+    # sender-keyed edit lookup. The new index carries a new name for exactly that reason; drop the
+    # superseded one rather than leaving a less selective duplicate behind.
+    await db.execute("DROP INDEX IF EXISTS idx_mindroom_event_cache_event_edits_room_original_ts")
     await db.execute(
         """
         CREATE TABLE IF NOT EXISTS mindroom_event_cache_event_threads (
@@ -1275,11 +1280,21 @@ class PostgresEventCache:
         budget: ThreadReadBudget = UNBOUNDED_THREAD_READ,
     ) -> list[dict[str, Any]] | None:
         """Return cached events for one thread sorted by timestamp."""
+        return (await self.get_thread_window(room_id, thread_id, budget=budget)).events
+
+    async def get_thread_window(
+        self,
+        room_id: str,
+        thread_id: str,
+        *,
+        budget: ThreadReadBudget = UNBOUNDED_THREAD_READ,
+    ) -> ThreadWindowRead:
+        """Return cached events for one thread plus whether the window left anything out."""
         return await self._operation(
             room_id,
-            operation="get_thread_events",
-            disabled_result=None,
-            callback=lambda db: postgres_event_cache_threads.load_thread_events(
+            operation="get_thread_window",
+            disabled_result=ThreadWindowRead(events=None, truncated=False),
+            callback=lambda db: postgres_event_cache_threads.load_thread_window(
                 db,
                 namespace=self._runtime.namespace,
                 room_id=room_id,

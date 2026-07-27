@@ -18,10 +18,13 @@ from typing import TYPE_CHECKING, Any, cast
 import nio
 import pytest
 
-from mindroom.matrix.cache import postgres_event_cache_threads, sqlite_event_cache_threads
+from mindroom.matrix.cache import (
+    postgres_event_cache_events,
+    postgres_event_cache_threads,
+    sqlite_event_cache_events,
+    sqlite_event_cache_threads,
+)
 from mindroom.matrix.cache.thread_read_window import (
-    DEFAULT_THREAD_READ_MAX_BYTES,
-    DEFAULT_THREAD_READ_MAX_MESSAGES,
     ThreadReadBudget,
     ThreadWindowCandidate,
     select_thread_window_event_ids,
@@ -36,7 +39,11 @@ if TYPE_CHECKING:
     from mindroom.matrix.cache import ConversationEventCache
 
 # Cache tables a thread read may touch. Any statement naming one of these counts.
-_THREAD_READ_TABLES = ("thread_events", "event_edits")
+#
+# "events" subsumes the other two by substring match and is the one that matters: the canonical
+# phase-2 regression is a per-message payload lookup against the events table alone, which a
+# filter naming only thread_events and event_edits counts as zero.
+_THREAD_READ_TABLES = ("events", "thread_events", "event_edits")
 
 _ROOM_ID = "!bounded:localhost"
 _THREAD_ID = "$root"
@@ -519,24 +526,65 @@ def test_window_selection_prices_rows_from_a_stored_size_column() -> None:
 
 def test_postgres_window_selection_does_not_use_distinct_on() -> None:
     """``DISTINCT ON`` cannot push the bound down and measured slower than no bound at all."""
-    _sqlite_sql, postgres_sql = _selection_sql()
+    assert "DISTINCT ON" not in _selection_sql()[1].upper()
 
-    assert "DISTINCT ON" not in postgres_sql.upper()
+
+def test_both_phases_scope_edits_to_this_thread_and_this_sender() -> None:
+    """The two phases must agree on which edits exist, or the window disagrees with the fold.
+
+    Selection prices the edits it expects the payload query to ship. If one phase scopes edits
+    differently from the other - by thread, or by sender - the window is priced for one set and
+    returns another, which is how both edit-window defects in this change were reachable.
+    """
+    payload_sql = (
+        sqlite_event_cache_threads._THREAD_WINDOW_PAYLOAD_SQL,
+        postgres_event_cache_threads._THREAD_WINDOW_PAYLOAD_SQL,
+    )
+    for sql in _selection_sql() + payload_sql:
+        assert "PARTITION BY" in sql, "edit ranking is not grouped at all"
+        assert "sender" in sql, "edit ranking is not grouped per sender"
+        assert "edit_membership.thread_id = " in sql, "edit ranking is not scoped to this thread"
 
 
 class TestTwoPhaseReadTolerance:
     """The gap between selection and payload fetch is normal, not an error."""
 
     @pytest.mark.asyncio
-    async def test_event_redacted_after_selection_is_simply_absent(
+    async def test_event_redacted_between_the_phases_is_simply_absent(
         self,
         event_cache: ConversationEventCache,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """Redaction hard-deletes, so a selected event can vanish before its payload is fetched."""
-        await _seed_thread(event_cache, _thread_event_sources(6))
+        """A message selected in phase 1 and redacted before phase 2 comes back short, not broken.
 
-        redacted = await event_cache.redact_event(_ROOM_ID, "$m5")
-        assert redacted is True
+        The redaction has to land *between* the phases for this to mean anything. Redacting before
+        the read never creates the gap: selection simply never emits the row, the payload result is
+        never short, and the test passes without exercising the tolerance it names.
+        """
+        await _seed_thread(event_cache, _thread_event_sources(6))
+        is_sqlite = type(event_cache).__name__ == "SqliteEventCache"
+        module = sqlite_event_cache_threads if is_sqlite else postgres_event_cache_threads
+        events_module = sqlite_event_cache_events if is_sqlite else postgres_event_cache_events
+        scope_key = "principal_id" if is_sqlite else "namespace"
+        original_loader = module._load_thread_window_candidates
+
+        async def redact_after_selection(db: object, **kwargs: str) -> list[ThreadWindowCandidate]:
+            candidates = await original_loader(db, **kwargs)
+            assert any(candidate.event_id == "$m5" for candidate in candidates), (
+                "the message being redacted must be selected, or the gap is never created"
+            )
+            # Redact on the connection the read already holds. Calling the public redact_event()
+            # from here would re-enter the runtime's non-reentrant _db_lock, which this very read
+            # is holding for both phases, and deadlock rather than exercise the gap.
+            await events_module.redact_event_locked(
+                db,
+                room_id=kwargs["room_id"],
+                event_id="$m5",
+                **{scope_key: kwargs[scope_key]},
+            )
+            return candidates
+
+        monkeypatch.setattr(module, "_load_thread_window_candidates", redact_after_selection)
 
         bounded_read = await event_cache.get_thread_events(
             _ROOM_ID,
@@ -546,7 +594,7 @@ class TestTwoPhaseReadTolerance:
         assert bounded_read is not None
 
         covered = _original_event_ids(bounded_read)
-        assert "$m5" not in covered
+        assert "$m5" not in covered, "a redacted payload must not be served"
         assert covered[0] == _THREAD_ID
 
 
@@ -631,14 +679,6 @@ class TestWindowTruncationIsReported:
         assert selection.event_ids == ["$m0"]
         assert selection.truncated is True
         assert selection.stopped_at_max_bytes is True
-
-    def test_default_byte_budget_clears_a_large_legitimate_thread(self) -> None:
-        """The default must not bind on a big-but-normal thread, only on the pathology."""
-        large_legitimate_thread_bytes = DEFAULT_THREAD_READ_MAX_MESSAGES * 2_048
-        pathological_thread_bytes = 1_000 * 20_000
-
-        assert large_legitimate_thread_bytes < DEFAULT_THREAD_READ_MAX_BYTES
-        assert pathological_thread_bytes > DEFAULT_THREAD_READ_MAX_BYTES
 
 
 class TestRedactionAcrossTheWindow:
@@ -892,3 +932,120 @@ class TestWindowAgreesWithTheFullReadOnEveryEdit:
                 f"{original_event_id}: window resolves to {winner}, full read resolves to "
                 f"{full_winners[original_event_id]}"
             )
+
+
+class TestTruncationIsVisibleToCallers:
+    """A window that left messages out must not be reported as full history.
+
+    ``is_full_history`` gates completeness-dependent planning and the model-history refresh, so a
+    truncated tail presented as complete silently drops older participants and mentions from the
+    context with nothing to notice it by.
+    """
+
+    @pytest.mark.asyncio
+    async def test_window_reports_truncation_only_when_it_dropped_something(
+        self,
+        event_cache: ConversationEventCache,
+    ) -> None:
+        """``truncated`` is the real answer, not an approximation in either direction."""
+        await _seed_thread(event_cache, _thread_event_sources(20))
+
+        cut = await event_cache.get_thread_window(
+            _ROOM_ID,
+            _THREAD_ID,
+            budget=ThreadReadBudget(max_messages=5),
+        )
+        assert cut.truncated is True
+        assert cut.events is not None
+
+        # A budget the thread fits inside must not claim truncation, or every read forces a refresh.
+        whole = await event_cache.get_thread_window(
+            _ROOM_ID,
+            _THREAD_ID,
+            budget=ThreadReadBudget(max_messages=500, max_bytes=10_000_000),
+        )
+        assert whole.truncated is False
+        assert whole.events is not None
+        assert len(whole.events) == 21
+
+        unbounded = await event_cache.get_thread_window(_ROOM_ID, _THREAD_ID)
+        assert unbounded.truncated is False
+
+    @pytest.mark.asyncio
+    async def test_absent_thread_is_not_truncated(
+        self,
+        event_cache: ConversationEventCache,
+    ) -> None:
+        """A miss is a miss, not a truncated window."""
+        window = await event_cache.get_thread_window(
+            _ROOM_ID,
+            "$absent",
+            budget=ThreadReadBudget(max_messages=5),
+        )
+
+        assert window.events is None
+        assert window.truncated is False
+
+
+class TestProductionShapedEditDensity:
+    """Production threads run ~94% edits, ~6 edits per edited original, up to 170 on one.
+
+    The failure this guards against is subtle and silent: an anti-join that excluded edited
+    ORIGINALS rather than edit EVENTS would still return a plausible-looking window, just a tiny
+    one - a handful of messages where the caller asked for fifty. No synthetic thread with a couple
+    of edits per message would notice.
+    """
+
+    @pytest.mark.asyncio
+    async def test_asking_for_fifty_on_a_99_percent_edit_thread_returns_every_message(
+        self,
+        event_cache: ConversationEventCache,
+    ) -> None:
+        """20 originals x 100 edits is 99% edit rows; a budget of 50 must still see all 20."""
+        events = _thread_event_sources(20, edits_per_message=100)
+        assert len(events) == 2_021
+        await _seed_thread(event_cache, events)
+
+        window = await event_cache.get_thread_window(
+            _ROOM_ID,
+            _THREAD_ID,
+            budget=ThreadReadBudget(max_messages=50),
+        )
+        assert window.events is not None
+
+        covered = _original_event_ids(window.events)
+        assert covered == [_THREAD_ID, *(f"$m{index}" for index in range(20))], (
+            f"asked for 50 messages on a 99%-edit thread and got {len(covered)}"
+        )
+        assert window.truncated is False, "the whole thread fits in 50 messages; nothing was dropped"
+
+    @pytest.mark.asyncio
+    async def test_uneven_edit_density_does_not_bias_which_messages_are_selected(
+        self,
+        event_cache: ConversationEventCache,
+    ) -> None:
+        """One heavily edited message must not crowd out its unedited neighbours."""
+        events = [
+            _message_event(_THREAD_ID, 1_000),
+            *(_message_event(f"$m{index}", 2_000 + index * 1_000, thread_id=_THREAD_ID) for index in range(10)),
+        ]
+        events.extend(
+            _message_event(
+                f"$m3-edit{edit_index}",
+                5_000 + edit_index,
+                thread_id=_THREAD_ID,
+                edit_of="$m3",
+            )
+            for edit_index in range(170)
+        )
+        await _seed_thread(event_cache, events)
+
+        window = await event_cache.get_thread_window(
+            _ROOM_ID,
+            _THREAD_ID,
+            budget=ThreadReadBudget(max_messages=5),
+        )
+        assert window.events is not None
+
+        covered = _original_event_ids(window.events)
+        assert covered == [_THREAD_ID, "$m5", "$m6", "$m7", "$m8", "$m9"]

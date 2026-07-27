@@ -38,6 +38,7 @@ from .thread_read_window import (
     UNBOUNDED_THREAD_READ,
     ThreadReadBudget,
     ThreadWindowCandidate,
+    ThreadWindowRead,
     log_thread_window_selection,
     select_thread_window_event_ids,
 )
@@ -63,56 +64,81 @@ WHERE thread_events.namespace = %s
 ORDER BY thread_events.origin_server_ts ASC, thread_events.write_seq ASC
 """
 
+# The winning edits for one thread, computed once.
+#
+# "Winning" is per (original, sender): a replacement is only legitimate from the sender of the
+# event it replaces, so shipping a single newest-overall edit lets any room member starve the fold
+# of the author's own and pin the message at its pre-edit body. Membership is joined in here rather
+# than filtered later, because ranking over edits the outer query will discard lets an
+# out-of-thread edit suppress the in-thread runner-up.
+#
+# ROW_NUMBER over one pass rather than a correlated NOT EXISTS per candidate: 5.3 ms against
+# 8.7 ms on a 2,021-event thread with current table statistics. Policy stays in Python; this is
+# only "latest per group", which is what a window function is for.
+#
+# Earlier revisions of this comment claimed the correlated shape cost 571 ms, or minutes. Those
+# numbers were planner misestimation on a freshly seeded database with no statistics, not the query
+# shape: on unanalyzed tables an unseen namespace estimates 1 row against 2,021 actual, every join
+# degrades to a nested loop with a join filter, and BOTH shapes collapse - the unbounded read
+# included, by 77x. Do not re-derive this query's cost without ANALYZE.
+#
+# MATERIALIZED is a hint, not a correctness requirement: measured 3.7 ms materialized against
+# 4.1 ms inlinable. It is kept only to stop the planner re-deriving the winners per candidate row.
+#
+# Do not rewrite this as ``DISTINCT ON (original_event_id) ... LIMIT`` without measuring: that
+# shape cannot push the bound down, so it materialises every row of the thread. The figure quoted
+# for it upstream (352.8 ms against a 208.8 ms baseline) predates the statistics finding above and
+# should be re-derived on analyzed tables before being trusted either way.
+_WINNING_EDITS_CTE = """
+WITH winning_edits AS MATERIALIZED (
+    SELECT edit_event_id, original_event_id, event_bytes
+    FROM (
+        SELECT event_edits.edit_event_id AS edit_event_id,
+               event_edits.original_event_id AS original_event_id,
+               edit_events.event_bytes AS event_bytes,
+               ROW_NUMBER() OVER (
+                   PARTITION BY event_edits.original_event_id, event_edits.sender
+                   ORDER BY event_edits.origin_server_ts DESC, event_edits.edit_event_id DESC
+               ) AS sender_rank
+        FROM mindroom_event_cache_event_edits AS event_edits
+        JOIN mindroom_event_cache_thread_events AS edit_membership
+            ON edit_membership.namespace = event_edits.namespace
+            AND edit_membership.room_id = event_edits.room_id
+            AND edit_membership.event_id = event_edits.edit_event_id
+            AND edit_membership.thread_id = %(thread_id)s
+        JOIN mindroom_event_cache_events AS edit_events
+            ON edit_events.namespace = event_edits.namespace
+            AND edit_events.room_id = event_edits.room_id
+            AND edit_events.event_id = event_edits.edit_event_id
+        WHERE event_edits.namespace = %(namespace)s
+            AND event_edits.room_id = %(room_id)s
+    ) AS ranked
+    WHERE sender_rank = 1
+)
+"""
+
 # Selection query. Prices every message in the thread from inline columns alone: ``event_json`` is
 # never referenced, so nothing outside the window is detoasted, transferred, or parsed. Rows that
-# are themselves edits are anti-joined out, because a bound over raw thread rows selects one
-# message and a pile of its own edits. Each candidate costs its own payload plus the latest edit
-# that accompanies it back.
-#
-# Do not rewrite this as ``DISTINCT ON (original_event_id) ... LIMIT``: that shape cannot push the
-# bound down, so it materialises every row of the thread and measured slower than no bound at all.
-_THREAD_WINDOW_CANDIDATES_SQL = """
+# are themselves edits are anti-joined out. A candidate costs its own payload plus every edit the
+# payload query will ship with it.
+_THREAD_WINDOW_CANDIDATES_SQL = (
+    _WINNING_EDITS_CTE  # noqa: S608 - both operands are literals; params stay bound
+    + """
 SELECT thread_events.event_id,
-       events.event_bytes + COALESCE(latest_edits.total_bytes, 0) AS window_bytes
+       events.event_bytes + COALESCE(edit_cost.total_bytes, 0) AS window_bytes
 FROM mindroom_event_cache_thread_events AS thread_events
 JOIN mindroom_event_cache_events AS events
     ON events.namespace = thread_events.namespace
     AND events.room_id = thread_events.room_id
     AND events.event_id = thread_events.event_id
-LEFT JOIN LATERAL (
-    SELECT SUM(edit_events.event_bytes) AS total_bytes
-    FROM mindroom_event_cache_event_edits AS event_edits
-    JOIN mindroom_event_cache_events AS edit_events
-        ON edit_events.namespace = event_edits.namespace
-        AND edit_events.room_id = event_edits.room_id
-        AND edit_events.event_id = event_edits.edit_event_id
-    JOIN mindroom_event_cache_thread_events AS edit_membership
-        ON edit_membership.namespace = event_edits.namespace
-        AND edit_membership.room_id = event_edits.room_id
-        AND edit_membership.event_id = event_edits.edit_event_id
-        AND edit_membership.thread_id = thread_events.thread_id
-    WHERE event_edits.namespace = thread_events.namespace
-        AND event_edits.room_id = thread_events.room_id
-        AND event_edits.original_event_id = thread_events.event_id
-        AND NOT EXISTS (
-            SELECT 1
-            FROM mindroom_event_cache_event_edits AS newer
-            JOIN mindroom_event_cache_thread_events AS newer_membership
-                ON newer_membership.namespace = newer.namespace
-                AND newer_membership.room_id = newer.room_id
-                AND newer_membership.event_id = newer.edit_event_id
-                AND newer_membership.thread_id = thread_events.thread_id
-            WHERE newer.namespace = event_edits.namespace
-                AND newer.room_id = event_edits.room_id
-                AND newer.original_event_id = event_edits.original_event_id
-                AND newer.sender = event_edits.sender
-                AND (newer.origin_server_ts, newer.edit_event_id)
-                    > (event_edits.origin_server_ts, event_edits.edit_event_id)
-        )
-) AS latest_edits ON TRUE
-WHERE thread_events.namespace = %s
-    AND thread_events.room_id = %s
-    AND thread_events.thread_id = %s
+LEFT JOIN (
+    SELECT original_event_id, SUM(event_bytes) AS total_bytes
+    FROM winning_edits
+    GROUP BY original_event_id
+) AS edit_cost ON edit_cost.original_event_id = thread_events.event_id
+WHERE thread_events.namespace = %(namespace)s
+    AND thread_events.room_id = %(room_id)s
+    AND thread_events.thread_id = %(thread_id)s
     AND NOT EXISTS (
         SELECT 1
         FROM mindroom_event_cache_event_edits AS candidate_is_edit
@@ -122,10 +148,12 @@ WHERE thread_events.namespace = %s
     )
 ORDER BY thread_events.origin_server_ts DESC, thread_events.write_seq DESC
 """
+)
 
-# Payload query. Fetches the selected originals, the thread root, and the latest edit of each, so
-# the read still resolves to the messages the unbounded read produces.
-_THREAD_WINDOW_PAYLOAD_SQL = """
+# Payload query. Fetches the selected originals, the thread root, and each one's winning edits.
+_THREAD_WINDOW_PAYLOAD_SQL = (
+    _WINNING_EDITS_CTE  # noqa: S608 - both operands are literals; params stay bound
+    + """
 SELECT thread_events.origin_server_ts, thread_events.write_seq, events.event_json
 FROM mindroom_event_cache_thread_events AS thread_events
 JOIN mindroom_event_cache_events AS events
@@ -138,35 +166,16 @@ WHERE thread_events.namespace = %(namespace)s
     AND (
         thread_events.event_id = ANY(%(selected_event_ids)s)
         OR thread_events.event_id = %(thread_id)s
-        OR EXISTS (
-            SELECT 1
-            FROM mindroom_event_cache_event_edits AS event_edits
-            WHERE event_edits.namespace = thread_events.namespace
-                AND event_edits.room_id = thread_events.room_id
-                AND event_edits.edit_event_id = thread_events.event_id
-                AND (
-                    event_edits.original_event_id = ANY(%(selected_event_ids)s)
-                    OR event_edits.original_event_id = %(thread_id)s
-                )
-                AND NOT EXISTS (
-                    SELECT 1
-                    FROM mindroom_event_cache_event_edits AS newer
-                    JOIN mindroom_event_cache_thread_events AS newer_membership
-                        ON newer_membership.namespace = newer.namespace
-                        AND newer_membership.room_id = newer.room_id
-                        AND newer_membership.event_id = newer.edit_event_id
-                        AND newer_membership.thread_id = thread_events.thread_id
-                    WHERE newer.namespace = event_edits.namespace
-                        AND newer.room_id = event_edits.room_id
-                        AND newer.original_event_id = event_edits.original_event_id
-                        AND newer.sender = event_edits.sender
-                        AND (newer.origin_server_ts, newer.edit_event_id)
-                            > (event_edits.origin_server_ts, event_edits.edit_event_id)
-                )
+        OR thread_events.event_id IN (
+            SELECT edit_event_id
+            FROM winning_edits
+            WHERE original_event_id = ANY(%(selected_event_ids)s)
+                OR original_event_id = %(thread_id)s
         )
     )
 ORDER BY thread_events.origin_server_ts ASC, thread_events.write_seq ASC
 """
+)
 
 
 async def _load_thread_window_candidates(
@@ -177,18 +186,22 @@ async def _load_thread_window_candidates(
     thread_id: str,
 ) -> list[ThreadWindowCandidate]:
     """Return this thread's messages newest first with the bytes each would cost."""
-    rows = await fetchall(db, _THREAD_WINDOW_CANDIDATES_SQL, (namespace, room_id, thread_id))
+    rows = await fetchall_mapping(
+        db,
+        _THREAD_WINDOW_CANDIDATES_SQL,
+        {"namespace": namespace, "room_id": room_id, "thread_id": thread_id},
+    )
     return [ThreadWindowCandidate(event_id=str(row[0]), window_bytes=int(row[1])) for row in rows]
 
 
-async def load_thread_events(
+async def load_thread_window(
     db: AsyncConnection,
     *,
     namespace: str,
     room_id: str,
     thread_id: str,
     budget: ThreadReadBudget = UNBOUNDED_THREAD_READ,
-) -> list[dict[str, Any]] | None:
+) -> ThreadWindowRead:
     """Return cached events for one thread sorted by timestamp.
 
     An unbounded budget returns every stored row. A bounded budget selects the newest messages that
@@ -197,7 +210,10 @@ async def load_thread_events(
     """
     if not budget.is_bounded:
         rows = await fetchall(db, _UNBOUNDED_THREAD_EVENTS_SQL, (namespace, room_id, thread_id))
-        return [json.loads(row[2]) for row in rows] if rows else None
+        return ThreadWindowRead(
+            events=[json.loads(row[2]) for row in rows] if rows else None,
+            truncated=False,
+        )
 
     candidates = await _load_thread_window_candidates(
         db,
@@ -206,7 +222,7 @@ async def load_thread_events(
         thread_id=thread_id,
     )
     if not candidates:
-        return None
+        return ThreadWindowRead(events=None, truncated=False)
     # The payload query may return fewer rows than were selected: redaction hard-deletes, so an
     # event removed between the two phases is correctly absent. A short result is normal here and
     # must never be asserted against the selected count.
@@ -228,7 +244,10 @@ async def load_thread_events(
             "selected_event_ids": selection.event_ids,
         },
     )
-    return [json.loads(row[2]) for row in rows] if rows else None
+    return ThreadWindowRead(
+        events=[json.loads(row[2]) for row in rows] if rows else None,
+        truncated=selection.truncated,
+    )
 
 
 async def load_recent_room_thread_ids(

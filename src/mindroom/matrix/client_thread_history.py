@@ -73,7 +73,6 @@ from mindroom.matrix.client_visible_messages import (
     ResolvedVisibleMessage,
     ThreadEditCandidates,
     apply_latest_edits_to_messages,
-    record_latest_thread_edit,
 )
 from mindroom.matrix.event_info import EventInfo, is_thread_affecting_relation
 from mindroom.matrix.media import (
@@ -504,15 +503,13 @@ async def _resolve_thread_history_from_event_sources_timed(
         if bundled_replacement_source is not None:
             bundled_replacement = nio.Event.parse_event(bundled_replacement_source)
             if isinstance(bundled_replacement, _VISIBLE_ROOM_MESSAGE_EVENT_TYPES):
-                record_latest_thread_edit(
+                edit_candidates.record(
                     bundled_replacement,
                     event_info=EventInfo.from_event(bundled_replacement.source),
-                    edit_candidates=edit_candidates,
                 )
-        if isinstance(event, _VISIBLE_ROOM_MESSAGE_EVENT_TYPES) and record_latest_thread_edit(
+        if isinstance(event, _VISIBLE_ROOM_MESSAGE_EVENT_TYPES) and edit_candidates.record(
             event,
             event_info=event_info,
-            edit_candidates=edit_candidates,
         ):
             continue
         if event_info.is_edit or event.event_id in messages_by_event_id:
@@ -730,7 +727,8 @@ async def _load_cached_thread_history_if_usable(
 
     resolution_started = time.perf_counter()
     cache_read_started = time.perf_counter()
-    cached_event_sources = await event_cache.get_thread_events(room_id, thread_id, budget=budget)
+    window = await event_cache.get_thread_window(room_id, thread_id, budget=budget)
+    cached_event_sources = window.events
     cache_read_ms = elapsed_ms_since(cache_read_started, clock=time.perf_counter)
     if cached_event_sources is None:
         return None, {THREAD_HISTORY_CACHE_REJECT_REASON_DIAGNOSTIC: "cache_rows_missing"}
@@ -761,13 +759,17 @@ async def _load_cached_thread_history_if_usable(
     if resolved_history is None:
         return None, {THREAD_HISTORY_CACHE_REJECT_REASON_DIAGNOSTIC: "cache_payload_unresolvable"}
 
+    # A window that left messages out is not full history, whatever its sidecars did. Callers gate
+    # completeness-dependent planning and the model-history refresh on this flag, so claiming a
+    # truncated tail is complete silently drops older participants and mentions from the context.
     return _thread_history_result(
         resolved_history,
-        is_full_history=hydrate_sidecars,
+        is_full_history=hydrate_sidecars and not window.truncated,
         diagnostics={
             "cache_read_ms": cache_read_ms,
             "resolution_ms": elapsed_ms_since(resolution_started, clock=time.perf_counter),
             "sidecar_hydration_ms": sidecar_hydration_ms,
+            "thread_read_truncated": window.truncated,
             "thread_read_max_messages": budget.max_messages if budget.max_messages is not None else 0,
             "thread_read_max_bytes": budget.max_bytes if budget.max_bytes is not None else 0,
             THREAD_HISTORY_SOURCE_DIAGNOSTIC: THREAD_HISTORY_SOURCE_CACHE,
@@ -1525,10 +1527,9 @@ def _record_scanned_room_message_source(
         return None
 
     event_info = EventInfo.from_event(event.source)
-    if isinstance(event, _VISIBLE_ROOM_MESSAGE_EVENT_TYPES) and record_latest_thread_edit(
+    if isinstance(event, _VISIBLE_ROOM_MESSAGE_EVENT_TYPES) and edit_candidates.record(
         event,
         event_info=event_info,
-        edit_candidates=edit_candidates,
     ):
         return None
     if event_info.is_edit:

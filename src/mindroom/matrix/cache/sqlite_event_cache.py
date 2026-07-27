@@ -30,7 +30,7 @@ from .thread_cache_state import (
     ThreadCacheReplaceOutcome,
     replacement_validated_at,
 )
-from .thread_read_window import UNBOUNDED_THREAD_READ, ThreadReadBudget
+from .thread_read_window import UNBOUNDED_THREAD_READ, ThreadReadBudget, ThreadWindowRead
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Collection
@@ -862,11 +862,21 @@ class SqliteEventCache:
         budget: ThreadReadBudget = UNBOUNDED_THREAD_READ,
     ) -> list[dict[str, Any]] | None:
         """Return cached events for one thread sorted by timestamp."""
+        return (await self.get_thread_window(room_id, thread_id, budget=budget)).events
+
+    async def get_thread_window(
+        self,
+        room_id: str,
+        thread_id: str,
+        *,
+        budget: ThreadReadBudget = UNBOUNDED_THREAD_READ,
+    ) -> ThreadWindowRead:
+        """Return cached events for one thread plus whether the window left anything out."""
         return await self._read_operation(
             room_id,
-            operation="get_thread_events",
-            disabled_result=None,
-            reader=lambda db: sqlite_event_cache_threads.load_thread_events(
+            operation="get_thread_window",
+            disabled_result=ThreadWindowRead(events=None, truncated=False),
+            reader=lambda db: sqlite_event_cache_threads.load_thread_window(
                 db,
                 principal_id=self.principal_id,
                 room_id=room_id,
