@@ -143,14 +143,10 @@ WITH surviving_edits AS MATERIALIZED (
             ON edit_events.namespace = event_edits.namespace
             AND edit_events.room_id = event_edits.room_id
             AND edit_events.event_id = event_edits.edit_event_id
-        LEFT JOIN mindroom_event_cache_thread_events AS original_membership
-            ON original_membership.namespace = event_edits.namespace
-            AND original_membership.room_id = event_edits.room_id
-            AND original_membership.event_id = event_edits.original_event_id
         LEFT JOIN mindroom_event_cache_events AS original_events
-            ON original_events.namespace = original_membership.namespace
-            AND original_events.room_id = original_membership.room_id
-            AND original_events.event_id = original_membership.event_id
+            ON original_events.namespace = event_edits.namespace
+            AND original_events.room_id = event_edits.room_id
+            AND original_events.event_id = event_edits.original_event_id
         WHERE event_edits.namespace = %(namespace)s
             AND event_edits.room_id = %(room_id)s
             AND (original_events.event_id IS NULL OR edit_events.sender = original_events.sender)

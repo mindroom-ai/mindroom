@@ -388,6 +388,37 @@ class TestTheSenderRuleSurvivesACrossThreadOriginal:
         )
         assert "$author-edit" in returned_ids
 
+    @pytest.mark.asyncio
+    async def test_a_point_cached_original_still_scopes_edits_to_its_sender(
+        self,
+        event_cache: ConversationEventCache,
+    ) -> None:
+        """An original needs no thread-membership row for its sender to protect the read."""
+        author = "@author:localhost"
+        attacker = "@attacker:localhost"
+        await _seed_thread(
+            event_cache,
+            [
+                _message_event(_THREAD_ID, 1_000, sender=author),
+                _message_event("$author-edit", 2_500, sender=author, edit_of="$victim"),
+                _message_event("$forged", 9_000, sender=attacker, edit_of="$victim"),
+            ],
+        )
+        await event_cache.store_event(
+            "$victim",
+            _ROOM_ID,
+            _message_event("$victim", 600, sender=author, thread_id=_THREAD_ID),
+        )
+        assert await event_cache.get_event(_ROOM_ID, "$victim") is not None
+        assert "$victim" not in await event_cache.get_thread_event_ids(_ROOM_ID, _THREAD_ID)
+
+        read = await event_cache.get_thread_events(_ROOM_ID, _THREAD_ID)
+        assert read is not None
+
+        returned_ids = {row["event_id"] for row in read}
+        assert "$forged" not in returned_ids
+        assert "$author-edit" in returned_ids
+
 
 class TestSingleEventReadObeysTheSameSenderRule:
     """``get_latest_edit`` and the collapsed thread read must not disagree about one message.

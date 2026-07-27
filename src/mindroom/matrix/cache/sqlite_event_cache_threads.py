@@ -162,14 +162,10 @@ WITH surviving_edits AS MATERIALIZED (
             ON edit_events.principal_id = event_edits.principal_id
             AND edit_events.room_id = event_edits.room_id
             AND edit_events.event_id = event_edits.edit_event_id
-        LEFT JOIN thread_events AS original_membership
-            ON original_membership.principal_id = event_edits.principal_id
-            AND original_membership.room_id = event_edits.room_id
-            AND original_membership.event_id = event_edits.original_event_id
         LEFT JOIN events AS original_events
-            ON original_events.principal_id = original_membership.principal_id
-            AND original_events.room_id = original_membership.room_id
-            AND original_events.event_id = original_membership.event_id
+            ON original_events.principal_id = event_edits.principal_id
+            AND original_events.room_id = event_edits.room_id
+            AND original_events.event_id = event_edits.original_event_id
         WHERE event_edits.principal_id = :principal_id
             AND event_edits.room_id = :room_id
             AND (original_events.event_id IS NULL OR edit_events.sender = original_events.sender)
