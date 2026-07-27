@@ -403,9 +403,12 @@ async def _watched_config_mtimes(api_app: FastAPI) -> tuple[constants.RuntimePat
     The scan stats every config source on each poll, so it runs in a worker
     thread rather than on the event loop.
     """
-    snapshot = _app_context(api_app)
-    paths = snapshot.source_files or frozenset({snapshot.runtime_paths.config_path})
-    return snapshot.runtime_paths, await asyncio.to_thread(file_watcher.paths_mtime_snapshot, paths)
+    while True:
+        snapshot = _app_context(api_app)
+        paths = snapshot.source_files or frozenset({snapshot.runtime_paths.config_path})
+        mtimes = await asyncio.to_thread(file_watcher.paths_mtime_snapshot, paths)
+        if _app_context(api_app).generation == snapshot.generation:
+            return snapshot.runtime_paths, mtimes
 
 
 async def _watch_config(

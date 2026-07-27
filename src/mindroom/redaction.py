@@ -16,7 +16,6 @@ from pydantic import BaseModel
 REDACTED = "***redacted***"
 __all__ = [
     "REDACTED",
-    "key_normalization_cache_size",
     "redact_log_event",
     "redact_sensitive_data",
     "redact_sensitive_text",
@@ -228,32 +227,11 @@ def _classify_key_text(key: str) -> _KeyClassification:
 _classify_key_text_cached = lru_cache(maxsize=_KEY_CLASSIFICATION_CACHE_SIZE)(_classify_key_text)
 
 
-def key_normalization_cache_size() -> int:
-    """Return how many distinct log keys are currently classified in the cache."""
-    return _classify_key_text_cached.cache_info().currsize
-
-
 def _classify_key(value: object) -> _KeyClassification:
     key = _safe_str(value)
     if len(key) > _MAX_CACHED_KEY_LENGTH:
         return _classify_key_text(key)
     return _classify_key_text_cached(key)
-
-
-def _normalize_key(value: object) -> str:
-    return _classify_key(value).normalized
-
-
-def _is_secret_key(value: object) -> bool:
-    return _classify_key(value).is_secret
-
-
-def _is_secret_container_key(value: object) -> bool:
-    return _classify_key(value).is_secret_container
-
-
-def _is_secret_container_suffix_key(value: object) -> bool:
-    return _classify_key(value).is_secret_container_suffix
 
 
 def _is_sensitive_key(value: object) -> bool:
@@ -271,10 +249,6 @@ def _is_redacted_query_key(value: object) -> bool:
 
 def _is_context_secret_label_key(value: object) -> bool:
     return _classify_key(value).is_context_secret_label
-
-
-def _is_context_secret_value_key(value: object) -> bool:
-    return _classify_key(value).is_context_secret_value
 
 
 def _mapping_has_secret_context_label(value: Mapping[object, object]) -> bool:

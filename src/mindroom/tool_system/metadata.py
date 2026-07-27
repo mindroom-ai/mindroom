@@ -807,17 +807,6 @@ def _module_origin_within_root(module: ModuleType, root: Path) -> bool:
     return _module_file_within_root(module_file, str(root))
 
 
-def _clear_module_origin_caches() -> None:
-    """Drop cached module-origin results.
-
-    Loaded modules keep the ``__file__`` they were imported from, so these entries
-    stay valid for the life of the process; clearing exists for tests that install
-    modules at synthetic paths.
-    """
-    _resolved_module_file.cache_clear()
-    _module_file_within_root.cache_clear()
-
-
 def _execute_validation_plugin_module(
     plugin_name: str,
     plugin_root: Path,

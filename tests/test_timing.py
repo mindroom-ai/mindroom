@@ -601,6 +601,32 @@ def test_emit_timing_event_emits_when_the_level_check_is_unsupported(
     logger.debug.assert_called_once()
 
 
+def test_emit_timing_event_emits_when_the_level_check_is_not_callable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A non-callable compatibility attribute must not break timing events."""
+    monkeypatch.setenv("MINDROOM_TIMING", "1")
+    logger = _mock_timing_logger(monkeypatch)
+    logger.isEnabledFor = False
+
+    emit_timing_event("dispatch delivery timing", phase="queued")
+
+    logger.debug.assert_called_once()
+
+
+def test_emit_timing_event_emits_when_the_level_check_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failing compatibility level check must not break timing events."""
+    monkeypatch.setenv("MINDROOM_TIMING", "1")
+    logger = _mock_timing_logger(monkeypatch)
+    logger.isEnabledFor.side_effect = RuntimeError("level check failed")
+
+    emit_timing_event("dispatch delivery timing", phase="queued")
+
+    logger.debug.assert_called_once()
+
+
 def test_dispatch_pipeline_summary_emits_when_the_level_check_is_unsupported() -> None:
     """The summary must survive loggers that cannot answer isEnabledFor."""
     logger = Mock()

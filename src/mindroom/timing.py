@@ -42,11 +42,11 @@ def _debug_enabled(bound_logger: object) -> bool:
     loggers must never lose a diagnostic to this check.
     """
     is_enabled_for = getattr(bound_logger, "isEnabledFor", None)
-    if is_enabled_for is None:
+    if not callable(is_enabled_for):
         return True
     try:
         return bool(is_enabled_for(logging.DEBUG))
-    except AttributeError:
+    except Exception:
         return True
 
 

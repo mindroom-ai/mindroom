@@ -68,6 +68,12 @@ def _restore_builtin_tool_metadata_state() -> None:
     TOOL_METADATA.update(_BASE_TOOL_METADATA)
 
 
+def _clear_module_origin_caches() -> None:
+    """Clear module-origin caches between tests."""
+    metadata_module._resolved_module_file.cache_clear()
+    metadata_module._module_file_within_root.cache_clear()
+
+
 def test_reconcile_dynamic_tool_state_replaces_only_owned_entries() -> None:
     """Dynamic registry reconciliation should preserve unrelated tools and remove stale owned entries."""
     factory = TOOL_REGISTRY["shell"]
@@ -401,13 +407,13 @@ def test_module_origin_within_root_caches_path_resolution(
             resolve_calls += 1
         return original_resolve(self, *args, **kwargs)
 
-    metadata_module._clear_module_origin_caches()
+    _clear_module_origin_caches()
     monkeypatch.setattr(metadata_module.Path, "resolve", counted_resolve)
     try:
         assert metadata_module._module_origin_within_root(module, plugin_root)
         assert metadata_module._module_origin_within_root(module, plugin_root)
     finally:
-        metadata_module._clear_module_origin_caches()
+        _clear_module_origin_caches()
 
     assert resolve_calls == 1
 
@@ -433,14 +439,14 @@ def test_module_origin_within_root_caches_containment_checks(
         containment_calls += 1
         return original_is_relative_to(self, *args, **kwargs)
 
-    metadata_module._clear_module_origin_caches()
+    _clear_module_origin_caches()
     monkeypatch.setattr(metadata_module.Path, "is_relative_to", counted_is_relative_to)
     try:
         for _ in range(5):
             assert metadata_module._module_origin_within_root(module, plugin_root)
             assert not metadata_module._module_origin_within_root(outside_module, plugin_root)
     finally:
-        metadata_module._clear_module_origin_caches()
+        _clear_module_origin_caches()
 
     assert containment_calls == 2
 

@@ -329,6 +329,11 @@ def _count_key_normalizations(monkeypatch: pytest.MonkeyPatch) -> Callable[[], i
     return take
 
 
+def _key_normalization_cache_size() -> int:
+    """Return the cache size for test assertions."""
+    return redaction._classify_key_text_cached.cache_info().currsize
+
+
 def test_repeated_log_events_normalize_each_key_only_once(monkeypatch: pytest.MonkeyPatch) -> None:
     """High-frequency structured logs repeat the same keys and must not re-normalize them."""
     # Unique keys keep the first event cold regardless of what earlier tests cached.
@@ -358,18 +363,18 @@ def test_key_normalization_cache_is_bounded() -> None:
 
     redact_log_event(None, "debug", {f"field_{index}": index for index in range(distinct_keys)})
 
-    assert 0 < redaction.key_normalization_cache_size() < distinct_keys
+    assert 0 < _key_normalization_cache_size() < distinct_keys
 
 
 def test_oversized_log_keys_are_not_cached_but_still_redact() -> None:
     """Pathologically long keys must bypass the cache so its memory stays bounded."""
     long_secret_key = "x" * 4096 + "_api_key"
-    before = redaction.key_normalization_cache_size()
+    before = _key_normalization_cache_size()
 
     redacted = redact_sensitive_data({long_secret_key: "plain-secret"})
 
     assert redacted == {long_secret_key: REDACTED}
-    assert redaction.key_normalization_cache_size() == before
+    assert _key_normalization_cache_size() == before
 
 
 # Key classification is security-relevant, so it is pinned explicitly rather than
