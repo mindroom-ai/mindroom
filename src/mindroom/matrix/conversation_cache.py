@@ -393,6 +393,15 @@ async def _cached_room_get_event(
 type _ThreadRefillKey = tuple[str, str, str, bool, bool]
 
 
+@dataclass(frozen=True, slots=True)
+class _ThreadRefillSingleFlightResult:
+    """One caller's view of a shared thread refill."""
+
+    result: ThreadReadResult
+    wait_ms: float
+    shared: bool
+
+
 @dataclass(slots=True)
 class _ThreadRefillSingleFlight:
     """Join concurrent refills of one thread onto a single homeserver scan.
@@ -417,9 +426,11 @@ class _ThreadRefillSingleFlight:
         self,
         key: _ThreadRefillKey,
         refill: Callable[[], Coroutine[Any, Any, ThreadReadResult]],
-    ) -> ThreadReadResult:
+    ) -> _ThreadRefillSingleFlightResult:
         """Run one refill, or join the one already running for this key."""
         in_flight = self._in_flight.get(key)
+        shared = in_flight is not None
+        wait_started = time.perf_counter() if shared else None
         if in_flight is None:
             in_flight = create_background_task(
                 refill(),
@@ -429,7 +440,12 @@ class _ThreadRefillSingleFlight:
             )
             self._in_flight[key] = in_flight
             in_flight.add_done_callback(lambda _task: self._in_flight.pop(key, None))
-        return await asyncio.shield(in_flight)
+        result = await asyncio.shield(in_flight)
+        return _ThreadRefillSingleFlightResult(
+            result=result,
+            wait_ms=elapsed_ms_since(wait_started, clock=time.perf_counter) if wait_started is not None else 0.0,
+            shared=shared,
+        )
 
 
 @dataclass
@@ -682,6 +698,7 @@ class MatrixConversationCache(ConversationCacheProtocol):
         coordinator_queue_wait_ms: float,
     ) -> ThreadHistoryResult:
         """Refresh one thread from Matrix without accepting a cache hit or stale fallback."""
+        post_coordinator_read_started = time.perf_counter()
         result = await self._refill_thread_from_client(
             room_id,
             thread_id,
@@ -696,6 +713,7 @@ class MatrixConversationCache(ConversationCacheProtocol):
             mode="full_scan",
             diagnostics=result.diagnostics,
             coordinator_queue_wait_ms=coordinator_queue_wait_ms,
+            post_coordinator_read_started=post_coordinator_read_started,
         )
         return result
 
@@ -733,9 +751,18 @@ class MatrixConversationCache(ConversationCacheProtocol):
                 trusted_sender_ids=self._trusted_sender_ids(),
             )
 
-        return await self._refill_single_flight.run(
+        refill_result = await self._refill_single_flight.run(
             (principal_id, room_id, thread_id, wants_full_history, allows_stale_fallback),
             refill,
+        )
+        return ThreadHistoryResult(
+            messages=list(refill_result.result),
+            is_full_history=refill_result.result.is_full_history,
+            diagnostics={
+                **refill_result.result.diagnostics,
+                "refill_singleflight_wait_ms": refill_result.wait_ms,
+                "refill_singleflight_shared": refill_result.shared,
+            },
         )
 
     async def _fetch_thread_from_client(
@@ -749,6 +776,8 @@ class MatrixConversationCache(ConversationCacheProtocol):
         wants_full_history: bool,
         allows_stale_fallback: bool,
     ) -> ThreadHistoryResult:
+        post_coordinator_read_started = time.perf_counter()
+
         async def refill(
             cache_reject_diagnostics: Mapping[str, str | int | float | bool] | None,
         ) -> ThreadHistoryResult:
@@ -768,6 +797,7 @@ class MatrixConversationCache(ConversationCacheProtocol):
             trusted_sender_ids=self._trusted_sender_ids(),
             caller_label=caller_label,
             coordinator_queue_wait_ms=coordinator_queue_wait_ms,
+            post_coordinator_read_started=post_coordinator_read_started,
             refill=refill,
         )
 

@@ -157,6 +157,7 @@ class _ThreadHistoryFetchResult:
     scanned_event_count: int
     resolution_ms: float
     sidecar_hydration_ms: float
+    homeserver_scan_parse_cpu_ms: float = 0.0
 
 
 @dataclass(slots=True)
@@ -166,6 +167,7 @@ class _ThreadEventSourceScanResult:
     event_sources: list[dict[str, Any]]
     page_count: int
     scanned_event_count: int
+    homeserver_scan_parse_cpu_ms: float = 0.0
 
 
 def _thread_history_result(
@@ -186,8 +188,10 @@ def log_thread_history_refresh(
     mode: str,
     diagnostics: Mapping[str, _ThreadHistoryDiagnosticValue],
     coordinator_queue_wait_ms: float,
+    post_coordinator_read_started: float,
 ) -> None:
     """Emit one structured INFO line for a completed thread read."""
+    post_coordinator_read_ms = elapsed_ms_since(post_coordinator_read_started, clock=time.perf_counter)
     log_fields: dict[str, _ThreadHistoryDiagnosticValue] = {
         "room_id": room_id,
         "thread_id": thread_id,
@@ -201,6 +205,11 @@ def log_thread_history_refresh(
         "resolution_ms": diagnostics.get("resolution_ms", 0.0),
         "sidecar_hydration_ms": diagnostics.get("sidecar_hydration_ms", 0.0),
         "coordinator_queue_wait_ms": coordinator_queue_wait_ms,
+        "post_coordinator_read_ms": post_coordinator_read_ms,
+        "thread_read_total_ms": coordinator_queue_wait_ms + post_coordinator_read_ms,
+        "refill_singleflight_wait_ms": diagnostics.get("refill_singleflight_wait_ms", 0.0),
+        "refill_singleflight_shared": diagnostics.get("refill_singleflight_shared", False),
+        "homeserver_scan_parse_cpu_ms": diagnostics.get("homeserver_scan_parse_cpu_ms", 0.0),
         "cache_reject_reason": diagnostics.get(THREAD_HISTORY_CACHE_REJECT_REASON_DIAGNOSTIC),
         "thread_read_source": diagnostics.get(THREAD_HISTORY_SOURCE_DIAGNOSTIC),
         "thread_read_degraded": diagnostics.get(THREAD_HISTORY_DEGRADED_DIAGNOSTIC, False),
@@ -222,6 +231,7 @@ def _report_direct_source_refresh(
     thread_id: str,
     caller_label: str | None,
     coordinator_queue_wait_ms: float,
+    post_coordinator_read_started: float,
 ) -> ThreadHistoryResult:
     """Log one direct source refresh under its caller's label."""
     if caller_label is not None:
@@ -232,6 +242,7 @@ def _report_direct_source_refresh(
             mode="full_scan",
             diagnostics=result.diagnostics,
             coordinator_queue_wait_ms=coordinator_queue_wait_ms,
+            post_coordinator_read_started=post_coordinator_read_started,
         )
     return result
 
@@ -804,6 +815,7 @@ async def _store_reconstructed_thread_snapshot(
         homeserver_scan_pages=fetch_result.room_scan_pages,
         homeserver_scanned_event_count=fetch_result.scanned_event_count,
         homeserver_thread_event_count=len(fetch_result.event_sources),
+        homeserver_scan_parse_cpu_ms=fetch_result.homeserver_scan_parse_cpu_ms,
     )
     return store_result
 
@@ -824,6 +836,7 @@ def _homeserver_thread_history_result(
         "homeserver_thread_event_count": len(fetch_result.event_sources),
         "resolution_ms": fetch_result.resolution_ms,
         "sidecar_hydration_ms": fetch_result.sidecar_hydration_ms,
+        "homeserver_scan_parse_cpu_ms": fetch_result.homeserver_scan_parse_cpu_ms,
         "cache_store_written": store_result.written,
         "cache_store_failed": store_result.failed,
         THREAD_HISTORY_SOURCE_DIAGNOSTIC: THREAD_HISTORY_SOURCE_HOMESERVER,
@@ -849,12 +862,16 @@ async def refresh_thread_history_from_source(
     trusted_sender_ids: Collection[str] = (),
     caller_label: str | None = None,
     coordinator_queue_wait_ms: float = 0.0,
+    post_coordinator_read_started: float | None = None,
 ) -> ThreadHistoryResult:
     """Fetch fresh thread history from Matrix and repopulate the advisory cache.
 
     One fetch, one store. There is no retry loop: a replacement cannot lose a race any more, and a
     gap that lands mid-fetch survives the store so the next read refetches it.
     """
+    resolved_post_coordinator_read_started = (
+        time.perf_counter() if post_coordinator_read_started is None else post_coordinator_read_started
+    )
     fetch_started_at = time.time()
     fetch_membership_epoch = await _capture_membership_epoch(event_cache, room_id)
     try:
@@ -892,6 +909,7 @@ async def refresh_thread_history_from_source(
                 thread_id=thread_id,
                 caller_label=caller_label,
                 coordinator_queue_wait_ms=coordinator_queue_wait_ms,
+                post_coordinator_read_started=resolved_post_coordinator_read_started,
             )
         raise
     store_result = await _store_reconstructed_thread_snapshot(
@@ -921,6 +939,7 @@ async def refresh_thread_history_from_source(
         thread_id=thread_id,
         caller_label=caller_label,
         coordinator_queue_wait_ms=coordinator_queue_wait_ms,
+        post_coordinator_read_started=resolved_post_coordinator_read_started,
     )
 
 
@@ -1064,9 +1083,13 @@ async def _fetch_thread_history_with_cache_policy(
     trusted_sender_ids: Collection[str] = (),
     caller_label: str = "unknown",
     coordinator_queue_wait_ms: float = 0.0,
+    post_coordinator_read_started: float | None,
     refill: _ThreadHistoryRefill | None = None,
 ) -> ThreadHistoryResult:
     """Serve one trusted cache hit or delegate only the required refill."""
+    resolved_post_coordinator_read_started = (
+        time.perf_counter() if post_coordinator_read_started is None else post_coordinator_read_started
+    )
     cache_reject_diagnostics: dict[str, str | int | float | bool] | None = None
     cached_history: ThreadHistoryResult | None = None
     try:
@@ -1107,6 +1130,7 @@ async def _fetch_thread_history_with_cache_policy(
         mode="cache_hit" if cached_history is not None else "full_scan",
         diagnostics=result.diagnostics,
         coordinator_queue_wait_ms=coordinator_queue_wait_ms,
+        post_coordinator_read_started=resolved_post_coordinator_read_started,
     )
     return result
 
@@ -1120,6 +1144,7 @@ async def fetch_thread_history(
     trusted_sender_ids: Collection[str] = (),
     caller_label: str = "unknown",
     coordinator_queue_wait_ms: float = 0.0,
+    post_coordinator_read_started: float | None = None,
     refill: _ThreadHistoryRefill | None = None,
 ) -> ThreadHistoryResult:
     """Fetch all messages in a thread, allowing advisory stale fallback.
@@ -1139,6 +1164,7 @@ async def fetch_thread_history(
         trusted_sender_ids=trusted_sender_ids,
         caller_label=caller_label,
         coordinator_queue_wait_ms=coordinator_queue_wait_ms,
+        post_coordinator_read_started=post_coordinator_read_started,
         refill=refill,
     )
 
@@ -1152,6 +1178,7 @@ async def fetch_dispatch_thread_history(
     trusted_sender_ids: Collection[str] = (),
     caller_label: str = "unknown",
     coordinator_queue_wait_ms: float = 0.0,
+    post_coordinator_read_started: float | None = None,
     refill: _ThreadHistoryRefill | None = None,
 ) -> ThreadHistoryResult:
     """Fetch strict full thread history from trusted cache or a fresh refill."""
@@ -1166,6 +1193,7 @@ async def fetch_dispatch_thread_history(
         trusted_sender_ids=trusted_sender_ids,
         caller_label=caller_label,
         coordinator_queue_wait_ms=coordinator_queue_wait_ms,
+        post_coordinator_read_started=post_coordinator_read_started,
         refill=refill,
     )
 
@@ -1179,6 +1207,7 @@ async def fetch_dispatch_thread_snapshot(
     trusted_sender_ids: Collection[str] = (),
     caller_label: str = "unknown",
     coordinator_queue_wait_ms: float = 0.0,
+    post_coordinator_read_started: float | None = None,
     refill: _ThreadHistoryRefill | None = None,
 ) -> ThreadHistoryResult:
     """Fetch strict lightweight dispatch context from trusted cache or a fresh refill."""
@@ -1193,6 +1222,7 @@ async def fetch_dispatch_thread_snapshot(
         trusted_sender_ids=trusted_sender_ids,
         caller_label=caller_label,
         coordinator_queue_wait_ms=coordinator_queue_wait_ms,
+        post_coordinator_read_started=post_coordinator_read_started,
         refill=refill,
     )
 
@@ -1230,6 +1260,7 @@ async def _fetch_thread_history_via_room_messages_with_events(
         scanned_event_count=scan_result.scanned_event_count,
         resolution_ms=elapsed_ms_since(resolution_started, clock=time.perf_counter),
         sidecar_hydration_ms=resolution.sidecar_hydration_ms,
+        homeserver_scan_parse_cpu_ms=scan_result.homeserver_scan_parse_cpu_ms,
     )
 
 
@@ -1300,6 +1331,7 @@ async def fetch_thread_event_sources_via_room_messages(
         event_sources=scan_result.thread_event_sources[thread_id],
         page_count=scan_result.page_count,
         scanned_event_count=scan_result.scanned_event_count,
+        homeserver_scan_parse_cpu_ms=scan_result.homeserver_scan_parse_cpu_ms,
     )
 
 
@@ -1313,6 +1345,7 @@ class _BulkThreadScanResult:
     page_count: int
     scanned_event_count: int
     scan_truncated: bool
+    homeserver_scan_parse_cpu_ms: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -1446,6 +1479,7 @@ async def _bulk_scan_thread_event_sources(
     page_count = 0
     scanned_event_count = 0
     scan_truncated = False
+    homeserver_scan_parse_cpu_ms = 0.0
 
     while remaining_root_ids:
         if max_scan_pages is not None and page_count >= max_scan_pages:
@@ -1465,6 +1499,7 @@ async def _bulk_scan_thread_event_sources(
         if not response.chunk:
             break
         page_count += 1
+        parse_cpu_started = time.thread_time()
         for event in response.chunk:
             if not isinstance(event, nio.Event):
                 continue
@@ -1476,6 +1511,7 @@ async def _bulk_scan_thread_event_sources(
             )
             if recorded_event_id is not None:
                 remaining_root_ids.discard(recorded_event_id)
+        homeserver_scan_parse_cpu_ms += elapsed_ms_since(parse_cpu_started, clock=time.thread_time)
         if not response.end:
             break
         from_token = response.end
@@ -1493,6 +1529,7 @@ async def _bulk_scan_thread_event_sources(
         page_count=page_count,
         scanned_event_count=scanned_event_count,
         scan_truncated=scan_truncated,
+        homeserver_scan_parse_cpu_ms=homeserver_scan_parse_cpu_ms,
     )
 
 

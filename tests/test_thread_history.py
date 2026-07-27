@@ -1768,6 +1768,73 @@ class TestThreadHistory:
         assert history[1].body == "Final answer"
 
     @pytest.mark.asyncio
+    async def test_room_scan_parse_cpu_accumulates_per_page_and_reaches_refresh_log(self) -> None:
+        """Count only synchronous event parsing CPU across paginated room-history responses."""
+        client = AsyncMock()
+        logger = MagicMock()
+        root_event = self._make_text_event(
+            event_id="$thread_root",
+            sender="@user:localhost",
+            body="root",
+            server_timestamp=1000,
+            source_content={"body": "root"},
+        )
+        thread_message = self._make_text_event(
+            event_id="$agent_msg",
+            sender="@agent:localhost",
+            body="reply",
+            server_timestamp=2000,
+            source_content={
+                "body": "reply",
+                "m.relates_to": {
+                    "rel_type": "m.thread",
+                    "event_id": "$thread_root",
+                },
+            },
+        )
+        first_page = MagicMock(spec=nio.RoomMessagesResponse)
+        first_page.chunk = [thread_message]
+        first_page.end = "page_2"
+        second_page = MagicMock(spec=nio.RoomMessagesResponse)
+        second_page.chunk = [root_event]
+        second_page.end = None
+        pages = iter((first_page, second_page))
+        page_index = 0
+
+        with (
+            patch.object(matrix_client_module, "logger", logger),
+            patch(
+                "mindroom.matrix.client_thread_history.time.thread_time",
+                side_effect=[10.0, 10.003, 20.0, 20.007],
+            ) as thread_cpu_clock,
+        ):
+
+            async def room_messages(*_args: object, **_kwargs: object) -> MagicMock:
+                nonlocal page_index
+                assert thread_cpu_clock.call_count == page_index * 2
+                page_index += 1
+                return next(pages)
+
+            client.room_messages.side_effect = room_messages
+            history = await fetch_thread_history(
+                client,
+                "!room:localhost",
+                "$thread_root",
+                event_cache=_event_cache(),
+                caller_label="parse_cpu_test",
+            )
+
+        refreshed_log = next(
+            call
+            for call in logger.info.call_args_list
+            if call.args and call.args[0] == "matrix_cache_thread_history_refreshed"
+        )
+        assert [message.event_id for message in history] == ["$thread_root", "$agent_msg"]
+        assert thread_cpu_clock.call_count == 4
+        assert history.diagnostics["homeserver_scan_parse_cpu_ms"] == pytest.approx(10.0)
+        assert refreshed_log.kwargs["homeserver_scan_parse_cpu_ms"] == pytest.approx(10.0)
+
+    @pytest.mark.asyncio
     async def test_fetch_thread_history_stops_when_root_is_found(self) -> None:
         """Stop pagination once the thread root has been seen."""
         client = AsyncMock()
@@ -2198,13 +2265,22 @@ class TestThreadHistoryCache:
             await asyncio.wait_for(first_scan_started.wait(), timeout=10)
             await asyncio.sleep(0.2)
             release_scan.set()
-            await asyncio.gather(*readers)
+            histories = await asyncio.gather(*readers)
         finally:
             release_scan.set()
             await coordinator.close()
             await cache.close()
 
         assert scans_started == 1, f"{scans_started} concurrent readers each ran their own homeserver scan"
+        assert sum(history.diagnostics["refill_singleflight_shared"] is False for history in histories) == 1
+        assert sum(history.diagnostics["refill_singleflight_shared"] is True for history in histories) == 19
+        leader = next(history for history in histories if history.diagnostics["refill_singleflight_shared"] is False)
+        joiners = [history for history in histories if history.diagnostics["refill_singleflight_shared"] is True]
+        assert leader.diagnostics["refill_singleflight_wait_ms"] == 0.0
+        assert all(history.diagnostics["refill_singleflight_wait_ms"] > 0.0 for history in joiners)
+        assert len({id(history.diagnostics) for history in histories}) == len(histories)
+        histories[0].diagnostics["caller_only"] = True
+        assert all("caller_only" not in history.diagnostics for history in histories[1:])
 
     @staticmethod
     def _conversation_cache_for_runtime(
@@ -3198,6 +3274,7 @@ class TestThreadHistoryCache:
                         scanned_event_count=42,
                         resolution_ms=8.6,
                         sidecar_hydration_ms=4.4,
+                        homeserver_scan_parse_cpu_ms=6.25,
                     ),
                 ),
             ),
@@ -3207,6 +3284,7 @@ class TestThreadHistoryCache:
                     return_value=matrix_client_module._ThreadCacheStoreResult(written=True, failed=False),
                 ),
             ),
+            patch("mindroom.matrix.client_thread_history.time.perf_counter", return_value=100.125),
         ):
             history = await matrix_client_module.fetch_thread_history(
                 AsyncMock(),
@@ -3215,6 +3293,7 @@ class TestThreadHistoryCache:
                 event_cache=_event_cache(),
                 caller_label="cache_miss_test",
                 coordinator_queue_wait_ms=45.6,
+                post_coordinator_read_started=100.0,
             )
 
         assert [message.event_id for message in history] == ["$thread_root"]
@@ -3236,6 +3315,11 @@ class TestThreadHistoryCache:
             "resolution_ms": 8.6,
             "sidecar_hydration_ms": 4.4,
             "coordinator_queue_wait_ms": 45.6,
+            "post_coordinator_read_ms": 125.0,
+            "thread_read_total_ms": 170.6,
+            "refill_singleflight_wait_ms": 0.0,
+            "refill_singleflight_shared": False,
+            "homeserver_scan_parse_cpu_ms": 6.25,
             "cache_reject_reason": "no_cache_state",
             "thread_read_source": THREAD_HISTORY_SOURCE_HOMESERVER,
             "thread_read_degraded": False,
@@ -3289,6 +3373,7 @@ class TestThreadHistoryCache:
                 "mindroom.matrix.client_thread_history._fetch_thread_history_with_events",
                 new=homeserver_fetch,
             ),
+            patch("mindroom.matrix.client_thread_history.time.perf_counter", return_value=200.25),
         ):
             history = await getattr(matrix_client_module, fetcher_name)(
                 AsyncMock(),
@@ -3297,6 +3382,7 @@ class TestThreadHistoryCache:
                 event_cache=_event_cache(),
                 caller_label="cache_hit_test",
                 coordinator_queue_wait_ms=34.5,
+                post_coordinator_read_started=200.0,
             )
 
         assert history == cached_history
@@ -3319,6 +3405,11 @@ class TestThreadHistoryCache:
             "resolution_ms": 3.2,
             "sidecar_hydration_ms": 1.4,
             "coordinator_queue_wait_ms": 34.5,
+            "post_coordinator_read_ms": 250.0,
+            "thread_read_total_ms": 284.5,
+            "refill_singleflight_wait_ms": 0.0,
+            "refill_singleflight_shared": False,
+            "homeserver_scan_parse_cpu_ms": 0.0,
             "cache_reject_reason": None,
             "thread_read_source": THREAD_HISTORY_SOURCE_CACHE,
             "thread_read_degraded": False,

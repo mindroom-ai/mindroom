@@ -333,6 +333,11 @@ async def test_conversation_cache_thread_reads_forward_client_fetch_metadata(
         ("get_dispatch_thread_snapshot", "fetch_dispatch_thread_snapshot", False, 75.0),
         ("get_dispatch_thread_history", "fetch_dispatch_thread_history", True, 100.0),
     ]
+    post_coordinator_read_starts = {
+        "get_thread_history": 1.06,
+        "get_dispatch_thread_snapshot": 2.08,
+        "get_dispatch_thread_history": 3.11,
+    }
     fetchers = {
         name: AsyncMock(return_value=thread_history_result([], is_full_history=is_full_history))
         for _method_name, name, is_full_history, _queue_wait_ms in read_modes
@@ -351,7 +356,23 @@ async def test_conversation_cache_thread_reads_forward_client_fetch_metadata(
             ),
             patch(
                 "mindroom.matrix.cache.thread_reads.time.perf_counter",
-                side_effect=[1.0, 1.05, 2.0, 2.01, 2.075, 2.075, 2.075, 3.0, 3.01, 3.1, 3.1, 3.1],
+                side_effect=[
+                    1.0,
+                    1.05,
+                    1.06,
+                    2.0,
+                    2.01,
+                    2.075,
+                    2.075,
+                    2.075,
+                    2.08,
+                    3.0,
+                    3.01,
+                    3.1,
+                    3.1,
+                    3.1,
+                    3.11,
+                ],
             ),
         ):
             read_methods = {
@@ -376,6 +397,7 @@ async def test_conversation_cache_thread_reads_forward_client_fetch_metadata(
                 trusted_sender_ids=conversation_cache._trusted_sender_ids(),
                 caller_label=f"caller-{method_name}",
                 coordinator_queue_wait_ms=queue_wait_ms,
+                post_coordinator_read_started=post_coordinator_read_starts[method_name],
                 # Always supplied now: the refill no longer depends on a write coordinator.
                 refill=ANY,
             )
