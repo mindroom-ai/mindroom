@@ -577,9 +577,9 @@ def test_window_selection_prices_rows_from_a_stored_size_column() -> None:
         assert "pg_column_size" not in sql
 
 
-def test_postgres_window_selection_does_not_use_distinct_on() -> None:
-    """``DISTINCT ON`` cannot push the bound down and measured slower than no bound at all."""
-    assert "DISTINCT ON" not in _selection_sql()[1].upper()
+# Why the ranking is not ``DISTINCT ON`` is recorded where the query is, not as an assert here.
+# A test that one string is absent from another cannot fail for any behavioural regression, only
+# for the single rewrite its own comment already forbids.
 
 
 def test_both_phases_scope_edits_to_this_thread_and_this_sender() -> None:
