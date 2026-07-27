@@ -20,12 +20,9 @@ from mindroom.bot_runtime_view import BotRuntimeState
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.matrix.cache import (
-    ThreadAppendOutcome,
-    ThreadCacheReplaceOutcome,
     ThreadHistoryResult,
     thread_cache_rejection_reason,
 )
-from mindroom.matrix.cache.event_cache import ThreadCacheState
 from mindroom.matrix.cache.sqlite_event_cache import SqliteEventCache
 from mindroom.matrix.cache.thread_cache_state import THREAD_HISTORY_TRUST_METADATA_KEY
 from mindroom.matrix.cache.write_coordinator import EventCacheWriteCoordinator
@@ -358,7 +355,9 @@ class TestThreadHistory:
             ) as mock_fallback,
             patch(
                 "mindroom.matrix.client_thread_history._store_thread_history_cache",
-                new=AsyncMock(return_value=ThreadCacheReplaceOutcome.STORED),
+                new=AsyncMock(
+                    return_value=matrix_client_module._ThreadCacheStoreResult(written=True, failed=False),
+                ),
             ) as mock_store,
         ):
             history = await fetch_thread_history(
@@ -2538,7 +2537,7 @@ class TestThreadHistoryCache:
             thread_id="$thread_root",
             events=[self._cache_source(root_event), self._cache_source(reply_event)],
         )
-        await cache.mark_thread_stale("!room:localhost", "$thread_root", reason="sync_thread_mutation")
+        await cache.mark_thread_gap("!room:localhost", "$thread_root", reason="sync_thread_mutation")
 
         client = MagicMock()
         page = MagicMock(spec=nio.RoomMessagesResponse)
@@ -2558,10 +2557,8 @@ class TestThreadHistoryCache:
 
         assert [message.event_id for message in history] == ["$thread_root", "$reply"]
         assert history.diagnostics[THREAD_HISTORY_SOURCE_DIAGNOSTIC] == THREAD_HISTORY_SOURCE_HOMESERVER
-        assert history.diagnostics[THREAD_HISTORY_CACHE_REJECT_REASON_DIAGNOSTIC] == (
-            "thread_invalidated_after_validation"
-        )
-        assert history.diagnostics["cache_invalidation_reason"] == "sync_thread_mutation"
+        assert history.diagnostics[THREAD_HISTORY_CACHE_REJECT_REASON_DIAGNOSTIC] == "sync_thread_mutation"
+        assert history.diagnostics["cache_gap_reason"] == "sync_thread_mutation"
         assert history.diagnostics["homeserver_scan_pages"] == 1
 
     @pytest.mark.asyncio
@@ -2593,7 +2590,6 @@ class TestThreadHistoryCache:
             "!room:localhost",
             "$thread_root",
             [self._cache_source(root_event), self._cache_source(reply_event)],
-            validated_at=runtime_started_at - 10.0,
         )
 
         client = MagicMock()
@@ -2651,7 +2647,6 @@ class TestThreadHistoryCache:
             "!room:localhost",
             "$thread_root",
             [self._cache_source(root_event), self._cache_source(reply_event)],
-            validated_at=runtime_started_at - 900.0,
         )
 
         client = MagicMock()
@@ -2709,7 +2704,6 @@ class TestThreadHistoryCache:
             "!room:localhost",
             "$thread_root",
             [self._cache_source(root_event), self._cache_source(reply_event)],
-            validated_at=runtime_started_at - 10.0,
         )
 
         client = MagicMock()
@@ -2854,9 +2848,8 @@ class TestThreadHistoryCache:
                 "!room:localhost",
                 "$thread_root",
                 [self._cache_source(root_event), self._cache_source(stale_reply)],
-                validated_at=time.time(),
             )
-            await cache.mark_room_threads_stale("!room:localhost", reason="sync_lookup_missing")
+            await cache.mark_room_threads_gap("!room:localhost", reason="sync_lookup_missing")
 
             history = await fetch_thread_history(
                 client,
@@ -2934,9 +2927,8 @@ class TestThreadHistoryCache:
                 "!room:localhost",
                 "$thread_root",
                 [self._cache_source(root_event), self._cache_source(stale_reply)],
-                validated_at=time.time(),
             )
-            await cache.mark_thread_stale("!room:localhost", "$thread_root", reason="force_refetch")
+            await cache.mark_thread_gap("!room:localhost", "$thread_root", reason="force_refetch")
 
             history = await fetch_thread_history(
                 client,
@@ -2990,9 +2982,8 @@ class TestThreadHistoryCache:
                 "!room:localhost",
                 "$thread_root",
                 [self._cache_source(rootless_reply)],
-                validated_at=time.time(),
             )
-            await cache.mark_thread_stale("!room:localhost", "$thread_root", reason="force_refetch")
+            await cache.mark_thread_gap("!room:localhost", "$thread_root", reason="force_refetch")
 
             with pytest.raises(RuntimeError, match="scan failed"):
                 await fetch_thread_history(
@@ -3045,9 +3036,8 @@ class TestThreadHistoryCache:
                 "!room:localhost",
                 "$thread_root",
                 [self._cache_source(root_event), self._cache_source(stale_reply)],
-                validated_at=time.time(),
             )
-            await cache.mark_thread_stale("!room:localhost", "$thread_root", reason="force_refetch")
+            await cache.mark_thread_gap("!room:localhost", "$thread_root", reason="force_refetch")
 
             with pytest.raises(RuntimeError, match="scan failed"):
                 await matrix_client_module.fetch_dispatch_thread_history(
@@ -3122,263 +3112,24 @@ class TestThreadHistoryCache:
         broken_cache = MagicMock(spec=SqliteEventCache)
         broken_cache.get_thread_cache_gap = AsyncMock(
             side_effect=cache_state_side_effect,
-            return_value=(
-                ThreadCacheState(
-                    validated_at=time.time(),
-                    invalidated_at=None,
-                    invalidation_reason=None,
-                    room_invalidated_at=None,
-                    room_invalidation_reason=None,
-                )
-                if cache_state_side_effect is None
-                else None
-            ),
+            return_value=None,
         )
         broken_cache.get_thread_events = AsyncMock(side_effect=cached_events_side_effect, return_value=[])
         broken_cache.replace_thread = AsyncMock(side_effect=RuntimeError("db broken"))
         history = await fetch_thread_history(client, "!room:localhost", "$thread_root", event_cache=broken_cache)
         assert [message.event_id for message in history] == ["$thread_root", "$reply"]
-        assert history.diagnostics["cache_store_outcome"] == ThreadCacheReplaceOutcome.HARD_FAILURE.value
-        assert history.diagnostics["cache_repair_usable"] is False
+        assert history.diagnostics["cache_store_failed"] is True
         broken_cache.replace_thread.assert_awaited_once()
 
     @pytest.mark.asyncio
-    async def test_refresh_retries_one_generation_conflict_then_installs_snapshot(self) -> None:
-        """A mid-flight invalidation should trigger one bounded authoritative retry."""
+    async def test_refresh_reports_a_failed_store_instead_of_claiming_cache_success(self) -> None:
+        """A store that installs nothing must stay explicit and never read as cache success.
+
+        The bounded retry this replaced is gone: replacement no longer conflicts, so there is
+        nothing to re-attempt. One fetch, one store attempt, and an honest diagnostic.
+        """
         event_cache = _event_cache()
-        event_cache.replace_thread.side_effect = [
-            ThreadCacheReplaceOutcome.INVALIDATED,
-            ThreadCacheReplaceOutcome.STORED,
-        ]
-        fetch_result = matrix_client_module._ThreadHistoryFetchResult(
-            history=[
-                ResolvedVisibleMessage.synthetic(
-                    sender="@user:localhost",
-                    body="fresh",
-                    event_id="$thread_root",
-                    content={"body": "fresh"},
-                ),
-            ],
-            event_sources=[{"event_id": "$thread_root"}],
-            fetch_ms=1.0,
-            room_scan_pages=1,
-            scanned_event_count=1,
-            resolution_ms=1.0,
-            sidecar_hydration_ms=0.0,
-        )
-
-        logger = MagicMock()
-        with (
-            patch.object(matrix_client_module, "logger", logger),
-            patch(
-                "mindroom.matrix.client_thread_history._fetch_thread_repair_snapshot",
-                new=AsyncMock(return_value=fetch_result),
-            ) as fetch,
-        ):
-            history = await matrix_client_module.refresh_thread_history_from_source(
-                AsyncMock(),
-                "!room:localhost",
-                "$thread_root",
-                event_cache=event_cache,
-                allow_stale_fallback=False,
-                caller_label="direct_source_test",
-            )
-
-        assert fetch.await_count == 2
-        assert history.diagnostics["cache_store_outcome"] == ThreadCacheReplaceOutcome.STORED.value
-        assert history.diagnostics["cache_repair_attempts"] == 2
-        assert history.diagnostics["cache_repair_usable"] is True
-        refreshed_log = next(
-            call
-            for call in logger.info.call_args_list
-            if call.args and call.args[0] == "matrix_cache_thread_history_refreshed"
-        )
-        assert refreshed_log.kwargs["caller_label"] == "direct_source_test"
-        assert refreshed_log.kwargs["cache_store_outcome"] == ThreadCacheReplaceOutcome.STORED.value
-        assert refreshed_log.kwargs["cache_repair_attempts"] == 2
-        assert refreshed_log.kwargs["cache_repair_usable"] is True
-
-    @pytest.mark.asyncio
-    async def test_refresh_retries_membership_epoch_race_then_installs_snapshot(
-        self,
-        tmp_path: Path,
-    ) -> None:
-        """A rejoin during reconstruction should recapture its epoch and install on attempt two."""
-        room_id = "!room:localhost"
-        thread_id = "$thread_root"
-        event_source = {
-            "type": "m.room.message",
-            "room_id": room_id,
-            "event_id": thread_id,
-            "sender": "@user:localhost",
-            "origin_server_ts": 1000,
-            "content": {"body": "fresh", "msgtype": "m.text"},
-        }
-        fetch_result = matrix_client_module._ThreadHistoryFetchResult(
-            history=[
-                ResolvedVisibleMessage.synthetic(
-                    sender="@user:localhost",
-                    body="fresh",
-                    event_id=thread_id,
-                    content={"body": "fresh", "msgtype": "m.text"},
-                ),
-            ],
-            event_sources=[event_source],
-            fetch_ms=1.0,
-            room_scan_pages=1,
-            scanned_event_count=1,
-            resolution_ms=1.0,
-            sidecar_hydration_ms=0.0,
-        )
-        event_cache = SqliteEventCache(tmp_path / "membership_epoch_retry.db")
-        fetch_count = 0
-
-        async def fetch_snapshot(*_args: object, **_kwargs: object) -> matrix_client_module._ThreadHistoryFetchResult:
-            nonlocal fetch_count
-            fetch_count += 1
-            if fetch_count == 1:
-                departure_epoch = event_cache.mark_room_departed(room_id)
-                await event_cache.purge_room(room_id)
-                await event_cache.mark_room_joined(
-                    room_id,
-                    expected_departure_epoch=departure_epoch,
-                )
-            return fetch_result
-
-        await event_cache.initialize()
-        try:
-            with patch(
-                "mindroom.matrix.client_thread_history._fetch_thread_repair_snapshot",
-                new=AsyncMock(side_effect=fetch_snapshot),
-            ) as fetch:
-                history = await matrix_client_module.refresh_thread_history_from_source(
-                    AsyncMock(),
-                    room_id,
-                    thread_id,
-                    event_cache=event_cache,
-                    allow_stale_fallback=False,
-                )
-
-            cached_events = await event_cache.get_thread_events(room_id, thread_id)
-        finally:
-            await event_cache.close()
-
-        assert fetch.await_count == 2
-        assert history.diagnostics["cache_store_outcome"] == ThreadCacheReplaceOutcome.STORED.value
-        assert history.diagnostics["cache_repair_attempts"] == 2
-        assert history.diagnostics["cache_repair_usable"] is True
-        assert cached_events is not None
-        assert [event["event_id"] for event in cached_events] == [thread_id]
-
-    @pytest.mark.asyncio
-    async def test_refresh_recognizes_existing_newer_usable_cache_winner(self) -> None:
-        """A newer trusted snapshot should win without another fetch or generic failure."""
-        event_cache = _event_cache()
-        event_cache.replace_thread.return_value = ThreadCacheReplaceOutcome.EXISTING_USABLE
-        fetched = matrix_client_module._ThreadHistoryFetchResult(
-            history=[
-                ResolvedVisibleMessage.synthetic(
-                    sender="@user:localhost",
-                    body="older fetch",
-                    event_id="$thread_root",
-                    content={"body": "older fetch"},
-                ),
-            ],
-            event_sources=[{"event_id": "$thread_root"}],
-            fetch_ms=1.0,
-            room_scan_pages=1,
-            scanned_event_count=1,
-            resolution_ms=1.0,
-            sidecar_hydration_ms=0.0,
-        )
-        newer = ThreadHistoryResult(
-            [
-                ResolvedVisibleMessage.synthetic(
-                    sender="@user:localhost",
-                    body="newer cache",
-                    event_id="$thread_root",
-                    content={"body": "newer cache"},
-                ),
-            ],
-            is_full_history=True,
-            diagnostics={THREAD_HISTORY_SOURCE_DIAGNOSTIC: THREAD_HISTORY_SOURCE_CACHE},
-        )
-
-        with (
-            patch(
-                "mindroom.matrix.client_thread_history._fetch_thread_repair_snapshot",
-                new=AsyncMock(return_value=fetched),
-            ) as fetch,
-            patch(
-                "mindroom.matrix.client_thread_history._load_cached_thread_history_if_usable",
-                new=AsyncMock(return_value=(newer, None)),
-            ),
-        ):
-            history = await matrix_client_module.refresh_thread_history_from_source(
-                AsyncMock(),
-                "!room:localhost",
-                "$thread_root",
-                event_cache=event_cache,
-                allow_stale_fallback=False,
-            )
-
-        assert fetch.await_count == 1
-        assert [message.body for message in history] == ["newer cache"]
-        assert history.diagnostics["cache_store_outcome"] == ThreadCacheReplaceOutcome.EXISTING_USABLE.value
-        assert history.diagnostics["cache_repair_usable"] is True
-
-    @pytest.mark.asyncio
-    async def test_refresh_fails_open_without_rescanning_when_existing_winner_load_fails(self) -> None:
-        """A backend read fault after an existing winner must not discard fetched homeserver history."""
-        event_cache = _event_cache()
-        event_cache.replace_thread.return_value = ThreadCacheReplaceOutcome.EXISTING_USABLE
-        fetched = matrix_client_module._ThreadHistoryFetchResult(
-            history=[
-                ResolvedVisibleMessage.synthetic(
-                    sender="@user:localhost",
-                    body="homeserver fallback",
-                    event_id="$thread_root",
-                    content={"body": "homeserver fallback"},
-                ),
-            ],
-            event_sources=[{"event_id": "$thread_root"}],
-            fetch_ms=1.0,
-            room_scan_pages=1,
-            scanned_event_count=1,
-            resolution_ms=1.0,
-            sidecar_hydration_ms=0.0,
-        )
-
-        with (
-            patch(
-                "mindroom.matrix.client_thread_history._fetch_thread_repair_snapshot",
-                new=AsyncMock(return_value=fetched),
-            ) as fetch,
-            patch(
-                "mindroom.matrix.client_thread_history._load_cached_thread_history_if_usable",
-                new=AsyncMock(side_effect=RuntimeError("cache unavailable")),
-            ) as load_existing,
-        ):
-            history = await matrix_client_module.refresh_thread_history_from_source(
-                AsyncMock(),
-                "!room:localhost",
-                "$thread_root",
-                event_cache=event_cache,
-                allow_stale_fallback=False,
-            )
-
-        assert fetch.await_count == 1
-        assert load_existing.await_count == 1
-        assert [message.body for message in history] == ["homeserver fallback"]
-        assert history.diagnostics["cache_store_outcome"] == ThreadCacheReplaceOutcome.EXISTING_USABLE.value
-        assert history.diagnostics["cache_repair_attempts"] == 1
-        assert history.diagnostics["cache_repair_usable"] is False
-
-    @pytest.mark.asyncio
-    async def test_refresh_reports_unresolved_invalidation_after_bounded_retry(self) -> None:
-        """Repeated invalidation must remain explicit and never become reported cache success."""
-        event_cache = _event_cache()
-        event_cache.replace_thread.return_value = ThreadCacheReplaceOutcome.INVALIDATED
+        event_cache.replace_thread.return_value = False
         fetch_result = matrix_client_module._ThreadHistoryFetchResult(
             history=[
                 ResolvedVisibleMessage.synthetic(
@@ -3408,101 +3159,11 @@ class TestThreadHistoryCache:
                 allow_stale_fallback=False,
             )
 
-        assert fetch.await_count == 2
+        assert fetch.await_count == 1
         assert [message.body for message in history] == ["homeserver fallback"]
-        assert history.diagnostics["cache_store_outcome"] == ThreadCacheReplaceOutcome.INVALIDATED.value
-        assert history.diagnostics["cache_repair_attempts"] == 2
-        assert history.diagnostics["cache_repair_usable"] is False
-
-    @pytest.mark.asyncio
-    async def test_incremental_thread_revalidation_ignores_runtime_age_but_not_room_staleness(
-        self,
-        tmp_path: Path,
-    ) -> None:
-        """Incremental append refresh should trust old caches unless room state is stale."""
-        cache = SqliteEventCache(tmp_path / "event_cache.db")
-        await cache.initialize()
-
-        root_event = self._make_text_event(
-            event_id="$thread_root",
-            sender="@user:localhost",
-            body="Root message",
-            server_timestamp=1000,
-            source_content={"body": "Root message"},
-        )
-        cached_reply = self._make_text_event(
-            event_id="$reply1",
-            sender="@agent:localhost",
-            body="Cached reply",
-            server_timestamp=2000,
-            source_content={
-                "body": "Cached reply",
-                "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread_root"},
-            },
-        )
-        appended_reply = self._make_text_event(
-            event_id="$reply2",
-            sender="@agent:localhost",
-            body="Incremental reply",
-            server_timestamp=3000,
-            source_content={
-                "body": "Incremental reply",
-                "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread_root"},
-            },
-        )
-        runtime_started_at = time.time() - 1
-
-        await _replace_thread(
-            cache,
-            "!room:localhost",
-            "$thread_root",
-            [self._cache_source(root_event), self._cache_source(cached_reply)],
-            validated_at=runtime_started_at - 100,
-        )
-        await cache.mark_thread_stale("!room:localhost", "$thread_root", reason="sync_thread_mutation")
-        pre_runtime_append = await cache.apply_thread_mutation_append(
-            "!room:localhost",
-            "$thread_root",
-            self._cache_source(appended_reply),
-            append_failed_reason="sync_append_failed",
-        )
-
-        await _replace_thread(
-            cache,
-            "!room:localhost",
-            "$thread_root",
-            [self._cache_source(root_event), self._cache_source(cached_reply)],
-            validated_at=time.time(),
-        )
-        await cache.mark_room_threads_stale("!room:localhost", reason="sync_redaction_lookup_unavailable")
-        await cache.mark_thread_stale("!room:localhost", "$thread_root", reason="sync_thread_mutation")
-        room_stale_append = await cache.apply_thread_mutation_append(
-            "!room:localhost",
-            "$thread_root",
-            self._cache_source(appended_reply),
-            append_failed_reason="sync_append_failed",
-        )
-
-        client = MagicMock()
-        page = MagicMock(spec=nio.RoomMessagesResponse)
-        page.chunk = [appended_reply, cached_reply, root_event]
-        page.end = None
-        client.room_messages = AsyncMock(return_value=page)
-
-        try:
-            history = await matrix_client_module.fetch_dispatch_thread_history(
-                client,
-                "!room:localhost",
-                "$thread_root",
-                event_cache=cache,
-            )
-        finally:
-            await cache.close()
-
-        assert pre_runtime_append is ThreadAppendOutcome.APPENDED
-        assert room_stale_append is ThreadAppendOutcome.APPENDED_STALE
-        assert [message.event_id for message in history] == ["$thread_root", "$reply1", "$reply2"]
-        assert history.diagnostics[THREAD_HISTORY_SOURCE_DIAGNOSTIC] == THREAD_HISTORY_SOURCE_HOMESERVER
+        assert history.diagnostics["cache_store_written"] is False
+        # A refused store is not a write fault, so it must not arm repair backoff.
+        assert history.diagnostics["cache_store_failed"] is False
 
     @pytest.mark.asyncio
     async def test_fetch_thread_history_logs_refresh_diagnostics_for_cache_miss(self) -> None:
@@ -3546,7 +3207,9 @@ class TestThreadHistoryCache:
             ),
             patch(
                 "mindroom.matrix.client_thread_history._store_thread_history_cache",
-                new=AsyncMock(return_value=ThreadCacheReplaceOutcome.STORED),
+                new=AsyncMock(
+                    return_value=matrix_client_module._ThreadCacheStoreResult(written=True, failed=False),
+                ),
             ),
         ):
             history = await matrix_client_module.fetch_thread_history(
@@ -3581,9 +3244,8 @@ class TestThreadHistoryCache:
             "thread_read_source": THREAD_HISTORY_SOURCE_HOMESERVER,
             "thread_read_degraded": False,
             "thread_read_error": None,
-            "cache_store_outcome": ThreadCacheReplaceOutcome.STORED.value,
-            "cache_repair_attempts": 1,
-            "cache_repair_usable": True,
+            "cache_store_written": True,
+            "cache_store_failed": False,
         }
 
     @pytest.mark.asyncio
@@ -3834,13 +3496,14 @@ class TestThreadHistoryCache:
         finally:
             await cache.close()
 
-        assert state_after_rejection is not None
-        assert state_after_rejection.validated_at is None
-        assert state_after_rejection.invalidation_reason == "thread_history_opaque_encrypted_event"
+        # The thread-scoped marker is written unconditionally, so it outlives the snapshot the
+        # rejection deleted -- belt and braces: no rows to serve, and a marker saying why.
         assert rows_after_rejection is None
+        assert state_after_rejection is not None
+        assert state_after_rejection.gap_reason == "thread_history_opaque_encrypted_event"
         assert [message.event_id for message in history] == ["$thread_root", "$clear_child"]
         assert history.diagnostics[THREAD_HISTORY_SOURCE_DIAGNOSTIC] == THREAD_HISTORY_SOURCE_HOMESERVER
-        assert state_after_recovery is not None
+        assert state_after_recovery is None
         assert thread_cache_rejection_reason(state_after_recovery) is None
         assert [message.event_id for message in cached_history] == ["$thread_root", "$clear_child"]
         assert cached_history.diagnostics[THREAD_HISTORY_SOURCE_DIAGNOSTIC] == THREAD_HISTORY_SOURCE_CACHE
@@ -3905,7 +3568,7 @@ class TestThreadHistoryCache:
 
         client.room_messages.assert_awaited_once()
         assert state is not None
-        assert state.invalidation_reason == "thread_history_opaque_encrypted_event"
+        assert state.gap_reason == "thread_history_opaque_encrypted_event"
         assert rows is None
 
     @pytest.mark.asyncio
@@ -3949,7 +3612,8 @@ class TestThreadHistoryCache:
 
         assert [message.event_id for message in history] == ["$thread_root", "$clear_child"]
         assert history.diagnostics[THREAD_HISTORY_SOURCE_DIAGNOSTIC] == THREAD_HISTORY_SOURCE_HOMESERVER
-        assert state is not None
+        # No marker at all is what a usable snapshot looks like.
+        assert state is None
         assert thread_cache_rejection_reason(state) is None
 
     @pytest.mark.asyncio
@@ -3996,10 +3660,12 @@ class TestThreadHistoryCache:
         finally:
             await cache.close()
 
-        assert state is not None
-        assert state.room_invalidation_reason == "thread_history_opaque_encrypted_event"
+        # $thread_root holds no snapshot, so the room-scoped fan-out leaves it unmarked -- and
+        # needs to: a read that finds no rows refetches anyway. The fail-closed guarantee is that
+        # every thread that *does* hold one is marked.
+        assert state is None
         assert unrelated_state is not None
-        assert unrelated_state.room_invalidation_reason == "thread_history_opaque_encrypted_event"
+        assert unrelated_state.gap_reason == "thread_history_opaque_encrypted_event"
 
     @pytest.mark.asyncio
     async def test_cached_snapshot_with_opaque_payload_is_rejected_and_refetched(
@@ -4040,7 +3706,8 @@ class TestThreadHistoryCache:
         assert history.diagnostics[THREAD_HISTORY_CACHE_REJECT_REASON_DIAGNOSTIC] == "cache_opaque_encrypted_event"
         assert cached_rows is not None
         assert {source["event_id"] for source in cached_rows} == {"$thread_root", "$clear_child"}
-        assert state is not None
+        # No marker at all is what a usable snapshot looks like: the refetch covered the gap.
+        assert state is None
         assert thread_cache_rejection_reason(state) is None
 
     @pytest.mark.asyncio
@@ -4062,7 +3729,7 @@ class TestThreadHistoryCache:
                 thread_id="$thread_root",
                 events=[self._cache_source(root_event), self._cache_source(child_event), legacy_opaque],
             )
-            await cache.mark_thread_stale("!room:localhost", "$thread_root", reason="sync_opaque_encrypted_event")
+            await cache.mark_thread_gap("!room:localhost", "$thread_root", reason="sync_opaque_encrypted_event")
             client = MagicMock()
             client.room_messages = AsyncMock(side_effect=aiohttp.ClientError("homeserver unavailable"))
             with pytest.raises(aiohttp.ClientError):
@@ -4121,7 +3788,7 @@ class TestThreadHistoryCache:
         assert thread_cache_rejection_reason(clean_state) is None
         assert poisoned_rows is None
         assert poisoned_state is not None
-        assert poisoned_state.invalidation_reason == "thread_history_opaque_encrypted_event"
+        assert poisoned_state.gap_reason == "thread_history_opaque_encrypted_event"
 
     @pytest.mark.asyncio
     async def test_bulk_refresh_with_unresolved_opaque_marks_all_requested_threads_stale(
@@ -4168,10 +3835,10 @@ class TestThreadHistoryCache:
 
         assert stats.usable_threads == 0
         for thread_id in ("$thread_root", "$other_root"):
-            state = states[thread_id]
-            assert state is not None
-            assert state.room_invalidation_reason == "thread_history_opaque_encrypted_event"
+            # Failing the whole bulk closed removes every snapshot, which is stronger than marking
+            # them: there is nothing left for a later read to serve.
             assert rows[thread_id] is None
+            assert states[thread_id] is None
 
     @pytest.mark.asyncio
     async def test_refresh_opaque_rejection_fails_closed_when_stale_marker_write_fails(
@@ -4187,7 +3854,7 @@ class TestThreadHistoryCache:
             def __getattr__(self, name: str) -> object:
                 return getattr(self._inner, name)
 
-            async def mark_thread_stale(self, room_id: str, thread_id: str, *, reason: str) -> None:
+            async def mark_thread_gap(self, room_id: str, thread_id: str, *, reason: str) -> None:
                 msg = f"stale marker write refused for {room_id}/{thread_id}: {reason}"
                 raise RuntimeError(msg)
 
@@ -4210,7 +3877,7 @@ class TestThreadHistoryCache:
                 thread_id="$thread_root",
                 events=[self._cache_source(root_event), self._cache_source(child_event)],
             )
-            await cache.mark_thread_stale("!room:localhost", "$thread_root", reason="sync_opaque_encrypted_event")
+            await cache.mark_thread_gap("!room:localhost", "$thread_root", reason="sync_opaque_encrypted_event")
             client = self._room_messages_client([opaque_child, child_event, root_event])
             with pytest.raises(matrix_client_module.OpaqueEncryptedThreadHistoryError):
                 await matrix_client_module.fetch_dispatch_thread_snapshot(
@@ -4230,7 +3897,7 @@ class TestThreadHistoryCache:
         """Authoritative history remains available while every derived cache write is rejected."""
         event_cache = _event_cache()
         event_cache.room_membership_epoch.side_effect = RuntimeError("cache unavailable")
-        event_cache.replace_thread.return_value = ThreadCacheReplaceOutcome.WRITES_UNAVAILABLE
+        event_cache.replace_thread.return_value = False
         fetch_result = matrix_client_module._ThreadHistoryFetchResult(
             history=[
                 ResolvedVisibleMessage.synthetic(

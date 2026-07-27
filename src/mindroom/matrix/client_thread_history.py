@@ -59,9 +59,9 @@ from mindroom.matrix.cache import (
     thread_cache_rejection_reason,
     thread_history_result,
 )
-from mindroom.matrix.cache.thread_cache_invalidation import (
-    mark_room_threads_stale_fail_closed,
-    mark_thread_stale_fail_closed,
+from mindroom.matrix.cache.thread_cache_gap import (
+    mark_room_threads_gap_fail_closed,
+    mark_thread_gap_fail_closed,
 )
 from mindroom.matrix.client_visible_messages import (
     ResolvedVisibleMessage,
@@ -882,7 +882,7 @@ async def _reject_opaque_thread_snapshot(
     """Reject an opaque-poisoned reconstruction before its guarded store."""
     if not any(is_opaque_encrypted_event_source(source) for source in fetch_result.event_sources):
         return
-    await _mark_thread_stale_for_opaque_history(event_cache, room_id=room_id, thread_id=thread_id)
+    await _mark_thread_gap_for_opaque_history(event_cache, room_id=room_id, thread_id=thread_id)
     msg = f"thread history for {thread_id} contains still-undecryptable encrypted events"
     raise OpaqueEncryptedThreadHistoryError(msg)
 
@@ -1100,14 +1100,14 @@ def _thread_history_cache_rejection_reason(
     return None
 
 
-async def _mark_thread_stale_for_opaque_history(
+async def _mark_thread_gap_for_opaque_history(
     event_cache: ConversationEventCache,
     *,
     room_id: str,
     thread_id: str,
 ) -> None:
     """Keep one opaque-poisoned thread durably stale, deleting the snapshot only when the marker fails."""
-    await mark_thread_stale_fail_closed(
+    await mark_thread_gap_fail_closed(
         event_cache,
         room_id=room_id,
         thread_id=thread_id,
@@ -1122,7 +1122,7 @@ async def _mark_room_stale_for_opaque_history(
     room_id: str,
 ) -> None:
     """Keep every thread stale when opaque relation impact cannot be scoped within the room."""
-    await mark_room_threads_stale_fail_closed(
+    await mark_room_threads_gap_fail_closed(
         event_cache,
         room_id=room_id,
         reason=_OPAQUE_ENCRYPTED_THREAD_HISTORY_REASON,
@@ -1672,7 +1672,7 @@ async def bulk_refresh_room_thread_histories(
         for thread_id, event_sources in scan_result.thread_event_sources.items():
             rejection_reason = _thread_history_cache_rejection_reason(event_sources, thread_id=thread_id)
             if rejection_reason == _OPAQUE_ENCRYPTED_EVENT_REJECTION:
-                await _mark_thread_stale_for_opaque_history(event_cache, room_id=room_id, thread_id=thread_id)
+                await _mark_thread_gap_for_opaque_history(event_cache, room_id=room_id, thread_id=thread_id)
                 opaque_stale_threads += 1
                 continue
             if rejection_reason is not None:
@@ -1715,14 +1715,25 @@ async def untrusted_cached_thread_ids(
     room_id: str,
     thread_ids: Collection[str],
 ) -> tuple[str, ...]:
-    """Return the given threads whose durable snapshots would not be served from cache."""
-    gaps = await asyncio.gather(
-        *(event_cache.get_thread_cache_gap(room_id, thread_id) for thread_id in thread_ids),
+    """Return the given threads whose durable snapshots would not be served from cache.
+
+    Two ways a thread fails to serve, and both have to be asked about: it carries a gap marker, or
+    it has no snapshot at all. Checking only the marker silently reports every never-cached thread
+    as a cache hit, which turns startup prewarm into a no-op.
+    """
+    reads = await asyncio.gather(
+        *(
+            asyncio.gather(
+                event_cache.get_thread_cache_gap(room_id, thread_id),
+                event_cache.has_thread_snapshot(room_id, thread_id),
+            )
+            for thread_id in thread_ids
+        ),
     )
     return tuple(
         thread_id
-        for thread_id, gap in zip(thread_ids, gaps, strict=True)
-        if thread_cache_rejection_reason(gap) is not None
+        for thread_id, (gap, has_snapshot) in zip(thread_ids, reads, strict=True)
+        if thread_cache_rejection_reason(gap) is not None or not has_snapshot
     )
 
 

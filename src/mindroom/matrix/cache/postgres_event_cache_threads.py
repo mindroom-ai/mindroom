@@ -284,7 +284,7 @@ async def set_room_membership_locked(
     reason: str,
 ) -> None:
     """Advance one durable room-membership transition and gap-mark prior refills."""
-    await mark_room_stale_locked(
+    await mark_room_gap_locked(
         db,
         namespace=namespace,
         room_id=room_id,
@@ -378,9 +378,22 @@ async def replace_thread_locked(
 ) -> None:
     """Replace one thread snapshot atomically within an existing DB transaction.
 
-    The replacement always installs: raw upserts are monotonic, so a concurrent writer cannot be
-    buried by one. Only the gap marker is conditional — see ``_clear_thread_gap_covered_by_fetch``.
+    Replacement is ordered by ``fetch_started_at``, not by arrival: because installing a snapshot
+    deletes the events it omits, a slow fetch landing after a newer one would otherwise bury the
+    newer thread contents and leave no gap marker behind to force a refetch. An older fetch is
+    therefore skipped outright. This is one comparison, not a conflict classifier — the loser has
+    nothing to retry, since the snapshot already installed is strictly fresher than its own.
+
+    The gap marker is separately conditional — see ``_clear_thread_gap_covered_by_fetch``.
     """
+    if await _thread_snapshot_is_newer_than_fetch(
+        db,
+        namespace=namespace,
+        room_id=room_id,
+        thread_id=thread_id,
+        fetch_started_at=fetch_started_at,
+    ):
+        return
     existing_event_ids = await _thread_event_ids_for_thread(
         db,
         namespace=namespace,
@@ -511,7 +524,7 @@ async def invalidate_room_threads_locked(
     )
 
 
-async def mark_thread_stale_locked(
+async def mark_thread_gap_locked(
     db: AsyncConnection,
     *,
     namespace: str,
@@ -575,7 +588,7 @@ async def apply_thread_mutation_append_locked(
         normalized_event=normalized_event,
     )
     if outcome is not ThreadAppendOutcome.APPENDED:
-        await mark_thread_stale_locked(
+        await mark_thread_gap_locked(
             db,
             namespace=namespace,
             room_id=room_id,
@@ -585,7 +598,7 @@ async def apply_thread_mutation_append_locked(
     return outcome
 
 
-async def mark_room_stale_locked(
+async def mark_room_gap_locked(
     db: AsyncConnection,
     *,
     namespace: str,
@@ -688,6 +701,29 @@ async def _append_existing_thread_event(
     return ThreadAppendOutcome.APPENDED
 
 
+async def _thread_snapshot_is_newer_than_fetch(
+    db: AsyncConnection,
+    *,
+    namespace: str,
+    room_id: str,
+    thread_id: str,
+    fetch_started_at: float,
+) -> bool:
+    """Return whether an installed snapshot came from a strictly newer fetch than this one."""
+    cursor = await db.execute(
+        """
+        SELECT snapshot_fetch_started_at
+        FROM mindroom_event_cache_thread_state
+        WHERE namespace = %s AND room_id = %s AND thread_id = %s
+        """,
+        (namespace, room_id, thread_id),
+    )
+    row = await cursor.fetchone()
+    if row is None or row[0] is None:
+        return False
+    return float(row[0]) > fetch_started_at
+
+
 async def _clear_thread_gap_covered_by_fetch(
     db: AsyncConnection,
     *,
@@ -708,10 +744,12 @@ async def _clear_thread_gap_covered_by_fetch(
             room_id,
             thread_id,
             gap_marked_at,
-            gap_reason
+            gap_reason,
+            snapshot_fetch_started_at
         )
-        VALUES (%s, %s, %s, NULL, NULL)
+        VALUES (%s, %s, %s, NULL, NULL, %s)
         ON CONFLICT(namespace, room_id, thread_id) DO UPDATE SET
+            snapshot_fetch_started_at = EXCLUDED.snapshot_fetch_started_at,
             gap_marked_at = CASE
                 WHEN mindroom_event_cache_thread_state.gap_marked_at <= %s THEN NULL
                 ELSE mindroom_event_cache_thread_state.gap_marked_at
@@ -721,7 +759,7 @@ async def _clear_thread_gap_covered_by_fetch(
                 ELSE mindroom_event_cache_thread_state.gap_reason
             END
         """,
-        (namespace, room_id, thread_id, fetch_started_at, fetch_started_at),
+        (namespace, room_id, thread_id, fetch_started_at, fetch_started_at, fetch_started_at),
     )
 
 
@@ -743,6 +781,28 @@ async def _thread_event_ids_for_thread(
         (namespace, room_id, thread_id),
     )
     return [str(row[0]) for row in rows]
+
+
+async def thread_snapshot_exists(
+    db: AsyncConnection,
+    *,
+    namespace: str,
+    room_id: str,
+    thread_id: str,
+) -> bool:
+    """Return whether one thread has at least one cached snapshot row."""
+    cursor = await db.execute(
+        """
+        SELECT 1
+        FROM mindroom_event_cache_thread_events
+        WHERE namespace = %s AND room_id = %s AND thread_id = %s
+        LIMIT 1
+        """,
+        (namespace, room_id, thread_id),
+    )
+    row = await cursor.fetchone()
+    await cursor.close()
+    return row is not None
 
 
 async def _thread_event_ids_for_room(

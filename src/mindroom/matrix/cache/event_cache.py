@@ -83,6 +83,17 @@ class ConversationEventCache(Protocol):
         reads as missing.
         """
 
+    async def has_thread_snapshot(self, room_id: str, thread_id: str) -> bool:
+        """Return whether any snapshot rows exist for one thread.
+
+        A gap marker says a snapshot is unusable; its absence does not say a snapshot exists. Both
+        answers are needed to decide whether a thread would be served from cache, and a caller that
+        asks only about the marker treats a never-cached thread as a cache hit.
+
+        Distinct from ``get_thread_event_ids``: this one answers existence in a single bounded
+        probe rather than loading every row to test the set for emptiness.
+        """
+
     async def get_recent_room_thread_ids(self, room_id: str, *, limit: int) -> list[str]:
         """Return locally known thread IDs for one room ordered by newest cached activity."""
 
@@ -183,10 +194,10 @@ class ConversationEventCache(Protocol):
     async def invalidate_room_threads(self, room_id: str) -> None:
         """Delete every cached thread snapshot for one room."""
 
-    async def mark_thread_stale(self, room_id: str, thread_id: str, *, reason: str) -> None:
+    async def mark_thread_gap(self, room_id: str, thread_id: str, *, reason: str) -> None:
         """Persist one durable thread gap marker."""
 
-    async def mark_room_threads_stale(self, room_id: str, *, reason: str) -> None:
+    async def mark_room_threads_gap(self, room_id: str, *, reason: str) -> None:
         """Persist a durable gap marker against every cached thread in one room."""
 
     async def apply_thread_mutation_append(

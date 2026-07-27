@@ -40,4 +40,3 @@ def test_thread_cache_gap_row_reads_a_marked_row() -> None:
         gap_marked_at=12.5,
         gap_reason="limited_sync_timeline",
     )
-

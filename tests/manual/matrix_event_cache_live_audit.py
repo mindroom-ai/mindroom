@@ -1408,7 +1408,7 @@ async def _strict_thread_read_sequence(
             representation="omitted",
         )
         await cache.redact_event(room_id, strict_child_id)
-        await cache.mark_thread_stale(
+        await cache.mark_thread_gap(
             room_id,
             root_id,
             reason="live_audit_redaction",

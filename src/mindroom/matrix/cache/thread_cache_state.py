@@ -7,7 +7,7 @@ revalidation allowlist: a stale or incomplete snapshot is **detected and refetch
 Two rules, and only two:
 
 1. A gap marker makes the snapshot unusable until a full refetch replaces it.
-   ``mark_room_threads_stale`` is the room-scoped (wildcard-thread) form and fans the marker out
+   ``mark_room_threads_gap`` is the room-scoped (wildcard-thread) form and fans the marker out
    across every thread the room has a snapshot for; a thread with no snapshot needs no marker
    because a read that finds no rows refetches anyway.
 
@@ -69,4 +69,3 @@ def thread_cache_gap_row(values: Sequence[float | str | None] | None) -> ThreadC
         gap_marked_at=float(gap_marked_at),
         gap_reason=values[1] if isinstance(values[1], str) else None,
     )
-

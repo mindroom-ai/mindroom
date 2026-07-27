@@ -37,7 +37,7 @@ if TYPE_CHECKING:
     from .cache_maintenance import CacheMaintenanceReport
     from .thread_cache_state import ThreadCacheGap
 
-_EVENT_CACHE_SCHEMA_VERSION = 14
+_EVENT_CACHE_SCHEMA_VERSION = 15
 _EVENT_CACHE_TABLES = (
     "cache_metadata",
     "thread_events",
@@ -275,6 +275,9 @@ async def _create_event_cache_schema(db: aiosqlite.Connection) -> None:
             thread_id TEXT NOT NULL,
             gap_marked_at REAL,
             gap_reason TEXT,
+            -- The ``fetch_started_at`` of the fetch whose snapshot is currently installed. Orders
+            -- concurrent replacements so a slow older fetch cannot delete a newer fetch's events.
+            snapshot_fetch_started_at REAL,
             PRIMARY KEY (principal_id, room_id, thread_id)
         )
         """,
@@ -881,6 +884,20 @@ class SqliteEventCache:
             ),
         )
 
+    async def has_thread_snapshot(self, room_id: str, thread_id: str) -> bool:
+        """Return whether any snapshot rows exist for one thread."""
+        return await self._read_operation(
+            room_id,
+            operation="has_thread_snapshot",
+            disabled_result=False,
+            reader=lambda db: sqlite_event_cache_threads.thread_snapshot_exists(
+                db,
+                principal_id=self.principal_id,
+                room_id=room_id,
+                thread_id=thread_id,
+            ),
+        )
+
     async def get_recent_room_thread_ids(self, room_id: str, *, limit: int) -> list[str]:
         """Return locally known thread IDs for one room ordered by newest cached activity."""
         return await self._read_operation(
@@ -1170,14 +1187,14 @@ class SqliteEventCache:
             ),
         )
 
-    async def mark_thread_stale(self, room_id: str, thread_id: str, *, reason: str) -> None:
+    async def mark_thread_gap(self, room_id: str, thread_id: str, *, reason: str) -> None:
         """Persist one durable thread gap marker."""
         try:
             await self._write_operation(
                 room_id,
-                operation="mark_thread_stale",
+                operation="mark_thread_gap",
                 disabled_result=None,
-                writer=lambda db: sqlite_event_cache_threads.mark_thread_stale_locked(
+                writer=lambda db: sqlite_event_cache_threads.mark_thread_gap_locked(
                     db,
                     principal_id=self.principal_id,
                     room_id=room_id,
@@ -1192,14 +1209,14 @@ class SqliteEventCache:
             msg = "SQLite event cache unavailable while marking thread stale"
             raise EventCacheBackendUnavailableError(msg) from exc
 
-    async def mark_room_threads_stale(self, room_id: str, *, reason: str) -> None:
+    async def mark_room_threads_gap(self, room_id: str, *, reason: str) -> None:
         """Record a durable gap marker against every cached thread in one room."""
         try:
             await self._write_operation(
                 room_id,
-                operation="mark_room_threads_stale",
+                operation="mark_room_threads_gap",
                 disabled_result=None,
-                writer=lambda db: sqlite_event_cache_threads.mark_room_stale_locked(
+                writer=lambda db: sqlite_event_cache_threads.mark_room_gap_locked(
                     db,
                     principal_id=self.principal_id,
                     room_id=room_id,

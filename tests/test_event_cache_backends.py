@@ -446,7 +446,7 @@ async def _assert_staleness_and_redaction_behavior(
     thread_id: str,
     latest_edit: dict[str, object],
 ) -> None:
-    await cache.mark_thread_stale(room_id, thread_id, reason="live_thread_mutation")
+    await cache.mark_thread_gap(room_id, thread_id, reason="live_thread_mutation")
     stale_state = await cache.get_thread_cache_gap(room_id, thread_id)
     assert stale_state is not None
     assert stale_state.gap_marked_at is not None
@@ -616,7 +616,7 @@ async def test_sqlite_v10_reset_is_atomic_and_creates_new_generation(tmp_path: P
         assert await cache.get_event("!room:localhost", "$legacy") is None
         assert cache._runtime.db is not None
         version_row = await (await cache._runtime.db.execute("PRAGMA user_version")).fetchone()
-        assert version_row == (14,)
+        assert version_row == (15,)
     finally:
         await cache.close()
 
@@ -672,7 +672,7 @@ async def test_sqlite_v11_reset_rotates_generation(tmp_path: Path) -> None:
                 "SELECT value FROM cache_metadata WHERE key = 'certification_generation'",
             )
         ).fetchone()
-        assert version_row == (14,)
+        assert version_row == (15,)
         assert generation_row is not None
         assert generation_row[0] != "sqlite-v11-generation"
     finally:
@@ -1718,7 +1718,7 @@ async def test_postgres_event_cache_recovers_after_backend_connection_terminatio
         finally:
             await admin.close()
 
-        await cache.mark_thread_stale(room_id, thread_id, reason="live_thread_mutation")
+        await cache.mark_thread_gap(room_id, thread_id, reason="live_thread_mutation")
 
         state = await cache.get_thread_cache_gap(room_id, thread_id)
         assert state is not None
@@ -1758,10 +1758,10 @@ async def test_postgres_event_cache_flushes_pending_invalidations_before_guarded
     await cache.initialize()
     try:
         await _replace_thread(cache, room_id, thread_id, [root_event])
-        cache._runtime.record_pending_thread_invalidation(
+        cache._runtime.record_pending_thread_gap(
             room_id,
             thread_id,
-            invalidated_at=200.0,
+            gap_marked_at=200.0,
             reason="live_thread_mutation",
         )
 
@@ -1778,7 +1778,7 @@ async def test_postgres_event_cache_flushes_pending_invalidations_before_guarded
         assert gap is not None
         assert gap.gap_marked_at == 200.0
         assert gap.gap_reason == "live_thread_mutation"
-        assert cache.runtime_diagnostics()["cache_postgres_pending_thread_invalidations"] == 0
+        assert cache.runtime_diagnostics()["cache_postgres_pending_thread_gaps"] == 0
     finally:
         await cache.close()
 
@@ -1808,15 +1808,15 @@ async def test_postgres_event_cache_flushes_newer_thread_marker_with_pending_roo
     await cache.initialize()
     try:
         await _replace_thread(cache, room_id, thread_id, [root_event])
-        cache._runtime.record_pending_room_invalidation(
+        cache._runtime.record_pending_room_gap(
             room_id,
-            invalidated_at=100.0,
+            gap_marked_at=100.0,
             reason="unknown_room_mutation",
         )
-        cache._runtime.record_pending_thread_invalidation(
+        cache._runtime.record_pending_thread_gap(
             room_id,
             thread_id,
-            invalidated_at=200.0,
+            gap_marked_at=200.0,
             reason="live_thread_mutation",
         )
 
@@ -1834,8 +1834,8 @@ async def test_postgres_event_cache_flushes_newer_thread_marker_with_pending_roo
         assert gap.gap_marked_at == 200.0
         assert gap.gap_reason == "live_thread_mutation"
         diagnostics = cache.runtime_diagnostics()
-        assert diagnostics["cache_postgres_pending_room_invalidations"] == 0
-        assert diagnostics["cache_postgres_pending_thread_invalidations"] == 0
+        assert diagnostics["cache_postgres_pending_room_gaps"] == 0
+        assert diagnostics["cache_postgres_pending_thread_gaps"] == 0
     finally:
         await cache.close()
 
@@ -1862,35 +1862,35 @@ async def test_postgres_event_cache_preserves_pending_marker_recorded_during_flu
     )
     namespace = f"tenant_{uuid.uuid4().hex}"
     cache = PostgresEventCache(database_url=postgres_event_cache_url, namespace=namespace)
-    original_mark_thread_stale_locked = postgres_event_cache_threads.mark_thread_stale_locked
+    original_mark_thread_gap_locked = postgres_event_cache_threads.mark_thread_gap_locked
     injected_newer_pending_marker = False
 
-    async def racing_mark_thread_stale_locked(*args: object, **kwargs: object) -> None:
+    async def racing_mark_thread_gap_locked(*args: object, **kwargs: object) -> None:
         nonlocal injected_newer_pending_marker
         if kwargs.get("thread_id") == thread_id and kwargs.get("gap_marked_at") == 200.0:
             injected_newer_pending_marker = True
-            cache._runtime.record_pending_thread_invalidation(
+            cache._runtime.record_pending_thread_gap(
                 room_id,
                 thread_id,
-                invalidated_at=300.0,
+                gap_marked_at=300.0,
                 reason="later_live_thread_mutation",
             )
-        await original_mark_thread_stale_locked(*args, **kwargs)
+        await original_mark_thread_gap_locked(*args, **kwargs)
 
     monkeypatch.setattr(
         postgres_event_cache_threads,
-        "mark_thread_stale_locked",
-        racing_mark_thread_stale_locked,
+        "mark_thread_gap_locked",
+        racing_mark_thread_gap_locked,
     )
 
     await cache.initialize()
     try:
         await _replace_thread(cache, room_id, thread_id, [root_event])
         membership_epoch = await cache.room_membership_epoch(room_id)
-        cache._runtime.record_pending_thread_invalidation(
+        cache._runtime.record_pending_thread_gap(
             room_id,
             thread_id,
-            invalidated_at=200.0,
+            gap_marked_at=200.0,
             reason="live_thread_mutation",
         )
 
@@ -1905,7 +1905,7 @@ async def test_postgres_event_cache_preserves_pending_marker_recorded_during_flu
         assert replaced is True
         assert injected_newer_pending_marker is True
         diagnostics = cache.runtime_diagnostics()
-        assert diagnostics["cache_postgres_pending_thread_invalidations"] == 1
+        assert diagnostics["cache_postgres_pending_thread_gaps"] == 1
 
         gap = await cache.get_thread_cache_gap(room_id, thread_id)
 
@@ -1913,7 +1913,7 @@ async def test_postgres_event_cache_preserves_pending_marker_recorded_during_flu
         assert gap.gap_marked_at == 300.0
         assert gap.gap_reason == "later_live_thread_mutation"
         diagnostics = cache.runtime_diagnostics()
-        assert diagnostics["cache_postgres_pending_thread_invalidations"] == 0
+        assert diagnostics["cache_postgres_pending_thread_gaps"] == 0
     finally:
         await cache.close()
 
@@ -1930,14 +1930,14 @@ async def test_postgres_event_cache_pending_thread_flush_does_not_downgrade_newe
 
     await cache.initialize()
     try:
-        cache._runtime.record_pending_thread_invalidation(
+        cache._runtime.record_pending_thread_gap(
             room_id,
             thread_id,
-            invalidated_at=100.0,
+            gap_marked_at=100.0,
             reason="older_pending_marker",
         )
         async with cache._runtime.acquire_db_operation(operation="test_newer_thread_marker") as db:
-            await postgres_event_cache_threads.mark_thread_stale_locked(
+            await postgres_event_cache_threads.mark_thread_gap_locked(
                 db,
                 namespace=namespace,
                 room_id=room_id,
@@ -1980,13 +1980,13 @@ async def test_postgres_event_cache_pending_room_flush_does_not_downgrade_newer_
             thread_id,
             [_message_event(event_id=thread_id, sender="@user:localhost", body="root", origin_server_ts=1000)],
         )
-        cache._runtime.record_pending_room_invalidation(
+        cache._runtime.record_pending_room_gap(
             room_id,
-            invalidated_at=100.0,
+            gap_marked_at=100.0,
             reason="older_pending_room_marker",
         )
         async with cache._runtime.acquire_db_operation(operation="test_newer_room_marker") as db:
-            await postgres_event_cache_threads.mark_room_stale_locked(
+            await postgres_event_cache_threads.mark_room_gap_locked(
                 db,
                 namespace=namespace,
                 room_id=room_id,
@@ -2046,53 +2046,53 @@ def test_postgres_pending_invalidation_records_are_monotonic() -> None:
     """Pending invalidation buffers should keep the newest marker for each scope."""
     runtime = _PostgresEventCacheRuntime("postgresql://cache:secret@db.internal/mindroom", namespace="tenant")
 
-    runtime.record_pending_thread_invalidation(
+    runtime.record_pending_thread_gap(
         "!room:localhost",
         "$thread",
-        invalidated_at=200.0,
+        gap_marked_at=200.0,
         reason="newer_thread_marker",
     )
-    runtime.record_pending_thread_invalidation(
+    runtime.record_pending_thread_gap(
         "!room:localhost",
         "$thread",
-        invalidated_at=100.0,
+        gap_marked_at=100.0,
         reason="older_thread_marker",
     )
-    runtime.record_pending_room_invalidation(
+    runtime.record_pending_room_gap(
         "!room:localhost",
-        invalidated_at=200.0,
+        gap_marked_at=200.0,
         reason="newer_room_marker",
     )
-    runtime.record_pending_room_invalidation(
+    runtime.record_pending_room_gap(
         "!room:localhost",
-        invalidated_at=100.0,
+        gap_marked_at=100.0,
         reason="older_room_marker",
     )
-    runtime.record_pending_thread_invalidation(
+    runtime.record_pending_thread_gap(
         "!room:localhost",
         "$strong-thread",
-        invalidated_at=100.0,
+        gap_marked_at=100.0,
         reason="sync_opaque_encrypted_event",
     )
-    runtime.record_pending_thread_invalidation(
+    runtime.record_pending_thread_gap(
         "!room:localhost",
         "$strong-thread",
-        invalidated_at=300.0,
+        gap_marked_at=300.0,
         reason="sync_thread_mutation",
     )
     # Monotonic by instant alone. There is no reason precedence: every reason means refetch, so
     # the newest marker's reason wins even though the older one used to outrank it.
 
-    thread_pending = runtime.pending_thread_invalidations("!room:localhost")
-    room_pending = runtime.pending_room_invalidation("!room:localhost")
+    thread_pending = runtime.pending_thread_gaps("!room:localhost")
+    room_pending = runtime.pending_room_gap("!room:localhost")
 
     pending_by_thread = dict(thread_pending)
-    assert pending_by_thread["$thread"].invalidated_at == 200.0
+    assert pending_by_thread["$thread"].gap_marked_at == 200.0
     assert pending_by_thread["$thread"].reason == "newer_thread_marker"
-    assert pending_by_thread["$strong-thread"].invalidated_at == 300.0
+    assert pending_by_thread["$strong-thread"].gap_marked_at == 300.0
     assert pending_by_thread["$strong-thread"].reason == "sync_thread_mutation"
     assert room_pending is not None
-    assert room_pending.invalidated_at == 200.0
+    assert room_pending.gap_marked_at == 200.0
     assert room_pending.reason == "newer_room_marker"
 
 

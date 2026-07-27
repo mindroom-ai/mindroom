@@ -17,7 +17,6 @@ from mindroom.matrix import client_thread_history
 from mindroom.matrix.cache import (
     ConversationEventCache,
     SharedConversationEventCache,
-    ThreadCacheReplaceOutcome,
     postgres_event_cache_events,
     postgres_event_cache_threads,
     sqlite_event_cache,
@@ -26,7 +25,7 @@ from mindroom.matrix.cache import (
 )
 from mindroom.matrix.cache.postgres_event_cache import PostgresEventCache
 from mindroom.matrix.cache.sqlite_event_cache import SqliteEventCache
-from mindroom.matrix.cache.thread_cache_invalidation import mark_thread_stale_fail_closed
+from mindroom.matrix.cache.thread_cache_gap import mark_thread_gap_fail_closed
 from mindroom.matrix.message_content import resolve_event_source_content
 from mindroom.matrix.rooms import leave_non_dm_rooms
 from mindroom.matrix.sync_cache_trust import SyncCacheTrust
@@ -363,7 +362,7 @@ async def test_sqlite_lock_contention_quarantines_then_heals_principal(
             assert await timeout_cursor.fetchone() == (5000,)
             await timeout_cursor.close()
             await db.execute("PRAGMA busy_timeout=0")
-            await mark_thread_stale_fail_closed(
+            await mark_thread_gap_fail_closed(
                 alice,
                 room_id=room_id,
                 thread_id=thread_id,
@@ -386,10 +385,8 @@ async def test_sqlite_lock_contention_quarantines_then_heals_principal(
         assert await bob.get_event(room_id, "$bob") == bob_event
 
         await replace_thread_unconditionally(alice, room_id, thread_id, [alice_event])
-        healed_state = await alice.get_thread_cache_gap(room_id, thread_id)
-        assert healed_state is not None
-        assert healed_state.validated_at is not None
-        assert healed_state.invalidated_at is None
+        assert await alice.get_thread_cache_gap(room_id, thread_id) is None
+        assert await alice.get_thread_events(room_id, thread_id) == [alice_event]
     finally:
         await root.close()
 
@@ -1051,7 +1048,6 @@ async def test_thread_refresh_prunes_only_plaintext_absent_from_replacement(
             room_id,
             thread_id,
             [surviving_event, removed_event],
-            validated_at=1.0,
         )
         assert await cache.store_mxc_text(room_id, "$surviving", surviving_mxc, "surviving plaintext")
         assert await cache.store_mxc_text(room_id, "$removed", removed_mxc, "removed plaintext")
@@ -1061,7 +1057,6 @@ async def test_thread_refresh_prunes_only_plaintext_absent_from_replacement(
             room_id,
             thread_id,
             [surviving_event],
-            validated_at=2.0,
         )
 
         assert await cache.get_mxc_text(room_id, "$surviving", surviving_mxc) == "surviving plaintext"
@@ -1090,7 +1085,6 @@ async def test_pre_departure_thread_refill_cannot_resurrect_after_rejoin(
             room_id,
             thread_id,
             [root_event, redacted_event],
-            validated_at=50.0,
         )
         fetch_membership_epoch = await cache.room_membership_epoch(room_id)
         assert await cache.redact_event(room_id, "$redacted")
@@ -1107,7 +1101,7 @@ async def test_pre_departure_thread_refill_cannot_resurrect_after_rejoin(
             fetch_started_at=100.0,
         )
 
-        assert replaced is ThreadCacheReplaceOutcome.RETRYABLE_CONFLICT
+        assert not replaced
         assert await cache.get_thread_events(room_id, thread_id) is None
         assert await cache.get_event(room_id, "$redacted") is None
     finally:
@@ -1135,7 +1129,6 @@ async def test_pre_departure_thread_refill_from_another_runtime_cannot_resurrect
             room_id,
             thread_id,
             events,
-            validated_at=50.0,
         )
         stale_membership_epoch = await stale_cache.room_membership_epoch(room_id)
 
@@ -1146,20 +1139,20 @@ async def test_pre_departure_thread_refill_from_another_runtime_cannot_resurrect
             expected_departure_epoch=departure_epoch,
         )
 
-        state = await departing_cache.get_thread_cache_gap(room_id, thread_id)
-        assert state is not None
-        assert state.room_invalidated_at is not None
-        assert state.room_invalidation_reason == "room_rejoined"
+        # 🔒 The purge removed the snapshot, so there is no thread row left to gap-mark -- and none
+        # is needed, because a read that finds no rows refetches anyway. What rejects the stale
+        # runtime's write is the membership epoch it captured before the departure, not a marker.
+        assert await departing_cache.get_thread_cache_gap(room_id, thread_id) is None
 
         replaced = await stale_cache.replace_thread(
             room_id,
             thread_id,
             events,
             expected_membership_epoch=stale_membership_epoch,
-            fetch_started_at=state.room_invalidated_at - 1.0,
+            fetch_started_at=100.0,
         )
 
-        assert replaced is ThreadCacheReplaceOutcome.RETRYABLE_CONFLICT
+        assert not replaced
         assert await departing_cache.get_thread_events(room_id, thread_id) is None
         assert await departing_cache.get_event(room_id, "$secret") is None
 
@@ -1169,9 +1162,9 @@ async def test_pre_departure_thread_refill_from_another_runtime_cannot_resurrect
                 thread_id,
                 events,
                 expected_membership_epoch=await stale_cache.room_membership_epoch(room_id),
-                fetch_started_at=state.room_invalidated_at + 1.0,
+                fetch_started_at=101.0,
             )
-            is ThreadCacheReplaceOutcome.STORED
+            is True
         )
     finally:
         await stale_root.close()
@@ -1245,7 +1238,7 @@ async def test_departed_refill_guard_blocks_point_plaintext_and_thread_writes_af
                 expected_membership_epoch=departed_membership_epoch,
                 fetch_started_at=float("inf"),
             )
-            is ThreadCacheReplaceOutcome.RETRYABLE_CONFLICT
+            is False
         )
         assert await refill_cache.get_thread_events(room_id, thread_id) is None
         assert await _raw_mxc_text_count(refill_cache, room_id, mxc_url) == 0
@@ -1258,7 +1251,7 @@ async def test_departed_refill_guard_blocks_point_plaintext_and_thread_writes_af
                 expected_membership_epoch=joined_membership_epoch,
                 fetch_started_at=float("inf"),
             )
-            is ThreadCacheReplaceOutcome.STORED
+            is True
         )
         assert await refill_cache.store_mxc_text(
             room_id,

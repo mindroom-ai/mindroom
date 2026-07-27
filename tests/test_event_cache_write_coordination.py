@@ -54,14 +54,14 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
         "append_outcome",
-        [ThreadAppendOutcome.APPENDED_STALE, RuntimeError("cache unavailable")],
+        [ThreadAppendOutcome.APPEND_REFUSED, RuntimeError("cache unavailable")],
         ids=["rejected", "failed"],
     )
     async def test_append_that_cannot_revalidate_retains_delta_and_schedules_repair(
         self,
         append_outcome: ThreadAppendOutcome | RuntimeError,
     ) -> None:
-        """A durable raw append is not converged until its snapshot becomes trusted."""
+        """An append that did not land keeps its delta and schedules a repair."""
         original_ops, logger, event_cache = _thread_mutation_cache_ops()
         if isinstance(append_outcome, RuntimeError):
             event_cache.apply_thread_mutation_append.side_effect = append_outcome
@@ -99,7 +99,10 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             coordination_scope=event_cache.principal_id,
         )
 
-        assert appended is not isinstance(append_outcome, RuntimeError)
+        # Neither a refusal nor a raised backend error converges the append, so both keep the delta
+        # for the scheduled repair to replay. There is no longer a "landed but untrusted" outcome:
+        # an append that returns APPENDED is converged, and the gap marker gates the read instead.
+        assert appended is False
         assert [event["event_id"] for event in retained] == ["$reply:localhost"]
         schedule_repair.assert_called_once_with(room_id, thread_id)
 
@@ -1251,7 +1254,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         assert event_cache.apply_thread_mutation_append.await_args.kwargs["append_failed_reason"] == (
             "live_append_failed"
         )
-        event_cache.mark_thread_stale.assert_not_awaited()
+        event_cache.mark_thread_gap.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_live_event_cache_update_recovers_after_same_room_failure(self) -> None:

@@ -23,8 +23,7 @@ from mindroom.conversation_resolver import ConversationResolver, ConversationRes
 from mindroom.matrix.cache import (
     ConversationEventCache,
     ThreadAppendOutcome,
-    ThreadCacheReplaceOutcome,
-    ThreadCacheState,
+    ThreadCacheGap,
     event_normalization,
     sqlite_event_cache_events,
     sqlite_event_cache_threads,
@@ -575,7 +574,7 @@ async def test_advisory_joiner_keeps_stale_fallback_from_strict_owner_failure(tm
         thread_id="$thread:localhost",
         events=[_clear_payload("$thread:localhost", body="stale root")],
     )
-    await event_cache.mark_thread_stale("!room:localhost", "$thread:localhost", reason="force_refetch")
+    await event_cache.mark_thread_gap("!room:localhost", "$thread:localhost", reason="force_refetch")
     strict_scan_started = asyncio.Event()
     release_strict_scan = asyncio.Event()
     scan_count = 0
@@ -763,7 +762,8 @@ def test_only_persistent_thread_repair_failure_arms_backoff(tmp_path: Path) -> N
         [],
         is_full_history=True,
         diagnostics={
-            "cache_store_outcome": ThreadCacheReplaceOutcome.WRITES_UNAVAILABLE.value,
+            "cache_store_written": False,
+            "cache_store_failed": False,
             "cache_repair_usable": False,
         },
     )
@@ -771,7 +771,8 @@ def test_only_persistent_thread_repair_failure_arms_backoff(tmp_path: Path) -> N
         [],
         is_full_history=True,
         diagnostics={
-            "cache_store_outcome": ThreadCacheReplaceOutcome.HARD_FAILURE.value,
+            "cache_store_written": False,
+            "cache_store_failed": True,
             "cache_repair_usable": False,
         },
     )
@@ -1005,7 +1006,8 @@ async def test_dispatch_retries_strictly_after_failed_cache_repair_backoff(tmp_p
         is_full_history=True,
         diagnostics={
             THREAD_HISTORY_DEGRADED_DIAGNOSTIC: True,
-            "cache_store_outcome": ThreadCacheReplaceOutcome.HARD_FAILURE.value,
+            "cache_store_written": False,
+            "cache_store_failed": True,
             "cache_repair_usable": False,
         },
     )
@@ -1162,7 +1164,8 @@ async def test_strict_thread_history_bypasses_repair_backoff_without_stalling(tm
         [],
         is_full_history=True,
         diagnostics={
-            "cache_store_outcome": ThreadCacheReplaceOutcome.HARD_FAILURE.value,
+            "cache_store_written": False,
+            "cache_store_failed": True,
             "cache_repair_usable": False,
         },
     )
@@ -1277,7 +1280,8 @@ async def test_stored_repair_releases_replayed_delta_filtered_by_redaction(tmp_p
             [],
             is_full_history=True,
             diagnostics={
-                "cache_store_outcome": ThreadCacheReplaceOutcome.STORED.value,
+                "cache_store_written": True,
+                "cache_store_failed": False,
                 "cache_repair_usable": True,
                 "thread_read_source": "homeserver",
             },
@@ -1530,14 +1534,14 @@ async def test_conversation_cache_startup_prewarm_bulk_refresh_preserves_metadat
 
 
 @pytest.mark.asyncio
-async def test_thread_snapshot_storage_exposes_direct_cache_state_reads(tmp_path: Path) -> None:
-    """Thread snapshot ownership should expose joined thread and room cache state."""
+async def test_thread_snapshot_storage_exposes_direct_gap_reads(tmp_path: Path) -> None:
+    """A stored snapshot should expose the newest gap marker recorded against its thread."""
     db, _maintenance_report, _generation = await event_cache_module._initialize_event_cache_db(
         tmp_path / "event_cache.db",
     )
 
     try:
-        await sqlite_event_cache_threads._replace_thread_locked(
+        await sqlite_event_cache_threads.replace_thread_locked(
             db,
             principal_id="__mindroom_default_principal__",
             room_id="!room:localhost",
@@ -1551,17 +1555,18 @@ async def test_thread_snapshot_storage_exposes_direct_cache_state_reads(tmp_path
                     "content": {"body": "Root message", "msgtype": "m.text"},
                 },
             ],
-            validated_at=100.0,
+            stored_at=100.0,
+            fetch_started_at=100.0,
         )
         with patch("mindroom.matrix.cache.sqlite_event_cache_threads.time.time", return_value=200.0):
-            await sqlite_event_cache_threads.mark_thread_stale_locked(
+            await sqlite_event_cache_threads.mark_thread_gap_locked(
                 db,
                 principal_id="__mindroom_default_principal__",
                 room_id="!room:localhost",
                 thread_id="$thread_root",
                 reason="thread_stale",
             )
-            await sqlite_event_cache_threads.mark_room_stale_locked(
+            await sqlite_event_cache_threads.mark_room_gap_locked(
                 db,
                 principal_id="__mindroom_default_principal__",
                 room_id="!room:localhost",
@@ -1569,7 +1574,7 @@ async def test_thread_snapshot_storage_exposes_direct_cache_state_reads(tmp_path
             )
         await db.commit()
 
-        state = await sqlite_event_cache_threads.load_thread_cache_gap(
+        gap = await sqlite_event_cache_threads.load_thread_cache_gap(
             db,
             principal_id="__mindroom_default_principal__",
             room_id="!room:localhost",
@@ -1578,46 +1583,45 @@ async def test_thread_snapshot_storage_exposes_direct_cache_state_reads(tmp_path
     finally:
         await db.close()
 
-    assert state is not None
-    assert state.validated_at == 100.0
-    assert state.invalidated_at == 200.0
-    assert state.invalidation_reason == "thread_stale"
-    assert state.room_invalidated_at == 200.0
-    assert state.room_invalidation_reason == "room_stale"
-    assert thread_cache_rejection_reason(state) == "thread_invalidated_after_validation"
+    # One marker per thread, not a thread column joined against a room column: the room-scoped
+    # marker fanned out onto this thread's row and, arriving no earlier, owns the reason.
+    assert gap is not None
+    assert gap.gap_marked_at == 200.0
+    assert gap.gap_reason == "room_stale"
+    assert thread_cache_rejection_reason(gap) == "room_stale"
 
 
 @pytest.mark.asyncio
-async def test_sqlite_stale_markers_are_monotonic(tmp_path: Path) -> None:
-    """Older stale markers should not downgrade newer thread or room invalidations."""
+async def test_sqlite_gap_markers_are_monotonic(tmp_path: Path) -> None:
+    """An older gap marker must not downgrade a newer one, at either scope."""
     db, _maintenance_report, _generation = await event_cache_module._initialize_event_cache_db(
         tmp_path / "event_cache.db",
     )
 
     try:
         with patch("mindroom.matrix.cache.sqlite_event_cache_threads.time.time", return_value=200.0):
-            await sqlite_event_cache_threads.mark_thread_stale_locked(
+            await sqlite_event_cache_threads.mark_thread_gap_locked(
                 db,
                 principal_id="__mindroom_default_principal__",
                 room_id="!room:localhost",
                 thread_id="$thread_root",
                 reason="newer_thread_marker",
             )
-            await sqlite_event_cache_threads.mark_room_stale_locked(
+            await sqlite_event_cache_threads.mark_room_gap_locked(
                 db,
                 principal_id="__mindroom_default_principal__",
                 room_id="!room:localhost",
                 reason="newer_room_marker",
             )
         with patch("mindroom.matrix.cache.sqlite_event_cache_threads.time.time", return_value=100.0):
-            await sqlite_event_cache_threads.mark_thread_stale_locked(
+            await sqlite_event_cache_threads.mark_thread_gap_locked(
                 db,
                 principal_id="__mindroom_default_principal__",
                 room_id="!room:localhost",
                 thread_id="$thread_root",
                 reason="older_thread_marker",
             )
-            await sqlite_event_cache_threads.mark_room_stale_locked(
+            await sqlite_event_cache_threads.mark_room_gap_locked(
                 db,
                 principal_id="__mindroom_default_principal__",
                 room_id="!room:localhost",
@@ -1625,7 +1629,7 @@ async def test_sqlite_stale_markers_are_monotonic(tmp_path: Path) -> None:
             )
         await db.commit()
 
-        state = await sqlite_event_cache_threads.load_thread_cache_gap(
+        gap = await sqlite_event_cache_threads.load_thread_cache_gap(
             db,
             principal_id="__mindroom_default_principal__",
             room_id="!room:localhost",
@@ -1634,79 +1638,38 @@ async def test_sqlite_stale_markers_are_monotonic(tmp_path: Path) -> None:
     finally:
         await db.close()
 
-    assert state is not None
-    assert state.invalidated_at == 200.0
-    assert state.invalidation_reason == "newer_thread_marker"
-    assert state.room_invalidated_at == 200.0
-    assert state.room_invalidation_reason == "newer_room_marker"
-
-
-def _thread_cache_state(
-    *,
-    validated_at: float | None = None,
-    invalidated_at: float | None = None,
-    invalidation_reason: str | None = None,
-    room_invalidated_at: float | None = None,
-    room_invalidation_reason: str | None = None,
-) -> ThreadCacheState:
-    return ThreadCacheState(
-        validated_at=validated_at,
-        invalidated_at=invalidated_at,
-        invalidation_reason=invalidation_reason,
-        room_invalidated_at=room_invalidated_at,
-        room_invalidation_reason=room_invalidation_reason,
-    )
+    assert gap is not None
+    assert gap.gap_marked_at == 200.0
+    assert gap.gap_reason == "newer_room_marker"
 
 
 @pytest.mark.parametrize(
-    ("cache_state", "expected_reason"),
+    ("gap", "expected_reason"),
     [
-        pytest.param(None, "no_cache_state", id="missing_state_rejects"),
+        pytest.param(None, None, id="no_marker_is_usable"),
         pytest.param(
-            _thread_cache_state(invalidated_at=100.0, invalidation_reason="live_thread_mutation"),
-            "cache_never_validated",
-            id="never_validated_rejects",
+            ThreadCacheGap(gap_marked_at=100.0, gap_reason="limited_sync_timeline"),
+            "limited_sync_timeline",
+            id="marker_reports_its_reason",
         ),
         pytest.param(
-            _thread_cache_state(validated_at=100.0, invalidated_at=100.0, invalidation_reason="tie"),
-            "thread_invalidated_after_validation",
-            id="thread_invalidation_tie_rejects",
-        ),
-        pytest.param(
-            _thread_cache_state(validated_at=100.0, room_invalidated_at=100.0, room_invalidation_reason="tie"),
-            "room_invalidated_after_validation",
-            id="room_invalidation_tie_rejects",
-        ),
-        pytest.param(
-            _thread_cache_state(validated_at=200.0, invalidated_at=100.0, invalidation_reason="superseded"),
-            None,
-            id="invalidation_before_validation_accepts",
-        ),
-        pytest.param(
-            _thread_cache_state(validated_at=200.0, room_invalidated_at=100.0, room_invalidation_reason="superseded"),
-            None,
-            id="room_invalidation_before_validation_accepts",
-        ),
-        # PR #731 removed the age rule and PR #734 removed the restart rule: an arbitrarily old
-        # validation stays trusted until an invalidation marker lands at or after it.
-        pytest.param(
-            _thread_cache_state(validated_at=1.0),
-            None,
-            id="ancient_validation_accepts",
+            ThreadCacheGap(gap_marked_at=100.0, gap_reason=None),
+            "thread_gap_marked",
+            id="reasonless_marker_still_rejects",
         ),
     ],
 )
 def test_thread_cache_rejection_reason_rule_table(
-    cache_state: ThreadCacheState | None,
+    gap: ThreadCacheGap | None,
     expected_reason: str | None,
 ) -> None:
-    """The durable trust gate must reject exactly on missing/never-validated/invalidated-at-or-after state."""
-    assert thread_cache_rejection_reason(cache_state) == expected_reason
+    """The snapshot gate asks exactly one question: is a gap recorded against this thread."""
+    assert thread_cache_rejection_reason(gap) == expected_reason
 
 
 @pytest.mark.asyncio
-async def test_replace_thread_refuses_after_midflight_invalidation(tmp_path: Path) -> None:
-    """A fetch that raced with a thread or room invalidation must not bury the newer stale marker."""
+async def test_thread_gap_marked_midflight_survives_the_replacement(tmp_path: Path) -> None:
+    """A gap marked after a fetch began is not covered by that fetch, so it outlives it."""
     cache = SqliteEventCache(tmp_path / "event_cache.db")
     await cache.initialize()
     root_source = {
@@ -1718,49 +1681,46 @@ async def test_replace_thread_refuses_after_midflight_invalidation(tmp_path: Pat
     }
 
     try:
-        await _replace_thread(cache, "!room:localhost", "$thread_root", [root_source], validated_at=100.0)
+        await _replace_thread(cache, "!room:localhost", "$thread_root", [root_source], fetch_started_at=100.0)
         with patch("mindroom.matrix.cache.sqlite_event_cache_threads.time.time", return_value=200.0):
-            await cache.mark_thread_stale("!room:localhost", "$thread_root", reason="live_thread_mutation")
+            await cache.mark_thread_gap("!room:localhost", "$thread_root", reason="live_thread_mutation")
 
-        replaced_behind_marker = await cache.replace_thread(
+        # This fetch started before the marker, so it cannot have seen what the marker describes.
+        stored_behind_marker = await cache.replace_thread(
             "!room:localhost",
             "$thread_root",
             [root_source],
             expected_membership_epoch=await cache.room_membership_epoch("!room:localhost"),
             fetch_started_at=150.0,
-            validated_at=300.0,
         )
-        state_after_refusal = await cache.get_thread_cache_gap("!room:localhost", "$thread_root")
+        gap_after_uncovered_fetch = await cache.get_thread_cache_gap("!room:localhost", "$thread_root")
 
-        replaced_after_marker = await cache.replace_thread(
+        # This one started after it, so it covers the marker and clears it.
+        stored_after_marker = await cache.replace_thread(
             "!room:localhost",
             "$thread_root",
             [root_source],
             expected_membership_epoch=await cache.room_membership_epoch("!room:localhost"),
             fetch_started_at=250.0,
-            validated_at=300.0,
         )
-        state_after_replace = await cache.get_thread_cache_gap("!room:localhost", "$thread_root")
+        gap_after_covering_fetch = await cache.get_thread_cache_gap("!room:localhost", "$thread_root")
     finally:
         await cache.close()
 
-    assert replaced_behind_marker is ThreadCacheReplaceOutcome.INVALIDATED
-    assert state_after_refusal is not None
-    assert state_after_refusal.invalidated_at == 200.0
-    assert thread_cache_rejection_reason(state_after_refusal) == "thread_invalidated_after_validation"
+    # The snapshot installs either way -- refusing it would strand the thread -- but the marker is
+    # what decides whether the next read may use it.
+    assert stored_behind_marker
+    assert gap_after_uncovered_fetch is not None
+    assert gap_after_uncovered_fetch.gap_marked_at == 200.0
+    assert thread_cache_rejection_reason(gap_after_uncovered_fetch) == "live_thread_mutation"
 
-    assert replaced_after_marker is ThreadCacheReplaceOutcome.STORED
-    assert state_after_replace is not None
-    # The stored validation time is clamped to fetch start, so an invalidation landing during the
-    # fetch still outranks this snapshot at read time even if it slipped past the replace guard.
-    assert state_after_replace.validated_at == 250.0
-    assert state_after_replace.invalidated_at is None
-    assert thread_cache_rejection_reason(state_after_replace) is None
+    assert stored_after_marker
+    assert gap_after_covering_fetch is None
 
 
 @pytest.mark.asyncio
-async def test_replace_thread_refuses_after_midflight_room_invalidation(tmp_path: Path) -> None:
-    """A room-wide stale marker that landed after fetch start must also refuse snapshot replacement."""
+async def test_room_gap_marked_midflight_survives_the_replacement(tmp_path: Path) -> None:
+    """The room-scoped marker follows the same covering rule once it has fanned out."""
     cache = SqliteEventCache(tmp_path / "event_cache.db")
     await cache.initialize()
     root_source = {
@@ -1772,80 +1732,25 @@ async def test_replace_thread_refuses_after_midflight_room_invalidation(tmp_path
     }
 
     try:
-        await _replace_thread(cache, "!room:localhost", "$thread_root", [root_source], validated_at=100.0)
+        await _replace_thread(cache, "!room:localhost", "$thread_root", [root_source], fetch_started_at=100.0)
         with patch("mindroom.matrix.cache.sqlite_event_cache_threads.time.time", return_value=200.0):
-            await cache.mark_room_threads_stale("!room:localhost", reason="sync_thread_lookup_unavailable")
+            await cache.mark_room_threads_gap("!room:localhost", reason="sync_thread_lookup_unavailable")
 
-        replaced = await cache.replace_thread(
+        stored = await cache.replace_thread(
             "!room:localhost",
             "$thread_root",
             [root_source],
             expected_membership_epoch=await cache.room_membership_epoch("!room:localhost"),
             fetch_started_at=150.0,
-            validated_at=300.0,
         )
-        state = await cache.get_thread_cache_gap("!room:localhost", "$thread_root")
+        gap = await cache.get_thread_cache_gap("!room:localhost", "$thread_root")
     finally:
         await cache.close()
 
-    assert replaced is ThreadCacheReplaceOutcome.INVALIDATED
-    assert state is not None
-    assert state.room_invalidated_at == 200.0
-    assert thread_cache_rejection_reason(state) == "room_invalidated_after_validation"
-
-
-@pytest.mark.asyncio
-async def test_incremental_revalidation_requires_incremental_invalidation_reason(tmp_path: Path) -> None:
-    """Appends may only clear invalidations caused by incremental mutations, never other reasons."""
-    cache = SqliteEventCache(tmp_path / "event_cache.db")
-    await cache.initialize()
-    root_source = {
-        "event_id": "$thread_root",
-        "sender": "@user:localhost",
-        "origin_server_ts": 1000,
-        "type": "m.room.message",
-        "content": {"body": "Root message", "msgtype": "m.text"},
-    }
-
-    async def append(event_id: str) -> ThreadAppendOutcome:
-        return await cache.apply_thread_mutation_append(
-            "!room:localhost",
-            "$thread_root",
-            _clear_payload(event_id, thread_root_id="$thread_root", origin_server_ts=2000),
-            append_failed_reason="live_append_failed",
-        )
-
-    try:
-        await _replace_thread(cache, "!room:localhost", "$thread_root", [root_source], validated_at=100.0)
-
-        not_invalidated = await append("$still-valid")
-
-        await cache.mark_thread_stale("!room:localhost", "$thread_root", reason="live_append_failed")
-        non_incremental = await append("$after-non-incremental")
-        state_after_non_incremental = await cache.get_thread_cache_gap("!room:localhost", "$thread_root")
-
-        await cache.mark_thread_stale("!room:localhost", "$thread_root", reason="live_thread_mutation")
-        weakened = await append("$after-weakening-attempt")
-        state_after_weakening_attempt = await cache.get_thread_cache_gap("!room:localhost", "$thread_root")
-
-        await _replace_thread(cache, "!room:localhost", "$thread_root", [root_source])
-        await cache.mark_thread_stale("!room:localhost", "$thread_root", reason="live_thread_mutation")
-        incremental = await append("$after-incremental")
-        state_after_incremental = await cache.get_thread_cache_gap("!room:localhost", "$thread_root")
-    finally:
-        await cache.close()
-
-    assert not_invalidated is ThreadAppendOutcome.APPENDED
-    assert non_incremental is ThreadAppendOutcome.APPENDED_STALE
-    assert state_after_non_incremental is not None
-    assert thread_cache_rejection_reason(state_after_non_incremental) == "thread_invalidated_after_validation"
-    assert weakened is ThreadAppendOutcome.APPENDED_STALE
-    assert state_after_weakening_attempt is not None
-    assert state_after_weakening_attempt.invalidation_reason == "live_append_failed"
-    assert thread_cache_rejection_reason(state_after_weakening_attempt) == "thread_invalidated_after_validation"
-    assert incremental is ThreadAppendOutcome.APPENDED
-    assert state_after_incremental is not None
-    assert thread_cache_rejection_reason(state_after_incremental) is None
+    assert stored
+    assert gap is not None
+    assert gap.gap_marked_at == 200.0
+    assert thread_cache_rejection_reason(gap) == "sync_thread_lookup_unavailable"
 
 
 @pytest.mark.asyncio

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import tempfile
-import time
 from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -31,7 +30,6 @@ from mindroom.delivery_gateway import SendTextRequest
 from mindroom.dispatch_source import SCHEDULED_SOURCE_KIND
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.matrix.cache import ThreadHistoryResult, thread_history_result
-from mindroom.matrix.cache.event_cache import ThreadCacheState
 from mindroom.matrix.cache.thread_reads import ThreadReadMode
 from mindroom.matrix.cache.write_coordinator import EventCacheWriteCoordinator
 from mindroom.matrix.client import ResolvedVisibleMessage
@@ -1736,15 +1734,8 @@ class TestExtractedModuleLoggerRebinding:
         bot = _agent_bot(config=config, agent_user=assistant_user, storage_path=tmp_path)
         bot.event_cache = make_event_cache_mock()
         sync_bot_runtime_state(bot)
-        bot.event_cache.get_thread_cache_gap = AsyncMock(
-            return_value=ThreadCacheState(
-                validated_at=time.time(),
-                invalidated_at=None,
-                invalidation_reason=None,
-                room_invalidated_at=None,
-                room_invalidation_reason=None,
-            ),
-        )
+        # No gap marker: the cached snapshot reads as usable.
+        bot.event_cache.get_thread_cache_gap = AsyncMock(return_value=None)
         bot.event_cache.get_thread_events = AsyncMock(
             return_value=[
                 {

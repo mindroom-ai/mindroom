@@ -316,8 +316,8 @@ class TestThreadMutationHelpers:
             original_event_id="$target:localhost",
         )
         event_cache.apply_thread_mutation_append.assert_not_awaited()
-        event_cache.mark_room_threads_stale.assert_not_awaited()
-        event_cache.mark_thread_stale.assert_not_awaited()
+        event_cache.mark_room_threads_gap.assert_not_awaited()
+        event_cache.mark_thread_gap.assert_not_awaited()
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
@@ -344,11 +344,11 @@ class TestThreadMutationHelpers:
 
         assert result is True
         event_cache.apply_thread_mutation_append.assert_not_awaited()
-        event_cache.mark_room_threads_stale.assert_awaited_once_with(
+        event_cache.mark_room_threads_gap.assert_awaited_once_with(
             "!room:localhost",
             reason=f"{context}_thread_lookup_unavailable",
         )
-        event_cache.mark_thread_stale.assert_not_awaited()
+        event_cache.mark_thread_gap.assert_not_awaited()
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
@@ -382,8 +382,8 @@ class TestThreadMutationHelpers:
             event_source,
             append_failed_reason=f"{context}_append_failed",
         )
-        event_cache.mark_room_threads_stale.assert_not_awaited()
-        event_cache.mark_thread_stale.assert_not_awaited()
+        event_cache.mark_room_threads_gap.assert_not_awaited()
+        event_cache.mark_thread_gap.assert_not_awaited()
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
@@ -422,7 +422,7 @@ class TestThreadMutationHelpers:
             {"event_id": "$event:localhost"},
             append_failed_reason=expected_reason,
         )
-        event_cache.mark_room_threads_stale.assert_not_awaited()
+        event_cache.mark_room_threads_gap.assert_not_awaited()
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("context", ["outbound", "live", "sync"])
@@ -442,8 +442,8 @@ class TestThreadMutationHelpers:
         )
 
         assert result is False
-        event_cache.mark_room_threads_stale.assert_not_awaited()
-        event_cache.mark_thread_stale.assert_not_awaited()
+        event_cache.mark_room_threads_gap.assert_not_awaited()
+        event_cache.mark_thread_gap.assert_not_awaited()
         event_cache.redact_event.assert_awaited_once_with("!room:localhost", "$target:localhost")
         logger.debug.assert_not_called()
 
@@ -462,11 +462,11 @@ class TestThreadMutationHelpers:
         )
 
         assert result is True
-        event_cache.mark_room_threads_stale.assert_awaited_once_with(
+        event_cache.mark_room_threads_gap.assert_awaited_once_with(
             "!room:localhost",
             reason=f"{context}_redaction_lookup_unavailable",
         )
-        event_cache.mark_thread_stale.assert_not_awaited()
+        event_cache.mark_thread_gap.assert_not_awaited()
         event_cache.redact_event.assert_awaited_once_with("!room:localhost", "$target:localhost")
 
     @pytest.mark.asyncio
@@ -484,8 +484,8 @@ class TestThreadMutationHelpers:
         )
 
         assert result is False
-        event_cache.mark_room_threads_stale.assert_not_awaited()
-        event_cache.mark_thread_stale.assert_awaited_once_with(
+        event_cache.mark_room_threads_gap.assert_not_awaited()
+        event_cache.mark_thread_gap.assert_awaited_once_with(
             "!room:localhost",
             "$thread:localhost",
             reason=f"{context}_redaction",
@@ -508,8 +508,8 @@ class TestThreadMutationHelpers:
         )
 
         assert result is False
-        event_cache.mark_room_threads_stale.assert_not_awaited()
-        event_cache.mark_thread_stale.assert_awaited_once_with(
+        event_cache.mark_room_threads_gap.assert_not_awaited()
+        event_cache.mark_thread_gap.assert_awaited_once_with(
             "!room:localhost",
             "$thread:localhost",
             reason=f"{context}_redaction_failed",
@@ -594,11 +594,11 @@ class TestMatrixConversationCacheThreadReads:
         )
         await _wait_for_room_cache_idle(access.runtime.event_cache_write_coordinator)
 
-        event_cache.mark_room_threads_stale.assert_awaited_once_with(
+        event_cache.mark_room_threads_gap.assert_awaited_once_with(
             "!room:localhost",
             reason="outbound_thread_lookup_unavailable",
         )
-        event_cache.mark_thread_stale.assert_not_awaited()
+        event_cache.mark_thread_gap.assert_not_awaited()
         event_cache.apply_thread_mutation_append.assert_not_awaited()
 
     @pytest.mark.asyncio
@@ -681,7 +681,7 @@ class TestMatrixConversationCacheThreadReads:
             assert append_args[0] == "!room:localhost"
             assert append_args[1] == "$claimed-thread:localhost"
             assert append_args[2]["event_id"] == "$edit:localhost"
-            event_cache.mark_thread_stale.assert_not_awaited()
+            event_cache.mark_thread_gap.assert_not_awaited()
         finally:
             release_sibling_thread_update.set()
             await asyncio.wait_for(
@@ -707,8 +707,8 @@ class TestMatrixConversationCacheThreadReads:
         access.notify_outbound_redaction("!room:localhost", "$room-message:localhost")
         await _wait_for_room_cache_idle(access.runtime.event_cache_write_coordinator)
 
-        event_cache.mark_room_threads_stale.assert_not_awaited()
-        event_cache.mark_thread_stale.assert_not_awaited()
+        event_cache.mark_room_threads_gap.assert_not_awaited()
+        event_cache.mark_thread_gap.assert_not_awaited()
         event_cache.redact_event.assert_awaited_once_with("!room:localhost", "$room-message:localhost")
 
     @pytest.mark.asyncio
@@ -734,8 +734,8 @@ class TestMatrixConversationCacheThreadReads:
         assert room_id == "!room:localhost"
         assert event_source["type"] == "m.room.message"
         assert event_source["content"]["body"] == "sent locally"
-        event_cache.mark_thread_stale.assert_not_awaited()
-        event_cache.mark_room_threads_stale.assert_not_awaited()
+        event_cache.mark_thread_gap.assert_not_awaited()
+        event_cache.mark_room_threads_gap.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_outbound_send_redaction_and_sync_echo_preserve_read_your_redaction(
@@ -995,8 +995,8 @@ class TestMatrixConversationCacheThreadReads:
         assert stored_event_source["content"]["m.relates_to"]["event_id"] == "$thread-reply:localhost"
         assert stored_event_source["content"]["m.relates_to"]["key"] == "🛑"
         assert isinstance(stored_event_source.get("origin_server_ts"), int)
-        event_cache.mark_thread_stale.assert_not_awaited()
-        event_cache.mark_room_threads_stale.assert_not_awaited()
+        event_cache.mark_thread_gap.assert_not_awaited()
+        event_cache.mark_room_threads_gap.assert_not_awaited()
         # A successful threaded mutation now writes no marker at all, so this is the only assertion
         # left that would catch a reaction being appended into thread cache.
         event_cache.apply_thread_mutation_append.assert_not_awaited()
@@ -1179,7 +1179,7 @@ class TestMatrixConversationCacheThreadReads:
         access.notify_outbound_redaction("!room:localhost", "$plain-two:localhost")
         await _wait_for_room_cache_idle(access.runtime.event_cache_write_coordinator)
 
-        event_cache.mark_thread_stale.assert_awaited_once_with(
+        event_cache.mark_thread_gap.assert_awaited_once_with(
             "!room:localhost",
             "$thread-root:localhost",
             reason="outbound_redaction",
@@ -1222,8 +1222,8 @@ class TestMatrixConversationCacheThreadReads:
         access.notify_outbound_redaction("!room:localhost", "$reaction:localhost")
         await _wait_for_room_cache_idle(access.runtime.event_cache_write_coordinator)
 
-        event_cache.mark_thread_stale.assert_not_awaited()
-        event_cache.mark_room_threads_stale.assert_not_awaited()
+        event_cache.mark_thread_gap.assert_not_awaited()
+        event_cache.mark_room_threads_gap.assert_not_awaited()
         event_cache.redact_event.assert_awaited_once_with("!room:localhost", "$reaction:localhost")
 
     @pytest.mark.asyncio
@@ -1555,7 +1555,7 @@ class TestMatrixConversationCacheThreadReads:
     async def test_invalidate_known_thread_fails_closed_when_stale_marker_write_fails(self) -> None:
         """Thread invalidation must delete cached rows when the stale marker cannot be persisted."""
         event_cache = _runtime_event_cache()
-        event_cache.mark_thread_stale = AsyncMock(side_effect=RuntimeError("sqlite write failed"))
+        event_cache.mark_thread_gap = AsyncMock(side_effect=RuntimeError("sqlite write failed"))
         access = MatrixConversationCache(
             logger=MagicMock(),
             runtime=_conversation_runtime(event_cache=event_cache),
@@ -1573,7 +1573,7 @@ class TestMatrixConversationCacheThreadReads:
     async def test_invalidate_room_threads_fails_closed_when_stale_marker_write_fails(self) -> None:
         """Room invalidation must delete cached room rows when the stale marker cannot be persisted."""
         event_cache = _runtime_event_cache()
-        event_cache.mark_room_threads_stale = AsyncMock(side_effect=RuntimeError("sqlite write failed"))
+        event_cache.mark_room_threads_gap = AsyncMock(side_effect=RuntimeError("sqlite write failed"))
         access = MatrixConversationCache(
             logger=MagicMock(),
             runtime=_conversation_runtime(event_cache=event_cache),
@@ -1591,7 +1591,7 @@ class TestMatrixConversationCacheThreadReads:
         """Transient backend loss should not permanently disable a cache that tracks pending markers."""
         event_cache = _runtime_event_cache()
         backend_error = EventCacheBackendUnavailableError("postgres unavailable")
-        event_cache.mark_thread_stale = AsyncMock(side_effect=backend_error)
+        event_cache.mark_thread_gap = AsyncMock(side_effect=backend_error)
         event_cache.invalidate_thread = AsyncMock(side_effect=backend_error)
         event_cache.disable = Mock()
         access = MatrixConversationCache(
@@ -1612,7 +1612,7 @@ class TestMatrixConversationCacheThreadReads:
         """Transient backend loss should not turn a reconnectable Postgres cache into a permanent miss."""
         event_cache = _runtime_event_cache()
         backend_error = EventCacheBackendUnavailableError("postgres unavailable")
-        event_cache.mark_room_threads_stale = AsyncMock(side_effect=backend_error)
+        event_cache.mark_room_threads_gap = AsyncMock(side_effect=backend_error)
         event_cache.invalidate_room_threads = AsyncMock(side_effect=backend_error)
         event_cache.disable = Mock()
         access = MatrixConversationCache(
@@ -1750,7 +1750,7 @@ class TestMatrixConversationCacheThreadReads:
                 "!test:localhost",
                 "$thread:localhost",
                 [root_event, stale_reply_event],
-                validated_at=time.time(),
+                fetch_started_at=time.time(),
             )
             first_access.notify_outbound_message(
                 "!test:localhost",

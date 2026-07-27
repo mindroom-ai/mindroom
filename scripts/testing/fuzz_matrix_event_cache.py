@@ -36,7 +36,6 @@ from mindroom.matrix.cache import (
     thread_cache_rejection_reason,
 )
 from mindroom.matrix.cache.sqlite_event_cache import SqliteEventCache
-from mindroom.matrix.cache.thread_cache_state import ThreadCacheReplaceOutcome
 from mindroom.matrix.cache.thread_write_cache_ops import ThreadMutationCacheOps
 from mindroom.matrix.cache.thread_writes import ThreadSyncWritePolicy
 from mindroom.matrix.event_info import EventInfo
@@ -72,7 +71,7 @@ class OperationKind(StrEnum):
     CIPHERTEXT_REPLAY = "ciphertext_replay"
     REPLACE_THREAD = "replace_thread"
     INVALIDATE_THREAD = "invalidate_thread"
-    MARK_THREAD_STALE = "mark_thread_stale"
+    MARK_THREAD_STALE = "mark_thread_gap"
     MARK_ROOM_STALE = "mark_room_stale"
     LIMITED_SYNC = "limited_sync"
 
@@ -192,7 +191,7 @@ class ObservableCacheState:
     events: tuple[tuple[str, str, str | None], ...]
     mappings: tuple[tuple[str, str, str | None], ...]
     threads: tuple[tuple[str, str, tuple[str, ...]], ...]
-    invalidation_reasons: tuple[tuple[str, str, str | None, str | None], ...]
+    gap_reasons: tuple[tuple[str, str, str | None], ...]
 
 
 def room_id(room: int) -> str:
@@ -528,15 +527,14 @@ class CacheFuzzRunner:
             for thread in range(self.thread_count):
                 root = root_source(room, thread)
                 root_event_id = cast("str", root["event_id"])
-                replaced = await self.cache.replace_thread_if_not_newer(
+                replaced = await self.cache.replace_thread(
                     current_room_id,
                     thread_id(room, thread),
                     [root],
                     expected_membership_epoch=membership_epoch,
                     fetch_started_at=float("inf"),
-                    validated_at=time.time(),
                 )
-                assert replaced is ThreadCacheReplaceOutcome.STORED
+                assert replaced
                 self.known_ids.add((current_room_id, root_event_id))
 
     async def run(self) -> ObservableCacheState:
@@ -635,13 +633,12 @@ class CacheFuzzRunner:
         membership_epoch = await self.cache.room_membership_epoch(current_room_id)
         if membership_epoch is None:
             return
-        await self.cache.replace_thread_if_not_newer(
+        await self.cache.replace_thread(
             current_room_id,
             current_thread_id,
             sources,
             expected_membership_epoch=membership_epoch,
             fetch_started_at=time.time(),
-            validated_at=time.time(),
         )
 
     async def _apply_thread_invalidation(self, operation: FuzzOperation) -> None:
@@ -654,7 +651,7 @@ class CacheFuzzRunner:
         current_room_id = room_id(operation.room)
         current_thread_id = thread_id(operation.room, operation.thread)
         reason = "sync_thread_mutation" if operation.variant % 3 else "sync_opaque_encrypted_event"
-        await self.cache.mark_thread_stale(
+        await self.cache.mark_thread_gap(
             current_room_id,
             current_thread_id,
             reason=reason,
@@ -671,7 +668,7 @@ class CacheFuzzRunner:
             )
 
     async def _apply_room_stale_marker(self, operation: FuzzOperation) -> None:
-        await self.cache.mark_room_threads_stale(
+        await self.cache.mark_room_threads_gap(
             room_id(operation.room),
             reason="sync_thread_lookup_unavailable",
         )
@@ -710,12 +707,11 @@ class CacheFuzzRunner:
                 events = await self.cache.get_thread_events(current_room_id, current_thread_id)
                 if events is None:
                     continue
-                cache_state = await self.cache.get_thread_cache_state(
+                gap = await self.cache.get_thread_cache_gap(
                     current_room_id,
                     current_thread_id,
                 )
-                assert cache_state is not None
-                snapshot_is_reusable = thread_cache_rejection_reason(cache_state) is None
+                snapshot_is_reusable = thread_cache_rejection_reason(gap) is None
                 event_ids = [cast("str", event["event_id"]) for event in events]
                 timestamps = [cast("int", event["origin_server_ts"]) for event in events]
                 assert len(event_ids) == len(set(event_ids))
@@ -772,7 +768,7 @@ class CacheFuzzRunner:
                 ),
             )
         threads: list[tuple[str, str, tuple[str, ...]]] = []
-        invalidation_reasons: list[tuple[str, str, str | None, str | None]] = []
+        gap_reasons: list[tuple[str, str, str | None]] = []
         for room in range(self.room_count):
             current_room_id = room_id(room)
             for thread in range(self.thread_count):
@@ -787,20 +783,19 @@ class CacheFuzzRunner:
                         else tuple(cast("str", event["event_id"]) for event in thread_events),
                     ),
                 )
-                state = await self.cache.get_thread_cache_state(current_room_id, current_thread_id)
-                invalidation_reasons.append(
+                gap = await self.cache.get_thread_cache_gap(current_room_id, current_thread_id)
+                gap_reasons.append(
                     (
                         current_room_id,
                         current_thread_id,
-                        None if state is None else state.invalidation_reason,
-                        None if state is None else state.room_invalidation_reason,
+                        None if gap is None else gap.gap_reason,
                     ),
                 )
         return ObservableCacheState(
             events=tuple(events),
             mappings=tuple(mappings),
             threads=tuple(threads),
-            invalidation_reasons=tuple(invalidation_reasons),
+            gap_reasons=tuple(gap_reasons),
         )
 
 

@@ -274,7 +274,7 @@ class TestConversationEventCacheContract:
         assert await event_cache.get_thread_id_for_event(room_id, "$appended:localhost") == thread_id
 
         # Rule 1: a gap marker makes the snapshot unusable, and a later append never clears it.
-        await event_cache.mark_thread_stale(room_id, thread_id, reason="live_thread_mutation")
+        await event_cache.mark_thread_gap(room_id, thread_id, reason="live_thread_mutation")
         re_appended = await event_cache.apply_thread_mutation_append(
             room_id,
             thread_id,
@@ -338,7 +338,7 @@ class TestConversationEventCacheContract:
         for thread_id in thread_ids:
             assert await event_cache.get_thread_cache_gap(room_id, thread_id) is None
 
-        await event_cache.mark_room_threads_stale(room_id, reason="limited_sync_timeline")
+        await event_cache.mark_room_threads_gap(room_id, reason="limited_sync_timeline")
 
         for thread_id in thread_ids:
             gap = await event_cache.get_thread_cache_gap(room_id, thread_id)
@@ -358,6 +358,64 @@ class TestConversationEventCacheContract:
         )
         assert await event_cache.get_thread_cache_gap(room_id, thread_ids[0]) is None
         assert await event_cache.get_thread_cache_gap(room_id, thread_ids[1]) is not None
+
+    @pytest.mark.asyncio
+    async def test_older_fetch_cannot_bury_a_newer_snapshot(
+        self,
+        event_cache: ConversationEventCache,
+    ) -> None:
+        """A replacement from an older fetch must not delete a newer fetch's thread events.
+
+        Installing a snapshot deletes the events it omits, so replacement has to be ordered by
+        ``fetch_started_at`` rather than by arrival. Two fetches overlap, the newer one lands
+        first, and the older one arrives late carrying a thread that no longer has the new reply.
+        If the late arrival wins, the cache silently loses an event *and* records no gap marker,
+        so the next read serves the truncated thread as complete. Pin both halves.
+        """
+        room_id = "!race:localhost"
+        thread_id = "$thread:localhost"
+        root = _message_event(thread_id, 1)
+        new_reply = _message_event("$new:localhost", 3, thread_id=thread_id)
+        old_fetch_started_at = 1000.0
+        new_fetch_started_at = 2000.0
+
+        # The newer fetch lands first and installs root + new reply.
+        await replace_thread_unconditionally(
+            event_cache,
+            room_id,
+            thread_id,
+            [root, new_reply],
+            fetch_started_at=new_fetch_started_at,
+        )
+
+        # The older fetch arrives late, having never seen the new reply.
+        stored = await event_cache.replace_thread(
+            room_id,
+            thread_id,
+            [root],
+            expected_membership_epoch=await event_cache.room_membership_epoch(room_id),
+            fetch_started_at=old_fetch_started_at,
+        )
+
+        # The loser reports success: a strictly fresher snapshot is installed, so there is nothing
+        # for the caller to retry and no reason to arm repair backoff.
+        assert stored
+        cached = await event_cache.get_thread_events(room_id, thread_id)
+        assert cached is not None
+        assert [event["event_id"] for event in cached] == [thread_id, "$new:localhost"]
+        assert await event_cache.get_thread_cache_gap(room_id, thread_id) is None
+
+        # A fetch that started after the installed one still replaces it.
+        await replace_thread_unconditionally(
+            event_cache,
+            room_id,
+            thread_id,
+            [root],
+            fetch_started_at=new_fetch_started_at + 1,
+        )
+        cached = await event_cache.get_thread_events(room_id, thread_id)
+        assert cached is not None
+        assert [event["event_id"] for event in cached] == [thread_id]
 
     @pytest.mark.asyncio
     async def test_redaction_tombstones_original_edits_and_late_replays(

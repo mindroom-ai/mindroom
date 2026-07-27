@@ -21,7 +21,6 @@ from mindroom.bot_runtime_view import BotRuntimeState
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
-from mindroom.matrix.cache import ThreadCacheReplaceOutcome
 from mindroom.matrix.cache.sqlite_event_cache import SqliteEventCache
 from mindroom.matrix.cache.thread_repair import (
     ThreadRepairRegistry,
@@ -130,13 +129,12 @@ async def test_missing_cache_append_storm_scans_each_thread_at_most_once(tmp_pat
     conversation_cache.runtime.event_cache_write_coordinator = coordinator
     recorder = _ScanRecorder()
 
-    # A snapshot that loses the guarded replacement race is exactly what a concurrent live append
-    # produces, and it leaves the thread without a usable cache for the next append to find.
-    invalidated_store = AsyncMock(return_value=ThreadCacheReplaceOutcome.INVALIDATED)
+    # A store that fails leaves the thread without a usable cache for the next append to find.
+    failed_store = AsyncMock(return_value=False)
 
     try:
         with (
-            patch.object(event_cache, "replace_thread", invalidated_store),
+            patch.object(event_cache, "replace_thread", failed_store),
             patch(
                 "mindroom.matrix.client_thread_history._fetch_thread_history_with_events",
                 AsyncMock(side_effect=recorder.scan),
@@ -170,11 +168,11 @@ async def test_missing_cache_append_storm_bounds_concurrent_history_scans(tmp_pa
     coordinator = EventCacheWriteCoordinator(logger=MagicMock())
     conversation_cache.runtime.event_cache_write_coordinator = coordinator
     recorder = _ScanRecorder(scan_seconds=0.05)
-    invalidated_store = AsyncMock(return_value=ThreadCacheReplaceOutcome.INVALIDATED)
+    failed_store = AsyncMock(return_value=False)
 
     try:
         with (
-            patch.object(event_cache, "replace_thread", invalidated_store),
+            patch.object(event_cache, "replace_thread", failed_store),
             patch(
                 "mindroom.matrix.client_thread_history._fetch_thread_history_with_events",
                 AsyncMock(side_effect=recorder.scan),

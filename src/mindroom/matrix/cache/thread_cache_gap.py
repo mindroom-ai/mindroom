@@ -1,4 +1,9 @@
-"""Shared fail-closed invalidation policy for one Matrix thread snapshot."""
+"""Fail-closed gap marking for Matrix thread snapshots.
+
+Recording a gap is what stops a stale snapshot being served, so a marker that cannot be written
+leaves the cache claiming freshness it does not have. These helpers fall back to purging the rows
+outright, which is strictly stronger: a read that finds nothing refetches.
+"""
 
 from __future__ import annotations
 
@@ -10,7 +15,7 @@ if TYPE_CHECKING:
     import structlog
 
 
-async def mark_thread_stale_fail_closed(
+async def mark_thread_gap_fail_closed(
     event_cache: ConversationEventCache,
     *,
     room_id: str,
@@ -21,7 +26,7 @@ async def mark_thread_stale_fail_closed(
 ) -> None:
     """Persist a stale marker, deleting rows or disabling the cache when persistence fails."""
     try:
-        await event_cache.mark_thread_stale(room_id, thread_id, reason=reason)
+        await event_cache.mark_thread_gap(room_id, thread_id, reason=reason)
     except Exception as stale_marker_error:
         logger.warning(
             "Failed to mark cached thread stale",
@@ -56,7 +61,7 @@ async def mark_thread_stale_fail_closed(
             raise
 
 
-async def mark_room_threads_stale_fail_closed(
+async def mark_room_threads_gap_fail_closed(
     event_cache: ConversationEventCache,
     *,
     room_id: str,
@@ -66,7 +71,7 @@ async def mark_room_threads_stale_fail_closed(
 ) -> None:
     """Persist a room stale marker, deleting rows or disabling the cache when persistence fails."""
     try:
-        await event_cache.mark_room_threads_stale(room_id, reason=reason)
+        await event_cache.mark_room_threads_gap(room_id, reason=reason)
     except Exception as stale_marker_error:
         logger.warning(
             "Failed to mark cached room threads stale",

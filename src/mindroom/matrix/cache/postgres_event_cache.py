@@ -390,6 +390,9 @@ async def _create_postgres_event_cache_schema(db: AsyncConnection) -> None:
             thread_id TEXT NOT NULL,
             gap_marked_at DOUBLE PRECISION,
             gap_reason TEXT,
+            -- The ``fetch_started_at`` of the fetch whose snapshot is currently installed. Orders
+            -- concurrent replacements so a slow older fetch cannot delete a newer fetch's events.
+            snapshot_fetch_started_at DOUBLE PRECISION,
             PRIMARY KEY (namespace, room_id, thread_id)
         )
         """,
@@ -402,6 +405,7 @@ async def _create_postgres_event_cache_schema(db: AsyncConnection) -> None:
         ALTER TABLE mindroom_event_cache_thread_state
         ADD COLUMN IF NOT EXISTS gap_marked_at DOUBLE PRECISION,
         ADD COLUMN IF NOT EXISTS gap_reason TEXT,
+        ADD COLUMN IF NOT EXISTS snapshot_fetch_started_at DOUBLE PRECISION,
         DROP COLUMN IF EXISTS validated_at,
         DROP COLUMN IF EXISTS invalidated_at,
         DROP COLUMN IF EXISTS invalidation_reason
@@ -577,10 +581,14 @@ async def _postgres_schema_version(db: AsyncConnection) -> int | None:
 
 
 @dataclass(frozen=True)
-class _PendingInvalidation:
-    """Stale marker that must be persisted before cache rows can be trusted again."""
+class _PendingGap:
+    """One gap marker held in memory until it can be persisted.
 
-    invalidated_at: float
+    This is the same marker the durable layer stores, just not written yet, so it carries the
+    durable field names rather than a second vocabulary for the same thing.
+    """
+
+    gap_marked_at: float
     reason: str
 
 
@@ -590,7 +598,7 @@ class _FlushedPendingWrites:
 
     room_purge: bool = False
     principal_purge: bool = False
-    invalidations: tuple[tuple[str, str | None, _PendingInvalidation], ...] = ()
+    gaps: tuple[tuple[str, str | None, _PendingGap], ...] = ()
 
 
 class _PostgresEventCacheRuntime:
@@ -609,8 +617,8 @@ class _PostgresEventCacheRuntime:
         self._reconnect_after_transient = False
         self._explicitly_closed = False
         self._db_lock = asyncio.Lock()
-        self._pending_thread_invalidations: dict[tuple[str, str], _PendingInvalidation] = {}
-        self._pending_room_invalidations: dict[str, _PendingInvalidation] = {}
+        self._pending_thread_gaps: dict[tuple[str, str], _PendingGap] = {}
+        self._pending_room_gaps: dict[str, _PendingGap] = {}
         self._pending_room_purges: set[str] = set()
         self._pending_principal_purge = False
         self._departed_rooms: set[str] = set()
@@ -676,8 +684,8 @@ class _PostgresEventCacheRuntime:
             "cache_postgres_disabled": self.is_disabled,
             "cache_postgres_transient_failure_count": self._transient_failure_count,
             "cache_postgres_reconnect_count": self._reconnect_count,
-            "cache_postgres_pending_thread_invalidations": len(self._pending_thread_invalidations),
-            "cache_postgres_pending_room_invalidations": len(self._pending_room_invalidations),
+            "cache_postgres_pending_thread_gaps": len(self._pending_thread_gaps),
+            "cache_postgres_pending_room_gaps": len(self._pending_room_gaps),
             "cache_postgres_pending_room_purges": len(self._pending_room_purges),
             "cache_postgres_pending_principal_purge": self._pending_principal_purge,
             "cache_postgres_departed_room_count": len(self._departed_rooms),
@@ -757,37 +765,37 @@ class _PostgresEventCacheRuntime:
             transient_failure_count=self._transient_failure_count,
         )
 
-    def record_pending_thread_invalidation(
+    def record_pending_thread_gap(
         self,
         room_id: str,
         thread_id: str,
         *,
-        invalidated_at: float,
+        gap_marked_at: float,
         reason: str,
     ) -> None:
         """Remember a best-effort gap marker that must be persisted before serving cache rows."""
         key = (room_id, thread_id)
-        existing = self._pending_thread_invalidations.get(key)
-        if existing is not None and existing.invalidated_at >= invalidated_at:
+        existing = self._pending_thread_gaps.get(key)
+        if existing is not None and existing.gap_marked_at >= gap_marked_at:
             return
-        self._pending_thread_invalidations[key] = _PendingInvalidation(
-            invalidated_at=invalidated_at,
+        self._pending_thread_gaps[key] = _PendingGap(
+            gap_marked_at=gap_marked_at,
             reason=reason,
         )
 
-    def record_pending_room_invalidation(
+    def record_pending_room_gap(
         self,
         room_id: str,
         *,
-        invalidated_at: float,
+        gap_marked_at: float,
         reason: str,
     ) -> None:
         """Remember a best-effort room stale marker that must be persisted before trusting cache rows."""
-        existing = self._pending_room_invalidations.get(room_id)
-        if existing is not None and existing.invalidated_at >= invalidated_at:
+        existing = self._pending_room_gaps.get(room_id)
+        if existing is not None and existing.gap_marked_at >= gap_marked_at:
             return
-        self._pending_room_invalidations[room_id] = _PendingInvalidation(
-            invalidated_at=invalidated_at,
+        self._pending_room_gaps[room_id] = _PendingGap(
+            gap_marked_at=gap_marked_at,
             reason=reason,
         )
 
@@ -825,60 +833,60 @@ class _PostgresEventCacheRuntime:
         """Forget one committed namespace deletion and covered pending writes."""
         self._pending_principal_purge = False
         self._pending_room_purges.clear()
-        self._pending_room_invalidations.clear()
-        self._pending_thread_invalidations.clear()
+        self._pending_room_gaps.clear()
+        self._pending_thread_gaps.clear()
 
     def has_pending_room_purge(self, room_id: str) -> bool:
         """Return whether a principal-room deletion is still pending."""
         return room_id in self._pending_room_purges
 
     def forget_pending_room_purge(self, room_id: str) -> None:
-        """Forget one committed room deletion and obsolete invalidations."""
+        """Forget one committed room deletion and the gap markers it obsoletes."""
         self._pending_room_purges.discard(room_id)
-        self._pending_room_invalidations.pop(room_id, None)
-        self._pending_thread_invalidations = {
-            key: pending for key, pending in self._pending_thread_invalidations.items() if key[0] != room_id
+        self._pending_room_gaps.pop(room_id, None)
+        self._pending_thread_gaps = {
+            key: pending for key, pending in self._pending_thread_gaps.items() if key[0] != room_id
         }
 
-    def pending_room_invalidation(self, room_id: str) -> _PendingInvalidation | None:
-        """Return one pending room invalidation, if any."""
-        return self._pending_room_invalidations.get(room_id)
+    def pending_room_gap(self, room_id: str) -> _PendingGap | None:
+        """Return one pending room-scoped gap marker, if any."""
+        return self._pending_room_gaps.get(room_id)
 
-    def pending_thread_invalidations(self, room_id: str) -> tuple[tuple[str, _PendingInvalidation], ...]:
-        """Return pending thread invalidations for one room."""
+    def pending_thread_gaps(self, room_id: str) -> tuple[tuple[str, _PendingGap], ...]:
+        """Return pending thread gap markers for one room."""
         return tuple(
             (thread_id, pending)
-            for (pending_room_id, thread_id), pending in self._pending_thread_invalidations.items()
+            for (pending_room_id, thread_id), pending in self._pending_thread_gaps.items()
             if pending_room_id == room_id
         )
 
-    def pending_invalidation_room_ids(self) -> tuple[str, ...]:
-        """Return rooms with runtime-only invalidation markers pending durable persistence."""
+    def pending_gap_room_ids(self) -> tuple[str, ...]:
+        """Return rooms with runtime-only gap markers pending durable persistence."""
         room_ids = set(self._pending_room_purges)
-        room_ids.update(self._pending_room_invalidations)
-        room_ids.update(room_id for room_id, _thread_id in self._pending_thread_invalidations)
+        room_ids.update(self._pending_room_gaps)
+        room_ids.update(room_id for room_id, _thread_id in self._pending_thread_gaps)
         return tuple(sorted(room_ids))
 
-    def forget_pending_room_invalidation(self, room_id: str, pending: _PendingInvalidation) -> None:
-        """Forget one persisted room invalidation and thread markers covered by it."""
-        if self._pending_room_invalidations.get(room_id) == pending:
-            self._pending_room_invalidations.pop(room_id, None)
-        self._pending_thread_invalidations = {
+    def forget_pending_room_gap(self, room_id: str, pending: _PendingGap) -> None:
+        """Forget one persisted room-scoped gap and the thread markers it covers."""
+        if self._pending_room_gaps.get(room_id) == pending:
+            self._pending_room_gaps.pop(room_id, None)
+        self._pending_thread_gaps = {
             key: thread_pending
-            for key, thread_pending in self._pending_thread_invalidations.items()
-            if key[0] != room_id or thread_pending.invalidated_at > pending.invalidated_at
+            for key, thread_pending in self._pending_thread_gaps.items()
+            if key[0] != room_id or thread_pending.gap_marked_at > pending.gap_marked_at
         }
 
-    def forget_pending_thread_invalidation(
+    def forget_pending_thread_gap(
         self,
         room_id: str,
         thread_id: str,
-        pending: _PendingInvalidation,
+        pending: _PendingGap,
     ) -> None:
-        """Forget one persisted thread invalidation."""
+        """Forget one persisted thread gap marker."""
         key = (room_id, thread_id)
-        if self._pending_thread_invalidations.get(key) == pending:
-            self._pending_thread_invalidations.pop(key, None)
+        if self._pending_thread_gaps.get(key) == pending:
+            self._pending_thread_gaps.pop(key, None)
 
     async def _close_db_locked(self, *, operation: str) -> None:
         """Close the active connection best-effort. Caller must hold ``_db_lock``."""
@@ -1039,7 +1047,7 @@ class PostgresEventCache:
 
     def pending_durable_write_room_ids(self) -> tuple[str, ...]:
         """Return rooms with runtime-only writes that must persist before certifying a sync token."""
-        return self._runtime.pending_invalidation_room_ids()
+        return self._runtime.pending_gap_room_ids()
 
     async def flush_pending_durable_writes(self, room_id: str) -> None:
         """Persist runtime-only writes for one room before certifying a sync token."""
@@ -1213,32 +1221,32 @@ class PostgresEventCache:
             )
             return _FlushedPendingWrites(room_purge=True)
 
-        flushed: list[tuple[str, str | None, _PendingInvalidation]] = []
-        room_pending = self._runtime.pending_room_invalidation(room_id)
-        thread_pending = self._runtime.pending_thread_invalidations(room_id)
+        flushed: list[tuple[str, str | None, _PendingGap]] = []
+        room_pending = self._runtime.pending_room_gap(room_id)
+        thread_pending = self._runtime.pending_thread_gaps(room_id)
         if room_pending is not None:
-            await postgres_event_cache_threads.mark_room_stale_locked(
+            await postgres_event_cache_threads.mark_room_gap_locked(
                 db,
                 namespace=self._runtime.namespace,
                 room_id=room_id,
-                gap_marked_at=room_pending.invalidated_at,
+                gap_marked_at=room_pending.gap_marked_at,
                 reason=room_pending.reason,
             )
             flushed.append(("room", None, room_pending))
 
-        for thread_id, pending_invalidation in thread_pending:
-            if room_pending is not None and pending_invalidation.invalidated_at <= room_pending.invalidated_at:
+        for thread_id, pending_gap in thread_pending:
+            if room_pending is not None and pending_gap.gap_marked_at <= room_pending.gap_marked_at:
                 continue
-            await postgres_event_cache_threads.mark_thread_stale_locked(
+            await postgres_event_cache_threads.mark_thread_gap_locked(
                 db,
                 namespace=self._runtime.namespace,
                 room_id=room_id,
                 thread_id=thread_id,
-                gap_marked_at=pending_invalidation.invalidated_at,
-                reason=pending_invalidation.reason,
+                gap_marked_at=pending_gap.gap_marked_at,
+                reason=pending_gap.reason,
             )
-            flushed.append(("thread", thread_id, pending_invalidation))
-        return _FlushedPendingWrites(invalidations=tuple(flushed))
+            flushed.append(("thread", thread_id, pending_gap))
+        return _FlushedPendingWrites(gaps=tuple(flushed))
 
     def _forget_flushed_pending_writes(
         self,
@@ -1251,12 +1259,12 @@ class PostgresEventCache:
         if flushed_pending.room_purge:
             self._runtime.forget_pending_room_purge(room_id)
             return
-        for kind, thread_id, pending in flushed_pending.invalidations:
+        for kind, thread_id, pending in flushed_pending.gaps:
             if kind == "room":
-                self._runtime.forget_pending_room_invalidation(room_id, pending)
+                self._runtime.forget_pending_room_gap(room_id, pending)
                 continue
             if thread_id is not None:
-                self._runtime.forget_pending_thread_invalidation(room_id, thread_id, pending)
+                self._runtime.forget_pending_thread_gap(room_id, thread_id, pending)
 
     async def get_thread_events(
         self,
@@ -1283,6 +1291,20 @@ class PostgresEventCache:
             operation="get_thread_event_ids",
             disabled_result=set(),
             callback=lambda db: postgres_event_cache_threads.load_thread_event_ids(
+                db,
+                namespace=self._runtime.namespace,
+                room_id=room_id,
+                thread_id=thread_id,
+            ),
+        )
+
+    async def has_thread_snapshot(self, room_id: str, thread_id: str) -> bool:
+        """Return whether any snapshot rows exist for one thread."""
+        return await self._operation(
+            room_id,
+            operation="has_thread_snapshot",
+            disabled_result=False,
+            callback=lambda db: postgres_event_cache_threads.thread_snapshot_exists(
                 db,
                 namespace=self._runtime.namespace,
                 room_id=room_id,
@@ -1579,52 +1601,52 @@ class PostgresEventCache:
             ),
         )
 
-    async def mark_thread_stale(self, room_id: str, thread_id: str, *, reason: str) -> None:
+    async def mark_thread_gap(self, room_id: str, thread_id: str, *, reason: str) -> None:
         """Persist one durable thread gap marker."""
-        invalidated_at = time.time()
+        gap_marked_at = time.time()
         try:
             await self._operation(
                 room_id,
-                operation="mark_thread_stale",
+                operation="mark_thread_gap",
                 disabled_result=None,
-                callback=lambda db: postgres_event_cache_threads.mark_thread_stale_locked(
+                callback=lambda db: postgres_event_cache_threads.mark_thread_gap_locked(
                     db,
                     namespace=self._runtime.namespace,
                     room_id=room_id,
                     thread_id=thread_id,
-                    gap_marked_at=invalidated_at,
+                    gap_marked_at=gap_marked_at,
                     reason=reason,
                 ),
             )
         except EventCacheBackendUnavailableError:
-            self._runtime.record_pending_thread_invalidation(
+            self._runtime.record_pending_thread_gap(
                 room_id,
                 thread_id,
-                invalidated_at=invalidated_at,
+                gap_marked_at=gap_marked_at,
                 reason=reason,
             )
             raise
 
-    async def mark_room_threads_stale(self, room_id: str, *, reason: str) -> None:
+    async def mark_room_threads_gap(self, room_id: str, *, reason: str) -> None:
         """Record a durable gap marker against every cached thread in one room."""
-        invalidated_at = time.time()
+        gap_marked_at = time.time()
         try:
             await self._operation(
                 room_id,
-                operation="mark_room_threads_stale",
+                operation="mark_room_threads_gap",
                 disabled_result=None,
-                callback=lambda db: postgres_event_cache_threads.mark_room_stale_locked(
+                callback=lambda db: postgres_event_cache_threads.mark_room_gap_locked(
                     db,
                     namespace=self._runtime.namespace,
                     room_id=room_id,
-                    gap_marked_at=invalidated_at,
+                    gap_marked_at=gap_marked_at,
                     reason=reason,
                 ),
             )
         except EventCacheBackendUnavailableError:
-            self._runtime.record_pending_room_invalidation(
+            self._runtime.record_pending_room_gap(
                 room_id,
-                invalidated_at=invalidated_at,
+                gap_marked_at=gap_marked_at,
                 reason=reason,
             )
             raise

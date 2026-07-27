@@ -15,7 +15,6 @@ from psycopg import sql
 from psycopg.conninfo import make_conninfo
 
 from mindroom.matrix.cache import (
-    ThreadCacheState,
     postgres_event_cache,
     sqlite_cache_maintenance,
     sqlite_event_cache,
@@ -41,8 +40,7 @@ _THREAD_ID = "$root:localhost"
 _CHILD_ID = "$child:localhost"
 _MISSING_ID = "$missing:localhost"
 _ORPHAN_ID = "$orphan:localhost"
-_FUTURE_INVALIDATED_AT = 4_000_000_000.0
-_FUTURE_VALIDATED_AT = 5_000_000_000.0
+_FUTURE_GAP_MARKED_AT = 4_000_000_000.0
 
 
 def _message_event(event_id: str, *, thread_id: str | None = None) -> dict[str, object]:
@@ -56,12 +54,6 @@ def _message_event(event_id: str, *, thread_id: str | None = None) -> dict[str, 
         "origin_server_ts": 10,
         "content": content,
     }
-
-
-def _assert_missing_source_state(state: ThreadCacheState | None) -> None:
-    assert state is not None
-    assert state.validated_at is None
-    assert state.invalidation_reason == "schema_migration_missing_thread_event_source"
 
 
 async def _prepare_sqlite_version_10(db_path: Path) -> None:
@@ -206,18 +198,16 @@ async def _prepare_postgres_version_1(database_url: str, *, namespace: str, othe
                 namespace,
                 room_id,
                 thread_id,
-                validated_at,
-                invalidated_at,
-                invalidation_reason
+                gap_marked_at,
+                gap_reason
             )
-            VALUES (%s, %s, %s, %s, %s, 'preexisting_newer_invalidation')
+            VALUES (%s, %s, %s, %s, 'preexisting_newer_gap')
             """,
             (
                 namespace,
                 _ROOM_ID,
                 _THREAD_ID,
-                _FUTURE_VALIDATED_AT,
-                _FUTURE_INVALIDATED_AT,
+                _FUTURE_GAP_MARKED_AT,
             ),
         )
         await db.commit()
@@ -324,7 +314,7 @@ async def test_sqlite_startup_report_uses_nonblocking_read_snapshot(
     initialize_secondary = asyncio.create_task(secondary.initialize())
     try:
         await asyncio.wait_for(report_started.wait(), timeout=1)
-        await primary.mark_thread_stale(_ROOM_ID, _THREAD_ID, reason="concurrent_startup_report")
+        await primary.mark_thread_gap(_ROOM_ID, _THREAD_ID, reason="concurrent_startup_report")
     finally:
         release_report.set()
         await initialize_secondary

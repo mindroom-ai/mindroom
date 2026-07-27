@@ -789,6 +789,11 @@ def make_event_cache_mock() -> AsyncMock:
     event_cache.get_recent_room_events.return_value = []
     event_cache.get_recent_room_thread_ids.return_value = []
     event_cache.get_thread_events.return_value = None
+
+    async def has_thread_snapshot(room_id: str, thread_id: str) -> bool:
+        return await event_cache.get_thread_events(room_id, thread_id) is not None
+
+    event_cache.has_thread_snapshot.side_effect = has_thread_snapshot
     event_cache.get_thread_cache_gap.return_value = None
     event_cache.get_thread_id_for_event.return_value = None
     event_cache.get_latest_agent_message_snapshot.return_value = None

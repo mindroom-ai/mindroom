@@ -2,8 +2,8 @@
 
 This is the application layer below the write policies in ``thread_writes``; it owns how mutations land:
 
-1. Gap marking is durable-marker-first and fails closed: ``mark_thread_stale`` and
-   ``mark_room_threads_stale`` write monotonic gap markers; when a marker cannot be written the rows
+1. Gap marking is durable-marker-first and fails closed: ``mark_thread_gap`` and
+   ``mark_room_threads_gap`` write monotonic gap markers; when a marker cannot be written the rows
    are deleted instead, and when even deletion fails (and the backend is not just temporarily
    unavailable) the cache is disabled for the rest of the runtime.
 
@@ -27,7 +27,7 @@ from typing import TYPE_CHECKING, Any
 from mindroom.background_tasks import create_background_task
 from mindroom.matrix.thread_bookkeeping import MutationThreadImpact, MutationThreadImpactState
 
-from .thread_cache_invalidation import mark_room_threads_stale_fail_closed, mark_thread_stale_fail_closed
+from .thread_cache_gap import mark_room_threads_gap_fail_closed, mark_thread_gap_fail_closed
 from .thread_cache_state import ThreadAppendOutcome
 
 if TYPE_CHECKING:
@@ -39,7 +39,7 @@ if TYPE_CHECKING:
 
 
 class ThreadMutationCacheOps:
-    """Own queueing, invalidation, and cache writes for thread mutations."""
+    """Own queueing, gap marking, and cache writes for thread mutations."""
 
     def __init__(
         self,
@@ -266,7 +266,7 @@ class ThreadMutationCacheOps:
         raise_on_failure: bool = False,
     ) -> None:
         """Mark one cached thread stale and fail closed if the marker cannot be written."""
-        await mark_thread_stale_fail_closed(
+        await mark_thread_gap_fail_closed(
             self.runtime.event_cache,
             room_id=room_id,
             thread_id=thread_id,
@@ -283,7 +283,7 @@ class ThreadMutationCacheOps:
         raise_on_failure: bool = False,
     ) -> None:
         """Mark one room's cached threads stale and fail closed if the marker cannot be written."""
-        await mark_room_threads_stale_fail_closed(
+        await mark_room_threads_gap_fail_closed(
             self.runtime.event_cache,
             room_id=room_id,
             reason=reason,
