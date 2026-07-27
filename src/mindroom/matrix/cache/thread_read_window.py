@@ -46,7 +46,16 @@ Three things that cost real time to learn
    candidate on PostgreSQL and reads every overflow page on SQLite, which is the cost the bound
    exists to avoid.
 
-A thread read is bounded in two dimensions because neither alone is right:
+Collapse is not truncation, and only one of them is on by default
+-----------------------------------------------------------------
+Every read collapses. Nothing truncates unless its caller asks, and no caller currently does.
+
+An earlier revision bounded every read at 2 MiB. That was wrong for a reason worth keeping: no
+consumer of a thread read wants a recent tail. The model history refresh, dispatch context, thread
+summaries and export all treat what they receive as the whole thread and cannot distinguish a
+truncated read from a short one, so a default bound does not give them a tail - it deletes the
+oldest half of their input and tells them nothing. Truncation is retained as an opt-in for a caller
+that genuinely wants a window, and is expressed in two dimensions because neither alone is right:
 
 * A message count alone truncates a thread of a thousand one-character messages that costs a
   kilobyte to return, and happily hauls back twenty twenty-kilobyte messages.
@@ -69,10 +78,11 @@ naptime and a freshly created database has nothing to analyze, so the practical 
 minute after a bulk refill. Any benchmark of this path must ANALYZE first or it measures the
 planner, not the query - the unbounded read degrades 77x under the same conditions.
 
-``event_bytes`` measures fetch cost, not context cost. An oversized body offloaded to sidecar
-storage has a small payload and a large resolved body, which is correct here - the bound exists to
-stop hauling megabytes across the wire, and sidecar hydration is separately bounded by the message
-count in the window. The token budget stays at the compaction layer; this is not a token budget.
+``event_bytes`` measures what returning a row costs, including anything it hydrates. An oversized
+body offloaded to sidecar storage leaves a stub of a few hundred bytes that resolves to megabytes,
+so the stub is charged the size its writer recorded before offloading rather than its stored
+weight. This is a fetch budget, not a token budget - the token budget stays at the compaction
+layer.
 """
 
 from __future__ import annotations
@@ -96,11 +106,14 @@ if TYPE_CHECKING:
 # messages cannot fit in 2 MiB - tiny messages still cost bytes - so the byte bound already caps
 # the count implicitly at roughly twenty thousand of them.
 #
-# The one case the byte bound genuinely cannot see is sidecars: an offloaded body has a small
+# The one case a byte bound could not originally see was sidecars: an offloaded body has a small
 # stored payload and a large resolved one, so ~7,000 stubs fit inside the budget and each then
-# hydrates. The fix for that is to record the sidecar's length where it is written -
-# ``store_mxc_text`` already has it in hand - and charge it here, not to bound the message count
-# and hope the two correlate.
+# hydrates. That is now charged at ingestion from the size the writer records on the stub, which
+# works on a cold cache too - the alternative, measuring the plaintext where it is cached, only has
+# a size to read after something has already paid to download it.
+#
+# This constant has no caller: it is the size an opt-in bound should use, kept as the one place
+# that number is justified rather than as a default anything inherits.
 DEFAULT_THREAD_READ_MAX_BYTES = 2 * 1024 * 1024
 
 
@@ -110,11 +123,6 @@ class ThreadReadBudget:
 
     max_messages: int | None = None
     max_bytes: int | None = None
-
-    @property
-    def is_bounded(self) -> bool:
-        """Return whether this budget constrains the read at all."""
-        return self.max_messages is not None or self.max_bytes is not None
 
 
 UNBOUNDED_THREAD_READ = ThreadReadBudget()

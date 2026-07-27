@@ -65,7 +65,7 @@ from mindroom.matrix.cache.thread_cache_invalidation import (
     mark_thread_stale_fail_closed,
 )
 from mindroom.matrix.cache.thread_read_window import (
-    DEFAULT_THREAD_READ_MAX_BYTES,
+    UNBOUNDED_THREAD_READ,
     ThreadReadBudget,
 )
 from mindroom.matrix.client_visible_messages import (
@@ -122,11 +122,18 @@ _OPAQUE_ENCRYPTED_THREAD_HISTORY_REASON = "thread_history_opaque_encrypted_event
 _OPAQUE_ENCRYPTED_EVENT_REJECTION = "opaque_encrypted_event"
 _MISSING_THREAD_ROOT_REJECTION = "missing_thread_root"
 _MAX_THREAD_REPAIR_ATTEMPTS = 2
-# Thread reads are windowed: consumers never need the whole thread, and the compaction layer
-# already discards most of it. Bounding here keeps a long thread off the read path entirely.
-_DEFAULT_THREAD_READ_BUDGET = ThreadReadBudget(
-    max_bytes=DEFAULT_THREAD_READ_MAX_BYTES,
-)
+# Thread reads are collapsed, not truncated.
+#
+# An earlier revision of this constant bounded every read at 2 MiB, on the reasoning that consumers
+# never need the whole thread. That reasoning was wrong: every consumer in the tree - the model
+# history refresh, dispatch context, thread summaries, export - treats what it receives as the
+# whole thread, and none of them can tell a truncated read from a short one. A bound here does not
+# give them a recent tail, it silently deletes the oldest half of their input.
+#
+# The reduction those callers actually wanted comes from collapsing edits, which the read now does
+# unconditionally, and which loses nothing. Truncation stays available per call for a caller that
+# genuinely wants a tail; there is currently no such caller.
+_DEFAULT_THREAD_READ_BUDGET = UNBOUNDED_THREAD_READ
 type _ThreadHistoryDiagnosticValue = str | int | float | bool | None
 type _ThreadHistoryRefill = Callable[
     [Mapping[str, str | int | float | bool] | None],
