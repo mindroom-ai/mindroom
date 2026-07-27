@@ -4262,7 +4262,4 @@ class TestThreadHistoryCache:
 
         assert [message.event_id for message in history] == ["$thread_root"]
         assert fetch.await_args.kwargs["expected_membership_epoch"] == UNCERTIFIED_MEMBERSHIP_EPOCH
-        assert (
-            event_cache.replace_thread.await_args.kwargs["expected_membership_epoch"]
-            == UNCERTIFIED_MEMBERSHIP_EPOCH
-        )
+        assert event_cache.replace_thread.await_args.kwargs["expected_membership_epoch"] == UNCERTIFIED_MEMBERSHIP_EPOCH

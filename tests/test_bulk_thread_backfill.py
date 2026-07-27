@@ -121,10 +121,7 @@ async def test_bulk_refresh_scans_room_once_and_stores_each_thread() -> None:
         "$a:localhost": ["$a:localhost", "$a1:localhost", "$a1-edit:localhost"],
         "$b:localhost": ["$b:localhost", "$b1:localhost"],
     }
-    assert all(
-        call.kwargs["expected_membership_epoch"] == 7
-        for call in event_cache.replace_thread.await_args_list
-    )
+    assert all(call.kwargs["expected_membership_epoch"] == 7 for call in event_cache.replace_thread.await_args_list)
 
 
 @pytest.mark.asyncio
