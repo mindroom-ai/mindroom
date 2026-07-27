@@ -27,8 +27,11 @@ def latest_visible_thread_event_id(history: Sequence[ResolvedVisibleMessage]) ->
     return history[-1].visible_event_id or history[-1].event_id or None
 
 
+def thread_cache_gap_reason(gap: ThreadCacheGap) -> str:
+    """Return the label for one recorded gap, naming the unlabelled case rather than dropping it."""
+    return gap.gap_reason or "thread_gap_marked"
+
+
 def thread_cache_rejection_reason(gap: ThreadCacheGap | None) -> str | None:
     """Return why one durable thread snapshot must be rejected, if at all."""
-    if gap is None:
-        return None
-    return gap.gap_reason or "thread_gap_marked"
+    return None if gap is None else thread_cache_gap_reason(gap)

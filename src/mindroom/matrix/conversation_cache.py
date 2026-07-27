@@ -42,7 +42,7 @@ from mindroom.matrix.client_thread_history import (
     get_room_threads_page,
     log_thread_history_refresh,
     refresh_thread_history_from_source,
-    untrusted_cached_thread_ids,
+    thread_ids_needing_refill,
 )
 from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.media import (
@@ -804,7 +804,7 @@ class MatrixConversationCache(ConversationCacheProtocol):
         if thread_ids is None or is_shutting_down() or not self.runtime.event_cache.durable_writes_available:
             return False
         try:
-            untrusted_thread_ids = await untrusted_cached_thread_ids(
+            thread_ids_to_refill = await thread_ids_needing_refill(
                 self.runtime.event_cache,
                 room_id,
                 thread_ids,
@@ -818,11 +818,11 @@ class MatrixConversationCache(ConversationCacheProtocol):
                 error_type=type(exc).__name__,
                 exc_info=True,
             )
-            untrusted_thread_ids = None
-        if untrusted_thread_ids is None or is_shutting_down() or not self.runtime.event_cache.durable_writes_available:
+            thread_ids_to_refill = None
+        if thread_ids_to_refill is None or is_shutting_down() or not self.runtime.event_cache.durable_writes_available:
             return False
-        already_warm = len(thread_ids) - len(untrusted_thread_ids)
-        if not untrusted_thread_ids:
+        already_warm = len(thread_ids) - len(thread_ids_to_refill)
+        if not thread_ids_to_refill:
             self._log_startup_thread_prewarm_complete(
                 room_id,
                 started_at=started_at,
@@ -834,19 +834,19 @@ class MatrixConversationCache(ConversationCacheProtocol):
         try:
             stats = await self._bulk_refresh_startup_threads(
                 room_id,
-                untrusted_thread_ids,
+                thread_ids_to_refill,
             )
         except Exception as exc:
             self.logger.warning(
                 "startup_thread_prewarm_bulk_failed",
                 room_id=room_id,
-                thread_count=len(untrusted_thread_ids),
+                thread_count=len(thread_ids_to_refill),
                 error=str(exc),
             )
             return False
 
         threads_warmed = already_warm + stats.usable_threads
-        threads_failed = len(untrusted_thread_ids) - stats.usable_threads
+        threads_failed = len(thread_ids_to_refill) - stats.usable_threads
         self._log_startup_thread_prewarm_complete(
             room_id,
             started_at=started_at,

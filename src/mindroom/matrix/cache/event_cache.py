@@ -75,23 +75,15 @@ class ConversationEventCache(Protocol):
         it rather than with every edit it ever received. No message is left out.
         """
 
-    async def get_thread_event_ids(self, room_id: str, thread_id: str) -> set[str]:
-        """Return every raw event ID this thread holds, superseded edits included.
-
-        Distinct from ``get_thread_events``, which collapses superseded edits away. Bookkeeping
-        that asks which rows are durably present must use this one, or every collapsed-away edit
-        reads as missing.
-        """
-
     async def has_thread_snapshot(self, room_id: str, thread_id: str) -> bool:
-        """Return whether any snapshot rows exist for one thread.
+        """Return whether any durably present snapshot rows exist for one thread.
 
         A gap marker says a snapshot is unusable; its absence does not say a snapshot exists. Both
         answers are needed to decide whether a thread would be served from cache, and a caller that
         asks only about the marker treats a never-cached thread as a cache hit.
 
-        Distinct from ``get_thread_event_ids``: this one answers existence in a single bounded
-        probe rather than loading every row to test the set for emptiness.
+        Distinct from ``get_thread_events``: this one answers existence in a single bounded probe
+        instead of loading and collapsing the whole thread to test it for emptiness.
         """
 
     async def get_recent_room_thread_ids(self, room_id: str, *, limit: int) -> list[str]:

@@ -1804,17 +1804,7 @@ depends_on = [
     "mindroom.constants",
     "mindroom.matrix.cache.thread_cache_helpers",
     "mindroom.matrix.cache.thread_history_result",
-    "mindroom.matrix.cache.thread_repair",
     "mindroom.matrix.thread_diagnostics",
-]
-
-[[modules]]
-path = "mindroom.matrix.cache.thread_repair"
-depends_on = []
-visibility = [
-    "mindroom.matrix.cache.thread_reads",
-    "mindroom.matrix.cache.write_coordinator",
-    "mindroom.matrix.conversation_cache",
 ]
 
 [[modules]]
@@ -1931,7 +1921,7 @@ visibility = ["mindroom.runtime_support"]
 
 [[modules]]
 path = "mindroom.matrix.cache.write_coordinator"
-depends_on = ["mindroom.matrix.cache.thread_repair"]
+depends_on = []
 
 [[modules]]
 path = "mindroom.matrix.cache.outbound_thread_reservations"
@@ -1957,7 +1947,6 @@ depends_on = [
     "mindroom.matrix.cache",
     "mindroom.matrix.cache.thread_history_result",
     "mindroom.matrix.cache.thread_reads",
-    "mindroom.matrix.cache.thread_repair",
     "mindroom.matrix.cache.thread_write_cache_ops",
     "mindroom.matrix.cache.thread_writes",
     "mindroom.matrix.client_thread_history",
@@ -3828,6 +3817,7 @@ expose = [
     "ThreadHistoryResult",
     "is_opaque_encrypted_event_source",
     "normalize_nio_event_for_cache",
+    "thread_cache_gap_reason",
     "thread_cache_rejection_reason",
     "thread_history_result",
 ]
@@ -4070,7 +4060,7 @@ expose = [
     "log_thread_history_refresh",
     "refresh_thread_history_from_source",
     "thread_history_refresh_mode",
-    "untrusted_cached_thread_ids",
+    "thread_ids_needing_refill",
 ]
 from = ["mindroom.matrix.client_thread_history"]
 

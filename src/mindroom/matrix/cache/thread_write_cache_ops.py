@@ -259,7 +259,7 @@ class ThreadMutationCacheOps:
         reason: str,
         raise_on_failure: bool = False,
     ) -> None:
-        """Mark one cached thread stale and fail closed if the marker cannot be written."""
+        """Mark a gap against one cached thread and fail closed if the marker cannot be written."""
         await mark_thread_gap_fail_closed(
             self.runtime.event_cache,
             room_id=room_id,
@@ -276,7 +276,7 @@ class ThreadMutationCacheOps:
         reason: str,
         raise_on_failure: bool = False,
     ) -> None:
-        """Mark one room's cached threads stale and fail closed if the marker cannot be written."""
+        """Mark a gap against one room's cached threads and fail closed if the marker cannot be written."""
         await mark_room_threads_gap_fail_closed(
             self.runtime.event_cache,
             room_id=room_id,

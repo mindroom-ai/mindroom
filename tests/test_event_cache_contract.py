@@ -360,6 +360,81 @@ class TestConversationEventCacheContract:
         assert await event_cache.get_thread_cache_gap(room_id, thread_ids[1]) is not None
 
     @pytest.mark.asyncio
+    async def test_room_scoped_gap_survives_a_fetch_that_was_already_running(
+        self,
+        event_cache: ConversationEventCache,
+    ) -> None:
+        """A thread cached for the first time after a room gap must not land unmarked.
+
+        The fan-out is an UPDATE over the room's existing ``thread_state`` rows, so it cannot reach a
+        thread that has none yet - which is exactly the thread whose first fetch is still in flight.
+        If the replacement that lands afterwards inserts a clean row, the room gap is silently lost
+        for that one thread and its pre-gap snapshot is served as complete. This is the fan-out's
+        blind spot, and the room-level copy of the marker is what covers it.
+        """
+        room_id = "!in-flight:localhost"
+        thread_id = "$late:localhost"
+        fetch_started_at = 1000.0
+
+        # No snapshot yet, so no thread_state row for the fan-out to touch.
+        assert await event_cache.get_thread_cache_gap(room_id, thread_id) is None
+        await event_cache.mark_room_threads_gap(room_id, reason="limited_sync_timeline")
+
+        # The fetch that began before the gap now lands.
+        stored = await event_cache.replace_thread(
+            room_id,
+            thread_id,
+            [_message_event(thread_id, 1)],
+            expected_membership_epoch=await event_cache.room_membership_epoch(room_id),
+            fetch_started_at=fetch_started_at,
+        )
+        assert stored
+
+        gap = await event_cache.get_thread_cache_gap(room_id, thread_id)
+        assert gap is not None, "a fetch older than the room gap installed a snapshot with no marker"
+        assert gap.gap_reason == "limited_sync_timeline"
+
+        # And a fetch that started after the room gap still clears it, or nothing would ever refill.
+        await replace_thread_unconditionally(event_cache, room_id, thread_id, [_message_event(thread_id, 1)])
+        assert await event_cache.get_thread_cache_gap(room_id, thread_id) is None
+
+    @pytest.mark.asyncio
+    async def test_snapshot_presence_is_reported_separately_from_the_gap_marker(
+        self,
+        event_cache: ConversationEventCache,
+    ) -> None:
+        """A never-cached thread has no gap marker either, so presence has to be asked separately.
+
+        ``thread_ids_needing_refill`` decides what startup prewarm fetches. Answering it from the
+        marker alone reports every cold thread as a cache hit and turns prewarm into a no-op, which
+        no read-path test catches because the reads themselves still refill on demand.
+        """
+        room_id = "!presence:localhost"
+        cached_thread_id = "$cached:localhost"
+        cold_thread_id = "$cold:localhost"
+
+        assert await event_cache.has_thread_snapshot(room_id, cold_thread_id) is False
+        assert await event_cache.get_thread_cache_gap(room_id, cold_thread_id) is None
+
+        await replace_thread_unconditionally(
+            event_cache,
+            room_id,
+            cached_thread_id,
+            [_message_event(cached_thread_id, 1)],
+        )
+        assert await event_cache.has_thread_snapshot(room_id, cached_thread_id) is True
+
+        # A gap marker does not remove the rows, so presence stays true while the thread is unusable.
+        await event_cache.mark_thread_gap(room_id, cached_thread_id, reason="live_thread_mutation")
+        assert await event_cache.has_thread_snapshot(room_id, cached_thread_id) is True
+
+        # Purging the rows does flip it, and marking a gap on a thread that has none never invents one.
+        await event_cache.invalidate_thread(room_id, cached_thread_id)
+        assert await event_cache.has_thread_snapshot(room_id, cached_thread_id) is False
+        await event_cache.mark_thread_gap(room_id, cold_thread_id, reason="live_thread_mutation")
+        assert await event_cache.has_thread_snapshot(room_id, cold_thread_id) is False
+
+    @pytest.mark.asyncio
     async def test_older_fetch_cannot_bury_a_newer_snapshot(
         self,
         event_cache: ConversationEventCache,

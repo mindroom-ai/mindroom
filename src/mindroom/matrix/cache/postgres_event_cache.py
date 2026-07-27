@@ -418,15 +418,23 @@ async def _create_postgres_event_cache_schema(db: AsyncConnection) -> None:
             room_id TEXT NOT NULL,
             membership_state TEXT NOT NULL DEFAULT 'joined',
             membership_epoch BIGINT NOT NULL DEFAULT 0,
+            -- The newest room-scoped gap. The fan-out across ``thread_state`` covers every thread
+            -- that already had a row; this covers the one that did not yet, because its fetch was
+            -- still running. Read only when installing a snapshot, never on a read.
+            room_gap_marked_at DOUBLE PRECISION,
+            room_gap_reason TEXT,
             PRIMARY KEY (namespace, room_id)
         )
         """,
     )
-    # 🔒 ``room_state`` survives for the membership fence alone; its invalidation columns are gone
-    # because a room-scoped gap now fans out across the room's ``thread_state`` rows.
+    # 🔒 ``room_state`` carries the membership fence, and nothing else about trust. The old
+    # invalidation columns go; the room-scoped gap replacing them is a different question, asked
+    # only by a replacement deciding whether its fetch predates the room's newest gap.
     await db.execute(
         """
         ALTER TABLE mindroom_event_cache_room_state
+        ADD COLUMN IF NOT EXISTS room_gap_marked_at DOUBLE PRECISION,
+        ADD COLUMN IF NOT EXISTS room_gap_reason TEXT,
         DROP COLUMN IF EXISTS invalidated_at,
         DROP COLUMN IF EXISTS invalidation_reason
         """,
@@ -790,7 +798,7 @@ class _PostgresEventCacheRuntime:
         gap_marked_at: float,
         reason: str,
     ) -> None:
-        """Remember a best-effort room stale marker that must be persisted before trusting cache rows."""
+        """Remember a best-effort room gap marker that must be persisted before any snapshot is served."""
         existing = self._pending_room_gaps.get(room_id)
         if existing is not None and existing.gap_marked_at >= gap_marked_at:
             return
@@ -1277,20 +1285,6 @@ class PostgresEventCache:
             operation="get_thread_events",
             disabled_result=None,
             callback=lambda db: postgres_event_cache_threads.load_thread_events(
-                db,
-                namespace=self._runtime.namespace,
-                room_id=room_id,
-                thread_id=thread_id,
-            ),
-        )
-
-    async def get_thread_event_ids(self, room_id: str, thread_id: str) -> set[str]:
-        """Return every raw event ID this thread holds, superseded edits included."""
-        return await self._operation(
-            room_id,
-            operation="get_thread_event_ids",
-            disabled_result=set(),
-            callback=lambda db: postgres_event_cache_threads.load_thread_event_ids(
                 db,
                 namespace=self._runtime.namespace,
                 room_id=room_id,

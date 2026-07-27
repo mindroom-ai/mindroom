@@ -7,13 +7,23 @@ revalidation allowlist: a stale or incomplete snapshot is **detected and refetch
 Two rules, and only two:
 
 1. A gap marker makes the snapshot unusable until a full refetch replaces it.
-   ``mark_room_threads_gap`` is the room-scoped (wildcard-thread) form and fans the marker out
-   across every thread the room has a snapshot for; a thread with no snapshot needs no marker
-   because a read that finds no rows refetches anyway.
+   ``mark_room_threads_gap`` is the room-scoped (wildcard-thread) form. It fans the marker out
+   across every thread the room already has a ``thread_state`` row for, *and* records it once on
+   the room. The fan-out alone is not the whole room: a thread whose first fetch is still in flight
+   has no row to update, and the replacement that lands afterwards would insert a clean one. The
+   room-level copy is a watermark that only replacement reads, so reads stay free of the join.
 
-2. A replacement clears the marker only when the marker predates the fetch that produced the
-   replacement (``gap_marked_at <= fetch_started_at``). A gap detected while the fetch was in
-   flight is not covered by that fetch, so it survives and the next read refetches.
+2. A replacement keeps whichever gap its fetch does not cover, at either scope. A marker predating
+   the fetch (``gap_marked_at <= fetch_started_at``) describes events the fetch did see, so it is
+   cleared; one recorded while the fetch was in flight is not covered by it and survives, and the
+   next read refetches.
+
+The wall clock is load-bearing here, and knowingly so: ``fetch_started_at`` is captured before the
+homeserver round-trip, so it cannot come from a database sequence without an extra round-trip per
+fetch. A backward clock step, or skew between two workers sharing one PostgreSQL namespace, can
+therefore let a fetch clear a gap recorded after it began. Ordering by wall clock predates the gap
+rework - the trust algebra compared the same ``time.time()`` values - and narrowing it would need a
+per-``(principal, room)`` logical clock, which is not this change.
 """
 
 from __future__ import annotations

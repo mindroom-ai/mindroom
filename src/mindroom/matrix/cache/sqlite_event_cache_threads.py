@@ -6,8 +6,9 @@ Durable gap-state invariants (mirrored by ``postgres_event_cache_threads``):
    newer one. There is no reason precedence, because every reason means the same thing — refetch.
 
 2. ``mark_room_gap_locked`` is the room-scoped (wildcard-thread) form. It fans the marker out
-   across the room's ``thread_cache_state`` rows: every stored snapshot has one, and a thread with
-   no snapshot refetches anyway.
+   across the room's ``thread_cache_state`` rows *and* records it once on ``room_cache_state``.
+   The fan-out cannot reach a thread whose first fetch is still in flight, because that thread has
+   no row yet; the room-level copy is what the replacement then consults.
 
 3. A replacement clears the marker only when the marker predates the fetch that produced it.
    A gap detected mid-fetch is not covered by that fetch, so it survives and the next read refetches.
@@ -202,43 +203,6 @@ async def load_thread_events(
     return [json.loads(row[2]) for row in rows] if rows else None
 
 
-async def load_thread_event_ids(
-    db: aiosqlite.Connection,
-    *,
-    principal_id: str,
-    room_id: str,
-    thread_id: str,
-) -> set[str]:
-    """Return every raw event ID this thread holds, superseded edits included.
-
-    Repair bookkeeping asks which rows are durably present; the visible read answers what the
-    thread looks like. Collapsing made those different questions, and answering the first with the
-    second reports every superseded edit as missing. A retained delta for such an edit can then
-    never reconcile, so the read invalidates the thread it just served - on the paths where an
-    append does not converge and its delta is deliberately kept.
-
-    Joined to ``events`` rather than reading membership alone: a membership row whose payload is
-    gone is not durably present, and reporting it as present would suppress a refill that should
-    happen. That join is also what the pre-collapse code did implicitly, since it derived these IDs
-    from a read that required the payload.
-    """
-    cursor = await db.execute(
-        """
-        SELECT thread_events.event_id
-        FROM thread_events
-        JOIN events
-            ON events.principal_id = thread_events.principal_id
-            AND events.room_id = thread_events.room_id
-            AND events.event_id = thread_events.event_id
-        WHERE thread_events.principal_id = ? AND thread_events.room_id = ? AND thread_events.thread_id = ?
-        """,
-        (principal_id, room_id, thread_id),
-    )
-    rows = await cursor.fetchall()
-    await cursor.close()
-    return {str(row[0]) for row in rows}
-
-
 async def load_recent_room_thread_ids(
     db: aiosqlite.Connection,
     *,
@@ -350,16 +314,8 @@ async def set_room_membership_locked(
         room_id=room_id,
         reason=reason,
     )
-    # The gap marker no longer touches ``room_cache_state``, so the membership row has to exist
-    # before it can be advanced. Insert rather than certify: the epoch that would read back is
-    # discarded.
-    await db.execute(
-        """
-        INSERT OR IGNORE INTO room_cache_state(principal_id, room_id, membership_state, membership_epoch)
-        VALUES (?, ?, 'joined', 0)
-        """,
-        (principal_id, room_id),
-    )
+    # 🔒 ``mark_room_gap_locked`` has already upserted the row, so the epoch below always has
+    # something to advance. A missing row and a fresh one both read as ``('joined', 0)``.
     await db.execute(
         """
         UPDATE room_cache_state
@@ -460,6 +416,28 @@ async def _thread_snapshot_is_newer_than_fetch(
     return float(row[0]) > fetch_started_at
 
 
+async def _uncovered_room_gap(
+    db: aiosqlite.Connection,
+    *,
+    principal_id: str,
+    room_id: str,
+    fetch_started_at: float,
+) -> tuple[float, str | None] | None:
+    """Return the room-scoped gap one fetch does not cover, if there is one."""
+    async with db.execute(
+        """
+        SELECT room_gap_marked_at, room_gap_reason
+        FROM room_cache_state
+        WHERE principal_id = ? AND room_id = ?
+        """,
+        (principal_id, room_id),
+    ) as cursor:
+        row = await cursor.fetchone()
+    if row is None or row[0] is None or float(row[0]) <= fetch_started_at:
+        return None
+    return (float(row[0]), row[1] if isinstance(row[1], str) else None)
+
+
 async def _clear_thread_gap_covered_by_fetch(
     db: aiosqlite.Connection,
     *,
@@ -468,11 +446,21 @@ async def _clear_thread_gap_covered_by_fetch(
     thread_id: str,
     fetch_started_at: float,
 ) -> None:
-    """Record this thread's snapshot, clearing only a gap the replacing fetch actually covers.
+    """Record this thread's snapshot, keeping any gap the replacing fetch does not cover.
 
     A gap marked after the fetch began describes events the fetch could not have seen, so it
-    survives and the next read refetches.
+    survives and the next read refetches. Both scopes have to be asked about, and the room one
+    cannot be answered by the fan-out alone: a thread whose first fetch was in flight when the room
+    was gapped has no row for the fan-out to update, so without the room-level copy this insert
+    would record a clean snapshot for events fetched from before the gap.
     """
+    room_gap = await _uncovered_room_gap(
+        db,
+        principal_id=principal_id,
+        room_id=room_id,
+        fetch_started_at=fetch_started_at,
+    )
+    room_gap_marked_at, room_gap_reason = room_gap if room_gap is not None else (None, None)
     await db.execute(
         """
         INSERT INTO thread_cache_state(
@@ -483,19 +471,32 @@ async def _clear_thread_gap_covered_by_fetch(
             gap_reason,
             snapshot_fetch_started_at
         )
-        VALUES (?, ?, ?, NULL, NULL, ?)
+        VALUES (?, ?, ?, ?, ?, ?)
         ON CONFLICT(principal_id, room_id, thread_id) DO UPDATE SET
             snapshot_fetch_started_at = excluded.snapshot_fetch_started_at,
             gap_marked_at = CASE
-                WHEN thread_cache_state.gap_marked_at <= ? THEN NULL
+                WHEN thread_cache_state.gap_marked_at IS NULL
+                    OR thread_cache_state.gap_marked_at <= ?
+                    THEN excluded.gap_marked_at
                 ELSE thread_cache_state.gap_marked_at
             END,
             gap_reason = CASE
-                WHEN thread_cache_state.gap_marked_at <= ? THEN NULL
+                WHEN thread_cache_state.gap_marked_at IS NULL
+                    OR thread_cache_state.gap_marked_at <= ?
+                    THEN excluded.gap_reason
                 ELSE thread_cache_state.gap_reason
             END
         """,
-        (principal_id, room_id, thread_id, fetch_started_at, fetch_started_at, fetch_started_at),
+        (
+            principal_id,
+            room_id,
+            thread_id,
+            room_gap_marked_at,
+            room_gap_reason,
+            fetch_started_at,
+            fetch_started_at,
+            fetch_started_at,
+        ),
     )
 
 
@@ -747,10 +748,13 @@ async def mark_room_gap_locked(
     room_id: str,
     reason: str,
 ) -> None:
-    """Record one room-scoped (wildcard-thread) gap by fanning the marker across the room's threads.
+    """Record one room-scoped (wildcard-thread) gap across the room's threads and on the room itself.
 
-    A thread with no snapshot needs no marker: a read that finds no rows refetches anyway, and every
-    stored snapshot carries a ``thread_cache_state`` row, so this one statement covers the whole room.
+    The fan-out reaches every thread that already holds a ``thread_cache_state`` row. That is not all
+    of them: a thread whose first fetch is still in flight has no row yet, so the fan-out skips it and
+    the replacement that lands afterwards would insert a clean row for a snapshot fetched from before
+    the gap. The room-level copy is what that replacement consults, so the two together cover the room
+    whether or not a thread's row existed when the gap was recorded.
     """
     gap_marked_at = time.time()
     await db.execute(
@@ -767,6 +771,24 @@ async def mark_room_gap_locked(
         WHERE principal_id = ? AND room_id = ?
         """,
         (gap_marked_at, reason, gap_marked_at, gap_marked_at, principal_id, room_id),
+    )
+    await db.execute(
+        """
+        INSERT INTO room_cache_state(principal_id, room_id, room_gap_marked_at, room_gap_reason)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT(principal_id, room_id) DO UPDATE SET
+            room_gap_reason = CASE
+                WHEN room_cache_state.room_gap_marked_at IS NULL
+                    OR excluded.room_gap_marked_at >= room_cache_state.room_gap_marked_at
+                    THEN excluded.room_gap_reason
+                ELSE room_cache_state.room_gap_reason
+            END,
+            room_gap_marked_at = MAX(
+                COALESCE(room_cache_state.room_gap_marked_at, excluded.room_gap_marked_at),
+                excluded.room_gap_marked_at
+            )
+        """,
+        (principal_id, room_id, gap_marked_at, reason),
     )
 
 
@@ -922,12 +944,21 @@ async def thread_snapshot_exists(
     room_id: str,
     thread_id: str,
 ) -> bool:
-    """Return whether one thread has at least one cached snapshot row."""
+    """Return whether one thread has at least one durably present snapshot row.
+
+    Joined to ``events`` rather than reading membership alone: a membership row whose payload is
+    gone is not durably present, and answering yes for one reports a thread as cached that no read
+    can serve, which is how startup prewarm silently skips it.
+    """
     async with db.execute(
         """
         SELECT 1
         FROM thread_events
-        WHERE principal_id = ? AND room_id = ? AND thread_id = ?
+        JOIN events
+            ON events.principal_id = thread_events.principal_id
+            AND events.room_id = thread_events.room_id
+            AND events.event_id = thread_events.event_id
+        WHERE thread_events.principal_id = ? AND thread_events.room_id = ? AND thread_events.thread_id = ?
         LIMIT 1
         """,
         (principal_id, room_id, thread_id),

@@ -56,6 +56,7 @@ from mindroom.matrix.cache import (
     ThreadHistoryResult,
     is_opaque_encrypted_event_source,
     normalize_nio_event_for_cache,
+    thread_cache_gap_reason,
     thread_cache_rejection_reason,
     thread_history_result,
 )
@@ -616,13 +617,14 @@ async def _resolve_cached_thread_history(
     return resolved.messages, resolved.sidecar_hydration_ms
 
 
-def _cache_reject_diagnostics(
-    *,
-    gap: ThreadCacheGap,
-    rejection_reason: str,
-) -> dict[str, str | int | float | bool]:
+def _cache_reject_diagnostics(gap: ThreadCacheGap) -> dict[str, str | int | float | bool]:
+    """Describe one gap-marked snapshot for the read that refused it.
+
+    The rejection reason comes from ``thread_cache_rejection_reason`` rather than an argument, so
+    the label a read logs and the gate that produced it cannot drift apart.
+    """
     diagnostics: dict[str, str | int | float | bool] = {
-        THREAD_HISTORY_CACHE_REJECT_REASON_DIAGNOSTIC: rejection_reason,
+        THREAD_HISTORY_CACHE_REJECT_REASON_DIAGNOSTIC: thread_cache_gap_reason(gap),
         "cache_gap_marked_at": gap.gap_marked_at,
         "cache_gap_age_ms": elapsed_ms_since(gap.gap_marked_at, clock=time.time),
     }
@@ -644,10 +646,7 @@ async def _load_cached_thread_history_if_usable(
     cached_membership_epoch = await _capture_membership_epoch(event_cache, room_id)
     gap = await event_cache.get_thread_cache_gap(room_id, thread_id)
     if gap is not None:
-        cache_reject_diagnostics = _cache_reject_diagnostics(
-            gap=gap,
-            rejection_reason=thread_cache_rejection_reason(gap) or "thread_gap_marked",
-        )
+        cache_reject_diagnostics = _cache_reject_diagnostics(gap)
         logger.info(
             "Thread cache rejected for read",
             room_id=room_id,
@@ -891,7 +890,7 @@ async def refresh_thread_history_from_source(
             trusted_sender_ids=trusted_sender_ids,
         )
     except _UnresolvedOpaqueRoomHistoryError:
-        await _mark_room_stale_for_opaque_history(event_cache, room_id=room_id)
+        await _mark_room_gap_for_opaque_history(event_cache, room_id=room_id)
         raise
     except Exception as exc:
         stale_history = (
@@ -997,7 +996,7 @@ async def _mark_thread_gap_for_opaque_history(
     room_id: str,
     thread_id: str,
 ) -> None:
-    """Keep one opaque-poisoned thread durably stale, deleting the snapshot only when the marker fails."""
+    """Keep one opaque-poisoned thread durably gapped, deleting the snapshot only when the marker fails."""
     await mark_thread_gap_fail_closed(
         event_cache,
         room_id=room_id,
@@ -1007,12 +1006,12 @@ async def _mark_thread_gap_for_opaque_history(
     )
 
 
-async def _mark_room_stale_for_opaque_history(
+async def _mark_room_gap_for_opaque_history(
     event_cache: ConversationEventCache,
     *,
     room_id: str,
 ) -> None:
-    """Keep every thread stale when opaque relation impact cannot be scoped within the room."""
+    """Keep every thread gapped when opaque relation impact cannot be scoped within the room."""
     await mark_room_threads_gap_fail_closed(
         event_cache,
         room_id=room_id,
@@ -1557,7 +1556,7 @@ async def bulk_refresh_room_thread_histories(
             caller_label=caller_label,
             unresolved_opaque_event_ids=sorted(scan_result.unresolved_opaque_event_ids),
         )
-        await _mark_room_stale_for_opaque_history(event_cache, room_id=room_id)
+        await _mark_room_gap_for_opaque_history(event_cache, room_id=room_id)
         opaque_stale_threads = len(set(thread_root_ids))
     else:
         for thread_id, event_sources in scan_result.thread_event_sources.items():
@@ -1601,7 +1600,7 @@ async def bulk_refresh_room_thread_histories(
     return stats
 
 
-async def untrusted_cached_thread_ids(
+async def thread_ids_needing_refill(
     event_cache: ConversationEventCache,
     room_id: str,
     thread_ids: Collection[str],
@@ -1795,5 +1794,5 @@ __all__ = [
     "get_room_threads_page",
     "log_thread_history_refresh",
     "refresh_thread_history_from_source",
-    "untrusted_cached_thread_ids",
+    "thread_ids_needing_refill",
 ]

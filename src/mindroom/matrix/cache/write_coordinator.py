@@ -12,8 +12,8 @@ All ordering is scoped to one ``(principal, room)`` lane.
 
 3. A room update cancelled before it started leaves a fence in its lane: later thread updates still wait
    for the earlier queue segment to drain, so cancellation cannot reorder writes.
-   its snapshot from the homeserver under a membership-epoch guard rather than extending queued state, and
-   it still waits for same-thread predecessors, so it cannot reorder same-thread writes.
+   Read-style waiters opt out via ``ignore_cancelled_room_fences``: they extend no queued state, so
+   letting them past a fence cannot reorder any write.
 
 4. Readers establish the write-read barrier with ``wait_for_thread_idle``: a thread read started after a
    mutation was queued in the same lane never observes cache state older than that mutation.

@@ -37,7 +37,7 @@ if TYPE_CHECKING:
     from .cache_maintenance import CacheMaintenanceReport
     from .thread_cache_state import ThreadCacheGap
 
-_EVENT_CACHE_SCHEMA_VERSION = 15
+_EVENT_CACHE_SCHEMA_VERSION = 16
 _EVENT_CACHE_TABLES = (
     "cache_metadata",
     "thread_events",
@@ -282,8 +282,7 @@ async def _create_event_cache_schema(db: aiosqlite.Connection) -> None:
         )
         """,
     )
-    # 🔒 ``room_cache_state`` survives for the membership fence alone; its invalidation columns are
-    # gone because a room-scoped gap now fans out across the room's ``thread_cache_state`` rows.
+    # 🔒 ``room_cache_state`` carries the membership fence, and nothing else about trust.
     await db.execute(
         """
         CREATE TABLE IF NOT EXISTS room_cache_state (
@@ -291,6 +290,11 @@ async def _create_event_cache_schema(db: aiosqlite.Connection) -> None:
             room_id TEXT NOT NULL,
             membership_state TEXT NOT NULL DEFAULT 'joined',
             membership_epoch INTEGER NOT NULL DEFAULT 0,
+            -- The newest room-scoped gap. The fan-out across ``thread_cache_state`` covers every
+            -- thread that already had a row; this covers the one that did not yet, because its
+            -- fetch was still running. Read only when installing a snapshot, never on a read.
+            room_gap_marked_at REAL,
+            room_gap_reason TEXT,
             PRIMARY KEY (principal_id, room_id)
         )
         """,
@@ -870,20 +874,6 @@ class SqliteEventCache:
             ),
         )
 
-    async def get_thread_event_ids(self, room_id: str, thread_id: str) -> set[str]:
-        """Return every raw event ID this thread holds, superseded edits included."""
-        return await self._read_operation(
-            room_id,
-            operation="get_thread_event_ids",
-            disabled_result=set(),
-            reader=lambda db: sqlite_event_cache_threads.load_thread_event_ids(
-                db,
-                principal_id=self.principal_id,
-                room_id=room_id,
-                thread_id=thread_id,
-            ),
-        )
-
     async def has_thread_snapshot(self, room_id: str, thread_id: str) -> bool:
         """Return whether any snapshot rows exist for one thread."""
         return await self._read_operation(
@@ -1206,7 +1196,7 @@ class SqliteEventCache:
             if not _is_sqlite_lock_contention(exc):
                 raise
             self._runtime.record_pending_principal_purge(self.principal_id)
-            msg = "SQLite event cache unavailable while marking thread stale"
+            msg = "SQLite event cache unavailable while marking a thread gap"
             raise EventCacheBackendUnavailableError(msg) from exc
 
     async def mark_room_threads_gap(self, room_id: str, *, reason: str) -> None:
@@ -1227,7 +1217,7 @@ class SqliteEventCache:
             if not _is_sqlite_lock_contention(exc):
                 raise
             self._runtime.record_pending_principal_purge(self.principal_id)
-            msg = "SQLite event cache unavailable while marking room stale"
+            msg = "SQLite event cache unavailable while marking a room gap"
             raise EventCacheBackendUnavailableError(msg) from exc
 
     async def apply_thread_mutation_append(
