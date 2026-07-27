@@ -21,6 +21,21 @@ from mindroom.event_loop_stall import (
 _STALL_EVENTS = {"event_loop_stall_detected", "event_loop_stall_ongoing", "event_loop_stall_ended"}
 
 
+class _LoopClock:
+    """Tiny loop clock for deterministic scheduled-callback lag tests."""
+
+    def __init__(self) -> None:
+        self.now = 0.0
+        self.scheduled: list[float] = []
+
+    def time(self) -> float:
+        return self.now
+
+    def call_at(self, when: float, _callback: object, *_args: object) -> object:
+        self.scheduled.append(when)
+        return object()
+
+
 def _fake_runtime_paths(**env_overrides: str) -> RuntimePaths:
     fake = Path("/var/empty/mindroom-test")
     return RuntimePaths(
@@ -47,6 +62,54 @@ def _detector(
 
 def _stall_logs(logs: list[dict[str, object]]) -> list[dict[str, object]]:
     return [entry for entry in logs if entry["event"] in _STALL_EVENTS]
+
+
+def test_scheduler_lag_summary_aggregates_delayed_heartbeats() -> None:
+    """Delayed callbacks emit one nearest-rank aggregate, never sample logs."""
+    detector = _detector()
+    loop = _LoopClock()
+    detector._loop = loop
+    detector._scheduler_lag_window_started_at = 0.0
+
+    with capture_logs() as logs:
+        for scheduled, lag_seconds in ((1.0, 0.001), (2.0, 0.002), (3.0, 0.003), (4.0, 0.004), (5.0, 0.005)):
+            loop.now = scheduled + lag_seconds
+            detector._beat(scheduled)
+        detector._report_scheduler_lag(60.0)
+
+    summaries = [entry for entry in logs if entry["event"] == "event_loop_scheduler_lag_summary"]
+    assert len(summaries) == 1
+    assert {field: summaries[0][field] for field in ("sample_count", "p50_ms", "p95_ms", "p99_ms", "max_ms")} == {
+        "sample_count": 5,
+        "p50_ms": 3.0,
+        "p95_ms": 5.0,
+        "p99_ms": 5.0,
+        "max_ms": 5.0,
+    }
+    assert [entry["event"] for entry in logs] == ["event_loop_scheduler_lag_summary"]
+
+
+def test_scheduler_lag_summary_resets_completed_window_samples() -> None:
+    """One completed window reports once; next window contains only new samples."""
+    detector = _detector()
+    loop = _LoopClock()
+    detector._loop = loop
+    detector._scheduler_lag_window_started_at = 0.0
+
+    with capture_logs() as logs:
+        loop.now = 1.001
+        detector._beat(1.0)
+        detector._report_scheduler_lag(60.0)
+        detector._report_scheduler_lag(60.1)
+        loop.now = 61.004
+        detector._beat(61.0)
+        detector._report_scheduler_lag(120.0)
+
+    summaries = [entry for entry in logs if entry["event"] == "event_loop_scheduler_lag_summary"]
+    assert [
+        (entry["sample_count"], entry["p50_ms"], entry["p95_ms"], entry["p99_ms"], entry["max_ms"])
+        for entry in summaries
+    ] == [(1, 1.0, 1.0, 1.0, 1.0), (1, 4.0, 4.0, 4.0, 4.0)]
 
 
 @pytest.mark.asyncio
