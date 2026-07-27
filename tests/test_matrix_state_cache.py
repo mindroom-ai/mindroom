@@ -140,6 +140,7 @@ def test_matrix_state_cached_reads_do_not_stat_the_file(tmp_path: Path, monkeypa
     runtime_paths = test_runtime_paths(tmp_path)
     state_file = _seed_state(runtime_paths, "dev", "!dev:localhost")
     _load_matrix_state_file_cached.cache_clear()
+    monkeypatch.setattr(matrix_state, "monotonic", lambda: 0.0)
     first = matrix_state_for_runtime(runtime_paths)
     stat_calls = 0
     original_stat = Path.stat
@@ -173,3 +174,31 @@ def test_matrix_state_cache_observes_first_write_after_missing_read(tmp_path: Pa
     written = matrix_state_for_runtime(runtime_paths)
     assert written is not missing
     assert written.get_room("dev") is not None
+
+
+def test_matrix_state_cache_observes_external_write_after_stat_ttl(tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
+    """A write from another process must become visible after the stat TTL."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    state_file = _seed_state(runtime_paths, "dev", "!dev:localhost")
+    _load_matrix_state_file_cached.cache_clear()
+    now = 0.0
+    monkeypatch.setattr(matrix_state, "monotonic", lambda: now)
+    monkeypatch.setattr(matrix_state, "_MATRIX_STATE_STAT_TTL_SECONDS", 1.0)
+
+    first = matrix_state_for_runtime(runtime_paths)
+    external = first.model_copy(deep=True)
+    external.add_room("research", room_id="!research:localhost", alias="#research:localhost", name="research")
+    state_file.write_text(
+        matrix_state.yaml_io.safe_dump(
+            external.model_dump(mode="json"),
+            default_flow_style=False,
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+    now = 1.0
+
+    second = matrix_state_for_runtime(runtime_paths)
+
+    assert second is not first
+    assert second.get_room("research") is not None

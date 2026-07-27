@@ -5,11 +5,13 @@ from datetime import UTC, datetime
 from functools import lru_cache
 from pathlib import Path
 from tempfile import NamedTemporaryFile
+from time import monotonic
 
 from pydantic import BaseModel, Field, field_serializer
 
 from mindroom import constants, yaml_io
 
+_MATRIX_STATE_STAT_TTL_SECONDS = 1.0
 _matrix_state_write_generation = 0
 
 
@@ -49,10 +51,10 @@ class MatrixState(BaseModel):
     def load(cls, runtime_paths: constants.RuntimePaths) -> "MatrixState":
         """Load state from file.
 
-        Reads come from a process-wide cache keyed by the state file path and
-        in-process write generation, so repeated calls between writes skip the
-        YAML parse. A deep copy is returned so callers may safely mutate the
-        result before ``save`` without polluting the cache.
+        Reads come from a process-wide cache keyed by the state file path,
+        in-process write generation, and a short-TTL file signature. A deep
+        copy is returned so callers may safely mutate the result before
+        ``save`` without polluting the cache.
         """
         return matrix_state_for_runtime(runtime_paths).model_copy(deep=True)
 
@@ -121,7 +123,7 @@ class MatrixState(BaseModel):
 
 
 def matrix_state_for_runtime(runtime_paths: constants.RuntimePaths) -> MatrixState:
-    """Return persisted Matrix state for one runtime, cached by write generation.
+    """Return persisted Matrix state cached by write generation and file signature.
 
     The returned object is shared across callers; **read-only callers** should
     prefer this helper for the lowest overhead. Callers that intend to mutate
@@ -130,8 +132,7 @@ def matrix_state_for_runtime(runtime_paths: constants.RuntimePaths) -> MatrixSta
     """
     state_file = constants.matrix_state_file(runtime_paths=runtime_paths)
     return _load_matrix_state_file_cached(
-        state_file,
-        _matrix_state_write_generation,
+        *_matrix_state_cache_key(state_file),
         current_domain=_current_runtime_domain(runtime_paths),
     )
 
@@ -179,15 +180,35 @@ def get_room_alias_from_id(room_id: str, runtime_paths: constants.RuntimePaths) 
     return None
 
 
+def _matrix_state_cache_key(state_file: Path) -> tuple[Path, int, int | None, int | None]:
+    """Return a key with eager local invalidation and bounded external staleness."""
+    stat_ttl_bucket = int(monotonic() / _MATRIX_STATE_STAT_TTL_SECONDS)
+    mtime_ns, size = _matrix_state_file_signature(state_file, stat_ttl_bucket)
+    return state_file, _matrix_state_write_generation, mtime_ns, size
+
+
+@lru_cache(maxsize=64)
+def _matrix_state_file_signature(state_file: Path, stat_ttl_bucket: int) -> tuple[int | None, int | None]:
+    """Stat one state file at most once per TTL bucket."""
+    del stat_ttl_bucket
+    try:
+        stat = state_file.stat()
+    except OSError:
+        return None, None
+    return stat.st_mtime_ns, stat.st_size
+
+
 @lru_cache(maxsize=64)
 def _load_matrix_state_file_cached(
     state_file: Path,
     write_generation: int,
+    mtime_ns: int | None,
+    size: int | None,
     *,
     current_domain: str,
 ) -> MatrixState:
-    """Load Matrix state through an in-process-write-sensitive cache."""
-    del write_generation
+    """Load Matrix state through a local-write and external-file-sensitive cache."""
+    del write_generation, mtime_ns, size
     return _load_matrix_state_file(state_file, current_domain=current_domain)
 
 
