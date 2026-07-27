@@ -16,6 +16,7 @@ from mindroom.matrix.client_thread_history import (
     refresh_thread_history_from_source,
     untrusted_cached_thread_ids,
 )
+from mindroom.matrix.thread_diagnostics import is_thread_history_degraded
 from mindroom.thread_export.models import (
     ThreadExportAccumulator,
     ThreadExportRoom,
@@ -130,12 +131,14 @@ async def _fetch_thread_payload(
             # default window would silently drop the oldest messages of a long thread.
             budget=UNBOUNDED_THREAD_READ,
         )
-        # An unbounded read cannot truncate, but it can still come back degraded - a stale
-        # fallback after a failed refetch, for instance. Export must not write a file that looks
-        # complete when it is not, so an incomplete read is refused rather than silently exported.
-        if not history.is_full_history:
+        # An unbounded read cannot truncate, but it can still come back degraded - a stale fallback
+        # after a failed refetch reports is_full_history=True whenever its window happened not to
+        # truncate, so completeness alone does not mean the rows are current. Export must not write
+        # a file that looks authoritative when it is stale, so both signals are checked.
+        if not history.is_full_history or is_thread_history_degraded(history):
             msg = (
-                f"Refusing to export thread {thread_id} from cache: the cached read is incomplete. "
+                f"Refusing to export thread {thread_id} from cache: the cached read is incomplete "
+                "or stale. "
                 "Re-run without --prefer-cache to fetch from the homeserver."
             )
             raise _IncompleteThreadExportError(msg)

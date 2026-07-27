@@ -1209,3 +1209,36 @@ class TestDefaultsDoNotWindowRealThreads:
         assert len(_original_event_ids(window.events)) == 21, "no message may be lost"
         assert len(window.events) <= 42, "one winning edit per message, not every edit ever seen"
         assert window.truncated is False
+
+
+class TestStaleReadsAreNotPassedOffAsAuthoritative:
+    """Completeness and freshness are separate signals, and export needs both.
+
+    A stale fallback sets the degraded diagnostic but still reports is_full_history=True whenever
+    its window happened not to truncate, so a caller checking only completeness will write stale
+    rows out as authoritative history.
+    """
+
+    def test_a_stale_result_can_be_complete_and_must_still_be_refused(self) -> None:
+        """The two signals are independent, which is why export checks both."""
+        from mindroom.matrix.cache import thread_history_result  # noqa: PLC0415
+        from mindroom.matrix.thread_diagnostics import (  # noqa: PLC0415
+            THREAD_HISTORY_DEGRADED_DIAGNOSTIC,
+            THREAD_HISTORY_SOURCE_DIAGNOSTIC,
+            THREAD_HISTORY_SOURCE_STALE_CACHE,
+            is_thread_history_degraded,
+        )
+
+        stale_but_untruncated = thread_history_result(
+            [],
+            is_full_history=True,
+            diagnostics={
+                THREAD_HISTORY_SOURCE_DIAGNOSTIC: THREAD_HISTORY_SOURCE_STALE_CACHE,
+                THREAD_HISTORY_DEGRADED_DIAGNOSTIC: True,
+            },
+        )
+
+        assert stale_but_untruncated.is_full_history is True
+        assert is_thread_history_degraded(stale_but_untruncated) is True, (
+            "completeness alone cannot tell a caller the rows are current"
+        )

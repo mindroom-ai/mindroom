@@ -1078,6 +1078,7 @@ async def refresh_thread_history_from_source(
     caller_label: str | None = None,
     coordinator_queue_wait_ms: float = 0.0,
     max_repair_attempts: int | None = None,
+    budget: ThreadReadBudget = _DEFAULT_THREAD_READ_BUDGET,
 ) -> ThreadHistoryResult:
     """Fetch fresh thread history from Matrix and repopulate the advisory cache.
 
@@ -1118,6 +1119,7 @@ async def refresh_thread_history_from_source(
                     fetch_error=exc,
                     cache_reject_diagnostics=cache_reject_diagnostics,
                     trusted_sender_ids=trusted_sender_ids,
+                    budget=budget,
                 )
                 if allow_stale_fallback
                 else None
@@ -1375,6 +1377,7 @@ async def _fetch_thread_history_with_cache_policy(
             allow_stale_fallback=allow_stale_fallback,
             cache_reject_diagnostics=cache_reject_diagnostics,
             trusted_sender_ids=trusted_sender_ids,
+            budget=budget,
         )
     log_thread_history_refresh(
         room_id=room_id,
