@@ -64,31 +64,24 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from structlog.stdlib import BoundLogger
 
-# The message bound is a guard against a degenerate thread, NOT a window onto a normal one.
+# There is deliberately no default message bound. ``max_messages`` remains available for callers
+# that genuinely want a message-shaped window, but nothing on the model-facing path passes one.
 #
-# It was 200, and that was wrong. A fixed count slides: turn N reads M1..M200, turn N+1 reads
-# M2..M201, so the prompt prefix changes every turn and provider prefix caching cannot hit the
-# history block. The unbounded read it replaced was append-only and cached by construction, so the
-# window introduced that churn rather than inheriting it. Worse, the read is upstream of
-# compaction, so anything it drops can never be summarized - the compactor cannot compress
-# messages it was never handed.
+# A count was tried and removed. It slides: turn N reads M1..M200, turn N+1 reads M2..M201, so the
+# prompt prefix changes every turn and provider prefix caching cannot hit the history block, while
+# the unbounded read it replaced was append-only and cached by construction. It also sits upstream
+# of compaction, so whatever it dropped was gone before anything could summarize it.
 #
-# The reduction this read is actually for comes from collapsing edits, not from dropping messages.
-# Production threads run ~94% edit rows; returning one winning edit per message instead of every
-# edit ever seen took a 2,021-row thread to 41 rows with no message lost. The count now sits far
-# above any real thread and only stops a pathological one - a thread of a million empty messages
-# would otherwise pass the byte bound and then cost a million sidecar hydrations and a fold over a
-# million rows, neither of which the byte bound can see.
-DEFAULT_THREAD_READ_MAX_MESSAGES = 5_000
-
-# The byte ceiling is the real bound, and it is not derived from a token budget: this measures what
-# the read hauls off disk, and token accounting stays at the compaction layer. Set from the two
-# sizes that matter:
+# It was also justified with an argument that does not survive arithmetic: that a count is needed
+# to stop a degenerate thread of a million tiny messages the byte bound cannot see. A million
+# messages cannot fit in 2 MiB - tiny messages still cost bytes - so the byte bound already caps
+# the count implicitly at roughly twenty thousand of them.
 #
-#   a large legitimate thread   200 messages x ~2 kB   ~400 kB   must never bind
-#   the pathology being killed  1,000 x 20 kB          ~20 MB    must always bind
-#
-# 2 MiB sits ~5x above the first and ~10x below the second, and costs ~7 ms at measured throughput.
+# The one case the byte bound genuinely cannot see is sidecars: an offloaded body has a small
+# stored payload and a large resolved one, so ~7,000 stubs fit inside the budget and each then
+# hydrates. The fix for that is to record the sidecar's length where it is written -
+# ``store_mxc_text`` already has it in hand - and charge it here, not to bound the message count
+# and hope the two correlate.
 DEFAULT_THREAD_READ_MAX_BYTES = 2 * 1024 * 1024
 
 
@@ -213,7 +206,6 @@ def log_thread_window_selection(
 
 __all__ = [
     "DEFAULT_THREAD_READ_MAX_BYTES",
-    "DEFAULT_THREAD_READ_MAX_MESSAGES",
     "UNBOUNDED_THREAD_READ",
     "ThreadReadBudget",
     "ThreadWindowCandidate",

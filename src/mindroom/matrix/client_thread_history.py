@@ -66,7 +66,6 @@ from mindroom.matrix.cache.thread_cache_invalidation import (
 )
 from mindroom.matrix.cache.thread_read_window import (
     DEFAULT_THREAD_READ_MAX_BYTES,
-    DEFAULT_THREAD_READ_MAX_MESSAGES,
     ThreadReadBudget,
 )
 from mindroom.matrix.client_visible_messages import (
@@ -126,7 +125,6 @@ _MAX_THREAD_REPAIR_ATTEMPTS = 2
 # Thread reads are windowed: consumers never need the whole thread, and the compaction layer
 # already discards most of it. Bounding here keeps a long thread off the read path entirely.
 _DEFAULT_THREAD_READ_BUDGET = ThreadReadBudget(
-    max_messages=DEFAULT_THREAD_READ_MAX_MESSAGES,
     max_bytes=DEFAULT_THREAD_READ_MAX_BYTES,
 )
 type _ThreadHistoryDiagnosticValue = str | int | float | bool | None

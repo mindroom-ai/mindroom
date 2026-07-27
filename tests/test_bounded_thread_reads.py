@@ -40,7 +40,6 @@ from mindroom.matrix.cache import (
 )
 from mindroom.matrix.cache.thread_read_window import (
     DEFAULT_THREAD_READ_MAX_BYTES,
-    DEFAULT_THREAD_READ_MAX_MESSAGES,
     ThreadReadBudget,
     ThreadWindowCandidate,
     select_thread_window_event_ids,
@@ -1142,9 +1141,15 @@ class TestDefaultsDoNotWindowRealThreads:
     thread.
     """
 
-    def test_message_default_sits_far_above_a_real_thread(self) -> None:
-        """A long human thread must never reach the message guard."""
-        assert DEFAULT_THREAD_READ_MAX_MESSAGES >= 5_000
+    def test_there_is_no_default_message_bound(self) -> None:
+        """Nothing on the model-facing path may window by message count.
+
+        A count slides, which changes the prompt prefix every turn and defeats provider prefix
+        caching, and it drops messages upstream of compaction where nothing can summarize them.
+        """
+        from mindroom.matrix.cache import thread_read_window  # noqa: PLC0415
+
+        assert not hasattr(thread_read_window, "DEFAULT_THREAD_READ_MAX_MESSAGES")
 
     @pytest.mark.asyncio
     async def test_a_thread_past_the_old_cap_is_returned_whole(
@@ -1157,10 +1162,7 @@ class TestDefaultsDoNotWindowRealThreads:
         window = await event_cache.get_thread_window(
             _ROOM_ID,
             _THREAD_ID,
-            budget=ThreadReadBudget(
-                max_messages=DEFAULT_THREAD_READ_MAX_MESSAGES,
-                max_bytes=DEFAULT_THREAD_READ_MAX_BYTES,
-            ),
+            budget=ThreadReadBudget(max_bytes=DEFAULT_THREAD_READ_MAX_BYTES),
         )
         assert window.events is not None
 
@@ -1173,10 +1175,7 @@ class TestDefaultsDoNotWindowRealThreads:
         event_cache: ConversationEventCache,
     ) -> None:
         """Appending a message must extend the read, not slide it - or prefix caching cannot hit."""
-        budget = ThreadReadBudget(
-            max_messages=DEFAULT_THREAD_READ_MAX_MESSAGES,
-            max_bytes=DEFAULT_THREAD_READ_MAX_BYTES,
-        )
+        budget = ThreadReadBudget(max_bytes=DEFAULT_THREAD_READ_MAX_BYTES)
         await _seed_thread(event_cache, _thread_event_sources(201))
         before = await event_cache.get_thread_window(_ROOM_ID, _THREAD_ID, budget=budget)
 
@@ -1203,10 +1202,7 @@ class TestDefaultsDoNotWindowRealThreads:
         window = await event_cache.get_thread_window(
             _ROOM_ID,
             _THREAD_ID,
-            budget=ThreadReadBudget(
-                max_messages=DEFAULT_THREAD_READ_MAX_MESSAGES,
-                max_bytes=DEFAULT_THREAD_READ_MAX_BYTES,
-            ),
+            budget=ThreadReadBudget(max_bytes=DEFAULT_THREAD_READ_MAX_BYTES),
         )
         assert window.events is not None
 
