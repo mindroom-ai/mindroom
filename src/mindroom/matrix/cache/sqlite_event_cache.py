@@ -184,6 +184,7 @@ async def _create_event_cache_schema(db: aiosqlite.Connection) -> None:
             origin_server_ts INTEGER NOT NULL,
             event_json TEXT NOT NULL,
             event_bytes INTEGER NOT NULL,
+            sender TEXT NOT NULL DEFAULT '',
             cached_at REAL NOT NULL,
             write_seq INTEGER NOT NULL,
             PRIMARY KEY (principal_id, room_id, event_id)
@@ -204,7 +205,6 @@ async def _create_event_cache_schema(db: aiosqlite.Connection) -> None:
             room_id TEXT NOT NULL,
             original_event_id TEXT NOT NULL,
             origin_server_ts INTEGER NOT NULL,
-            sender TEXT NOT NULL DEFAULT '',
             PRIMARY KEY (principal_id, room_id, edit_event_id)
         )
         """,
@@ -212,7 +212,7 @@ async def _create_event_cache_schema(db: aiosqlite.Connection) -> None:
     await db.execute(
         """
         CREATE INDEX IF NOT EXISTS idx_event_edits_room_original_ts
-        ON event_edits(principal_id, room_id, original_event_id, sender, origin_server_ts DESC, edit_event_id DESC)
+        ON event_edits(principal_id, room_id, original_event_id, origin_server_ts DESC, edit_event_id DESC)
         """,
     )
     await db.execute(

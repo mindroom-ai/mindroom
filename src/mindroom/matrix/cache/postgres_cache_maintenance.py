@@ -35,9 +35,9 @@ async def _backfill_bounded_read_columns(db: AsyncConnection, *, namespace: str)
     are idempotent and match nothing once a namespace is current, so running them every time costs
     an indexed no-op. This mirrors the per-namespace normalization below.
 
-    ``event_bytes`` at its 0 default prices a row as free, which makes ``max_bytes`` inert; a
-    ``sender`` at its '' default collapses every edit of one message into a single bucket, which
-    reintroduces the foreign-edit rollback the per-sender window exists to prevent.
+    ``event_bytes`` at its 0 default prices a row as free, which makes ``max_bytes`` inert. A
+    ``sender`` at its '' default makes every event look like it came from the same account, so the
+    window can no longer tell an author's own edit from someone else's and prices both.
     """
     await db.execute(
         """
@@ -49,14 +49,9 @@ async def _backfill_bounded_read_columns(db: AsyncConnection, *, namespace: str)
     )
     await db.execute(
         """
-        UPDATE mindroom_event_cache_event_edits AS edits
-        SET sender = COALESCE(events.event_json::jsonb ->> 'sender', '')
-        FROM mindroom_event_cache_events AS events
-        WHERE edits.namespace = %s
-            AND edits.sender = ''
-            AND events.namespace = edits.namespace
-            AND events.room_id = edits.room_id
-            AND events.event_id = edits.edit_event_id
+        UPDATE mindroom_event_cache_events
+        SET sender = COALESCE(event_json::jsonb ->> 'sender', '')
+        WHERE namespace = %s AND sender = ''
         """,
         (namespace,),
     )

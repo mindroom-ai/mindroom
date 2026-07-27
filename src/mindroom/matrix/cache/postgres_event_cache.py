@@ -294,6 +294,7 @@ async def _create_postgres_event_cache_schema(db: AsyncConnection) -> None:
             origin_server_ts BIGINT NOT NULL,
             event_json TEXT NOT NULL,
             event_bytes BIGINT NOT NULL DEFAULT 0,
+            sender TEXT NOT NULL DEFAULT '',
             cached_at DOUBLE PRECISION NOT NULL,
             write_seq BIGINT NOT NULL DEFAULT nextval('mindroom_event_cache_write_seq'),
             PRIMARY KEY (namespace, room_id, event_id)
@@ -311,6 +312,12 @@ async def _create_postgres_event_cache_schema(db: AsyncConnection) -> None:
     )
     await db.execute(
         """
+        ALTER TABLE mindroom_event_cache_events
+        ADD COLUMN IF NOT EXISTS sender TEXT NOT NULL DEFAULT ''
+        """,
+    )
+    await db.execute(
+        """
         CREATE INDEX IF NOT EXISTS idx_mindroom_event_cache_events_room_origin_ts
         ON mindroom_event_cache_events(namespace, room_id, origin_server_ts DESC)
         """,
@@ -323,35 +330,22 @@ async def _create_postgres_event_cache_schema(db: AsyncConnection) -> None:
             room_id TEXT NOT NULL,
             original_event_id TEXT NOT NULL,
             origin_server_ts BIGINT NOT NULL,
-            sender TEXT NOT NULL DEFAULT '',
             PRIMARY KEY (namespace, room_id, edit_event_id)
         )
         """,
     )
     await db.execute(
         """
-        ALTER TABLE mindroom_event_cache_event_edits
-        ADD COLUMN IF NOT EXISTS sender TEXT NOT NULL DEFAULT ''
-        """,
-    )
-    await db.execute(
-        """
-        CREATE INDEX IF NOT EXISTS idx_mindroom_event_cache_event_edits_room_original_sender_ts
+        CREATE INDEX IF NOT EXISTS idx_mindroom_event_cache_event_edits_room_original_ts
         ON mindroom_event_cache_event_edits(
             namespace,
             room_id,
             original_event_id,
-            sender,
             origin_server_ts DESC,
             edit_event_id DESC
         )
         """,
     )
-    # A v3 database already has the old index under its old name, and CREATE INDEX IF NOT EXISTS
-    # would silently keep that definition - which lacks `sender` and so no longer covers the
-    # sender-keyed edit lookup. The new index carries a new name for exactly that reason; drop the
-    # superseded one rather than leaving a less selective duplicate behind.
-    await db.execute("DROP INDEX IF EXISTS idx_mindroom_event_cache_event_edits_room_original_ts")
     await db.execute(
         """
         CREATE TABLE IF NOT EXISTS mindroom_event_cache_event_threads (

@@ -121,7 +121,7 @@ WITH winning_edits AS MATERIALIZED (
                event_edits.original_event_id AS original_event_id,
                edit_events.event_bytes AS event_bytes,
                ROW_NUMBER() OVER (
-                   PARTITION BY event_edits.original_event_id, event_edits.sender
+                   PARTITION BY event_edits.original_event_id
                    ORDER BY event_edits.origin_server_ts DESC, event_edits.edit_event_id DESC
                ) AS sender_rank
         FROM event_edits
@@ -134,8 +134,13 @@ WITH winning_edits AS MATERIALIZED (
             ON edit_events.principal_id = event_edits.principal_id
             AND edit_events.room_id = event_edits.room_id
             AND edit_events.event_id = event_edits.edit_event_id
+        JOIN events AS original_events
+            ON original_events.principal_id = event_edits.principal_id
+            AND original_events.room_id = event_edits.room_id
+            AND original_events.event_id = event_edits.original_event_id
         WHERE event_edits.principal_id = :principal_id
             AND event_edits.room_id = :room_id
+            AND edit_events.sender = original_events.sender
     )
     WHERE sender_rank = 1
 )

@@ -829,11 +829,16 @@ class TestForeignEditCannotStarveTheAuthorsEdit:
         assert "$victim" in returned_ids
 
     @pytest.mark.asyncio
-    async def test_window_keeps_the_newest_edit_of_each_sender(
+    async def test_window_keeps_only_the_authors_newest_edit(
         self,
         event_cache: ConversationEventCache,
     ) -> None:
-        """Each sender contributes its own newest candidate, and only its newest."""
+        """Only the original author's newest replacement survives selection.
+
+        Earlier this shipped one winner per sender and left the fold to discard the foreign ones,
+        which meant a foreign edit still cost window budget. Selection now compares the edit's
+        sender against the original's, so a foreign replacement never reaches the payload query.
+        """
         author = "@author:localhost"
         other = "@other:localhost"
         await _seed_thread(
@@ -857,8 +862,8 @@ class TestForeignEditCannotStarveTheAuthorsEdit:
 
         returned_ids = {row["event_id"] for row in bounded_read}
         assert "$author-new" in returned_ids
-        assert "$other-new" in returned_ids
         assert "$author-old" not in returned_ids
+        assert "$other-new" not in returned_ids, "a foreign edit must not be shipped or charged"
         assert "$other-old" not in returned_ids
 
 
@@ -1242,3 +1247,44 @@ class TestStaleReadsAreNotPassedOffAsAuthoritative:
         assert is_thread_history_degraded(stale_but_untruncated) is True, (
             "completeness alone cannot tell a caller the rows are current"
         )
+
+
+class TestForeignEditsDoNotConsumeTheBudget:
+    """A replacement the fold will discard must not be priced or shipped.
+
+    Selection used to price one winner per sender and the payload query shipped them all, so a
+    replacement from anyone other than the original's author spent window budget on a row that was
+    then thrown away - enough of them evict legitimate messages. Reachable in any room where an
+    untrusted party can send events, which multi_user mode and bridges both allow.
+    """
+
+    @pytest.mark.asyncio
+    async def test_a_foreign_edit_is_neither_shipped_nor_charged(
+        self,
+        event_cache: ConversationEventCache,
+    ) -> None:
+        """A large forged edit must not evict real messages from the window."""
+        author = "@author:localhost"
+        attacker = "@attacker:localhost"
+        events = [_message_event(_THREAD_ID, 1_000, sender=author)]
+        events += [
+            _message_event(f"$m{index}", 2_000 + index * 1_000, sender=author, thread_id=_THREAD_ID)
+            for index in range(10)
+        ]
+        # One oversized replacement of someone else's message.
+        events.append(
+            _message_event("$forged", 50_000, sender=attacker, body="z" * 50_000, edit_of="$m0"),
+        )
+        await _seed_thread(event_cache, events)
+
+        window = await event_cache.get_thread_window(
+            _ROOM_ID,
+            _THREAD_ID,
+            budget=ThreadReadBudget(max_bytes=20_000),
+        )
+        assert window.events is not None
+
+        returned_ids = {row["event_id"] for row in window.events}
+        assert "$forged" not in returned_ids, "a discarded edit must not be shipped"
+        covered = _original_event_ids(window.events)
+        assert len(covered) == 11, f"the forged edit evicted real messages: only {len(covered)} left"

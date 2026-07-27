@@ -562,14 +562,16 @@ async def write_lookup_index_rows(
                 origin_server_ts,
                 event_json,
                 event_bytes,
+                sender,
                 cached_at,
                 write_seq
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(principal_id, room_id, event_id) DO UPDATE SET
                 origin_server_ts = excluded.origin_server_ts,
                 event_json = excluded.event_json,
                 event_bytes = excluded.event_bytes,
+                sender = excluded.sender,
                 cached_at = excluded.cached_at,
                 write_seq = excluded.write_seq
             WHERE json_extract(events.event_json, '$.type') = 'm.room.encrypted'
@@ -583,6 +585,7 @@ async def write_lookup_index_rows(
                 event.origin_server_ts,
                 event.event_json,
                 event.event_bytes,
+                event.sender,
                 cached_at,
                 write_sequence,
             ),
@@ -637,13 +640,12 @@ async def write_lookup_index_rows(
         await db.executemany(
             """
             INSERT INTO event_edits(
-                principal_id, edit_event_id, room_id, original_event_id, origin_server_ts, sender
+                principal_id, edit_event_id, room_id, original_event_id, origin_server_ts
             )
-            VALUES (?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?)
             ON CONFLICT(principal_id, room_id, edit_event_id) DO UPDATE SET
                 original_event_id = excluded.original_event_id,
-                origin_server_ts = excluded.origin_server_ts,
-                sender = excluded.sender
+                origin_server_ts = excluded.origin_server_ts
             """,
             [
                 (
@@ -652,7 +654,6 @@ async def write_lookup_index_rows(
                     row.room_id,
                     row.original_event_id,
                     row.origin_server_ts,
-                    row.sender,
                 )
                 for row in edit_rows
             ],

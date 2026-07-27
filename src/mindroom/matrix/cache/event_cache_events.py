@@ -24,6 +24,18 @@ class SerializedCachedEvent:
     event: dict[str, Any]
 
     @property
+    def sender(self) -> str:
+        """Return the Matrix user that sent this event.
+
+        Persisted as its own narrow column so a thread read can compare an edit's sender against
+        the sender of the event it replaces without reading either payload. A replacement is only
+        legitimate from the original's sender, and a read that cannot check that cheaply ends up
+        pricing and shipping edits the fold will discard.
+        """
+        sender = self.event.get("sender")
+        return sender if isinstance(sender, str) else ""
+
+    @property
     def event_bytes(self) -> int:
         """Return the stored payload size in bytes.
 
@@ -59,7 +71,6 @@ class _EventEditRow:
     room_id: str
     original_event_id: str
     origin_server_ts: int
-    sender: str
 
 
 def event_id_for_cache(event: dict[str, Any]) -> str:
@@ -191,13 +202,11 @@ def _event_edit_row(room_id: str, event: dict[str, Any]) -> _EventEditRow | None
     event_info = EventInfo.from_event(event)
     if not event_info.is_edit or not isinstance(event_info.original_event_id, str):
         return None
-    sender = event.get("sender")
     return _EventEditRow(
         edit_event_id=event_id_for_cache(event),
         room_id=room_id,
         original_event_id=event_info.original_event_id,
         origin_server_ts=_event_timestamp_for_cache(event),
-        sender=sender if isinstance(sender, str) else "",
     )
 
 

@@ -2512,6 +2512,7 @@ visibility = [
 [[modules]]
 path = "mindroom.thread_export.execution"
 depends_on = [
+    "mindroom.matrix.thread_diagnostics",
     "mindroom.matrix.cache.thread_read_window",
     "mindroom.matrix.client_thread_history",
     "mindroom.thread_export.models",

@@ -605,20 +605,11 @@ async def test_bounded_read_columns_backfill_every_namespace_not_just_the_first(
                 await setup.execute(
                     """
                     INSERT INTO mindroom_event_cache_events(
-                        namespace, event_id, room_id, origin_server_ts, event_json, event_bytes, cached_at
+                        namespace, event_id, room_id, origin_server_ts, event_json, event_bytes, sender, cached_at
                     )
-                    VALUES (%s, %s, %s, %s, %s, 0, 0)
+                    VALUES (%s, %s, %s, %s, %s, 0, '', 0)
                     """,
                     (namespace, "$legacy", _ROOM_ID, 1000, '{"event_id":"$legacy","sender":"@a:localhost"}'),
-                )
-                await setup.execute(
-                    """
-                    INSERT INTO mindroom_event_cache_event_edits(
-                        namespace, edit_event_id, room_id, original_event_id, origin_server_ts, sender
-                    )
-                    VALUES (%s, %s, %s, %s, %s, '')
-                    """,
-                    (namespace, "$legacy", _ROOM_ID, "$original", 1000),
                 )
             await setup.commit()
         finally:
@@ -640,7 +631,7 @@ async def test_bounded_read_columns_backfill_every_namespace_not_just_the_first(
                 await cursor.close()
 
                 cursor = await check.execute(
-                    "SELECT sender FROM mindroom_event_cache_event_edits WHERE namespace = %s",
+                    "SELECT sender FROM mindroom_event_cache_events WHERE namespace = %s",
                     (namespace,),
                 )
                 assert await cursor.fetchone() == ("@a:localhost",), f"{namespace} kept the sender default"
