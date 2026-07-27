@@ -374,7 +374,7 @@ class TestAgentBot(AgentBotTestBase):
             patch(
                 "mindroom.delivery_gateway.edit_message_result",
                 new=AsyncMock(side_effect=delivered_matrix_side_effect("$edit")),
-            ),
+            ) as mock_edit_message,
             patch_response_runner_module(
                 typing_indicator=_noop_typing_indicator,
                 should_use_streaming=AsyncMock(return_value=False),
@@ -399,6 +399,9 @@ class TestAgentBot(AgentBotTestBase):
         assert content["m.relates_to"]["rel_type"] == "m.thread"
         assert content["m.relates_to"]["event_id"] == "$canonical_thread:localhost"
         assert content["m.relates_to"]["m.in_reply_to"]["event_id"] == "$reply_plain:localhost"
+        mock_edit_message.assert_awaited_once()
+        assert mock_edit_message.await_args.args[2] == "$team"
+        assert mock_edit_message.await_args.args[4] == "Team reply"
 
     @pytest.mark.asyncio
     async def test_team_generate_response_nonteam_fallback_uses_locked_runner(
