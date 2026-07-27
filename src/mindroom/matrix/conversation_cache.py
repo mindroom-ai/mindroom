@@ -728,11 +728,10 @@ class MatrixConversationCache(ConversationCacheProtocol):
     ) -> ThreadHistoryResult:
         """Rebuild one thread from Matrix and reinstall its snapshot.
 
-        Single-flight, and nothing else. The admission policy that used to wrap this - interactive
-        versus speculative tiers, five suppression conditions, a fan-out budget, cooldowns and
-        capped exponential backoff - is gone, and stays gone. What is kept is the one property that
-        is about cost rather than policy: a full room scan takes seconds under load, so N readers of
-        one gapped thread join a single scan instead of running N.
+        Matching readers join one single-flight, and its fetch-plus-store owns the same-thread write
+        lane. Mutations queued before the refill run first; mutations arriving while it runs wait
+        until the snapshot is installed, then extend that snapshot instead of repeatedly re-gapping
+        a snapshotless thread.
 
         The 126 ms figure quoted elsewhere in this subsystem prices a warm *cache* read and does not
         apply here.
@@ -740,16 +739,23 @@ class MatrixConversationCache(ConversationCacheProtocol):
         principal_id = self.runtime.event_cache.principal_id
 
         async def refill() -> ThreadReadResult:
-            return await refresh_thread_history_from_source(
-                self._require_client(),
+            result = await self._write_cache_ops.queue_thread_cache_update(
                 room_id,
                 thread_id,
-                self.runtime.event_cache,
-                hydrate_sidecars=wants_full_history,
-                allow_stale_fallback=allows_stale_fallback,
-                cache_reject_diagnostics=cache_reject_diagnostics,
-                trusted_sender_ids=self._trusted_sender_ids(),
+                lambda: refresh_thread_history_from_source(
+                    self._require_client(),
+                    room_id,
+                    thread_id,
+                    self.runtime.event_cache,
+                    hydrate_sidecars=wants_full_history,
+                    allow_stale_fallback=allows_stale_fallback,
+                    cache_reject_diagnostics=cache_reject_diagnostics,
+                    trusted_sender_ids=self._trusted_sender_ids(),
+                ),
+                name="matrix_cache_thread_refill",
+                emit_timing=True,
             )
+            return cast("ThreadReadResult", result)
 
         refill_result = await self._refill_single_flight.run(
             (principal_id, room_id, thread_id, wants_full_history, allows_stale_fallback),

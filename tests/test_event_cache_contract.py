@@ -575,21 +575,19 @@ class TestConversationEventCacheContract:
         assert [event["event_id"] for event in cached] == [thread_id, "$live:localhost"]
 
     @pytest.mark.asyncio
-    async def test_in_flight_fetch_over_a_snapshotless_thread_does_not_refetch_forever(
+    async def test_in_flight_fetch_cannot_install_snapshot_after_snapshotless_live_append(
         self,
         event_cache: ConversationEventCache,
     ) -> None:
-        """A live append onto a not-yet-cached thread makes an in-flight fetch too old, once.
+        """A live append onto a not-yet-cached thread makes an in-flight fetch too old.
 
         This is the SNAPSHOT_MISSING sibling of the append-shaped burial test above. A thread has
         no cached rows yet. A refill scan starts; while it runs, a live event lands in the thread.
         The append finds no snapshot to extend (SNAPSHOT_MISSING), records the point row, and marks
         a gap. Because that append advances the ordering watermark, the in-flight scan is now too
-        old to install its snapshot, so its store is refused and the gap it would otherwise keep
-        forever survives for exactly one more read. A *fresh* fetch (which genuinely saw the live
-        event) then clears the gap and installs a clean snapshot -- so the thread stops refetching.
-        Without the watermark advance on SNAPSHOT_MISSING, the stale store lands, keeps the
-        post-fetch gap, and every subsequent read refetches in a loop.
+        old to install its snapshot, so its store is refused and the gap survives. The runtime
+        write barrier supplies liveness by keeping same-thread appends out of the fetch-and-store
+        window; this contract supplies safety for off-lane and cross-process races.
         """
         room_id = "!race-missing:localhost"
         thread_id = "$thread-missing:localhost"
@@ -624,18 +622,19 @@ class TestConversationEventCacheContract:
             expected_membership_epoch=await event_cache.room_membership_epoch(room_id),
             fetch_started_at=fetch_started_at,
         )
-        assert (
-            thread_cache_rejection_reason(await event_cache.get_thread_cache_gap(room_id, thread_id)) is not None
-        ), "stale in-flight store must not clear the gap"
+        assert thread_cache_rejection_reason(await event_cache.get_thread_cache_gap(room_id, thread_id)) is not None, (
+            "stale in-flight store must not clear the gap"
+        )
 
-        # A fresh fetch that started after the live event landed (so it genuinely saw it) clears
-        # the gap and installs the full snapshot, breaking the refetch loop.
+        # A fresh fetch that started after the live event landed (so it genuinely saw it) may clear
+        # the gap and install the full snapshot.
+        fresh_fetch_started_at = time.time()
         await replace_thread_unconditionally(
             event_cache,
             room_id,
             thread_id,
             [root, live],
-            fetch_started_at=time.time() + 1.0,
+            fetch_started_at=fresh_fetch_started_at,
         )
         assert thread_cache_rejection_reason(await event_cache.get_thread_cache_gap(room_id, thread_id)) is None
         cached = await event_cache.get_thread_events(room_id, thread_id)

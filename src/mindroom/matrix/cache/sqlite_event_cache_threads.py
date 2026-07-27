@@ -889,10 +889,9 @@ async def _append_existing_thread_event(
         # Only lookup-index rows are recorded: there is no snapshot to extend, so only a full
         # history scan can make this thread readable again. Advance the watermark anyway: a fetch
         # already in flight when this event landed cannot represent the thread, so it must not be
-        # allowed to install a snapshot that predates the event and then keep the gap this append
-        # is about to mark. Moving the watermark makes replace_thread_locked refuse that stale
-        # fetch, exactly as it does after an APPENDED live event -- otherwise a live event landing
-        # mid-fetch re-gaps the just-stored snapshot on every cycle and the thread refetches forever.
+        # allowed to install a snapshot that predates the event. The runtime coordinator normally
+        # serializes same-thread refills and appends; this watermark also protects off-lane startup,
+        # prewarm, and cross-process races.
         await _advance_snapshot_watermark(
             db,
             principal_id=principal_id,
