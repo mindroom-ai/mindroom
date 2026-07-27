@@ -1621,9 +1621,161 @@ class TestMatrixConversationCacheThreadReads:
                 runtime=_conversation_runtime(client=reader_client, event_cache=event_cache),
             )
 
-            history = await second_access.get_thread_history("!test:localhost", "$thread:localhost")
+            history = await second_access.refresh_strict_thread_history_from_source("!test:localhost", "$thread:localhost")
         finally:
             await event_cache.close()
 
         assert [message.body for message in history] == ["Root", "Fresh reply"]
         reader_client.room_messages.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_refill_runs_under_same_thread_write_barrier() -> None:
+    """A thread refill holds the same-thread write lane, so a mid-refill append waits for it.
+
+    Restores the invariant test_get_thread_history_refresh_runs_under_same_thread_write_barrier
+    (removed in #1690) that the watermark change alone did not provide. An append that lands while
+    the refill's homeserver scan is in flight must be queued *behind* the store rather than racing
+    it: otherwise it re-gaps the just-installed snapshot and the thread refetches forever under
+    sustained load.
+    """
+    access = MatrixConversationCache(
+        logger=MagicMock(),
+        runtime=_conversation_runtime(client=_make_client_mock()),
+    )
+    access.runtime.event_cache.get_thread_cache_state = AsyncMock(return_value=None)
+    access.runtime.event_cache.get_thread_events = AsyncMock(return_value=[{"event_id": "$thread:localhost"}])
+    refresh_started = asyncio.Event()
+    allow_refresh = asyncio.Event()
+    queued_update_started = asyncio.Event()
+
+    async def slow_refresh(*_args: object, **_kwargs: object) -> ThreadHistoryResult:
+        refresh_started.set()
+        await allow_refresh.wait()
+        return thread_history_result(
+            [_message(event_id="$thread:localhost", body="Root")],
+            is_full_history=True,
+        )
+
+    async def queued_update() -> None:
+        queued_update_started.set()
+
+    with patch(
+        "mindroom.matrix.conversation_cache.refresh_thread_history_from_source",
+        new=AsyncMock(side_effect=slow_refresh),
+    ):
+        refresh_task = asyncio.create_task(access.refresh_strict_thread_history_from_source("!test:localhost", "$thread:localhost"))
+        await asyncio.wait_for(refresh_started.wait(), timeout=1.0)
+
+        access.runtime.event_cache_write_coordinator.queue_thread_update(
+            "!test:localhost",
+            "$thread:localhost",
+            queued_update,
+            name="matrix_cache_follow_up_update",
+            coordination_scope=access.runtime.event_cache.principal_id,
+        )
+        await asyncio.sleep(0)
+        # The append queued during the refill must NOT run while the refill holds the lane.
+        assert queued_update_started.is_set() is False
+
+        allow_refresh.set()
+        await refresh_task
+    await _wait_for_room_cache_idle(access.runtime.event_cache_write_coordinator)
+
+    # Once the refill's store released the lane, the queued append runs.
+    assert queued_update_started.is_set()
+
+
+@pytest.mark.asyncio
+async def test_refill_does_not_block_a_different_thread() -> None:
+    """The refill barrier is per-thread: a write to a different thread proceeds concurrently."""
+    access = MatrixConversationCache(
+        logger=MagicMock(),
+        runtime=_conversation_runtime(client=_make_client_mock()),
+    )
+    access.runtime.event_cache.get_thread_cache_state = AsyncMock(return_value=None)
+    access.runtime.event_cache.get_thread_events = AsyncMock(return_value=[{"event_id": "$thread:localhost"}])
+    refresh_started = asyncio.Event()
+    allow_refresh = asyncio.Event()
+    other_thread_ran = asyncio.Event()
+
+    async def slow_refresh(*_args: object, **_kwargs: object) -> ThreadHistoryResult:
+        refresh_started.set()
+        await allow_refresh.wait()
+        return thread_history_result(
+            [_message(event_id="$thread:localhost", body="Root")],
+            is_full_history=True,
+        )
+
+    async def other_thread_update() -> None:
+        other_thread_ran.set()
+
+    with patch(
+        "mindroom.matrix.conversation_cache.refresh_thread_history_from_source",
+        new=AsyncMock(side_effect=slow_refresh),
+    ):
+        refresh_task = asyncio.create_task(access.refresh_strict_thread_history_from_source("!test:localhost", "$thread:localhost"))
+        await asyncio.wait_for(refresh_started.wait(), timeout=1.0)
+
+        access.runtime.event_cache_write_coordinator.queue_thread_update(
+            "!test:localhost",
+            "$other-thread:localhost",
+            other_thread_update,
+            name="matrix_cache_other_thread_update",
+            coordination_scope=access.runtime.event_cache.principal_id,
+        )
+        await asyncio.wait_for(other_thread_ran.wait(), timeout=1.0)
+        # A different thread's write ran while the refill still held the first thread's lane.
+        assert other_thread_ran.is_set()
+
+        allow_refresh.set()
+        await refresh_task
+    await _wait_for_room_cache_idle(access.runtime.event_cache_write_coordinator)
+
+
+@pytest.mark.asyncio
+async def test_refill_failure_releases_the_thread_lane() -> None:
+    """If the refill's fetch raises, the lane is released so queued appends still run."""
+    access = MatrixConversationCache(
+        logger=MagicMock(),
+        runtime=_conversation_runtime(client=_make_client_mock()),
+    )
+    access.runtime.event_cache.get_thread_cache_state = AsyncMock(return_value=None)
+    access.runtime.event_cache.get_thread_events = AsyncMock(return_value=[{"event_id": "$thread:localhost"}])
+    refresh_started = asyncio.Event()
+    allow_refresh = asyncio.Event()
+    queued_update_started = asyncio.Event()
+
+    async def failing_refresh(*_args: object, **_kwargs: object) -> ThreadHistoryResult:
+        refresh_started.set()
+        await allow_refresh.wait()
+        raise RuntimeError("homeserver scan failed")
+
+    async def queued_update() -> None:
+        queued_update_started.set()
+
+    with patch(
+        "mindroom.matrix.conversation_cache.refresh_thread_history_from_source",
+        new=AsyncMock(side_effect=failing_refresh),
+    ):
+        refresh_task = asyncio.create_task(
+            access.refresh_strict_thread_history_from_source("!test:localhost", "$thread:localhost")
+        )
+        await asyncio.wait_for(refresh_started.wait(), timeout=1.0)
+        access.runtime.event_cache_write_coordinator.queue_thread_update(
+            "!test:localhost",
+            "$thread:localhost",
+            queued_update,
+            name="matrix_cache_follow_up_update",
+            coordination_scope=access.runtime.event_cache.principal_id,
+        )
+        await asyncio.sleep(0)
+        assert queued_update_started.is_set() is False  # still waits behind the in-flight refill
+
+        allow_refresh.set()
+        with pytest.raises(RuntimeError, match="homeserver scan failed"):
+            await refresh_task
+    await _wait_for_room_cache_idle(access.runtime.event_cache_write_coordinator)
+
+    # The failed refill released the lane, so the queued append ran.
+    assert queued_update_started.is_set()

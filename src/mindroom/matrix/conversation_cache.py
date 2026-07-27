@@ -738,6 +738,7 @@ class MatrixConversationCache(ConversationCacheProtocol):
         apply here.
         """
         principal_id = self.runtime.event_cache.principal_id
+        coordinator = self.runtime.event_cache_write_coordinator
 
         async def refill() -> ThreadReadResult:
             return await refresh_thread_history_from_source(
@@ -751,9 +752,30 @@ class MatrixConversationCache(ConversationCacheProtocol):
                 trusted_sender_ids=self._trusted_sender_ids(),
             )
 
+        async def barriered_refill() -> ThreadReadResult:
+            # Run the whole fetch+store inside this thread's write lane. A live append that lands
+            # while the ~250ms homeserver scan is in flight is queued *behind* the store instead of
+            # racing it; it then extends the freshly installed snapshot (APPENDED) rather than
+            # re-marking a gap the store cannot clear. Without this barrier the thread refetches
+            # forever under sustained message flow. The coordinator's done-callback releases the
+            # lane on success, exception, or cancellation, and the single-flight below shields the
+            # queued task, so a caller giving up (e.g. a dispatch timeout) never leaves it hanging.
+            # Startup bulk prewarm deliberately bypasses this path and relies on the snapshot
+            # watermark instead; a None coordinator (test/degraded runtimes) runs the refill inline.
+            if coordinator is None:
+                return await refill()
+            lane_task = coordinator.queue_thread_update(
+                room_id,
+                thread_id,
+                refill,
+                name="matrix_cache_thread_refill",
+                coordination_scope=principal_id,
+            )
+            return cast("ThreadReadResult", await asyncio.shield(lane_task))
+
         refill_result = await self._refill_single_flight.run(
             (principal_id, room_id, thread_id, wants_full_history, allows_stale_fallback),
-            refill,
+            barriered_refill,
         )
         return ThreadHistoryResult(
             messages=list(refill_result.result),
