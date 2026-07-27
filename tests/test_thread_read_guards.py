@@ -291,6 +291,11 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             return room_messages_response
 
         client.room_messages = AsyncMock(side_effect=blocking_room_messages)
+        different_thread_update_started = asyncio.Event()
+
+        async def different_thread_update() -> None:
+            different_thread_update_started.set()
+
         access = MatrixConversationCache(
             logger=MagicMock(),
             runtime=_conversation_runtime(
@@ -304,6 +309,13 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
 
         try:
             await asyncio.wait_for(fetch_started.wait(), timeout=1.0)
+            access._write_cache_ops.queue_thread_cache_update(
+                room_id,
+                "$other-thread:localhost",
+                different_thread_update,
+                name="matrix_cache_test_different_thread_update",
+            )
+            await asyncio.wait_for(different_thread_update_started.wait(), timeout=1.0)
             mutation_task = access._write_cache_ops.queue_thread_cache_update(
                 room_id,
                 thread_id,
