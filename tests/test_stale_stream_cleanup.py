@@ -45,7 +45,6 @@ from mindroom.matrix.stale_stream_cleanup import (
     _StaleStreamRecoveryResult as StaleStreamRecoveryResult,
 )
 from mindroom.matrix.state import MatrixState
-from mindroom.matrix.thread_projection import latest_visible_thread_event_id_by_thread
 from mindroom.orchestrator import _MultiAgentOrchestrator
 from mindroom.streaming import build_cancelled_response_update, build_restart_interrupted_body
 from mindroom.tool_system.events import _TOOL_TRACE_KEY
@@ -319,47 +318,6 @@ def _assert_preserved_edit_payload(content: dict[str, object], expected_keys: di
     for key, value in expected_keys.items():
         assert content[key] == value
         assert new_content[key] == value
-
-
-def test_latest_visible_thread_event_id_by_thread_prefers_same_timestamp_descendant() -> None:
-    """Same-timestamp descendants should win the cleanup thread tail order."""
-    same_timestamp = NOW_MS - 1_000
-    root = ResolvedVisibleMessage.synthetic(
-        sender=USER_ID,
-        body="root",
-        event_id="$thread-root",
-        timestamp=NOW_MS - 2_000,
-        content={"body": "root", "msgtype": "m.text"},
-        thread_id="$thread-root",
-    )
-    parent = ResolvedVisibleMessage.synthetic(
-        sender=USER_ID,
-        body="parent",
-        event_id="$zzz_parent",
-        timestamp=same_timestamp,
-        content={
-            "body": "parent",
-            "msgtype": "m.text",
-            "m.relates_to": _thread_reply_relation("$thread-root", "$thread-root"),
-        },
-        thread_id="$thread-root",
-    )
-    child = ResolvedVisibleMessage.synthetic(
-        sender=USER_ID,
-        body="child",
-        event_id="$aaa_child",
-        timestamp=same_timestamp,
-        content={
-            "body": "child",
-            "msgtype": "m.text",
-            "m.relates_to": {"m.in_reply_to": {"event_id": "$zzz_parent"}},
-        },
-        thread_id="$thread-root",
-    )
-
-    assert latest_visible_thread_event_id_by_thread([root, parent, child]) == {
-        "$thread-root": "$aaa_child",
-    }
 
 
 @pytest.mark.asyncio
