@@ -837,8 +837,11 @@ def _winning_edit_ids_by_original(rows: list[dict[str, Any]]) -> dict[str, str |
             senders[row["event_id"]] = row["sender"]
     winners: dict[str, str | None] = {}
     for original_event_id, sender in senders.items():
-        winner = candidates.winner_for(original_event_id, sender=sender)
-        winners[original_event_id] = None if winner is None else winner["event_id"]
+        ordered = candidates.ordered_for(
+            {"event_id": original_event_id, "sender": sender, "type": "m.room.message"},
+            room_id=_ROOM_ID,
+        )
+        winners[original_event_id] = ordered[0]["event_id"] if ordered else None
     return winners
 
 

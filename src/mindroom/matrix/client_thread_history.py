@@ -69,10 +69,17 @@ from mindroom.matrix.client_visible_messages import (
     ThreadEditCandidates,
     apply_latest_edits_to_messages,
 )
-from mindroom.matrix.event_info import EventInfo, event_source_is_timeline_in_room, is_thread_affecting_relation
+from mindroom.matrix.event_info import (
+    EventInfo,
+    event_source_is_state_event,
+    event_source_is_timeline_in_room,
+    event_source_matches_room,
+    event_type_supports_thread_relations,
+    is_thread_affecting_relation,
+)
 from mindroom.matrix.media import (
-    is_encrypted_media_event_source,
-    parse_matrix_media_event_source,
+    event_source_supports_valid_thread_relations,
+    parse_room_message_event_source,
     valid_room_message_replacement,
 )
 from mindroom.matrix.membership_fence import UNCERTIFIED_MEMBERSHIP_EPOCH
@@ -82,7 +89,12 @@ from mindroom.matrix.message_content import (
     prepare_sidecar_hydration_batch,
     resolve_event_source_content,
 )
-from mindroom.matrix.replacements import observe_event_representation
+from mindroom.matrix.replacements import (
+    bundled_replacement_candidates,
+    canonical_event_sources,
+    observe_event_representation,
+    ordered_replacements,
+)
 from mindroom.matrix.thread_diagnostics import (
     THREAD_HISTORY_CACHE_REJECT_REASON_DIAGNOSTIC,
     THREAD_HISTORY_DEGRADED_DIAGNOSTIC,
@@ -95,6 +107,7 @@ from mindroom.matrix.thread_diagnostics import (
 from mindroom.matrix.thread_membership import (
     ThreadResolutionState,
     ThreadRoomScanRootNotFoundError,
+    local_events_prove_thread_root,
     map_backed_thread_membership_access,
     resolve_event_thread_membership,
 )
@@ -118,6 +131,9 @@ _MAX_THREAD_ENUMERATION_PAGES = 100
 _OPAQUE_ENCRYPTED_THREAD_HISTORY_REASON = "thread_history_opaque_encrypted_event"
 _OPAQUE_ENCRYPTED_EVENT_REJECTION = "opaque_encrypted_event"
 _MISSING_THREAD_ROOT_REJECTION = "missing_thread_root"
+_INVALID_EVENT_SCOPE_REJECTION = "invalid_event_scope"
+_INVALID_THREAD_EVENT_REJECTION = "invalid_thread_event"
+_INVALID_THREAD_MEMBERSHIP_REJECTION = "invalid_thread_membership"
 type _ThreadHistoryDiagnosticValue = str | int | float | bool | None
 type _ThreadHistoryRefill = Callable[
     [Mapping[str, str | int | float | bool] | None],
@@ -318,27 +334,15 @@ def _snapshot_message_dict(
 
 
 def _parse_room_message_event(event_source: dict[str, Any]) -> nio.Event | None:
-    """Parse one event dict into a room-message event when possible."""
-    if is_encrypted_media_event_source(event_source):
-        parsed_event = parse_matrix_media_event_source(event_source)
-    else:
-        try:
-            parsed_event = nio.Event.parse_event(event_source)
-        except Exception:
-            return None
-    if parsed_event is None:
+    """Parse one event dict into a room-message event when possible.
+
+    A state event and anything nio could only render as ``BadEvent`` are both rejected here rather
+    than downstream, so no caller has to defend against a payload with no event ID.
+    """
+    if event_source_is_state_event(event_source):
         return None
-    # nio's parser returns BadEvent even though its public return type is Event.
-    event = cast("nio.Event", parsed_event)
-    return event if _is_room_message_event(event) else None
-
-
-def _parse_visible_text_message_event(
-    event_source: dict[str, Any],
-) -> nio.RoomMessageText | nio.RoomMessageNotice | None:
-    """Parse one event dict into a visible text or notice message when possible."""
-    parsed_event = _parse_room_message_event(event_source)
-    return parsed_event if isinstance(parsed_event, (nio.RoomMessageText, nio.RoomMessageNotice)) else None
+    parsed_event = parse_room_message_event_source(event_source)
+    return parsed_event if isinstance(parsed_event, nio.RoomMessage) and _is_room_message_event(parsed_event) else None
 
 
 def _event_source_for_cache(event: nio.Event) -> dict[str, Any]:
@@ -350,54 +354,6 @@ def _event_id_from_source(event_source: Mapping[str, Any]) -> str | None:
     """Return one Matrix event ID from a raw event source when present."""
     event_id = event_source.get("event_id")
     return event_id if isinstance(event_id, str) else None
-
-
-def _bundled_replacement_source(event_source: Mapping[str, Any]) -> dict[str, Any] | None:
-    """Return one bundled replacement event source when Matrix already included it."""
-    unsigned = event_source.get("unsigned")
-    if not isinstance(unsigned, Mapping):
-        return None
-    relations = unsigned.get("m.relations")
-    if not isinstance(relations, Mapping):
-        return None
-    replacement = relations.get("m.replace")
-    if not isinstance(replacement, Mapping):
-        return None
-    candidates: tuple[object, ...] = (
-        replacement.get("event"),
-        replacement.get("latest_event"),
-    )
-    for candidate in candidates:
-        if not isinstance(candidate, Mapping):
-            continue
-        normalized_candidate = {key: value for key, value in candidate.items() if isinstance(key, str)}
-        if _parse_visible_text_message_event(normalized_candidate) is not None:
-            return normalized_candidate
-    replacement_candidate = {key: value for key, value in replacement.items() if isinstance(key, str)}
-    if {
-        "event_id",
-        "sender",
-        "type",
-        "origin_server_ts",
-    }.issubset(replacement_candidate) and _parse_visible_text_message_event(replacement_candidate) is not None:
-        return replacement_candidate
-    return None
-
-
-def _sidecar_hydration_sources(
-    event_sources: Sequence[dict[str, Any]],
-    *,
-    hydrate_sidecars: bool,
-) -> list[dict[str, Any]]:
-    """Return sources whose sidecars this resolution pass may hydrate."""
-    hydration_sources: list[dict[str, Any]] = []
-    for event_source in event_sources:
-        bundled_replacement = _bundled_replacement_source(event_source)
-        if bundled_replacement is not None:
-            hydration_sources.append(bundled_replacement)
-        if hydrate_sidecars or EventInfo.from_event(event_source).is_edit:
-            hydration_sources.append(event_source)
-    return hydration_sources
 
 
 @dataclass(slots=True)
@@ -422,25 +378,63 @@ async def _resolve_thread_history_from_event_sources_timed(
     trusted_sender_ids: Collection[str] = (),
     register_sidecar_owners: bool = False,
 ) -> _ResolvedThreadEventSources:
-    """Resolve visible thread history and return approximate sidecar hydration time."""
+    """Resolve visible thread history and return approximate sidecar hydration time.
+
+    Identity is canonicalized before anything is resolved: one event ID can arrive both standalone
+    and bundled into another event's relations, and two copies that disagree retire that ID rather
+    than letting scan order pick a winner. Tombstoned and contradictory IDs drop out here, so no
+    later step has to re-derive which payloads were eligible.
+    """
+    redacted_event_ids = await event_cache.redacted_event_ids(
+        room_id,
+        {
+            candidate_id
+            for event_source in event_sources
+            for candidate in (*bundled_replacement_candidates(event_source), event_source)
+            if isinstance(candidate_id := candidate.get("event_id"), str)
+        },
+    )
+    room_event_sources, conflicting_event_ids = canonical_event_sources(
+        event_sources,
+        room_id=room_id,
+        replacement_validator=valid_room_message_replacement,
+    )
+    redacted_event_ids |= conflicting_event_ids
+    eligible_event_sources = [
+        event_source
+        for event_source in room_event_sources
+        if _event_id_from_source(event_source) not in redacted_event_ids
+    ]
     input_order_by_event_id: dict[str, int] = {}
     related_event_id_by_event_id: dict[str, str] = {}
-    for index, event_source in enumerate(event_sources):
+    for index, event_source in enumerate(eligible_event_sources):
         event_id = event_source.get("event_id")
         if isinstance(event_id, str):
-            input_order_by_event_id[event_id] = index
+            input_order_by_event_id.setdefault(event_id, index)
             related_event_id = EventInfo.from_event(event_source).next_related_event_id(event_id)
             if isinstance(related_event_id, str):
-                related_event_id_by_event_id[event_id] = related_event_id
+                related_event_id_by_event_id.setdefault(event_id, related_event_id)
     parsed_events = [
         parsed_event
-        for event_source in event_sources
+        for event_source in eligible_event_sources
         if (parsed_event := _parse_room_message_event(event_source)) is not None
     ]
     messages_by_event_id: dict[str, ResolvedVisibleMessage] = {}
     edit_candidates = ThreadEditCandidates()
     sidecar_hydration_started = time.perf_counter()
-    hydration_sources = _sidecar_hydration_sources(event_sources, hydrate_sidecars=hydrate_sidecars)
+    hydration_sources = [
+        candidate
+        for event_source in eligible_event_sources
+        for candidate in (
+            *ordered_replacements(
+                event_source,
+                room_id=room_id,
+                validator=valid_room_message_replacement,
+                excluded_event_ids=redacted_event_ids,
+            ),
+            *((event_source,) if hydrate_sidecars or EventInfo.from_event(event_source).is_edit else ()),
+        )
+    ]
     hydration_batch = await prepare_sidecar_hydration_batch(
         hydration_sources,
         event_cache=event_cache,
@@ -450,14 +444,13 @@ async def _resolve_thread_history_from_event_sources_timed(
     )
     for event in parsed_events:
         event_info = EventInfo.from_event(event.source)
-        bundled_replacement_source = _bundled_replacement_source(event.source)
-        if bundled_replacement_source is not None:
-            bundled_replacement = nio.Event.parse_event(bundled_replacement_source)
-            if isinstance(bundled_replacement, _VISIBLE_ROOM_MESSAGE_EVENT_TYPES):
-                edit_candidates.record(
-                    bundled_replacement,
-                    event_info=EventInfo.from_event(bundled_replacement.source),
-                )
+        for replacement_source in ordered_replacements(
+            event.source,
+            room_id=room_id,
+            validator=valid_room_message_replacement,
+            excluded_event_ids=redacted_event_ids,
+        ):
+            edit_candidates.record_event_source(replacement_source)
         if isinstance(event, _VISIBLE_ROOM_MESSAGE_EVENT_TYPES) and edit_candidates.record(
             event,
             event_info=event_info,
@@ -532,7 +525,11 @@ async def _load_stale_cached_thread_history(
         return None
     if cached_event_sources is None:
         return None
-    cached_rejection_reason = _thread_history_cache_rejection_reason(cached_event_sources, thread_id=thread_id)
+    cached_rejection_reason = await _thread_history_cache_rejection_reason(
+        cached_event_sources,
+        room_id=room_id,
+        thread_id=thread_id,
+    )
     if cached_rejection_reason is not None:
         logger.warning(
             "Stale thread cache is incomplete; refusing degraded history",
@@ -663,7 +660,11 @@ async def _load_cached_thread_history_if_usable(
     cache_read_ms = elapsed_ms_since(cache_read_started, clock=time.perf_counter)
     if cached_event_sources is None:
         return None, {THREAD_HISTORY_CACHE_REJECT_REASON_DIAGNOSTIC: "cache_rows_missing"}
-    cached_rejection_reason = _thread_history_cache_rejection_reason(cached_event_sources, thread_id=thread_id)
+    cached_rejection_reason = await _thread_history_cache_rejection_reason(
+        cached_event_sources,
+        room_id=room_id,
+        thread_id=thread_id,
+    )
     if cached_rejection_reason is not None:
         await _invalidate_thread_cache_entry(event_cache, room_id=room_id, thread_id=thread_id)
         payload_reject_diagnostics: dict[str, str | int | float | bool] = {
@@ -957,17 +958,58 @@ async def _store_thread_history_cache(
     return _ThreadCacheStoreResult(written=written, failed=False)
 
 
-def _thread_history_cache_rejection_reason(
+async def _thread_history_cache_rejection_reason(
     event_sources: Sequence[dict[str, Any]],
     *,
+    room_id: str,
     thread_id: str,
 ) -> str | None:
     """Return why one thread event payload cannot become an authoritative snapshot."""
+    if any(not event_source_matches_room(event_source, room_id) for event_source in event_sources):
+        return _INVALID_EVENT_SCOPE_REJECTION
     if any(is_opaque_encrypted_event_source(event_source) for event_source in event_sources):
         return _OPAQUE_ENCRYPTED_EVENT_REJECTION
-    if not any(_event_id_from_source(event_source) == thread_id for event_source in event_sources):
+    event_ids = [_event_id_from_source(event_source) for event_source in event_sources]
+    if any(not event_id for event_id in event_ids) or len(set(event_ids)) != len(event_ids):
+        return _INVALID_THREAD_EVENT_REJECTION
+    validated_event_ids = cast("list[str]", event_ids)
+    sources_by_event_id = dict(zip(validated_event_ids, event_sources, strict=True))
+    root_source = sources_by_event_id.get(thread_id)
+    if (
+        root_source is None
+        or _parse_room_message_event(root_source) is None
+        or not EventInfo.from_event(root_source).can_be_thread_root
+    ):
         return _MISSING_THREAD_ROOT_REJECTION
-    return None
+    if any(
+        event_id != thread_id
+        and event_type_supports_thread_relations(event_source.get("type"))
+        and _parse_room_message_event(event_source) is None
+        for event_id, event_source in sources_by_event_id.items()
+    ):
+        return _INVALID_THREAD_EVENT_REJECTION
+    event_infos = {
+        event_id: EventInfo.from_event(event_source) for event_id, event_source in sources_by_event_id.items()
+    }
+    resolved_thread_ids = await resolve_thread_ids_for_event_infos(
+        room_id,
+        event_infos=event_infos,
+        event_sources_by_event_id=sources_by_event_id,
+        ordered_event_ids=ordered_event_ids_from_scanned_event_sources(event_sources),
+        # Seed the root only once these events prove it is one, so a payload holding nothing but
+        # the root and plain replies to it cannot certify as a thread snapshot.
+        resolved_thread_ids={thread_id: thread_id} if local_events_prove_thread_root(thread_id, event_infos) else None,
+    )
+    return (
+        _INVALID_THREAD_MEMBERSHIP_REJECTION
+        if any(
+            event_id != thread_id
+            and event_type_supports_thread_relations(event_source.get("type"))
+            and resolved_thread_ids.get(event_id) != thread_id
+            for event_id, event_source in sources_by_event_id.items()
+        )
+        else None
+    )
 
 
 async def _mark_thread_gap_for_opaque_history(
@@ -1235,9 +1277,16 @@ async def _fetch_thread_history_via_room_messages_with_events(
     )
 
 
-def _is_opaque_thread_affecting_event_source(event_source: Mapping[str, Any]) -> bool:
+def _is_opaque_thread_affecting_event_source(
+    event_source: Mapping[str, Any],
+    *,
+    room_id: str,
+) -> bool:
     """Return whether one scanned payload is undecrypted ciphertext with exposed thread-affecting relations."""
-    if not is_opaque_encrypted_event_source(event_source):
+    if not is_opaque_encrypted_event_source(event_source) or not event_source_supports_valid_thread_relations(
+        event_source,
+        room_id,
+    ):
         return False
     event_info = EventInfo.from_event(dict(event_source))
     return is_thread_affecting_relation(event_info, event_type=event_info.event_type)
@@ -1288,7 +1337,7 @@ def _record_scanned_room_message_source(
     event_source = event.source if isinstance(event.source, dict) else {}
     if not event_source_is_timeline_in_room(event_source, room_id):
         return None
-    if _is_opaque_thread_affecting_event_source(event_source):
+    if _is_opaque_thread_affecting_event_source(event_source, room_id=room_id):
         # Undecryptable relation-bearing ciphertext is recorded as fail-closed evidence: it resolves
         # thread membership through its exposed relation and poisons only that reconstruction.
         accepted = _observe_scanned_room_message_identity(
@@ -1299,7 +1348,7 @@ def _record_scanned_room_message_source(
             conflicting_event_ids=conflicting_event_ids,
         )
         return event.event_id if accepted else None
-    if not _is_room_message_event(event):
+    if isinstance(event, nio.BadEvent) or not _is_room_message_event(event):
         return None
 
     normalized_event_source = _event_source_for_cache(event)
@@ -1317,11 +1366,41 @@ def _record_scanned_room_message_source(
         event,
         event_info=event_info,
     )
+    # An edit stays in the scanned sources even though it is not a visible message: the canonical
+    # pass rebuilds the edit buckets from them once the whole scan is in, so removing it here would
+    # drop the edit entirely.
     if recorded_as_edit or event_info.is_edit:
-        # An edit is not itself a visible message, so retire the identity it just claimed.
-        scanned_message_sources.pop(event.event_id, None)
         return None
     return event.event_id
+
+
+def _canonical_scanned_room_sources(
+    scanned_message_sources: Mapping[str, dict[str, Any]],
+    *,
+    room_id: str,
+    conflicting_event_ids: Collection[str],
+) -> tuple[dict[str, dict[str, Any]], ThreadEditCandidates]:
+    """Collapse one room scan to final identities and rebuild explicit edit buckets.
+
+    A scan can observe an event standalone on one page and bundled into another event's relations
+    on a later one. Buckets built while scanning are therefore provisional; they are rebuilt here
+    from the collapsed identities so a reconstruction cannot depend on page order.
+    """
+    canonical_sources, _conflicting_event_ids = canonical_event_sources(
+        scanned_message_sources.values(),
+        room_id=room_id,
+        known_conflicting_event_ids=conflicting_event_ids,
+        replacement_validator=valid_room_message_replacement,
+    )
+    canonical_by_event_id = {
+        event_id: event_source
+        for event_source in canonical_sources
+        if isinstance(event_id := event_source.get("event_id"), str)
+    }
+    edit_candidates = ThreadEditCandidates()
+    for event_source in canonical_sources:
+        edit_candidates.record_event_source(event_source)
+    return canonical_by_event_id, edit_candidates
 
 
 async def fetch_thread_event_sources_via_room_messages(
@@ -1407,14 +1486,6 @@ async def _unresolved_opaque_relation_event_ids(
     return frozenset(unresolved_event_ids)
 
 
-def _scanned_event_sender(event_source: dict[str, Any] | None) -> str | None:
-    """Return one scanned event's sender, or None when the event was never scanned."""
-    if event_source is None:
-        return None
-    sender = event_source.get("sender")
-    return sender if isinstance(sender, str) else None
-
-
 async def _group_scanned_sources_by_thread(
     *,
     room_id: str,
@@ -1457,12 +1528,8 @@ async def _group_scanned_sources_by_thread(
 
     edits_by_root: dict[str, list[dict[str, Any]]] = {}
     for original_event_id in edit_candidates.original_event_ids():
-        winner = edit_candidates.winner_for(
-            original_event_id,
-            sender=_scanned_event_sender(scanned_message_sources.get(original_event_id)),
-            room_id=room_id,
-        )
-        if winner is None:
+        original_source = scanned_message_sources.get(original_event_id)
+        if original_source is None:
             continue
         # Both roots are derived from the original. An edit's own ``m.new_content`` relation is
         # written by whoever sent it, so bucketing on it would let anyone place a message into any
@@ -1470,8 +1537,11 @@ async def _group_scanned_sources_by_thread(
         target_roots = {
             root_id for root_id in (original_event_id, resolved_thread_ids.get(original_event_id)) if root_id in grouped
         }
-        for root_id in target_roots:
-            edits_by_root.setdefault(root_id, []).append(winner)
+        # Every legitimate candidate is carried, not just the newest: resolution below re-ranks
+        # them and needs the runners-up to fall back on when the newest cannot be rendered.
+        for edit_source in edit_candidates.ordered_for(original_source, room_id=room_id):
+            for root_id in target_roots:
+                edits_by_root.setdefault(root_id, []).append(edit_source)
 
     grouped_sources = {
         root_id: sort_thread_event_sources_root_first(
@@ -1538,6 +1608,12 @@ async def _bulk_scan_thread_event_sources(
             break
         from_token = response.end
 
+    scanned_message_sources, edit_candidates = _canonical_scanned_room_sources(
+        scanned_message_sources,
+        room_id=room_id,
+        conflicting_event_ids=conflicting_event_ids,
+    )
+    remaining_root_ids.update(root_id for root_id in thread_root_ids if root_id not in scanned_message_sources)
     thread_event_sources, unresolved_opaque_event_ids = await _group_scanned_sources_by_thread(
         room_id=room_id,
         thread_root_ids=thread_root_ids,
@@ -1596,7 +1672,11 @@ async def bulk_refresh_room_thread_histories(
         opaque_gap_threads = len(set(thread_root_ids))
     else:
         for thread_id, event_sources in scan_result.thread_event_sources.items():
-            rejection_reason = _thread_history_cache_rejection_reason(event_sources, thread_id=thread_id)
+            rejection_reason = await _thread_history_cache_rejection_reason(
+                event_sources,
+                room_id=room_id,
+                thread_id=thread_id,
+            )
             if rejection_reason == _OPAQUE_ENCRYPTED_EVENT_REJECTION:
                 await _mark_thread_gap_for_opaque_history(event_cache, room_id=room_id, thread_id=thread_id)
                 opaque_gap_threads += 1

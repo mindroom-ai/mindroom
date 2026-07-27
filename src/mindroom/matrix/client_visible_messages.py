@@ -410,10 +410,18 @@ class ThreadEditCandidates:
         *,
         event_info: EventInfo,
     ) -> bool:
-        """Track one replacement candidate, returning whether the event was an edit at all."""
+        """Track one replacement candidate, returning whether the event was an edit at all.
+
+        Normalized rather than stored raw: a parsed event carries its ID, sender and timestamp as
+        attributes, and ``source`` is not guaranteed to repeat them. Ranking reads those fields off
+        the payload, so a raw copy would drop every candidate for want of an event ID.
+        """
         if not (event_info.is_edit and event_info.original_event_id):
             return False
-        self.record_source(dict(event.source), original_event_id=event_info.original_event_id)
+        self.record_source(
+            normalize_nio_event_for_cache(event),
+            original_event_id=event_info.original_event_id,
+        )
         return True
 
     def record_source(self, event_source: dict[str, Any], *, original_event_id: str) -> None:
@@ -466,27 +474,6 @@ class ThreadEditCandidates:
             room_id=room_id,
             validator=valid_room_message_replacement,
         )
-
-    def winner_for(
-        self,
-        original_event_id: str,
-        *,
-        sender: str | None,
-        room_id: str | None = None,
-    ) -> dict[str, Any] | None:
-        """Return the newest legitimate replacement for one original.
-
-        ``sender`` is the original's sender, or ``None`` when the original was never seen.
-        """
-        ordered = (
-            self.ordered_unattributed_for(original_event_id, room_id=room_id)
-            if sender is None
-            else self.ordered_for(
-                {"event_id": original_event_id, "sender": sender, "type": "m.room.message"},
-                room_id=room_id,
-            )
-        )
-        return ordered[0] if ordered else None
 
 
 async def apply_latest_edits_to_messages(

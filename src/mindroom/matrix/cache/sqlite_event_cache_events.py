@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import time
 from typing import TYPE_CHECKING, Any
 
 from .event_cache_events import (
@@ -11,9 +12,9 @@ from .event_cache_events import (
     batch_redaction_candidate_ids,
     bundled_replacement_event_ids,
     cache_rows_were_deleted,
+    cached_event_owns_mxc,
     conflicting_cached_bundled_event_ids,
     decode_cached_event,
-    direct_redaction_candidate_ids,
     event_edit_rows,
     event_mxc_urls,
     event_thread_rows,
@@ -285,28 +286,13 @@ async def load_mxc_text(
     mxc_url: str,
 ) -> str | None:
     """Return plaintext only through a surviving visible event reference."""
-    cursor = await db.execute(
-        """
-        SELECT plaintext.text_content
-        FROM mxc_text_cache AS plaintext
-        JOIN event_mxc_references AS reference
-          ON reference.principal_id = plaintext.principal_id
-         AND reference.room_id = plaintext.room_id
-         AND reference.mxc_url = plaintext.mxc_url
-        JOIN events
-          ON events.principal_id = reference.principal_id
-         AND events.room_id = reference.room_id
-         AND events.event_id = reference.event_id
-        WHERE plaintext.principal_id = ?
-          AND plaintext.room_id = ?
-          AND reference.event_id = ?
-          AND plaintext.mxc_url = ?
-        """,
-        (principal_id, room_id, event_id, mxc_url),
+    texts = await load_mxc_texts(
+        db,
+        principal_id=principal_id,
+        room_id=room_id,
+        references=((event_id, mxc_url),),
     )
-    row = await cursor.fetchone()
-    await cursor.close()
-    return None if row is None else str(row[0])
+    return texts.get((event_id, mxc_url))
 
 
 async def load_mxc_texts(
@@ -364,7 +350,7 @@ async def _event_owns_mxc_text(
     """Return whether one visible event currently owns the room-scoped MXC."""
     cursor = await db.execute(
         """
-        SELECT 1
+        SELECT events.event_json
         FROM events
         JOIN event_mxc_references AS reference
           ON reference.principal_id = events.principal_id
@@ -379,7 +365,13 @@ async def _event_owns_mxc_text(
     )
     owns_plaintext = await cursor.fetchone()
     await cursor.close()
-    return owns_plaintext is not None
+    # A surviving reference row is not ownership on its own: it can outlive the payload that
+    # created it, so the stored event has to still name this MXC in its own room scope.
+    return owns_plaintext is not None and cached_event_owns_mxc(
+        event_json=owns_plaintext[0],
+        room_id=room_id,
+        mxc_url=mxc_url,
+    )
 
 
 async def persist_mxc_text(
@@ -556,25 +548,6 @@ async def _scrub_bundled_references_to(
     return len(bundled_rows)
 
 
-async def event_or_original_is_redacted(
-    db: aiosqlite.Connection,
-    principal_id: str,
-    room_id: str,
-    *,
-    event_id: str,
-    event: dict[str, Any],
-) -> bool:
-    """Return whether this event or its edited original has a tombstone."""
-    return bool(
-        await _redacted_event_ids_for_candidates(
-            db,
-            principal_id,
-            room_id,
-            event_ids=direct_redaction_candidate_ids(event_id, event, room_id),
-        ),
-    )
-
-
 async def filter_cacheable_events(
     db: aiosqlite.Connection,
     principal_id: str,
@@ -612,6 +585,47 @@ async def _thread_ids_for_events(
     rows = await cursor.fetchall()
     await cursor.close()
     return {str(row[0]) for row in rows}
+
+
+async def _gap_mark_displaced_root_threads(
+    db: aiosqlite.Connection,
+    principal_id: str,
+    room_id: str,
+    *,
+    root_ids: set[str],
+) -> None:
+    """Gap-mark threads that just lost a member to a newly proven root of its own.
+
+    An event promoted to a thread root stops being a member of whatever thread previously held
+    it, so that thread's stored snapshot no longer describes its contents and has to be refetched.
+    The marker is monotonic, matching ``mark_thread_gap_locked``.
+    """
+    if not root_ids:
+        return
+    placeholders = ",".join("?" for _root_id in root_ids)
+    await db.execute(
+        f"""
+        INSERT INTO thread_cache_state(principal_id, room_id, thread_id, gap_marked_at, gap_reason)
+        SELECT ?, ?, thread_id, ?, 'event_thread_membership_changed'
+        FROM event_threads
+        WHERE principal_id = ? AND room_id = ? AND event_id IN ({placeholders})
+            AND event_id <> thread_id
+        ON CONFLICT(principal_id, room_id, thread_id) DO UPDATE SET
+            gap_marked_at = CASE
+                WHEN thread_cache_state.gap_marked_at IS NULL
+                    OR excluded.gap_marked_at >= thread_cache_state.gap_marked_at
+                    THEN excluded.gap_marked_at
+                ELSE thread_cache_state.gap_marked_at
+            END,
+            gap_reason = CASE
+                WHEN thread_cache_state.gap_marked_at IS NULL
+                    OR excluded.gap_marked_at >= thread_cache_state.gap_marked_at
+                    THEN excluded.gap_reason
+                ELSE thread_cache_state.gap_reason
+            END
+        """,  # noqa: S608
+        (principal_id, room_id, time.time(), principal_id, room_id, *sorted(root_ids)),
+    )
 
 
 async def _reconcile_thread_root_self_rows(
@@ -855,6 +869,12 @@ async def write_lookup_index_rows(
         else set()
     )
     thread_rows = event_thread_rows(room_id, thread_index_events, thread_id=thread_id)
+    await _gap_mark_displaced_root_threads(
+        db,
+        principal_id,
+        room_id,
+        root_ids={row.thread_id for row in thread_rows if row.event_id == row.thread_id},
+    )
     await db.executemany(
         """
         DELETE FROM event_threads
@@ -1131,10 +1151,17 @@ async def redacted_event_ids(
 ) -> frozenset[str]:
     """Return the subset of candidate event IDs that are durably tombstoned.
 
-    Callers pass the bundled replacement identities of one event, so the candidate set is small
-    and bounded by what a single aggregation can name.
+    This is the public entry point and takes an arbitrary candidate set, so the lookup is issued in
+    bounded chunks. A whole-thread caller asks about one candidate per raw row, and a long agent
+    thread holds one ``m.replace`` row per streaming edit, which overruns SQLITE_MAX_VARIABLE_NUMBER
+    (999 before SQLite 3.32) in a single ``IN (...)``.
     """
-    return await _redacted_event_ids_for_candidates(db, principal_id, room_id, event_ids=event_ids)
+    sorted_event_ids = sorted(event_ids)
+    tombstoned: set[str] = set()
+    for start in range(0, len(sorted_event_ids), _MAX_SQLITE_IDENTITY_QUERY_IDS):
+        chunk = frozenset(sorted_event_ids[start : start + _MAX_SQLITE_IDENTITY_QUERY_IDS])
+        tombstoned |= await _redacted_event_ids_for_candidates(db, principal_id, room_id, event_ids=chunk)
+    return frozenset(tombstoned)
 
 
 async def _redacted_event_ids_for_candidates(

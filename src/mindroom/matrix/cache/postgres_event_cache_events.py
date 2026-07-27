@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import time
 from typing import TYPE_CHECKING, Any
 
 from .event_cache_events import (
@@ -11,9 +12,9 @@ from .event_cache_events import (
     batch_redaction_candidate_ids,
     bundled_replacement_event_ids,
     cache_rows_were_deleted,
+    cached_event_owns_mxc,
     conflicting_cached_bundled_event_ids,
     decode_cached_event,
-    direct_redaction_candidate_ids,
     event_edit_rows,
     event_mxc_urls,
     event_thread_rows,
@@ -271,28 +272,14 @@ async def load_mxc_text(
     event_id: str,
     mxc_url: str,
 ) -> str | None:
-    """Return one durably cached MXC text payload when present."""
-    row = await fetchone(
+    """Return plaintext only through a surviving visible event reference."""
+    texts = await load_mxc_texts(
         db,
-        """
-        SELECT plaintext.text_content
-        FROM mindroom_event_cache_mxc_text AS plaintext
-        JOIN mindroom_event_cache_event_mxc_references AS reference
-          ON reference.namespace = plaintext.namespace
-         AND reference.room_id = plaintext.room_id
-         AND reference.mxc_url = plaintext.mxc_url
-        JOIN mindroom_event_cache_events AS events
-          ON events.namespace = reference.namespace
-         AND events.room_id = reference.room_id
-         AND events.event_id = reference.event_id
-        WHERE plaintext.namespace = %s
-          AND plaintext.room_id = %s
-          AND reference.event_id = %s
-          AND plaintext.mxc_url = %s
-        """,
-        (namespace, room_id, event_id, mxc_url),
+        namespace=namespace,
+        room_id=room_id,
+        references=((event_id, mxc_url),),
     )
-    return None if row is None else str(row[0])
+    return texts.get((event_id, mxc_url))
 
 
 async def load_mxc_texts(
@@ -353,7 +340,7 @@ async def persist_mxc_text(
     owns_plaintext = await fetchone(
         db,
         """
-        SELECT 1
+        SELECT events.event_json
         FROM mindroom_event_cache_events AS events
         JOIN mindroom_event_cache_event_mxc_references AS reference
           ON reference.namespace = events.namespace
@@ -366,7 +353,13 @@ async def persist_mxc_text(
         """,
         (namespace, room_id, event_id, mxc_url),
     )
-    if owns_plaintext is None:
+    # A surviving reference row is not ownership on its own: it can outlive the payload that
+    # created it, so the stored event has to still name this MXC in its own room scope.
+    if owns_plaintext is None or not cached_event_owns_mxc(
+        event_json=owns_plaintext[0],
+        room_id=room_id,
+        mxc_url=mxc_url,
+    ):
         return False
     await db.execute(
         """
@@ -526,25 +519,6 @@ async def _scrub_bundled_references_to(
     return scrubbed_rows
 
 
-async def event_or_original_is_redacted(
-    db: AsyncConnection,
-    namespace: str,
-    room_id: str,
-    *,
-    event_id: str,
-    event: dict[str, Any],
-) -> bool:
-    """Return whether this event or its edited original was durably redacted."""
-    return bool(
-        await _redacted_event_ids_for_candidates(
-            db,
-            namespace,
-            room_id,
-            event_ids=direct_redaction_candidate_ids(event_id, event, room_id),
-        ),
-    )
-
-
 async def filter_cacheable_events(
     db: AsyncConnection,
     namespace: str,
@@ -580,6 +554,46 @@ async def _thread_ids_for_events(
         (namespace, room_id, event_ids),
     )
     return {str(row[0]) for row in rows}
+
+
+async def _gap_mark_displaced_root_threads(
+    db: AsyncConnection,
+    namespace: str,
+    room_id: str,
+    *,
+    root_ids: set[str],
+) -> None:
+    """Gap-mark threads that just lost a member to a newly proven root of its own.
+
+    An event promoted to a thread root stops being a member of whatever thread previously held
+    it, so that thread's stored snapshot no longer describes its contents and has to be refetched.
+    The marker is monotonic, matching ``mark_thread_gap_locked``.
+    """
+    if not root_ids:
+        return
+    await db.execute(
+        """
+        INSERT INTO mindroom_event_cache_thread_state(
+            namespace, room_id, thread_id, gap_marked_at, gap_reason
+        )
+        SELECT %s, %s, thread_id, %s, 'event_thread_membership_changed'
+        FROM mindroom_event_cache_event_threads
+        WHERE namespace = %s AND room_id = %s AND event_id = ANY(%s)
+            AND event_id <> thread_id
+        ON CONFLICT(namespace, room_id, thread_id) DO UPDATE SET
+            gap_marked_at = GREATEST(
+                mindroom_event_cache_thread_state.gap_marked_at,
+                excluded.gap_marked_at
+            ),
+            gap_reason = CASE
+                WHEN mindroom_event_cache_thread_state.gap_marked_at IS NULL
+                    OR excluded.gap_marked_at >= mindroom_event_cache_thread_state.gap_marked_at
+                    THEN excluded.gap_reason
+                ELSE mindroom_event_cache_thread_state.gap_reason
+            END
+        """,
+        (namespace, room_id, time.time(), namespace, room_id, sorted(root_ids)),
+    )
 
 
 async def _reconcile_thread_root_self_rows(
@@ -786,6 +800,12 @@ async def write_lookup_index_rows(
         event_ids=thread_index_event_ids,
     )
     thread_rows = event_thread_rows(room_id, thread_index_events, thread_id=thread_id)
+    await _gap_mark_displaced_root_threads(
+        db,
+        namespace,
+        room_id,
+        root_ids={row.thread_id for row in thread_rows if row.event_id == row.thread_id},
+    )
     await db.execute(
         """
         DELETE FROM mindroom_event_cache_event_threads

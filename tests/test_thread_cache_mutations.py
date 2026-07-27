@@ -638,6 +638,11 @@ class TestMatrixConversationCacheThreadReads:
             return ThreadAppendOutcome.APPENDED
 
         event_cache.apply_thread_mutation_append = AsyncMock(side_effect=apply_thread_mutation_append)
+        access.reserve_outbound_thread(
+            "!room:localhost",
+            "$thread-message:localhost",
+            "$claimed-thread:localhost",
+        )
         sibling_thread_task = coordinator.queue_thread_update(
             "!room:localhost",
             "$sibling-thread:localhost",

@@ -26,6 +26,7 @@ from mindroom.matrix.cache import (
 )
 from mindroom.matrix.cache.event_cache import EventCacheBackendUnavailableError
 from mindroom.matrix.cache.postgres_event_cache import (
+    _POSTGRES_EVENT_CACHE_SCHEMA_VERSION,
     PostgresEventCache,
     _create_postgres_event_cache_schema,
     _FlushedPendingWrites,
@@ -1917,16 +1918,16 @@ async def test_postgres_event_cache_round_trips_core_conversation_cache_behavior
 
 
 @pytest.mark.asyncio
-async def test_postgres_v3_startup_retains_single_latest_edit_index(
+async def test_postgres_v3_migration_retains_single_latest_edit_index(
     postgres_event_cache_url: str,
 ) -> None:
-    """Schema v3 keeps one narrowing index while query collation owns correctness."""
+    """Migrating a v3 database keeps one narrowing index; query collation owns correctness."""
     schema_name = f"cache_migration_v3_{uuid.uuid4().hex}"
     isolated_url = await _seed_postgres_v3_schema(postgres_event_cache_url, schema_name)
     cache = PostgresEventCache(database_url=isolated_url, namespace="runtime")
     await cache.initialize()
     try:
-        assert "cache_schema_migrated_from" not in cache.runtime_diagnostics()
+        assert cache.runtime_diagnostics()["cache_schema_migrated_from"] == 3
         assert cache._runtime.db is not None
         version_cursor = await cache._runtime.db.execute(
             "SELECT value FROM mindroom_event_cache_metadata WHERE key = 'schema_version'",
@@ -1945,7 +1946,7 @@ async def test_postgres_v3_startup_retains_single_latest_edit_index(
     finally:
         await cache.close()
 
-    assert version == ("3",)
+    assert version == (str(_POSTGRES_EVENT_CACHE_SCHEMA_VERSION),)
     assert indexes == [("idx_mindroom_event_cache_event_edits_room_original_ts",)]
 
 

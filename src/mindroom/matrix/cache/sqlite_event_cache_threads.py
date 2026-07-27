@@ -39,7 +39,6 @@ from .sqlite_event_cache_events import (
     delete_cached_events,
     delete_event_edit_rows,
     delete_event_thread_rows,
-    event_or_original_is_redacted,
     filter_cacheable_events,
     write_lookup_index_rows,
 )
@@ -849,16 +848,18 @@ async def _append_existing_thread_event(
     A redacted event (or one whose edit target is redacted) is refused before anything is written, so
     its payload never reaches the point-lookup table.
     """
-    event_id = event_id_for_cache(normalized_event)
-    if await event_or_original_is_redacted(
+    # Filtering rather than only refusing: a tombstoned edit can reach the cache inside another
+    # event's bundled aggregation, so the surviving payload is the sanitized one.
+    cacheable_events = await filter_cacheable_events(
         db,
         principal_id,
         room_id,
-        event_id=event_id,
-        event=normalized_event,
-    ):
+        [(event_id_for_cache(normalized_event), normalized_event)],
+    )
+    if not cacheable_events:
         return ThreadAppendOutcome.APPEND_REFUSED
 
+    event_id, normalized_event = cacheable_events[0]
     serialized_event = serialize_cached_event(event_id, normalized_event)
     cursor = await db.execute(
         """

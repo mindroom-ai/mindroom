@@ -1626,7 +1626,7 @@ class TestThreadHistory:
     @pytest.mark.asyncio
     async def test_cache_certification_rejects_legacy_wrong_room_rows(self) -> None:
         """Read certification must reject wrong-room rows left by an older cache writer."""
-        rejection = matrix_client_module._thread_history_cache_rejection_reason(
+        rejection = await matrix_client_module._thread_history_cache_rejection_reason(
             [
                 {
                     "event_id": "$thread_root",
@@ -1637,6 +1637,7 @@ class TestThreadHistory:
                     "content": {"body": "Poison", "msgtype": "m.text"},
                 },
             ],
+            room_id="!room:localhost",
             thread_id="$thread_root",
         )
 
@@ -3389,7 +3390,7 @@ class TestThreadHistory:
             },
         )
         scanned_sources = {"$thread_root": root_event.source}
-        edit_candidates = {}
+        edit_candidates = ThreadEditCandidates()
 
         recorded_event_id = _record_scanned_room_message_source(
             malformed_event,
@@ -3456,7 +3457,7 @@ class TestThreadHistory:
             },
         )
         scanned_sources = {"$thread_root": root_event.source}
-        edit_candidates = {}
+        edit_candidates = ThreadEditCandidates()
 
         recorded_event_id = _record_scanned_room_message_source(
             malformed_event,
@@ -5012,8 +5013,9 @@ class TestThreadHistoryCache:
         if has_thread_child:
             event_sources.insert(1, source("$thread_child", 2000, {"rel_type": "m.thread", "event_id": thread_id}))
 
-        rejection = matrix_client_module._thread_history_cache_rejection_reason(
+        rejection = await matrix_client_module._thread_history_cache_rejection_reason(
             event_sources,
+            room_id=room_id,
             thread_id=thread_id,
         )
 
@@ -5064,8 +5066,9 @@ class TestThreadHistoryCache:
             },
         ]
 
-        rejection = matrix_client_module._thread_history_cache_rejection_reason(
+        rejection = await matrix_client_module._thread_history_cache_rejection_reason(
             event_sources,
+            room_id=room_id,
             thread_id=thread_id,
         )
 
@@ -5150,8 +5153,9 @@ class TestThreadHistoryCache:
             ),
         ]
 
-        rejection = matrix_client_module._thread_history_cache_rejection_reason(
+        rejection = await matrix_client_module._thread_history_cache_rejection_reason(
             event_sources,
+            room_id=room_id,
             thread_id=thread_id,
         )
 
