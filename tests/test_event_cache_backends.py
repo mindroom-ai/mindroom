@@ -1734,10 +1734,10 @@ async def test_postgres_event_cache_recovers_after_backend_connection_terminatio
 
 
 @pytest.mark.asyncio
-async def test_postgres_event_cache_flushes_pending_invalidations_before_guarded_replace(
+async def test_postgres_event_cache_flushes_pending_gaps_before_replace(
     postgres_event_cache_url: str,
 ) -> None:
-    """A deferred stale marker must be persisted before a guarded cache replacement can win."""
+    """A deferred gap marker must be persisted before a cache replacement lands."""
     room_id = "!room:localhost"
     thread_id = "$thread"
     root_event = _message_event(
@@ -1922,7 +1922,7 @@ async def test_postgres_event_cache_preserves_pending_marker_recorded_during_flu
 async def test_postgres_event_cache_pending_thread_flush_does_not_downgrade_newer_durable_marker(
     postgres_event_cache_url: str,
 ) -> None:
-    """An older pending thread marker must not overwrite a newer durable invalidation."""
+    """An older pending thread marker must not overwrite a newer durable gap marker."""
     room_id = "!room:localhost"
     thread_id = "$thread"
     namespace = f"tenant_{uuid.uuid4().hex}"
@@ -2042,8 +2042,8 @@ def test_postgres_transient_classifier_rejects_authentication_failures_without_s
     assert not _is_transient_postgres_failure(exc)
 
 
-def test_postgres_pending_invalidation_records_are_monotonic() -> None:
-    """Pending invalidation buffers should keep the newest marker for each scope."""
+def test_postgres_pending_gap_records_are_monotonic() -> None:
+    """Pending gap buffers should keep the newest marker for each scope."""
     runtime = _PostgresEventCacheRuntime("postgresql://cache:secret@db.internal/mindroom", namespace="tenant")
 
     runtime.record_pending_thread_gap(

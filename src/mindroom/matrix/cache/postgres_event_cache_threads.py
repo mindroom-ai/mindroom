@@ -729,7 +729,8 @@ async def _thread_snapshot_is_newer_than_fetch(
     fetch_started_at: float,
 ) -> bool:
     """Return whether an installed snapshot came from a strictly newer fetch than this one."""
-    cursor = await db.execute(
+    row = await fetchone(
+        db,
         """
         SELECT snapshot_fetch_started_at
         FROM mindroom_event_cache_thread_state
@@ -737,7 +738,6 @@ async def _thread_snapshot_is_newer_than_fetch(
         """,
         (namespace, room_id, thread_id),
     )
-    row = await cursor.fetchone()
     if row is None or row[0] is None:
         return False
     return float(row[0]) > fetch_started_at

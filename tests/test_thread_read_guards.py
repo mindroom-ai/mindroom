@@ -1461,127 +1461,17 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         )
 
     @pytest.mark.asyncio
-    async def test_dispatch_thread_snapshot_racing_unknown_live_mutation_leaves_gap_marked(  # noqa: PLR0915
+    async def test_dispatch_thread_snapshot_racing_unknown_live_mutation_leaves_gap_marked(
         self,
         tmp_path: Path,
     ) -> None:
         """A gap raised mid-fetch survives, so the next dispatch-snapshot read refetches."""
-        room_id = "!test:localhost"
-        thread_id = "$thread:localhost"
-        event_cache = SqliteEventCache(tmp_path / "event_cache.db")
-        await event_cache.initialize()
-        root_event = _text_event(
-            event_id=thread_id,
-            body="Root",
-            sender="@user:localhost",
-            server_timestamp=1000,
-            room_id=room_id,
+        await _assert_racing_unknown_live_mutation_leaves_thread_gap_marked(
+            tmp_path,
+            read_thread=MatrixConversationCache.get_dispatch_thread_snapshot,
+            force_refetch_reason="test_force_dispatch_refetch",
+            expected_full_history=False,
         )
-        old_reply = _text_event(
-            event_id="$reply-old:localhost",
-            body="Old reply",
-            sender="@agent:localhost",
-            server_timestamp=2000,
-            room_id=room_id,
-            thread_id=thread_id,
-        )
-        coordinator = _runtime_write_coordinator()
-        client = _relations_client(
-            root_event=root_event,
-            thread_events=[old_reply],
-            next_batch="s_initial",
-        )
-        await _replace_thread(
-            event_cache,
-            room_id,
-            thread_id,
-            [root_event.source, old_reply.source],
-        )
-        await event_cache.mark_thread_gap(room_id, thread_id, reason="test_force_dispatch_refetch")
-        room_messages_response = client.room_messages.return_value
-        fetch_started = asyncio.Event()
-        release_fetch = asyncio.Event()
-        room_invalidation_finished = asyncio.Event()
-        dispatch_snapshot: ThreadHistoryResult | None = None
-        live_task: asyncio.Task[None] | None = None
-
-        async def blocking_room_messages(*_args: object, **_kwargs: object) -> nio.RoomMessagesResponse:
-            fetch_started.set()
-            await release_fetch.wait()
-            return room_messages_response
-
-        client.room_messages = AsyncMock(side_effect=blocking_room_messages)
-        access = MatrixConversationCache(
-            logger=MagicMock(),
-            runtime=_conversation_runtime(
-                client=client,
-                event_cache=event_cache,
-                coordinator=coordinator,
-            ),
-        )
-        real_mark_room_threads_gap = event_cache.mark_room_threads_gap
-
-        async def mark_room_threads_gap(room_id_arg: str, *, reason: str) -> None:
-            assert room_id_arg == room_id
-            assert reason == "live_thread_lookup_unavailable"
-            await real_mark_room_threads_gap(room_id_arg, reason=reason)
-            room_invalidation_finished.set()
-
-        async def resolve_unknown_impact(*_args: object, **_kwargs: object) -> MutationThreadImpact:
-            return MutationThreadImpact.unknown()
-
-        event_cache.mark_room_threads_gap = AsyncMock(side_effect=mark_room_threads_gap)
-        access._live._resolver.resolve_thread_impact_for_mutation = AsyncMock(side_effect=resolve_unknown_impact)
-        unknown_event = _text_event(
-            event_id="$unknown-edit:localhost",
-            body="* Updated",
-            sender="@agent:localhost",
-            server_timestamp=3000,
-            room_id=room_id,
-            replacement_of="$missing:localhost",
-            new_body="Updated",
-        )
-        read_task = asyncio.create_task(access.get_dispatch_thread_snapshot(room_id, thread_id))
-
-        try:
-            await asyncio.wait_for(fetch_started.wait(), timeout=1.0)
-            live_task = asyncio.create_task(
-                access.append_live_event(
-                    room_id,
-                    unknown_event,
-                    event_info=EventInfo.from_event(unknown_event.source),
-                ),
-            )
-            await asyncio.wait_for(room_invalidation_finished.wait(), timeout=1.0)
-
-            release_fetch.set()
-            dispatch_snapshot = await asyncio.wait_for(read_task, timeout=1.0)
-            await asyncio.wait_for(live_task, timeout=1.0)
-            await _wait_for_room_cache_idle(coordinator)
-            thread_state = await event_cache.get_thread_cache_gap(room_id, thread_id)
-        finally:
-            release_fetch.set()
-            await asyncio.wait_for(
-                asyncio.gather(
-                    read_task,
-                    *(task for task in [live_task] if task is not None),
-                    return_exceptions=True,
-                ),
-                timeout=1.0,
-            )
-            await _wait_for_room_cache_idle(coordinator)
-            await event_cache.close()
-
-        assert dispatch_snapshot is not None
-        assert dispatch_snapshot.diagnostics[THREAD_HISTORY_SOURCE_DIAGNOSTIC] == THREAD_HISTORY_SOURCE_HOMESERVER
-        assert [message.body for message in dispatch_snapshot] == ["Root", "Old reply"]
-        # The racing gap was raised after the fetch started, so the replacement that fetch
-        # installed does not cover it: the marker survives and the next read refetches.
-        assert thread_state is not None
-        assert thread_state.gap_reason == "live_thread_lookup_unavailable"
-        assert matrix_cache.thread_cache_rejection_reason(thread_state) == "live_thread_lookup_unavailable"
-        # One fetch, not two: the read no longer retries in-place to re-establish trust.
-        assert client.room_messages.await_count == 1
 
     @pytest.mark.asyncio
     async def test_latest_thread_event_lookup_refetches_invalidated_thread_tail(

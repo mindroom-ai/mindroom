@@ -203,17 +203,14 @@ async def test_bulk_refresh_page_budget_stores_found_threads_and_reports_remaini
     assert event_cache.replace_thread.await_args.args[1] == "$a:localhost"
 
 
-def _cached_message_source(event_id: str, *, thread_id: str | None = None) -> dict[str, Any]:
-    content: dict[str, Any] = {"body": event_id, "msgtype": "m.text"}
-    if thread_id is not None:
-        content["m.relates_to"] = {"rel_type": "m.thread", "event_id": thread_id}
+def _cached_message_source(event_id: str) -> dict[str, Any]:
     return {
         "event_id": event_id,
         "sender": "@alice:localhost",
         "origin_server_ts": 1_000,
         "room_id": _ROOM_ID,
         "type": "m.room.message",
-        "content": content,
+        "content": {"body": event_id, "msgtype": "m.text"},
     }
 
 
