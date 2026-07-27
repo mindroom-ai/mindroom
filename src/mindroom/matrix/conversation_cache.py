@@ -28,7 +28,6 @@ from mindroom.entity_resolution import current_internal_sender_ids
 from mindroom.logging_config import get_logger
 from mindroom.matrix.cache import (
     ConversationEventCache,
-    ThreadCacheReplaceOutcome,
     ThreadHistoryResult,
     normalize_nio_event_for_cache,
     thread_history_result,
@@ -109,7 +108,6 @@ _SYNC_REPLAY_TIMELINE_EVENT_THRESHOLD = 50
 
 # A caller waiting for history may rescan after losing the guarded replacement race; a speculative
 # repair may not, because the conflict it lost is another writer already rewriting that thread.
-_SPECULATIVE_REPAIR_ATTEMPTS = 1
 
 
 def _is_sync_replay_batch(response: nio.SyncResponse) -> bool:
@@ -854,7 +852,7 @@ class MatrixConversationCache(ConversationCacheProtocol):
             room_id=room_id,
             thread_id=thread_id,
             caller_label=caller_label,
-            mode=thread_history_refresh_mode(result, cache_hit=False),
+            mode=thread_history_refresh_mode(cache_hit=False),
             diagnostics=result.diagnostics,
             coordinator_queue_wait_ms=coordinator_queue_wait_ms,
         )
@@ -906,7 +904,6 @@ class MatrixConversationCache(ConversationCacheProtocol):
                 cache_reject_diagnostics=cache_reject_diagnostics,
                 trusted_sender_ids=self._trusted_sender_ids(),
                 retained_event_sources=retained_event_source_provider,
-                max_repair_attempts=_SPECULATIVE_REPAIR_ATTEMPTS if speculative else None,
             )
             if self._thread_repair_result_is_usable(result):
                 await self._acknowledge_repaired_thread_deltas(
@@ -915,8 +912,7 @@ class MatrixConversationCache(ConversationCacheProtocol):
                     thread_id,
                     principal_id=principal_id,
                     replayed_event_ids=retained_event_source_provider.provided_event_ids,
-                    snapshot_stored=result.diagnostics.get("cache_store_outcome")
-                    == ThreadCacheReplaceOutcome.STORED.value,
+                    snapshot_stored=result.diagnostics.get("cache_store_written") is True,
                 )
             return result
 
@@ -979,12 +975,12 @@ class MatrixConversationCache(ConversationCacheProtocol):
     def _thread_repair_result_is_usable(result: ThreadHistoryResult) -> bool:
         """Return whether one flight left a trusted durable snapshot."""
         source = result.diagnostics.get(THREAD_HISTORY_SOURCE_DIAGNOSTIC)
-        return source == THREAD_HISTORY_SOURCE_CACHE or result.diagnostics.get("cache_repair_usable") is True
+        return source == THREAD_HISTORY_SOURCE_CACHE or result.diagnostics.get("cache_store_written") is True
 
     @staticmethod
     def _thread_repair_result_arms_backoff(result: ThreadHistoryResult) -> bool:
         """Return whether one persistent failure should throttle later refills."""
-        return result.diagnostics.get("cache_store_outcome") == ThreadCacheReplaceOutcome.HARD_FAILURE.value
+        return result.diagnostics.get("cache_store_failed") is True
 
     def _schedule_missing_thread_repair(self, room_id: str, thread_id: str) -> None:
         """Schedule bounded background repair after an append finds no snapshot.

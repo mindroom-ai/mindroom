@@ -6,7 +6,7 @@ from typing import Any
 
 import pytest
 
-from mindroom.matrix.cache import ConversationEventCache, ThreadAppendOutcome, ThreadCacheReplaceOutcome
+from mindroom.matrix.cache import ConversationEventCache, ThreadAppendOutcome
 from tests.event_cache_test_support import replace_thread_unconditionally
 
 
@@ -244,13 +244,16 @@ class TestConversationEventCacheContract:
             assert await event_cache.get_event("!room:localhost", event_id) is None
 
     @pytest.mark.asyncio
-    async def test_thread_snapshot_append_state_and_race_guard(self, event_cache: ConversationEventCache) -> None:
-        """Thread snapshots share ordering, index, incremental-update, and replacement-guard semantics."""
+    async def test_thread_snapshot_append_ordering_and_gap_rules(
+        self,
+        event_cache: ConversationEventCache,
+    ) -> None:
+        """Thread snapshots share append ordering, index maintenance, and the two gap rules."""
         room_id = "!room:localhost"
         thread_id = "$thread:localhost"
         root = _message_event(thread_id, 1)
         reply = _message_event("$reply:localhost", 2, thread_id=thread_id)
-        await replace_thread_unconditionally(event_cache, room_id, thread_id, [reply, root], validated_at=10.0)
+        await replace_thread_unconditionally(event_cache, room_id, thread_id, [reply, root])
 
         appended = await event_cache.apply_thread_mutation_append(
             room_id,
@@ -258,27 +261,10 @@ class TestConversationEventCacheContract:
             _message_event("$appended:localhost", 3, thread_id=thread_id),
             append_failed_reason="live_append_failed",
         )
-        await event_cache.mark_thread_stale(room_id, thread_id, reason="live_thread_mutation")
-        # Re-appending the same event keeps thread membership identical, so this asserts trust
-        # recovery alone rather than also changing what the snapshot contains.
-        revalidated = await event_cache.apply_thread_mutation_append(
-            room_id,
-            thread_id,
-            _message_event("$appended:localhost", 3, thread_id=thread_id),
-            append_failed_reason="live_append_failed",
-        )
-        guarded_replacement = await event_cache.replace_thread_if_not_newer(
-            room_id,
-            thread_id,
-            [root],
-            expected_membership_epoch=await event_cache.room_membership_epoch(room_id),
-            fetch_started_at=0.0,
-        )
-        cached_events = await event_cache.get_thread_events(room_id, thread_id)
-
         assert appended is ThreadAppendOutcome.APPENDED
-        assert revalidated is ThreadAppendOutcome.APPENDED
-        assert guarded_replacement is ThreadCacheReplaceOutcome.EXISTING_USABLE
+        assert await event_cache.get_thread_cache_gap(room_id, thread_id) is None
+
+        cached_events = await event_cache.get_thread_events(room_id, thread_id)
         assert cached_events is not None
         assert [event["event_id"] for event in cached_events] == [
             "$thread:localhost",
@@ -286,6 +272,32 @@ class TestConversationEventCacheContract:
             "$appended:localhost",
         ]
         assert await event_cache.get_thread_id_for_event(room_id, "$appended:localhost") == thread_id
+
+        # Rule 1: a gap marker makes the snapshot unusable, and a later append never clears it.
+        await event_cache.mark_thread_stale(room_id, thread_id, reason="live_thread_mutation")
+        re_appended = await event_cache.apply_thread_mutation_append(
+            room_id,
+            thread_id,
+            _message_event("$appended:localhost", 3, thread_id=thread_id),
+            append_failed_reason="live_append_failed",
+        )
+        assert re_appended is ThreadAppendOutcome.APPENDED
+        assert await event_cache.get_thread_cache_gap(room_id, thread_id) is not None
+
+        # Rule 2: a replacement whose fetch predates the marker leaves it in place.
+        stale_stored = await event_cache.replace_thread(
+            room_id,
+            thread_id,
+            [root, reply],
+            expected_membership_epoch=await event_cache.room_membership_epoch(room_id),
+            fetch_started_at=0.0,
+        )
+        assert stale_stored
+        assert await event_cache.get_thread_cache_gap(room_id, thread_id) is not None
+
+        # ...and a replacement whose fetch covers the marker clears it.
+        await replace_thread_unconditionally(event_cache, room_id, thread_id, [root, reply])
+        assert await event_cache.get_thread_cache_gap(room_id, thread_id) is None
 
     @pytest.mark.asyncio
     async def test_redaction_tombstones_original_edits_and_late_replays(

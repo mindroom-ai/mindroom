@@ -23,20 +23,13 @@ from .postgres_event_cache_events import (
 )
 from .thread_cache_state import (
     ThreadAppendOutcome,
-    ThreadCacheReplaceOutcome,
-    ThreadCacheStateRow,
-    append_keeps_thread_valid,
-    guarded_thread_replacement_conflict,
-    incremental_thread_revalidation_reasons,
-    is_incremental_thread_revalidation_reason,
-    thread_cache_state_changed_after,
-    thread_cache_state_row,
+    ThreadCacheGap,
+    thread_cache_gap_row,
 )
 
 if TYPE_CHECKING:
     from psycopg import AsyncConnection
 
-    from .event_cache import ThreadCacheState
 
 # The edits that survive a collapsed read: one per message, from the right sender.
 #
@@ -211,54 +204,28 @@ async def load_recent_room_thread_ids(
     return [str(row[0]) for row in rows]
 
 
-async def _load_thread_cache_state_row(
+async def load_thread_cache_gap(
     db: AsyncConnection,
     *,
     namespace: str,
     room_id: str,
     thread_id: str,
-) -> ThreadCacheStateRow | None:
-    """Return one raw thread-cache-state row joined with room invalidation state."""
+) -> ThreadCacheGap | None:
+    """Return the durable gap marker recorded against one cached thread, if any.
+
+    Room-scoped gaps are fanned out across the room's thread rows when they are marked, so this is
+    a single-table read with no room-state join.
+    """
     row = await fetchone(
         db,
         """
-        SELECT
-            mindroom_event_cache_thread_state.validated_at,
-            mindroom_event_cache_thread_state.invalidated_at,
-            mindroom_event_cache_thread_state.invalidation_reason,
-            mindroom_event_cache_room_state.invalidated_at,
-            mindroom_event_cache_room_state.invalidation_reason
-        FROM (SELECT %s AS requested_namespace, %s AS requested_room_id, %s AS requested_thread_id) AS requested
-        LEFT JOIN mindroom_event_cache_thread_state
-            ON mindroom_event_cache_thread_state.namespace = requested.requested_namespace
-            AND mindroom_event_cache_thread_state.room_id = requested.requested_room_id
-            AND mindroom_event_cache_thread_state.thread_id = requested.requested_thread_id
-        LEFT JOIN mindroom_event_cache_room_state
-            ON mindroom_event_cache_room_state.namespace = requested.requested_namespace
-            AND mindroom_event_cache_room_state.room_id = requested.requested_room_id
+        SELECT gap_marked_at, gap_reason
+        FROM mindroom_event_cache_thread_state
+        WHERE namespace = %s AND room_id = %s AND thread_id = %s
         """,
         (namespace, room_id, thread_id),
     )
-    return thread_cache_state_row(row)
-
-
-async def load_thread_cache_state(
-    db: AsyncConnection,
-    *,
-    namespace: str,
-    room_id: str,
-    thread_id: str,
-) -> ThreadCacheState | None:
-    """Return one thread cache state object joined with room invalidation state."""
-    row = await _load_thread_cache_state_row(
-        db,
-        namespace=namespace,
-        room_id=room_id,
-        thread_id=thread_id,
-    )
-    if row is None:
-        return None
-    return row.as_public_state()
+    return thread_cache_gap_row(row)
 
 
 async def load_room_membership_locked(
@@ -316,13 +283,16 @@ async def set_room_membership_locked(
     membership_state: Literal["joined", "departed"],
     reason: str,
 ) -> None:
-    """Advance one durable room-membership transition and invalidate prior refills."""
+    """Advance one durable room-membership transition and gap-mark prior refills."""
     await mark_room_stale_locked(
         db,
         namespace=namespace,
         room_id=room_id,
         reason=reason,
     )
+    # The gap marker no longer touches ``room_state``, so the membership row has to be created here
+    # before it can be advanced.
+    await certify_room_membership_locked(db, namespace=namespace, room_id=room_id)
     await db.execute(
         """
         UPDATE mindroom_event_cache_room_state
@@ -340,7 +310,8 @@ async def _store_thread_events_locked(
     room_id: str,
     thread_id: str,
     events: list[dict[str, Any]],
-    validated_at: float,
+    stored_at: float,
+    fetch_started_at: float,
 ) -> frozenset[str]:
     """Persist one authoritative thread snapshot within an existing DB transaction."""
     normalized_events = [normalize_event_source_for_cache(event) for event in events]
@@ -356,7 +327,7 @@ async def _store_thread_events_locked(
         namespace=namespace,
         room_id=room_id,
         serialized_events=serialized_events,
-        cached_at=validated_at,
+        cached_at=stored_at,
         thread_id=thread_id,
     )
     for event in serialized_events:
@@ -378,26 +349,31 @@ async def _store_thread_events_locked(
                 event.origin_server_ts,
             ),
         )
-    await _upsert_thread_cache_state(
+    await _clear_thread_gap_covered_by_fetch(
         db,
         namespace=namespace,
         room_id=room_id,
         thread_id=thread_id,
-        validated_at=validated_at,
+        fetch_started_at=fetch_started_at,
     )
     return frozenset(event.event_id for event in serialized_events)
 
 
-async def _replace_thread_locked(
+async def replace_thread_locked(
     db: AsyncConnection,
     *,
     namespace: str,
     room_id: str,
     thread_id: str,
     events: list[dict[str, Any]],
-    validated_at: float,
+    stored_at: float,
+    fetch_started_at: float,
 ) -> None:
-    """Replace one thread snapshot atomically within an existing DB transaction."""
+    """Replace one thread snapshot atomically within an existing DB transaction.
+
+    The replacement always installs: raw upserts are monotonic, so a concurrent writer cannot be
+    buried by one. Only the gap marker is conditional — see ``_clear_thread_gap_covered_by_fetch``.
+    """
     existing_event_ids = await _thread_event_ids_for_thread(
         db,
         namespace=namespace,
@@ -410,7 +386,8 @@ async def _replace_thread_locked(
         room_id=room_id,
         thread_id=thread_id,
         events=events,
-        validated_at=validated_at,
+        stored_at=stored_at,
+        fetch_started_at=fetch_started_at,
     )
     removed_event_ids = sorted(set(existing_event_ids) - replacement_event_ids)
     if removed_event_ids:
@@ -441,51 +418,6 @@ async def _replace_thread_locked(
             event_ids=removed_event_ids,
             current_self_root_ids={thread_id} if thread_id in replacement_event_ids else (),
         )
-
-
-async def replace_thread_locked_if_not_newer(
-    db: AsyncConnection,
-    *,
-    namespace: str,
-    room_id: str,
-    thread_id: str,
-    events: list[dict[str, Any]],
-    fetch_started_at: float,
-    validated_at: float,
-) -> ThreadCacheReplaceOutcome:
-    """Replace one thread snapshot or classify the newer state that won."""
-    cache_state_row = await _load_thread_cache_state_row(
-        db,
-        namespace=namespace,
-        room_id=room_id,
-        thread_id=thread_id,
-    )
-    # The snapshot-row lookup only distinguishes conflict outcomes, so unchanged state skips it.
-    conflict = (
-        guarded_thread_replacement_conflict(
-            cache_state_row,
-            fetch_started_at=fetch_started_at,
-            has_snapshot_rows=await _thread_has_snapshot_rows_for_thread(
-                db,
-                namespace=namespace,
-                room_id=room_id,
-                thread_id=thread_id,
-            ),
-        )
-        if thread_cache_state_changed_after(cache_state_row, fetch_started_at=fetch_started_at)
-        else None
-    )
-    if conflict is not None:
-        return conflict
-    await _replace_thread_locked(
-        db,
-        namespace=namespace,
-        room_id=room_id,
-        thread_id=thread_id,
-        events=events,
-        validated_at=validated_at,
-    )
-    return ThreadCacheReplaceOutcome.STORED
 
 
 async def invalidate_thread_locked(
@@ -579,61 +511,37 @@ async def mark_thread_stale_locked(
     room_id: str,
     thread_id: str,
     reason: str,
-    invalidated_at: float | None = None,
+    gap_marked_at: float | None = None,
 ) -> None:
-    """Persist a durable invalidate-and-refetch marker within an active transaction."""
-    stale_at = time.time() if invalidated_at is None else invalidated_at
-    incremental_reasons = list(incremental_thread_revalidation_reasons())
-    incoming_is_incremental = is_incremental_thread_revalidation_reason(reason)
+    """Record one durable thread gap marker within an active transaction.
+
+    The marker is monotonic: a later gap never loses to an earlier one. There is no reason
+    precedence — every reason means the same thing, that this snapshot must be refetched.
+    """
+    marked_at = time.time() if gap_marked_at is None else gap_marked_at
     await db.execute(
         """
         INSERT INTO mindroom_event_cache_thread_state(
             namespace,
             room_id,
             thread_id,
-            validated_at,
-            invalidated_at,
-            invalidation_reason
+            gap_marked_at,
+            gap_reason
         )
-        VALUES (%s, %s, %s, NULL, %s, %s)
+        VALUES (%s, %s, %s, %s, %s)
         ON CONFLICT(namespace, room_id, thread_id) DO UPDATE SET
-            invalidated_at = CASE
-                WHEN mindroom_event_cache_thread_state.invalidated_at IS NULL
-                    OR excluded.invalidated_at >= mindroom_event_cache_thread_state.invalidated_at
-                    THEN excluded.invalidated_at
-                ELSE mindroom_event_cache_thread_state.invalidated_at
-            END,
-            invalidation_reason = CASE
-                WHEN mindroom_event_cache_thread_state.invalidated_at IS NULL
-                    THEN excluded.invalidation_reason
-                WHEN %s
-                    AND NOT COALESCE(
-                        mindroom_event_cache_thread_state.invalidation_reason = ANY(%s),
-                        FALSE
-                    )
-                    THEN mindroom_event_cache_thread_state.invalidation_reason
-                WHEN NOT %s
-                    AND COALESCE(
-                        mindroom_event_cache_thread_state.invalidation_reason = ANY(%s),
-                        FALSE
-                    )
-                    THEN excluded.invalidation_reason
-                WHEN excluded.invalidated_at >= mindroom_event_cache_thread_state.invalidated_at
-                    THEN excluded.invalidation_reason
-                ELSE mindroom_event_cache_thread_state.invalidation_reason
+            gap_marked_at = GREATEST(
+                mindroom_event_cache_thread_state.gap_marked_at,
+                excluded.gap_marked_at
+            ),
+            gap_reason = CASE
+                WHEN mindroom_event_cache_thread_state.gap_marked_at IS NULL
+                    OR excluded.gap_marked_at >= mindroom_event_cache_thread_state.gap_marked_at
+                    THEN excluded.gap_reason
+                ELSE mindroom_event_cache_thread_state.gap_reason
             END
         """,
-        (
-            namespace,
-            room_id,
-            thread_id,
-            stale_at,
-            reason,
-            incoming_is_incremental,
-            incremental_reasons,
-            incoming_is_incremental,
-            incremental_reasons,
-        ),
+        (namespace, room_id, thread_id, marked_at, reason),
     )
 
 
@@ -646,9 +554,11 @@ async def apply_thread_mutation_append_locked(
     normalized_event: dict[str, Any],
     append_failed_reason: str,
 ) -> ThreadAppendOutcome:
-    """Append one threaded mutation and settle this thread's trust in the same transaction.
+    """Append one threaded mutation, recording a gap marker in the same transaction when it cannot land.
 
-    See invariant 5 in the module docstring of ``sqlite_event_cache_threads`` for why it is one.
+    Appending and marking are one operation so a mutation that fails can never leave a snapshot
+    readable while it is missing the event. A successful append clears nothing: an append extends a
+    snapshot, it does not prove the snapshot complete.
     """
     outcome = await _append_existing_thread_event(
         db,
@@ -665,27 +575,7 @@ async def apply_thread_mutation_append_locked(
             thread_id=thread_id,
             reason=append_failed_reason,
         )
-        return outcome
-
-    # Read after the append: it touches no trust column, and the failure paths above never need it.
-    state_row = await _load_thread_cache_state_row(
-        db,
-        namespace=namespace,
-        room_id=room_id,
-        thread_id=thread_id,
-    )
-    if not append_keeps_thread_valid(state_row):
-        return ThreadAppendOutcome.APPENDED_STALE
-
-    await db.execute(
-        """
-        UPDATE mindroom_event_cache_thread_state
-        SET validated_at = %s, invalidated_at = NULL, invalidation_reason = NULL
-        WHERE namespace = %s AND room_id = %s AND thread_id = %s
-        """,
-        (time.time(), namespace, room_id, thread_id),
-    )
-    return ThreadAppendOutcome.APPENDED
+    return outcome
 
 
 async def mark_room_stale_locked(
@@ -694,29 +584,25 @@ async def mark_room_stale_locked(
     namespace: str,
     room_id: str,
     reason: str,
-    invalidated_at: float | None = None,
+    gap_marked_at: float | None = None,
 ) -> None:
-    """Persist one durable room-scoped invalidate-and-refetch marker."""
-    stale_at = time.time() if invalidated_at is None else invalidated_at
+    """Record one room-scoped (wildcard-thread) gap by fanning the marker across the room's threads.
+
+    A thread with no snapshot needs no marker: a read that finds no rows refetches anyway, and every
+    stored snapshot carries a ``thread_state`` row, so this one statement covers the whole room.
+    """
+    marked_at = time.time() if gap_marked_at is None else gap_marked_at
     await db.execute(
         """
-        INSERT INTO mindroom_event_cache_room_state(namespace, room_id, invalidated_at, invalidation_reason)
-        VALUES (%s, %s, %s, %s)
-        ON CONFLICT(namespace, room_id) DO UPDATE SET
-            invalidated_at = CASE
-                WHEN mindroom_event_cache_room_state.invalidated_at IS NULL
-                    OR excluded.invalidated_at >= mindroom_event_cache_room_state.invalidated_at
-                    THEN excluded.invalidated_at
-                ELSE mindroom_event_cache_room_state.invalidated_at
-            END,
-            invalidation_reason = CASE
-                WHEN mindroom_event_cache_room_state.invalidated_at IS NULL
-                    OR excluded.invalidated_at >= mindroom_event_cache_room_state.invalidated_at
-                    THEN excluded.invalidation_reason
-                ELSE mindroom_event_cache_room_state.invalidation_reason
+        UPDATE mindroom_event_cache_thread_state
+        SET gap_marked_at = GREATEST(gap_marked_at, %s),
+            gap_reason = CASE
+                WHEN gap_marked_at IS NULL OR %s >= gap_marked_at THEN %s
+                ELSE gap_reason
             END
+        WHERE namespace = %s AND room_id = %s
         """,
-        (namespace, room_id, stale_at, reason),
+        (marked_at, marked_at, reason, namespace, room_id),
     )
 
 
@@ -795,31 +681,40 @@ async def _append_existing_thread_event(
     return ThreadAppendOutcome.APPENDED
 
 
-async def _upsert_thread_cache_state(
+async def _clear_thread_gap_covered_by_fetch(
     db: AsyncConnection,
     *,
     namespace: str,
     room_id: str,
     thread_id: str,
-    validated_at: float,
+    fetch_started_at: float,
 ) -> None:
+    """Record this thread's snapshot, clearing only a gap the replacing fetch actually covers.
+
+    A gap marked after the fetch began describes events the fetch could not have seen, so it
+    survives and the next read refetches.
+    """
     await db.execute(
         """
         INSERT INTO mindroom_event_cache_thread_state(
             namespace,
             room_id,
             thread_id,
-            validated_at,
-            invalidated_at,
-            invalidation_reason
+            gap_marked_at,
+            gap_reason
         )
-        VALUES (%s, %s, %s, %s, NULL, NULL)
+        VALUES (%s, %s, %s, NULL, NULL)
         ON CONFLICT(namespace, room_id, thread_id) DO UPDATE SET
-            validated_at = excluded.validated_at,
-            invalidated_at = NULL,
-            invalidation_reason = NULL
+            gap_marked_at = CASE
+                WHEN mindroom_event_cache_thread_state.gap_marked_at <= %s THEN NULL
+                ELSE mindroom_event_cache_thread_state.gap_marked_at
+            END,
+            gap_reason = CASE
+                WHEN mindroom_event_cache_thread_state.gap_marked_at <= %s THEN NULL
+                ELSE mindroom_event_cache_thread_state.gap_reason
+            END
         """,
-        (namespace, room_id, thread_id, validated_at),
+        (namespace, room_id, thread_id, fetch_started_at, fetch_started_at),
     )
 
 
@@ -842,26 +737,6 @@ async def _thread_event_ids_for_thread(
     )
     return [str(row[0]) for row in rows]
 
-
-async def _thread_has_snapshot_rows_for_thread(
-    db: AsyncConnection,
-    *,
-    namespace: str,
-    room_id: str,
-    thread_id: str,
-) -> bool:
-    """Return whether one thread has at least one cached snapshot row."""
-    row = await fetchone(
-        db,
-        """
-        SELECT 1
-        FROM mindroom_event_cache_thread_events
-        WHERE namespace = %s AND room_id = %s AND thread_id = %s
-        LIMIT 1
-        """,
-        (namespace, room_id, thread_id),
-    )
-    return row is not None
 
 
 async def _thread_event_ids_for_room(

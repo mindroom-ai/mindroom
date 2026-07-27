@@ -25,9 +25,6 @@ from .thread_cache_state import (
     THREAD_HISTORY_TRUST_METADATA_KEY,
     THREAD_HISTORY_TRUST_VERSION,
     ThreadAppendOutcome,
-    ThreadCacheReplaceOutcome,
-    incoming_thread_invalidation_takes_precedence,
-    replacement_validated_at,
 )
 
 if TYPE_CHECKING:
@@ -37,7 +34,7 @@ if TYPE_CHECKING:
 
     from .agent_message_snapshot import AgentMessageSnapshot
     from .cache_maintenance import CacheMaintenanceReport
-    from .event_cache import ThreadCacheState
+    from .thread_cache_state import ThreadCacheGap
 
 
 _POSTGRES_EVENT_CACHE_SCHEMA_VERSION = 4
@@ -391,11 +388,23 @@ async def _create_postgres_event_cache_schema(db: AsyncConnection) -> None:
             namespace TEXT NOT NULL,
             room_id TEXT NOT NULL,
             thread_id TEXT NOT NULL,
-            validated_at DOUBLE PRECISION,
-            invalidated_at DOUBLE PRECISION,
-            invalidation_reason TEXT,
+            gap_marked_at DOUBLE PRECISION,
+            gap_reason TEXT,
             PRIMARY KEY (namespace, room_id, thread_id)
         )
+        """,
+    )
+    # Pre-existing deployments keep their table. The trust columns are dropped rather than
+    # translated: the cache is derived from the homeserver and disposable, and the trust-version
+    # reset below empties both thread tables anyway.
+    await db.execute(
+        """
+        ALTER TABLE mindroom_event_cache_thread_state
+        ADD COLUMN IF NOT EXISTS gap_marked_at DOUBLE PRECISION,
+        ADD COLUMN IF NOT EXISTS gap_reason TEXT,
+        DROP COLUMN IF EXISTS validated_at,
+        DROP COLUMN IF EXISTS invalidated_at,
+        DROP COLUMN IF EXISTS invalidation_reason
         """,
     )
     await db.execute(
@@ -403,12 +412,19 @@ async def _create_postgres_event_cache_schema(db: AsyncConnection) -> None:
         CREATE TABLE IF NOT EXISTS mindroom_event_cache_room_state (
             namespace TEXT NOT NULL,
             room_id TEXT NOT NULL,
-            invalidated_at DOUBLE PRECISION,
-            invalidation_reason TEXT,
             membership_state TEXT NOT NULL DEFAULT 'joined',
             membership_epoch BIGINT NOT NULL DEFAULT 0,
             PRIMARY KEY (namespace, room_id)
         )
+        """,
+    )
+    # 🔒 ``room_state`` survives for the membership fence alone; its invalidation columns are gone
+    # because a room-scoped gap now fans out across the room's ``thread_state`` rows.
+    await db.execute(
+        """
+        ALTER TABLE mindroom_event_cache_room_state
+        DROP COLUMN IF EXISTS invalidated_at,
+        DROP COLUMN IF EXISTS invalidation_reason
         """,
     )
     await db.execute(
@@ -749,18 +765,11 @@ class _PostgresEventCacheRuntime:
         invalidated_at: float,
         reason: str,
     ) -> None:
-        """Remember a best-effort stale marker that must be persisted before trusting cache rows."""
+        """Remember a best-effort gap marker that must be persisted before serving cache rows."""
         key = (room_id, thread_id)
         existing = self._pending_thread_invalidations.get(key)
-        if existing is not None:
-            incoming_takes_precedence = incoming_thread_invalidation_takes_precedence(
-                current_invalidated_at=existing.invalidated_at,
-                current_reason=existing.reason,
-                incoming_invalidated_at=invalidated_at,
-                incoming_reason=reason,
-            )
-            reason = reason if incoming_takes_precedence else existing.reason
-            invalidated_at = max(existing.invalidated_at, invalidated_at)
+        if existing is not None and existing.invalidated_at >= invalidated_at:
+            return
         self._pending_thread_invalidations[key] = _PendingInvalidation(
             invalidated_at=invalidated_at,
             reason=reason,
@@ -1212,7 +1221,7 @@ class PostgresEventCache:
                 db,
                 namespace=self._runtime.namespace,
                 room_id=room_id,
-                invalidated_at=room_pending.invalidated_at,
+                gap_marked_at=room_pending.invalidated_at,
                 reason=room_pending.reason,
             )
             flushed.append(("room", None, room_pending))
@@ -1225,7 +1234,7 @@ class PostgresEventCache:
                 namespace=self._runtime.namespace,
                 room_id=room_id,
                 thread_id=thread_id,
-                invalidated_at=pending_invalidation.invalidated_at,
+                gap_marked_at=pending_invalidation.invalidated_at,
                 reason=pending_invalidation.reason,
             )
             flushed.append(("thread", thread_id, pending_invalidation))
@@ -1295,13 +1304,13 @@ class PostgresEventCache:
             ),
         )
 
-    async def get_thread_cache_state(self, room_id: str, thread_id: str) -> ThreadCacheState | None:
-        """Return durable freshness metadata for one cached thread."""
+    async def get_thread_cache_gap(self, room_id: str, thread_id: str) -> ThreadCacheGap | None:
+        """Return the durable gap marker recorded against one cached thread, if any."""
         return await self._operation(
             room_id,
-            operation="get_thread_cache_state",
+            operation="get_thread_cache_gap",
             disabled_result=None,
-            callback=lambda db: postgres_event_cache_threads.load_thread_cache_state(
+            callback=lambda db: postgres_event_cache_threads.load_thread_cache_gap(
                 db,
                 namespace=self._runtime.namespace,
                 room_id=room_id,
@@ -1498,7 +1507,7 @@ class PostgresEventCache:
             ),
         )
 
-    async def replace_thread_if_not_newer(
+    async def replace_thread(
         self,
         room_id: str,
         thread_id: str,
@@ -1506,30 +1515,42 @@ class PostgresEventCache:
         *,
         expected_membership_epoch: int,
         fetch_started_at: float,
-        validated_at: float | None = None,
-    ) -> ThreadCacheReplaceOutcome:
-        """Replace a fetched snapshot and classify any guarded non-installation."""
-        replacement_timestamp = replacement_validated_at(
-            fetch_started_at=fetch_started_at,
-            validated_at=validated_at,
-        )
-
+    ) -> bool:
+        """Install one fetched snapshot, clearing a gap marker the fetch covers."""
         return await self._operation(
             room_id,
-            operation="replace_thread_if_not_newer",
-            disabled_result=ThreadCacheReplaceOutcome.WRITES_UNAVAILABLE,
-            callback=lambda db: postgres_event_cache_threads.replace_thread_locked_if_not_newer(
+            operation="replace_thread",
+            disabled_result=False,
+            callback=lambda db: self._replace_thread_locked(
                 db,
-                namespace=self._runtime.namespace,
                 room_id=room_id,
                 thread_id=thread_id,
                 events=events,
                 fetch_started_at=fetch_started_at,
-                validated_at=replacement_timestamp,
             ),
             expected_membership_epoch=expected_membership_epoch,
-            membership_epoch_mismatch_result=ThreadCacheReplaceOutcome.RETRYABLE_CONFLICT,
+            membership_epoch_mismatch_result=False,
         )
+
+    async def _replace_thread_locked(
+        self,
+        db: psycopg.AsyncConnection,
+        *,
+        room_id: str,
+        thread_id: str,
+        events: list[dict[str, Any]],
+        fetch_started_at: float,
+    ) -> bool:
+        await postgres_event_cache_threads.replace_thread_locked(
+            db,
+            namespace=self._runtime.namespace,
+            room_id=room_id,
+            thread_id=thread_id,
+            events=events,
+            stored_at=time.time(),
+            fetch_started_at=fetch_started_at,
+        )
+        return True
 
     async def invalidate_thread(self, room_id: str, thread_id: str) -> None:
         """Delete cached events for one thread."""
@@ -1559,7 +1580,7 @@ class PostgresEventCache:
         )
 
     async def mark_thread_stale(self, room_id: str, thread_id: str, *, reason: str) -> None:
-        """Persist one durable thread invalidation marker."""
+        """Persist one durable thread gap marker."""
         invalidated_at = time.time()
         try:
             await self._operation(
@@ -1571,7 +1592,7 @@ class PostgresEventCache:
                     namespace=self._runtime.namespace,
                     room_id=room_id,
                     thread_id=thread_id,
-                    invalidated_at=invalidated_at,
+                    gap_marked_at=invalidated_at,
                     reason=reason,
                 ),
             )
@@ -1585,7 +1606,7 @@ class PostgresEventCache:
             raise
 
     async def mark_room_threads_stale(self, room_id: str, *, reason: str) -> None:
-        """Persist a durable invalidate-and-refetch marker for every cached thread in one room."""
+        """Record a durable gap marker against every cached thread in one room."""
         invalidated_at = time.time()
         try:
             await self._operation(
@@ -1596,7 +1617,7 @@ class PostgresEventCache:
                     db,
                     namespace=self._runtime.namespace,
                     room_id=room_id,
-                    invalidated_at=invalidated_at,
+                    gap_marked_at=invalidated_at,
                     reason=reason,
                 ),
             )
@@ -1616,7 +1637,7 @@ class PostgresEventCache:
         *,
         append_failed_reason: str,
     ) -> ThreadAppendOutcome:
-        """Append one threaded mutation and settle this thread's trust atomically."""
+        """Append one threaded mutation, recording a gap marker when it cannot land."""
         normalized_event = normalize_event_source_for_cache(event)
         return await self._operation(
             room_id,

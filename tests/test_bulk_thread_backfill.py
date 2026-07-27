@@ -7,7 +7,6 @@ from unittest.mock import AsyncMock, Mock
 import nio
 import pytest
 
-from mindroom.matrix.cache import ThreadCacheReplaceOutcome
 from mindroom.matrix.client_thread_history import bulk_refresh_room_thread_histories
 
 _ROOM_ID = "!room:localhost"
@@ -98,12 +97,7 @@ async def test_bulk_refresh_scans_room_once_and_stores_each_thread() -> None:
     )
     event_cache = AsyncMock()
     event_cache.room_membership_epoch = AsyncMock(return_value=7)
-    event_cache.replace_thread_if_not_newer = AsyncMock(
-        side_effect=[
-            ThreadCacheReplaceOutcome.STORED,
-            ThreadCacheReplaceOutcome.EXISTING_USABLE,
-        ],
-    )
+    event_cache.replace_thread = AsyncMock(side_effect=[True, True])
 
     stats = await bulk_refresh_room_thread_histories(
         client,
@@ -121,7 +115,7 @@ async def test_bulk_refresh_scans_room_once_and_stores_each_thread() -> None:
 
     stored = {
         call.args[1]: [source["event_id"] for source in call.args[2]]
-        for call in event_cache.replace_thread_if_not_newer.await_args_list
+        for call in event_cache.replace_thread.await_args_list
     }
     assert stored == {
         "$a:localhost": ["$a:localhost", "$a1:localhost", "$a1-edit:localhost"],
@@ -129,7 +123,7 @@ async def test_bulk_refresh_scans_room_once_and_stores_each_thread() -> None:
     }
     assert all(
         call.kwargs["expected_membership_epoch"] == 7
-        for call in event_cache.replace_thread_if_not_newer.await_args_list
+        for call in event_cache.replace_thread.await_args_list
     )
 
 
@@ -150,9 +144,7 @@ async def test_bulk_refresh_reports_missing_roots_without_storing_partial_thread
     )
     event_cache = AsyncMock()
     event_cache.room_departure_epoch = Mock(return_value=3)
-    event_cache.replace_thread_if_not_newer = AsyncMock(
-        return_value=ThreadCacheReplaceOutcome.STORED,
-    )
+    event_cache.replace_thread = AsyncMock(return_value=True)
 
     stats = await bulk_refresh_room_thread_histories(
         client,
@@ -164,8 +156,8 @@ async def test_bulk_refresh_reports_missing_roots_without_storing_partial_thread
 
     assert stats.usable_threads == 1
     assert stats.missing_root_ids == frozenset({"$ghost:localhost"})
-    event_cache.replace_thread_if_not_newer.assert_awaited_once()
-    assert event_cache.replace_thread_if_not_newer.await_args.args[1] == "$a:localhost"
+    event_cache.replace_thread.assert_awaited_once()
+    assert event_cache.replace_thread.await_args.args[1] == "$a:localhost"
 
 
 @pytest.mark.asyncio
@@ -189,9 +181,7 @@ async def test_bulk_refresh_page_budget_stores_found_threads_and_reports_remaini
     )
     event_cache = AsyncMock()
     event_cache.room_membership_epoch = AsyncMock(return_value=7)
-    event_cache.replace_thread_if_not_newer = AsyncMock(
-        return_value=ThreadCacheReplaceOutcome.STORED,
-    )
+    event_cache.replace_thread = AsyncMock(return_value=True)
 
     stats = await bulk_refresh_room_thread_histories(
         client,
@@ -207,5 +197,5 @@ async def test_bulk_refresh_page_budget_stores_found_threads_and_reports_remaini
     assert stats.missing_root_ids == frozenset({"$b:localhost"})
     assert stats.room_scan_pages == 1
     assert stats.scan_truncated is True
-    event_cache.replace_thread_if_not_newer.assert_awaited_once()
-    assert event_cache.replace_thread_if_not_newer.await_args.args[1] == "$a:localhost"
+    event_cache.replace_thread.assert_awaited_once()
+    assert event_cache.replace_thread.await_args.args[1] == "$a:localhost"

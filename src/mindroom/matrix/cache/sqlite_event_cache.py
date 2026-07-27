@@ -27,8 +27,6 @@ from .thread_cache_state import (
     THREAD_HISTORY_TRUST_METADATA_KEY,
     THREAD_HISTORY_TRUST_VERSION,
     ThreadAppendOutcome,
-    ThreadCacheReplaceOutcome,
-    replacement_validated_at,
 )
 
 if TYPE_CHECKING:
@@ -37,9 +35,9 @@ if TYPE_CHECKING:
 
     from .agent_message_snapshot import AgentMessageSnapshot
     from .cache_maintenance import CacheMaintenanceReport
-    from .event_cache import ThreadCacheState
+    from .thread_cache_state import ThreadCacheGap
 
-_EVENT_CACHE_SCHEMA_VERSION = 13
+_EVENT_CACHE_SCHEMA_VERSION = 14
 _EVENT_CACHE_TABLES = (
     "cache_metadata",
     "thread_events",
@@ -275,20 +273,19 @@ async def _create_event_cache_schema(db: aiosqlite.Connection) -> None:
             principal_id TEXT NOT NULL,
             room_id TEXT NOT NULL,
             thread_id TEXT NOT NULL,
-            validated_at REAL,
-            invalidated_at REAL,
-            invalidation_reason TEXT,
+            gap_marked_at REAL,
+            gap_reason TEXT,
             PRIMARY KEY (principal_id, room_id, thread_id)
         )
         """,
     )
+    # 🔒 ``room_cache_state`` survives for the membership fence alone; its invalidation columns are
+    # gone because a room-scoped gap now fans out across the room's ``thread_cache_state`` rows.
     await db.execute(
         """
         CREATE TABLE IF NOT EXISTS room_cache_state (
             principal_id TEXT NOT NULL,
             room_id TEXT NOT NULL,
-            invalidated_at REAL,
-            invalidation_reason TEXT,
             membership_state TEXT NOT NULL DEFAULT 'joined',
             membership_epoch INTEGER NOT NULL DEFAULT 0,
             PRIMARY KEY (principal_id, room_id)
@@ -898,13 +895,13 @@ class SqliteEventCache:
             ),
         )
 
-    async def get_thread_cache_state(self, room_id: str, thread_id: str) -> ThreadCacheState | None:
-        """Return durable freshness metadata for one cached thread."""
+    async def get_thread_cache_gap(self, room_id: str, thread_id: str) -> ThreadCacheGap | None:
+        """Return the durable gap marker recorded against one cached thread, if any."""
         return await self._read_operation(
             room_id,
-            operation="get_thread_cache_state",
+            operation="get_thread_cache_gap",
             disabled_result=None,
-            reader=lambda db: sqlite_event_cache_threads.load_thread_cache_state(
+            reader=lambda db: sqlite_event_cache_threads.load_thread_cache_gap(
                 db,
                 principal_id=self.principal_id,
                 room_id=room_id,
@@ -1101,7 +1098,7 @@ class SqliteEventCache:
             ),
         )
 
-    async def replace_thread_if_not_newer(
+    async def replace_thread(
         self,
         room_id: str,
         thread_id: str,
@@ -1109,30 +1106,42 @@ class SqliteEventCache:
         *,
         expected_membership_epoch: int,
         fetch_started_at: float,
-        validated_at: float | None = None,
-    ) -> ThreadCacheReplaceOutcome:
-        """Replace a fetched snapshot and classify any guarded non-installation."""
-        replacement_timestamp = replacement_validated_at(
-            fetch_started_at=fetch_started_at,
-            validated_at=validated_at,
-        )
-
+    ) -> bool:
+        """Install one fetched snapshot, clearing a gap marker the fetch covers."""
         return await self._write_operation(
             room_id,
-            operation="replace_thread_if_not_newer",
-            disabled_result=ThreadCacheReplaceOutcome.WRITES_UNAVAILABLE,
-            writer=lambda db: sqlite_event_cache_threads.replace_thread_locked_if_not_newer(
+            operation="replace_thread",
+            disabled_result=False,
+            writer=lambda db: self._replace_thread_locked(
                 db,
-                principal_id=self.principal_id,
                 room_id=room_id,
                 thread_id=thread_id,
                 events=events,
                 fetch_started_at=fetch_started_at,
-                validated_at=replacement_timestamp,
             ),
             expected_membership_epoch=expected_membership_epoch,
-            membership_epoch_mismatch_result=ThreadCacheReplaceOutcome.RETRYABLE_CONFLICT,
+            membership_epoch_mismatch_result=False,
         )
+
+    async def _replace_thread_locked(
+        self,
+        db: aiosqlite.Connection,
+        *,
+        room_id: str,
+        thread_id: str,
+        events: list[dict[str, Any]],
+        fetch_started_at: float,
+    ) -> bool:
+        await sqlite_event_cache_threads.replace_thread_locked(
+            db,
+            principal_id=self.principal_id,
+            room_id=room_id,
+            thread_id=thread_id,
+            events=events,
+            stored_at=time.time(),
+            fetch_started_at=fetch_started_at,
+        )
+        return True
 
     async def invalidate_thread(self, room_id: str, thread_id: str) -> None:
         """Delete cached events for one thread."""
@@ -1162,7 +1171,7 @@ class SqliteEventCache:
         )
 
     async def mark_thread_stale(self, room_id: str, thread_id: str, *, reason: str) -> None:
-        """Persist one durable thread invalidation marker."""
+        """Persist one durable thread gap marker."""
         try:
             await self._write_operation(
                 room_id,
@@ -1184,7 +1193,7 @@ class SqliteEventCache:
             raise EventCacheBackendUnavailableError(msg) from exc
 
     async def mark_room_threads_stale(self, room_id: str, *, reason: str) -> None:
-        """Persist a durable invalidate-and-refetch marker for every cached thread in one room."""
+        """Record a durable gap marker against every cached thread in one room."""
         try:
             await self._write_operation(
                 room_id,
@@ -1212,7 +1221,7 @@ class SqliteEventCache:
         *,
         append_failed_reason: str,
     ) -> ThreadAppendOutcome:
-        """Append one threaded mutation and settle this thread's trust atomically."""
+        """Append one threaded mutation, recording a gap marker when it cannot land."""
         normalized_event = normalize_event_source_for_cache(event)
         return await self._write_operation(
             room_id,

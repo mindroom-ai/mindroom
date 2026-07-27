@@ -81,16 +81,7 @@ async def _collect_maintenance_report(
         room_state_rows=await _scalar_count(db, "SELECT COUNT(*) FROM room_cache_state"),
         stale_thread_markers=await _scalar_count(
             db,
-            """
-            SELECT COUNT(*)
-            FROM thread_cache_state
-            WHERE invalidated_at IS NOT NULL
-                AND (validated_at IS NULL OR invalidated_at >= validated_at)
-            """,
-        ),
-        stale_room_markers=await _scalar_count(
-            db,
-            "SELECT COUNT(*) FROM room_cache_state WHERE invalidated_at IS NOT NULL",
+            "SELECT COUNT(*) FROM thread_cache_state WHERE gap_marked_at IS NOT NULL",
         ),
         orphan_edit_indexes_after=await _orphan_edit_index_count(db),
         orphan_thread_indexes_after=await orphan_thread_index_count(db),

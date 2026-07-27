@@ -2,25 +2,13 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 if TYPE_CHECKING:
     from collections.abc import Collection
 
     from .agent_message_snapshot import AgentMessageSnapshot
-    from .thread_cache_state import ThreadAppendOutcome, ThreadCacheReplaceOutcome
-
-
-@dataclass(frozen=True, slots=True)
-class ThreadCacheState:
-    """Durable freshness and invalidation metadata for one cached thread."""
-
-    validated_at: float | None
-    invalidated_at: float | None
-    invalidation_reason: str | None
-    room_invalidated_at: float | None
-    room_invalidation_reason: str | None
+    from .thread_cache_state import ThreadAppendOutcome, ThreadCacheGap
 
 
 class EventCacheBackendUnavailableError(RuntimeError):
@@ -98,8 +86,8 @@ class ConversationEventCache(Protocol):
     async def get_recent_room_thread_ids(self, room_id: str, *, limit: int) -> list[str]:
         """Return locally known thread IDs for one room ordered by newest cached activity."""
 
-    async def get_thread_cache_state(self, room_id: str, thread_id: str) -> ThreadCacheState | None:
-        """Return durable freshness metadata for one cached thread."""
+    async def get_thread_cache_gap(self, room_id: str, thread_id: str) -> ThreadCacheGap | None:
+        """Return the durable gap marker recorded against one cached thread, if any."""
 
     async def get_event(self, room_id: str, event_id: str) -> dict[str, Any] | None:
         """Return one cached event payload by event ID."""
@@ -174,7 +162,7 @@ class ConversationEventCache(Protocol):
     ) -> bool:
         """Cache MXC plaintext only for a visible, non-tombstoned owning event."""
 
-    async def replace_thread_if_not_newer(
+    async def replace_thread(
         self,
         room_id: str,
         thread_id: str,
@@ -182,9 +170,12 @@ class ConversationEventCache(Protocol):
         *,
         expected_membership_epoch: int,
         fetch_started_at: float,
-        validated_at: float | None = None,
-    ) -> ThreadCacheReplaceOutcome:
-        """Replace a fetched snapshot and classify any guarded non-installation."""
+    ) -> bool:
+        """Install one fetched snapshot, clearing a gap marker the fetch covers.
+
+        Returns whether the snapshot was stored. A gap recorded after ``fetch_started_at``
+        survives the replacement, so the next read refetches.
+        """
 
     async def invalidate_thread(self, room_id: str, thread_id: str) -> None:
         """Delete cached events for one thread."""
@@ -193,10 +184,10 @@ class ConversationEventCache(Protocol):
         """Delete every cached thread snapshot for one room."""
 
     async def mark_thread_stale(self, room_id: str, thread_id: str, *, reason: str) -> None:
-        """Persist one durable thread invalidation marker."""
+        """Persist one durable thread gap marker."""
 
     async def mark_room_threads_stale(self, room_id: str, *, reason: str) -> None:
-        """Persist a durable invalidate-and-refetch marker for every cached thread in one room."""
+        """Persist a durable gap marker against every cached thread in one room."""
 
     async def apply_thread_mutation_append(
         self,
@@ -206,7 +197,7 @@ class ConversationEventCache(Protocol):
         *,
         append_failed_reason: str,
     ) -> ThreadAppendOutcome:
-        """Append one threaded mutation and settle this thread's trust in one transaction."""
+        """Append one threaded mutation, recording a gap marker when it cannot land."""
 
     async def get_thread_id_for_event(self, room_id: str, event_id: str) -> str | None:
         """Return the cached thread ID for one event."""

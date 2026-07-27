@@ -2,12 +2,9 @@
 
 from __future__ import annotations
 
-import time
 from typing import TYPE_CHECKING, Any
 
 import nio
-
-from mindroom.matrix.cache.thread_cache_state import ThreadCacheReplaceOutcome
 
 if TYPE_CHECKING:
     from mindroom.matrix.cache import ConversationEventCache
@@ -19,19 +16,17 @@ async def replace_thread_unconditionally(
     thread_id: str,
     events: list[dict[str, Any]],
     *,
-    validated_at: float | None = None,
+    fetch_started_at: float = float("inf"),
 ) -> None:
-    """Replace a cached thread snapshot without timestamp race rejection."""
-    timestamp = time.time() if validated_at is None else validated_at
-    replaced = await cache.replace_thread_if_not_newer(
+    """Replace a cached thread snapshot, clearing any recorded gap."""
+    stored = await cache.replace_thread(
         room_id,
         thread_id,
         events,
         expected_membership_epoch=await cache.room_membership_epoch(room_id),
-        fetch_started_at=float("inf"),
-        validated_at=timestamp,
+        fetch_started_at=fetch_started_at,
     )
-    assert replaced is ThreadCacheReplaceOutcome.STORED
+    assert stored
 
 
 def raw_nio_event(event_source: dict[str, Any]) -> nio.Event:
