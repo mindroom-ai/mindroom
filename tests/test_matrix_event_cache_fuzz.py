@@ -122,6 +122,39 @@ async def test_seeded_concurrent_trace_matches_every_cache_backend(
 
 
 @pytest.mark.asyncio
+async def test_fuzz_seed_allows_newer_replacement_and_rejects_stale_replacement(
+    event_cache_factory: Callable[[], ConversationEventCache],
+) -> None:
+    """The seed watermark must leave both replacement-ordering branches reachable."""
+    state = await run_scenario(
+        event_cache_factory,
+        FuzzScenario(
+            batches=(
+                (FuzzOperation(OperationKind.REPLACE_THREAD, 0, 0, 0, 0, 4),),
+                (FuzzOperation(OperationKind.STALE_REPLACE_THREAD, 0, 0, 0, 0, 1),),
+            ),
+        ),
+        room_count=1,
+        thread_count=1,
+        verify_restart=False,
+    )
+
+    assert state.threads == (
+        (
+            "!fuzz-room-0:localhost",
+            "$fuzz-r0-t0-root",
+            (
+                "$fuzz-r0-t0-root",
+                "$fuzz-r0-t0-message-0",
+                "$fuzz-r0-t0-message-1",
+                "$fuzz-r0-t0-message-2",
+                "$fuzz-r0-t0-message-3",
+            ),
+        ),
+    )
+
+
+@pytest.mark.asyncio
 async def test_forty_five_thread_fanout_matches_every_cache_backend(
     event_cache_factory: Callable[[], ConversationEventCache],
 ) -> None:
