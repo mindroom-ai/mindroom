@@ -58,6 +58,18 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
     async def test_live_edit_cache_lookup_failure_does_not_raise(self, bot: AgentBot) -> None:
         """Live edit caching should degrade cleanly when SQLite lookup fails."""
         event_cache = _runtime_event_cache()
+        # The original has to resolve before its thread is looked up: a replacement inherits a
+        # thread only once the event it replaces is a real room message from the same sender.
+        event_cache.get_event = AsyncMock(
+            return_value={
+                "content": {"body": "original", "msgtype": "m.text"},
+                "event_id": "$thread_msg:localhost",
+                "sender": "@user:localhost",
+                "origin_server_ts": 1234567880,
+                "room_id": "!test:localhost",
+                "type": "m.room.message",
+            },
+        )
         event_cache.get_thread_id_for_event = AsyncMock(side_effect=RuntimeError("database is locked"))
         event_cache.apply_thread_mutation_append = AsyncMock()
         bot.event_cache = event_cache

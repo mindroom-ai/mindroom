@@ -357,36 +357,6 @@ def _latest_first(candidates: list[dict[str, Any]], *, room_id: str | None) -> l
     )
 
 
-def ordered_unattributed_replacements(
-    original_event_id: str,
-    candidates: Iterable[Mapping[str, Any]],
-    *,
-    room_id: str | None,
-    validator: ReplacementValidator,
-) -> list[dict[str, Any]]:
-    """Order replacements of an original that was never observed, Matrix latest-first.
-
-    The same-sender rule cannot be applied here: with no original there is no sender to compare
-    against. A caller may therefore only attribute the result to the editor that sent it, and must
-    not let it claim any property of the original it names - including thread membership.
-    """
-
-    def valid(candidate: dict[str, Any]) -> bool:
-        event_id, timestamp = (candidate.get(key) for key in ("event_id", "origin_server_ts"))
-        return (
-            isinstance(event_id, str)
-            and event_id not in ("", original_event_id)
-            and type(timestamp) is int
-            and event_source_is_timeline_in_room(candidate, room_id)
-            and _valid_explicit_room(candidate)
-            and _replaces_event_id(candidate, original_event_id)
-            and validator(candidate)
-        )
-
-    normalized = [dict(candidate) for candidate in candidates]
-    return _latest_first([candidate for candidate in normalized if valid(candidate)], room_id=room_id)
-
-
 def _ordered_valid_replacements(
     original: Mapping[str, Any],
     candidates: list[dict[str, Any]],

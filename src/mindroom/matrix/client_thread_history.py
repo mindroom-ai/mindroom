@@ -80,6 +80,7 @@ from mindroom.matrix.event_info import (
 from mindroom.matrix.media import (
     event_source_supports_valid_thread_relations,
     parse_room_message_event_source,
+    valid_room_message_event_source,
     valid_room_message_replacement,
 )
 from mindroom.matrix.membership_fence import UNCERTIFIED_MEMBERSHIP_EPOCH
@@ -110,6 +111,7 @@ from mindroom.matrix.thread_membership import (
     local_events_prove_thread_root,
     map_backed_thread_membership_access,
     resolve_event_thread_membership,
+    resolve_related_event_thread_membership,
 )
 from mindroom.matrix.thread_projection import (
     ordered_event_ids_from_scanned_event_sources,
@@ -451,10 +453,7 @@ async def _resolve_thread_history_from_event_sources_timed(
             excluded_event_ids=redacted_event_ids,
         ):
             edit_candidates.record_event_source(replacement_source)
-        if isinstance(event, _VISIBLE_ROOM_MESSAGE_EVENT_TYPES) and edit_candidates.record(
-            event,
-            event_info=event_info,
-        ):
+        if edit_candidates.record(event, event_info=event_info):
             continue
         if event_info.is_edit or event.event_id in messages_by_event_id:
             continue
@@ -476,7 +475,6 @@ async def _resolve_thread_history_from_event_sources_timed(
         client,
         messages_by_event_id=messages_by_event_id,
         edit_candidates=edit_candidates,
-        required_thread_id=thread_id,
         event_cache=event_cache,
         room_id=room_id,
         expected_membership_epoch=expected_membership_epoch,
@@ -1362,10 +1360,7 @@ def _record_scanned_room_message_source(
         return None
 
     event_info = EventInfo.from_event(event.source)
-    recorded_as_edit = isinstance(event, _VISIBLE_ROOM_MESSAGE_EVENT_TYPES) and edit_candidates.record(
-        event,
-        event_info=event_info,
-    )
+    recorded_as_edit = edit_candidates.record(event, event_info=event_info)
     # An edit stays in the scanned sources even though it is not a visible message: the canonical
     # pass rebuilds the edit buckets from them once the whole scan is in, so removing it here would
     # drop the edit entirely.
@@ -1466,22 +1461,55 @@ async def _unresolved_opaque_relation_event_ids(
     event_infos: dict[str, EventInfo],
     scanned_message_sources: dict[str, dict[str, Any]],
     resolved_thread_ids: dict[str, str],
+    thread_root_ids: Collection[str],
 ) -> frozenset[str]:
     """Return scanned opaque relation-bearing events whose thread impact stays unknown."""
     access = map_backed_thread_membership_access(
         event_infos=event_infos,
         resolved_thread_ids=resolved_thread_ids,
+        event_sources_by_event_id=scanned_message_sources,
     )
     unresolved_event_ids: set[str] = set()
     for event_id, event_source in scanned_message_sources.items():
-        if event_id in resolved_thread_ids or not is_opaque_encrypted_event_source(event_source):
+        event_info = event_infos[event_id]
+        if not is_opaque_encrypted_event_source(event_source) or (
+            event_info.is_edit and event_info.original_event_id is None
+        ):
+            continue
+        if event_id in resolved_thread_ids:
+            if event_info.is_edit and resolved_thread_ids[event_id] in thread_root_ids:
+                unresolved_event_ids.add(event_id)
             continue
         resolution = await resolve_event_thread_membership(
             room_id,
-            event_infos[event_id],
+            event_info,
             access=access,
+            event_id=event_id,
+            event_source=event_source,
         )
         if resolution.state is ThreadResolutionState.INDETERMINATE:
+            unresolved_event_ids.add(event_id)
+            continue
+        if not event_info.is_edit or resolution.state is not ThreadResolutionState.ROOM_LEVEL:
+            continue
+        original_event_id = event_info.original_event_id
+        assert original_event_id is not None
+        original_source = scanned_message_sources.get(original_event_id)
+        if original_source is None:
+            unresolved_event_ids.add(event_id)
+            continue
+        if (
+            event_source.get("sender") != original_source.get("sender")
+            or not valid_room_message_event_source(original_source)
+            or EventInfo.from_event(original_source).is_edit
+        ):
+            continue
+        original_resolution = await resolve_related_event_thread_membership(
+            room_id,
+            original_event_id,
+            access=access,
+        )
+        if original_event_id in thread_root_ids or original_resolution.state is not ThreadResolutionState.ROOM_LEVEL:
             unresolved_event_ids.add(event_id)
     return frozenset(unresolved_event_ids)
 
@@ -1508,6 +1536,7 @@ async def _group_scanned_sources_by_thread(
     resolved_thread_ids = await resolve_thread_ids_for_event_infos(
         room_id,
         event_infos=event_infos,
+        event_sources_by_event_id=scanned_message_sources,
         ordered_event_ids=ordered_event_ids,
     )
     for event_id in ordered_event_ids:
@@ -1515,7 +1544,9 @@ async def _group_scanned_sources_by_thread(
         if root_id is None or root_id == event_id:
             continue
         bucket = grouped.get(root_id)
-        if bucket is None or event_id in bucket:
+        # An edit is never a thread member in its own right. It reaches the thread below, but only
+        # as a replacement that was validated against the original it names.
+        if bucket is None or event_id in bucket or event_infos[event_id].is_edit:
             continue
         bucket[event_id] = scanned_message_sources[event_id]
 
@@ -1524,6 +1555,7 @@ async def _group_scanned_sources_by_thread(
         event_infos=event_infos,
         scanned_message_sources=scanned_message_sources,
         resolved_thread_ids=resolved_thread_ids,
+        thread_root_ids=thread_root_ids,
     )
 
     edits_by_root: dict[str, list[dict[str, Any]]] = {}
@@ -1774,7 +1806,15 @@ async def get_room_threads_page(
     if not isinstance(response, RoomThreadsResponse):
         raise _room_threads_page_error_from_response(response)
 
-    return response.thread_roots, response.next_batch
+    # A homeserver's thread list is not self-certifying: it can name an event in another room or
+    # one that already carries a relation, and neither can be a thread root here.
+    thread_roots = [
+        event
+        for event in response.thread_roots
+        if EventInfo.from_event(event.source).can_be_thread_root
+        and event_source_is_timeline_in_room(event.source, room_id)
+    ]
+    return thread_roots, response.next_batch
 
 
 def _append_unique_thread_root_ids(

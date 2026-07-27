@@ -163,7 +163,6 @@ async def _folded_messages(rows: list[dict[str, Any]]) -> list[ResolvedVisibleMe
         cast("nio.AsyncClient", None),
         messages_by_event_id=messages,
         edit_candidates=candidates,
-        required_thread_id=_THREAD_ID,
     )
     ordered = list(messages.values())
     sort_thread_messages_root_first(ordered, thread_id=_THREAD_ID)

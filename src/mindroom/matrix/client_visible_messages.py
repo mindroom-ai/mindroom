@@ -406,7 +406,7 @@ class ThreadEditCandidates:
 
     def record(
         self,
-        event: nio.RoomMessageText | nio.RoomMessageNotice,
+        event: nio.Event,
         *,
         event_info: EventInfo,
     ) -> bool:
@@ -416,12 +416,15 @@ class ThreadEditCandidates:
         attributes, and ``source`` is not guaranteed to repeat them. Ranking reads those fields off
         the payload, so a raw copy would drop every candidate for want of an event ID.
         """
-        if not (event_info.is_edit and event_info.original_event_id):
+        if not event_info.is_edit:
             return False
-        self.record_source(
-            normalize_nio_event_for_cache(event),
-            original_event_id=event_info.original_event_id,
-        )
+        if event_info.original_event_id:
+            self.record_source(
+                normalize_nio_event_for_cache(event),
+                original_event_id=event_info.original_event_id,
+            )
+        # A replacement naming no usable target is still a replacement, so it is consumed rather
+        # than falling through and rendering its own ``* `` fallback body as a message.
         return True
 
     def record_source(self, event_source: dict[str, Any], *, original_event_id: str) -> None:
@@ -431,9 +434,10 @@ class ThreadEditCandidates:
     def record_event_source(self, event_source: dict[str, Any]) -> bool:
         """Track one raw event when it is a replacement, returning whether it was one."""
         event_info = EventInfo.from_event(event_source)
-        if not (event_info.is_edit and event_info.original_event_id):
+        if not event_info.is_edit:
             return False
-        self.record_source(event_source, original_event_id=event_info.original_event_id)
+        if event_info.original_event_id:
+            self.record_source(event_source, original_event_id=event_info.original_event_id)
         return True
 
     def original_event_ids(self) -> list[str]:
@@ -463,25 +467,12 @@ class ThreadEditCandidates:
             validator=valid_room_message_replacement,
         )
 
-    def ordered_unattributed_for(self, original_event_id: str, *, room_id: str | None = None) -> list[dict[str, Any]]:
-        """Return candidates for an original that was never seen, latest-first.
-
-        No sender check is possible here, so a caller may only attribute these to the editor.
-        """
-        return replacements.ordered_unattributed_replacements(
-            original_event_id,
-            self._by_original.get(original_event_id, ()),
-            room_id=room_id,
-            validator=valid_room_message_replacement,
-        )
-
 
 async def apply_latest_edits_to_messages(
     client: nio.AsyncClient,
     *,
     messages_by_event_id: dict[str, ResolvedVisibleMessage],
     edit_candidates: ThreadEditCandidates,
-    required_thread_id: str | None = None,
     event_cache: ConversationEventCache | None = None,
     room_id: str | None = None,
     expected_membership_epoch: int | None = None,
@@ -490,31 +481,26 @@ async def apply_latest_edits_to_messages(
 ) -> None:
     """Apply each original's newest valid same-sender replacement.
 
-    An original that was never seen is synthesized from its newest replacement, so an edit does not
-    disappear along with the message it replaces. That synthesized message is attributed to the
-    editor and carries no thread: with no original there is no sender to check a replacement
-    against, and an edit's own ``m.new_content`` relation is written by whoever sent it. Honouring
-    it would let anyone place a message into any thread by replacing an event that does not exist,
-    so a read scoped to one thread declines to synthesize at all.
+    An edit whose original is absent applies to nothing. It is not turned into a message of its own:
+    every caller here reads a bounded window, so a missing original means "outside this window",
+    not "does not exist", and inventing one would show text at a position the reader never saw,
+    attributed to whoever sent the edit. Nothing can check a replacement against an original that
+    is not there - not its sender, and not the thread its ``m.new_content`` claims.
     """
     for original_event_id in edit_candidates.original_event_ids():
         existing_message = messages_by_event_id.get(original_event_id)
-        if existing_message is None and required_thread_id is not None:
+        if existing_message is None:
             continue
 
-        ordered_candidates = (
-            edit_candidates.ordered_unattributed_for(original_event_id, room_id=room_id)
-            if existing_message is None
-            else edit_candidates.ordered_for(
-                {
-                    "event_id": existing_message.event_id,
-                    "sender": existing_message.sender,
-                    "origin_server_ts": existing_message.timestamp,
-                    "type": "m.room.message",
-                    "content": existing_message.content,
-                },
-                room_id=room_id,
-            )
+        ordered_candidates = edit_candidates.ordered_for(
+            {
+                "event_id": existing_message.event_id,
+                "sender": existing_message.sender,
+                "origin_server_ts": existing_message.timestamp,
+                "type": "m.room.message",
+                "content": existing_message.content,
+            },
+            room_id=room_id,
         )
         for edit_source in ordered_candidates:
             edited_body, edited_content = await extract_edit_body(
@@ -533,25 +519,12 @@ async def apply_latest_edits_to_messages(
             edit_timestamp = origin_server_ts_from_event_source(edit_source)
             assert isinstance(edit_event_id, str)
             assert isinstance(edit_timestamp, int)
-            if existing_message is not None:
-                existing_message.apply_edit(
-                    body=edited_body,
-                    latest_event_id=edit_event_id,
-                    latest_event_timestamp=edit_timestamp,
-                    content=edited_content,
-                )
-                break
-            synthesized_message = ResolvedVisibleMessage(
-                sender=edit_source["sender"],
+            existing_message.apply_edit(
                 body=edited_body,
-                timestamp=edit_timestamp,
-                event_id=original_event_id,
-                content=edited_content if edited_content is not None else {},
-                thread_id=None,
                 latest_event_id=edit_event_id,
+                latest_event_timestamp=edit_timestamp,
+                content=edited_content,
             )
-            synthesized_message.refresh_stream_status()
-            messages_by_event_id[original_event_id] = synthesized_message
             break
 
 
