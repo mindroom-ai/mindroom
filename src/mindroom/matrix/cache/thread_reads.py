@@ -11,12 +11,13 @@ Read-side invariants:
 2. Dispatch-safe modes (``DISPATCH_SNAPSHOT``, ``DISPATCH_FULL``) bound the whole wait-plus-fetch by one
    shared timeout and return an explicitly degraded empty result
    (``THREAD_HISTORY_SOURCE_DEGRADED``) instead of blocking dispatch; consumers must treat that result
-   as unusable for caching, memoization, and root proofs.
+   as unusable for caching and root proofs.
 
-3. Every cache-miss refill enters principal-scoped single-flight ownership on the same-thread barrier.
+3. Every cache-miss refill fetches the thread itself. There is no single-flight and no admission gate,
+   so concurrent readers of one gapped thread each pay their own 126 ms fetch rather than a shared wait.
    ``ADVISORY_FULL``, ``STRICT_FULL``, and ``STRICT_SOURCE_REFRESH`` have no dispatch timeout; strict
    modes are intentionally not dispatch-safe because they may block for authoritative post-lock model
-   context or a direct source refresh, but they never absorb a retained repair retry delay.
+   context or a direct source refresh.
 
 4. A stale-cache thread tail is never used for MSC3440 latest-event fallback:
    ``get_latest_thread_event_id_if_needed`` falls back to the thread root instead.

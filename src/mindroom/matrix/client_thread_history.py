@@ -222,7 +222,7 @@ def _report_direct_source_refresh(
     caller_label: str | None,
     coordinator_queue_wait_ms: float,
 ) -> ThreadHistoryResult:
-    """Report a direct source caller; shared repairs report at their outer caller boundary."""
+    """Log one direct source refresh under its caller's label."""
     if caller_label is not None:
         log_thread_history_refresh(
             room_id=room_id,
@@ -785,15 +785,15 @@ class _ThreadCacheStoreResult:
     """What one snapshot store attempt did.
 
     ``written`` and ``failed`` are independent, not two views of one flag: a cache whose writes are
-    unavailable stores nothing without failing, and only a genuine write fault should throttle
-    later refills.
+    unavailable stores nothing without failing, and operators reading the two diagnostics keys need
+    to tell that case apart from a genuine write fault.
     """
 
     written: bool
     failed: bool
 
 
-async def _store_repaired_thread_snapshot(
+async def _store_reconstructed_thread_snapshot(
     *,
     room_id: str,
     thread_id: str,
@@ -917,7 +917,7 @@ async def refresh_thread_history_from_source(
                 coordinator_queue_wait_ms=coordinator_queue_wait_ms,
             )
         raise
-    store_result = await _store_repaired_thread_snapshot(
+    store_result = await _store_reconstructed_thread_snapshot(
         room_id=room_id,
         thread_id=thread_id,
         event_cache=event_cache,
