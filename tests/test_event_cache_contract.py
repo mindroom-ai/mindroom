@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from typing import Any
+from unittest.mock import patch
 
 import pytest
 
@@ -462,6 +463,47 @@ class TestConversationEventCacheContract:
         gap = await event_cache.get_thread_cache_gap(room_id, thread_id)
         assert gap is not None, "an unreadable gap marker read as a clean thread"
         assert thread_cache_rejection_reason(gap) == "cache_gap_read_unavailable"
+
+    @pytest.mark.asyncio
+    async def test_gap_markers_are_monotonic_at_both_scopes(
+        self,
+        event_cache: ConversationEventCache,
+    ) -> None:
+        """An older marker must never downgrade a newer one, at either scope, on either backend.
+
+        The monotonic advance is the one expression the two backends cannot spell the same way:
+        PostgreSQL's ``GREATEST`` ignores NULL arguments, while SQLite's scalar ``MAX`` returns
+        NULL if any argument is NULL and so has to wrap the stored value in a ``COALESCE``. The two
+        agree only while the incoming value is known present, which is a precondition no type
+        signature carries.
+
+        Only the SQLite spelling had a regression test, so the PostgreSQL one could drift without
+        anything failing - and a downgraded marker is a stale thread served as complete, which is
+        silent by construction.
+        """
+        room_id = "!monotonic:localhost"
+        thread_id = "$root:localhost"
+        await replace_thread_unconditionally(
+            event_cache,
+            room_id,
+            thread_id,
+            [_message_event(thread_id, 1)],
+        )
+
+        # ``event_cache_thread_ops.time`` is the stdlib module, so this reaches whichever side
+        # stamps the marker: the shared operation on SQLite, the backend facade on PostgreSQL.
+        clock = "mindroom.matrix.cache.event_cache_thread_ops.time.time"
+        with patch(clock, return_value=200.0):
+            await event_cache.mark_thread_gap(room_id, thread_id, reason="newer_thread_marker")
+            await event_cache.mark_room_threads_gap(room_id, reason="newer_room_marker")
+        with patch(clock, return_value=100.0):
+            await event_cache.mark_thread_gap(room_id, thread_id, reason="older_thread_marker")
+            await event_cache.mark_room_threads_gap(room_id, reason="older_room_marker")
+
+        gap = await event_cache.get_thread_cache_gap(room_id, thread_id)
+        assert gap is not None
+        assert gap.gap_marked_at == 200.0, "an older marker overwrote a newer one"
+        assert gap.gap_reason == "newer_room_marker"
 
     @pytest.mark.asyncio
     async def test_older_fetch_cannot_bury_a_newer_snapshot(

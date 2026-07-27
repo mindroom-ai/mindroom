@@ -14,6 +14,7 @@ import aiosqlite
 
 from mindroom.logging_config import get_logger
 
+from . import event_cache_thread_ops as thread_ops
 from . import sqlite_event_cache_events, sqlite_event_cache_threads
 from .event_batching import group_lookup_events_by_room
 from .event_cache import EventCacheBackendUnavailableError
@@ -739,9 +740,10 @@ class SqliteEventCache:
                     )
                     result = disabled_result
                 else:
-                    membership_state, membership_epoch = await sqlite_event_cache_threads.load_room_membership_locked(
+                    membership_state, membership_epoch = await thread_ops.load_room_membership_locked(
+                        sqlite_event_cache_threads.BACKEND,
                         db,
-                        principal_id=self.principal_id,
+                        scope=self.principal_id,
                         room_id=room_id,
                     )
                     result = (
@@ -805,9 +807,10 @@ class SqliteEventCache:
                         principal_id=self.principal_id,
                         room_id=room_id,
                     )
-                    await sqlite_event_cache_threads.set_room_membership_locked(
+                    await thread_ops.set_room_membership_locked(
+                        sqlite_event_cache_threads.BACKEND,
                         db,
-                        principal_id=self.principal_id,
+                        scope=self.principal_id,
                         room_id=room_id,
                         membership_state="departed",
                         reason="room_departed",
@@ -817,14 +820,16 @@ class SqliteEventCache:
                 elif allow_departed:
                     result = await writer(db)
                 else:
-                    await sqlite_event_cache_threads.certify_room_membership_locked(
+                    await thread_ops.certify_room_membership_locked(
+                        sqlite_event_cache_threads.BACKEND,
                         db,
-                        principal_id=self.principal_id,
+                        scope=self.principal_id,
                         room_id=room_id,
                     )
-                    membership_state, membership_epoch = await sqlite_event_cache_threads.load_room_membership_locked(
+                    membership_state, membership_epoch = await thread_ops.load_room_membership_locked(
+                        sqlite_event_cache_threads.BACKEND,
                         db,
-                        principal_id=self.principal_id,
+                        scope=self.principal_id,
                         room_id=room_id,
                     )
                     if membership_state != "joined":
@@ -867,9 +872,10 @@ class SqliteEventCache:
             room_id,
             operation="get_thread_events",
             disabled_result=None,
-            reader=lambda db: sqlite_event_cache_threads.load_thread_events(
+            reader=lambda db: thread_ops.load_thread_events(
+                sqlite_event_cache_threads.BACKEND,
                 db,
-                principal_id=self.principal_id,
+                scope=self.principal_id,
                 room_id=room_id,
                 thread_id=thread_id,
             ),
@@ -881,9 +887,10 @@ class SqliteEventCache:
             room_id,
             operation="get_thread_event_ids",
             disabled_result=set(),
-            reader=lambda db: sqlite_event_cache_threads.load_thread_event_ids(
+            reader=lambda db: thread_ops.load_thread_event_ids(
+                sqlite_event_cache_threads.BACKEND,
                 db,
-                principal_id=self.principal_id,
+                scope=self.principal_id,
                 room_id=room_id,
                 thread_id=thread_id,
             ),
@@ -895,9 +902,10 @@ class SqliteEventCache:
             room_id,
             operation="has_thread_snapshot",
             disabled_result=False,
-            reader=lambda db: sqlite_event_cache_threads.thread_snapshot_exists(
+            reader=lambda db: thread_ops.thread_snapshot_exists(
+                sqlite_event_cache_threads.BACKEND,
                 db,
-                principal_id=self.principal_id,
+                scope=self.principal_id,
                 room_id=room_id,
                 thread_id=thread_id,
             ),
@@ -909,9 +917,10 @@ class SqliteEventCache:
             room_id,
             operation="get_recent_room_thread_ids",
             disabled_result=[],
-            reader=lambda db: sqlite_event_cache_threads.load_recent_room_thread_ids(
+            reader=lambda db: thread_ops.load_recent_room_thread_ids(
+                sqlite_event_cache_threads.BACKEND,
                 db,
-                principal_id=self.principal_id,
+                scope=self.principal_id,
                 room_id=room_id,
                 limit=limit,
             ),
@@ -923,9 +932,10 @@ class SqliteEventCache:
             room_id,
             operation="get_thread_cache_gap",
             disabled_result=CACHE_GAP_UNAVAILABLE,
-            reader=lambda db: sqlite_event_cache_threads.load_thread_cache_gap(
+            reader=lambda db: thread_ops.load_thread_cache_gap(
+                sqlite_event_cache_threads.BACKEND,
                 db,
-                principal_id=self.principal_id,
+                scope=self.principal_id,
                 room_id=room_id,
                 thread_id=thread_id,
             ),
@@ -1154,9 +1164,10 @@ class SqliteEventCache:
         events: list[dict[str, Any]],
         fetch_started_at: float,
     ) -> bool:
-        await sqlite_event_cache_threads.replace_thread_locked(
+        await thread_ops.replace_thread_locked(
+            sqlite_event_cache_threads.BACKEND,
             db,
-            principal_id=self.principal_id,
+            scope=self.principal_id,
             room_id=room_id,
             thread_id=thread_id,
             events=events,
@@ -1171,9 +1182,10 @@ class SqliteEventCache:
             room_id,
             operation="invalidate_thread",
             disabled_result=None,
-            writer=lambda db: sqlite_event_cache_threads.invalidate_thread_locked(
+            writer=lambda db: thread_ops.invalidate_thread_locked(
+                sqlite_event_cache_threads.BACKEND,
                 db,
-                principal_id=self.principal_id,
+                scope=self.principal_id,
                 room_id=room_id,
                 thread_id=thread_id,
             ),
@@ -1185,9 +1197,10 @@ class SqliteEventCache:
             room_id,
             operation="invalidate_room_threads",
             disabled_result=None,
-            writer=lambda db: sqlite_event_cache_threads.invalidate_room_threads_locked(
+            writer=lambda db: thread_ops.invalidate_room_threads_locked(
+                sqlite_event_cache_threads.BACKEND,
                 db,
-                principal_id=self.principal_id,
+                scope=self.principal_id,
                 room_id=room_id,
             ),
         )
@@ -1199,9 +1212,10 @@ class SqliteEventCache:
                 room_id,
                 operation="mark_thread_gap",
                 disabled_result=None,
-                writer=lambda db: sqlite_event_cache_threads.mark_thread_gap_locked(
+                writer=lambda db: thread_ops.mark_thread_gap_locked(
+                    sqlite_event_cache_threads.BACKEND,
                     db,
-                    principal_id=self.principal_id,
+                    scope=self.principal_id,
                     room_id=room_id,
                     thread_id=thread_id,
                     reason=reason,
@@ -1221,9 +1235,10 @@ class SqliteEventCache:
                 room_id,
                 operation="mark_room_threads_gap",
                 disabled_result=None,
-                writer=lambda db: sqlite_event_cache_threads.mark_room_gap_locked(
+                writer=lambda db: thread_ops.mark_room_gap_locked(
+                    sqlite_event_cache_threads.BACKEND,
                     db,
-                    principal_id=self.principal_id,
+                    scope=self.principal_id,
                     room_id=room_id,
                     reason=reason,
                 ),
@@ -1249,9 +1264,10 @@ class SqliteEventCache:
             room_id,
             operation="apply_thread_mutation_append",
             disabled_result=ThreadAppendOutcome.WRITES_UNAVAILABLE,
-            writer=lambda db: sqlite_event_cache_threads.apply_thread_mutation_append_locked(
+            writer=lambda db: thread_ops.apply_thread_mutation_append_locked(
+                sqlite_event_cache_threads.BACKEND,
                 db,
-                principal_id=self.principal_id,
+                scope=self.principal_id,
                 room_id=room_id,
                 thread_id=thread_id,
                 normalized_event=normalized_event,
@@ -1320,9 +1336,10 @@ class SqliteEventCache:
             room_id,
             operation="room_membership_epoch",
             disabled_result=None,
-            writer=lambda db: sqlite_event_cache_threads.certify_room_membership_locked(
+            writer=lambda db: thread_ops.certify_room_membership_locked(
+                sqlite_event_cache_threads.BACKEND,
                 db,
-                principal_id=self.principal_id,
+                scope=self.principal_id,
                 room_id=room_id,
             ),
             allow_departed=True,
@@ -1353,15 +1370,17 @@ class SqliteEventCache:
         async def join_if_current(db: aiosqlite.Connection) -> bool:
             if self.room_departure_epoch(room_id) != expected_departure_epoch:
                 return False
-            membership_state, _membership_epoch = await sqlite_event_cache_threads.load_room_membership_locked(
+            membership_state, _membership_epoch = await thread_ops.load_room_membership_locked(
+                sqlite_event_cache_threads.BACKEND,
                 db,
-                principal_id=self.principal_id,
+                scope=self.principal_id,
                 room_id=room_id,
             )
             if membership_state != "joined":
-                await sqlite_event_cache_threads.set_room_membership_locked(
+                await thread_ops.set_room_membership_locked(
+                    sqlite_event_cache_threads.BACKEND,
                     db,
-                    principal_id=self.principal_id,
+                    scope=self.principal_id,
                     room_id=room_id,
                     membership_state="joined",
                     reason="room_rejoined",
@@ -1373,9 +1392,10 @@ class SqliteEventCache:
                 principal_id=self.principal_id,
                 room_id=room_id,
             )
-            await sqlite_event_cache_threads.set_room_membership_locked(
+            await thread_ops.set_room_membership_locked(
+                sqlite_event_cache_threads.BACKEND,
                 db,
-                principal_id=self.principal_id,
+                scope=self.principal_id,
                 room_id=room_id,
                 membership_state="departed",
                 reason="room_departed",

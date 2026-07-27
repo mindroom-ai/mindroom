@@ -29,6 +29,7 @@ from mindroom.matrix.cache import (
     sqlite_event_cache_threads,
     thread_cache_rejection_reason,
 )
+from mindroom.matrix.cache import event_cache_thread_ops as thread_ops
 from mindroom.matrix.cache.event_batching import group_lookup_events_by_room
 from mindroom.matrix.cache.sqlite_event_cache import SqliteEventCache
 from mindroom.matrix.cache.thread_history_result import thread_history_result
@@ -892,9 +893,10 @@ async def test_thread_snapshot_storage_exposes_direct_gap_reads(tmp_path: Path) 
     )
 
     try:
-        await sqlite_event_cache_threads.replace_thread_locked(
+        await thread_ops.replace_thread_locked(
+            sqlite_event_cache_threads.BACKEND,
             db,
-            principal_id="__mindroom_default_principal__",
+            scope="__mindroom_default_principal__",
             room_id="!room:localhost",
             thread_id="$thread_root",
             events=[
@@ -909,25 +911,28 @@ async def test_thread_snapshot_storage_exposes_direct_gap_reads(tmp_path: Path) 
             stored_at=100.0,
             fetch_started_at=100.0,
         )
-        with patch("mindroom.matrix.cache.sqlite_event_cache_threads.time.time", return_value=200.0):
-            await sqlite_event_cache_threads.mark_thread_gap_locked(
+        with patch("mindroom.matrix.cache.event_cache_thread_ops.time.time", return_value=200.0):
+            await thread_ops.mark_thread_gap_locked(
+                sqlite_event_cache_threads.BACKEND,
                 db,
-                principal_id="__mindroom_default_principal__",
+                scope="__mindroom_default_principal__",
                 room_id="!room:localhost",
                 thread_id="$thread_root",
                 reason="thread_stale",
             )
-            await sqlite_event_cache_threads.mark_room_gap_locked(
+            await thread_ops.mark_room_gap_locked(
+                sqlite_event_cache_threads.BACKEND,
                 db,
-                principal_id="__mindroom_default_principal__",
+                scope="__mindroom_default_principal__",
                 room_id="!room:localhost",
                 reason="room_stale",
             )
         await db.commit()
 
-        gap = await sqlite_event_cache_threads.load_thread_cache_gap(
+        gap = await thread_ops.load_thread_cache_gap(
+            sqlite_event_cache_threads.BACKEND,
             db,
-            principal_id="__mindroom_default_principal__",
+            scope="__mindroom_default_principal__",
             room_id="!room:localhost",
             thread_id="$thread_root",
         )
@@ -950,39 +955,44 @@ async def test_sqlite_gap_markers_are_monotonic(tmp_path: Path) -> None:
     )
 
     try:
-        with patch("mindroom.matrix.cache.sqlite_event_cache_threads.time.time", return_value=200.0):
-            await sqlite_event_cache_threads.mark_thread_gap_locked(
+        with patch("mindroom.matrix.cache.event_cache_thread_ops.time.time", return_value=200.0):
+            await thread_ops.mark_thread_gap_locked(
+                sqlite_event_cache_threads.BACKEND,
                 db,
-                principal_id="__mindroom_default_principal__",
+                scope="__mindroom_default_principal__",
                 room_id="!room:localhost",
                 thread_id="$thread_root",
                 reason="newer_thread_marker",
             )
-            await sqlite_event_cache_threads.mark_room_gap_locked(
+            await thread_ops.mark_room_gap_locked(
+                sqlite_event_cache_threads.BACKEND,
                 db,
-                principal_id="__mindroom_default_principal__",
+                scope="__mindroom_default_principal__",
                 room_id="!room:localhost",
                 reason="newer_room_marker",
             )
-        with patch("mindroom.matrix.cache.sqlite_event_cache_threads.time.time", return_value=100.0):
-            await sqlite_event_cache_threads.mark_thread_gap_locked(
+        with patch("mindroom.matrix.cache.event_cache_thread_ops.time.time", return_value=100.0):
+            await thread_ops.mark_thread_gap_locked(
+                sqlite_event_cache_threads.BACKEND,
                 db,
-                principal_id="__mindroom_default_principal__",
+                scope="__mindroom_default_principal__",
                 room_id="!room:localhost",
                 thread_id="$thread_root",
                 reason="older_thread_marker",
             )
-            await sqlite_event_cache_threads.mark_room_gap_locked(
+            await thread_ops.mark_room_gap_locked(
+                sqlite_event_cache_threads.BACKEND,
                 db,
-                principal_id="__mindroom_default_principal__",
+                scope="__mindroom_default_principal__",
                 room_id="!room:localhost",
                 reason="older_room_marker",
             )
         await db.commit()
 
-        gap = await sqlite_event_cache_threads.load_thread_cache_gap(
+        gap = await thread_ops.load_thread_cache_gap(
+            sqlite_event_cache_threads.BACKEND,
             db,
-            principal_id="__mindroom_default_principal__",
+            scope="__mindroom_default_principal__",
             room_id="!room:localhost",
             thread_id="$thread_root",
         )
@@ -1033,7 +1043,7 @@ async def test_thread_gap_marked_midflight_survives_the_replacement(tmp_path: Pa
 
     try:
         await _replace_thread(cache, "!room:localhost", "$thread_root", [root_source], fetch_started_at=100.0)
-        with patch("mindroom.matrix.cache.sqlite_event_cache_threads.time.time", return_value=200.0):
+        with patch("mindroom.matrix.cache.event_cache_thread_ops.time.time", return_value=200.0):
             await cache.mark_thread_gap("!room:localhost", "$thread_root", reason="live_thread_mutation")
 
         # This fetch started before the marker, so it cannot have seen what the marker describes.
@@ -1084,7 +1094,7 @@ async def test_room_gap_marked_midflight_survives_the_replacement(tmp_path: Path
 
     try:
         await _replace_thread(cache, "!room:localhost", "$thread_root", [root_source], fetch_started_at=100.0)
-        with patch("mindroom.matrix.cache.sqlite_event_cache_threads.time.time", return_value=200.0):
+        with patch("mindroom.matrix.cache.event_cache_thread_ops.time.time", return_value=200.0):
             await cache.mark_room_threads_gap("!room:localhost", reason="sync_thread_lookup_unavailable")
 
         stored = await cache.replace_thread(

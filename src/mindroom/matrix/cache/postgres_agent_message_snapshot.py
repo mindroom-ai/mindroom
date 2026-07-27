@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Any
 
 import psycopg
 
+from . import event_cache_thread_ops as thread_ops
 from . import postgres_event_cache_events, postgres_event_cache_threads
 from .agent_message_snapshot import AgentMessageSnapshot, AgentMessageSnapshotUnavailable
 from .agent_message_snapshot_semantics import (
@@ -32,9 +33,10 @@ async def _reject_thread_scope_with_gap(
         return
 
     reject_snapshot_scope_with_gap(
-        await postgres_event_cache_threads.load_thread_cache_gap(
+        await thread_ops.load_thread_cache_gap(
+            postgres_event_cache_threads.BACKEND,
             db,
-            namespace=namespace,
+            scope=namespace,
             room_id=room_id,
             thread_id=thread_id,
         ),

@@ -36,6 +36,7 @@ from mindroom.matrix.cache import (
     postgres_event_cache_threads,
     sqlite_event_cache_threads,
 )
+from mindroom.matrix.cache.event_cache_sql_dialect import POSTGRES_DIALECT, SQLITE_DIALECT
 from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage, ThreadEditCandidates
 from mindroom.matrix.event_info import EventInfo
 from tests.event_cache_test_support import replace_thread_unconditionally
@@ -581,8 +582,8 @@ def test_edit_ranking_is_scoped_to_this_thread_and_this_sender() -> None:
     shipped as bugs, and both are invisible to a test that only exercises the fold.
     """
     for sql in (
-        sqlite_event_cache_threads._THREAD_EVENTS_SQL,
-        postgres_event_cache_threads._THREAD_EVENTS_SQL,
+        sqlite_event_cache_threads.BACKEND.statements.thread_events,
+        postgres_event_cache_threads.BACKEND.statements.thread_events,
     ):
         assert "PARTITION BY" in sql, "edit ranking is not grouped at all"
         assert "sender" in sql, "edit ranking does not compare senders"
@@ -592,8 +593,15 @@ def test_edit_ranking_is_scoped_to_this_thread_and_this_sender() -> None:
     # collation where 'a' sorts before 'B'; the CI fixture pins postgres:15-alpine and musl has no
     # real locale support, so every libc collation there behaves like C and a seeded read cannot
     # fail whether or not the pin is present. This assertion fails wherever the pin is deleted.
-    assert 'edit_event_id COLLATE "C" DESC' in postgres_event_cache_threads._THREAD_EVENTS_SQL, (
+    assert 'edit_event_id COLLATE "C" DESC' in postgres_event_cache_threads.BACKEND.statements.thread_events, (
         "the Postgres tie-break is back on the database default collation"
+    )
+
+    # The same pin, stated against the dialect the statement is rendered from, so deleting the
+    # collation there fails here even if the statement above is later restructured.
+    assert POSTGRES_DIALECT.binary_collation == ' COLLATE "C"'
+    assert SQLITE_DIALECT.binary_collation == "", (
+        "SQLite compares TEXT bytewise already; an override here would diverge from the fold"
     )
 
 

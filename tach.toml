@@ -1737,6 +1737,7 @@ path = "mindroom.matrix.cache.sqlite_agent_message_snapshot"
 depends_on = [
     "mindroom.matrix.cache.agent_message_snapshot",
     "mindroom.matrix.cache.agent_message_snapshot_semantics",
+    "mindroom.matrix.cache.event_cache_thread_ops",
     "mindroom.matrix.cache.sqlite_event_cache_events",
     "mindroom.matrix.cache.sqlite_event_cache_threads",
 ]
@@ -1747,6 +1748,7 @@ path = "mindroom.matrix.cache.postgres_agent_message_snapshot"
 depends_on = [
     "mindroom.matrix.cache.agent_message_snapshot",
     "mindroom.matrix.cache.agent_message_snapshot_semantics",
+    "mindroom.matrix.cache.event_cache_thread_ops",
     "mindroom.matrix.cache.postgres_event_cache_events",
     "mindroom.matrix.cache.postgres_event_cache_threads",
 ]
@@ -1755,20 +1757,48 @@ visibility = ["mindroom.matrix.cache.postgres_event_cache"]
 [[modules]]
 path = "mindroom.matrix.cache.sqlite_event_cache_threads"
 depends_on = [
-    "mindroom.matrix.cache.event_cache_events",
-    "mindroom.matrix.cache.event_normalization",
+    "mindroom.matrix.cache.event_cache_sql_dialect",
+    "mindroom.matrix.cache.event_cache_thread_statements",
     "mindroom.matrix.cache.sqlite_event_cache_events",
-    "mindroom.matrix.cache.thread_cache_state",
 ]
 
 [[modules]]
 path = "mindroom.matrix.cache.postgres_event_cache_threads"
 depends_on = [
+    "mindroom.matrix.cache.event_cache_sql_dialect",
+    "mindroom.matrix.cache.event_cache_thread_statements",
+    "mindroom.matrix.cache.postgres_event_cache_events",
+]
+
+[[modules]]
+path = "mindroom.matrix.cache.event_cache_sql_dialect"
+depends_on = []
+visibility = [
+    "mindroom.matrix.cache.event_cache_thread_statements",
+    "mindroom.matrix.cache.postgres_event_cache_threads",
+    "mindroom.matrix.cache.sqlite_event_cache_threads",
+]
+
+[[modules]]
+path = "mindroom.matrix.cache.event_cache_thread_statements"
+depends_on = ["mindroom.matrix.cache.event_cache_sql_dialect"]
+visibility = [
+    "mindroom.matrix.cache.postgres_event_cache_threads",
+    "mindroom.matrix.cache.sqlite_event_cache_threads",
+]
+
+[[modules]]
+path = "mindroom.matrix.cache.event_cache_thread_ops"
+depends_on = [
     "mindroom.matrix.cache.event_cache_events",
     "mindroom.matrix.cache.event_normalization",
-    "mindroom.matrix.cache.postgres_cursor",
-    "mindroom.matrix.cache.postgres_event_cache_events",
     "mindroom.matrix.cache.thread_cache_state",
+]
+visibility = [
+    "mindroom.matrix.cache.postgres_agent_message_snapshot",
+    "mindroom.matrix.cache.postgres_event_cache",
+    "mindroom.matrix.cache.sqlite_agent_message_snapshot",
+    "mindroom.matrix.cache.sqlite_event_cache",
 ]
 
 [[modules]]
@@ -1782,6 +1812,7 @@ depends_on = [
     "mindroom.matrix.sidecar_content",
 ]
 visibility = [
+    "mindroom.matrix.cache.event_cache_thread_ops",
     "mindroom.matrix.cache.postgres_event_cache_events",
     "mindroom.matrix.cache.postgres_event_cache_threads",
     "mindroom.matrix.cache.sqlite_event_cache_events",
@@ -1824,6 +1855,7 @@ path = "mindroom.matrix.cache.thread_cache_state"
 depends_on = ["mindroom.matrix.cache.event_cache"]
 visibility = [
     "mindroom.matrix.cache",
+    "mindroom.matrix.cache.event_cache_thread_ops",
     "mindroom.matrix.cache.postgres_event_cache",
     "mindroom.matrix.cache.postgres_event_cache_threads",
     "mindroom.matrix.cache.sqlite_event_cache",
@@ -1889,33 +1921,35 @@ depends_on = []
 [[modules]]
 path = "mindroom.matrix.cache.sqlite_event_cache"
 depends_on = [
-    "mindroom.matrix.cache.event_batching",
-    "mindroom.matrix.cache.cache_maintenance",
-    "mindroom.matrix.cache.event_cache",
-    "mindroom.matrix.cache.event_normalization",
-    "mindroom.matrix.cache.thread_cache_state",
     "mindroom.logging_config",
+    "mindroom.matrix.cache.cache_maintenance",
+    "mindroom.matrix.cache.event_batching",
+    "mindroom.matrix.cache.event_cache",
+    "mindroom.matrix.cache.event_cache_thread_ops",
+    "mindroom.matrix.cache.event_normalization",
     "mindroom.matrix.cache.sqlite_agent_message_snapshot",
     "mindroom.matrix.cache.sqlite_cache_maintenance",
     "mindroom.matrix.cache.sqlite_event_cache_events",
     "mindroom.matrix.cache.sqlite_event_cache_threads",
+    "mindroom.matrix.cache.thread_cache_state",
 ]
 visibility = ["mindroom.runtime_support"]
 
 [[modules]]
 path = "mindroom.matrix.cache.postgres_event_cache"
 depends_on = [
+    "mindroom.logging_config",
     "mindroom.matrix.cache.cache_maintenance",
     "mindroom.matrix.cache.event_batching",
     "mindroom.matrix.cache.event_cache",
+    "mindroom.matrix.cache.event_cache_thread_ops",
     "mindroom.matrix.cache.event_normalization",
-    "mindroom.matrix.cache.thread_cache_state",
-    "mindroom.logging_config",
     "mindroom.matrix.cache.postgres_agent_message_snapshot",
     "mindroom.matrix.cache.postgres_cache_maintenance",
     "mindroom.matrix.cache.postgres_event_cache_events",
     "mindroom.matrix.cache.postgres_event_cache_threads",
     "mindroom.matrix.cache.postgres_redaction",
+    "mindroom.matrix.cache.thread_cache_state",
 ]
 visibility = ["mindroom.runtime_support"]
 

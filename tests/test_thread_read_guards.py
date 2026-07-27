@@ -11,8 +11,8 @@ import nio
 import pytest
 
 import mindroom.matrix.cache as matrix_cache
-import mindroom.matrix.cache.sqlite_event_cache_threads as sqlite_event_cache_threads_module
 from mindroom.background_tasks import wait_for_background_tasks
+from mindroom.matrix.cache import event_cache_thread_ops as thread_ops
 from mindroom.matrix.cache.sqlite_event_cache import SqliteEventCache
 from mindroom.matrix.cache.thread_cache_state import ThreadAppendOutcome, ThreadCacheGap
 from mindroom.matrix.cache.write_coordinator import EventCacheWriteCoordinator
@@ -1091,7 +1091,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         )
         write_entered = asyncio.Event()
         allow_write_commit = asyncio.Event()
-        original_replace = sqlite_event_cache_threads_module.replace_thread_locked
+        original_replace = thread_ops.replace_thread_locked
 
         async def blocked_replace(*args: object, **kwargs: object) -> None:
             write_entered.set()
@@ -1101,7 +1101,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         try:
             fetch_started_at = time.time()
             with patch(
-                "mindroom.matrix.cache.sqlite_event_cache_threads.replace_thread_locked",
+                "mindroom.matrix.cache.event_cache_thread_ops.replace_thread_locked",
                 new=blocked_replace,
             ):
                 write_task = asyncio.create_task(

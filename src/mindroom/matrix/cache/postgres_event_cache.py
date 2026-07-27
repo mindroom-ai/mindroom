@@ -14,6 +14,7 @@ import psycopg
 
 from mindroom.logging_config import get_logger
 
+from . import event_cache_thread_ops as thread_ops
 from . import postgres_event_cache_events, postgres_event_cache_threads
 from .event_batching import group_lookup_events_by_room
 from .event_cache import EventCacheBackendUnavailableError
@@ -1200,9 +1201,10 @@ class PostgresEventCache:
         if flushed_pending.room_purge or flushed_pending.principal_purge:
             result = disabled_result
         elif not allow_departed:
-            membership_state, membership_epoch = await postgres_event_cache_threads.load_room_membership_locked(
+            membership_state, membership_epoch = await thread_ops.load_room_membership_locked(
+                postgres_event_cache_threads.BACKEND,
                 db,
-                namespace=self._runtime.namespace,
+                scope=self._runtime.namespace,
                 room_id=room_id,
             )
             if membership_state != "joined":
@@ -1235,9 +1237,10 @@ class PostgresEventCache:
                 namespace=self._runtime.namespace,
                 room_id=room_id,
             )
-            await postgres_event_cache_threads.set_room_membership_locked(
+            await thread_ops.set_room_membership_locked(
+                postgres_event_cache_threads.BACKEND,
                 db,
-                namespace=self._runtime.namespace,
+                scope=self._runtime.namespace,
                 room_id=room_id,
                 membership_state="departed",
                 reason="room_departed",
@@ -1248,9 +1251,10 @@ class PostgresEventCache:
         room_pending = self._runtime.pending_room_gap(room_id)
         thread_pending = self._runtime.pending_thread_gaps(room_id)
         if room_pending is not None:
-            await postgres_event_cache_threads.mark_room_gap_locked(
+            await thread_ops.mark_room_gap_locked(
+                postgres_event_cache_threads.BACKEND,
                 db,
-                namespace=self._runtime.namespace,
+                scope=self._runtime.namespace,
                 room_id=room_id,
                 gap_marked_at=room_pending.gap_marked_at,
                 reason=room_pending.reason,
@@ -1260,9 +1264,10 @@ class PostgresEventCache:
         for thread_id, pending_gap in thread_pending:
             if room_pending is not None and pending_gap.gap_marked_at <= room_pending.gap_marked_at:
                 continue
-            await postgres_event_cache_threads.mark_thread_gap_locked(
+            await thread_ops.mark_thread_gap_locked(
+                postgres_event_cache_threads.BACKEND,
                 db,
-                namespace=self._runtime.namespace,
+                scope=self._runtime.namespace,
                 room_id=room_id,
                 thread_id=thread_id,
                 gap_marked_at=pending_gap.gap_marked_at,
@@ -1299,9 +1304,10 @@ class PostgresEventCache:
             room_id,
             operation="get_thread_events",
             disabled_result=None,
-            callback=lambda db: postgres_event_cache_threads.load_thread_events(
+            callback=lambda db: thread_ops.load_thread_events(
+                postgres_event_cache_threads.BACKEND,
                 db,
-                namespace=self._runtime.namespace,
+                scope=self._runtime.namespace,
                 room_id=room_id,
                 thread_id=thread_id,
             ),
@@ -1313,9 +1319,10 @@ class PostgresEventCache:
             room_id,
             operation="get_thread_event_ids",
             disabled_result=set(),
-            callback=lambda db: postgres_event_cache_threads.load_thread_event_ids(
+            callback=lambda db: thread_ops.load_thread_event_ids(
+                postgres_event_cache_threads.BACKEND,
                 db,
-                namespace=self._runtime.namespace,
+                scope=self._runtime.namespace,
                 room_id=room_id,
                 thread_id=thread_id,
             ),
@@ -1327,9 +1334,10 @@ class PostgresEventCache:
             room_id,
             operation="has_thread_snapshot",
             disabled_result=False,
-            callback=lambda db: postgres_event_cache_threads.thread_snapshot_exists(
+            callback=lambda db: thread_ops.thread_snapshot_exists(
+                postgres_event_cache_threads.BACKEND,
                 db,
-                namespace=self._runtime.namespace,
+                scope=self._runtime.namespace,
                 room_id=room_id,
                 thread_id=thread_id,
             ),
@@ -1341,9 +1349,10 @@ class PostgresEventCache:
             room_id,
             operation="get_recent_room_thread_ids",
             disabled_result=[],
-            callback=lambda db: postgres_event_cache_threads.load_recent_room_thread_ids(
+            callback=lambda db: thread_ops.load_recent_room_thread_ids(
+                postgres_event_cache_threads.BACKEND,
                 db,
-                namespace=self._runtime.namespace,
+                scope=self._runtime.namespace,
                 room_id=room_id,
                 limit=limit,
             ),
@@ -1355,9 +1364,10 @@ class PostgresEventCache:
             room_id,
             operation="get_thread_cache_gap",
             disabled_result=CACHE_GAP_UNAVAILABLE,
-            callback=lambda db: postgres_event_cache_threads.load_thread_cache_gap(
+            callback=lambda db: thread_ops.load_thread_cache_gap(
+                postgres_event_cache_threads.BACKEND,
                 db,
-                namespace=self._runtime.namespace,
+                scope=self._runtime.namespace,
                 room_id=room_id,
                 thread_id=thread_id,
             ),
@@ -1586,9 +1596,10 @@ class PostgresEventCache:
         events: list[dict[str, Any]],
         fetch_started_at: float,
     ) -> bool:
-        await postgres_event_cache_threads.replace_thread_locked(
+        await thread_ops.replace_thread_locked(
+            postgres_event_cache_threads.BACKEND,
             db,
-            namespace=self._runtime.namespace,
+            scope=self._runtime.namespace,
             room_id=room_id,
             thread_id=thread_id,
             events=events,
@@ -1603,9 +1614,10 @@ class PostgresEventCache:
             room_id,
             operation="invalidate_thread",
             disabled_result=None,
-            callback=lambda db: postgres_event_cache_threads.invalidate_thread_locked(
+            callback=lambda db: thread_ops.invalidate_thread_locked(
+                postgres_event_cache_threads.BACKEND,
                 db,
-                namespace=self._runtime.namespace,
+                scope=self._runtime.namespace,
                 room_id=room_id,
                 thread_id=thread_id,
             ),
@@ -1617,9 +1629,10 @@ class PostgresEventCache:
             room_id,
             operation="invalidate_room_threads",
             disabled_result=None,
-            callback=lambda db: postgres_event_cache_threads.invalidate_room_threads_locked(
+            callback=lambda db: thread_ops.invalidate_room_threads_locked(
+                postgres_event_cache_threads.BACKEND,
                 db,
-                namespace=self._runtime.namespace,
+                scope=self._runtime.namespace,
                 room_id=room_id,
             ),
         )
@@ -1632,9 +1645,10 @@ class PostgresEventCache:
                 room_id,
                 operation="mark_thread_gap",
                 disabled_result=None,
-                callback=lambda db: postgres_event_cache_threads.mark_thread_gap_locked(
+                callback=lambda db: thread_ops.mark_thread_gap_locked(
+                    postgres_event_cache_threads.BACKEND,
                     db,
-                    namespace=self._runtime.namespace,
+                    scope=self._runtime.namespace,
                     room_id=room_id,
                     thread_id=thread_id,
                     gap_marked_at=gap_marked_at,
@@ -1658,9 +1672,10 @@ class PostgresEventCache:
                 room_id,
                 operation="mark_room_threads_gap",
                 disabled_result=None,
-                callback=lambda db: postgres_event_cache_threads.mark_room_gap_locked(
+                callback=lambda db: thread_ops.mark_room_gap_locked(
+                    postgres_event_cache_threads.BACKEND,
                     db,
-                    namespace=self._runtime.namespace,
+                    scope=self._runtime.namespace,
                     room_id=room_id,
                     gap_marked_at=gap_marked_at,
                     reason=reason,
@@ -1688,9 +1703,10 @@ class PostgresEventCache:
             room_id,
             operation="apply_thread_mutation_append",
             disabled_result=ThreadAppendOutcome.WRITES_UNAVAILABLE,
-            callback=lambda db: postgres_event_cache_threads.apply_thread_mutation_append_locked(
+            callback=lambda db: thread_ops.apply_thread_mutation_append_locked(
+                postgres_event_cache_threads.BACKEND,
                 db,
-                namespace=self._runtime.namespace,
+                scope=self._runtime.namespace,
                 room_id=room_id,
                 thread_id=thread_id,
                 normalized_event=normalized_event,
@@ -1759,9 +1775,10 @@ class PostgresEventCache:
             room_id,
             operation="room_membership_epoch",
             disabled_result=None,
-            callback=lambda db: postgres_event_cache_threads.certify_room_membership_locked(
+            callback=lambda db: thread_ops.certify_room_membership_locked(
+                postgres_event_cache_threads.BACKEND,
                 db,
-                namespace=self._runtime.namespace,
+                scope=self._runtime.namespace,
                 room_id=room_id,
             ),
             allow_departed=True,
@@ -1793,15 +1810,17 @@ class PostgresEventCache:
         async def join_if_current(db: psycopg.AsyncConnection) -> bool:
             if self.room_departure_epoch(room_id) != expected_departure_epoch:
                 return False
-            membership_state, _membership_epoch = await postgres_event_cache_threads.load_room_membership_locked(
+            membership_state, _membership_epoch = await thread_ops.load_room_membership_locked(
+                postgres_event_cache_threads.BACKEND,
                 db,
-                namespace=self._runtime.namespace,
+                scope=self._runtime.namespace,
                 room_id=room_id,
             )
             if membership_state != "joined":
-                await postgres_event_cache_threads.set_room_membership_locked(
+                await thread_ops.set_room_membership_locked(
+                    postgres_event_cache_threads.BACKEND,
                     db,
-                    namespace=self._runtime.namespace,
+                    scope=self._runtime.namespace,
                     room_id=room_id,
                     membership_state="joined",
                     reason="room_rejoined",
@@ -1813,9 +1832,10 @@ class PostgresEventCache:
                 namespace=self._runtime.namespace,
                 room_id=room_id,
             )
-            await postgres_event_cache_threads.set_room_membership_locked(
+            await thread_ops.set_room_membership_locked(
+                postgres_event_cache_threads.BACKEND,
                 db,
-                namespace=self._runtime.namespace,
+                scope=self._runtime.namespace,
                 room_id=room_id,
                 membership_state="departed",
                 reason="room_departed",

@@ -21,8 +21,8 @@ from mindroom.matrix.cache import (
     ThreadAppendOutcome,
     postgres_event_cache_threads,
     sqlite_event_cache,
-    sqlite_event_cache_threads,
 )
+from mindroom.matrix.cache import event_cache_thread_ops as thread_ops
 from mindroom.matrix.cache.event_cache import EventCacheBackendUnavailableError
 from mindroom.matrix.cache.postgres_event_cache import (
     PostgresEventCache,
@@ -554,7 +554,7 @@ async def test_sqlite_event_cache_write_operation_rolls_back_cancelled_writer(
         raise asyncio.CancelledError(cancel_reason)
 
     monkeypatch.setattr(
-        sqlite_event_cache_threads,
+        thread_ops,
         "load_room_membership_locked",
         AsyncMock(return_value=("joined", 0)),
     )
@@ -1493,7 +1493,7 @@ async def test_postgres_event_cache_operation_rolls_back_cancelled_callback(
     )
     monkeypatch.setattr(cache, "_flush_pending_writes", AsyncMock(return_value=_FlushedPendingWrites()))
     monkeypatch.setattr(
-        postgres_event_cache_threads,
+        thread_ops,
         "load_room_membership_locked",
         AsyncMock(return_value=("joined", 0)),
     )
@@ -1862,7 +1862,7 @@ async def test_postgres_event_cache_preserves_pending_marker_recorded_during_flu
     )
     namespace = f"tenant_{uuid.uuid4().hex}"
     cache = PostgresEventCache(database_url=postgres_event_cache_url, namespace=namespace)
-    original_mark_thread_gap_locked = postgres_event_cache_threads.mark_thread_gap_locked
+    original_mark_thread_gap_locked = thread_ops.mark_thread_gap_locked
     injected_newer_pending_marker = False
 
     async def racing_mark_thread_gap_locked(*args: object, **kwargs: object) -> None:
@@ -1878,7 +1878,7 @@ async def test_postgres_event_cache_preserves_pending_marker_recorded_during_flu
         await original_mark_thread_gap_locked(*args, **kwargs)
 
     monkeypatch.setattr(
-        postgres_event_cache_threads,
+        thread_ops,
         "mark_thread_gap_locked",
         racing_mark_thread_gap_locked,
     )
@@ -1937,9 +1937,10 @@ async def test_postgres_event_cache_pending_thread_flush_does_not_downgrade_newe
             reason="older_pending_marker",
         )
         async with cache._runtime.acquire_db_operation(operation="test_newer_thread_marker") as db:
-            await postgres_event_cache_threads.mark_thread_gap_locked(
+            await thread_ops.mark_thread_gap_locked(
+                postgres_event_cache_threads.BACKEND,
                 db,
-                namespace=namespace,
+                scope=namespace,
                 room_id=room_id,
                 thread_id=thread_id,
                 gap_marked_at=200.0,
@@ -1986,9 +1987,10 @@ async def test_postgres_event_cache_pending_room_flush_does_not_downgrade_newer_
             reason="older_pending_room_marker",
         )
         async with cache._runtime.acquire_db_operation(operation="test_newer_room_marker") as db:
-            await postgres_event_cache_threads.mark_room_gap_locked(
+            await thread_ops.mark_room_gap_locked(
+                postgres_event_cache_threads.BACKEND,
                 db,
-                namespace=namespace,
+                scope=namespace,
                 room_id=room_id,
                 gap_marked_at=200.0,
                 reason="newer_durable_room_marker",

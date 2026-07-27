@@ -18,11 +18,10 @@ from mindroom.matrix.cache import (
     ConversationEventCache,
     SharedConversationEventCache,
     postgres_event_cache_events,
-    postgres_event_cache_threads,
     sqlite_event_cache,
     sqlite_event_cache_events,
-    sqlite_event_cache_threads,
 )
+from mindroom.matrix.cache import event_cache_thread_ops as thread_ops
 from mindroom.matrix.cache.postgres_event_cache import PostgresEventCache
 from mindroom.matrix.cache.sqlite_event_cache import SqliteEventCache
 from mindroom.matrix.cache.thread_cache_gap import mark_thread_gap_fail_closed
@@ -1333,13 +1332,10 @@ async def test_newer_departure_during_rejoin_closes_durable_room(
     expected_departure_epoch = cache.room_departure_epoch(room_id)
     load_started = asyncio.Event()
     release_load = asyncio.Event()
-    if isinstance(cache, SqliteEventCache):
-        original_load = sqlite_event_cache_threads.load_room_membership_locked
-        module = sqlite_event_cache_threads
-    else:
-        assert isinstance(cache, PostgresEventCache)
-        original_load = postgres_event_cache_threads.load_room_membership_locked
-        module = postgres_event_cache_threads
+    assert isinstance(cache, SqliteEventCache | PostgresEventCache)
+    # Both backends route this read through the one shared operation, so the pause is installed
+    # once. The fixture still parametrizes the backend, so each still runs its own path here.
+    original_load = thread_ops.load_room_membership_locked
 
     async def pause_membership_load(*args: object, **kwargs: object) -> tuple[str, int]:
         result = await original_load(*args, **kwargs)
@@ -1347,7 +1343,7 @@ async def test_newer_departure_during_rejoin_closes_durable_room(
         await release_load.wait()
         return result
 
-    monkeypatch.setattr(module, "load_room_membership_locked", pause_membership_load)
+    monkeypatch.setattr(thread_ops, "load_room_membership_locked", pause_membership_load)
     join_task = asyncio.create_task(
         cache.mark_room_joined(
             room_id,
