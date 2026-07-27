@@ -33,8 +33,8 @@ Cache rules (each encodes a shipped regression fix; do not weaken them):
 
 7. Still-opaque encrypted evidence fails closed: a reconstruction whose sources include an
    undecryptable relation-bearing event for the requested thread, or whose scan contains one with
-   unresolved thread impact, marks the thread stale and raises ``OpaqueEncryptedThreadHistoryError``
-   instead of certifying incomplete history; the stale marker survives until a decryption-capable
+   unresolved thread impact, gap-marks the thread and raises ``OpaqueEncryptedThreadHistoryError``
+   instead of certifying incomplete history; the gap marker survives until a decryption-capable
    refresh replaces the snapshot.
 """
 
@@ -1514,8 +1514,8 @@ async def bulk_refresh_room_thread_histories(
     ``replace_thread`` path. Threads whose root never appeared in the scan are
     reported in ``missing_root_ids`` and never stored. A caller-provided page budget stops the scan
     with remaining roots reported as missing and ``scan_truncated`` set. Threads whose reconstruction
-    contains still-opaque encrypted evidence are marked stale instead of stored, and a scan holding
-    opaque relations with unresolved impact marks every requested thread stale.
+    contains still-opaque encrypted evidence are gap-marked instead of stored, and a scan holding
+    opaque relations with unresolved impact gap-marks every requested thread.
     """
     fetch_started_at = time.time()
     fetch_membership_epoch = await _capture_membership_epoch(event_cache, room_id)
@@ -1526,7 +1526,7 @@ async def bulk_refresh_room_thread_histories(
         max_scan_pages=max_scan_pages,
     )
     usable_threads = 0
-    opaque_stale_threads = 0
+    opaque_gap_threads = 0
     if scan_result.unresolved_opaque_event_ids:
         logger.warning(
             "Bulk thread refresh scan contains opaque encrypted relations with unresolved impact",
@@ -1535,13 +1535,13 @@ async def bulk_refresh_room_thread_histories(
             unresolved_opaque_event_ids=sorted(scan_result.unresolved_opaque_event_ids),
         )
         await _mark_room_gap_for_opaque_history(event_cache, room_id=room_id)
-        opaque_stale_threads = len(set(thread_root_ids))
+        opaque_gap_threads = len(set(thread_root_ids))
     else:
         for thread_id, event_sources in scan_result.thread_event_sources.items():
             rejection_reason = _thread_history_cache_rejection_reason(event_sources, thread_id=thread_id)
             if rejection_reason == _OPAQUE_ENCRYPTED_EVENT_REJECTION:
                 await _mark_thread_gap_for_opaque_history(event_cache, room_id=room_id, thread_id=thread_id)
-                opaque_stale_threads += 1
+                opaque_gap_threads += 1
                 continue
             if rejection_reason is not None:
                 continue
@@ -1569,7 +1569,7 @@ async def bulk_refresh_room_thread_histories(
         caller_label=caller_label,
         requested_threads=stats.requested_threads,
         usable_threads=stats.usable_threads,
-        opaque_stale_threads=opaque_stale_threads,
+        opaque_gap_threads=opaque_gap_threads,
         missing_roots=len(stats.missing_root_ids),
         room_scan_pages=stats.room_scan_pages,
         scanned_event_count=stats.scanned_event_count,

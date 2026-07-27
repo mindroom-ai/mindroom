@@ -63,6 +63,15 @@ def _required_int(value: dict[str, object], key: str) -> int:
 # older than every snapshot and marker the trace produces.
 _STALE_FETCH_STARTED_AT = 1_000_000.0
 
+# The fetch the seed pretends to come from. Between _STALE_FETCH_STARTED_AT and any real
+# time.time(), which is the whole point: a stale replacement is deterministically older than the
+# seed and must lose, while an ordinary replacement is newer and must win.
+#
+# Not float("inf"). Seeding at infinity makes replace_thread_locked refuse every later fetch, which
+# silently turns REPLACE_THREAD - and the stale variant that exists to exercise the ordering rule -
+# into no-ops for the entire run. The suite still passes; it just stops testing replacement.
+_SEED_FETCH_STARTED_AT = 2_000_000.0
+
 
 class OperationKind(StrEnum):
     """One mutation family understood by the cache fuzzer."""
@@ -538,7 +547,7 @@ class CacheFuzzRunner:
                     thread_id(room, thread),
                     [root],
                     expected_membership_epoch=membership_epoch,
-                    fetch_started_at=float("inf"),
+                    fetch_started_at=_SEED_FETCH_STARTED_AT,
                 )
                 assert replaced
                 self.known_ids.add((current_room_id, root_event_id))

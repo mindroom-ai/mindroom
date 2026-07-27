@@ -428,7 +428,7 @@ class TestThreadMutationHelpers:
         self,
         context: str,
     ) -> None:
-        """Room-level redactions should never stale-mark thread state."""
+        """Room-level redactions should never gap-mark thread state."""
         cache_ops, logger, event_cache = _thread_mutation_cache_ops()
 
         result = await _apply_thread_redaction_mutation(
@@ -470,7 +470,7 @@ class TestThreadMutationHelpers:
     @pytest.mark.asyncio
     @pytest.mark.parametrize("context", ["outbound", "live", "sync"])
     async def test_thread_redaction_mutation_threaded_success_uses_context_reason(self, context: str) -> None:
-        """Threaded redactions should stale-mark the owning thread once on success."""
+        """Threaded redactions should gap-mark the owning thread once on success."""
         cache_ops, _logger, event_cache = _thread_mutation_cache_ops()
 
         result = await _apply_thread_redaction_mutation(
@@ -493,7 +493,7 @@ class TestThreadMutationHelpers:
     @pytest.mark.asyncio
     @pytest.mark.parametrize("context", ["outbound", "live", "sync"])
     async def test_thread_redaction_mutation_threaded_failure_uses_failure_reason(self, context: str) -> None:
-        """Threaded redaction failures should stale-mark once with the failure reason."""
+        """Threaded redaction failures should gap-mark once with the failure reason."""
         cache_ops, _logger, event_cache = _thread_mutation_cache_ops()
         event_cache.redact_event = AsyncMock(return_value=False)
 
@@ -1114,7 +1114,7 @@ class TestMatrixConversationCacheThreadReads:
 
     @pytest.mark.asyncio
     async def test_notify_outbound_redaction_transitive_target_updates_thread_cache(self) -> None:
-        """Transitive-threaded redactions should still stale-mark the owning thread."""
+        """Transitive-threaded redactions should still gap-mark the owning thread."""
         event_cache = _runtime_event_cache()
         event_cache.get_thread_id_for_event = AsyncMock(
             side_effect=lambda room_id, event_id: (
@@ -1186,7 +1186,7 @@ class TestMatrixConversationCacheThreadReads:
 
     @pytest.mark.asyncio
     async def test_notify_outbound_redaction_of_reaction_does_not_invalidate_thread_cache(self) -> None:
-        """Reaction redactions should not stale-mark thread message history."""
+        """Reaction redactions should not gap-mark thread message history."""
         event_cache = _runtime_event_cache()
         event_cache.get_thread_id_for_event = AsyncMock(return_value="$thread-root:localhost")
         event_cache.redact_event = AsyncMock(return_value=True)
@@ -1403,8 +1403,8 @@ class TestMatrixConversationCacheThreadReads:
         )
 
     @pytest.mark.asyncio
-    async def test_invalidate_known_thread_fails_closed_when_stale_marker_write_fails(self) -> None:
-        """Thread invalidation must delete cached rows when the stale marker cannot be persisted."""
+    async def test_invalidate_known_thread_fails_closed_when_gap_marker_write_fails(self) -> None:
+        """Thread invalidation must delete cached rows when the gap marker cannot be persisted."""
         event_cache = _runtime_event_cache()
         event_cache.mark_thread_gap = AsyncMock(side_effect=RuntimeError("sqlite write failed"))
         access = MatrixConversationCache(
@@ -1421,8 +1421,8 @@ class TestMatrixConversationCacheThreadReads:
         event_cache.invalidate_thread.assert_awaited_once_with("!room:localhost", "$thread:localhost")
 
     @pytest.mark.asyncio
-    async def test_invalidate_room_threads_fails_closed_when_stale_marker_write_fails(self) -> None:
-        """Room invalidation must delete cached room rows when the stale marker cannot be persisted."""
+    async def test_invalidate_room_threads_fails_closed_when_gap_marker_write_fails(self) -> None:
+        """Room invalidation must delete cached room rows when the gap marker cannot be persisted."""
         event_cache = _runtime_event_cache()
         event_cache.mark_room_threads_gap = AsyncMock(side_effect=RuntimeError("sqlite write failed"))
         access = MatrixConversationCache(
