@@ -576,6 +576,44 @@ async def test_watched_config_mtimes_retries_when_snapshot_changes_during_scan(
 
 
 @pytest.mark.asyncio
+async def test_watched_config_mtimes_retries_when_same_generation_snapshot_replaces_sources(
+    monkeypatch: pytest.MonkeyPatch,
+    split_app: FastAPI,
+) -> None:
+    """A source-set replacement must invalidate an in-flight scan even without a generation bump."""
+    initial_snapshot = _snapshot(split_app)
+    runtime_config = initial_snapshot.runtime_config
+    assert runtime_config is not None
+    flattened_source = yaml.safe_dump(runtime_config.authored_model_dump(), sort_keys=True)
+    scanned_paths: list[frozenset[Path]] = []
+
+    async def fake_to_thread(function: Callable[..., object], paths: frozenset[Path]) -> object:
+        scanned_paths.append(paths)
+        if len(scanned_paths) == 1:
+            initial_snapshot.runtime_paths.config_path.write_text(flattened_source, encoding="utf-8")
+            assert config_lifecycle._publish_runtime_config_into_app(
+                runtime_config,
+                initial_snapshot.runtime_paths,
+                split_app,
+            )
+            replacement_snapshot = _snapshot(split_app)
+            assert replacement_snapshot is not initial_snapshot
+            assert replacement_snapshot.generation == initial_snapshot.generation
+            assert replacement_snapshot.source_files == frozenset(
+                {initial_snapshot.runtime_paths.config_path.resolve()},
+            )
+        return function(paths)
+
+    monkeypatch.setattr(main.asyncio, "to_thread", fake_to_thread)
+
+    runtime_paths, mtimes = await main._watched_config_mtimes(split_app)
+
+    assert runtime_paths == initial_snapshot.runtime_paths
+    assert set(mtimes) == {initial_snapshot.runtime_paths.config_path.resolve()}
+    assert len(scanned_paths) == 2
+
+
+@pytest.mark.asyncio
 async def test_api_config_watcher_scans_off_the_event_loop(
     monkeypatch: pytest.MonkeyPatch,
     split_runtime_paths: constants.RuntimePaths,

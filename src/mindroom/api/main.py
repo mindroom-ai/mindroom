@@ -407,7 +407,7 @@ async def _watched_config_mtimes(api_app: FastAPI) -> tuple[constants.RuntimePat
         snapshot = _app_context(api_app)
         paths = snapshot.source_files or frozenset({snapshot.runtime_paths.config_path})
         mtimes = await asyncio.to_thread(file_watcher.paths_mtime_snapshot, paths)
-        if _app_context(api_app).generation == snapshot.generation:
+        if _app_context(api_app) is snapshot:
             return snapshot.runtime_paths, mtimes
 
 
