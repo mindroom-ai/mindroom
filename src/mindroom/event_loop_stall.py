@@ -22,6 +22,7 @@ from collections import deque
 from typing import TYPE_CHECKING
 
 from mindroom.logging_config import get_logger
+from mindroom.timing import elapsed_ms_between
 
 if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
@@ -128,7 +129,7 @@ class EventLoopStallDetector:
             self._scheduler_lag_window_started_at = now
         if not samples:
             return
-        milliseconds = sorted(round(sample * 1000, 3) for sample in samples)
+        milliseconds = sorted(elapsed_ms_between(0.0, sample, ndigits=3) for sample in samples)
         logger.info(
             "event_loop_scheduler_lag_summary",
             sample_count=len(milliseconds),
