@@ -1,5 +1,19 @@
 """Bounded thread reads.
 
+Two testing lessons this file exists to carry
+---------------------------------------------
+1. Test the seam, not one side of it. Every defect this feature shipped lived between the SQL and
+   the in-memory fold, and tests that exercised each side separately all passed while the joined
+   behaviour was wrong. tests/test_thread_edit_integrity.py asserts the same-sender rule against
+   the fold and never executes the query that decides which candidates the fold is handed, so it
+   stayed green through two bugs that broke exactly that rule. The guard that actually holds is
+   TestWindowAgreesWithTheFullReadOnEveryEdit: for every message in the window, the fold's winner
+   over the windowed rows must equal its winner over the full read.
+2. Rerouting a read past a monkeypatched seam HANGS a test, it does not fail it. Twice on this
+   feature a test kept passing its own setup and then waited out its timeout, which reads as a slow
+   test rather than a broken one. If a test that patches a cache method starts timing out, check
+   first whether production still calls the method it patched.
+
 A windowed read must never disagree with a full read about the messages it returns; it may only
 return fewer of them. The thread root is always pinned into the window so a bounded read still
 carries the original question alongside the recent tail.
@@ -25,6 +39,8 @@ from mindroom.matrix.cache import (
     sqlite_event_cache_threads,
 )
 from mindroom.matrix.cache.thread_read_window import (
+    DEFAULT_THREAD_READ_MAX_BYTES,
+    DEFAULT_THREAD_READ_MAX_MESSAGES,
     ThreadReadBudget,
     ThreadWindowCandidate,
     select_thread_window_event_ids,
@@ -1114,3 +1130,86 @@ class TestTailAgreesAfterALateEdit:
         assert message.edited_timestamp == 999_000
         assert message.body == "edited"
         assert message.latest_event_id == "$m0-late"
+
+
+class TestDefaultsDoNotWindowRealThreads:
+    """The default budget must not act as a sliding window on a normal thread.
+
+    A fixed message count slides - M1..M200 becomes M2..M201 - which changes the prompt prefix
+    every turn and defeats provider prefix caching, and it drops messages upstream of compaction
+    where nothing can ever summarize them. The reduction this read exists for comes from collapsing
+    edits, not from dropping messages, so the count is a pathological guard well above any real
+    thread.
+    """
+
+    def test_message_default_sits_far_above_a_real_thread(self) -> None:
+        """A long human thread must never reach the message guard."""
+        assert DEFAULT_THREAD_READ_MAX_MESSAGES >= 5_000
+
+    @pytest.mark.asyncio
+    async def test_a_thread_past_the_old_cap_is_returned_whole(
+        self,
+        event_cache: ConversationEventCache,
+    ) -> None:
+        """201 messages come back complete and untruncated under the default budget."""
+        await _seed_thread(event_cache, _thread_event_sources(201))
+
+        window = await event_cache.get_thread_window(
+            _ROOM_ID,
+            _THREAD_ID,
+            budget=ThreadReadBudget(
+                max_messages=DEFAULT_THREAD_READ_MAX_MESSAGES,
+                max_bytes=DEFAULT_THREAD_READ_MAX_BYTES,
+            ),
+        )
+        assert window.events is not None
+
+        assert window.truncated is False
+        assert len(_original_event_ids(window.events)) == 202
+
+    @pytest.mark.asyncio
+    async def test_consecutive_reads_keep_a_stable_prefix_as_the_thread_grows(
+        self,
+        event_cache: ConversationEventCache,
+    ) -> None:
+        """Appending a message must extend the read, not slide it - or prefix caching cannot hit."""
+        budget = ThreadReadBudget(
+            max_messages=DEFAULT_THREAD_READ_MAX_MESSAGES,
+            max_bytes=DEFAULT_THREAD_READ_MAX_BYTES,
+        )
+        await _seed_thread(event_cache, _thread_event_sources(201))
+        before = await event_cache.get_thread_window(_ROOM_ID, _THREAD_ID, budget=budget)
+
+        await _seed_thread(event_cache, _thread_event_sources(202))
+        after = await event_cache.get_thread_window(_ROOM_ID, _THREAD_ID, budget=budget)
+
+        assert before.events is not None
+        assert after.events is not None
+        before_messages = _original_event_ids(before.events)
+        after_messages = _original_event_ids(after.events)
+
+        assert after_messages[: len(before_messages)] == before_messages, (
+            "the read slid instead of extending; a changed prefix defeats provider prompt caching"
+        )
+
+    @pytest.mark.asyncio
+    async def test_edit_collapse_is_where_the_reduction_comes_from(
+        self,
+        event_cache: ConversationEventCache,
+    ) -> None:
+        """A 99%-edit thread collapses to a fraction of its rows without losing a message."""
+        await _seed_thread(event_cache, _thread_event_sources(20, edits_per_message=100))
+
+        window = await event_cache.get_thread_window(
+            _ROOM_ID,
+            _THREAD_ID,
+            budget=ThreadReadBudget(
+                max_messages=DEFAULT_THREAD_READ_MAX_MESSAGES,
+                max_bytes=DEFAULT_THREAD_READ_MAX_BYTES,
+            ),
+        )
+        assert window.events is not None
+
+        assert len(_original_event_ids(window.events)) == 21, "no message may be lost"
+        assert len(window.events) <= 42, "one winning edit per message, not every edit ever seen"
+        assert window.truncated is False
