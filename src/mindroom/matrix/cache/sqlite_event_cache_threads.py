@@ -160,6 +160,7 @@ WHERE thread_events.principal_id = :principal_id
                     WHERE latest.principal_id = event_edits.principal_id
                         AND latest.room_id = event_edits.room_id
                         AND latest.original_event_id = event_edits.original_event_id
+                        AND latest.sender = event_edits.sender
                     ORDER BY latest.origin_server_ts DESC, latest.edit_event_id DESC
                     LIMIT 1
                 )

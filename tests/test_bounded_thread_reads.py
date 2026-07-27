@@ -721,3 +721,84 @@ class TestRedactionAcrossTheWindow:
         )
         assert bounded_read is not None
         assert bounded_read[0]["event_id"] == _THREAD_ID
+
+
+class TestForeignEditCannotStarveTheAuthorsEdit:
+    """A foreign replacement must not remove the author's own edit from the window.
+
+    This is the seam tests/test_thread_edit_integrity.py cannot reach. That file hands the fold
+    both candidates directly, so it proves the sender rule but never sees the SQL that decides
+    which candidates the fold is given. Phase 2 originally shipped one latest edit across all
+    senders; the fold then wanted a same-sender one, found none, and rendered the message at its
+    pre-edit body - a rollback any room member could pin with a single m.replace.
+    """
+
+    @pytest.mark.asyncio
+    async def test_window_keeps_the_authors_edit_when_a_foreign_edit_is_newer(
+        self,
+        event_cache: ConversationEventCache,
+    ) -> None:
+        """A newer foreign m.replace must not evict the author's own edit from the window."""
+        author = "@author:localhost"
+        attacker = "@attacker:localhost"
+        await _seed_thread(
+            event_cache,
+            [
+                _message_event(_THREAD_ID, 1_000, sender=author),
+                _message_event("$victim", 2_000, sender=author, thread_id=_THREAD_ID),
+                _message_event("$author-edit", 3_000, sender=author, edit_of="$victim"),
+            ],
+        )
+        forged = _message_event("$forged", 9_000, sender=attacker, edit_of="$victim")
+        assert (
+            await event_cache.apply_thread_mutation_append(
+                _ROOM_ID,
+                _THREAD_ID,
+                forged,
+                append_failed_reason="test",
+            )
+        ).wrote_event
+
+        bounded_read = await event_cache.get_thread_events(
+            _ROOM_ID,
+            _THREAD_ID,
+            budget=ThreadReadBudget(max_messages=50),
+        )
+        assert bounded_read is not None
+
+        returned_ids = {row["event_id"] for row in bounded_read}
+        assert "$author-edit" in returned_ids, "author's own edit was starved out of the window"
+        assert "$victim" in returned_ids
+
+    @pytest.mark.asyncio
+    async def test_window_keeps_the_newest_edit_of_each_sender(
+        self,
+        event_cache: ConversationEventCache,
+    ) -> None:
+        """Each sender contributes its own newest candidate, and only its newest."""
+        author = "@author:localhost"
+        other = "@other:localhost"
+        await _seed_thread(
+            event_cache,
+            [
+                _message_event(_THREAD_ID, 1_000, sender=author),
+                _message_event("$victim", 2_000, sender=author, thread_id=_THREAD_ID),
+                _message_event("$author-old", 3_000, sender=author, edit_of="$victim"),
+                _message_event("$author-new", 4_000, sender=author, edit_of="$victim"),
+                _message_event("$other-old", 5_000, sender=other, edit_of="$victim"),
+                _message_event("$other-new", 6_000, sender=other, edit_of="$victim"),
+            ],
+        )
+
+        bounded_read = await event_cache.get_thread_events(
+            _ROOM_ID,
+            _THREAD_ID,
+            budget=ThreadReadBudget(max_messages=50),
+        )
+        assert bounded_read is not None
+
+        returned_ids = {row["event_id"] for row in bounded_read}
+        assert "$author-new" in returned_ids
+        assert "$other-new" in returned_ids
+        assert "$author-old" not in returned_ids
+        assert "$other-old" not in returned_ids

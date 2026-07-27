@@ -608,13 +608,16 @@ async def write_lookup_index_rows(
     for row in edit_rows:
         await db.execute(
             """
-            INSERT INTO mindroom_event_cache_event_edits(namespace, edit_event_id, room_id, original_event_id, origin_server_ts)
-            VALUES (%s, %s, %s, %s, %s)
+            INSERT INTO mindroom_event_cache_event_edits(
+                namespace, edit_event_id, room_id, original_event_id, origin_server_ts, sender
+            )
+            VALUES (%s, %s, %s, %s, %s, %s)
             ON CONFLICT(namespace, room_id, edit_event_id) DO UPDATE SET
                 original_event_id = excluded.original_event_id,
-                origin_server_ts = excluded.origin_server_ts
+                origin_server_ts = excluded.origin_server_ts,
+                sender = excluded.sender
             """,
-            (namespace, row.edit_event_id, row.room_id, row.original_event_id, row.origin_server_ts),
+            (namespace, row.edit_event_id, row.room_id, row.original_event_id, row.origin_server_ts, row.sender),
         )
 
     thread_index_events = serialized_events if thread_id is not None else accepted_events

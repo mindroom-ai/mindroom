@@ -637,15 +637,23 @@ async def write_lookup_index_rows(
         await db.executemany(
             """
             INSERT INTO event_edits(
-                principal_id, edit_event_id, room_id, original_event_id, origin_server_ts
+                principal_id, edit_event_id, room_id, original_event_id, origin_server_ts, sender
             )
-            VALUES (?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?)
             ON CONFLICT(principal_id, room_id, edit_event_id) DO UPDATE SET
                 original_event_id = excluded.original_event_id,
-                origin_server_ts = excluded.origin_server_ts
+                origin_server_ts = excluded.origin_server_ts,
+                sender = excluded.sender
             """,
             [
-                (principal_id, row.edit_event_id, row.room_id, row.original_event_id, row.origin_server_ts)
+                (
+                    principal_id,
+                    row.edit_event_id,
+                    row.room_id,
+                    row.original_event_id,
+                    row.origin_server_ts,
+                    row.sender,
+                )
                 for row in edit_rows
             ],
         )

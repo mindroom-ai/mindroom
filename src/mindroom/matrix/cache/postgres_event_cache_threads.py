@@ -136,6 +136,7 @@ WHERE thread_events.namespace = %(namespace)s
                     WHERE latest.namespace = event_edits.namespace
                         AND latest.room_id = event_edits.room_id
                         AND latest.original_event_id = event_edits.original_event_id
+                        AND latest.sender = event_edits.sender
                     ORDER BY latest.origin_server_ts DESC, latest.edit_event_id DESC
                     LIMIT 1
                 )

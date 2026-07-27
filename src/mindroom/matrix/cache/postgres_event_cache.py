@@ -323,8 +323,15 @@ async def _create_postgres_event_cache_schema(db: AsyncConnection) -> None:
             room_id TEXT NOT NULL,
             original_event_id TEXT NOT NULL,
             origin_server_ts BIGINT NOT NULL,
+            sender TEXT NOT NULL DEFAULT '',
             PRIMARY KEY (namespace, room_id, edit_event_id)
         )
+        """,
+    )
+    await db.execute(
+        """
+        ALTER TABLE mindroom_event_cache_event_edits
+        ADD COLUMN IF NOT EXISTS sender TEXT NOT NULL DEFAULT ''
         """,
     )
     await db.execute(
@@ -334,6 +341,7 @@ async def _create_postgres_event_cache_schema(db: AsyncConnection) -> None:
             namespace,
             room_id,
             original_event_id,
+            sender,
             origin_server_ts DESC,
             edit_event_id DESC
         )

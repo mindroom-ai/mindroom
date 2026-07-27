@@ -24,18 +24,39 @@ class _PostgresSchemaMigrationResult:
     normalized_legacy_thread_payload_rows: int
 
 
-async def _backfill_event_payload_sizes(db: AsyncConnection, *, namespace: str) -> None:
-    """Record the payload size of one namespace's pre-existing events.
+async def _backfill_bounded_read_columns(db: AsyncConnection, *, namespace: str) -> None:
+    """Populate the columns a bounded read needs on one namespace's pre-existing rows.
 
-    Bounded thread reads price a window from ``event_bytes`` alone, so a row that kept the column
-    default would look free and let a window return unbounded bytes. This detoasts each stored
-    payload exactly once, inside the migration transaction, instead of on every later read.
+    Runs unconditionally per namespace, deliberately. ``schema_version`` lives in
+    ``mindroom_event_cache_metadata``, which is keyed by ``key`` alone and is therefore global to
+    the database, while every Matrix principal owns its own namespace and initializes separately.
+    Gating this on the shared version would let the first principal to start backfill its own rows,
+    write the new version, and leave every other principal's rows behind forever. Both statements
+    are idempotent and match nothing once a namespace is current, so running them every time costs
+    an indexed no-op. This mirrors the per-namespace normalization below.
+
+    ``event_bytes`` at its 0 default prices a row as free, which makes ``max_bytes`` inert; a
+    ``sender`` at its '' default collapses every edit of one message into a single bucket, which
+    reintroduces the foreign-edit rollback the per-sender window exists to prevent.
     """
     await db.execute(
         """
         UPDATE mindroom_event_cache_events
         SET event_bytes = octet_length(event_json)
         WHERE namespace = %s AND event_bytes = 0
+        """,
+        (namespace,),
+    )
+    await db.execute(
+        """
+        UPDATE mindroom_event_cache_event_edits AS edits
+        SET sender = COALESCE(events.event_json::jsonb ->> 'sender', '')
+        FROM mindroom_event_cache_events AS events
+        WHERE edits.namespace = %s
+            AND edits.sender = ''
+            AND events.namespace = edits.namespace
+            AND events.room_id = edits.room_id
+            AND events.event_id = edits.edit_event_id
         """,
         (namespace,),
     )
@@ -65,8 +86,7 @@ async def migrate_postgres_schema(
             ALTER COLUMN event_json DROP NOT NULL
             """,
         )
-    if upgrading:
-        await _backfill_event_payload_sizes(db, namespace=namespace)
+    await _backfill_bounded_read_columns(db, namespace=namespace)
 
     normalized_legacy_thread_payload_rows = await rowcount(
         db,

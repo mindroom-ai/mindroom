@@ -59,6 +59,7 @@ class _EventEditRow:
     room_id: str
     original_event_id: str
     origin_server_ts: int
+    sender: str
 
 
 def event_id_for_cache(event: dict[str, Any]) -> str:
@@ -190,11 +191,13 @@ def _event_edit_row(room_id: str, event: dict[str, Any]) -> _EventEditRow | None
     event_info = EventInfo.from_event(event)
     if not event_info.is_edit or not isinstance(event_info.original_event_id, str):
         return None
+    sender = event.get("sender")
     return _EventEditRow(
         edit_event_id=event_id_for_cache(event),
         room_id=room_id,
         original_event_id=event_info.original_event_id,
         origin_server_ts=_event_timestamp_for_cache(event),
+        sender=sender if isinstance(sender, str) else "",
     )
 
 
