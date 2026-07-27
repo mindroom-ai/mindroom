@@ -1759,6 +1759,7 @@ visibility = ["mindroom.matrix.cache.postgres_event_cache"]
 [[modules]]
 path = "mindroom.matrix.cache.sqlite_event_cache_threads"
 depends_on = [
+    "mindroom.logging_config",
     "mindroom.matrix.cache.thread_read_window",
     "mindroom.matrix.cache.event_cache_events",
     "mindroom.matrix.cache.event_normalization",
@@ -1769,6 +1770,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.matrix.cache.postgres_event_cache_threads"
 depends_on = [
+    "mindroom.logging_config",
     "mindroom.matrix.cache.thread_read_window",
     "mindroom.matrix.cache.event_cache_events",
     "mindroom.matrix.cache.event_normalization",

@@ -35,6 +35,8 @@ import json
 import time
 from typing import TYPE_CHECKING, Any, Literal
 
+from mindroom.logging_config import get_logger
+
 from .event_cache_events import (
     event_id_for_cache,
     serialize_cacheable_events,
@@ -65,8 +67,11 @@ from .thread_read_window import (
     UNBOUNDED_THREAD_READ,
     ThreadReadBudget,
     ThreadWindowCandidate,
+    log_thread_window_selection,
     select_thread_window_event_ids,
 )
+
+logger = get_logger(__name__)
 
 if TYPE_CHECKING:
     import aiosqlite
@@ -209,13 +214,21 @@ async def load_thread_events(
     # The payload query may return fewer rows than were selected: redaction hard-deletes, so an
     # event removed between the two phases is correctly absent. A short result is normal here and
     # must never be asserted against the selected count.
+    selection = select_thread_window_event_ids(candidates, budget=budget)
+    log_thread_window_selection(
+        selection,
+        budget=budget,
+        logger=logger,
+        room_id=room_id,
+        thread_id=thread_id,
+    )
     cursor = await db.execute(
         _THREAD_WINDOW_PAYLOAD_SQL,
         {
             "principal_id": principal_id,
             "room_id": room_id,
             "thread_id": thread_id,
-            "selected_event_ids": json.dumps(select_thread_window_event_ids(candidates, budget=budget)),
+            "selected_event_ids": json.dumps(selection.event_ids),
         },
     )
     rows = await cursor.fetchall()

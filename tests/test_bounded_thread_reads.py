@@ -17,7 +17,13 @@ from typing import TYPE_CHECKING, Any
 import pytest
 
 from mindroom.matrix.cache import postgres_event_cache_threads, sqlite_event_cache_threads
-from mindroom.matrix.cache.thread_read_window import ThreadReadBudget
+from mindroom.matrix.cache.thread_read_window import (
+    DEFAULT_THREAD_READ_MAX_BYTES,
+    DEFAULT_THREAD_READ_MAX_MESSAGES,
+    ThreadReadBudget,
+    ThreadWindowCandidate,
+    select_thread_window_event_ids,
+)
 from tests.event_cache_test_support import replace_thread_unconditionally
 
 if TYPE_CHECKING:
@@ -490,3 +496,48 @@ class TestStoredPayloadSizeStaysCurrent:
         assert _original_event_ids(bounded_read) == [_THREAD_ID, "$newest"]
         stored_clear = next(row for row in bounded_read if row["event_id"] == "$newest")
         assert len(stored_clear["content"]["body"]) == 40_000
+
+
+class TestWindowTruncationIsReported:
+    """A bound that fires is a signal, not routine truncation."""
+
+    def test_selection_reports_which_bound_stopped_the_walk(self) -> None:
+        """Callers can tell a byte cut from a message cut, and an untruncated read from either."""
+        candidates = [ThreadWindowCandidate(event_id=f"$m{index}", window_bytes=100) for index in range(10)]
+
+        by_bytes = select_thread_window_event_ids(candidates, budget=ThreadReadBudget(max_bytes=250))
+        assert by_bytes.stopped_at_max_bytes is True
+        assert by_bytes.stopped_at_max_messages is False
+        assert by_bytes.truncated is True
+        assert by_bytes.selected_bytes == 200
+
+        by_messages = select_thread_window_event_ids(candidates, budget=ThreadReadBudget(max_messages=3))
+        assert by_messages.stopped_at_max_messages is True
+        assert by_messages.stopped_at_max_bytes is False
+        assert by_messages.truncated is True
+
+        untruncated = select_thread_window_event_ids(
+            candidates,
+            budget=ThreadReadBudget(max_messages=50, max_bytes=1_000_000),
+        )
+        assert untruncated.truncated is False
+        assert untruncated.stopped_at_max_bytes is False
+        assert untruncated.stopped_at_max_messages is False
+
+    def test_oversized_newest_message_is_returned_and_reported(self) -> None:
+        """The newest-message floor still counts as truncation so it gets logged."""
+        candidates = [ThreadWindowCandidate(event_id=f"$m{index}", window_bytes=50_000) for index in range(4)]
+
+        selection = select_thread_window_event_ids(candidates, budget=ThreadReadBudget(max_bytes=1))
+
+        assert selection.event_ids == ["$m0"]
+        assert selection.truncated is True
+        assert selection.stopped_at_max_bytes is True
+
+    def test_default_byte_budget_clears_a_large_legitimate_thread(self) -> None:
+        """The default must not bind on a big-but-normal thread, only on the pathology."""
+        large_legitimate_thread_bytes = DEFAULT_THREAD_READ_MAX_MESSAGES * 2_048
+        pathological_thread_bytes = 1_000 * 20_000
+
+        assert large_legitimate_thread_bytes < DEFAULT_THREAD_READ_MAX_BYTES
+        assert pathological_thread_bytes > DEFAULT_THREAD_READ_MAX_BYTES
