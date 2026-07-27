@@ -855,6 +855,10 @@ async def add_reaction_buttons(
         idempotency_key: Stable delivery identity used for Matrix transaction IDs
 
     """
+    # Every button is attempted before reporting failure. Stopping at the first
+    # rejection would leave later options unsent until a retry, and each reaction
+    # carries its own transaction ID, so a repeat of an accepted one is a no-op.
+    failed_emoji: list[str] = []
     for opt in options:
         emoji_char = opt.get("emoji", "❓")
         transaction = (
@@ -874,8 +878,10 @@ async def add_reaction_buttons(
         )
         if not isinstance(reaction_response, nio.RoomSendResponse):
             logger.warning("Failed to add reaction", emoji=emoji_char, error=str(reaction_response))
-            message = f"Failed to add reaction {emoji_char}"
-            raise RuntimeError(message)  # noqa: TRY004
+            failed_emoji.append(emoji_char)
+    if failed_emoji:
+        message = f"Failed to add reaction {' '.join(failed_emoji)}"
+        raise RuntimeError(message)
 
 
 def _cleanup() -> None:
