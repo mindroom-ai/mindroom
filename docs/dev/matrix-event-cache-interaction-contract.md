@@ -95,7 +95,10 @@ Authoritative membership handling separately fences and purges retained history 
 
 ## Thread snapshot reads
 
-A durable thread snapshot is usable only when its state row exists, `validated_at` is set, and no thread or room invalidation is at least as new as that validation.
+A durable thread snapshot is usable unless a gap marker is recorded against it.
+A gap is detected and refetched rather than prevented, so there is no validation timestamp and no trust comparison.
+A room-scoped gap is a wildcard-thread marker: it fans out across every thread in the room that holds a snapshot.
+A replacement clears the marker only when the marker predates the fetch that produced the replacement.
 
 A snapshot without its thread root or one still containing opaque `m.room.encrypted` payloads is rejected.
 

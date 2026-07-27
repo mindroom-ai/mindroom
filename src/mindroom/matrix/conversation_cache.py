@@ -46,7 +46,6 @@ from mindroom.matrix.client_thread_history import (
     get_room_threads_page,
     log_thread_history_refresh,
     refresh_thread_history_from_source,
-    thread_history_refresh_mode,
     untrusted_cached_thread_ids,
 )
 from mindroom.matrix.event_info import EventInfo
@@ -852,7 +851,7 @@ class MatrixConversationCache(ConversationCacheProtocol):
             room_id=room_id,
             thread_id=thread_id,
             caller_label=caller_label,
-            mode=thread_history_refresh_mode(cache_hit=False),
+            mode="full_scan",
             diagnostics=result.diagnostics,
             coordinator_queue_wait_ms=coordinator_queue_wait_ms,
         )
@@ -973,13 +972,22 @@ class MatrixConversationCache(ConversationCacheProtocol):
 
     @staticmethod
     def _thread_repair_result_is_usable(result: ThreadHistoryResult) -> bool:
-        """Return whether one flight left a trusted durable snapshot."""
+        """Return whether one flight left a durable snapshot behind.
+
+        A snapshot installed under a surviving gap marker still counts. Retained deltas are merged
+        into the fetch before it is stored, so they are durably in the snapshot either way; the
+        marker only means the next read refetches, and dropping the deltas then costs nothing.
+        """
         source = result.diagnostics.get(THREAD_HISTORY_SOURCE_DIAGNOSTIC)
         return source == THREAD_HISTORY_SOURCE_CACHE or result.diagnostics.get("cache_store_written") is True
 
     @staticmethod
     def _thread_repair_result_arms_backoff(result: ThreadHistoryResult) -> bool:
-        """Return whether one persistent failure should throttle later refills."""
+        """Return whether one persistent failure should throttle later refills.
+
+        Only a genuine write fault arms it. A cache whose writes are unavailable stores nothing
+        without failing, and throttling that would delay the refill that recovers from it.
+        """
         return result.diagnostics.get("cache_store_failed") is True
 
     def _schedule_missing_thread_repair(self, room_id: str, thread_id: str) -> None:

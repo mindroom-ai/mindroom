@@ -70,11 +70,3 @@ def thread_cache_gap_row(values: Sequence[float | str | None] | None) -> ThreadC
         gap_reason=values[1] if isinstance(values[1], str) else None,
     )
 
-
-def replacement_clears_gap(gap: ThreadCacheGap | None, *, fetch_started_at: float) -> bool:
-    """Return whether one replacement's fetch covers the recorded gap.
-
-    A gap marked while the fetch was in flight describes events the fetch could not have seen, so
-    the replacement leaves it in place and the next read refetches.
-    """
-    return gap is None or gap.gap_marked_at <= fetch_started_at

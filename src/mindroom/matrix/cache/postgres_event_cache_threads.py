@@ -290,9 +290,16 @@ async def set_room_membership_locked(
         room_id=room_id,
         reason=reason,
     )
-    # The gap marker no longer touches ``room_state``, so the membership row has to be created here
-    # before it can be advanced.
-    await certify_room_membership_locked(db, namespace=namespace, room_id=room_id)
+    # The gap marker no longer touches ``room_state``, so the membership row has to exist before it
+    # can be advanced. Insert rather than certify: the epoch that would read back is discarded.
+    await db.execute(
+        """
+        INSERT INTO mindroom_event_cache_room_state(namespace, room_id, membership_state, membership_epoch)
+        VALUES (%s, %s, 'joined', 0)
+        ON CONFLICT(namespace, room_id) DO NOTHING
+        """,
+        (namespace, room_id),
+    )
     await db.execute(
         """
         UPDATE mindroom_event_cache_room_state
@@ -736,7 +743,6 @@ async def _thread_event_ids_for_thread(
         (namespace, room_id, thread_id),
     )
     return [str(row[0]) for row in rows]
-
 
 
 async def _thread_event_ids_for_room(

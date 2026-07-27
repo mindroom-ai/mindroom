@@ -350,9 +350,16 @@ async def set_room_membership_locked(
         room_id=room_id,
         reason=reason,
     )
-    # The gap marker no longer touches ``room_cache_state``, so the membership row has to be created
-    # here before it can be advanced.
-    await certify_room_membership_locked(db, principal_id=principal_id, room_id=room_id)
+    # The gap marker no longer touches ``room_cache_state``, so the membership row has to exist
+    # before it can be advanced. Insert rather than certify: the epoch that would read back is
+    # discarded.
+    await db.execute(
+        """
+        INSERT OR IGNORE INTO room_cache_state(principal_id, room_id, membership_state, membership_epoch)
+        VALUES (?, ?, 'joined', 0)
+        """,
+        (principal_id, room_id),
+    )
     await db.execute(
         """
         UPDATE room_cache_state

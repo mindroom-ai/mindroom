@@ -9,14 +9,21 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from mindroom.matrix.cache import ThreadCacheReplaceOutcome, thread_cache_rejection_reason
+from mindroom.matrix import client_thread_history
+from mindroom.matrix.cache import thread_cache_rejection_reason
 from mindroom.matrix.cache.sqlite_event_cache import SqliteEventCache
 from mindroom.matrix.cache.thread_repair import ThreadRepairBackoffError, ThreadRepairRegistry
 from mindroom.matrix.cache.write_coordinator import EventCacheWriteCoordinator
+from mindroom.matrix.conversation_cache import MatrixConversationCache
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
     from pathlib import Path
+
+
+_STORED = "stored"
+_HARD_FAILURE = "hard_failure"
+_WRITES_UNAVAILABLE = "writes_unavailable"
 
 
 def _schedule[T](repair_factory: Callable[[], Awaitable[T]]) -> asyncio.Task[T]:
@@ -56,7 +63,7 @@ async def test_twenty_missing_thread_callers_share_one_repair_and_converge(  # n
     fetch_count = 0
     expected_ids = (thread_id, "$initial", *(f"$live-{index}" for index in range(5)))
 
-    async def repair() -> ThreadCacheReplaceOutcome:
+    async def repair() -> bool:
         nonlocal fetch_count
         fetch_count += 1
         repair_started.set()
@@ -94,7 +101,7 @@ async def test_twenty_missing_thread_callers_share_one_repair_and_converge(  # n
                 coordination_scope=principal_id,
                 hydrate_sidecars=True,
                 allow_stale_fallback=False,
-                result_arms_backoff=lambda outcome: not outcome.usable,
+                result_arms_backoff=lambda stored: not stored,
             )
             coordinator.acknowledge_thread_repair_deltas(
                 room_id,
@@ -319,24 +326,24 @@ async def test_hard_failure_enters_backoff_without_reusing_history() -> None:
     """A persistent store failure should throttle retries without caching reconstructed history."""
     now = 10.0
     registry = ThreadRepairRegistry(failure_backoff_seconds=2.0, clock=lambda: now)
-    repair = AsyncMock(return_value=ThreadCacheReplaceOutcome.HARD_FAILURE)
+    repair = AsyncMock(return_value=_HARD_FAILURE)
     key = ("@agent:localhost", "!room:localhost", "$thread", True, False)
 
     first = await registry.run(
         key,
         schedule=_schedule,
         repair=repair,
-        result_arms_backoff=lambda result: not result.usable,
+        result_arms_backoff=lambda result: result is not _STORED,
     )
     with pytest.raises(ThreadRepairBackoffError):
         await registry.run(
             key,
             schedule=_schedule,
             repair=repair,
-            result_arms_backoff=lambda result: not result.usable,
+            result_arms_backoff=lambda result: result is not _STORED,
         )
 
-    assert first is ThreadCacheReplaceOutcome.HARD_FAILURE
+    assert first is _HARD_FAILURE
     repair.assert_awaited_once()
 
     now = 12.0
@@ -344,10 +351,10 @@ async def test_hard_failure_enters_backoff_without_reusing_history() -> None:
         key,
         schedule=_schedule,
         repair=repair,
-        result_arms_backoff=lambda result: not result.usable,
+        result_arms_backoff=lambda result: result is not _STORED,
     )
 
-    assert second is ThreadCacheReplaceOutcome.HARD_FAILURE
+    assert second is _HARD_FAILURE
     assert repair.await_count == 2
 
 
@@ -355,24 +362,24 @@ async def test_hard_failure_enters_backoff_without_reusing_history() -> None:
 async def test_writes_unavailable_completion_does_not_arm_backoff() -> None:
     """A disabled cache should allow each strict caller to attempt an uncached read."""
     registry = ThreadRepairRegistry(failure_backoff_seconds=2.0)
-    repair = AsyncMock(return_value=ThreadCacheReplaceOutcome.WRITES_UNAVAILABLE)
+    repair = AsyncMock(return_value=_WRITES_UNAVAILABLE)
     key = ("@agent:localhost", "!room:localhost", "$thread", False, False)
 
     first = await registry.run(
         key,
         schedule=_schedule,
         repair=repair,
-        result_arms_backoff=lambda result: result is ThreadCacheReplaceOutcome.HARD_FAILURE,
+        result_arms_backoff=lambda result: result is _HARD_FAILURE,
     )
     second = await registry.run(
         key,
         schedule=_schedule,
         repair=repair,
-        result_arms_backoff=lambda result: result is ThreadCacheReplaceOutcome.HARD_FAILURE,
+        result_arms_backoff=lambda result: result is _HARD_FAILURE,
     )
 
-    assert first is ThreadCacheReplaceOutcome.WRITES_UNAVAILABLE
-    assert second is ThreadCacheReplaceOutcome.WRITES_UNAVAILABLE
+    assert first is _WRITES_UNAVAILABLE
+    assert second is _WRITES_UNAVAILABLE
     assert repair.await_count == 2
 
 
@@ -388,10 +395,10 @@ async def test_failure_backoff_doubles_to_cap_and_resets_after_success() -> None
     key = ("@agent:localhost", "!room:localhost", "$thread", True, False)
     repair = AsyncMock(
         side_effect=[
-            ThreadCacheReplaceOutcome.HARD_FAILURE,
-            ThreadCacheReplaceOutcome.HARD_FAILURE,
-            ThreadCacheReplaceOutcome.HARD_FAILURE,
-            ThreadCacheReplaceOutcome.STORED,
+            _HARD_FAILURE,
+            _HARD_FAILURE,
+            _HARD_FAILURE,
+            _STORED,
         ],
     )
 
@@ -400,7 +407,7 @@ async def test_failure_backoff_doubles_to_cap_and_resets_after_success() -> None
             key,
             schedule=_schedule,
             repair=repair,
-            result_arms_backoff=lambda result: not result.usable,
+            result_arms_backoff=lambda result: result is not _STORED,
         )
         assert registry.retry_after_seconds(key) == expected_delay
         now += expected_delay
@@ -409,7 +416,7 @@ async def test_failure_backoff_doubles_to_cap_and_resets_after_success() -> None
         key,
         schedule=_schedule,
         repair=repair,
-        result_arms_backoff=lambda result: not result.usable,
+        result_arms_backoff=lambda result: result is not _STORED,
     )
 
     assert registry.retry_after_seconds(key) == 0.0
@@ -438,21 +445,21 @@ async def test_clear_room_detaches_active_flight_and_ignores_its_late_failure() 
     release_old = asyncio.Event()
     new_started = asyncio.Event()
 
-    async def old_repair() -> ThreadCacheReplaceOutcome:
+    async def old_repair() -> str:
         old_started.set()
         await release_old.wait()
-        return ThreadCacheReplaceOutcome.HARD_FAILURE
+        return _HARD_FAILURE
 
-    async def new_repair() -> ThreadCacheReplaceOutcome:
+    async def new_repair() -> str:
         new_started.set()
-        return ThreadCacheReplaceOutcome.STORED
+        return _STORED
 
     old_flight = asyncio.create_task(
         registry.run(
             key,
             schedule=_schedule,
             repair=old_repair,
-            result_arms_backoff=lambda result: result is ThreadCacheReplaceOutcome.HARD_FAILURE,
+            result_arms_backoff=lambda result: result is _HARD_FAILURE,
         ),
     )
     await old_started.wait()
@@ -462,7 +469,7 @@ async def test_clear_room_detaches_active_flight_and_ignores_its_late_failure() 
             key,
             schedule=_schedule,
             repair=new_repair,
-            result_arms_backoff=lambda result: result is ThreadCacheReplaceOutcome.HARD_FAILURE,
+            result_arms_backoff=lambda result: result is _HARD_FAILURE,
         ),
     )
 
@@ -473,8 +480,8 @@ async def test_clear_room_detaches_active_flight_and_ignores_its_late_failure() 
         release_old.set()
         old_result = await old_flight
 
-    assert new_result is ThreadCacheReplaceOutcome.STORED
-    assert old_result is ThreadCacheReplaceOutcome.HARD_FAILURE
+    assert new_result is _STORED
+    assert old_result is _HARD_FAILURE
     assert registry.retry_after_seconds(key) == 0.0
 
 
@@ -528,3 +535,78 @@ async def test_retained_delta_survives_a_scan_that_outlives_the_retention_window
     assert replayed_event_ids == ["$live"]
     now = 300.0
     assert registry.pending_deltas(delta_key) == ()
+
+
+@pytest.mark.asyncio
+async def test_hard_store_failure_arms_repair_backoff_through_real_diagnostics() -> None:
+    """A write fault must reach the backoff predicate through the diagnostics the refill publishes.
+
+    The producer and the consumer of these diagnostics live in different modules, so a key renamed
+    on one side alone silently disarms backoff and a persistently failing cache is retried forever.
+    Drive the real refill path rather than a hand-built diagnostics dict, so the two stay wired.
+    """
+    event_cache = AsyncMock()
+    event_cache.room_membership_epoch.return_value = 0
+    event_cache.replace_thread.side_effect = RuntimeError("cache write exploded")
+
+    store_result = await client_thread_history._store_thread_history_cache(
+        event_cache,
+        room_id="!room:localhost",
+        thread_id="$thread",
+        event_sources=[_event("$thread", 1000)],
+        expected_membership_epoch=0,
+        fetch_started_at=1.0,
+    )
+    result = client_thread_history._homeserver_thread_history_result(
+        client_thread_history._ThreadHistoryFetchResult(
+            history=[],
+            event_sources=[],
+            fetch_ms=0.0,
+            room_scan_pages=1,
+            scanned_event_count=0,
+            resolution_ms=0.0,
+            sidecar_hydration_ms=0.0,
+        ),
+        hydrate_sidecars=True,
+        store_result=store_result,
+        cache_reject_diagnostics=None,
+    )
+
+    assert store_result.failed is True
+    assert store_result.written is False
+    assert MatrixConversationCache._thread_repair_result_arms_backoff(result) is True
+    assert MatrixConversationCache._thread_repair_result_is_usable(result) is False
+
+
+@pytest.mark.asyncio
+async def test_unavailable_cache_writes_do_not_arm_repair_backoff() -> None:
+    """A cache that stores nothing without failing must not throttle the refill that recovers it."""
+    event_cache = AsyncMock()
+    event_cache.room_membership_epoch.return_value = 0
+    event_cache.replace_thread.return_value = False
+
+    store_result = await client_thread_history._store_thread_history_cache(
+        event_cache,
+        room_id="!room:localhost",
+        thread_id="$thread",
+        event_sources=[_event("$thread", 1000)],
+        expected_membership_epoch=0,
+        fetch_started_at=1.0,
+    )
+    result = client_thread_history._homeserver_thread_history_result(
+        client_thread_history._ThreadHistoryFetchResult(
+            history=[],
+            event_sources=[],
+            fetch_ms=0.0,
+            room_scan_pages=1,
+            scanned_event_count=0,
+            resolution_ms=0.0,
+            sidecar_hydration_ms=0.0,
+        ),
+        hydrate_sidecars=True,
+        store_result=store_result,
+        cache_reject_diagnostics=None,
+    )
+
+    assert store_result == client_thread_history._ThreadCacheStoreResult(written=False, failed=False)
+    assert MatrixConversationCache._thread_repair_result_arms_backoff(result) is False

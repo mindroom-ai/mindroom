@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from mindroom.matrix.cache.thread_cache_state import ThreadCacheGap, replacement_clears_gap, thread_cache_gap_row
+from mindroom.matrix.cache.thread_cache_state import ThreadCacheGap, thread_cache_gap_row
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -41,10 +41,3 @@ def test_thread_cache_gap_row_reads_a_marked_row() -> None:
         gap_reason="limited_sync_timeline",
     )
 
-
-def test_replacement_clears_only_a_gap_its_fetch_covers() -> None:
-    """A gap marked mid-fetch survives the replacement that fetch produced."""
-    assert replacement_clears_gap(None, fetch_started_at=10.0)
-    assert replacement_clears_gap(ThreadCacheGap(gap_marked_at=9.0, gap_reason="x"), fetch_started_at=10.0)
-    assert replacement_clears_gap(ThreadCacheGap(gap_marked_at=10.0, gap_reason="x"), fetch_started_at=10.0)
-    assert not replacement_clears_gap(ThreadCacheGap(gap_marked_at=11.0, gap_reason="x"), fetch_started_at=10.0)

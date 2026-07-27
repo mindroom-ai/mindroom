@@ -238,11 +238,6 @@ def log_thread_history_refresh(
     logger.info("matrix_cache_thread_history_refreshed", **log_fields)
 
 
-def thread_history_refresh_mode(*, cache_hit: bool) -> str:
-    """Classify one completed public read."""
-    return "cache_hit" if cache_hit else "full_scan"
-
-
 def _report_direct_source_refresh(
     result: ThreadHistoryResult,
     *,
@@ -257,7 +252,7 @@ def _report_direct_source_refresh(
             room_id=room_id,
             thread_id=thread_id,
             caller_label=caller_label,
-            mode=thread_history_refresh_mode(cache_hit=False),
+            mode="full_scan",
             diagnostics=result.diagnostics,
             coordinator_queue_wait_ms=coordinator_queue_wait_ms,
         )
@@ -672,12 +667,10 @@ async def _load_cached_thread_history_if_usable(
     """Return a durable thread snapshot when the current runtime may safely trust it."""
     cached_membership_epoch = await _capture_membership_epoch(event_cache, room_id)
     gap = await event_cache.get_thread_cache_gap(room_id, thread_id)
-    rejection_reason = thread_cache_rejection_reason(gap)
-    if rejection_reason is not None:
-        assert gap is not None
+    if gap is not None:
         cache_reject_diagnostics = _cache_reject_diagnostics(
             gap=gap,
-            rejection_reason=rejection_reason,
+            rejection_reason=thread_cache_rejection_reason(gap) or "thread_gap_marked",
         )
         logger.info(
             "Thread cache rejected for read",
@@ -894,6 +887,19 @@ async def _reject_opaque_thread_snapshot(
     raise OpaqueEncryptedThreadHistoryError(msg)
 
 
+@dataclass(frozen=True, slots=True)
+class _ThreadCacheStoreResult:
+    """What one snapshot store attempt did.
+
+    ``written`` and ``failed`` are independent, not two views of one flag: a cache whose writes are
+    unavailable stores nothing without failing, and only a genuine write fault should throttle
+    later refills.
+    """
+
+    written: bool
+    failed: bool
+
+
 async def _store_repaired_thread_snapshot(
     *,
     room_id: str,
@@ -902,15 +908,15 @@ async def _store_repaired_thread_snapshot(
     fetch_result: _ThreadHistoryFetchResult,
     membership_epoch: int,
     fetch_started_at: float,
-) -> bool:
-    """Install one reconstructed snapshot and report whether it was stored."""
+) -> _ThreadCacheStoreResult:
+    """Install one reconstructed snapshot and report what the store attempt did."""
     await _reject_opaque_thread_snapshot(
         event_cache,
         room_id=room_id,
         thread_id=thread_id,
         fetch_result=fetch_result,
     )
-    stored = await _store_thread_history_cache(
+    store_result = await _store_thread_history_cache(
         event_cache,
         room_id=room_id,
         thread_id=thread_id,
@@ -922,20 +928,21 @@ async def _store_repaired_thread_snapshot(
         "Thread history cache store completed",
         room_id=room_id,
         thread_id=thread_id,
-        cache_store_written=stored,
+        cache_store_written=store_result.written,
+        cache_store_failed=store_result.failed,
         event_count=len(fetch_result.event_sources),
         homeserver_scan_pages=fetch_result.room_scan_pages,
         homeserver_scanned_event_count=fetch_result.scanned_event_count,
         homeserver_thread_event_count=len(fetch_result.event_sources),
     )
-    return stored
+    return store_result
 
 
 def _homeserver_thread_history_result(
     fetch_result: _ThreadHistoryFetchResult,
     *,
     hydrate_sidecars: bool,
-    cache_store_written: bool,
+    store_result: _ThreadCacheStoreResult,
     cache_reject_diagnostics: Mapping[str, str | int | float | bool] | None,
 ) -> ThreadHistoryResult:
     """Build the fail-open homeserver result after one reconstruct-and-store."""
@@ -947,7 +954,8 @@ def _homeserver_thread_history_result(
         "homeserver_thread_event_count": len(fetch_result.event_sources),
         "resolution_ms": fetch_result.resolution_ms,
         "sidecar_hydration_ms": fetch_result.sidecar_hydration_ms,
-        "cache_store_written": cache_store_written,
+        "cache_store_written": store_result.written,
+        "cache_store_failed": store_result.failed,
         THREAD_HISTORY_SOURCE_DIAGNOSTIC: THREAD_HISTORY_SOURCE_HOMESERVER,
     }
     if cache_reject_diagnostics is not None:
@@ -1018,7 +1026,7 @@ async def refresh_thread_history_from_source(
                 coordinator_queue_wait_ms=coordinator_queue_wait_ms,
             )
         raise
-    stored = await _store_repaired_thread_snapshot(
+    store_result = await _store_repaired_thread_snapshot(
         room_id=room_id,
         thread_id=thread_id,
         event_cache=event_cache,
@@ -1026,7 +1034,7 @@ async def refresh_thread_history_from_source(
         membership_epoch=fetch_membership_epoch,
         fetch_started_at=fetch_started_at,
     )
-    if not stored:
+    if not store_result.written:
         # A cache that cannot accept writes is the condition operators most need to see, and it is
         # otherwise only logged at INFO.
         logger.warning(
@@ -1038,7 +1046,7 @@ async def refresh_thread_history_from_source(
         _homeserver_thread_history_result(
             fetch_result,
             hydrate_sidecars=hydrate_sidecars,
-            cache_store_written=stored,
+            store_result=store_result,
             cache_reject_diagnostics=cache_reject_diagnostics,
         ),
         room_id=room_id,
@@ -1056,10 +1064,10 @@ async def _store_thread_history_cache(
     event_sources: Sequence[dict[str, Any]],
     expected_membership_epoch: int,
     fetch_started_at: float,
-) -> bool:
+) -> _ThreadCacheStoreResult:
     """Best-effort replacement of one cached thread snapshot."""
     try:
-        return await event_cache.replace_thread(
+        written = await event_cache.replace_thread(
             room_id,
             thread_id,
             list(event_sources),
@@ -1071,12 +1079,12 @@ async def _store_thread_history_cache(
             "Event cache write failed; continuing without cache",
             room_id=room_id,
             thread_id=thread_id,
-            cache_store_failed=True,
             event_count=len(event_sources),
             error_type=type(exc).__name__,
             error=str(exc),
         )
-        return False
+        return _ThreadCacheStoreResult(written=False, failed=True)
+    return _ThreadCacheStoreResult(written=written, failed=False)
 
 
 def _thread_history_cache_rejection_reason(
@@ -1228,7 +1236,7 @@ async def _fetch_thread_history_with_cache_policy(
         room_id=room_id,
         thread_id=thread_id,
         caller_label=caller_label,
-        mode=thread_history_refresh_mode(cache_hit=cached_history is not None),
+        mode="cache_hit" if cached_history is not None else "full_scan",
         diagnostics=result.diagnostics,
         coordinator_queue_wait_ms=coordinator_queue_wait_ms,
     )
@@ -1669,7 +1677,7 @@ async def bulk_refresh_room_thread_histories(
                 continue
             if rejection_reason is not None:
                 continue
-            stored = await _store_thread_history_cache(
+            store_result = await _store_thread_history_cache(
                 event_cache,
                 room_id=room_id,
                 thread_id=thread_id,
@@ -1677,7 +1685,7 @@ async def bulk_refresh_room_thread_histories(
                 expected_membership_epoch=fetch_membership_epoch,
                 fetch_started_at=fetch_started_at,
             )
-            if stored:
+            if store_result.written:
                 usable_threads += 1
     stats = BulkThreadRefreshStats(
         requested_threads=len(set(thread_root_ids)),
@@ -1886,6 +1894,5 @@ __all__ = [
     "get_room_threads_page",
     "log_thread_history_refresh",
     "refresh_thread_history_from_source",
-    "thread_history_refresh_mode",
     "untrusted_cached_thread_ids",
 ]
