@@ -11,6 +11,7 @@ messages should not.
 
 from __future__ import annotations
 
+import contextlib
 import json
 from typing import TYPE_CHECKING, Any
 
@@ -27,6 +28,8 @@ from mindroom.matrix.cache.thread_read_window import (
 from tests.event_cache_test_support import replace_thread_unconditionally
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
+
     from mindroom.matrix.cache import ConversationEventCache
 
 _ROOM_ID = "!bounded:localhost"
@@ -345,8 +348,94 @@ class TestBoundedThreadReadEquivalence:
         assert len(_original_event_ids(first_read)) == 5
 
 
+@contextlib.contextmanager
+def _count_thread_statements(event_cache: ConversationEventCache) -> Iterator[list[str]]:
+    """Count SQL statements against ``thread_events`` that one read actually issues.
+
+    Real statement counting, not a structural argument: the regression this guards against is a
+    locally-correct change quietly reintroducing a per-message query, which only a count catches.
+    """
+    statements: list[str] = []
+    db = event_cache._runtime.require_db()
+    original_execute = db.execute
+
+    async def counting_execute(query: object, *args: object, **kwargs: object) -> object:
+        if isinstance(query, str) and "thread_events" in query:
+            statements.append(query)
+        return await original_execute(query, *args, **kwargs)
+
+    db.execute = counting_execute  # type: ignore[method-assign]
+    try:
+        yield statements
+    finally:
+        db.execute = original_execute  # type: ignore[method-assign]
+
+
 class TestBoundedThreadReadCost:
     """T2 - a bounded read costs a fixed number of queries and returns O(window) rows."""
+
+    @pytest.mark.asyncio
+    async def test_statement_count_does_not_grow_with_thread_size(
+        self,
+        event_cache: ConversationEventCache,
+    ) -> None:
+        """A 10x larger thread costs the same number of queries: two, not two per message."""
+        await _seed_thread(event_cache, _thread_event_sources(20))
+        with _count_thread_statements(event_cache) as small_statements:
+            await event_cache.get_thread_events(
+                _ROOM_ID,
+                _THREAD_ID,
+                budget=ThreadReadBudget(max_messages=5),
+            )
+
+        await _seed_thread(event_cache, _thread_event_sources(200))
+        with _count_thread_statements(event_cache) as large_statements:
+            await event_cache.get_thread_events(
+                _ROOM_ID,
+                _THREAD_ID,
+                budget=ThreadReadBudget(max_messages=5),
+            )
+
+        assert len(small_statements) == len(large_statements) == 2, (
+            f"expected selection + payload only, got {len(small_statements)} and {len(large_statements)}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_statement_count_does_not_grow_with_edit_density(
+        self,
+        event_cache: ConversationEventCache,
+    ) -> None:
+        """Re-attaching each message's latest edit must not become a query per message."""
+        await _seed_thread(event_cache, _thread_event_sources(20, edits_per_message=5))
+        with _count_thread_statements(event_cache) as sparse_statements:
+            await event_cache.get_thread_events(
+                _ROOM_ID,
+                _THREAD_ID,
+                budget=ThreadReadBudget(max_messages=10),
+            )
+
+        await _seed_thread(event_cache, _thread_event_sources(20, edits_per_message=50))
+        with _count_thread_statements(event_cache) as dense_statements:
+            await event_cache.get_thread_events(
+                _ROOM_ID,
+                _THREAD_ID,
+                budget=ThreadReadBudget(max_messages=10),
+            )
+
+        assert len(sparse_statements) == len(dense_statements) == 2
+
+    @pytest.mark.asyncio
+    async def test_unbounded_read_is_a_single_statement(
+        self,
+        event_cache: ConversationEventCache,
+    ) -> None:
+        """An unbounded read keeps its single-query shape."""
+        await _seed_thread(event_cache, _thread_event_sources(30))
+
+        with _count_thread_statements(event_cache) as statements:
+            await event_cache.get_thread_events(_ROOM_ID, _THREAD_ID)
+
+        assert len(statements) == 1
 
     @pytest.mark.asyncio
     async def test_returned_rows_do_not_grow_with_thread_size(
@@ -541,3 +630,88 @@ class TestWindowTruncationIsReported:
 
         assert large_legitimate_thread_bytes < DEFAULT_THREAD_READ_MAX_BYTES
         assert pathological_thread_bytes > DEFAULT_THREAD_READ_MAX_BYTES
+
+
+class TestRedactionAcrossTheWindow:
+    """T3 case 3 - a redacted original must not survive via its own edits, in either order.
+
+    Redaction hard-deletes and tombstones, while windowing changes which rows reach the fold, so
+    redaction crossed with a bounded read is an interaction this feature newly creates.
+    """
+
+    @pytest.mark.asyncio
+    async def test_redacting_an_original_removes_it_from_the_window_despite_its_edits(
+        self,
+        event_cache: ConversationEventCache,
+    ) -> None:
+        """Edits stored before the redaction must not resurrect the redacted message."""
+        events = [
+            _message_event(_THREAD_ID, 1_000),
+            _message_event("$victim", 2_000, thread_id=_THREAD_ID),
+            _message_event("$victim-edit0", 2_100, thread_id=_THREAD_ID, edit_of="$victim"),
+            _message_event("$victim-edit1", 2_200, thread_id=_THREAD_ID, edit_of="$victim"),
+            _message_event("$survivor", 3_000, thread_id=_THREAD_ID),
+        ]
+        await _seed_thread(event_cache, events)
+
+        assert await event_cache.redact_event(_ROOM_ID, "$victim") is True
+
+        bounded_read = await event_cache.get_thread_events(
+            _ROOM_ID,
+            _THREAD_ID,
+            budget=ThreadReadBudget(max_messages=10),
+        )
+        assert bounded_read is not None
+
+        returned_ids = {row["event_id"] for row in bounded_read}
+        assert "$victim" not in returned_ids
+        assert "$victim-edit0" not in returned_ids
+        assert "$victim-edit1" not in returned_ids
+        assert "$survivor" in returned_ids
+        assert _THREAD_ID in returned_ids
+
+    @pytest.mark.asyncio
+    async def test_edit_arriving_after_its_original_was_redacted_is_refused(
+        self,
+        event_cache: ConversationEventCache,
+    ) -> None:
+        """A tombstoned original refuses a later edit, so the window cannot show it."""
+        await _seed_thread(
+            event_cache,
+            [
+                _message_event(_THREAD_ID, 1_000),
+                _message_event("$victim", 2_000, thread_id=_THREAD_ID),
+            ],
+        )
+        assert await event_cache.redact_event(_ROOM_ID, "$victim") is True
+
+        late_edit = _message_event("$victim-late", 5_000, thread_id=_THREAD_ID, edit_of="$victim")
+        await event_cache.store_event("$victim-late", _ROOM_ID, late_edit)
+
+        bounded_read = await event_cache.get_thread_events(
+            _ROOM_ID,
+            _THREAD_ID,
+            budget=ThreadReadBudget(max_messages=10),
+        )
+
+        returned_ids = {row["event_id"] for row in bounded_read or ()}
+        assert "$victim-late" not in returned_ids
+        assert "$victim" not in returned_ids
+
+    @pytest.mark.asyncio
+    async def test_redaction_does_not_evict_the_pinned_root_from_the_window(
+        self,
+        event_cache: ConversationEventCache,
+    ) -> None:
+        """Redacting a message must not cost the window its root, which would drop the cache."""
+        await _seed_thread(event_cache, _thread_event_sources(8))
+
+        assert await event_cache.redact_event(_ROOM_ID, "$m7") is True
+
+        bounded_read = await event_cache.get_thread_events(
+            _ROOM_ID,
+            _THREAD_ID,
+            budget=ThreadReadBudget(max_messages=2),
+        )
+        assert bounded_read is not None
+        assert bounded_read[0]["event_id"] == _THREAD_ID
