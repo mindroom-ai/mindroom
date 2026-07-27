@@ -1248,7 +1248,9 @@ async def test_stored_repair_releases_replayed_delta_filtered_by_redaction(tmp_p
     """A tombstone-filtered replay entered into a stored snapshot must not invalidate every later read."""
     event_cache = MagicMock()
     event_cache.principal_id = "@agent:localhost"
-    event_cache.get_thread_events = AsyncMock(return_value=None)
+    # Repair bookkeeping reads raw row IDs, not the collapsed thread: a superseded edit is absent
+    # from the latter, so reconciling a retained delta against it would never converge.
+    event_cache.get_thread_event_ids = AsyncMock(return_value=set())
     conversation_cache = _conversation_cache_for_thread_reads(tmp_path, event_cache, client=MagicMock())
     coordinator = MagicMock()
     coordinator.pending_thread_repair_deltas.return_value = ({"event_id": "$redacted"},)
@@ -1304,7 +1306,7 @@ async def test_stored_repair_releases_replayed_delta_filtered_by_redaction(tmp_p
         {"$redacted"},
         coordination_scope="@agent:localhost",
     )
-    event_cache.get_thread_events.assert_awaited_once()
+    event_cache.get_thread_event_ids.assert_awaited_once()
 
 
 @pytest.mark.asyncio

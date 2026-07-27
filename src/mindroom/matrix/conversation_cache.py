@@ -741,9 +741,15 @@ class MatrixConversationCache(ConversationCacheProtocol):
         room_id: str,
         thread_id: str,
     ) -> set[str] | None:
-        """Read raw event IDs for repair bookkeeping without failing the user-facing read."""
+        """Read raw event IDs for repair bookkeeping without failing the user-facing read.
+
+        Deliberately not ``get_thread_events``: that read collapses superseded edits away, and a
+        retained delta for one of them would then read as permanently missing and invalidate the
+        thread on every reconciliation. This asks the question bookkeeping actually has - which
+        rows are durably present - which is not the same as what the thread looks like.
+        """
         try:
-            event_sources = await self.runtime.event_cache.get_thread_events(room_id, thread_id)
+            return await self.runtime.event_cache.get_thread_event_ids(room_id, thread_id)
         except Exception as exc:
             self.logger.warning(
                 "Failed to inspect raw thread cache during repair",
@@ -753,7 +759,6 @@ class MatrixConversationCache(ConversationCacheProtocol):
                 error=str(exc),
             )
             return None
-        return self._event_ids(event_sources or ())
 
     async def _prepare_pending_thread_repair_deltas(
         self,

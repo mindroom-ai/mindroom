@@ -17,8 +17,8 @@ Two testing lessons this file exists to carry
 A third lesson, about the shape of the feature rather than its tests
 --------------------------------------------------------------------
 This read was briefly bounded, and the bound was the wrong idea. Collapsing edits loses nothing:
-it returns the same messages with the superseded history stripped, which on a real 2,021-row
-thread is 41 rows. Truncating loses the oldest half of the caller's context, and no consumer in
+it returns the same messages with the superseded history stripped. Truncating loses the oldest
+half of the caller's context, and no consumer in
 the tree can tell a truncated read from a short one. The two got fused because both reduce row
 counts, but only one of them is free. Do not reintroduce a bound without a caller that can
 explicitly handle partial history.
@@ -179,9 +179,12 @@ class TestCollapsedReadLosesNoMessage:
     ) -> None:
         """A 99%-edit thread collapses to a fraction of its rows without losing a message.
 
-        This is the entire value of the feature, stated once. A production thread of 2,021 rows
-        returns 41. Dropping messages on top of that buys nothing and costs the oldest half of the
-        caller's context.
+        This is the entire value of the feature, stated once. Dropping messages on top of it buys
+        nothing and costs the oldest half of the caller's context.
+
+        The thread built here is synthetic and deliberately extreme. Production measured 53%
+        edit rows overall and 6.30 edits per edited original, with one thread at 94.5%; the
+        20x100 shape below is that worst case exaggerated, not a typical thread.
         """
         await _seed_thread(event_cache, _thread_event_sources(20, edits_per_message=100))
 
@@ -303,6 +306,51 @@ def _count_thread_statements(event_cache: ConversationEventCache) -> Iterator[li
         yield statements
     finally:
         db.execute = original_execute  # type: ignore[method-assign]
+
+
+class TestRawEventIdsStayVisibleToBookkeeping:
+    """Collapsing hides superseded edits from the visible read, not from the database.
+
+    Repair bookkeeping reconciles retained deltas against "what is durably present". Answering
+    that with the collapsed read reports every superseded edit as missing, so a delta retained for
+    one - which happens whenever an append does not converge - can never reconcile and the reader
+    invalidates the thread it just served.
+    """
+
+    @pytest.mark.asyncio
+    async def test_superseded_edits_are_absent_from_the_read_but_present_in_the_id_set(
+        self,
+        event_cache: ConversationEventCache,
+    ) -> None:
+        """The two reads answer different questions, and bookkeeping needs the second."""
+        author = "@author:localhost"
+        await _seed_thread(
+            event_cache,
+            [
+                _message_event(_THREAD_ID, 1_000, sender=author),
+                _message_event("$p", 2_000, sender=author, thread_id=_THREAD_ID),
+                _message_event("$e1", 2_100, sender=author, edit_of="$p"),
+                _message_event("$e2", 2_200, sender=author, edit_of="$p"),
+                _message_event("$e3", 2_300, sender=author, edit_of="$p"),
+            ],
+        )
+
+        read = await event_cache.get_thread_events(_ROOM_ID, _THREAD_ID)
+        raw_ids = await event_cache.get_thread_event_ids(_ROOM_ID, _THREAD_ID)
+        assert read is not None
+
+        assert {row["event_id"] for row in read} == {_THREAD_ID, "$p", "$e3"}
+        assert raw_ids == {_THREAD_ID, "$p", "$e1", "$e2", "$e3"}, (
+            "bookkeeping would see the superseded edits as missing and invalidate the thread"
+        )
+
+    @pytest.mark.asyncio
+    async def test_an_unknown_thread_has_no_raw_event_ids(
+        self,
+        event_cache: ConversationEventCache,
+    ) -> None:
+        """An absent thread is an empty set, not a failure."""
+        assert await event_cache.get_thread_event_ids(_ROOM_ID, "$absent") == set()
 
 
 class TestCollapsedReadCost:
@@ -463,13 +511,13 @@ class TestRedactionAcrossTheCollapsedRead:
 
         assert await event_cache.redact_event(_ROOM_ID, "$victim") is True
 
-        bounded_read = await event_cache.get_thread_events(
+        read = await event_cache.get_thread_events(
             _ROOM_ID,
             _THREAD_ID,
         )
-        assert bounded_read is not None
+        assert read is not None
 
-        returned_ids = {row["event_id"] for row in bounded_read}
+        returned_ids = {row["event_id"] for row in read}
         assert "$victim" not in returned_ids
         assert "$victim-edit0" not in returned_ids
         assert "$victim-edit1" not in returned_ids
@@ -494,12 +542,12 @@ class TestRedactionAcrossTheCollapsedRead:
         late_edit = _message_event("$victim-late", 5_000, thread_id=_THREAD_ID, edit_of="$victim")
         await event_cache.store_event("$victim-late", _ROOM_ID, late_edit)
 
-        bounded_read = await event_cache.get_thread_events(
+        read = await event_cache.get_thread_events(
             _ROOM_ID,
             _THREAD_ID,
         )
 
-        returned_ids = {row["event_id"] for row in bounded_read or ()}
+        returned_ids = {row["event_id"] for row in read or ()}
         assert "$victim-late" not in returned_ids
         assert "$victim" not in returned_ids
 
@@ -513,12 +561,12 @@ class TestRedactionAcrossTheCollapsedRead:
 
         assert await event_cache.redact_event(_ROOM_ID, "$m7") is True
 
-        bounded_read = await event_cache.get_thread_events(
+        read = await event_cache.get_thread_events(
             _ROOM_ID,
             _THREAD_ID,
         )
-        assert bounded_read is not None
-        assert bounded_read[0]["event_id"] == _THREAD_ID
+        assert read is not None
+        assert read[0]["event_id"] == _THREAD_ID
 
 
 class TestForeignEditCannotStarveTheAuthorsEdit:
@@ -557,13 +605,13 @@ class TestForeignEditCannotStarveTheAuthorsEdit:
             )
         ).wrote_event
 
-        bounded_read = await event_cache.get_thread_events(
+        read = await event_cache.get_thread_events(
             _ROOM_ID,
             _THREAD_ID,
         )
-        assert bounded_read is not None
+        assert read is not None
 
-        returned_ids = {row["event_id"] for row in bounded_read}
+        returned_ids = {row["event_id"] for row in read}
         assert "$author-edit" in returned_ids, "author's own edit was starved out of the read"
         assert "$victim" in returned_ids
 
@@ -592,13 +640,13 @@ class TestForeignEditCannotStarveTheAuthorsEdit:
             ],
         )
 
-        bounded_read = await event_cache.get_thread_events(
+        read = await event_cache.get_thread_events(
             _ROOM_ID,
             _THREAD_ID,
         )
-        assert bounded_read is not None
+        assert read is not None
 
-        returned_ids = {row["event_id"] for row in bounded_read}
+        returned_ids = {row["event_id"] for row in read}
         assert "$author-new" in returned_ids
         assert "$author-old" not in returned_ids
         assert "$other-new" not in returned_ids, "a foreign edit must not be shipped or charged"
@@ -703,7 +751,7 @@ class TestCollapsedReadAgreesWithTheFoldOnEveryEdit:
 
 
 class TestProductionShapedEditDensity:
-    """Production threads run ~94% edits, ~6 edits per edited original, up to 170 on one.
+    """Production measured 6.30 edits per edited original, max 170, one thread 94.5% edits.
 
     The failure this guards against is subtle and silent: an anti-join that excluded edited
     ORIGINALS rather than edit EVENTS would still return a plausible-looking read, just a tiny
@@ -716,7 +764,7 @@ class TestProductionShapedEditDensity:
         self,
         event_cache: ConversationEventCache,
     ) -> None:
-        """20 originals x 100 edits is 2,021 rows and 99% edit rows; all 20 messages come back."""
+        """20 originals x 100 edits is 2,021 synthetic rows, 99% edits; all 20 messages return."""
         events = _thread_event_sources(20, edits_per_message=100)
         assert len(events) == 2_021
         await _seed_thread(event_cache, events)

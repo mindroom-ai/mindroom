@@ -35,8 +35,6 @@ import json
 import time
 from typing import TYPE_CHECKING, Any, Literal
 
-from mindroom.logging_config import get_logger
-
 from .event_cache_events import (
     event_id_for_cache,
     serialize_cacheable_events,
@@ -64,8 +62,6 @@ from .thread_cache_state import (
     thread_cache_state_row,
 )
 
-logger = get_logger(__name__)
-
 if TYPE_CHECKING:
     import aiosqlite
 
@@ -73,10 +69,16 @@ if TYPE_CHECKING:
 
 # The edits that survive a collapsed read: one per message, from the right sender.
 #
-# A thread stores every edit ever sent, and production threads run ~94% edit rows. Returning them
-# all makes the caller's fold re-derive per message what one window function derives once, and
-# hauls the whole superseded history across the wire to do it. Returning only the survivor took a
-# 2,021-row production thread to 41 rows without losing a message.
+# A thread stores every edit ever sent. Returning them all makes the caller's fold re-derive per
+# message what one window function derives once, and hauls the whole superseded history across
+# the wire to do it.
+#
+# Measured in production 2026-07-27: edits are 53% of all event rows, 6.30 per edited original,
+# max 170 on one original, and one thread is 94.5% edits. Threads themselves are small - p50 9
+# rows, max 538 - so this is a correctness and write-amplification story, not a read-latency
+# one: the slowest production thread read measured 126.6 ms warm, which was never the problem
+# an earlier revision of this comment claimed it was. The 2,021-row figure quoted here before
+# was this repository's synthetic fixture (20 messages x 100 edits), not a production thread.
 #
 # The root fix is upstream of this query: prune superseded edits at write time and there is nothing
 # to collapse. Retention is deliberate rather than accidental, so that is a trade - redacting the
@@ -102,6 +104,12 @@ if TYPE_CHECKING:
 # than filtered later, because ranking over edits the outer query will discard lets an
 # out-of-thread edit suppress the in-thread runner-up.
 #
+# The sender comparison here is an optimization, not the security boundary. The fold re-checks
+# every candidate against the JSON sender (``ThreadEditCandidates.winner_for``), so if this
+# filter ever admits a foreign replacement the fold still finds nothing in the author's bucket
+# and renders the pre-edit body - wrong, but not the attacker's text. Doing it in SQL keeps a
+# foreign edit from being ranked as the survivor and hiding the author's own.
+#
 # The original is LEFT joined, not required. An edit can outlive the message it replaces -
 # ``event_edits`` holds no foreign key to ``events`` - and the fold synthesizes a message from such
 # an edit rather than dropping it, carrying the editor's own sender because an original nobody has
@@ -110,13 +118,13 @@ if TYPE_CHECKING:
 # which is also when ``winner_for`` stops applying it, for the same reason.
 #
 # ROW_NUMBER over one pass rather than a correlated NOT EXISTS per candidate: 5.3 ms against
-# 8.7 ms on a 2,021-event thread with current table statistics. Policy stays in Python; this is
+# 8.7 ms on a synthetic 2,021-event thread with current table statistics. Policy stays in Python; this is
 # only "latest per group", which is what a window function is for. Splitting present-original and
 # absent-original edits into two CTEs scans ``event_edits`` twice and timed out a 2,000-edit
 # PostgreSQL test that one pass completes.
 #
 # Do not re-derive this query's cost without ANALYZE. On unanalyzed tables an unseen namespace
-# estimates 1 row against 2,021 actual, every join degrades to a nested loop with a join filter,
+# estimates 1 row against thousands actual, every join degrades to a nested loop with a join filter,
 # and every shape collapses - a plain unfiltered read of the same thread included, by 77x. A
 # comparison made in that state measures the planner, not the query.
 #
@@ -201,6 +209,34 @@ async def load_thread_events(
     rows = await cursor.fetchall()
     await cursor.close()
     return [json.loads(row[2]) for row in rows] if rows else None
+
+
+async def load_thread_event_ids(
+    db: aiosqlite.Connection,
+    *,
+    principal_id: str,
+    room_id: str,
+    thread_id: str,
+) -> set[str]:
+    """Return every raw event ID this thread holds, superseded edits included.
+
+    Repair bookkeeping asks which rows are durably present; the visible read answers what the
+    thread looks like. Collapsing made those different questions, and answering the first with the
+    second reports every superseded edit as missing. A retained delta for such an edit can then
+    never reconcile, so the read invalidates the thread it just served - on the paths where an
+    append does not converge and its delta is deliberately kept.
+    """
+    cursor = await db.execute(
+        """
+        SELECT event_id
+        FROM thread_events
+        WHERE principal_id = ? AND room_id = ? AND thread_id = ?
+        """,
+        (principal_id, room_id, thread_id),
+    )
+    rows = await cursor.fetchall()
+    await cursor.close()
+    return {str(row[0]) for row in rows}
 
 
 async def load_recent_room_thread_ids(

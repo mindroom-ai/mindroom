@@ -87,6 +87,14 @@ class ConversationEventCache(Protocol):
         it rather than with every edit it ever received. No message is left out.
         """
 
+    async def get_thread_event_ids(self, room_id: str, thread_id: str) -> set[str]:
+        """Return every raw event ID this thread holds, superseded edits included.
+
+        Distinct from ``get_thread_events``, which collapses superseded edits away. Bookkeeping
+        that asks which rows are durably present must use this one, or every collapsed-away edit
+        reads as missing.
+        """
+
     async def get_recent_room_thread_ids(self, room_id: str, *, limit: int) -> list[str]:
         """Return locally known thread IDs for one room ordered by newest cached activity."""
 
