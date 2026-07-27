@@ -707,13 +707,17 @@ async def test_strict_thread_history_uses_no_stale_fetch_without_dispatch_timeou
     client = MagicMock()
     conversation_cache = _conversation_cache_for_thread_reads(tmp_path, event_cache, client=client)
 
-    coordinator = MagicMock()
-    coordinator.wait_for_thread_idle = AsyncMock(return_value=None)
+    coordinator = EventCacheWriteCoordinator(logger=conversation_cache.logger)
     conversation_cache.runtime.event_cache_write_coordinator = coordinator
     fetched_history = thread_history_result([], is_full_history=True)
 
     try:
         with (
+            patch.object(
+                coordinator,
+                "wait_for_thread_idle",
+                wraps=coordinator.wait_for_thread_idle,
+            ) as wait_for_thread_idle,
             patch(
                 "mindroom.matrix.conversation_cache.refresh_thread_history_from_source",
                 AsyncMock(return_value=fetched_history),
@@ -729,10 +733,11 @@ async def test_strict_thread_history_uses_no_stale_fetch_without_dispatch_timeou
                 caller_label="dispatch_post_lock_refresh",
             )
     finally:
+        await coordinator.close()
         await event_cache.close()
 
     assert result.is_full_history is True
-    coordinator.wait_for_thread_idle.assert_awaited_once()
+    wait_for_thread_idle.assert_awaited_once()
     refresh_thread_history.assert_awaited_once()
     assert refresh_thread_history.await_args.kwargs["allow_stale_fallback"] is False
 
