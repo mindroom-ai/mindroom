@@ -41,6 +41,7 @@ from mindroom.streaming import (
     StreamingResponse,
     send_streaming_response,
 )
+from mindroom.timing import DispatchPipelineTiming
 from mindroom.tool_system.events import _TOOL_TRACE_KEY, ToolTraceEntry
 from tests.conftest import (
     bind_runtime_paths,
@@ -270,6 +271,67 @@ async def test_nonterminal_delivery_formats_off_event_loop_thread(config: Config
     assert all(thread_id != loop_thread_id for thread_id in format_thread_ids)
     assert delivered_content["body"] == "Hello **world**"
     assert "<strong>world</strong>" in delivered_content["formatted_body"]
+
+
+@pytest.mark.asyncio
+async def test_placeholder_ack_waits_for_answer_ack_before_marking_substantive(config: Config) -> None:
+    """Substantive timing must describe the acknowledged payload, not newer buffered text."""
+    timing = DispatchPipelineTiming(source_event_id="$request", room_id="!test:localhost")
+    streaming = StreamingResponse(
+        target=MessageTarget.resolve("!test:localhost", None, "$original_123", room_mode=True),
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+        pipeline_timing=timing,
+    )
+    delivered_bodies: list[str] = []
+
+    async def fake_send(
+        _client: object,
+        _room_id: str,
+        content: dict[str, Any],
+        *,
+        retry_sync_recovery: bool = False,  # noqa: ARG001
+    ) -> DeliveredMatrixEvent:
+        delivered_bodies.append(content["body"])
+        streaming.accumulated_text = "Answer buffered while the placeholder is in flight"
+        return DeliveredMatrixEvent(event_id="$placeholder", content_sent=dict(content))
+
+    async def fake_edit(
+        _client: object,
+        _room_id: str,
+        _event_id: str,
+        new_content: dict[str, Any],
+        _new_text: str,
+        *,
+        retry_sync_recovery: bool = False,  # noqa: ARG001
+    ) -> DeliveredMatrixEvent:
+        delivered_bodies.append(new_content["body"])
+        return DeliveredMatrixEvent(event_id="$answer-edit", content_sent=dict(new_content))
+
+    with (
+        patch("mindroom.streaming.send_message_result", new=fake_send),
+        patch("mindroom.streaming.edit_message_result", new=fake_edit),
+    ):
+        placeholder_sent = await streaming._send_or_edit_message(
+            make_matrix_client_mock(user_id="@mindroom_helper:localhost"),
+            allow_empty_progress=True,
+        )
+        assert placeholder_sent is True
+        assert delivered_bodies == [_PROGRESS_PLACEHOLDER]
+        assert "first_substantive_reply" not in timing.marks
+        assert "first_substantive_kind" not in timing.metadata
+
+        answer_sent = await streaming._send_or_edit_message(
+            make_matrix_client_mock(user_id="@mindroom_helper:localhost"),
+        )
+
+    assert answer_sent is True
+    assert delivered_bodies == [
+        _PROGRESS_PLACEHOLDER,
+        "Answer buffered while the placeholder is in flight",
+    ]
+    assert "first_substantive_reply" in timing.marks
+    assert timing.metadata["first_substantive_kind"] == "stream_update"
 
 
 def test_delivery_snapshot_isolates_tool_trace(config: Config) -> None:
