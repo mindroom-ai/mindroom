@@ -12,7 +12,7 @@ from weakref import WeakKeyDictionary
 import pytest
 
 import mindroom.matrix.client_thread_history as matrix_client_module
-from mindroom.matrix.cache import ThreadCacheState, ThreadRevision
+from mindroom.matrix.cache import ThreadAppendOutcome, ThreadCacheState, ThreadRevision
 from mindroom.matrix.client_thread_history import fetch_thread_history
 from mindroom.matrix.thread_resolution_reuse import (
     ThreadResolutionReuseCache,
@@ -682,8 +682,15 @@ class TestFetchPathIntegration:
             first = await fetch_thread_history(client, ROOM, THREAD, event_cache=cache, resolution_reuse=reuse)
             appended = _message_row("$m2", 3000, "new reply")
             await cache.mark_thread_stale(ROOM, THREAD, reason="live_thread_mutation")
-            assert await cache.append_event(ROOM, THREAD, appended)
-            assert await cache.revalidate_thread_after_incremental_update(ROOM, THREAD)
+            assert (
+                await cache.apply_thread_mutation_append(
+                    ROOM,
+                    THREAD,
+                    appended,
+                    append_failed_reason="live_append_failed",
+                )
+                is ThreadAppendOutcome.APPENDED
+            )
             with patch.object(
                 cache,
                 "get_thread_events",

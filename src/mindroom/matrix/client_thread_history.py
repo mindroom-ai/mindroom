@@ -1349,12 +1349,20 @@ async def refresh_thread_history_from_source(
     retained_event_sources: RetainedThreadEventSourceProvider | None = None,
     caller_label: str | None = None,
     coordinator_queue_wait_ms: float = 0.0,
+    max_repair_attempts: int | None = None,
 ) -> ThreadHistoryResult:
-    """Fetch fresh thread history from Matrix and repopulate the advisory cache."""
+    """Fetch fresh thread history from Matrix and repopulate the advisory cache.
+
+    ``max_repair_attempts`` overrides how many times a lost guarded replacement is rescanned at
+    once. Callers nobody is waiting on pass ``1``: a retryable conflict means another writer owns
+    the thread right now, so an undelayed rescan is least likely to win and most expensive to run.
+    """
+    assert max_repair_attempts is None or max_repair_attempts >= 1
+    attempt_limit = _MAX_THREAD_REPAIR_ATTEMPTS if max_repair_attempts is None else max_repair_attempts
     fetch_result: _ThreadHistoryFetchResult | None = None
     attempt: _ThreadCacheRefillAttempt | None = None
     repair_attempts = 0
-    for repair_attempts in range(1, _MAX_THREAD_REPAIR_ATTEMPTS + 1):
+    for repair_attempts in range(1, attempt_limit + 1):
         fetch_started_at = time.time()
         fetch_membership_epoch = await _capture_membership_epoch(event_cache, room_id)
         try:
@@ -1424,7 +1432,7 @@ async def refresh_thread_history_from_source(
                 caller_label=caller_label,
                 coordinator_queue_wait_ms=coordinator_queue_wait_ms,
             )
-        if not attempt.replace_outcome.retryable or repair_attempts == _MAX_THREAD_REPAIR_ATTEMPTS:
+        if not attempt.replace_outcome.retryable or repair_attempts == attempt_limit:
             break
         logger.warning(
             "Retrying thread cache repair after guarded replacement conflict",

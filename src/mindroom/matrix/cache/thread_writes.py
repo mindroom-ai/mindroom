@@ -29,6 +29,9 @@ These three policies are the only writers of durable thread-cache state:
 7. A still-opaque ``m.room.encrypted`` mutation with a known thread never appends into the snapshot or
    revalidates it; it only marks that thread stale under a non-incremental reason, so the snapshot
    stays rejected until a decryption-capable refresh replaces it.
+
+8. Every other threaded mutation appends through one atomic cache operation that also settles the
+   thread's trust, so the snapshot is never observably rejected mid-append.
    Point rows and explicit relation indexes are still persisted by the batch store, and unknown-impact
    opaque mutations fail closed through the standard room-scope invalidation.
 """
@@ -191,7 +194,6 @@ async def _apply_thread_message_mutation(
     event_id: str | None,
     context: MutationWriteContext,
     room_level_skip_message: str,
-    invalidate_on_append_failure: bool,
     allow_room_invalidation: bool = True,
     raise_on_cache_write_failure: bool = False,
 ) -> bool:
@@ -229,26 +231,18 @@ async def _apply_thread_message_mutation(
         impact.thread_id,
         event_source,
     )
-    await cache_ops.invalidate_known_thread(
-        room_id,
-        impact.thread_id,
-        reason=_mutation_reason(context, "thread_mutation"),
-        raise_on_failure=raise_on_cache_write_failure,
-    )
-    appended = await cache_ops.append_event_to_cache(
+    await cache_ops.append_event_to_cache(
         room_id,
         impact.thread_id,
         event_source,
         context=context,
+        # Always a reason outside the incremental allowlist. A marker a later append could clear
+        # would let the next successful mutation return the thread to trusted while it is still
+        # missing this event, and the retained delta that would have caught it expires after a
+        # minute.
+        append_failed_reason=_mutation_reason(context, "append_failed"),
         raise_on_failure=raise_on_cache_write_failure,
     )
-    if invalidate_on_append_failure and not appended:
-        await cache_ops.invalidate_known_thread(
-            room_id,
-            impact.thread_id,
-            reason=_mutation_reason(context, "append_failed"),
-            raise_on_failure=raise_on_cache_write_failure,
-        )
     return False
 
 
@@ -379,7 +373,6 @@ class ThreadOutboundWritePolicy:
             event_id=event_id,
             context="outbound",
             room_level_skip_message="Skipping outbound thread cache bookkeeping for non-threaded event mutation",
-            invalidate_on_append_failure=False,
         )
 
     def _resolve_prequeue_thread_route(
@@ -889,14 +882,13 @@ class ThreadLiveWritePolicy:
                 event_id=event.event_id,
                 context="live",
                 room_level_skip_message=room_level_skip_message,
-                invalidate_on_append_failure=True,
             )
             return
         if impact.state is MutationThreadImpactState.UNKNOWN:
             # UNKNOWN-impact mutations must use the eager invalidate_room_threads
             # path: the per-thread coordinator's concurrent writers cannot safely
             # uphold the `room_invalidated_at >= validated_at` invariant that
-            # revalidate_thread_after_incremental_update_locked relies on at read
+            # append_keeps_thread_valid relies on at read
             # time. See ISSUE-189 for the architectural follow-up.
             await self._cache_ops.invalidate_room_threads(
                 room_id,
@@ -909,7 +901,7 @@ class ThreadLiveWritePolicy:
         event_source = normalize_nio_event_for_cache(event)
         self._cache_ops.retain_thread_repair_delta(room_id, thread_id, event_source)
 
-        async def append_and_invalidate() -> bool:
+        async def append_live_mutation() -> bool:
             return await _apply_thread_message_mutation(
                 cache_ops=self._cache_ops,
                 room_id=room_id,
@@ -919,13 +911,12 @@ class ThreadLiveWritePolicy:
                 event_id=event.event_id,
                 context="live",
                 room_level_skip_message=room_level_skip_message,
-                invalidate_on_append_failure=True,
             )
 
         await self._cache_ops.queue_thread_cache_update(
             room_id,
             thread_id,
-            append_and_invalidate,
+            append_live_mutation,
             name="matrix_cache_append_live_event",
         )
 
@@ -945,34 +936,17 @@ class ThreadLiveWritePolicy:
         queue_started = time.perf_counter()
         append_metrics: dict[str, str | int | float | bool] = {}
 
-        async def append_and_invalidate() -> bool:
-            invalidate_started = time.perf_counter()
-            await self._cache_ops.invalidate_known_thread(
-                room_id,
-                thread_id,
-                reason="live_thread_mutation",
-            )
-            append_metrics["invalidate_ms"] = elapsed_ms_since(invalidate_started, clock=time.perf_counter)
+        async def append_live_mutation() -> bool:
             append_started = time.perf_counter()
             appended = await self._cache_ops.append_event_to_cache(
                 room_id,
                 thread_id,
                 event_source,
                 context="live",
+                append_failed_reason="live_append_failed",
             )
             append_metrics["append_ms"] = elapsed_ms_since(append_started, clock=time.perf_counter)
             append_metrics["appended"] = appended
-            if not appended:
-                fallback_invalidate_started = time.perf_counter()
-                await self._cache_ops.invalidate_known_thread(
-                    room_id,
-                    thread_id,
-                    reason="live_append_failed",
-                )
-                append_metrics["append_failure_invalidate_ms"] = elapsed_ms_since(
-                    fallback_invalidate_started,
-                    clock=time.perf_counter,
-                )
             return appended
 
         outcome = "ok"
@@ -980,7 +954,7 @@ class ThreadLiveWritePolicy:
             appended = await self._cache_ops.queue_thread_cache_update(
                 room_id,
                 thread_id,
-                append_and_invalidate,
+                append_live_mutation,
                 name="matrix_cache_append_live_event",
             )
             if appended is False:
@@ -1043,7 +1017,7 @@ class ThreadLiveWritePolicy:
             # UNKNOWN-impact mutations must use the eager invalidate_room_threads
             # path: the per-thread coordinator's concurrent writers cannot safely
             # uphold the `room_invalidated_at >= validated_at` invariant that
-            # revalidate_thread_after_incremental_update_locked relies on at read
+            # append_keeps_thread_valid relies on at read
             # time. See ISSUE-189 for the architectural follow-up.
             await self._cache_ops.invalidate_room_threads(
                 room_id,
@@ -1172,7 +1146,6 @@ class ThreadSyncWritePolicy:
                     event_id=event_id if isinstance(event_id, str) else None,
                     context="sync",
                     room_level_skip_message="Skipping sync thread cache bookkeeping for known non-threaded message mutation",
-                    invalidate_on_append_failure=True,
                     allow_room_invalidation=not room_threads_invalidated,
                     raise_on_cache_write_failure=raise_on_cache_write_failure,
                 )

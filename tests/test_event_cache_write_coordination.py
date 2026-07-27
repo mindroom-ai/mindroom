@@ -21,6 +21,7 @@ from mindroom.constants import (
 )
 from mindroom.matrix.cache import ThreadHistoryResult, thread_writes
 from mindroom.matrix.cache.outbound_thread_reservations import OutboundThreadReservations
+from mindroom.matrix.cache.thread_cache_state import ThreadAppendOutcome
 from mindroom.matrix.cache.thread_write_cache_ops import ThreadMutationCacheOps
 from mindroom.matrix.cache.write_coordinator import EventCacheWriteCoordinator
 from mindroom.matrix.conversation_cache import MatrixConversationCache
@@ -52,20 +53,20 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
-        "revalidation_result",
-        [False, RuntimeError("cache unavailable")],
+        "append_outcome",
+        [ThreadAppendOutcome.APPENDED_STALE, RuntimeError("cache unavailable")],
         ids=["rejected", "failed"],
     )
     async def test_append_that_cannot_revalidate_retains_delta_and_schedules_repair(
         self,
-        revalidation_result: bool | RuntimeError,
+        append_outcome: ThreadAppendOutcome | RuntimeError,
     ) -> None:
         """A durable raw append is not converged until its snapshot becomes trusted."""
         original_ops, logger, event_cache = _thread_mutation_cache_ops()
-        if isinstance(revalidation_result, RuntimeError):
-            event_cache.revalidate_thread_after_incremental_update.side_effect = revalidation_result
+        if isinstance(append_outcome, RuntimeError):
+            event_cache.apply_thread_mutation_append.side_effect = append_outcome
         else:
-            event_cache.revalidate_thread_after_incremental_update.return_value = revalidation_result
+            event_cache.apply_thread_mutation_append.return_value = append_outcome
         schedule_repair = Mock()
         cache_ops = ThreadMutationCacheOps(
             logger_getter=lambda: logger,
@@ -90,6 +91,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             thread_id,
             event_source,
             context="live",
+            append_failed_reason="live_append_failed",
         )
         retained = original_ops.runtime.event_cache_write_coordinator.pending_thread_repair_deltas(
             room_id,
@@ -97,7 +99,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             coordination_scope=event_cache.principal_id,
         )
 
-        assert appended is True
+        assert appended is not isinstance(append_outcome, RuntimeError)
         assert [event["event_id"] for event in retained] == ["$reply:localhost"]
         schedule_repair.assert_called_once_with(room_id, thread_id)
 
@@ -335,33 +337,31 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         )
         assert access._outbound._reservations.active_count == thread_count
 
-        event_cache.append_event.reset_mock()
-        event_cache.mark_thread_stale.reset_mock()
+        event_cache.apply_thread_mutation_append.reset_mock()
         entered_by_thread = {thread_id: asyncio.Event() for thread_id in thread_ids}
         release_first_edits = asyncio.Event()
         active_threads: set[str] = set()
         max_active_thread_count = 0
         appended_event_ids_by_thread: dict[str, list[str]] = {thread_id: [] for thread_id in thread_ids}
 
-        async def blocking_mark_thread_stale(_room_id: str, thread_id: str, *, reason: str) -> None:
+        async def blocking_record_append(
+            _room_id: str,
+            thread_id: str,
+            event_source: dict[str, object],
+            *,
+            append_failed_reason: str,
+        ) -> ThreadAppendOutcome:
             nonlocal max_active_thread_count
-            assert reason == "outbound_thread_mutation"
+            assert append_failed_reason == "outbound_append_failed"
             active_threads.add(thread_id)
             max_active_thread_count = max(max_active_thread_count, len(active_threads))
             entered_by_thread[thread_id].set()
             await release_first_edits.wait()
             active_threads.remove(thread_id)
-
-        async def record_append(
-            _room_id: str,
-            thread_id: str,
-            event_source: dict[str, object],
-        ) -> bool:
             appended_event_ids_by_thread[thread_id].append(str(event_source["event_id"]))
-            return True
+            return ThreadAppendOutcome.APPENDED
 
-        event_cache.mark_thread_stale = AsyncMock(side_effect=blocking_mark_thread_stale)
-        event_cache.append_event = AsyncMock(side_effect=record_append)
+        event_cache.apply_thread_mutation_append = AsyncMock(side_effect=blocking_record_append)
 
         with (
             patch.object(coordinator, "queue_room_update", wraps=coordinator.queue_room_update) as room_updates,
@@ -467,7 +467,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             coordination_scope=event_cache.principal_id,
         )
         assert access._outbound._reservations.active_count == 1
-        event_cache.append_event.reset_mock()
+        event_cache.apply_thread_mutation_append.reset_mock()
 
         for event_id, body, stream_status in (
             ("$edit-progress:localhost", "partial", STREAM_STATUS_STREAMING),
@@ -497,7 +497,9 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             thread_id,
             coordination_scope=event_cache.principal_id,
         )
-        appended_event_ids = [call.args[2]["event_id"] for call in event_cache.append_event.await_args_list]
+        appended_event_ids = [
+            call.args[2]["event_id"] for call in event_cache.apply_thread_mutation_append.await_args_list
+        ]
         assert appended_event_ids == ["$edit-progress:localhost", "$edit-terminal:localhost"]
         assert not coordinator._room_states
 
@@ -536,7 +538,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             thread_id,
             coordination_scope=event_cache.principal_id,
         )
-        event_cache.append_event.reset_mock()
+        event_cache.apply_thread_mutation_append.reset_mock()
         access.notify_outbound_message(
             room_id,
             first_edit_event_id,
@@ -577,11 +579,11 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             thread_id,
             coordination_scope=event_cache.principal_id,
         )
-        assert [call.args[2]["event_id"] for call in event_cache.append_event.await_args_list] == [
+        assert [call.args[2]["event_id"] for call in event_cache.apply_thread_mutation_append.await_args_list] == [
             first_edit_event_id,
             "$edit-terminal:localhost",
         ]
-        assert all(call.args[1] == thread_id for call in event_cache.append_event.await_args_list)
+        assert all(call.args[1] == thread_id for call in event_cache.apply_thread_mutation_append.await_args_list)
         assert access._outbound._reservations.active_count == 0
 
     def test_thread_reservations_isolate_principals_rooms_and_expire(self) -> None:
@@ -683,8 +685,8 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             release_blocker.set()
             await coordinator.close()
 
-        event_cache.append_event.assert_awaited_once()
-        _room_id, _thread_id, appended_event = event_cache.append_event.await_args.args
+        event_cache.apply_thread_mutation_append.assert_awaited_once()
+        _room_id, _thread_id, appended_event = event_cache.apply_thread_mutation_append.await_args.args
         assert appended_event["event_id"] == "$edit-2:localhost"
         assert appended_event["content"]["m.new_content"]["body"] == "stream update 2"
         assert any(
@@ -772,9 +774,11 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             release_blocker.set()
             await coordinator.close()
 
-        appended_event_ids = [call.args[2]["event_id"] for call in event_cache.append_event.await_args_list]
+        appended_event_ids = [
+            call.args[2]["event_id"] for call in event_cache.apply_thread_mutation_append.await_args_list
+        ]
         assert appended_event_ids == ["$edit-2:localhost", "$edit-final:localhost"]
-        final_content = event_cache.append_event.await_args_list[-1].args[2]["content"]
+        final_content = event_cache.apply_thread_mutation_append.await_args_list[-1].args[2]["content"]
         assert final_content["m.new_content"][STREAM_STATUS_KEY] == STREAM_STATUS_COMPLETED
 
     @pytest.mark.asyncio
@@ -835,7 +839,9 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             release_blocker.set()
             await coordinator.close()
 
-        appended_event_ids = [call.args[2]["event_id"] for call in event_cache.append_event.await_args_list]
+        appended_event_ids = [
+            call.args[2]["event_id"] for call in event_cache.apply_thread_mutation_append.await_args_list
+        ]
         assert appended_event_ids == ["$plain-edit-1:localhost", "$plain-edit-2:localhost"]
 
     @pytest.mark.asyncio
@@ -1048,7 +1054,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         timing_logger = MagicMock()
         monkeypatch.setattr(timing_module, "logger", timing_logger)
         event_cache = _runtime_event_cache()
-        event_cache.append_event = AsyncMock(return_value=True)
+        event_cache.apply_thread_mutation_append = AsyncMock(return_value=ThreadAppendOutcome.APPENDED)
         access = MatrixConversationCache(
             logger=MagicMock(),
             runtime=_conversation_runtime(event_cache=event_cache),
@@ -1086,7 +1092,6 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             and call.kwargs["impact_state"] == "threaded"
             and call.kwargs["impact_resolution_ms"] >= 0.0
             and call.kwargs["queue_and_update_ms"] >= 0.0
-            and call.kwargs["invalidate_ms"] >= 0.0
             and call.kwargs["append_ms"] >= 0.0
             and call.kwargs["outcome"] == "ok"
             for call in append_calls
@@ -1102,7 +1107,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         timing_logger = MagicMock()
         monkeypatch.setattr(timing_module, "logger", timing_logger)
         event_cache = _runtime_event_cache()
-        event_cache.append_event = AsyncMock(return_value=False)
+        event_cache.apply_thread_mutation_append = AsyncMock(return_value=ThreadAppendOutcome.SNAPSHOT_MISSING)
         access = MatrixConversationCache(
             logger=MagicMock(),
             runtime=_conversation_runtime(event_cache=event_cache),
@@ -1242,12 +1247,11 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             event_info=EventInfo.from_event(event.source),
         )
 
-        event_cache.mark_thread_stale.assert_awaited_once_with(
-            "!room:localhost",
-            "$thread:localhost",
-            reason="live_thread_mutation",
+        event_cache.apply_thread_mutation_append.assert_awaited_once()
+        assert event_cache.apply_thread_mutation_append.await_args.kwargs["append_failed_reason"] == (
+            "live_append_failed"
         )
-        event_cache.append_event.assert_awaited_once()
+        event_cache.mark_thread_stale.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_live_event_cache_update_recovers_after_same_room_failure(self) -> None:

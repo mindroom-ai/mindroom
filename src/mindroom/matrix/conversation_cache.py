@@ -34,7 +34,7 @@ from mindroom.matrix.cache import (
     thread_history_result,
 )
 from mindroom.matrix.cache.thread_reads import ThreadReadMode, ThreadReadPolicy
-from mindroom.matrix.cache.thread_repair import ThreadRepairBackoffError
+from mindroom.matrix.cache.thread_repair import ThreadRepairBackoffError, ThreadRepairSuppressedError
 from mindroom.matrix.cache.thread_write_cache_ops import ThreadMutationCacheOps
 from mindroom.matrix.cache.thread_writes import ThreadLiveWritePolicy, ThreadOutboundWritePolicy, ThreadSyncWritePolicy
 from mindroom.matrix.client_thread_history import (
@@ -103,6 +103,26 @@ __all__ = [
 
 _STARTUP_PREWARM_THREAD_LIMIT = 32
 _STARTUP_PREWARM_MAX_SCAN_PAGES = 20
+
+# A steady-state sync carries a handful of events. Anything at this scale is the runtime catching up
+# on a gap, which is when speculative repair is both least useful and most expensive.
+_SYNC_REPLAY_TIMELINE_EVENT_THRESHOLD = 50
+
+# A caller waiting for history may rescan after losing the guarded replacement race; a speculative
+# repair may not, because the conflict it lost is another writer already rewriting that thread.
+_SPECULATIVE_REPAIR_ATTEMPTS = 1
+
+
+def _is_sync_replay_batch(response: nio.SyncResponse) -> bool:
+    """Return whether one sync response is a gap catch-up rather than steady-state delivery.
+
+    A truncated (``limited``) timeline is the homeserver saying the client fell behind, which is the
+    exact condition that leaves many threads without a usable snapshot at once.
+    """
+    timelines = [room_info.timeline for room_info in response.rooms.join.values()]
+    if any(timeline.limited for timeline in timelines):
+        return True
+    return sum(len(timeline.events) for timeline in timelines) >= _SYNC_REPLAY_TIMELINE_EVENT_THRESHOLD
 
 
 async def resolve_thread_root_event_id_for_client(
@@ -842,6 +862,8 @@ class MatrixConversationCache(ConversationCacheProtocol):
         wants_full_history: bool,
         allows_stale_fallback: bool,
         bypass_repair_backoff: bool,
+        speculative: bool = False,
+        claim_token: object | None = None,
     ) -> ThreadHistoryResult:
         coordinator = self.runtime.event_cache_write_coordinator
         if coordinator is None:
@@ -877,6 +899,7 @@ class MatrixConversationCache(ConversationCacheProtocol):
                 cache_reject_diagnostics=cache_reject_diagnostics,
                 trusted_sender_ids=self._trusted_sender_ids(),
                 retained_event_sources=retained_event_source_provider,
+                max_repair_attempts=_SPECULATIVE_REPAIR_ATTEMPTS if speculative else None,
             )
             if self._thread_repair_result_is_usable(result):
                 await self._acknowledge_repaired_thread_deltas(
@@ -899,6 +922,8 @@ class MatrixConversationCache(ConversationCacheProtocol):
             allow_stale_fallback=allows_stale_fallback,
             result_arms_backoff=self._thread_repair_result_arms_backoff,
             bypass_failure_backoff=bypass_repair_backoff,
+            speculative=speculative,
+            claim_token=claim_token,
         )
 
     async def _fetch_thread_from_client(
@@ -912,6 +937,8 @@ class MatrixConversationCache(ConversationCacheProtocol):
         wants_full_history: bool,
         allows_stale_fallback: bool,
         bypass_repair_backoff: bool,
+        speculative: bool = False,
+        claim_token: object | None = None,
     ) -> ThreadHistoryResult:
         coordinator = self.runtime.event_cache_write_coordinator
         await self._prepare_pending_thread_repair_deltas(room_id, thread_id)
@@ -926,6 +953,8 @@ class MatrixConversationCache(ConversationCacheProtocol):
                 wants_full_history=wants_full_history,
                 allows_stale_fallback=allows_stale_fallback,
                 bypass_repair_backoff=bypass_repair_backoff,
+                speculative=speculative,
+                claim_token=claim_token,
             )
 
         return await fetcher(
@@ -952,9 +981,27 @@ class MatrixConversationCache(ConversationCacheProtocol):
         return result.diagnostics.get("cache_store_outcome") == ThreadCacheReplaceOutcome.HARD_FAILURE.value
 
     def _schedule_missing_thread_repair(self, room_id: str, thread_id: str) -> None:
-        """Schedule bounded background repair after an append finds no snapshot."""
+        """Schedule bounded background repair after an append finds no snapshot.
+
+        Every replayed event in a stale thread reaches this method, so the fan-out gate is consulted
+        before a task is even created; the thread stays marked stale, so a declined repair only
+        defers the scan to the next read.
+        """
         coordinator = self.runtime.event_cache_write_coordinator
         if coordinator is None or not self.runtime.event_cache.durable_writes_available:
+            return
+        principal_id = self.runtime.event_cache.principal_id
+        # Claimed before the task exists. A replay burst reaches this method once per event without
+        # ever yielding, so a check that does not also claim lets every one of them add a task. The
+        # claim is held until the registry takes ownership of the thread, which covers the awaited
+        # preparation in between.
+        reservation = coordinator.reserve_speculative_thread_repair(
+            room_id,
+            thread_id,
+            coordination_scope=principal_id,
+        )
+        if reservation is None:
+            self._log_suppressed_thread_repair(room_id, thread_id, reason="already_scheduled")
             return
 
         async def repair() -> None:
@@ -969,7 +1016,11 @@ class MatrixConversationCache(ConversationCacheProtocol):
                     allows_stale_fallback=False,
                     # Speculative work is the one caller the retained delay is meant to suppress.
                     bypass_repair_backoff=False,
+                    speculative=True,
+                    claim_token=reservation,
                 )
+            except ThreadRepairSuppressedError as exc:
+                self._log_suppressed_thread_repair(room_id, thread_id, reason=exc.reason)
             except ThreadRepairBackoffError as exc:
                 self.logger.debug(
                     "Thread cache repair remains in backoff",
@@ -986,11 +1037,32 @@ class MatrixConversationCache(ConversationCacheProtocol):
                     error=str(exc),
                 )
 
-        create_background_task(
+        task = create_background_task(
             repair(),
             name="matrix_cache_schedule_missing_thread_repair",
             owner=coordinator.background_task_owner,
             log_exceptions=False,
+        )
+        # On the task, not in the coroutine: a task cancelled before its first instruction never
+        # runs its body at all, and a claim leaked that way would suppress this thread until the
+        # process ends, and unrelated threads once enough of them accumulate. Releasing is a no-op
+        # once the registry has taken the claim over, and the token makes it a no-op if a later
+        # wave has since claimed the same thread.
+        task.add_done_callback(
+            lambda _task: coordinator.release_speculative_thread_repair(
+                room_id,
+                thread_id,
+                coordination_scope=principal_id,
+                token=reservation,
+            ),
+        )
+
+    def _log_suppressed_thread_repair(self, room_id: str, thread_id: str, *, reason: str) -> None:
+        self.logger.debug(
+            "Speculative thread cache repair suppressed",
+            room_id=room_id,
+            thread_id=thread_id,
+            reason=reason,
         )
 
     async def _bulk_refresh_startup_threads(
@@ -1405,4 +1477,10 @@ class MatrixConversationCache(ConversationCacheProtocol):
         response: nio.SyncResponse,
     ) -> SyncCacheWriteResult:
         """Durably persist sync timeline events and report cache-certification status."""
-        return await self._sync.cache_sync_timeline_for_certification(response)
+        coordinator = self.runtime.event_cache_write_coordinator
+        if coordinator is None or not _is_sync_replay_batch(response):
+            return await self._sync.cache_sync_timeline_for_certification(response)
+        # Replay rewrites these threads anyway, and its speculative repairs would contend for the
+        # very write path this call is blocking the sync callback on.
+        with coordinator.suppress_speculative_thread_repairs():
+            return await self._sync.cache_sync_timeline_for_certification(response)

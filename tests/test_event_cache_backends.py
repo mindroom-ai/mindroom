@@ -18,6 +18,7 @@ from mindroom.config.matrix import CacheConfig
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.logging_config import get_logger
 from mindroom.matrix.cache import (
+    ThreadAppendOutcome,
     ThreadCacheReplaceOutcome,
     postgres_event_cache_threads,
     sqlite_event_cache,
@@ -610,7 +611,15 @@ async def _assert_staleness_and_redaction_behavior(
     assert stale_state is not None
     assert stale_state.invalidated_at is not None
     assert stale_state.invalidation_reason == "live_thread_mutation"
-    assert await cache.revalidate_thread_after_incremental_update(room_id, thread_id) is True
+    # Re-appending the newest known edit keeps the snapshot's membership identical, so this asserts
+    # trust recovery alone rather than also changing what the thread contains.
+    revalidating_append = await cache.apply_thread_mutation_append(
+        room_id,
+        thread_id,
+        latest_edit,
+        append_failed_reason="live_append_failed",
+    )
+    assert revalidating_append is ThreadAppendOutcome.APPENDED
     fresh_state = await cache.get_thread_cache_state(room_id, thread_id)
     assert fresh_state is not None
     assert fresh_state.invalidated_at is None

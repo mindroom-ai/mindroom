@@ -22,9 +22,10 @@ from .postgres_event_cache_events import (
     write_lookup_index_rows,
 )
 from .thread_cache_state import (
+    ThreadAppendOutcome,
     ThreadCacheReplaceOutcome,
     ThreadCacheStateRow,
-    can_revalidate_after_incremental_update,
+    append_keeps_thread_valid,
     guarded_thread_replacement_conflict,
     incremental_thread_revalidation_reasons,
     is_incremental_thread_revalidation_reason,
@@ -617,22 +618,46 @@ async def mark_thread_stale_locked(
     )
 
 
-async def revalidate_thread_after_incremental_update_locked(
+async def apply_thread_mutation_append_locked(
     db: AsyncConnection,
     *,
     namespace: str,
     room_id: str,
     thread_id: str,
-) -> bool:
-    """Mark one thread cache fresh after a safe incremental update."""
-    row = await _load_thread_cache_state_row(
+    normalized_event: dict[str, Any],
+    append_failed_reason: str,
+) -> ThreadAppendOutcome:
+    """Append one threaded mutation and settle this thread's trust in the same transaction.
+
+    See invariant 5 in the module docstring of ``sqlite_event_cache_threads`` for why it is one.
+    """
+    outcome = await _append_existing_thread_event(
+        db,
+        namespace=namespace,
+        room_id=room_id,
+        thread_id=thread_id,
+        normalized_event=normalized_event,
+    )
+    if outcome is not ThreadAppendOutcome.APPENDED:
+        await mark_thread_stale_locked(
+            db,
+            namespace=namespace,
+            room_id=room_id,
+            thread_id=thread_id,
+            reason=append_failed_reason,
+        )
+        return outcome
+
+    # Read after the append: it touches no trust column, and the failure paths above never need it.
+    state_row = await _load_thread_cache_state_row(
         db,
         namespace=namespace,
         room_id=room_id,
         thread_id=thread_id,
     )
-    if not can_revalidate_after_incremental_update(row):
-        return False
+    if not append_keeps_thread_valid(state_row):
+        return ThreadAppendOutcome.APPENDED_STALE
+
     await db.execute(
         """
         UPDATE mindroom_event_cache_thread_state
@@ -641,7 +666,7 @@ async def revalidate_thread_after_incremental_update_locked(
         """,
         (time.time(), namespace, room_id, thread_id),
     )
-    return True
+    return ThreadAppendOutcome.APPENDED
 
 
 async def mark_room_stale_locked(
@@ -676,17 +701,19 @@ async def mark_room_stale_locked(
     )
 
 
-async def append_existing_thread_event(
+async def _append_existing_thread_event(
     db: AsyncConnection,
     *,
     namespace: str,
     room_id: str,
     thread_id: str,
     normalized_event: dict[str, Any],
-) -> bool:
-    """Append one event to an existing cached thread.
+) -> ThreadAppendOutcome:
+    """Append one event to an existing cached thread and classify what happened.
 
     An opaque ``m.room.encrypted`` payload never replaces stored clear content for the same event ID.
+    A redacted event (or one whose edit target is redacted) is refused before anything is written, so
+    its payload never reaches the point-lookup table.
     """
     event_id = event_id_for_cache(normalized_event)
     if await event_or_original_is_redacted(
@@ -696,7 +723,7 @@ async def append_existing_thread_event(
         event_id=event_id,
         event=normalized_event,
     ):
-        return False
+        return ThreadAppendOutcome.APPEND_REFUSED
 
     serialized_event = serialize_cached_event(event_id, normalized_event)
     row = await fetchone(
@@ -724,15 +751,18 @@ async def append_existing_thread_event(
         cached_at=time.time(),
         thread_id=thread_id,
     )
-    if thread_exists:
-        await _upsert_thread_membership_rows(
-            db,
-            namespace=namespace,
-            room_id=room_id,
-            thread_id=thread_id,
-            serialized_events=[serialized_event],
-        )
-    return thread_exists
+    if not thread_exists:
+        # Only lookup-index rows are recorded: there is no snapshot to extend, so only a full
+        # history scan can make this thread readable again.
+        return ThreadAppendOutcome.SNAPSHOT_MISSING
+    await _upsert_thread_membership_rows(
+        db,
+        namespace=namespace,
+        room_id=room_id,
+        thread_id=thread_id,
+        serialized_events=[serialized_event],
+    )
+    return ThreadAppendOutcome.APPENDED
 
 
 async def _upsert_thread_cache_state(

@@ -16,6 +16,7 @@ from mindroom.hooks import EVENT_AGENT_STARTED
 from mindroom.matrix.cache import thread_cache_rejection_reason
 from mindroom.matrix.cache.event_cache import EventCacheBackendUnavailableError
 from mindroom.matrix.cache.sqlite_event_cache import SqliteEventCache
+from mindroom.matrix.cache.thread_cache_state import ThreadAppendOutcome
 from mindroom.matrix.cache.write_coordinator import EventCacheWriteCoordinator
 from mindroom.matrix.client import PermanentMatrixStartupError
 from mindroom.matrix.sync_certification import SyncCacheWriteResult, SyncCheckpoint, SyncTrustState
@@ -765,7 +766,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
 
         event_cache = _runtime_event_cache()
         event_cache.store_events_batch = AsyncMock(side_effect=slow_store_events_batch)
-        event_cache.append_event = AsyncMock(return_value=False)
+        event_cache.apply_thread_mutation_append = AsyncMock(return_value=ThreadAppendOutcome.SNAPSHOT_MISSING)
         event_cache.redact_event = AsyncMock()
         bot.event_cache = event_cache
         _install_runtime_write_coordinator(bot)
@@ -798,7 +799,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         await wait_for_background_tasks(timeout=1.0, owner=bot._runtime_view)
 
         event_cache.store_events_batch.assert_awaited_once()
-        event_cache.append_event.assert_awaited_once()
+        event_cache.apply_thread_mutation_append.assert_awaited_once()
         event_cache.redact_event.assert_not_awaited()
 
     @pytest.mark.asyncio
@@ -806,7 +807,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         """Sync timeline writes should append direct thread events through the thread-cache helper."""
         event_cache = _runtime_event_cache()
         event_cache.store_events_batch = AsyncMock()
-        event_cache.append_event = AsyncMock(return_value=False)
+        event_cache.apply_thread_mutation_append = AsyncMock(return_value=ThreadAppendOutcome.SNAPSHOT_MISSING)
         event_cache.redact_event = AsyncMock()
         bot.event_cache = event_cache
         _install_runtime_write_coordinator(bot)
@@ -835,8 +836,8 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         bot._conversation_cache.cache_sync_timeline(sync_response)
         await wait_for_background_tasks(timeout=1.0, owner=bot._runtime_view)
 
-        event_cache.append_event.assert_awaited_once()
-        append_args = event_cache.append_event.await_args.args
+        event_cache.apply_thread_mutation_append.assert_awaited_once()
+        append_args = event_cache.apply_thread_mutation_append.await_args.args
         assert append_args[0] == "!test:localhost"
         assert append_args[1] == "$thread_root:localhost"
         assert append_args[2]["event_id"] == "$thread_msg:localhost"
@@ -846,7 +847,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         """Sync timeline writes should append threaded edits using the thread root from m.new_content."""
         event_cache = _runtime_event_cache()
         event_cache.store_events_batch = AsyncMock()
-        event_cache.append_event = AsyncMock(return_value=False)
+        event_cache.apply_thread_mutation_append = AsyncMock(return_value=ThreadAppendOutcome.SNAPSHOT_MISSING)
         event_cache.redact_event = AsyncMock()
         bot.event_cache = event_cache
         _install_runtime_write_coordinator(bot)
@@ -880,8 +881,8 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         bot._conversation_cache.cache_sync_timeline(sync_response)
         await wait_for_background_tasks(timeout=1.0, owner=bot._runtime_view)
 
-        event_cache.append_event.assert_awaited_once()
-        append_args = event_cache.append_event.await_args.args
+        event_cache.apply_thread_mutation_append.assert_awaited_once()
+        append_args = event_cache.apply_thread_mutation_append.await_args.args
         assert append_args[0] == "!test:localhost"
         assert append_args[1] == "$thread_root:localhost"
         assert append_args[2]["event_id"] == "$thread_edit:localhost"
@@ -971,7 +972,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         """Sync timeline writes should not append non-threaded events into thread cache state."""
         event_cache = _runtime_event_cache()
         event_cache.store_events_batch = AsyncMock()
-        event_cache.append_event = AsyncMock(return_value=False)
+        event_cache.apply_thread_mutation_append = AsyncMock(return_value=ThreadAppendOutcome.SNAPSHOT_MISSING)
         event_cache.redact_event = AsyncMock()
         bot.event_cache = event_cache
         _install_runtime_write_coordinator(bot)
@@ -999,7 +1000,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         bot._conversation_cache.cache_sync_timeline(sync_response)
         await wait_for_background_tasks(timeout=1.0, owner=bot._runtime_view)
 
-        event_cache.append_event.assert_not_awaited()
+        event_cache.apply_thread_mutation_append.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_cache_sync_timeline_plain_edit_lookup_miss_invalidates_room_threads(
@@ -1009,7 +1010,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         """Sync room-mode edits should fail closed when lookup certainty is unavailable."""
         event_cache = _runtime_event_cache()
         event_cache.store_events_batch = AsyncMock()
-        event_cache.append_event = AsyncMock(return_value=False)
+        event_cache.apply_thread_mutation_append = AsyncMock(return_value=ThreadAppendOutcome.SNAPSHOT_MISSING)
         event_cache.redact_event = AsyncMock()
         event_cache.get_thread_id_for_event = AsyncMock(return_value=None)
         event_cache.get_event = AsyncMock(
@@ -1057,7 +1058,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             "!test:localhost",
             reason="sync_thread_lookup_unavailable",
         )
-        event_cache.append_event.assert_not_awaited()
+        event_cache.apply_thread_mutation_append.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_cache_sync_timeline_plain_edit_missing_original_invalidates_room_threads(
@@ -1067,7 +1068,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         """Sync plain edits without enough local proof should invalidate room thread snapshots once."""
         event_cache = _runtime_event_cache()
         event_cache.store_events_batch = AsyncMock()
-        event_cache.append_event = AsyncMock(return_value=False)
+        event_cache.apply_thread_mutation_append = AsyncMock(return_value=ThreadAppendOutcome.SNAPSHOT_MISSING)
         event_cache.redact_event = AsyncMock()
         event_cache.get_thread_id_for_event = AsyncMock(return_value=None)
         event_cache.get_event = AsyncMock(return_value=None)
@@ -1108,7 +1109,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             "!test:localhost",
             reason="sync_thread_lookup_unavailable",
         )
-        event_cache.append_event.assert_not_awaited()
+        event_cache.apply_thread_mutation_append.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_sync_reaction_redaction_lookup_miss_without_cached_target_does_not_invalidate_room_threads(
@@ -1159,7 +1160,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         """Sync mutation fallback should invalidate once per room and avoid room-history scans."""
         event_cache = _runtime_event_cache()
         event_cache.store_events_batch = AsyncMock()
-        event_cache.append_event = AsyncMock(return_value=False)
+        event_cache.apply_thread_mutation_append = AsyncMock(return_value=ThreadAppendOutcome.SNAPSHOT_MISSING)
         event_cache.get_thread_id_for_event = AsyncMock(return_value=None)
         event_cache.get_event = AsyncMock(return_value=None)
         bot.event_cache = event_cache
@@ -1302,7 +1303,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
 
         event_cache = _runtime_event_cache()
         event_cache.store_events_batch = AsyncMock(side_effect=slow_store_events_batch)
-        event_cache.append_event = AsyncMock(return_value=False)
+        event_cache.apply_thread_mutation_append = AsyncMock(return_value=ThreadAppendOutcome.SNAPSHOT_MISSING)
         event_cache.redact_event = AsyncMock(side_effect=record_redaction)
         bot.event_cache = event_cache
         _install_runtime_write_coordinator(bot)
@@ -1367,7 +1368,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         """A failed thread append should not stop later redactions in the same sync batch."""
         event_cache = _runtime_event_cache()
         event_cache.store_events_batch = AsyncMock()
-        event_cache.append_event = AsyncMock(side_effect=RuntimeError("append failed"))
+        event_cache.apply_thread_mutation_append = AsyncMock(side_effect=RuntimeError("append failed"))
         event_cache.redact_event = AsyncMock(return_value=True)
         bot.event_cache = event_cache
         _install_runtime_write_coordinator(bot)
@@ -1410,7 +1411,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         bot._conversation_cache.cache_sync_timeline(sync_response)
         await wait_for_background_tasks(timeout=1.0, owner=bot._runtime_view)
 
-        event_cache.append_event.assert_awaited_once()
+        event_cache.apply_thread_mutation_append.assert_awaited_once()
         event_cache.redact_event.assert_awaited_once_with("!test:localhost", "$thread_msg_old:localhost")
 
     @pytest.mark.asyncio
@@ -1455,7 +1456,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
 
         event_cache = _runtime_event_cache()
         event_cache.store_events_batch = AsyncMock(side_effect=store_events_batch)
-        event_cache.append_event = AsyncMock(return_value=False)
+        event_cache.apply_thread_mutation_append = AsyncMock(return_value=ThreadAppendOutcome.SNAPSHOT_MISSING)
         event_cache.redact_event = AsyncMock()
         bot.event_cache = event_cache
         _install_runtime_write_coordinator(bot)
@@ -1640,7 +1641,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         """Failed point-lookup writes must not leave split thread cache state."""
         event_cache = _runtime_event_cache()
         event_cache.store_events_batch = AsyncMock(side_effect=RuntimeError("store failed"))
-        event_cache.append_event = AsyncMock(return_value=False)
+        event_cache.apply_thread_mutation_append = AsyncMock(return_value=ThreadAppendOutcome.SNAPSHOT_MISSING)
         event_cache.redact_event = AsyncMock(return_value=True)
         bot.event_cache = event_cache
         _install_runtime_write_coordinator(bot)
@@ -1684,7 +1685,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         await wait_for_background_tasks(timeout=1.0, owner=bot._runtime_view)
 
         event_cache.store_events_batch.assert_awaited_once()
-        event_cache.append_event.assert_awaited_once()
+        event_cache.apply_thread_mutation_append.assert_awaited_once()
         event_cache.redact_event.assert_awaited_once_with("!test:localhost", "$thread_msg_old:localhost")
 
     @pytest.mark.asyncio

@@ -23,6 +23,7 @@ from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.constants import STREAM_STATUS_KEY, STREAM_STATUS_STREAMING
 from mindroom.matrix.cache.sqlite_event_cache import SqliteEventCache
+from mindroom.matrix.cache.thread_cache_state import ThreadAppendOutcome
 from mindroom.matrix.cache.thread_history_result import thread_history_result as _thread_history_result_impl
 from mindroom.matrix.cache.thread_write_cache_ops import ThreadMutationCacheOps
 from mindroom.matrix.cache.write_coordinator import EventCacheWriteCoordinator
@@ -251,14 +252,13 @@ def _thread_mutation_cache_ops() -> tuple[ThreadMutationCacheOps, MagicMock, Mag
     logger = MagicMock()
     event_cache = MagicMock()
     event_cache.principal_id = "@mindroom_test:localhost"
-    event_cache.append_event = AsyncMock(return_value=True)
+    event_cache.apply_thread_mutation_append = AsyncMock(return_value=ThreadAppendOutcome.APPENDED)
     event_cache.disable = Mock()
     event_cache.invalidate_room_threads = AsyncMock()
     event_cache.invalidate_thread = AsyncMock()
     event_cache.mark_room_threads_stale = AsyncMock()
     event_cache.mark_thread_stale = AsyncMock()
     event_cache.redact_event = AsyncMock(return_value=True)
-    event_cache.revalidate_thread_after_incremental_update = AsyncMock()
     runtime = MagicMock()
     runtime.event_cache = event_cache
     runtime.event_cache_write_coordinator = _runtime_write_coordinator()

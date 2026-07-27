@@ -1838,6 +1838,7 @@ visibility = [
     "mindroom.matrix.cache.postgres_event_cache_threads",
     "mindroom.matrix.cache.sqlite_event_cache",
     "mindroom.matrix.cache.sqlite_event_cache_threads",
+    "mindroom.matrix.cache.thread_write_cache_ops",
 ]
 
 [[modules]]
@@ -1847,8 +1848,10 @@ depends_on = []
 [[modules]]
 path = "mindroom.matrix.cache.thread_write_cache_ops"
 depends_on = [
+    "mindroom.background_tasks",
     "mindroom.matrix.cache.event_cache",
     "mindroom.matrix.cache.thread_cache_invalidation",
+    "mindroom.matrix.cache.thread_cache_state",
     "mindroom.matrix.thread_bookkeeping",
 ]
 

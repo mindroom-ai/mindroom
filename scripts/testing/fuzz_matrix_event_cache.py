@@ -662,9 +662,14 @@ class CacheFuzzRunner:
             reason=reason,
         )
         if operation.variant % 2:
-            await self.cache.revalidate_thread_after_incremental_update(
+            # Trust is now only ever restored as part of an append, in the same transaction.
+            source = threaded_message_source(operation)
+            self._remember_source(source)
+            await self.cache.apply_thread_mutation_append(
                 current_room_id,
                 current_thread_id,
+                source,
+                append_failed_reason="sync_append_failed",
             )
 
     async def _apply_room_stale_marker(self, operation: FuzzOperation) -> None:

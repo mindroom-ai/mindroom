@@ -12,6 +12,7 @@ from mindroom.logging_config import get_logger
 from mindroom.matrix.cache import (
     ConversationEventCache,
     EventCacheWriteCoordinator,
+    ThreadAppendOutcome,
     thread_cache_rejection_reason,
 )
 from mindroom.matrix.cache.thread_write_cache_ops import ThreadMutationCacheOps
@@ -1182,7 +1183,13 @@ async def test_mark_thread_stale_upgrades_incremental_reason_to_full_refetch_rea
     assert downgraded_state.invalidated_at is not None
     assert state.invalidated_at is not None
     assert downgraded_state.invalidated_at >= state.invalidated_at
-    assert await event_cache.revalidate_thread_after_incremental_update(_ROOM_ID, _THREAD_ID) is False
+    non_incremental_append = await event_cache.apply_thread_mutation_append(
+        _ROOM_ID,
+        _THREAD_ID,
+        _message_source("$after-opaque", "m.text", timestamp=70, relation=_thread_relation()),
+        append_failed_reason="sync_append_failed",
+    )
+    assert non_incremental_append is ThreadAppendOutcome.APPENDED_STALE
 
 
 @pytest.mark.asyncio
