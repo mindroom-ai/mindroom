@@ -45,6 +45,10 @@ def sidecar_declared_bytes(content: dict[str, Any]) -> int:
     pre-offload size in ``original_event_size``, which lets the bound charge what hydration will
     actually cost without joining the plaintext table or downloading anything.
 
+    That value is already UTF-8 bytes, not characters - ``_calculate_event_size`` encodes the
+    canonical JSON before measuring it, and adds a 2 KB allowance for event metadata. It therefore
+    slightly overstates a stub's true cost, which is the safe direction for a budget.
+
     The value is only read for content that is already a structurally valid sidecar, and a stub
     whose declaration is missing or nonsensical is charged nothing beyond its stored payload -
     under-charging degrades to today's behaviour, while trusting a negative number would let a stub
