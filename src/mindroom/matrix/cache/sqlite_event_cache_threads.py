@@ -887,7 +887,19 @@ async def _append_existing_thread_event(
     )
     if row is None:
         # Only lookup-index rows are recorded: there is no snapshot to extend, so only a full
-        # history scan can make this thread readable again.
+        # history scan can make this thread readable again. Advance the watermark anyway: a fetch
+        # already in flight when this event landed cannot represent the thread, so it must not be
+        # allowed to install a snapshot that predates the event and then keep the gap this append
+        # is about to mark. Moving the watermark makes replace_thread_locked refuse that stale
+        # fetch, exactly as it does after an APPENDED live event -- otherwise a live event landing
+        # mid-fetch re-gaps the just-stored snapshot on every cycle and the thread refetches forever.
+        await _advance_snapshot_watermark(
+            db,
+            principal_id=principal_id,
+            room_id=room_id,
+            thread_id=thread_id,
+            reflected_at=time.time(),
+        )
         return ThreadAppendOutcome.SNAPSHOT_MISSING
 
     write_sequence = (await allocate_write_sequences(db, 1))[0]

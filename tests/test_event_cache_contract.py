@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from typing import Any
 
 import pytest
@@ -569,6 +570,74 @@ class TestConversationEventCacheContract:
         )
 
         assert stored
+        cached = await event_cache.get_thread_events(room_id, thread_id)
+        assert cached is not None
+        assert [event["event_id"] for event in cached] == [thread_id, "$live:localhost"]
+
+    @pytest.mark.asyncio
+    async def test_in_flight_fetch_over_a_snapshotless_thread_does_not_refetch_forever(
+        self,
+        event_cache: ConversationEventCache,
+    ) -> None:
+        """A live append onto a not-yet-cached thread makes an in-flight fetch too old, once.
+
+        This is the SNAPSHOT_MISSING sibling of the append-shaped burial test above. A thread has
+        no cached rows yet. A refill scan starts; while it runs, a live event lands in the thread.
+        The append finds no snapshot to extend (SNAPSHOT_MISSING), records the point row, and marks
+        a gap. Because that append advances the ordering watermark, the in-flight scan is now too
+        old to install its snapshot, so its store is refused and the gap it would otherwise keep
+        forever survives for exactly one more read. A *fresh* fetch (which genuinely saw the live
+        event) then clears the gap and installs a clean snapshot -- so the thread stops refetching.
+        Without the watermark advance on SNAPSHOT_MISSING, the stale store lands, keeps the
+        post-fetch gap, and every subsequent read refetches in a loop.
+        """
+        room_id = "!race-missing:localhost"
+        thread_id = "$thread-missing:localhost"
+        root = _message_event(thread_id, 1)
+
+        # A scan starts over a thread with no cached snapshot. The gap the live append marks below
+        # is stamped with real wall-clock time, so the in-flight fetch must be dated just before it
+        # for the interleaving to be realistic; the fresh fetch afterwards is dated just after.
+        before_append = time.time()
+        fetch_started_at = before_append - 1.0
+
+        # ...and a live event lands in the thread while it is still running. No snapshot exists yet,
+        # so the append is SNAPSHOT_MISSING and marks a gap.
+        live = _message_event("$live:localhost", 3, thread_id=thread_id)
+        assert (
+            await event_cache.apply_thread_mutation_append(
+                room_id,
+                thread_id,
+                live,
+                append_failed_reason="live_append_failed",
+            )
+            is ThreadAppendOutcome.SNAPSHOT_MISSING
+        )
+        assert thread_cache_rejection_reason(await event_cache.get_thread_cache_gap(room_id, thread_id)) is not None
+
+        # The in-flight scan finishes carrying only the root (it predates the live event). The
+        # watermark advanced by the append must refuse this stale store, leaving the gap in place.
+        await event_cache.replace_thread(
+            room_id,
+            thread_id,
+            [root],
+            expected_membership_epoch=await event_cache.room_membership_epoch(room_id),
+            fetch_started_at=fetch_started_at,
+        )
+        assert (
+            thread_cache_rejection_reason(await event_cache.get_thread_cache_gap(room_id, thread_id)) is not None
+        ), "stale in-flight store must not clear the gap"
+
+        # A fresh fetch that started after the live event landed (so it genuinely saw it) clears
+        # the gap and installs the full snapshot, breaking the refetch loop.
+        await replace_thread_unconditionally(
+            event_cache,
+            room_id,
+            thread_id,
+            [root, live],
+            fetch_started_at=time.time() + 1.0,
+        )
+        assert thread_cache_rejection_reason(await event_cache.get_thread_cache_gap(room_id, thread_id)) is None
         cached = await event_cache.get_thread_events(room_id, thread_id)
         assert cached is not None
         assert [event["event_id"] for event in cached] == [thread_id, "$live:localhost"]
