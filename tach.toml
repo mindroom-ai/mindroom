@@ -3919,7 +3919,7 @@ visibility = ["mindroom.matrix.conversation_cache"]
 exclusive = true
 
 [[interfaces]]
-expose = ["sidecar_mxc_url"]
+expose = ["sidecar_declared_bytes", "sidecar_mxc_url"]
 from = ["mindroom.matrix.sidecar_content"]
 visibility = [
     "mindroom.matrix.cache.event_cache_events",

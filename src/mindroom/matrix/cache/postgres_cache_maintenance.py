@@ -38,6 +38,13 @@ async def _backfill_bounded_read_columns(db: AsyncConnection, *, namespace: str)
     ``event_bytes`` at its 0 default prices a row as free, which makes ``max_bytes`` inert. A
     ``sender`` at its '' default makes every event look like it came from the same account, so the
     window can no longer tell an author's own edit from someone else's and prices both.
+
+    The payload size recorded here deliberately omits the sidecar charge that
+    ``SerializedCachedEvent.event_bytes`` adds on write. Replicating that parse in SQL would mean a
+    second implementation of the sidecar format - version and encoding checks, both content blocks,
+    dedup by MXC - that can drift from the Python without anything failing. A legacy stub therefore
+    stays priced at its stored payload until the event is next written, which under-charges it
+    exactly as much as the release before this one did; the write path is what closes the hole.
     """
     await db.execute(
         """
