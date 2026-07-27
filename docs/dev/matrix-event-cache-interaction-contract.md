@@ -112,8 +112,8 @@ A snapshot without its thread root or one still containing opaque `m.room.encryp
 
 Only a rejected or absent snapshot enters an authoritative homeserver room-history scan and cache refill.
 
-Every refill fetches the thread itself.
-There is no single-flight, no admission gate and no failure backoff: concurrent readers of one gapped thread each pay their own scan rather than sharing one.
+A cache-miss refill is single-flight per full read contract, so concurrent matching readers share one homeserver scan.
+There is no admission gate, failure backoff, or cooldown.
 A refill that completes without installing a snapshot still returns its homeserver history, so reads stay fail-open.
 
 A degraded dispatch proof for an unproven thread candidate retries strict proof before it may demote the event to room level.
@@ -132,7 +132,7 @@ The advisory read path may use a labelled stale-cache fallback when a required r
 
 Dispatch reads reject stale fallback and propagate the refill failure.
 
-Every completed cache or source fetch emits its own `matrix_cache_thread_history_refreshed` event with `mode`, `cache_read_ms`, `homeserver_fetch_ms`, page and event counts, `cache_reject_reason`, `thread_read_source`, degradation state, and error state.
+Every completed cache or source fetch emits its own `matrix_cache_thread_history_refreshed` event with `mode`, `cache_read_ms`, `homeserver_fetch_ms`, `homeserver_scan_parse_cpu_ms`, `resolution_ms`, `sidecar_hydration_ms`, `coordinator_queue_wait_ms`, `post_coordinator_read_ms`, `thread_read_total_ms`, `refill_singleflight_wait_ms`, `refill_singleflight_shared`, page and event counts, `cache_reject_reason`, `thread_read_source`, degradation state, and error state.
 Refilled reads add `cache_store_written` and `cache_store_failed`, and a rejected snapshot adds `cache_gap_marked_at`, `cache_gap_age_ms`, and `cache_gap_reason`.
 A dispatch read cut short by a coordinator timeout or a fetch timeout instead emits `matrix_cache_thread_read_degraded`.
 

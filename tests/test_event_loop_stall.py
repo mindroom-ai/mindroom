@@ -75,6 +75,15 @@ def _stall_logs(logs: list[dict[str, object]]) -> list[dict[str, object]]:
     return [entry for entry in logs if entry["event"] in _STALL_EVENTS]
 
 
+@pytest.mark.parametrize("heartbeat_interval_seconds", [0.0, -0.05, float("inf"), float("-inf"), float("nan")])
+def test_detector_rejects_non_positive_or_nonfinite_heartbeat_intervals(
+    heartbeat_interval_seconds: float,
+) -> None:
+    """Heartbeat scheduling requires a finite interval greater than zero."""
+    with pytest.raises(ValueError, match="finite and > 0"):
+        EventLoopStallDetector(heartbeat_interval_seconds=heartbeat_interval_seconds)
+
+
 def test_scheduler_lag_summary_aggregates_delayed_heartbeats() -> None:
     """Delayed callbacks emit one nearest-rank aggregate, never sample logs."""
     detector = _detector()

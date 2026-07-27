@@ -13,10 +13,8 @@ Read-side invariants:
    (``THREAD_HISTORY_SOURCE_DEGRADED``) instead of blocking dispatch; consumers must treat that result
    as unusable for caching and root proofs.
 
-3. Every cache-miss refill fetches the thread itself. There is no single-flight and no admission gate,
-   so concurrent readers of one gapped thread each pay their own homeserver scan rather than a shared
-   wait. See ``conversation_cache._refill_thread_from_client`` for why that trade is acceptable - it is
-   the measured 1.244x fan-out, not the cost of one scan.
+3. Each cache-miss refill is single-flight per full read contract, so one leader runs the homeserver
+   scan and concurrent matching readers share it. There is no admission gate, failure backoff, or cooldown.
    ``ADVISORY_FULL``, ``STRICT_FULL``, and ``STRICT_SOURCE_REFRESH`` have no dispatch timeout; strict
    modes are intentionally not dispatch-safe because they may block for authoritative post-lock model
    context or a direct source refresh.

@@ -57,6 +57,9 @@ class EventLoopStallDetector:
         poll_interval_seconds: float | None = None,
     ) -> None:
         """Configure thresholds; ``start()`` arms the heartbeat and thread."""
+        if not math.isfinite(heartbeat_interval_seconds) or heartbeat_interval_seconds <= 0:
+            msg = "heartbeat_interval_seconds must be finite and > 0"
+            raise ValueError(msg)
         self.threshold_seconds = threshold_seconds
         self.heartbeat_interval_seconds = heartbeat_interval_seconds
         self.repeat_log_interval_seconds = repeat_log_interval_seconds
