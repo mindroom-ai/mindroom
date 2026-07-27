@@ -620,7 +620,7 @@ async def _resolve_cached_thread_history(
 def _cache_reject_diagnostics(gap: ThreadCacheGap) -> dict[str, str | int | float | bool]:
     """Describe one gap-marked snapshot for the read that refused it.
 
-    The rejection reason comes from ``thread_cache_rejection_reason`` rather than an argument, so
+    The rejection reason comes from ``thread_cache_gap_reason`` rather than an argument, so
     the label a read logs and the gate that produced it cannot drift apart.
     """
     diagnostics: dict[str, str | int | float | bool] = {

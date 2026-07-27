@@ -2188,6 +2188,13 @@ class TestThreadHistoryCache:
         cache = SqliteEventCache(tmp_path / "cache.db")
         await cache.initialize()
 
+        root_event = self._make_text_event(
+            event_id="$thread_root",
+            sender="@user:localhost",
+            body="Root",
+            server_timestamp=1_000,
+            source_content={"body": "Root", "msgtype": "m.text"},
+        )
         scans_started = 0
         release_scan = asyncio.Event()
         first_scan_started = asyncio.Event()
@@ -2199,7 +2206,7 @@ class TestThreadHistoryCache:
             await release_scan.wait()
             return nio.RoomMessagesResponse(
                 room_id="!room:localhost",
-                chunk=[],
+                chunk=[root_event],
                 start="",
                 end=None,
             )
@@ -2224,15 +2231,14 @@ class TestThreadHistoryCache:
             # fixed interval instead would pass vacuously if no reader reached the homeserver.
             await asyncio.wait_for(first_scan_started.wait(), timeout=10)
             await asyncio.sleep(0.2)
-            in_flight_scans = scans_started
             release_scan.set()
-            await asyncio.gather(*readers, return_exceptions=True)
+            await asyncio.gather(*readers)
         finally:
             release_scan.set()
             await coordinator.close()
             await cache.close()
 
-        assert in_flight_scans == 1, f"{in_flight_scans} concurrent readers each ran their own homeserver scan"
+        assert scans_started == 1, f"{scans_started} concurrent readers each ran their own homeserver scan"
 
     @staticmethod
     def _conversation_cache_for_runtime(
