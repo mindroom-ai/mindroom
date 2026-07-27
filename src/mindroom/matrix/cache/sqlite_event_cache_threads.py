@@ -877,12 +877,13 @@ async def _append_existing_thread_event(
     )
     row = await cursor.fetchone()
     await cursor.close()
+    reflected_at = time.time()
     await write_lookup_index_rows(
         db,
         principal_id=principal_id,
         room_id=room_id,
         serialized_events=[serialized_event],
-        cached_at=time.time(),
+        cached_at=reflected_at,
         thread_id=thread_id,
     )
     if row is None:
@@ -897,7 +898,7 @@ async def _append_existing_thread_event(
             principal_id=principal_id,
             room_id=room_id,
             thread_id=thread_id,
-            reflected_at=time.time(),
+            reflected_at=reflected_at,
         )
         return ThreadAppendOutcome.SNAPSHOT_MISSING
 
@@ -932,7 +933,7 @@ async def _append_existing_thread_event(
         principal_id=principal_id,
         room_id=room_id,
         thread_id=thread_id,
-        reflected_at=time.time(),
+        reflected_at=reflected_at,
     )
     return ThreadAppendOutcome.APPENDED
 

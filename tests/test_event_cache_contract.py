@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import time
 from typing import Any
+from unittest.mock import patch
 
 import pytest
 
@@ -640,6 +641,41 @@ class TestConversationEventCacheContract:
         cached = await event_cache.get_thread_events(room_id, thread_id)
         assert cached is not None
         assert [event["event_id"] for event in cached] == [thread_id, "$live:localhost"]
+
+    @pytest.mark.asyncio
+    async def test_clock_rollback_during_snapshotless_append_does_not_admit_stale_fetch(
+        self,
+        event_cache: ConversationEventCache,
+    ) -> None:
+        """One append timestamp must fence a fetch even if the wall clock steps backward."""
+        room_id = "!clock-rollback:localhost"
+        thread_id = "$thread-clock-rollback:localhost"
+        root = _message_event(thread_id, 1)
+        live = _message_event("$live-clock-rollback:localhost", 2, thread_id=thread_id)
+        backend = event_cache.runtime_diagnostics()["cache_backend"]
+        clock_target = f"mindroom.matrix.cache.{backend}_event_cache_threads.time.time"
+
+        with patch(clock_target, side_effect=[200.0, 100.0, 100.0]):
+            assert (
+                await event_cache.apply_thread_mutation_append(
+                    room_id,
+                    thread_id,
+                    live,
+                    append_failed_reason="live_append_failed",
+                )
+                is ThreadAppendOutcome.SNAPSHOT_MISSING
+            )
+
+        await event_cache.replace_thread(
+            room_id,
+            thread_id,
+            [root],
+            expected_membership_epoch=await event_cache.room_membership_epoch(room_id),
+            fetch_started_at=150.0,
+        )
+
+        assert await event_cache.get_thread_events(room_id, thread_id) is None
+        assert thread_cache_rejection_reason(await event_cache.get_thread_cache_gap(room_id, thread_id)) is not None
 
     @pytest.mark.asyncio
     async def test_redaction_tombstones_original_edits_and_late_replays(
