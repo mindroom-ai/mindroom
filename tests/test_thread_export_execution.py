@@ -13,6 +13,11 @@ import yaml
 
 from mindroom.matrix.cache import thread_history_result
 from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
+from mindroom.matrix.thread_diagnostics import (
+    THREAD_HISTORY_DEGRADED_DIAGNOSTIC,
+    THREAD_HISTORY_SOURCE_DIAGNOSTIC,
+    THREAD_HISTORY_SOURCE_STALE_CACHE,
+)
 from mindroom.thread_export import ThreadExportTarget
 from mindroom.thread_export import storage as thread_export_storage
 from mindroom.thread_export.execution import (
@@ -203,6 +208,60 @@ async def test_export_threads_prefer_cache_uses_cache_first_fetch(tmp_path: Path
     cache_fetch.assert_awaited_once()
     assert cache_fetch.await_args.kwargs["caller_label"] == "thread_export"
     assert len(list((tmp_path / "exports" / "lobby").glob("*.yaml"))) == 1
+
+
+@pytest.mark.asyncio
+async def test_export_refuses_a_stale_cached_read_that_reports_itself_complete(tmp_path: Path) -> None:
+    """Completeness and freshness are independent, and export needs both.
+
+    A stale fallback reports ``is_full_history=True`` whenever its read happened not to truncate,
+    so an export checking only completeness writes rows out as authoritative that the homeserver
+    has already moved past. Asserted through the real export so it fails if that check is dropped:
+    the earlier version of this test only rebuilt two diagnostic helpers and compared them to what
+    it had just constructed, which no change to export could have broken.
+    """
+    config = _config(tmp_path)
+    runtime_paths = runtime_paths_for(config)
+    _write_matrix_state(tmp_path)
+
+    stale_but_untruncated = thread_history_result(
+        [
+            ResolvedVisibleMessage.synthetic(
+                sender="@alice:localhost",
+                body="Stale thread",
+                event_id="$cached:localhost",
+            ),
+        ],
+        is_full_history=True,
+        diagnostics={
+            THREAD_HISTORY_SOURCE_DIAGNOSTIC: THREAD_HISTORY_SOURCE_STALE_CACHE,
+            THREAD_HISTORY_DEGRADED_DIAGNOSTIC: True,
+        },
+    )
+
+    with (
+        patch(
+            "mindroom.thread_export.execution.enumerate_room_thread_root_ids",
+            new=AsyncMock(return_value=(["$cached:localhost"], False)),
+        ),
+        patch(
+            "mindroom.thread_export.execution.fetch_thread_history",
+            new=AsyncMock(return_value=stale_but_untruncated),
+        ),
+    ):
+        stats = await _export_threads_for_client(
+            client=Mock(),
+            config=config,
+            runtime_paths=runtime_paths,
+            event_cache=Mock(),
+            output_dir=tmp_path / "exports",
+            rooms=_export_rooms(runtime_paths, "lobby"),
+            prefer_cache=True,
+        )
+
+    assert stats.threads_exported == 0
+    assert stats.failures == 1
+    assert list((tmp_path / "exports").rglob("*.yaml")) == [], "a stale read must not be written out"
 
 
 @pytest.mark.asyncio

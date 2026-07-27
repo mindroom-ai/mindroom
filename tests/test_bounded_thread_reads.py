@@ -38,6 +38,7 @@ from mindroom.matrix.cache import (
     sqlite_event_cache_events,
     sqlite_event_cache_threads,
 )
+from mindroom.matrix.cache.event_cache_events import serialize_cached_event
 from mindroom.matrix.cache.thread_read_window import (
     DEFAULT_THREAD_READ_MAX_BYTES,
     ThreadReadBudget,
@@ -116,6 +117,22 @@ def _thread_event_sources(
     return events
 
 
+def _sidecar_stub_event(
+    event_id: str,
+    timestamp: int,
+    *,
+    declared_bytes: int | None,
+) -> dict[str, Any]:
+    """Return the compact stub a long body is replaced by once offloaded to sidecar storage."""
+    event = _message_event(event_id, timestamp, body="preview", thread_id=_THREAD_ID)
+    metadata: dict[str, Any] = {"version": 2, "encoding": "matrix_event_content_json"}
+    if declared_bytes is not None:
+        metadata["original_event_size"] = declared_bytes
+    event["content"]["io.mindroom.long_text"] = metadata
+    event["content"]["url"] = f"mxc://localhost/{event_id.lstrip('$')}"
+    return event
+
+
 def _is_edit(event: dict[str, Any]) -> bool:
     relates_to = event.get("content", {}).get("m.relates_to") or {}
     return relates_to.get("rel_type") == "m.replace"
@@ -147,6 +164,11 @@ def _latest_edit_by_original(events: list[dict[str, Any]]) -> dict[str, str]:
 
 def _payload_bytes(events: list[dict[str, Any]]) -> int:
     return sum(len(json.dumps(event, separators=(",", ":")).encode()) for event in events)
+
+
+def _charged_bytes(event: dict[str, Any]) -> int:
+    """Return what selection would price one event at, through the column the read reads."""
+    return serialize_cached_event(event["event_id"], event).event_bytes
 
 
 async def _seed_thread(
@@ -274,13 +296,20 @@ class TestBoundedThreadReadEquivalence:
         self,
         event_cache: ConversationEventCache,
     ) -> None:
-        """An unbounded read is unchanged by this feature."""
+        """An unbounded read loses no message, and still collapses each one's edits.
+
+        Unbounded means untruncated, not uncollapsed. Every message the thread holds comes back;
+        what does not come back is the pile of superseded edits behind each one.
+        """
         events = _thread_event_sources(8, edits_per_message=2)
         await _seed_thread(event_cache, events)
 
         full_read = await event_cache.get_thread_events(_ROOM_ID, _THREAD_ID)
         assert full_read is not None
-        assert len(full_read) == len(events)
+
+        assert _original_event_ids(full_read) == _original_event_ids(events), "a message was lost"
+        assert len(full_read) < len(events), "an unbounded read must still collapse superseded edits"
+        assert _latest_edit_by_original(full_read) == _latest_edit_by_original(events)
 
     @pytest.mark.asyncio
     async def test_budget_at_and_above_thread_size_returns_the_whole_thread(
@@ -460,13 +489,22 @@ class TestBoundedThreadReadCost:
         self,
         event_cache: ConversationEventCache,
     ) -> None:
-        """An unbounded read keeps its single-query shape."""
-        await _seed_thread(event_cache, _thread_event_sources(30))
+        """An unbounded read is two statements, and stays two as the thread grows.
 
-        with _count_thread_statements(event_cache) as statements:
+        It costs one more query than the single SELECT it replaced, because it collapses like
+        every other read. What matters is that the count is fixed: the regression worth catching
+        is a per-message lookup, not the constant.
+        """
+        await _seed_thread(event_cache, _thread_event_sources(30))
+        with _count_thread_statements(event_cache) as small:
             await event_cache.get_thread_events(_ROOM_ID, _THREAD_ID)
 
-        assert len(statements) == 1
+        await _seed_thread(event_cache, _thread_event_sources(300))
+        with _count_thread_statements(event_cache) as large:
+            await event_cache.get_thread_events(_ROOM_ID, _THREAD_ID)
+
+        assert len(small) == 2, "selection and payload, nothing per message"
+        assert len(large) == len(small)
 
     @pytest.mark.asyncio
     async def test_returned_rows_do_not_grow_with_thread_size(
@@ -657,6 +695,118 @@ class TestStoredPayloadSizeStaysCurrent:
         assert _original_event_ids(bounded_read) == [_THREAD_ID, "$newest"]
         stored_clear = next(row for row in bounded_read if row["event_id"] == "$newest")
         assert len(stored_clear["content"]["body"]) == 40_000
+
+
+class TestSidecarStubsArePricedAtWhatTheyHydrateTo:
+    """An offloaded body costs what it resolves to, not what its stub weighs.
+
+    A long message is uploaded to sidecar storage and replaced in the timeline by a stub of a few
+    hundred bytes. Pricing the stub is the one case a byte bound genuinely cannot see through:
+    thousands fit inside the budget and every one of them then hydrates. The writer records the
+    pre-offload size on the stub, so the bound charges that instead.
+    """
+
+    @pytest.mark.asyncio
+    async def test_a_sidecar_stub_is_charged_its_declared_resolved_size(
+        self,
+        event_cache: ConversationEventCache,
+    ) -> None:
+        """Two small stubs that each resolve to 40 kB must not both fit a 50 kB budget."""
+        await _seed_thread(
+            event_cache,
+            [
+                _message_event(_THREAD_ID, 1_000, body="root"),
+                _sidecar_stub_event("$older", 2_000, declared_bytes=40_000),
+                _sidecar_stub_event("$newest", 3_000, declared_bytes=40_000),
+            ],
+        )
+
+        bounded_read = await event_cache.get_thread_events(
+            _ROOM_ID,
+            _THREAD_ID,
+            budget=ThreadReadBudget(max_bytes=50_000),
+        )
+        assert bounded_read is not None
+
+        # Priced by stored payload alone both stubs are a few hundred bytes and both fit.
+        assert "$older" not in _original_event_ids(bounded_read), (
+            "a stub priced at its stored payload lets the budget admit bodies it cannot afford"
+        )
+        assert "$newest" in _original_event_ids(bounded_read)
+
+    def test_a_stub_is_charged_once_when_an_edit_repeats_its_pointer(self) -> None:
+        """Hydration resolves each MXC once, so double-charging would truncate a window that fits."""
+        stub = _sidecar_stub_event("$edit", 2_000, declared_bytes=40_000)
+        stub["content"]["m.new_content"] = dict(stub["content"])
+
+        assert _charged_bytes(stub) == _payload_bytes([stub]) + 40_000
+
+    def test_an_unusable_declaration_is_charged_nothing_extra(self) -> None:
+        """A missing or negative size degrades to the stored payload rather than poisoning the walk."""
+        missing = _sidecar_stub_event("$missing", 2_000, declared_bytes=None)
+        negative = _sidecar_stub_event("$negative", 2_000, declared_bytes=-40_000)
+
+        assert _charged_bytes(missing) == _payload_bytes([missing])
+        assert _charged_bytes(negative) == _payload_bytes([negative])
+
+
+class TestEditsWhoseOriginalWasNeverCached:
+    """An edit can outlive the message it replaces, and collapsing must not delete it.
+
+    ``event_edits`` holds no foreign key to ``events``, so a thread can carry an edit whose
+    original was never cached. The fold synthesizes a message from such an edit under the missing
+    original's ID, carrying the editor's own sender. Collapsing anti-joins every edit out of the
+    candidate set and re-attaches only those whose original is present to compare senders against,
+    so an orphaned edit matches neither path and the message vanishes from the read entirely.
+    """
+
+    @pytest.mark.asyncio
+    async def test_an_orphaned_edit_survives_the_collapse(
+        self,
+        event_cache: ConversationEventCache,
+    ) -> None:
+        """An edit whose original this thread never cached is still handed to the fold."""
+        author = "@author:localhost"
+        await _seed_thread(
+            event_cache,
+            [
+                _message_event(_THREAD_ID, 1_000, sender=author),
+                _message_event("$kept", 2_000, sender=author, thread_id=_THREAD_ID),
+                _message_event("$orphan-edit", 3_000, sender=author, edit_of="$never-cached"),
+            ],
+        )
+
+        rows = await event_cache.get_thread_events(_ROOM_ID, _THREAD_ID)
+        assert rows is not None
+
+        assert "$orphan-edit" in {row["event_id"] for row in rows}, (
+            "collapsing dropped an edit the fold would have synthesized a message from"
+        )
+        assert "$kept" in {row["event_id"] for row in rows}
+
+    @pytest.mark.asyncio
+    async def test_only_the_newest_orphaned_edit_per_missing_original_is_returned(
+        self,
+        event_cache: ConversationEventCache,
+    ) -> None:
+        """A missing original must not reintroduce the edit pile the collapse removes."""
+        author = "@author:localhost"
+        await _seed_thread(
+            event_cache,
+            [
+                _message_event(_THREAD_ID, 1_000, sender=author),
+                *[
+                    _message_event(f"$orphan-edit{index}", 2_000 + index, sender=author, edit_of="$never-cached")
+                    for index in range(5)
+                ],
+            ],
+        )
+
+        rows = await event_cache.get_thread_events(_ROOM_ID, _THREAD_ID)
+        assert rows is not None
+
+        returned_orphans = {row["event_id"] for row in rows if row["event_id"].startswith("$orphan-edit")}
+        assert returned_orphans == {"$orphan-edit4"}
 
 
 class TestWindowTruncationIsReported:
@@ -1216,37 +1366,10 @@ class TestDefaultsDoNotWindowRealThreads:
         assert window.truncated is False
 
 
-class TestStaleReadsAreNotPassedOffAsAuthoritative:
-    """Completeness and freshness are separate signals, and export needs both.
-
-    A stale fallback sets the degraded diagnostic but still reports is_full_history=True whenever
-    its window happened not to truncate, so a caller checking only completeness will write stale
-    rows out as authoritative history.
-    """
-
-    def test_a_stale_result_can_be_complete_and_must_still_be_refused(self) -> None:
-        """The two signals are independent, which is why export checks both."""
-        from mindroom.matrix.cache import thread_history_result  # noqa: PLC0415
-        from mindroom.matrix.thread_diagnostics import (  # noqa: PLC0415
-            THREAD_HISTORY_DEGRADED_DIAGNOSTIC,
-            THREAD_HISTORY_SOURCE_DIAGNOSTIC,
-            THREAD_HISTORY_SOURCE_STALE_CACHE,
-            is_thread_history_degraded,
-        )
-
-        stale_but_untruncated = thread_history_result(
-            [],
-            is_full_history=True,
-            diagnostics={
-                THREAD_HISTORY_SOURCE_DIAGNOSTIC: THREAD_HISTORY_SOURCE_STALE_CACHE,
-                THREAD_HISTORY_DEGRADED_DIAGNOSTIC: True,
-            },
-        )
-
-        assert stale_but_untruncated.is_full_history is True
-        assert is_thread_history_degraded(stale_but_untruncated) is True, (
-            "completeness alone cannot tell a caller the rows are current"
-        )
+# The stale-export guard is asserted where it can actually fail, through the real export in
+# tests/test_thread_export_execution.py: test_export_refuses_a_stale_cached_read_that_reports_
+# itself_complete. The version that lived here only rebuilt two diagnostic helpers and compared
+# them to what it had just constructed, so no change to export could have broken it.
 
 
 class TestForeignEditsDoNotConsumeTheBudget:
