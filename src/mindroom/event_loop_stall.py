@@ -109,14 +109,14 @@ class EventLoopStallDetector:
         self._heartbeat_handle = self._loop.call_at(scheduled_loop_time, self._beat, scheduled_loop_time)
 
     def _beat(self, scheduled_loop_time: float) -> None:
-        """Refresh heartbeat, sample callback lag, and re-arm from scheduled time."""
+        """Refresh heartbeat, sample callback lag, and re-arm from actual loop time."""
         assert self._loop is not None
         actual_loop_time = self._loop.time()
         self._last_beat = time.monotonic()
         with self._scheduler_lag_lock:
             self._scheduler_lag_samples.append(max(0.0, actual_loop_time - scheduled_loop_time))
         if not self._stop_event.is_set():
-            self._schedule_heartbeat(scheduled_loop_time + self.heartbeat_interval_seconds)
+            self._schedule_heartbeat(actual_loop_time + self.heartbeat_interval_seconds)
 
     def _report_scheduler_lag(self, now: float) -> None:
         """Emit one completed scheduler-lag window from the native watcher."""

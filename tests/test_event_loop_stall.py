@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import time
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
 from structlog.testing import capture_logs
@@ -18,6 +19,9 @@ from mindroom.event_loop_stall import (
     start_event_loop_stall_detector,
 )
 
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
 _STALL_EVENTS = {"event_loop_stall_detected", "event_loop_stall_ongoing", "event_loop_stall_ended"}
 
 
@@ -26,14 +30,21 @@ class _LoopClock:
 
     def __init__(self) -> None:
         self.now = 0.0
-        self.scheduled: list[float] = []
+        self.scheduled: list[tuple[float, Callable[[float], None], float]] = []
 
     def time(self) -> float:
         return self.now
 
-    def call_at(self, when: float, _callback: object, *_args: object) -> object:
-        self.scheduled.append(when)
+    def call_at(self, when: float, callback: Callable[[float], None], scheduled_loop_time: float) -> object:
+        self.scheduled.append((when, callback, scheduled_loop_time))
         return object()
+
+    def next_scheduled_time(self) -> float:
+        return self.scheduled[0][0]
+
+    def run_next(self) -> None:
+        _, callback, scheduled_loop_time = self.scheduled.pop(0)
+        callback(scheduled_loop_time)
 
 
 def _fake_runtime_paths(**env_overrides: str) -> RuntimePaths:
@@ -70,11 +81,12 @@ def test_scheduler_lag_summary_aggregates_delayed_heartbeats() -> None:
     loop = _LoopClock()
     detector._loop = loop
     detector._scheduler_lag_window_started_at = 0.0
+    detector._schedule_heartbeat(1.0)
 
     with capture_logs() as logs:
-        for scheduled, lag_seconds in ((1.0, 0.001), (2.0, 0.002), (3.0, 0.003), (4.0, 0.004), (5.0, 0.005)):
-            loop.now = scheduled + lag_seconds
-            detector._beat(scheduled)
+        for lag_seconds in (0.001, 0.002, 0.003, 0.004, 0.005):
+            loop.now = loop.next_scheduled_time() + lag_seconds
+            loop.run_next()
         detector._report_scheduler_lag(60.0)
 
     summaries = [entry for entry in logs if entry["event"] == "event_loop_scheduler_lag_summary"]
@@ -95,14 +107,15 @@ def test_scheduler_lag_summary_resets_completed_window_samples() -> None:
     loop = _LoopClock()
     detector._loop = loop
     detector._scheduler_lag_window_started_at = 0.0
+    detector._schedule_heartbeat(1.0)
 
     with capture_logs() as logs:
-        loop.now = 1.001
-        detector._beat(1.0)
+        loop.now = loop.next_scheduled_time() + 0.001
+        loop.run_next()
         detector._report_scheduler_lag(60.0)
         detector._report_scheduler_lag(60.1)
-        loop.now = 61.004
-        detector._beat(61.0)
+        loop.now = loop.next_scheduled_time() + 0.004
+        loop.run_next()
         detector._report_scheduler_lag(120.0)
 
     summaries = [entry for entry in logs if entry["event"] == "event_loop_scheduler_lag_summary"]
@@ -110,6 +123,22 @@ def test_scheduler_lag_summary_resets_completed_window_samples() -> None:
         (entry["sample_count"], entry["p50_ms"], entry["p95_ms"], entry["p99_ms"], entry["max_ms"])
         for entry in summaries
     ] == [(1, 1.0, 1.0, 1.0, 1.0), (1, 4.0, 4.0, 4.0, 4.0)]
+
+
+def test_scheduler_lag_heartbeat_rearms_from_actual_time_after_stall() -> None:
+    """A recovered heartbeat must schedule future 50 ms samples, not replay missed ones."""
+    detector = EventLoopStallDetector(heartbeat_interval_seconds=0.05)
+    loop = _LoopClock()
+    detector._loop = loop
+    detector._schedule_heartbeat(1.0)
+
+    loop.now = 1.31
+    loop.run_next()
+    assert loop.next_scheduled_time() == pytest.approx(1.36)
+
+    loop.now = 1.36
+    loop.run_next()
+    assert loop.next_scheduled_time() == pytest.approx(1.41)
 
 
 @pytest.mark.asyncio
