@@ -132,8 +132,9 @@ The advisory read path may use a labelled stale-cache fallback when a required r
 
 Dispatch reads reject stale fallback and propagate the refill failure.
 
-Every completed cache or source fetch emits its own `matrix_cache_thread_history_refreshed` event with `mode`, `cache_read_ms`, `homeserver_fetch_ms`, `homeserver_scan_parse_cpu_ms`, `resolution_ms`, `sidecar_hydration_ms`, `coordinator_queue_wait_ms`, `post_coordinator_read_ms`, `thread_read_total_ms`, `refill_singleflight_wait_ms`, `refill_singleflight_shared`, page and event counts, `cache_reject_reason`, `thread_read_source`, degradation state, and error state.
-Refilled reads add `cache_store_written` and `cache_store_failed`, and a rejected snapshot adds `cache_gap_marked_at`, `cache_gap_age_ms`, and `cache_gap_reason`.
+Every completed labelled cache or source read emits its own `matrix_cache_thread_history_refreshed` event with `mode`, `cache_read_ms`, `homeserver_fetch_ms`, `homeserver_scan_parse_cpu_ms`, `resolution_ms`, `sidecar_hydration_ms`, `coordinator_queue_wait_ms`, `post_coordinator_read_ms`, `thread_read_total_ms`, `refill_singleflight_wait_ms`, `refill_singleflight_shared`, page and event counts, `cache_reject_reason`, `thread_read_source`, degradation state, and error state.
+Refilled labelled reads add `cache_store_written` and `cache_store_failed`.
+A rejected snapshot instead emits `Thread cache rejected for read` with `cache_gap_marked_at`, `cache_gap_age_ms`, and `cache_gap_reason` when its gap carries that metadata.
 A dispatch read cut short by a coordinator timeout or a fetch timeout instead emits `matrix_cache_thread_read_degraded`.
 
 ## Disposable live audit
