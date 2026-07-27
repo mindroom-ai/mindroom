@@ -95,21 +95,50 @@ ORDER BY thread_events.origin_server_ts ASC, thread_events.write_seq ASC
 # Selection query. Prices every message in the thread from inline columns alone: no ``event_json``
 # is referenced, so no payload outside the window is read or parsed. Rows that are themselves edits
 # are anti-joined out, because a bound over raw thread rows selects one message and a pile of its
-# own edits. Each candidate costs its own payload plus the latest edit that accompanies it back.
+# own edits.
+#
+# A candidate costs its own payload plus every edit the payload query will ship with it, which is
+# one per sender that replaced it - not one overall. Pricing a single edit would under-count a
+# message several people replaced, and an under-counted window is one the byte bound never binds
+# on, which is the failure this bound exists to prevent. The predicate here must stay identical to
+# the payload query's, or the two phases disagree about what the window costs.
 _THREAD_WINDOW_CANDIDATES_SQL = """
 SELECT thread_events.event_id,
        events.event_bytes + COALESCE((
-           SELECT edit_events.event_bytes
+           SELECT SUM(edit_events.event_bytes)
            FROM event_edits
            JOIN events AS edit_events
                ON edit_events.principal_id = event_edits.principal_id
                AND edit_events.room_id = event_edits.room_id
                AND edit_events.event_id = event_edits.edit_event_id
+           JOIN thread_events AS edit_membership
+               ON edit_membership.principal_id = event_edits.principal_id
+               AND edit_membership.room_id = event_edits.room_id
+               AND edit_membership.event_id = event_edits.edit_event_id
+               AND edit_membership.thread_id = thread_events.thread_id
            WHERE event_edits.principal_id = thread_events.principal_id
                AND event_edits.room_id = thread_events.room_id
                AND event_edits.original_event_id = thread_events.event_id
-           ORDER BY event_edits.origin_server_ts DESC, event_edits.edit_event_id DESC
-           LIMIT 1
+               AND NOT EXISTS (
+                   SELECT 1
+                   FROM event_edits AS newer
+                   JOIN thread_events AS newer_membership
+                       ON newer_membership.principal_id = newer.principal_id
+                       AND newer_membership.room_id = newer.room_id
+                       AND newer_membership.event_id = newer.edit_event_id
+                       AND newer_membership.thread_id = thread_events.thread_id
+                   WHERE newer.principal_id = event_edits.principal_id
+                       AND newer.room_id = event_edits.room_id
+                       AND newer.original_event_id = event_edits.original_event_id
+                       AND newer.sender = event_edits.sender
+                       AND (
+                           newer.origin_server_ts > event_edits.origin_server_ts
+                           OR (
+                               newer.origin_server_ts = event_edits.origin_server_ts
+                               AND newer.edit_event_id > event_edits.edit_event_id
+                           )
+                       )
+               )
        ), 0) AS window_bytes
 FROM thread_events
 JOIN events
@@ -154,15 +183,25 @@ WHERE thread_events.principal_id = :principal_id
                     event_edits.original_event_id IN (SELECT value FROM json_each(:selected_event_ids))
                     OR event_edits.original_event_id = :thread_id
                 )
-                AND event_edits.edit_event_id = (
-                    SELECT latest.edit_event_id
-                    FROM event_edits AS latest
-                    WHERE latest.principal_id = event_edits.principal_id
-                        AND latest.room_id = event_edits.room_id
-                        AND latest.original_event_id = event_edits.original_event_id
-                        AND latest.sender = event_edits.sender
-                    ORDER BY latest.origin_server_ts DESC, latest.edit_event_id DESC
-                    LIMIT 1
+                AND NOT EXISTS (
+                    SELECT 1
+                    FROM event_edits AS newer
+                    JOIN thread_events AS newer_membership
+                        ON newer_membership.principal_id = newer.principal_id
+                        AND newer_membership.room_id = newer.room_id
+                        AND newer_membership.event_id = newer.edit_event_id
+                        AND newer_membership.thread_id = thread_events.thread_id
+                    WHERE newer.principal_id = event_edits.principal_id
+                        AND newer.room_id = event_edits.room_id
+                        AND newer.original_event_id = event_edits.original_event_id
+                        AND newer.sender = event_edits.sender
+                        AND (
+                            newer.origin_server_ts > event_edits.origin_server_ts
+                            OR (
+                                newer.origin_server_ts = event_edits.origin_server_ts
+                                AND newer.edit_event_id > event_edits.edit_event_id
+                            )
+                        )
                 )
         )
     )

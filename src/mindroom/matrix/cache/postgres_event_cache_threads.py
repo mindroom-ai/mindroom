@@ -73,25 +73,43 @@ ORDER BY thread_events.origin_server_ts ASC, thread_events.write_seq ASC
 # bound down, so it materialises every row of the thread and measured slower than no bound at all.
 _THREAD_WINDOW_CANDIDATES_SQL = """
 SELECT thread_events.event_id,
-       events.event_bytes + COALESCE(latest_edit.event_bytes, 0) AS window_bytes
+       events.event_bytes + COALESCE(latest_edits.total_bytes, 0) AS window_bytes
 FROM mindroom_event_cache_thread_events AS thread_events
 JOIN mindroom_event_cache_events AS events
     ON events.namespace = thread_events.namespace
     AND events.room_id = thread_events.room_id
     AND events.event_id = thread_events.event_id
 LEFT JOIN LATERAL (
-    SELECT edit_events.event_bytes
+    SELECT SUM(edit_events.event_bytes) AS total_bytes
     FROM mindroom_event_cache_event_edits AS event_edits
     JOIN mindroom_event_cache_events AS edit_events
         ON edit_events.namespace = event_edits.namespace
         AND edit_events.room_id = event_edits.room_id
         AND edit_events.event_id = event_edits.edit_event_id
+    JOIN mindroom_event_cache_thread_events AS edit_membership
+        ON edit_membership.namespace = event_edits.namespace
+        AND edit_membership.room_id = event_edits.room_id
+        AND edit_membership.event_id = event_edits.edit_event_id
+        AND edit_membership.thread_id = thread_events.thread_id
     WHERE event_edits.namespace = thread_events.namespace
         AND event_edits.room_id = thread_events.room_id
         AND event_edits.original_event_id = thread_events.event_id
-    ORDER BY event_edits.origin_server_ts DESC, event_edits.edit_event_id DESC
-    LIMIT 1
-) AS latest_edit ON TRUE
+        AND NOT EXISTS (
+            SELECT 1
+            FROM mindroom_event_cache_event_edits AS newer
+            JOIN mindroom_event_cache_thread_events AS newer_membership
+                ON newer_membership.namespace = newer.namespace
+                AND newer_membership.room_id = newer.room_id
+                AND newer_membership.event_id = newer.edit_event_id
+                AND newer_membership.thread_id = thread_events.thread_id
+            WHERE newer.namespace = event_edits.namespace
+                AND newer.room_id = event_edits.room_id
+                AND newer.original_event_id = event_edits.original_event_id
+                AND newer.sender = event_edits.sender
+                AND (newer.origin_server_ts, newer.edit_event_id)
+                    > (event_edits.origin_server_ts, event_edits.edit_event_id)
+        )
+) AS latest_edits ON TRUE
 WHERE thread_events.namespace = %s
     AND thread_events.room_id = %s
     AND thread_events.thread_id = %s
@@ -130,15 +148,20 @@ WHERE thread_events.namespace = %(namespace)s
                     event_edits.original_event_id = ANY(%(selected_event_ids)s)
                     OR event_edits.original_event_id = %(thread_id)s
                 )
-                AND event_edits.edit_event_id = (
-                    SELECT latest.edit_event_id
-                    FROM mindroom_event_cache_event_edits AS latest
-                    WHERE latest.namespace = event_edits.namespace
-                        AND latest.room_id = event_edits.room_id
-                        AND latest.original_event_id = event_edits.original_event_id
-                        AND latest.sender = event_edits.sender
-                    ORDER BY latest.origin_server_ts DESC, latest.edit_event_id DESC
-                    LIMIT 1
+                AND NOT EXISTS (
+                    SELECT 1
+                    FROM mindroom_event_cache_event_edits AS newer
+                    JOIN mindroom_event_cache_thread_events AS newer_membership
+                        ON newer_membership.namespace = newer.namespace
+                        AND newer_membership.room_id = newer.room_id
+                        AND newer_membership.event_id = newer.edit_event_id
+                        AND newer_membership.thread_id = thread_events.thread_id
+                    WHERE newer.namespace = event_edits.namespace
+                        AND newer.room_id = event_edits.room_id
+                        AND newer.original_event_id = event_edits.original_event_id
+                        AND newer.sender = event_edits.sender
+                        AND (newer.origin_server_ts, newer.edit_event_id)
+                            > (event_edits.origin_server_ts, event_edits.edit_event_id)
                 )
         )
     )

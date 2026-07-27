@@ -13,8 +13,9 @@ from __future__ import annotations
 
 import contextlib
 import json
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
+import nio
 import pytest
 
 from mindroom.matrix.cache import postgres_event_cache_threads, sqlite_event_cache_threads
@@ -25,6 +26,8 @@ from mindroom.matrix.cache.thread_read_window import (
     ThreadWindowCandidate,
     select_thread_window_event_ids,
 )
+from mindroom.matrix.client_visible_messages import ThreadEditCandidates
+from mindroom.matrix.event_info import EventInfo
 from tests.event_cache_test_support import replace_thread_unconditionally
 
 if TYPE_CHECKING:
@@ -802,3 +805,90 @@ class TestForeignEditCannotStarveTheAuthorsEdit:
         assert "$other-new" in returned_ids
         assert "$author-old" not in returned_ids
         assert "$other-old" not in returned_ids
+
+
+def _winning_edit_ids_by_original(rows: list[dict[str, Any]]) -> dict[str, str | None]:
+    """Return, per original in ``rows``, the edit the fold would apply to it.
+
+    Runs the real fold selection - candidates keyed per sender, winner matched against the
+    original's own sender - over whichever row set it is handed.
+    """
+    candidates = ThreadEditCandidates()
+    senders: dict[str, str] = {}
+    for row in rows:
+        if _is_edit(row):
+            candidates.record(_nio_text_event(row), event_info=EventInfo.from_event(row))
+        else:
+            senders[row["event_id"]] = row["sender"]
+    winners: dict[str, str | None] = {}
+    for original_event_id, sender in senders.items():
+        winner = candidates.winner_for(original_event_id, sender=sender)
+        winners[original_event_id] = None if winner is None else winner[0].event_id
+    return winners
+
+
+def _nio_text_event(source: dict[str, Any]) -> nio.RoomMessageText:
+    """Return the parsed nio event the fold would have been handed for one raw source."""
+    return cast("nio.RoomMessageText", nio.RoomMessageText.from_dict({**source, "room_id": _ROOM_ID}))
+
+
+class TestWindowAgreesWithTheFullReadOnEveryEdit:
+    """The invariant both edit-window defects violated, stated once.
+
+    Phase 2's ranking universe must be exactly the row set the unbounded read returns, and its
+    grouping key must be exactly the fold's grouping key. Ranking over a wider universe lets a row
+    the outer query later discards suppress the in-thread runner-up; grouping by a coarser key lets
+    a foreign edit suppress the author's own.
+    """
+
+    @pytest.mark.asyncio
+    async def test_every_windowed_message_resolves_to_the_same_edit_as_the_full_read(
+        self,
+        event_cache: ConversationEventCache,
+    ) -> None:
+        """For each message in the window, the fold picks the same edit it would unbounded."""
+        author = "@author:localhost"
+        attacker = "@attacker:localhost"
+        await _seed_thread(
+            event_cache,
+            [
+                _message_event(_THREAD_ID, 1_000, sender=author),
+                _message_event("$plain", 2_000, sender=author, thread_id=_THREAD_ID),
+                _message_event("$edited", 3_000, sender=author, thread_id=_THREAD_ID),
+                _message_event("$edited-e1", 3_100, sender=author, edit_of="$edited"),
+                _message_event("$edited-e2", 3_200, sender=author, edit_of="$edited"),
+                _message_event("$contested", 4_000, sender=author, thread_id=_THREAD_ID),
+                _message_event("$contested-own", 4_100, sender=author, edit_of="$contested"),
+            ],
+        )
+        # A newer foreign replacement, and a newer same-sender replacement that is not in the thread.
+        await event_cache.apply_thread_mutation_append(
+            _ROOM_ID,
+            _THREAD_ID,
+            _message_event("$contested-forged", 8_000, sender=attacker, edit_of="$contested"),
+            append_failed_reason="test",
+        )
+        await event_cache.store_event(
+            "$edited-orphan",
+            _ROOM_ID,
+            _message_event("$edited-orphan", 9_000, sender=author, edit_of="$edited"),
+        )
+
+        full_read = await event_cache.get_thread_events(_ROOM_ID, _THREAD_ID)
+        bounded_read = await event_cache.get_thread_events(
+            _ROOM_ID,
+            _THREAD_ID,
+            budget=ThreadReadBudget(max_messages=50),
+        )
+        assert full_read is not None
+        assert bounded_read is not None
+
+        full_winners = _winning_edit_ids_by_original(full_read)
+        bounded_winners = _winning_edit_ids_by_original(bounded_read)
+
+        assert bounded_winners
+        for original_event_id, winner in bounded_winners.items():
+            assert winner == full_winners[original_event_id], (
+                f"{original_event_id}: window resolves to {winner}, full read resolves to "
+                f"{full_winners[original_event_id]}"
+            )
