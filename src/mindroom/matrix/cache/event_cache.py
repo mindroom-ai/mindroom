@@ -6,10 +6,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 if TYPE_CHECKING:
-    from collections.abc import Collection
-
     from .agent_message_snapshot import AgentMessageSnapshot
-    from .thread_cache_state import ThreadAppendOutcome, ThreadCacheReplaceOutcome
 
 
 @dataclass(frozen=True, slots=True)
@@ -23,51 +20,13 @@ class ThreadCacheState:
     room_invalidation_reason: str | None
 
 
-@dataclass(frozen=True, slots=True)
-class ThreadRevision:
-    """Durable revision identity of one non-empty thread's raw rows."""
-
-    event_count: int
-    max_write_seq: int
-    max_thread_write_seq: int
-    max_origin_server_ts: int
-
-
 class EventCacheBackendUnavailableError(RuntimeError):
     """Raised when cache storage is temporarily unreachable but not logically corrupt."""
 
 
 @runtime_checkable
 class ConversationEventCache(Protocol):
-    """Principal-bound durable cache for joined-room conversation timelines.
-
-    Every returned row belongs to ``principal_id`` and ``room_id``.
-    A runtime-wide storage service must expose one bound view per authenticated Matrix
-    account instead of sharing this interface directly between bots.
-
-    Sync ingestion admits only joined-room ``timeline.events`` and deliberately
-    excludes complete room state, invite and leave timelines, ephemeral typing
-    and receipts, presence, account data, to-device events, and device-list
-    changes.
-
-    Point lookup is broader than visible conversation history, so any admitted
-    timeline event with an event ID can be retained while thread projection
-    renders only supported ``m.room.message`` content.
-
-    Redaction envelopes are not stored as point events, while their durable
-    effect removes or tombstones the target and repairs dependent indexes.
-
-    Membership loss fences access and purges only the departed principal's
-    retained joined-room history.
-    """
-
-    @property
-    def principal_id(self) -> str:
-        """Return the Matrix user ID that owns every row visible through this view."""
-
-    @property
-    def cache_generation(self) -> str | None:
-        """Return the durable generation used to certify restart checkpoints when available."""
+    """Storage-agnostic cache API for Matrix event and thread lookups."""
 
     @property
     def durable_writes_available(self) -> bool:
@@ -80,35 +39,17 @@ class ConversationEventCache(Protocol):
     async def initialize(self) -> None:
         """Initialize any backing storage."""
 
-    def for_principal(self, principal_id: str) -> ConversationEventCache:
-        """Return a cache view that can access only ``principal_id`` rows."""
-
     async def close(self) -> None:
         """Close any backing storage."""
 
     async def get_thread_events(self, room_id: str, thread_id: str) -> list[dict[str, Any]] | None:
         """Return cached events for one thread sorted by timestamp."""
 
-    async def get_thread_events_written_between(
-        self,
-        room_id: str,
-        thread_id: str,
-        *,
-        after_write_seq: int,
-        through_write_seq: int,
-        after_thread_write_seq: int,
-        through_thread_write_seq: int,
-    ) -> list[dict[str, Any]]:
-        """Return thread events changed in bounded payload or thread-index intervals."""
-
     async def get_recent_room_thread_ids(self, room_id: str, *, limit: int) -> list[str]:
         """Return locally known thread IDs for one room ordered by newest cached activity."""
 
     async def get_thread_cache_state(self, room_id: str, thread_id: str) -> ThreadCacheState | None:
         """Return durable freshness metadata for one cached thread."""
-
-    async def get_thread_revision(self, room_id: str, thread_id: str) -> ThreadRevision | None:
-        """Return the durable revision identity of one non-empty cached thread."""
 
     async def get_event(self, room_id: str, event_id: str) -> dict[str, Any] | None:
         """Return one cached event payload by event ID."""
@@ -142,46 +83,17 @@ class ConversationEventCache(Protocol):
     ) -> AgentMessageSnapshot | None:
         """Return the latest visible cached message from one sender in the given scope."""
 
-    async def get_mxc_text(self, room_id: str, event_id: str, mxc_url: str) -> str | None:
-        """Return MXC plaintext only while a visible owning event still references it."""
+    async def get_mxc_text(self, room_id: str, mxc_url: str) -> str | None:
+        """Return one durably cached MXC text payload when present."""
 
-    async def get_mxc_texts(
-        self,
-        room_id: str,
-        references: Collection[tuple[str, str]],
-        *,
-        expected_membership_epoch: int,
-    ) -> dict[tuple[str, str], str]:
-        """Return scoped MXC plaintext for many surviving event references in one read."""
+    async def store_event(self, event_id: str, room_id: str, event_data: dict[str, Any]) -> None:
+        """Insert or replace one individually cached Matrix event."""
 
-    async def store_event(
-        self,
-        event_id: str,
-        room_id: str,
-        event_data: dict[str, Any],
-        *,
-        expected_membership_epoch: int | None = None,
-    ) -> None:
-        """Insert or replace one event without replacing clear payloads with opaque ciphertext."""
+    async def store_events_batch(self, events: list[tuple[str, str, dict[str, Any]]]) -> None:
+        """Insert or replace a batch of individually cached Matrix events."""
 
-    async def store_events_batch(
-        self,
-        events: list[tuple[str, str, dict[str, Any]]],
-        *,
-        expected_membership_epoch: int | None = None,
-    ) -> None:
-        """Insert or replace events without replacing clear payloads with opaque ciphertext."""
-
-    async def store_mxc_text(
-        self,
-        room_id: str,
-        event_id: str,
-        mxc_url: str,
-        text: str,
-        *,
-        expected_membership_epoch: int | None = None,
-    ) -> bool:
-        """Cache MXC plaintext only for a visible, non-tombstoned owning event."""
+    async def store_mxc_text(self, room_id: str, mxc_url: str, text: str) -> None:
+        """Insert or replace one durably cached MXC text payload."""
 
     async def replace_thread_if_not_newer(
         self,
@@ -189,11 +101,10 @@ class ConversationEventCache(Protocol):
         thread_id: str,
         events: list[dict[str, Any]],
         *,
-        expected_membership_epoch: int,
         fetch_started_at: float,
         validated_at: float | None = None,
-    ) -> ThreadCacheReplaceOutcome:
-        """Replace a fetched snapshot and classify any guarded non-installation."""
+    ) -> bool:
+        """Replace one cached thread snapshot only when nothing newer touched it after fetch start."""
 
     async def invalidate_thread(self, room_id: str, thread_id: str) -> None:
         """Delete cached events for one thread."""
@@ -207,15 +118,15 @@ class ConversationEventCache(Protocol):
     async def mark_room_threads_stale(self, room_id: str, *, reason: str) -> None:
         """Persist a durable invalidate-and-refetch marker for every cached thread in one room."""
 
-    async def apply_thread_mutation_append(
+    async def append_event(self, room_id: str, thread_id: str, event: dict[str, Any]) -> bool:
+        """Append one event when the thread already has cached data."""
+
+    async def revalidate_thread_after_incremental_update(
         self,
         room_id: str,
         thread_id: str,
-        event: dict[str, Any],
-        *,
-        append_failed_reason: str,
-    ) -> ThreadAppendOutcome:
-        """Append one threaded mutation and settle this thread's trust in one transaction."""
+    ) -> bool:
+        """Refresh thread validation after a safe incremental update."""
 
     async def get_thread_id_for_event(self, room_id: str, event_id: str) -> str | None:
         """Return the cached thread ID for one event."""
@@ -226,29 +137,6 @@ class ConversationEventCache(Protocol):
         event_id: str,
     ) -> bool:
         """Delete one cached event after a redaction."""
-
-    async def purge_room(self, room_id: str) -> None:
-        """Delete only this principal's cached ownership for one left or banned room."""
-
-    def mark_room_departed(self, room_id: str) -> int:
-        """Synchronously reject access, queue durable cleanup, and return the new room-fence epoch."""
-
-    def room_departure_epoch(self, room_id: str) -> int:
-        """Return the current room-fence epoch for ordering queued membership work."""
-
-    async def room_membership_epoch(self, room_id: str) -> int | None:
-        """Certify and return the durable room-membership transition epoch."""
-
-    async def mark_room_joined(
-        self,
-        room_id: str,
-        *,
-        expected_departure_epoch: int,
-    ) -> None:
-        """Allow cache access after an authoritative rejoin finishes any pending purge."""
-
-    async def purge_principal(self) -> None:
-        """Delete every cached row owned by this principal."""
 
     def disable(self, reason: str) -> None:
         """Disable the advisory cache for the rest of the runtime."""
@@ -261,28 +149,3 @@ class ConversationEventCache(Protocol):
 
     async def flush_pending_durable_writes(self, room_id: str) -> None:
         """Persist runtime-only writes for one room before certifying a sync token."""
-
-
-@runtime_checkable
-class SharedConversationEventCache(Protocol):
-    """Runtime-owned cache storage that creates isolated principal views."""
-
-    @property
-    def durable_writes_available(self) -> bool:
-        """Return whether cache writes can durably persist data."""
-
-    @property
-    def is_initialized(self) -> bool:
-        """Return whether the backing storage is currently initialized."""
-
-    async def initialize(self) -> None:
-        """Initialize any backing storage."""
-
-    async def close(self) -> None:
-        """Close any backing storage."""
-
-    def disable(self, reason: str) -> None:
-        """Disable the advisory cache for the rest of the runtime."""
-
-    def for_principal(self, principal_id: str) -> ConversationEventCache:
-        """Return a cache view that can access only ``principal_id`` rows."""

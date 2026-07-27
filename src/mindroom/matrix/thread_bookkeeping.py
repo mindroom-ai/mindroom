@@ -15,8 +15,7 @@ Who may mutate thread state, and how:
    (``ThreadOutboundWritePolicy``, ``ThreadLiveWritePolicy``, ``ThreadSyncWritePolicy``),
    which all resolve impact through this module's ``ThreadMutationResolver``,
    apply it through ``mindroom.matrix.cache.thread_write_cache_ops.ThreadMutationCacheOps``,
-   and order every write through the room or certified per-thread
-   ``EventCacheWriteCoordinator`` barrier.
+   and order every write through the per-room ``EventCacheWriteCoordinator`` barrier.
    The only other thread-cache writer is the read-refill in
    ``mindroom.matrix.client_thread_history``: after an authoritative homeserver fetch it stores the
    snapshot through the guarded ``replace_thread_if_not_newer``, and it invalidates entries it proves
@@ -35,13 +34,9 @@ Who may mutate thread state, and how:
    ROOM_LEVEL means no thread-cache change,
    and UNKNOWN means the writer must invalidate the whole room's cached threads
    (or, pre-send in tools, refuse the operation) because membership could not be proven.
-   A redaction with UNKNOWN impact invalidates the room only when it actually removed a cached target;
-   an absent target is a thread-state no-op.
 
-5. Redactions are thread-affecting only when target metadata identifies a plaintext or encrypted
-   room message.
-   Known reactions and non-message targets are ROOM_LEVEL because removing them cannot change a
-   cached thread's visible messages.
+5. Redactions of reactions are always ROOM_LEVEL: removing an annotation cannot change any cached
+   thread's visible messages.
 
 6. Redactions whose target metadata is gone fall back to the cache's own event->thread index before
    failing closed: the homeserver strips a redacted event's content, so old redaction targets are
@@ -55,14 +50,13 @@ from dataclasses import dataclass, field
 from enum import Enum, auto
 from typing import TYPE_CHECKING, Literal, cast
 
-from mindroom.matrix.event_info import EventInfo, event_type_supports_thread_relations
+from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.thread_membership import (
     ThreadMembershipAccess,
     ThreadMembershipLookupError,
     ThreadResolution,
     ThreadResolutionState,
     ThreadRootProof,
-    conversation_relation_thread_membership_access,
     page_event_info_counts_as_thread_child_proof,
     resolve_event_thread_membership,
     resolve_related_event_thread_membership,
@@ -87,9 +81,16 @@ if TYPE_CHECKING:
 MutationWriteContext = Literal["outbound", "live", "sync"]
 
 
+def is_thread_affecting_relation(event_info: EventInfo) -> bool:
+    """Return whether one room message relation can affect thread-scoped cache state."""
+    return (
+        event_info.is_thread or event_info.is_edit or event_info.is_reply or event_info.relation_type == "m.reference"
+    )
+
+
 def _redaction_can_affect_thread_cache(event_info: EventInfo) -> bool:
     """Return whether redacting one related event can invalidate cached thread messages."""
-    return event_type_supports_thread_relations(event_info.event_type) and not event_info.is_reaction
+    return not event_info.is_reaction
 
 
 class MutationThreadImpactState(Enum):
@@ -191,7 +192,7 @@ async def resolve_redaction_thread_impact_for_client(
             event_id,
             strict=True,
         )
-    if target_event_info is not None and not _redaction_can_affect_thread_cache(target_event_info):
+    if target_event_info is not None and target_event_info.is_reaction:
         return MutationThreadImpact.room_level()
     resolution = await resolve_related_event_thread_membership(
         room_id,
@@ -239,14 +240,9 @@ class ThreadMutationResolver:
                 continue
             page_event_infos[event_id] = EventInfo.from_event(event_source)
             ordered_event_ids.append(event_id)
-        relation_event_infos = {
-            event_id: event_info
-            for event_id, event_info in page_event_infos.items()
-            if event_type_supports_thread_relations(event_info.event_type)
-        }
         page_resolved_thread_ids = await resolve_thread_ids_for_event_infos(
             room_id,
-            event_infos=relation_event_infos,
+            event_infos=page_event_infos,
             ordered_event_ids=ordered_event_ids,
         )
         return MutationResolutionContext(
@@ -486,12 +482,10 @@ class ThreadMutationResolver:
                 resolution_context=resolution_context,
             )
 
-        return conversation_relation_thread_membership_access(
-            ThreadMembershipAccess(
-                lookup_thread_id=lookup_thread_id,
-                fetch_event_info=fetch_event_info,
-                prove_thread_root=prove_thread_root,
-            ),
+        return ThreadMembershipAccess(
+            lookup_thread_id=lookup_thread_id,
+            fetch_event_info=fetch_event_info,
+            prove_thread_root=prove_thread_root,
         )
 
 
@@ -502,11 +496,9 @@ def _event_source_counts_as_thread_child_proof(
 ) -> bool:
     """Return whether one cached event proves a root has real thread children."""
     event_id = event_source.get("event_id")
-    if not isinstance(event_id, str):
+    if event_id == thread_root_id:
         return False
     event_info = EventInfo.from_event(event_source)
-    return page_event_info_counts_as_thread_child_proof(
-        thread_root_id,
-        event_id=event_id,
-        event_info=event_info,
-    )
+    if event_info.is_edit and event_info.original_event_id == thread_root_id:
+        return False
+    return isinstance(event_info.thread_id, str) and event_info.thread_id == thread_root_id

@@ -1,8 +1,8 @@
-"""Own Matrix sync-checkpoint persistence and event-cache trust."""
+"""Adapt current bot lifecycle calls to pre-campaign sync-cache trust."""
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from mindroom.matrix.sync_certification import (
@@ -10,11 +10,11 @@ from mindroom.matrix.sync_certification import (
     SyncCertificationDecision,
     SyncCheckpoint,
     SyncTrustState,
-    certify_sync_response,
     handle_unknown_pos,
+    start_from_loaded_token,
     sync_cache_write_diagnostics,
 )
-from mindroom.matrix.sync_tokens import clear_sync_token, load_sync_checkpoint, save_sync_token
+from mindroom.matrix.sync_tokens import clear_sync_token, load_sync_token_record, save_sync_token
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -26,7 +26,7 @@ if TYPE_CHECKING:
 
 @dataclass
 class SyncCacheTrust:
-    """Own one bot's cache-certified sync continuity."""
+    """Expose current lifecycle methods with pre-campaign checkpoint semantics."""
 
     storage_path: Path
     agent_name: str
@@ -34,62 +34,37 @@ class SyncCacheTrust:
     logger: structlog.stdlib.BoundLogger
     state: SyncTrustState = SyncTrustState.COLD
     checkpoint: SyncCheckpoint | None = None
-    _awaiting_initial_window: bool = field(default=False, init=False, repr=False)
 
-    async def prepare_startup(self) -> str | None:
-        """Initialize cache trust, then restore a valid checkpoint or start cold."""
-        cache = self.runtime.event_cache
+    def restore_saved_token(self) -> str | None:
+        """Restore the pre-campaign token record without initializing storage."""
         try:
-            await cache.initialize()
-        except Exception as exc:
-            self.logger.warning("matrix_principal_event_cache_init_failed", error=str(exc))
-
-        loaded = self._load_valid_checkpoint()
-        if loaded is None and self.invalidate_for_cache_scope_cleanup():
-            try:
-                await cache.purge_principal()
-            except Exception as exc:
-                cache.disable("untrusted_principal_cache_cleanup_failed")
-                self.logger.warning("matrix_untrusted_principal_cache_disabled", error=str(exc))
-
-        self.state = SyncTrustState.PENDING if loaded is not None else SyncTrustState.COLD
-        self.checkpoint = None
-        self._awaiting_initial_window = loaded is None
-        return loaded.token if loaded is not None else None
-
-    def _load_valid_checkpoint(self) -> SyncCheckpoint | None:
-        """Load a checkpoint only when the current cache generation proves it."""
-        try:
-            checkpoint = load_sync_checkpoint(self.storage_path, self.agent_name)
+            loaded = load_sync_token_record(self.storage_path, self.agent_name)
         except OSError as exc:
             self.logger.warning("matrix_sync_token_load_failed", error=str(exc))
-            return None
-        if checkpoint is None:
-            return None
-
-        cache_generation = self.runtime.event_cache.cache_generation
-        if cache_generation is None:
-            self.logger.warning("matrix_sync_token_cache_generation_unavailable")
-            return None
-        if checkpoint.cache_generation != cache_generation:
-            self.logger.warning("matrix_sync_token_cache_generation_mismatch")
-            return None
-        self.logger.info("matrix_sync_token_restored", certified=True)
-        return checkpoint
+            loaded = None
+        startup = start_from_loaded_token(
+            loaded.checkpoint
+            if loaded is not None and loaded.checkpoint is not None
+            else loaded.token
+            if loaded
+            else None,
+        )
+        self.state = startup.state
+        self.checkpoint = None
+        if loaded is not None:
+            self.logger.info("matrix_sync_token_restored", certified=loaded.certified)
+        if startup.legacy_token:
+            self.logger.warning("matrix_sync_token_uncertified_legacy")
+        return startup.sync_token
 
     def save(self, checkpoint: SyncCheckpoint) -> None:
-        """Persist one checkpoint against the current durable cache generation."""
-        cache_generation = self.runtime.event_cache.cache_generation
-        if cache_generation is None:
-            self.logger.warning("matrix_sync_checkpoint_skipped_without_cache_generation")
-            self._clear_saved()
-            return
+        """Persist one pre-campaign cache-certified checkpoint."""
         try:
-            save_sync_token(self.storage_path, self.agent_name, checkpoint.token, cache_generation=cache_generation)
+            save_sync_token(self.storage_path, self.agent_name, checkpoint.token)
         except (OSError, ValueError) as exc:
             self.logger.warning("matrix_sync_token_save_failed", error=str(exc))
 
-    def _clear_saved(self) -> bool:
+    def clear_saved(self) -> bool:
         """Clear the durable checkpoint, returning whether invalidation succeeded."""
         try:
             clear_sync_token(self.storage_path, self.agent_name)
@@ -99,14 +74,13 @@ class SyncCacheTrust:
         return True
 
     def invalidate_for_cache_scope_cleanup(self) -> bool:
-        """Invalidate continuity before principal- or room-owned rows are removed."""
+        """Invalidate continuity without campaign-era principal cache cleanup."""
         self.state = SyncTrustState.UNCERTAIN
         self.checkpoint = None
-        if self._clear_saved():
+        if self.clear_saved():
             return True
         self.runtime.mark_callback_failed()
-        self.runtime.event_cache.disable("sync_checkpoint_clear_failed")
-        self.logger.warning("matrix_cache_scope_cleanup_deferred_until_checkpoint_replay")
+        self.logger.warning("matrix_sync_checkpoint_clear_failed")
         return False
 
     def mark_callback_failed(self) -> None:
@@ -114,41 +88,13 @@ class SyncCacheTrust:
         self.runtime.mark_callback_failed()
         self.invalidate_for_cache_scope_cleanup()
 
-    def certify_response(
-        self,
-        *,
-        next_batch: str | None,
-        cache_result: SyncCacheWriteResult,
-        first_sync: bool,
-    ) -> SyncCertificationDecision:
-        """Apply the certification decision for one completed sync response."""
-        decision = certify_sync_response(
-            self.state,
-            next_batch=next_batch,
-            cache_result=cache_result,
-            first_sync=first_sync,
-        )
-        limited_timeline = bool(cache_result.limited_room_ids)
-        if limited_timeline and not self._awaiting_initial_window:
-            decision = replace(decision, reset_client_token=True)
-        self._apply_decision(decision, cache_result=cache_result)
-        # Re-arm from applied trust, not from the decision: _apply_decision rejects
-        # certification while a callback failure is outstanding, and a rejected
-        # certification must not license another since-less replay.
-        if decision.reset_client_token:
-            self._awaiting_initial_window = True
-        elif self.state is SyncTrustState.CERTIFIED:
-            self._awaiting_initial_window = False
-        return decision
-
     def reject_unknown_pos(self) -> SyncCertificationDecision:
         """Invalidate a checkpoint rejected by the homeserver."""
         decision = handle_unknown_pos()
-        self._awaiting_initial_window = True
-        self._apply_decision(decision)
+        self.apply_decision(decision)
         return decision
 
-    def _apply_decision(
+    def apply_decision(
         self,
         decision: SyncCertificationDecision,
         *,
@@ -159,7 +105,7 @@ class SyncCacheTrust:
         if callback_failure_count:
             self.state = SyncTrustState.UNCERTAIN
             self.checkpoint = None
-            self._clear_saved()
+            self.clear_saved()
             self.logger.warning(
                 "matrix_sync_certification_uncertain",
                 reason="callback_failed",
@@ -170,35 +116,9 @@ class SyncCacheTrust:
         self.state = decision.state
         self.checkpoint = decision.checkpoint_to_save
         if decision.clear_saved_token:
-            self._clear_saved()
+            self.clear_saved()
         if decision.checkpoint_to_save is not None:
             self.save(decision.checkpoint_to_save)
         if decision.reason is not None:
             diagnostics = sync_cache_write_diagnostics(cache_result) if cache_result is not None else {}
             self.logger.warning("matrix_sync_certification_uncertain", reason=decision.reason, **diagnostics)
-
-    def persist_current(self) -> None:
-        """Persist the current certified checkpoint."""
-        assert self.state is SyncTrustState.CERTIFIED
-        assert self.checkpoint is not None
-        self.save(self.checkpoint)
-
-    def discard(self) -> None:
-        """Discard runtime and durable checkpoint trust."""
-        self.state = SyncTrustState.UNCERTAIN
-        self.checkpoint = None
-        self._clear_saved()
-
-    def retry_token(self) -> str | None:
-        """Select a generation-safe token for replaying a failed sync response."""
-        if self.checkpoint is not None:
-            return self.checkpoint.token
-        try:
-            saved = load_sync_checkpoint(self.storage_path, self.agent_name)
-        except OSError as exc:
-            self.logger.warning("matrix_sync_token_load_failed", error=str(exc))
-            return None
-        cache_generation = self.runtime.event_cache.cache_generation
-        if saved is None or cache_generation is None or saved.cache_generation != cache_generation:
-            return None
-        return saved.token

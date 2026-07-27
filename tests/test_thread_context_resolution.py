@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, MagicMock, call, patch
 import nio
 import pytest
 
+import mindroom.matrix.message_content as message_content_module
 from mindroom.matrix.cache import ThreadHistoryResult
 from mindroom.matrix.cache.sqlite_event_cache import SqliteEventCache
 from mindroom.matrix.cache.thread_reads import ThreadReadMode
@@ -502,7 +503,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         mock_lookup.assert_awaited_once_with(room.room_id, "$plain_reply_1:localhost")
         mock_fetch.assert_awaited_once()
         assert mock_fetch.await_args.args == (room.room_id, "$thread_root:localhost")
-        bot.client.room_get_event.assert_awaited_once_with(room.room_id, "$plain_reply_1:localhost")
+        bot.client.room_get_event.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_extract_context_edit_of_thread_root_uses_cached_root_mapping(self, bot: AgentBot) -> None:
@@ -579,7 +580,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             assert context.is_thread is True
             assert context.thread_id == "$thread_root:localhost"
             assert context.thread_history == expected_history
-            bot.client.room_get_event.assert_awaited_once_with(room.room_id, "$thread_root:localhost")
+            bot.client.room_get_event.assert_not_awaited()
             mock_fetch.assert_awaited_once()
             assert mock_fetch.await_args.args == (room.room_id, "$thread_root:localhost")
         finally:
@@ -1023,6 +1024,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         bot: AgentBot,
     ) -> None:
         """Dispatch policy context should inherit an existing explicit thread across plain replies."""
+        message_content_module._mxc_cache.clear()
         room = _matrix_room(name="Test Room")
 
         event = nio.RoomMessageText.from_dict(
@@ -1052,22 +1054,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
                 ).encode("utf-8"),
             ),
         )
-        bot.client.room_get_event = AsyncMock(
-            return_value=nio.RoomGetEventResponse.from_dict(
-                {
-                    "content": {
-                        "body": "Plain reply",
-                        "msgtype": "m.text",
-                        "m.relates_to": {"m.in_reply_to": {"event_id": "$thread_msg:localhost"}},
-                    },
-                    "event_id": "$plain1:localhost",
-                    "sender": "@user:localhost",
-                    "origin_server_ts": 1234567895,
-                    "room_id": "!test:localhost",
-                    "type": "m.room.message",
-                },
-            ),
-        )
+        bot.client.room_get_event = AsyncMock()
 
         dispatch_history = ThreadHistoryResult(
             [
@@ -1106,7 +1093,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             ]
             assert preview_context.requires_model_history_refresh is False
             bot.client.download.assert_not_awaited()
-            bot.client.room_get_event.assert_awaited_once_with(room.room_id, "$plain1:localhost")
+            bot.client.room_get_event.assert_not_awaited()
             mock_lookup.assert_awaited_once_with(room.room_id, "$plain1:localhost")
             mock_history.assert_awaited_once()
             assert mock_history.await_args.args == (room.room_id, "$thread_root:localhost")
@@ -1170,7 +1157,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         self,
         bot: AgentBot,
     ) -> None:
-        """Strict root proof should demote an indeterminate plain-reply candidate to room-level dispatch."""
+        """Degraded root proof should demote an indeterminate plain-reply candidate to room-level dispatch."""
         room = _matrix_room(name="Test Room")
         event = nio.RoomMessageText.from_dict(
             {
@@ -1205,11 +1192,6 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
                 THREAD_HISTORY_ERROR_DIAGNOSTIC: "cache_coordinator_timeout",
             },
         )
-        strict_history = ThreadHistoryResult(
-            [],
-            is_full_history=True,
-            diagnostics={THREAD_HISTORY_SOURCE_DIAGNOSTIC: THREAD_HISTORY_SOURCE_CACHE},
-        )
 
         with (
             patch.object(
@@ -1227,11 +1209,6 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
                 "get_dispatch_thread_history",
                 AsyncMock(return_value=degraded_history),
             ) as mock_read,
-            patch.object(
-                bot._conversation_cache,
-                "get_strict_thread_history",
-                AsyncMock(return_value=strict_history),
-            ) as mock_strict_read,
         ):
             context_result = await bot._conversation_resolver.extract_dispatch_context(room, event)
             context = context_result.context
@@ -1244,31 +1221,15 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         assert context.thread_id is None
         assert context.thread_history == []
         assert context_result.thread_context.thread_history == []
-        assert context_result.thread_context.replay_guard_history is strict_history
-        assert context_result.thread_context.replay_guard_degraded is False
+        assert context_result.thread_context.replay_guard_history is degraded_history
         assert context.requires_model_history_refresh is False
         assert context.planning_thread_history == ()
-        mock_lookup.assert_has_awaits(
-            [
-                call(room.room_id, "$thread_root:localhost"),
-                call(room.room_id, "$thread_root:localhost"),
-            ],
-        )
-        mock_get_event.assert_has_awaits(
-            [
-                call(room.room_id, "$thread_root:localhost"),
-                call(room.room_id, "$thread_root:localhost"),
-            ],
-        )
+        mock_lookup.assert_awaited_once_with(room.room_id, "$thread_root:localhost")
+        mock_get_event.assert_awaited_once_with(room.room_id, "$thread_root:localhost")
         mock_read.assert_awaited_once_with(
             room.room_id,
             "$thread_root:localhost",
             caller_label="dispatch_context",
-        )
-        mock_strict_read.assert_awaited_once_with(
-            room.room_id,
-            "$thread_root:localhost",
-            caller_label="dispatch_context_strict_candidate_fallback",
         )
 
     @pytest.mark.asyncio
@@ -1545,11 +1506,11 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         assert context.requires_model_history_refresh is False
 
     @pytest.mark.asyncio
-    async def test_degraded_dispatch_candidate_calls_strict_proof_before_planning(
+    async def test_degraded_dispatch_candidate_does_not_call_strict_proof_before_planning(
         self,
         bot: AgentBot,
     ) -> None:
-        """Degraded dispatch candidates must receive strict proof before room-level planning."""
+        """Degraded dispatch candidates must be demoted before policy without strict proof."""
         room = _matrix_room(name="Test Room")
         event = nio.RoomMessageText.from_dict(
             {
@@ -1584,11 +1545,6 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
                 "type": "m.room.message",
             },
         )
-        strict_history = ThreadHistoryResult(
-            [],
-            is_full_history=True,
-            diagnostics={THREAD_HISTORY_SOURCE_DIAGNOSTIC: THREAD_HISTORY_SOURCE_CACHE},
-        )
         observed_targets = []
 
         async def fake_plan(_room: object, _event: object, dispatch: object, **_kwargs: object) -> _DispatchPlan:
@@ -1610,17 +1566,13 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             patch.object(
                 bot._conversation_cache,
                 "get_strict_thread_history",
-                AsyncMock(return_value=strict_history),
+                AsyncMock(side_effect=AssertionError("dispatch finalization must remain bounded")),
             ) as mock_strict_history,
             patch("mindroom.turn_policy.TurnPolicy.plan_turn", new=AsyncMock(side_effect=fake_plan)) as mock_plan,
         ):
             await bot._turn_controller._dispatch_text_message(room, event, "@user:localhost")
 
-        mock_strict_history.assert_awaited_once_with(
-            room.room_id,
-            "$thread_root:localhost",
-            caller_label="dispatch_context_strict_candidate_fallback",
-        )
+        mock_strict_history.assert_not_awaited()
         mock_plan.assert_awaited_once()
         assert observed_targets
         assert observed_targets[0].source_thread_id is None

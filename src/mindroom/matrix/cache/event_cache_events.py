@@ -6,8 +6,7 @@ import json
 from dataclasses import dataclass
 from typing import Any
 
-from mindroom.matrix.event_info import EventInfo, event_type_supports_thread_relations
-from mindroom.matrix.sidecar_content import sidecar_mxc_url
+from mindroom.matrix.event_info import EventInfo
 
 _EDITABLE_EVENT_TYPES = frozenset({"m.room.message", "io.mindroom.tool_approval"})
 
@@ -84,26 +83,6 @@ def serialize_cacheable_events(cacheable_events: list[_CachedEventValue]) -> lis
     return [serialize_cached_event(event_id, event) for event_id, event in cacheable_events]
 
 
-def event_mxc_urls(event: dict[str, Any]) -> frozenset[str]:
-    """Return room-scoped sidecar MXCs visibly referenced by one event.
-
-    Both the top-level content and an edit's ``m.new_content`` are inspected so
-    plaintext ownership follows every supported long-text representation.
-    """
-    content = event.get("content")
-    if not isinstance(content, dict):
-        return frozenset()
-    candidate_contents = [content]
-    new_content = content.get("m.new_content")
-    if isinstance(new_content, dict):
-        candidate_contents.append(new_content)
-    return frozenset(
-        mxc_url
-        for candidate_content in candidate_contents
-        if (mxc_url := sidecar_mxc_url(candidate_content)) is not None
-    )
-
-
 def event_redaction_candidate_ids(event_id: str, event: dict[str, Any]) -> frozenset[str]:
     """Return IDs whose tombstones would prevent caching one event."""
     candidate_ids = {event_id}
@@ -125,12 +104,13 @@ def filter_redacted_events(
     *,
     redacted_event_ids: frozenset[str],
 ) -> list[_CachedEventValue]:
-    """Drop redaction envelopes, tombstoned events, and edits of tombstoned originals."""
+    """Drop events that are tombstoned or edit a tombstoned original."""
+    if not redacted_event_ids:
+        return events
     return [
         (event_id, event)
         for event_id, event in events
-        if event.get("type") != "m.room.redaction"
-        and event_redaction_candidate_ids(event_id, event).isdisjoint(redacted_event_ids)
+        if event_redaction_candidate_ids(event_id, event).isdisjoint(redacted_event_ids)
     ]
 
 
@@ -147,7 +127,7 @@ def cache_rows_were_deleted(*row_counts: int) -> bool:
 def _event_thread_row(room_id: str, event: dict[str, Any]) -> _EventThreadRow | None:
     """Return an event-to-thread row when thread membership is explicit."""
     event_id = event.get("event_id")
-    if not isinstance(event_id, str) or not event_id or not event_type_supports_thread_relations(event.get("type")):
+    if not isinstance(event_id, str) or not event_id:
         return None
     event_info = EventInfo.from_event(event)
     thread_id = event_info.thread_id
@@ -201,11 +181,7 @@ def event_thread_rows(
 ) -> list[_EventThreadRow]:
     """Return root-complete event-to-thread rows derived from serialized events."""
     rows = (
-        [
-            _EventThreadRow(room_id=room_id, event_id=event.event_id, thread_id=thread_id)
-            for event in events
-            if event_type_supports_thread_relations(event.event.get("type"))
-        ]
+        [_EventThreadRow(room_id=room_id, event_id=event.event_id, thread_id=thread_id) for event in events]
         if thread_id is not None
         else [row for event in events if (row := _event_thread_row(room_id, event.event)) is not None]
     )

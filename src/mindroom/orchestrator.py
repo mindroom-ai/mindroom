@@ -256,7 +256,6 @@ class _MultiAgentOrchestrator:
     _runtime_shutdown_event: asyncio.Event | None = field(default=None, init=False, repr=False)
     _external_trigger_runtime: ExternalTriggerRuntimeCoordinator = field(init=False, repr=False)
     _approval_transport: ApprovalMatrixTransport = field(init=False, repr=False)
-    _router_principal_id: str | None = field(default=None, init=False, repr=False)
     _startup_maintenance: StartupMaintenanceController = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
@@ -378,19 +377,16 @@ class _MultiAgentOrchestrator:
     def _bind_runtime_support_services(self, bot: AgentBot | TeamBot) -> None:
         """Bind the current runtime support services to one managed bot."""
         bot.admission_gate = self._response_admission_gate
-        bot.event_cache = self._runtime_support.event_cache.for_principal(bot.matrix_id.full_id)
+        bot.event_cache = self._runtime_support.event_cache
         bot.event_cache_write_coordinator = self._runtime_support.event_cache_write_coordinator
         bot.startup_thread_prewarm_registry = self._runtime_support.startup_thread_prewarm_registry
 
     def _approval_event_cache(self) -> ConversationEventCache:
-        """Return the router principal's isolated cache before or after bot construction."""
+        """Return the runtime-owned shared cache."""
         router_bot = self.agent_bots.get(ROUTER_AGENT_NAME)
         if router_bot is not None:
             return router_bot.event_cache
-        if self._router_principal_id is None:
-            msg = "Router Matrix principal is unavailable for approval cache binding"
-            raise RuntimeError(msg)
-        return self._runtime_support.event_cache.for_principal(self._router_principal_id)
+        return self._runtime_support.event_cache
 
     def _rebind_runtime_support_services(self) -> None:
         """Rebind the current runtime support services to every managed bot."""
@@ -770,8 +766,6 @@ class _MultiAgentOrchestrator:
         bot.hook_registry = self.hook_registry
         self._bind_runtime_support_services(bot)
         self.agent_bots[entity_name] = bot
-        if entity_name == ROUTER_AGENT_NAME:
-            self._router_principal_id = agent_user.user_id
         return bot
 
     def _build_hook_registry(self, config: Config) -> HookRegistry:
@@ -957,7 +951,6 @@ class _MultiAgentOrchestrator:
         self._preflight_account_provisioning(config, entity_names=entity_names, include_internal_user=True)
         await self._prepare_user_account(config, update_runtime_state=True)
         entity_users = await self._prepare_entity_accounts(config, entity_names)
-        self._router_principal_id = entity_users[ROUTER_AGENT_NAME].user_id
         self.config = config
         self._activate_hook_registry(hook_registry)
         await self._sync_mcp_manager(config)

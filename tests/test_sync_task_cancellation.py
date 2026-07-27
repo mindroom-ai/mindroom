@@ -1322,8 +1322,8 @@ def test_sliding_own_membership_sets_split_joins_invites_and_departures() -> Non
 
 
 @pytest.mark.asyncio
-async def test_sliding_sync_remote_departure_fences_and_purges() -> None:
-    """A sliding response reporting a kick must fence, purge, and notify the call manager."""
+async def test_sliding_sync_remote_departure_updates_lifecycle_without_cache_purge() -> None:
+    """Pre-campaign cache semantics keep sliding membership handling outside cache storage."""
     bot = MagicMock(spec=AgentBot)
     bot.agent_name = "test_agent"
     bot.last_sync_time = None
@@ -1332,7 +1332,6 @@ async def test_sliding_sync_remote_departure_fences_and_purges() -> None:
     bot._calls_reconcile_pending = False
     bot._room_member_join_hooks_armed = True
     bot.orchestrator = None
-    bot._local_departures_awaiting_sync = set()
     bot._sync_cache_trust = MagicMock()
     bot._room_lifecycle = MagicMock()
     bot._conversation_cache = MagicMock(purge_rooms=AsyncMock(), mark_room_joined=AsyncMock())
@@ -1340,7 +1339,6 @@ async def test_sliding_sync_remote_departure_fences_and_purges() -> None:
     bot._apply_own_room_membership_from_sliding_sync = AgentBot._apply_own_room_membership_from_sliding_sync.__get__(
         bot,
     )
-    bot._apply_own_room_membership = AgentBot._apply_own_room_membership.__get__(bot)
 
     response = nio.SlidingSyncResponse(
         "pos",
@@ -1352,10 +1350,10 @@ async def test_sliding_sync_remote_departure_fences_and_purges() -> None:
 
     await AgentBot._on_sync_response(bot, response)
 
-    bot._sync_cache_trust.invalidate_for_cache_scope_cleanup.assert_called_once_with()
+    bot._sync_cache_trust.invalidate_for_cache_scope_cleanup.assert_not_called()
     bot._room_lifecycle.forget_invited_room.assert_called_once_with("!kicked:localhost")
-    bot._conversation_cache.purge_rooms.assert_awaited_once_with({"!kicked:localhost"})
-    bot._conversation_cache.mark_room_joined.assert_awaited_once_with("!joined:localhost")
+    bot._conversation_cache.purge_rooms.assert_not_awaited()
+    bot._conversation_cache.mark_room_joined.assert_not_awaited()
     bot._call_manager.on_sync_room_membership.assert_awaited_once_with(
         joined_room_ids={"!joined:localhost"},
         left_room_ids={"!kicked:localhost"},
