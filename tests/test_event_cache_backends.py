@@ -2178,7 +2178,7 @@ def test_postgres_transient_classifier_accepts_dns_resolution_failure() -> None:
     """Transient Kubernetes DNS gaps should retry later instead of disabling the cache."""
     assert _is_transient_postgres_failure(
         psycopg.OperationalError(
-            "failed to resolve host 'mindroom-cache-postgres': [Errno -2] Name or service not known",
+            "failed to resolve host 'event-cache-postgres': [Errno -2] Name or service not known",
         ),
     )
 

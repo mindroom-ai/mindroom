@@ -248,6 +248,10 @@ wgcf-profile.conf
 mindroom-test-storage/
 
 # Local AI-agent artifacts
+# CLAUDE.local.md is the per-checkout override for CLAUDE.md. Keep it untracked: it is where
+# operator-private context belongs, and nothing in it may reach this public repository.
+CLAUDE.local.md
+**/CLAUDE.local.md
 .claude/LIVE-TEST.md
 .claude/REPORT.md
 .claude/settings.local.json
