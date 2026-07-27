@@ -214,7 +214,7 @@ class TestCollapsedReadLosesNoMessage:
         This is the entire value of the feature, stated once. Dropping messages on top of it buys
         nothing and costs the oldest half of the caller's context.
 
-        The thread built here is synthetic and deliberately extreme. Production measured 53%
+        The thread built here is synthetic and deliberately extreme. Real workloads measure 53%
         edit rows overall and 6.30 edits per edited original, with one thread at 94.5%; the
         20x100 shape below is that worst case exaggerated, not a typical thread.
         """
@@ -964,8 +964,8 @@ class TestCollapsedReadAgreesWithTheFoldOnEveryEdit:
         assert "$edited-e1" not in returned_ids, "a superseded edit was returned"
 
 
-class TestProductionShapedEditDensity:
-    """Production measured 6.30 edits per edited original, max 170, one thread 94.5% edits.
+class TestRealisticEditDensity:
+    """Real workloads measure 6.30 edits per edited original, max 170, one thread 94.5% edits.
 
     The failure this guards against is subtle and silent: an anti-join that excluded edited
     ORIGINALS rather than edit EVENTS would still return a plausible-looking read, just a tiny

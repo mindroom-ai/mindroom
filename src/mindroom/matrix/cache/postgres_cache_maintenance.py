@@ -28,7 +28,8 @@ class _PostgresSchemaMigrationResult:
 _SENDER_BACKFILL_MARKER_KEY = "sender_backfilled"
 
 # Keyset page size for the backfill. Small enough that one page of payloads is a bounded amount of
-# memory (production averages ~4.4 KB per row), large enough that round trips do not dominate.
+# memory (cached payloads commonly run to several kilobytes), large enough that round trips
+# do not dominate.
 _SENDER_BACKFILL_PAGE_ROWS = 500
 
 
@@ -56,23 +57,24 @@ async def _backfill_collapsed_read_columns(db: AsyncConnection, *, namespace: st
     ``_initialize_postgres_event_cache_db`` re-raises, so a single bad row locks that namespace out
     of its cache on every restart, permanently. PostgreSQL rejects at least two shapes that
     ``json.dumps`` emits and ``json.loads`` reads back without complaint: a NUL escape
-    (``UntranslatableCharacter``) and a lone surrogate (``InvalidTextRepresentation``). Production
-    held 19 rows of the first kind in its primary namespace, from tool output that captured binary
-    content into a message body.
+    (``UntranslatableCharacter``) and a lone surrogate (``InvalidTextRepresentation``). Both occur
+    in real caches; the NUL escape turns up when tool output captures binary content into a
+    message body.
 
     Two narrower SQL guards were tried and rejected. Rewriting the payload to strip the offending
     escape merges into neighbouring backslash runs and turns valid JSON invalid. Skipping rows by
     ``strpos`` over that escape is both unsound and incomplete: it also matches a payload that
-    merely quotes the escape as literal text, which casts fine - 28 of 47 production matches were
-    exactly that - and it does not match a lone surrogate at all. Decoding with ``json.loads``
-    needs no such guard, because it is the exact inverse of the ``json.dumps`` that wrote the row.
+    merely quotes the escape as literal text, which casts fine - and on a real cache most matches
+    were exactly that - while it does not match a lone surrogate at all. Decoding with
+    ``json.loads`` needs no such guard, because it is the exact inverse of the ``json.dumps``
+    that wrote the row.
 
     Cost is one keyset-paginated pass over the namespace's un-backfilled rows, inside the
     advisory-lock transaction that serializes other principals' startup, once per namespace ever.
-    Budget tens of seconds for a large namespace, because the payloads have to cross the wire and
-    the production table is 122,674 rows over 538 MB. An earlier revision of this docstring claimed
-    13.7 ms per 50,000 rows for a SQL-side cast; that came from a synthetic table of tiny payloads
-    and understated real data by about two orders of magnitude.
+    Budget tens of seconds for a large namespace, because every payload has to cross the wire. An
+    earlier revision of this docstring claimed 13.7 ms per 50,000 rows for a SQL-side cast; that
+    came from a synthetic table of tiny payloads and understated realistic ones by about two
+    orders of magnitude, because those live in TOAST and have to be detoasted and parsed.
 
     The marker costs the self-healing property an unconditional backfill would have, which is
     acceptable here rather than merely convenient: a row can only reach '' after the marker if a
@@ -111,19 +113,32 @@ async def _backfill_collapsed_read_columns(db: AsyncConnection, *, namespace: st
         )
         if not page:
             break
+        room_ids: list[str] = []
+        event_ids: list[str] = []
+        senders: list[str] = []
         for room_id, event_id, event_json in page:
             last_room_id, last_event_id = str(room_id), str(event_id)
-            sender = _sender_from_cached_payload(str(event_json))
-            if sender is None:
+            if (sender := _sender_from_cached_payload(str(event_json))) is None:
                 continue
-            await db.execute(
-                """
-                UPDATE mindroom_event_cache_events
-                SET sender = %s
-                WHERE namespace = %s AND room_id = %s AND event_id = %s
-                """,
-                (sender, namespace, last_room_id, last_event_id),
-            )
+            room_ids.append(last_room_id)
+            event_ids.append(last_event_id)
+            senders.append(sender)
+        if not senders:
+            continue
+        # One statement per page, not per row. Pagination bounds memory; this bounds round trips,
+        # which is the cost that matters while the startup advisory lock is held.
+        await db.execute(
+            """
+            UPDATE mindroom_event_cache_events AS events
+            SET sender = backfilled.sender
+            FROM unnest(%s::text[], %s::text[], %s::text[])
+                AS backfilled(room_id, event_id, sender)
+            WHERE events.namespace = %s
+                AND events.room_id = backfilled.room_id
+                AND events.event_id = backfilled.event_id
+            """,
+            (room_ids, event_ids, senders, namespace),
+        )
     await db.execute(
         """
         INSERT INTO mindroom_event_cache_namespace_metadata(namespace, key, value)

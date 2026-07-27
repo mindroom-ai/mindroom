@@ -73,18 +73,18 @@ if TYPE_CHECKING:
 # message what one window function derives once, and hauls the whole superseded history across
 # the wire to do it.
 #
-# Measured in production 2026-07-27: edits are 53% of all event rows, 6.30 per edited original,
-# max 170 on one original, and one thread is 94.5% edits. Threads themselves are small - p50 9
-# rows, max 538.
+# Measured on a representative agent workload: edits are 53% of all event rows, 6.30 per edited
+# original, max 170 on one original, and one thread is 94.5% edits. Threads themselves are
+# small - p50 9 rows, max 538.
 #
 # So be precise about what this buys, because two earlier revisions of this comment were not. It
 # does not reduce writes - it is a read-side query, and every edit is still stored. It does not
 # change what the fold produces either; the fold already picked one edit per message. What it buys
 # is fewer rows off disk and over the wire, and less fold work, on a median thread of nine rows -
 # paid for with a window function and three joins on every read. The correctness fixes that came
-# with it are the substantial part. The slowest production read measured 126.6 ms warm, so no
-# speedup is claimed, and the 2,021-row thread quoted here before was this repository's synthetic
-# fixture (20 messages x 100 edits), not production.
+# with it are the substantial part. The slowest measured read was 126.6 ms warm, so no speedup
+# is claimed, and the 2,021-row thread quoted here before was this repository's synthetic
+# fixture (20 messages x 100 edits), not a real one.
 #
 # The root fix is upstream of this query: prune superseded edits at write time and there is nothing
 # to collapse. Retention is deliberate rather than accidental, so that is a trade - redacting the

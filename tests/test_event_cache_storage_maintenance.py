@@ -20,7 +20,11 @@ from mindroom.matrix.cache import (
     sqlite_cache_maintenance,
     sqlite_event_cache,
 )
-from mindroom.matrix.cache.postgres_cache_maintenance import migrate_postgres_schema
+from mindroom.matrix.cache.postgres_cache_maintenance import (
+    _SENDER_BACKFILL_PAGE_ROWS,
+    _backfill_collapsed_read_columns,
+    migrate_postgres_schema,
+)
 from mindroom.matrix.cache.postgres_event_cache import (
     _POSTGRES_EVENT_CACHE_SCHEMA_VERSION,
     PostgresEventCache,
@@ -706,9 +710,8 @@ async def test_sender_backfill_survives_a_payload_jsonb_cannot_parse(
     than JSON does. A NUL escape raises ``UntranslatableCharacter`` and a lone surrogate raises
     ``InvalidTextRepresentation``, either of which aborts the whole statement - and with it the
     migration transaction that ``_initialize_postgres_event_cache_db`` re-raises, so one such row
-    locks that namespace out of its cache permanently, on every restart. Production held 19 of the
-    first kind in its primary namespace, from tool output that captured binary content into a
-    message body.
+    locks that namespace out of its cache permanently, on every restart. The NUL case is not
+    theoretical: it turns up when tool output captures binary content into a message body.
 
     Both senders must still be recovered: decoding in Python is the exact inverse of the dump that
     wrote the row, so an unparseable-to-PostgreSQL payload is not an unreadable one.
@@ -766,3 +769,70 @@ async def test_sender_backfill_survives_a_payload_jsonb_cannot_parse(
             ("$ordinary", "@a:localhost"),
             ("$surrogate", "@lone:localhost"),
         ]
+
+
+@pytest.mark.asyncio
+async def test_sender_backfill_batches_each_page_into_one_statement(
+    postgres_event_cache_url: str,
+) -> None:
+    """The backfill must cost one UPDATE per page, not one per row.
+
+    It runs inside the advisory-lock transaction that serializes every other principal's startup,
+    so a round trip per row turns a large namespace into a multi-minute stall for every principal
+    behind it. Pagination alone does not fix that: it bounds how many payloads are held in memory
+    at once, not how many statements are issued.
+    """
+    namespace = f"tenant_{uuid.uuid4().hex}"
+    # Enough rows to need more than one page, so pagination and batching are both exercised.
+    row_count = _SENDER_BACKFILL_PAGE_ROWS + 7
+    async with _isolated_postgres_database(postgres_event_cache_url) as database_url:
+        setup = await psycopg.AsyncConnection.connect(database_url)
+        try:
+            await postgres_event_cache._create_postgres_event_cache_schema(setup)
+            for index in range(row_count):
+                await setup.execute(
+                    """
+                    INSERT INTO mindroom_event_cache_events(
+                        namespace, event_id, room_id, origin_server_ts, event_json, sender, cached_at
+                    )
+                    VALUES (%s, %s, %s, %s, %s, '', 0)
+                    """,
+                    (
+                        namespace,
+                        f"$event{index:05d}",
+                        _ROOM_ID,
+                        index,
+                        json.dumps({"event_id": f"$event{index:05d}", "sender": f"@user{index}:localhost"}),
+                    ),
+                )
+            await setup.commit()
+        finally:
+            await setup.close()
+
+        db = await psycopg.AsyncConnection.connect(database_url)
+        statements: list[str] = []
+        original_execute = db.execute
+
+        async def counting_execute(query, params=None, **kwargs):  # noqa: ANN001, ANN003, ANN202
+            statements.append(str(query))
+            return await original_execute(query, params, **kwargs)
+
+        try:
+            db.execute = counting_execute  # type: ignore[method-assign]
+            await _backfill_collapsed_read_columns(db, namespace=namespace)
+            db.execute = original_execute  # type: ignore[method-assign]
+            await db.commit()
+
+            cursor = await db.execute(
+                "SELECT count(*) FROM mindroom_event_cache_events WHERE namespace = %s AND sender <> ''",
+                (namespace,),
+            )
+            backfilled = (await cursor.fetchone())[0]
+            await cursor.close()
+        finally:
+            await db.close()
+
+        assert backfilled == row_count, "pagination must reach every row, not just the first page"
+        updates = [statement for statement in statements if statement.lstrip().startswith("UPDATE")]
+        pages = -(-row_count // _SENDER_BACKFILL_PAGE_ROWS)
+        assert len(updates) == pages, f"expected one UPDATE per page ({pages}), issued {len(updates)}"
