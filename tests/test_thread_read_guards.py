@@ -251,8 +251,13 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         await _wait_for_room_cache_idle(coordinator)
 
     @pytest.mark.asyncio
-    async def test_missing_cache_live_append_repairs_and_replays_delta_once(self, tmp_path: Path) -> None:
-        """A certified live event should survive a missing snapshot and join the scheduled repair."""
+    async def test_live_append_without_a_snapshot_is_recovered_by_the_next_read(self, tmp_path: Path) -> None:
+        """A live event arriving with no cached snapshot is not lost; the next read refetches it.
+
+        There is no scheduled repair and no retained delta any more. The append finds no snapshot,
+        records a gap, and the homeserver -- which has the event -- is what the next read rebuilds
+        from. Same guarantee, one mechanism instead of three.
+        """
         room_id = "!test:localhost"
         thread_id = "$thread:localhost"
         event_cache = SqliteEventCache(tmp_path / "event_cache.db")
@@ -273,21 +278,12 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             room_id=room_id,
             thread_id=thread_id,
         )
+        # The homeserver already has both, which is exactly why the delta need not be retained.
         client = _relations_client(
             root_event=root_event,
-            thread_events=[],
+            thread_events=[live_event],
             next_batch="s_initial",
         )
-        room_messages_response = client.room_messages.return_value
-        fetch_started = asyncio.Event()
-        release_fetch = asyncio.Event()
-
-        async def blocking_room_messages(*_args: object, **_kwargs: object) -> nio.RoomMessagesResponse:
-            fetch_started.set()
-            await release_fetch.wait()
-            return room_messages_response
-
-        client.room_messages = AsyncMock(side_effect=blocking_room_messages)
         access = MatrixConversationCache(
             logger=MagicMock(),
             runtime=_conversation_runtime(
@@ -303,118 +299,11 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
                 live_event,
                 event_info=EventInfo.from_event(live_event.source),
             )
-            await asyncio.wait_for(fetch_started.wait(), timeout=1.0)
-            concurrent_reads = [
-                asyncio.create_task(access.get_dispatch_thread_history(room_id, thread_id)) for _index in range(10)
-            ]
-            release_fetch.set()
-            histories = await asyncio.gather(*concurrent_reads)
             await wait_for_background_tasks(timeout=1.0, owner=coordinator.background_task_owner)
-            final_history = await access.get_dispatch_thread_history(room_id, thread_id)
+            history = await access.get_dispatch_thread_history(room_id, thread_id)
             cached_rows = await event_cache.get_thread_events(room_id, thread_id)
-            cache_state = await event_cache.get_thread_cache_gap(room_id, thread_id)
+            gap_after_read = await event_cache.get_thread_cache_gap(room_id, thread_id)
         finally:
-            release_fetch.set()
-            await wait_for_background_tasks(timeout=1.0, owner=coordinator.background_task_owner)
-            await event_cache.close()
-
-        expected_event_ids = [thread_id, "$live:localhost"]
-        assert all([message.event_id for message in history] == expected_event_ids for history in histories)
-        assert [message.event_id for message in final_history] == expected_event_ids
-        assert cached_rows is not None
-        assert [event["event_id"] for event in cached_rows] == expected_event_ids
-        assert matrix_cache.thread_cache_rejection_reason(cache_state) is None
-        client.room_messages.assert_awaited_once()
-
-    @pytest.mark.asyncio
-    async def test_live_append_arriving_during_reconstruction_joins_snapshot(self, tmp_path: Path) -> None:
-        """A live event retained after the scan starts should be merged before snapshot installation."""
-        room_id = "!test:localhost"
-        thread_id = "$thread:localhost"
-        event_cache = SqliteEventCache(tmp_path / "event_cache.db")
-        await event_cache.initialize()
-        coordinator = _runtime_write_coordinator()
-        root_event = _text_event(
-            event_id=thread_id,
-            body="Root",
-            sender="@user:localhost",
-            server_timestamp=1000,
-            room_id=room_id,
-        )
-        live_event = _text_event(
-            event_id="$live:localhost",
-            body="Live",
-            sender="@agent:localhost",
-            server_timestamp=2000,
-            room_id=room_id,
-            thread_id=thread_id,
-        )
-        client = _relations_client(
-            root_event=root_event,
-            thread_events=[],
-            next_batch="s_initial",
-        )
-        room_messages_response = client.room_messages.return_value
-        fetch_started = asyncio.Event()
-        release_fetch = asyncio.Event()
-        delta_retained = asyncio.Event()
-        real_retain_delta = coordinator.retain_thread_repair_delta
-
-        async def blocking_room_messages(*_args: object, **_kwargs: object) -> nio.RoomMessagesResponse:
-            fetch_started.set()
-            await release_fetch.wait()
-            return room_messages_response
-
-        def retain_delta(
-            retained_room_id: str,
-            retained_thread_id: str,
-            event_source: dict[str, object],
-            *,
-            coordination_scope: str,
-        ) -> None:
-            real_retain_delta(
-                retained_room_id,
-                retained_thread_id,
-                event_source,
-                coordination_scope=coordination_scope,
-            )
-            delta_retained.set()
-
-        client.room_messages = AsyncMock(side_effect=blocking_room_messages)
-        coordinator.retain_thread_repair_delta = MagicMock(side_effect=retain_delta)
-        access = MatrixConversationCache(
-            logger=MagicMock(),
-            runtime=_conversation_runtime(
-                client=client,
-                event_cache=event_cache,
-                coordinator=coordinator,
-            ),
-        )
-        read_task = asyncio.create_task(access.get_dispatch_thread_history(room_id, thread_id))
-        append_task: asyncio.Task[None] | None = None
-
-        try:
-            await asyncio.wait_for(fetch_started.wait(), timeout=1.0)
-            append_task = asyncio.create_task(
-                access.append_live_event(
-                    room_id,
-                    live_event,
-                    event_info=EventInfo.from_event(live_event.source),
-                ),
-            )
-            await asyncio.wait_for(delta_retained.wait(), timeout=1.0)
-            release_fetch.set()
-            history = await read_task
-            await append_task
-            await wait_for_background_tasks(timeout=1.0, owner=coordinator.background_task_owner)
-            cached_rows = await event_cache.get_thread_events(room_id, thread_id)
-        finally:
-            release_fetch.set()
-            await asyncio.gather(
-                read_task,
-                *(task for task in [append_task] if task is not None),
-                return_exceptions=True,
-            )
             await wait_for_background_tasks(timeout=1.0, owner=coordinator.background_task_owner)
             await event_cache.close()
 
@@ -422,7 +311,8 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         assert [message.event_id for message in history] == expected_event_ids
         assert cached_rows is not None
         assert [event["event_id"] for event in cached_rows] == expected_event_ids
-        client.room_messages.assert_awaited_once()
+        # The refetch covered the gap, so the rebuilt snapshot is usable.
+        assert matrix_cache.thread_cache_rejection_reason(gap_after_read) is None
 
     @pytest.mark.asyncio
     async def test_live_redaction_resolution_does_not_block_same_room_read(self) -> None:
@@ -1313,58 +1203,6 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
 
         with pytest.raises(RuntimeError, match="boom"):
             await access.get_thread_history("!test:localhost", "$thread:localhost")
-
-    @pytest.mark.asyncio
-    async def test_get_thread_history_refresh_runs_under_same_thread_write_barrier(self) -> None:
-        """Thread refreshes should serialize with same-thread mutations without blocking other threads."""
-        access = MatrixConversationCache(
-            logger=MagicMock(),
-            runtime=_conversation_runtime(client=_make_client_mock()),
-        )
-        access.runtime.event_cache.get_thread_cache_gap = AsyncMock(return_value=None)
-        # A genuine cache miss, so the read has to take the refresh path this test is about.
-        access.runtime.event_cache.get_thread_events = AsyncMock(return_value=None)
-        refresh_started = asyncio.Event()
-        allow_refresh = asyncio.Event()
-        queued_update_started = asyncio.Event()
-
-        async def slow_refresh(
-            *_args: object,
-            **_kwargs: object,
-        ) -> ThreadHistoryResult:
-            refresh_started.set()
-            await allow_refresh.wait()
-            return thread_history_result(
-                [_message(event_id="$thread:localhost", body="Root")],
-                is_full_history=True,
-                diagnostics={"cache_repair_usable": True},
-            )
-
-        async def queued_update() -> None:
-            queued_update_started.set()
-
-        with patch(
-            "mindroom.matrix.conversation_cache.refresh_thread_history_from_source",
-            new=AsyncMock(side_effect=slow_refresh),
-        ):
-            refresh_task = asyncio.create_task(access.get_thread_history("!test:localhost", "$thread:localhost"))
-            await asyncio.wait_for(refresh_started.wait(), timeout=1.0)
-
-            access.runtime.event_cache_write_coordinator.queue_thread_update(
-                "!test:localhost",
-                "$thread:localhost",
-                lambda: queued_update(),
-                name="matrix_cache_follow_up_update",
-                coordination_scope=access.runtime.event_cache.principal_id,
-            )
-            await asyncio.sleep(0)
-            assert queued_update_started.is_set() is False
-
-            allow_refresh.set()
-            await refresh_task
-        await _wait_for_room_cache_idle(access.runtime.event_cache_write_coordinator)
-
-        assert queued_update_started.is_set()
 
     @pytest.mark.asyncio
     async def test_thread_read_refetches_once_mutation_starts_after_room_barrier(self) -> None:

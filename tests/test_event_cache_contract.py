@@ -418,6 +418,58 @@ class TestConversationEventCacheContract:
         assert [event["event_id"] for event in cached] == [thread_id]
 
     @pytest.mark.asyncio
+    async def test_in_flight_fetch_cannot_delete_a_live_event_appended_after_it_started(
+        self,
+        event_cache: ConversationEventCache,
+    ) -> None:
+        """A live append makes an already-running fetch too old to replace the snapshot.
+
+        This is the append-shaped version of burying a snapshot. A scan starts, a live event lands
+        in the thread while it is running, and the scan finishes carrying a thread that predates
+        that event. Installing it would delete the event *and* record no gap, so the next read
+        would serve the thread as complete with the event missing. Nothing retains the delta and
+        no barrier serializes the two any more, so the ordering watermark is what prevents it.
+        """
+        room_id = "!race:localhost"
+        thread_id = "$thread:localhost"
+        root = _message_event(thread_id, 1)
+        await replace_thread_unconditionally(
+            event_cache,
+            room_id,
+            thread_id,
+            [root],
+            fetch_started_at=1000.0,
+        )
+
+        # A scan starts here, at 2000.0, seeing only the root...
+        fetch_started_at = 2000.0
+
+        # ...and a live event lands in the thread while it is still running.
+        live = _message_event("$live:localhost", 3, thread_id=thread_id)
+        assert (
+            await event_cache.apply_thread_mutation_append(
+                room_id,
+                thread_id,
+                live,
+                append_failed_reason="live_append_failed",
+            )
+            is ThreadAppendOutcome.APPENDED
+        )
+
+        stored = await event_cache.replace_thread(
+            room_id,
+            thread_id,
+            [root],
+            expected_membership_epoch=await event_cache.room_membership_epoch(room_id),
+            fetch_started_at=fetch_started_at,
+        )
+
+        assert stored
+        cached = await event_cache.get_thread_events(room_id, thread_id)
+        assert cached is not None
+        assert [event["event_id"] for event in cached] == [thread_id, "$live:localhost"]
+
+    @pytest.mark.asyncio
     async def test_redaction_tombstones_original_edits_and_late_replays(
         self,
         event_cache: ConversationEventCache,

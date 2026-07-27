@@ -698,6 +698,13 @@ async def _append_existing_thread_event(
             serialized_event.origin_server_ts,
         ),
     )
+    await _advance_snapshot_watermark(
+        db,
+        namespace=namespace,
+        room_id=room_id,
+        thread_id=thread_id,
+        reflected_at=time.time(),
+    )
     return ThreadAppendOutcome.APPENDED
 
 
@@ -760,6 +767,39 @@ async def _clear_thread_gap_covered_by_fetch(
             END
         """,
         (namespace, room_id, thread_id, fetch_started_at, fetch_started_at, fetch_started_at),
+    )
+
+
+async def _advance_snapshot_watermark(
+    db: AsyncConnection,
+    *,
+    namespace: str,
+    room_id: str,
+    thread_id: str,
+    reflected_at: float,
+) -> None:
+    """Record that this snapshot now reflects the thread as of ``reflected_at``.
+
+    An append mutates the snapshot, so a fetch that started before it cannot represent the thread
+    any more. Moving the watermark forward makes ``replace_thread_locked`` refuse such a fetch,
+    which is what stops a slow scan from deleting a live event that landed while it was running.
+    """
+    await db.execute(
+        """
+        INSERT INTO mindroom_event_cache_thread_state(
+            namespace,
+            room_id,
+            thread_id,
+            snapshot_fetch_started_at
+        )
+        VALUES (%s, %s, %s, %s)
+        ON CONFLICT(namespace, room_id, thread_id) DO UPDATE SET
+            snapshot_fetch_started_at = GREATEST(
+                mindroom_event_cache_thread_state.snapshot_fetch_started_at,
+                EXCLUDED.snapshot_fetch_started_at
+            )
+        """,
+        (namespace, room_id, thread_id, reflected_at),
     )
 
 

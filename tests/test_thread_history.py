@@ -32,7 +32,6 @@ from mindroom.matrix.client_thread_history import (
     _event_source_for_cache,
     _fetch_thread_history_via_room_messages_with_events,
     _group_scanned_sources_by_thread,
-    _merge_retained_thread_event_sources,
     _resolve_thread_history_from_event_sources_timed,
 )
 from mindroom.matrix.client_visible_messages import ThreadEditCandidates
@@ -98,45 +97,6 @@ def build_threaded_edit_content(*args: object, **kwargs: object) -> dict[str, ob
 
 class TestThreadHistory:
     """Test thread history fetching functionality."""
-
-    def test_retained_delta_does_not_resurrect_redacted_fetched_event(self) -> None:
-        """Authoritative fetched state must win when the retained journal has the same event ID."""
-        fetched_sources = [
-            {
-                "event_id": "$thread_root",
-                "origin_server_ts": 1000,
-                "type": "m.room.message",
-                "content": {"body": "Root"},
-            },
-            {
-                "event_id": "$reply",
-                "origin_server_ts": 2000,
-                "type": "m.room.message",
-                "content": {},
-                "unsigned": {"redacted_because": {"event_id": "$redaction"}},
-            },
-        ]
-        retained_sources = [
-            {
-                "event_id": "$reply",
-                "origin_server_ts": 2000,
-                "type": "m.room.message",
-                "content": {
-                    "body": "Pre-redaction reply",
-                    "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread_root"},
-                },
-            },
-        ]
-
-        merged, changed = _merge_retained_thread_event_sources(
-            fetched_sources,
-            retained_sources,
-            thread_id="$thread_root",
-        )
-
-        assert changed is False
-        assert merged[1]["content"] == {}
-        assert merged[1]["unsigned"] == {"redacted_because": {"event_id": "$redaction"}}
 
     @pytest.mark.asyncio
     async def test_long_cached_sidecar_thread_uses_one_bounded_cache_read(self) -> None:
@@ -3148,7 +3108,7 @@ class TestThreadHistoryCache:
         )
 
         with patch(
-            "mindroom.matrix.client_thread_history._fetch_thread_repair_snapshot",
+            "mindroom.matrix.client_thread_history._fetch_thread_snapshot",
             new=AsyncMock(return_value=fetch_result),
         ) as fetch:
             history = await matrix_client_module.refresh_thread_history_from_source(

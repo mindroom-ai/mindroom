@@ -851,7 +851,47 @@ async def _append_existing_thread_event(
             write_sequence,
         ),
     )
+    await _advance_snapshot_watermark(
+        db,
+        principal_id=principal_id,
+        room_id=room_id,
+        thread_id=thread_id,
+        reflected_at=time.time(),
+    )
     return ThreadAppendOutcome.APPENDED
+
+
+async def _advance_snapshot_watermark(
+    db: aiosqlite.Connection,
+    *,
+    principal_id: str,
+    room_id: str,
+    thread_id: str,
+    reflected_at: float,
+) -> None:
+    """Record that this snapshot now reflects the thread as of ``reflected_at``.
+
+    An append mutates the snapshot, so a fetch that started before it cannot represent the thread
+    any more. Moving the watermark forward makes ``replace_thread_locked`` refuse such a fetch,
+    which is what stops a slow scan from deleting a live event that landed while it was running.
+    """
+    await db.execute(
+        """
+        INSERT INTO thread_cache_state(
+            principal_id,
+            room_id,
+            thread_id,
+            snapshot_fetch_started_at
+        )
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT(principal_id, room_id, thread_id) DO UPDATE SET
+            snapshot_fetch_started_at = MAX(
+                COALESCE(thread_cache_state.snapshot_fetch_started_at, ?),
+                ?
+            )
+        """,
+        (principal_id, room_id, thread_id, reflected_at, reflected_at, reflected_at),
+    )
 
 
 async def _thread_event_ids_for_thread(

@@ -22,7 +22,6 @@ from mindroom.constants import (
 from mindroom.matrix.cache import ThreadHistoryResult, thread_writes
 from mindroom.matrix.cache.outbound_thread_reservations import OutboundThreadReservations
 from mindroom.matrix.cache.thread_cache_state import ThreadAppendOutcome
-from mindroom.matrix.cache.thread_write_cache_ops import ThreadMutationCacheOps
 from mindroom.matrix.cache.write_coordinator import EventCacheWriteCoordinator
 from mindroom.matrix.conversation_cache import MatrixConversationCache
 from mindroom.matrix.event_info import EventInfo
@@ -42,7 +41,7 @@ from tests.threading_helpers import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Collection, Coroutine
+    from collections.abc import Callable, Coroutine
     from typing import Any
 
     from mindroom.bot import AgentBot
@@ -50,61 +49,6 @@ if TYPE_CHECKING:
 
 class TestThreadingBehavior(ThreadingBehaviorTestBase):
     """Threading behavior tests moved verbatim from tests/test_threading_error.py."""
-
-    @pytest.mark.asyncio
-    @pytest.mark.parametrize(
-        "append_outcome",
-        [ThreadAppendOutcome.APPEND_REFUSED, RuntimeError("cache unavailable")],
-        ids=["rejected", "failed"],
-    )
-    async def test_append_that_cannot_revalidate_retains_delta_and_schedules_repair(
-        self,
-        append_outcome: ThreadAppendOutcome | RuntimeError,
-    ) -> None:
-        """An append that did not land keeps its delta and schedules a repair."""
-        original_ops, logger, event_cache = _thread_mutation_cache_ops()
-        if isinstance(append_outcome, RuntimeError):
-            event_cache.apply_thread_mutation_append.side_effect = append_outcome
-        else:
-            event_cache.apply_thread_mutation_append.return_value = append_outcome
-        schedule_repair = Mock()
-        cache_ops = ThreadMutationCacheOps(
-            logger_getter=lambda: logger,
-            runtime=original_ops.runtime,
-            schedule_thread_repair=schedule_repair,
-        )
-        room_id = "!room:localhost"
-        thread_id = "$thread:localhost"
-        event_source = {
-            "event_id": "$reply:localhost",
-            "origin_server_ts": 2000,
-            "type": "m.room.message",
-            "content": {
-                "body": "Reply",
-                "m.relates_to": {"rel_type": "m.thread", "event_id": thread_id},
-            },
-        }
-        cache_ops.retain_thread_repair_delta(room_id, thread_id, event_source)
-
-        appended = await cache_ops.append_event_to_cache(
-            room_id,
-            thread_id,
-            event_source,
-            context="live",
-            append_failed_reason="live_append_failed",
-        )
-        retained = original_ops.runtime.event_cache_write_coordinator.pending_thread_repair_deltas(
-            room_id,
-            thread_id,
-            coordination_scope=event_cache.principal_id,
-        )
-
-        # Neither a refusal nor a raised backend error converges the append, so both keep the delta
-        # for the scheduled repair to replay. There is no longer a "landed but untrusted" outcome:
-        # an append that returns APPENDED is converged, and the gap marker gates the read instead.
-        assert appended is False
-        assert [event["event_id"] for event in retained] == ["$reply:localhost"]
-        schedule_repair.assert_called_once_with(room_id, thread_id)
 
     @pytest.mark.asyncio
     async def test_get_event_queues_persistent_cache_fill_through_room_write_barrier(self) -> None:
@@ -1200,26 +1144,6 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
                     coordination_scope=coordination_scope,
                 )
 
-            def retain_thread_repair_delta(
-                self,
-                room_id: str,
-                thread_id: str,
-                event_source: dict[str, Any],
-                *,
-                coordination_scope: str,
-            ) -> None:
-                del room_id, thread_id, event_source, coordination_scope
-
-            def acknowledge_thread_repair_deltas(
-                self,
-                room_id: str,
-                thread_id: str,
-                event_ids: Collection[str],
-                *,
-                coordination_scope: str,
-            ) -> None:
-                del room_id, thread_id, event_ids, coordination_scope
-
         cache_ops.runtime.event_cache_write_coordinator = _InlineCoordinator()
         resolver = MagicMock()
         resolver.resolve_thread_impact_for_mutation = AsyncMock(
@@ -1597,11 +1521,9 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             *,
             caller_label: str,
             coordinator_queue_wait_ms: float,
-            bypass_repair_backoff: bool,
         ) -> ThreadHistoryResult:
             assert caller_label == "unknown"
             assert coordinator_queue_wait_ms >= 0.0
-            assert bypass_repair_backoff is True
             fetch_started.set()
             return thread_history_result(
                 [_message(event_id="$thread-a:localhost", body="Root")],

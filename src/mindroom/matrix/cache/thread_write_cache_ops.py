@@ -46,20 +46,14 @@ class ThreadMutationCacheOps:
         *,
         logger_getter: Callable[[], structlog.stdlib.BoundLogger],
         runtime: BotRuntimeView,
-        schedule_thread_repair: Callable[[str, str], None] | None = None,
     ) -> None:
         self._logger_getter = logger_getter
         self.runtime = runtime
-        self._schedule_thread_repair = schedule_thread_repair
 
     @property
     def logger(self) -> structlog.stdlib.BoundLogger:
         """Return the facade-bound logger so collaborator rebinding stays visible."""
         return self._logger_getter()
-
-    def _schedule_repair_if_available(self, room_id: str, thread_id: str) -> None:
-        if self._schedule_thread_repair is not None:
-            self._schedule_thread_repair(room_id, thread_id)
 
     def cache_runtime_available(self) -> bool:
         """Return whether event-cache writes can safely proceed."""
@@ -329,7 +323,6 @@ class ThreadMutationCacheOps:
             # Cancellation rolls the transaction back the same way and is not an ``Exception``, so it
             # is caught here too.
             await self._write_append_failure_marker(room_id, thread_id, reason=append_failed_reason)
-            self._schedule_repair_if_available(room_id, thread_id)
             if raise_on_failure or isinstance(exc, asyncio.CancelledError):
                 raise
             return False
@@ -342,19 +335,9 @@ class ThreadMutationCacheOps:
                 event_id=event_id,
                 context=context,
             )
-        if not outcome.wrote_event:
-            self._schedule_repair_if_available(room_id, thread_id)
-            return False
-
-        coordinator = self.runtime.event_cache_write_coordinator
-        if coordinator is not None and isinstance(event_id, str):
-            coordinator.acknowledge_thread_repair_deltas(
-                room_id,
-                thread_id,
-                (event_id,),
-                coordination_scope=self.runtime.event_cache.principal_id,
-            )
-        return True
+        # An append that did not land leaves the thread gap-marked, and the next read refetches
+        # it from the homeserver. Nothing is scheduled here: the marker is the whole recovery.
+        return outcome.wrote_event
 
     async def _write_append_failure_marker(self, room_id: str, thread_id: str, *, reason: str) -> None:
         """Persist the marker a rolled-back append owes, surviving the cancellation that caused it.
@@ -378,21 +361,4 @@ class ThreadMutationCacheOps:
                 name="matrix_cache_append_failure_marker",
                 owner=coordinator.failure_marker_task_owner,
             ),
-        )
-
-    def retain_thread_repair_delta(
-        self,
-        room_id: str,
-        thread_id: str,
-        event_source: dict[str, Any],
-    ) -> None:
-        """Retain one certified event before its ordered append begins."""
-        coordinator = self.runtime.event_cache_write_coordinator
-        if coordinator is None:
-            return
-        coordinator.retain_thread_repair_delta(
-            room_id,
-            thread_id,
-            event_source,
-            coordination_scope=self.runtime.event_cache.principal_id,
         )

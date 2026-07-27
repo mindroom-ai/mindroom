@@ -23,7 +23,6 @@ from typing import TYPE_CHECKING, Any, Protocol, cast
 import nio
 from nio.responses import RoomGetEventError
 
-from mindroom.background_tasks import create_background_task
 from mindroom.entity_resolution import current_internal_sender_ids
 from mindroom.logging_config import get_logger
 from mindroom.matrix.cache import (
@@ -32,12 +31,10 @@ from mindroom.matrix.cache import (
     normalize_nio_event_for_cache,
 )
 from mindroom.matrix.cache.thread_reads import ThreadReadMode, ThreadReadPolicy
-from mindroom.matrix.cache.thread_repair import ThreadRepairBackoffError, ThreadRepairSuppressedError
 from mindroom.matrix.cache.thread_write_cache_ops import ThreadMutationCacheOps
 from mindroom.matrix.cache.thread_writes import ThreadLiveWritePolicy, ThreadOutboundWritePolicy, ThreadSyncWritePolicy
 from mindroom.matrix.client_thread_history import (
     BulkThreadRefreshStats,
-    RetainedThreadEventSourceProvider,
     bulk_refresh_room_thread_histories,
     fetch_dispatch_thread_history,
     fetch_dispatch_thread_snapshot,
@@ -55,10 +52,6 @@ from mindroom.matrix.media import (
 from mindroom.matrix.membership_fence import UNCERTIFIED_MEMBERSHIP_EPOCH
 from mindroom.matrix.message_content import extract_edit_body
 from mindroom.matrix.thread_bookkeeping import ThreadMutationResolver
-from mindroom.matrix.thread_diagnostics import (
-    THREAD_HISTORY_SOURCE_CACHE,
-    THREAD_HISTORY_SOURCE_DIAGNOSTIC,
-)
 from mindroom.matrix.thread_membership import resolve_event_thread_membership
 from mindroom.matrix.thread_room_scan import (
     fetch_event_info_for_client,
@@ -74,7 +67,6 @@ if TYPE_CHECKING:
     import structlog
 
     from mindroom.bot_runtime_view import BotRuntimeView
-    from mindroom.matrix.cache.write_coordinator import EventCacheWriteCoordinator
     from mindroom.matrix.sync_certification import SyncCacheWriteResult
 
 
@@ -97,25 +89,6 @@ __all__ = [
 
 _STARTUP_PREWARM_THREAD_LIMIT = 32
 _STARTUP_PREWARM_MAX_SCAN_PAGES = 20
-
-# A steady-state sync carries a handful of events. Anything at this scale is the runtime catching up
-# on a gap, which is when speculative repair is both least useful and most expensive.
-_SYNC_REPLAY_TIMELINE_EVENT_THRESHOLD = 50
-
-# A caller waiting for history may rescan after losing the guarded replacement race; a speculative
-# repair may not, because the conflict it lost is another writer already rewriting that thread.
-
-
-def _is_sync_replay_batch(response: nio.SyncResponse) -> bool:
-    """Return whether one sync response is a gap catch-up rather than steady-state delivery.
-
-    A truncated (``limited``) timeline is the homeserver saying the client fell behind, which is the
-    exact condition that leaves many threads without a usable snapshot at once.
-    """
-    timelines = [room_info.timeline for room_info in response.rooms.join.values()]
-    if any(timeline.limited for timeline in timelines):
-        return True
-    return sum(len(timeline.events) for timeline in timelines) >= _SYNC_REPLAY_TIMELINE_EVENT_THRESHOLD
 
 
 async def resolve_thread_root_event_id_for_client(
@@ -449,7 +422,6 @@ class MatrixConversationCache(ConversationCacheProtocol):
         self._write_cache_ops = ThreadMutationCacheOps(
             logger_getter=lambda: self.logger,
             runtime=self.runtime,
-            schedule_thread_repair=self._schedule_missing_thread_repair,
         )
         self._outbound = ThreadOutboundWritePolicy(
             resolver=resolver,
@@ -609,7 +581,6 @@ class MatrixConversationCache(ConversationCacheProtocol):
         *,
         caller_label: str,
         coordinator_queue_wait_ms: float,
-        bypass_repair_backoff: bool,
     ) -> ThreadHistoryResult:
         return await self._fetch_thread_from_client(
             fetch_thread_history,
@@ -619,7 +590,6 @@ class MatrixConversationCache(ConversationCacheProtocol):
             coordinator_queue_wait_ms=coordinator_queue_wait_ms,
             wants_full_history=True,
             allows_stale_fallback=True,
-            bypass_repair_backoff=bypass_repair_backoff,
         )
 
     async def _fetch_dispatch_thread_history_from_client(
@@ -629,7 +599,6 @@ class MatrixConversationCache(ConversationCacheProtocol):
         *,
         caller_label: str,
         coordinator_queue_wait_ms: float,
-        bypass_repair_backoff: bool,
     ) -> ThreadHistoryResult:
         return await self._fetch_thread_from_client(
             fetch_dispatch_thread_history,
@@ -639,7 +608,6 @@ class MatrixConversationCache(ConversationCacheProtocol):
             coordinator_queue_wait_ms=coordinator_queue_wait_ms,
             wants_full_history=True,
             allows_stale_fallback=False,
-            bypass_repair_backoff=bypass_repair_backoff,
         )
 
     async def _fetch_dispatch_thread_snapshot_from_client(
@@ -649,7 +617,6 @@ class MatrixConversationCache(ConversationCacheProtocol):
         *,
         caller_label: str,
         coordinator_queue_wait_ms: float,
-        bypass_repair_backoff: bool,
     ) -> ThreadHistoryResult:
         return await self._fetch_thread_from_client(
             fetch_dispatch_thread_snapshot,
@@ -659,104 +626,6 @@ class MatrixConversationCache(ConversationCacheProtocol):
             coordinator_queue_wait_ms=coordinator_queue_wait_ms,
             wants_full_history=False,
             allows_stale_fallback=False,
-            bypass_repair_backoff=bypass_repair_backoff,
-        )
-
-    @staticmethod
-    def _event_ids(event_sources: Collection[dict[str, Any]]) -> set[str]:
-        """Return valid event IDs from raw cache or retained-journal sources."""
-        return {
-            event_id for event_source in event_sources if isinstance((event_id := event_source.get("event_id")), str)
-        }
-
-    async def _cached_thread_event_ids_for_repair(
-        self,
-        room_id: str,
-        thread_id: str,
-    ) -> set[str] | None:
-        """Read raw event IDs for repair bookkeeping without failing the user-facing read.
-
-        Deliberately not ``get_thread_events``: that read collapses superseded edits away, and a
-        retained delta for one of them would then read as permanently missing and invalidate the
-        thread on every reconciliation. This asks the question bookkeeping actually has - which
-        rows are durably present - which is not the same as what the thread looks like.
-        """
-        try:
-            return await self.runtime.event_cache.get_thread_event_ids(room_id, thread_id)
-        except Exception as exc:
-            self.logger.warning(
-                "Failed to inspect raw thread cache during repair",
-                room_id=room_id,
-                thread_id=thread_id,
-                error_type=type(exc).__name__,
-                error=str(exc),
-            )
-            return None
-
-    async def _prepare_pending_thread_repair_deltas(
-        self,
-        room_id: str,
-        thread_id: str,
-    ) -> None:
-        """Force a refill when pending repair deltas are not yet in raw cache."""
-        coordinator = self.runtime.event_cache_write_coordinator
-        if coordinator is None:
-            return
-        retained_event_sources = coordinator.pending_thread_repair_deltas(
-            room_id,
-            thread_id,
-            coordination_scope=self.runtime.event_cache.principal_id,
-        )
-        retained_event_ids = self._event_ids(retained_event_sources)
-        if not retained_event_ids:
-            return
-        cached_event_ids = await self._cached_thread_event_ids_for_repair(
-            room_id,
-            thread_id,
-        )
-        if cached_event_ids is None or retained_event_ids - cached_event_ids:
-            await self._write_cache_ops.invalidate_known_thread(
-                room_id,
-                thread_id,
-                reason="retained_thread_delta_missing",
-            )
-
-    async def _acknowledge_repaired_thread_deltas(
-        self,
-        coordinator: EventCacheWriteCoordinator,
-        room_id: str,
-        thread_id: str,
-        *,
-        principal_id: str,
-        replayed_event_ids: Collection[str],
-        snapshot_stored: bool,
-    ) -> None:
-        """Forget retained deltas persisted or terminally filtered by one usable repair."""
-        pending_event_ids = self._event_ids(
-            coordinator.pending_thread_repair_deltas(
-                room_id,
-                thread_id,
-                coordination_scope=principal_id,
-            ),
-        )
-        if not pending_event_ids:
-            return
-        acknowledged_event_ids = pending_event_ids & set(replayed_event_ids) if snapshot_stored else set()
-        remaining_event_ids = pending_event_ids - acknowledged_event_ids
-        if remaining_event_ids:
-            repaired_event_ids = await self._cached_thread_event_ids_for_repair(
-                room_id,
-                thread_id,
-            )
-            if repaired_event_ids is not None:
-                acknowledged_event_ids.update(remaining_event_ids & repaired_event_ids)
-        if not acknowledged_event_ids:
-            return
-        coordinator.acknowledge_thread_repair_deltas(
-            room_id,
-            thread_id,
-            acknowledged_event_ids,
-            coordination_scope=principal_id,
         )
 
     async def _refresh_thread_history_from_client(
@@ -766,17 +635,14 @@ class MatrixConversationCache(ConversationCacheProtocol):
         *,
         caller_label: str,
         coordinator_queue_wait_ms: float,
-        bypass_repair_backoff: bool,
     ) -> ThreadHistoryResult:
         """Refresh one thread from Matrix without accepting a cache hit or stale fallback."""
-        await self._prepare_pending_thread_repair_deltas(room_id, thread_id)
         result = await self._refill_thread_from_client(
             room_id,
             thread_id,
             cache_reject_diagnostics=None,
             wants_full_history=True,
             allows_stale_fallback=False,
-            bypass_repair_backoff=bypass_repair_backoff,
         )
         log_thread_history_refresh(
             room_id=room_id,
@@ -796,67 +662,23 @@ class MatrixConversationCache(ConversationCacheProtocol):
         cache_reject_diagnostics: Mapping[str, str | int | float | bool] | None,
         wants_full_history: bool,
         allows_stale_fallback: bool,
-        bypass_repair_backoff: bool,
-        speculative: bool = False,
-        claim_token: object | None = None,
     ) -> ThreadHistoryResult:
-        coordinator = self.runtime.event_cache_write_coordinator
-        if coordinator is None:
-            return await refresh_thread_history_from_source(
-                self._require_client(),
-                room_id,
-                thread_id,
-                self.runtime.event_cache,
-                hydrate_sidecars=wants_full_history,
-                allow_stale_fallback=allows_stale_fallback,
-                cache_reject_diagnostics=cache_reject_diagnostics,
-                trusted_sender_ids=self._trusted_sender_ids(),
-            )
+        """Rebuild one thread from Matrix and reinstall its snapshot.
 
-        principal_id = self.runtime.event_cache.principal_id
-
-        async def repair() -> ThreadHistoryResult:
-            def pending_event_sources() -> tuple[dict[str, Any], ...]:
-                return coordinator.pending_thread_repair_deltas(
-                    room_id,
-                    thread_id,
-                    coordination_scope=principal_id,
-                )
-
-            retained_event_source_provider = RetainedThreadEventSourceProvider(pending_event_sources)
-            result = await refresh_thread_history_from_source(
-                self._require_client(),
-                room_id,
-                thread_id,
-                self.runtime.event_cache,
-                hydrate_sidecars=wants_full_history,
-                allow_stale_fallback=allows_stale_fallback,
-                cache_reject_diagnostics=cache_reject_diagnostics,
-                trusted_sender_ids=self._trusted_sender_ids(),
-                retained_event_sources=retained_event_source_provider,
-            )
-            if self._thread_repair_result_is_usable(result):
-                await self._acknowledge_repaired_thread_deltas(
-                    coordinator,
-                    room_id,
-                    thread_id,
-                    principal_id=principal_id,
-                    replayed_event_ids=retained_event_source_provider.provided_event_ids,
-                    snapshot_stored=result.diagnostics.get("cache_store_written") is True,
-                )
-            return result
-
-        return await coordinator.run_thread_repair(
+        One fetch per caller, unconditionally. There is no single-flight, no admission gate and no
+        failure backoff: those existed to ration a scan believed to cost seconds, and a measured
+        126 ms refetch does not need rationing. Concurrent readers of the same gapped thread each
+        pay their own read, which is the cost of not maintaining an admission policy.
+        """
+        return await refresh_thread_history_from_source(
+            self._require_client(),
             room_id,
             thread_id,
-            repair,
-            coordination_scope=principal_id,
+            self.runtime.event_cache,
             hydrate_sidecars=wants_full_history,
             allow_stale_fallback=allows_stale_fallback,
-            result_arms_backoff=self._thread_repair_result_arms_backoff,
-            bypass_failure_backoff=bypass_repair_backoff,
-            speculative=speculative,
-            claim_token=claim_token,
+            cache_reject_diagnostics=cache_reject_diagnostics,
+            trusted_sender_ids=self._trusted_sender_ids(),
         )
 
     async def _fetch_thread_from_client(
@@ -869,13 +691,7 @@ class MatrixConversationCache(ConversationCacheProtocol):
         coordinator_queue_wait_ms: float,
         wants_full_history: bool,
         allows_stale_fallback: bool,
-        bypass_repair_backoff: bool,
-        speculative: bool = False,
-        claim_token: object | None = None,
     ) -> ThreadHistoryResult:
-        coordinator = self.runtime.event_cache_write_coordinator
-        await self._prepare_pending_thread_repair_deltas(room_id, thread_id)
-
         async def refill(
             cache_reject_diagnostics: Mapping[str, str | int | float | bool] | None,
         ) -> ThreadHistoryResult:
@@ -885,9 +701,6 @@ class MatrixConversationCache(ConversationCacheProtocol):
                 cache_reject_diagnostics=cache_reject_diagnostics,
                 wants_full_history=wants_full_history,
                 allows_stale_fallback=allows_stale_fallback,
-                bypass_repair_backoff=bypass_repair_backoff,
-                speculative=speculative,
-                claim_token=claim_token,
             )
 
         return await fetcher(
@@ -898,112 +711,7 @@ class MatrixConversationCache(ConversationCacheProtocol):
             trusted_sender_ids=self._trusted_sender_ids(),
             caller_label=caller_label,
             coordinator_queue_wait_ms=coordinator_queue_wait_ms,
-            refill=refill if coordinator is not None else None,
-        )
-
-    @staticmethod
-    def _thread_repair_result_is_usable(result: ThreadHistoryResult) -> bool:
-        """Return whether one flight left a durable snapshot behind.
-
-        A snapshot installed under a surviving gap marker still counts. Retained deltas are merged
-        into the fetch before it is stored, so they are durably in the snapshot either way; the
-        marker only means the next read refetches, and dropping the deltas then costs nothing.
-        """
-        source = result.diagnostics.get(THREAD_HISTORY_SOURCE_DIAGNOSTIC)
-        return source == THREAD_HISTORY_SOURCE_CACHE or result.diagnostics.get("cache_store_written") is True
-
-    @staticmethod
-    def _thread_repair_result_arms_backoff(result: ThreadHistoryResult) -> bool:
-        """Return whether one persistent failure should throttle later refills.
-
-        Only a genuine write fault arms it. A cache whose writes are unavailable stores nothing
-        without failing, and throttling that would delay the refill that recovers from it.
-        """
-        return result.diagnostics.get("cache_store_failed") is True
-
-    def _schedule_missing_thread_repair(self, room_id: str, thread_id: str) -> None:
-        """Schedule bounded background repair after an append finds no snapshot.
-
-        Every replayed event in a stale thread reaches this method, so the fan-out gate is consulted
-        before a task is even created; the thread stays marked stale, so a declined repair only
-        defers the scan to the next read.
-        """
-        coordinator = self.runtime.event_cache_write_coordinator
-        if coordinator is None or not self.runtime.event_cache.durable_writes_available:
-            return
-        principal_id = self.runtime.event_cache.principal_id
-        # Claimed before the task exists. A replay burst reaches this method once per event without
-        # ever yielding, so a check that does not also claim lets every one of them add a task. The
-        # claim is held until the registry takes ownership of the thread, which covers the awaited
-        # preparation in between.
-        reservation = coordinator.reserve_speculative_thread_repair(
-            room_id,
-            thread_id,
-            coordination_scope=principal_id,
-        )
-        if reservation is None:
-            self._log_suppressed_thread_repair(room_id, thread_id, reason="already_scheduled")
-            return
-
-        async def repair() -> None:
-            try:
-                await self._fetch_thread_from_client(
-                    fetch_dispatch_thread_snapshot,
-                    room_id,
-                    thread_id,
-                    caller_label="missing_cache_live_append_repair",
-                    coordinator_queue_wait_ms=0.0,
-                    wants_full_history=False,
-                    allows_stale_fallback=False,
-                    # Speculative work is the one caller the retained delay is meant to suppress.
-                    bypass_repair_backoff=False,
-                    speculative=True,
-                    claim_token=reservation,
-                )
-            except ThreadRepairSuppressedError as exc:
-                self._log_suppressed_thread_repair(room_id, thread_id, reason=exc.reason)
-            except ThreadRepairBackoffError as exc:
-                self.logger.debug(
-                    "Thread cache repair remains in backoff",
-                    room_id=room_id,
-                    thread_id=thread_id,
-                    retry_after_seconds=exc.retry_after_seconds,
-                )
-            except Exception as exc:
-                self.logger.warning(
-                    "Background thread cache repair failed",
-                    room_id=room_id,
-                    thread_id=thread_id,
-                    error_type=type(exc).__name__,
-                    error=str(exc),
-                )
-
-        task = create_background_task(
-            repair(),
-            name="matrix_cache_schedule_missing_thread_repair",
-            owner=coordinator.background_task_owner,
-            log_exceptions=False,
-        )
-        # On the task, not in the coroutine: a task cancelled before its first instruction never
-        # runs its body at all, and a claim leaked that way would suppress this thread until the
-        # process ends, and unrelated threads once enough of them accumulate. Releasing is a no-op
-        # once the registry has taken the claim over, and the token makes it a no-op if a later
-        # wave has since claimed the same thread.
-        task.add_done_callback(
-            lambda _task: coordinator.release_speculative_thread_repair(
-                room_id,
-                thread_id,
-                coordination_scope=principal_id,
-                token=reservation,
-            ),
-        )
-
-    def _log_suppressed_thread_repair(self, room_id: str, thread_id: str, *, reason: str) -> None:
-        self.logger.debug(
-            "Speculative thread cache repair suppressed",
-            room_id=room_id,
-            thread_id=thread_id,
-            reason=reason,
+            refill=refill,
         )
 
     async def _bulk_refresh_startup_threads(
@@ -1342,14 +1050,8 @@ class MatrixConversationCache(ConversationCacheProtocol):
     async def purge_rooms(self, room_ids: Collection[str]) -> None:
         """Fence an entire authoritative leave batch before awaiting any purge."""
         departed_room_ids = tuple(dict.fromkeys(room_ids))
-        coordinator = self.runtime.event_cache_write_coordinator
         for room_id in departed_room_ids:
             self._write_cache_ops.mark_room_departed(room_id)
-            if coordinator is not None:
-                coordinator.clear_thread_repair_room(
-                    room_id,
-                    coordination_scope=self.runtime.event_cache.principal_id,
-                )
         tasks = tuple(
             self._write_cache_ops.queue_room_cache_update(
                 room_id,
@@ -1391,10 +1093,4 @@ class MatrixConversationCache(ConversationCacheProtocol):
         response: nio.SyncResponse,
     ) -> SyncCacheWriteResult:
         """Durably persist sync timeline events and report cache-certification status."""
-        coordinator = self.runtime.event_cache_write_coordinator
-        if coordinator is None or not _is_sync_replay_batch(response):
-            return await self._sync.cache_sync_timeline_for_certification(response)
-        # Replay rewrites these threads anyway, and its speculative repairs would contend for the
-        # very write path this call is blocking the sync callback on.
-        with coordinator.suppress_speculative_thread_repairs():
-            return await self._sync.cache_sync_timeline_for_certification(response)
+        return await self._sync.cache_sync_timeline_for_certification(response)

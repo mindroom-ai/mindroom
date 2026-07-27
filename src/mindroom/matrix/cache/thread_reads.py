@@ -33,7 +33,6 @@ from typing import TYPE_CHECKING
 from mindroom.constants import runtime_dispatch_thread_read_timeout_seconds
 from mindroom.matrix.cache.thread_cache_helpers import latest_visible_thread_event_id
 from mindroom.matrix.cache.thread_history_result import ThreadHistoryResult, thread_history_result
-from mindroom.matrix.cache.thread_repair import ThreadRepairBackoffError
 from mindroom.matrix.thread_diagnostics import (
     THREAD_HISTORY_DEGRADED_DIAGNOSTIC,
     THREAD_HISTORY_ERROR_DIAGNOSTIC,
@@ -51,7 +50,6 @@ if TYPE_CHECKING:
 
 
 _CACHE_COORDINATOR_TIMEOUT = "cache_coordinator_timeout"
-_CACHE_REPAIR_BACKOFF = "cache_repair_backoff"
 _DISPATCH_READ_TIMEOUT = "dispatch_read_timeout"
 
 
@@ -90,7 +88,6 @@ class _ThreadHistoryFetcher(typing.Protocol):
         *,
         caller_label: str,
         coordinator_queue_wait_ms: float,
-        bypass_repair_backoff: bool,
     ) -> typing.Awaitable[ThreadHistoryResult]:
         """Fetch one thread from cache/source and attach refresh diagnostics."""
 
@@ -157,7 +154,6 @@ class ThreadReadPolicy:
         error_code: str,
         dispatch_timeout_seconds: float,
         fetch_started: float | None = None,
-        repair_backoff_seconds: float | None = None,
     ) -> ThreadHistoryResult:
         coordinator_queue_wait_ms = elapsed_ms_since(queue_wait_started, clock=time.perf_counter)
         dispatch_fetch_wait_ms = (
@@ -173,8 +169,6 @@ class ThreadReadPolicy:
         }
         if dispatch_fetch_wait_ms is not None:
             diagnostics["dispatch_fetch_wait_ms"] = dispatch_fetch_wait_ms
-        if repair_backoff_seconds is not None:
-            diagnostics["cache_repair_backoff_seconds"] = repair_backoff_seconds
         log_fields = {
             "room_id": room_id,
             "thread_id": thread_id,
@@ -186,8 +180,6 @@ class ThreadReadPolicy:
         }
         if dispatch_fetch_wait_ms is not None:
             log_fields["dispatch_fetch_wait_ms"] = dispatch_fetch_wait_ms
-        if repair_backoff_seconds is not None:
-            log_fields["cache_repair_backoff_seconds"] = repair_backoff_seconds
         self.logger.warning(
             "matrix_cache_thread_read_degraded",
             **log_fields,
@@ -206,16 +198,14 @@ class ThreadReadPolicy:
         fetcher: _ThreadHistoryFetcher,
         caller_label: str,
         queue_wait_started: float,
-        bypass_repair_backoff: bool,
     ) -> ThreadHistoryResult:
-        """Load one read, letting untimed authoritative modes skip a retained repair delay."""
+        """Load one read and attach its coordinator queue wait."""
         coordinator_queue_wait_ms = elapsed_ms_since(queue_wait_started, clock=time.perf_counter)
         return await fetcher(
             room_id,
             thread_id,
             caller_label=caller_label,
             coordinator_queue_wait_ms=coordinator_queue_wait_ms,
-            bypass_repair_backoff=bypass_repair_backoff,
         )
 
     async def _load_dispatch_thread_read(
@@ -250,7 +240,6 @@ class ThreadReadPolicy:
                     fetcher=fetcher,
                     caller_label=caller_label,
                     queue_wait_started=queue_wait_started,
-                    bypass_repair_backoff=False,
                 ),
                 timeout=remaining_timeout,
             )
@@ -263,17 +252,6 @@ class ThreadReadPolicy:
                 error_code=_DISPATCH_READ_TIMEOUT,
                 dispatch_timeout_seconds=dispatch_timeout_seconds,
                 fetch_started=fetch_started,
-            )
-        except ThreadRepairBackoffError as exc:
-            return self._degraded_dispatch_timeout_result(
-                room_id=room_id,
-                thread_id=thread_id,
-                caller_label=caller_label,
-                queue_wait_started=queue_wait_started,
-                error_code=_CACHE_REPAIR_BACKOFF,
-                dispatch_timeout_seconds=dispatch_timeout_seconds,
-                fetch_started=fetch_started,
-                repair_backoff_seconds=exc.retry_after_seconds,
             )
 
     async def read_thread(
@@ -322,7 +300,6 @@ class ThreadReadPolicy:
             fetcher=fetcher,
             caller_label=caller_label,
             queue_wait_started=queue_wait_started,
-            bypass_repair_backoff=True,
         )
 
     async def get_latest_thread_event_id_if_needed(

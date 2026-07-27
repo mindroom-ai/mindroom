@@ -43,7 +43,7 @@ from __future__ import annotations
 import asyncio
 import time
 from collections.abc import Awaitable, Callable, Collection, Iterable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, cast
 
 import nio
@@ -120,29 +120,6 @@ type _ThreadHistoryRefill = Callable[
     [Mapping[str, str | int | float | bool] | None],
     Awaitable[ThreadHistoryResult],
 ]
-
-
-@dataclass(slots=True)
-class RetainedThreadEventSourceProvider:
-    """Late-bound retained deltas captured after the homeserver scan completes."""
-
-    get_event_sources: Callable[[], Collection[dict[str, Any]]]
-    _provided_event_ids: set[str] = field(default_factory=set, init=False)
-
-    def current_event_sources(self) -> tuple[dict[str, Any], ...]:
-        """Return current retained deltas and remember which IDs entered this snapshot."""
-        event_sources = tuple(dict(event_source) for event_source in self.get_event_sources())
-        self._provided_event_ids.update(
-            event_id
-            for event_source in event_sources
-            if isinstance((event_id := event_source.get("event_id")), str) and event_id
-        )
-        return event_sources
-
-    @property
-    def provided_event_ids(self) -> frozenset[str]:
-        """Return IDs supplied to snapshot reconstruction."""
-        return frozenset(self._provided_event_ids)
 
 
 class OpaqueEncryptedThreadHistoryError(RuntimeError):
@@ -231,7 +208,6 @@ def log_thread_history_refresh(
     for field_name in (
         "cache_store_written",
         "cache_store_failed",
-        "cache_repair_backoff_seconds",
     ):
         if field_name in diagnostics:
             log_fields[field_name] = diagnostics[field_name]
@@ -767,78 +743,7 @@ async def _fetch_thread_history_with_events(
     )
 
 
-def _merge_retained_thread_event_sources(
-    event_sources: Sequence[dict[str, Any]],
-    retained_event_sources: Collection[dict[str, Any]],
-    *,
-    thread_id: str,
-) -> tuple[list[dict[str, Any]], bool]:
-    """Merge certified concurrent deltas exactly once in canonical event order."""
-    merged_by_event_id = {
-        event_id: dict(event_source)
-        for event_source in event_sources
-        if (event_id := _event_id_from_source(event_source)) is not None
-    }
-    changed = False
-    for event_source in retained_event_sources:
-        event_id = _event_id_from_source(event_source)
-        if event_id is None or event_id in merged_by_event_id:
-            continue
-        merged_by_event_id[event_id] = dict(event_source)
-        changed = True
-    return (
-        sort_thread_event_sources_root_first(
-            list(merged_by_event_id.values()),
-            thread_id=thread_id,
-        ),
-        changed,
-    )
-
-
-async def _resolve_merged_thread_fetch_result(
-    fetch_result: _ThreadHistoryFetchResult,
-    *,
-    client: nio.AsyncClient,
-    room_id: str,
-    thread_id: str,
-    event_cache: ConversationEventCache,
-    expected_membership_epoch: int,
-    hydrate_sidecars: bool,
-    retained_event_sources: RetainedThreadEventSourceProvider | None,
-    trusted_sender_ids: Collection[str],
-) -> _ThreadHistoryFetchResult:
-    """Replay retained deltas onto a fetched snapshot before installation and delivery."""
-    merged_event_sources, changed = _merge_retained_thread_event_sources(
-        fetch_result.event_sources,
-        () if retained_event_sources is None else retained_event_sources.current_event_sources(),
-        thread_id=thread_id,
-    )
-    if not changed:
-        return fetch_result
-    resolution_started = time.perf_counter()
-    resolution = await _resolve_thread_history_from_event_sources_timed(
-        client,
-        room_id=room_id,
-        thread_id=thread_id,
-        event_sources=merged_event_sources,
-        hydrate_sidecars=hydrate_sidecars,
-        event_cache=event_cache,
-        expected_membership_epoch=expected_membership_epoch,
-        trusted_sender_ids=trusted_sender_ids,
-        register_sidecar_owners=True,
-    )
-    return _ThreadHistoryFetchResult(
-        history=resolution.messages,
-        event_sources=merged_event_sources,
-        fetch_ms=fetch_result.fetch_ms,
-        room_scan_pages=fetch_result.room_scan_pages,
-        scanned_event_count=fetch_result.scanned_event_count,
-        resolution_ms=elapsed_ms_since(resolution_started, clock=time.perf_counter),
-        sidecar_hydration_ms=resolution.sidecar_hydration_ms,
-    )
-
-
-async def _fetch_thread_repair_snapshot(
+async def _fetch_thread_snapshot(
     client: nio.AsyncClient,
     *,
     room_id: str,
@@ -846,28 +751,16 @@ async def _fetch_thread_repair_snapshot(
     event_cache: ConversationEventCache,
     membership_epoch: int,
     hydrate_sidecars: bool,
-    retained_event_sources: RetainedThreadEventSourceProvider | None,
     trusted_sender_ids: Collection[str],
 ) -> _ThreadHistoryFetchResult:
-    """Fetch and resolve one snapshot with every retained live delta."""
-    fetch_result = await _fetch_thread_history_with_events(
+    """Fetch and resolve one thread snapshot from the homeserver."""
+    return await _fetch_thread_history_with_events(
         client,
         room_id,
         thread_id,
         hydrate_sidecars=hydrate_sidecars,
         event_cache=event_cache,
         expected_membership_epoch=membership_epoch,
-        trusted_sender_ids=trusted_sender_ids,
-    )
-    return await _resolve_merged_thread_fetch_result(
-        fetch_result,
-        client=client,
-        room_id=room_id,
-        thread_id=thread_id,
-        event_cache=event_cache,
-        expected_membership_epoch=membership_epoch,
-        hydrate_sidecars=hydrate_sidecars,
-        retained_event_sources=retained_event_sources,
         trusted_sender_ids=trusted_sender_ids,
     )
 
@@ -977,7 +870,6 @@ async def refresh_thread_history_from_source(
     allow_stale_fallback: bool = True,
     cache_reject_diagnostics: Mapping[str, str | int | float | bool] | None = None,
     trusted_sender_ids: Collection[str] = (),
-    retained_event_sources: RetainedThreadEventSourceProvider | None = None,
     caller_label: str | None = None,
     coordinator_queue_wait_ms: float = 0.0,
 ) -> ThreadHistoryResult:
@@ -989,14 +881,13 @@ async def refresh_thread_history_from_source(
     fetch_started_at = time.time()
     fetch_membership_epoch = await _capture_membership_epoch(event_cache, room_id)
     try:
-        fetch_result = await _fetch_thread_repair_snapshot(
+        fetch_result = await _fetch_thread_snapshot(
             client,
             room_id=room_id,
             thread_id=thread_id,
             event_cache=event_cache,
             membership_epoch=fetch_membership_epoch,
             hydrate_sidecars=hydrate_sidecars,
-            retained_event_sources=retained_event_sources,
             trusted_sender_ids=trusted_sender_ids,
         )
     except _UnresolvedOpaqueRoomHistoryError:
@@ -1893,7 +1784,6 @@ async def enumerate_room_thread_root_ids(
 __all__ = [
     "BulkThreadRefreshStats",
     "OpaqueEncryptedThreadHistoryError",
-    "RetainedThreadEventSourceProvider",
     "RoomThreadsPageError",
     "ThreadRoomScanRootNotFoundError",
     "bulk_refresh_room_thread_histories",
