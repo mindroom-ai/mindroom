@@ -33,7 +33,6 @@ from mindroom.logging_config import get_logger
 from mindroom.matrix.cache import (
     ConversationEventCache,
     EventCacheWriteCoordinator,
-    ThreadRevision,
     thread_cache_rejection_reason,
 )
 from mindroom.matrix.cache.sqlite_event_cache import SqliteEventCache
@@ -193,7 +192,6 @@ class ObservableCacheState:
     events: tuple[tuple[str, str, str | None], ...]
     mappings: tuple[tuple[str, str, str | None], ...]
     threads: tuple[tuple[str, str, tuple[str, ...]], ...]
-    revisions: tuple[tuple[str, str, ThreadRevision | None], ...]
     invalidation_reasons: tuple[tuple[str, str, str | None, str | None], ...]
 
 
@@ -710,9 +708,7 @@ class CacheFuzzRunner:
             for thread in range(self.thread_count):
                 current_thread_id = thread_id(room, thread)
                 events = await self.cache.get_thread_events(current_room_id, current_thread_id)
-                revision = await self.cache.get_thread_revision(current_room_id, current_thread_id)
                 if events is None:
-                    assert revision is None
                     continue
                 cache_state = await self.cache.get_thread_cache_state(
                     current_room_id,
@@ -724,9 +720,6 @@ class CacheFuzzRunner:
                 timestamps = [cast("int", event["origin_server_ts"]) for event in events]
                 assert len(event_ids) == len(set(event_ids))
                 assert timestamps == sorted(timestamps)
-                assert revision is not None
-                assert revision.event_count == len(events)
-                assert revision.max_origin_server_ts == max(timestamps)
                 for event, event_id in zip(events, event_ids, strict=True):
                     assert await self.cache.get_event(current_room_id, event_id) == event
                     mapping = await self.cache.get_thread_id_for_event(current_room_id, event_id)
@@ -779,7 +772,6 @@ class CacheFuzzRunner:
                 ),
             )
         threads: list[tuple[str, str, tuple[str, ...]]] = []
-        revisions: list[tuple[str, str, ThreadRevision | None]] = []
         invalidation_reasons: list[tuple[str, str, str | None, str | None]] = []
         for room in range(self.room_count):
             current_room_id = room_id(room)
@@ -795,13 +787,6 @@ class CacheFuzzRunner:
                         else tuple(cast("str", event["event_id"]) for event in thread_events),
                     ),
                 )
-                revisions.append(
-                    (
-                        current_room_id,
-                        current_thread_id,
-                        await self.cache.get_thread_revision(current_room_id, current_thread_id),
-                    ),
-                )
                 state = await self.cache.get_thread_cache_state(current_room_id, current_thread_id)
                 invalidation_reasons.append(
                     (
@@ -815,7 +800,6 @@ class CacheFuzzRunner:
             events=tuple(events),
             mappings=tuple(mappings),
             threads=tuple(threads),
-            revisions=tuple(revisions),
             invalidation_reasons=tuple(invalidation_reasons),
         )
 

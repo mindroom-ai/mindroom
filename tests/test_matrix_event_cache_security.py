@@ -27,6 +27,7 @@ from mindroom.matrix.cache import (
 from mindroom.matrix.cache.postgres_event_cache import PostgresEventCache
 from mindroom.matrix.cache.sqlite_event_cache import SqliteEventCache
 from mindroom.matrix.cache.thread_cache_invalidation import mark_thread_stale_fail_closed
+from mindroom.matrix.cache.thread_read_window import UNBOUNDED_THREAD_READ, ThreadReadBudget
 from mindroom.matrix.message_content import resolve_event_source_content
 from mindroom.matrix.rooms import leave_non_dm_rooms
 from mindroom.matrix.sync_cache_trust import SyncCacheTrust
@@ -1438,8 +1439,13 @@ async def test_cached_sidecar_hydration_cannot_cross_principal_purge(
     release_rows = asyncio.Event()
     original_get_thread_events = reader_cache.get_thread_events
 
-    async def pause_after_read(read_room_id: str, read_thread_id: str) -> list[dict[str, Any]] | None:
-        rows = await original_get_thread_events(read_room_id, read_thread_id)
+    async def pause_after_read(
+        read_room_id: str,
+        read_thread_id: str,
+        *,
+        budget: ThreadReadBudget = UNBOUNDED_THREAD_READ,
+    ) -> list[dict[str, Any]] | None:
+        rows = await original_get_thread_events(read_room_id, read_thread_id, budget=budget)
         rows_loaded.set()
         await release_rows.wait()
         return rows

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any
@@ -367,6 +368,27 @@ def _stream_status_from_content(content: dict[str, Any] | None) -> str | None:
 type _EditCandidate = tuple[nio.RoomMessageText | nio.RoomMessageNotice, str | None]
 
 
+def _edit_candidate_rank(event: nio.RoomMessageText | nio.RoomMessageNotice) -> tuple[int, str, bool, int, str]:
+    """Return the total order that decides between replacement candidates.
+
+    Timestamp then event ID is the Matrix rule. The trailing content terms only ever apply when two
+    payloads claim the *same* event ID, which happens when one event is observed both bundled and
+    standalone and the two copies disagree. Ordering on the payload rather than on arrival keeps a
+    reconstruction from depending on which copy the scan happened to see first, and prefers the
+    copy that actually carries replacement content over an abridged one.
+    """
+    content = event.source.get("content") if isinstance(event.source, dict) else None
+    normalized_content = content if isinstance(content, dict) else {}
+    serialized_content = json.dumps(normalized_content, sort_keys=True, separators=(",", ":"))
+    return (
+        event.server_timestamp,
+        event.event_id,
+        isinstance(normalized_content.get("m.new_content"), dict),
+        len(serialized_content),
+        serialized_content,
+    )
+
+
 @dataclass(slots=True)
 class ThreadEditCandidates:
     """Replacement candidates for one reconstruction, kept per original and per sender.
@@ -393,10 +415,7 @@ class ThreadEditCandidates:
 
         by_sender = self._by_original_and_sender.setdefault(event_info.original_event_id, {})
         current = by_sender.get(event.sender)
-        if current is None or (event.server_timestamp, event.event_id) > (
-            current[0].server_timestamp,
-            current[0].event_id,
-        ):
+        if current is None or _edit_candidate_rank(event) > _edit_candidate_rank(current[0]):
             by_sender[event.sender] = (event, event_info.thread_id_from_edit)
         return True
 
@@ -416,10 +435,7 @@ class ThreadEditCandidates:
             return None
         if sender is not None:
             return by_sender.get(sender)
-        return max(
-            by_sender.values(),
-            key=lambda candidate: (candidate[0].server_timestamp, candidate[0].event_id),
-        )
+        return max(by_sender.values(), key=lambda candidate: _edit_candidate_rank(candidate[0]))
 
 
 def record_latest_thread_edit(
