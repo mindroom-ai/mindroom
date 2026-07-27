@@ -23,6 +23,7 @@ from typing import TYPE_CHECKING, Any, Protocol, cast
 import nio
 from nio.responses import RoomGetEventError
 
+from mindroom.background_tasks import create_background_task
 from mindroom.entity_resolution import current_internal_sender_ids
 from mindroom.logging_config import get_logger
 from mindroom.matrix.cache import (
@@ -61,7 +62,7 @@ from mindroom.matrix.thread_room_scan import (
 from mindroom.timing import elapsed_ms_since
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Awaitable, Callable, Collection, Mapping
+    from collections.abc import AsyncIterator, Awaitable, Callable, Collection, Coroutine, Mapping
     from contextlib import AbstractAsyncContextManager
 
     import structlog
@@ -389,6 +390,48 @@ async def _cached_room_get_event(
     return (visible_response if visible_response is not None else response), normalized_event_source
 
 
+type _ThreadRefillKey = tuple[str, str, str, bool, bool]
+
+
+@dataclass(slots=True)
+class _ThreadRefillSingleFlight:
+    """Join concurrent refills of one thread onto a single homeserver scan.
+
+    This is all that survives of the deleted repair registry: no tiering, no speculative fan-out
+    gate, no cooldown, no failure backoff. Just "one scan per thread in flight at a time", because
+    a full room scan costs seconds under load and N readers of one gapped thread would otherwise
+    each run their own.
+
+    Keyed by the caller's whole contract rather than the thread alone. A caller that asked for
+    hydrated sidecars, or that allows a stale fallback, must not be handed the result of one that
+    did not - sharing across those would return history the caller did not ask for.
+
+    Waiters ``shield`` the shared task, so a caller giving up cannot cancel the scan the others are
+    still waiting on. The task is owned so shutdown drains it rather than leaving it pending.
+    """
+
+    _owner: object
+    _in_flight: dict[_ThreadRefillKey, asyncio.Task[ThreadReadResult]] = field(default_factory=dict, init=False)
+
+    async def run(
+        self,
+        key: _ThreadRefillKey,
+        refill: Callable[[], Coroutine[Any, Any, ThreadReadResult]],
+    ) -> ThreadReadResult:
+        """Run one refill, or join the one already running for this key."""
+        in_flight = self._in_flight.get(key)
+        if in_flight is None:
+            in_flight = create_background_task(
+                refill(),
+                name="matrix_cache_thread_refill",
+                owner=self._owner,
+                log_exceptions=False,
+            )
+            self._in_flight[key] = in_flight
+            in_flight.add_done_callback(lambda _task: self._in_flight.pop(key, None))
+        return await asyncio.shield(in_flight)
+
+
 @dataclass
 class MatrixConversationCache(ConversationCacheProtocol):
     """Own Matrix conversation reads and advisory cache writes for one bot."""
@@ -399,6 +442,7 @@ class MatrixConversationCache(ConversationCacheProtocol):
         default_factory=lambda: ContextVar("mindroom_turn_event_lookup_cache", default=None),
     )
     _reads: ThreadReadPolicy = field(init=False, repr=False)
+    _refill_single_flight: _ThreadRefillSingleFlight = field(init=False, repr=False)
     _write_cache_ops: ThreadMutationCacheOps = field(init=False, repr=False)
     _outbound: ThreadOutboundWritePolicy = field(init=False, repr=False)
     _live: ThreadLiveWritePolicy = field(init=False, repr=False)
@@ -423,6 +467,7 @@ class MatrixConversationCache(ConversationCacheProtocol):
             logger_getter=lambda: self.logger,
             runtime=self.runtime,
         )
+        self._refill_single_flight = _ThreadRefillSingleFlight(_owner=self)
         self._outbound = ThreadOutboundWritePolicy(
             resolver=resolver,
             cache_ops=self._write_cache_ops,
@@ -665,29 +710,32 @@ class MatrixConversationCache(ConversationCacheProtocol):
     ) -> ThreadHistoryResult:
         """Rebuild one thread from Matrix and reinstall its snapshot.
 
-        One fetch per caller, unconditionally. There is no single-flight, no admission gate and no
-        failure backoff.
+        Single-flight, and nothing else. The admission policy that used to wrap this - interactive
+        versus speculative tiers, five suppression conditions, a fan-out budget, cooldowns and
+        capped exponential backoff - is gone, and stays gone. What is kept is the one property that
+        is about cost rather than policy: a full room scan takes seconds under load, so N readers of
+        one gapped thread join a single scan instead of running N.
 
-        Not because a refetch is cheap - this is a full homeserver room scan, and the 126 ms figure
-        quoted elsewhere in this subsystem prices a warm *cache* read, not this. The reason is that
-        the storm those gates rationed was measured at a 1.244x per-principal fan-out rather than
-        the assumed 6x, and the trust algebra that generated most of the spurious invalidations
-        feeding it is gone. Fewer refetches to storm with, so the policy layer costs more to
-        maintain than the storm costs to absorb.
-
-        Concurrent readers of one gapped thread each pay their own scan. If that ever shows up as
-        real load, the fix is single-flight keyed on (principal, room, thread) - not the tiering,
-        cooldowns and suppression conditions that were deleted with it.
+        The 126 ms figure quoted elsewhere in this subsystem prices a warm *cache* read and does not
+        apply here.
         """
-        return await refresh_thread_history_from_source(
-            self._require_client(),
-            room_id,
-            thread_id,
-            self.runtime.event_cache,
-            hydrate_sidecars=wants_full_history,
-            allow_stale_fallback=allows_stale_fallback,
-            cache_reject_diagnostics=cache_reject_diagnostics,
-            trusted_sender_ids=self._trusted_sender_ids(),
+        principal_id = self.runtime.event_cache.principal_id
+
+        async def refill() -> ThreadReadResult:
+            return await refresh_thread_history_from_source(
+                self._require_client(),
+                room_id,
+                thread_id,
+                self.runtime.event_cache,
+                hydrate_sidecars=wants_full_history,
+                allow_stale_fallback=allows_stale_fallback,
+                cache_reject_diagnostics=cache_reject_diagnostics,
+                trusted_sender_ids=self._trusted_sender_ids(),
+            )
+
+        return await self._refill_single_flight.run(
+            (principal_id, room_id, thread_id, wants_full_history, allows_stale_fallback),
+            refill,
         )
 
     async def _fetch_thread_from_client(

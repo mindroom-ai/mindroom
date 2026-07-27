@@ -7,6 +7,7 @@ import json
 import uuid
 from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING
+from unittest.mock import patch
 
 import aiosqlite
 import psycopg
@@ -826,3 +827,42 @@ async def test_sender_backfill_batches_each_page_into_one_statement(
         updates = [statement for statement in statements if statement.lstrip().startswith("UPDATE")]
         pages = -(-row_count // _SENDER_BACKFILL_PAGE_ROWS)
         assert len(updates) == pages, f"expected one UPDATE per page ({pages}), issued {len(updates)}"
+
+
+@pytest.mark.asyncio
+async def test_startup_on_current_schema_runs_no_alter_table(postgres_event_cache_url: str) -> None:
+    """A principal starting against an already-current schema must issue no ALTER TABLE.
+
+    ALTER TABLE takes ACCESS EXCLUSIVE on its target even when every clause is a no-op, and the
+    cache tables are shared by every namespace. Running the gap migration unconditionally would let
+    one starting agent stall all cache traffic for all of them, which is why the security migration
+    is version-gated and why this one has to be too.
+    """
+    async with _isolated_postgres_database(postgres_event_cache_url) as database_url:
+        namespace = f"ns_{uuid.uuid4().hex[:8]}"
+
+        first = postgres_event_cache.PostgresEventCache(database_url=database_url, namespace=namespace)
+        await first.initialize()
+        await first.close()
+
+        statements: list[str] = []
+        original_connect = psycopg.AsyncConnection.connect
+
+        async def recording_connect(*args: object, **kwargs: object) -> psycopg.AsyncConnection:
+            db = await original_connect(*args, **kwargs)
+            original_execute = db.execute
+
+            async def recording_execute(query, params=None, **execute_kwargs):  # noqa: ANN001, ANN003, ANN202
+                statements.append(str(query))
+                return await original_execute(query, params, **execute_kwargs)
+
+            db.execute = recording_execute  # type: ignore[method-assign]
+            return db
+
+        second = postgres_event_cache.PostgresEventCache(database_url=database_url, namespace=namespace)
+        with patch.object(psycopg.AsyncConnection, "connect", recording_connect):
+            await second.initialize()
+        await second.close()
+
+        altered = [statement for statement in statements if "ALTER TABLE" in statement.upper()]
+        assert not altered, f"startup on a current schema issued {len(altered)} ALTER TABLE statements: {altered}"

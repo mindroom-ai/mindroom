@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import sqlite3
@@ -2169,6 +2170,69 @@ class TestThreadHistoryCache:
         events: list[dict[str, object]],
     ) -> None:
         await _replace_thread(cache, room_id, thread_id, events)
+
+    @pytest.mark.asyncio
+    async def test_concurrent_cold_readers_of_one_thread_share_a_single_homeserver_scan(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Twenty readers of one gapped thread must produce one scan, not twenty.
+
+        A full room scan costs seconds under load, so the deleted repair layer's one property worth
+        keeping is single-flight. Without it every concurrent reader of the same thread runs its own
+        scan, which is a storm keyed on exactly the hot threads that attract concurrent readers.
+        None of the admission policy around it - tiering, cooldowns, fan-out budget, backoff - comes
+        back with it.
+        """
+        runtime_started_at = 1_000.0
+        cache = SqliteEventCache(tmp_path / "cache.db")
+        await cache.initialize()
+
+        scans_started = 0
+        release_scan = asyncio.Event()
+        first_scan_started = asyncio.Event()
+
+        async def room_messages(*_args: object, **_kwargs: object) -> nio.RoomMessagesResponse:
+            nonlocal scans_started
+            scans_started += 1
+            first_scan_started.set()
+            await release_scan.wait()
+            return nio.RoomMessagesResponse(
+                room_id="!room:localhost",
+                chunk=[],
+                start="",
+                end=None,
+            )
+
+        client = MagicMock()
+        client.room_messages = AsyncMock(side_effect=room_messages)
+        conversation_cache, coordinator = self._conversation_cache_for_runtime(
+            tmp_path=tmp_path,
+            client=client,
+            event_cache=cache,
+            runtime_started_at=runtime_started_at,
+        )
+
+        try:
+            readers = [
+                asyncio.create_task(
+                    conversation_cache.get_dispatch_thread_history("!room:localhost", "$thread_root"),
+                )
+                for _ in range(20)
+            ]
+            # Wait for a scan to actually start, then let the rest pile up behind it. Sleeping a
+            # fixed interval instead would pass vacuously if no reader reached the homeserver.
+            await asyncio.wait_for(first_scan_started.wait(), timeout=10)
+            await asyncio.sleep(0.2)
+            in_flight_scans = scans_started
+            release_scan.set()
+            await asyncio.gather(*readers, return_exceptions=True)
+        finally:
+            release_scan.set()
+            await coordinator.close()
+            await cache.close()
+
+        assert in_flight_scans == 1, f"{in_flight_scans} concurrent readers each ran their own homeserver scan"
 
     @staticmethod
     def _conversation_cache_for_runtime(

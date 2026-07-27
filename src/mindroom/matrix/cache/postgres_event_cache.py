@@ -203,6 +203,8 @@ async def _initialize_postgres_event_cache_db(
         if current_schema_version in {1, 2}:
             await _migrate_postgres_event_cache_security_schema(db)
         await _create_postgres_event_cache_schema(db)
+        if current_schema_version is not None and current_schema_version < _POSTGRES_EVENT_CACHE_SCHEMA_VERSION:
+            await _migrate_postgres_event_cache_gap_schema(db)
         await db.execute(
             "SELECT pg_advisory_xact_lock(hashtext(%s), hashtext(%s))",
             (namespace, _PRINCIPAL_NAMESPACE_LOCK_SCOPE),
@@ -402,20 +404,6 @@ async def _create_postgres_event_cache_schema(db: AsyncConnection) -> None:
         )
         """,
     )
-    # Pre-existing deployments keep their table. The trust columns are dropped rather than
-    # translated: the cache is derived from the homeserver and disposable, and the trust-version
-    # reset below empties both thread tables anyway.
-    await db.execute(
-        """
-        ALTER TABLE mindroom_event_cache_thread_state
-        ADD COLUMN IF NOT EXISTS gap_marked_at DOUBLE PRECISION,
-        ADD COLUMN IF NOT EXISTS gap_reason TEXT,
-        ADD COLUMN IF NOT EXISTS snapshot_fetch_started_at DOUBLE PRECISION,
-        DROP COLUMN IF EXISTS validated_at,
-        DROP COLUMN IF EXISTS invalidated_at,
-        DROP COLUMN IF EXISTS invalidation_reason
-        """,
-    )
     await db.execute(
         """
         CREATE TABLE IF NOT EXISTS mindroom_event_cache_room_state (
@@ -432,18 +420,6 @@ async def _create_postgres_event_cache_schema(db: AsyncConnection) -> None:
         )
         """,
     )
-    # 🔒 ``room_state`` carries the membership fence, and nothing else about trust. The old
-    # invalidation columns go; the room-scoped gap replacing them is a different question, asked
-    # only by a replacement deciding whether its fetch predates the room's newest gap.
-    await db.execute(
-        """
-        ALTER TABLE mindroom_event_cache_room_state
-        ADD COLUMN IF NOT EXISTS room_gap_marked_at DOUBLE PRECISION,
-        ADD COLUMN IF NOT EXISTS room_gap_reason TEXT,
-        DROP COLUMN IF EXISTS invalidated_at,
-        DROP COLUMN IF EXISTS invalidation_reason
-        """,
-    )
     await db.execute(
         """
         CREATE TABLE IF NOT EXISTS mindroom_event_cache_namespace_metadata (
@@ -452,6 +428,40 @@ async def _create_postgres_event_cache_schema(db: AsyncConnection) -> None:
             value TEXT NOT NULL,
             PRIMARY KEY (namespace, key)
         )
+        """,
+    )
+
+
+async def _migrate_postgres_event_cache_gap_schema(db: AsyncConnection) -> None:
+    """Swap the trust columns for gap columns on a database created before schema 5.
+
+    Gated on the schema version, never run unconditionally. ``ALTER TABLE`` takes ACCESS EXCLUSIVE
+    on the target even when every clause is a no-op, and these two tables are shared by every
+    namespace - so running them on each principal's initialization would let one starting agent
+    stall all cache traffic for all of them. That is why the security migration above is gated the
+    same way.
+
+    The trust columns are dropped rather than translated: the cache is derived from the homeserver
+    and disposable, and the thread-history version reset empties both thread tables anyway.
+    """
+    await db.execute(
+        """
+        ALTER TABLE mindroom_event_cache_thread_state
+        ADD COLUMN IF NOT EXISTS gap_marked_at DOUBLE PRECISION,
+        ADD COLUMN IF NOT EXISTS gap_reason TEXT,
+        ADD COLUMN IF NOT EXISTS snapshot_fetch_started_at DOUBLE PRECISION,
+        DROP COLUMN IF EXISTS validated_at,
+        DROP COLUMN IF EXISTS invalidated_at,
+        DROP COLUMN IF EXISTS invalidation_reason
+        """,
+    )
+    await db.execute(
+        """
+        ALTER TABLE mindroom_event_cache_room_state
+        ADD COLUMN IF NOT EXISTS room_gap_marked_at DOUBLE PRECISION,
+        ADD COLUMN IF NOT EXISTS room_gap_reason TEXT,
+        DROP COLUMN IF EXISTS invalidated_at,
+        DROP COLUMN IF EXISTS invalidation_reason
         """,
     )
 
