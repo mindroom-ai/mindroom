@@ -75,10 +75,16 @@ if TYPE_CHECKING:
 #
 # Measured in production 2026-07-27: edits are 53% of all event rows, 6.30 per edited original,
 # max 170 on one original, and one thread is 94.5% edits. Threads themselves are small - p50 9
-# rows, max 538 - so this is a correctness and write-amplification story, not a read-latency
-# one: the slowest production thread read measured 126.6 ms warm, which was never the problem
-# an earlier revision of this comment claimed it was. The 2,021-row figure quoted here before
-# was this repository's synthetic fixture (20 messages x 100 edits), not a production thread.
+# rows, max 538.
+#
+# So be precise about what this buys, because two earlier revisions of this comment were not. It
+# does not reduce writes - it is a read-side query, and every edit is still stored. It does not
+# change what the fold produces either; the fold already picked one edit per message. What it buys
+# is fewer rows off disk and over the wire, and less fold work, on a median thread of nine rows -
+# paid for with a window function and four joins on every read. The correctness fixes that came
+# with it are the substantial part. The slowest production read measured 126.6 ms warm, so no
+# speedup is claimed, and the 2,021-row thread quoted here before was this repository's synthetic
+# fixture (20 messages x 100 edits), not production.
 #
 # The root fix is upstream of this query: prune superseded edits at write time and there is nothing
 # to collapse. Retention is deliberate rather than accidental, so that is a trade - redacting the
@@ -225,12 +231,21 @@ async def load_thread_event_ids(
     second reports every superseded edit as missing. A retained delta for such an edit can then
     never reconcile, so the read invalidates the thread it just served - on the paths where an
     append does not converge and its delta is deliberately kept.
+
+    Joined to ``events`` rather than reading membership alone: a membership row whose payload is
+    gone is not durably present, and reporting it as present would suppress a refill that should
+    happen. That join is also what the pre-collapse code did implicitly, since it derived these IDs
+    from a read that required the payload.
     """
     cursor = await db.execute(
         """
-        SELECT event_id
+        SELECT thread_events.event_id
         FROM thread_events
-        WHERE principal_id = ? AND room_id = ? AND thread_id = ?
+        JOIN events
+            ON events.principal_id = thread_events.principal_id
+            AND events.room_id = thread_events.room_id
+            AND events.event_id = thread_events.event_id
+        WHERE thread_events.principal_id = ? AND thread_events.room_id = ? AND thread_events.thread_id = ?
         """,
         (principal_id, room_id, thread_id),
     )

@@ -24,32 +24,43 @@ class _PostgresSchemaMigrationResult:
     normalized_legacy_thread_payload_rows: int
 
 
-_SENDER_BACKFILL_MARKER_PREFIX = "sender_backfilled:"
+_SENDER_BACKFILL_MARKER_KEY = "sender_backfilled"
 
 
 async def _backfill_collapsed_read_columns(db: AsyncConnection, *, namespace: str) -> None:
     """Populate the sender column a collapsed read needs on one namespace's pre-existing rows.
 
-    Gated on a per-namespace marker, not on ``schema_version``. That version lives in
+    Gated on a per-namespace marker rather than on ``schema_version``. That version lives in
     ``mindroom_event_cache_metadata``, which is keyed by ``key`` alone and is therefore global to
     the database, while every Matrix principal owns its own namespace and initializes separately.
     Gating on the shared version would let the first principal to start backfill its own rows,
     write the new version, and leave every other principal's rows behind forever.
 
-    Running it unconditionally instead is not free, which an earlier revision of this docstring
-    claimed: no index covers ``sender``, so the "no-op" is a bitmap heap scan of every row in the
-    namespace, on every initialization, inside the advisory-lock transaction that serializes other
-    principals' startup - measured at 13.7 ms per 50,000-row namespace and linear from there. It
-    also rewrites any row whose payload genuinely carries no sender, every single time, because
-    such a row can never leave the '' default. The marker makes the second run an indexed lookup
-    of one metadata key.
+    Running unconditionally instead is not free: no index covers ``sender``, so it is a heap scan
+    of every row in the namespace on every initialization, inside the advisory-lock transaction
+    that serializes other principals' startup - 13.7 ms per 50,000 rows and linear from there. It
+    also rewrites every row whose payload genuinely carries no sender, forever, because such a row
+    can never leave the '' default.
+
+    The marker costs the self-healing property an unconditional backfill would have, which is
+    acceptable here rather than merely convenient: a row can only reach '' after the marker if a
+    writer omits the sender, and the sole INSERT supplies it from ``SerializedCachedEvent.sender``.
+    That yields '' only for a payload with no string sender - exactly the rows the backfill
+    expression cannot recover either. Supported deployments are single-replica ``Recreate``, so
+    there is no mixed-version writer, and an older build refuses to start against schema 4 rather
+    than writing behind the marker.
 
     A ``sender`` at its '' default makes every event look like it came from the same account, so a
-    collapsed read can no longer tell an author's own edit from someone else's and lets a foreign
-    replacement win. That is a wrong message body, not a slow query.
+    collapsed read can no longer tell an author's own edit from someone else's. The message then
+    renders at its pre-edit body - the fold refuses the foreign edit, so this is a wrong body
+    rather than an impersonation.
     """
-    marker_key = f"{_SENDER_BACKFILL_MARKER_PREFIX}{namespace}"
-    if await fetchone(db, "SELECT 1 FROM mindroom_event_cache_metadata WHERE key = %s", (marker_key,)) is not None:
+    marked = await fetchone(
+        db,
+        "SELECT 1 FROM mindroom_event_cache_namespace_metadata WHERE namespace = %s AND key = %s",
+        (namespace, _SENDER_BACKFILL_MARKER_KEY),
+    )
+    if marked is not None:
         return
     await db.execute(
         """
@@ -61,11 +72,11 @@ async def _backfill_collapsed_read_columns(db: AsyncConnection, *, namespace: st
     )
     await db.execute(
         """
-        INSERT INTO mindroom_event_cache_metadata(key, value)
-        VALUES (%s, 'done')
-        ON CONFLICT(key) DO NOTHING
+        INSERT INTO mindroom_event_cache_namespace_metadata(namespace, key, value)
+        VALUES (%s, %s, 'done')
+        ON CONFLICT(namespace, key) DO NOTHING
         """,
-        (marker_key,),
+        (namespace, _SENDER_BACKFILL_MARKER_KEY),
     )
 
 

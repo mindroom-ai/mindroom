@@ -46,10 +46,16 @@ if TYPE_CHECKING:
 #
 # Measured in production 2026-07-27: edits are 53% of all event rows, 6.30 per edited original,
 # max 170 on one original, and one thread is 94.5% edits. Threads themselves are small - p50 9
-# rows, max 538 - so this is a correctness and write-amplification story, not a read-latency
-# one: the slowest production thread read measured 126.6 ms warm, which was never the problem
-# an earlier revision of this comment claimed it was. The 2,021-row figure quoted here before
-# was this repository's synthetic fixture (20 messages x 100 edits), not a production thread.
+# rows, max 538.
+#
+# So be precise about what this buys, because two earlier revisions of this comment were not. It
+# does not reduce writes - it is a read-side query, and every edit is still stored. It does not
+# change what the fold produces either; the fold already picked one edit per message. What it buys
+# is fewer rows off disk and over the wire, and less fold work, on a median thread of nine rows -
+# paid for with a window function and four joins on every read. The correctness fixes that came
+# with it are the substantial part. The slowest production read measured 126.6 ms warm, so no
+# speedup is claimed, and the 2,021-row thread quoted here before was this repository's synthetic
+# fixture (20 messages x 100 edits), not production.
 #
 # Why the root fix is a write-time prune, and what it would have to preserve, is recorded once in
 # sqlite_event_cache_threads.py rather than duplicated here.
@@ -97,8 +103,19 @@ if TYPE_CHECKING:
 # ships a different surviving edit than SQLite does for the same two edits sharing a timestamp -
 # and the fold applies whichever single edit it is handed, so the message renders differently per
 # backend. Matrix v4+ event IDs are mixed-case base64url, the input where the two orders diverge
-# most. CI cannot catch this: the fixture pins postgres:15-alpine, and musl collations behave
-# like C.
+# most.
+#
+# It is nearly free, not free. A different collation is a different OID, so this ORDER BY no
+# longer matches idx_..._event_edits_room_original_ts and the plan gains an Incremental Sort
+# above it - on a C-collation database too, since "C" (950) is not the default OID (100) even
+# when datcollate is C. The presorted prefix survives, so the residual sort covers one
+# (original, timestamp) group, which is a single row outside the tie this exists to fix.
+# Measured end to end on a 540-row 94%-edit thread: 11.8 ms with, 10.7 ms without.
+#
+# The behavioural divergence is invisible to CI: the fixture pins postgres:15-alpine and musl
+# has no real locale support, so every libc collation there behaves like C and a seeded read
+# cannot fail whether or not this pin is present. test_edit_ranking_is_scoped_to_this_thread
+# _and_this_sender therefore asserts the pin structurally, which is what can actually fail.
 _SURVIVING_EDITS_CTE = """
 WITH surviving_edits AS MATERIALIZED (
     SELECT edit_event_id
@@ -194,13 +211,22 @@ async def load_thread_event_ids(
     second reports every superseded edit as missing. A retained delta for such an edit can then
     never reconcile, so the read invalidates the thread it just served - on the paths where an
     append does not converge and its delta is deliberately kept.
+
+    Joined to ``events`` rather than reading membership alone: a membership row whose payload is
+    gone is not durably present, and reporting it as present would suppress a refill that should
+    happen. That join is also what the pre-collapse code did implicitly, since it derived these IDs
+    from a read that required the payload.
     """
     rows = await fetchall(
         db,
         """
-        SELECT event_id
-        FROM mindroom_event_cache_thread_events
-        WHERE namespace = %s AND room_id = %s AND thread_id = %s
+        SELECT thread_events.event_id
+        FROM mindroom_event_cache_thread_events AS thread_events
+        JOIN mindroom_event_cache_events AS events
+            ON events.namespace = thread_events.namespace
+            AND events.room_id = thread_events.room_id
+            AND events.event_id = thread_events.event_id
+        WHERE thread_events.namespace = %s AND thread_events.room_id = %s AND thread_events.thread_id = %s
         """,
         (namespace, room_id, thread_id),
     )

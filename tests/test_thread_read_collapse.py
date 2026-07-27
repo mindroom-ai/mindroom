@@ -427,6 +427,14 @@ def test_edit_ranking_is_scoped_to_this_thread_and_this_sender() -> None:
         assert "sender" in sql, "edit ranking does not compare senders"
         assert "edit_membership.thread_id = " in sql, "edit ranking is not scoped to this thread"
 
+    # Structural, deliberately, and the only guard available. The behavioural divergence needs a
+    # collation where 'a' sorts before 'B'; the CI fixture pins postgres:15-alpine and musl has no
+    # real locale support, so every libc collation there behaves like C and a seeded read cannot
+    # fail whether or not the pin is present. This assertion fails wherever the pin is deleted.
+    assert 'edit_event_id COLLATE "C" DESC' in postgres_event_cache_threads._THREAD_EVENTS_SQL, (
+        "the Postgres tie-break is back on the database default collation"
+    )
+
 
 class TestEditsWhoseOriginalWasNeverCached:
     """An edit can outlive the message it replaces, and collapsing must not delete it.

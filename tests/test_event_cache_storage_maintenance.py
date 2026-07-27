@@ -411,6 +411,65 @@ async def test_postgres_version_1_migration_is_namespace_safe_and_repairs_orphan
 
 
 @pytest.mark.asyncio
+async def test_sender_backfill_skips_a_namespace_it_already_completed(
+    postgres_event_cache_url: str,
+) -> None:
+    """The second start does not rescan, which is the whole point of the marker.
+
+    Nothing indexes ``sender``, so an ungated backfill is a heap scan of the namespace on every
+    initialization inside the advisory-lock transaction that serializes other principals' startup,
+    and it rewrites every payload that genuinely carries no sender forever. Asserted by behaviour
+    rather than timing: a row forced back to '' after the marker exists survives the next start,
+    which can only happen if the statement did not run.
+    """
+    namespace = f"tenant_{uuid.uuid4().hex}"
+    async with _isolated_postgres_database(postgres_event_cache_url) as database_url:
+        first = PostgresEventCache(database_url=database_url, namespace=namespace)
+        await first.initialize()
+        await first.close()
+
+        setup = await psycopg.AsyncConnection.connect(database_url)
+        try:
+            await setup.execute(
+                """
+                INSERT INTO mindroom_event_cache_events(
+                    namespace, event_id, room_id, origin_server_ts, event_json, sender, cached_at
+                )
+                VALUES (%s, %s, %s, %s, %s, '', 0)
+                """,
+                (namespace, "$after_marker", _ROOM_ID, 1000, '{"event_id":"$after_marker","sender":"@a:localhost"}'),
+            )
+            await setup.commit()
+        finally:
+            await setup.close()
+
+        second = PostgresEventCache(database_url=database_url, namespace=namespace)
+        await second.initialize()
+        await second.close()
+
+        check = await psycopg.AsyncConnection.connect(database_url)
+        try:
+            cursor = await check.execute(
+                "SELECT sender FROM mindroom_event_cache_events WHERE namespace = %s AND event_id = %s",
+                (namespace, "$after_marker"),
+            )
+            assert await cursor.fetchone() == ("",), "the namespace was rescanned despite its completion marker"
+            await cursor.close()
+
+            cursor = await check.execute(
+                """
+                SELECT value FROM mindroom_event_cache_namespace_metadata
+                WHERE namespace = %s AND key = 'sender_backfilled'
+                """,
+                (namespace,),
+            )
+            assert await cursor.fetchone() == ("done",), "the marker is not namespace-scoped"
+            await cursor.close()
+        finally:
+            await check.close()
+
+
+@pytest.mark.asyncio
 async def test_postgres_current_version_maintenance_avoids_exclusive_schema_lock(
     postgres_event_cache_url: str,
 ) -> None:
