@@ -6,7 +6,7 @@ from typing import Any
 
 import pytest
 
-from mindroom.matrix.cache import ConversationEventCache, ThreadAppendOutcome
+from mindroom.matrix.cache import ConversationEventCache, ThreadAppendOutcome, thread_cache_rejection_reason
 from tests.event_cache_test_support import replace_thread_unconditionally
 
 
@@ -433,6 +433,35 @@ class TestConversationEventCacheContract:
         assert await event_cache.has_thread_snapshot(room_id, cached_thread_id) is False
         await event_cache.mark_thread_gap(room_id, cold_thread_id, reason="live_thread_mutation")
         assert await event_cache.has_thread_snapshot(room_id, cold_thread_id) is False
+
+    @pytest.mark.asyncio
+    async def test_an_unreadable_gap_marker_refuses_the_snapshot(
+        self,
+        event_cache: ConversationEventCache,
+    ) -> None:
+        """Not knowing whether a gap exists must reject the snapshot, not serve it.
+
+        "No gap recorded" and "could not find out" are opposite answers, and a backend that returns
+        the same value for both makes an unreadable marker read as a clean thread. The trust algebra
+        failed closed here - a missing state row rejected with ``no_cache_state`` - so the gap rework
+        has to as well, or a marker written during SQLite write contention is invisible to the very
+        next read and the stale snapshot is served as complete.
+        """
+        room_id = "!unreadable:localhost"
+        thread_id = "$thread:localhost"
+        await replace_thread_unconditionally(
+            event_cache,
+            room_id,
+            thread_id,
+            [_message_event(thread_id, 1)],
+        )
+        assert await event_cache.get_thread_cache_gap(room_id, thread_id) is None
+
+        event_cache.disable("contract_test_unreadable_gap")
+
+        gap = await event_cache.get_thread_cache_gap(room_id, thread_id)
+        assert gap is not None, "an unreadable gap marker read as a clean thread"
+        assert thread_cache_rejection_reason(gap) == "cache_gap_read_unavailable"
 
     @pytest.mark.asyncio
     async def test_older_fetch_cannot_bury_a_newer_snapshot(

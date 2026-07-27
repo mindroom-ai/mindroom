@@ -178,13 +178,12 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
                 update_coro_factory: Callable[[], Coroutine[Any, Any, object]],
                 *,
                 name: str,
-                log_exceptions: bool = True,
                 emit_timing: bool = True,
                 coalesce_key: tuple[str, str] | None = None,
                 coalesce_log_context: dict[str, object] | None = None,
                 coordination_scope: str | None = None,
             ) -> asyncio.Task[object]:
-                del room_id, name, log_exceptions, coalesce_key, coalesce_log_context, coordination_scope
+                del room_id, name, coalesce_key, coalesce_log_context, coordination_scope
                 observed_emit_timing.append(emit_timing)
                 return asyncio.create_task(update_coro_factory())
 
@@ -211,13 +210,12 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
                 update_coro_factory: Callable[[], Coroutine[Any, Any, object]],
                 *,
                 name: str,
-                log_exceptions: bool = True,
                 emit_timing: object = "missing",
                 coalesce_key: object = "missing",
                 coalesce_log_context: object = "missing",
                 coordination_scope: object = "missing",
             ) -> asyncio.Task[object]:
-                del room_id, thread_id, name, log_exceptions
+                del room_id, thread_id, name
                 observed_options.append((emit_timing, coalesce_key, coalesce_log_context, coordination_scope))
                 return asyncio.create_task(update_coro_factory())
 
@@ -1110,13 +1108,12 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
                 update_coro_factory: Callable[[], Coroutine[Any, Any, object]],
                 *,
                 name: str,
-                log_exceptions: bool = True,
                 emit_timing: bool = False,
                 coalesce_key: tuple[str, str] | None = None,
                 coalesce_log_context: dict[str, object] | None = None,
                 coordination_scope: str | None = None,
             ) -> asyncio.Task[object]:
-                del room_id, name, log_exceptions, emit_timing, coalesce_key, coalesce_log_context, coordination_scope
+                del room_id, name, emit_timing, coalesce_key, coalesce_log_context, coordination_scope
                 return asyncio.create_task(update_coro_factory())
 
             def queue_thread_update(
@@ -1126,7 +1123,6 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
                 update_coro_factory: Callable[[], Coroutine[Any, Any, object]],
                 *,
                 name: str,
-                log_exceptions: bool = True,
                 emit_timing: bool = False,
                 coalesce_key: tuple[str, str] | None = None,
                 coalesce_log_context: dict[str, object] | None = None,
@@ -1137,7 +1133,6 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
                     room_id,
                     update_coro_factory,
                     name=name,
-                    log_exceptions=log_exceptions,
                     emit_timing=emit_timing,
                     coalesce_key=coalesce_key,
                     coalesce_log_context=coalesce_log_context,
@@ -1747,112 +1742,6 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             )
 
     @pytest.mark.asyncio
-    async def test_queue_thread_update_preserves_same_thread_order_across_ignored_cancelled_room_fence(  # noqa: PLR0915
-        self,
-    ) -> None:
-        """Ignoring a cancelled room fence must not let a later same-thread update jump the queue."""
-        blocker_started = asyncio.Event()
-        release_blocker = asyncio.Event()
-        first_target_started = asyncio.Event()
-        release_first_target = asyncio.Event()
-        second_target_started = asyncio.Event()
-        release_second_target = asyncio.Event()
-        coordinator = _runtime_write_coordinator()
-        run_order: list[str] = []
-
-        async def blocking_other_thread() -> None:
-            blocker_started.set()
-            await release_blocker.wait()
-
-        async def first_target_update() -> str:
-            run_order.append("first")
-            first_target_started.set()
-            await release_first_target.wait()
-            return "first"
-
-        async def second_target_update() -> str:
-            run_order.append("second")
-            second_target_started.set()
-            await release_second_target.wait()
-            return "second"
-
-        async def cancelled_room_update() -> None:
-            msg = "Cancelled room cache update should not start"
-            raise AssertionError(msg)
-
-        blocker_task = coordinator.queue_thread_update(
-            "!test:localhost",
-            "$other-thread:localhost",
-            blocking_other_thread,
-            name="matrix_cache_blocking_other_thread_update",
-            coordination_scope="test-principal",
-        )
-        await asyncio.wait_for(blocker_started.wait(), timeout=1.0)
-
-        cancelled_room_task = coordinator.queue_room_update(
-            "!test:localhost",
-            cancelled_room_update,
-            name="matrix_cache_cancelled_room_update",
-            coordination_scope="test-principal",
-        )
-        first_target_task = coordinator.queue_thread_update(
-            "!test:localhost",
-            "$target-thread:localhost",
-            first_target_update,
-            name="matrix_cache_first_target_thread_update",
-            log_exceptions=False,
-            coordination_scope="test-principal",
-        )
-        second_target_task = coordinator.queue_thread_update(
-            "!test:localhost",
-            "$target-thread:localhost",
-            second_target_update,
-            name="matrix_cache_second_target_thread_update",
-            log_exceptions=False,
-            coordination_scope="test-principal",
-            ignore_cancelled_room_fences=True,
-        )
-
-        try:
-            cancelled_room_task.cancel()
-            await asyncio.gather(cancelled_room_task, return_exceptions=True)
-
-            with pytest.raises(asyncio.TimeoutError):
-                await asyncio.wait_for(second_target_started.wait(), timeout=0.1)
-            assert first_target_started.is_set() is False
-
-            release_blocker.set()
-            await asyncio.wait_for(first_target_started.wait(), timeout=1.0)
-            assert run_order == ["first"]
-
-            with pytest.raises(asyncio.TimeoutError):
-                await asyncio.wait_for(second_target_started.wait(), timeout=0.1)
-
-            release_first_target.set()
-            await asyncio.wait_for(second_target_started.wait(), timeout=1.0)
-            release_second_target.set()
-            assert await asyncio.wait_for(first_target_task, timeout=1.0) == "first"
-            assert await asyncio.wait_for(second_target_task, timeout=1.0) == "second"
-            assert run_order == ["first", "second"]
-        finally:
-            release_blocker.set()
-            release_first_target.set()
-            release_second_target.set()
-            if not cancelled_room_task.done():
-                cancelled_room_task.cancel()
-            await asyncio.wait_for(
-                asyncio.gather(
-                    blocker_task,
-                    first_target_task,
-                    second_target_task,
-                    cancelled_room_task,
-                    return_exceptions=True,
-                ),
-                timeout=1.0,
-            )
-            await _wait_for_room_cache_idle(coordinator)
-
-    @pytest.mark.asyncio
     async def test_get_thread_history_ignores_cancelled_room_fence_for_unrelated_thread(self) -> None:
         """Public thread-history reads should bypass cancelled room fences without waiting for other threads."""
         first_thread_started = asyncio.Event()
@@ -2242,29 +2131,3 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
                 ),
                 timeout=1.0,
             )
-
-    @pytest.mark.asyncio
-    async def test_run_room_update_does_not_log_handled_exception_as_background_failure(self) -> None:
-        """Awaited room updates should not be logged as unhandled background task failures."""
-        owner = object()
-        coordinator = EventCacheWriteCoordinator(
-            logger=MagicMock(),
-            background_task_owner=owner,
-        )
-
-        async def failing_update() -> None:
-            msg = "boom"
-            raise RuntimeError(msg)
-
-        with patch("mindroom.background_tasks.logger.exception") as background_logger_exception:
-            with pytest.raises(RuntimeError, match="boom"):
-                await coordinator.queue_room_update(
-                    "!test:localhost",
-                    lambda: failing_update(),
-                    name="matrix_cache_test_failure",
-                    coordination_scope="test-principal",
-                    log_exceptions=False,
-                )
-            await asyncio.sleep(0)
-
-        background_logger_exception.assert_not_called()

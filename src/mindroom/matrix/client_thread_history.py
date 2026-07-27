@@ -742,28 +742,6 @@ async def _fetch_thread_history_with_events(
     )
 
 
-async def _fetch_thread_snapshot(
-    client: nio.AsyncClient,
-    *,
-    room_id: str,
-    thread_id: str,
-    event_cache: ConversationEventCache,
-    membership_epoch: int,
-    hydrate_sidecars: bool,
-    trusted_sender_ids: Collection[str],
-) -> _ThreadHistoryFetchResult:
-    """Fetch and resolve one thread snapshot from the homeserver."""
-    return await _fetch_thread_history_with_events(
-        client,
-        room_id,
-        thread_id,
-        hydrate_sidecars=hydrate_sidecars,
-        event_cache=event_cache,
-        expected_membership_epoch=membership_epoch,
-        trusted_sender_ids=trusted_sender_ids,
-    )
-
-
 async def _reject_opaque_thread_snapshot(
     event_cache: ConversationEventCache,
     *,
@@ -880,13 +858,13 @@ async def refresh_thread_history_from_source(
     fetch_started_at = time.time()
     fetch_membership_epoch = await _capture_membership_epoch(event_cache, room_id)
     try:
-        fetch_result = await _fetch_thread_snapshot(
+        fetch_result = await _fetch_thread_history_with_events(
             client,
-            room_id=room_id,
-            thread_id=thread_id,
-            event_cache=event_cache,
-            membership_epoch=fetch_membership_epoch,
+            room_id,
+            thread_id,
             hydrate_sidecars=hydrate_sidecars,
+            event_cache=event_cache,
+            expected_membership_epoch=fetch_membership_epoch,
             trusted_sender_ids=trusted_sender_ids,
         )
     except _UnresolvedOpaqueRoomHistoryError:

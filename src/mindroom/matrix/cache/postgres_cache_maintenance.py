@@ -379,6 +379,19 @@ async def _collect_maintenance_report(
             """,
             (namespace,),
         ),
+        # A room gap that is wrongly advanced puts every thread in that room into permanent
+        # refetch, because each replacement copies the uncovered marker onto the snapshot it just
+        # installed. Nothing else would show it: the per-thread count above cannot distinguish a
+        # room fan-out from ordinary churn.
+        room_gap_markers=await _count(
+            db,
+            """
+            SELECT COUNT(*)
+            FROM mindroom_event_cache_room_state
+            WHERE namespace = %s AND room_gap_marked_at IS NOT NULL
+            """,
+            (namespace,),
+        ),
         orphan_edit_indexes_after=await _orphan_edit_index_count(db, namespace=namespace),
         orphan_thread_indexes_after=await orphan_thread_index_count(db, namespace=namespace),
         repaired_edit_indexes=repaired_counts[0],

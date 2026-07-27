@@ -144,7 +144,7 @@ async def test_mutation_on_a_snapshotless_thread_reports_it_distinctly(cache: Co
     ("mark", "reason"),
     [
         pytest.param("thread", "sync_thread_mutation", id="thread_marker_from_a_mutation"),
-        pytest.param("thread", "retained_thread_delta_missing", id="thread_marker_from_a_lost_delta"),
+        pytest.param("thread", "thread_history_opaque_encrypted_event", id="thread_marker_from_opaque_history"),
         pytest.param("room", "limited_sync_timeline", id="room_scoped_marker"),
     ],
 )

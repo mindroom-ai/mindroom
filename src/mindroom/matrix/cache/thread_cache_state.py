@@ -65,6 +65,21 @@ class ThreadCacheGap:
     gap_reason: str | None
 
 
+# What a backend returns when it cannot answer whether this thread carries a gap - a disabled cache,
+# a departed room, or a SQLite reader that lost the database to a writer.
+#
+# It is a gap, not ``None``, and that is the whole point. "No gap recorded" and "could not find out"
+# are opposite answers, and collapsing them into ``None`` makes an unreadable marker mean the
+# snapshot is clean. The trust algebra failed closed here - a missing state row rejected the read
+# with ``no_cache_state`` - and the gap rework has to keep failing closed or a thread stays readable
+# through exactly the contention that was trying to mark it.
+#
+# ``gap_marked_at`` is 0.0 because this marker is never ordered against a fetch: it is not durable,
+# it never reaches ``_clear_thread_gap_covered_by_fetch``, and the only consumer is the read that
+# refuses the snapshot on the spot.
+CACHE_GAP_UNAVAILABLE = ThreadCacheGap(gap_marked_at=0.0, gap_reason="cache_gap_read_unavailable")
+
+
 def thread_cache_gap_row(values: Sequence[float | str | None] | None) -> ThreadCacheGap | None:
     """Normalize one backend storage row into a backend-neutral gap marker."""
     if values is None:

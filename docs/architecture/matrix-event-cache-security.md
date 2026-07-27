@@ -72,7 +72,7 @@ An authoritative rejoin also recovers a durable departed row after process resta
 If it observes a newer local departure inside the rejoin transaction, it purges the room and restores durable departed state before commit.
 Generic thread invalidation preserves the room-state row, so it cannot erase the cross-process membership fence.
 
-Per-turn event and thread memoization includes the runtime departure epoch in every key, so active turns cannot replay pre-leave cached content.
+Per-turn event memoization includes the runtime departure epoch in every key, so active turns cannot replay pre-leave cached content; thread reads are no longer memoized at all, so there is nothing for a turn to replay.
 
 Principal-scoped safety disables affect only that bot's SQLite or PostgreSQL view, while root-owned shared-service disables still stop every current and future principal.
 

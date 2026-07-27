@@ -59,6 +59,11 @@ def _required_int(value: dict[str, object], key: str) -> int:
     return field
 
 
+# Comfortably before any wall clock this run will observe, so a stale replacement is unambiguously
+# older than every snapshot and marker the trace produces.
+_STALE_FETCH_STARTED_AT = 1_000_000.0
+
+
 class OperationKind(StrEnum):
     """One mutation family understood by the cache fuzzer."""
 
@@ -70,6 +75,7 @@ class OperationKind(StrEnum):
     REDACTION = "redaction"
     CIPHERTEXT_REPLAY = "ciphertext_replay"
     REPLACE_THREAD = "replace_thread"
+    STALE_REPLACE_THREAD = "stale_replace_thread"
     INVALIDATE_THREAD = "invalidate_thread"
     MARK_THREAD_STALE = "mark_thread_gap"
     MARK_ROOM_STALE = "mark_room_stale"
@@ -573,6 +579,7 @@ class CacheFuzzRunner:
             OperationKind.REDACTION: self._apply_redaction,
             OperationKind.CIPHERTEXT_REPLAY: self._apply_source_operation,
             OperationKind.REPLACE_THREAD: self._apply_thread_replacement,
+            OperationKind.STALE_REPLACE_THREAD: self._apply_stale_thread_replacement,
             OperationKind.INVALIDATE_THREAD: self._apply_thread_invalidation,
             OperationKind.MARK_THREAD_STALE: self._apply_thread_stale_marker,
             OperationKind.MARK_ROOM_STALE: self._apply_room_stale_marker,
@@ -608,7 +615,23 @@ class CacheFuzzRunner:
         self.redacted_ids.add((current_room_id, target_id))
         await self._apply_sync(operation.room, [_redaction_event(operation)])
 
-    async def _apply_thread_replacement(self, operation: FuzzOperation) -> None:
+    async def _apply_stale_thread_replacement(self, operation: FuzzOperation) -> None:
+        """Replay one replacement whose fetch began before everything already stored.
+
+        Replacement ordering and the room-scoped gap watermark are the two mechanisms that replaced
+        the trust algebra, and neither is exercised by a replacement that always claims to have
+        started just now. A fetch stamped in the past must lose to any installed snapshot and must
+        not clear a marker written after it began - identically on both backends, which is what the
+        differential comparison of ``threads`` and ``gap_reasons`` checks.
+        """
+        await self._apply_thread_replacement(operation, fetch_started_at=_STALE_FETCH_STARTED_AT)
+
+    async def _apply_thread_replacement(
+        self,
+        operation: FuzzOperation,
+        *,
+        fetch_started_at: float | None = None,
+    ) -> None:
         current_room_id = room_id(operation.room)
         current_thread_id = thread_id(operation.room, operation.thread)
         upper_slot = operation.variant % 6
@@ -638,7 +661,7 @@ class CacheFuzzRunner:
             current_thread_id,
             sources,
             expected_membership_epoch=membership_epoch,
-            fetch_started_at=time.time(),
+            fetch_started_at=time.time() if fetch_started_at is None else fetch_started_at,
         )
 
     async def _apply_thread_invalidation(self, operation: FuzzOperation) -> None:
@@ -867,6 +890,7 @@ _WEIGHTED_KINDS = (
     OperationKind.REDACTION,
     OperationKind.CIPHERTEXT_REPLAY,
     OperationKind.REPLACE_THREAD,
+    OperationKind.STALE_REPLACE_THREAD,
     OperationKind.INVALIDATE_THREAD,
     OperationKind.MARK_THREAD_STALE,
     OperationKind.MARK_ROOM_STALE,

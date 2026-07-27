@@ -11,9 +11,9 @@ All ordering is scoped to one ``(principal, room)`` lane.
    one lane and thread, and never start while a room update queued ahead of them is pending or active.
 
 3. A room update cancelled before it started leaves a fence in its lane: later thread updates still wait
-   for the earlier queue segment to drain, so cancellation cannot reorder writes.
-   Read-style waiters opt out via ``ignore_cancelled_room_fences``: they extend no queued state, so
-   letting them past a fence cannot reorder any write.
+   for the earlier queue segment to drain, so cancellation cannot reorder writes. No queued update can
+   opt out. Only ``wait_for_thread_idle`` may, via ``ignore_cancelled_room_fences``, because a waiter
+   extends no queued state, so letting it past a fence cannot reorder any write.
 
 4. Readers establish the write-read barrier with ``wait_for_thread_idle``: a thread read started after a
    mutation was queued in the same lane never observes cache state older than that mutation.
@@ -61,7 +61,6 @@ class _QueuedUpdate:
     start_signal: asyncio.Future[None]
     update_state: _QueuedUpdateState
     thread_id: str | None = None
-    ignore_cancelled_room_fences: bool = False
     coalesce_key: _CoalesceKey | None = None
     started: bool = False
 
@@ -231,10 +230,9 @@ class EventCacheWriteCoordinator:
             return True, cancelled_room_fence_pending
 
         assert entry.thread_id is not None
-        cancelled_room_fence_blocks_entry = cancelled_room_fence_pending and not entry.ignore_cancelled_room_fences
         if (
             room_barrier_pending
-            or cancelled_room_fence_blocks_entry
+            or cancelled_room_fence_pending
             or same_thread_predecessor_pending
             or state.active_room is not None
         ):
@@ -408,9 +406,7 @@ class EventCacheWriteCoordinator:
         kind: typing.Literal["room", "thread"],
         update_coro_factory: _UpdateCoroFactory,
         name: str,
-        log_exceptions: bool,
         emit_timing: bool = False,
-        ignore_cancelled_room_fences: bool = False,
         coalesce_key: _CoalesceKey | None = None,
         coalesce_log_context: dict[str, object] | None = None,
         coordination_scope: str,
@@ -502,7 +498,6 @@ class EventCacheWriteCoordinator:
             run_when_scheduled(),
             name=name,
             owner=self.background_task_owner,
-            log_exceptions=log_exceptions,
         )
         entry = _QueuedUpdate(
             sequence=self._next_entry_sequence(),
@@ -511,7 +506,6 @@ class EventCacheWriteCoordinator:
             start_signal=start_signal,
             update_state=update_state,
             thread_id=thread_id,
-            ignore_cancelled_room_fences=ignore_cancelled_room_fences,
             coalesce_key=coalesce_key,
         )
 
@@ -585,7 +579,6 @@ class EventCacheWriteCoordinator:
         update_coro_factory: _UpdateCoroFactory,
         *,
         name: str,
-        log_exceptions: bool = True,
         emit_timing: bool = True,
         coalesce_key: _CoalesceKey | None = None,
         coalesce_log_context: dict[str, object] | None = None,
@@ -598,7 +591,6 @@ class EventCacheWriteCoordinator:
             kind="room",
             update_coro_factory=update_coro_factory,
             name=name,
-            log_exceptions=log_exceptions,
             emit_timing=emit_timing,
             coalesce_key=coalesce_key,
             coalesce_log_context=coalesce_log_context,
@@ -612,11 +604,9 @@ class EventCacheWriteCoordinator:
         update_coro_factory: _UpdateCoroFactory,
         *,
         name: str,
-        log_exceptions: bool = True,
         emit_timing: bool = False,
         coalesce_key: _CoalesceKey | None = None,
         coalesce_log_context: dict[str, object] | None = None,
-        ignore_cancelled_room_fences: bool = False,
         coordination_scope: str,
     ) -> asyncio.Task[object]:
         """Schedule one thread-scoped cache update behind room-wide and same-thread predecessors."""
@@ -626,11 +616,9 @@ class EventCacheWriteCoordinator:
             kind="thread",
             update_coro_factory=update_coro_factory,
             name=name,
-            log_exceptions=log_exceptions,
             emit_timing=emit_timing,
             coalesce_key=coalesce_key,
             coalesce_log_context=coalesce_log_context,
-            ignore_cancelled_room_fences=ignore_cancelled_room_fences,
             coordination_scope=coordination_scope,
         )
 

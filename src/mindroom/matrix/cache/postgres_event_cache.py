@@ -22,6 +22,7 @@ from .postgres_agent_message_snapshot import load_postgres_agent_message_snapsho
 from .postgres_cache_maintenance import migrate_postgres_schema, run_startup_maintenance
 from .postgres_redaction import redact_postgres_connection_info
 from .thread_cache_state import (
+    CACHE_GAP_UNAVAILABLE,
     THREAD_HISTORY_TRUST_METADATA_KEY,
     THREAD_HISTORY_TRUST_VERSION,
     ThreadAppendOutcome,
@@ -1343,7 +1344,7 @@ class PostgresEventCache:
         return await self._operation(
             room_id,
             operation="get_thread_cache_gap",
-            disabled_result=None,
+            disabled_result=CACHE_GAP_UNAVAILABLE,
             callback=lambda db: postgres_event_cache_threads.load_thread_cache_gap(
                 db,
                 namespace=self._runtime.namespace,

@@ -24,6 +24,7 @@ from .sqlite_cache_maintenance import (
     with_sqlite_storage_bytes,
 )
 from .thread_cache_state import (
+    CACHE_GAP_UNAVAILABLE,
     THREAD_HISTORY_TRUST_METADATA_KEY,
     THREAD_HISTORY_TRUST_VERSION,
     ThreadAppendOutcome,
@@ -921,7 +922,7 @@ class SqliteEventCache:
         return await self._read_operation(
             room_id,
             operation="get_thread_cache_gap",
-            disabled_result=None,
+            disabled_result=CACHE_GAP_UNAVAILABLE,
             reader=lambda db: sqlite_event_cache_threads.load_thread_cache_gap(
                 db,
                 principal_id=self.principal_id,

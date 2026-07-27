@@ -832,7 +832,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
 
     @pytest.mark.asyncio
     async def test_startup_prewarm_does_not_starve_live_dispatch(self, bot: AgentBot) -> None:
-        """A blocked bulk scan should not occupy the live thread-repair coordinator."""
+        """A blocked bulk scan should not occupy the live write coordinator."""
         support = await _bind_owned_runtime_support(bot)
         room_id = "!test:localhost"
         thread_id = "$thread_root:localhost"

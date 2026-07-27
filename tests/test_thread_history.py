@@ -3108,7 +3108,7 @@ class TestThreadHistoryCache:
         )
 
         with patch(
-            "mindroom.matrix.client_thread_history._fetch_thread_snapshot",
+            "mindroom.matrix.client_thread_history._fetch_thread_history_with_events",
             new=AsyncMock(return_value=fetch_result),
         ) as fetch:
             history = await matrix_client_module.refresh_thread_history_from_source(
@@ -3122,7 +3122,7 @@ class TestThreadHistoryCache:
         assert fetch.await_count == 1
         assert [message.body for message in history] == ["homeserver fallback"]
         assert history.diagnostics["cache_store_written"] is False
-        # A refused store is not a write fault, so it must not arm repair backoff.
+        # A refused store is not a write fault; the diagnostics have to keep the two apart.
         assert history.diagnostics["cache_store_failed"] is False
 
     @pytest.mark.asyncio

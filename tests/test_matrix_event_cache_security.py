@@ -331,7 +331,13 @@ async def test_sqlite_lock_contention_quarantines_then_heals_principal(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A transient SQLite writer must fence stale data without disabling the principal forever."""
+    """A transient SQLite writer must fence stale data without disabling the principal forever.
+
+    Also pins the fail polarity of the gap read under contention: a reader that loses the database
+    to a writer reports an unavailable marker, never "no gap". The trust algebra failed closed here
+    via ``no_cache_state``, and inverting it would serve a stale snapshot during exactly the
+    contention that is trying to mark it.
+    """
     root = SqliteEventCache(tmp_path / "event_cache.db")
     await root.initialize()
     alice = root.for_principal("@alice:localhost")
@@ -353,7 +359,11 @@ async def test_sqlite_lock_contention_quarantines_then_heals_principal(
                 alice.get_thread_cache_gap(room_id, thread_id),
                 timeout=0.5,
             )
-            assert readable_state is None
+            # Fail closed, not open: the read could not find out whether a gap exists, and
+            # answering "no gap" would serve a snapshot straight through the contention that a
+            # concurrent writer is using to mark it.
+            assert readable_state is not None
+            assert readable_state.gap_reason == "cache_gap_read_unavailable"
             read_logger.debug.assert_called_once_with(
                 "SQLite event cache read skipped because another writer owns storage",
                 operation="get_thread_cache_gap",
@@ -380,7 +390,11 @@ async def test_sqlite_lock_contention_quarantines_then_heals_principal(
         assert alice.durable_writes_available is False
         assert alice.cache_generation is None
 
-        assert await alice.get_thread_cache_gap(room_id, thread_id) is None
+        # The read that drains the pending purge cannot speak for a principal whose rows it just
+        # wiped, so it reports the same unavailable marker rather than a clean thread.
+        purging_read = await alice.get_thread_cache_gap(room_id, thread_id)
+        assert purging_read is not None
+        assert purging_read.gap_reason == "cache_gap_read_unavailable"
         assert alice.runtime_diagnostics()["cache_sqlite_pending_principal_purge"] is False
         assert await bob.get_event(room_id, "$bob") == bob_event
 
