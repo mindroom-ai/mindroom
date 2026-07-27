@@ -268,7 +268,7 @@ def build_restart_interrupted_body(text: str) -> str:
 
 @dataclass(frozen=True)
 class _CommittedDeliveryState:
-    """One frozen non-terminal stream state that definitely reached Matrix."""
+    """One frozen stream state that definitely reached Matrix."""
 
     accumulated_text: str
     tool_trace: list[ToolTraceEntry]
@@ -276,6 +276,7 @@ class _CommittedDeliveryState:
     rendered_body: str
     visible_body_state: Literal["placeholder_only", "visible_body"]
     interactive_metadata: interactive.InteractiveMetadata | None
+    stream_status: str
 
 
 def _normalize_stream_accumulated_text(text: str) -> str:
@@ -409,6 +410,7 @@ def _prepare_delivery_from_snapshot(snapshot: _StreamingDeliverySnapshot) -> _Pr
                 "placeholder_only" if canonical_visible_body == _PROGRESS_PLACEHOLDER else "visible_body"
             ),
             interactive_metadata=response.interactive_metadata,
+            stream_status=snapshot.stream_status,
         ),
         had_warmup_suffix=bool(snapshot.warmup_suffix_lines),
     )
@@ -1081,7 +1083,11 @@ class StreamingResponse:
     def _mark_first_visible_reply_if_needed(self, delivered_state: _CommittedDeliveryState) -> None:
         """Mark first visible reply timing from the payload acknowledged by Matrix."""
         if self.pipeline_timing is not None and delivered_state.visible_body_state == "visible_body":
-            self.pipeline_timing.mark_first_visible_reply("stream_update", substantive=True)
+            self.pipeline_timing.mark_first_visible_reply(
+                "stream_update",
+                substantive=delivered_state.stream_status
+                in {STREAM_STATUS_PENDING, STREAM_STATUS_STREAMING, STREAM_STATUS_COMPLETED},
+            )
 
     async def _send_initial_content(
         self,

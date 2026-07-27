@@ -28,6 +28,7 @@ from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.constants import (
     STREAM_STATUS_CANCELLED,
     STREAM_STATUS_COMPLETED,
+    STREAM_STATUS_ERROR,
     STREAM_STATUS_KEY,
     STREAM_STATUS_PENDING,
     STREAM_STATUS_STREAMING,
@@ -332,6 +333,56 @@ async def test_placeholder_ack_waits_for_answer_ack_before_marking_substantive(c
     ]
     assert "first_substantive_reply" in timing.marks
     assert timing.metadata["first_substantive_kind"] == "stream_update"
+
+
+@pytest.mark.parametrize(
+    ("stream_status", "terminal_note"),
+    [
+        (STREAM_STATUS_ERROR, "**[Response interrupted by an error: boom]**"),
+        (STREAM_STATUS_CANCELLED, _CANCELLED_RESPONSE_NOTE),
+    ],
+)
+@pytest.mark.asyncio
+async def test_terminal_failure_note_ack_is_visible_but_not_substantive(
+    config: Config,
+    stream_status: str,
+    terminal_note: str,
+) -> None:
+    """Acknowledged failure notes are visible transport output, not substantive replies."""
+    timing = DispatchPipelineTiming(source_event_id="$request", room_id="!test:localhost")
+    streaming = StreamingResponse(
+        target=MessageTarget.resolve("!test:localhost", None, "$original_123", room_mode=True),
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+        pipeline_timing=timing,
+    )
+    streaming.event_id = "$placeholder"
+    streaming.placeholder_progress_sent = True
+    streaming.accumulated_text = terminal_note
+
+    async def fake_edit(
+        _client: object,
+        _room_id: str,
+        _event_id: str,
+        new_content: dict[str, Any],
+        _new_text: str,
+        *,
+        retry_sync_recovery: bool = False,  # noqa: ARG001
+    ) -> DeliveredMatrixEvent:
+        return DeliveredMatrixEvent(event_id="$terminal-edit", content_sent=dict(new_content))
+
+    with patch("mindroom.streaming.edit_message_result", new=fake_edit):
+        sent = await streaming._send_or_edit_message(
+            make_matrix_client_mock(user_id="@mindroom_helper:localhost"),
+            is_final=True,
+            stream_status=stream_status,
+        )
+
+    assert sent is True
+    assert "first_visible_reply" in timing.marks
+    assert timing.metadata["first_visible_kind"] == "stream_update"
+    assert "first_substantive_reply" not in timing.marks
+    assert "first_substantive_kind" not in timing.metadata
 
 
 def test_delivery_snapshot_isolates_tool_trace(config: Config) -> None:
