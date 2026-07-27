@@ -30,7 +30,7 @@ from mindroom.matrix.cache.sqlite_event_cache import SqliteEventCache
 from mindroom.matrix.cache.thread_cache_state import THREAD_HISTORY_TRUST_METADATA_KEY
 from mindroom.matrix.cache.write_coordinator import EventCacheWriteCoordinator
 from mindroom.matrix.client import ResolvedVisibleMessage, RoomThreadsPageError, get_room_threads_page
-from mindroom.matrix.client_delivery import build_threaded_edit_content as _build_threaded_edit_content_impl
+from mindroom.matrix.client_delivery import build_edit_event_content
 from mindroom.matrix.client_thread_history import (
     _event_source_for_cache,
     _fetch_thread_history_via_room_messages_with_events,
@@ -92,11 +92,6 @@ def test_thread_agent_detection_uses_actual_persisted_ids(tmp_path: Path) -> Non
     agents = get_agents_in_thread(history, config, runtime_paths)
 
     assert [agent.full_id for agent in agents] == ["@actual_general:localhost"]
-
-
-def build_threaded_edit_content(*args: object, **kwargs: object) -> dict[str, object]:
-    """Call the real threaded edit-content helper directly."""
-    return _build_threaded_edit_content_impl(*args, **kwargs)
 
 
 class TestThreadHistory:
@@ -738,33 +733,32 @@ class TestThreadHistory:
         assert history[0].to_dict()["msgtype"] == "m.notice"
         assert history[0].body == "Compacted summary"
 
-    @pytest.mark.asyncio
-    async def test_build_threaded_edit_content_uses_latest_thread_event_id_for_fallback(self) -> None:
-        """Threaded edits should preserve MSC3440 fallback semantics through the latest visible event."""
-        with patch(
-            "mindroom.matrix.client_delivery.format_message_with_mentions",
-            return_value={"body": "edited"},
-        ) as mock_format:
-            content = build_threaded_edit_content(
-                new_text="edited",
-                thread_id="$thread_root",
-                config=MagicMock(),
-                runtime_paths=MagicMock(),
-                latest_thread_event_id="$latest",
-            )
+    def test_edit_envelope_discards_the_thread_relation(self) -> None:
+        """Pin why the fallback lookup is dead: the edit envelope drops ``m.relates_to``.
 
-        assert content == {"body": "edited"}
-        assert mock_format.call_args.kwargs["latest_thread_event_id"] == "$latest"
+        If this ever stops holding, the removed ``get_latest_thread_event_id_if_needed``
+        calls in ``DeliveryGateway`` become load-bearing again.
+        """
+        replacement_with_fallback = {
+            "msgtype": "m.text",
+            "body": "edited",
+            "m.relates_to": {
+                "rel_type": "m.thread",
+                "event_id": "$thread_root",
+                "is_falling_back": True,
+                "m.in_reply_to": {"event_id": "$latest"},
+            },
+        }
 
-    def test_build_threaded_edit_content_requires_latest_thread_event_id_for_threads(self) -> None:
-        """Threaded edit content should require caller-owned fallback resolution."""
-        with pytest.raises(ValueError, match="latest_thread_event_id is required for thread fallback"):
-            build_threaded_edit_content(
-                new_text="edited",
-                thread_id="$thread_root",
-                config=MagicMock(),
-                runtime_paths=MagicMock(),
-            )
+        edit_content = build_edit_event_content(
+            event_id="$original",
+            new_content=replacement_with_fallback,
+            new_text="edited",
+        )
+
+        assert "m.relates_to" not in edit_content["m.new_content"]
+        assert edit_content["m.relates_to"]["rel_type"] == "m.replace"
+        assert edit_content["m.relates_to"]["event_id"] == "$original"
 
     @pytest.mark.asyncio
     async def test_fetch_thread_history_includes_root_message(self) -> None:

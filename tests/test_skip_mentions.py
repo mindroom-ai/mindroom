@@ -437,11 +437,9 @@ async def test_delivery_gateway_edit_text_records_threaded_outbound_edit(tmp_pat
     assert record_args[2]["m.relates_to"]["rel_type"] == "m.replace"
     assert record_args[2]["m.relates_to"]["event_id"] == "$original"
     assert "m.relates_to" not in record_args[2]["m.new_content"]
-    gateway.deps.resolver.deps.conversation_cache.get_latest_thread_event_id_if_needed.assert_awaited_once_with(
-        "!test:server",
-        "$thread",
-        caller_label="delivery_edit_text",
-    )
+    # The fallback the lookup would resolve is popped by the edit envelope, asserted above,
+    # so the threaded edit path must not pay for a wait_for_thread_idle to compute it.
+    gateway.deps.resolver.deps.conversation_cache.get_latest_thread_event_id_if_needed.assert_not_awaited()
 
 
 @pytest.mark.asyncio

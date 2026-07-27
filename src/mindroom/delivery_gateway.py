@@ -31,7 +31,7 @@ from mindroom.hooks import (
     emit_final_response_transform,
     emit_transform,
 )
-from mindroom.matrix.client_delivery import build_threaded_edit_content, edit_message_result, send_message_result
+from mindroom.matrix.client_delivery import edit_message_result, send_message_result
 from mindroom.matrix.mentions import format_message_with_mentions
 from mindroom.matrix.message_builder import build_message_content
 from mindroom.runtime_protocols import SupportsClientConfig  # noqa: TC001
@@ -555,21 +555,17 @@ class DeliveryGateway:
                 extra_content=request.extra_content,
             )
         else:
-            latest_thread_event_id = (
-                await self.deps.resolver.deps.conversation_cache.get_latest_thread_event_id_if_needed(
-                    target.room_id,
-                    target.resolved_thread_id,
-                    caller_label="delivery_edit_text",
-                )
-            )
-            content = build_threaded_edit_content(
-                new_text=request.new_text,
-                thread_id=target.resolved_thread_id,
-                config=config,
-                runtime_paths=self.deps.runtime_paths,
+            # No thread relation and no latest-thread lookup: both would only populate
+            # ``m.relates_to``, and ``build_edit_event_content`` pops that off the
+            # replacement before sending, at both the top level and in ``m.new_content``.
+            # Resolving the fallback cost a ``wait_for_thread_idle`` that, under load,
+            # blocks behind the very stream this edit belongs to.
+            content = format_message_with_mentions(
+                config,
+                self.deps.runtime_paths,
+                request.new_text,
                 tool_trace=request.tool_trace,
                 extra_content=request.extra_content,
-                latest_thread_event_id=latest_thread_event_id,
             )
 
         failure_reason = "edit_message_result returned None"
@@ -963,19 +959,14 @@ class DeliveryGateway:
         body: str,
         metadata: dict[str, object],
     ) -> None:
-        latest_thread_event_id = await self.deps.resolver.deps.conversation_cache.get_latest_thread_event_id_if_needed(
-            target.room_id,
-            target.resolved_thread_id,
-            target.reply_to_event_id,
-            event_id,
-            caller_label="delivery_compaction_lifecycle_edit",
-        )
+        # Same as ``edit_text``: this content is wrapped by ``build_edit_event_content``,
+        # which discards ``m.relates_to``, so neither the thread relation nor the
+        # latest-thread lookup that completes it survives to the wire. Passing
+        # ``thread_event_id`` without a resolved fallback would also trip the thread-relation
+        # assertion in ``build_thread_relation``.
         content = build_message_content(
             body,
             formatted_body=f"<em>{html_escape(body).replace(chr(10), '<br/>')}</em>",
-            thread_event_id=target.resolved_thread_id,
-            reply_to_event_id=target.reply_to_event_id,
-            latest_thread_event_id=latest_thread_event_id,
             extra_content={
                 "msgtype": "m.notice",
                 constants.COMPACTION_NOTICE_CONTENT_KEY: metadata,
