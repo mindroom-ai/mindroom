@@ -356,7 +356,7 @@ async def test_postgres_version_1_migration_is_namespace_safe_and_repairs_orphan
         try:
             diagnostics = cache.runtime_diagnostics()
             cached_thread = await cache.get_thread_events(_ROOM_ID, _THREAD_ID)
-            stale_state = await cache.get_thread_cache_state(_ROOM_ID, _THREAD_ID)
+            stale_state = await cache.get_thread_cache_gap(_ROOM_ID, _THREAD_ID)
 
             assert diagnostics["cache_schema_migrated_from"] == 1
             assert diagnostics["cache_orphan_edit_indexes_after"] == 0
@@ -408,7 +408,7 @@ async def test_postgres_version_1_migration_is_namespace_safe_and_repairs_orphan
             assert await cursor.fetchone() is None
             await cursor.close()
             assert await other_cache.get_thread_events(_ROOM_ID, _THREAD_ID) is None
-            other_stale_state = await other_cache.get_thread_cache_state(_ROOM_ID, _THREAD_ID)
+            other_stale_state = await other_cache.get_thread_cache_gap(_ROOM_ID, _THREAD_ID)
             assert other_stale_state is None
         finally:
             await other_cache.close()

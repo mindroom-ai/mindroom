@@ -541,7 +541,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
                     },
                 ],
             )
-            state_before = await bot.event_cache.get_thread_cache_state(room_id, thread_id)
+            state_before = await bot.event_cache.get_thread_cache_gap(room_id, thread_id)
             assert state_before is not None
             assert thread_cache_rejection_reason(state_before) is None
 
@@ -563,7 +563,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
                 self._sync_response({room_id: MagicMock(timeline=MagicMock(events=[partial_reply], limited=True))}),
             )
             cached_event = await bot.event_cache.get_event(room_id, "$partial_reply:localhost")
-            state_after = await bot.event_cache.get_thread_cache_state(room_id, thread_id)
+            state_after = await bot.event_cache.get_thread_cache_gap(room_id, thread_id)
         finally:
             await _close_bound_runtime_support(bot, support)
 

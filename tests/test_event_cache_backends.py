@@ -19,7 +19,6 @@ from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.logging_config import get_logger
 from mindroom.matrix.cache import (
     ThreadAppendOutcome,
-    ThreadCacheReplaceOutcome,
     postgres_event_cache_threads,
     sqlite_event_cache,
     sqlite_event_cache_threads,
@@ -37,7 +36,6 @@ from mindroom.matrix.cache.sqlite_event_cache import SqliteEventCache
 from mindroom.matrix.cache.thread_cache_state import (
     THREAD_HISTORY_TRUST_METADATA_KEY,
     THREAD_HISTORY_TRUST_VERSION,
-    ThreadCacheStateRow,
 )
 from mindroom.matrix.cache.write_coordinator import EventCacheWriteCoordinator
 from mindroom.runtime_support import (
@@ -85,161 +83,6 @@ def _message_event(
         "content": content,
     }
 
-
-@pytest.mark.asyncio
-async def test_sqlite_guarded_replace_fast_path_skips_snapshot_row_lookup(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """An unchanged SQLite cache state must not query existing snapshot rows."""
-    load_state = AsyncMock(
-        return_value=ThreadCacheStateRow(
-            validated_at=50.0,
-            invalidated_at=None,
-            invalidation_reason=None,
-            room_invalidated_at=None,
-            room_invalidation_reason=None,
-        ),
-    )
-    has_snapshot_rows = AsyncMock()
-    replace_thread = AsyncMock()
-    monkeypatch.setattr(sqlite_event_cache_threads, "_load_thread_cache_state_row", load_state)
-    monkeypatch.setattr(
-        sqlite_event_cache_threads,
-        "_thread_has_snapshot_rows_for_thread",
-        has_snapshot_rows,
-    )
-    monkeypatch.setattr(sqlite_event_cache_threads, "_replace_thread_locked", replace_thread)
-
-    result = await sqlite_event_cache_threads.replace_thread_locked_if_not_newer(
-        AsyncMock(),
-        principal_id="@agent:localhost",
-        room_id="!room:localhost",
-        thread_id="$thread",
-        events=[],
-        fetch_started_at=100.0,
-        validated_at=100.0,
-    )
-
-    assert result is ThreadCacheReplaceOutcome.STORED
-    has_snapshot_rows.assert_not_awaited()
-    replace_thread.assert_awaited_once()
-
-
-@pytest.mark.asyncio
-async def test_postgres_guarded_replace_fast_path_skips_snapshot_row_lookup(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """An unchanged PostgreSQL cache state must not query existing snapshot rows."""
-    load_state = AsyncMock(
-        return_value=ThreadCacheStateRow(
-            validated_at=50.0,
-            invalidated_at=None,
-            invalidation_reason=None,
-            room_invalidated_at=None,
-            room_invalidation_reason=None,
-        ),
-    )
-    has_snapshot_rows = AsyncMock()
-    replace_thread = AsyncMock()
-    monkeypatch.setattr(postgres_event_cache_threads, "_load_thread_cache_state_row", load_state)
-    monkeypatch.setattr(
-        postgres_event_cache_threads,
-        "_thread_has_snapshot_rows_for_thread",
-        has_snapshot_rows,
-    )
-    monkeypatch.setattr(postgres_event_cache_threads, "_replace_thread_locked", replace_thread)
-
-    result = await postgres_event_cache_threads.replace_thread_locked_if_not_newer(
-        AsyncMock(),
-        namespace="@agent:localhost",
-        room_id="!room:localhost",
-        thread_id="$thread",
-        events=[],
-        fetch_started_at=100.0,
-        validated_at=100.0,
-    )
-
-    assert result is ThreadCacheReplaceOutcome.STORED
-    has_snapshot_rows.assert_not_awaited()
-    replace_thread.assert_awaited_once()
-
-
-@pytest.mark.asyncio
-async def test_sqlite_guarded_replace_recognizes_newer_usable_snapshot(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A later validation wins over an invalidation raised during the fetch."""
-    load_state = AsyncMock(
-        return_value=ThreadCacheStateRow(
-            validated_at=200.0,
-            invalidated_at=150.0,
-            invalidation_reason="concurrent update",
-            room_invalidated_at=None,
-            room_invalidation_reason=None,
-        ),
-    )
-    has_snapshot_rows = AsyncMock(return_value=True)
-    replace_thread = AsyncMock()
-    monkeypatch.setattr(sqlite_event_cache_threads, "_load_thread_cache_state_row", load_state)
-    monkeypatch.setattr(
-        sqlite_event_cache_threads,
-        "_thread_has_snapshot_rows_for_thread",
-        has_snapshot_rows,
-    )
-    monkeypatch.setattr(sqlite_event_cache_threads, "_replace_thread_locked", replace_thread)
-
-    result = await sqlite_event_cache_threads.replace_thread_locked_if_not_newer(
-        AsyncMock(),
-        principal_id="@agent:localhost",
-        room_id="!room:localhost",
-        thread_id="$thread",
-        events=[],
-        fetch_started_at=100.0,
-        validated_at=100.0,
-    )
-
-    assert result is ThreadCacheReplaceOutcome.EXISTING_USABLE
-    has_snapshot_rows.assert_awaited_once()
-    replace_thread.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_postgres_guarded_replace_recognizes_newer_usable_snapshot(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A later validation wins over an invalidation raised during the fetch."""
-    load_state = AsyncMock(
-        return_value=ThreadCacheStateRow(
-            validated_at=200.0,
-            invalidated_at=150.0,
-            invalidation_reason="concurrent update",
-            room_invalidated_at=None,
-            room_invalidation_reason=None,
-        ),
-    )
-    has_snapshot_rows = AsyncMock(return_value=True)
-    replace_thread = AsyncMock()
-    monkeypatch.setattr(postgres_event_cache_threads, "_load_thread_cache_state_row", load_state)
-    monkeypatch.setattr(
-        postgres_event_cache_threads,
-        "_thread_has_snapshot_rows_for_thread",
-        has_snapshot_rows,
-    )
-    monkeypatch.setattr(postgres_event_cache_threads, "_replace_thread_locked", replace_thread)
-
-    result = await postgres_event_cache_threads.replace_thread_locked_if_not_newer(
-        AsyncMock(),
-        namespace="@agent:localhost",
-        room_id="!room:localhost",
-        thread_id="$thread",
-        events=[],
-        fetch_started_at=100.0,
-        validated_at=100.0,
-    )
-
-    assert result is ThreadCacheReplaceOutcome.EXISTING_USABLE
-    has_snapshot_rows.assert_awaited_once()
-    replace_thread.assert_not_awaited()
 
 
 def _edit_event(
@@ -607,7 +450,7 @@ async def _assert_staleness_and_redaction_behavior(
     latest_edit: dict[str, object],
 ) -> None:
     await cache.mark_thread_stale(room_id, thread_id, reason="live_thread_mutation")
-    stale_state = await cache.get_thread_cache_state(room_id, thread_id)
+    stale_state = await cache.get_thread_cache_gap(room_id, thread_id)
     assert stale_state is not None
     assert stale_state.invalidated_at is not None
     assert stale_state.invalidation_reason == "live_thread_mutation"
@@ -620,7 +463,7 @@ async def _assert_staleness_and_redaction_behavior(
         append_failed_reason="live_append_failed",
     )
     assert revalidating_append is ThreadAppendOutcome.APPENDED
-    fresh_state = await cache.get_thread_cache_state(room_id, thread_id)
+    fresh_state = await cache.get_thread_cache_gap(room_id, thread_id)
     assert fresh_state is not None
     assert fresh_state.invalidated_at is None
     assert fresh_state.invalidation_reason is None
@@ -927,7 +770,7 @@ async def test_sqlite_opaque_history_trust_upgrade_clears_only_certified_snapsho
         assert upgraded_generation is not None
         assert upgraded_generation != original_generation
         assert await upgraded.get_thread_events(room_id, thread_id) is None
-        assert await upgraded.get_thread_cache_state(room_id, thread_id) is None
+        assert await upgraded.get_thread_cache_gap(room_id, thread_id) is None
         assert await upgraded.get_event(room_id, thread_id) == root_event
         assert await upgraded.get_event(room_id, "$reply") == reply_event
         assert await upgraded.get_event(room_id, "$standalone") == standalone_event
@@ -1469,7 +1312,7 @@ async def test_postgres_opaque_history_trust_upgrade_is_namespace_scoped_and_one
         assert upgraded_generation is not None
         assert upgraded_generation != original_generation
         assert await upgraded.get_thread_events(room_id, thread_id) is None
-        assert await upgraded.get_thread_cache_state(room_id, thread_id) is None
+        assert await upgraded.get_thread_cache_gap(room_id, thread_id) is None
         assert await upgraded.get_event(room_id, thread_id) == root_event
         assert await upgraded.get_event(room_id, "$reply") == reply_event
         assert await upgraded.get_event(room_id, "$standalone") == standalone_event
@@ -1880,7 +1723,7 @@ async def test_postgres_event_cache_recovers_after_backend_connection_terminatio
 
         await cache.mark_thread_stale(room_id, thread_id, reason="live_thread_mutation")
 
-        state = await cache.get_thread_cache_state(room_id, thread_id)
+        state = await cache.get_thread_cache_gap(room_id, thread_id)
         assert state is not None
         assert state.invalidated_at is not None
         assert state.invalidation_reason == "live_thread_mutation"
@@ -1925,7 +1768,7 @@ async def test_postgres_event_cache_flushes_pending_invalidations_before_guarded
             reason="live_thread_mutation",
         )
 
-        replaced = await cache.replace_thread_if_not_newer(
+        replaced = await cache.replace_thread(
             room_id,
             thread_id,
             [replacement_event],
@@ -1933,11 +1776,11 @@ async def test_postgres_event_cache_flushes_pending_invalidations_before_guarded
             fetch_started_at=150.0,
         )
 
-        assert replaced is ThreadCacheReplaceOutcome.INVALIDATED
-        state = await cache.get_thread_cache_state(room_id, thread_id)
-        assert state is not None
-        assert state.invalidated_at == 200.0
-        assert state.invalidation_reason == "live_thread_mutation"
+        assert replaced is True
+        gap = await cache.get_thread_cache_gap(room_id, thread_id)
+        assert gap is not None
+        assert gap.gap_marked_at == 200.0
+        assert gap.gap_reason == "live_thread_mutation"
         assert cache.runtime_diagnostics()["cache_postgres_pending_thread_invalidations"] == 0
     finally:
         await cache.close()
@@ -1980,7 +1823,7 @@ async def test_postgres_event_cache_flushes_newer_thread_marker_with_pending_roo
             reason="live_thread_mutation",
         )
 
-        replaced = await cache.replace_thread_if_not_newer(
+        replaced = await cache.replace_thread(
             room_id,
             thread_id,
             [replacement_event],
@@ -1988,12 +1831,11 @@ async def test_postgres_event_cache_flushes_newer_thread_marker_with_pending_roo
             fetch_started_at=150.0,
         )
 
-        assert replaced is ThreadCacheReplaceOutcome.INVALIDATED
-        state = await cache.get_thread_cache_state(room_id, thread_id)
-        assert state is not None
-        assert state.room_invalidated_at == 100.0
-        assert state.invalidated_at == 200.0
-        assert state.invalidation_reason == "live_thread_mutation"
+        assert replaced is True
+        gap = await cache.get_thread_cache_gap(room_id, thread_id)
+        assert gap is not None
+        assert gap.gap_marked_at == 200.0
+        assert gap.gap_reason == "live_thread_mutation"
         diagnostics = cache.runtime_diagnostics()
         assert diagnostics["cache_postgres_pending_room_invalidations"] == 0
         assert diagnostics["cache_postgres_pending_thread_invalidations"] == 0
@@ -2028,7 +1870,7 @@ async def test_postgres_event_cache_preserves_pending_marker_recorded_during_flu
 
     async def racing_mark_thread_stale_locked(*args: object, **kwargs: object) -> None:
         nonlocal injected_newer_pending_marker
-        if kwargs.get("thread_id") == thread_id and kwargs.get("invalidated_at") == 200.0:
+        if kwargs.get("thread_id") == thread_id and kwargs.get("gap_marked_at") == 200.0:
             injected_newer_pending_marker = True
             cache._runtime.record_pending_thread_invalidation(
                 room_id,
@@ -2055,7 +1897,7 @@ async def test_postgres_event_cache_preserves_pending_marker_recorded_during_flu
             reason="live_thread_mutation",
         )
 
-        replaced = await cache.replace_thread_if_not_newer(
+        replaced = await cache.replace_thread(
             room_id,
             thread_id,
             [replacement_event],
@@ -2063,16 +1905,16 @@ async def test_postgres_event_cache_preserves_pending_marker_recorded_during_flu
             fetch_started_at=150.0,
         )
 
-        assert replaced is ThreadCacheReplaceOutcome.INVALIDATED
+        assert replaced is True
         assert injected_newer_pending_marker is True
         diagnostics = cache.runtime_diagnostics()
         assert diagnostics["cache_postgres_pending_thread_invalidations"] == 1
 
-        state = await cache.get_thread_cache_state(room_id, thread_id)
+        gap = await cache.get_thread_cache_gap(room_id, thread_id)
 
-        assert state is not None
-        assert state.invalidated_at == 300.0
-        assert state.invalidation_reason == "later_live_thread_mutation"
+        assert gap is not None
+        assert gap.gap_marked_at == 300.0
+        assert gap.gap_reason == "later_live_thread_mutation"
         diagnostics = cache.runtime_diagnostics()
         assert diagnostics["cache_postgres_pending_thread_invalidations"] == 0
     finally:
@@ -2109,7 +1951,7 @@ async def test_postgres_event_cache_pending_thread_flush_does_not_downgrade_newe
             await db.commit()
 
         await cache.flush_pending_durable_writes(room_id)
-        state = await cache.get_thread_cache_state(room_id, thread_id)
+        state = await cache.get_thread_cache_gap(room_id, thread_id)
 
         assert state is not None
         assert state.invalidated_at == 200.0
@@ -2147,7 +1989,7 @@ async def test_postgres_event_cache_pending_room_flush_does_not_downgrade_newer_
             await db.commit()
 
         await cache.flush_pending_durable_writes(room_id)
-        state = await cache.get_thread_cache_state(room_id, thread_id)
+        state = await cache.get_thread_cache_gap(room_id, thread_id)
 
         assert state is not None
         assert state.room_invalidated_at == 200.0

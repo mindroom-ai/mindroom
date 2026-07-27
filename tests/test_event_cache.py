@@ -1569,7 +1569,7 @@ async def test_thread_snapshot_storage_exposes_direct_cache_state_reads(tmp_path
             )
         await db.commit()
 
-        state = await sqlite_event_cache_threads.load_thread_cache_state(
+        state = await sqlite_event_cache_threads.load_thread_cache_gap(
             db,
             principal_id="__mindroom_default_principal__",
             room_id="!room:localhost",
@@ -1625,7 +1625,7 @@ async def test_sqlite_stale_markers_are_monotonic(tmp_path: Path) -> None:
             )
         await db.commit()
 
-        state = await sqlite_event_cache_threads.load_thread_cache_state(
+        state = await sqlite_event_cache_threads.load_thread_cache_gap(
             db,
             principal_id="__mindroom_default_principal__",
             room_id="!room:localhost",
@@ -1705,7 +1705,7 @@ def test_thread_cache_rejection_reason_rule_table(
 
 
 @pytest.mark.asyncio
-async def test_replace_thread_if_not_newer_refuses_after_midflight_invalidation(tmp_path: Path) -> None:
+async def test_replace_thread_refuses_after_midflight_invalidation(tmp_path: Path) -> None:
     """A fetch that raced with a thread or room invalidation must not bury the newer stale marker."""
     cache = SqliteEventCache(tmp_path / "event_cache.db")
     await cache.initialize()
@@ -1722,7 +1722,7 @@ async def test_replace_thread_if_not_newer_refuses_after_midflight_invalidation(
         with patch("mindroom.matrix.cache.sqlite_event_cache_threads.time.time", return_value=200.0):
             await cache.mark_thread_stale("!room:localhost", "$thread_root", reason="live_thread_mutation")
 
-        replaced_behind_marker = await cache.replace_thread_if_not_newer(
+        replaced_behind_marker = await cache.replace_thread(
             "!room:localhost",
             "$thread_root",
             [root_source],
@@ -1730,9 +1730,9 @@ async def test_replace_thread_if_not_newer_refuses_after_midflight_invalidation(
             fetch_started_at=150.0,
             validated_at=300.0,
         )
-        state_after_refusal = await cache.get_thread_cache_state("!room:localhost", "$thread_root")
+        state_after_refusal = await cache.get_thread_cache_gap("!room:localhost", "$thread_root")
 
-        replaced_after_marker = await cache.replace_thread_if_not_newer(
+        replaced_after_marker = await cache.replace_thread(
             "!room:localhost",
             "$thread_root",
             [root_source],
@@ -1740,7 +1740,7 @@ async def test_replace_thread_if_not_newer_refuses_after_midflight_invalidation(
             fetch_started_at=250.0,
             validated_at=300.0,
         )
-        state_after_replace = await cache.get_thread_cache_state("!room:localhost", "$thread_root")
+        state_after_replace = await cache.get_thread_cache_gap("!room:localhost", "$thread_root")
     finally:
         await cache.close()
 
@@ -1759,7 +1759,7 @@ async def test_replace_thread_if_not_newer_refuses_after_midflight_invalidation(
 
 
 @pytest.mark.asyncio
-async def test_replace_thread_if_not_newer_refuses_after_midflight_room_invalidation(tmp_path: Path) -> None:
+async def test_replace_thread_refuses_after_midflight_room_invalidation(tmp_path: Path) -> None:
     """A room-wide stale marker that landed after fetch start must also refuse snapshot replacement."""
     cache = SqliteEventCache(tmp_path / "event_cache.db")
     await cache.initialize()
@@ -1776,7 +1776,7 @@ async def test_replace_thread_if_not_newer_refuses_after_midflight_room_invalida
         with patch("mindroom.matrix.cache.sqlite_event_cache_threads.time.time", return_value=200.0):
             await cache.mark_room_threads_stale("!room:localhost", reason="sync_thread_lookup_unavailable")
 
-        replaced = await cache.replace_thread_if_not_newer(
+        replaced = await cache.replace_thread(
             "!room:localhost",
             "$thread_root",
             [root_source],
@@ -1784,7 +1784,7 @@ async def test_replace_thread_if_not_newer_refuses_after_midflight_room_invalida
             fetch_started_at=150.0,
             validated_at=300.0,
         )
-        state = await cache.get_thread_cache_state("!room:localhost", "$thread_root")
+        state = await cache.get_thread_cache_gap("!room:localhost", "$thread_root")
     finally:
         await cache.close()
 
@@ -1822,16 +1822,16 @@ async def test_incremental_revalidation_requires_incremental_invalidation_reason
 
         await cache.mark_thread_stale("!room:localhost", "$thread_root", reason="live_append_failed")
         non_incremental = await append("$after-non-incremental")
-        state_after_non_incremental = await cache.get_thread_cache_state("!room:localhost", "$thread_root")
+        state_after_non_incremental = await cache.get_thread_cache_gap("!room:localhost", "$thread_root")
 
         await cache.mark_thread_stale("!room:localhost", "$thread_root", reason="live_thread_mutation")
         weakened = await append("$after-weakening-attempt")
-        state_after_weakening_attempt = await cache.get_thread_cache_state("!room:localhost", "$thread_root")
+        state_after_weakening_attempt = await cache.get_thread_cache_gap("!room:localhost", "$thread_root")
 
         await _replace_thread(cache, "!room:localhost", "$thread_root", [root_source])
         await cache.mark_thread_stale("!room:localhost", "$thread_root", reason="live_thread_mutation")
         incremental = await append("$after-incremental")
-        state_after_incremental = await cache.get_thread_cache_state("!room:localhost", "$thread_root")
+        state_after_incremental = await cache.get_thread_cache_gap("!room:localhost", "$thread_root")
     finally:
         await cache.close()
 

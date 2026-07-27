@@ -314,7 +314,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             await wait_for_background_tasks(timeout=1.0, owner=coordinator.background_task_owner)
             final_history = await access.get_dispatch_thread_history(room_id, thread_id)
             cached_rows = await event_cache.get_thread_events(room_id, thread_id)
-            cache_state = await event_cache.get_thread_cache_state(room_id, thread_id)
+            cache_state = await event_cache.get_thread_cache_gap(room_id, thread_id)
         finally:
             release_fetch.set()
             await wait_for_background_tasks(timeout=1.0, owner=coordinator.background_task_owner)
@@ -925,7 +925,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
                 validated_at=prewarm_fetch_started_at + 1,
             )
 
-            replaced = await event_cache.replace_thread_if_not_newer(
+            replaced = await event_cache.replace_thread(
                 room_id,
                 thread_id,
                 [old_root_event.source, old_reply_event.source],
@@ -1216,7 +1216,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
                 new=blocked_replace,
             ):
                 write_task = asyncio.create_task(
-                    bot.event_cache.replace_thread_if_not_newer(
+                    bot.event_cache.replace_thread(
                         room_id,
                         thread_id,
                         [old_root_event.source, old_reply_event.source],
@@ -1295,7 +1295,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             }
             access.cache_sync_timeline(sync_response)
             await _wait_for_room_cache_idle(access.runtime.event_cache_write_coordinator)
-            cache_state = await event_cache.get_thread_cache_state("!test:localhost", "$thread_root:localhost")
+            cache_state = await event_cache.get_thread_cache_gap("!test:localhost", "$thread_root:localhost")
         finally:
             await event_cache.close()
 
@@ -1322,7 +1322,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             logger=MagicMock(),
             runtime=_conversation_runtime(client=_make_client_mock()),
         )
-        access.runtime.event_cache.get_thread_cache_state = AsyncMock(return_value=None)
+        access.runtime.event_cache.get_thread_cache_gap = AsyncMock(return_value=None)
         access.runtime.event_cache.get_thread_events = AsyncMock(return_value=[{"event_id": "$thread:localhost"}])
         refresh_started = asyncio.Event()
         allow_refresh = asyncio.Event()
@@ -1437,7 +1437,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
                 diagnostics={THREAD_HISTORY_SOURCE_DIAGNOSTIC: THREAD_HISTORY_SOURCE_HOMESERVER},
             )
 
-        event_cache.get_thread_cache_state = AsyncMock(side_effect=lambda *_args, **_kwargs: thread_state["value"])
+        event_cache.get_thread_cache_gap = AsyncMock(side_effect=lambda *_args, **_kwargs: thread_state["value"])
         event_cache.get_thread_events = AsyncMock(side_effect=lambda *_args, **_kwargs: list(raw_events))
         event_cache.get_thread_id_for_event = AsyncMock(return_value="$thread:localhost")
         event_cache.mark_thread_stale = AsyncMock(side_effect=mark_thread_stale)
@@ -1544,7 +1544,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             validated_at=time.time(),
         )
 
-        real_get_thread_cache_state = event_cache.get_thread_cache_state
+        real_get_thread_cache_gap = event_cache.get_thread_cache_gap
         real_mark_room_threads_stale = event_cache.mark_room_threads_stale
         reader_ready = asyncio.Event()
         release_reader = asyncio.Event()
@@ -1552,12 +1552,12 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         live_task: asyncio.Task[None] | None = None
         history: ThreadHistoryResult | None = None
 
-        async def blocking_get_thread_cache_state(room_id_arg: str, thread_id_arg: str) -> ThreadCacheState | None:
+        async def blocking_get_thread_cache_gap(room_id_arg: str, thread_id_arg: str) -> ThreadCacheState | None:
             assert room_id_arg == room_id
             assert thread_id_arg == thread_id
             reader_ready.set()
             await release_reader.wait()
-            return await real_get_thread_cache_state(room_id_arg, thread_id_arg)
+            return await real_get_thread_cache_gap(room_id_arg, thread_id_arg)
 
         async def mark_room_threads_stale(room_id_arg: str, *, reason: str) -> None:
             assert room_id_arg == room_id
@@ -1568,7 +1568,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         async def resolve_unknown_impact(*_args: object, **_kwargs: object) -> MutationThreadImpact:
             return MutationThreadImpact.unknown()
 
-        event_cache.get_thread_cache_state = AsyncMock(side_effect=blocking_get_thread_cache_state)
+        event_cache.get_thread_cache_gap = AsyncMock(side_effect=blocking_get_thread_cache_gap)
         event_cache.mark_room_threads_stale = AsyncMock(side_effect=mark_room_threads_stale)
         access._live._resolver.resolve_thread_impact_for_mutation = AsyncMock(side_effect=resolve_unknown_impact)
         unknown_event = _text_event(
@@ -1742,7 +1742,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             dispatch_snapshot = await asyncio.wait_for(read_task, timeout=1.0)
             await asyncio.wait_for(live_task, timeout=1.0)
             await _wait_for_room_cache_idle(coordinator)
-            thread_state = await event_cache.get_thread_cache_state(room_id, thread_id)
+            thread_state = await event_cache.get_thread_cache_gap(room_id, thread_id)
         finally:
             release_fetch.set()
             await asyncio.wait_for(

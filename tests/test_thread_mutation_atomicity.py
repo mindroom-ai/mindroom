@@ -69,14 +69,14 @@ async def cache(
 
 
 async def _seed_valid_thread(cache: ConversationEventCache) -> None:
-    await cache.replace_thread_if_not_newer(
+    await cache.replace_thread(
         ROOM_ID,
         THREAD_ID,
         [_event(THREAD_ID, 1000), _event("$initial", 1500, thread_id=THREAD_ID)],
         expected_membership_epoch=await cache.room_membership_epoch(ROOM_ID),
         fetch_started_at=0.0,
     )
-    assert thread_cache_rejection_reason(await cache.get_thread_cache_state(ROOM_ID, THREAD_ID)) is None
+    assert thread_cache_rejection_reason(await cache.get_thread_cache_gap(ROOM_ID, THREAD_ID)) is None
 
 
 async def _collect_rejections_while(
@@ -89,7 +89,7 @@ async def _collect_rejections_while(
 
     async def read_until_stopped() -> None:
         while not stop_reading.is_set():
-            reason = thread_cache_rejection_reason(await cache.get_thread_cache_state(ROOM_ID, THREAD_ID))
+            reason = thread_cache_rejection_reason(await cache.get_thread_cache_gap(ROOM_ID, THREAD_ID))
             if reason is not None:
                 rejections.append(reason)
             await asyncio.sleep(0)
@@ -132,7 +132,7 @@ async def test_mutation_on_a_snapshotless_thread_reports_it_distinctly(cache: Co
         _event("$live", 2000, thread_id=THREAD_ID),
         append_failed_reason="sync_append_failed",
     )
-    state = await cache.get_thread_cache_state(ROOM_ID, THREAD_ID)
+    state = await cache.get_thread_cache_gap(ROOM_ID, THREAD_ID)
 
     assert outcome is ThreadAppendOutcome.SNAPSHOT_MISSING
     assert outcome.wrote_event is False
@@ -144,7 +144,7 @@ async def test_append_clears_an_invalidation_left_by_an_earlier_mutation(cache: 
     """The incremental revalidation allowlist must still apply when a prior mutation left a marker."""
     await _seed_valid_thread(cache)
     await cache.mark_thread_stale(ROOM_ID, THREAD_ID, reason="sync_thread_mutation")
-    assert thread_cache_rejection_reason(await cache.get_thread_cache_state(ROOM_ID, THREAD_ID)) is not None
+    assert thread_cache_rejection_reason(await cache.get_thread_cache_gap(ROOM_ID, THREAD_ID)) is not None
 
     outcome = await cache.apply_thread_mutation_append(
         ROOM_ID,
@@ -152,7 +152,7 @@ async def test_append_clears_an_invalidation_left_by_an_earlier_mutation(cache: 
         _event("$live", 2000, thread_id=THREAD_ID),
         append_failed_reason="sync_append_failed",
     )
-    state = await cache.get_thread_cache_state(ROOM_ID, THREAD_ID)
+    state = await cache.get_thread_cache_gap(ROOM_ID, THREAD_ID)
 
     assert outcome is ThreadAppendOutcome.APPENDED
     assert thread_cache_rejection_reason(state) is None
@@ -170,7 +170,7 @@ async def test_append_does_not_clear_an_invalidation_outside_the_allowlist(cache
         _event("$live", 2000, thread_id=THREAD_ID),
         append_failed_reason="sync_append_failed",
     )
-    state = await cache.get_thread_cache_state(ROOM_ID, THREAD_ID)
+    state = await cache.get_thread_cache_gap(ROOM_ID, THREAD_ID)
 
     assert outcome is ThreadAppendOutcome.APPENDED_STALE
     assert outcome.wrote_event is True
@@ -189,7 +189,7 @@ async def test_room_invalidation_still_blocks_revalidation_after_append(cache: C
         _event("$live", 2000, thread_id=THREAD_ID),
         append_failed_reason="sync_append_failed",
     )
-    state = await cache.get_thread_cache_state(ROOM_ID, THREAD_ID)
+    state = await cache.get_thread_cache_gap(ROOM_ID, THREAD_ID)
 
     assert outcome is ThreadAppendOutcome.APPENDED_STALE
     assert thread_cache_rejection_reason(state) is not None
@@ -295,7 +295,7 @@ async def test_a_failed_cache_write_never_leaves_a_trusted_snapshot(tmp_path: Pa
                 context="sync",
                 room_level_skip_message="skip",
             )
-        state = await cache.get_thread_cache_state(ROOM_ID, THREAD_ID)
+        state = await cache.get_thread_cache_gap(ROOM_ID, THREAD_ID)
     finally:
         await root_cache.close()
 
@@ -333,7 +333,7 @@ async def test_a_cancelled_cache_write_never_leaves_a_trusted_snapshot(tmp_path:
                 context="sync",
                 room_level_skip_message="skip",
             )
-        state = await cache.get_thread_cache_state(ROOM_ID, THREAD_ID)
+        state = await cache.get_thread_cache_gap(ROOM_ID, THREAD_ID)
     finally:
         await root_cache.close()
 
@@ -405,7 +405,7 @@ async def test_a_cancelled_appends_marker_is_owned_by_the_shutdown_drain(tmp_pat
             with pytest.raises(asyncio.CancelledError):
                 await mutation
             await wait_for_background_tasks(timeout=5.0, owner=coordinator.failure_marker_task_owner)
-        state = await cache.get_thread_cache_state(ROOM_ID, THREAD_ID)
+        state = await cache.get_thread_cache_gap(ROOM_ID, THREAD_ID)
     finally:
         await root_cache.close()
 
@@ -437,7 +437,7 @@ async def test_a_later_outbound_append_cannot_erase_an_earlier_failed_one(cache:
         _event("$later", 3000, thread_id=THREAD_ID),
         append_failed_reason="outbound_append_failed",
     )
-    state = await cache.get_thread_cache_state(ROOM_ID, THREAD_ID)
+    state = await cache.get_thread_cache_gap(ROOM_ID, THREAD_ID)
     cached_ids = {event["event_id"] for event in (await cache.get_thread_events(ROOM_ID, THREAD_ID) or [])}
 
     assert refused is ThreadAppendOutcome.APPEND_REFUSED
@@ -496,7 +496,7 @@ async def test_the_drain_that_cancels_an_append_still_lands_its_marker(tmp_path:
             )
             await asyncio.sleep(0.05)
             await coordinator.close()
-        state = await cache.get_thread_cache_state(ROOM_ID, THREAD_ID)
+        state = await cache.get_thread_cache_gap(ROOM_ID, THREAD_ID)
     finally:
         await root_cache.close()
 

@@ -461,7 +461,7 @@ async def _assert_thread_read_guard_retries_when_unknown_live_mutation_races_fet
         thread_result = await asyncio.wait_for(read_task, timeout=1.0)
         await asyncio.wait_for(live_task, timeout=1.0)
         await _wait_for_room_cache_idle(coordinator)
-        thread_state = await event_cache.get_thread_cache_state(room_id, thread_id)
+        thread_state = await event_cache.get_thread_cache_gap(room_id, thread_id)
     finally:
         release_fetch.set()
         await asyncio.wait_for(

@@ -3120,7 +3120,7 @@ class TestThreadHistoryCache:
             },
         )
         broken_cache = MagicMock(spec=SqliteEventCache)
-        broken_cache.get_thread_cache_state = AsyncMock(
+        broken_cache.get_thread_cache_gap = AsyncMock(
             side_effect=cache_state_side_effect,
             return_value=(
                 ThreadCacheState(
@@ -3135,18 +3135,18 @@ class TestThreadHistoryCache:
             ),
         )
         broken_cache.get_thread_events = AsyncMock(side_effect=cached_events_side_effect, return_value=[])
-        broken_cache.replace_thread_if_not_newer = AsyncMock(side_effect=RuntimeError("db broken"))
+        broken_cache.replace_thread = AsyncMock(side_effect=RuntimeError("db broken"))
         history = await fetch_thread_history(client, "!room:localhost", "$thread_root", event_cache=broken_cache)
         assert [message.event_id for message in history] == ["$thread_root", "$reply"]
         assert history.diagnostics["cache_store_outcome"] == ThreadCacheReplaceOutcome.HARD_FAILURE.value
         assert history.diagnostics["cache_repair_usable"] is False
-        broken_cache.replace_thread_if_not_newer.assert_awaited_once()
+        broken_cache.replace_thread.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_refresh_retries_one_generation_conflict_then_installs_snapshot(self) -> None:
         """A mid-flight invalidation should trigger one bounded authoritative retry."""
         event_cache = _event_cache()
-        event_cache.replace_thread_if_not_newer.side_effect = [
+        event_cache.replace_thread.side_effect = [
             ThreadCacheReplaceOutcome.INVALIDATED,
             ThreadCacheReplaceOutcome.STORED,
         ]
@@ -3274,7 +3274,7 @@ class TestThreadHistoryCache:
     async def test_refresh_recognizes_existing_newer_usable_cache_winner(self) -> None:
         """A newer trusted snapshot should win without another fetch or generic failure."""
         event_cache = _event_cache()
-        event_cache.replace_thread_if_not_newer.return_value = ThreadCacheReplaceOutcome.EXISTING_USABLE
+        event_cache.replace_thread.return_value = ThreadCacheReplaceOutcome.EXISTING_USABLE
         fetched = matrix_client_module._ThreadHistoryFetchResult(
             history=[
                 ResolvedVisibleMessage.synthetic(
@@ -3331,7 +3331,7 @@ class TestThreadHistoryCache:
     async def test_refresh_fails_open_without_rescanning_when_existing_winner_load_fails(self) -> None:
         """A backend read fault after an existing winner must not discard fetched homeserver history."""
         event_cache = _event_cache()
-        event_cache.replace_thread_if_not_newer.return_value = ThreadCacheReplaceOutcome.EXISTING_USABLE
+        event_cache.replace_thread.return_value = ThreadCacheReplaceOutcome.EXISTING_USABLE
         fetched = matrix_client_module._ThreadHistoryFetchResult(
             history=[
                 ResolvedVisibleMessage.synthetic(
@@ -3378,7 +3378,7 @@ class TestThreadHistoryCache:
     async def test_refresh_reports_unresolved_invalidation_after_bounded_retry(self) -> None:
         """Repeated invalidation must remain explicit and never become reported cache success."""
         event_cache = _event_cache()
-        event_cache.replace_thread_if_not_newer.return_value = ThreadCacheReplaceOutcome.INVALIDATED
+        event_cache.replace_thread.return_value = ThreadCacheReplaceOutcome.INVALIDATED
         fetch_result = matrix_client_module._ThreadHistoryFetchResult(
             history=[
                 ResolvedVisibleMessage.synthetic(
@@ -3811,7 +3811,7 @@ class TestThreadHistoryCache:
                     "$thread_root",
                     event_cache=cache,
                 )
-            state_after_rejection = await cache.get_thread_cache_state("!room:localhost", "$thread_root")
+            state_after_rejection = await cache.get_thread_cache_gap("!room:localhost", "$thread_root")
             rows_after_rejection = await cache.get_thread_events("!room:localhost", "$thread_root")
 
             decrypted_client = self._room_messages_client([decrypted_child, root_event])
@@ -3821,7 +3821,7 @@ class TestThreadHistoryCache:
                 "$thread_root",
                 event_cache=cache,
             )
-            state_after_recovery = await cache.get_thread_cache_state("!room:localhost", "$thread_root")
+            state_after_recovery = await cache.get_thread_cache_gap("!room:localhost", "$thread_root")
 
             offline_client = MagicMock()
             offline_client.room_messages = AsyncMock(side_effect=AssertionError("must serve validated cache"))
@@ -3898,7 +3898,7 @@ class TestThreadHistoryCache:
                     thread_id,
                     event_cache=upgraded_cache,
                 )
-            state = await upgraded_cache.get_thread_cache_state(room_id, thread_id)
+            state = await upgraded_cache.get_thread_cache_gap(room_id, thread_id)
             rows = await upgraded_cache.get_thread_events(room_id, thread_id)
         finally:
             await upgraded_cache.close()
@@ -3943,7 +3943,7 @@ class TestThreadHistoryCache:
                 "$thread_root",
                 event_cache=cache,
             )
-            state = await cache.get_thread_cache_state("!room:localhost", "$thread_root")
+            state = await cache.get_thread_cache_gap("!room:localhost", "$thread_root")
         finally:
             await cache.close()
 
@@ -3991,8 +3991,8 @@ class TestThreadHistoryCache:
                     "$thread_root",
                     event_cache=cache,
                 )
-            state = await cache.get_thread_cache_state("!room:localhost", "$thread_root")
-            unrelated_state = await cache.get_thread_cache_state("!room:localhost", "$unrelated_root")
+            state = await cache.get_thread_cache_gap("!room:localhost", "$thread_root")
+            unrelated_state = await cache.get_thread_cache_gap("!room:localhost", "$unrelated_root")
         finally:
             await cache.close()
 
@@ -4031,7 +4031,7 @@ class TestThreadHistoryCache:
                 event_cache=cache,
             )
             cached_rows = await cache.get_thread_events("!room:localhost", "$thread_root")
-            state = await cache.get_thread_cache_state("!room:localhost", "$thread_root")
+            state = await cache.get_thread_cache_gap("!room:localhost", "$thread_root")
         finally:
             await cache.close()
 
@@ -4108,9 +4108,9 @@ class TestThreadHistoryCache:
                 thread_root_ids=["$thread_root", "$other_root"],
             )
             clean_rows = await cache.get_thread_events("!room:localhost", "$thread_root")
-            clean_state = await cache.get_thread_cache_state("!room:localhost", "$thread_root")
+            clean_state = await cache.get_thread_cache_gap("!room:localhost", "$thread_root")
             poisoned_rows = await cache.get_thread_events("!room:localhost", "$other_root")
-            poisoned_state = await cache.get_thread_cache_state("!room:localhost", "$other_root")
+            poisoned_state = await cache.get_thread_cache_gap("!room:localhost", "$other_root")
         finally:
             await cache.close()
 
@@ -4156,7 +4156,7 @@ class TestThreadHistoryCache:
                 thread_root_ids=["$thread_root", "$other_root"],
             )
             states = {
-                thread_id: await cache.get_thread_cache_state("!room:localhost", thread_id)
+                thread_id: await cache.get_thread_cache_gap("!room:localhost", thread_id)
                 for thread_id in ("$thread_root", "$other_root")
             }
             rows = {
@@ -4230,7 +4230,7 @@ class TestThreadHistoryCache:
         """Authoritative history remains available while every derived cache write is rejected."""
         event_cache = _event_cache()
         event_cache.room_membership_epoch.side_effect = RuntimeError("cache unavailable")
-        event_cache.replace_thread_if_not_newer.return_value = ThreadCacheReplaceOutcome.WRITES_UNAVAILABLE
+        event_cache.replace_thread.return_value = ThreadCacheReplaceOutcome.WRITES_UNAVAILABLE
         fetch_result = matrix_client_module._ThreadHistoryFetchResult(
             history=[
                 ResolvedVisibleMessage.synthetic(
@@ -4263,6 +4263,6 @@ class TestThreadHistoryCache:
         assert [message.event_id for message in history] == ["$thread_root"]
         assert fetch.await_args.kwargs["expected_membership_epoch"] == UNCERTIFIED_MEMBERSHIP_EPOCH
         assert (
-            event_cache.replace_thread_if_not_newer.await_args.kwargs["expected_membership_epoch"]
+            event_cache.replace_thread.await_args.kwargs["expected_membership_epoch"]
             == UNCERTIFIED_MEMBERSHIP_EPOCH
         )

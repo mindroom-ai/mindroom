@@ -136,7 +136,7 @@ async def test_missing_cache_append_storm_scans_each_thread_at_most_once(tmp_pat
 
     try:
         with (
-            patch.object(event_cache, "replace_thread_if_not_newer", invalidated_store),
+            patch.object(event_cache, "replace_thread", invalidated_store),
             patch(
                 "mindroom.matrix.client_thread_history._fetch_thread_history_with_events",
                 AsyncMock(side_effect=recorder.scan),
@@ -174,7 +174,7 @@ async def test_missing_cache_append_storm_bounds_concurrent_history_scans(tmp_pa
 
     try:
         with (
-            patch.object(event_cache, "replace_thread_if_not_newer", invalidated_store),
+            patch.object(event_cache, "replace_thread", invalidated_store),
             patch(
                 "mindroom.matrix.client_thread_history._fetch_thread_history_with_events",
                 AsyncMock(side_effect=recorder.scan),

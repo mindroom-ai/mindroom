@@ -351,13 +351,13 @@ async def test_sqlite_lock_contention_quarantines_then_heals_principal(
         blocker.execute("BEGIN IMMEDIATE")
         try:
             readable_state = await asyncio.wait_for(
-                alice.get_thread_cache_state(room_id, thread_id),
+                alice.get_thread_cache_gap(room_id, thread_id),
                 timeout=0.5,
             )
             assert readable_state is None
             read_logger.debug.assert_called_once_with(
                 "SQLite event cache read skipped because another writer owns storage",
-                operation="get_thread_cache_state",
+                operation="get_thread_cache_gap",
             )
             timeout_cursor = await db.execute("PRAGMA busy_timeout")
             assert await timeout_cursor.fetchone() == (5000,)
@@ -381,12 +381,12 @@ async def test_sqlite_lock_contention_quarantines_then_heals_principal(
         assert alice.durable_writes_available is False
         assert alice.cache_generation is None
 
-        assert await alice.get_thread_cache_state(room_id, thread_id) is None
+        assert await alice.get_thread_cache_gap(room_id, thread_id) is None
         assert alice.runtime_diagnostics()["cache_sqlite_pending_principal_purge"] is False
         assert await bob.get_event(room_id, "$bob") == bob_event
 
         await replace_thread_unconditionally(alice, room_id, thread_id, [alice_event])
-        healed_state = await alice.get_thread_cache_state(room_id, thread_id)
+        healed_state = await alice.get_thread_cache_gap(room_id, thread_id)
         assert healed_state is not None
         assert healed_state.validated_at is not None
         assert healed_state.invalidated_at is None
@@ -1099,7 +1099,7 @@ async def test_pre_departure_thread_refill_cannot_resurrect_after_rejoin(
         await cache.purge_room(room_id)
         await cache.mark_room_joined(room_id, expected_departure_epoch=departure_epoch)
 
-        replaced = await cache.replace_thread_if_not_newer(
+        replaced = await cache.replace_thread(
             room_id,
             thread_id,
             [root_event, redacted_event],
@@ -1146,12 +1146,12 @@ async def test_pre_departure_thread_refill_from_another_runtime_cannot_resurrect
             expected_departure_epoch=departure_epoch,
         )
 
-        state = await departing_cache.get_thread_cache_state(room_id, thread_id)
+        state = await departing_cache.get_thread_cache_gap(room_id, thread_id)
         assert state is not None
         assert state.room_invalidated_at is not None
         assert state.room_invalidation_reason == "room_rejoined"
 
-        replaced = await stale_cache.replace_thread_if_not_newer(
+        replaced = await stale_cache.replace_thread(
             room_id,
             thread_id,
             events,
@@ -1164,7 +1164,7 @@ async def test_pre_departure_thread_refill_from_another_runtime_cannot_resurrect
         assert await departing_cache.get_event(room_id, "$secret") is None
 
         assert (
-            await stale_cache.replace_thread_if_not_newer(
+            await stale_cache.replace_thread(
                 room_id,
                 thread_id,
                 events,
@@ -1238,7 +1238,7 @@ async def test_departed_refill_guard_blocks_point_plaintext_and_thread_writes_af
             expected_membership_epoch=departed_membership_epoch,
         )
         assert (
-            await refill_cache.replace_thread_if_not_newer(
+            await refill_cache.replace_thread(
                 room_id,
                 thread_id,
                 events,
@@ -1251,7 +1251,7 @@ async def test_departed_refill_guard_blocks_point_plaintext_and_thread_writes_af
         assert await _raw_mxc_text_count(refill_cache, room_id, mxc_url) == 0
 
         assert (
-            await refill_cache.replace_thread_if_not_newer(
+            await refill_cache.replace_thread(
                 room_id,
                 thread_id,
                 events,

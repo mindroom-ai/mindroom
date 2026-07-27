@@ -71,7 +71,7 @@ async def test_twenty_missing_thread_callers_share_one_repair_and_converge(  # n
             _event("$initial", 1500, thread_id=thread_id),
             *retained,
         ]
-        return await cache.replace_thread_if_not_newer(
+        return await cache.replace_thread(
             room_id,
             thread_id,
             events,
@@ -84,7 +84,7 @@ async def test_twenty_missing_thread_callers_share_one_repair_and_converge(  # n
         participant_count += 1
         if participant_count == 20:
             participants_arrived.set()
-        state = await cache.get_thread_cache_state(room_id, thread_id)
+        state = await cache.get_thread_cache_gap(room_id, thread_id)
         rows = await cache.get_thread_events(room_id, thread_id)
         if rows is None or thread_cache_rejection_reason(state) is not None:
             await coordinator.run_thread_repair(
@@ -102,7 +102,7 @@ async def test_twenty_missing_thread_callers_share_one_repair_and_converge(  # n
                 expected_ids,
                 coordination_scope=principal_id,
             )
-        final_state = await cache.get_thread_cache_state(room_id, thread_id)
+        final_state = await cache.get_thread_cache_gap(room_id, thread_id)
         final_rows = await cache.get_thread_events(room_id, thread_id)
         assert final_rows is not None
         assert thread_cache_rejection_reason(final_state) is None

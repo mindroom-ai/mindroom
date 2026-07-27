@@ -1736,7 +1736,7 @@ class TestExtractedModuleLoggerRebinding:
         bot = _agent_bot(config=config, agent_user=assistant_user, storage_path=tmp_path)
         bot.event_cache = make_event_cache_mock()
         sync_bot_runtime_state(bot)
-        bot.event_cache.get_thread_cache_state = AsyncMock(
+        bot.event_cache.get_thread_cache_gap = AsyncMock(
             return_value=ThreadCacheState(
                 validated_at=time.time(),
                 invalidated_at=None,
