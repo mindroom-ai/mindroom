@@ -27,7 +27,11 @@ from mindroom.matrix.cache import (
 from mindroom.matrix.cache.postgres_event_cache import PostgresEventCache
 from mindroom.matrix.cache.sqlite_event_cache import SqliteEventCache
 from mindroom.matrix.cache.thread_cache_invalidation import mark_thread_stale_fail_closed
-from mindroom.matrix.cache.thread_read_window import UNBOUNDED_THREAD_READ, ThreadReadBudget
+from mindroom.matrix.cache.thread_read_window import (
+    UNBOUNDED_THREAD_READ,
+    ThreadReadBudget,
+    ThreadWindowRead,
+)
 from mindroom.matrix.message_content import resolve_event_source_content
 from mindroom.matrix.rooms import leave_non_dm_rooms
 from mindroom.matrix.sync_cache_trust import SyncCacheTrust
@@ -1437,20 +1441,23 @@ async def test_cached_sidecar_hydration_cannot_cross_principal_purge(
     )
     rows_loaded = asyncio.Event()
     release_rows = asyncio.Event()
-    original_get_thread_events = reader_cache.get_thread_events
+    # Patch the method the read actually calls. The cache-hit path reads through
+    # get_thread_window because it needs to know whether the budget truncated; patching
+    # get_thread_events instead would never fire and this test would hang rather than fail.
+    original_get_thread_window = reader_cache.get_thread_window
 
     async def pause_after_read(
         read_room_id: str,
         read_thread_id: str,
         *,
         budget: ThreadReadBudget = UNBOUNDED_THREAD_READ,
-    ) -> list[dict[str, Any]] | None:
-        rows = await original_get_thread_events(read_room_id, read_thread_id, budget=budget)
+    ) -> ThreadWindowRead:
+        window = await original_get_thread_window(read_room_id, read_thread_id, budget=budget)
         rows_loaded.set()
         await release_rows.wait()
-        return rows
+        return window
 
-    monkeypatch.setattr(reader_cache, "get_thread_events", pause_after_read)
+    monkeypatch.setattr(reader_cache, "get_thread_window", pause_after_read)
     download_response = MagicMock(spec=nio.DownloadResponse)
     download_response.body = b'{"msgtype":"m.text","body":"secret plaintext"}'
     client = MagicMock(spec=nio.AsyncClient)
