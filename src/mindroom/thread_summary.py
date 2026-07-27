@@ -262,7 +262,7 @@ async def _load_thread_history(
 ) -> list[ResolvedVisibleMessage]:
     """Load fresh authoritative history without inherited turn memoization."""
     return list(
-        await conversation_cache.get_fresh_strict_thread_history(
+        await conversation_cache.get_strict_thread_history(
             room_id,
             thread_id,
             caller_label="thread_summary_background",

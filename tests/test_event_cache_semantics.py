@@ -6,14 +6,12 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from mindroom.matrix.cache import ThreadRevision
 from mindroom.matrix.cache.event_cache_events import filter_redacted_events
 from mindroom.matrix.cache.event_normalization import normalize_event_source_for_cache
-from mindroom.matrix.cache.thread_cache_state import thread_cache_state_row, thread_revision_row
+from mindroom.matrix.cache.thread_cache_state import ThreadCacheGap, thread_cache_gap_row
 from mindroom.matrix.media import valid_room_message_replacement
 from mindroom.matrix.replacements import (
     bundled_replacement_candidates,
-    event_representation_covers,
     is_valid_replacement,
     ordered_replacements,
 )
@@ -27,47 +25,28 @@ if TYPE_CHECKING:
     [
         (),
         (1.0,),
-        (1.0, 2.0, "reason", 3.0),
-        (1.0, 2.0, "reason", 3.0, "room_reason", 4.0),
+        (1.0, "reason", 3.0),
     ],
 )
-def test_thread_cache_state_row_rejects_malformed_storage_width(
+def test_thread_cache_gap_row_rejects_malformed_storage_width(
     values: Sequence[float | str | None],
 ) -> None:
-    """Storage rows must match the five-column query contract exactly."""
-    with pytest.raises(ValueError, match=r"must contain exactly 5 values, got \d+"):
-        thread_cache_state_row(values)
+    """Storage rows must match the two-column query contract exactly."""
+    with pytest.raises(ValueError, match=r"must contain exactly 2 values, got \d+"):
+        thread_cache_gap_row(values)
 
 
-def test_thread_cache_state_row_treats_full_null_row_as_absent() -> None:
-    """A complete outer-join miss remains an absent cache-state row."""
-    assert thread_cache_state_row((None, None, None, None, None)) is None
+def test_thread_cache_gap_row_treats_unmarked_row_as_absent() -> None:
+    """A thread row with no marker carries no gap."""
+    assert thread_cache_gap_row((None, None)) is None
+    assert thread_cache_gap_row(None) is None
 
 
-@pytest.mark.parametrize("values", [(), (1,), (1, 2, 3), (1, 2, 3, 4, 5)])
-def test_thread_revision_row_rejects_malformed_storage_width(
-    values: Sequence[float | int | None],
-) -> None:
-    """Aggregate rows must match the four-column revision query contract exactly."""
-    with pytest.raises(ValueError, match=r"must contain exactly 4 values, got \d+"):
-        thread_revision_row(values)
-
-
-@pytest.mark.parametrize("values", [None, (0, None, None, None), (1, None, 2, 3)])
-def test_thread_revision_row_treats_empty_thread_as_absent(
-    values: Sequence[float | int | None] | None,
-) -> None:
-    """Empty or partially aggregated threads never produce a revision."""
-    assert thread_revision_row(values) is None
-
-
-def test_thread_revision_row_normalizes_backend_values() -> None:
-    """Backend numeric values normalize into one integer revision."""
-    assert thread_revision_row((3, 7, 9, 1000)) == ThreadRevision(
-        event_count=3,
-        max_write_seq=7,
-        max_thread_write_seq=9,
-        max_origin_server_ts=1000,
+def test_thread_cache_gap_row_reads_a_marked_row() -> None:
+    """A marked row carries its instant and reason."""
+    assert thread_cache_gap_row((12.5, "limited_sync_timeline")) == ThreadCacheGap(
+        gap_marked_at=12.5,
+        gap_reason="limited_sync_timeline",
     )
 
 
@@ -80,39 +59,6 @@ def test_cache_normalization_uses_authoritative_event_id() -> None:
         )["event_id"]
         == "$indexed"
     )
-
-
-@pytest.mark.parametrize(
-    "conflicting_fields",
-    [
-        {"sender": "@mallory:localhost"},
-        {"room_id": "!other:localhost"},
-        {"state_key": ""},
-        {"type": "io.mindroom.tool_approval"},
-        {"origin_server_ts": 2001},
-    ],
-    ids=("sender", "room", "state", "type", "timestamp"),
-)
-def test_redaction_covers_only_the_same_immutable_event_identity(
-    conflicting_fields: dict[str, object],
-) -> None:
-    """A redacted view is authoritative only for its matching immutable envelope."""
-    candidate = {
-        "event_id": "$event",
-        "room_id": "!room:localhost",
-        "sender": "@alice:localhost",
-        "origin_server_ts": 2000,
-        "type": "m.room.message",
-        "content": {"body": "Visible", "msgtype": "m.text"},
-    }
-    redacted = {
-        **candidate,
-        "content": {},
-        "unsigned": {"redacted_because": {"event_id": "$redaction"}},
-    }
-
-    assert event_representation_covers(redacted, candidate)
-    assert not event_representation_covers({**redacted, **conflicting_fields}, candidate)
 
 
 @pytest.mark.parametrize(

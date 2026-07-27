@@ -11,10 +11,9 @@ All ordering is scoped to one ``(principal, room)`` lane.
    one lane and thread, and never start while a room update queued ahead of them is pending or active.
 
 3. A room update cancelled before it started leaves a fence in its lane: later thread updates still wait
-   for the earlier queue segment to drain, so cancellation cannot reorder writes.
-   Thread-cache repair (``run_thread_repair``) opts out via ``ignore_cancelled_room_fences``: it rebuilds
-   its snapshot from the homeserver under a membership-epoch guard rather than extending queued state, and
-   it still waits for same-thread predecessors, so it cannot reorder same-thread writes.
+   for the earlier queue segment to drain, so cancellation cannot reorder writes. No queued update can
+   opt out. Only ``wait_for_thread_idle`` may, via ``ignore_cancelled_room_fences``, because a waiter
+   extends no queued state, so letting it past a fence cannot reorder any write.
 
 4. Readers establish the write-read barrier with ``wait_for_thread_idle``: a thread read started after a
    mutation was queued in the same lane never observes cache state older than that mutation.
@@ -32,11 +31,7 @@ from mindroom.background_tasks import create_background_task, wait_for_backgroun
 from mindroom.logging_config import bound_log_context
 from mindroom.timing import elapsed_ms_between, emit_timing_event, timing_enabled
 
-from .thread_repair import ThreadRepairRegistry
-
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Collection, Mapping
-
     import structlog
 
 
@@ -66,7 +61,6 @@ class _QueuedUpdate:
     start_signal: asyncio.Future[None]
     update_state: _QueuedUpdateState
     thread_id: str | None = None
-    ignore_cancelled_room_fences: bool = False
     coalesce_key: _CoalesceKey | None = None
     started: bool = False
 
@@ -95,6 +89,9 @@ class EventCacheWriteCoordinator:
 
     logger: structlog.stdlib.BoundLogger
     background_task_owner: object = field(default_factory=object)
+    # Fail-closed markers owed by a cancelled append are owned separately, so the generic
+    # cancellation rounds cannot reach them: those rounds are what create them.
+    failure_marker_task_owner: object = field(default_factory=object)
     _room_states: dict[_CoordinationRoomKey, _RoomSchedulerState] = field(default_factory=dict, init=False)
     _room_update_tasks: dict[_CoordinationRoomKey, _UpdateTask] = field(default_factory=dict, init=False)
     _thread_update_tasks: dict[tuple[_CoordinationRoomKey, str], _UpdateTask] = field(
@@ -106,7 +103,6 @@ class EventCacheWriteCoordinator:
         init=False,
     )
     _next_sequence: int = field(default=0, init=False)
-    _thread_repairs: ThreadRepairRegistry = field(default_factory=ThreadRepairRegistry, init=False)
 
     def _next_entry_sequence(self) -> int:
         sequence = self._next_sequence
@@ -234,10 +230,9 @@ class EventCacheWriteCoordinator:
             return True, cancelled_room_fence_pending
 
         assert entry.thread_id is not None
-        cancelled_room_fence_blocks_entry = cancelled_room_fence_pending and not entry.ignore_cancelled_room_fences
         if (
             room_barrier_pending
-            or cancelled_room_fence_blocks_entry
+            or cancelled_room_fence_pending
             or same_thread_predecessor_pending
             or state.active_room is not None
         ):
@@ -411,9 +406,7 @@ class EventCacheWriteCoordinator:
         kind: typing.Literal["room", "thread"],
         update_coro_factory: _UpdateCoroFactory,
         name: str,
-        log_exceptions: bool,
         emit_timing: bool = False,
-        ignore_cancelled_room_fences: bool = False,
         coalesce_key: _CoalesceKey | None = None,
         coalesce_log_context: dict[str, object] | None = None,
         coordination_scope: str,
@@ -505,7 +498,6 @@ class EventCacheWriteCoordinator:
             run_when_scheduled(),
             name=name,
             owner=self.background_task_owner,
-            log_exceptions=log_exceptions,
         )
         entry = _QueuedUpdate(
             sequence=self._next_entry_sequence(),
@@ -514,7 +506,6 @@ class EventCacheWriteCoordinator:
             start_signal=start_signal,
             update_state=update_state,
             thread_id=thread_id,
-            ignore_cancelled_room_fences=ignore_cancelled_room_fences,
             coalesce_key=coalesce_key,
         )
 
@@ -588,7 +579,6 @@ class EventCacheWriteCoordinator:
         update_coro_factory: _UpdateCoroFactory,
         *,
         name: str,
-        log_exceptions: bool = True,
         emit_timing: bool = True,
         coalesce_key: _CoalesceKey | None = None,
         coalesce_log_context: dict[str, object] | None = None,
@@ -601,7 +591,6 @@ class EventCacheWriteCoordinator:
             kind="room",
             update_coro_factory=update_coro_factory,
             name=name,
-            log_exceptions=log_exceptions,
             emit_timing=emit_timing,
             coalesce_key=coalesce_key,
             coalesce_log_context=coalesce_log_context,
@@ -615,11 +604,9 @@ class EventCacheWriteCoordinator:
         update_coro_factory: _UpdateCoroFactory,
         *,
         name: str,
-        log_exceptions: bool = True,
         emit_timing: bool = False,
         coalesce_key: _CoalesceKey | None = None,
         coalesce_log_context: dict[str, object] | None = None,
-        ignore_cancelled_room_fences: bool = False,
         coordination_scope: str,
     ) -> asyncio.Task[object]:
         """Schedule one thread-scoped cache update behind room-wide and same-thread predecessors."""
@@ -629,92 +616,11 @@ class EventCacheWriteCoordinator:
             kind="thread",
             update_coro_factory=update_coro_factory,
             name=name,
-            log_exceptions=log_exceptions,
             emit_timing=emit_timing,
             coalesce_key=coalesce_key,
             coalesce_log_context=coalesce_log_context,
-            ignore_cancelled_room_fences=ignore_cancelled_room_fences,
             coordination_scope=coordination_scope,
         )
-
-    async def run_thread_repair[T](
-        self,
-        room_id: str,
-        thread_id: str,
-        repair_coro_factory: Callable[[], Awaitable[T]],
-        *,
-        coordination_scope: str,
-        hydrate_sidecars: bool,
-        allow_stale_fallback: bool,
-        result_arms_backoff: Callable[[T], bool],
-        bypass_failure_backoff: bool = False,
-    ) -> T:
-        """Join or start one principal-scoped repair under the same-thread barrier.
-
-        Untimed reads may bypass a retained delay; dispatch and background repairs leave the default.
-        """
-        return await self._thread_repairs.run(
-            (coordination_scope, room_id, thread_id, hydrate_sidecars, allow_stale_fallback),
-            schedule=lambda repair: typing.cast(
-                "asyncio.Task[T]",
-                self.queue_thread_update(
-                    room_id,
-                    thread_id,
-                    repair,
-                    name="matrix_cache_repair_thread",
-                    log_exceptions=False,
-                    ignore_cancelled_room_fences=True,
-                    coordination_scope=coordination_scope,
-                ),
-            ),
-            repair=repair_coro_factory,
-            result_arms_backoff=result_arms_backoff,
-            bypass_failure_backoff=bypass_failure_backoff,
-        )
-
-    def retain_thread_repair_delta(
-        self,
-        room_id: str,
-        thread_id: str,
-        event_source: dict[str, Any],
-        *,
-        coordination_scope: str,
-    ) -> None:
-        """Retain one certified delta until append or repair includes it."""
-        self._thread_repairs.retain_delta(
-            (coordination_scope, room_id, thread_id),
-            event_source,
-        )
-
-    def pending_thread_repair_deltas(
-        self,
-        room_id: str,
-        thread_id: str,
-        *,
-        coordination_scope: str,
-    ) -> tuple[dict[str, Any], ...]:
-        """Return retained deltas for one principal-scoped repair."""
-        return self._thread_repairs.pending_deltas(
-            (coordination_scope, room_id, thread_id),
-        )
-
-    def acknowledge_thread_repair_deltas(
-        self,
-        room_id: str,
-        thread_id: str,
-        event_sources: Collection[Mapping[str, Any]],
-        *,
-        coordination_scope: str,
-    ) -> None:
-        """Forget exact retained representations after a successful append or repair."""
-        self._thread_repairs.acknowledge_deltas(
-            (coordination_scope, room_id, thread_id),
-            event_sources,
-        )
-
-    def clear_thread_repair_room(self, room_id: str, *, coordination_scope: str) -> None:
-        """Drop retained repair state at one authoritative membership departure."""
-        self._thread_repairs.clear_room(coordination_scope, room_id)
 
     async def wait_for_thread_idle(
         self,
@@ -785,10 +691,15 @@ class EventCacheWriteCoordinator:
             )
 
     async def close(self) -> None:
-        """Drain any queued cache writes for this coordinator."""
+        """Drain any queued cache writes for this coordinator.
+
+        Markers are drained after, and on their own budget. Cancelling a queued append is what makes
+        it owe one, so an owed marker does not exist until the first drain has already given up, and
+        sharing that drain would leave it to be cancelled by the very next round.
+        """
         await wait_for_background_tasks(timeout=5.0, owner=self.background_task_owner)
+        await wait_for_background_tasks(timeout=5.0, owner=self.failure_marker_task_owner)
         self._room_states.clear()
         self._room_update_tasks.clear()
         self._thread_update_tasks.clear()
         self._thread_update_tasks_by_room.clear()
-        self._thread_repairs.clear()

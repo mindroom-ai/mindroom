@@ -174,13 +174,6 @@ class ThreadMembershipLookupError(RuntimeError):
     """Raised when related-event lookup cannot determine thread membership from available data."""
 
 
-def event_info_proves_thread_membership(event_info: EventInfo, event_id: str, thread_id: str) -> bool:
-    """Return whether local event facts alone prove membership in one thread."""
-    if event_id == thread_id:
-        return event_info.can_be_thread_root
-    return bool(thread_id) and event_info.thread_id == thread_id
-
-
 class ThreadRoomScanRootNotFoundError(RuntimeError):
     """Raised when a room scan finishes without ever seeing the requested root event."""
 

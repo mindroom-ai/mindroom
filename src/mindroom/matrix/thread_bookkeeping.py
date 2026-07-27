@@ -19,7 +19,7 @@ Who may mutate thread state, and how:
    ``EventCacheWriteCoordinator`` barrier.
    The only other thread-cache writer is the read-refill in
    ``mindroom.matrix.client_thread_history``: after an authoritative homeserver fetch it stores the
-   snapshot through the guarded ``replace_thread_if_not_newer``, and it invalidates entries it proves
+   snapshot through ``replace_thread``, and it invalidates entries it proves
    corrupt (unresolvable payloads or rows missing the thread root).
    No code outside those two sites may call the event cache's thread-write methods.
 

@@ -399,7 +399,9 @@ class TestAgentBot(AgentBotTestBase):
         assert content["m.relates_to"]["rel_type"] == "m.thread"
         assert content["m.relates_to"]["event_id"] == "$canonical_thread:localhost"
         assert content["m.relates_to"]["m.in_reply_to"]["event_id"] == "$reply_plain:localhost"
-        assert mock_edit_message.await_args.args[3]["m.relates_to"]["event_id"] == "$canonical_thread:localhost"
+        mock_edit_message.assert_awaited_once()
+        assert mock_edit_message.await_args.args[2] == "$team"
+        assert mock_edit_message.await_args.args[4] == "Team reply"
 
     @pytest.mark.asyncio
     async def test_team_generate_response_nonteam_fallback_uses_locked_runner(

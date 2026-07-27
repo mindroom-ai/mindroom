@@ -996,6 +996,11 @@ def _merge_resolved_message_state(
     normalized_latest_content = {key: value for key, value in message.content.items() if isinstance(key, str)}
     state = message_states.setdefault(target_event_id, _MessageState())
     state.latest_body = message.body
+    # The last time this message changed, not when it was created. ``timestamp`` deliberately
+    # stays the original event's so an edit cannot reorder a thread, which means it is the
+    # wrong clock for "is this stream still active": a placeholder posted eight hours ago and
+    # edited seconds before a restart would read as older than the cleanup window and be
+    # skipped, leaving it displaying ``streaming`` forever.
     state.latest_timestamp = message.visible_timestamp
     state.latest_event_id = message.visible_event_id
     state.latest_content = normalized_latest_content

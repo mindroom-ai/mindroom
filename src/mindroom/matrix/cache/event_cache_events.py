@@ -52,6 +52,21 @@ class SerializedCachedEvent:
     event_json: str
     event: dict[str, Any]
 
+    @property
+    def sender(self) -> str:
+        """Return the Matrix user that sent this event.
+
+        Persisted as its own narrow column so a collapsed thread read can compare an edit's sender
+        against the sender of the event it replaces without reading either payload. A replacement
+        is only legitimate from the original's sender, and a read that cannot check that cheaply
+        ranks a foreign edit as the survivor. The fold then finds nothing in the author's own
+        bucket and renders the pre-edit body, so the damage is a silent rollback of the author's
+        own edit rather than the impersonation it first looks like - the fold, not this column,
+        is what stops someone else's text being shown.
+        """
+        sender = self.event.get("sender")
+        return sender if isinstance(sender, str) else ""
+
 
 @dataclass(frozen=True, slots=True)
 class CachedEventRow:
@@ -368,7 +383,7 @@ def event_mxc_urls(event: dict[str, Any], *, room_id: str) -> frozenset[str]:
     )
 
 
-def cached_event_owns_mxc(
+def _cached_event_owns_mxc(
     *,
     event_json: str,
     room_id: str,
@@ -386,7 +401,7 @@ def validated_mxc_text_rows(rows: Iterable[Sequence[Any]], *, room_id: str) -> d
     return {
         (event_id, mxc_url): text_content
         for event_id, mxc_url, text_content, event_json in rows
-        if cached_event_owns_mxc(
+        if _cached_event_owns_mxc(
             event_json=event_json,
             room_id=room_id,
             mxc_url=mxc_url,
@@ -403,7 +418,7 @@ def bundled_replacement_event_ids(event: Mapping[str, Any]) -> frozenset[str]:
     )
 
 
-def _direct_redaction_candidate_ids(event_id: str, event: dict[str, Any], room_id: str) -> frozenset[str]:
+def direct_redaction_candidate_ids(event_id: str, event: dict[str, Any], room_id: str) -> frozenset[str]:
     """Return tombstones that suppress this event rather than only its bundled preview."""
     original_event_id = EventInfo.from_event(event).original_event_id
     if (
@@ -419,7 +434,7 @@ def batch_redaction_candidate_ids(events: list[_CachedEventValue], room_id: str)
     """Return IDs whose tombstones would prevent caching any event in a batch."""
     return frozenset().union(
         *(
-            _direct_redaction_candidate_ids(event_id, event, room_id) | bundled_replacement_event_ids(event)
+            direct_redaction_candidate_ids(event_id, event, room_id) | bundled_replacement_event_ids(event)
             for event_id, event in events
         ),
     )
@@ -459,7 +474,7 @@ def filter_redacted_events(
     """Drop tombstoned events and sanitize bundled replacements with tombstones."""
     retained: list[_CachedEventValue] = []
     for event_id, event in events:
-        direct_ids = _direct_redaction_candidate_ids(event_id, event, room_id)
+        direct_ids = direct_redaction_candidate_ids(event_id, event, room_id)
         if event.get("type") == "m.room.redaction" or direct_ids & redacted_event_ids:
             continue
         sanitized = (

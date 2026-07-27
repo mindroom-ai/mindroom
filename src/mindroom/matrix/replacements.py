@@ -9,7 +9,6 @@ from typing import Any, Literal
 
 from mindroom.matrix.event_identity import (
     PROVISIONAL_OUTBOUND_KEY,
-    event_representation_identity_matches,
     event_representation_transition,
 )
 from mindroom.matrix.event_info import EventInfo, event_source_is_timeline_in_room, event_source_matches_room
@@ -89,24 +88,6 @@ def replacement_content(original: Mapping[str, object], new: Mapping[str, object
     if "m.relates_to" in original:
         content["m.relates_to"] = original["m.relates_to"]
     return content
-
-
-def event_representation_covers(
-    existing: Mapping[str, Any],
-    candidate: Mapping[str, Any],
-) -> bool:
-    """Return whether an existing canonical or redacted view fully covers a candidate."""
-    unsigned = existing.get("unsigned")
-    if isinstance(unsigned, Mapping) and isinstance(unsigned.get("redacted_because"), Mapping):
-        return event_representation_identity_matches(existing, candidate)
-    transition = event_representation_transition(existing, candidate)
-    same_canonical_payload = (
-        existing.get(PROVISIONAL_OUTBOUND_KEY) is not True
-        and event_representation_identity_matches(existing, candidate)
-        and existing.get("type") == candidate.get("type")
-        and existing.get("content") == candidate.get("content")
-    )
-    return transition == "ignore" or (transition == "accept" and (existing == candidate or same_canonical_payload))
 
 
 def _compatible_representation_types(original_type: object, candidate_type: object) -> bool:
@@ -357,6 +338,55 @@ def _deduplicated_replacement_candidates(
     ]
 
 
+def _replaces_event_id(candidate: Mapping[str, Any], original_id: str) -> bool:
+    """Return whether one candidate carries exact ``m.replace`` identity for ``original_id``."""
+    content = candidate.get("content")
+    relation = content.get("m.relates_to") if isinstance(content, Mapping) else None
+    return isinstance(relation, Mapping) and (relation.get("rel_type"), relation.get("event_id")) == (
+        "m.replace",
+        original_id,
+    )
+
+
+def _latest_first(candidates: list[dict[str, Any]], *, room_id: str | None) -> list[dict[str, Any]]:
+    """Return deduplicated candidates in canonical Matrix latest-first order."""
+    return sorted(
+        _deduplicated_replacement_candidates(candidates, room_id=room_id),
+        key=itemgetter("origin_server_ts", "event_id"),
+        reverse=True,
+    )
+
+
+def ordered_unattributed_replacements(
+    original_event_id: str,
+    candidates: Iterable[Mapping[str, Any]],
+    *,
+    room_id: str | None,
+    validator: ReplacementValidator,
+) -> list[dict[str, Any]]:
+    """Order replacements of an original that was never observed, Matrix latest-first.
+
+    The same-sender rule cannot be applied here: with no original there is no sender to compare
+    against. A caller may therefore only attribute the result to the editor that sent it, and must
+    not let it claim any property of the original it names - including thread membership.
+    """
+
+    def valid(candidate: dict[str, Any]) -> bool:
+        event_id, timestamp = (candidate.get(key) for key in ("event_id", "origin_server_ts"))
+        return (
+            isinstance(event_id, str)
+            and event_id not in ("", original_event_id)
+            and type(timestamp) is int
+            and event_source_is_timeline_in_room(candidate, room_id)
+            and _valid_explicit_room(candidate)
+            and _replaces_event_id(candidate, original_event_id)
+            and validator(candidate)
+        )
+
+    normalized = [dict(candidate) for candidate in candidates]
+    return _latest_first([candidate for candidate in normalized if valid(candidate)], room_id=room_id)
+
+
 def _ordered_valid_replacements(
     original: Mapping[str, Any],
     candidates: list[dict[str, Any]],
@@ -374,11 +404,10 @@ def _ordered_valid_replacements(
         or EventInfo.from_event(dict(original)).is_edit
     ):
         return []
+    assert isinstance(original_id, str)
 
     def valid(candidate: dict[str, Any]) -> bool:
         event_id, timestamp = (candidate.get(key) for key in ("event_id", "origin_server_ts"))
-        content = candidate.get("content")
-        relation = content.get("m.relates_to") if isinstance(content, Mapping) else None
         return (
             isinstance(event_id, str)
             and event_id not in ("", original_id)
@@ -387,17 +416,11 @@ def _ordered_valid_replacements(
             and type(timestamp) is int
             and event_source_is_timeline_in_room(candidate, room_id)
             and _valid_explicit_room(candidate, original.get("room_id"))
-            and isinstance(relation, Mapping)
-            and (relation.get("rel_type"), relation.get("event_id")) == ("m.replace", original_id)
+            and _replaces_event_id(candidate, original_id)
             and validator(candidate)
         )
 
-    valid_candidates = [candidate for candidate in candidates if valid(candidate)]
-    return sorted(
-        _deduplicated_replacement_candidates(valid_candidates, room_id=room_id),
-        key=itemgetter("origin_server_ts", "event_id"),
-        reverse=True,
-    )
+    return _latest_first([candidate for candidate in candidates if valid(candidate)], room_id=room_id)
 
 
 def ordered_replacements(

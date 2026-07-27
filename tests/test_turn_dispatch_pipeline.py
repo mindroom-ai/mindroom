@@ -408,7 +408,6 @@ class TestAgentBot(AgentBotTestBase):
             trusted_sender_ids=trusted_sender_ids,
             caller_label="dispatch_context",
             coordinator_queue_wait_ms=ANY,
-            resolution_reuse=ANY,
             refill=ANY,
         )
 

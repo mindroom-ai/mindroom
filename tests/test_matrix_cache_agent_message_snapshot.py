@@ -224,8 +224,7 @@ async def test_get_latest_agent_message_snapshot_ignores_wrong_thread_index_row(
                 ),
             ],
         )
-        await cache.mark_thread_stale(room_id, thread_id, reason="live_thread_mutation")
-        assert await cache.append_event(
+        assert await cache.apply_thread_mutation_append(
             room_id,
             thread_id,
             _message_event(
@@ -235,8 +234,8 @@ async def test_get_latest_agent_message_snapshot_ignores_wrong_thread_index_row(
                 origin_server_ts=3000,
                 relates_to={"rel_type": "m.thread", "event_id": "$other-root"},
             ),
+            append_failed_reason="test_wrong_thread_append",
         )
-        assert await cache.revalidate_thread_after_incremental_update(room_id, thread_id)
         snapshot = await cache.get_latest_agent_message_snapshot(
             room_id,
             thread_id,
@@ -1183,7 +1182,7 @@ async def test_accessor_accepts_old_thread_cache_without_stale_marker(
                     relates_to={"rel_type": "m.thread", "event_id": "$thread-root"},
                 ),
             ],
-            validated_at=400.0,
+            fetch_started_at=400.0,
         )
     finally:
         await cache.close()
@@ -1233,7 +1232,7 @@ async def test_accessor_reuses_thread_cache_from_prior_bot_run(
                     relates_to={"rel_type": "m.thread", "event_id": "$thread-root"},
                 ),
             ],
-            validated_at=1000.0,
+            fetch_started_at=1000.0,
         )
     finally:
         await cache.close()
@@ -1283,9 +1282,9 @@ async def test_accessor_rejects_invalidated_thread_cache(
                     relates_to={"rel_type": "m.thread", "event_id": "$thread-root"},
                 ),
             ],
-            validated_at=1000.0,
+            fetch_started_at=1000.0,
         )
-        await cache.mark_thread_stale(
+        await cache.mark_thread_gap(
             "!room:localhost",
             "$thread-root",
             reason="test_invalidated",
@@ -1293,7 +1292,7 @@ async def test_accessor_rejects_invalidated_thread_cache(
     finally:
         await cache.close()
 
-    with pytest.raises(AgentMessageSnapshotUnavailable, match="thread_invalidated_after_validation"):
+    with pytest.raises(AgentMessageSnapshotUnavailable, match="test_invalidated"):
         await _read_snapshot(
             event_cache_factory,
             room_id="!room:localhost",
@@ -1344,7 +1343,7 @@ async def test_room_scope_returns_latest_by_origin_server_ts_not_cached_at(
                     relates_to={"rel_type": "m.thread", "event_id": "$thread-root"},
                 ),
             ],
-            validated_at=5000.0,
+            fetch_started_at=5000.0,
         )
     finally:
         await cache.close()
@@ -1399,7 +1398,7 @@ async def test_thread_scope_uses_authoritative_event_timestamp_after_point_updat
                 newest,
                 older,
             ],
-            validated_at=1000.0,
+            fetch_started_at=1000.0,
         )
         await cache.store_event(
             "$newest",

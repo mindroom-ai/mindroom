@@ -2,31 +2,35 @@
 
 This is the application layer below the write policies in ``thread_writes``; it owns how mutations land:
 
-1. Invalidation is durable-marker-first and fails closed: ``mark_thread_stale`` and
-   ``mark_room_threads_stale`` write monotonic stale markers; when a marker cannot be written the rows
+1. Gap marking is durable-marker-first and fails closed: ``mark_thread_gap`` and
+   ``mark_room_threads_gap`` write monotonic gap markers; when a marker cannot be written the rows
    are deleted instead, and when even deletion fails (and the backend is not just temporarily
    unavailable) the cache is disabled for the rest of the runtime.
 
-2. Appends are incremental-only: ``append_event`` refuses when the thread has no cached snapshot rows
-   (it then only records lookup-index rows), and a failed append re-invalidates the thread so a partial
-   snapshot is never trusted.
+2. Appends are incremental-only and atomic: ``apply_thread_mutation_append`` appends the event and,
+   when the append cannot land, records the gap marker in the same transaction. It refuses when the
+   thread has no cached snapshot rows (then only recording lookup-index rows), so a partial snapshot
+   is never served and a mutation that succeeds is never observably gapped in between.
+   That transaction carries the marker, so when it rolls back there is no marker either; the append
+   path then writes one through the same fail-closed ladder as rule 1 rather than leaving a thread
+   readable while it is missing the mutation.
 
-3. After a successful append the thread is revalidated only under the conditions enforced by
-   ``revalidate_thread_after_incremental_update`` (see ``sqlite_event_cache_threads``): the prior
-   invalidation must come from an incremental mutation reason and the room must not have been
-   invalidated at or after the last validation.
+3. A successful append clears nothing. An append extends a snapshot; it does not prove the snapshot
+   complete, and only a full replacement can clear a gap marker.
 """
 
 from __future__ import annotations
 
+import asyncio
 from typing import TYPE_CHECKING, Any
 
+from mindroom.background_tasks import create_background_task
 from mindroom.matrix.thread_bookkeeping import MutationThreadImpact, MutationThreadImpactState
 
-from .thread_cache_invalidation import mark_room_threads_stale_fail_closed, mark_thread_stale_fail_closed
+from .thread_cache_gap import mark_room_threads_gap_fail_closed, mark_thread_gap_fail_closed
+from .thread_cache_state import ThreadAppendOutcome
 
 if TYPE_CHECKING:
-    import asyncio
     from collections.abc import Callable, Coroutine, Sequence
 
     import structlog
@@ -35,27 +39,21 @@ if TYPE_CHECKING:
 
 
 class ThreadMutationCacheOps:
-    """Own queueing, invalidation, and cache writes for thread mutations."""
+    """Own queueing, gap marking, and cache writes for thread mutations."""
 
     def __init__(
         self,
         *,
         logger_getter: Callable[[], structlog.stdlib.BoundLogger],
         runtime: BotRuntimeView,
-        schedule_thread_repair: Callable[[str, str], None] | None = None,
     ) -> None:
         self._logger_getter = logger_getter
         self.runtime = runtime
-        self._schedule_thread_repair = schedule_thread_repair
 
     @property
     def logger(self) -> structlog.stdlib.BoundLogger:
         """Return the facade-bound logger so collaborator rebinding stays visible."""
         return self._logger_getter()
-
-    def _schedule_repair_if_available(self, room_id: str, thread_id: str) -> None:
-        if self._schedule_thread_repair is not None:
-            self._schedule_thread_repair(room_id, thread_id)
 
     def cache_runtime_available(self) -> bool:
         """Return whether event-cache writes can safely proceed."""
@@ -261,8 +259,8 @@ class ThreadMutationCacheOps:
         reason: str,
         raise_on_failure: bool = False,
     ) -> None:
-        """Mark one cached thread stale and fail closed if the marker cannot be written."""
-        await mark_thread_stale_fail_closed(
+        """Mark a gap against one cached thread and fail closed if the marker cannot be written."""
+        await mark_thread_gap_fail_closed(
             self.runtime.event_cache,
             room_id=room_id,
             thread_id=thread_id,
@@ -278,8 +276,8 @@ class ThreadMutationCacheOps:
         reason: str,
         raise_on_failure: bool = False,
     ) -> None:
-        """Mark one room's cached threads stale and fail closed if the marker cannot be written."""
-        await mark_room_threads_stale_fail_closed(
+        """Mark a gap against one room's cached threads and fail closed if the marker cannot be written."""
+        await mark_room_threads_gap_fail_closed(
             self.runtime.event_cache,
             room_id=room_id,
             reason=reason,
@@ -294,13 +292,23 @@ class ThreadMutationCacheOps:
         event_source: dict[str, Any],
         *,
         context: str,
+        append_failed_reason: str,
         raise_on_failure: bool = False,
     ) -> bool:
-        """Append one event into a cached thread fail-open and report whether a row changed."""
+        """Append one event into a cached thread fail-open and report whether a row changed.
+
+        Appending, and gap-marking when the append cannot land, happen in one durable operation.
+        Splitting them used to leave a snapshot readable while it was missing the event.
+        """
         event_id = event_source.get("event_id")
         try:
-            appended = await self.runtime.event_cache.append_event(room_id, thread_id, event_source)
-        except Exception as exc:
+            outcome = await self.runtime.event_cache.apply_thread_mutation_append(
+                room_id,
+                thread_id,
+                event_source,
+                append_failed_reason=append_failed_reason,
+            )
+        except (Exception, asyncio.CancelledError) as exc:
             self.logger.warning(
                 "Failed to append thread event to cache",
                 room_id=room_id,
@@ -309,11 +317,17 @@ class ThreadMutationCacheOps:
                 context=context,
                 error=str(exc),
             )
-            self._schedule_repair_if_available(room_id, thread_id)
-            if raise_on_failure:
+            # The atomic operation rolled back, so it wrote no marker either. Without one, a thread
+            # that was readable before this mutation stays readable while missing the event, so the
+            # marker has to be written separately and fail closed exactly as pre-marking did.
+            # Cancellation rolls the transaction back the same way and is not an ``Exception``, so it
+            # is caught here too.
+            await self._write_append_failure_marker(room_id, thread_id, reason=append_failed_reason)
+            if raise_on_failure or isinstance(exc, asyncio.CancelledError):
                 raise
             return False
-        if not appended:
+
+        if outcome is ThreadAppendOutcome.SNAPSHOT_MISSING:
             self.logger.debug(
                 "Skipping thread event append because raw thread cache is missing",
                 room_id=room_id,
@@ -321,51 +335,30 @@ class ThreadMutationCacheOps:
                 event_id=event_id,
                 context=context,
             )
-            self._schedule_repair_if_available(room_id, thread_id)
-            return False
-        try:
-            revalidated = await self.runtime.event_cache.revalidate_thread_after_incremental_update(
-                room_id,
-                thread_id,
-            )
-        except Exception as exc:
-            self.logger.warning(
-                "Failed to refresh thread cache validation after incremental update",
-                room_id=room_id,
-                thread_id=thread_id,
-                event_id=event_id,
-                context=context,
-                error=str(exc),
-            )
-            self._schedule_repair_if_available(room_id, thread_id)
-            if raise_on_failure:
-                raise
-        else:
-            coordinator = self.runtime.event_cache_write_coordinator
-            if revalidated and coordinator is not None and isinstance(event_id, str):
-                coordinator.acknowledge_thread_repair_deltas(
-                    room_id,
-                    thread_id,
-                    (event_source,),
-                    coordination_scope=self.runtime.event_cache.principal_id,
-                )
-            elif not revalidated:
-                self._schedule_repair_if_available(room_id, thread_id)
-        return True
+        # An append that did not land leaves the thread gap-marked, and the next read refetches
+        # it from the homeserver. Nothing is scheduled here: the marker is the whole recovery.
+        return outcome.wrote_event
 
-    def retain_thread_repair_delta(
-        self,
-        room_id: str,
-        thread_id: str,
-        event_source: dict[str, Any],
-    ) -> None:
-        """Retain one certified event before its ordered append begins."""
+    async def _write_append_failure_marker(self, room_id: str, thread_id: str, *, reason: str) -> None:
+        """Persist the marker a rolled-back append owes, surviving the cancellation that caused it.
+
+        Shielding alone is not enough: it keeps the write running but leaves it untracked, so
+        ``close`` returns without it and a marker abandoned mid-shutdown is the fail-open this
+        handler exists to prevent. Owning the task puts it in the set ``close`` waits on.
+
+        It is owned separately from ordinary cache writes because the common way to owe a marker is
+        for the drain to cancel the append: by then the shared budget is spent, and a marker put in
+        the same set would simply be cancelled by the next round. ``close`` drains this owner after
+        that one, on its own budget.
+        """
+        # Every caller reaches an append only through `cache_runtime_available`, and the queue
+        # helpers dereference the coordinator unguarded, so a missing one is a bug, not a mode.
         coordinator = self.runtime.event_cache_write_coordinator
-        if coordinator is None:
-            return
-        coordinator.retain_thread_repair_delta(
-            room_id,
-            thread_id,
-            event_source,
-            coordination_scope=self.runtime.event_cache.principal_id,
+        assert coordinator is not None
+        await asyncio.shield(
+            create_background_task(
+                self.invalidate_known_thread(room_id, thread_id, reason=reason),
+                name="matrix_cache_append_failure_marker",
+                owner=coordinator.failure_marker_task_owner,
+            ),
         )
