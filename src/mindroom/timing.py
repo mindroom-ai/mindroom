@@ -83,6 +83,7 @@ _PRIMARY_SEGMENTS: tuple[tuple[str, str, str], ...] = (
 
 _PRIMARY_TOTALS: tuple[tuple[str, str, str], ...] = (
     ("time_to_first_visible_reply_ms", "message_received", "first_visible_reply"),
+    ("time_to_first_substantive_reply_ms", "message_received", "first_substantive_reply"),
     ("total_pipeline_ms", "message_received", "response_complete"),
 )
 
@@ -105,6 +106,16 @@ _DIAGNOSTIC_SPANS: tuple[tuple[str, str, str], ...] = (
     ("diag_prompt_assembly_ms", "prompt_assembly_start", "prompt_assembly_ready"),
     ("diag_history_ready_to_model_request_ms", "history_ready", "model_request_sent"),
     ("diag_provider_ttft_ms", "model_request_sent", "model_first_token"),
+    (
+        "diag_first_visible_to_first_substantive_reply_ms",
+        "first_visible_reply",
+        "first_substantive_reply",
+    ),
+    (
+        "diag_model_first_token_to_first_substantive_reply_ms",
+        "model_first_token",
+        "first_substantive_reply",
+    ),
     ("diag_first_visible_to_stream_complete_ms", "first_visible_reply", "streaming_complete"),
     ("diag_model_request_to_completion_ms", "model_request_sent", "response_complete"),
 )
@@ -132,11 +143,18 @@ class DispatchPipelineTiming:
                 self.metadata[key] = value
 
     def mark_first_visible_reply(self, kind: str) -> None:
-        """Record the first user-visible response milestone once."""
-        if "first_visible_reply" in self.marks:
+        """Record the first visible and first non-placeholder response milestones."""
+        needs_visible = "first_visible_reply" not in self.marks
+        needs_substantive = kind != "placeholder" and "first_substantive_reply" not in self.marks
+        if not needs_visible and not needs_substantive:
             return
-        self.marks["first_visible_reply"] = time.perf_counter()
-        self.metadata["first_visible_kind"] = kind
+        now = time.perf_counter()
+        if needs_visible:
+            self.marks["first_visible_reply"] = now
+            self.metadata["first_visible_kind"] = kind
+        if needs_substantive:
+            self.marks["first_substantive_reply"] = now
+            self.metadata["first_substantive_kind"] = kind
 
     def elapsed_ms(self, start_label: str, end_label: str) -> float | None:
         """Return elapsed time between two recorded phase boundaries."""
