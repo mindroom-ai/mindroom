@@ -32,6 +32,9 @@ if TYPE_CHECKING:
 
     from mindroom.matrix.cache import ConversationEventCache
 
+# Cache tables a thread read may touch. Any statement naming one of these counts.
+_THREAD_READ_TABLES = ("thread_events", "event_edits")
+
 _ROOM_ID = "!bounded:localhost"
 _THREAD_ID = "$root"
 
@@ -360,7 +363,10 @@ def _count_thread_statements(event_cache: ConversationEventCache) -> Iterator[li
     original_execute = db.execute
 
     async def counting_execute(query: object, *args: object, **kwargs: object) -> object:
-        if isinstance(query, str) and "thread_events" in query:
+        # Every cache table a thread read touches, not just thread_events. The most likely
+        # regression is a per-message lookup of each survivor's latest edit, which queries
+        # event_edits and would go uncounted by a narrower filter.
+        if isinstance(query, str) and any(table in query for table in _THREAD_READ_TABLES):
             statements.append(query)
         return await original_execute(query, *args, **kwargs)
 
