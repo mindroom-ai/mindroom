@@ -1937,7 +1937,7 @@ class ResponseRunner:
                 if request.pipeline_timing is not None:
                     request.pipeline_timing.mark_first_visible_reply(
                         "final",
-                        substantive=delivery.is_visible_response,
+                        substantive=delivery.delivered_substantive_content,
                     )
                     request.pipeline_timing.mark("response_complete")
             else:
@@ -2055,7 +2055,7 @@ class ResponseRunner:
                 if request.pipeline_timing is not None:
                     request.pipeline_timing.mark_first_visible_reply(
                         "final",
-                        substantive=delivery.is_visible_response,
+                        substantive=delivery.delivered_substantive_content,
                     )
                     request.pipeline_timing.mark("response_complete")
 
@@ -2583,7 +2583,7 @@ class ResponseRunner:
         if request.pipeline_timing is not None:
             request.pipeline_timing.mark_first_visible_reply(
                 "final",
-                substantive=delivery.is_visible_response,
+                substantive=delivery.delivered_substantive_content,
             )
             request.pipeline_timing.mark("response_complete")
         return build_outcome(delivery)
@@ -2769,7 +2769,7 @@ class ResponseRunner:
         if request.pipeline_timing is not None:
             request.pipeline_timing.mark_first_visible_reply(
                 "final",
-                substantive=delivery.is_visible_response,
+                substantive=delivery.delivered_substantive_content,
             )
             request.pipeline_timing.mark("response_complete")
         return build_outcome(delivery)

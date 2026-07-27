@@ -828,6 +828,40 @@ async def test_non_streaming_invisible_delivery_does_not_mark_substantive_reply(
 
 
 @pytest.mark.asyncio
+async def test_non_streaming_failed_edit_preserving_old_body_does_not_mark_substantive_reply(
+    tmp_path: Path,
+) -> None:
+    """A preserved old answer must not count as newly delivered substantive content."""
+    bot = _bot(tmp_path)
+    coordinator = unwrap_extracted_collaborator(bot._response_runner)
+    delivery = FinalDeliveryOutcome(
+        terminal_status="error",
+        event_id="$existing",
+        is_visible_response=True,
+        failure_reason="delivery_failed",
+    )
+    timing = DispatchPipelineTiming(source_event_id="$request", room_id="!room:localhost")
+    request = replace(
+        _plain_request(_target()),
+        existing_event_id="$existing",
+        pipeline_timing=timing,
+    )
+
+    with (
+        patch.object(DeliveryGateway, "deliver_final", new=AsyncMock(return_value=delivery)),
+        patch_response_runner_module(
+            ai_response=AsyncMock(return_value="replacement text"),
+            typing_indicator=_noop_typing,
+        ),
+    ):
+        generation = await coordinator.process_and_respond(request)
+
+    assert generation.delivery is delivery
+    assert "first_substantive_reply" not in timing.marks
+    assert "first_substantive_kind" not in timing.metadata
+
+
+@pytest.mark.asyncio
 async def test_streaming_response_streams_then_finalizes_through_gateway(tmp_path: Path) -> None:
     """The streaming path delivers via deliver_stream, then finalizes the same transport outcome."""
     bot = _bot(tmp_path)
