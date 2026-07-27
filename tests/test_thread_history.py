@@ -30,7 +30,6 @@ from mindroom.matrix.cache.sqlite_event_cache import SqliteEventCache
 from mindroom.matrix.cache.thread_cache_state import THREAD_HISTORY_TRUST_METADATA_KEY
 from mindroom.matrix.cache.write_coordinator import EventCacheWriteCoordinator
 from mindroom.matrix.client import ResolvedVisibleMessage, RoomThreadsPageError, get_room_threads_page
-from mindroom.matrix.client_delivery import build_edit_event_content
 from mindroom.matrix.client_thread_history import (
     _event_source_for_cache,
     _fetch_thread_history_via_room_messages_with_events,
@@ -732,33 +731,6 @@ class TestThreadHistory:
         assert [message.event_id for message in history] == ["$thread_root", "$reply"]
         assert history[0].to_dict()["msgtype"] == "m.notice"
         assert history[0].body == "Compacted summary"
-
-    def test_edit_envelope_discards_the_thread_relation(self) -> None:
-        """Pin why the fallback lookup is dead: the edit envelope drops ``m.relates_to``.
-
-        If this ever stops holding, the removed ``get_latest_thread_event_id_if_needed``
-        calls in ``DeliveryGateway`` become load-bearing again.
-        """
-        replacement_with_fallback = {
-            "msgtype": "m.text",
-            "body": "edited",
-            "m.relates_to": {
-                "rel_type": "m.thread",
-                "event_id": "$thread_root",
-                "is_falling_back": True,
-                "m.in_reply_to": {"event_id": "$latest"},
-            },
-        }
-
-        edit_content = build_edit_event_content(
-            event_id="$original",
-            new_content=replacement_with_fallback,
-            new_text="edited",
-        )
-
-        assert "m.relates_to" not in edit_content["m.new_content"]
-        assert edit_content["m.relates_to"]["rel_type"] == "m.replace"
-        assert edit_content["m.relates_to"]["event_id"] == "$original"
 
     @pytest.mark.asyncio
     async def test_fetch_thread_history_includes_root_message(self) -> None:

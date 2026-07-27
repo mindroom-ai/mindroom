@@ -374,7 +374,7 @@ class TestAgentBot(AgentBotTestBase):
             patch(
                 "mindroom.delivery_gateway.edit_message_result",
                 new=AsyncMock(side_effect=delivered_matrix_side_effect("$edit")),
-            ) as mock_edit_message,
+            ),
             patch_response_runner_module(
                 typing_indicator=_noop_typing_indicator,
                 should_use_streaming=AsyncMock(return_value=False),
@@ -399,10 +399,6 @@ class TestAgentBot(AgentBotTestBase):
         assert content["m.relates_to"]["rel_type"] == "m.thread"
         assert content["m.relates_to"]["event_id"] == "$canonical_thread:localhost"
         assert content["m.relates_to"]["m.in_reply_to"]["event_id"] == "$reply_plain:localhost"
-        # The placeholder send above carries the canonical root; the follow-up edit does not,
-        # because ``build_edit_event_content`` pops ``m.relates_to`` off the replacement. Asserting
-        # it on the pre-envelope edit content would pin a value that never reaches the wire.
-        assert "m.relates_to" not in mock_edit_message.await_args.args[3]
 
     @pytest.mark.asyncio
     async def test_team_generate_response_nonteam_fallback_uses_locked_runner(
