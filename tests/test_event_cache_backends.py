@@ -26,6 +26,7 @@ from mindroom.matrix.cache import (
 )
 from mindroom.matrix.cache.event_cache import EventCacheBackendUnavailableError
 from mindroom.matrix.cache.postgres_event_cache import (
+    _PRINCIPAL_NAMESPACE_LOCK_SCOPE,
     PostgresEventCache,
     _create_postgres_event_cache_schema,
     _FlushedPendingWrites,
@@ -1693,6 +1694,107 @@ async def test_postgres_runtime_rolls_back_cancelled_advisory_lock() -> None:
             pytest.fail("acquire_db_operation should not yield when advisory lock acquisition is cancelled")
 
     db.rollback.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_postgres_initialization_does_not_deadlock_with_namespace_operation(
+    postgres_event_cache_url: str,
+) -> None:
+    """Initialization must acquire the namespace lock before schema DDL."""
+    namespace = f"initialize_overlap_{uuid.uuid4().hex}"
+    room_id = "!overlap:localhost"
+    seeded = PostgresEventCache(
+        database_url=postgres_event_cache_url,
+        namespace=namespace,
+    )
+    operation_cache = PostgresEventCache(
+        database_url=postgres_event_cache_url,
+        namespace=namespace,
+    )
+    initializing_cache = PostgresEventCache(
+        database_url=postgres_event_cache_url,
+        namespace=namespace,
+    )
+    observer = await psycopg.AsyncConnection.connect(postgres_event_cache_url)
+    operation_holds_conflicting_table_lock = asyncio.Event()
+    initializer_waits_for_namespace = asyncio.Event()
+
+    async def write_while_initialization_waits(db: psycopg.AsyncConnection) -> None:
+        await db.execute(
+            """
+            INSERT INTO mindroom_event_cache_events(
+                namespace,
+                event_id,
+                room_id,
+                origin_server_ts,
+                event_json,
+                cached_at
+            )
+            VALUES (%s, %s, %s, %s, %s, %s)
+            """,
+            (namespace, "$overlap", room_id, 1, "{}", 1.0),
+        )
+        operation_holds_conflicting_table_lock.set()
+        await initializer_waits_for_namespace.wait()
+
+    async def run_namespace_operation() -> None:
+        await operation_cache._operation(
+            room_id,
+            operation="initialization_overlap",
+            disabled_result=None,
+            callback=write_while_initialization_waits,
+            allow_departed=True,
+        )
+
+    async def wait_for_initializer_namespace_lock() -> None:
+        async with asyncio.timeout(5):
+            while True:
+                cursor = await observer.execute(
+                    """
+                    SELECT EXISTS (
+                        SELECT 1
+                        FROM pg_locks
+                        WHERE locktype = 'advisory'
+                          AND classid = hashtext(%s)::oid
+                          AND objid = hashtext(%s)::oid
+                          AND objsubid = 2
+                          AND NOT granted
+                    )
+                    """,
+                    (namespace, _PRINCIPAL_NAMESPACE_LOCK_SCOPE),
+                )
+                if await cursor.fetchone() == (True,):
+                    return
+                await asyncio.sleep(0)
+
+    operation_task: asyncio.Task[None] | None = None
+    initialization_task: asyncio.Task[None] | None = None
+    try:
+        async with asyncio.timeout(15):
+            await seeded.initialize()
+            await seeded.close()
+            await operation_cache.initialize()
+
+            operation_task = asyncio.create_task(run_namespace_operation())
+            await operation_holds_conflicting_table_lock.wait()
+            initialization_task = asyncio.create_task(initializing_cache.initialize())
+            await wait_for_initializer_namespace_lock()
+            initializer_waits_for_namespace.set()
+
+            await operation_task
+            await initialization_task
+    finally:
+        initializer_waits_for_namespace.set()
+        tasks = tuple(task for task in (operation_task, initialization_task) if task is not None)
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        await observer.close()
+        await seeded.close()
+        await operation_cache.close()
+        await initializing_cache.close()
 
 
 @pytest.mark.asyncio

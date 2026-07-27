@@ -378,6 +378,42 @@ async def test_scheduled_history_limit_does_not_count_current_event_as_history()
 
 
 @pytest.mark.asyncio
+async def test_scheduled_history_limit_ignores_events_after_current() -> None:
+    """Newer thread events cannot displace prior context from a scheduled turn's budget."""
+
+    async def prepare_scope_history(_prepared_prompt: str) -> PreparedScopeHistory:
+        return _prepared_scope_with_persisted_replay()
+
+    prepared = await _prepare_execution_context_common(
+        make_turn_context(
+            reply_to_event_id="$current",
+            scheduled_history_budget=ScheduledHistoryBudget(limit=2, source_event_id="$current"),
+        ),
+        scope_context=None,
+        prompt="Current request",
+        thread_history=[
+            make_visible_message(sender="@alice:localhost", body="older one", event_id="$older-1"),
+            make_visible_message(sender="@alice:localhost", body="older two", event_id="$older-2"),
+            make_visible_message(sender="@alice:localhost", body="Current request", event_id="$current"),
+            make_visible_message(sender="@alice:localhost", body="newer one", event_id="$newer-1"),
+            make_visible_message(sender="@alice:localhost", body="newer two", event_id="$newer-2"),
+        ],
+        response_sender_id="@mindroom_code:localhost",
+        current_sender_id="@alice:localhost",
+        config=_config(),
+        prepare_scope_history_fn=prepare_scope_history,
+        estimate_static_tokens_fn=lambda text: len(text.split()),
+        render_messages_text_fn=render_prepared_messages_text,
+        fallback_static_token_budget=100,
+    )
+
+    assert [message.content for message in prepared.context_messages] == [
+        render_msg_tag(sender="@alice:localhost", body="older one", event_id="$older-1"),
+        render_msg_tag(sender="@alice:localhost", body="older two", event_id="$older-2"),
+    ]
+
+
+@pytest.mark.asyncio
 async def test_scheduled_history_limit_zero_yields_prompt_only_context() -> None:
     """With history_limit=0 the scheduled turn sees no persisted replay and no thread fallback."""
 
@@ -1144,6 +1180,51 @@ def test_unseen_context_keeps_self_sent_relayed_user_message() -> None:
         body="@mindroom_missing_agent Please investigate this",
         event_id="$spawn-root",
     )
+
+
+def test_unseen_context_stops_at_current_thread_event() -> None:
+    """A backlog turn must not include newer events from its hydrated thread."""
+    thread_history = [
+        make_visible_message(
+            sender="@alice:localhost",
+            body="Older message",
+            event_id="$older",
+            thread_id="$root",
+        ),
+        make_visible_message(
+            sender="@alice:localhost",
+            body="Current message",
+            event_id="$current",
+            thread_id="$root",
+        ),
+        make_visible_message(
+            sender="@bob:localhost",
+            body="Newer message",
+            event_id="$newer",
+            thread_id="$root",
+        ),
+    ]
+
+    messages, unseen_event_ids = _build_unseen_context_messages(
+        "Current message",
+        thread_history,
+        seen_event_ids=set(),
+        current_event_id="$current",
+        active_event_ids=(),
+        response_sender_id="@mindroom_code:localhost",
+        current_sender_id="@alice:localhost",
+        config=_config(),
+    )
+
+    assert unseen_event_ids == ["$older"]
+    assert len(messages) == 2
+    assert messages[0].content == render_msg_tag(
+        sender="@alice:localhost",
+        body="Older message",
+        event_id="$older",
+    )
+    assert messages[1].content == 'Current message:\n<msg from="@alice:localhost"><![CDATA[Current message]]></msg>'
+    assert all("$newer" not in str(message.content) for message in messages)
 
 
 def test_unseen_context_keeps_unpersisted_self_sent_message() -> None:

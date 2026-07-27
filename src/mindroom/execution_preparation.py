@@ -449,8 +449,9 @@ def _build_unseen_context_messages(
     attachment_context: _ThreadAttachmentContext | None = None,
 ) -> tuple[tuple[Message, ...], list[str]]:
     """Return canonical request messages for unseen thread context plus the current turn."""
+    history_before_current = _thread_history_before_current_event(thread_history, current_event_id)
     unseen_messages, partial_reply_kinds, in_progress_event_ids = _get_unseen_messages_for_sender(
-        thread_history,
+        history_before_current or (),
         sender_id=response_sender_id,
         seen_event_ids=seen_event_ids,
         current_event_id=current_event_id,
@@ -585,16 +586,22 @@ def _thread_history_with_scheduled_budget(
     if not thread_history:
         return thread_history
 
+    history_through_current: list[ResolvedVisibleMessage] = []
+    for message in thread_history:
+        history_through_current.append(message)
+        if current_event_id is not None and message.event_id == current_event_id:
+            break
+
     prompt_event_ids = {source_event_id}
     if current_event_id is not None:
         prompt_event_ids.add(current_event_id)
     history_indices = [
-        index for index, message in enumerate(thread_history) if message.event_id not in prompt_event_ids
+        index for index, message in enumerate(history_through_current) if message.event_id not in prompt_event_ids
     ]
     selected_indices = set(history_indices[-history_limit:]) if history_limit > 0 else set()
     return tuple(
         message
-        for index, message in enumerate(thread_history)
+        for index, message in enumerate(history_through_current)
         if index in selected_indices or message.event_id == current_event_id
     )
 
