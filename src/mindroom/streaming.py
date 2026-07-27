@@ -1080,7 +1080,7 @@ class StreamingResponse:
     def _mark_first_visible_reply_if_needed(self) -> None:
         """Mark first visible reply timing once visible text exists."""
         if self.pipeline_timing is not None and self.accumulated_text.strip():
-            self.pipeline_timing.mark_first_visible_reply("stream_update")
+            self.pipeline_timing.mark_first_visible_reply("stream_update", substantive=True)
 
     async def _send_initial_content(
         self,

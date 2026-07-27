@@ -531,8 +531,8 @@ def test_dispatch_pipeline_visible_reply_milestones_are_first_write_wins(
     timing = DispatchPipelineTiming(source_event_id="$event", room_id="!room")
 
     timing.mark_first_visible_reply("placeholder")
-    timing.mark_first_visible_reply("stream_update")
-    timing.mark_first_visible_reply("final")
+    timing.mark_first_visible_reply("stream_update", substantive=True)
+    timing.mark_first_visible_reply("final", substantive=True)
 
     assert timing.marks["first_visible_reply"] == 1.5
     assert timing.metadata["first_visible_kind"] == "placeholder"

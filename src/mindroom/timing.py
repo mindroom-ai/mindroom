@@ -142,10 +142,10 @@ class DispatchPipelineTiming:
             if value is not None:
                 self.metadata[key] = value
 
-    def mark_first_visible_reply(self, kind: str) -> None:
-        """Record the first visible and first non-placeholder response milestones."""
+    def mark_first_visible_reply(self, kind: str, *, substantive: bool = False) -> None:
+        """Record the first visible reply and, when confirmed, the first substantive reply."""
         needs_visible = "first_visible_reply" not in self.marks
-        needs_substantive = kind != "placeholder" and "first_substantive_reply" not in self.marks
+        needs_substantive = substantive and "first_substantive_reply" not in self.marks
         if not needs_visible and not needs_substantive:
             return
         now = time.perf_counter()
