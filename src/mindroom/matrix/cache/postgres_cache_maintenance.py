@@ -24,21 +24,33 @@ class _PostgresSchemaMigrationResult:
     normalized_legacy_thread_payload_rows: int
 
 
+_SENDER_BACKFILL_MARKER_PREFIX = "sender_backfilled:"
+
+
 async def _backfill_collapsed_read_columns(db: AsyncConnection, *, namespace: str) -> None:
     """Populate the sender column a collapsed read needs on one namespace's pre-existing rows.
 
-    Runs unconditionally per namespace, deliberately. ``schema_version`` lives in
+    Gated on a per-namespace marker, not on ``schema_version``. That version lives in
     ``mindroom_event_cache_metadata``, which is keyed by ``key`` alone and is therefore global to
     the database, while every Matrix principal owns its own namespace and initializes separately.
-    Gating this on the shared version would let the first principal to start backfill its own rows,
-    write the new version, and leave every other principal's rows behind forever. The statement is
-    idempotent and matches nothing once a namespace is current, so running it every time costs an
-    indexed no-op. This mirrors the per-namespace normalization below.
+    Gating on the shared version would let the first principal to start backfill its own rows,
+    write the new version, and leave every other principal's rows behind forever.
+
+    Running it unconditionally instead is not free, which an earlier revision of this docstring
+    claimed: no index covers ``sender``, so the "no-op" is a bitmap heap scan of every row in the
+    namespace, on every initialization, inside the advisory-lock transaction that serializes other
+    principals' startup - measured at 13.7 ms per 50,000-row namespace and linear from there. It
+    also rewrites any row whose payload genuinely carries no sender, every single time, because
+    such a row can never leave the '' default. The marker makes the second run an indexed lookup
+    of one metadata key.
 
     A ``sender`` at its '' default makes every event look like it came from the same account, so a
     collapsed read can no longer tell an author's own edit from someone else's and lets a foreign
     replacement win. That is a wrong message body, not a slow query.
     """
+    marker_key = f"{_SENDER_BACKFILL_MARKER_PREFIX}{namespace}"
+    if await fetchone(db, "SELECT 1 FROM mindroom_event_cache_metadata WHERE key = %s", (marker_key,)) is not None:
+        return
     await db.execute(
         """
         UPDATE mindroom_event_cache_events
@@ -46,6 +58,14 @@ async def _backfill_collapsed_read_columns(db: AsyncConnection, *, namespace: st
         WHERE namespace = %s AND sender = ''
         """,
         (namespace,),
+    )
+    await db.execute(
+        """
+        INSERT INTO mindroom_event_cache_metadata(key, value)
+        VALUES (%s, 'done')
+        ON CONFLICT(key) DO NOTHING
+        """,
+        (marker_key,),
     )
 
 

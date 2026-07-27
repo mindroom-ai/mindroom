@@ -101,10 +101,10 @@ class ResolvedVisibleMessage:
         ``timestamp`` deliberately stays the original event's. It is the thread's ordering key, and
         an edit is a correction to a message rather than a new position in the conversation - a
         reply from an hour ago does not become the newest thing in the room because its author
-        fixed a typo. It also has to stay immutable for the windowed read to agree with the full
-        read: the cache selects the tail by the original ordering timestamp, so a fold that moved
-        edited messages to the end would disagree with the window about which messages the tail
-        even contains. The edit's own time is kept separately for callers that want it.
+        fixed a typo. It also has to stay immutable for the collapsed read to agree with the raw
+        read: the query orders by the original timestamp, so a fold that moved edited messages to
+        the end would disagree with it about the order of the thread itself. The edit's own time
+        is kept separately for callers that want it.
         """
         self.body = body
         self.edited_timestamp = timestamp
