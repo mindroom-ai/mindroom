@@ -109,8 +109,9 @@ class FuzzOperation:
         if not isinstance(raw_kind, str):
             msg = "Matrix cache fuzz operation kind must be a string"
             raise TypeError(msg)
+        kind = OperationKind.MARK_ROOM_GAP if raw_kind == "mark_room_stale" else OperationKind(raw_kind)
         return cls(
-            kind=OperationKind(raw_kind),
+            kind=kind,
             room=_required_int(value, "room"),
             thread=_required_int(value, "thread"),
             slot=_required_int(value, "slot"),

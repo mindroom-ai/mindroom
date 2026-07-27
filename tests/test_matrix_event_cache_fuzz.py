@@ -189,3 +189,28 @@ def test_fuzz_trace_json_round_trip_is_exact() -> None:
         )
         == scenario
     )
+
+
+def test_fuzz_trace_json_accepts_legacy_room_gap_operation() -> None:
+    """Version-one traces using the former room-gap name remain replayable."""
+    scenario = FuzzScenario.from_json(
+        """
+        {
+          "version": 1,
+          "batches": [[
+            {
+              "kind": "mark_room_stale",
+              "room": 0,
+              "thread": 1,
+              "slot": 2,
+              "target": 3,
+              "variant": 4
+            }
+          ]]
+        }
+        """,
+    )
+
+    assert scenario == FuzzScenario(
+        batches=((FuzzOperation(OperationKind.MARK_ROOM_GAP, 0, 1, 2, 3, 4),),),
+    )
