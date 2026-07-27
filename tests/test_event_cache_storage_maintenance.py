@@ -700,27 +700,37 @@ async def test_sender_backfills_in_every_namespace_not_just_the_first(
 async def test_sender_backfill_survives_a_payload_jsonb_cannot_parse(
     postgres_event_cache_url: str,
 ) -> None:
-    r"""One NUL-escaped payload must not stop its whole namespace from ever initializing.
+    r"""Payloads PostgreSQL cannot cast must not stop a namespace from ever initializing.
 
-    ``event_json`` is always valid JSON because ``json.dumps`` wrote it, but valid JSON may carry
-    a ``\u0000`` escape and ``jsonb`` cannot represent one. The cast raises for the entire
-    statement, which aborts the migration transaction that
-    ``_initialize_postgres_event_cache_db`` re-raises - so a single such row locks that namespace
-    out of the cache permanently, on every restart. Production held 47, from tool output that
-    captured binary content into a message body.
+    ``event_json`` is always valid JSON because ``json.dumps`` wrote it, but ``jsonb`` accepts less
+    than JSON does. A NUL escape raises ``UntranslatableCharacter`` and a lone surrogate raises
+    ``InvalidTextRepresentation``, either of which aborts the whole statement - and with it the
+    migration transaction that ``_initialize_postgres_event_cache_db`` re-raises, so one such row
+    locks that namespace out of its cache permanently, on every restart. Production held 19 of the
+    first kind in its primary namespace, from tool output that captured binary content into a
+    message body.
+
+    Both senders must still be recovered: decoding in Python is the exact inverse of the dump that
+    wrote the row, so an unparseable-to-PostgreSQL payload is not an unreadable one.
     """
     namespace = f"tenant_{uuid.uuid4().hex}"
     # A real payload shape: a message body carrying a NUL escape, next to an ordinary event.
     poisoned = json.dumps(
         {"event_id": "$binary", "sender": "@tool:localhost", "content": {"body": "RIFF" + chr(0) + "WAVE"}},
     )
+    # A lone surrogate is the other shape PostgreSQL rejects and json.dumps still emits.
+    surrogate = json.dumps(
+        {"event_id": "$surrogate", "sender": "@lone:localhost", "content": {"body": chr(0xD800)}},
+    )
     assert "\\u0000" in poisoned, "the fixture must carry the escape the cast rejects"
+    assert "\\ud800" in surrogate, "the fixture must carry a lone surrogate"
     async with _isolated_postgres_database(postgres_event_cache_url) as database_url:
         setup = await psycopg.AsyncConnection.connect(database_url)
         try:
             await postgres_event_cache._create_postgres_event_cache_schema(setup)
             for event_id, event_json in (
                 ("$binary", poisoned),
+                ("$surrogate", surrogate),
                 ("$ordinary", '{"event_id":"$ordinary","sender":"@a:localhost"}'),
             ):
                 await setup.execute(
@@ -750,5 +760,9 @@ async def test_sender_backfill_survives_a_payload_jsonb_cannot_parse(
             await cursor.close()
         finally:
             await check.close()
-        # The unparseable row keeps the '' default; every other row is still backfilled.
-        assert rows == [("$binary", ""), ("$ordinary", "@a:localhost")]
+        # Decoding in Python recovers the sender from every payload PostgreSQL cannot cast.
+        assert rows == [
+            ("$binary", "@tool:localhost"),
+            ("$ordinary", "@a:localhost"),
+            ("$surrogate", "@lone:localhost"),
+        ]
