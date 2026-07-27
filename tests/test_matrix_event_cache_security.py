@@ -27,11 +27,6 @@ from mindroom.matrix.cache import (
 from mindroom.matrix.cache.postgres_event_cache import PostgresEventCache
 from mindroom.matrix.cache.sqlite_event_cache import SqliteEventCache
 from mindroom.matrix.cache.thread_cache_invalidation import mark_thread_stale_fail_closed
-from mindroom.matrix.cache.thread_read_window import (
-    UNBOUNDED_THREAD_READ,
-    ThreadReadBudget,
-    ThreadWindowRead,
-)
 from mindroom.matrix.message_content import resolve_event_source_content
 from mindroom.matrix.rooms import leave_non_dm_rooms
 from mindroom.matrix.sync_cache_trust import SyncCacheTrust
@@ -1441,23 +1436,21 @@ async def test_cached_sidecar_hydration_cannot_cross_principal_purge(
     )
     rows_loaded = asyncio.Event()
     release_rows = asyncio.Event()
-    # Patch the method the read actually calls. The cache-hit path reads through
-    # get_thread_window because it needs to know whether the budget truncated; patching
-    # get_thread_events instead would never fire and this test would hang rather than fail.
-    original_get_thread_window = reader_cache.get_thread_window
+    # Patch the method the read actually calls. Patching a seam production no longer routes
+    # through does not fail this test, it hangs it: the pause never fires, the reader never
+    # blocks, and the test waits out its timeout looking merely slow.
+    original_get_thread_events = reader_cache.get_thread_events
 
     async def pause_after_read(
         read_room_id: str,
         read_thread_id: str,
-        *,
-        budget: ThreadReadBudget = UNBOUNDED_THREAD_READ,
-    ) -> ThreadWindowRead:
-        window = await original_get_thread_window(read_room_id, read_thread_id, budget=budget)
+    ) -> list[dict[str, Any]] | None:
+        rows = await original_get_thread_events(read_room_id, read_thread_id)
         rows_loaded.set()
         await release_rows.wait()
-        return window
+        return rows
 
-    monkeypatch.setattr(reader_cache, "get_thread_window", pause_after_read)
+    monkeypatch.setattr(reader_cache, "get_thread_events", pause_after_read)
     download_response = MagicMock(spec=nio.DownloadResponse)
     download_response.body = b'{"msgtype":"m.text","body":"secret plaintext"}'
     client = MagicMock(spec=nio.AsyncClient)

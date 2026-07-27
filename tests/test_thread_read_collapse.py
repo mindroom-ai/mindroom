@@ -1,0 +1,797 @@
+"""Collapsed thread reads: one surviving edit per message, and no message lost.
+
+Two testing lessons this file exists to carry
+---------------------------------------------
+1. Test the seam, not one side of it. Every defect this feature shipped lived between the SQL and
+   the in-memory fold, and tests that exercised each side separately all passed while the joined
+   behaviour was wrong. tests/test_thread_edit_integrity.py asserts the same-sender rule against
+   the fold and never executes the query that decides which edits the fold is handed, so it stayed
+   green through two bugs that broke exactly that rule. The guard that actually holds is
+   TestCollapsedReadAgreesWithTheFoldOnEveryEdit: for every message, the fold's winner over the
+   collapsed rows must equal its winner over the raw ones.
+2. Rerouting a read past a monkeypatched seam HANGS a test, it does not fail it. Twice on this
+   feature a test kept passing its own setup and then waited out its timeout, which reads as a slow
+   test rather than a broken one. If a test that patches a cache method starts timing out, check
+   first whether production still calls the method it patched.
+
+A third lesson, about the shape of the feature rather than its tests
+--------------------------------------------------------------------
+This read was briefly bounded, and the bound was the wrong idea. Collapsing edits loses nothing:
+it returns the same messages with the superseded history stripped, which on a real 2,021-row
+thread is 41 rows. Truncating loses the oldest half of the caller's context, and no consumer in
+the tree can tell a truncated read from a short one. The two got fused because both reduce row
+counts, but only one of them is free. Do not reintroduce a bound without a caller that can
+explicitly handle partial history.
+"""
+
+from __future__ import annotations
+
+import contextlib
+from typing import TYPE_CHECKING, Any, cast
+
+import nio
+import pytest
+
+from mindroom.matrix.cache import (
+    postgres_event_cache_threads,
+    sqlite_event_cache_threads,
+)
+from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage, ThreadEditCandidates
+from mindroom.matrix.event_info import EventInfo
+from tests.event_cache_test_support import replace_thread_unconditionally
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
+
+    from mindroom.matrix.cache import ConversationEventCache
+
+# Cache tables a thread read may touch. Any statement naming one of these counts.
+#
+# "events" subsumes the other two by substring match and is the one that matters: the canonical
+# regression is a per-message payload lookup against the events table alone, which a filter
+# naming only thread_events and event_edits counts as zero.
+_THREAD_READ_TABLES = ("events", "thread_events", "event_edits")
+
+_ROOM_ID = "!bounded:localhost"
+_THREAD_ID = "$root"
+
+
+def _message_event(
+    event_id: str,
+    timestamp: int,
+    *,
+    body: str = "body",
+    sender: str = "@user:localhost",
+    thread_id: str | None = None,
+    edit_of: str | None = None,
+) -> dict[str, Any]:
+    """Return one raw thread event source."""
+    content: dict[str, Any] = {"body": body, "msgtype": "m.text"}
+    if thread_id is not None:
+        content["m.relates_to"] = {"rel_type": "m.thread", "event_id": thread_id}
+    if edit_of is not None:
+        content["m.new_content"] = {"body": body, "msgtype": "m.text"}
+        content["m.relates_to"] = {"rel_type": "m.replace", "event_id": edit_of}
+    return {
+        "event_id": event_id,
+        "sender": sender,
+        "origin_server_ts": timestamp,
+        "type": "m.room.message",
+        "content": content,
+    }
+
+
+def _thread_event_sources(
+    message_count: int,
+    *,
+    edits_per_message: int = 0,
+    body_chars: int = 4,
+    same_timestamp: bool = False,
+) -> list[dict[str, Any]]:
+    """Return one thread's raw sources: a root, N messages, and per-message edits."""
+    body = "x" * body_chars
+    events = [_message_event(_THREAD_ID, 1_000, body=body)]
+    for message_index in range(message_count):
+        message_id = f"$m{message_index}"
+        message_ts = 1_000 if same_timestamp else 2_000 + message_index * 1_000
+        events.append(_message_event(message_id, message_ts, body=body, thread_id=_THREAD_ID))
+        events.extend(
+            _message_event(
+                f"$m{message_index}-edit{edit_index}",
+                message_ts if same_timestamp else message_ts + 1 + edit_index,
+                body=body,
+                thread_id=_THREAD_ID,
+                edit_of=message_id,
+            )
+            for edit_index in range(edits_per_message)
+        )
+    return events
+
+
+def _is_edit(event: dict[str, Any]) -> bool:
+    relates_to = event.get("content", {}).get("m.relates_to") or {}
+    return relates_to.get("rel_type") == "m.replace"
+
+
+def _original_event_ids(events: list[dict[str, Any]]) -> list[str]:
+    """Return the distinct messages a read covers, in returned order."""
+    covered: list[str] = []
+    for event in events:
+        relates_to = event.get("content", {}).get("m.relates_to") or {}
+        event_id = relates_to["event_id"] if _is_edit(event) else event["event_id"]
+        if event_id not in covered:
+            covered.append(event_id)
+    return covered
+
+
+def _latest_edit_by_original(events: list[dict[str, Any]]) -> dict[str, str]:
+    """Return the winning edit event ID for each edited message."""
+    latest: dict[str, tuple[int, str]] = {}
+    for event in events:
+        if not _is_edit(event):
+            continue
+        original_event_id = event["content"]["m.relates_to"]["event_id"]
+        candidate = (event["origin_server_ts"], event["event_id"])
+        if original_event_id not in latest or candidate > latest[original_event_id]:
+            latest[original_event_id] = candidate
+    return {original: winner for original, (_ts, winner) in latest.items()}
+
+
+async def _seed_thread(
+    event_cache: ConversationEventCache,
+    events: list[dict[str, Any]],
+) -> None:
+    await replace_thread_unconditionally(event_cache, _ROOM_ID, _THREAD_ID, events)
+
+
+class TestCollapsedReadLosesNoMessage:
+    """A collapsed read returns every message the thread holds, with one edit each."""
+
+    @pytest.mark.asyncio
+    async def test_every_message_survives_the_collapse(
+        self,
+        event_cache: ConversationEventCache,
+    ) -> None:
+        """Collapsed means fewer rows, never fewer messages."""
+        events = _thread_event_sources(8, edits_per_message=2)
+        await _seed_thread(event_cache, events)
+
+        read = await event_cache.get_thread_events(_ROOM_ID, _THREAD_ID)
+        assert read is not None
+
+        assert _original_event_ids(read) == _original_event_ids(events), "a message was lost"
+        assert len(read) < len(events), "superseded edits were not collapsed"
+        assert _latest_edit_by_original(read) == _latest_edit_by_original(events)
+
+    @pytest.mark.asyncio
+    async def test_edit_collapse_is_where_the_reduction_comes_from(
+        self,
+        event_cache: ConversationEventCache,
+    ) -> None:
+        """A 99%-edit thread collapses to a fraction of its rows without losing a message.
+
+        This is the entire value of the feature, stated once. A production thread of 2,021 rows
+        returns 41. Dropping messages on top of that buys nothing and costs the oldest half of the
+        caller's context.
+        """
+        await _seed_thread(event_cache, _thread_event_sources(20, edits_per_message=100))
+
+        read = await event_cache.get_thread_events(_ROOM_ID, _THREAD_ID)
+        assert read is not None
+
+        assert len(_original_event_ids(read)) == 21, "no message may be lost"
+        assert len(read) <= 42, "one winning edit per message, not every edit ever seen"
+
+    @pytest.mark.asyncio
+    async def test_a_thousand_tiny_messages_all_come_back(
+        self,
+        event_cache: ConversationEventCache,
+    ) -> None:
+        """Nothing truncates by count, so a long cheap thread returns whole."""
+        await _seed_thread(event_cache, _thread_event_sources(1_000, body_chars=1))
+
+        read = await event_cache.get_thread_events(_ROOM_ID, _THREAD_ID)
+        assert read is not None
+
+        assert len(_original_event_ids(read)) == 1_001
+
+    @pytest.mark.asyncio
+    async def test_twenty_huge_messages_all_come_back(
+        self,
+        event_cache: ConversationEventCache,
+    ) -> None:
+        """Nothing truncates by size either: an expensive thread is still complete.
+
+        This read was briefly bounded at 2 MiB, which silently dropped the oldest messages of any
+        thread past it. No consumer could tell that from a short thread, so the bound is gone.
+        """
+        await _seed_thread(event_cache, _thread_event_sources(20, body_chars=20_000))
+
+        read = await event_cache.get_thread_events(_ROOM_ID, _THREAD_ID)
+        assert read is not None
+
+        assert len(_original_event_ids(read)) == 21
+
+    @pytest.mark.asyncio
+    async def test_appending_a_message_extends_the_read_rather_than_sliding_it(
+        self,
+        event_cache: ConversationEventCache,
+    ) -> None:
+        """A stable prefix is what lets provider prompt caching hit the history block."""
+        await _seed_thread(event_cache, _thread_event_sources(201))
+        before = await event_cache.get_thread_events(_ROOM_ID, _THREAD_ID)
+
+        await _seed_thread(event_cache, _thread_event_sources(202))
+        after = await event_cache.get_thread_events(_ROOM_ID, _THREAD_ID)
+
+        assert before is not None
+        assert after is not None
+        before_messages = _original_event_ids(before)
+
+        assert _original_event_ids(after)[: len(before_messages)] == before_messages, (
+            "the read slid instead of extending; a changed prefix defeats provider prompt caching"
+        )
+
+    @pytest.mark.asyncio
+    async def test_the_root_is_returned_first(
+        self,
+        event_cache: ConversationEventCache,
+    ) -> None:
+        """The thread root carries the original question and leads the read."""
+        await _seed_thread(event_cache, _thread_event_sources(30))
+
+        read = await event_cache.get_thread_events(_ROOM_ID, _THREAD_ID)
+        assert read is not None
+
+        assert read[0]["event_id"] == _THREAD_ID
+        assert len(read) == 31
+
+    @pytest.mark.asyncio
+    async def test_an_unknown_thread_reads_as_a_miss(
+        self,
+        event_cache: ConversationEventCache,
+    ) -> None:
+        """A thread with no cached rows is an advisory miss, not an empty thread."""
+        assert await event_cache.get_thread_events(_ROOM_ID, "$absent") is None
+
+    @pytest.mark.asyncio
+    async def test_uniform_timestamps_read_deterministically(
+        self,
+        event_cache: ConversationEventCache,
+    ) -> None:
+        """Equal ``origin_server_ts`` rows still resolve to a stable, repeatable read."""
+        await _seed_thread(event_cache, _thread_event_sources(12, same_timestamp=True))
+
+        first_read = await event_cache.get_thread_events(_ROOM_ID, _THREAD_ID)
+        second_read = await event_cache.get_thread_events(_ROOM_ID, _THREAD_ID)
+
+        assert first_read is not None
+        assert first_read == second_read
+        assert len(_original_event_ids(first_read)) == 13
+
+
+@contextlib.contextmanager
+def _count_thread_statements(event_cache: ConversationEventCache) -> Iterator[list[str]]:
+    """Count SQL statements against ``thread_events`` that one read actually issues.
+
+    Real statement counting, not a structural argument: the regression this guards against is a
+    locally-correct change quietly reintroducing a per-message query, which only a count catches.
+    """
+    statements: list[str] = []
+    db = event_cache._runtime.require_db()
+    original_execute = db.execute
+
+    async def counting_execute(query: object, *args: object, **kwargs: object) -> object:
+        # Every cache table a thread read touches, not just thread_events. The most likely
+        # regression is a per-message lookup of each survivor's latest edit, which queries
+        # event_edits and would go uncounted by a narrower filter.
+        if isinstance(query, str) and any(table in query for table in _THREAD_READ_TABLES):
+            statements.append(query)
+        return await original_execute(query, *args, **kwargs)
+
+    db.execute = counting_execute  # type: ignore[method-assign]
+    try:
+        yield statements
+    finally:
+        db.execute = original_execute  # type: ignore[method-assign]
+
+
+class TestCollapsedReadCost:
+    """One query per read, no matter how large or how edit-dense the thread is."""
+
+    @pytest.mark.asyncio
+    async def test_statement_count_does_not_grow_with_thread_size(
+        self,
+        event_cache: ConversationEventCache,
+    ) -> None:
+        """A 10x larger thread costs the same one query, not one per message."""
+        await _seed_thread(event_cache, _thread_event_sources(20))
+        with _count_thread_statements(event_cache) as small_statements:
+            await event_cache.get_thread_events(_ROOM_ID, _THREAD_ID)
+
+        await _seed_thread(event_cache, _thread_event_sources(200))
+        with _count_thread_statements(event_cache) as large_statements:
+            await event_cache.get_thread_events(_ROOM_ID, _THREAD_ID)
+
+        assert len(small_statements) == len(large_statements) == 1, (
+            f"expected one collapsed read, got {len(small_statements)} and {len(large_statements)}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_statement_count_does_not_grow_with_edit_density(
+        self,
+        event_cache: ConversationEventCache,
+    ) -> None:
+        """Re-attaching each message's surviving edit must not become a query per message."""
+        await _seed_thread(event_cache, _thread_event_sources(20, edits_per_message=5))
+        with _count_thread_statements(event_cache) as sparse_statements:
+            await event_cache.get_thread_events(_ROOM_ID, _THREAD_ID)
+
+        await _seed_thread(event_cache, _thread_event_sources(20, edits_per_message=50))
+        with _count_thread_statements(event_cache) as dense_statements:
+            await event_cache.get_thread_events(_ROOM_ID, _THREAD_ID)
+
+        assert len(sparse_statements) == len(dense_statements) == 1
+
+    @pytest.mark.asyncio
+    async def test_returned_rows_do_not_grow_with_edit_density(
+        self,
+        event_cache: ConversationEventCache,
+    ) -> None:
+        """A 10x edit density costs one extra row per message, not ten."""
+        await _seed_thread(event_cache, _thread_event_sources(20, edits_per_message=10))
+        sparse_read = await event_cache.get_thread_events(_ROOM_ID, _THREAD_ID)
+
+        await _seed_thread(event_cache, _thread_event_sources(20, edits_per_message=100))
+        dense_read = await event_cache.get_thread_events(_ROOM_ID, _THREAD_ID)
+
+        assert sparse_read is not None
+        assert dense_read is not None
+        assert len(sparse_read) == len(dense_read)
+
+
+# Why the ranking is not ``DISTINCT ON`` is recorded where the query is, not as an assert here.
+# A test that one string is absent from another cannot fail for any behavioural regression, only
+# for the single rewrite its own comment already forbids.
+
+
+def test_edit_ranking_is_scoped_to_this_thread_and_this_sender() -> None:
+    """Both backends must rank edits over the same universe, grouped the same way.
+
+    Ranking over a wider universe lets a row the outer query discards suppress the in-thread
+    runner-up; grouping by a coarser key lets a foreign edit suppress the author's own. Both
+    shipped as bugs, and both are invisible to a test that only exercises the fold.
+    """
+    for sql in (
+        sqlite_event_cache_threads._THREAD_EVENTS_SQL,
+        postgres_event_cache_threads._THREAD_EVENTS_SQL,
+    ):
+        assert "PARTITION BY" in sql, "edit ranking is not grouped at all"
+        assert "sender" in sql, "edit ranking does not compare senders"
+        assert "edit_membership.thread_id = " in sql, "edit ranking is not scoped to this thread"
+
+
+class TestEditsWhoseOriginalWasNeverCached:
+    """An edit can outlive the message it replaces, and collapsing must not delete it.
+
+    ``event_edits`` holds no foreign key to ``events``, so a thread can carry an edit whose
+    original was never cached. The fold synthesizes a message from such an edit under the missing
+    original's ID, carrying the editor's own sender. Collapsing anti-joins every edit out of the
+    candidate set and re-attaches only those whose original is present to compare senders against,
+    so an orphaned edit matches neither path and the message vanishes from the read entirely.
+    """
+
+    @pytest.mark.asyncio
+    async def test_an_orphaned_edit_survives_the_collapse(
+        self,
+        event_cache: ConversationEventCache,
+    ) -> None:
+        """An edit whose original this thread never cached is still handed to the fold."""
+        author = "@author:localhost"
+        await _seed_thread(
+            event_cache,
+            [
+                _message_event(_THREAD_ID, 1_000, sender=author),
+                _message_event("$kept", 2_000, sender=author, thread_id=_THREAD_ID),
+                _message_event("$orphan-edit", 3_000, sender=author, edit_of="$never-cached"),
+            ],
+        )
+
+        rows = await event_cache.get_thread_events(_ROOM_ID, _THREAD_ID)
+        assert rows is not None
+
+        assert "$orphan-edit" in {row["event_id"] for row in rows}, (
+            "collapsing dropped an edit the fold would have synthesized a message from"
+        )
+        assert "$kept" in {row["event_id"] for row in rows}
+
+    @pytest.mark.asyncio
+    async def test_only_the_newest_orphaned_edit_per_missing_original_is_returned(
+        self,
+        event_cache: ConversationEventCache,
+    ) -> None:
+        """A missing original must not reintroduce the edit pile the collapse removes."""
+        author = "@author:localhost"
+        await _seed_thread(
+            event_cache,
+            [
+                _message_event(_THREAD_ID, 1_000, sender=author),
+                *[
+                    _message_event(f"$orphan-edit{index}", 2_000 + index, sender=author, edit_of="$never-cached")
+                    for index in range(5)
+                ],
+            ],
+        )
+
+        rows = await event_cache.get_thread_events(_ROOM_ID, _THREAD_ID)
+        assert rows is not None
+
+        returned_orphans = {row["event_id"] for row in rows if row["event_id"].startswith("$orphan-edit")}
+        assert returned_orphans == {"$orphan-edit4"}
+
+
+class TestRedactionAcrossTheCollapsedRead:
+    """T3 case 3 - a redacted original must not survive via its own edits, in either order.
+
+    Redaction hard-deletes and tombstones, while collapsing changes which rows reach the fold, so
+    redaction crossed with a collapsed read is an interaction this feature newly creates.
+    """
+
+    @pytest.mark.asyncio
+    async def test_redacting_an_original_removes_it_from_the_read_despite_its_edits(
+        self,
+        event_cache: ConversationEventCache,
+    ) -> None:
+        """Edits stored before the redaction must not resurrect the redacted message."""
+        events = [
+            _message_event(_THREAD_ID, 1_000),
+            _message_event("$victim", 2_000, thread_id=_THREAD_ID),
+            _message_event("$victim-edit0", 2_100, thread_id=_THREAD_ID, edit_of="$victim"),
+            _message_event("$victim-edit1", 2_200, thread_id=_THREAD_ID, edit_of="$victim"),
+            _message_event("$survivor", 3_000, thread_id=_THREAD_ID),
+        ]
+        await _seed_thread(event_cache, events)
+
+        assert await event_cache.redact_event(_ROOM_ID, "$victim") is True
+
+        bounded_read = await event_cache.get_thread_events(
+            _ROOM_ID,
+            _THREAD_ID,
+        )
+        assert bounded_read is not None
+
+        returned_ids = {row["event_id"] for row in bounded_read}
+        assert "$victim" not in returned_ids
+        assert "$victim-edit0" not in returned_ids
+        assert "$victim-edit1" not in returned_ids
+        assert "$survivor" in returned_ids
+        assert _THREAD_ID in returned_ids
+
+    @pytest.mark.asyncio
+    async def test_edit_arriving_after_its_original_was_redacted_is_refused(
+        self,
+        event_cache: ConversationEventCache,
+    ) -> None:
+        """A tombstoned original refuses a later edit, so the read cannot show it."""
+        await _seed_thread(
+            event_cache,
+            [
+                _message_event(_THREAD_ID, 1_000),
+                _message_event("$victim", 2_000, thread_id=_THREAD_ID),
+            ],
+        )
+        assert await event_cache.redact_event(_ROOM_ID, "$victim") is True
+
+        late_edit = _message_event("$victim-late", 5_000, thread_id=_THREAD_ID, edit_of="$victim")
+        await event_cache.store_event("$victim-late", _ROOM_ID, late_edit)
+
+        bounded_read = await event_cache.get_thread_events(
+            _ROOM_ID,
+            _THREAD_ID,
+        )
+
+        returned_ids = {row["event_id"] for row in bounded_read or ()}
+        assert "$victim-late" not in returned_ids
+        assert "$victim" not in returned_ids
+
+    @pytest.mark.asyncio
+    async def test_redaction_does_not_evict_the_root_from_the_read(
+        self,
+        event_cache: ConversationEventCache,
+    ) -> None:
+        """Redacting a message must not cost the read its root, which would drop the cache."""
+        await _seed_thread(event_cache, _thread_event_sources(8))
+
+        assert await event_cache.redact_event(_ROOM_ID, "$m7") is True
+
+        bounded_read = await event_cache.get_thread_events(
+            _ROOM_ID,
+            _THREAD_ID,
+        )
+        assert bounded_read is not None
+        assert bounded_read[0]["event_id"] == _THREAD_ID
+
+
+class TestForeignEditCannotStarveTheAuthorsEdit:
+    """A foreign replacement must not remove the author's own edit from the read.
+
+    This is the seam tests/test_thread_edit_integrity.py cannot reach. That file hands the fold
+    both candidates directly, so it proves the sender rule but never sees the SQL that decides
+    which candidates the fold is given. Phase 2 originally shipped one latest edit across all
+    senders; the fold then wanted a same-sender one, found none, and rendered the message at its
+    pre-edit body - a rollback any room member could pin with a single m.replace.
+    """
+
+    @pytest.mark.asyncio
+    async def test_read_keeps_the_authors_edit_when_a_foreign_edit_is_newer(
+        self,
+        event_cache: ConversationEventCache,
+    ) -> None:
+        """A newer foreign m.replace must not evict the author's own edit from the read."""
+        author = "@author:localhost"
+        attacker = "@attacker:localhost"
+        await _seed_thread(
+            event_cache,
+            [
+                _message_event(_THREAD_ID, 1_000, sender=author),
+                _message_event("$victim", 2_000, sender=author, thread_id=_THREAD_ID),
+                _message_event("$author-edit", 3_000, sender=author, edit_of="$victim"),
+            ],
+        )
+        forged = _message_event("$forged", 9_000, sender=attacker, edit_of="$victim")
+        assert (
+            await event_cache.apply_thread_mutation_append(
+                _ROOM_ID,
+                _THREAD_ID,
+                forged,
+                append_failed_reason="test",
+            )
+        ).wrote_event
+
+        bounded_read = await event_cache.get_thread_events(
+            _ROOM_ID,
+            _THREAD_ID,
+        )
+        assert bounded_read is not None
+
+        returned_ids = {row["event_id"] for row in bounded_read}
+        assert "$author-edit" in returned_ids, "author's own edit was starved out of the read"
+        assert "$victim" in returned_ids
+
+    @pytest.mark.asyncio
+    async def test_read_keeps_only_the_authors_newest_edit(
+        self,
+        event_cache: ConversationEventCache,
+    ) -> None:
+        """Only the original author's newest replacement survives selection.
+
+        Earlier this shipped one winner per sender and left the fold to discard the foreign ones,
+        leaving the fold to discard the foreign ones. The query now compares the edit's sender
+        against the original's, so a foreign replacement is never returned at all.
+        """
+        author = "@author:localhost"
+        other = "@other:localhost"
+        await _seed_thread(
+            event_cache,
+            [
+                _message_event(_THREAD_ID, 1_000, sender=author),
+                _message_event("$victim", 2_000, sender=author, thread_id=_THREAD_ID),
+                _message_event("$author-old", 3_000, sender=author, edit_of="$victim"),
+                _message_event("$author-new", 4_000, sender=author, edit_of="$victim"),
+                _message_event("$other-old", 5_000, sender=other, edit_of="$victim"),
+                _message_event("$other-new", 6_000, sender=other, edit_of="$victim"),
+            ],
+        )
+
+        bounded_read = await event_cache.get_thread_events(
+            _ROOM_ID,
+            _THREAD_ID,
+        )
+        assert bounded_read is not None
+
+        returned_ids = {row["event_id"] for row in bounded_read}
+        assert "$author-new" in returned_ids
+        assert "$author-old" not in returned_ids
+        assert "$other-new" not in returned_ids, "a foreign edit must not be shipped or charged"
+        assert "$other-old" not in returned_ids
+
+
+def _winning_edit_ids_by_original(rows: list[dict[str, Any]]) -> dict[str, str | None]:
+    """Return, per original in ``rows``, the edit the fold would apply to it.
+
+    Runs the real fold selection - candidates keyed per sender, winner matched against the
+    original's own sender - over whichever row set it is handed.
+    """
+    candidates = ThreadEditCandidates()
+    senders: dict[str, str] = {}
+    for row in rows:
+        if _is_edit(row):
+            candidates.record(_nio_text_event(row), event_info=EventInfo.from_event(row))
+        else:
+            senders[row["event_id"]] = row["sender"]
+    winners: dict[str, str | None] = {}
+    for original_event_id, sender in senders.items():
+        winner = candidates.winner_for(original_event_id, sender=sender)
+        winners[original_event_id] = None if winner is None else winner[0].event_id
+    return winners
+
+
+def _nio_text_event(source: dict[str, Any]) -> nio.RoomMessageText:
+    """Return the parsed nio event the fold would have been handed for one raw source."""
+    return cast("nio.RoomMessageText", nio.RoomMessageText.from_dict({**source, "room_id": _ROOM_ID}))
+
+
+class TestCollapsedReadAgreesWithTheFoldOnEveryEdit:
+    """The invariant both edit-collapse defects violated, stated once.
+
+    Phase 2's ranking universe must be exactly the row set the unbounded read returns, and its
+    grouping key must be exactly the fold's grouping key. Ranking over a wider universe lets a row
+    the outer query later discards suppress the in-thread runner-up; grouping by a coarser key lets
+    a foreign edit suppress the author's own.
+    """
+
+    @pytest.mark.asyncio
+    async def test_every_collapsed_message_resolves_to_the_same_edit_as_the_raw_rows(
+        self,
+        event_cache: ConversationEventCache,
+    ) -> None:
+        """For each message, the fold over collapsed rows picks the edit it picks over raw rows."""
+        author = "@author:localhost"
+        attacker = "@attacker:localhost"
+        await _seed_thread(
+            event_cache,
+            [
+                _message_event(_THREAD_ID, 1_000, sender=author),
+                _message_event("$plain", 2_000, sender=author, thread_id=_THREAD_ID),
+                _message_event("$edited", 3_000, sender=author, thread_id=_THREAD_ID),
+                _message_event("$edited-e1", 3_100, sender=author, edit_of="$edited"),
+                _message_event("$edited-e2", 3_200, sender=author, edit_of="$edited"),
+                _message_event("$contested", 4_000, sender=author, thread_id=_THREAD_ID),
+                _message_event("$contested-own", 4_100, sender=author, edit_of="$contested"),
+            ],
+        )
+        # A newer foreign replacement, and a newer same-sender replacement that is not in the thread.
+        await event_cache.apply_thread_mutation_append(
+            _ROOM_ID,
+            _THREAD_ID,
+            _message_event("$contested-forged", 8_000, sender=attacker, edit_of="$contested"),
+            append_failed_reason="test",
+        )
+        await event_cache.store_event(
+            "$edited-orphan",
+            _ROOM_ID,
+            _message_event("$edited-orphan", 9_000, sender=author, edit_of="$edited"),
+        )
+
+        full_read = await event_cache.get_thread_events(_ROOM_ID, _THREAD_ID)
+        bounded_read = await event_cache.get_thread_events(
+            _ROOM_ID,
+            _THREAD_ID,
+        )
+        assert full_read is not None
+        assert bounded_read is not None
+
+        full_winners = _winning_edit_ids_by_original(full_read)
+        bounded_winners = _winning_edit_ids_by_original(bounded_read)
+
+        assert bounded_winners
+        for original_event_id, winner in bounded_winners.items():
+            assert winner == full_winners[original_event_id], (
+                f"{original_event_id}: collapsed resolves to {winner}, raw resolves to "
+                f"{full_winners[original_event_id]}"
+            )
+
+
+class TestProductionShapedEditDensity:
+    """Production threads run ~94% edits, ~6 edits per edited original, up to 170 on one.
+
+    The failure this guards against is subtle and silent: an anti-join that excluded edited
+    ORIGINALS rather than edit EVENTS would still return a plausible-looking read, just a tiny
+    one - a handful of messages where the thread has twenty. No synthetic thread with a couple of
+    edits per message would notice.
+    """
+
+    @pytest.mark.asyncio
+    async def test_a_99_percent_edit_thread_still_returns_every_message(
+        self,
+        event_cache: ConversationEventCache,
+    ) -> None:
+        """20 originals x 100 edits is 2,021 rows and 99% edit rows; all 20 messages come back."""
+        events = _thread_event_sources(20, edits_per_message=100)
+        assert len(events) == 2_021
+        await _seed_thread(event_cache, events)
+
+        read = await event_cache.get_thread_events(_ROOM_ID, _THREAD_ID)
+        assert read is not None
+
+        covered = _original_event_ids(read)
+        assert covered == [_THREAD_ID, *(f"$m{index}" for index in range(20))], (
+            f"a 99%-edit thread of 20 messages returned {len(covered)}"
+        )
+        assert len(read) == 41, "one root, twenty messages, twenty surviving edits"
+
+    @pytest.mark.asyncio
+    async def test_one_heavily_edited_message_does_not_crowd_out_its_neighbours(
+        self,
+        event_cache: ConversationEventCache,
+    ) -> None:
+        """170 edits on a single message collapse to one row and cost the others nothing."""
+        events = [
+            _message_event(_THREAD_ID, 1_000),
+            *(_message_event(f"$m{index}", 2_000 + index * 1_000, thread_id=_THREAD_ID) for index in range(10)),
+        ]
+        events.extend(
+            _message_event(
+                f"$m3-edit{edit_index}",
+                5_000 + edit_index,
+                thread_id=_THREAD_ID,
+                edit_of="$m3",
+            )
+            for edit_index in range(170)
+        )
+        await _seed_thread(event_cache, events)
+
+        read = await event_cache.get_thread_events(_ROOM_ID, _THREAD_ID)
+        assert read is not None
+
+        assert _original_event_ids(read) == [_THREAD_ID, *(f"$m{index}" for index in range(10))]
+        assert len(read) == 12, "the 170 edits of $m3 collapsed to one"
+
+
+class TestAnEditDoesNotMoveItsMessage:
+    """An edit is a correction to a message, not a new position in the conversation.
+
+    The fold used to move an edited message to its edit timestamp while SQL ordered by the
+    original timestamp, so the two disagreed about the order of the thread itself: one path put a
+    late-edited first message last. Position stays immutable and the edit time is recorded
+    separately.
+    """
+
+    @pytest.mark.asyncio
+    async def test_a_late_edit_of_the_oldest_message_keeps_it_at_the_front(
+        self,
+        event_cache: ConversationEventCache,
+    ) -> None:
+        """Editing the oldest message long after the newest must not reorder the thread."""
+        events = _thread_event_sources(12)
+        # The oldest message is edited long after every later message was sent.
+        events.append(_message_event("$m0-late", 999_000, thread_id=_THREAD_ID, edit_of="$m0"))
+        await _seed_thread(event_cache, events)
+
+        read = await event_cache.get_thread_events(_ROOM_ID, _THREAD_ID)
+        assert read is not None
+
+        messages = _original_event_ids(read)
+        assert messages[-3:] == ["$m9", "$m10", "$m11"]
+        assert messages.index("$m0") < messages.index("$m9"), "a late edit moved its message"
+
+    def test_applying_an_edit_keeps_the_original_position(self) -> None:
+        """apply_edit records the edit's time separately instead of moving the message."""
+        message = ResolvedVisibleMessage(
+            sender="@user:localhost",
+            body="original",
+            timestamp=1_000,
+            event_id="$m0",
+            content={"body": "original", "msgtype": "m.text"},
+            thread_id=None,
+            latest_event_id="$m0",
+        )
+
+        message.apply_edit(
+            body="edited",
+            timestamp=999_000,
+            latest_event_id="$m0-late",
+            thread_id=None,
+            content={"body": "edited", "msgtype": "m.text"},
+        )
+
+        assert message.timestamp == 1_000, "an edit must not move the message in the thread"
+        assert message.edited_timestamp == 999_000
+        assert message.body == "edited"
+        assert message.latest_event_id == "$m0-late"
+
+
+# The stale-export guard is asserted where it can actually fail, through the real export in
+# tests/test_thread_export_execution.py: test_export_refuses_a_stale_cached_read_that_reports_
+# itself_complete. The version that lived here only rebuilt two diagnostic helpers and compared
+# them to what it had just constructed, so no change to export could have broken it.

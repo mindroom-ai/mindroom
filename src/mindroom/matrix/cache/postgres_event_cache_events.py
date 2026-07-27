@@ -542,15 +542,13 @@ async def write_lookup_index_rows(
                 room_id,
                 origin_server_ts,
                 event_json,
-                event_bytes,
                 sender,
                 cached_at
             )
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT(namespace, room_id, event_id) DO UPDATE SET
                 origin_server_ts = excluded.origin_server_ts,
                 event_json = excluded.event_json,
-                event_bytes = excluded.event_bytes,
                 sender = excluded.sender,
                 cached_at = excluded.cached_at,
                 write_seq = nextval('mindroom_event_cache_write_seq')
@@ -564,7 +562,6 @@ async def write_lookup_index_rows(
                 room_id,
                 event.origin_server_ts,
                 event.event_json,
-                event.event_bytes,
                 event.sender,
                 cached_at,
             ),

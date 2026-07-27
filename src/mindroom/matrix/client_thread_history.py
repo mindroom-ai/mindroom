@@ -64,10 +64,6 @@ from mindroom.matrix.cache.thread_cache_invalidation import (
     mark_room_threads_stale_fail_closed,
     mark_thread_stale_fail_closed,
 )
-from mindroom.matrix.cache.thread_read_window import (
-    UNBOUNDED_THREAD_READ,
-    ThreadReadBudget,
-)
 from mindroom.matrix.client_visible_messages import (
     ResolvedVisibleMessage,
     ThreadEditCandidates,
@@ -122,18 +118,6 @@ _OPAQUE_ENCRYPTED_THREAD_HISTORY_REASON = "thread_history_opaque_encrypted_event
 _OPAQUE_ENCRYPTED_EVENT_REJECTION = "opaque_encrypted_event"
 _MISSING_THREAD_ROOT_REJECTION = "missing_thread_root"
 _MAX_THREAD_REPAIR_ATTEMPTS = 2
-# Thread reads are collapsed, not truncated.
-#
-# An earlier revision of this constant bounded every read at 2 MiB, on the reasoning that consumers
-# never need the whole thread. That reasoning was wrong: every consumer in the tree - the model
-# history refresh, dispatch context, thread summaries, export - treats what it receives as the
-# whole thread, and none of them can tell a truncated read from a short one. A bound here does not
-# give them a recent tail, it silently deletes the oldest half of their input.
-#
-# The reduction those callers actually wanted comes from collapsing edits, which the read now does
-# unconditionally, and which loses nothing. Truncation stays available per call for a caller that
-# genuinely wants a tail; there is currently no such caller.
-_DEFAULT_THREAD_READ_BUDGET = UNBOUNDED_THREAD_READ
 type _ThreadHistoryDiagnosticValue = str | int | float | bool | None
 type _ThreadHistoryRefill = Callable[
     [Mapping[str, str | int | float | bool] | None],
@@ -574,14 +558,12 @@ async def _load_stale_cached_thread_history(
     fetch_error: Exception,
     cache_reject_diagnostics: Mapping[str, str | int | float | bool] | None = None,
     trusted_sender_ids: Collection[str] = (),
-    budget: ThreadReadBudget = _DEFAULT_THREAD_READ_BUDGET,
 ) -> ThreadHistoryResult | None:
     """Return stale cached thread history when a refetch fails but durable rows still exist."""
     cache_read_started = time.perf_counter()
     cached_membership_epoch = await _capture_membership_epoch(event_cache, room_id)
     try:
-        stale_window = await event_cache.get_thread_window(room_id, thread_id, budget=budget)
-        cached_event_sources = stale_window.events
+        cached_event_sources = await event_cache.get_thread_events(room_id, thread_id)
     except Exception as exc:
         logger.warning(
             "Failed to read stale thread cache after refetch failure",
@@ -635,13 +617,12 @@ async def _load_stale_cached_thread_history(
     }
     if cache_reject_diagnostics is not None:
         diagnostics.update(cache_reject_diagnostics)
-    # Same rule as the trusted-cache path: a window that dropped messages is not full history,
-    # whatever its sidecars did. This result is already flagged degraded, but is_full_history is a
-    # separate signal that gates planning completeness and the model-history refresh.
-    diagnostics["thread_read_truncated"] = stale_window.truncated
+    # Same rule as the trusted-cache path: a cached read cannot drop messages, so completeness
+    # turns only on whether sidecars were hydrated. This result is already flagged degraded, but
+    # is_full_history is a separate signal gating planning completeness and the model refresh.
     return _thread_history_result(
         resolved_history,
-        is_full_history=hydrate_sidecars and not stale_window.truncated,
+        is_full_history=hydrate_sidecars,
         diagnostics=diagnostics,
     )
 
@@ -713,7 +694,6 @@ async def _load_cached_thread_history_if_usable(
     event_cache: ConversationEventCache,
     hydrate_sidecars: bool,
     trusted_sender_ids: Collection[str] = (),
-    budget: ThreadReadBudget = _DEFAULT_THREAD_READ_BUDGET,
 ) -> tuple[ThreadHistoryResult | None, dict[str, str | int | float | bool] | None]:
     """Return a durable thread snapshot when the current runtime may safely trust it."""
     cached_membership_epoch = await _capture_membership_epoch(event_cache, room_id)
@@ -734,8 +714,7 @@ async def _load_cached_thread_history_if_usable(
 
     resolution_started = time.perf_counter()
     cache_read_started = time.perf_counter()
-    window = await event_cache.get_thread_window(room_id, thread_id, budget=budget)
-    cached_event_sources = window.events
+    cached_event_sources = await event_cache.get_thread_events(room_id, thread_id)
     cache_read_ms = elapsed_ms_since(cache_read_started, clock=time.perf_counter)
     if cached_event_sources is None:
         return None, {THREAD_HISTORY_CACHE_REJECT_REASON_DIAGNOSTIC: "cache_rows_missing"}
@@ -771,14 +750,11 @@ async def _load_cached_thread_history_if_usable(
     # truncated tail is complete silently drops older participants and mentions from the context.
     return _thread_history_result(
         resolved_history,
-        is_full_history=hydrate_sidecars and not window.truncated,
+        is_full_history=hydrate_sidecars,
         diagnostics={
             "cache_read_ms": cache_read_ms,
             "resolution_ms": elapsed_ms_since(resolution_started, clock=time.perf_counter),
             "sidecar_hydration_ms": sidecar_hydration_ms,
-            "thread_read_truncated": window.truncated,
-            "thread_read_max_messages": budget.max_messages if budget.max_messages is not None else 0,
-            "thread_read_max_bytes": budget.max_bytes if budget.max_bytes is not None else 0,
             THREAD_HISTORY_SOURCE_DIAGNOSTIC: THREAD_HISTORY_SOURCE_CACHE,
         },
     ), None
@@ -1085,7 +1061,6 @@ async def refresh_thread_history_from_source(
     caller_label: str | None = None,
     coordinator_queue_wait_ms: float = 0.0,
     max_repair_attempts: int | None = None,
-    budget: ThreadReadBudget = _DEFAULT_THREAD_READ_BUDGET,
 ) -> ThreadHistoryResult:
     """Fetch fresh thread history from Matrix and repopulate the advisory cache.
 
@@ -1126,7 +1101,6 @@ async def refresh_thread_history_from_source(
                     fetch_error=exc,
                     cache_reject_diagnostics=cache_reject_diagnostics,
                     trusted_sender_ids=trusted_sender_ids,
-                    budget=budget,
                 )
                 if allow_stale_fallback
                 else None
@@ -1348,7 +1322,6 @@ async def _fetch_thread_history_with_cache_policy(
     caller_label: str = "unknown",
     coordinator_queue_wait_ms: float = 0.0,
     refill: _ThreadHistoryRefill | None = None,
-    budget: ThreadReadBudget = _DEFAULT_THREAD_READ_BUDGET,
 ) -> ThreadHistoryResult:
     """Serve one trusted cache hit or delegate only the required refill."""
     cache_reject_diagnostics: dict[str, str | int | float | bool] | None = None
@@ -1361,7 +1334,6 @@ async def _fetch_thread_history_with_cache_policy(
             event_cache=event_cache,
             hydrate_sidecars=hydrate_sidecars,
             trusted_sender_ids=trusted_sender_ids,
-            budget=budget,
         )
     except Exception as exc:
         logger.warning(
@@ -1384,7 +1356,6 @@ async def _fetch_thread_history_with_cache_policy(
             allow_stale_fallback=allow_stale_fallback,
             cache_reject_diagnostics=cache_reject_diagnostics,
             trusted_sender_ids=trusted_sender_ids,
-            budget=budget,
         )
     log_thread_history_refresh(
         room_id=room_id,
@@ -1407,13 +1378,12 @@ async def fetch_thread_history(
     caller_label: str = "unknown",
     coordinator_queue_wait_ms: float = 0.0,
     refill: _ThreadHistoryRefill | None = None,
-    budget: ThreadReadBudget = _DEFAULT_THREAD_READ_BUDGET,
 ) -> ThreadHistoryResult:
     """Fetch all messages in a thread, allowing advisory stale fallback.
 
-    ``budget`` bounds the cached window. Callers whose output is the history itself - export, and
-    anything else that must be complete rather than recent - pass ``UNBOUNDED_THREAD_READ``; a
-    windowed read would silently drop the oldest messages and they have no use for the tail alone.
+    Cached reads are collapsed but never truncated, so a caller whose output is the history
+    itself - export, and anything else that must be complete rather than recent - gets every
+    message. ``is_full_history`` still reports false when sidecar hydration was skipped.
     """
     return await _fetch_thread_history_with_cache_policy(
         client,
@@ -1427,7 +1397,6 @@ async def fetch_thread_history(
         caller_label=caller_label,
         coordinator_queue_wait_ms=coordinator_queue_wait_ms,
         refill=refill,
-        budget=budget,
     )
 
 

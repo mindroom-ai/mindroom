@@ -63,14 +63,6 @@ from .thread_cache_state import (
     thread_cache_state_changed_after,
     thread_cache_state_row,
 )
-from .thread_read_window import (
-    UNBOUNDED_THREAD_READ,
-    ThreadReadBudget,
-    ThreadWindowCandidate,
-    ThreadWindowRead,
-    log_thread_window_selection,
-    select_thread_window_event_ids,
-)
 
 logger = get_logger(__name__)
 
@@ -79,11 +71,33 @@ if TYPE_CHECKING:
 
     from .event_cache import ThreadCacheState
 
-
-# Every edit this thread holds, ranked so exactly one survives per message.
+# The edits that survive a collapsed read: one per message, from the right sender.
 #
-# "Winning" is per (original, sender): a replacement is only legitimate from the sender of the
-# event it replaces, so shipping a single newest-overall edit lets any room member starve the fold
+# A thread stores every edit ever sent, and production threads run ~94% edit rows. Returning them
+# all makes the caller's fold re-derive per message what one window function derives once, and
+# hauls the whole superseded history across the wire to do it. Returning only the survivor took a
+# 2,021-row production thread to 41 rows without losing a message.
+#
+# The root fix is upstream of this query: prune superseded edits at write time and there is nothing
+# to collapse. Retention is deliberate rather than accidental, so that is a trade - redacting the
+# current winning edit is contractually supposed to reveal the previous one, which only works while
+# the older rows exist (``test_redacting_latest_edit_falls_back_to_previous_cached_edit``). The
+# trade looks sound because the case is close to unreachable: redacting a MESSAGE already removes
+# the original and every dependent edit together, and mindroom-cinny's delete targets the original
+# event ID - ``MessageDeleteItem`` passes ``mEvent.getId()``, and a replacement is only ever reached
+# through ``replacingEvent()``, which is never a redaction target there. Reaching the rollback path
+# needs the raw API, ``/redact <edit-event-id>``, or moderation tooling. Element was not checked.
+#
+# The contract to implement, if it is built: keep only the current legitimate edit per (original,
+# sender); redacting an already-pruned edit tombstones it and is otherwise a no-op; redacting the
+# retained winner deletes it, marks the thread stale and refetches full history, which
+# ``invalidate_after_redaction`` in ``thread_writes`` already does on the live redaction path; if
+# the homeserver is unreachable at that moment, fail or degrade explicitly rather than serving the
+# pre-edit body as confirmed history; and keep tombstones, so out-of-order sync cannot resurrect a
+# deleted edit.
+#
+# "Surviving" is per (original, sender): a replacement is only legitimate from the sender of the
+# event it replaces, so keeping a single newest-overall edit lets any room member starve the fold
 # of the author's own and pin the message at its pre-edit body. Membership is joined in here rather
 # than filtered later, because ranking over edits the outer query will discard lets an
 # out-of-thread edit suppress the in-thread runner-up.
@@ -91,36 +105,28 @@ if TYPE_CHECKING:
 # The original is LEFT joined, not required. An edit can outlive the message it replaces -
 # ``event_edits`` holds no foreign key to ``events`` - and the fold synthesizes a message from such
 # an edit rather than dropping it, carrying the editor's own sender because an original nobody has
-# seen cannot be impersonated. Requiring the original here would delete those messages from the
-# read outright, since the candidate query anti-joins every edit away and would then have nothing
-# to re-attach them to. ``original_present`` is what tells the two apart downstream: a present
-# original carries its winner, an absent one is replaced by its winner standing alone.
-#
-# One ranking pass serves both. The sender filter is skipped exactly when there is no original to
-# compare against, which is also when ``winner_for`` stops applying it, for the same reason.
+# seen cannot be impersonated. Requiring the original would delete those messages from the read
+# outright. The sender filter is skipped exactly when there is no original to compare against,
+# which is also when ``winner_for`` stops applying it, for the same reason.
 #
 # ROW_NUMBER over one pass rather than a correlated NOT EXISTS per candidate: 5.3 ms against
 # 8.7 ms on a 2,021-event thread with current table statistics. Policy stays in Python; this is
-# only "latest per group", which is what a window function is for. Splitting present and absent
-# originals into two CTEs scans ``event_edits`` twice and timed out a 2,000-edit PostgreSQL test
-# that one pass completes.
+# only "latest per group", which is what a window function is for. Splitting present-original and
+# absent-original edits into two CTEs scans ``event_edits`` twice and timed out a 2,000-edit
+# PostgreSQL test that one pass completes.
 #
-# Earlier revisions of this comment claimed the correlated shape cost 571 ms, or minutes. Those
-# numbers were planner misestimation on a freshly seeded database with no statistics, not the query
-# shape: on unanalyzed tables an unseen namespace estimates 1 row against 2,021 actual, every join
-# degrades to a nested loop with a join filter, and BOTH shapes collapse - the unbounded read
-# included, by 77x. Do not re-derive this query's cost without ANALYZE.
+# Do not re-derive this query's cost without ANALYZE. On unanalyzed tables an unseen namespace
+# estimates 1 row against 2,021 actual, every join degrades to a nested loop with a join filter,
+# and every shape collapses - a plain unfiltered read of the same thread included, by 77x. A
+# comparison made in that state measures the planner, not the query.
 #
 # MATERIALIZED is a hint, not a correctness requirement: measured 3.7 ms materialized against
-# 4.1 ms inlinable. It is kept only to stop the planner re-deriving the winners per candidate row.
-_WINNING_EDITS_CTE = """
-WITH ranked_edits AS MATERIALIZED (
-    SELECT edit_event_id, original_event_id, event_bytes, original_present
+# 4.1 ms inlinable. It is kept only to stop the planner re-deriving the survivors per row.
+_SURVIVING_EDITS_CTE = """
+WITH surviving_edits AS MATERIALIZED (
+    SELECT edit_event_id
     FROM (
         SELECT event_edits.edit_event_id AS edit_event_id,
-               event_edits.original_event_id AS original_event_id,
-               edit_events.event_bytes AS event_bytes,
-               original_events.event_id IS NOT NULL AS original_present,
                ROW_NUMBER() OVER (
                    PARTITION BY event_edits.original_event_id
                    ORDER BY event_edits.origin_server_ts DESC, event_edits.edit_event_id DESC
@@ -149,64 +155,12 @@ WITH ranked_edits AS MATERIALIZED (
             AND (original_events.event_id IS NULL OR edit_events.sender = original_events.sender)
     )
     WHERE edit_rank = 1
-),
-winning_edits AS (
-    SELECT edit_event_id, original_event_id, event_bytes FROM ranked_edits WHERE original_present
-),
-orphan_edits AS (
-    SELECT edit_event_id, original_event_id, event_bytes FROM ranked_edits WHERE NOT original_present
 )
 """
 
-# Selection query. Prices every message in the thread from inline columns alone: no ``event_json``
-# is referenced, so no payload outside the window is read or parsed. Rows that are themselves edits
-# are anti-joined out, because a bound over raw thread rows selects one message and a pile of its
-# own edits. A candidate costs its own payload plus every edit the payload query will ship with it.
-_THREAD_WINDOW_CANDIDATES_SQL = (
-    _WINNING_EDITS_CTE  # noqa: S608 - both operands are literals; params stay bound
-    + """
-SELECT thread_events.event_id AS event_id,
-       events.event_bytes + COALESCE(edit_cost.total_bytes, 0) AS window_bytes,
-       thread_events.origin_server_ts AS order_ts,
-       thread_events.write_seq AS order_seq
-FROM thread_events
-JOIN events
-    ON events.principal_id = thread_events.principal_id
-    AND events.room_id = thread_events.room_id
-    AND events.event_id = thread_events.event_id
-LEFT JOIN (
-    SELECT original_event_id, SUM(event_bytes) AS total_bytes
-    FROM winning_edits
-    GROUP BY original_event_id
-) AS edit_cost ON edit_cost.original_event_id = thread_events.event_id
-WHERE thread_events.principal_id = :principal_id
-    AND thread_events.room_id = :room_id
-    AND thread_events.thread_id = :thread_id
-    AND NOT EXISTS (
-        SELECT 1
-        FROM event_edits AS candidate_is_edit
-        WHERE candidate_is_edit.principal_id = thread_events.principal_id
-            AND candidate_is_edit.room_id = thread_events.room_id
-            AND candidate_is_edit.edit_event_id = thread_events.event_id
-    )
-UNION ALL
-SELECT orphan_edits.edit_event_id AS event_id,
-       orphan_edits.event_bytes AS window_bytes,
-       thread_events.origin_server_ts AS order_ts,
-       thread_events.write_seq AS order_seq
-FROM orphan_edits
-JOIN thread_events
-    ON thread_events.principal_id = :principal_id
-    AND thread_events.room_id = :room_id
-    AND thread_events.event_id = orphan_edits.edit_event_id
-    AND thread_events.thread_id = :thread_id
-ORDER BY order_ts DESC, order_seq DESC
-"""
-)
-
-# Payload query. Fetches the selected originals, the thread root, and each one's winning edits.
-_THREAD_WINDOW_PAYLOAD_SQL = (
-    _WINNING_EDITS_CTE  # noqa: S608 - both operands are literals; params stay bound
+# One thread, collapsed: every non-edit row, plus the one surviving edit per edited message.
+_THREAD_EVENTS_SQL = (
+    _SURVIVING_EDITS_CTE  # noqa: S608 - both operands are literals; params stay bound
     + """
 SELECT thread_events.origin_server_ts, thread_events.write_seq, events.event_json
 FROM thread_events
@@ -218,87 +172,35 @@ WHERE thread_events.principal_id = :principal_id
     AND thread_events.room_id = :room_id
     AND thread_events.thread_id = :thread_id
     AND (
-        thread_events.event_id IN (SELECT value FROM json_each(:selected_event_ids))
-        OR thread_events.event_id = :thread_id
-        OR thread_events.event_id IN (
-            SELECT edit_event_id
-            FROM winning_edits
-            WHERE original_event_id IN (SELECT value FROM json_each(:selected_event_ids))
-                OR original_event_id = :thread_id
+        NOT EXISTS (
+            SELECT 1
+            FROM event_edits AS row_is_an_edit
+            WHERE row_is_an_edit.principal_id = thread_events.principal_id
+                AND row_is_an_edit.room_id = thread_events.room_id
+                AND row_is_an_edit.edit_event_id = thread_events.event_id
         )
+        OR thread_events.event_id IN (SELECT edit_event_id FROM surviving_edits)
     )
 ORDER BY thread_events.origin_server_ts ASC, thread_events.write_seq ASC
 """
 )
 
 
-async def _load_thread_window_candidates(
+async def load_thread_events(
     db: aiosqlite.Connection,
     *,
     principal_id: str,
     room_id: str,
     thread_id: str,
-) -> list[ThreadWindowCandidate]:
-    """Return this thread's messages newest first with the bytes each would cost."""
+) -> list[dict[str, Any]] | None:
+    """Return one thread's cached events oldest first, collapsed to one edit per message."""
     cursor = await db.execute(
-        _THREAD_WINDOW_CANDIDATES_SQL,
+        _THREAD_EVENTS_SQL,
         {"principal_id": principal_id, "room_id": room_id, "thread_id": thread_id},
     )
     rows = await cursor.fetchall()
     await cursor.close()
-    return [ThreadWindowCandidate(event_id=str(row[0]), window_bytes=int(row[1])) for row in rows]
-
-
-async def load_thread_window(
-    db: aiosqlite.Connection,
-    *,
-    principal_id: str,
-    room_id: str,
-    thread_id: str,
-    budget: ThreadReadBudget = UNBOUNDED_THREAD_READ,
-) -> ThreadWindowRead:
-    """Return cached events for one thread sorted by timestamp.
-
-    Every read is collapsed: each message is returned with its latest legitimate edit instead of
-    with every edit it ever received, which is where the reduction comes from. Truncation is a
-    separate, opt-in concern - an unbounded budget selects every message and still collapses, so a
-    caller that needs complete history does not have to choose between completeness and hauling a
-    thread's entire edit history.
-    """
-    candidates = await _load_thread_window_candidates(
-        db,
-        principal_id=principal_id,
-        room_id=room_id,
-        thread_id=thread_id,
-    )
-    if not candidates:
-        return ThreadWindowRead(events=None, truncated=False)
-    # The payload query may return fewer rows than were selected: redaction hard-deletes, so an
-    # event removed between the two phases is correctly absent. A short result is normal here and
-    # must never be asserted against the selected count.
-    selection = select_thread_window_event_ids(candidates, budget=budget)
-    log_thread_window_selection(
-        selection,
-        budget=budget,
-        logger=logger,
-        room_id=room_id,
-        thread_id=thread_id,
-    )
-    cursor = await db.execute(
-        _THREAD_WINDOW_PAYLOAD_SQL,
-        {
-            "principal_id": principal_id,
-            "room_id": room_id,
-            "thread_id": thread_id,
-            "selected_event_ids": json.dumps(selection.event_ids),
-        },
-    )
-    rows = await cursor.fetchall()
-    await cursor.close()
-    return ThreadWindowRead(
-        events=[json.loads(row[2]) for row in rows] if rows else None,
-        truncated=selection.truncated,
-    )
+    return [json.loads(row[2]) for row in rows] if rows else None
 
 
 async def load_recent_room_thread_ids(

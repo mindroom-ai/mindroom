@@ -1706,10 +1706,6 @@ depends_on = [
 ]
 
 [[modules]]
-path = "mindroom.matrix.cache.thread_read_window"
-depends_on = []
-
-[[modules]]
 path = "mindroom.matrix.cache.agent_message_snapshot"
 depends_on = []
 
@@ -1760,7 +1756,6 @@ visibility = ["mindroom.matrix.cache.postgres_event_cache"]
 path = "mindroom.matrix.cache.sqlite_event_cache_threads"
 depends_on = [
     "mindroom.logging_config",
-    "mindroom.matrix.cache.thread_read_window",
     "mindroom.matrix.cache.event_cache_events",
     "mindroom.matrix.cache.event_normalization",
     "mindroom.matrix.cache.sqlite_event_cache_events",
@@ -1771,7 +1766,6 @@ depends_on = [
 path = "mindroom.matrix.cache.postgres_event_cache_threads"
 depends_on = [
     "mindroom.logging_config",
-    "mindroom.matrix.cache.thread_read_window",
     "mindroom.matrix.cache.event_cache_events",
     "mindroom.matrix.cache.event_normalization",
     "mindroom.matrix.cache.postgres_cursor",
@@ -1782,7 +1776,6 @@ depends_on = [
 [[modules]]
 path = "mindroom.matrix.cache.event_cache"
 depends_on = [
-    "mindroom.matrix.cache.thread_read_window",
 ]
 
 [[modules]]
@@ -1909,7 +1902,6 @@ depends_on = []
 [[modules]]
 path = "mindroom.matrix.cache.sqlite_event_cache"
 depends_on = [
-    "mindroom.matrix.cache.thread_read_window",
     "mindroom.matrix.cache.event_batching",
     "mindroom.matrix.cache.cache_maintenance",
     "mindroom.matrix.cache.event_cache",
@@ -1926,7 +1918,6 @@ visibility = ["mindroom.runtime_support"]
 [[modules]]
 path = "mindroom.matrix.cache.postgres_event_cache"
 depends_on = [
-    "mindroom.matrix.cache.thread_read_window",
     "mindroom.matrix.cache.cache_maintenance",
     "mindroom.matrix.cache.event_batching",
     "mindroom.matrix.cache.event_cache",
@@ -2433,7 +2424,6 @@ depends_on = []
 [[modules]]
 path = "mindroom.matrix.client_thread_history"
 depends_on = [
-    "mindroom.matrix.cache.thread_read_window",
     "mindroom.matrix.cache",
     "mindroom.matrix.cache.thread_cache_invalidation",
     "mindroom.matrix.cache.thread_history_result",
@@ -2513,7 +2503,6 @@ visibility = [
 path = "mindroom.thread_export.execution"
 depends_on = [
     "mindroom.matrix.thread_diagnostics",
-    "mindroom.matrix.cache.thread_read_window",
     "mindroom.matrix.client_thread_history",
     "mindroom.thread_export.models",
     "mindroom.thread_export.policy",
@@ -3919,7 +3908,7 @@ visibility = ["mindroom.matrix.conversation_cache"]
 exclusive = true
 
 [[interfaces]]
-expose = ["sidecar_declared_bytes", "sidecar_mxc_url"]
+expose = ["sidecar_mxc_url"]
 from = ["mindroom.matrix.sidecar_content"]
 visibility = [
     "mindroom.matrix.cache.event_cache_events",

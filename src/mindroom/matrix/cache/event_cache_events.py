@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from mindroom.matrix.event_info import EventInfo, event_type_supports_thread_relations
-from mindroom.matrix.sidecar_content import sidecar_declared_bytes, sidecar_mxc_url
+from mindroom.matrix.sidecar_content import sidecar_mxc_url
 
 _EDITABLE_EVENT_TYPES = frozenset({"m.room.message", "io.mindroom.tool_approval"})
 
@@ -27,27 +27,13 @@ class SerializedCachedEvent:
     def sender(self) -> str:
         """Return the Matrix user that sent this event.
 
-        Persisted as its own narrow column so a thread read can compare an edit's sender against
-        the sender of the event it replaces without reading either payload. A replacement is only
-        legitimate from the original's sender, and a read that cannot check that cheaply ends up
-        pricing and shipping edits the fold will discard.
+        Persisted as its own narrow column so a collapsed thread read can compare an edit's sender
+        against the sender of the event it replaces without reading either payload. A replacement
+        is only legitimate from the original's sender, and a read that cannot check that cheaply
+        returns a foreign edit as the winner - rendering the message at someone else's text.
         """
         sender = self.event.get("sender")
         return sender if isinstance(sender, str) else ""
-
-    @property
-    def event_bytes(self) -> int:
-        """Return what returning this event costs, stored payload plus anything it hydrates.
-
-        Persisted as its own narrow column so a byte-bounded thread read can size a window from
-        inline values alone: reading ``length(event_json)`` would detoast every candidate payload,
-        which is the cost the bound exists to avoid.
-
-        An oversized body is offloaded to a sidecar, leaving a stub of a few hundred bytes that
-        resolves to megabytes. Charging the stub alone would let thousands through a budget they
-        blow the moment hydration runs, so the sidecar's declared resolved size is added here.
-        """
-        return len(self.event_json.encode()) + _event_sidecar_bytes(self.event)
 
 
 @dataclass(frozen=True, slots=True)
@@ -110,44 +96,24 @@ def serialize_cacheable_events(cacheable_events: list[_CachedEventValue]) -> lis
     return [serialize_cached_event(event_id, event) for event_id, event in cacheable_events]
 
 
-def _sidecar_candidate_contents(event: dict[str, Any]) -> list[dict[str, Any]]:
-    """Return the content blocks of one event that may carry a long-text sidecar.
+def event_mxc_urls(event: dict[str, Any]) -> frozenset[str]:
+    """Return room-scoped sidecar MXCs visibly referenced by one event.
 
     Both the top-level content and an edit's ``m.new_content`` are inspected so
     plaintext ownership follows every supported long-text representation.
     """
     content = event.get("content")
     if not isinstance(content, dict):
-        return []
+        return frozenset()
     candidate_contents = [content]
     new_content = content.get("m.new_content")
     if isinstance(new_content, dict):
         candidate_contents.append(new_content)
-    return candidate_contents
-
-
-def event_mxc_urls(event: dict[str, Any]) -> frozenset[str]:
-    """Return room-scoped sidecar MXCs visibly referenced by one event."""
     return frozenset(
         mxc_url
-        for candidate_content in _sidecar_candidate_contents(event)
+        for candidate_content in candidate_contents
         if (mxc_url := sidecar_mxc_url(candidate_content)) is not None
     )
-
-
-def _event_sidecar_bytes(event: dict[str, Any]) -> int:
-    """Return the total resolved size of the sidecars one event will hydrate.
-
-    Keyed by MXC so an edit that repeats its own pointer in ``m.new_content`` is charged once:
-    hydration resolves each distinct URL a single time, and double-charging would truncate a window
-    that actually fits.
-    """
-    declared_bytes_by_mxc = {
-        mxc_url: sidecar_declared_bytes(candidate_content)
-        for candidate_content in _sidecar_candidate_contents(event)
-        if (mxc_url := sidecar_mxc_url(candidate_content)) is not None
-    }
-    return sum(declared_bytes_by_mxc.values())
 
 
 def event_redaction_candidate_ids(event_id: str, event: dict[str, Any]) -> frozenset[str]:

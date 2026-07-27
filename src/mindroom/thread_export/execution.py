@@ -8,7 +8,6 @@ from typing import TYPE_CHECKING
 import nio
 
 from mindroom.logging_config import get_logger
-from mindroom.matrix.cache.thread_read_window import UNBOUNDED_THREAD_READ
 from mindroom.matrix.client_thread_history import (
     bulk_refresh_room_thread_histories,
     enumerate_room_thread_root_ids,
@@ -127,14 +126,11 @@ async def _fetch_thread_payload(
             event_cache,
             trusted_sender_ids=trusted_sender_ids,
             caller_label="thread_export",
-            # An export is the history, so the recent tail is not an acceptable answer. The
-            # default window would silently drop the oldest messages of a long thread.
-            budget=UNBOUNDED_THREAD_READ,
         )
-        # An unbounded read cannot truncate, but it can still come back degraded - a stale fallback
-        # after a failed refetch reports is_full_history=True whenever its window happened not to
-        # truncate, so completeness alone does not mean the rows are current. Export must not write
-        # a file that looks authoritative when it is stale, so both signals are checked.
+        # A cached read cannot truncate, but it can still come back degraded - a stale fallback
+        # after a failed refetch reports is_full_history=True whenever its sidecars hydrated, so
+        # completeness alone does not mean the rows are current. Export must not write a file that
+        # looks authoritative when it is stale, so both signals are checked.
         if not history.is_full_history or is_thread_history_degraded(history):
             msg = (
                 f"Refusing to export thread {thread_id} from cache: the cached read is incomplete "

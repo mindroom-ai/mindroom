@@ -24,36 +24,21 @@ class _PostgresSchemaMigrationResult:
     normalized_legacy_thread_payload_rows: int
 
 
-async def _backfill_bounded_read_columns(db: AsyncConnection, *, namespace: str) -> None:
-    """Populate the columns a bounded read needs on one namespace's pre-existing rows.
+async def _backfill_collapsed_read_columns(db: AsyncConnection, *, namespace: str) -> None:
+    """Populate the sender column a collapsed read needs on one namespace's pre-existing rows.
 
     Runs unconditionally per namespace, deliberately. ``schema_version`` lives in
     ``mindroom_event_cache_metadata``, which is keyed by ``key`` alone and is therefore global to
     the database, while every Matrix principal owns its own namespace and initializes separately.
     Gating this on the shared version would let the first principal to start backfill its own rows,
-    write the new version, and leave every other principal's rows behind forever. Both statements
-    are idempotent and match nothing once a namespace is current, so running them every time costs
-    an indexed no-op. This mirrors the per-namespace normalization below.
+    write the new version, and leave every other principal's rows behind forever. The statement is
+    idempotent and matches nothing once a namespace is current, so running it every time costs an
+    indexed no-op. This mirrors the per-namespace normalization below.
 
-    ``event_bytes`` at its 0 default prices a row as free, which makes ``max_bytes`` inert. A
-    ``sender`` at its '' default makes every event look like it came from the same account, so the
-    window can no longer tell an author's own edit from someone else's and prices both.
-
-    The payload size recorded here deliberately omits the sidecar charge that
-    ``SerializedCachedEvent.event_bytes`` adds on write. Replicating that parse in SQL would mean a
-    second implementation of the sidecar format - version and encoding checks, both content blocks,
-    dedup by MXC - that can drift from the Python without anything failing. A legacy stub therefore
-    stays priced at its stored payload until the event is next written, which under-charges it
-    exactly as much as the release before this one did; the write path is what closes the hole.
+    A ``sender`` at its '' default makes every event look like it came from the same account, so a
+    collapsed read can no longer tell an author's own edit from someone else's and lets a foreign
+    replacement win. That is a wrong message body, not a slow query.
     """
-    await db.execute(
-        """
-        UPDATE mindroom_event_cache_events
-        SET event_bytes = octet_length(event_json)
-        WHERE namespace = %s AND event_bytes = 0
-        """,
-        (namespace,),
-    )
     await db.execute(
         """
         UPDATE mindroom_event_cache_events
@@ -88,7 +73,7 @@ async def migrate_postgres_schema(
             ALTER COLUMN event_json DROP NOT NULL
             """,
         )
-    await _backfill_bounded_read_columns(db, namespace=namespace)
+    await _backfill_collapsed_read_columns(db, namespace=namespace)
 
     normalized_legacy_thread_payload_rows = await rowcount(
         db,
