@@ -26,9 +26,12 @@ class _PostgresSchemaMigrationResult:
 
 _SENDER_BACKFILL_MARKER_KEY = "sender_backfilled"
 
+# The six-character JSON escape for NUL, spelled without embedding a NUL in this file.
+_JSON_NUL_ESCAPE = "\\u0000"
+
 
 async def _backfill_collapsed_read_columns(db: AsyncConnection, *, namespace: str) -> None:
-    """Populate the sender column a collapsed read needs on one namespace's pre-existing rows.
+    r"""Populate the sender column a collapsed read needs on one namespace's pre-existing rows.
 
     Gated on a per-namespace marker rather than on ``schema_version``. That version lives in
     ``mindroom_event_cache_metadata``, which is keyed by ``key`` alone and is therefore global to
@@ -38,9 +41,23 @@ async def _backfill_collapsed_read_columns(db: AsyncConnection, *, namespace: st
 
     Running unconditionally instead is not free: no index covers ``sender``, so it is a heap scan
     of every row in the namespace on every initialization, inside the advisory-lock transaction
-    that serializes other principals' startup - 13.7 ms per 50,000 rows and linear from there. It
-    also rewrites every row whose payload genuinely carries no sender, forever, because such a row
-    can never leave the '' default.
+    that serializes other principals' startup. Budget roughly 1.4 s per 50,000 rows for the read
+    half alone, measured against the production table (122,555 rows, 538 MB, ~4.4 KB per row) where
+    the ``jsonb`` cast has to detoast and parse each payload; an earlier figure of 13.7 ms per
+    50,000 rows came from a synthetic table of tiny payloads and understated real data by about
+    two orders of magnitude. It also rewrites every row whose payload genuinely carries no sender,
+    forever, because such a row can never leave the '' default.
+
+    Rows whose payload contains a ``\u0000`` escape are skipped, because ``jsonb`` cannot
+    represent one and the cast raises ``UntranslatableCharacter`` for the whole statement. Since
+    ``event_json`` is always written by ``json.dumps`` it is always syntactically valid JSON, and
+    that escape is the only thing valid JSON may carry that ``jsonb`` rejects - so this predicate
+    is complete, not merely sufficient for the payloads seen so far. Without it the backfill
+    aborts the migration transaction, which is re-raised by ``_initialize_postgres_event_cache_db``,
+    so a single such row stops that whole namespace from ever initializing. Production held 47 of
+    them across two namespaces, from tool output that captured binary content into a message body.
+    Sanitizing rather than skipping was tried and rejected: replacing the escape corrupts
+    neighbouring backslash runs and turns valid payloads into invalid ones.
 
     The marker costs the self-healing property an unconditional backfill would have, which is
     acceptable here rather than merely convenient: a row can only reach '' after the marker if a
@@ -53,7 +70,8 @@ async def _backfill_collapsed_read_columns(db: AsyncConnection, *, namespace: st
     A ``sender`` at its '' default makes every event look like it came from the same account, so a
     collapsed read can no longer tell an author's own edit from someone else's. The message then
     renders at its pre-edit body - the fold refuses the foreign edit, so this is a wrong body
-    rather than an impersonation.
+    rather than an impersonation. That is also the bounded cost of the skip above: a skipped row
+    keeps '', so an edit of it renders un-edited rather than wrong-authored.
     """
     marked = await fetchone(
         db,
@@ -66,9 +84,9 @@ async def _backfill_collapsed_read_columns(db: AsyncConnection, *, namespace: st
         """
         UPDATE mindroom_event_cache_events
         SET sender = COALESCE(event_json::jsonb ->> 'sender', '')
-        WHERE namespace = %s AND sender = ''
+        WHERE namespace = %s AND sender = '' AND strpos(event_json, %s) = 0
         """,
-        (namespace,),
+        (namespace, _JSON_NUL_ESCAPE),
     )
     await db.execute(
         """
