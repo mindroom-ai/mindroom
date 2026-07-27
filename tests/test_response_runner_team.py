@@ -416,8 +416,12 @@ class TestAgentBot(AgentBotTestBase):
         assert content["m.relates_to"]["rel_type"] == "m.thread"
         assert content["m.relates_to"]["event_id"] == "$canonical_thread:localhost"
         assert content["m.relates_to"]["m.in_reply_to"]["event_id"] == "$reply_plain:localhost"
+        # The terminal edit now goes through the durable checkpoint path, so keep
+        # main's target and body assertions against that mock.
+        mock_terminal_edit.assert_awaited_once()
         terminal_content = mock_terminal_edit.await_args.args[2]
         assert terminal_content["m.relates_to"]["event_id"] == "$team"
+        assert terminal_content["m.new_content"]["body"] == "Team reply"
 
     @pytest.mark.asyncio
     async def test_team_generate_response_nonteam_fallback_uses_locked_runner(

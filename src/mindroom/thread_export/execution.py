@@ -13,8 +13,9 @@ from mindroom.matrix.client_thread_history import (
     enumerate_room_thread_root_ids,
     fetch_thread_history,
     refresh_thread_history_from_source,
-    untrusted_cached_thread_ids,
+    thread_ids_needing_refill,
 )
+from mindroom.matrix.thread_diagnostics import is_thread_history_degraded
 from mindroom.thread_export.models import (
     ThreadExportAccumulator,
     ThreadExportRoom,
@@ -51,7 +52,7 @@ def retract_room_export(accumulator: ThreadExportAccumulator, room: ThreadExport
         accumulator.failed_items.append(failure_for_room(room, f"Room removal failed: {exc}"))
 
 
-async def _bulk_backfill_untrusted_threads(
+async def _bulk_backfill_threads_needing_refill(
     client: nio.AsyncClient,
     room: ThreadExportRoom,
     thread_ids: Sequence[str],
@@ -66,22 +67,22 @@ async def _bulk_backfill_untrusted_threads(
     full per-thread history walk each. Any bulk failure falls back to the per-thread path.
     """
     try:
-        untrusted = await untrusted_cached_thread_ids(event_cache, room.room_id, thread_ids)
+        needs_refill = await thread_ids_needing_refill(event_cache, room.room_id, thread_ids)
     except Exception as exc:
         logger.warning(
-            "Untrusted-thread probe failed; using per-thread fetches",
+            "Thread-refill probe failed; using per-thread fetches",
             room_id=room.room_id,
             error=str(exc),
         )
         return frozenset()
-    if not untrusted:
+    if not needs_refill:
         return frozenset()
     try:
         stats = await bulk_refresh_room_thread_histories(
             client,
             room.room_id,
             event_cache,
-            thread_root_ids=untrusted,
+            thread_root_ids=needs_refill,
             caller_label="thread_export_bulk",
         )
     except Exception as exc:
@@ -122,6 +123,17 @@ async def _fetch_thread_payload(
             trusted_sender_ids=trusted_sender_ids,
             caller_label="thread_export",
         )
+        # A cached read cannot truncate, but it can still come back degraded - a stale fallback
+        # after a failed refetch reports is_full_history=True whenever its sidecars hydrated, so
+        # completeness alone does not mean the rows are current. Export must not write a file that
+        # looks authoritative when it is stale, so both signals are checked.
+        if not history.is_full_history or is_thread_history_degraded(history):
+            msg = (
+                f"Refusing to export thread {thread_id} from cache: the cached read is incomplete "
+                "or stale. "
+                "Re-run without --prefer-cache to fetch from the homeserver."
+            )
+            raise RuntimeError(msg)
     else:
         history = await refresh_thread_history_from_source(
             client,
@@ -324,7 +336,7 @@ async def _export_enumerated_room_threads(
     changed_accumulator_ids: set[int] = set()
     missing_root_ids: frozenset[str] = frozenset()
     if prefer_cache and thread_ids:
-        missing_root_ids = await _bulk_backfill_untrusted_threads(
+        missing_root_ids = await _bulk_backfill_threads_needing_refill(
             client,
             room,
             thread_ids,

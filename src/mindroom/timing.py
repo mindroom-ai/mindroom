@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import functools
 import inspect
+import logging
 import os
 import time
 from contextlib import contextmanager
@@ -31,6 +32,22 @@ _DISPATCH_PIPELINE_TIMING_KEY = "com.mindroom.dispatch_pipeline_timing"
 
 def _is_enabled() -> bool:
     return os.environ.get("MINDROOM_TIMING", "") == "1"
+
+
+def _debug_enabled(bound_logger: object) -> bool:
+    """Return whether one logger would keep a debug event.
+
+    Only used to skip work that would be discarded, so anything that cannot
+    answer the question counts as enabled: test doubles and non-stdlib structlog
+    loggers must never lose a diagnostic to this check.
+    """
+    is_enabled_for = getattr(bound_logger, "isEnabledFor", None)
+    if not callable(is_enabled_for):
+        return True
+    try:
+        return bool(is_enabled_for(logging.DEBUG))
+    except Exception:
+        return True
 
 
 def timing_enabled() -> bool:
@@ -134,6 +151,8 @@ class DispatchPipelineTiming:
         if self.summary_emitted:
             return
         self.summary_emitted = True
+        if not _debug_enabled(logger):
+            return
         summary: dict[str, Any] = {
             "source_event_id": self.source_event_id,
             "room_id": self.room_id,
@@ -190,11 +209,10 @@ def emit_timing_event(event_name: str, **event_data: object) -> None:
 
     Emitted at ``debug`` level so callers can keep ``MINDROOM_TIMING=1`` enabled
     in long-running processes and still flip emission off cheaply via the global
-    log level. With ``MINDROOM_TIMING=1`` and log level at INFO or above, the
-    stdlib ``isEnabledFor(DEBUG)`` check short-circuits before formatting and
-    handler dispatch.
+    log level. The ``isEnabledFor`` check runs before the payload is assembled,
+    so a dropped event costs one level lookup rather than a discarded dict.
     """
-    if not _is_enabled():
+    if not _is_enabled() or not _debug_enabled(logger):
         return
     scope = event_data.pop("timing_scope", None)
     if not isinstance(scope, str) or not scope:

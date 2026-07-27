@@ -176,7 +176,7 @@ async def _load_latest_edit_row(
     original_event_id: str,
     sender: str | None,
 ) -> CachedEventRow | None:
-    sender_predicate = "" if sender is None else "AND events.event_json::jsonb ->> 'sender' = %s"
+    sender_predicate = "" if sender is None else "AND events.sender = %s"
     parameters = (namespace, room_id, original_event_id, *((sender,) if sender is not None else ()))
     row = await fetchone(
         db,
@@ -191,7 +191,7 @@ async def _load_latest_edit_row(
             AND edits.room_id = %s
             AND edits.original_event_id = %s
             {sender_predicate}
-        ORDER BY edits.origin_server_ts DESC, events.write_seq DESC
+        ORDER BY edits.origin_server_ts DESC, edits.edit_event_id COLLATE "C" DESC
         LIMIT 1
         """,  # noqa: S608
         parameters,
@@ -536,11 +536,20 @@ async def write_lookup_index_rows(
         accepted_row = await fetchone(
             db,
             """
-            INSERT INTO mindroom_event_cache_events(namespace, event_id, room_id, origin_server_ts, event_json, cached_at)
-            VALUES (%s, %s, %s, %s, %s, %s)
+            INSERT INTO mindroom_event_cache_events(
+                namespace,
+                event_id,
+                room_id,
+                origin_server_ts,
+                event_json,
+                sender,
+                cached_at
+            )
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT(namespace, room_id, event_id) DO UPDATE SET
                 origin_server_ts = excluded.origin_server_ts,
                 event_json = excluded.event_json,
+                sender = excluded.sender,
                 cached_at = excluded.cached_at,
                 write_seq = nextval('mindroom_event_cache_write_seq')
             WHERE mindroom_event_cache_events.event_json::jsonb ->> 'type' = 'm.room.encrypted'
@@ -553,6 +562,7 @@ async def write_lookup_index_rows(
                 room_id,
                 event.origin_server_ts,
                 event.event_json,
+                event.sender,
                 cached_at,
             ),
         )
@@ -598,7 +608,9 @@ async def write_lookup_index_rows(
     for row in edit_rows:
         await db.execute(
             """
-            INSERT INTO mindroom_event_cache_event_edits(namespace, edit_event_id, room_id, original_event_id, origin_server_ts)
+            INSERT INTO mindroom_event_cache_event_edits(
+                namespace, edit_event_id, room_id, original_event_id, origin_server_ts
+            )
             VALUES (%s, %s, %s, %s, %s)
             ON CONFLICT(namespace, room_id, edit_event_id) DO UPDATE SET
                 original_event_id = excluded.original_event_id,

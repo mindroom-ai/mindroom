@@ -177,7 +177,7 @@ async def _load_latest_edit_row(
     original_event_id: str,
     sender: str | None,
 ) -> CachedEventRow | None:
-    sender_predicate = "" if sender is None else "AND json_extract(events.event_json, '$.sender') = ?"
+    sender_predicate = "" if sender is None else "AND events.sender = ?"
     parameters = (principal_id, room_id, original_event_id, *((sender,) if sender is not None else ()))
     cursor = await db.execute(
         f"""
@@ -191,7 +191,7 @@ async def _load_latest_edit_row(
           AND event_edits.room_id = ?
           AND event_edits.original_event_id = ?
           {sender_predicate}
-        ORDER BY event_edits.origin_server_ts DESC, events.write_seq DESC
+        ORDER BY event_edits.origin_server_ts DESC, event_edits.edit_event_id DESC
         LIMIT 1
         """,  # noqa: S608
         parameters,
@@ -561,13 +561,15 @@ async def write_lookup_index_rows(
                 room_id,
                 origin_server_ts,
                 event_json,
+                sender,
                 cached_at,
                 write_seq
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(principal_id, room_id, event_id) DO UPDATE SET
                 origin_server_ts = excluded.origin_server_ts,
                 event_json = excluded.event_json,
+                sender = excluded.sender,
                 cached_at = excluded.cached_at,
                 write_seq = excluded.write_seq
             WHERE json_extract(events.event_json, '$.type') = 'm.room.encrypted'
@@ -580,6 +582,7 @@ async def write_lookup_index_rows(
                 room_id,
                 event.origin_server_ts,
                 event.event_json,
+                event.sender,
                 cached_at,
                 write_sequence,
             ),
@@ -642,7 +645,13 @@ async def write_lookup_index_rows(
                 origin_server_ts = excluded.origin_server_ts
             """,
             [
-                (principal_id, row.edit_event_id, row.room_id, row.original_event_id, row.origin_server_ts)
+                (
+                    principal_id,
+                    row.edit_event_id,
+                    row.room_id,
+                    row.original_event_id,
+                    row.origin_server_ts,
+                )
                 for row in edit_rows
             ],
         )

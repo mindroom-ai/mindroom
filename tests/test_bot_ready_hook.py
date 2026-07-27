@@ -951,7 +951,7 @@ async def test_startup_thread_prewarm_bulk_refresh_does_not_block_live_write(tmp
             new=AsyncMock(return_value=thread_ids),
         ),
         patch(
-            "mindroom.matrix.conversation_cache.untrusted_cached_thread_ids",
+            "mindroom.matrix.conversation_cache.thread_ids_needing_refill",
             new=AsyncMock(return_value=tuple(thread_ids)),
         ),
         patch(
@@ -1011,7 +1011,7 @@ async def test_startup_thread_prewarm_rechecks_shutdown_before_bulk_scan(tmp_pat
     thread_ids = ["$thread:localhost"]
     shutting_down = False
 
-    async def probe_untrusted_threads(*_args: object, **_kwargs: object) -> tuple[str, ...]:
+    async def probe_threads_needing_refill(*_args: object, **_kwargs: object) -> tuple[str, ...]:
         nonlocal shutting_down
         shutting_down = True
         return tuple(thread_ids)
@@ -1023,8 +1023,8 @@ async def test_startup_thread_prewarm_rechecks_shutdown_before_bulk_scan(tmp_pat
             new=AsyncMock(return_value=thread_ids),
         ),
         patch(
-            "mindroom.matrix.conversation_cache.untrusted_cached_thread_ids",
-            new=AsyncMock(side_effect=probe_untrusted_threads),
+            "mindroom.matrix.conversation_cache.thread_ids_needing_refill",
+            new=AsyncMock(side_effect=probe_threads_needing_refill),
         ),
         patch.object(
             bot._conversation_cache,
@@ -1055,7 +1055,7 @@ async def test_startup_thread_prewarm_cache_probe_failure_is_fail_open(tmp_path:
             new=AsyncMock(return_value=thread_ids),
         ),
         patch(
-            "mindroom.matrix.conversation_cache.untrusted_cached_thread_ids",
+            "mindroom.matrix.conversation_cache.thread_ids_needing_refill",
             new=AsyncMock(side_effect=RuntimeError("database unavailable")),
         ),
         patch.object(

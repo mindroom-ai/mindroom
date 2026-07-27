@@ -1822,17 +1822,7 @@ depends_on = [
     "mindroom.constants",
     "mindroom.matrix.cache.thread_cache_helpers",
     "mindroom.matrix.cache.thread_history_result",
-    "mindroom.matrix.cache.thread_repair",
     "mindroom.matrix.thread_diagnostics",
-]
-
-[[modules]]
-path = "mindroom.matrix.cache.thread_repair"
-depends_on = []
-visibility = [
-    "mindroom.matrix.cache.thread_reads",
-    "mindroom.matrix.cache.write_coordinator",
-    "mindroom.matrix.conversation_cache",
 ]
 
 [[modules]]
@@ -1840,7 +1830,7 @@ path = "mindroom.matrix.cache.thread_cache_helpers"
 depends_on = []
 
 [[modules]]
-path = "mindroom.matrix.cache.thread_cache_invalidation"
+path = "mindroom.matrix.cache.thread_cache_gap"
 depends_on = ["mindroom.matrix.cache.event_cache"]
 visibility = [
     "mindroom.matrix.cache.thread_write_cache_ops",
@@ -1856,6 +1846,7 @@ visibility = [
     "mindroom.matrix.cache.postgres_event_cache_threads",
     "mindroom.matrix.cache.sqlite_event_cache",
     "mindroom.matrix.cache.sqlite_event_cache_threads",
+    "mindroom.matrix.cache.thread_write_cache_ops",
 ]
 
 [[modules]]
@@ -1865,8 +1856,10 @@ depends_on = []
 [[modules]]
 path = "mindroom.matrix.cache.thread_write_cache_ops"
 depends_on = [
+    "mindroom.background_tasks",
     "mindroom.matrix.cache.event_cache",
-    "mindroom.matrix.cache.thread_cache_invalidation",
+    "mindroom.matrix.cache.thread_cache_gap",
+    "mindroom.matrix.cache.thread_cache_state",
     "mindroom.matrix.thread_bookkeeping",
 ]
 
@@ -1946,7 +1939,7 @@ visibility = ["mindroom.runtime_support"]
 
 [[modules]]
 path = "mindroom.matrix.cache.write_coordinator"
-depends_on = ["mindroom.matrix.cache.thread_repair"]
+depends_on = []
 
 [[modules]]
 path = "mindroom.matrix.cache.outbound_thread_reservations"
@@ -1972,7 +1965,6 @@ depends_on = [
     "mindroom.matrix.cache",
     "mindroom.matrix.cache.thread_history_result",
     "mindroom.matrix.cache.thread_reads",
-    "mindroom.matrix.cache.thread_repair",
     "mindroom.matrix.cache.thread_write_cache_ops",
     "mindroom.matrix.cache.thread_writes",
     "mindroom.matrix.client_thread_history",
@@ -1982,7 +1974,6 @@ depends_on = [
     "mindroom.matrix.message_content",
     "mindroom.matrix.thread_bookkeeping",
     "mindroom.matrix.thread_membership",
-    "mindroom.matrix.thread_resolution_reuse",
     "mindroom.matrix.thread_room_scan",
     "mindroom.matrix.visible_body",
 ]
@@ -2386,7 +2377,6 @@ visibility = [
     "mindroom.matrix.client",
     "mindroom.matrix.client_thread_history",
     "mindroom.matrix.stale_stream_cleanup",
-    "mindroom.matrix.thread_resolution_reuse",
     "mindroom.response_runner",
     "mindroom.routing",
     "mindroom.thread_export.selection",
@@ -2440,7 +2430,7 @@ depends_on = []
 path = "mindroom.matrix.client_thread_history"
 depends_on = [
     "mindroom.matrix.cache",
-    "mindroom.matrix.cache.thread_cache_invalidation",
+    "mindroom.matrix.cache.thread_cache_gap",
     "mindroom.matrix.cache.thread_history_result",
     "mindroom.matrix.client_visible_messages",
     "mindroom.matrix.event_info",
@@ -2449,7 +2439,6 @@ depends_on = [
     "mindroom.matrix.message_content",
     "mindroom.matrix.thread_membership",
     "mindroom.matrix.thread_projection",
-    "mindroom.matrix.thread_resolution_reuse",
     "mindroom.matrix.visible_body",
 ]
 visibility = [
@@ -2461,18 +2450,6 @@ visibility = [
     "mindroom.matrix.conversation_cache",
     "mindroom.matrix.thread_room_scan",
     "mindroom.thread_export.execution",
-]
-
-[[modules]]
-path = "mindroom.matrix.thread_resolution_reuse"
-depends_on = [
-    "mindroom.matrix.cache",
-    "mindroom.matrix.client_visible_messages",
-    "mindroom.matrix.event_info",
-]
-visibility = [
-    "mindroom.matrix.client_thread_history",
-    "mindroom.matrix.conversation_cache",
 ]
 
 [[modules]]
@@ -2531,6 +2508,7 @@ visibility = [
 path = "mindroom.thread_export.execution"
 depends_on = [
     "mindroom.matrix.client_thread_history",
+    "mindroom.matrix.thread_diagnostics",
     "mindroom.thread_export.models",
     "mindroom.thread_export.policy",
     "mindroom.thread_export.selection",
@@ -3853,14 +3831,13 @@ expose = [
     "ConversationEventCache",
     "EventCacheWriteCoordinator",
     "SharedConversationEventCache",
-    "ThreadCacheState",
-    "ThreadCacheReplaceOutcome",
+    "ThreadAppendOutcome",
+    "ThreadCacheGap",
     "ThreadHistoryResult",
-    "ThreadRevision",
     "is_opaque_encrypted_event_source",
     "normalize_nio_event_for_cache",
+    "thread_cache_gap_reason",
     "thread_cache_rejection_reason",
-    "thread_cache_state_is_usable",
     "thread_history_result",
 ]
 from = ["mindroom.matrix.cache"]
@@ -3870,8 +3847,6 @@ expose = [
     "ConversationEventCache",
     "EventCacheBackendUnavailableError",
     "SharedConversationEventCache",
-    "ThreadCacheState",
-    "ThreadRevision",
 ]
 from = ["mindroom.matrix.cache.event_cache"]
 visibility = ["mindroom.matrix.cache"]
@@ -3898,7 +3873,6 @@ exclusive = true
 [[interfaces]]
 expose = [
     "ConversationEventCache",
-    "ThreadCacheReplaceOutcome",
     "ThreadHistoryResult",
     "normalize_nio_event_for_cache",
     "thread_history_result",
@@ -4077,11 +4051,11 @@ from = ["mindroom.matrix.voice_message"]
 [[interfaces]]
 expose = [
     "ResolvedVisibleMessage",
+    "ThreadEditCandidates",
     "apply_latest_edits_to_messages",
     "extract_visible_edit_body",
     "extract_visible_message",
     "message_preview",
-    "record_latest_thread_edit",
     "replace_visible_message",
     "resolve_visible_event_source",
     "resolve_latest_visible_messages",
@@ -4094,7 +4068,6 @@ from = ["mindroom.matrix.client_visible_messages"]
 expose = [
     "fetch_thread_event_sources_via_room_messages",
     "BulkThreadRefreshStats",
-    "RetainedThreadEventSourceProvider",
     "RoomThreadsPageError",
     "ThreadRoomScanRootNotFoundError",
     "bulk_refresh_room_thread_histories",
@@ -4105,8 +4078,7 @@ expose = [
     "get_room_threads_page",
     "log_thread_history_refresh",
     "refresh_thread_history_from_source",
-    "thread_history_refresh_mode",
-    "untrusted_cached_thread_ids",
+    "thread_ids_needing_refill",
 ]
 from = ["mindroom.matrix.client_thread_history"]
 

@@ -529,3 +529,114 @@ def test_dispatch_pipeline_first_visible_reply_is_first_write_wins(
 
     assert timing.marks["first_visible_reply"] == 1.5
     assert timing.metadata["first_visible_kind"] == "placeholder"
+
+
+def test_emit_timing_event_builds_no_payload_when_debug_is_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """High-frequency timing events must not be assembled just to be dropped downstream."""
+    monkeypatch.setenv("MINDROOM_TIMING", "1")
+    logger = _mock_timing_logger(monkeypatch)
+    logger.isEnabledFor.return_value = False
+
+    emit_timing_event("dispatch delivery timing", phase="queued", queue_size=7, progress_hint=True)
+
+    logger.debug.assert_not_called()
+
+
+def test_emit_timing_event_still_emits_when_debug_is_enabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The level guard must not change what an enabled timing event reports."""
+    monkeypatch.setenv("MINDROOM_TIMING", "1")
+    logger = _mock_timing_logger(monkeypatch)
+    logger.isEnabledFor.return_value = True
+
+    emit_timing_event("dispatch delivery timing", phase="queued", queue_size=7, dropped=None)
+
+    logger.debug.assert_called_once()
+    assert logger.debug.call_args.args == ("dispatch delivery timing",)
+    assert logger.debug.call_args.kwargs == {"phase": "queued", "queue_size": 7}
+
+
+def test_dispatch_pipeline_summary_builds_no_payload_when_debug_is_disabled() -> None:
+    """The end-to-end summary walks every span pair, so it must not run when dropped."""
+    logger = Mock()
+    logger.isEnabledFor.return_value = False
+    timing = DispatchPipelineTiming(
+        source_event_id="$event",
+        room_id="!room",
+        marks={"message_received": 1.0, "response_complete": 2.0},
+    )
+
+    timing.emit_summary(logger, outcome="edited")
+
+    logger.debug.assert_not_called()
+    assert timing.summary_emitted
+
+
+def test_emit_timing_event_emits_when_the_logger_has_no_level_api(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Loggers without the stdlib level API must keep receiving timing events."""
+    monkeypatch.setenv("MINDROOM_TIMING", "1")
+    logger = Mock(spec_set=["debug"])
+    monkeypatch.setattr(timing_module, "logger", logger)
+
+    emit_timing_event("dispatch delivery timing", phase="queued")
+
+    logger.debug.assert_called_once()
+
+
+def test_emit_timing_event_emits_when_the_level_check_is_unsupported(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A wrapped logger that cannot answer isEnabledFor must not silence the event."""
+    monkeypatch.setenv("MINDROOM_TIMING", "1")
+    logger = _mock_timing_logger(monkeypatch)
+    logger.isEnabledFor.side_effect = AttributeError("'ReturnLogger' object has no attribute 'isEnabledFor'")
+
+    emit_timing_event("dispatch delivery timing", phase="queued")
+
+    logger.debug.assert_called_once()
+
+
+def test_emit_timing_event_emits_when_the_level_check_is_not_callable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A non-callable compatibility attribute must not break timing events."""
+    monkeypatch.setenv("MINDROOM_TIMING", "1")
+    logger = _mock_timing_logger(monkeypatch)
+    logger.isEnabledFor = False
+
+    emit_timing_event("dispatch delivery timing", phase="queued")
+
+    logger.debug.assert_called_once()
+
+
+def test_emit_timing_event_emits_when_the_level_check_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failing compatibility level check must not break timing events."""
+    monkeypatch.setenv("MINDROOM_TIMING", "1")
+    logger = _mock_timing_logger(monkeypatch)
+    logger.isEnabledFor.side_effect = RuntimeError("level check failed")
+
+    emit_timing_event("dispatch delivery timing", phase="queued")
+
+    logger.debug.assert_called_once()
+
+
+def test_dispatch_pipeline_summary_emits_when_the_level_check_is_unsupported() -> None:
+    """The summary must survive loggers that cannot answer isEnabledFor."""
+    logger = Mock()
+    logger.isEnabledFor.side_effect = AttributeError("'ReturnLogger' object has no attribute 'isEnabledFor'")
+    timing = DispatchPipelineTiming(
+        source_event_id="$event",
+        room_id="!room",
+        marks={"message_received": 1.0, "response_complete": 2.0},
+    )
+
+    timing.emit_summary(logger, outcome="edited")
+
+    logger.debug.assert_called_once()

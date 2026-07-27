@@ -12,10 +12,8 @@ from .agent_message_snapshot import AgentMessageSnapshot, AgentMessageSnapshotUn
 from .thread_cache_helpers import thread_cache_rejection_reason
 
 if TYPE_CHECKING:
-    from .event_cache import ThreadCacheState
     from .event_cache_events import CachedEventRow
-
-_THREAD_CACHE_REJECTION_NONE_REASONS = frozenset({"no_cache_state", "cache_never_validated"})
+    from .thread_cache_state import ThreadCacheGap
 
 
 @dataclass(frozen=True, slots=True)
@@ -26,15 +24,16 @@ class SnapshotLookupResult:
     stop_scanning: bool = False
 
 
-def thread_cache_has_no_snapshot(cache_state: ThreadCacheState | None) -> bool:
-    """Return whether a thread has no snapshot, raising when cached state is unsafe."""
-    rejection_reason = thread_cache_rejection_reason(cache_state)
-    if rejection_reason in _THREAD_CACHE_REJECTION_NONE_REASONS:
-        return True
+def reject_snapshot_scope_with_gap(gap: ThreadCacheGap | None) -> None:
+    """Refuse a snapshot read for one thread whose durable state records a gap.
+
+    A thread with no state row is not a gap: it simply has no snapshot yet, and the scan below
+    finds nothing and returns nothing.
+    """
+    rejection_reason = thread_cache_rejection_reason(gap)
     if rejection_reason is not None:
         msg = f"Thread cache snapshot is not usable: {rejection_reason}"
         raise AgentMessageSnapshotUnavailable(msg)
-    return False
 
 
 def event_matches_snapshot_scope(

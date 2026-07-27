@@ -445,6 +445,10 @@ def _message_payload(message: ResolvedVisibleMessage) -> dict[str, object]:
     }
     if timestamp_iso := _timestamp_iso(message.timestamp):
         payload["timestamp_iso"] = timestamp_iso
+    if message.edited_timestamp is not None:
+        payload["edited_timestamp"] = message.edited_timestamp
+        if edited_timestamp_iso := _timestamp_iso(message.edited_timestamp):
+            payload["edited_timestamp_iso"] = edited_timestamp_iso
     if message.thread_id is not None:
         payload["thread_id"] = message.thread_id
     if message.reply_to_event_id is not None:
