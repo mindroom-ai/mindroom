@@ -536,11 +536,20 @@ async def write_lookup_index_rows(
         accepted_row = await fetchone(
             db,
             """
-            INSERT INTO mindroom_event_cache_events(namespace, event_id, room_id, origin_server_ts, event_json, cached_at)
-            VALUES (%s, %s, %s, %s, %s, %s)
+            INSERT INTO mindroom_event_cache_events(
+                namespace,
+                event_id,
+                room_id,
+                origin_server_ts,
+                event_json,
+                event_bytes,
+                cached_at
+            )
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT(namespace, room_id, event_id) DO UPDATE SET
                 origin_server_ts = excluded.origin_server_ts,
                 event_json = excluded.event_json,
+                event_bytes = excluded.event_bytes,
                 cached_at = excluded.cached_at,
                 write_seq = nextval('mindroom_event_cache_write_seq')
             WHERE mindroom_event_cache_events.event_json::jsonb ->> 'type' = 'm.room.encrypted'
@@ -553,6 +562,7 @@ async def write_lookup_index_rows(
                 room_id,
                 event.origin_server_ts,
                 event.event_json,
+                event.event_bytes,
                 cached_at,
             ),
         )

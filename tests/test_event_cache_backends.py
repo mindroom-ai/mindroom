@@ -776,7 +776,7 @@ async def test_sqlite_v10_reset_is_atomic_and_creates_new_generation(tmp_path: P
         assert await cache.get_event("!room:localhost", "$legacy") is None
         assert cache._runtime.db is not None
         version_row = await (await cache._runtime.db.execute("PRAGMA user_version")).fetchone()
-        assert version_row == (12,)
+        assert version_row == (13,)
     finally:
         await cache.close()
 
@@ -832,7 +832,7 @@ async def test_sqlite_v11_reset_rotates_generation(tmp_path: Path) -> None:
                 "SELECT value FROM cache_metadata WHERE key = 'certification_generation'",
             )
         ).fetchone()
-        assert version_row == (12,)
+        assert version_row == (13,)
         assert generation_row is not None
         assert generation_row[0] != "sqlite-v11-generation"
     finally:
@@ -1124,7 +1124,7 @@ async def test_postgres_v1_migration_is_concurrent_and_namespace_preserving(
             )
         ).fetchall()
         await db.close()
-        assert version == ("3",)
+        assert version == ("4",)
         assert namespaces == [("legacy_a",), ("legacy_b",)]
         assert legacy_plaintext == []
         assert membership_columns == [("membership_epoch",), ("membership_state",)]
@@ -1273,7 +1273,7 @@ async def test_postgres_v2_migration_is_namespace_preserving(
         await db.rollback()
         await db.close()
 
-        assert version == ("3",)
+        assert version == ("4",)
         assert namespaces == [("legacy_a",), ("legacy_b",)]
         assert plaintext == []
         assert generations == [

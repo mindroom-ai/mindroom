@@ -24,6 +24,23 @@ class _PostgresSchemaMigrationResult:
     normalized_legacy_thread_payload_rows: int
 
 
+async def _backfill_event_payload_sizes(db: AsyncConnection, *, namespace: str) -> None:
+    """Record the payload size of one namespace's pre-existing events.
+
+    Bounded thread reads price a window from ``event_bytes`` alone, so a row that kept the column
+    default would look free and let a window return unbounded bytes. This detoasts each stored
+    payload exactly once, inside the migration transaction, instead of on every later read.
+    """
+    await db.execute(
+        """
+        UPDATE mindroom_event_cache_events
+        SET event_bytes = octet_length(event_json)
+        WHERE namespace = %s AND event_bytes = 0
+        """,
+        (namespace,),
+    )
+
+
 async def migrate_postgres_schema(
     db: AsyncConnection,
     *,
@@ -32,14 +49,15 @@ async def migrate_postgres_schema(
     target_schema_version: int,
 ) -> _PostgresSchemaMigrationResult:
     """Transactionally normalize one namespace while upgrading the shared schema."""
-    if current_schema_version not in {None, 1, 2, target_schema_version}:
+    if current_schema_version not in {None, 1, 2, 3, target_schema_version}:
         msg = (
             "PostgreSQL Matrix event cache schema version "
             f"{current_schema_version} is not compatible with expected version {target_schema_version}"
         )
         raise RuntimeError(msg)
 
-    migrated_from = current_schema_version if current_schema_version in {1, 2} else None
+    upgrading = current_schema_version is not None and current_schema_version < target_schema_version
+    migrated_from = current_schema_version if upgrading else None
     if current_schema_version == 1:
         await db.execute(
             """
@@ -47,6 +65,8 @@ async def migrate_postgres_schema(
             ALTER COLUMN event_json DROP NOT NULL
             """,
         )
+    if upgrading:
+        await _backfill_event_payload_sizes(db, namespace=namespace)
 
     normalized_legacy_thread_payload_rows = await rowcount(
         db,

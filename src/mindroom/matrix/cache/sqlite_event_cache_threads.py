@@ -62,11 +62,121 @@ from .thread_cache_state import (
     thread_cache_state_row,
     thread_revision_row,
 )
+from .thread_read_window import (
+    UNBOUNDED_THREAD_READ,
+    ThreadReadBudget,
+    ThreadWindowCandidate,
+    select_thread_window_event_ids,
+)
 
 if TYPE_CHECKING:
     import aiosqlite
 
     from .event_cache import ThreadCacheState, ThreadRevision
+
+
+_UNBOUNDED_THREAD_EVENTS_SQL = """
+SELECT thread_events.origin_server_ts, thread_events.write_seq, events.event_json
+FROM thread_events
+JOIN events
+    ON events.principal_id = thread_events.principal_id
+    AND events.room_id = thread_events.room_id
+    AND events.event_id = thread_events.event_id
+WHERE thread_events.principal_id = ?
+    AND thread_events.room_id = ?
+    AND thread_events.thread_id = ?
+ORDER BY thread_events.origin_server_ts ASC, thread_events.write_seq ASC
+"""
+
+# Selection query. Prices every message in the thread from inline columns alone: no ``event_json``
+# is referenced, so no payload outside the window is read or parsed. Rows that are themselves edits
+# are anti-joined out, because a bound over raw thread rows selects one message and a pile of its
+# own edits. Each candidate costs its own payload plus the latest edit that accompanies it back.
+_THREAD_WINDOW_CANDIDATES_SQL = """
+SELECT thread_events.event_id,
+       events.event_bytes + COALESCE((
+           SELECT edit_events.event_bytes
+           FROM event_edits
+           JOIN events AS edit_events
+               ON edit_events.principal_id = event_edits.principal_id
+               AND edit_events.room_id = event_edits.room_id
+               AND edit_events.event_id = event_edits.edit_event_id
+           WHERE event_edits.principal_id = thread_events.principal_id
+               AND event_edits.room_id = thread_events.room_id
+               AND event_edits.original_event_id = thread_events.event_id
+           ORDER BY event_edits.origin_server_ts DESC, event_edits.edit_event_id DESC
+           LIMIT 1
+       ), 0) AS window_bytes
+FROM thread_events
+JOIN events
+    ON events.principal_id = thread_events.principal_id
+    AND events.room_id = thread_events.room_id
+    AND events.event_id = thread_events.event_id
+WHERE thread_events.principal_id = ?
+    AND thread_events.room_id = ?
+    AND thread_events.thread_id = ?
+    AND NOT EXISTS (
+        SELECT 1
+        FROM event_edits AS candidate_is_edit
+        WHERE candidate_is_edit.principal_id = thread_events.principal_id
+            AND candidate_is_edit.room_id = thread_events.room_id
+            AND candidate_is_edit.edit_event_id = thread_events.event_id
+    )
+ORDER BY thread_events.origin_server_ts DESC, thread_events.write_seq DESC
+"""
+
+# Payload query. Fetches the selected originals, the thread root, and the latest edit of each, so
+# the read still resolves to the messages the unbounded read produces.
+_THREAD_WINDOW_PAYLOAD_SQL = """
+SELECT thread_events.origin_server_ts, thread_events.write_seq, events.event_json
+FROM thread_events
+JOIN events
+    ON events.principal_id = thread_events.principal_id
+    AND events.room_id = thread_events.room_id
+    AND events.event_id = thread_events.event_id
+WHERE thread_events.principal_id = :principal_id
+    AND thread_events.room_id = :room_id
+    AND thread_events.thread_id = :thread_id
+    AND (
+        thread_events.event_id IN (SELECT value FROM json_each(:selected_event_ids))
+        OR thread_events.event_id = :thread_id
+        OR EXISTS (
+            SELECT 1
+            FROM event_edits
+            WHERE event_edits.principal_id = thread_events.principal_id
+                AND event_edits.room_id = thread_events.room_id
+                AND event_edits.edit_event_id = thread_events.event_id
+                AND (
+                    event_edits.original_event_id IN (SELECT value FROM json_each(:selected_event_ids))
+                    OR event_edits.original_event_id = :thread_id
+                )
+                AND event_edits.edit_event_id = (
+                    SELECT latest.edit_event_id
+                    FROM event_edits AS latest
+                    WHERE latest.principal_id = event_edits.principal_id
+                        AND latest.room_id = event_edits.room_id
+                        AND latest.original_event_id = event_edits.original_event_id
+                    ORDER BY latest.origin_server_ts DESC, latest.edit_event_id DESC
+                    LIMIT 1
+                )
+        )
+    )
+ORDER BY thread_events.origin_server_ts ASC, thread_events.write_seq ASC
+"""
+
+
+async def _load_thread_window_candidates(
+    db: aiosqlite.Connection,
+    *,
+    principal_id: str,
+    room_id: str,
+    thread_id: str,
+) -> list[ThreadWindowCandidate]:
+    """Return this thread's messages newest first with the bytes each would cost."""
+    cursor = await db.execute(_THREAD_WINDOW_CANDIDATES_SQL, (principal_id, room_id, thread_id))
+    rows = await cursor.fetchall()
+    await cursor.close()
+    return [ThreadWindowCandidate(event_id=str(row[0]), window_bytes=int(row[1])) for row in rows]
 
 
 async def load_thread_events(
@@ -75,28 +185,43 @@ async def load_thread_events(
     principal_id: str,
     room_id: str,
     thread_id: str,
+    budget: ThreadReadBudget = UNBOUNDED_THREAD_READ,
 ) -> list[dict[str, Any]] | None:
-    """Return cached events for one thread sorted by timestamp."""
+    """Return cached events for one thread sorted by timestamp.
+
+    An unbounded budget returns every stored row. A bounded budget selects the newest messages that
+    fit from inline columns, then fetches only those payloads, each with its latest edit, plus the
+    thread root.
+    """
+    if not budget.is_bounded:
+        cursor = await db.execute(_UNBOUNDED_THREAD_EVENTS_SQL, (principal_id, room_id, thread_id))
+        rows = await cursor.fetchall()
+        await cursor.close()
+        return [json.loads(row[2]) for row in rows] if rows else None
+
+    candidates = await _load_thread_window_candidates(
+        db,
+        principal_id=principal_id,
+        room_id=room_id,
+        thread_id=thread_id,
+    )
+    if not candidates:
+        return None
+    # The payload query may return fewer rows than were selected: redaction hard-deletes, so an
+    # event removed between the two phases is correctly absent. A short result is normal here and
+    # must never be asserted against the selected count.
     cursor = await db.execute(
-        """
-        SELECT thread_events.origin_server_ts, thread_events.write_seq, events.event_json
-        FROM thread_events
-        JOIN events
-            ON events.principal_id = thread_events.principal_id
-            AND events.room_id = thread_events.room_id
-            AND events.event_id = thread_events.event_id
-        WHERE thread_events.principal_id = ?
-            AND thread_events.room_id = ?
-            AND thread_events.thread_id = ?
-        ORDER BY thread_events.origin_server_ts ASC, thread_events.write_seq ASC
-        """,
-        (principal_id, room_id, thread_id),
+        _THREAD_WINDOW_PAYLOAD_SQL,
+        {
+            "principal_id": principal_id,
+            "room_id": room_id,
+            "thread_id": thread_id,
+            "selected_event_ids": json.dumps(select_thread_window_event_ids(candidates, budget=budget)),
+        },
     )
     rows = await cursor.fetchall()
     await cursor.close()
-    if not rows:
-        return None
-    return [json.loads(row[2]) for row in rows]
+    return [json.loads(row[2]) for row in rows] if rows else None
 
 
 async def load_thread_events_written_between(

@@ -29,6 +29,7 @@ from .thread_cache_state import (
     incoming_thread_invalidation_takes_precedence,
     replacement_validated_at,
 )
+from .thread_read_window import UNBOUNDED_THREAD_READ, ThreadReadBudget
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Collection
@@ -40,7 +41,7 @@ if TYPE_CHECKING:
     from .event_cache import ThreadCacheState, ThreadRevision
 
 
-_POSTGRES_EVENT_CACHE_SCHEMA_VERSION = 3
+_POSTGRES_EVENT_CACHE_SCHEMA_VERSION = 4
 _DEFAULT_PRINCIPAL_ID = "__mindroom_default_principal__"
 _POSTGRES_SCHEMA_LOCK_NAME = "mindroom_event_cache_schema"
 _MAX_TRANSIENT_OPERATION_ATTEMPTS = 2
@@ -191,7 +192,7 @@ async def _initialize_postgres_event_cache_db(
             """,
         )
         current_schema_version = await _postgres_schema_version(db)
-        if current_schema_version not in (None, 1, 2, _POSTGRES_EVENT_CACHE_SCHEMA_VERSION):
+        if current_schema_version not in (None, 1, 2, 3, _POSTGRES_EVENT_CACHE_SCHEMA_VERSION):
             msg = (
                 "PostgreSQL Matrix event cache schema version "
                 f"{current_schema_version} is not compatible with expected version "
@@ -292,10 +293,20 @@ async def _create_postgres_event_cache_schema(db: AsyncConnection) -> None:
             room_id TEXT NOT NULL,
             origin_server_ts BIGINT NOT NULL,
             event_json TEXT NOT NULL,
+            event_bytes BIGINT NOT NULL DEFAULT 0,
             cached_at DOUBLE PRECISION NOT NULL,
             write_seq BIGINT NOT NULL DEFAULT nextval('mindroom_event_cache_write_seq'),
             PRIMARY KEY (namespace, room_id, event_id)
         )
+        """,
+    )
+    # Pre-existing deployments keep their table; the column is added in place and the version-4
+    # migration backfills it, so no row is left at the default size a bounded read would treat
+    # as free.
+    await db.execute(
+        """
+        ALTER TABLE mindroom_event_cache_events
+        ADD COLUMN IF NOT EXISTS event_bytes BIGINT NOT NULL DEFAULT 0
         """,
     )
     await db.execute(
@@ -1248,7 +1259,13 @@ class PostgresEventCache:
             if thread_id is not None:
                 self._runtime.forget_pending_thread_invalidation(room_id, thread_id, pending)
 
-    async def get_thread_events(self, room_id: str, thread_id: str) -> list[dict[str, Any]] | None:
+    async def get_thread_events(
+        self,
+        room_id: str,
+        thread_id: str,
+        *,
+        budget: ThreadReadBudget = UNBOUNDED_THREAD_READ,
+    ) -> list[dict[str, Any]] | None:
         """Return cached events for one thread sorted by timestamp."""
         return await self._operation(
             room_id,
@@ -1259,6 +1276,7 @@ class PostgresEventCache:
                 namespace=self._runtime.namespace,
                 room_id=room_id,
                 thread_id=thread_id,
+                budget=budget,
             ),
         )
 

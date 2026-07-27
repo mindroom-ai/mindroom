@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
+from .thread_read_window import UNBOUNDED_THREAD_READ, ThreadReadBudget
+
 if TYPE_CHECKING:
     from collections.abc import Collection
 
@@ -86,8 +88,18 @@ class ConversationEventCache(Protocol):
     async def close(self) -> None:
         """Close any backing storage."""
 
-    async def get_thread_events(self, room_id: str, thread_id: str) -> list[dict[str, Any]] | None:
-        """Return cached events for one thread sorted by timestamp."""
+    async def get_thread_events(
+        self,
+        room_id: str,
+        thread_id: str,
+        *,
+        budget: ThreadReadBudget = UNBOUNDED_THREAD_READ,
+    ) -> list[dict[str, Any]] | None:
+        """Return cached events for one thread sorted by timestamp.
+
+        A bounded budget returns the newest messages that fit, each with its latest edit, plus the
+        thread root. Selection never reads a payload it does not return.
+        """
 
     async def get_thread_events_written_between(
         self,

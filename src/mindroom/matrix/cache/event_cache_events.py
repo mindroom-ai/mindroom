@@ -23,6 +23,16 @@ class SerializedCachedEvent:
     event_json: str
     event: dict[str, Any]
 
+    @property
+    def event_bytes(self) -> int:
+        """Return the stored payload size in bytes.
+
+        Persisted as its own narrow column so a byte-bounded thread read can size a window from
+        inline values alone: reading ``length(event_json)`` would detoast every candidate payload,
+        which is the cost the bound exists to avoid.
+        """
+        return len(self.event_json.encode())
+
 
 @dataclass(frozen=True, slots=True)
 class CachedEventRow:

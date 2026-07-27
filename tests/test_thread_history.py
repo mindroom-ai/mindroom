@@ -38,6 +38,7 @@ from mindroom.matrix.client_thread_history import (
     _merge_retained_thread_event_sources,
     _resolve_thread_history_from_event_sources_timed,
 )
+from mindroom.matrix.client_visible_messages import ThreadEditCandidates
 from mindroom.matrix.conversation_cache import MatrixConversationCache
 from mindroom.matrix.membership_fence import UNCERTIFIED_MEMBERSHIP_EPOCH
 from mindroom.matrix.thread_diagnostics import (
@@ -1285,7 +1286,7 @@ class TestThreadHistory:
         grouped, _unresolved_opaque = await _group_scanned_sources_by_thread(
             room_id="!room:localhost",
             thread_root_ids=("$room_root",),
-            latest_edits_by_original_event_id={},
+            edit_candidates=ThreadEditCandidates(),
             scanned_message_sources={
                 "$room_root": {
                     "event_id": "$room_root",
@@ -1314,7 +1315,7 @@ class TestThreadHistory:
         grouped, _unresolved_opaque = await _group_scanned_sources_by_thread(
             room_id="!room:localhost",
             thread_root_ids=("$root",),
-            latest_edits_by_original_event_id={},
+            edit_candidates=ThreadEditCandidates(),
             scanned_message_sources={
                 "$root": {
                     "event_id": "$root",
@@ -1353,7 +1354,7 @@ class TestThreadHistory:
         grouped, _unresolved_opaque = await _group_scanned_sources_by_thread(
             room_id="!room:localhost",
             thread_root_ids=("$root",),
-            latest_edits_by_original_event_id={},
+            edit_candidates=ThreadEditCandidates(),
             scanned_message_sources={
                 "$root": {
                     "event_id": "$root",

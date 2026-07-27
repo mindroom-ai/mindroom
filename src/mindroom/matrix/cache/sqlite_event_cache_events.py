@@ -561,13 +561,15 @@ async def write_lookup_index_rows(
                 room_id,
                 origin_server_ts,
                 event_json,
+                event_bytes,
                 cached_at,
                 write_seq
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(principal_id, room_id, event_id) DO UPDATE SET
                 origin_server_ts = excluded.origin_server_ts,
                 event_json = excluded.event_json,
+                event_bytes = excluded.event_bytes,
                 cached_at = excluded.cached_at,
                 write_seq = excluded.write_seq
             WHERE json_extract(events.event_json, '$.type') = 'm.room.encrypted'
@@ -580,6 +582,7 @@ async def write_lookup_index_rows(
                 room_id,
                 event.origin_server_ts,
                 event.event_json,
+                event.event_bytes,
                 cached_at,
                 write_sequence,
             ),
