@@ -7,11 +7,30 @@ The reduction comes from collapsing edits, not from dropping messages. Productio
 2,021-row thread to 41 rows without losing a message. Dropping messages buys nothing on top of
 that and costs a great deal: see the message-bound comment below.
 
-The root fix is upstream of here. Nothing in the codebase reads a superseded edit - every consumer
-takes the latest, or bulk-deletes - so only the winning edit per (original, sender) needs to be
-persisted at all. Pruning superseded edits at write time would remove those rows at the source and
-make this read's collapse unnecessary. That is a write-path change with redaction and
-arrival-order consequences, so it is not done here, but it is the better place to solve this.
+The root fix is upstream of here, and it is a write-path change rather than a read one. Threads run
+~94% edit rows because every superseded edit is retained. Pruning them at write time removes those
+rows at the source and makes this read's collapse unnecessary.
+
+That retention is deliberate, so pruning is a trade rather than a cleanup: redacting the current
+winning edit is contractually supposed to reveal the previous one, which only works while the older
+rows exist (``test_redacting_latest_edit_falls_back_to_previous_cached_edit``). The trade looks
+sound because the case is close to unreachable. Redacting a *message* already removes the original
+and every dependent edit together, and mindroom-cinny's delete targets the original event ID -
+``MessageDeleteItem`` passes ``mEvent.getId()``, and a replacement is only ever reached through
+``replacingEvent()``, which is never a redaction target there. Reaching the rollback path needs the
+raw API, ``/redact <edit-event-id>``, or moderation tooling. Element was not checked; check it
+before building this.
+
+The contract to implement, if it is built:
+
+* keep only the current legitimate edit per (original, sender);
+* redacting an already-pruned edit tombstones it and is otherwise a no-op;
+* redacting the retained winner deletes it, marks the thread stale, and refetches full history.
+  ``invalidate_after_redaction`` in ``thread_writes`` already does this on the live redaction path,
+  so this is a simplification of existing machinery rather than new machinery;
+* if the homeserver is unreachable at that moment, fail or degrade explicitly - never serve the
+  original body as confirmed full history;
+* keep tombstones, so out-of-order sync cannot resurrect a deleted edit.
 
 Three things that cost real time to learn
 -----------------------------------------
