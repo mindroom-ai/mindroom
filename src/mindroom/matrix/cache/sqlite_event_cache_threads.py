@@ -73,9 +73,12 @@ if TYPE_CHECKING:
 # message what one window function derives once, and hauls the whole superseded history across
 # the wire to do it.
 #
-# Measured on a representative agent workload: edits are 53% of all event rows, 6.30 per edited
-# original, max 170 on one original, and one thread is 94.5% edits. Threads themselves are
-# small - p50 9 rows, max 538.
+# Two real agent workloads, and they differ by more than you would guess, so do not treat either
+# as the shape. One runs 53% edit rows at 6.30 edits per edited original, max 170 on one original,
+# with a thread at 94.5% edits. The other runs 28% edit rows but only ~1.07 per (original, sender),
+# so collapsing removes under 2% of its rows. Threads are small in both - p50 9 rows, max 538.
+# Where superseded edits do not accumulate this query costs about 1.3x the plain read and returns
+# almost the same rows; it earns its place on the correctness fixes below, not on that ratio.
 #
 # So be precise about what this buys, because two earlier revisions of this comment were not. It
 # does not reduce writes - it is a read-side query, and every edit is still stored. It does not
