@@ -75,6 +75,15 @@ class ConversationEventCache(Protocol):
         it rather than with every edit it ever received. No message is left out.
         """
 
+    async def get_thread_event_ids(self, room_id: str, thread_id: str) -> set[str]:
+        """Return every raw event ID this thread holds, superseded edits included.
+
+        Distinct from ``get_thread_events``, which collapses superseded edits away and requires a
+        payload. This one answers which rows this thread durably owns, which is the question the
+        collapse security tests ask: a point-cached original with no membership row must not appear
+        here, and a superseded edit must.
+        """
+
     async def has_thread_snapshot(self, room_id: str, thread_id: str) -> bool:
         """Return whether any durably present snapshot rows exist for one thread.
 
@@ -176,8 +185,11 @@ class ConversationEventCache(Protocol):
     ) -> bool:
         """Install one fetched snapshot, clearing a gap marker the fetch covers.
 
-        Returns whether the snapshot was stored. A gap recorded after ``fetch_started_at``
-        survives the replacement, so the next read refetches.
+        Returns whether this call left a usable snapshot behind, which is not the same as "stored":
+        a fetch older than the installed one is skipped and still returns ``True``, because a fresher
+        snapshot is already there and the caller has nothing to retry. ``False`` means writes were
+        unavailable. A gap recorded after ``fetch_started_at`` survives the replacement at either
+        scope, so the next read refetches.
         """
 
     async def invalidate_thread(self, room_id: str, thread_id: str) -> None:

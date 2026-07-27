@@ -666,9 +666,18 @@ class MatrixConversationCache(ConversationCacheProtocol):
         """Rebuild one thread from Matrix and reinstall its snapshot.
 
         One fetch per caller, unconditionally. There is no single-flight, no admission gate and no
-        failure backoff: those existed to ration a scan believed to cost seconds, and a measured
-        126 ms refetch does not need rationing. Concurrent readers of the same gapped thread each
-        pay their own read, which is the cost of not maintaining an admission policy.
+        failure backoff.
+
+        Not because a refetch is cheap - this is a full homeserver room scan, and the 126 ms figure
+        quoted elsewhere in this subsystem prices a warm *cache* read, not this. The reason is that
+        the storm those gates rationed was measured at a 1.244x per-principal fan-out rather than
+        the assumed 6x, and the trust algebra that generated most of the spurious invalidations
+        feeding it is gone. Fewer refetches to storm with, so the policy layer costs more to
+        maintain than the storm costs to absorb.
+
+        Concurrent readers of one gapped thread each pay their own scan. If that ever shows up as
+        real load, the fix is single-flight keyed on (principal, room, thread) - not the tiering,
+        cooldowns and suppression conditions that were deleted with it.
         """
         return await refresh_thread_history_from_source(
             self._require_client(),

@@ -874,6 +874,20 @@ class SqliteEventCache:
             ),
         )
 
+    async def get_thread_event_ids(self, room_id: str, thread_id: str) -> set[str]:
+        """Return every raw event ID this thread holds, superseded edits included."""
+        return await self._read_operation(
+            room_id,
+            operation="get_thread_event_ids",
+            disabled_result=set(),
+            reader=lambda db: sqlite_event_cache_threads.load_thread_event_ids(
+                db,
+                principal_id=self.principal_id,
+                room_id=room_id,
+                thread_id=thread_id,
+            ),
+        )
+
     async def has_thread_snapshot(self, room_id: str, thread_id: str) -> bool:
         """Return whether any snapshot rows exist for one thread."""
         return await self._read_operation(

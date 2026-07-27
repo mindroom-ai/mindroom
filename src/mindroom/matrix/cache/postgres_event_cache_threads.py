@@ -145,6 +145,41 @@ async def load_thread_events(
     return [json.loads(row[2]) for row in rows] if rows else None
 
 
+async def load_thread_event_ids(
+    db: AsyncConnection,
+    *,
+    namespace: str,
+    room_id: str,
+    thread_id: str,
+) -> set[str]:
+    """Return every raw event ID this thread holds, superseded edits included.
+
+    Membership and visibility are different questions, and collapsing is what made them differ:
+    the visible read shows one edit per message, while this returns every row the thread owns. The
+    repair bookkeeping this was written for is gone; the surviving caller is the edit-sender rule's
+    coverage, which needs the membership set to state its precondition.
+
+    Joined to ``events`` rather than reading membership alone: a membership row whose payload is
+    gone is not durably present, and reporting it as present would suppress a refill that should
+    happen. That join is also what the pre-collapse code did implicitly, since it derived these IDs
+    from a read that required the payload.
+    """
+    rows = await fetchall(
+        db,
+        """
+        SELECT thread_events.event_id
+        FROM mindroom_event_cache_thread_events AS thread_events
+        JOIN mindroom_event_cache_events AS events
+            ON events.namespace = thread_events.namespace
+            AND events.room_id = thread_events.room_id
+            AND events.event_id = thread_events.event_id
+        WHERE thread_events.namespace = %s AND thread_events.room_id = %s AND thread_events.thread_id = %s
+        """,
+        (namespace, room_id, thread_id),
+    )
+    return {str(row[0]) for row in rows}
+
+
 async def load_recent_room_thread_ids(
     db: AsyncConnection,
     *,

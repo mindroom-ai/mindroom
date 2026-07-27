@@ -964,7 +964,7 @@ async def test_postgres_v1_migration_is_concurrent_and_namespace_preserving(
             )
         ).fetchall()
         await db.close()
-        assert version == ("4",)
+        assert version == ("5",)
         assert namespaces == [("legacy_a",), ("legacy_b",)]
         assert legacy_plaintext == []
         assert membership_columns == [("membership_epoch",), ("membership_state",)]
@@ -1113,7 +1113,7 @@ async def test_postgres_v2_migration_is_namespace_preserving(
         await db.rollback()
         await db.close()
 
-        assert version == ("4",)
+        assert version == ("5",)
         assert namespaces == [("legacy_a",), ("legacy_b",)]
         assert plaintext == []
         assert generations == [

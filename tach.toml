@@ -4048,7 +4048,6 @@ from = ["mindroom.matrix.client_visible_messages"]
 expose = [
     "fetch_thread_event_sources_via_room_messages",
     "BulkThreadRefreshStats",
-    "RetainedThreadEventSourceProvider",
     "RoomThreadsPageError",
     "ThreadRoomScanRootNotFoundError",
     "bulk_refresh_room_thread_histories",
@@ -4059,7 +4058,6 @@ expose = [
     "get_room_threads_page",
     "log_thread_history_refresh",
     "refresh_thread_history_from_source",
-    "thread_history_refresh_mode",
     "thread_ids_needing_refill",
 ]
 from = ["mindroom.matrix.client_thread_history"]

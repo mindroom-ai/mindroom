@@ -157,7 +157,7 @@ async def migrate_postgres_schema(
     target_schema_version: int,
 ) -> _PostgresSchemaMigrationResult:
     """Transactionally normalize one namespace while upgrading the shared schema."""
-    if current_schema_version not in {None, 1, 2, 3, target_schema_version}:
+    if current_schema_version not in {None, 1, 2, 3, 4, target_schema_version}:
         msg = (
             "PostgreSQL Matrix event cache schema version "
             f"{current_schema_version} is not compatible with expected version {target_schema_version}"

@@ -377,7 +377,7 @@ async def test_postgres_version_1_migration_is_namespace_safe_and_repairs_orphan
             cursor = await db.execute(
                 "SELECT value FROM mindroom_event_cache_metadata WHERE key = 'schema_version'",
             )
-            assert await cursor.fetchone() == ("4",)
+            assert await cursor.fetchone() == ("5",)
             await cursor.close()
         finally:
             await cache.close()

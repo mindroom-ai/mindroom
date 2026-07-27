@@ -37,7 +37,11 @@ if TYPE_CHECKING:
     from .thread_cache_state import ThreadCacheGap
 
 
-_POSTGRES_EVENT_CACHE_SCHEMA_VERSION = 4
+# Bumped to 5 by the gap-marker rework. The version is what makes a downgrade fail loudly: this
+# revision DROPs validated_at / invalidated_at / invalidation_reason, and the prior code only ever
+# created those columns inside CREATE TABLE IF NOT EXISTS - so rolling back onto an already-migrated
+# database would leave it querying columns that no longer exist. Version 4 refuses version 5.
+_POSTGRES_EVENT_CACHE_SCHEMA_VERSION = 5
 _DEFAULT_PRINCIPAL_ID = "__mindroom_default_principal__"
 _POSTGRES_SCHEMA_LOCK_NAME = "mindroom_event_cache_schema"
 _MAX_TRANSIENT_OPERATION_ATTEMPTS = 2
@@ -188,7 +192,7 @@ async def _initialize_postgres_event_cache_db(
             """,
         )
         current_schema_version = await _postgres_schema_version(db)
-        if current_schema_version not in (None, 1, 2, 3, _POSTGRES_EVENT_CACHE_SCHEMA_VERSION):
+        if current_schema_version not in (None, 1, 2, 3, 4, _POSTGRES_EVENT_CACHE_SCHEMA_VERSION):
             msg = (
                 "PostgreSQL Matrix event cache schema version "
                 f"{current_schema_version} is not compatible with expected version "
@@ -1285,6 +1289,20 @@ class PostgresEventCache:
             operation="get_thread_events",
             disabled_result=None,
             callback=lambda db: postgres_event_cache_threads.load_thread_events(
+                db,
+                namespace=self._runtime.namespace,
+                room_id=room_id,
+                thread_id=thread_id,
+            ),
+        )
+
+    async def get_thread_event_ids(self, room_id: str, thread_id: str) -> set[str]:
+        """Return every raw event ID this thread holds, superseded edits included."""
+        return await self._operation(
+            room_id,
+            operation="get_thread_event_ids",
+            disabled_result=set(),
+            callback=lambda db: postgres_event_cache_threads.load_thread_event_ids(
                 db,
                 namespace=self._runtime.namespace,
                 room_id=room_id,
