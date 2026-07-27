@@ -78,7 +78,6 @@ from mindroom.matrix.membership_fence import UNCERTIFIED_MEMBERSHIP_EPOCH
 from mindroom.matrix.message_content import (
     SidecarHydrationBatch,
     extract_and_resolve_message,
-    has_sidecar_references,
     prepare_sidecar_hydration_batch,
     resolve_event_source_content,
 )
@@ -439,13 +438,12 @@ def _sidecar_hydration_sources(
 
 @dataclass(slots=True)
 class _ResolvedThreadEventSources:
-    """One resolution pass over raw thread rows plus the inputs needed to reuse it later."""
+    """One resolution pass over raw thread rows."""
 
     messages: list[ResolvedVisibleMessage]
     sidecar_hydration_ms: float
     input_order_by_event_id: dict[str, int]
     related_event_id_by_event_id: dict[str, str]
-    hydration_complete: bool
 
 
 async def _resolve_thread_history_from_event_sources_timed(
@@ -535,16 +533,11 @@ async def _resolve_thread_history_from_event_sources_timed(
         input_order_by_event_id=input_order_by_event_id,
         related_event_id_by_event_id=related_event_id_by_event_id,
     )
-    if hydration_batch is None:
-        hydration_complete = not has_sidecar_references(hydration_sources)
-    else:
-        hydration_complete = hydration_batch.references <= frozenset(hydration_batch.cached_texts)
     return _ResolvedThreadEventSources(
         messages=messages,
         sidecar_hydration_ms=elapsed_ms_since(sidecar_hydration_started, clock=time.perf_counter),
         input_order_by_event_id=input_order_by_event_id,
         related_event_id_by_event_id=related_event_id_by_event_id,
-        hydration_complete=hydration_complete,
     )
 
 

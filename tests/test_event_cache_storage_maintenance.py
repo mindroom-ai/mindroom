@@ -21,7 +21,10 @@ from mindroom.matrix.cache import (
     sqlite_event_cache,
 )
 from mindroom.matrix.cache.postgres_cache_maintenance import migrate_postgres_schema
-from mindroom.matrix.cache.postgres_event_cache import PostgresEventCache
+from mindroom.matrix.cache.postgres_event_cache import (
+    _POSTGRES_EVENT_CACHE_SCHEMA_VERSION,
+    PostgresEventCache,
+)
 from mindroom.matrix.cache.sqlite_event_cache import SqliteEventCache
 
 if TYPE_CHECKING:
@@ -428,8 +431,8 @@ async def test_postgres_current_version_maintenance_avoids_exclusive_schema_lock
             migration_result = await migrate_postgres_schema(
                 maintainer,
                 namespace=namespace,
-                current_schema_version=3,
-                target_schema_version=3,
+                current_schema_version=_POSTGRES_EVENT_CACHE_SCHEMA_VERSION,
+                target_schema_version=_POSTGRES_EVENT_CACHE_SCHEMA_VERSION,
             )
             assert migration_result.migrated_from_schema_version is None
             assert migration_result.normalized_legacy_thread_payload_rows == 0

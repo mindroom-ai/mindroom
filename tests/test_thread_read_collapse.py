@@ -54,6 +54,7 @@ _THREAD_READ_TABLES = ("events", "thread_events", "event_edits")
 
 _ROOM_ID = "!bounded:localhost"
 _THREAD_ID = "$root"
+_OTHER_THREAD_ID = "$otherroot"
 
 
 def _message_event(
@@ -142,6 +143,14 @@ async def _seed_thread(
     events: list[dict[str, Any]],
 ) -> None:
     await replace_thread_unconditionally(event_cache, _ROOM_ID, _THREAD_ID, events)
+
+
+async def _seed_other_thread(
+    event_cache: ConversationEventCache,
+    events: list[dict[str, Any]],
+) -> None:
+    """Seed a second thread in the same room, for scoping assertions."""
+    await replace_thread_unconditionally(event_cache, _ROOM_ID, _OTHER_THREAD_ID, events)
 
 
 class TestCollapsedReadLosesNoMessage:
@@ -624,18 +633,22 @@ def _nio_text_event(source: dict[str, Any]) -> nio.RoomMessageText:
 class TestCollapsedReadAgreesWithTheFoldOnEveryEdit:
     """The invariant both edit-collapse defects violated, stated once.
 
-    Phase 2's ranking universe must be exactly the row set the unbounded read returns, and its
-    grouping key must be exactly the fold's grouping key. Ranking over a wider universe lets a row
-    the outer query later discards suppress the in-thread runner-up; grouping by a coarser key lets
-    a foreign edit suppress the author's own.
+    The query's ranking universe must be exactly the rows the read returns, and its grouping key
+    must be exactly the fold's grouping key. Ranking over a wider universe lets a row the outer
+    query later discards suppress the in-thread runner-up; grouping by a coarser key lets a foreign
+    edit suppress the author's own.
+
+    Expectations here are written out by hand rather than derived from a second read. A guard that
+    compares one collapsed read against another cannot fail: both sides move together under any
+    change to the query, which is exactly the change this is meant to catch.
     """
 
     @pytest.mark.asyncio
-    async def test_every_collapsed_message_resolves_to_the_same_edit_as_the_raw_rows(
+    async def test_the_query_hands_the_fold_the_edit_the_fold_should_pick(
         self,
         event_cache: ConversationEventCache,
     ) -> None:
-        """For each message, the fold over collapsed rows picks the edit it picks over raw rows."""
+        """Four messages, four different ways an edit can win, lose, or not count."""
         author = "@author:localhost"
         attacker = "@attacker:localhost"
         await _seed_thread(
@@ -650,36 +663,43 @@ class TestCollapsedReadAgreesWithTheFoldOnEveryEdit:
                 _message_event("$contested-own", 4_100, sender=author, edit_of="$contested"),
             ],
         )
-        # A newer foreign replacement, and a newer same-sender replacement that is not in the thread.
+        # A foreign replacement, newer than the author's own.
         await event_cache.apply_thread_mutation_append(
             _ROOM_ID,
             _THREAD_ID,
             _message_event("$contested-forged", 8_000, sender=attacker, edit_of="$contested"),
             append_failed_reason="test",
         )
-        await event_cache.store_event(
-            "$edited-orphan",
-            _ROOM_ID,
-            _message_event("$edited-orphan", 9_000, sender=author, edit_of="$edited"),
+        # A same-sender replacement that is newer still but lives in a DIFFERENT thread of the
+        # same room. It has to be in another thread rather than in none: an edit belonging to no
+        # thread is excluded by the membership join whatever the thread predicate says, so a
+        # fixture built that way cannot tell a correctly scoped ranking from an unscoped one.
+        await _seed_other_thread(
+            event_cache,
+            [
+                _message_event(_OTHER_THREAD_ID, 8_500, sender=author),
+                _message_event("$edited-elsewhere", 9_000, sender=author, edit_of="$edited"),
+            ],
         )
 
-        full_read = await event_cache.get_thread_events(_ROOM_ID, _THREAD_ID)
-        bounded_read = await event_cache.get_thread_events(
-            _ROOM_ID,
-            _THREAD_ID,
-        )
-        assert full_read is not None
-        assert bounded_read is not None
+        read = await event_cache.get_thread_events(_ROOM_ID, _THREAD_ID)
+        assert read is not None
 
-        full_winners = _winning_edit_ids_by_original(full_read)
-        bounded_winners = _winning_edit_ids_by_original(bounded_read)
+        assert _winning_edit_ids_by_original(read) == {
+            _THREAD_ID: None,
+            "$plain": None,
+            # The newest of the author's own in-thread edits. Not $edited-elsewhere, which is
+            # newer and same-sender but sits in another thread, so ranking must never see it.
+            "$edited": "$edited-e2",
+            # The author's own, despite $contested-forged being newer: a replacement from anyone
+            # but the original's sender is not an edit of that message.
+            "$contested": "$contested-own",
+        }
 
-        assert bounded_winners
-        for original_event_id, winner in bounded_winners.items():
-            assert winner == full_winners[original_event_id], (
-                f"{original_event_id}: collapsed resolves to {winner}, raw resolves to "
-                f"{full_winners[original_event_id]}"
-            )
+        returned_ids = {row["event_id"] for row in read}
+        assert "$contested-forged" not in returned_ids, "a foreign replacement was returned"
+        assert "$edited-elsewhere" not in returned_ids, "an out-of-thread replacement was returned"
+        assert "$edited-e1" not in returned_ids, "a superseded edit was returned"
 
 
 class TestProductionShapedEditDensity:
