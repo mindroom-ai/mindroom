@@ -10,6 +10,8 @@ from pydantic import BaseModel, Field, field_serializer
 
 from mindroom import constants, yaml_io
 
+_matrix_state_write_generation = 0
+
 
 class MatrixAccount(BaseModel):
     """Represents a Matrix account (user or agent)."""
@@ -47,10 +49,10 @@ class MatrixState(BaseModel):
     def load(cls, runtime_paths: constants.RuntimePaths) -> "MatrixState":
         """Load state from file.
 
-        Reads come from a process-wide cache keyed by the state file's
-        ``(path, st_mtime_ns, st_size)`` so repeated calls against an unchanged
-        file skip the YAML parse. A deep copy is returned so callers may safely
-        mutate the result before ``save`` without polluting the cache.
+        Reads come from a process-wide cache keyed by the state file path and
+        in-process write generation, so repeated calls between writes skip the
+        YAML parse. A deep copy is returned so callers may safely mutate the
+        result before ``save`` without polluting the cache.
         """
         return matrix_state_for_runtime(runtime_paths).model_copy(deep=True)
 
@@ -119,7 +121,7 @@ class MatrixState(BaseModel):
 
 
 def matrix_state_for_runtime(runtime_paths: constants.RuntimePaths) -> MatrixState:
-    """Return persisted Matrix state for one runtime, cached by file mtime/size.
+    """Return persisted Matrix state for one runtime, cached by write generation.
 
     The returned object is shared across callers; **read-only callers** should
     prefer this helper for the lowest overhead. Callers that intend to mutate
@@ -128,7 +130,8 @@ def matrix_state_for_runtime(runtime_paths: constants.RuntimePaths) -> MatrixSta
     """
     state_file = constants.matrix_state_file(runtime_paths=runtime_paths)
     return _load_matrix_state_file_cached(
-        *_matrix_state_cache_key(state_file),
+        state_file,
+        _matrix_state_write_generation,
         current_domain=_current_runtime_domain(runtime_paths),
     )
 
@@ -176,30 +179,15 @@ def get_room_alias_from_id(room_id: str, runtime_paths: constants.RuntimePaths) 
     return None
 
 
-def _matrix_state_cache_key(state_file: Path) -> tuple[Path, int | None, int | None]:
-    """Return one cache key that invalidates when the state file changes.
-
-    Every cached read rebuilds this key, so it stats once and treats an
-    unreadable file as absent rather than paying a second syscall for a separate
-    existence check.
-    """
-    try:
-        stat = state_file.stat()
-    except OSError:
-        return state_file, None, None
-    return state_file, stat.st_mtime_ns, stat.st_size
-
-
 @lru_cache(maxsize=64)
 def _load_matrix_state_file_cached(
     state_file: Path,
-    mtime_ns: int | None,
-    size: int | None,
+    write_generation: int,
     *,
     current_domain: str,
 ) -> MatrixState:
-    """Load Matrix state through a file-change-sensitive cache."""
-    del mtime_ns, size
+    """Load Matrix state through an in-process-write-sensitive cache."""
+    del write_generation
     return _load_matrix_state_file(state_file, current_domain=current_domain)
 
 
@@ -239,6 +227,8 @@ def _load_matrix_state_file(state_file: Path, *, current_domain: str) -> MatrixS
 
 def _write_matrix_state_file(state_file: Path, data: dict[str, object]) -> None:
     """Atomically persist Matrix state without cross-process advisory locking."""
+    global _matrix_state_write_generation
+
     state_file.parent.mkdir(parents=True, exist_ok=True)
     temp_path: Path | None = None
     try:
@@ -255,6 +245,7 @@ def _write_matrix_state_file(state_file: Path, data: dict[str, object]) -> None:
             temp_file.flush()
             os.fsync(temp_file.fileno())
         temp_path.replace(state_file)
+        _matrix_state_write_generation += 1
         _fsync_directory(state_file.parent)
     finally:
         if temp_path is not None and temp_path.exists():

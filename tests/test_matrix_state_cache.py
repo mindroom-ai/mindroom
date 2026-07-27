@@ -1,14 +1,17 @@
-"""Tests for the file-mtime-keyed cache around the Matrix state YAML."""
+"""Tests for the generation-keyed cache around the Matrix state YAML."""
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from mindroom import constants
 from mindroom.matrix import state as matrix_state
 from mindroom.matrix.state import MatrixState, _load_matrix_state_file_cached, matrix_state_for_runtime
 from tests.conftest import test_runtime_paths
+
+if TYPE_CHECKING:
+    import os
 
 
 def _seed_state(runtime_paths: constants.RuntimePaths, room_key: str, room_id: str) -> Path:
@@ -34,10 +37,10 @@ def test_matrix_state_cache_hits_when_file_unchanged(tmp_path: Path) -> None:
     assert info.misses == 1
 
 
-def test_matrix_state_cache_invalidates_when_file_mtime_changes(tmp_path: Path) -> None:
-    """Touching the state file should bypass the cache and produce a fresh state."""
+def test_matrix_state_cache_invalidates_after_write(tmp_path: Path) -> None:
+    """Saving state should bypass the cache and make the next read fresh."""
     runtime_paths = test_runtime_paths(tmp_path)
-    state_file = _seed_state(runtime_paths, "dev", "!dev:localhost")
+    _seed_state(runtime_paths, "dev", "!dev:localhost")
     _load_matrix_state_file_cached.cache_clear()
 
     first = matrix_state_for_runtime(runtime_paths)
@@ -47,9 +50,6 @@ def test_matrix_state_cache_invalidates_when_file_mtime_changes(tmp_path: Path) 
     fresh = MatrixState.load(runtime_paths=runtime_paths)
     fresh.add_room("research", room_id="!research:localhost", alias="#research:localhost", name="research")
     fresh.save(runtime_paths=runtime_paths)
-
-    stat = state_file.stat()
-    os.utime(state_file, ns=(stat.st_atime_ns, stat.st_mtime_ns + 1_000_000))
 
     second = matrix_state_for_runtime(runtime_paths)
     assert second is not first
@@ -135,10 +135,12 @@ def test_resolve_room_aliases_does_not_reparse_yaml(
     assert safe_load_calls == 1
 
 
-def test_matrix_state_cache_key_stats_the_file_once(tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
-    """The cache key is built on every read, so it must not stat the file twice."""
+def test_matrix_state_cached_reads_do_not_stat_the_file(tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
+    """Repeated reads of cached state must not stat the file."""
     runtime_paths = test_runtime_paths(tmp_path)
     state_file = _seed_state(runtime_paths, "dev", "!dev:localhost")
+    _load_matrix_state_file_cached.cache_clear()
+    first = matrix_state_for_runtime(runtime_paths)
     stat_calls = 0
     original_stat = Path.stat
 
@@ -150,16 +152,24 @@ def test_matrix_state_cache_key_stats_the_file_once(tmp_path: Path, monkeypatch)
 
     monkeypatch.setattr(matrix_state.Path, "stat", counting_stat)
 
-    key = matrix_state._matrix_state_cache_key(state_file)
+    second = matrix_state_for_runtime(runtime_paths)
+    third = matrix_state_for_runtime(runtime_paths)
 
-    assert key[0] == state_file
-    assert key[1] is not None
-    assert key[2] is not None
-    assert stat_calls == 1
+    assert second is first
+    assert third is first
+    assert stat_calls == 0
 
 
-def test_matrix_state_cache_key_reports_missing_file_without_stat_details(tmp_path: Path) -> None:
-    """A missing state file must still key as absent rather than raising."""
-    missing = tmp_path / "nonexistent" / "matrix_state.yaml"
+def test_matrix_state_cache_observes_first_write_after_missing_read(tmp_path: Path) -> None:
+    """A write must invalidate a cached empty state for a previously missing file."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    _load_matrix_state_file_cached.cache_clear()
 
-    assert matrix_state._matrix_state_cache_key(missing) == (missing, None, None)
+    missing = matrix_state_for_runtime(runtime_paths)
+    assert missing.rooms == {}
+
+    _seed_state(runtime_paths, "dev", "!dev:localhost")
+
+    written = matrix_state_for_runtime(runtime_paths)
+    assert written is not missing
+    assert written.get_room("dev") is not None
