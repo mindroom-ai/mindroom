@@ -403,8 +403,8 @@ async def test_a_later_outbound_append_cannot_erase_an_earlier_failed_one(cache:
 
     Under the allowlist this depended on picking a reason outside it. It now holds unconditionally,
     because no append clears a marker -- but the guarantee still matters: without it the next
-    outbound mutation would revalidate a thread that is still missing the earlier event, and the
-    retained delta that would otherwise catch it expires after a minute.
+    outbound mutation would return a thread to readable while it is still missing the earlier
+    event, and nothing downstream would ever notice.
     """
     await _seed_valid_thread(cache)
     missed = _event("$missed", 2000, thread_id=THREAD_ID)
