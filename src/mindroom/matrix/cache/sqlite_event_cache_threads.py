@@ -73,12 +73,21 @@ if TYPE_CHECKING:
 # message what one window function derives once, and hauls the whole superseded history across
 # the wire to do it.
 #
-# Two real agent workloads, and they differ by more than you would guess, so do not treat either
-# as the shape. One runs 53% edit rows at 6.30 edits per edited original, max 170 on one original,
-# with a thread at 94.5% edits. The other runs 28% edit rows but only ~1.07 per (original, sender),
-# so collapsing removes under 2% of its rows. Threads are small in both - p50 9 rows, max 538.
-# Where superseded edits do not accumulate this query costs about 1.3x the plain read and returns
-# almost the same rows; it earns its place on the correctness fixes below, not on that ratio.
+# Two real agent workloads measured 6x apart on edit density, and the homeserver is why. The
+# mindroom-tuwunel fork collapses superseded m.replace events per (target, sender) on read
+# (``collapse_superseded_edits``) and deletes them outright once they age past its edit-purge
+# minimum, 86,400 seconds by default. So a cache whose threads were re-read after that carries
+# ~1.07 edits per (original, sender) and loses under 2% of its rows here, for about 1.3x the plain
+# read, while one accumulating live sync inside the purge window runs 53% edit rows at 6.30 per
+# original, max 170, with a thread at 94.5% edits. Threads are small either way - p50 9 rows,
+# max 538. Expect the cheap case against that fork and the expensive one against a stock
+# homeserver; neither is the shape.
+#
+# That the fork groups by (target, sender) is worth saying twice. It is the same key this query
+# uses, arrived at independently, which is why grouping by original alone was a real defect rather
+# than a theoretical one. It also orders by ``event_id.cmp()``, bytewise, so the COLLATE "C" pin
+# below has to hold for this read to agree with the homeserver as well as with SQLite and the
+# fold.
 #
 # So be precise about what this buys, because two earlier revisions of this comment were not. It
 # does not reduce writes - it is a read-side query, and every edit is still stored. It does not
@@ -89,15 +98,21 @@ if TYPE_CHECKING:
 # is claimed, and the 2,021-row thread quoted here before was this repository's synthetic
 # fixture (20 messages x 100 edits), not a real one.
 #
-# The root fix is upstream of this query: prune superseded edits at write time and there is nothing
-# to collapse. Retention is deliberate rather than accidental, so that is a trade - redacting the
-# current winning edit is contractually supposed to reveal the previous one, which only works while
-# the older rows exist (``test_redacting_latest_edit_falls_back_to_previous_cached_edit``). The
-# trade looks sound because the case is close to unreachable: redacting a MESSAGE already removes
-# the original and every dependent edit together, and mindroom-cinny's delete targets the original
-# event ID - ``MessageDeleteItem`` passes ``mEvent.getId()``, and a replacement is only ever reached
-# through ``replacingEvent()``, which is never a redaction target there. Reaching the rollback path
-# needs the raw API, ``/redact <edit-event-id>``, or moderation tooling. Element was not checked.
+# The root fix is upstream of this query - prune superseded edits at the source and there is
+# nothing to collapse - and against the mindroom-tuwunel fork it is already built, so do not plan
+# it again as an open question. Its edit-purge service deletes superseded edits once they pass the
+# minimum age above, which also settles the trade this comment used to call undecided: redacting
+# the current winning edit is contractually supposed to reveal the previous one
+# (``test_redacting_latest_edit_falls_back_to_previous_cached_edit``), and past that age there is
+# no previous one left to reveal, wherever the read is served from. It was already close to
+# unreachable - redacting a MESSAGE removes the original and every dependent edit together, and
+# mindroom-cinny's delete targets the original event ID, since ``MessageDeleteItem`` passes
+# ``mEvent.getId()`` and a replacement is only ever reached through ``replacingEvent()``, never a
+# redaction target there. Reaching the rollback path needs the raw API,
+# ``/redact <edit-event-id>``, or moderation tooling. Element was not checked.
+#
+# What stays genuinely open is the case this cache must still handle alone: a stock homeserver that
+# neither collapses nor purges, where every superseded edit arrives and stays.
 #
 # The contract to implement, if it is built: keep only the current legitimate edit per (original,
 # sender); redacting an already-pruned edit tombstones it and is otherwise a no-op; redacting the
