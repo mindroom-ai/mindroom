@@ -18,53 +18,33 @@ import time
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Protocol, cast
+from typing import TYPE_CHECKING, Any, Literal, Protocol
 
 import nio
 from nio.responses import RoomGetEventError
 
-from mindroom.background_tasks import create_background_task
 from mindroom.entity_resolution import current_internal_sender_ids
 from mindroom.logging_config import get_logger
 from mindroom.matrix.cache import (
     ConversationEventCache,
-    ThreadCacheReplaceOutcome,
     ThreadHistoryResult,
     normalize_nio_event_for_cache,
     thread_history_result,
 )
 from mindroom.matrix.cache.thread_reads import ThreadReadMode, ThreadReadPolicy
-from mindroom.matrix.cache.thread_repair import ThreadRepairBackoffError, ThreadRepairSuppressedError
 from mindroom.matrix.cache.thread_write_cache_ops import ThreadMutationCacheOps
 from mindroom.matrix.cache.thread_writes import ThreadLiveWritePolicy, ThreadOutboundWritePolicy, ThreadSyncWritePolicy
 from mindroom.matrix.client_thread_history import (
-    BulkThreadRefreshStats,
-    RetainedThreadEventSourceProvider,
-    bulk_refresh_room_thread_histories,
     fetch_dispatch_thread_history,
     fetch_dispatch_thread_snapshot,
     fetch_thread_history,
     get_room_threads_page,
-    log_thread_history_refresh,
-    refresh_thread_history_from_source,
-    thread_history_refresh_mode,
-    untrusted_cached_thread_ids,
 )
 from mindroom.matrix.event_info import EventInfo
-from mindroom.matrix.media import (
-    is_encrypted_media_event_source,
-    parse_matrix_media_event_source,
-)
-from mindroom.matrix.membership_fence import UNCERTIFIED_MEMBERSHIP_EPOCH
 from mindroom.matrix.message_content import extract_edit_body
 from mindroom.matrix.thread_bookkeeping import ThreadMutationResolver
-from mindroom.matrix.thread_diagnostics import (
-    THREAD_HISTORY_SOURCE_CACHE,
-    THREAD_HISTORY_SOURCE_DIAGNOSTIC,
-    is_thread_history_degraded,
-)
+from mindroom.matrix.thread_diagnostics import is_thread_history_degraded
 from mindroom.matrix.thread_membership import resolve_event_thread_membership
-from mindroom.matrix.thread_resolution_reuse import ThreadResolutionReuseCache
 from mindroom.matrix.thread_room_scan import (
     fetch_event_info_for_client,
     lookup_thread_id_from_conversation_cache,
@@ -73,22 +53,29 @@ from mindroom.matrix.thread_room_scan import (
 from mindroom.timing import elapsed_ms_since
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Awaitable, Callable, Collection, Mapping
+    from collections.abc import AsyncIterator, Awaitable, Callable, Collection
     from contextlib import AbstractAsyncContextManager
 
     import structlog
 
     from mindroom.bot_runtime_view import BotRuntimeView
-    from mindroom.matrix.cache.write_coordinator import EventCacheWriteCoordinator
     from mindroom.matrix.sync_certification import SyncCacheWriteResult
 
 
 type ThreadReadResult = ThreadHistoryResult
 type EventLookupResult = nio.RoomGetEventResponse | RoomGetEventError
-type _TurnEventCacheKey = tuple[str, str, int]
-type _ThreadReadCacheKey = tuple[str, str, ThreadReadMode, int]
+type _ThreadReadCacheKey = tuple[str, str, ThreadReadMode]
 
 logger = get_logger(__name__)
+
+
+@dataclass
+class _TurnEventLookup:
+    """One memoized event lookup plus metadata for deferred cache persistence."""
+
+    response: EventLookupResult
+    fetched_event_source: dict[str, Any] | None
+    lookup_fill_persisted: bool
 
 
 __all__ = [
@@ -102,27 +89,8 @@ __all__ = [
 
 
 _STARTUP_PREWARM_THREAD_LIMIT = 32
-_STARTUP_PREWARM_MAX_SCAN_PAGES = 20
-
-# A steady-state sync carries a handful of events. Anything at this scale is the runtime catching up
-# on a gap, which is when speculative repair is both least useful and most expensive.
-_SYNC_REPLAY_TIMELINE_EVENT_THRESHOLD = 50
-
-# A caller waiting for history may rescan after losing the guarded replacement race; a speculative
-# repair may not, because the conflict it lost is another writer already rewriting that thread.
-_SPECULATIVE_REPAIR_ATTEMPTS = 1
-
-
-def _is_sync_replay_batch(response: nio.SyncResponse) -> bool:
-    """Return whether one sync response is a gap catch-up rather than steady-state delivery.
-
-    A truncated (``limited``) timeline is the homeserver saying the client fell behind, which is the
-    exact condition that leaves many threads without a usable snapshot at once.
-    """
-    timelines = [room_info.timeline for room_info in response.rooms.join.values()]
-    if any(timeline.limited for timeline in timelines):
-        return True
-    return sum(len(timeline.events) for timeline in timelines) >= _SYNC_REPLAY_TIMELINE_EVENT_THRESHOLD
+_STARTUP_PREWARM_THREAD_CONCURRENCY = 8
+type _StartupThreadPrewarmOutcome = Literal["warmed", "failed", "aborted"]
 
 
 async def resolve_thread_root_event_id_for_client(
@@ -223,20 +191,8 @@ class ConversationCacheProtocol(Protocol):
     ) -> ThreadReadResult:
         """Resolve strict full history without reusing the current turn's memoized read."""
 
-    async def refresh_strict_thread_history_from_source(
-        self,
-        room_id: str,
-        thread_id: str,
-        *,
-        caller_label: str = "unknown",
-    ) -> ThreadReadResult:
-        """Refresh strict full history directly from Matrix."""
-
     async def get_thread_id_for_event(self, room_id: str, event_id: str) -> str | None:
         """Resolve the cached thread root for one event when known."""
-
-    async def purge_rooms(self, room_ids: Collection[str]) -> None:
-        """Fence and purge one authoritative batch of departed rooms."""
 
     async def get_latest_thread_event_id_if_needed(
         self,
@@ -255,7 +211,7 @@ class ConversationCacheProtocol(Protocol):
         event_id: str | None,
         content: dict[str, Any],
     ) -> None:
-        """Schedule one locally sent message or edit for advisory cache bookkeeping.
+        """Schedule one locally sent threaded message or edit for advisory cache bookkeeping.
 
         This is advisory post-send bookkeeping and must fail open.
         Callers should treat Matrix delivery as complete before this local cache work runs.
@@ -265,16 +221,10 @@ class ConversationCacheProtocol(Protocol):
         """Schedule one locally sent outbound event for advisory cache bookkeeping."""
 
     def notify_outbound_redaction(self, room_id: str, redacted_event_id: str) -> None:
-        """Schedule one locally redacted message for advisory cache bookkeeping.
+        """Schedule one locally redacted threaded message for advisory cache bookkeeping.
 
         This is advisory post-redaction bookkeeping and must fail open.
         """
-
-    def reserve_outbound_thread(self, room_id: str, event_id: str, thread_id: str) -> None:
-        """Reserve one known outbound response thread for later relation-free edits."""
-
-    def release_outbound_thread(self, room_id: str, event_id: str) -> None:
-        """Release one outbound response thread reservation after terminal delivery."""
 
     async def append_live_event(
         self,
@@ -292,7 +242,6 @@ async def _apply_cached_latest_edit(
     room_id: str,
     client: nio.AsyncClient,
     event_cache: ConversationEventCache,
-    expected_membership_epoch: int | None = None,
     trusted_sender_ids: Collection[str] = (),
 ) -> dict[str, Any]:
     """Project one cached original event into its latest visible edited state."""
@@ -313,7 +262,6 @@ async def _apply_cached_latest_edit(
         client,
         event_cache=event_cache,
         room_id=room_id,
-        expected_membership_epoch=expected_membership_epoch,
         trusted_sender_ids=trusted_sender_ids,
     )
     if edited_body is None or edited_content is None:
@@ -343,7 +291,6 @@ async def _cached_room_get_event_response(
     *,
     room_id: str,
     event_source: dict[str, Any],
-    expected_membership_epoch: int | None = None,
     trusted_sender_ids: Collection[str] = (),
 ) -> nio.RoomGetEventResponse | None:
     """Reconstruct one cached room-get-event response, applying visible edits when present."""
@@ -352,17 +299,8 @@ async def _cached_room_get_event_response(
         room_id=room_id,
         client=client,
         event_cache=event_cache,
-        expected_membership_epoch=expected_membership_epoch,
         trusted_sender_ids=trusted_sender_ids,
     )
-    if is_encrypted_media_event_source(visible_event_source):
-        parsed_media_event = parse_matrix_media_event_source(visible_event_source)
-        if parsed_media_event is None:
-            return None
-        cached_response = nio.RoomGetEventResponse()
-        # nio's response parser also assigns BadEvent to this Event-typed field.
-        cached_response.event = cast("nio.Event", parsed_media_event)
-        return cached_response
     cached_response = nio.RoomGetEventResponse.from_dict(visible_event_source)
     return cached_response if isinstance(cached_response, nio.RoomGetEventResponse) else None
 
@@ -373,7 +311,6 @@ async def _cached_room_get_event(
     room_id: str,
     event_id: str,
     *,
-    expected_membership_epoch: int | None = None,
     trusted_sender_ids: Collection[str] = (),
 ) -> tuple[nio.RoomGetEventResponse | RoomGetEventError, dict[str, Any] | None]:
     """Return one event through the persistent cache when available."""
@@ -395,7 +332,6 @@ async def _cached_room_get_event(
                     event_cache,
                     room_id=room_id,
                     event_source=cached_event,
-                    expected_membership_epoch=expected_membership_epoch,
                     trusted_sender_ids=trusted_sender_ids,
                 )
                 if cached_response is not None:
@@ -421,7 +357,6 @@ async def _cached_room_get_event(
         event_cache,
         room_id=room_id,
         event_source=normalized_event_source,
-        expected_membership_epoch=expected_membership_epoch,
         trusted_sender_ids=trusted_sender_ids,
     )
     return (visible_response if visible_response is not None else response), normalized_event_source
@@ -433,7 +368,7 @@ class MatrixConversationCache(ConversationCacheProtocol):
 
     logger: structlog.stdlib.BoundLogger
     runtime: BotRuntimeView
-    _turn_event_cache: ContextVar[dict[_TurnEventCacheKey, EventLookupResult] | None] = field(
+    _turn_event_cache: ContextVar[dict[tuple[str, str], _TurnEventLookup] | None] = field(
         default_factory=lambda: ContextVar("mindroom_turn_event_lookup_cache", default=None),
     )
     _turn_thread_read_cache: ContextVar[dict[_ThreadReadCacheKey, ThreadReadResult] | None] = field(
@@ -444,18 +379,15 @@ class MatrixConversationCache(ConversationCacheProtocol):
     _outbound: ThreadOutboundWritePolicy = field(init=False, repr=False)
     _live: ThreadLiveWritePolicy = field(init=False, repr=False)
     _sync: ThreadSyncWritePolicy = field(init=False, repr=False)
-    _thread_resolution_reuse: ThreadResolutionReuseCache = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
         """Bind extracted read/write collaborators to this facade."""
-        self._thread_resolution_reuse = ThreadResolutionReuseCache()
         self._reads = ThreadReadPolicy(
             logger_getter=lambda: self.logger,
             runtime=self.runtime,
             fetch_thread_history_from_client=self._fetch_thread_history_from_client,
             fetch_dispatch_thread_history_from_client=self._fetch_dispatch_thread_history_from_client,
             fetch_dispatch_thread_snapshot_from_client=self._fetch_dispatch_thread_snapshot_from_client,
-            refresh_thread_history_from_source=self._refresh_thread_history_from_client,
         )
         resolver = ThreadMutationResolver(
             logger_getter=lambda: self.logger,
@@ -465,7 +397,6 @@ class MatrixConversationCache(ConversationCacheProtocol):
         self._write_cache_ops = ThreadMutationCacheOps(
             logger_getter=lambda: self.logger,
             runtime=self.runtime,
-            schedule_thread_repair=self._schedule_missing_thread_repair,
         )
         self._outbound = ThreadOutboundWritePolicy(
             resolver=resolver,
@@ -538,12 +469,7 @@ class MatrixConversationCache(ConversationCacheProtocol):
         caller_label: str,
     ) -> ThreadReadResult:
         """Resolve one thread read through per-turn memoization."""
-        cache_key: _ThreadReadCacheKey = (
-            room_id,
-            thread_id,
-            mode,
-            self._write_cache_ops.room_departure_epoch(room_id),
-        )
+        cache_key: _ThreadReadCacheKey = (room_id, thread_id, mode)
         turn_cache = self._turn_thread_read_cache.get()
         if turn_cache is not None and cache_key in turn_cache:
             return self._copy_thread_read_result(turn_cache[cache_key])
@@ -563,58 +489,54 @@ class MatrixConversationCache(ConversationCacheProtocol):
         self,
         room_id: str,
         event_id: str,
+        *,
+        persist_lookup_fill: bool = True,
     ) -> EventLookupResult:
         """Resolve one event through per-turn memoization and the advisory cache."""
         normalized_event_id = event_id.strip()
-        cache_key: _TurnEventCacheKey = (
-            room_id,
-            normalized_event_id,
-            self._write_cache_ops.room_departure_epoch(room_id),
-        )
+        cache_key = (room_id, normalized_event_id)
         turn_cache = self._turn_event_cache.get()
         if turn_cache is not None and cache_key in turn_cache:
-            return turn_cache[cache_key]
+            cached_lookup = turn_cache[cache_key]
+            if (
+                persist_lookup_fill
+                and not cached_lookup.lookup_fill_persisted
+                and cached_lookup.fetched_event_source is not None
+            ):
+                await self._persist_lookup_fill(
+                    room_id=room_id,
+                    event_id=normalized_event_id,
+                    fetched_event_source=cached_lookup.fetched_event_source,
+                    queue_write=False,
+                )
+                turn_cache[cache_key] = _TurnEventLookup(
+                    response=cached_lookup.response,
+                    fetched_event_source=cached_lookup.fetched_event_source,
+                    lookup_fill_persisted=True,
+                )
+            return cached_lookup.response
 
-        coordinator = self.runtime.event_cache_write_coordinator
-        if coordinator is not None:
-            await coordinator.wait_for_prior_room_updates(
-                room_id,
-                coordination_scope=self.runtime.event_cache.principal_id,
-            )
-
-        membership_epoch = await self._capture_membership_epoch(room_id)
         response, fetched_event_source = await _cached_room_get_event(
             self._require_client(),
             self.runtime.event_cache,
             room_id,
             event_id,
-            expected_membership_epoch=membership_epoch,
             trusted_sender_ids=self._trusted_sender_ids(),
         )
-        if fetched_event_source is not None:
+        if fetched_event_source is not None and persist_lookup_fill:
             await self._persist_lookup_fill(
                 room_id=room_id,
                 event_id=normalized_event_id,
                 fetched_event_source=fetched_event_source,
-                expected_membership_epoch=membership_epoch,
-                queue_write=coordinator is not None,
+                queue_write=True,
             )
         if turn_cache is not None:
-            turn_cache[cache_key] = response
-        return response
-
-    async def _capture_membership_epoch(self, room_id: str) -> int:
-        """Return a durable lookup generation or one that rejects every cache write."""
-        try:
-            membership_epoch = await self.runtime.event_cache.room_membership_epoch(room_id)
-        except Exception as exc:
-            self.logger.warning(
-                "Failed to certify Matrix lookup cache generation; continuing without cache writes",
-                room_id=room_id,
-                error=str(exc),
+            turn_cache[cache_key] = _TurnEventLookup(
+                response=response,
+                fetched_event_source=fetched_event_source,
+                lookup_fill_persisted=fetched_event_source is None or persist_lookup_fill,
             )
-            return UNCERTIFIED_MEMBERSHIP_EPOCH
-        return UNCERTIFIED_MEMBERSHIP_EPOCH if membership_epoch is None else membership_epoch
+        return response
 
     async def _persist_lookup_fill(
         self,
@@ -622,18 +544,12 @@ class MatrixConversationCache(ConversationCacheProtocol):
         room_id: str,
         event_id: str,
         fetched_event_source: dict[str, Any],
-        expected_membership_epoch: int,
         queue_write: bool,
     ) -> None:
         """Persist one point-lookup fill without reintroducing same-room barrier deadlocks."""
 
         async def persist_lookup_event() -> None:
-            await self.runtime.event_cache.store_event(
-                event_id,
-                room_id,
-                fetched_event_source,
-                expected_membership_epoch=expected_membership_epoch,
-            )
+            await self.runtime.event_cache.store_event(event_id, room_id, fetched_event_source)
 
         try:
             if queue_write:
@@ -641,7 +557,6 @@ class MatrixConversationCache(ConversationCacheProtocol):
                     room_id,
                     persist_lookup_event,
                     name="matrix_cache_store_room_get_event",
-                    coordination_scope=self.runtime.event_cache.principal_id,
                 )
             else:
                 await persist_lookup_event()
@@ -658,16 +573,8 @@ class MatrixConversationCache(ConversationCacheProtocol):
         room_id: str,
         event_id: str,
     ) -> EventInfo | None:
-        """Resolve one related event without memoizing pre-mutation state in the active turn."""
-        membership_epoch = await self._capture_membership_epoch(room_id)
-        response, _fetched_event_source = await _cached_room_get_event(
-            self._require_client(),
-            self.runtime.event_cache,
-            room_id,
-            event_id,
-            expected_membership_epoch=membership_epoch,
-            trusted_sender_ids=self._trusted_sender_ids(),
-        )
+        """Resolve one related event through the shared conversation-cache lookup path."""
+        response = await self.get_event(room_id, event_id, persist_lookup_fill=False)
         if not isinstance(response, nio.RoomGetEventResponse):
             return None
         return EventInfo.from_event(response.event.source)
@@ -679,7 +586,6 @@ class MatrixConversationCache(ConversationCacheProtocol):
         *,
         caller_label: str,
         coordinator_queue_wait_ms: float,
-        bypass_repair_backoff: bool,
     ) -> ThreadHistoryResult:
         return await self._fetch_thread_from_client(
             fetch_thread_history,
@@ -687,9 +593,6 @@ class MatrixConversationCache(ConversationCacheProtocol):
             thread_id,
             caller_label=caller_label,
             coordinator_queue_wait_ms=coordinator_queue_wait_ms,
-            wants_full_history=True,
-            allows_stale_fallback=True,
-            bypass_repair_backoff=bypass_repair_backoff,
         )
 
     async def _fetch_dispatch_thread_history_from_client(
@@ -699,7 +602,6 @@ class MatrixConversationCache(ConversationCacheProtocol):
         *,
         caller_label: str,
         coordinator_queue_wait_ms: float,
-        bypass_repair_backoff: bool,
     ) -> ThreadHistoryResult:
         return await self._fetch_thread_from_client(
             fetch_dispatch_thread_history,
@@ -707,9 +609,6 @@ class MatrixConversationCache(ConversationCacheProtocol):
             thread_id,
             caller_label=caller_label,
             coordinator_queue_wait_ms=coordinator_queue_wait_ms,
-            wants_full_history=True,
-            allows_stale_fallback=False,
-            bypass_repair_backoff=bypass_repair_backoff,
         )
 
     async def _fetch_dispatch_thread_snapshot_from_client(
@@ -719,7 +618,6 @@ class MatrixConversationCache(ConversationCacheProtocol):
         *,
         caller_label: str,
         coordinator_queue_wait_ms: float,
-        bypass_repair_backoff: bool,
     ) -> ThreadHistoryResult:
         return await self._fetch_thread_from_client(
             fetch_dispatch_thread_snapshot,
@@ -727,203 +625,6 @@ class MatrixConversationCache(ConversationCacheProtocol):
             thread_id,
             caller_label=caller_label,
             coordinator_queue_wait_ms=coordinator_queue_wait_ms,
-            wants_full_history=False,
-            allows_stale_fallback=False,
-            bypass_repair_backoff=bypass_repair_backoff,
-        )
-
-    @staticmethod
-    def _event_ids(event_sources: Collection[dict[str, Any]]) -> set[str]:
-        """Return valid event IDs from raw cache or retained-journal sources."""
-        return {
-            event_id for event_source in event_sources if isinstance((event_id := event_source.get("event_id")), str)
-        }
-
-    async def _cached_thread_event_ids_for_repair(
-        self,
-        room_id: str,
-        thread_id: str,
-    ) -> set[str] | None:
-        """Read raw event IDs for repair bookkeeping without failing the user-facing read."""
-        try:
-            event_sources = await self.runtime.event_cache.get_thread_events(room_id, thread_id)
-        except Exception as exc:
-            self.logger.warning(
-                "Failed to inspect raw thread cache during repair",
-                room_id=room_id,
-                thread_id=thread_id,
-                error_type=type(exc).__name__,
-                error=str(exc),
-            )
-            return None
-        return self._event_ids(event_sources or ())
-
-    async def _prepare_pending_thread_repair_deltas(
-        self,
-        room_id: str,
-        thread_id: str,
-    ) -> None:
-        """Force a refill when pending repair deltas are not yet in raw cache."""
-        coordinator = self.runtime.event_cache_write_coordinator
-        if coordinator is None:
-            return
-        retained_event_sources = coordinator.pending_thread_repair_deltas(
-            room_id,
-            thread_id,
-            coordination_scope=self.runtime.event_cache.principal_id,
-        )
-        retained_event_ids = self._event_ids(retained_event_sources)
-        if not retained_event_ids:
-            return
-        cached_event_ids = await self._cached_thread_event_ids_for_repair(
-            room_id,
-            thread_id,
-        )
-        if cached_event_ids is None or retained_event_ids - cached_event_ids:
-            await self._write_cache_ops.invalidate_known_thread(
-                room_id,
-                thread_id,
-                reason="retained_thread_delta_missing",
-            )
-
-    async def _acknowledge_repaired_thread_deltas(
-        self,
-        coordinator: EventCacheWriteCoordinator,
-        room_id: str,
-        thread_id: str,
-        *,
-        principal_id: str,
-        replayed_event_ids: Collection[str],
-        snapshot_stored: bool,
-    ) -> None:
-        """Forget retained deltas persisted or terminally filtered by one usable repair."""
-        pending_event_ids = self._event_ids(
-            coordinator.pending_thread_repair_deltas(
-                room_id,
-                thread_id,
-                coordination_scope=principal_id,
-            ),
-        )
-        if not pending_event_ids:
-            return
-        acknowledged_event_ids = pending_event_ids & set(replayed_event_ids) if snapshot_stored else set()
-        remaining_event_ids = pending_event_ids - acknowledged_event_ids
-        if remaining_event_ids:
-            repaired_event_ids = await self._cached_thread_event_ids_for_repair(
-                room_id,
-                thread_id,
-            )
-            if repaired_event_ids is not None:
-                acknowledged_event_ids.update(remaining_event_ids & repaired_event_ids)
-        if not acknowledged_event_ids:
-            return
-        coordinator.acknowledge_thread_repair_deltas(
-            room_id,
-            thread_id,
-            acknowledged_event_ids,
-            coordination_scope=principal_id,
-        )
-
-    async def _refresh_thread_history_from_client(
-        self,
-        room_id: str,
-        thread_id: str,
-        *,
-        caller_label: str,
-        coordinator_queue_wait_ms: float,
-        bypass_repair_backoff: bool,
-    ) -> ThreadHistoryResult:
-        """Refresh one thread from Matrix without accepting a cache hit or stale fallback."""
-        await self._prepare_pending_thread_repair_deltas(room_id, thread_id)
-        result = await self._refill_thread_from_client(
-            room_id,
-            thread_id,
-            cache_reject_diagnostics=None,
-            wants_full_history=True,
-            allows_stale_fallback=False,
-            bypass_repair_backoff=bypass_repair_backoff,
-        )
-        log_thread_history_refresh(
-            room_id=room_id,
-            thread_id=thread_id,
-            caller_label=caller_label,
-            mode=thread_history_refresh_mode(result, cache_hit=False),
-            diagnostics=result.diagnostics,
-            coordinator_queue_wait_ms=coordinator_queue_wait_ms,
-        )
-        return result
-
-    async def _refill_thread_from_client(
-        self,
-        room_id: str,
-        thread_id: str,
-        *,
-        cache_reject_diagnostics: Mapping[str, str | int | float | bool] | None,
-        wants_full_history: bool,
-        allows_stale_fallback: bool,
-        bypass_repair_backoff: bool,
-        speculative: bool = False,
-        claim_token: object | None = None,
-    ) -> ThreadHistoryResult:
-        coordinator = self.runtime.event_cache_write_coordinator
-        if coordinator is None:
-            return await refresh_thread_history_from_source(
-                self._require_client(),
-                room_id,
-                thread_id,
-                self.runtime.event_cache,
-                hydrate_sidecars=wants_full_history,
-                allow_stale_fallback=allows_stale_fallback,
-                cache_reject_diagnostics=cache_reject_diagnostics,
-                trusted_sender_ids=self._trusted_sender_ids(),
-            )
-
-        principal_id = self.runtime.event_cache.principal_id
-
-        async def repair() -> ThreadHistoryResult:
-            def pending_event_sources() -> tuple[dict[str, Any], ...]:
-                return coordinator.pending_thread_repair_deltas(
-                    room_id,
-                    thread_id,
-                    coordination_scope=principal_id,
-                )
-
-            retained_event_source_provider = RetainedThreadEventSourceProvider(pending_event_sources)
-            result = await refresh_thread_history_from_source(
-                self._require_client(),
-                room_id,
-                thread_id,
-                self.runtime.event_cache,
-                hydrate_sidecars=wants_full_history,
-                allow_stale_fallback=allows_stale_fallback,
-                cache_reject_diagnostics=cache_reject_diagnostics,
-                trusted_sender_ids=self._trusted_sender_ids(),
-                retained_event_sources=retained_event_source_provider,
-                max_repair_attempts=_SPECULATIVE_REPAIR_ATTEMPTS if speculative else None,
-            )
-            if self._thread_repair_result_is_usable(result):
-                await self._acknowledge_repaired_thread_deltas(
-                    coordinator,
-                    room_id,
-                    thread_id,
-                    principal_id=principal_id,
-                    replayed_event_ids=retained_event_source_provider.provided_event_ids,
-                    snapshot_stored=result.diagnostics.get("cache_store_outcome")
-                    == ThreadCacheReplaceOutcome.STORED.value,
-                )
-            return result
-
-        return await coordinator.run_thread_repair(
-            room_id,
-            thread_id,
-            repair,
-            coordination_scope=principal_id,
-            hydrate_sidecars=wants_full_history,
-            allow_stale_fallback=allows_stale_fallback,
-            result_arms_backoff=self._thread_repair_result_arms_backoff,
-            bypass_failure_backoff=bypass_repair_backoff,
-            speculative=speculative,
-            claim_token=claim_token,
         )
 
     async def _fetch_thread_from_client(
@@ -934,166 +635,32 @@ class MatrixConversationCache(ConversationCacheProtocol):
         *,
         caller_label: str,
         coordinator_queue_wait_ms: float,
-        wants_full_history: bool,
-        allows_stale_fallback: bool,
-        bypass_repair_backoff: bool,
-        speculative: bool = False,
-        claim_token: object | None = None,
     ) -> ThreadHistoryResult:
-        coordinator = self.runtime.event_cache_write_coordinator
-        await self._prepare_pending_thread_repair_deltas(room_id, thread_id)
-
-        async def refill(
-            cache_reject_diagnostics: Mapping[str, str | int | float | bool] | None,
-        ) -> ThreadHistoryResult:
-            return await self._refill_thread_from_client(
-                room_id,
-                thread_id,
-                cache_reject_diagnostics=cache_reject_diagnostics,
-                wants_full_history=wants_full_history,
-                allows_stale_fallback=allows_stale_fallback,
-                bypass_repair_backoff=bypass_repair_backoff,
-                speculative=speculative,
-                claim_token=claim_token,
-            )
-
+        fetch_started_at = time.time()
         return await fetcher(
             self._require_client(),
             room_id,
             thread_id,
             event_cache=self.runtime.event_cache,
+            cache_write_guard_started_at=fetch_started_at,
             trusted_sender_ids=self._trusted_sender_ids(),
             caller_label=caller_label,
             coordinator_queue_wait_ms=coordinator_queue_wait_ms,
-            resolution_reuse=self._thread_resolution_reuse,
-            refill=refill if coordinator is not None else None,
         )
 
-    @staticmethod
-    def _thread_repair_result_is_usable(result: ThreadHistoryResult) -> bool:
-        """Return whether one flight left a trusted durable snapshot."""
-        source = result.diagnostics.get(THREAD_HISTORY_SOURCE_DIAGNOSTIC)
-        return source == THREAD_HISTORY_SOURCE_CACHE or result.diagnostics.get("cache_repair_usable") is True
-
-    @staticmethod
-    def _thread_repair_result_arms_backoff(result: ThreadHistoryResult) -> bool:
-        """Return whether one persistent failure should throttle later refills."""
-        return result.diagnostics.get("cache_store_outcome") == ThreadCacheReplaceOutcome.HARD_FAILURE.value
-
-    def _schedule_missing_thread_repair(self, room_id: str, thread_id: str) -> None:
-        """Schedule bounded background repair after an append finds no snapshot.
-
-        Every replayed event in a stale thread reaches this method, so the fan-out gate is consulted
-        before a task is even created; the thread stays marked stale, so a declined repair only
-        defers the scan to the next read.
-        """
-        coordinator = self.runtime.event_cache_write_coordinator
-        if coordinator is None or not self.runtime.event_cache.durable_writes_available:
-            return
-        principal_id = self.runtime.event_cache.principal_id
-        # Claimed before the task exists. A replay burst reaches this method once per event without
-        # ever yielding, so a check that does not also claim lets every one of them add a task. The
-        # claim is held until the registry takes ownership of the thread, which covers the awaited
-        # preparation in between.
-        reservation = coordinator.reserve_speculative_thread_repair(
+    async def _refresh_dispatch_thread_snapshot_for_startup_prewarm(
+        self,
+        room_id: str,
+        thread_id: str,
+    ) -> ThreadHistoryResult:
+        """Refresh one strict thread snapshot for advisory startup prewarm without the live read barrier."""
+        return await self._fetch_thread_from_client(
+            fetch_dispatch_thread_snapshot,
             room_id,
             thread_id,
-            coordination_scope=principal_id,
-        )
-        if reservation is None:
-            self._log_suppressed_thread_repair(room_id, thread_id, reason="already_scheduled")
-            return
-
-        async def repair() -> None:
-            try:
-                await self._fetch_thread_from_client(
-                    fetch_dispatch_thread_snapshot,
-                    room_id,
-                    thread_id,
-                    caller_label="missing_cache_live_append_repair",
-                    coordinator_queue_wait_ms=0.0,
-                    wants_full_history=False,
-                    allows_stale_fallback=False,
-                    # Speculative work is the one caller the retained delay is meant to suppress.
-                    bypass_repair_backoff=False,
-                    speculative=True,
-                    claim_token=reservation,
-                )
-            except ThreadRepairSuppressedError as exc:
-                self._log_suppressed_thread_repair(room_id, thread_id, reason=exc.reason)
-            except ThreadRepairBackoffError as exc:
-                self.logger.debug(
-                    "Thread cache repair remains in backoff",
-                    room_id=room_id,
-                    thread_id=thread_id,
-                    retry_after_seconds=exc.retry_after_seconds,
-                )
-            except Exception as exc:
-                self.logger.warning(
-                    "Background thread cache repair failed",
-                    room_id=room_id,
-                    thread_id=thread_id,
-                    error_type=type(exc).__name__,
-                    error=str(exc),
-                )
-
-        task = create_background_task(
-            repair(),
-            name="matrix_cache_schedule_missing_thread_repair",
-            owner=coordinator.background_task_owner,
-            log_exceptions=False,
-        )
-        # On the task, not in the coroutine: a task cancelled before its first instruction never
-        # runs its body at all, and a claim leaked that way would suppress this thread until the
-        # process ends, and unrelated threads once enough of them accumulate. Releasing is a no-op
-        # once the registry has taken the claim over, and the token makes it a no-op if a later
-        # wave has since claimed the same thread.
-        task.add_done_callback(
-            lambda _task: coordinator.release_speculative_thread_repair(
-                room_id,
-                thread_id,
-                coordination_scope=principal_id,
-                token=reservation,
-            ),
-        )
-
-    def _log_suppressed_thread_repair(self, room_id: str, thread_id: str, *, reason: str) -> None:
-        self.logger.debug(
-            "Speculative thread cache repair suppressed",
-            room_id=room_id,
-            thread_id=thread_id,
-            reason=reason,
-        )
-
-    async def _bulk_refresh_startup_threads(
-        self,
-        room_id: str,
-        thread_ids: Collection[str],
-    ) -> BulkThreadRefreshStats:
-        """Refresh startup threads without occupying the live write coordinator during the scan."""
-        return await bulk_refresh_room_thread_histories(
-            self._require_client(),
-            room_id,
-            self.runtime.event_cache,
-            thread_root_ids=thread_ids,
             caller_label="startup_thread_prewarm",
-            max_scan_pages=_STARTUP_PREWARM_MAX_SCAN_PAGES,
-        )
-
-    def _log_startup_thread_prewarm_complete(
-        self,
-        room_id: str,
-        *,
-        started_at: float,
-        threads_warmed: int,
-        threads_failed: int,
-    ) -> None:
-        self.logger.info(
-            "startup_thread_prewarm_complete",
-            room_id=room_id,
-            threads_warmed=threads_warmed,
-            threads_failed=threads_failed,
-            elapsed_ms=elapsed_ms_since(started_at, clock=time.perf_counter),
+            # Startup prewarm bypasses the read coordinator; 0.0 means no coordinator queue was used.
+            coordinator_queue_wait_ms=0.0,
         )
 
     async def _startup_thread_prewarm_ids(
@@ -1118,6 +685,8 @@ class MatrixConversationCache(ConversationCacheProtocol):
                 room_id,
                 limit=_STARTUP_PREWARM_THREAD_LIMIT,
             )
+        except asyncio.CancelledError:
+            raise
         except Exception as exc:
             self.logger.warning(
                 "startup_thread_prewarm_room_threads_failed",
@@ -1143,68 +712,85 @@ class MatrixConversationCache(ConversationCacheProtocol):
         is_shutting_down: Callable[[], bool],
     ) -> bool:
         """Warm one room's recent thread roots and report whether the room-level pass finished."""
-        if not self.runtime.event_cache.durable_writes_available:
-            self.logger.warning(
-                "startup_thread_prewarm_skipped",
-                room_id=room_id,
-                reason="event_cache_writes_unavailable",
-            )
-            return False
         started_at = time.perf_counter()
+        threads_warmed = 0
+        threads_failed = 0
         thread_ids = await self._startup_thread_prewarm_ids(room_id)
-        if thread_ids is None or is_shutting_down() or not self.runtime.event_cache.durable_writes_available:
-            return False
-        try:
-            untrusted_thread_ids = await untrusted_cached_thread_ids(
-                self.runtime.event_cache,
-                room_id,
-                thread_ids,
-            )
-        except Exception as exc:
-            self.logger.warning(
-                "startup_thread_prewarm_cache_probe_failed",
-                room_id=room_id,
-                thread_count=len(thread_ids),
-                error=str(exc),
-                error_type=type(exc).__name__,
-                exc_info=True,
-            )
-            untrusted_thread_ids = None
-        if untrusted_thread_ids is None or is_shutting_down() or not self.runtime.event_cache.durable_writes_available:
-            return False
-        already_warm = len(thread_ids) - len(untrusted_thread_ids)
-        if not untrusted_thread_ids:
-            self._log_startup_thread_prewarm_complete(
-                room_id,
-                started_at=started_at,
-                threads_warmed=already_warm,
-                threads_failed=0,
-            )
-            return True
-
-        try:
-            stats = await self._bulk_refresh_startup_threads(
-                room_id,
-                untrusted_thread_ids,
-            )
-        except Exception as exc:
-            self.logger.warning(
-                "startup_thread_prewarm_bulk_failed",
-                room_id=room_id,
-                thread_count=len(untrusted_thread_ids),
-                error=str(exc),
-            )
+        if thread_ids is None:
             return False
 
-        threads_warmed = already_warm + stats.usable_threads
-        threads_failed = len(untrusted_thread_ids) - stats.usable_threads
-        self._log_startup_thread_prewarm_complete(
-            room_id,
-            started_at=started_at,
+        completed = True
+        pending_thread_ids = list(thread_ids)
+
+        async def worker() -> None:
+            nonlocal completed, threads_failed, threads_warmed
+            while pending_thread_ids:
+                if is_shutting_down():
+                    completed = False
+                    return
+                outcome = await self._prewarm_one_startup_thread(
+                    room_id,
+                    pending_thread_ids.pop(0),
+                    is_shutting_down=is_shutting_down,
+                )
+                if outcome == "aborted":
+                    completed = False
+                    return
+                if outcome == "failed":
+                    threads_failed += 1
+                else:
+                    threads_warmed += 1
+
+        worker_count = min(_STARTUP_PREWARM_THREAD_CONCURRENCY, len(pending_thread_ids))
+        await asyncio.gather(*(worker() for _ in range(worker_count)))
+
+        self.logger.info(
+            "startup_thread_prewarm_complete",
+            room_id=room_id,
             threads_warmed=threads_warmed,
             threads_failed=threads_failed,
+            elapsed_ms=elapsed_ms_since(started_at, clock=time.perf_counter),
         )
-        return not is_shutting_down() and self.runtime.event_cache.durable_writes_available
+        return completed
+
+    async def _prewarm_one_startup_thread(
+        self,
+        room_id: str,
+        thread_id: str,
+        *,
+        is_shutting_down: Callable[[], bool],
+    ) -> _StartupThreadPrewarmOutcome:
+        """Refresh one startup thread snapshot and return its room-level prewarm outcome."""
+        if is_shutting_down():
+            return "aborted"
+        if not thread_id:
+            self.logger.warning(
+                "startup_thread_prewarm_thread_failed",
+                room_id=room_id,
+                thread_id=thread_id,
+                error="missing_thread_root_event_id",
+            )
+            await asyncio.sleep(0)
+            return "failed"
+
+        try:
+            await self._refresh_dispatch_thread_snapshot_for_startup_prewarm(
+                room_id,
+                thread_id,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            self.logger.warning(
+                "startup_thread_prewarm_thread_failed",
+                room_id=room_id,
+                thread_id=thread_id,
+                error=str(exc),
+            )
+            return "failed"
+
+        await asyncio.sleep(0)
+        return "warmed"
 
     async def get_thread_history(
         self,
@@ -1281,21 +867,6 @@ class MatrixConversationCache(ConversationCacheProtocol):
             caller_label=caller_label,
         )
 
-    async def refresh_strict_thread_history_from_source(
-        self,
-        room_id: str,
-        thread_id: str,
-        *,
-        caller_label: str = "unknown",
-    ) -> ThreadReadResult:
-        """Refresh strict full history directly from Matrix."""
-        return await self._reads.read_thread(
-            room_id,
-            thread_id,
-            mode=ThreadReadMode.STRICT_SOURCE_REFRESH,
-            caller_label=caller_label,
-        )
-
     async def get_thread_id_for_event(self, room_id: str, event_id: str) -> str | None:
         """Resolve the cached thread root for one event when known."""
         try:
@@ -1333,13 +904,7 @@ class MatrixConversationCache(ConversationCacheProtocol):
         event_id: str | None,
         content: dict[str, Any],
     ) -> None:
-        """Schedule one locally sent message or edit for advisory cache bookkeeping."""
-        self._evict_turn_thread_reads_for_room(room_id)
-        self._evict_turn_event_lookups_for_outbound_event(
-            room_id,
-            event_id=event_id,
-            event_info=EventInfo.from_event({"type": "m.room.message", "content": content}),
-        )
+        """Schedule one locally sent threaded message or edit for advisory cache bookkeeping."""
         self._outbound.notify_outbound_message(room_id, event_id, content)
 
     def notify_outbound_event(
@@ -1348,68 +913,11 @@ class MatrixConversationCache(ConversationCacheProtocol):
         event_source: dict[str, Any],
     ) -> None:
         """Schedule one locally sent outbound event for advisory cache bookkeeping."""
-        self._evict_turn_thread_reads_for_room(room_id)
-        event_id = event_source.get("event_id")
-        self._evict_turn_event_lookups_for_outbound_event(
-            room_id,
-            event_id=event_id if isinstance(event_id, str) else None,
-            event_info=EventInfo.from_event(event_source),
-        )
         self._outbound.notify_outbound_event(room_id, event_source)
 
     def notify_outbound_redaction(self, room_id: str, redacted_event_id: str) -> None:
-        """Schedule one locally redacted message for advisory cache bookkeeping."""
-        self._evict_turn_thread_reads_for_room(room_id)
-        self._evict_turn_event_lookups_for_room(room_id)
+        """Schedule one locally redacted threaded message for advisory cache bookkeeping."""
         self._outbound.notify_outbound_redaction(room_id, redacted_event_id)
-
-    def reserve_outbound_thread(self, room_id: str, event_id: str, thread_id: str) -> None:
-        """Reserve one known outbound response thread for later relation-free edits."""
-        self._outbound.reserve_thread_response(room_id, event_id, thread_id)
-
-    def release_outbound_thread(self, room_id: str, event_id: str) -> None:
-        """Release one outbound response thread reservation after terminal delivery."""
-        self._outbound.release_thread_response(room_id, event_id)
-
-    def _evict_turn_thread_reads_for_room(self, room_id: str) -> None:
-        """Discard thread reads changed by a successful outbound mutation."""
-        turn_cache = self._turn_thread_read_cache.get()
-        if turn_cache is None:
-            return
-        for cache_key in tuple(turn_cache):
-            if cache_key[0] == room_id:
-                turn_cache.pop(cache_key)
-
-    def _evict_turn_event_lookup(self, room_id: str, event_id: str) -> None:
-        """Discard point-read memoization invalidated by one successful outbound mutation."""
-        turn_cache = self._turn_event_cache.get()
-        if turn_cache is None:
-            return
-        normalized_event_id = event_id.strip()
-        for cache_key in tuple(turn_cache):
-            if cache_key[:2] == (room_id, normalized_event_id):
-                turn_cache.pop(cache_key)
-
-    def _evict_turn_event_lookups_for_room(self, room_id: str) -> None:
-        """Discard point reads that one outbound redaction could change indirectly."""
-        turn_cache = self._turn_event_cache.get()
-        if turn_cache is None:
-            return
-        for cache_key in tuple(turn_cache):
-            if cache_key[0] == room_id:
-                turn_cache.pop(cache_key)
-
-    def _evict_turn_event_lookups_for_outbound_event(
-        self,
-        room_id: str,
-        *,
-        event_id: str | None,
-        event_info: EventInfo,
-    ) -> None:
-        """Discard point reads changed by one outbound event or edit."""
-        for changed_event_id in (event_id, event_info.original_event_id):
-            if isinstance(changed_event_id, str):
-                self._evict_turn_event_lookup(room_id, changed_event_id)
 
     async def append_live_event(
         self,
@@ -1424,41 +932,6 @@ class MatrixConversationCache(ConversationCacheProtocol):
     async def apply_redaction(self, room_id: str, event: nio.RedactionEvent) -> None:
         """Apply one redaction to the advisory cache when the affected thread is known."""
         await self._live.apply_redaction(room_id, event)
-
-    async def purge_rooms(self, room_ids: Collection[str]) -> None:
-        """Fence an entire authoritative leave batch before awaiting any purge."""
-        departed_room_ids = tuple(dict.fromkeys(room_ids))
-        coordinator = self.runtime.event_cache_write_coordinator
-        for room_id in departed_room_ids:
-            self._write_cache_ops.mark_room_departed(room_id)
-            if coordinator is not None:
-                coordinator.clear_thread_repair_room(
-                    room_id,
-                    coordination_scope=self.runtime.event_cache.principal_id,
-                )
-        tasks = tuple(
-            self._write_cache_ops.queue_room_cache_update(
-                room_id,
-                lambda room_id=room_id: self._write_cache_ops.purge_room(room_id),
-                name="matrix_cache_purge_departed_room",
-            )
-            for room_id in departed_room_ids
-        )
-        if tasks:
-            await asyncio.gather(*tasks)
-
-    async def mark_room_joined(self, room_id: str) -> None:
-        """Allow principal-owned caching again after an authoritative rejoin."""
-        expected_departure_epoch = self._write_cache_ops.room_departure_epoch(room_id)
-        task = self._write_cache_ops.queue_room_cache_update(
-            room_id,
-            lambda: self._write_cache_ops.mark_room_joined(
-                room_id,
-                expected_departure_epoch=expected_departure_epoch,
-            ),
-            name="matrix_cache_mark_room_joined",
-        )
-        await task
 
     def cache_sync_timeline(
         self,
@@ -1477,10 +950,4 @@ class MatrixConversationCache(ConversationCacheProtocol):
         response: nio.SyncResponse,
     ) -> SyncCacheWriteResult:
         """Durably persist sync timeline events and report cache-certification status."""
-        coordinator = self.runtime.event_cache_write_coordinator
-        if coordinator is None or not _is_sync_replay_batch(response):
-            return await self._sync.cache_sync_timeline_for_certification(response)
-        # Replay rewrites these threads anyway, and its speculative repairs would contend for the
-        # very write path this call is blocking the sync callback on.
-        with coordinator.suppress_speculative_thread_repairs():
-            return await self._sync.cache_sync_timeline_for_certification(response)
+        return await self._sync.cache_sync_timeline_for_certification(response)

@@ -76,6 +76,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         )
         bot.event_cache = _runtime_event_cache()
         bot.event_cache.get_thread_events.return_value = None
+        bot.event_cache.append_event.return_value = True
         _install_runtime_write_coordinator(bot)
 
         # Initialize the bot (to set up components it needs)
@@ -153,6 +154,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         )
         bot.event_cache = _runtime_event_cache()
         bot.event_cache.get_thread_events.return_value = None
+        bot.event_cache.append_event.return_value = True
         _install_runtime_write_coordinator(bot)
 
         # Initialize response tracking
@@ -668,6 +670,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         )
         bot.event_cache = _runtime_event_cache()
         bot.event_cache.get_thread_events.return_value = None
+        bot.event_cache.append_event.return_value = True
         _install_runtime_write_coordinator(bot)
 
         # Initialize response tracking

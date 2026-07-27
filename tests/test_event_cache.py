@@ -15,6 +15,7 @@ import pytest
 from nio.api import RelationshipType
 
 import mindroom.matrix.cache.sqlite_event_cache as event_cache_module
+import mindroom.matrix.message_content as message_content_module
 from mindroom.bot_runtime_view import BotRuntimeState
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
@@ -22,8 +23,6 @@ from mindroom.config.models import ModelConfig
 from mindroom.conversation_resolver import ConversationResolver, ConversationResolverDeps, _ThreadIdLookup
 from mindroom.matrix.cache import (
     ConversationEventCache,
-    ThreadAppendOutcome,
-    ThreadCacheReplaceOutcome,
     ThreadCacheState,
     event_normalization,
     sqlite_event_cache_events,
@@ -34,25 +33,12 @@ from mindroom.matrix.cache.event_batching import group_lookup_events_by_room
 from mindroom.matrix.cache.sqlite_event_cache import SqliteEventCache
 from mindroom.matrix.cache.thread_history_result import thread_history_result
 from mindroom.matrix.cache.thread_reads import ThreadReadMode
-from mindroom.matrix.cache.thread_repair import (
-    ThreadRepairBackoffError,
-    ThreadRepairRegistry,
-)
 from mindroom.matrix.cache.write_coordinator import EventCacheWriteCoordinator
-from mindroom.matrix.client_thread_history import (
-    BulkThreadRefreshStats,
-    RetainedThreadEventSourceProvider,
-    fetch_thread_history,
-)
+from mindroom.matrix.client_thread_history import fetch_thread_history
 from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 from mindroom.matrix.conversation_cache import MatrixConversationCache, _cached_room_get_event
 from mindroom.matrix.event_info import EventInfo
-from mindroom.matrix.thread_diagnostics import (
-    THREAD_HISTORY_DEGRADED_DIAGNOSTIC,
-    THREAD_HISTORY_SOURCE_DIAGNOSTIC,
-    THREAD_HISTORY_SOURCE_STALE_CACHE,
-    is_thread_history_degraded,
-)
+from mindroom.matrix.thread_diagnostics import THREAD_HISTORY_DEGRADED_DIAGNOSTIC
 from mindroom.timing import DispatchPipelineTiming
 from tests.conftest import (
     agent_response_should_respond,
@@ -338,13 +324,13 @@ async def test_conversation_cache_thread_reads_forward_client_fetch_metadata(
     client = MagicMock()
     conversation_cache = _conversation_cache_for_thread_reads(tmp_path, event_cache, client=client)
     read_modes = [
-        ("get_thread_history", "fetch_thread_history", True, 50.0),
-        ("get_dispatch_thread_snapshot", "fetch_dispatch_thread_snapshot", False, 75.0),
-        ("get_dispatch_thread_history", "fetch_dispatch_thread_history", True, 100.0),
+        ("get_thread_history", "fetch_thread_history", True, 101.0, 50.0),
+        ("get_dispatch_thread_snapshot", "fetch_dispatch_thread_snapshot", False, 102.0, 75.0),
+        ("get_dispatch_thread_history", "fetch_dispatch_thread_history", True, 103.0, 100.0),
     ]
     fetchers = {
         name: AsyncMock(return_value=thread_history_result([], is_full_history=is_full_history))
-        for _method_name, name, is_full_history, _queue_wait_ms in read_modes
+        for _method_name, name, is_full_history, _guard_started_at, _queue_wait_ms in read_modes
     }
 
     try:
@@ -358,6 +344,7 @@ async def test_conversation_cache_thread_reads_forward_client_fetch_metadata(
                 "mindroom.matrix.conversation_cache.fetch_dispatch_thread_history",
                 fetchers["fetch_dispatch_thread_history"],
             ),
+            patch("mindroom.matrix.conversation_cache.time.time", side_effect=[101.0, 102.0, 103.0]),
             patch(
                 "mindroom.matrix.cache.thread_reads.time.perf_counter",
                 side_effect=[1.0, 1.05, 2.0, 2.01, 2.075, 2.075, 2.075, 3.0, 3.01, 3.1, 3.1, 3.1],
@@ -368,7 +355,7 @@ async def test_conversation_cache_thread_reads_forward_client_fetch_metadata(
                 "get_dispatch_thread_snapshot": conversation_cache.get_dispatch_thread_snapshot,
                 "get_dispatch_thread_history": conversation_cache.get_dispatch_thread_history,
             }
-            for method_name, _name, is_full_history, _queue_wait_ms in read_modes:
+            for method_name, _name, is_full_history, _guard_started_at, _queue_wait_ms in read_modes:
                 result = await read_methods[method_name](
                     "!room:localhost",
                     "$thread:localhost",
@@ -376,17 +363,16 @@ async def test_conversation_cache_thread_reads_forward_client_fetch_metadata(
                 )
                 assert result.is_full_history is is_full_history
 
-        for method_name, name, _is_full_history, queue_wait_ms in read_modes:
+        for method_name, name, _is_full_history, guard_started_at, queue_wait_ms in read_modes:
             fetchers[name].assert_awaited_once_with(
                 client,
                 "!room:localhost",
                 "$thread:localhost",
                 event_cache=event_cache,
+                cache_write_guard_started_at=guard_started_at,
                 trusted_sender_ids=conversation_cache._trusted_sender_ids(),
                 caller_label=f"caller-{method_name}",
                 coordinator_queue_wait_ms=queue_wait_ms,
-                resolution_reuse=conversation_cache._thread_resolution_reuse,
-                refill=None,
             )
     finally:
         await event_cache.close()
@@ -407,6 +393,7 @@ async def test_dispatch_thread_read_degrades_when_cache_coordinator_never_drains
 
     coordinator = MagicMock()
     coordinator.wait_for_thread_idle = AsyncMock(side_effect=never_idle)
+    coordinator.run_thread_update = AsyncMock(side_effect=AssertionError("timed-out reads must not enter refresh"))
     conversation_cache.runtime.event_cache_write_coordinator = coordinator
     _set_dispatch_thread_read_timeout(conversation_cache, 0.01)
 
@@ -429,6 +416,7 @@ async def test_dispatch_thread_read_degrades_when_cache_coordinator_never_drains
     assert result.diagnostics["thread_read_source"] == "degraded"
     assert result.diagnostics["caller_label"] == "dispatch_context"
     coordinator.wait_for_thread_idle.assert_awaited_once()
+    coordinator.run_thread_update.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -448,13 +436,9 @@ async def test_dispatch_thread_read_timeout_does_not_cancel_pending_cache_write(
         write_started.set()
         await release_write.wait()
 
-    pending_write_task = coordinator.queue_thread_update(
-        "!room:localhost",
-        "$thread:localhost",
-        pending_cache_write,
-        name="matrix_cache_pending_test_write",
-        coordination_scope=event_cache.principal_id,
-    )
+    pending_write_task = asyncio.create_task(pending_cache_write())
+    coordinator._thread_update_tasks[("!room:localhost", "$thread:localhost")] = pending_write_task
+    coordinator._thread_update_tasks_by_room["!room:localhost"] = {"$thread:localhost": pending_write_task}
     conversation_cache.runtime.event_cache_write_coordinator = coordinator
     _set_dispatch_thread_read_timeout(conversation_cache, 0.01)
     baseline_wait_tasks = _pending_thread_cache_update_wait_tasks()
@@ -486,14 +470,10 @@ async def test_dispatch_thread_read_timeout_does_not_cancel_pending_cache_write(
 
 
 @pytest.mark.asyncio
-async def test_dispatch_thread_read_enters_repair_ownership_once_after_idle_wait(
+async def test_dispatch_thread_read_bypasses_refresh_queue_after_idle_wait(
     tmp_path: Path,
 ) -> None:
-    """Dispatch fetches should claim repair ownership exactly once, after the bounded idle wait.
-
-    Joining an existing flight is owned by the registry and covered in ``test_thread_repair``; this
-    read-path test stubs the coordinator, so it can only observe that ownership is claimed once.
-    """
+    """Dispatch fetches should bypass coordinator queuing after the bounded idle wait."""
     event_cache = SqliteEventCache(tmp_path / "event_cache.db")
     await event_cache.initialize()
     client = MagicMock()
@@ -501,25 +481,15 @@ async def test_dispatch_thread_read_enters_repair_ownership_once_after_idle_wait
 
     coordinator = MagicMock()
     coordinator.wait_for_thread_idle = AsyncMock(return_value=None)
-    coordinator.pending_thread_repair_deltas.return_value = ()
-
-    async def run_thread_repair(
-        _room_id: str,
-        _thread_id: str,
-        repair: Callable[[], Awaitable[ThreadHistoryResult]],
-        **_kwargs: object,
-    ) -> ThreadHistoryResult:
-        return await repair()
-
-    coordinator.run_thread_repair = AsyncMock(side_effect=run_thread_repair)
+    coordinator.run_thread_update = AsyncMock(side_effect=AssertionError("dispatch reads should bypass refresh queue"))
     conversation_cache.runtime.event_cache_write_coordinator = coordinator
     fetched_history = thread_history_result([], is_full_history=True)
 
     try:
         with patch(
-            "mindroom.matrix.conversation_cache.refresh_thread_history_from_source",
+            "mindroom.matrix.conversation_cache.fetch_dispatch_thread_history",
             AsyncMock(return_value=fetched_history),
-        ) as refresh_thread_history:
+        ) as fetch_dispatch_thread_history:
             result = await asyncio.wait_for(
                 conversation_cache.get_dispatch_thread_history(
                     "!room:localhost",
@@ -534,297 +504,8 @@ async def test_dispatch_thread_read_enters_repair_ownership_once_after_idle_wait
     assert result == []
     assert result.is_full_history is True
     coordinator.wait_for_thread_idle.assert_awaited_once()
-    coordinator.run_thread_repair.assert_awaited_once()
-    refresh_thread_history.assert_awaited_once()
-
-
-@pytest.mark.asyncio
-async def test_healthy_cache_hit_does_not_enter_repair_lane(tmp_path: Path) -> None:
-    """A trusted snapshot should not occupy the serialized refill lane."""
-    event_cache = SqliteEventCache(tmp_path / "event_cache.db")
-    await event_cache.initialize()
-    await _seed_thread_cache(
-        event_cache,
-        room_id="!room:localhost",
-        thread_id="$thread:localhost",
-        events=[_clear_payload("$thread:localhost", body="root")],
-    )
-    conversation_cache = _conversation_cache_for_thread_reads(tmp_path, event_cache, client=MagicMock())
-    coordinator = MagicMock()
-    coordinator.wait_for_thread_idle = AsyncMock(return_value=None)
-    coordinator.pending_thread_repair_deltas.return_value = ()
-    coordinator.run_thread_repair = AsyncMock(side_effect=AssertionError("cache hit must not claim repair ownership"))
-    conversation_cache.runtime.event_cache_write_coordinator = coordinator
-
-    try:
-        result = await conversation_cache.get_thread_history("!room:localhost", "$thread:localhost")
-    finally:
-        await event_cache.close()
-
-    assert [message.event_id for message in result] == ["$thread:localhost"]
-    coordinator.run_thread_repair.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_advisory_joiner_keeps_stale_fallback_from_strict_owner_failure(tmp_path: Path) -> None:
-    """Strict and advisory refills must not share failure or stale-fallback contracts."""
-    event_cache = SqliteEventCache(tmp_path / "event_cache.db")
-    await event_cache.initialize()
-    await _seed_thread_cache(
-        event_cache,
-        room_id="!room:localhost",
-        thread_id="$thread:localhost",
-        events=[_clear_payload("$thread:localhost", body="stale root")],
-    )
-    await event_cache.mark_thread_stale("!room:localhost", "$thread:localhost", reason="force_refetch")
-    strict_scan_started = asyncio.Event()
-    release_strict_scan = asyncio.Event()
-    scan_count = 0
-    strict_failure = RuntimeError("strict scan failed")
-    advisory_failure = RuntimeError("advisory scan failed")
-
-    async def failing_scan(*_args: object, **_kwargs: object) -> object:
-        nonlocal scan_count
-        scan_count += 1
-        if scan_count == 1:
-            strict_scan_started.set()
-            await release_strict_scan.wait()
-            raise strict_failure
-        raise advisory_failure
-
-    client = MagicMock()
-    client.room_messages = AsyncMock(side_effect=failing_scan)
-    conversation_cache = _conversation_cache_for_thread_reads(tmp_path, event_cache, client=client)
-    coordinator = EventCacheWriteCoordinator(logger=MagicMock())
-    conversation_cache.runtime.event_cache_write_coordinator = coordinator
-
-    try:
-        strict = asyncio.create_task(
-            conversation_cache.get_strict_thread_history(
-                "!room:localhost",
-                "$thread:localhost",
-                caller_label="strict_reader",
-            ),
-        )
-        await asyncio.wait_for(strict_scan_started.wait(), timeout=1.0)
-        advisory = asyncio.create_task(
-            conversation_cache.get_thread_history(
-                "!room:localhost",
-                "$thread:localhost",
-                caller_label="advisory_reader",
-            ),
-        )
-        await asyncio.sleep(0)
-        release_strict_scan.set()
-        with pytest.raises(RuntimeError, match="strict scan failed"):
-            await strict
-        advisory_result = await asyncio.wait_for(advisory, timeout=1.0)
-    finally:
-        release_strict_scan.set()
-        await coordinator.close()
-        await event_cache.close()
-
-    assert advisory_result.diagnostics[THREAD_HISTORY_SOURCE_DIAGNOSTIC] == THREAD_HISTORY_SOURCE_STALE_CACHE
-    assert scan_count == 2
-
-
-@pytest.mark.asyncio
-async def test_shared_repair_logs_completion_for_each_caller(tmp_path: Path) -> None:  # noqa: PLR0915
-    """Every caller should own completion telemetry even when one refill is shared."""
-    event_cache = SqliteEventCache(tmp_path / "event_cache.db")
-    await event_cache.initialize()
-    conversation_cache = _conversation_cache_for_thread_reads(tmp_path, event_cache, client=MagicMock())
-    coordinator = EventCacheWriteCoordinator(logger=MagicMock())
-    conversation_cache.runtime.event_cache_write_coordinator = coordinator
-    fetch_started = asyncio.Event()
-    release_fetch = asyncio.Event()
-    both_callers_waiting = asyncio.Event()
-    release_idle_wait = asyncio.Event()
-    both_callers_entered_repair = asyncio.Event()
-    fetch_count = 0
-    idle_wait_count = 0
-    repair_call_count = 0
-    root = ResolvedVisibleMessage.synthetic(
-        sender="@user:localhost",
-        body="root",
-        event_id="$thread:localhost",
-        content={"body": "root"},
-    )
-
-    async def fetch_snapshot(*_args: object, **_kwargs: object) -> object:
-        nonlocal fetch_count
-        fetch_count += 1
-        fetch_started.set()
-        await release_fetch.wait()
-        return MagicMock(
-            history=[root],
-            event_sources=[_clear_payload("$thread:localhost", body="root")],
-            fetch_ms=1.0,
-            room_scan_pages=1,
-            scanned_event_count=1,
-            resolution_ms=1.0,
-            sidecar_hydration_ms=0.0,
-        )
-
-    wait_for_thread_idle = coordinator.wait_for_thread_idle
-    run_thread_repair = coordinator.run_thread_repair
-
-    async def observed_wait_for_thread_idle(*args: object, **kwargs: object) -> None:
-        nonlocal idle_wait_count
-        await wait_for_thread_idle(*args, **kwargs)
-        idle_wait_count += 1
-        if idle_wait_count == 2:
-            both_callers_waiting.set()
-        await release_idle_wait.wait()
-
-    async def observed_run_thread_repair(
-        room_id: str,
-        thread_id: str,
-        repair: Callable[[], Awaitable[ThreadHistoryResult]],
-        **kwargs: object,
-    ) -> ThreadHistoryResult:
-        nonlocal repair_call_count
-        repair_call_count += 1
-        if repair_call_count == 2:
-            both_callers_entered_repair.set()
-        return await run_thread_repair(room_id, thread_id, repair, **kwargs)
-
-    telemetry_logger = MagicMock()
-    try:
-        with (
-            patch("mindroom.matrix.client_thread_history.logger", telemetry_logger),
-            patch.object(coordinator, "wait_for_thread_idle", side_effect=observed_wait_for_thread_idle),
-            patch.object(coordinator, "run_thread_repair", side_effect=observed_run_thread_repair),
-            patch(
-                "mindroom.matrix.client_thread_history._fetch_thread_history_with_events",
-                AsyncMock(side_effect=fetch_snapshot),
-            ),
-        ):
-            first = asyncio.create_task(
-                conversation_cache.get_thread_history(
-                    "!room:localhost",
-                    "$thread:localhost",
-                    caller_label="first_reader",
-                ),
-            )
-            second = asyncio.create_task(
-                conversation_cache.get_thread_history(
-                    "!room:localhost",
-                    "$thread:localhost",
-                    caller_label="second_reader",
-                ),
-            )
-            await asyncio.wait_for(both_callers_waiting.wait(), timeout=1.0)
-            release_idle_wait.set()
-            await asyncio.wait_for(fetch_started.wait(), timeout=1.0)
-            await asyncio.wait_for(both_callers_entered_repair.wait(), timeout=1.0)
-            release_fetch.set()
-            await asyncio.gather(first, second)
-    finally:
-        release_idle_wait.set()
-        release_fetch.set()
-        await coordinator.close()
-        await event_cache.close()
-
-    refresh_logs = [
-        call
-        for call in telemetry_logger.info.call_args_list
-        if call.args and call.args[0] == "matrix_cache_thread_history_refreshed"
-    ]
-    assert fetch_count == 1
-    assert [call.kwargs["caller_label"] for call in refresh_logs] == [
-        "first_reader",
-        "second_reader",
-    ]
-
-
-def test_missing_thread_repair_skips_when_writes_unavailable(tmp_path: Path) -> None:
-    """A disabled durable cache should not launch futile background refill work."""
-    event_cache = MagicMock()
-    event_cache.principal_id = "@agent:localhost"
-    event_cache.durable_writes_available = False
-    conversation_cache = _conversation_cache_for_thread_reads(tmp_path, event_cache, client=MagicMock())
-    coordinator = MagicMock()
-    coordinator.run_thread_repair = AsyncMock()
-    conversation_cache.runtime.event_cache_write_coordinator = coordinator
-
-    with patch("mindroom.matrix.conversation_cache.create_background_task") as create_task:
-        conversation_cache._schedule_missing_thread_repair("!room:localhost", "$thread:localhost")
-
-    if create_task.called:
-        create_task.call_args.args[0].close()
-    create_task.assert_not_called()
-    coordinator.run_thread_repair.assert_not_awaited()
-
-
-def test_only_persistent_thread_repair_failure_arms_backoff(tmp_path: Path) -> None:
-    """Unavailable writes should stay uncached without throttling later strict reads."""
-    conversation_cache = _conversation_cache_for_thread_reads(tmp_path, MagicMock(), client=MagicMock())
-    writes_unavailable = thread_history_result(
-        [],
-        is_full_history=True,
-        diagnostics={
-            "cache_store_outcome": ThreadCacheReplaceOutcome.WRITES_UNAVAILABLE.value,
-            "cache_repair_usable": False,
-        },
-    )
-    hard_failure = thread_history_result(
-        [],
-        is_full_history=True,
-        diagnostics={
-            "cache_store_outcome": ThreadCacheReplaceOutcome.HARD_FAILURE.value,
-            "cache_repair_usable": False,
-        },
-    )
-    stale_fallback = thread_history_result(
-        [],
-        is_full_history=True,
-        diagnostics={
-            THREAD_HISTORY_SOURCE_DIAGNOSTIC: THREAD_HISTORY_SOURCE_STALE_CACHE,
-            "cache_repair_usable": False,
-        },
-    )
-
-    assert conversation_cache._thread_repair_result_arms_backoff(writes_unavailable) is False
-    assert conversation_cache._thread_repair_result_arms_backoff(stale_fallback) is False
-    assert conversation_cache._thread_repair_result_arms_backoff(hard_failure) is True
-
-
-@pytest.mark.asyncio
-async def test_departure_clears_retained_thread_repair_deltas(tmp_path: Path) -> None:
-    """A leave/rejoin boundary must not replay plaintext retained before departure."""
-    event_cache = SqliteEventCache(tmp_path / "event_cache.db", principal_id="@agent:localhost")
-    await event_cache.initialize()
-    conversation_cache = _conversation_cache_for_thread_reads(tmp_path, event_cache, client=MagicMock())
-    coordinator = EventCacheWriteCoordinator(logger=MagicMock())
-    conversation_cache.runtime.event_cache_write_coordinator = coordinator
-    room_id = "!room:localhost"
-    thread_id = "$thread:localhost"
-    coordinator.retain_thread_repair_delta(
-        room_id,
-        thread_id,
-        _clear_payload("$old:localhost", body="pre-departure", thread_root_id=thread_id),
-        coordination_scope=event_cache.principal_id,
-    )
-
-    try:
-        assert coordinator.pending_thread_repair_deltas(
-            room_id,
-            thread_id,
-            coordination_scope=event_cache.principal_id,
-        )
-        await conversation_cache.purge_rooms([room_id])
-        await conversation_cache.mark_room_joined(room_id)
-        retained_after_rejoin = coordinator.pending_thread_repair_deltas(
-            room_id,
-            thread_id,
-            coordination_scope=event_cache.principal_id,
-        )
-    finally:
-        await coordinator.close()
-        await event_cache.close()
-
-    assert retained_after_rejoin == ()
+    coordinator.run_thread_update.assert_not_awaited()
+    fetch_dispatch_thread_history.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -837,13 +518,12 @@ async def test_dispatch_thread_read_degrades_when_fetcher_stalls(
     client = MagicMock()
     conversation_cache = _conversation_cache_for_thread_reads(tmp_path, event_cache, client=client)
 
-    release_fetch = asyncio.Event()
-
     async def never_returns(*_args: object, **_kwargs: object) -> ThreadHistoryResult:
-        await release_fetch.wait()
-        return thread_history_result([], is_full_history=False)
+        await asyncio.Event().wait()
 
-    coordinator = EventCacheWriteCoordinator(logger=MagicMock())
+    coordinator = MagicMock()
+    coordinator.wait_for_thread_idle = AsyncMock(return_value=None)
+    coordinator.run_thread_update = AsyncMock(side_effect=AssertionError("dispatch reads should bypass refresh queue"))
     conversation_cache.runtime.event_cache_write_coordinator = coordinator
     _set_dispatch_thread_read_timeout(conversation_cache, 0.01)
 
@@ -861,8 +541,6 @@ async def test_dispatch_thread_read_degrades_when_fetcher_stalls(
                 timeout=0.2,
             )
     finally:
-        release_fetch.set()
-        await coordinator.close()
         await event_cache.close()
 
     assert result == []
@@ -872,6 +550,8 @@ async def test_dispatch_thread_read_degrades_when_fetcher_stalls(
     assert result.diagnostics["thread_read_source"] == "degraded"
     assert result.diagnostics["caller_label"] == "dispatch_context"
     assert "dispatch_fetch_wait_ms" in result.diagnostics
+    coordinator.wait_for_thread_idle.assert_awaited_once()
+    coordinator.run_thread_update.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -980,83 +660,6 @@ async def test_dispatch_context_waits_for_strict_thread_history_after_degraded_s
 
 
 @pytest.mark.asyncio
-async def test_dispatch_retries_strictly_after_failed_cache_repair_backoff(tmp_path: Path) -> None:
-    """A proven thread should move from failed dispatch repair to fresh strict history."""
-    event_cache = SqliteEventCache(tmp_path / "event_cache.db", principal_id="@mindroom_code:localhost")
-    await event_cache.initialize()
-    conversation_cache = _conversation_cache_for_thread_reads(tmp_path, event_cache, client=MagicMock())
-    coordinator = EventCacheWriteCoordinator(logger=MagicMock())
-    coordinator._thread_repairs = ThreadRepairRegistry(failure_backoff_seconds=0.05)
-    conversation_cache.runtime.event_cache_write_coordinator = coordinator
-    config = conversation_cache.runtime.config
-    runtime_paths = conversation_cache.runtime.runtime_paths
-    matrix_id = entity_ids(config, runtime_paths)["code"]
-    resolver = ConversationResolver(
-        ConversationResolverDeps(
-            runtime=conversation_cache.runtime,
-            logger=MagicMock(),
-            runtime_paths=runtime_paths,
-            agent_name="code",
-            matrix_id=matrix_id,
-            conversation_cache=conversation_cache,
-        ),
-    )
-    failed_history = thread_history_result(
-        [],
-        is_full_history=True,
-        diagnostics={
-            THREAD_HISTORY_DEGRADED_DIAGNOSTIC: True,
-            "cache_store_outcome": ThreadCacheReplaceOutcome.HARD_FAILURE.value,
-            "cache_repair_usable": False,
-        },
-    )
-    strict_history = thread_history_result(
-        [
-            ResolvedVisibleMessage.synthetic(
-                sender="@user:localhost",
-                body="Recovered context",
-                event_id="$reply:localhost",
-                thread_id="$thread:localhost",
-            ),
-        ],
-        is_full_history=True,
-        diagnostics={"cache_repair_usable": True},
-    )
-    room = nio.MatrixRoom("!room:localhost", matrix_id.full_id)
-    event = nio.RoomMessageText.from_dict(
-        {
-            "content": {
-                "body": "Continue",
-                "msgtype": "m.text",
-                "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread:localhost"},
-            },
-            "event_id": "$incoming:localhost",
-            "sender": "@user:localhost",
-            "origin_server_ts": 1234567890,
-            "room_id": room.room_id,
-            "type": "m.room.message",
-        },
-    )
-
-    try:
-        with patch(
-            "mindroom.matrix.conversation_cache.fetch_dispatch_thread_history",
-            AsyncMock(side_effect=[failed_history, strict_history]),
-        ) as fetch_dispatch_thread_history:
-            result = await resolver.extract_dispatch_context(room, event)
-    finally:
-        await coordinator.close()
-        await event_cache.close()
-
-    assert result.context.is_thread is True
-    assert result.context.thread_id == "$thread:localhost"
-    assert result.context.thread_history is strict_history
-    assert result.thread_context is not None
-    assert result.thread_context.replay_guard_degraded is False
-    assert fetch_dispatch_thread_history.await_count == 2
-
-
-@pytest.mark.asyncio
 async def test_dispatch_thread_read_uses_single_deadline_after_coordinator_wait(
     tmp_path: Path,
 ) -> None:
@@ -1068,6 +671,7 @@ async def test_dispatch_thread_read_uses_single_deadline_after_coordinator_wait(
 
     coordinator = MagicMock()
     coordinator.wait_for_thread_idle = AsyncMock(return_value=None)
+    coordinator.run_thread_update = AsyncMock(side_effect=AssertionError("dispatch reads should bypass refresh queue"))
     conversation_cache.runtime.event_cache_write_coordinator = coordinator
     _set_dispatch_thread_read_timeout(conversation_cache, 1.0)
 
@@ -1099,6 +703,7 @@ async def test_dispatch_thread_read_uses_single_deadline_after_coordinator_wait(
     assert result.diagnostics["thread_read_source"] == "degraded"
     assert "dispatch_fetch_wait_ms" in result.diagnostics
     coordinator.wait_for_thread_idle.assert_awaited_once()
+    coordinator.run_thread_update.assert_not_awaited()
     fetch_dispatch_thread_snapshot.assert_not_awaited()
 
 
@@ -1112,27 +717,26 @@ async def test_strict_thread_history_uses_no_stale_fetch_without_dispatch_timeou
     client = MagicMock()
     conversation_cache = _conversation_cache_for_thread_reads(tmp_path, event_cache, client=client)
 
-    async def run_thread_repair(
+    async def run_thread_update(
         _room_id: str,
         _thread_id: str,
-        repair: Callable[[], Awaitable[ThreadHistoryResult]],
+        update_coro_factory: Callable[[], Awaitable[ThreadHistoryResult]],
         **_kwargs: object,
     ) -> ThreadHistoryResult:
-        return await repair()
+        return await update_coro_factory()
 
     coordinator = MagicMock()
     coordinator.wait_for_thread_idle = AsyncMock(return_value=None)
-    coordinator.pending_thread_repair_deltas.return_value = ()
-    coordinator.run_thread_repair = AsyncMock(side_effect=run_thread_repair)
+    coordinator.run_thread_update = AsyncMock(side_effect=run_thread_update)
     conversation_cache.runtime.event_cache_write_coordinator = coordinator
     fetched_history = thread_history_result([], is_full_history=True)
 
     try:
         with (
             patch(
-                "mindroom.matrix.conversation_cache.refresh_thread_history_from_source",
+                "mindroom.matrix.conversation_cache.fetch_dispatch_thread_history",
                 AsyncMock(return_value=fetched_history),
-            ) as refresh_thread_history,
+            ) as fetch_dispatch_thread_history,
             patch(
                 "mindroom.matrix.conversation_cache.fetch_thread_history",
                 AsyncMock(side_effect=AssertionError("strict reads must not allow stale fallback")),
@@ -1148,164 +752,9 @@ async def test_strict_thread_history_uses_no_stale_fetch_without_dispatch_timeou
 
     assert result.is_full_history is True
     coordinator.wait_for_thread_idle.assert_awaited_once()
-    coordinator.run_thread_repair.assert_awaited_once()
-    refresh_thread_history.assert_awaited_once()
-    assert refresh_thread_history.await_args.kwargs["allow_stale_fallback"] is False
-
-
-@pytest.mark.asyncio
-async def test_strict_thread_history_bypasses_repair_backoff_without_stalling(tmp_path: Path) -> None:
-    """Strict model-history reads should not absorb retained repair backoff."""
-    event_cache = SqliteEventCache(tmp_path / "event_cache.db")
-    await event_cache.initialize()
-    conversation_cache = _conversation_cache_for_thread_reads(tmp_path, event_cache, client=MagicMock())
-    failed_history = thread_history_result(
-        [],
-        is_full_history=True,
-        diagnostics={
-            "cache_store_outcome": ThreadCacheReplaceOutcome.HARD_FAILURE.value,
-            "cache_repair_usable": False,
-        },
-    )
-    fresh_history = thread_history_result(
-        [ResolvedVisibleMessage.synthetic(sender="@user:localhost", body="Context", event_id="$reply")],
-        is_full_history=True,
-        diagnostics={"cache_repair_usable": True},
-    )
-    coordinator = EventCacheWriteCoordinator(logger=MagicMock())
-    registry = ThreadRepairRegistry(
-        failure_backoff_seconds=30.0,
-        max_failure_backoff_seconds=30.0,
-    )
-    coordinator._thread_repairs = registry
-    conversation_cache.runtime.event_cache_write_coordinator = coordinator
-    repair_key = (event_cache.principal_id, "!room:localhost", "$thread:localhost", True, False)
-    await coordinator.run_thread_repair(
-        "!room:localhost",
-        "$thread:localhost",
-        AsyncMock(return_value=failed_history),
-        coordination_scope=event_cache.principal_id,
-        hydrate_sidecars=True,
-        allow_stale_fallback=False,
-        result_arms_backoff=conversation_cache._thread_repair_result_arms_backoff,
-    )
-    assert registry.retry_after_seconds(repair_key) > 29.0
-
-    try:
-        with patch(
-            "mindroom.matrix.conversation_cache.refresh_thread_history_from_source",
-            AsyncMock(return_value=fresh_history),
-        ) as refresh_thread_history:
-            result = await asyncio.wait_for(
-                conversation_cache.get_strict_thread_history(
-                    "!room:localhost",
-                    "$thread:localhost",
-                    caller_label="dispatch_post_lock_refresh",
-                ),
-                timeout=1.0,
-            )
-    finally:
-        await coordinator.close()
-        await event_cache.close()
-
-    assert result == fresh_history
-    assert result.is_full_history is True
-    assert registry.retry_after_seconds(repair_key) == 0.0
-    refresh_thread_history.assert_awaited_once()
-
-
-@pytest.mark.asyncio
-async def test_dispatch_thread_read_degrades_immediately_on_repair_backoff(tmp_path: Path) -> None:
-    """Dispatch reads must surface repair backoff at once instead of spending their whole budget."""
-    event_cache = SqliteEventCache(tmp_path / "event_cache.db")
-    await event_cache.initialize()
-    conversation_cache = _conversation_cache_for_thread_reads(tmp_path, event_cache, client=MagicMock())
-    coordinator = MagicMock()
-    coordinator.wait_for_thread_idle = AsyncMock(return_value=None)
-    coordinator.run_thread_repair = AsyncMock(side_effect=ThreadRepairBackoffError(30.0))
-    conversation_cache.runtime.event_cache_write_coordinator = coordinator
-
-    try:
-        result = await asyncio.wait_for(
-            conversation_cache.get_dispatch_thread_history(
-                "!room:localhost",
-                "$thread:localhost",
-                caller_label="dispatch_context",
-            ),
-            timeout=1.0,
-        )
-    finally:
-        await event_cache.close()
-
-    assert list(result) == []
-    assert is_thread_history_degraded(result)
-    assert result.diagnostics["thread_read_error"] == "cache_repair_backoff"
-    assert result.diagnostics["cache_repair_backoff_seconds"] == 30.0
-    coordinator.run_thread_repair.assert_awaited_once()
-
-
-@pytest.mark.asyncio
-async def test_stored_repair_releases_replayed_delta_filtered_by_redaction(tmp_path: Path) -> None:
-    """A tombstone-filtered replay entered into a stored snapshot must not invalidate every later read."""
-    event_cache = MagicMock()
-    event_cache.principal_id = "@agent:localhost"
-    event_cache.get_thread_events = AsyncMock(return_value=None)
-    conversation_cache = _conversation_cache_for_thread_reads(tmp_path, event_cache, client=MagicMock())
-    coordinator = MagicMock()
-    coordinator.pending_thread_repair_deltas.return_value = ({"event_id": "$redacted"},)
-
-    async def run_thread_repair(
-        _room_id: str,
-        _thread_id: str,
-        repair: Callable[[], Awaitable[ThreadHistoryResult]],
-        **_kwargs: object,
-    ) -> ThreadHistoryResult:
-        return await repair()
-
-    async def refresh(
-        _client: object,
-        _room_id: str,
-        _thread_id: str,
-        _event_cache: object,
-        *,
-        retained_event_sources: RetainedThreadEventSourceProvider,
-        **_kwargs: object,
-    ) -> ThreadHistoryResult:
-        assert [source["event_id"] for source in retained_event_sources.current_event_sources()] == ["$redacted"]
-        return thread_history_result(
-            [],
-            is_full_history=True,
-            diagnostics={
-                "cache_store_outcome": ThreadCacheReplaceOutcome.STORED.value,
-                "cache_repair_usable": True,
-                "thread_read_source": "homeserver",
-            },
-        )
-
-    coordinator.run_thread_repair = AsyncMock(side_effect=run_thread_repair)
-    conversation_cache.runtime.event_cache_write_coordinator = coordinator
-    conversation_cache._write_cache_ops.invalidate_known_thread = AsyncMock()
-
-    with patch("mindroom.matrix.conversation_cache.refresh_thread_history_from_source", side_effect=refresh):
-        result = await conversation_cache._fetch_thread_from_client(
-            fetch_thread_history,
-            "!room:localhost",
-            "$thread:localhost",
-            caller_label="redaction_repair",
-            coordinator_queue_wait_ms=0.0,
-            wants_full_history=True,
-            allows_stale_fallback=False,
-            bypass_repair_backoff=False,
-        )
-
-    assert result.is_full_history is True
-    coordinator.acknowledge_thread_repair_deltas.assert_called_once_with(
-        "!room:localhost",
-        "$thread:localhost",
-        {"$redacted"},
-        coordination_scope="@agent:localhost",
-    )
-    event_cache.get_thread_events.assert_awaited_once()
+    coordinator.run_thread_update.assert_awaited_once()
+    assert coordinator.run_thread_update.await_args.kwargs["name"] == "matrix_cache_refresh_strict_thread_history"
+    fetch_dispatch_thread_history.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -1315,23 +764,21 @@ async def test_fresh_strict_history_bypasses_inherited_turn_memoization(tmp_path
     await event_cache.initialize()
     conversation_cache = _conversation_cache_for_thread_reads(tmp_path, event_cache, client=MagicMock())
 
-    async def run_thread_repair(
+    async def run_thread_update(
         _room_id: str,
         _thread_id: str,
-        repair: Callable[[], Awaitable[ThreadHistoryResult]],
+        update_coro_factory: Callable[[], Awaitable[ThreadHistoryResult]],
         **_kwargs: object,
     ) -> ThreadHistoryResult:
-        return await repair()
+        return await update_coro_factory()
 
     coordinator = MagicMock()
     coordinator.wait_for_thread_idle = AsyncMock(return_value=None)
-    coordinator.pending_thread_repair_deltas.return_value = ()
-    coordinator.run_thread_repair = AsyncMock(side_effect=run_thread_repair)
+    coordinator.run_thread_update = AsyncMock(side_effect=run_thread_update)
     conversation_cache.runtime.event_cache_write_coordinator = coordinator
     before_delivery = thread_history_result(
         [ResolvedVisibleMessage.synthetic(sender="@user:localhost", body="Question", event_id="$question")],
         is_full_history=True,
-        diagnostics={"cache_repair_usable": True},
     )
     after_delivery = thread_history_result(
         [
@@ -1339,7 +786,6 @@ async def test_fresh_strict_history_bypasses_inherited_turn_memoization(tmp_path
             ResolvedVisibleMessage.synthetic(sender="@bot:localhost", body="Answer", event_id="$answer"),
         ],
         is_full_history=True,
-        diagnostics={"cache_repair_usable": True},
     )
 
     try:
@@ -1365,100 +811,6 @@ async def test_fresh_strict_history_bypasses_inherited_turn_memoization(tmp_path
 
 
 @pytest.mark.asyncio
-async def test_strict_source_refresh_bypasses_usable_cache(
-    tmp_path: Path,
-) -> None:
-    """Explicit source refresh should serialize one Matrix fetch without accepting a cache hit."""
-    event_cache = SqliteEventCache(tmp_path / "event_cache.db")
-    await event_cache.initialize()
-    client = object()
-    conversation_cache = _conversation_cache_for_thread_reads(tmp_path, event_cache, client=client)
-    coordinator = EventCacheWriteCoordinator(logger=conversation_cache.logger)
-    conversation_cache.runtime.event_cache_write_coordinator = coordinator
-    barrier_entered = asyncio.Event()
-    release_write = asyncio.Event()
-    write_started = asyncio.Event()
-    wait_for_thread_idle = coordinator.wait_for_thread_idle
-
-    async def pending_cache_write() -> None:
-        write_started.set()
-        await release_write.wait()
-
-    async def observed_wait_for_thread_idle(
-        room_id: str,
-        thread_id: str,
-        *,
-        ignore_cancelled_room_fences: bool = False,
-        coordination_scope: str,
-    ) -> None:
-        barrier_entered.set()
-        await wait_for_thread_idle(
-            room_id,
-            thread_id,
-            ignore_cancelled_room_fences=ignore_cancelled_room_fences,
-            coordination_scope=coordination_scope,
-        )
-
-    pending_write_task = coordinator.queue_thread_update(
-        "!room:localhost",
-        "$thread:localhost",
-        pending_cache_write,
-        name="matrix_cache_pending_source_refresh_test_write",
-        coordination_scope=event_cache.principal_id,
-    )
-    fetched_history = thread_history_result(
-        [ResolvedVisibleMessage.synthetic(sender="@bot:localhost", body="Target", event_id="$target")],
-        is_full_history=True,
-    )
-
-    try:
-        await asyncio.wait_for(write_started.wait(), timeout=5.0)
-        with (
-            patch.object(
-                coordinator,
-                "wait_for_thread_idle",
-                side_effect=observed_wait_for_thread_idle,
-            ),
-            patch(
-                "mindroom.matrix.conversation_cache.fetch_dispatch_thread_history",
-                AsyncMock(side_effect=AssertionError("source refresh must bypass cache selection")),
-            ) as cache_thread_history,
-            patch(
-                "mindroom.matrix.conversation_cache.refresh_thread_history_from_source",
-                AsyncMock(return_value=fetched_history),
-            ) as refresh_thread_history,
-        ):
-            read_task = asyncio.create_task(
-                conversation_cache.refresh_strict_thread_history_from_source(
-                    "!room:localhost",
-                    "$thread:localhost",
-                    caller_label="startup_auto_resume_freshness",
-                ),
-            )
-            await asyncio.wait_for(barrier_entered.wait(), timeout=5.0)
-            refresh_thread_history.assert_not_awaited()
-            release_write.set()
-            result = await asyncio.wait_for(read_task, timeout=5.0)
-    finally:
-        release_write.set()
-        await pending_write_task
-        await coordinator.close()
-        await event_cache.close()
-
-    assert [message.event_id for message in result] == ["$target"]
-    assert result.is_full_history is True
-    refresh_thread_history.assert_awaited_once()
-    assert refresh_thread_history.await_args.args[:4] == (
-        client,
-        "!room:localhost",
-        "$thread:localhost",
-        event_cache,
-    )
-    assert refresh_thread_history.await_args.kwargs["allow_stale_fallback"] is False
-    cache_thread_history.assert_not_awaited()
-
-
-@pytest.mark.asyncio
 async def test_strict_thread_history_propagates_cache_coordinator_timeout(
     tmp_path: Path,
 ) -> None:
@@ -1470,7 +822,7 @@ async def test_strict_thread_history_propagates_cache_coordinator_timeout(
 
     coordinator = MagicMock()
     coordinator.wait_for_thread_idle = AsyncMock(side_effect=TimeoutError("strict wait timed out"))
-    coordinator.run_thread_repair = AsyncMock(side_effect=AssertionError("strict read should not fetch after timeout"))
+    coordinator.run_thread_update = AsyncMock(side_effect=AssertionError("strict read should not fetch after timeout"))
     conversation_cache.runtime.event_cache_write_coordinator = coordinator
 
     try:
@@ -1484,45 +836,42 @@ async def test_strict_thread_history_propagates_cache_coordinator_timeout(
         await event_cache.close()
 
     coordinator.wait_for_thread_idle.assert_awaited_once()
-    coordinator.run_thread_repair.assert_not_awaited()
+    coordinator.run_thread_update.assert_not_awaited()
 
 
 @pytest.mark.asyncio
-async def test_conversation_cache_startup_prewarm_bulk_refresh_preserves_metadata(
+async def test_conversation_cache_startup_prewarm_fetch_preserves_fixed_metadata(
     tmp_path: Path,
 ) -> None:
-    """Startup prewarm should call the bulk room refresher with fixed metadata."""
+    """Startup prewarm should bypass read coordination while keeping strict fetch metadata."""
     event_cache = SqliteEventCache(tmp_path / "event_cache.db")
     await event_cache.initialize()
     client = MagicMock()
     conversation_cache = _conversation_cache_for_thread_reads(tmp_path, event_cache, client=client)
-    stats = BulkThreadRefreshStats(
-        requested_threads=1,
-        usable_threads=1,
-        missing_root_ids=frozenset(),
-        room_scan_pages=1,
-        scanned_event_count=2,
-    )
-    bulk_refresh_room_thread_histories = AsyncMock(return_value=stats)
+    fetch_dispatch_thread_snapshot = AsyncMock(return_value=thread_history_result([], is_full_history=False))
 
     try:
-        with patch(
-            "mindroom.matrix.conversation_cache.bulk_refresh_room_thread_histories",
-            bulk_refresh_room_thread_histories,
+        with (
+            patch(
+                "mindroom.matrix.conversation_cache.fetch_dispatch_thread_snapshot",
+                fetch_dispatch_thread_snapshot,
+            ),
+            patch("mindroom.matrix.conversation_cache.time.time", return_value=222.0),
         ):
-            result = await conversation_cache._bulk_refresh_startup_threads(
+            await conversation_cache._refresh_dispatch_thread_snapshot_for_startup_prewarm(
                 "!room:localhost",
-                ["$thread:localhost"],
+                "$thread:localhost",
             )
 
-        assert result == stats
-        bulk_refresh_room_thread_histories.assert_awaited_once_with(
+        fetch_dispatch_thread_snapshot.assert_awaited_once_with(
             client,
             "!room:localhost",
-            event_cache,
-            thread_root_ids=["$thread:localhost"],
+            "$thread:localhost",
+            event_cache=event_cache,
+            cache_write_guard_started_at=222.0,
+            trusted_sender_ids=conversation_cache._trusted_sender_ids(),
             caller_label="startup_thread_prewarm",
-            max_scan_pages=20,
+            coordinator_queue_wait_ms=0.0,
         )
     finally:
         await event_cache.close()
@@ -1531,14 +880,11 @@ async def test_conversation_cache_startup_prewarm_bulk_refresh_preserves_metadat
 @pytest.mark.asyncio
 async def test_thread_snapshot_storage_exposes_direct_cache_state_reads(tmp_path: Path) -> None:
     """Thread snapshot ownership should expose joined thread and room cache state."""
-    db, _maintenance_report, _generation = await event_cache_module._initialize_event_cache_db(
-        tmp_path / "event_cache.db",
-    )
+    db = await event_cache_module._initialize_event_cache_db(tmp_path / "event_cache.db")
 
     try:
         await sqlite_event_cache_threads._replace_thread_locked(
             db,
-            principal_id="__mindroom_default_principal__",
             room_id="!room:localhost",
             thread_id="$thread_root",
             events=[
@@ -1555,14 +901,12 @@ async def test_thread_snapshot_storage_exposes_direct_cache_state_reads(tmp_path
         with patch("mindroom.matrix.cache.sqlite_event_cache_threads.time.time", return_value=200.0):
             await sqlite_event_cache_threads.mark_thread_stale_locked(
                 db,
-                principal_id="__mindroom_default_principal__",
                 room_id="!room:localhost",
                 thread_id="$thread_root",
                 reason="thread_stale",
             )
             await sqlite_event_cache_threads.mark_room_stale_locked(
                 db,
-                principal_id="__mindroom_default_principal__",
                 room_id="!room:localhost",
                 reason="room_stale",
             )
@@ -1570,7 +914,6 @@ async def test_thread_snapshot_storage_exposes_direct_cache_state_reads(tmp_path
 
         state = await sqlite_event_cache_threads.load_thread_cache_state(
             db,
-            principal_id="__mindroom_default_principal__",
             room_id="!room:localhost",
             thread_id="$thread_root",
         )
@@ -1589,36 +932,30 @@ async def test_thread_snapshot_storage_exposes_direct_cache_state_reads(tmp_path
 @pytest.mark.asyncio
 async def test_sqlite_stale_markers_are_monotonic(tmp_path: Path) -> None:
     """Older stale markers should not downgrade newer thread or room invalidations."""
-    db, _maintenance_report, _generation = await event_cache_module._initialize_event_cache_db(
-        tmp_path / "event_cache.db",
-    )
+    db = await event_cache_module._initialize_event_cache_db(tmp_path / "event_cache.db")
 
     try:
         with patch("mindroom.matrix.cache.sqlite_event_cache_threads.time.time", return_value=200.0):
             await sqlite_event_cache_threads.mark_thread_stale_locked(
                 db,
-                principal_id="__mindroom_default_principal__",
                 room_id="!room:localhost",
                 thread_id="$thread_root",
                 reason="newer_thread_marker",
             )
             await sqlite_event_cache_threads.mark_room_stale_locked(
                 db,
-                principal_id="__mindroom_default_principal__",
                 room_id="!room:localhost",
                 reason="newer_room_marker",
             )
         with patch("mindroom.matrix.cache.sqlite_event_cache_threads.time.time", return_value=100.0):
             await sqlite_event_cache_threads.mark_thread_stale_locked(
                 db,
-                principal_id="__mindroom_default_principal__",
                 room_id="!room:localhost",
                 thread_id="$thread_root",
                 reason="older_thread_marker",
             )
             await sqlite_event_cache_threads.mark_room_stale_locked(
                 db,
-                principal_id="__mindroom_default_principal__",
                 room_id="!room:localhost",
                 reason="older_room_marker",
             )
@@ -1626,7 +963,6 @@ async def test_sqlite_stale_markers_are_monotonic(tmp_path: Path) -> None:
 
         state = await sqlite_event_cache_threads.load_thread_cache_state(
             db,
-            principal_id="__mindroom_default_principal__",
             room_id="!room:localhost",
             thread_id="$thread_root",
         )
@@ -1725,7 +1061,6 @@ async def test_replace_thread_if_not_newer_refuses_after_midflight_invalidation(
             "!room:localhost",
             "$thread_root",
             [root_source],
-            expected_membership_epoch=await cache.room_membership_epoch("!room:localhost"),
             fetch_started_at=150.0,
             validated_at=300.0,
         )
@@ -1735,7 +1070,6 @@ async def test_replace_thread_if_not_newer_refuses_after_midflight_invalidation(
             "!room:localhost",
             "$thread_root",
             [root_source],
-            expected_membership_epoch=await cache.room_membership_epoch("!room:localhost"),
             fetch_started_at=250.0,
             validated_at=300.0,
         )
@@ -1743,12 +1077,12 @@ async def test_replace_thread_if_not_newer_refuses_after_midflight_invalidation(
     finally:
         await cache.close()
 
-    assert replaced_behind_marker is ThreadCacheReplaceOutcome.INVALIDATED
+    assert replaced_behind_marker is False
     assert state_after_refusal is not None
     assert state_after_refusal.invalidated_at == 200.0
     assert thread_cache_rejection_reason(state_after_refusal) == "thread_invalidated_after_validation"
 
-    assert replaced_after_marker is ThreadCacheReplaceOutcome.STORED
+    assert replaced_after_marker is True
     assert state_after_replace is not None
     # The stored validation time is clamped to fetch start, so an invalidation landing during the
     # fetch still outranks this snapshot at read time even if it slipped past the replace guard.
@@ -1779,7 +1113,6 @@ async def test_replace_thread_if_not_newer_refuses_after_midflight_room_invalida
             "!room:localhost",
             "$thread_root",
             [root_source],
-            expected_membership_epoch=await cache.room_membership_epoch("!room:localhost"),
             fetch_started_at=150.0,
             validated_at=300.0,
         )
@@ -1787,7 +1120,7 @@ async def test_replace_thread_if_not_newer_refuses_after_midflight_room_invalida
     finally:
         await cache.close()
 
-    assert replaced is ThreadCacheReplaceOutcome.INVALIDATED
+    assert replaced is False
     assert state is not None
     assert state.room_invalidated_at == 200.0
     assert thread_cache_rejection_reason(state) == "room_invalidated_after_validation"
@@ -1806,43 +1139,26 @@ async def test_incremental_revalidation_requires_incremental_invalidation_reason
         "content": {"body": "Root message", "msgtype": "m.text"},
     }
 
-    async def append(event_id: str) -> ThreadAppendOutcome:
-        return await cache.apply_thread_mutation_append(
-            "!room:localhost",
-            "$thread_root",
-            _clear_payload(event_id, thread_root_id="$thread_root", origin_server_ts=2000),
-            append_failed_reason="live_append_failed",
-        )
-
     try:
         await _replace_thread(cache, "!room:localhost", "$thread_root", [root_source], validated_at=100.0)
 
-        not_invalidated = await append("$still-valid")
+        not_invalidated = await cache.revalidate_thread_after_incremental_update("!room:localhost", "$thread_root")
 
         await cache.mark_thread_stale("!room:localhost", "$thread_root", reason="live_append_failed")
-        non_incremental = await append("$after-non-incremental")
+        non_incremental = await cache.revalidate_thread_after_incremental_update("!room:localhost", "$thread_root")
         state_after_non_incremental = await cache.get_thread_cache_state("!room:localhost", "$thread_root")
 
         await cache.mark_thread_stale("!room:localhost", "$thread_root", reason="live_thread_mutation")
-        weakened = await append("$after-weakening-attempt")
-        state_after_weakening_attempt = await cache.get_thread_cache_state("!room:localhost", "$thread_root")
-
-        await _replace_thread(cache, "!room:localhost", "$thread_root", [root_source])
-        await cache.mark_thread_stale("!room:localhost", "$thread_root", reason="live_thread_mutation")
-        incremental = await append("$after-incremental")
+        incremental = await cache.revalidate_thread_after_incremental_update("!room:localhost", "$thread_root")
         state_after_incremental = await cache.get_thread_cache_state("!room:localhost", "$thread_root")
     finally:
         await cache.close()
 
-    assert not_invalidated is ThreadAppendOutcome.APPENDED
-    assert non_incremental is ThreadAppendOutcome.APPENDED_STALE
+    assert not_invalidated is False
+    assert non_incremental is False
     assert state_after_non_incremental is not None
     assert thread_cache_rejection_reason(state_after_non_incremental) == "thread_invalidated_after_validation"
-    assert weakened is ThreadAppendOutcome.APPENDED_STALE
-    assert state_after_weakening_attempt is not None
-    assert state_after_weakening_attempt.invalidation_reason == "live_append_failed"
-    assert thread_cache_rejection_reason(state_after_weakening_attempt) == "thread_invalidated_after_validation"
-    assert incremental is ThreadAppendOutcome.APPENDED
+    assert incremental is True
     assert state_after_incremental is not None
     assert thread_cache_rejection_reason(state_after_incremental) is None
 
@@ -2139,370 +1455,137 @@ async def test_individual_event_cache_store_and_retrieve(event_cache: Conversati
     assert missing_event is None
 
 
-def _clear_payload(
-    event_id: str,
-    *,
-    body: str = "clear",
-    thread_root_id: str | None = None,
-    edit_of: str | None = None,
-    origin_server_ts: int = 1000,
-) -> dict[str, object]:
-    content: dict[str, object] = {"body": body, "msgtype": "m.text"}
-    if thread_root_id is not None:
-        content["m.relates_to"] = {"rel_type": "m.thread", "event_id": thread_root_id}
-    if edit_of is not None:
-        content["body"] = f"* {body}"
-        content["m.new_content"] = {"body": body, "msgtype": "m.text"}
-        content["m.relates_to"] = {"rel_type": "m.replace", "event_id": edit_of}
-    return {
-        "event_id": event_id,
-        "sender": "@user:localhost",
-        "origin_server_ts": origin_server_ts,
-        "type": "m.room.message",
-        "content": content,
-    }
+def test_event_cache_room_lock_cache_evicts_idle_rooms(tmp_path: Path) -> None:
+    """Idle per-room locks should be evicted instead of growing without bound."""
+    runtime = event_cache_module._SqliteEventCacheRuntime(tmp_path / "event_cache.db")
 
+    for index in range(event_cache_module._MAX_CACHED_ROOM_LOCKS + 8):
+        _ = runtime.room_lock_entry(f"!room-{index}:localhost").lock
 
-def _opaque_payload(
-    event_id: str,
-    *,
-    thread_root_id: str | None = None,
-    origin_server_ts: int = 1000,
-) -> dict[str, object]:
-    content: dict[str, object] = {
-        "algorithm": "m.megolm.v1.aes-sha2",
-        "ciphertext": "opaque ciphertext",
-        "device_id": "DEVICE",
-        "sender_key": "sender-key",
-        "session_id": "session",
-    }
-    if thread_root_id is not None:
-        content["m.relates_to"] = {"rel_type": "m.thread", "event_id": thread_root_id}
-    return {
-        "event_id": event_id,
-        "sender": "@user:localhost",
-        "origin_server_ts": origin_server_ts,
-        "type": "m.room.encrypted",
-        "content": content,
-    }
+    assert len(runtime._room_locks) == event_cache_module._MAX_CACHED_ROOM_LOCKS
+    assert "!room-0:localhost" not in runtime._room_locks
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("arrival_order", [("clear", "opaque"), ("opaque", "clear")])
-async def test_point_payload_upgrade_is_monotonic_across_arrival_orders(
-    event_cache: ConversationEventCache,
-    arrival_order: tuple[str, str],
-) -> None:
-    """Opaque ciphertext must never replace a decrypted point payload in either arrival order.
+async def test_event_cache_room_lock_cache_keeps_contended_room_waiters(tmp_path: Path) -> None:
+    """Queued waiters must keep a room lock alive across pruning churn."""
+    runtime = event_cache_module._SqliteEventCacheRuntime(tmp_path / "event_cache.db")
+    room_id = "!busy:localhost"
+    holder_entered = asyncio.Event()
+    release_holder = asyncio.Event()
+    pruned_after_release = asyncio.Event()
+    allow_waiter_exit = asyncio.Event()
+    waiter_acquired = asyncio.Event()
+    post_release_snapshot: dict[str, object] = {}
 
-    The divergent thread roots make index derivation observable: a refused payload must
-    contribute no thread index rows, so the index always describes the accepted payload.
-    """
-    room_id = "!room:localhost"
-    event_id = "$mixed:localhost"
-    payloads = {
-        "clear": _clear_payload(event_id, body="decrypted", thread_root_id="$clear-root:localhost"),
-        "opaque": _opaque_payload(event_id, thread_root_id="$opaque-root:localhost"),
+    async def first_holder() -> None:
+        async with runtime.acquire_room_lock(room_id, operation="first_holder"):
+            holder_entered.set()
+            await release_holder.wait()
+        for index in range(event_cache_module._MAX_CACHED_ROOM_LOCKS + 8):
+            _ = runtime.room_lock_entry(f"!churn-{index}:localhost").lock
+        entry = runtime._room_locks.get(room_id)
+        post_release_snapshot["room_present"] = entry is not None
+        post_release_snapshot["active_users"] = entry.active_users if entry is not None else None
+        post_release_snapshot["lock_locked"] = entry.lock.locked() if entry is not None else None
+        pruned_after_release.set()
+
+    async def queued_waiter() -> None:
+        async with runtime.acquire_room_lock(room_id, operation="queued_waiter"):
+            waiter_acquired.set()
+            await allow_waiter_exit.wait()
+
+    async def wait_for_waiter_registration() -> None:
+        loop = asyncio.get_running_loop()
+        waiter_registered = loop.create_future()
+
+        def check_waiter_registration() -> None:
+            if runtime._room_locks[room_id].active_users >= 2:
+                waiter_registered.set_result(None)
+                return
+            loop.call_soon(check_waiter_registration)
+
+        loop.call_soon(check_waiter_registration)
+        await asyncio.wait_for(waiter_registered, timeout=1.0)
+
+    holder_task = asyncio.create_task(first_holder())
+    waiter_task = asyncio.create_task(queued_waiter())
+
+    await asyncio.wait_for(holder_entered.wait(), timeout=1.0)
+    await wait_for_waiter_registration()
+
+    busy_lock = runtime.room_lock_entry(room_id).lock
+    release_holder.set()
+    await asyncio.wait_for(pruned_after_release.wait(), timeout=1.0)
+
+    assert post_release_snapshot == {
+        "room_present": True,
+        "active_users": 1,
+        "lock_locked": False,
     }
+    assert runtime.room_lock_entry(room_id).lock is busy_lock
 
-    for payload_kind in arrival_order:
-        await event_cache.store_event(event_id, room_id, payloads[payload_kind])
-
-    cached_event = await event_cache.get_event(room_id, event_id)
-    assert cached_event is not None
-    assert cached_event["type"] == "m.room.message"
-    assert cached_event["content"]["body"] == "decrypted"
-    assert await event_cache.get_thread_id_for_event(room_id, event_id) == "$clear-root:localhost"
-    assert await event_cache.get_thread_id_for_event(room_id, "$clear-root:localhost") == "$clear-root:localhost"
-    if arrival_order == ("clear", "opaque"):
-        assert await event_cache.get_thread_id_for_event(room_id, "$opaque-root:localhost") is None
+    await asyncio.wait_for(waiter_acquired.wait(), timeout=1.0)
+    allow_waiter_exit.set()
+    await asyncio.gather(holder_task, waiter_task)
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "batch_order",
-    [
-        ("clear", "opaque"),
-        ("opaque", "clear"),
-        ("opaque", "clear", "opaque"),
-    ],
-)
-async def test_duplicate_ids_in_one_batch_converge_on_clear_payload(
-    event_cache: ConversationEventCache,
-    batch_order: tuple[str, ...],
-) -> None:
-    """Duplicate event IDs inside one batch must converge on the decrypted payload."""
-    room_id = "!room:localhost"
-    event_id = "$duplicated:localhost"
-    thread_root_id = "$root:localhost"
-    payloads = {
-        "clear": _clear_payload(event_id, body="decrypted", thread_root_id=thread_root_id),
-        "opaque": _opaque_payload(event_id, thread_root_id=thread_root_id),
-    }
+async def test_event_cache_room_lock_cache_keeps_new_active_room_at_capacity(tmp_path: Path) -> None:
+    """A newly acquired room lock must survive pruning when the cache is already full of active rooms."""
+    runtime = event_cache_module._SqliteEventCacheRuntime(tmp_path / "event_cache.db")
+    release_active_rooms = asyncio.Event()
+    active_rooms_registered = asyncio.Event()
+    release_new_room_holder = asyncio.Event()
+    new_room_holder_entered = asyncio.Event()
+    new_room_waiter_acquired = asyncio.Event()
+    active_room_count = 0
+    new_room_id = "!new-room:localhost"
 
-    await event_cache.store_events_batch(
-        [(event_id, room_id, payloads[payload_kind]) for payload_kind in batch_order],
-    )
+    async def hold_active_room(room_id: str) -> None:
+        nonlocal active_room_count
+        async with runtime.acquire_room_lock(room_id, operation="hold_active_room"):
+            active_room_count += 1
+            if active_room_count == event_cache_module._MAX_CACHED_ROOM_LOCKS:
+                active_rooms_registered.set()
+            await release_active_rooms.wait()
 
-    cached_event = await event_cache.get_event(room_id, event_id)
-    assert cached_event is not None
-    assert cached_event["type"] == "m.room.message"
-    assert cached_event["content"]["body"] == "decrypted"
-    assert await event_cache.get_thread_id_for_event(room_id, event_id) == thread_root_id
-    assert await event_cache.get_thread_id_for_event(room_id, thread_root_id) == thread_root_id
+    async def hold_new_room() -> None:
+        async with runtime.acquire_room_lock(new_room_id, operation="hold_new_room"):
+            new_room_holder_entered.set()
+            await release_new_room_holder.wait()
 
+    async def wait_for_new_room() -> None:
+        async with runtime.acquire_room_lock(new_room_id, operation="wait_for_new_room"):
+            new_room_waiter_acquired.set()
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize("arrival_order", [("clear", "opaque"), ("opaque", "clear")])
-async def test_separate_cache_clients_cannot_downgrade_decrypted_payload(
-    event_cache_factory: Callable[[], ConversationEventCache],
-    arrival_order: tuple[str, str],
-) -> None:
-    """Two cache clients on one backing store must converge on the decrypted payload."""
-    room_id = "!room:localhost"
-    event_id = "$shared:localhost"
-    thread_root_id = "$root:localhost"
-    decrypting_client = event_cache_factory()
-    await decrypting_client.initialize()
+    active_room_tasks = [
+        asyncio.create_task(hold_active_room(f"!active-room-{index}:localhost"))
+        for index in range(event_cache_module._MAX_CACHED_ROOM_LOCKS)
+    ]
+    new_room_holder_task: asyncio.Task[None] | None = None
+    new_room_waiter_task: asyncio.Task[None] | None = None
     try:
-        keyless_client = event_cache_factory()
-        await keyless_client.initialize()
-        try:
-            writers = {"clear": decrypting_client, "opaque": keyless_client}
-            payloads = {
-                "clear": _clear_payload(event_id, body="decrypted", thread_root_id=thread_root_id),
-                "opaque": _opaque_payload(event_id, thread_root_id=thread_root_id),
-            }
-            for payload_kind in arrival_order:
-                await writers[payload_kind].store_event(event_id, room_id, payloads[payload_kind])
-            cached_by_decrypting = await decrypting_client.get_event(room_id, event_id)
-            cached_by_keyless = await keyless_client.get_event(room_id, event_id)
-        finally:
-            await keyless_client.close()
+        await asyncio.wait_for(active_rooms_registered.wait(), timeout=1.0)
+
+        new_room_holder_task = asyncio.create_task(hold_new_room())
+        await asyncio.wait_for(new_room_holder_entered.wait(), timeout=1.0)
+
+        new_room_waiter_task = asyncio.create_task(wait_for_new_room())
+        await asyncio.sleep(0)
+
+        assert new_room_waiter_acquired.is_set() is False
+
+        release_new_room_holder.set()
+        await asyncio.wait_for(new_room_waiter_acquired.wait(), timeout=1.0)
     finally:
-        await decrypting_client.close()
-
-    for cached_event in (cached_by_decrypting, cached_by_keyless):
-        assert cached_event is not None
-        assert cached_event["type"] == "m.room.message"
-        assert cached_event["content"]["body"] == "decrypted"
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("arrival_order", [("clear", "opaque"), ("opaque", "clear")])
-async def test_thread_append_preserves_decrypted_payload_across_arrival_orders(
-    event_cache: ConversationEventCache,
-    arrival_order: tuple[str, str],
-) -> None:
-    """Incremental appends must never downgrade an already-decrypted thread snapshot row."""
-    room_id = "!room:localhost"
-    thread_id = "$root:localhost"
-    child_event_id = "$child:localhost"
-    await _replace_thread(event_cache, room_id, thread_id, [_clear_payload(thread_id, body="root")])
-    payloads = {
-        "clear": _clear_payload(
-            child_event_id,
-            body="decrypted child",
-            thread_root_id=thread_id,
-            origin_server_ts=2000,
-        ),
-        "opaque": _opaque_payload(child_event_id, thread_root_id=thread_id, origin_server_ts=2000),
-    }
-
-    for payload_kind in arrival_order:
-        outcome = await event_cache.apply_thread_mutation_append(
-            room_id,
-            thread_id,
-            payloads[payload_kind],
-            append_failed_reason="live_append_failed",
+        release_new_room_holder.set()
+        release_active_rooms.set()
+        await asyncio.gather(
+            *active_room_tasks,
+            *(task for task in (new_room_holder_task, new_room_waiter_task) if task is not None),
+            return_exceptions=True,
         )
-        assert outcome is ThreadAppendOutcome.APPENDED
-
-    thread_events = await event_cache.get_thread_events(room_id, thread_id)
-    assert thread_events is not None
-    cached_child = next(event for event in thread_events if event["event_id"] == child_event_id)
-    assert cached_child["type"] == "m.room.message"
-    assert cached_child["content"]["body"] == "decrypted child"
-    cached_event = await event_cache.get_event(room_id, child_event_id)
-    assert cached_event is not None
-    assert cached_event["type"] == "m.room.message"
-    assert cached_event["content"]["body"] == "decrypted child"
-
-
-@pytest.mark.asyncio
-async def test_thread_replacement_preserves_decrypted_payload(
-    event_cache: ConversationEventCache,
-) -> None:
-    """A full snapshot replacement must not bypass the clear-payload invariant."""
-    room_id = "!room:localhost"
-    thread_id = "$root:localhost"
-    await _replace_thread(
-        event_cache,
-        room_id,
-        thread_id,
-        [_clear_payload(thread_id, body="decrypted root")],
-    )
-
-    await _replace_thread(
-        event_cache,
-        room_id,
-        thread_id,
-        [_opaque_payload(thread_id)],
-    )
-
-    cached_event = await event_cache.get_event(room_id, thread_id)
-    thread_events = await event_cache.get_thread_events(room_id, thread_id)
-    assert cached_event is not None
-    assert cached_event["type"] == "m.room.message"
-    assert cached_event["content"]["body"] == "decrypted root"
-    assert thread_events is not None
-    assert len(thread_events) == 1
-    assert thread_events[0]["type"] == "m.room.message"
-    assert thread_events[0]["content"]["body"] == "decrypted root"
-
-
-@pytest.mark.asyncio
-async def test_refused_opaque_thread_replacement_preserves_mxc_plaintext(
-    event_cache: ConversationEventCache,
-) -> None:
-    """A refused ciphertext snapshot must retain the clear payload's sidecar ownership."""
-    room_id = "!room:localhost"
-    thread_id = "$root:localhost"
-    mxc_url = "mxc://server/decrypted-sidecar"
-    clear_event = _clear_payload(thread_id, body="decrypted root")
-    clear_event["content"] = {
-        "body": "preview",
-        "msgtype": "m.file",
-        "url": mxc_url,
-        "io.mindroom.long_text": {
-            "version": 2,
-            "encoding": "matrix_event_content_json",
-        },
-    }
-    await _replace_thread(event_cache, room_id, thread_id, [clear_event])
-    assert await event_cache.store_mxc_text(room_id, thread_id, mxc_url, "decrypted sidecar")
-
-    await _replace_thread(
-        event_cache,
-        room_id,
-        thread_id,
-        [_opaque_payload(thread_id)],
-    )
-
-    assert await event_cache.get_mxc_text(room_id, thread_id, mxc_url) == "decrypted sidecar"
-
-
-@pytest.mark.asyncio
-async def test_refused_opaque_snapshot_still_records_explicit_thread_membership(
-    event_cache: ConversationEventCache,
-) -> None:
-    """Snapshot membership must be indexed even when its opaque payload is refused."""
-    room_id = "!room:localhost"
-    thread_id = "$root:localhost"
-    await event_cache.store_event(
-        thread_id,
-        room_id,
-        _clear_payload(thread_id, body="decrypted root"),
-    )
-    assert await event_cache.get_thread_id_for_event(room_id, thread_id) is None
-
-    await _replace_thread(
-        event_cache,
-        room_id,
-        thread_id,
-        [_opaque_payload(thread_id)],
-    )
-
-    cached_event = await event_cache.get_event(room_id, thread_id)
-    assert cached_event is not None
-    assert cached_event["type"] == "m.room.message"
-    assert cached_event["content"]["body"] == "decrypted root"
-    assert await event_cache.get_thread_id_for_event(room_id, thread_id) == thread_id
-
-
-@pytest.mark.asyncio
-async def test_refused_opaque_write_keeps_latest_edit_join_readable(
-    event_cache: ConversationEventCache,
-) -> None:
-    """A keyless client's ciphertext for an indexed edit must not corrupt latest-edit reads."""
-    room_id = "!room:localhost"
-    original_event_id = "$original:localhost"
-    edit_event_id = "$edit:localhost"
-    await event_cache.store_event(
-        original_event_id,
-        room_id,
-        _clear_payload(original_event_id, body="original"),
-    )
-    await event_cache.store_event(
-        edit_event_id,
-        room_id,
-        _clear_payload(edit_event_id, body="edited", edit_of=original_event_id, origin_server_ts=2000),
-    )
-
-    await event_cache.store_event(edit_event_id, room_id, _opaque_payload(edit_event_id, origin_server_ts=2000))
-
-    latest_edit = await event_cache.get_latest_edit(room_id, original_event_id)
-    assert latest_edit is not None
-    assert latest_edit["type"] == "m.room.message"
-    assert latest_edit["content"]["m.new_content"]["body"] == "edited"
-
-
-@pytest.mark.asyncio
-async def test_redaction_tombstone_survives_clear_and_opaque_rewrites(
-    event_cache: ConversationEventCache,
-) -> None:
-    """The monotonic upsert must not resurrect durably redacted events for any payload quality."""
-    room_id = "!room:localhost"
-    event_id = "$redacted:localhost"
-    await event_cache.store_event(event_id, room_id, _clear_payload(event_id))
-    assert await event_cache.redact_event(room_id, event_id)
-
-    await event_cache.store_event(event_id, room_id, _opaque_payload(event_id))
-    await event_cache.store_event(event_id, room_id, _clear_payload(event_id))
-
-    assert await event_cache.get_event(room_id, event_id) is None
-
-
-@pytest.mark.asyncio
-async def test_accepted_clear_rewrite_still_moves_thread_index_row(
-    event_cache: ConversationEventCache,
-) -> None:
-    """Accepted clear rewrites must keep last-wins thread index moves working."""
-    room_id = "!room:localhost"
-    event_id = "$moved:localhost"
-    await event_cache.store_events_batch(
-        [(event_id, room_id, _clear_payload(event_id, thread_root_id="$root-a:localhost"))],
-    )
-    assert await event_cache.get_thread_id_for_event(room_id, event_id) == "$root-a:localhost"
-
-    await event_cache.store_events_batch(
-        [(event_id, room_id, _clear_payload(event_id, thread_root_id="$root-b:localhost"))],
-    )
-
-    assert await event_cache.get_thread_id_for_event(room_id, event_id) == "$root-b:localhost"
-
-
-@pytest.mark.asyncio
-async def test_opaque_payload_remains_retained_and_refreshable(
-    event_cache: ConversationEventCache,
-) -> None:
-    """Opaque events must stay retained and refreshable until clear content improves them."""
-    room_id = "!room:localhost"
-    event_id = "$opaque-only:localhost"
-    thread_root_id = "$root:localhost"
-    await event_cache.store_event(event_id, room_id, _opaque_payload(event_id, thread_root_id=thread_root_id))
-
-    cached_event = await event_cache.get_event(room_id, event_id)
-    assert cached_event is not None
-    assert cached_event["type"] == "m.room.encrypted"
-    assert await event_cache.get_thread_id_for_event(room_id, event_id) == thread_root_id
-    assert await event_cache.get_thread_id_for_event(room_id, thread_root_id) == thread_root_id
-
-    await event_cache.store_event(event_id, room_id, _opaque_payload(event_id, thread_root_id=thread_root_id))
-
-    refreshed_event = await event_cache.get_event(room_id, event_id)
-    assert refreshed_event is not None
-    assert refreshed_event["type"] == "m.room.encrypted"
 
 
 @pytest.mark.asyncio
@@ -2528,18 +1611,11 @@ async def test_event_cache_close_waits_for_in_flight_operation(tmp_path: Path) -
     async def blocking_load_event(
         db: object,
         *,
-        principal_id: str,
-        room_id: str,
         event_id: str,
     ) -> dict[str, object] | None:
         operation_started.set()
         await allow_operation_finish.wait()
-        return await original_load_event(
-            db,
-            principal_id=principal_id,
-            room_id=room_id,
-            event_id=event_id,
-        )
+        return await original_load_event(db, event_id=event_id)
 
     try:
         with patch(
@@ -2718,63 +1794,6 @@ async def test_cached_room_get_event_cache_hit_avoids_network_call(event_cache: 
     assert response.event.event_id == "$reply"
     assert response.event.body == "Cached reply"
     client.room_get_event.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_matrix_conversation_lookup_fill_cannot_cross_leave_and_rejoin(tmp_path: Path) -> None:
-    """A point fetch begun before departure must not repopulate the rejoined cache."""
-    db_path = tmp_path / "event_cache.db"
-    principal_id = "@alice:localhost"
-    room_id = "!room:localhost"
-    event_id = "$lookup"
-    lookup_root = SqliteEventCache(db_path)
-    membership_root = SqliteEventCache(db_path)
-    await lookup_root.initialize()
-    await membership_root.initialize()
-    lookup_cache = lookup_root.for_principal(principal_id)
-    membership_cache = membership_root.for_principal(principal_id)
-    event = _make_text_event(
-        event_id=event_id,
-        sender="@agent:localhost",
-        body="Fetched",
-        server_timestamp=1,
-        source_content={"body": "Fetched"},
-    )
-    fetch_started = asyncio.Event()
-    release_fetch = asyncio.Event()
-
-    async def room_get_event(_room_id: str, _event_id: str) -> MagicMock:
-        fetch_started.set()
-        await release_fetch.wait()
-        return _make_room_get_event_response(event)
-
-    client = MagicMock()
-    client.room_get_event = AsyncMock(side_effect=room_get_event)
-    conversation_cache = _conversation_cache_for_thread_reads(tmp_path, lookup_cache, client=client)
-    conversation_cache.runtime.event_cache_write_coordinator = EventCacheWriteCoordinator(
-        logger=MagicMock(),
-        background_task_owner=conversation_cache.runtime,
-    )
-    lookup_task = asyncio.create_task(conversation_cache.get_event(room_id, event_id))
-    try:
-        await fetch_started.wait()
-        departure_epoch = membership_cache.mark_room_departed(room_id)
-        await membership_cache.purge_room(room_id)
-        await membership_cache.mark_room_joined(
-            room_id,
-            expected_departure_epoch=departure_epoch,
-        )
-        release_fetch.set()
-
-        response = await lookup_task
-        assert isinstance(response, nio.RoomGetEventResponse)
-        assert await lookup_cache.get_event(room_id, event_id) is None
-    finally:
-        release_fetch.set()
-        if not lookup_task.done():
-            await lookup_task
-        await membership_root.close()
-        await lookup_root.close()
 
 
 @pytest.mark.asyncio
@@ -3626,41 +2645,16 @@ async def test_mxc_text_cache_round_trips_across_event_cache_reopen(
     """Durable MXC text rows should survive closing and reopening the event cache."""
     cache = event_cache_factory()
     await cache.initialize()
-    owner_event = {
-        "event_id": "$sidecar-owner",
-        "origin_server_ts": 1000,
-        "type": "m.room.message",
-        "sender": "@agent:localhost",
-        "content": {
-            "body": "preview",
-            "msgtype": "m.file",
-            "url": "mxc://server/sidecar",
-            "io.mindroom.long_text": {
-                "version": 2,
-                "encoding": "matrix_event_content_json",
-            },
-        },
-    }
 
     try:
-        await cache.store_event("$sidecar-owner", "!room:localhost", owner_event)
-        assert await cache.store_mxc_text(
-            "!room:localhost",
-            "$sidecar-owner",
-            "mxc://server/sidecar",
-            "Full text sidecar",
-        )
+        await cache.store_mxc_text("!room:localhost", "mxc://server/sidecar", "Full text sidecar")
     finally:
         await cache.close()
 
     reopened_cache = event_cache_factory()
     await reopened_cache.initialize()
     try:
-        cached_text = await reopened_cache.get_mxc_text(
-            "!room:localhost",
-            "$sidecar-owner",
-            "mxc://server/sidecar",
-        )
+        cached_text = await reopened_cache.get_mxc_text("!room:localhost", "mxc://server/sidecar")
     finally:
         await reopened_cache.close()
 
@@ -3668,184 +2662,101 @@ async def test_mxc_text_cache_round_trips_across_event_cache_reopen(
 
 
 @pytest.mark.asyncio
-async def test_thread_revision_tracks_point_payload_updates(
-    event_cache_factory: Callable[[], ConversationEventCache],
-) -> None:
-    """Thread revisions and delta reads include changed lookup payloads."""
-    cache = event_cache_factory()
-    await cache.initialize()
-    root = {
-        "event_id": "$thread_root",
-        "origin_server_ts": 1000,
-        "type": "m.room.message",
-        "sender": "@user:localhost",
-        "content": {"msgtype": "m.text", "body": "original"},
-    }
-    try:
-        await _replace_thread(cache, "!room:localhost", "$thread_root", [root])
-        before = await cache.get_thread_revision("!room:localhost", "$thread_root")
-        updated = {**root, "content": {"msgtype": "m.text", "body": "updated"}}
-        await cache.store_event("$thread_root", "!room:localhost", updated)
-        after = await cache.get_thread_revision("!room:localhost", "$thread_root")
-        assert before is not None
-        assert after is not None
-        changed_rows = await cache.get_thread_events_written_between(
-            "!room:localhost",
-            "$thread_root",
-            after_write_seq=before.max_write_seq,
-            through_write_seq=after.max_write_seq,
-            after_thread_write_seq=before.max_thread_write_seq,
-            through_thread_write_seq=after.max_thread_write_seq,
-        )
-    finally:
-        await cache.close()
-
-    assert before.event_count == after.event_count == 1
-    assert after.max_write_seq > before.max_write_seq
-    assert after.max_thread_write_seq == before.max_thread_write_seq
-    assert changed_rows == [updated]
-
-
-@pytest.mark.asyncio
-async def test_thread_revision_tracks_index_replacements(
-    event_cache_factory: Callable[[], ConversationEventCache],
-) -> None:
-    """Thread revisions detect membership changes when payload writes are refused."""
-    cache = event_cache_factory()
-    await cache.initialize()
-    room_id = "!room:localhost"
-    thread_id = "$thread_root"
-    root = _clear_payload(thread_id, body="root", origin_server_ts=1000)
-    old_reply = _clear_payload(
-        "$old",
-        body="old",
-        thread_root_id=thread_id,
-        origin_server_ts=2000,
-    )
-    new_reply = _clear_payload(
-        "$new",
-        body="new",
-        thread_root_id=thread_id,
-        origin_server_ts=2000,
-    )
-    shared_reply = _clear_payload(
-        "$shared",
-        body="shared",
-        thread_root_id=thread_id,
-        origin_server_ts=3000,
-    )
-    try:
-        await cache.store_event("$new", room_id, new_reply)
-        await _replace_thread(cache, room_id, thread_id, [root, old_reply, shared_reply])
-        before = await cache.get_thread_revision(room_id, thread_id)
-        replacement = [
-            _opaque_payload(thread_id, origin_server_ts=1000),
-            _opaque_payload("$new", thread_root_id=thread_id, origin_server_ts=2000),
-            _opaque_payload("$shared", thread_root_id=thread_id, origin_server_ts=3000),
-        ]
-        await _replace_thread(cache, room_id, thread_id, replacement)
-        after = await cache.get_thread_revision(room_id, thread_id)
-        assert before is not None
-        assert after is not None
-        changed_rows = await cache.get_thread_events_written_between(
-            room_id,
-            thread_id,
-            after_write_seq=before.max_write_seq,
-            through_write_seq=after.max_write_seq,
-            after_thread_write_seq=before.max_thread_write_seq,
-            through_thread_write_seq=after.max_thread_write_seq,
-        )
-    finally:
-        await cache.close()
-
-    assert before.event_count == after.event_count == 3
-    assert after.max_write_seq == before.max_write_seq
-    assert after.max_thread_write_seq > before.max_thread_write_seq
-    assert [row["event_id"] for row in changed_rows] == [thread_id, "$new", "$shared"]
-
-
-@pytest.mark.asyncio
 async def test_fetch_thread_history_reuses_durable_mxc_text_after_restart(
     event_cache_factory: Callable[[], ConversationEventCache],
 ) -> None:
     """Cached full-history reads should reuse durable sidecar text after a restart."""
-    cache = event_cache_factory()
-    await cache.initialize()
+    message_content_module._mxc_cache.clear()
+    try:
+        cache = event_cache_factory()
+        await cache.initialize()
 
-    root_event = _make_text_event(
-        event_id="$thread_root",
-        sender="@user:localhost",
-        body="Root message",
-        server_timestamp=1000,
-        source_content={"body": "Root message"},
-    )
-    sidecar_reply = _make_text_event(
-        event_id="$reply",
-        sender="@agent:localhost",
-        body="Preview reply",
-        server_timestamp=2000,
-        source_content={
-            "body": "Preview reply",
-            "msgtype": "m.file",
-            "io.mindroom.long_text": {
-                "version": 2,
-                "encoding": "matrix_event_content_json",
+        root_event = _make_text_event(
+            event_id="$thread_root",
+            sender="@user:localhost",
+            body="Root message",
+            server_timestamp=1000,
+            source_content={"body": "Root message"},
+        )
+        sidecar_reply = _make_text_event(
+            event_id="$reply",
+            sender="@agent:localhost",
+            body="Preview reply",
+            server_timestamp=2000,
+            source_content={
+                "body": "Preview reply",
+                "msgtype": "m.file",
+                "io.mindroom.long_text": {
+                    "version": 2,
+                    "encoding": "matrix_event_content_json",
+                },
+                "url": "mxc://server/sidecar",
+                "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread_root"},
             },
-            "url": "mxc://server/sidecar",
-            "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread_root"},
-        },
-    )
-    canonical_sidecar_content = {"body": "Full reply", "msgtype": "m.text"}
-
-    first_client = MagicMock()
-    first_client.download = AsyncMock(
-        return_value=MagicMock(
-            spec=nio.DownloadResponse,
-            body=json.dumps(canonical_sidecar_content).encode("utf-8"),
-        ),
-    )
-    first_client.room_get_event = AsyncMock()
-    first_client.room_messages = AsyncMock()
-    first_client.room_get_event_relations = MagicMock()
-
-    try:
-        await _seed_thread_cache(
-            cache,
-            room_id="!room:localhost",
-            thread_id="$thread_root",
-            events=[_cache_source(root_event), _cache_source(sidecar_reply)],
         )
+        canonical_sidecar_content = {"body": "Full reply", "msgtype": "m.text"}
 
-        first_history = await fetch_thread_history(
-            first_client,
-            "!room:localhost",
-            "$thread_root",
-            event_cache=cache,
+        first_client = MagicMock()
+        first_client.download = AsyncMock(
+            return_value=MagicMock(
+                spec=nio.DownloadResponse,
+                body=json.dumps(canonical_sidecar_content).encode("utf-8"),
+            ),
         )
+        first_client.room_get_event = AsyncMock()
+        first_client.room_messages = AsyncMock()
+        first_client.room_get_event_relations = MagicMock()
+
+        try:
+            await _seed_thread_cache(
+                cache,
+                room_id="!room:localhost",
+                thread_id="$thread_root",
+                events=[_cache_source(root_event), _cache_source(sidecar_reply)],
+            )
+
+            first_history = await fetch_thread_history(
+                first_client,
+                "!room:localhost",
+                "$thread_root",
+                event_cache=cache,
+            )
+        finally:
+            await cache.close()
+
+        message_content_module._mxc_cache.clear()
+
+        reopened_cache = event_cache_factory()
+        await reopened_cache.initialize()
+        second_client = MagicMock()
+        second_client.download = AsyncMock(
+            return_value=MagicMock(spec=nio.DownloadError),
+        )
+        second_client.room_get_event = AsyncMock()
+        second_client.room_messages = AsyncMock()
+        second_client.room_get_event_relations = MagicMock()
+
+        try:
+            second_history = await fetch_thread_history(
+                second_client,
+                "!room:localhost",
+                "$thread_root",
+                event_cache=reopened_cache,
+            )
+        finally:
+            await reopened_cache.close()
     finally:
-        await cache.close()
-
-    reopened_cache = event_cache_factory()
-    await reopened_cache.initialize()
-    second_client = MagicMock()
-    second_client.download = AsyncMock(
-        return_value=MagicMock(spec=nio.DownloadError),
-    )
-    second_client.room_get_event = AsyncMock()
-    second_client.room_messages = AsyncMock()
-    second_client.room_get_event_relations = MagicMock()
-
-    try:
-        second_history = await fetch_thread_history(
-            second_client,
-            "!room:localhost",
-            "$thread_root",
-            event_cache=reopened_cache,
-        )
-    finally:
-        await reopened_cache.close()
+        message_content_module._mxc_cache.clear()
 
     assert [message.body for message in first_history] == ["Root message", "Full reply"]
     assert [message.body for message in second_history] == ["Root message", "Full reply"]
     first_client.download.assert_awaited_once_with(mxc="mxc://server/sidecar")
     second_client.download.assert_not_awaited()
+
+
+def test_event_cache_uses_distinct_locks_per_room(tmp_path: Path) -> None:
+    """Event cache should keep independent locks per room."""
+    runtime = event_cache_module._SqliteEventCacheRuntime(tmp_path / "event_cache.db")
+
+    assert runtime.room_lock_entry("!room:localhost").lock is runtime.room_lock_entry("!room:localhost").lock
+    assert runtime.room_lock_entry("!room:localhost").lock is not runtime.room_lock_entry("!other:localhost").lock

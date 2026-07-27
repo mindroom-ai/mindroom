@@ -23,14 +23,13 @@ from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.constants import STREAM_STATUS_KEY, STREAM_STATUS_STREAMING
 from mindroom.matrix.cache.sqlite_event_cache import SqliteEventCache
-from mindroom.matrix.cache.thread_cache_state import ThreadAppendOutcome
 from mindroom.matrix.cache.thread_history_result import thread_history_result as _thread_history_result_impl
 from mindroom.matrix.cache.thread_write_cache_ops import ThreadMutationCacheOps
 from mindroom.matrix.cache.write_coordinator import EventCacheWriteCoordinator
 from mindroom.matrix.client import ResolvedVisibleMessage
 from mindroom.matrix.conversation_cache import MatrixConversationCache
 from mindroom.matrix.event_info import EventInfo
-from mindroom.matrix.sync_tokens import load_sync_checkpoint, save_sync_token
+from mindroom.matrix.sync_tokens import load_sync_token_record, save_sync_token
 from mindroom.matrix.thread_bookkeeping import MutationThreadImpact
 from mindroom.matrix.thread_diagnostics import (
     THREAD_HISTORY_SOURCE_DIAGNOSTIC,
@@ -68,10 +67,10 @@ async def _wait_for_room_cache_idle(coordinator: EventCacheWriteCoordinator) -> 
 
 
 def _load_sync_token_value(storage_path: Path, agent_name: str) -> str | None:
-    checkpoint = load_sync_checkpoint(storage_path, agent_name)
-    if checkpoint is None:
+    token_record = load_sync_token_record(storage_path, agent_name)
+    if token_record is None:
         return None
-    return checkpoint.token
+    return token_record.token
 
 
 def _runtime_bound_config(config: Config, runtime_root: Path) -> Config:
@@ -251,14 +250,14 @@ def _thread_mutation_cache_ops() -> tuple[ThreadMutationCacheOps, MagicMock, Mag
     """Return concrete thread cache ops backed by one async-mock event cache."""
     logger = MagicMock()
     event_cache = MagicMock()
-    event_cache.principal_id = "@mindroom_test:localhost"
-    event_cache.apply_thread_mutation_append = AsyncMock(return_value=ThreadAppendOutcome.APPENDED)
+    event_cache.append_event = AsyncMock(return_value=True)
     event_cache.disable = Mock()
     event_cache.invalidate_room_threads = AsyncMock()
     event_cache.invalidate_thread = AsyncMock()
     event_cache.mark_room_threads_stale = AsyncMock()
     event_cache.mark_thread_stale = AsyncMock()
     event_cache.redact_event = AsyncMock(return_value=True)
+    event_cache.revalidate_thread_after_incremental_update = AsyncMock()
     runtime = MagicMock()
     runtime.event_cache = event_cache
     runtime.event_cache_write_coordinator = _runtime_write_coordinator()
@@ -358,14 +357,14 @@ def _conversation_runtime_config() -> Config:
     )
 
 
-async def _assert_thread_read_guard_retries_when_unknown_live_mutation_races_fetch(  # noqa: PLR0915
+async def _assert_thread_read_guard_rejects_cache_when_unknown_live_mutation_races_fetch(  # noqa: PLR0915
     tmp_path: Path,
     *,
     read_thread: Callable[[MatrixConversationCache, str, str], Coroutine[Any, Any, ThreadHistoryResult]],
     force_refetch_reason: str,
     expected_full_history: bool,
 ) -> None:
-    """Assert a blocked thread read retries before validating after a racing UNKNOWN live mutation."""
+    """Assert a blocked thread read does not validate cache after a racing UNKNOWN live mutation."""
     room_id = "!test:localhost"
     thread_id = "$thread:localhost"
     event_cache = SqliteEventCache(tmp_path / "event_cache.db")
@@ -448,6 +447,7 @@ async def _assert_thread_read_guard_retries_when_unknown_live_mutation_races_fet
 
     try:
         await asyncio.wait_for(fetch_started.wait(), timeout=1.0)
+        await asyncio.sleep(0.01)
         live_task = asyncio.create_task(
             access.append_live_event(
                 room_id,
@@ -482,9 +482,9 @@ async def _assert_thread_read_guard_retries_when_unknown_live_mutation_races_fet
     assert thread_state is not None
     assert thread_state.validated_at is not None
     assert thread_state.room_invalidated_at is not None
-    assert thread_state.room_invalidated_at < thread_state.validated_at
-    assert matrix_cache.thread_cache_rejection_reason(thread_state) is None
-    assert client.room_messages.await_count == 2
+    assert thread_state.room_invalidated_at > thread_state.validated_at
+    assert matrix_cache.thread_cache_rejection_reason(thread_state) is not None
+    client.room_messages.assert_awaited_once()
 
 
 def _install_runtime_write_coordinator(bot: AgentBot) -> EventCacheWriteCoordinator:
@@ -532,7 +532,6 @@ def _save_certified_sync_token(
         bot.storage_path,
         bot.agent_name,
         token,
-        cache_generation=bot.event_cache.cache_generation,
     )
 
 

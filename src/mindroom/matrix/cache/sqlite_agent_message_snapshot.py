@@ -23,7 +23,6 @@ if TYPE_CHECKING:
 async def _thread_scope_has_no_snapshot(
     db: aiosqlite.Connection,
     *,
-    principal_id: str,
     room_id: str,
     thread_id: str | None,
 ) -> bool:
@@ -33,7 +32,6 @@ async def _thread_scope_has_no_snapshot(
     return thread_cache_has_no_snapshot(
         await sqlite_event_cache_threads.load_thread_cache_state(
             db,
-            principal_id=principal_id,
             room_id=room_id,
             thread_id=thread_id,
         ),
@@ -43,7 +41,6 @@ async def _thread_scope_has_no_snapshot(
 async def _snapshot_from_event(
     db: aiosqlite.Connection,
     *,
-    principal_id: str,
     room_id: str,
     thread_id: str | None,
     sender: str,
@@ -57,7 +54,6 @@ async def _snapshot_from_event(
 
     latest_edit = await sqlite_event_cache_events.load_latest_edit_row(
         db,
-        principal_id=principal_id,
         room_id=room_id,
         original_event_id=event_id,
         sender=sender,
@@ -74,41 +70,33 @@ async def _snapshot_from_event(
 async def _iter_scope_events(
     db: aiosqlite.Connection,
     *,
-    principal_id: str,
     room_id: str,
     thread_id: str | None,
 ) -> aiosqlite.Cursor:
-    if thread_id is not None:
+    if thread_id is None:
         return await db.execute(
             """
-            SELECT events.event_json, events.cached_at
-            FROM thread_events
-            JOIN events
-                ON events.principal_id = thread_events.principal_id
-                AND events.room_id = thread_events.room_id
-                AND events.event_id = thread_events.event_id
-            WHERE thread_events.principal_id = ?
-                AND thread_events.room_id = ?
-                AND thread_events.thread_id = ?
-            ORDER BY thread_events.origin_server_ts DESC, thread_events.write_seq DESC
+            SELECT event_json, cached_at
+            FROM events
+            WHERE room_id = ?
+            ORDER BY origin_server_ts DESC, rowid DESC
             """,
-            (principal_id, room_id, thread_id),
+            (room_id,),
         )
     return await db.execute(
         """
-        SELECT event_json, cached_at
-        FROM events
-        WHERE principal_id = ? AND room_id = ?
-        ORDER BY origin_server_ts DESC, write_seq DESC
+        SELECT event_json, NULL AS cached_at
+        FROM thread_events
+        WHERE room_id = ? AND thread_id = ?
+        ORDER BY origin_server_ts DESC, rowid DESC
         """,
-        (principal_id, room_id),
+        (room_id, thread_id),
     )
 
 
 async def _load_scope_snapshot(
     db: aiosqlite.Connection,
     *,
-    principal_id: str,
     room_id: str,
     thread_id: str | None,
     sender: str,
@@ -116,7 +104,6 @@ async def _load_scope_snapshot(
 ) -> AgentMessageSnapshot | None:
     cursor = await _iter_scope_events(
         db,
-        principal_id=principal_id,
         room_id=room_id,
         thread_id=thread_id,
     )
@@ -134,7 +121,6 @@ async def _load_scope_snapshot(
                 continue
             result = await _snapshot_from_event(
                 db,
-                principal_id=principal_id,
                 room_id=room_id,
                 thread_id=thread_id,
                 sender=sender,
@@ -153,7 +139,6 @@ async def _load_scope_snapshot(
 async def load_sqlite_agent_message_snapshot(
     db: aiosqlite.Connection,
     *,
-    principal_id: str,
     room_id: str,
     thread_id: str | None,
     sender: str,
@@ -163,14 +148,12 @@ async def load_sqlite_agent_message_snapshot(
     try:
         if await _thread_scope_has_no_snapshot(
             db,
-            principal_id=principal_id,
             room_id=room_id,
             thread_id=thread_id,
         ):
             return None
         return await _load_scope_snapshot(
             db,
-            principal_id=principal_id,
             room_id=room_id,
             thread_id=thread_id,
             sender=sender,

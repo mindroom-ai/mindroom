@@ -20,6 +20,7 @@ from mindroom.timing import (
     DispatchPipelineTiming,
     elapsed_ms_between,
     emit_timing_event,
+    milliseconds,
     timed,
     timed_block,
     timing_enabled,
@@ -327,6 +328,7 @@ def test_elapsed_ms_between_rounds_to_one_decimal_place() -> None:
     """Elapsed-millisecond conversion should use the shared one-decimal policy."""
     assert elapsed_ms_between(1.0, 1.23456) == 234.6
     assert elapsed_ms_between(1.0, 1.23456, ndigits=2) == 234.56
+    assert milliseconds(0.123456, ndigits=2) == 123.46
 
 
 def test_elapsed_millisecond_rounding_policy_is_shared() -> None:

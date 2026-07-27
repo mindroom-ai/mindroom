@@ -45,13 +45,18 @@ from mindroom.matrix.presence import build_agent_status_message, set_presence_st
 from mindroom.matrix.room_cleanup import cleanup_all_orphaned_bots
 from mindroom.matrix.rooms import leave_non_dm_rooms
 from mindroom.matrix.state import resolve_room_aliases
-from mindroom.matrix.sync_cache_trust import SyncCacheTrust
 from mindroom.matrix.sync_certification import (
     SyncCacheWriteResult,
     SyncCertificationDecision,
+    SyncCheckpoint,
     SyncTrustState,
+    certify_sync_response,
+    handle_unknown_pos,
+    start_from_loaded_token,
+    sync_cache_write_diagnostics,
 )
 from mindroom.matrix.sync_loop import run_matrix_sync_forever, sliding_own_membership_sets
+from mindroom.matrix.sync_tokens import clear_sync_token, load_sync_token_record, save_sync_token
 from mindroom.matrix.users import AgentMatrixUser, login_agent_user
 from mindroom.matrix_rtc.call_manager import CallManager, maybe_build_call_manager
 from mindroom.memory import store_conversation_memory
@@ -314,8 +319,6 @@ class AgentBot:
     _sliding_sync_startup_warning_emitted: bool
     _turn_controller: TurnController
     _room_lifecycle: BotRoomLifecycle
-    _local_departures_awaiting_sync: set[str]
-    _sync_cache_trust: SyncCacheTrust
 
     def __init__(
         self,
@@ -341,6 +344,8 @@ class AgentBot:
         self._last_sync_monotonic = None
         self._first_sync_done = False
         self._sync_shutting_down = False
+        self._sync_trust_state = SyncTrustState.COLD
+        self._sync_checkpoint: SyncCheckpoint | None = None
         self._hook_registry_state = HookRegistryState(HookRegistry.empty())
         self._room_member_callback_registered = False
         self._room_member_join_hooks_armed = False
@@ -355,17 +360,10 @@ class AgentBot:
             event_cache_write_coordinator=None,
             startup_thread_prewarm_registry=None,
         )
-        self._sync_cache_trust = SyncCacheTrust(
-            storage_path=self.storage_path,
-            agent_name=self.agent_name,
-            runtime=self._runtime_view,
-            logger=self.logger,
-        )
         self._deferred_overdue_task_drain_task = None
         self._startup_thread_prewarm_task = None
         self._call_manager: CallManager | None = None
         self._calls_reconcile_pending = False
-        self._local_departures_awaiting_sync = set()
 
         async def send_room_lifecycle_response(
             *,
@@ -390,9 +388,7 @@ class AgentBot:
                 get_logger=lambda: self.logger,
                 get_configured_rooms=lambda: self.rooms,
                 send_response=send_room_lifecycle_response,
-                on_room_joined=self._on_room_joined,
-                on_configured_room_joined=self._post_join_room_setup,
-                on_room_left=self._purge_left_room,
+                on_configured_room_joined=lambda room_id: self._post_join_room_setup(room_id),
             ),
         )
         self._init_runtime_components()
@@ -616,7 +612,6 @@ class AgentBot:
 
         self.agent_user.__dict__.pop("matrix_id", None)
         self.__dict__.pop("matrix_id", None)
-        self.event_cache = self.event_cache.for_principal(self.matrix_id.full_id)
         self._init_runtime_components()
 
     @property
@@ -818,16 +813,16 @@ class AgentBot:
                 )
         finally:
             if not completed:
-                await self.startup_thread_prewarm_registry.release(self.event_cache.principal_id, room_id)
+                await self.startup_thread_prewarm_registry.release(room_id)
 
     async def _run_startup_thread_prewarm(self) -> None:
-        """Prewarm recent thread snapshots with one bulk scan per joined room."""
+        """Prewarm recent thread snapshots per joined room without blocking live dispatch behind cache seeding."""
         try:
             joined_rooms = await self._get_startup_thread_prewarm_joined_rooms()
             for room_id in joined_rooms:
                 if self._sync_shutting_down:
                     return
-                if not await self.startup_thread_prewarm_registry.try_claim(self.event_cache.principal_id, room_id):
+                if not await self.startup_thread_prewarm_registry.try_claim(room_id):
                     continue
                 await self._prewarm_claimed_startup_thread_room(room_id)
         finally:
@@ -991,11 +986,6 @@ class AgentBot:
         if self._first_sync_done:
             self._maybe_start_deferred_overdue_task_drain()
 
-    async def _on_room_joined(self, room_id: str) -> None:
-        """Reopen cache access after an explicit homeserver-confirmed join."""
-        self._local_departures_awaiting_sync.discard(room_id)
-        await self._conversation_cache.mark_room_joined(room_id)
-
     async def leave_unconfigured_rooms(self) -> None:
         """Leave any rooms this agent is no longer configured for."""
         await self._room_lifecycle.leave_unconfigured_rooms()
@@ -1053,32 +1043,118 @@ class AgentBot:
         """Reset the monotonic watchdog clock for a fresh sync iteration."""
         self._last_sync_monotonic = None
 
-    async def _prepare_matrix_sync_continuity(self) -> None:
-        """Apply cache-trust startup output to the authenticated Matrix client."""
-        client = self.client
-        assert client is not None
-        sync_token = await self._sync_cache_trust.prepare_startup()
-        cast("Any", client).next_batch = sync_token
-        if sync_token is None and client.user_id:
-            # A cold sync replays history handled by an older device.
-            raise_notice_floor(client.user_id)
-
-    def _certify_sync_response(
-        self,
-        *,
-        next_batch: str | None,
-        cache_result: SyncCacheWriteResult,
-        first_sync: bool,
-    ) -> SyncCertificationDecision:
-        """Apply cache certification and any requested Matrix client rewind."""
-        decision = self._sync_cache_trust.certify_response(
-            next_batch=next_batch,
-            cache_result=cache_result,
-            first_sync=first_sync,
+    def _loaded_sync_token_for_certification(self) -> SyncCheckpoint | str | None:
+        """Load a saved token record without deciding trust in bot code."""
+        try:
+            token_record = load_sync_token_record(self.storage_path, self.agent_name)
+        except OSError as exc:
+            self.logger.warning("matrix_sync_token_load_failed", error=str(exc))
+            return None
+        if token_record is None:
+            return None
+        self.logger.info(
+            "matrix_sync_token_restored",
+            certified=token_record.certified,
         )
+        return token_record.checkpoint if token_record.checkpoint is not None else token_record.token
+
+    def _restore_saved_sync_token(self) -> None:
+        """Restore Matrix sync continuity and initialize cache certification state."""
+        assert self.client is not None
+        startup = start_from_loaded_token(self._loaded_sync_token_for_certification())
+        self._sync_trust_state = startup.state
+        self._sync_checkpoint = None
+        client = cast("Any", self.client)
+        client.next_batch = startup.sync_token
+        if startup.sync_token is None and self.client.user_id:
+            # Without sync continuity the initial sync replays recent history an
+            # earlier device may already have handled; don't re-notify on it.
+            raise_notice_floor(self.client.user_id)
+        if startup.legacy_token:
+            self.logger.warning("matrix_sync_token_uncertified_legacy")
+
+    def _save_sync_checkpoint(self, checkpoint: SyncCheckpoint | None) -> None:
+        """Persist one certified sync checkpoint if present."""
+        if checkpoint is None:
+            return
+        try:
+            save_sync_token(
+                self.storage_path,
+                self.agent_name,
+                checkpoint.token,
+            )
+        except (OSError, ValueError) as exc:
+            self.logger.warning("matrix_sync_token_save_failed", error=str(exc))
+
+    def _clear_saved_sync_token(self) -> None:
+        """Clear the saved sync token file."""
+        try:
+            clear_sync_token(self.storage_path, self.agent_name)
+        except OSError as exc:
+            self.logger.warning("matrix_sync_token_clear_failed", error=str(exc))
+
+    def _mark_callback_failed(self) -> None:
+        """Mark sync certification unsafe after a Matrix callback failure."""
+        self._runtime_view.mark_callback_failed()
+        self._sync_trust_state = SyncTrustState.UNCERTAIN
+        self._sync_checkpoint = None
+        self._clear_saved_sync_token()
+
+    def _apply_sync_certification_decision(
+        self,
+        decision: SyncCertificationDecision,
+        *,
+        cache_result: SyncCacheWriteResult | None = None,
+    ) -> None:
+        """Apply a certifier decision to runtime state and token storage."""
+        if self._runtime_view.callback_failure_count:
+            if decision.reset_client_token and self.client is not None:
+                client = cast("Any", self.client)
+                client.next_batch = None
+            self._sync_trust_state = SyncTrustState.UNCERTAIN
+            self._sync_checkpoint = None
+            self._clear_saved_sync_token()
+            self.logger.warning(
+                "matrix_sync_certification_uncertain",
+                reason="callback_failed",
+                callback_failure_count=self._runtime_view.callback_failure_count,
+            )
+            return
+        self._sync_trust_state = decision.state
+        self._sync_checkpoint = decision.checkpoint_to_save
         if decision.reset_client_token and self.client is not None:
-            cast("Any", self.client).next_batch = None
-        return decision
+            client = cast("Any", self.client)
+            client.next_batch = None
+        if decision.clear_saved_token:
+            self._clear_saved_sync_token()
+        if decision.checkpoint_to_save is not None:
+            self._save_sync_checkpoint(decision.checkpoint_to_save)
+        if decision.reason is not None:
+            diagnostics = sync_cache_write_diagnostics(cache_result) if cache_result is not None else {}
+            self.logger.warning(
+                "matrix_sync_certification_uncertain",
+                reason=decision.reason,
+                **diagnostics,
+            )
+
+    async def _sync_cache_result_for_certification(self, response: nio.SyncResponse) -> SyncCacheWriteResult:
+        """Return the durable cache write result for one sync response."""
+        return await self._conversation_cache.cache_sync_timeline_for_certification(response)
+
+    def _sync_certification_decision(
+        self,
+        response: nio.SyncResponse,
+        *,
+        cache_result: SyncCacheWriteResult,
+        first_sync_response: bool,
+    ) -> SyncCertificationDecision:
+        """Return the certifier decision for one sync response."""
+        return certify_sync_response(
+            self._sync_trust_state,
+            next_batch=response.next_batch,
+            cache_result=cache_result,
+            first_sync=first_sync_response,
+        )
 
     def seconds_since_last_sync_activity(self) -> float | None:
         """Return elapsed seconds since the last sync-loop activity seen by the watchdog."""
@@ -1114,7 +1190,7 @@ class AgentBot:
                 except asyncio.CancelledError:
                     pass
                 except Exception:
-                    self._sync_cache_trust.mark_callback_failed()
+                    self._mark_callback_failed()
                     logger.exception("Error in event callback")
 
             create_background_task(error_handler(), owner=self._runtime_view)
@@ -1186,23 +1262,25 @@ class AgentBot:
         if isinstance(_response, nio.SyncResponse):
             await self._apply_own_room_membership_from_sync(_response)
             restored_token_first_sync_response = (
-                first_sync_response and self._sync_cache_trust.state is SyncTrustState.PENDING
+                first_sync_response and self._sync_trust_state is SyncTrustState.PENDING
             )
             try:
-                cache_result = await self._conversation_cache.cache_sync_timeline_for_certification(_response)
+                cache_result = await self._sync_cache_result_for_certification(_response)
             except asyncio.CancelledError as exc:
                 cache_result = SyncCacheWriteResult(complete=False, errors=(exc,))
-                self._certify_sync_response(
-                    next_batch=_response.next_batch,
+                decision = self._sync_certification_decision(
+                    _response,
                     cache_result=cache_result,
-                    first_sync=first_sync_response,
+                    first_sync_response=first_sync_response,
                 )
+                self._apply_sync_certification_decision(decision, cache_result=cache_result)
                 raise
-            decision = self._certify_sync_response(
-                next_batch=_response.next_batch,
+            decision = self._sync_certification_decision(
+                _response,
                 cache_result=cache_result,
-                first_sync=first_sync_response,
+                first_sync_response=first_sync_response,
             )
+            self._apply_sync_certification_decision(decision, cache_result=cache_result)
             room_member_join_hook_plan = self._room_member_join_sync_hook_plan(
                 first_sync_response=first_sync_response,
                 restored_token_first_sync_response=restored_token_first_sync_response,
@@ -1223,10 +1301,10 @@ class AgentBot:
                 room_member_join_hook_plan=room_member_join_hook_plan,
             )
         except asyncio.CancelledError:
-            self._sync_cache_trust.mark_callback_failed()
+            self._mark_callback_failed()
             raise
         except Exception:
-            self._sync_cache_trust.mark_callback_failed()
+            self._mark_callback_failed()
             raise
         if self._calls_reconcile_pending:
             self._calls_reconcile_pending = False
@@ -1249,9 +1327,7 @@ class AgentBot:
             self._warn_if_sliding_sync_never_succeeded(_response)
             return
         if _response.status_code == "M_UNKNOWN_POS":
-            decision = self._sync_cache_trust.reject_unknown_pos()
-            if decision.reset_client_token and self.client is not None:
-                cast("Any", self.client).next_batch = None
+            self._apply_sync_certification_decision(handle_unknown_pos())
             self._room_member_join_hooks_armed = False
             self.logger.warning(
                 "matrix_sync_token_rejected",
@@ -1306,7 +1382,6 @@ class AgentBot:
 
     def _register_call_manager_callbacks(self, client: nio.AsyncClient) -> None:
         """Build the optional call manager and wire its Matrix callbacks."""
-        callback_failed = self._sync_cache_trust.mark_callback_failed
         self._call_manager = maybe_build_call_manager(
             agent_name=self.agent_name,
             config=self.config,
@@ -1320,7 +1395,7 @@ class AgentBot:
             _create_task_wrapper(
                 self._on_room_membership_event,
                 owner=self._runtime_view,
-                on_error=callback_failed,
+                on_error=self._mark_callback_failed,
             ),
             nio.RoomMemberEvent,
         )
@@ -1330,7 +1405,7 @@ class AgentBot:
             _create_task_wrapper(
                 self._call_manager.on_room_event,
                 owner=self._runtime_view,
-                on_error=callback_failed,
+                on_error=self._mark_callback_failed,
             ),
             nio.UnknownEvent,
         )
@@ -1338,7 +1413,7 @@ class AgentBot:
             _create_task_wrapper(  # ty: ignore[invalid-argument-type]  # matrix-nio callback types are too strict here
                 self._call_manager.on_to_device_event,
                 owner=self._runtime_view,
-                on_error=callback_failed,
+                on_error=self._mark_callback_failed,
             ),
             AuthenticatedToDeviceEvent,
         )
@@ -1347,20 +1422,9 @@ class AgentBot:
         """Apply this bot's authoritative joined/left room sections before other sync work."""
         joined_room_ids = set(response.rooms.join)
         left_room_ids = set(response.rooms.leave)
-        timeline_departure_room_ids = {
-            room_id
-            for room_id, room_info in response.rooms.join.items()
-            if any(
-                isinstance(event, nio.RoomMemberEvent)
-                and event.state_key == self.agent_user.user_id
-                and event.membership in {"leave", "ban"}
-                for event in room_info.timeline.events
-            )
-        }
         await self._apply_own_room_membership(
             joined_room_ids=joined_room_ids,
             left_room_ids=left_room_ids,
-            departed_room_ids=left_room_ids | timeline_departure_room_ids,
         )
 
     async def _apply_own_room_membership_from_sliding_sync(self, response: nio.SlidingSyncResponse) -> None:
@@ -1369,7 +1433,6 @@ class AgentBot:
         await self._apply_own_room_membership(
             joined_room_ids=joined_room_ids,
             left_room_ids=departed_room_ids,
-            departed_room_ids=departed_room_ids,
         )
 
     async def _apply_own_room_membership(
@@ -1377,22 +1440,14 @@ class AgentBot:
         *,
         joined_room_ids: set[str],
         left_room_ids: set[str],
-        departed_room_ids: set[str],
     ) -> None:
-        """Fence departed rooms and refresh joined-room cache access for one sync response."""
-        if departed_room_ids:
-            self._sync_cache_trust.invalidate_for_cache_scope_cleanup()
-        for room_id in departed_room_ids:
+        """Apply this bot's joined/left room sections for one sync response."""
+        for room_id in left_room_ids:
             self._room_lifecycle.forget_invited_room(room_id)
-        await self._conversation_cache.purge_rooms(departed_room_ids)
-        self._local_departures_awaiting_sync.difference_update(departed_room_ids)
-        current_joined_room_ids = joined_room_ids - left_room_ids - self._local_departures_awaiting_sync
-        for room_id in current_joined_room_ids:
-            await self._conversation_cache.mark_room_joined(room_id)
         call_manager = self._call_manager
         if call_manager is not None:
             await call_manager.on_sync_room_membership(
-                joined_room_ids=current_joined_room_ids,
+                joined_room_ids=joined_room_ids,
                 left_room_ids=left_room_ids,
             )
 
@@ -1417,6 +1472,8 @@ class AgentBot:
         event: nio.RoomMemberEvent,
     ) -> None:
         """Apply invited-room cleanup before optional call reconciliation."""
+        if event.state_key == self.agent_user.user_id and event.membership in {"leave", "ban"}:
+            self._room_lifecycle.forget_invited_room(room.room_id)
         call_manager = self._call_manager
         if call_manager is not None:
             await call_manager.on_room_membership_event(room, event)
@@ -1437,23 +1494,22 @@ class AgentBot:
             if orchestrator is not None:
                 orchestrator.validate_managed_entity_identities()
             self._runtime_view.mark_runtime_started()
-            await self._prepare_matrix_sync_continuity()
+            self._restore_saved_sync_token()
             await self._set_avatar_if_available()
             # Keep durable tracking-state loading off the event loop at startup.
             await asyncio.to_thread(self._turn_store.warm)
             await asyncio.to_thread(interactive.init_persistence, self.runtime_paths.storage_root)
             client = self.client
             assert client is not None
-            callback_failed = self._sync_cache_trust.mark_callback_failed
 
             # Register event callbacks - wrap them to run as background tasks
             # This ensures the sync loop is never blocked, allowing stop reactions to work
             client.add_event_callback(
-                _create_task_wrapper(self._on_invite, owner=self._runtime_view, on_error=callback_failed),
+                _create_task_wrapper(self._on_invite, owner=self._runtime_view, on_error=self._mark_callback_failed),
                 nio.InviteEvent,  # ty: ignore[invalid-argument-type]  # InviteEvent doesn't inherit Event
             )
             client.add_event_callback(
-                _create_task_wrapper(self._on_message, owner=self._runtime_view, on_error=callback_failed),
+                _create_task_wrapper(self._on_message, owner=self._runtime_view, on_error=self._mark_callback_failed),
                 nio.RoomMessageText,
             )
             client.add_event_callback(
@@ -1461,7 +1517,7 @@ class AgentBot:
                 nio.RedactionEvent,
             )
             client.add_event_callback(
-                _create_task_wrapper(self._on_reaction, owner=self._runtime_view, on_error=callback_failed),
+                _create_task_wrapper(self._on_reaction, owner=self._runtime_view, on_error=self._mark_callback_failed),
                 nio.ReactionEvent,
             )
 
@@ -1469,7 +1525,7 @@ class AgentBot:
             media_callback = _create_task_wrapper(
                 self._on_media_message,
                 owner=self._runtime_view,
-                on_error=callback_failed,
+                on_error=self._mark_callback_failed,
             )
             for event_type in MATRIX_MEDIA_EVENT_TYPES:
                 client.add_event_callback(media_callback, event_type)
@@ -1477,7 +1533,7 @@ class AgentBot:
                 _create_task_wrapper(
                     self._on_unknown_event,
                     owner=self._runtime_view,
-                    on_error=callback_failed,
+                    on_error=self._mark_callback_failed,
                 ),
                 nio.UnknownEvent,
             )
@@ -1485,7 +1541,7 @@ class AgentBot:
                 _create_task_wrapper(
                     self._on_decryption_failure,
                     owner=self._runtime_view,
-                    on_error=callback_failed,
+                    on_error=self._mark_callback_failed,
                 ),
                 nio.MegolmEvent,
             )
@@ -1498,7 +1554,7 @@ class AgentBot:
                 callback_wrapper=lambda callback: _create_task_wrapper(
                     callback,
                     owner=self._runtime_view,
-                    on_error=callback_failed,
+                    on_error=self._mark_callback_failed,
                 ),
             )
             await self._set_presence_with_model_info()
@@ -1567,22 +1623,12 @@ class AgentBot:
         try:
             joined_rooms = await get_joined_rooms(self.client)
             if joined_rooms:
-                await leave_non_dm_rooms(
-                    self.client,
-                    joined_rooms,
-                    on_room_left=self._purge_left_room,
-                )
+                await leave_non_dm_rooms(self.client, joined_rooms)
         except Exception:
             self.logger.exception("Error leaving rooms during cleanup")
 
         # Stop the bot
         await self.stop(shutdown_intent=ENTITY_REMOVED_SHUTDOWN)
-
-    async def _purge_left_room(self, room_id: str) -> None:
-        """Fence and purge one principal-owned room immediately after departure."""
-        self._local_departures_awaiting_sync.add(room_id)
-        self._sync_cache_trust.invalidate_for_cache_scope_cleanup()
-        await self._conversation_cache.purge_rooms((room_id,))
 
     async def stop(
         self,
@@ -1727,9 +1773,9 @@ class AgentBot:
             and responses_drained
             and post_drain_background_tasks_completed
             and callback_failure_count == 0
-            and self._sync_cache_trust.state is SyncTrustState.CERTIFIED
+            and self._sync_trust_state is SyncTrustState.CERTIFIED
         ):
-            self._sync_cache_trust.persist_current()
+            self._save_sync_checkpoint(self._sync_checkpoint)
         elif (
             not background_tasks_completed
             or not drain_result.completed
@@ -1737,7 +1783,9 @@ class AgentBot:
             or not post_drain_background_tasks_completed
             or callback_failure_count
         ):
-            self._sync_cache_trust.discard()
+            self._sync_trust_state = SyncTrustState.UNCERTAIN
+            self._sync_checkpoint = None
+            self._clear_saved_sync_token()
             self.logger.warning(
                 "sync_checkpoint_not_saved_after_incomplete_coalescing_drain",
                 agent_name=self.agent_name,
@@ -1847,7 +1895,15 @@ class AgentBot:
         client = self.client
         if client is None:
             return
-        retry_token = self._sync_cache_trust.retry_token()
+        checkpoint = self._sync_checkpoint
+        retry_token = checkpoint.token if checkpoint is not None else None
+        if retry_token is None:
+            try:
+                token_record = load_sync_token_record(self.storage_path, self.agent_name)
+            except OSError as exc:
+                self.logger.warning("matrix_sync_token_load_failed", error=str(exc))
+            else:
+                retry_token = token_record.token if token_record is not None else None
         cast("Any", client).next_batch = retry_token
         self.logger.warning(
             "matrix_redaction_callback_failed_replaying_sync",

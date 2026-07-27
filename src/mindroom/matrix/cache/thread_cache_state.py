@@ -3,95 +3,20 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from enum import StrEnum
 from typing import TYPE_CHECKING
 
-from .event_cache import ThreadCacheState, ThreadRevision
+from .event_cache import ThreadCacheState
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-_INCREMENTAL_THREAD_REVALIDATION_REASONS = (
-    "live_thread_mutation",
-    "sync_thread_mutation",
-    "outbound_thread_mutation",
+_INCREMENTAL_THREAD_REVALIDATION_REASONS = frozenset(
+    {
+        "live_thread_mutation",
+        "sync_thread_mutation",
+        "outbound_thread_mutation",
+    },
 )
-THREAD_HISTORY_TRUST_METADATA_KEY = "thread_history_trust_version"
-THREAD_HISTORY_TRUST_VERSION = "opaque_encrypted_relations_v1"
-
-
-class ThreadAppendOutcome(StrEnum):
-    """Describe what one atomic threaded-mutation append did to a cached thread."""
-
-    APPENDED = "appended"
-    APPENDED_STALE = "appended_stale"
-    # No rows to append into: only a full history scan can make this thread readable again. A
-    # refused append leaves the existing snapshot under a durable marker instead.
-    SNAPSHOT_MISSING = "snapshot_missing"
-    APPEND_REFUSED = "append_refused"
-    WRITES_UNAVAILABLE = "writes_unavailable"
-
-    @property
-    def wrote_event(self) -> bool:
-        """Return whether the mutation landed in the cached snapshot."""
-        return self in {ThreadAppendOutcome.APPENDED, ThreadAppendOutcome.APPENDED_STALE}
-
-
-class ThreadCacheReplaceOutcome(StrEnum):
-    """Describe whether one guarded thread snapshot became usable."""
-
-    STORED = "stored"
-    EXISTING_USABLE = "existing_usable"
-    RETRYABLE_CONFLICT = "retryable_conflict"
-    INVALIDATED = "invalidated"
-    WRITES_UNAVAILABLE = "writes_unavailable"
-    HARD_FAILURE = "hard_failure"
-
-    @property
-    def written(self) -> bool:
-        """Return whether this operation installed the supplied snapshot."""
-        return self is ThreadCacheReplaceOutcome.STORED
-
-    @property
-    def usable(self) -> bool:
-        """Return whether a trusted snapshot exists after this operation."""
-        return self in {
-            ThreadCacheReplaceOutcome.STORED,
-            ThreadCacheReplaceOutcome.EXISTING_USABLE,
-        }
-
-    @property
-    def retryable(self) -> bool:
-        """Return whether another bounded reconstruction may still install a snapshot."""
-        return self in {
-            ThreadCacheReplaceOutcome.INVALIDATED,
-            ThreadCacheReplaceOutcome.RETRYABLE_CONFLICT,
-        }
-
-
-def incremental_thread_revalidation_reasons() -> tuple[str, ...]:
-    """Return the invalidation reasons that one successful incremental append may clear."""
-    return _INCREMENTAL_THREAD_REVALIDATION_REASONS
-
-
-def is_incremental_thread_revalidation_reason(reason: str | None) -> bool:
-    """Return whether one invalidation reason may be cleared after an incremental append."""
-    return reason in _INCREMENTAL_THREAD_REVALIDATION_REASONS
-
-
-def incoming_thread_invalidation_takes_precedence(
-    *,
-    current_invalidated_at: float,
-    current_reason: str | None,
-    incoming_invalidated_at: float,
-    incoming_reason: str,
-) -> bool:
-    """Return whether an incoming marker's reason should replace the current reason."""
-    current_is_incremental = is_incremental_thread_revalidation_reason(current_reason)
-    incoming_is_incremental = is_incremental_thread_revalidation_reason(incoming_reason)
-    if current_is_incremental != incoming_is_incremental:
-        return not incoming_is_incremental
-    return incoming_invalidated_at >= current_invalidated_at
 
 
 @dataclass(frozen=True, slots=True)
@@ -133,24 +58,6 @@ def thread_cache_state_row(values: Sequence[float | str | None] | None) -> Threa
     )
 
 
-def thread_revision_row(values: Sequence[float | int | None] | None) -> ThreadRevision | None:
-    """Normalize one backend aggregate row into a revision, absent for empty threads."""
-    if values is None:
-        return None
-    if len(values) != 4:
-        msg = f"Thread revision row must contain exactly 4 values, got {len(values)}"
-        raise ValueError(msg)
-    event_count = 0 if values[0] is None else int(values[0])
-    if event_count <= 0 or values[1] is None or values[2] is None or values[3] is None:
-        return None
-    return ThreadRevision(
-        event_count=event_count,
-        max_write_seq=int(values[1]),
-        max_thread_write_seq=int(values[2]),
-        max_origin_server_ts=int(values[3]),
-    )
-
-
 def thread_cache_state_changed_after(
     cache_state: ThreadCacheStateRow | None,
     *,
@@ -165,45 +72,18 @@ def thread_cache_state_changed_after(
     )
 
 
-def guarded_thread_replacement_conflict(
-    cache_state: ThreadCacheStateRow | None,
-    *,
-    fetch_started_at: float,
-    has_snapshot_rows: bool,
-) -> ThreadCacheReplaceOutcome | None:
-    """Classify state changed after one snapshot fetch, if any."""
-    if cache_state is None or not thread_cache_state_changed_after(cache_state, fetch_started_at=fetch_started_at):
-        return None
-    trusted_existing = (
+def can_revalidate_after_incremental_update(cache_state: ThreadCacheStateRow | None) -> bool:
+    """Return whether an incremental update may clear one thread invalidation."""
+    if cache_state is None:
+        return False
+    return (
         cache_state.validated_at is not None
-        and (cache_state.invalidated_at is None or cache_state.invalidated_at < cache_state.validated_at)
-        and (cache_state.room_invalidated_at is None or cache_state.room_invalidated_at < cache_state.validated_at)
+        and cache_state.invalidated_at is not None
+        and cache_state.invalidation_reason in _INCREMENTAL_THREAD_REVALIDATION_REASONS
+        and not (
+            cache_state.room_invalidated_at is not None and cache_state.room_invalidated_at >= cache_state.validated_at
+        )
     )
-    if trusted_existing and has_snapshot_rows:
-        return ThreadCacheReplaceOutcome.EXISTING_USABLE
-    invalidated_after_fetch = any(
-        timestamp is not None and timestamp > fetch_started_at
-        for timestamp in (cache_state.invalidated_at, cache_state.room_invalidated_at)
-    )
-    if invalidated_after_fetch:
-        return ThreadCacheReplaceOutcome.INVALIDATED
-    return ThreadCacheReplaceOutcome.RETRYABLE_CONFLICT
-
-
-def append_keeps_thread_valid(cache_state: ThreadCacheStateRow | None) -> bool:
-    """Return whether one appended mutation may leave this thread trusted.
-
-    A thread that was still valid when the mutation began was never invalidated, so there is nothing
-    to clear and nothing to expose. A room-wide marker at or after the last validation outranks an
-    append, and a thread marker is only cleared when an incremental mutation wrote it.
-    """
-    if cache_state is None or cache_state.validated_at is None:
-        return False
-    if cache_state.room_invalidated_at is not None and cache_state.room_invalidated_at >= cache_state.validated_at:
-        return False
-    if cache_state.invalidated_at is None:
-        return True
-    return is_incremental_thread_revalidation_reason(cache_state.invalidation_reason)
 
 
 def replacement_validated_at(*, fetch_started_at: float, validated_at: float | None) -> float:

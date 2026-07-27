@@ -18,7 +18,6 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.matrix.cache import ConversationEventCache
-    from mindroom.matrix.message_content import SidecarHydrationBatch
 
 _VISIBLE_ROOM_MESSAGE_EVENT_TYPES = (nio.RoomMessageText, nio.RoomMessageNotice)
 
@@ -393,8 +392,6 @@ async def apply_latest_edits_to_messages(
     required_thread_id: str | None = None,
     event_cache: ConversationEventCache | None = None,
     room_id: str | None = None,
-    expected_membership_epoch: int | None = None,
-    hydration_batch: SidecarHydrationBatch | None = None,
     trusted_sender_ids: Collection[str] = (),
 ) -> None:
     """Apply latest edits to message records and synthesize missing originals when allowed."""
@@ -411,8 +408,6 @@ async def apply_latest_edits_to_messages(
             client,
             event_cache=event_cache,
             room_id=room_id,
-            expected_membership_epoch=expected_membership_epoch,
-            hydration_batch=hydration_batch,
             trusted_sender_ids=trusted_sender_ids,
         )
         if edited_body is None:

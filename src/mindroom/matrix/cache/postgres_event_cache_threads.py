@@ -4,13 +4,9 @@ from __future__ import annotations
 
 import json
 import time
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any
 
-from .event_cache_events import (
-    event_id_for_cache,
-    serialize_cacheable_events,
-    serialize_cached_event,
-)
+from .event_cache_events import event_id_for_cache, serialize_cacheable_events, serialize_cached_event
 from .event_normalization import normalize_event_source_for_cache
 from .postgres_cursor import fetchall, fetchone
 from .postgres_event_cache_events import (
@@ -22,22 +18,16 @@ from .postgres_event_cache_events import (
     write_lookup_index_rows,
 )
 from .thread_cache_state import (
-    ThreadAppendOutcome,
-    ThreadCacheReplaceOutcome,
     ThreadCacheStateRow,
-    append_keeps_thread_valid,
-    guarded_thread_replacement_conflict,
-    incremental_thread_revalidation_reasons,
-    is_incremental_thread_revalidation_reason,
+    can_revalidate_after_incremental_update,
     thread_cache_state_changed_after,
     thread_cache_state_row,
-    thread_revision_row,
 )
 
 if TYPE_CHECKING:
     from psycopg import AsyncConnection
 
-    from .event_cache import ThreadCacheState, ThreadRevision
+    from .event_cache import ThreadCacheState
 
 
 async def load_thread_events(
@@ -51,95 +41,16 @@ async def load_thread_events(
     rows = await fetchall(
         db,
         """
-        SELECT thread_events.origin_server_ts, thread_events.write_seq, events.event_json
-        FROM mindroom_event_cache_thread_events AS thread_events
-        JOIN mindroom_event_cache_events AS events
-            ON events.namespace = thread_events.namespace
-            AND events.room_id = thread_events.room_id
-            AND events.event_id = thread_events.event_id
-        WHERE thread_events.namespace = %s
-            AND thread_events.room_id = %s
-            AND thread_events.thread_id = %s
-        ORDER BY thread_events.origin_server_ts ASC, thread_events.write_seq ASC
+        SELECT event_json
+        FROM mindroom_event_cache_thread_events
+        WHERE namespace = %s AND room_id = %s AND thread_id = %s
+        ORDER BY origin_server_ts ASC, write_seq ASC
         """,
         (namespace, room_id, thread_id),
     )
     if not rows:
         return None
-    return [json.loads(row[2]) for row in rows]
-
-
-async def load_thread_events_written_between(
-    db: AsyncConnection,
-    *,
-    namespace: str,
-    room_id: str,
-    thread_id: str,
-    after_write_seq: int,
-    through_write_seq: int,
-    after_thread_write_seq: int,
-    through_thread_write_seq: int,
-) -> list[dict[str, Any]]:
-    """Return cached thread events changed in bounded durable revision intervals."""
-    rows = await fetchall(
-        db,
-        """
-        SELECT thread_events.origin_server_ts, thread_events.write_seq, events.event_json
-        FROM mindroom_event_cache_thread_events AS thread_events
-        JOIN mindroom_event_cache_events AS events
-            ON events.namespace = thread_events.namespace
-            AND events.room_id = thread_events.room_id
-            AND events.event_id = thread_events.event_id
-        WHERE thread_events.namespace = %s
-            AND thread_events.room_id = %s
-            AND thread_events.thread_id = %s
-            AND (
-                (events.write_seq > %s AND events.write_seq <= %s)
-                OR (thread_events.write_seq > %s AND thread_events.write_seq <= %s)
-            )
-        ORDER BY thread_events.origin_server_ts ASC, thread_events.write_seq ASC
-        """,
-        (
-            namespace,
-            room_id,
-            thread_id,
-            after_write_seq,
-            through_write_seq,
-            after_thread_write_seq,
-            through_thread_write_seq,
-        ),
-    )
-    return [json.loads(row[2]) for row in rows]
-
-
-async def load_thread_revision(
-    db: AsyncConnection,
-    *,
-    namespace: str,
-    room_id: str,
-    thread_id: str,
-) -> ThreadRevision | None:
-    """Return the durable revision identity of one non-empty cached thread."""
-    row = await fetchone(
-        db,
-        """
-        SELECT
-            COUNT(*),
-            MAX(events.write_seq),
-            MAX(thread_events.write_seq),
-            MAX(thread_events.origin_server_ts)
-        FROM mindroom_event_cache_thread_events AS thread_events
-        JOIN mindroom_event_cache_events AS events
-            ON events.namespace = thread_events.namespace
-            AND events.room_id = thread_events.room_id
-            AND events.event_id = thread_events.event_id
-        WHERE thread_events.namespace = %s
-            AND thread_events.room_id = %s
-            AND thread_events.thread_id = %s
-        """,
-        (namespace, room_id, thread_id),
-    )
-    return thread_revision_row(row)
+    return [json.loads(row[0]) for row in rows]
 
 
 async def load_recent_room_thread_ids(
@@ -215,78 +126,6 @@ async def load_thread_cache_state(
     return row.as_public_state()
 
 
-async def load_room_membership_locked(
-    db: AsyncConnection,
-    *,
-    namespace: str,
-    room_id: str,
-) -> tuple[str, int]:
-    """Return the durable membership state and transition epoch for one principal-room."""
-    row = await fetchone(
-        db,
-        """
-        SELECT membership_state, membership_epoch
-        FROM mindroom_event_cache_room_state
-        WHERE namespace = %s AND room_id = %s
-        """,
-        (namespace, room_id),
-    )
-    return ("joined", 0) if row is None else (str(row[0]), int(row[1]))
-
-
-async def certify_room_membership_locked(
-    db: AsyncConnection,
-    *,
-    namespace: str,
-    room_id: str,
-) -> int:
-    """Create a durable generation row and return its current epoch."""
-    await db.execute(
-        """
-        INSERT INTO mindroom_event_cache_room_state(
-            namespace,
-            room_id,
-            membership_state,
-            membership_epoch
-        )
-        VALUES (%s, %s, 'joined', 0)
-        ON CONFLICT(namespace, room_id) DO NOTHING
-        """,
-        (namespace, room_id),
-    )
-    _membership_state, membership_epoch = await load_room_membership_locked(
-        db,
-        namespace=namespace,
-        room_id=room_id,
-    )
-    return membership_epoch
-
-
-async def set_room_membership_locked(
-    db: AsyncConnection,
-    *,
-    namespace: str,
-    room_id: str,
-    membership_state: Literal["joined", "departed"],
-    reason: str,
-) -> None:
-    """Advance one durable room-membership transition and invalidate prior refills."""
-    await mark_room_stale_locked(
-        db,
-        namespace=namespace,
-        room_id=room_id,
-        reason=reason,
-    )
-    await db.execute(
-        """
-        UPDATE mindroom_event_cache_room_state
-        SET membership_state = %s, membership_epoch = membership_epoch + 1
-        WHERE namespace = %s AND room_id = %s
-        """,
-        (membership_state, namespace, room_id),
-    )
-
-
 async def _store_thread_events_locked(
     db: AsyncConnection,
     *,
@@ -295,8 +134,18 @@ async def _store_thread_events_locked(
     thread_id: str,
     events: list[dict[str, Any]],
     validated_at: float,
-) -> frozenset[str]:
+) -> None:
     """Persist one authoritative thread snapshot within an existing DB transaction."""
+    if not events:
+        await _upsert_thread_cache_state(
+            db,
+            namespace=namespace,
+            room_id=room_id,
+            thread_id=thread_id,
+            validated_at=validated_at,
+        )
+        return
+
     normalized_events = [normalize_event_source_for_cache(event) for event in events]
     cacheable_events = await filter_cacheable_events(
         db,
@@ -305,23 +154,15 @@ async def _store_thread_events_locked(
         [(event_id_for_cache(event), event) for event in normalized_events],
     )
     serialized_events = serialize_cacheable_events(cacheable_events)
-    await write_lookup_index_rows(
-        db,
-        namespace=namespace,
-        room_id=room_id,
-        serialized_events=serialized_events,
-        cached_at=validated_at,
-        thread_id=thread_id,
-    )
     for event in serialized_events:
         await db.execute(
             """
-            INSERT INTO mindroom_event_cache_thread_events(namespace, room_id, thread_id, event_id, origin_server_ts)
-            VALUES (%s, %s, %s, %s, %s)
+            INSERT INTO mindroom_event_cache_thread_events(namespace, room_id, thread_id, event_id, origin_server_ts, event_json)
+            VALUES (%s, %s, %s, %s, %s, %s)
             ON CONFLICT(namespace, room_id, event_id) DO UPDATE SET
                 thread_id = excluded.thread_id,
                 origin_server_ts = excluded.origin_server_ts,
-                event_json = NULL,
+                event_json = excluded.event_json,
                 write_seq = nextval('mindroom_event_cache_write_seq')
             """,
             (
@@ -330,8 +171,17 @@ async def _store_thread_events_locked(
                 thread_id,
                 event.event_id,
                 event.origin_server_ts,
+                event.event_json,
             ),
         )
+    await write_lookup_index_rows(
+        db,
+        namespace=namespace,
+        room_id=room_id,
+        serialized_events=serialized_events,
+        cached_at=validated_at,
+        thread_id=thread_id,
+    )
     await _upsert_thread_cache_state(
         db,
         namespace=namespace,
@@ -339,7 +189,6 @@ async def _store_thread_events_locked(
         thread_id=thread_id,
         validated_at=validated_at,
     )
-    return frozenset(event.event_id for event in serialized_events)
 
 
 async def _replace_thread_locked(
@@ -358,7 +207,29 @@ async def _replace_thread_locked(
         room_id=room_id,
         thread_id=thread_id,
     )
-    replacement_event_ids = await _store_thread_events_locked(
+    await db.execute(
+        """
+        DELETE FROM mindroom_event_cache_thread_events
+        WHERE namespace = %s AND room_id = %s AND thread_id = %s
+        """,
+        (namespace, room_id, thread_id),
+    )
+    if existing_event_ids:
+        await delete_cached_events(db, namespace=namespace, event_ids=existing_event_ids)
+        await delete_event_edit_rows(
+            db,
+            namespace,
+            room_id,
+            event_ids=existing_event_ids,
+            original_event_id=None,
+        )
+        await delete_event_thread_rows(
+            db,
+            namespace,
+            room_id,
+            event_ids=existing_event_ids,
+        )
+    await _store_thread_events_locked(
         db,
         namespace=namespace,
         room_id=room_id,
@@ -366,35 +237,6 @@ async def _replace_thread_locked(
         events=events,
         validated_at=validated_at,
     )
-    removed_event_ids = sorted(set(existing_event_ids) - replacement_event_ids)
-    if removed_event_ids:
-        await db.execute(
-            """
-            DELETE FROM mindroom_event_cache_thread_events
-            WHERE namespace = %s AND room_id = %s AND event_id = ANY(%s)
-            """,
-            (namespace, room_id, removed_event_ids),
-        )
-        await delete_cached_events(
-            db,
-            namespace=namespace,
-            room_id=room_id,
-            event_ids=removed_event_ids,
-        )
-        await delete_event_edit_rows(
-            db,
-            namespace,
-            room_id,
-            event_ids=removed_event_ids,
-            original_event_id=None,
-        )
-        await delete_event_thread_rows(
-            db,
-            namespace,
-            room_id,
-            event_ids=removed_event_ids,
-            current_self_root_ids={thread_id} if thread_id in replacement_event_ids else (),
-        )
 
 
 async def replace_thread_locked_if_not_newer(
@@ -406,31 +248,16 @@ async def replace_thread_locked_if_not_newer(
     events: list[dict[str, Any]],
     fetch_started_at: float,
     validated_at: float,
-) -> ThreadCacheReplaceOutcome:
-    """Replace one thread snapshot or classify the newer state that won."""
+) -> bool:
+    """Replace one thread snapshot only when nothing newer touched this room after the fetch began."""
     cache_state_row = await _load_thread_cache_state_row(
         db,
         namespace=namespace,
         room_id=room_id,
         thread_id=thread_id,
     )
-    # The snapshot-row lookup only distinguishes conflict outcomes, so unchanged state skips it.
-    conflict = (
-        guarded_thread_replacement_conflict(
-            cache_state_row,
-            fetch_started_at=fetch_started_at,
-            has_snapshot_rows=await _thread_has_snapshot_rows_for_thread(
-                db,
-                namespace=namespace,
-                room_id=room_id,
-                thread_id=thread_id,
-            ),
-        )
-        if thread_cache_state_changed_after(cache_state_row, fetch_started_at=fetch_started_at)
-        else None
-    )
-    if conflict is not None:
-        return conflict
+    if thread_cache_state_changed_after(cache_state_row, fetch_started_at=fetch_started_at):
+        return False
     await _replace_thread_locked(
         db,
         namespace=namespace,
@@ -439,7 +266,7 @@ async def replace_thread_locked_if_not_newer(
         events=events,
         validated_at=validated_at,
     )
-    return ThreadCacheReplaceOutcome.STORED
+    return True
 
 
 async def invalidate_thread_locked(
@@ -464,7 +291,7 @@ async def invalidate_thread_locked(
         (namespace, room_id, thread_id),
     )
     if event_ids:
-        await delete_cached_events(db, namespace=namespace, room_id=room_id, event_ids=event_ids)
+        await delete_cached_events(db, namespace=namespace, event_ids=event_ids)
         await delete_event_edit_rows(
             db,
             namespace,
@@ -493,7 +320,7 @@ async def invalidate_room_threads_locked(
     namespace: str,
     room_id: str,
 ) -> None:
-    """Delete every cached thread snapshot while preserving durable room membership."""
+    """Delete every cached thread snapshot and room state for one room."""
     event_ids = await _thread_event_ids_for_room(db, namespace=namespace, room_id=room_id)
     await db.execute(
         """
@@ -503,7 +330,7 @@ async def invalidate_room_threads_locked(
         (namespace, room_id),
     )
     if event_ids:
-        await delete_cached_events(db, namespace=namespace, room_id=room_id, event_ids=event_ids)
+        await delete_cached_events(db, namespace=namespace, event_ids=event_ids)
         await delete_event_edit_rows(
             db,
             namespace,
@@ -524,6 +351,13 @@ async def invalidate_room_threads_locked(
         """,
         (namespace, room_id),
     )
+    await db.execute(
+        """
+        DELETE FROM mindroom_event_cache_room_state
+        WHERE namespace = %s AND room_id = %s
+        """,
+        (namespace, room_id),
+    )
 
 
 async def mark_thread_stale_locked(
@@ -537,8 +371,6 @@ async def mark_thread_stale_locked(
 ) -> None:
     """Persist a durable invalidate-and-refetch marker within an active transaction."""
     stale_at = time.time() if invalidated_at is None else invalidated_at
-    incremental_reasons = list(incremental_thread_revalidation_reasons())
-    incoming_is_incremental = is_incremental_thread_revalidation_reason(reason)
     await db.execute(
         """
         INSERT INTO mindroom_event_cache_thread_state(
@@ -559,78 +391,31 @@ async def mark_thread_stale_locked(
             END,
             invalidation_reason = CASE
                 WHEN mindroom_event_cache_thread_state.invalidated_at IS NULL
-                    THEN excluded.invalidation_reason
-                WHEN %s
-                    AND NOT COALESCE(
-                        mindroom_event_cache_thread_state.invalidation_reason = ANY(%s),
-                        FALSE
-                    )
-                    THEN mindroom_event_cache_thread_state.invalidation_reason
-                WHEN NOT %s
-                    AND COALESCE(
-                        mindroom_event_cache_thread_state.invalidation_reason = ANY(%s),
-                        FALSE
-                    )
-                    THEN excluded.invalidation_reason
-                WHEN excluded.invalidated_at >= mindroom_event_cache_thread_state.invalidated_at
+                    OR excluded.invalidated_at >= mindroom_event_cache_thread_state.invalidated_at
                     THEN excluded.invalidation_reason
                 ELSE mindroom_event_cache_thread_state.invalidation_reason
             END
         """,
-        (
-            namespace,
-            room_id,
-            thread_id,
-            stale_at,
-            reason,
-            incoming_is_incremental,
-            incremental_reasons,
-            incoming_is_incremental,
-            incremental_reasons,
-        ),
+        (namespace, room_id, thread_id, stale_at, reason),
     )
 
 
-async def apply_thread_mutation_append_locked(
+async def revalidate_thread_after_incremental_update_locked(
     db: AsyncConnection,
     *,
     namespace: str,
     room_id: str,
     thread_id: str,
-    normalized_event: dict[str, Any],
-    append_failed_reason: str,
-) -> ThreadAppendOutcome:
-    """Append one threaded mutation and settle this thread's trust in the same transaction.
-
-    See invariant 5 in the module docstring of ``sqlite_event_cache_threads`` for why it is one.
-    """
-    outcome = await _append_existing_thread_event(
-        db,
-        namespace=namespace,
-        room_id=room_id,
-        thread_id=thread_id,
-        normalized_event=normalized_event,
-    )
-    if outcome is not ThreadAppendOutcome.APPENDED:
-        await mark_thread_stale_locked(
-            db,
-            namespace=namespace,
-            room_id=room_id,
-            thread_id=thread_id,
-            reason=append_failed_reason,
-        )
-        return outcome
-
-    # Read after the append: it touches no trust column, and the failure paths above never need it.
-    state_row = await _load_thread_cache_state_row(
+) -> bool:
+    """Mark one thread cache fresh after a safe incremental update."""
+    row = await _load_thread_cache_state_row(
         db,
         namespace=namespace,
         room_id=room_id,
         thread_id=thread_id,
     )
-    if not append_keeps_thread_valid(state_row):
-        return ThreadAppendOutcome.APPENDED_STALE
-
+    if not can_revalidate_after_incremental_update(row):
+        return False
     await db.execute(
         """
         UPDATE mindroom_event_cache_thread_state
@@ -639,7 +424,7 @@ async def apply_thread_mutation_append_locked(
         """,
         (time.time(), namespace, room_id, thread_id),
     )
-    return ThreadAppendOutcome.APPENDED
+    return True
 
 
 async def mark_room_stale_locked(
@@ -674,20 +459,15 @@ async def mark_room_stale_locked(
     )
 
 
-async def _append_existing_thread_event(
+async def append_existing_thread_event(
     db: AsyncConnection,
     *,
     namespace: str,
     room_id: str,
     thread_id: str,
     normalized_event: dict[str, Any],
-) -> ThreadAppendOutcome:
-    """Append one event to an existing cached thread and classify what happened.
-
-    An opaque ``m.room.encrypted`` payload never replaces stored clear content for the same event ID.
-    A redacted event (or one whose edit target is redacted) is refused before anything is written, so
-    its payload never reaches the point-lookup table.
-    """
+) -> bool:
+    """Append one event to an existing cached thread."""
     event_id = event_id_for_cache(normalized_event)
     if await event_or_original_is_redacted(
         db,
@@ -696,46 +476,38 @@ async def _append_existing_thread_event(
         event_id=event_id,
         event=normalized_event,
     ):
-        return ThreadAppendOutcome.APPEND_REFUSED
+        return False
 
     serialized_event = serialize_cached_event(event_id, normalized_event)
     row = await fetchone(
         db,
         """
         SELECT 1
-        FROM mindroom_event_cache_thread_events AS membership
-        JOIN mindroom_event_cache_events AS events
-            ON events.namespace = membership.namespace
-            AND events.event_id = membership.event_id
-            AND events.room_id = membership.room_id
-        WHERE membership.namespace = %s
-            AND membership.room_id = %s
-            AND membership.thread_id = %s
+        FROM mindroom_event_cache_thread_events
+        WHERE namespace = %s AND room_id = %s AND thread_id = %s
         LIMIT 1
         """,
         (namespace, room_id, thread_id),
     )
-    thread_exists = row is not None
-    await write_lookup_index_rows(
-        db,
-        namespace=namespace,
-        room_id=room_id,
-        serialized_events=[serialized_event],
-        cached_at=time.time(),
-        thread_id=thread_id,
-    )
-    if not thread_exists:
-        # Only lookup-index rows are recorded: there is no snapshot to extend, so only a full
-        # history scan can make this thread readable again.
-        return ThreadAppendOutcome.SNAPSHOT_MISSING
+    if row is None:
+        await write_lookup_index_rows(
+            db,
+            namespace=namespace,
+            room_id=room_id,
+            serialized_events=[serialized_event],
+            cached_at=time.time(),
+            thread_id=thread_id,
+        )
+        return False
+
     await db.execute(
         """
-        INSERT INTO mindroom_event_cache_thread_events(namespace, room_id, thread_id, event_id, origin_server_ts)
-        VALUES (%s, %s, %s, %s, %s)
+        INSERT INTO mindroom_event_cache_thread_events(namespace, room_id, thread_id, event_id, origin_server_ts, event_json)
+        VALUES (%s, %s, %s, %s, %s, %s)
         ON CONFLICT(namespace, room_id, event_id) DO UPDATE SET
             thread_id = excluded.thread_id,
             origin_server_ts = excluded.origin_server_ts,
-            event_json = NULL,
+            event_json = excluded.event_json,
             write_seq = nextval('mindroom_event_cache_write_seq')
         """,
         (
@@ -744,9 +516,18 @@ async def _append_existing_thread_event(
             thread_id,
             serialized_event.event_id,
             serialized_event.origin_server_ts,
+            serialized_event.event_json,
         ),
     )
-    return ThreadAppendOutcome.APPENDED
+    await write_lookup_index_rows(
+        db,
+        namespace=namespace,
+        room_id=room_id,
+        serialized_events=[serialized_event],
+        cached_at=time.time(),
+        thread_id=thread_id,
+    )
+    return True
 
 
 async def _upsert_thread_cache_state(
@@ -795,27 +576,6 @@ async def _thread_event_ids_for_thread(
         (namespace, room_id, thread_id),
     )
     return [str(row[0]) for row in rows]
-
-
-async def _thread_has_snapshot_rows_for_thread(
-    db: AsyncConnection,
-    *,
-    namespace: str,
-    room_id: str,
-    thread_id: str,
-) -> bool:
-    """Return whether one thread has at least one cached snapshot row."""
-    row = await fetchone(
-        db,
-        """
-        SELECT 1
-        FROM mindroom_event_cache_thread_events
-        WHERE namespace = %s AND room_id = %s AND thread_id = %s
-        LIMIT 1
-        """,
-        (namespace, room_id, thread_id),
-    )
-    return row is not None
 
 
 async def _thread_event_ids_for_room(

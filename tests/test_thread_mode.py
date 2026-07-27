@@ -1567,7 +1567,7 @@ class TestExtractedModuleLoggerRebinding:
         bot.logger = rebound_logger
 
         event_cache = AsyncMock()
-        event_cache.apply_thread_mutation_append.side_effect = RuntimeError("cache write failed")
+        event_cache.append_event.side_effect = RuntimeError("cache write failed")
         bot.event_cache = event_cache
         bot.event_cache_write_coordinator = EventCacheWriteCoordinator(
             logger=MagicMock(),
@@ -1596,9 +1596,8 @@ class TestExtractedModuleLoggerRebinding:
             event,
             event_info=EventInfo.from_event(event.source),
         )
-        await bot.event_cache_write_coordinator.close()
 
-        original_logger.warning.assert_any_call(
+        original_logger.warning.assert_called_once_with(
             "Failed to append thread event to cache",
             room_id="!room:localhost",
             thread_id="$threadroot",
@@ -1606,14 +1605,6 @@ class TestExtractedModuleLoggerRebinding:
             context="live",
             error="cache write failed",
         )
-        original_logger.warning.assert_any_call(
-            "Background thread cache repair failed",
-            room_id="!room:localhost",
-            thread_id="$threadroot",
-            error_type="RuntimeError",
-            error="Matrix client is not ready for conversation cache",
-        )
-        assert original_logger.warning.call_count == 2
         rebound_logger.warning.assert_not_called()
 
     def test_conversation_resolver_fetch_path_uses_conversation_cache_api(
@@ -1818,25 +1809,6 @@ class TestExtractedModuleLoggerRebinding:
 
         bot._conversation_resolver.deps.conversation_cache.get_thread_id_for_event = AsyncMock(
             side_effect=lambda _room_id, event_id: "$threadroot" if event_id == "$reply-seed:localhost" else None,
-        )
-        bot._conversation_resolver.deps.conversation_cache.get_event = AsyncMock(
-            return_value=nio.RoomGetEventResponse.from_dict(
-                {
-                    "event_id": "$reply-seed:localhost",
-                    "sender": "@user:localhost",
-                    "origin_server_ts": 1234567889,
-                    "room_id": room.room_id,
-                    "type": "m.room.message",
-                    "content": {
-                        "msgtype": "m.text",
-                        "body": "thread reply",
-                        "m.relates_to": {
-                            "event_id": "$threadroot",
-                            "rel_type": "m.thread",
-                        },
-                    },
-                },
-            ),
         )
         thread_lookup = await bot._conversation_resolver._explicit_thread_id_for_event(
             room.room_id,

@@ -12,11 +12,8 @@ import pytest
 
 import mindroom.matrix.cache as matrix_cache
 import mindroom.matrix.cache.sqlite_event_cache_threads as sqlite_event_cache_threads_module
-from mindroom.background_tasks import wait_for_background_tasks
-from mindroom.matrix.cache import ThreadCacheReplaceOutcome
 from mindroom.matrix.cache.event_cache import ThreadCacheState
 from mindroom.matrix.cache.sqlite_event_cache import SqliteEventCache
-from mindroom.matrix.cache.thread_cache_state import ThreadAppendOutcome
 from mindroom.matrix.cache.write_coordinator import EventCacheWriteCoordinator
 from mindroom.matrix.conversation_cache import MatrixConversationCache
 from mindroom.matrix.event_info import EventInfo
@@ -31,7 +28,7 @@ from mindroom.matrix.thread_diagnostics import (
 from tests.event_cache_test_support import replace_thread_unconditionally as _replace_thread
 from tests.threading_helpers import (
     ThreadingBehaviorTestBase,
-    _assert_thread_read_guard_retries_when_unknown_live_mutation_races_fetch,
+    _assert_thread_read_guard_rejects_cache_when_unknown_live_mutation_races_fetch,
     _bind_owned_runtime_support,
     _close_bound_runtime_support,
     _conversation_runtime,
@@ -61,7 +58,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         """Live edit caching should degrade cleanly when SQLite lookup fails."""
         event_cache = _runtime_event_cache()
         event_cache.get_thread_id_for_event = AsyncMock(side_effect=RuntimeError("database is locked"))
-        event_cache.apply_thread_mutation_append = AsyncMock()
+        event_cache.append_event = AsyncMock()
         bot.event_cache = event_cache
 
         edit_event = nio.RoomMessageText.from_dict(
@@ -87,7 +84,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         )
 
         event_cache.get_thread_id_for_event.assert_awaited_once_with("!test:localhost", "$thread_msg:localhost")
-        event_cache.apply_thread_mutation_append.assert_not_awaited()
+        event_cache.append_event.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_live_plain_edit_lookup_miss_invalidates_room_threads(self, bot: AgentBot) -> None:
@@ -103,7 +100,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
                 "content": {"body": "Room message", "msgtype": "m.text"},
             },
         )
-        event_cache.apply_thread_mutation_append = AsyncMock()
+        event_cache.append_event = AsyncMock()
         bot.event_cache = event_cache
         bot.event_cache_write_coordinator = EventCacheWriteCoordinator(
             logger=MagicMock(),
@@ -138,7 +135,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             "!test:localhost",
             reason="live_thread_lookup_unavailable",
         )
-        event_cache.apply_thread_mutation_append.assert_not_awaited()
+        event_cache.append_event.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_live_plain_edit_missing_original_invalidates_room_threads(self, bot: AgentBot) -> None:
@@ -146,7 +143,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         event_cache = _runtime_event_cache()
         event_cache.get_thread_id_for_event = AsyncMock(return_value=None)
         event_cache.get_event = AsyncMock(return_value=None)
-        event_cache.apply_thread_mutation_append = AsyncMock()
+        event_cache.append_event = AsyncMock()
         bot.event_cache = event_cache
         bot.event_cache_write_coordinator = EventCacheWriteCoordinator(
             logger=MagicMock(),
@@ -182,7 +179,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             "!test:localhost",
             reason="live_thread_lookup_unavailable",
         )
-        event_cache.apply_thread_mutation_append.assert_not_awaited()
+        event_cache.append_event.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_live_message_resolution_does_not_block_same_room_read(self) -> None:
@@ -251,180 +248,6 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         allow_resolve.set()
         await live_task
         await _wait_for_room_cache_idle(coordinator)
-
-    @pytest.mark.asyncio
-    async def test_missing_cache_live_append_repairs_and_replays_delta_once(self, tmp_path: Path) -> None:
-        """A certified live event should survive a missing snapshot and join the scheduled repair."""
-        room_id = "!test:localhost"
-        thread_id = "$thread:localhost"
-        event_cache = SqliteEventCache(tmp_path / "event_cache.db")
-        await event_cache.initialize()
-        coordinator = _runtime_write_coordinator()
-        root_event = _text_event(
-            event_id=thread_id,
-            body="Root",
-            sender="@user:localhost",
-            server_timestamp=1000,
-            room_id=room_id,
-        )
-        live_event = _text_event(
-            event_id="$live:localhost",
-            body="Live",
-            sender="@agent:localhost",
-            server_timestamp=2000,
-            room_id=room_id,
-            thread_id=thread_id,
-        )
-        client = _relations_client(
-            root_event=root_event,
-            thread_events=[],
-            next_batch="s_initial",
-        )
-        room_messages_response = client.room_messages.return_value
-        fetch_started = asyncio.Event()
-        release_fetch = asyncio.Event()
-
-        async def blocking_room_messages(*_args: object, **_kwargs: object) -> nio.RoomMessagesResponse:
-            fetch_started.set()
-            await release_fetch.wait()
-            return room_messages_response
-
-        client.room_messages = AsyncMock(side_effect=blocking_room_messages)
-        access = MatrixConversationCache(
-            logger=MagicMock(),
-            runtime=_conversation_runtime(
-                client=client,
-                event_cache=event_cache,
-                coordinator=coordinator,
-            ),
-        )
-
-        try:
-            await access.append_live_event(
-                room_id,
-                live_event,
-                event_info=EventInfo.from_event(live_event.source),
-            )
-            await asyncio.wait_for(fetch_started.wait(), timeout=1.0)
-            concurrent_reads = [
-                asyncio.create_task(access.get_dispatch_thread_history(room_id, thread_id)) for _index in range(10)
-            ]
-            release_fetch.set()
-            histories = await asyncio.gather(*concurrent_reads)
-            await wait_for_background_tasks(timeout=1.0, owner=coordinator.background_task_owner)
-            final_history = await access.get_dispatch_thread_history(room_id, thread_id)
-            cached_rows = await event_cache.get_thread_events(room_id, thread_id)
-            cache_state = await event_cache.get_thread_cache_state(room_id, thread_id)
-        finally:
-            release_fetch.set()
-            await wait_for_background_tasks(timeout=1.0, owner=coordinator.background_task_owner)
-            await event_cache.close()
-
-        expected_event_ids = [thread_id, "$live:localhost"]
-        assert all([message.event_id for message in history] == expected_event_ids for history in histories)
-        assert [message.event_id for message in final_history] == expected_event_ids
-        assert cached_rows is not None
-        assert [event["event_id"] for event in cached_rows] == expected_event_ids
-        assert matrix_cache.thread_cache_rejection_reason(cache_state) is None
-        client.room_messages.assert_awaited_once()
-
-    @pytest.mark.asyncio
-    async def test_live_append_arriving_during_reconstruction_joins_snapshot(self, tmp_path: Path) -> None:
-        """A live event retained after the scan starts should be merged before snapshot installation."""
-        room_id = "!test:localhost"
-        thread_id = "$thread:localhost"
-        event_cache = SqliteEventCache(tmp_path / "event_cache.db")
-        await event_cache.initialize()
-        coordinator = _runtime_write_coordinator()
-        root_event = _text_event(
-            event_id=thread_id,
-            body="Root",
-            sender="@user:localhost",
-            server_timestamp=1000,
-            room_id=room_id,
-        )
-        live_event = _text_event(
-            event_id="$live:localhost",
-            body="Live",
-            sender="@agent:localhost",
-            server_timestamp=2000,
-            room_id=room_id,
-            thread_id=thread_id,
-        )
-        client = _relations_client(
-            root_event=root_event,
-            thread_events=[],
-            next_batch="s_initial",
-        )
-        room_messages_response = client.room_messages.return_value
-        fetch_started = asyncio.Event()
-        release_fetch = asyncio.Event()
-        delta_retained = asyncio.Event()
-        real_retain_delta = coordinator.retain_thread_repair_delta
-
-        async def blocking_room_messages(*_args: object, **_kwargs: object) -> nio.RoomMessagesResponse:
-            fetch_started.set()
-            await release_fetch.wait()
-            return room_messages_response
-
-        def retain_delta(
-            retained_room_id: str,
-            retained_thread_id: str,
-            event_source: dict[str, object],
-            *,
-            coordination_scope: str,
-        ) -> None:
-            real_retain_delta(
-                retained_room_id,
-                retained_thread_id,
-                event_source,
-                coordination_scope=coordination_scope,
-            )
-            delta_retained.set()
-
-        client.room_messages = AsyncMock(side_effect=blocking_room_messages)
-        coordinator.retain_thread_repair_delta = MagicMock(side_effect=retain_delta)
-        access = MatrixConversationCache(
-            logger=MagicMock(),
-            runtime=_conversation_runtime(
-                client=client,
-                event_cache=event_cache,
-                coordinator=coordinator,
-            ),
-        )
-        read_task = asyncio.create_task(access.get_dispatch_thread_history(room_id, thread_id))
-        append_task: asyncio.Task[None] | None = None
-
-        try:
-            await asyncio.wait_for(fetch_started.wait(), timeout=1.0)
-            append_task = asyncio.create_task(
-                access.append_live_event(
-                    room_id,
-                    live_event,
-                    event_info=EventInfo.from_event(live_event.source),
-                ),
-            )
-            await asyncio.wait_for(delta_retained.wait(), timeout=1.0)
-            release_fetch.set()
-            history = await read_task
-            await append_task
-            await wait_for_background_tasks(timeout=1.0, owner=coordinator.background_task_owner)
-            cached_rows = await event_cache.get_thread_events(room_id, thread_id)
-        finally:
-            release_fetch.set()
-            await asyncio.gather(
-                read_task,
-                *(task for task in [append_task] if task is not None),
-                return_exceptions=True,
-            )
-            await wait_for_background_tasks(timeout=1.0, owner=coordinator.background_task_owner)
-            await event_cache.close()
-
-        expected_event_ids = [thread_id, "$live:localhost"]
-        assert [message.event_id for message in history] == expected_event_ids
-        assert cached_rows is not None
-        assert [event["event_id"] for event in cached_rows] == expected_event_ids
-        client.room_messages.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_live_redaction_resolution_does_not_block_same_room_read(self) -> None:
@@ -518,7 +341,6 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             "!test:localhost",
             slow_prior_room_update,
             name="matrix_cache_prior_update",
-            coordination_scope=event_cache.principal_id,
         )
         await asyncio.wait_for(prior_write_started.wait(), timeout=1.0)
 
@@ -589,7 +411,6 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             thread_b_id,
             blocking_sibling_thread_update,
             name="matrix_cache_blocking_sibling_thread_update",
-            coordination_scope=event_cache.principal_id,
         )
         redaction_event = MagicMock(spec=nio.RedactionEvent)
         redaction_event.event_id = "$redaction:localhost"
@@ -660,7 +481,6 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             thread_a_id,
             blocking_same_thread_update,
             name="matrix_cache_blocking_same_thread_update",
-            coordination_scope=event_cache.principal_id,
         )
         redaction_event = MagicMock(spec=nio.RedactionEvent)
         redaction_event.event_id = "$redaction:localhost"
@@ -733,29 +553,27 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             sibling_update_started.set()
             await release_sibling_update.wait()
 
-        async def apply_thread_mutation_append(
+        async def mark_thread_stale(
             marked_room_id: str,
             marked_thread_id: str,
-            _event_source: dict[str, object],
             *,
-            append_failed_reason: str,
-        ) -> ThreadAppendOutcome:
+            reason: str,
+        ) -> None:
             assert marked_room_id == room_id
             assert marked_thread_id == thread_a_id
-            assert append_failed_reason == "live_append_failed"
+            assert reason == "live_thread_mutation"
             append_started.set()
-            return ThreadAppendOutcome.APPENDED
 
         access._live._resolver.resolve_thread_impact_for_mutation = AsyncMock(
             return_value=MutationThreadImpact.threaded(thread_a_id),
         )
-        event_cache.apply_thread_mutation_append = AsyncMock(side_effect=apply_thread_mutation_append)
+        event_cache.mark_thread_stale = AsyncMock(side_effect=mark_thread_stale)
+        event_cache.append_event = AsyncMock(return_value=True)
         sibling_task = coordinator.queue_thread_update(
             room_id,
             thread_b_id,
             blocking_sibling_thread_update,
             name="matrix_cache_blocking_other_thread_update",
-            coordination_scope=event_cache.principal_id,
         )
         try:
             await asyncio.wait_for(sibling_update_started.wait(), timeout=1.0)
@@ -795,13 +613,16 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             )
             await coordinator.close()
 
-        event_cache.apply_thread_mutation_append.assert_awaited_once_with(
+        event_cache.mark_thread_stale.assert_awaited_once_with(
+            room_id,
+            thread_a_id,
+            reason="live_thread_mutation",
+        )
+        event_cache.append_event.assert_awaited_once_with(
             room_id,
             thread_a_id,
             event.source,
-            append_failed_reason="live_append_failed",
         )
-        event_cache.mark_thread_stale.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_sync_edit_marks_cached_thread_stale_and_next_read_refetches(
@@ -856,7 +677,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             sync_response.__class__ = nio.SyncResponse
             sync_response.rooms = MagicMock()
             sync_response.rooms.join = {
-                "!test:localhost": MagicMock(timeline=MagicMock(events=[reply_edit], limited=False)),
+                "!test:localhost": MagicMock(timeline=MagicMock(events=[reply_edit])),
             }
             access.cache_sync_timeline(sync_response)
             await _wait_for_room_cache_idle(access.runtime.event_cache_write_coordinator)
@@ -929,7 +750,6 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
                 room_id,
                 thread_id,
                 [old_root_event.source, old_reply_event.source],
-                expected_membership_epoch=await event_cache.room_membership_epoch(room_id),
                 fetch_started_at=prewarm_fetch_started_at,
                 validated_at=prewarm_fetch_started_at + 2,
             )
@@ -937,72 +757,9 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         finally:
             await event_cache.close()
 
-        assert replaced is ThreadCacheReplaceOutcome.EXISTING_USABLE
+        assert replaced is False
         assert cached_history is not None
         assert [event["event_id"] for event in cached_history] == [thread_id, "$reply_new:localhost"]
-
-    @pytest.mark.asyncio
-    async def test_startup_prewarm_does_not_starve_live_dispatch(self, bot: AgentBot) -> None:
-        """A blocked bulk scan should not occupy the live thread-repair coordinator."""
-        support = await _bind_owned_runtime_support(bot)
-        room_id = "!test:localhost"
-        thread_id = "$thread_root:localhost"
-        root_event = _text_event(
-            event_id=thread_id,
-            body="Root",
-            sender="@user:localhost",
-            server_timestamp=1000,
-        )
-        reply_event = _text_event(
-            event_id="$reply:localhost",
-            body="Reply",
-            sender="@agent:localhost",
-            server_timestamp=2000,
-            thread_id=thread_id,
-        )
-        prewarm_started = asyncio.Event()
-        release_prewarm = asyncio.Event()
-        live_scan_started = asyncio.Event()
-        room_scan_count = 0
-
-        async def room_messages(*_args: object, **_kwargs: object) -> nio.RoomMessagesResponse:
-            nonlocal room_scan_count
-            room_scan_count += 1
-            if room_scan_count == 1:
-                prewarm_started.set()
-                await release_prewarm.wait()
-            else:
-                live_scan_started.set()
-            return nio.RoomMessagesResponse(
-                room_id=room_id,
-                chunk=[reply_event, root_event],
-                start="",
-                end=None,
-            )
-
-        prewarm_task: asyncio.Task[object] | None = None
-        try:
-            bot.client.room_messages = AsyncMock(side_effect=room_messages)
-            prewarm_task = asyncio.create_task(
-                bot._conversation_cache._bulk_refresh_startup_threads(room_id, [thread_id]),
-            )
-            await asyncio.wait_for(prewarm_started.wait(), timeout=1.0)
-            dispatch_task = asyncio.create_task(
-                bot._conversation_cache.get_dispatch_thread_history(room_id, thread_id),
-            )
-            await asyncio.wait_for(live_scan_started.wait(), timeout=1.0)
-            history = await asyncio.wait_for(dispatch_task, timeout=1.0)
-            assert prewarm_task.done() is False
-            release_prewarm.set()
-            await prewarm_task
-        finally:
-            release_prewarm.set()
-            if prewarm_task is not None:
-                await asyncio.gather(prewarm_task, return_exceptions=True)
-            await _close_bound_runtime_support(bot, support)
-
-        assert [message.event_id for message in history] == [thread_id, "$reply:localhost"]
-        assert room_scan_count == 2
 
     @pytest.mark.asyncio
     async def test_prewarm_result_remains_reusable_after_restart(
@@ -1065,22 +822,22 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         try:
             bot.client.room_messages = AsyncMock(side_effect=room_messages)
             prewarm_task = asyncio.create_task(
-                bot._conversation_cache._bulk_refresh_startup_threads(
+                bot._conversation_cache._refresh_dispatch_thread_snapshot_for_startup_prewarm(
                     room_id,
-                    [thread_id],
+                    thread_id,
                 ),
             )
             await asyncio.wait_for(prewarm_fetch_started.wait(), timeout=1.0)
 
             allow_prewarm_fetch_finish.set()
-            prewarm_stats = await asyncio.wait_for(prewarm_task, timeout=1.0)
+            prewarm_history = await asyncio.wait_for(prewarm_task, timeout=1.0)
 
             history = await bot._conversation_cache.get_dispatch_thread_history(room_id, thread_id)
         finally:
             allow_prewarm_fetch_finish.set()
             await _close_bound_runtime_support(bot, support)
 
-        assert prewarm_stats.usable_threads == 1
+        assert [message.body for message in prewarm_history] == ["Old root", "Old reply"]
         assert [message.body for message in history] == ["Old root", "Old reply"]
         assert history.diagnostics[THREAD_HISTORY_SOURCE_DIAGNOSTIC] == THREAD_HISTORY_SOURCE_CACHE
         assert THREAD_HISTORY_CACHE_REJECT_REASON_DIAGNOSTIC not in history.diagnostics
@@ -1204,7 +961,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         allow_write_commit = asyncio.Event()
         original_replace = sqlite_event_cache_threads_module.replace_thread_locked_if_not_newer
 
-        async def blocked_replace(*args: object, **kwargs: object) -> ThreadCacheReplaceOutcome:
+        async def blocked_replace(*args: object, **kwargs: object) -> bool:
             write_entered.set()
             await allow_write_commit.wait()
             return await original_replace(*args, **kwargs)
@@ -1220,7 +977,6 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
                         room_id,
                         thread_id,
                         [old_root_event.source, old_reply_event.source],
-                        expected_membership_epoch=await bot.event_cache.room_membership_epoch(room_id),
                         fetch_started_at=fetch_started_at,
                     ),
                 )
@@ -1239,7 +995,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             allow_write_commit.set()
             await _close_bound_runtime_support(bot, support)
 
-        assert replaced is ThreadCacheReplaceOutcome.STORED
+        assert replaced is True
         assert [message.body for message in history] == ["Old root", "Old reply"]
         assert history.diagnostics[THREAD_HISTORY_SOURCE_DIAGNOSTIC] == THREAD_HISTORY_SOURCE_CACHE
         assert THREAD_HISTORY_CACHE_REJECT_REASON_DIAGNOSTIC not in history.diagnostics
@@ -1291,7 +1047,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             sync_response.__class__ = nio.SyncResponse
             sync_response.rooms = MagicMock()
             sync_response.rooms.join = {
-                "!test:localhost": MagicMock(timeline=MagicMock(events=[ambiguous_edit], limited=False)),
+                "!test:localhost": MagicMock(timeline=MagicMock(events=[ambiguous_edit])),
             }
             access.cache_sync_timeline(sync_response)
             await _wait_for_room_cache_idle(access.runtime.event_cache_write_coordinator)
@@ -1308,7 +1064,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         """Thread-history reads should fail closed instead of silently returning an empty thread."""
         access = MatrixConversationCache(
             logger=MagicMock(),
-            runtime=_conversation_runtime(client=_make_client_mock()),
+            runtime=_conversation_runtime(),
         )
         access._reads.fetch_thread_history_from_client = AsyncMock(side_effect=RuntimeError("boom"))
 
@@ -1320,7 +1076,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         """Thread refreshes should serialize with same-thread mutations without blocking other threads."""
         access = MatrixConversationCache(
             logger=MagicMock(),
-            runtime=_conversation_runtime(client=_make_client_mock()),
+            runtime=_conversation_runtime(),
         )
         access.runtime.event_cache.get_thread_cache_state = AsyncMock(return_value=None)
         access.runtime.event_cache.get_thread_events = AsyncMock(return_value=[{"event_id": "$thread:localhost"}])
@@ -1329,7 +1085,8 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         queued_update_started = asyncio.Event()
 
         async def slow_refresh(
-            *_args: object,
+            _room_id: str,
+            _thread_id: str,
             **_kwargs: object,
         ) -> ThreadHistoryResult:
             refresh_started.set()
@@ -1337,31 +1094,27 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             return thread_history_result(
                 [_message(event_id="$thread:localhost", body="Root")],
                 is_full_history=True,
-                diagnostics={"cache_repair_usable": True},
             )
 
         async def queued_update() -> None:
             queued_update_started.set()
 
-        with patch(
-            "mindroom.matrix.conversation_cache.refresh_thread_history_from_source",
-            new=AsyncMock(side_effect=slow_refresh),
-        ):
-            refresh_task = asyncio.create_task(access.get_thread_history("!test:localhost", "$thread:localhost"))
-            await asyncio.wait_for(refresh_started.wait(), timeout=1.0)
+        access._reads.fetch_thread_history_from_client = AsyncMock(side_effect=slow_refresh)
 
-            access.runtime.event_cache_write_coordinator.queue_thread_update(
-                "!test:localhost",
-                "$thread:localhost",
-                lambda: queued_update(),
-                name="matrix_cache_follow_up_update",
-                coordination_scope=access.runtime.event_cache.principal_id,
-            )
-            await asyncio.sleep(0)
-            assert queued_update_started.is_set() is False
+        refresh_task = asyncio.create_task(access.get_thread_history("!test:localhost", "$thread:localhost"))
+        await asyncio.wait_for(refresh_started.wait(), timeout=1.0)
 
-            allow_refresh.set()
-            await refresh_task
+        access.runtime.event_cache_write_coordinator.queue_thread_update(
+            "!test:localhost",
+            "$thread:localhost",
+            lambda: queued_update(),
+            name="matrix_cache_follow_up_update",
+        )
+        await asyncio.sleep(0)
+        assert queued_update_started.is_set() is False
+
+        allow_refresh.set()
+        await refresh_task
         await _wait_for_room_cache_idle(access.runtime.event_cache_write_coordinator)
 
         assert queued_update_started.is_set()
@@ -1404,16 +1157,14 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
                 room_invalidation_reason=None,
             )
 
-        async def apply_thread_mutation_append(
+        async def append_event(
             _room_id: str,
             _thread_id: str,
             event: dict[str, object],
-            *,
-            append_failed_reason: str,  # noqa: ARG001  # keyword must match the runtime call
-        ) -> ThreadAppendOutcome:
+        ) -> bool:
             raw_events.append(event)
             raw_append_committed.set()
-            return ThreadAppendOutcome.APPENDED
+            return True
 
         async def fetch_fresh_history(
             _room_id: str,
@@ -1441,7 +1192,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         event_cache.get_thread_events = AsyncMock(side_effect=lambda *_args, **_kwargs: list(raw_events))
         event_cache.get_thread_id_for_event = AsyncMock(return_value="$thread:localhost")
         event_cache.mark_thread_stale = AsyncMock(side_effect=mark_thread_stale)
-        event_cache.apply_thread_mutation_append = AsyncMock(side_effect=apply_thread_mutation_append)
+        event_cache.append_event = AsyncMock(side_effect=append_event)
         access._reads._wait_for_pending_thread_cache_updates = AsyncMock(side_effect=pause_reader)
         access._reads.fetch_thread_history_from_client = AsyncMock(side_effect=fetch_fresh_history)
         new_event_source = {
@@ -1617,12 +1368,12 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         client.room_messages.assert_awaited_once()
 
     @pytest.mark.asyncio
-    async def test_thread_history_guard_retries_when_unknown_live_mutation_races_fetch(
+    async def test_thread_history_guard_rejects_cache_when_unknown_live_mutation_races_fetch(
         self,
         tmp_path: Path,
     ) -> None:
-        """A thread history fetched before room invalidation must reconstruct again before validation."""
-        await _assert_thread_read_guard_retries_when_unknown_live_mutation_races_fetch(
+        """A thread history fetched before room invalidation must not validate stale cache."""
+        await _assert_thread_read_guard_rejects_cache_when_unknown_live_mutation_races_fetch(
             tmp_path,
             read_thread=MatrixConversationCache.get_thread_history,
             force_refetch_reason="test_force_thread_history_refetch",
@@ -1630,12 +1381,12 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         )
 
     @pytest.mark.asyncio
-    async def test_dispatch_thread_history_guard_retries_when_unknown_live_mutation_races_fetch(
+    async def test_dispatch_thread_history_guard_rejects_cache_when_unknown_live_mutation_races_fetch(
         self,
         tmp_path: Path,
     ) -> None:
-        """A dispatch history fetched before room invalidation must reconstruct again before validation."""
-        await _assert_thread_read_guard_retries_when_unknown_live_mutation_races_fetch(
+        """A dispatch history fetched before room invalidation must not validate stale cache."""
+        await _assert_thread_read_guard_rejects_cache_when_unknown_live_mutation_races_fetch(
             tmp_path,
             read_thread=MatrixConversationCache.get_dispatch_thread_history,
             force_refetch_reason="test_force_dispatch_history_refetch",
@@ -1643,11 +1394,11 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         )
 
     @pytest.mark.asyncio
-    async def test_dispatch_thread_snapshot_guard_retries_when_unknown_live_mutation_races_fetch(  # noqa: PLR0915
+    async def test_dispatch_thread_snapshot_guard_rejects_cache_when_unknown_live_mutation_races_fetch(  # noqa: PLR0915
         self,
         tmp_path: Path,
     ) -> None:
-        """A dispatch snapshot fetched before room invalidation must reconstruct again before validation."""
+        """A dispatch snapshot fetched before room invalidation must not validate stale cache."""
         room_id = "!test:localhost"
         thread_id = "$thread:localhost"
         event_cache = SqliteEventCache(tmp_path / "event_cache.db")
@@ -1729,6 +1480,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
 
         try:
             await asyncio.wait_for(fetch_started.wait(), timeout=1.0)
+            await asyncio.sleep(0.01)
             live_task = asyncio.create_task(
                 access.append_live_event(
                     room_id,
@@ -1762,9 +1514,9 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         assert thread_state is not None
         assert thread_state.validated_at is not None
         assert thread_state.room_invalidated_at is not None
-        assert thread_state.room_invalidated_at < thread_state.validated_at
-        assert matrix_cache.thread_cache_rejection_reason(thread_state) is None
-        assert client.room_messages.await_count == 2
+        assert thread_state.room_invalidated_at > thread_state.validated_at
+        assert matrix_cache.thread_cache_rejection_reason(thread_state) is not None
+        client.room_messages.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_latest_thread_event_lookup_refetches_invalidated_thread_tail(

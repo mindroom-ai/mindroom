@@ -16,13 +16,7 @@ from mindroom.matrix.room_cleanup import _cleanup_orphaned_bots_in_room, cleanup
 from mindroom.matrix.state import MatrixState
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.tool_system.worker_routing import agent_state_root_path
-from tests.conftest import (
-    TEST_PASSWORD,
-    bind_runtime_paths,
-    install_runtime_cache_support,
-    orchestrator_runtime_paths,
-    runtime_paths_for,
-)
+from tests.conftest import TEST_PASSWORD, bind_runtime_paths, orchestrator_runtime_paths, runtime_paths_for
 
 
 def _config_with_runtime_paths(tmp_path: Path, **config_data: object) -> Config:
@@ -68,7 +62,6 @@ class TestDMPreservationDuringCleanup:
             runtime_paths=runtime_paths_for(config),
             rooms=["!regular:server", "!another:server"],
         )
-        install_runtime_cache_support(bot)
         bot.client = AsyncMock()
         bot.logger = MagicMock()
 
@@ -123,7 +116,6 @@ class TestDMPreservationDuringCleanup:
             runtime_paths=runtime_paths_for(config),
             rooms=["!configured:server"],  # Only one configured room
         )
-        install_runtime_cache_support(bot)
         bot.client = AsyncMock()
         bot.logger = MagicMock()
 

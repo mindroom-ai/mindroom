@@ -102,13 +102,6 @@ def _knowledge_access_support() -> SimpleNamespace:
     )
 
 
-def _empty_storage_factory() -> MagicMock:
-    """Return a fresh session-storage double with no persisted session."""
-    storage = MagicMock()
-    storage.get_session.return_value = None
-    return storage
-
-
 def _build_response_runner(bot: AgentBot) -> None:
     """Rebuild extracted collaborators after tests replace bot-facing dependencies."""
     replace_delivery_gateway_deps(
@@ -366,11 +359,7 @@ class TestAIErrorDisplay:
             patch(
                 "mindroom.ai.open_resolved_scope_session_context",
                 new=lambda **_kwargs: nullcontext(
-                    SimpleNamespace(
-                        storage=MagicMock(),
-                        storage_factory=_empty_storage_factory,
-                        session=None,
-                    ),
+                    SimpleNamespace(storage=MagicMock(), session=None),
                 ),
             ),
             patch("mindroom.ai._prepare_agent_and_prompt", new=AsyncMock(return_value=_prepared_run(mock_agent))),
@@ -433,11 +422,7 @@ class TestAIErrorDisplay:
             patch(
                 "mindroom.ai.open_resolved_scope_session_context",
                 new=lambda **_kwargs: nullcontext(
-                    SimpleNamespace(
-                        storage=MagicMock(),
-                        storage_factory=_empty_storage_factory,
-                        session=None,
-                    ),
+                    SimpleNamespace(storage=MagicMock(), session=None),
                 ),
             ),
             patch("mindroom.ai._prepare_agent_and_prompt", new=AsyncMock(return_value=_prepared_run(mock_agent))),
@@ -499,11 +484,7 @@ class TestAIErrorDisplay:
             patch(
                 "mindroom.ai.open_resolved_scope_session_context",
                 new=lambda **_kwargs: nullcontext(
-                    SimpleNamespace(
-                        storage=MagicMock(),
-                        storage_factory=_empty_storage_factory,
-                        session=None,
-                    ),
+                    SimpleNamespace(storage=MagicMock(), session=None),
                 ),
             ),
             patch("mindroom.ai._prepare_agent_and_prompt", new=AsyncMock(return_value=_prepared_run(mock_agent))),

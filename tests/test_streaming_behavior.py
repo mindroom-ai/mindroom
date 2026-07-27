@@ -64,7 +64,6 @@ from mindroom.streaming import (
     _DeliveryRequest,
     _drive_stream_delivery,
     _flush_phase_boundary_if_needed,
-    _queue_delivery_request,
     _shutdown_stream_delivery,
     _StreamDeliveryShutdownTimeoutError,
     build_restart_interrupted_body,
@@ -182,63 +181,6 @@ async def _consume_streaming_chunks_for_test(
             cleanup_error = await _shutdown_stream_delivery(delivery_queue, delivery_task)
             if cleanup_error is not None:
                 raise cleanup_error
-
-
-@pytest.mark.asyncio
-async def test_delivery_queue_bounds_optional_updates() -> None:
-    """A stalled delivery owner should retain bounded optional updates while preserving barriers."""
-    delivery_queue: asyncio.Queue[_DeliveryRequest | None] = asyncio.Queue()
-
-    for _ in range(100):
-        _queue_delivery_request(delivery_queue, progress_hint=True)
-
-    assert delivery_queue.qsize() == 32
-    capture = _queue_delivery_request(delivery_queue, phase_boundary_flush=True, wait_for_capture=True)
-    assert capture is not None
-    assert delivery_queue.qsize() == 33
-    _queue_delivery_request(delivery_queue, force_refresh=True)
-    assert delivery_queue.qsize() == 34
-
-
-@pytest.mark.asyncio
-async def test_dropped_optional_delivery_still_sends_latest_visible_text(tmp_path: Path) -> None:
-    """Queued optional work reads live state, so dropped superseded requests cannot strand text."""
-    mock_client = _make_matrix_client_mock()
-    mock_response = MagicMock()
-    mock_response.__class__ = nio.RoomSendResponse
-    mock_response.event_id = "$latest_visible_text"
-    mock_client.room_send.return_value = mock_response
-    config = bind_runtime_paths(Config(), test_runtime_paths(tmp_path))
-    streaming = StreamingResponse(
-        target=MessageTarget.resolve("!test:localhost", None, "$original_123"),
-        config=config,
-        runtime_paths=runtime_paths_for(config),
-        update_interval=10.0,
-        min_update_interval=10.0,
-        interval_ramp_seconds=0.0,
-        update_char_threshold=1,
-        min_update_char_threshold=1,
-        min_char_update_interval=0.0,
-    )
-    streaming.last_update = float("-inf")
-    streaming.accumulated_text = "stale body"
-    streaming.chars_since_last_update = len(streaming.accumulated_text)
-    delivery_queue: asyncio.Queue[_DeliveryRequest | None] = asyncio.Queue()
-
-    for _ in range(32):
-        _queue_delivery_request(delivery_queue)
-
-    streaming.accumulated_text = "latest body"
-    streaming.chars_since_last_update = len(streaming.accumulated_text)
-    assert _queue_delivery_request(delivery_queue) is None
-    assert delivery_queue.qsize() == 32
-
-    delivery_task = asyncio.create_task(_drive_stream_delivery(mock_client, streaming, delivery_queue))
-    shutdown_error = await _shutdown_stream_delivery(delivery_queue, delivery_task)
-
-    assert shutdown_error is None
-    mock_client.room_send.assert_awaited_once()
-    assert mock_client.room_send.await_args.kwargs["content"]["body"] == "latest body"
 
 
 @pytest.fixture
@@ -1942,8 +1884,6 @@ class TestStreamingBehavior:
         mock_client = _make_matrix_client_mock()
         conversation_cache = AsyncMock()
         conversation_cache.notify_outbound_message = Mock()
-        conversation_cache.reserve_outbound_thread = Mock()
-        conversation_cache.release_outbound_thread = Mock()
 
         async def one_chunk_stream() -> AsyncIterator[str]:
             yield "Hello from stream"
@@ -2002,53 +1942,6 @@ class TestStreamingBehavior:
         assert second_call[:2] == ("!test:localhost", "$stream-edit")
         assert second_call[2]["m.relates_to"]["rel_type"] == "m.replace"
         assert second_call[2]["m.relates_to"]["event_id"] == "$stream-send"
-        conversation_cache.reserve_outbound_thread.assert_called_once_with(
-            "!test:localhost",
-            "$stream-send",
-            "$thread_root",
-        )
-        conversation_cache.release_outbound_thread.assert_called_once_with(
-            "!test:localhost",
-            "$stream-send",
-        )
-
-    @pytest.mark.asyncio
-    async def test_adopted_event_header_failure_releases_thread_reservation(self) -> None:
-        """A header edit failure must not retain an adopted response reservation."""
-        mock_client = _make_matrix_client_mock()
-        conversation_cache = MagicMock()
-
-        async def empty_stream() -> AsyncIterator[str]:
-            if False:
-                yield ""
-
-        with (
-            patch(
-                "mindroom.streaming.edit_message_result",
-                new=AsyncMock(side_effect=RuntimeError("header edit failed")),
-            ),
-            pytest.raises(RuntimeError, match="header edit failed"),
-        ):
-            await send_streaming_response(
-                client=mock_client,
-                target=MessageTarget.resolve("!test:localhost", "$thread_root", "$original_123"),
-                config=self.config,
-                runtime_paths=runtime_paths_for(self.config),
-                response_stream=empty_stream(),
-                header="Header",
-                existing_event_id="$thinking_123",
-                conversation_cache=conversation_cache,
-            )
-
-        conversation_cache.reserve_outbound_thread.assert_called_once_with(
-            "!test:localhost",
-            "$thinking_123",
-            "$thread_root",
-        )
-        conversation_cache.release_outbound_thread.assert_called_once_with(
-            "!test:localhost",
-            "$thinking_123",
-        )
 
     @pytest.mark.asyncio
     async def test_streaming_first_send_uses_resolved_thread_root(

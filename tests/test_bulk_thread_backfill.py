@@ -2,12 +2,11 @@
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock
 
 import nio
 import pytest
 
-from mindroom.matrix.cache import ThreadCacheReplaceOutcome
 from mindroom.matrix.client_thread_history import bulk_refresh_room_thread_histories
 
 _ROOM_ID = "!room:localhost"
@@ -97,13 +96,7 @@ async def test_bulk_refresh_scans_room_once_and_stores_each_thread() -> None:
         ],
     )
     event_cache = AsyncMock()
-    event_cache.room_membership_epoch = AsyncMock(return_value=7)
-    event_cache.replace_thread_if_not_newer = AsyncMock(
-        side_effect=[
-            ThreadCacheReplaceOutcome.STORED,
-            ThreadCacheReplaceOutcome.EXISTING_USABLE,
-        ],
-    )
+    event_cache.replace_thread_if_not_newer = AsyncMock(return_value=True)
 
     stats = await bulk_refresh_room_thread_histories(
         client,
@@ -115,7 +108,7 @@ async def test_bulk_refresh_scans_room_once_and_stores_each_thread() -> None:
 
     assert client.room_messages.await_count == 2
     assert stats.requested_threads == 2
-    assert stats.usable_threads == 2
+    assert stats.stored_threads == 2
     assert stats.missing_root_ids == frozenset()
     assert stats.room_scan_pages == 2
 
@@ -127,10 +120,6 @@ async def test_bulk_refresh_scans_room_once_and_stores_each_thread() -> None:
         "$a:localhost": ["$a:localhost", "$a1:localhost", "$a1-edit:localhost"],
         "$b:localhost": ["$b:localhost", "$b1:localhost"],
     }
-    assert all(
-        call.kwargs["expected_membership_epoch"] == 7
-        for call in event_cache.replace_thread_if_not_newer.await_args_list
-    )
 
 
 @pytest.mark.asyncio
@@ -149,10 +138,7 @@ async def test_bulk_refresh_reports_missing_roots_without_storing_partial_thread
         ],
     )
     event_cache = AsyncMock()
-    event_cache.room_departure_epoch = Mock(return_value=3)
-    event_cache.replace_thread_if_not_newer = AsyncMock(
-        return_value=ThreadCacheReplaceOutcome.STORED,
-    )
+    event_cache.replace_thread_if_not_newer = AsyncMock(return_value=True)
 
     stats = await bulk_refresh_room_thread_histories(
         client,
@@ -162,50 +148,7 @@ async def test_bulk_refresh_reports_missing_roots_without_storing_partial_thread
         caller_label="test",
     )
 
-    assert stats.usable_threads == 1
+    assert stats.stored_threads == 1
     assert stats.missing_root_ids == frozenset({"$ghost:localhost"})
-    event_cache.replace_thread_if_not_newer.assert_awaited_once()
-    assert event_cache.replace_thread_if_not_newer.await_args.args[1] == "$a:localhost"
-
-
-@pytest.mark.asyncio
-async def test_bulk_refresh_page_budget_stores_found_threads_and_reports_remaining_roots() -> None:
-    """A capped startup scan should preserve partial success without reading another page."""
-    client = AsyncMock()
-    client.room_messages = AsyncMock(
-        side_effect=[
-            _messages_response(
-                [
-                    _message_event("$b1:localhost", "reply b", timestamp=3000, thread_root_id="$b:localhost"),
-                    _message_event("$a:localhost", "root a", timestamp=1000),
-                ],
-                end="t1",
-            ),
-            _messages_response(
-                [_message_event("$b:localhost", "root b", timestamp=500)],
-                end=None,
-            ),
-        ],
-    )
-    event_cache = AsyncMock()
-    event_cache.room_membership_epoch = AsyncMock(return_value=7)
-    event_cache.replace_thread_if_not_newer = AsyncMock(
-        return_value=ThreadCacheReplaceOutcome.STORED,
-    )
-
-    stats = await bulk_refresh_room_thread_histories(
-        client,
-        _ROOM_ID,
-        event_cache,
-        thread_root_ids=["$a:localhost", "$b:localhost"],
-        caller_label="test",
-        max_scan_pages=1,
-    )
-
-    client.room_messages.assert_awaited_once()
-    assert stats.usable_threads == 1
-    assert stats.missing_root_ids == frozenset({"$b:localhost"})
-    assert stats.room_scan_pages == 1
-    assert stats.scan_truncated is True
     event_cache.replace_thread_if_not_newer.assert_awaited_once()
     assert event_cache.replace_thread_if_not_newer.await_args.args[1] == "$a:localhost"
