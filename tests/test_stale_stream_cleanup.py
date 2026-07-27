@@ -489,6 +489,37 @@ async def test_relations_lookup_uses_original_event_id_not_latest_edit(tmp_path:
 
 
 @pytest.mark.asyncio
+async def test_recent_edit_keeps_old_stream_within_cleanup_window(tmp_path: Path) -> None:
+    """Cleanup should age an edited stream from its latest edit, not its original message."""
+    config = _make_config(tmp_path)
+    client = AsyncMock(spec=nio.AsyncClient)
+    original = _make_message_event(
+        event_id="$old-original",
+        body="Initial answer",
+        timestamp_ms=NOW_MS - OLD_STALE_AGE_MS,
+    )
+    recent_edit = _make_message_event(
+        event_id="$recent-edit",
+        body="* Still working",
+        timestamp_ms=NOW_MS - STALE_AGE_MS,
+        relates_to={"rel_type": "m.replace", "event_id": "$old-original"},
+        new_content={"body": "Still working", "msgtype": "m.text", STREAM_STATUS_KEY: "streaming"},
+    )
+    client.room_messages.return_value = _room_messages_response(original, recent_edit)
+    client.room_get_event_relations = MagicMock(return_value=_aiter())
+
+    with patch(
+        "mindroom.matrix.stale_stream_cleanup.edit_message_result",
+        new=AsyncMock(side_effect=delivered_matrix_side_effect("$cleanup-edit")),
+    ) as mock_edit:
+        cleaned, interrupted = await _run_cleanup(client, config, joined_rooms=[ROOM_ID])
+
+    assert cleaned == 1
+    assert interrupted == []
+    assert mock_edit.await_args.args[2] == "$old-original"
+
+
+@pytest.mark.asyncio
 async def test_cleanup_skips_completed_stream_status_even_with_trailing_marker(tmp_path: Path) -> None:
     """Cleanup must trust persisted stream status over a stale visible marker."""
     config = _make_config(tmp_path)

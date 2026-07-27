@@ -87,6 +87,20 @@ async def test_export_threads_fetches_from_matrix_source_and_writes_yaml(tmp_pat
     runtime_paths = runtime_paths_for(config)
     _write_matrix_state(tmp_path)
 
+    edited_reply = ResolvedVisibleMessage.synthetic(
+        sender="@mindroom_general:localhost",
+        body="Follow-up details",
+        timestamp=1_700_000_001_000,
+        event_id="$reply:localhost",
+        thread_id="$thread/root:localhost",
+    )
+    edited_reply.apply_edit(
+        body="Revised follow-up details",
+        timestamp=1_700_000_002_000,
+        latest_event_id="$reply-edit:localhost",
+        thread_id="$thread/root:localhost",
+        content={"body": "Revised follow-up details", "msgtype": "m.text"},
+    )
     fetch_result = [
         ResolvedVisibleMessage.synthetic(
             sender="@alice:localhost",
@@ -95,13 +109,7 @@ async def test_export_threads_fetches_from_matrix_source_and_writes_yaml(tmp_pat
             event_id="$thread/root:localhost",
             thread_id=None,
         ),
-        ResolvedVisibleMessage.synthetic(
-            sender="@mindroom_general:localhost",
-            body="Follow-up details",
-            timestamp=1_700_000_001_000,
-            event_id="$reply:localhost",
-            thread_id="$thread/root:localhost",
-        ),
+        edited_reply,
     ]
 
     with (
@@ -153,12 +161,14 @@ async def test_export_threads_fetches_from_matrix_source_and_writes_yaml(tmp_pat
         },
         {
             "event_id": "$reply:localhost",
-            "latest_event_id": "$reply:localhost",
+            "latest_event_id": "$reply-edit:localhost",
             "sender": "@mindroom_general:localhost",
             "timestamp": 1_700_000_001_000,
             "timestamp_iso": "2023-11-14T22:13:21+00:00",
+            "edited_timestamp": 1_700_000_002_000,
+            "edited_timestamp_iso": "2023-11-14T22:13:22+00:00",
             "thread_id": "$thread/root:localhost",
-            "body": "Follow-up details",
+            "body": "Revised follow-up details",
         },
     ]
 

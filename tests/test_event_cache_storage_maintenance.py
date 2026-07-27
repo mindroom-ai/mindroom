@@ -484,7 +484,7 @@ async def test_postgres_current_version_maintenance_avoids_exclusive_schema_lock
         maintainer = await psycopg.AsyncConnection.connect(database_url)
         try:
             await blocker.execute(
-                "LOCK TABLE mindroom_event_cache_thread_events IN ACCESS SHARE MODE",
+                "LOCK TABLE mindroom_event_cache_events IN ACCESS SHARE MODE",
             )
             await maintainer.execute("SET statement_timeout = '500ms'")
             migration_result = await migrate_postgres_schema(
