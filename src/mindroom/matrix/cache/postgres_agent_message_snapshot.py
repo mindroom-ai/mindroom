@@ -92,7 +92,7 @@ async def _iter_scope_events(
             WHERE thread_events.namespace = %s
                 AND thread_events.room_id = %s
                 AND thread_events.thread_id = %s
-            ORDER BY events.origin_server_ts DESC, thread_events.write_seq DESC
+            ORDER BY thread_events.origin_server_ts DESC, thread_events.write_seq DESC
             """,
             (namespace, room_id, thread_id),
         )

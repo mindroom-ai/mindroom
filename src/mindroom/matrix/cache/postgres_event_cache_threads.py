@@ -123,11 +123,16 @@ WHERE thread_events.namespace = %(namespace)s
         )
         OR thread_events.event_id IN (SELECT edit_event_id FROM surviving_edits)
     )
--- Ordered by the payload timestamp, not the thread index's copy of it. A cached event can be
--- rewritten with an authoritative origin_server_ts after a provisional local one, and only the
--- events row is updated, so the index copy can be stale. Both plans build a temp b-tree over one
--- thread either way; this only widens it from one sort term to two.
-ORDER BY events.origin_server_ts ASC, thread_events.write_seq ASC
+-- Ordered by the thread index's own origin_server_ts, which is what
+-- idx_thread_events_room_thread_ts covers. Ordering on the joined events row instead is a ~200x
+-- regression on PostgreSQL for an edit-dense thread (measured: 0.3s -> 59s on the collapse test);
+-- SQLite's planner barely notices, so measure both before touching this.
+--
+-- The index copy can in principle lag the payload: an event rewritten with an authoritative
+-- origin_server_ts after a provisional local one updates the events row alone. The two timestamps
+-- are milliseconds apart in that window, which cannot reorder a thread, so the read stays on the
+-- indexed column.
+ORDER BY thread_events.origin_server_ts ASC, thread_events.write_seq ASC
 """
 )
 
