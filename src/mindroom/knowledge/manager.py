@@ -2068,9 +2068,41 @@ class KnowledgeManager:
                 exc_info=True,
             )
 
+    async def _source_revision(self) -> str | None:
+        """Return the current Git revision, or None when the source is not Git-backed."""
+        if self._git_config() is None:
+            return None
+        return await self._git_rev_parse("HEAD")
+
+    async def _source_moved_during_pass(
+        self,
+        round_revision: str | None,
+        candidate_source_signature: str,
+    ) -> bool:
+        """Return whether the source changed while one indexing pass ran.
+
+        A Git checkout is program-owned and realigned with a hard reset, so its
+        tracked content is fully determined by HEAD: re-reading the revision the
+        round started at detects a mid-pass move without touching the corpus. A
+        source with no usable revision falls back to hashing every managed file,
+        which is the dominant cost of a refresh on a large or network-mounted
+        source.
+        """
+        if round_revision is not None:
+            return await self._git_rev_parse("HEAD") != round_revision
+        live_source_signature = await asyncio.to_thread(
+            knowledge_source_signature,
+            self.config,
+            self.base_id,
+            self._knowledge_source_path(),
+            tracked_relative_paths=self._git_tracked_relative_paths,
+        )
+        return live_source_signature != candidate_source_signature
+
     async def _advance_candidate(self, run: _CandidateRun, progress: _CandidateProgress) -> None:
         """Reconcile, index and publish until the candidate matches the live source."""
         for _round in range(_MAX_CANDIDATE_RECONCILE_ROUNDS):
+            round_revision = await self._source_revision()
             files = await asyncio.to_thread(self.list_files)
             plan = await self._reconcile_candidate(run, files)
             progress.total = len(plan.expected)
@@ -2128,14 +2160,7 @@ class KnowledgeManager:
                 return
 
             candidate_source_signature = _source_signature_from_file_signatures(candidate_signatures)
-            live_source_signature = await asyncio.to_thread(
-                knowledge_source_signature,
-                self.config,
-                self.base_id,
-                self._knowledge_source_path(),
-                tracked_relative_paths=self._git_tracked_relative_paths,
-            )
-            if live_source_signature != candidate_source_signature:
+            if await self._source_moved_during_pass(round_revision, candidate_source_signature):
                 # The source moved while this pass ran. Keep every unchanged
                 # vector and reconcile the delta instead of discarding the
                 # candidate; only the changed files are re-embedded.

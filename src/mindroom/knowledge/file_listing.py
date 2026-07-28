@@ -235,11 +235,12 @@ def _iter_target_files(target: _ListingTarget, guard: _DirectoryGuard) -> Iterat
             yield current_dir / filename
 
 
-def _resolve_safe_file(candidate: Path) -> Path | None:
+def _safe_regular_file(candidate: Path) -> Path | None:
     """Return a chain-vetted candidate when it is a regular file inside the knowledge root.
 
-    ``_DirectoryGuard`` has already vetted every directory component and rejected
-    ".." traversal, so a candidate that is not itself a symlink cannot resolve
+    The candidate is returned as given, not canonicalized: ``_DirectoryGuard`` has
+    already vetted every directory component and rejected ".." traversal, so a
+    candidate that is not itself a symlink is already canonical and cannot point
     outside the root. A single ``lstat`` therefore settles both questions, where
     ``resolve(strict=True)`` re-walked the whole path for every file — several
     extra round trips per file on a network filesystem.
@@ -264,9 +265,9 @@ def list_knowledge_files(config: Config, base_id: str, knowledge_root: Path) -> 
         for candidate in _iter_target_files(target, guard):
             if not include_knowledge_relative_path(config, base_id, candidate.relative_to(root).as_posix()):
                 continue
-            resolved = _resolve_safe_file(candidate)
-            if resolved is not None:
-                files.add(resolved)
+            safe_file = _safe_regular_file(candidate)
+            if safe_file is not None:
+                files.add(safe_file)
     return sorted(files)
 
 
@@ -286,9 +287,9 @@ def knowledge_files_from_relative_paths(
         candidate = root / relative_path
         if not guard.is_safe(candidate.parent):
             continue
-        resolved = _resolve_safe_file(candidate)
-        if resolved is not None:
-            files.append(resolved)
+        safe_file = _safe_regular_file(candidate)
+        if safe_file is not None:
+            files.append(safe_file)
     return files
 
 

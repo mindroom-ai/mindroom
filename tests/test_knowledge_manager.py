@@ -9,7 +9,7 @@ import os
 import subprocess
 import sys
 from contextlib import asynccontextmanager
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from pathlib import Path
 from threading import Event, Lock, get_ident
 from typing import TYPE_CHECKING, ClassVar
@@ -21,6 +21,7 @@ from agno.knowledge.document.base import Document
 from agno.knowledge.embedder.base import Embedder
 from fastapi.testclient import TestClient
 from openai import AuthenticationError
+from pydantic import ValidationError
 from structlog.testing import capture_logs
 from watchfiles import Change
 
@@ -68,7 +69,8 @@ from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_p
 from tests.knowledge_test_support import metadata_matches
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Coroutine, Iterator
+    from collections.abc import AsyncIterator, Coroutine, Iterable, Iterator
+    from types import ModuleType
 
     from mindroom.constants import RuntimePaths
 
@@ -1527,6 +1529,42 @@ def test_tracked_path_listing_rejects_symlinked_directory_escape(tmp_path: Path)
     config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
 
     assert knowledge_files_from_relative_paths(config, "docs", docs_path, ["linked/secret.md"]) == []
+
+
+def test_directory_guard_rejects_parent_traversal(tmp_path: Path) -> None:
+    """The guard must reject "..", which pathlib's lexical ``relative_to`` lets through.
+
+    This is the containment control that replaced ``resolve(strict=True)``. Without
+    it a "../*.md" include pattern yields a listing target at the parent directory
+    whose candidates pass every remaining per-file safety check.
+    """
+    root = tmp_path / "docs"
+    root.mkdir()
+    guard = knowledge_file_listing_module._DirectoryGuard(root=root)
+
+    assert guard.is_safe(root) is True
+    assert guard.is_safe(root / "..") is False
+    assert guard.is_safe(root / ".." / "..") is False
+    assert guard.is_safe(root / "nested" / ".." / ".." / "outside") is False
+
+
+def test_tracked_path_listing_rejects_parent_traversal_escape(tmp_path: Path) -> None:
+    """A tracked relative path that walks out of the knowledge root must stay excluded."""
+    docs_path = tmp_path / "docs"
+    docs_path.mkdir()
+    (tmp_path / "secret.md").write_text("secret outside root", encoding="utf-8")
+    (docs_path / "kept.md").write_text("kept", encoding="utf-8")
+    config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
+
+    files = knowledge_files_from_relative_paths(config, "docs", docs_path, ["kept.md", "../secret.md"])
+
+    assert [path.name for path in files] == ["kept.md"]
+
+
+def test_knowledge_base_config_rejects_parent_traversal_patterns() -> None:
+    """Config validation is the first containment layer, so the guard is never reached this way."""
+    with pytest.raises(ValidationError):
+        KnowledgeBaseConfig(path="./docs", include_patterns=["../*.md"])
 
 
 def test_tracked_path_listing_rejects_directories_and_missing_paths(tmp_path: Path) -> None:
@@ -6722,35 +6760,88 @@ async def test_git_refresh_syncs_before_reindex_and_publishes_revision_without_s
     assert "x-oauth-basic" not in metadata_text
 
 
+def _git_noop_config(tmp_path: Path) -> tuple[Config, RuntimePaths]:
+    """Build a Git-backed single-file base used by the revision-gating tests."""
+    docs_path = tmp_path / "docs"
+    docs_path.mkdir()
+    (docs_path / "doc.md").write_text("git index", encoding="utf-8")
+    config = _config(
+        tmp_path,
+        bases={"docs": docs_path},
+        agent_bases=["docs"],
+        git_configs={"docs": KnowledgeGitConfig(repo_url="https://example.com/org/repo.git", branch="main")},
+    )
+    return config, runtime_paths_for(config)
+
+
+def _install_git_sync_results(
+    monkeypatch: pytest.MonkeyPatch,
+    results: list[dict[str, object]],
+) -> None:
+    """Drive ``sync_git_source`` through a fixed sequence of poll outcomes."""
+
+    async def _sync(self: KnowledgeManager) -> dict[str, object]:
+        result = results.pop(0)
+        self._git_last_successful_commit = str(result["commit"])
+        _set_git_tracked_files(self, "doc.md")
+        return result
+
+    monkeypatch.setattr(KnowledgeManager, "sync_git_source", _sync)
+
+
+def _install_git_revisions(monkeypatch: pytest.MonkeyPatch, revisions: list[str | None]) -> None:
+    """Return a fixed sequence of ``git rev-parse`` results, repeating the last."""
+    pending = list(revisions)
+
+    async def _rev_parse(self: KnowledgeManager, ref: str) -> str | None:
+        del self, ref
+        return pending.pop(0) if len(pending) > 1 else pending[0]
+
+    monkeypatch.setattr(KnowledgeManager, "_git_rev_parse", _rev_parse)
+
+
+@dataclass
+class _SignatureCounter:
+    """Count corpus-hash calls made through one module's imported binding."""
+
+    calls: int = 0
+
+
+def _install_counting_signature(monkeypatch: pytest.MonkeyPatch, module: ModuleType) -> _SignatureCounter:
+    """Count ``knowledge_source_signature`` calls without changing its behavior."""
+    counter = _SignatureCounter()
+    original_signature = module.knowledge_source_signature
+
+    def _counting_signature(
+        config: Config,
+        base_id: str,
+        knowledge_root: Path,
+        *,
+        tracked_relative_paths: Iterable[str] | None = None,
+    ) -> str:
+        counter.calls += 1
+        return original_signature(config, base_id, knowledge_root, tracked_relative_paths=tracked_relative_paths)
+
+    monkeypatch.setattr(module, "knowledge_source_signature", _counting_signature)
+    return counter
+
+
 @pytest.mark.asyncio
 async def test_git_noop_refresh_skips_full_reindex_when_index_is_complete(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """An unchanged Git poll should update sync metadata without rebuilding the collection."""
-    docs_path = tmp_path / "docs"
-    docs_path.mkdir()
-    (docs_path / "doc.md").write_text("git index", encoding="utf-8")
-    git_config = KnowledgeGitConfig(repo_url="https://example.com/org/repo.git", branch="main")
-    config = _config(
-        tmp_path,
-        bases={"docs": docs_path},
-        agent_bases=["docs"],
-        git_configs={"docs": git_config},
+    config, runtime_paths = _git_noop_config(tmp_path)
+    _install_git_sync_results(
+        monkeypatch,
+        [
+            {"updated": True, "changed_count": 1, "removed_count": 0, "commit": "rev-a"},
+            {"updated": False, "changed_count": 0, "removed_count": 0, "commit": "rev-b"},
+        ],
     )
-    runtime_paths = runtime_paths_for(config)
-    sync_results = [
-        {"updated": True, "changed_count": 1, "removed_count": 0, "commit": "rev-a"},
-        {"updated": False, "changed_count": 0, "removed_count": 0, "commit": "rev-b"},
-    ]
     reindex_count = 0
     original_reindex = KnowledgeManager.reindex_all
-
-    async def _sync(self: KnowledgeManager) -> dict[str, object]:
-        result = sync_results.pop(0)
-        self._git_last_successful_commit = str(result["commit"])
-        _set_git_tracked_files(self, "doc.md")
-        return result
 
     async def _track_reindex(self: KnowledgeManager) -> int:
         nonlocal reindex_count
@@ -6760,7 +6851,6 @@ async def test_git_noop_refresh_skips_full_reindex_when_index_is_complete(
             raise AssertionError(msg)
         return await original_reindex(self)
 
-    monkeypatch.setattr(KnowledgeManager, "sync_git_source", _sync)
     monkeypatch.setattr(KnowledgeManager, "reindex_all", _track_reindex)
 
     await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
@@ -6782,42 +6872,13 @@ async def test_git_noop_refresh_skips_full_reindex_when_index_is_complete(
     assert reindex_count == 1
 
 
-def _git_noop_config(tmp_path: Path) -> tuple[Config, RuntimePaths, Path]:
-    """Build a Git-backed single-file base used by the revision-gating tests."""
-    docs_path = tmp_path / "docs"
-    docs_path.mkdir()
-    (docs_path / "doc.md").write_text("git index", encoding="utf-8")
-    config = _config(
-        tmp_path,
-        bases={"docs": docs_path},
-        agent_bases=["docs"],
-        git_configs={"docs": KnowledgeGitConfig(repo_url="https://example.com/org/repo.git", branch="main")},
-    )
-    return config, runtime_paths_for(config), docs_path
-
-
-def _install_git_sync_results(
-    monkeypatch: pytest.MonkeyPatch,
-    results: list[dict[str, object]],
-) -> None:
-    """Drive ``sync_git_source`` through a fixed sequence of poll outcomes."""
-
-    async def _sync(self: KnowledgeManager) -> dict[str, object]:
-        result = results.pop(0)
-        self._git_last_successful_commit = str(result["commit"])
-        _set_git_tracked_files(self, "doc.md")
-        return result
-
-    monkeypatch.setattr(KnowledgeManager, "sync_git_source", _sync)
-
-
 @pytest.mark.asyncio
 async def test_git_noop_refresh_skips_corpus_hash_when_revision_is_unchanged(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """An unmoved Git revision proves the corpus is unchanged without reading every file."""
-    config, runtime_paths, _ = _git_noop_config(tmp_path)
+    config, runtime_paths = _git_noop_config(tmp_path)
     _install_git_sync_results(
         monkeypatch,
         [
@@ -6848,7 +6909,7 @@ async def test_git_noop_refresh_hashes_corpus_when_revision_moved(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A revision the published index was not built from still needs content verification."""
-    config, runtime_paths, _ = _git_noop_config(tmp_path)
+    config, runtime_paths = _git_noop_config(tmp_path)
     _install_git_sync_results(
         monkeypatch,
         [
@@ -6858,18 +6919,10 @@ async def test_git_noop_refresh_hashes_corpus_when_revision_moved(
     )
     await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
 
-    signature_calls = 0
-    original_signature = knowledge_refresh_runner.knowledge_source_signature
-
-    def _counting_signature(*args: object, **kwargs: object) -> str:
-        nonlocal signature_calls
-        signature_calls += 1
-        return original_signature(*args, **kwargs)  # type: ignore[arg-type]
-
-    monkeypatch.setattr(knowledge_refresh_runner, "knowledge_source_signature", _counting_signature)
+    counter = _install_counting_signature(monkeypatch, knowledge_refresh_runner)
     result = await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
 
-    assert signature_calls == 1
+    assert counter.calls == 1
     assert result.index_published is True
 
 
@@ -6879,7 +6932,7 @@ async def test_git_noop_refresh_hashes_corpus_when_index_predates_revision_track
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """An index published without a recorded revision cannot be trusted by revision alone."""
-    config, runtime_paths, _ = _git_noop_config(tmp_path)
+    config, runtime_paths = _git_noop_config(tmp_path)
     _install_git_sync_results(
         monkeypatch,
         [
@@ -6894,18 +6947,76 @@ async def test_git_noop_refresh_hashes_corpus_when_index_predates_revision_track
     assert published is not None
     save_published_index_state(metadata_path, replace(published, published_revision=None))
 
-    signature_calls = 0
-    original_signature = knowledge_refresh_runner.knowledge_source_signature
-
-    def _counting_signature(*args: object, **kwargs: object) -> str:
-        nonlocal signature_calls
-        signature_calls += 1
-        return original_signature(*args, **kwargs)  # type: ignore[arg-type]
-
-    monkeypatch.setattr(knowledge_refresh_runner, "knowledge_source_signature", _counting_signature)
+    counter = _install_counting_signature(monkeypatch, knowledge_refresh_runner)
     await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
 
-    assert signature_calls == 1
+    assert counter.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_reindex_skips_live_corpus_hash_when_revision_is_stable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A Git revision that held still proves the source did not move while the pass ran."""
+    config, runtime_paths = _git_noop_config(tmp_path)
+    _install_git_sync_results(
+        monkeypatch,
+        [{"updated": True, "changed_count": 1, "removed_count": 0, "commit": "rev-a"}],
+    )
+    _install_git_revisions(monkeypatch, ["rev-a"])
+
+    def _unexpected_signature(*_args: object, **_kwargs: object) -> str:
+        msg = "a stable Git revision must not re-hash the corpus after indexing"
+        raise AssertionError(msg)
+
+    monkeypatch.setattr(knowledge_manager_module, "knowledge_source_signature", _unexpected_signature)
+
+    result = await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+
+    assert result.index_published is True
+    assert result.indexed_count == 1
+
+
+@pytest.mark.asyncio
+async def test_reindex_reconciles_when_revision_moves_mid_pass(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A revision that moved while the pass ran must reconcile before publishing."""
+    config, runtime_paths = _git_noop_config(tmp_path)
+    _install_git_sync_results(
+        monkeypatch,
+        [{"updated": True, "changed_count": 1, "removed_count": 0, "commit": "rev-a"}],
+    )
+    # Round one starts at rev-a and finds rev-b after indexing; round two is stable.
+    _install_git_revisions(monkeypatch, ["rev-a", "rev-b", "rev-b"])
+
+    with capture_logs() as logs:
+        result = await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+
+    events = [entry.get("event") for entry in logs]
+    assert "Knowledge source changed during refresh; reconciling candidate" in events
+    assert result.index_published is True
+
+
+@pytest.mark.asyncio
+async def test_reindex_hashes_live_corpus_for_non_git_bases(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A local base has no revision to trust, so it still verifies by content."""
+    docs_path = tmp_path / "docs"
+    docs_path.mkdir()
+    (docs_path / "doc.md").write_text("local index", encoding="utf-8")
+    config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
+    runtime_paths = runtime_paths_for(config)
+
+    counter = _install_counting_signature(monkeypatch, knowledge_manager_module)
+    result = await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+
+    assert counter.calls >= 1
+    assert result.index_published is True
 
 
 @pytest.mark.asyncio

@@ -846,9 +846,9 @@ async def _publish_unchanged_index(
             )
         return None
 
+    # Settings already matched at the top of this function, so only the revision
+    # and publish stamp can still move.
     updated_state = state
-    if state.settings != key.indexing_settings:
-        updated_state = replace(updated_state, settings=key.indexing_settings)
     if published_revision is not None:
         updated_state = replace(
             updated_state,
