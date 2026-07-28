@@ -234,6 +234,21 @@ class _FakeKnowledge:
         return self.vector_db.search(query=query, limit=max_results or self.max_results)
 
 
+class _AutoCreatingFakeKnowledge(_FakeKnowledge):
+    """Knowledge that creates a missing collection on construction, like Agno's.
+
+    ``Knowledge.__post_init__`` runs ``if not vector_db.exists():
+    vector_db.create()``, so any existence probe taken after building it always
+    answers yes. A test that cares whether a candidate's vectors really survived
+    has to model that, or it proves nothing about production.
+    """
+
+    def __init__(self, vector_db: _FakeVectorDb | None = None) -> None:
+        super().__init__(vector_db)
+        if vector_db is not None and not vector_db.exists():
+            vector_db.create()
+
+
 class _RecordingNonBatchEmbedder(Embedder):
     """Recording embedder with no batch surface at all, like Ollama.
 
@@ -3075,3 +3090,49 @@ def test_vector_verification_records_that_it_had_to_split(tmp_path: Path) -> Non
 
     split_logs = [entry for entry in logs if entry["event"] == "Split a refused knowledge vector verification query"]
     assert [entry["paths"] for entry in split_logs] == [8, 4, 4]
+
+
+# --------------------------------------------------------------------------
+# Resuming a candidate whose collection is gone
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_candidate_whose_collection_vanished_is_rebuilt_rather_than_resumed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Existence has to be probed before Agno can auto-create the collection.
+
+    Agno creates a missing collection when ``Knowledge`` is built, so the probe
+    taken afterwards always answered yes and this repair never ran. A candidate
+    whose vectors are gone was resumed still carrying claims nothing backs, and
+    every one of them then went through the vector-existence query to be dropped
+    a batch at a time -- at full corpus size, through the query whose row
+    ceiling this module already has to work around.
+    """
+    monkeypatch.setattr(knowledge_manager_module, "Knowledge", _AutoCreatingFakeKnowledge)
+    docs_path = tmp_path / "docs"
+    names = _write_corpus(docs_path, 3)
+    config = _config(tmp_path, docs_path)
+    runtime_paths = runtime_paths_for(config)
+    original_index = KnowledgeManager._index_file_locked
+
+    async def _fail_last(self: KnowledgeManager, resolved_path: Path, **kwargs: object) -> bool:
+        if resolved_path.name == names[-1]:
+            return False
+        return await original_index(self, resolved_path, **kwargs)
+
+    monkeypatch.setattr(KnowledgeManager, "_index_file_locked", _fail_last)
+    await _manager(config).reindex_all()
+    monkeypatch.setattr(KnowledgeManager, "_index_file_locked", original_index)
+
+    checkpoint = load_candidate_checkpoint(_storage_path(config, runtime_paths))
+    assert checkpoint is not None
+    assert len(checkpoint.completed) == 2, "the candidate should have kept the files it did index"
+    _FakeVectorDb.store.pop(checkpoint.collection)
+
+    run = await _manager(config)._open_candidate_run()
+
+    assert run.resumed is False
+    assert run.completed == {}, "claims survived a collection that no longer holds their vectors"

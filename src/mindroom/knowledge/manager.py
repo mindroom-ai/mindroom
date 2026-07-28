@@ -1768,11 +1768,16 @@ class KnowledgeManager:
             vector_db = _require_chroma_vector_db(knowledge)
             await asyncio.to_thread(self._reset_vector_db, vector_db)
         else:
-            knowledge = self._build_knowledge(checkpoint.collection, embedder=embedder)
-            vector_db = _require_chroma_vector_db(knowledge)
-            if await asyncio.to_thread(vector_db.exists):
-                resumed = True
-            else:
+            # Probed before ``Knowledge`` is built: Agno's ``Knowledge`` creates a
+            # missing collection on construction, so asked afterwards this always
+            # answers yes and a candidate whose vectors are gone is resumed still
+            # carrying claims nothing backs.
+            candidate_exists = await asyncio.to_thread(
+                chroma_collection_exists,
+                self._base_storage_path,
+                checkpoint.collection,
+            )
+            if not candidate_exists:
                 logger.warning(
                     "Knowledge candidate collection is missing; rebuilding it from scratch",
                     base_id=self.base_id,
@@ -1780,6 +1785,11 @@ class KnowledgeManager:
                 )
                 checkpoint = replace(checkpoint, completed={}, failed={})
                 checkpoint = await asyncio.to_thread(save_candidate_checkpoint, self._base_storage_path, checkpoint)
+            knowledge = self._build_knowledge(checkpoint.collection, embedder=embedder)
+            vector_db = _require_chroma_vector_db(knowledge)
+            if candidate_exists:
+                resumed = True
+            else:
                 await asyncio.to_thread(self._reset_vector_db, vector_db)
 
         run = _CandidateRun(
