@@ -10,6 +10,7 @@ import subprocess
 import sys
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
+from itertools import count
 from pathlib import Path
 from threading import Event, Lock, get_ident
 from typing import TYPE_CHECKING, ClassVar
@@ -75,6 +76,9 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
 
 
+_vector_row_ids = count()
+
+
 class _Collection:
     def __init__(self, name: str) -> None:
         self._name = name
@@ -87,15 +91,51 @@ class _Collection:
         include: list[str] | None = None,
         where: dict[str, object] | None = None,
     ) -> dict[str, object]:
-        _ = include
         with _VectorDb.lock:
             selected_all = list(_VectorDb.collections.get(self._name, []))
         if where:
             key, condition = next(iter(where.items()))
             selected_all = [item for item in selected_all if metadata_matches(item["metadata"], key, condition)]
         selected = selected_all[offset:] if limit is None else selected_all[offset : offset + limit]
-        ids = [str(index) for index in range(offset, offset + len(selected))]
-        return {"ids": ids, "metadatas": [dict(item["metadata"]) for item in selected]}
+        included = set(include or [])
+        payload: dict[str, object] = {
+            "ids": [str(item["id"]) for item in selected],
+            "metadatas": [dict(item["metadata"]) for item in selected],
+        }
+        if "documents" in included:
+            payload["documents"] = [str(item["content"]) for item in selected]
+        if "embeddings" in included:
+            payload["embeddings"] = [list(item["embedding"]) for item in selected]
+        return payload
+
+    def add(
+        self,
+        *,
+        ids: list[str],
+        embeddings: list[list[float]],
+        documents: list[str],
+        metadatas: list[dict[str, object]],
+    ) -> None:
+        if not ids:
+            # Chroma rejects an empty write rather than treating it as a no-op.
+            message = "Expected Embeddings to be non-empty list or numpy array, got [] in add."
+            raise ValueError(message)
+        with _VectorDb.lock:
+            _VectorDb.collections.setdefault(self._name, []).extend(
+                {
+                    "id": identifier,
+                    "content": document,
+                    "embedding": list(embedding),
+                    "metadata": dict(metadata),
+                }
+                for identifier, embedding, document, metadata in zip(
+                    ids,
+                    embeddings,
+                    documents,
+                    metadatas,
+                    strict=True,
+                )
+            )
 
     def delete(self, *, where: dict[str, object]) -> None:
         key, condition = next(iter(where.items()))
@@ -174,7 +214,12 @@ class _Knowledge:
         _ = (upsert, reader)
         with _VectorDb.lock:
             _VectorDb.collections.setdefault(self.vector_db.collection_name, []).append(
-                {"content": Path(path).read_text(encoding="utf-8"), "metadata": dict(metadata)},
+                {
+                    "id": f"row-{next(_vector_row_ids)}",
+                    "content": Path(path).read_text(encoding="utf-8"),
+                    "embedding": [1.0],
+                    "metadata": dict(metadata),
+                },
             )
 
     async def ainsert(
@@ -7884,6 +7929,69 @@ async def test_git_query_and_fragment_tokens_stay_out_of_persistent_remote_and_m
     assert "query-secret" not in metadata_text
     assert "frag-secret" not in metadata_text
     assert redact_url_credentials(config.knowledge_bases["docs"].git.repo_url) == clean_url
+
+
+@pytest.mark.asyncio
+async def test_git_pull_that_changes_one_file_only_reindexes_that_file(tmp_path: Path) -> None:
+    """A one-file commit must cost one file's indexing, not the whole checkout's."""
+    remote_work = tmp_path / "remote-work"
+    remote_work.mkdir()
+
+    async def _git(cwd: Path, *args: str) -> None:
+        await asyncio.to_thread(
+            subprocess.run,
+            ["git", *args],
+            cwd=cwd,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
+    await _git(remote_work, "init", "-b", "main")
+    await _git(remote_work, "config", "user.email", "tests@example.com")
+    await _git(remote_work, "config", "user.name", "MindRoom Tests")
+    for index in range(5):
+        (remote_work / f"doc{index}.md").write_text(f"original body {index}", encoding="utf-8")
+    await _git(remote_work, "add", ".")
+    await _git(remote_work, "commit", "-m", "seed")
+    remote_bare = tmp_path / "remote.git"
+    await asyncio.to_thread(
+        subprocess.run,
+        ["git", "clone", "--bare", str(remote_work), str(remote_bare)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    docs_path = tmp_path / "checkout"
+    config = _config(
+        tmp_path,
+        bases={"docs": docs_path},
+        agent_bases=["docs"],
+        git_configs={"docs": KnowledgeGitConfig(repo_url=str(remote_bare), branch="main")},
+    )
+    runtime_paths = runtime_paths_for(config)
+    first = await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+    assert first.indexed_count == 5
+
+    (remote_work / "doc2.md").write_text("rewritten body 2", encoding="utf-8")
+    await _git(remote_work, "commit", "-am", "change one file")
+    await _git(remote_work, "push", str(remote_bare), "main")
+
+    second = await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+
+    assert second.index_published is True
+    assert second.indexed_count == 1, "the whole checkout was reindexed for a one-file commit"
+    lookup = get_published_index("docs", config=config, runtime_paths=runtime_paths)
+    assert lookup.index is not None
+    contents = sorted(document.content for document in lookup.index.knowledge.search("body", max_results=10))
+    assert contents == [
+        "original body 0",
+        "original body 1",
+        "original body 3",
+        "original body 4",
+        "rewritten body 2",
+    ]
 
 
 @pytest.mark.asyncio

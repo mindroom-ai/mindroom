@@ -19,6 +19,7 @@ from agno.knowledge.reader import ReaderFactory
 from agno.knowledge.reader.markdown_reader import MarkdownReader
 from agno.knowledge.reader.text_reader import TextReader
 from agno.vectordb.chroma import ChromaDb
+from chromadb.api.types import Embeddings, Metadata
 from chromadb.errors import NotFoundError
 
 from mindroom.chunking import SafeFixedSizeChunking
@@ -119,6 +120,11 @@ _MAX_PREFETCH_TEXT_BYTES = 8_000_000
 _SIGNATURE_SCAN_CHUNK = 512
 #: Completed candidate entries whose vectors are confirmed in one Chroma query.
 _VECTOR_VERIFY_BATCH = 128
+#: Published chunk rows read in one copy query. Chroma binds one SQL variable
+#: per *returned* row and SQLite caps a statement at 32,766, so nothing about
+#: the file or path count bounds a copy query -- only the rows it may return.
+#: The page also bounds how much vector data the copy holds in memory at once.
+_PUBLISHED_VECTOR_COPY_PAGE_ROWS = 500
 #: Reconciliation passes before a refresh gives up for now. A source that keeps
 #: changing keeps its candidate and converges over successive refreshes instead
 #: of thrashing inside one.
@@ -493,6 +499,22 @@ def knowledge_source_signature(
         digest.update(source_digest.encode("ascii"))
         digest.update(b"\0")
     return digest.hexdigest()
+
+
+def _reusable_row_signature(
+    metadata: Metadata,
+    managed_paths: frozenset[str],
+) -> tuple[str, FileSignature] | None:
+    """Return the managed source path and signature one published chunk carries."""
+    source_path = metadata.get(_SOURCE_PATH_KEY)
+    if not isinstance(source_path, str) or source_path not in managed_paths:
+        return None
+    source_mtime_ns = metadata.get(_SOURCE_MTIME_NS_KEY)
+    source_size = metadata.get(_SOURCE_SIZE_KEY)
+    source_digest = metadata.get(_SOURCE_DIGEST_KEY)
+    if not isinstance(source_mtime_ns, int) or not isinstance(source_size, int) or not isinstance(source_digest, str):
+        return None
+    return source_path, (source_mtime_ns, source_size, source_digest)
 
 
 def _source_signature_from_file_signatures(file_signatures: Mapping[str, FileSignature]) -> str:
@@ -1653,6 +1675,128 @@ class KnowledgeManager:
             run.verified.update(found)
         return missing
 
+    def _copy_published_vectors(
+        self,
+        *,
+        published_collection: str,
+        candidate_vector_db: ChromaDb,
+        managed_paths: frozenset[str],
+    ) -> dict[str, FileSignature]:
+        """Copy stored chunks for currently-managed paths into the candidate.
+
+        Every published chunk carries the signature of the file it came from,
+        so the published collection is already an index from source path to
+        vectors. Chunks are copied verbatim -- ids, embeddings, documents and
+        metadata -- because ids key content in the vector store and
+        regenerating them would corrupt the candidate.
+
+        Reads are paged because Chroma binds one SQL variable per *returned*
+        row and SQLite caps a statement at 32,766 of them. Neither the file
+        count nor the path count bounds that, so a single large file can refuse
+        an unpaged read on its own; only bounding the returned rows escapes.
+
+        Returns the signature published for each path that actually received
+        rows, so a path the published index cannot serve is never claimed.
+        """
+        client = candidate_vector_db.client
+        published = client.get_collection(name=published_collection)
+        candidate = client.get_collection(name=candidate_vector_db.collection_name)
+        reused: dict[str, FileSignature] = {}
+        offset = 0
+        while True:
+            page = published.get(
+                limit=_PUBLISHED_VECTOR_COPY_PAGE_ROWS,
+                offset=offset,
+                include=["embeddings", "documents", "metadatas"],
+            )
+            ids = page["ids"]
+            if not ids:
+                return reused
+            offset += len(ids)
+            # Unquoted so the name is a runtime reference: quoting it would make
+            # the import look unused to the dead-code check.
+            embeddings = cast(Embeddings, page["embeddings"])  # noqa: TC006
+            documents = cast("list[str]", page["documents"])
+            metadatas = cast("list[Metadata]", page["metadatas"])
+            kept: list[int] = []
+            for index, metadata in enumerate(metadatas):
+                entry = _reusable_row_signature(metadata, managed_paths)
+                if entry is None:
+                    continue
+                relative_path, signature = entry
+                reused[relative_path] = signature
+                kept.append(index)
+            if kept:
+                candidate.add(
+                    ids=[ids[index] for index in kept],
+                    embeddings=[embeddings[index] for index in kept],
+                    documents=[documents[index] for index in kept],
+                    metadatas=[dict(metadatas[index]) for index in kept],
+                )
+
+    async def _seed_candidate_from_published(
+        self,
+        *,
+        candidate_vector_db: ChromaDb,
+        persisted_state: _PersistedIndexState | None,
+    ) -> dict[str, FileSignature]:
+        """Start a fresh candidate from the published index instead of from zero.
+
+        Publication retires the candidate checkpoint, so without this the next
+        refresh mints an empty candidate and re-embeds the whole corpus to
+        reproduce chunks byte-identical to ones already stored: every refresh
+        costs O(corpus) provider requests where the change was one file.
+
+        Matching ``IndexingSettings`` is what makes the copy sound. It pins the
+        chunker, the embedder identity and every corpus filter, so identical
+        bytes under identical settings produce identical chunks and identical
+        vectors. Whether the bytes are still identical is not assumed: each
+        copied path is recorded with the signature the published index stored
+        for it, and reconciliation compares that against the file on disk,
+        dropping and re-indexing whatever moved. Reuse is therefore an
+        optimization on top of the existing correctness check, not a new one.
+
+        The published collection is only ever read. Publication stays an atomic
+        swap into a separate collection.
+        """
+        if (
+            persisted_state is None
+            or persisted_state.status != _INDEXING_STATUS_COMPLETE
+            or persisted_state.collection is None
+            or persisted_state.settings != self._indexing_settings
+        ):
+            return {}
+        managed_paths = frozenset(
+            self._relative_path(file_path) for file_path in await asyncio.to_thread(self.list_files)
+        )
+        try:
+            reused = await asyncio.to_thread(
+                self._copy_published_vectors,
+                published_collection=persisted_state.collection,
+                candidate_vector_db=candidate_vector_db,
+                managed_paths=managed_paths,
+            )
+        except Exception:
+            # Reuse is an optimization, so a vector store that cannot serve the
+            # copy must cost a full rebuild rather than a failed refresh. The
+            # partially filled candidate is reset so the rebuild starts clean.
+            logger.warning(
+                "Falling back to a full knowledge rebuild after the published index could not be copied",
+                base_id=self.base_id,
+                collection=persisted_state.collection,
+                exc_info=True,
+            )
+            await asyncio.to_thread(self._reset_vector_db, candidate_vector_db)
+            return {}
+        logger.info(
+            "Reused published knowledge vectors in a new candidate",
+            base_id=self.base_id,
+            collection=candidate_vector_db.collection_name,
+            reused_files=len(reused),
+            managed_files=len(managed_paths),
+        )
+        return reused
+
     async def _open_candidate_run(self) -> _CandidateRun:
         """Resolve the durable candidate to continue, or start one clean candidate."""
         checkpoint = await asyncio.to_thread(load_candidate_checkpoint, self._base_storage_path)
@@ -1700,6 +1844,7 @@ class KnowledgeManager:
 
         embedder = BatchPrefetchEmbedder(inner=create_configured_embedder(self.config, self.runtime_paths))
         resumed = False
+        reused: dict[str, FileSignature] = {}
         if checkpoint is None:
             checkpoint = CandidateCheckpoint(
                 collection=self._candidate_collection_name(),
@@ -1711,6 +1856,15 @@ class KnowledgeManager:
             knowledge = self._build_knowledge(checkpoint.collection, embedder=embedder)
             vector_db = _require_chroma_vector_db(knowledge)
             await asyncio.to_thread(self._reset_vector_db, vector_db)
+            reused = await self._seed_candidate_from_published(
+                candidate_vector_db=vector_db,
+                persisted_state=persisted_state,
+            )
+            checkpoint = await asyncio.to_thread(
+                save_candidate_checkpoint,
+                self._base_storage_path,
+                replace(checkpoint, completed=reused),
+            )
         else:
             knowledge = self._build_knowledge(checkpoint.collection, embedder=embedder)
             vector_db = _require_chroma_vector_db(knowledge)
@@ -1733,6 +1887,9 @@ class KnowledgeManager:
             embedder=embedder,
             completed=dict(checkpoint.completed),
             failed=dict(checkpoint.failed),
+            # Rows this process just copied need no vector-existence probe: the
+            # copy already reported which paths actually received them.
+            verified=set(reused),
             journal_appends=checkpoint.replayed_journal_entries,
             resumed=resumed,
         )

@@ -12,6 +12,7 @@ all progress lived in process memory.
 from __future__ import annotations
 
 import asyncio
+import itertools
 import os
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -83,9 +84,18 @@ class _SupportsRead(Protocol):
 
 @dataclass
 class _Record:
+    identifier: str
     content: str
     embedding: list[float]
     metadata: dict[str, Any]
+
+
+_record_ids = itertools.count()
+
+
+def _next_record_id() -> str:
+    """Return a chunk id unique across every collection in one test."""
+    return f"chunk-{next(_record_ids)}"
 
 
 class _FakeCollection:
@@ -100,16 +110,48 @@ class _FakeCollection:
         include: list[str] | None = None,
         where: dict[str, object] | None = None,
     ) -> dict[str, object]:
-        _ = include
         records = list(_FakeVectorDb.store.get(self._name, []))
         if where:
             key, condition = next(iter(where.items()))
             records = [record for record in records if metadata_matches(record.metadata, key, condition)]
         selected = records[offset:] if limit is None else records[offset : offset + limit]
-        return {
-            "ids": [str(index) for index in range(len(selected))],
+        _FakeVectorDb.queries.append((len(selected), where))
+        if len(selected) > _FakeVectorDb.max_rows_per_query:
+            # Chroma binds one SQL variable per *returned* row, so a query is
+            # refused for how much it hands back, not for how much it asks about.
+            message = f"too many SQL variables ({len(selected)})"
+            raise RuntimeError(message)
+        included = set(include or [])
+        payload: dict[str, object] = {
+            "ids": [record.identifier for record in selected],
             "metadatas": [dict(record.metadata) for record in selected],
         }
+        if "documents" in included:
+            payload["documents"] = [record.content for record in selected]
+        if "embeddings" in included:
+            payload["embeddings"] = [list(record.embedding) for record in selected]
+        return payload
+
+    def add(
+        self,
+        *,
+        ids: list[str],
+        embeddings: list[list[float]],
+        documents: list[str],
+        metadatas: list[dict[str, Any]],
+    ) -> None:
+        if not ids:
+            # Chroma rejects an empty write rather than treating it as a no-op.
+            message = "Expected Embeddings to be non-empty list or numpy array, got [] in add."
+            raise ValueError(message)
+        _FakeVectorDb.writes.append(len(ids))
+        if len(_FakeVectorDb.writes) > _FakeVectorDb.max_writes:
+            message = "vector store refused the write"
+            raise RuntimeError(message)
+        _FakeVectorDb.store.setdefault(self._name, []).extend(
+            _Record(identifier=identifier, content=document, embedding=list(embedding), metadata=dict(metadata))
+            for identifier, embedding, document, metadata in zip(ids, embeddings, documents, metadatas, strict=True)
+        )
 
     def delete(self, *, where: dict[str, object]) -> None:
         key, condition = next(iter(where.items()))
@@ -133,6 +175,16 @@ class _FakeClient:
 
 class _FakeVectorDb:
     store: ClassVar[dict[str, list[_Record]]] = {}
+    #: Rows one ``get`` may return before the store refuses it, mirroring the
+    #: real backend's per-returned-row SQL variable ceiling.
+    max_rows_per_query: ClassVar[int] = 1_000_000
+    #: Rows returned by each ``get``, with its filter, so tests can prove a copy
+    #: query was paged and that a verification probe was or was not issued.
+    queries: ClassVar[list[tuple[int, dict[str, object] | None]]] = []
+    #: Copy writes accepted before the store starts refusing them.
+    max_writes: ClassVar[int] = 1_000_000
+    #: Rows handed to each accepted or refused ``add``.
+    writes: ClassVar[list[int]] = []
 
     def __init__(self, *, collection: str, embedder: Embedder | None = None, **_: object) -> None:
         self.collection_name = collection
@@ -191,7 +243,14 @@ class _FakeKnowledge:
             embedder = self.vector_db.embedder
             assert embedder is not None
             embedding, _usage = embedder.get_embedding_and_usage(document.content)
-            embedded.append(_Record(content=document.content, embedding=embedding, metadata=dict(metadata)))
+            embedded.append(
+                _Record(
+                    identifier=_next_record_id(),
+                    content=document.content,
+                    embedding=embedding,
+                    metadata=dict(metadata),
+                ),
+            )
         records.extend(embedded)
 
     def remove_vectors_by_metadata(self, metadata: dict[str, Any]) -> bool:
@@ -314,6 +373,10 @@ def fake_vector_store(
 ) -> Iterator[None]:
     """Install the in-memory vector store, fake Knowledge and recording embedder."""
     _FakeVectorDb.store = {}
+    _FakeVectorDb.max_rows_per_query = 1_000_000
+    _FakeVectorDb.queries = []
+    _FakeVectorDb.max_writes = 1_000_000
+    _FakeVectorDb.writes = []
     monkeypatch.setattr(knowledge_manager_module, "ChromaDb", _FakeVectorDb)
     monkeypatch.setattr(knowledge_manager_module, "Knowledge", _FakeKnowledge)
     monkeypatch.setattr(knowledge_manager_module, "create_configured_embedder", lambda *_a, **_k: embedder)
@@ -330,6 +393,8 @@ def fake_vector_store(
     yield
     knowledge_registry._published_indexes.clear()
     _FakeVectorDb.store = {}
+    _FakeVectorDb.queries = []
+    _FakeVectorDb.writes = []
 
 
 # --------------------------------------------------------------------------
@@ -2916,3 +2981,326 @@ async def test_file_skipped_by_overlap_expansion_still_indexes_and_publishes(
     assert state.indexed_count == 4
     stored = sorted(record.metadata["source_path"] for record in _FakeVectorDb.store[state.collection])
     assert "expanding.md" in stored
+
+
+# --------------------------------------------------------------------------
+# 14. Reusing published vectors for files a refresh did not change
+# --------------------------------------------------------------------------
+
+
+def _stored_paths(collection: str) -> list[str]:
+    return sorted(record.metadata["source_path"] for record in _FakeVectorDb.store[collection])
+
+
+@pytest.mark.asyncio
+async def test_refresh_after_publish_reuses_vectors_for_unchanged_files(
+    tmp_path: Path,
+    embedder: _RecordingEmbedder,
+) -> None:
+    """Changing one file must cost one embedding, not one per file in the corpus."""
+    docs_path = tmp_path / "docs"
+    names = _write_corpus(docs_path, 3)
+    config = _config(tmp_path, docs_path)
+    runtime_paths = runtime_paths_for(config)
+
+    assert await _manager(config).reindex_all() == 3
+    first_state = _published_state(config, runtime_paths)
+    assert first_state is not None
+    first_collection = first_state.collection
+    assert first_collection is not None
+    published_ids = {record.identifier for record in _FakeVectorDb.store[first_collection]}
+
+    (docs_path / names[1]).write_text("rewritten body", encoding="utf-8")
+    embedder.embedded_texts.clear()
+
+    assert await _manager(config).reindex_all() == 1, "the whole corpus was embedded again"
+
+    assert embedder.embedded_count("content 0") == 0
+    assert embedder.embedded_count("content 2") == 0
+    assert embedder.embedded_count("rewritten body") == 1
+    state = _published_state(config, runtime_paths)
+    assert state is not None
+    assert state.status == "complete"
+    assert state.indexed_count == 3
+    assert state.collection is not None
+    assert state.collection != first_collection, "publication must still swap in a separate collection"
+    assert _stored_paths(state.collection) == sorted(names)
+    reused_ids = {
+        record.identifier
+        for record in _FakeVectorDb.store[state.collection]
+        if record.metadata["source_path"] != names[1]
+    }
+    assert reused_ids <= published_ids, "copied chunks must keep their published ids"
+
+
+@pytest.mark.asyncio
+async def test_published_vector_reuse_leaves_the_published_collection_untouched(
+    tmp_path: Path,
+) -> None:
+    """The published index serves live queries throughout; the copy may only read it."""
+    docs_path = tmp_path / "docs"
+    names = _write_corpus(docs_path, 3)
+    config = _config(tmp_path, docs_path)
+    runtime_paths = runtime_paths_for(config)
+
+    await _manager(config).reindex_all()
+    first_state = _published_state(config, runtime_paths)
+    assert first_state is not None
+    first_collection = first_state.collection
+    assert first_collection is not None
+    before = [replace(record) for record in _FakeVectorDb.store[first_collection]]
+
+    (docs_path / names[0]).write_text("rewritten body", encoding="utf-8")
+    run = await _manager(config)._open_candidate_run()
+
+    assert run.checkpoint.collection != first_collection
+    assert _FakeVectorDb.store[first_collection] == before, "the live published collection was mutated"
+
+
+@pytest.mark.asyncio
+async def test_published_vector_reuse_requires_matching_indexing_settings(
+    tmp_path: Path,
+    embedder: _RecordingEmbedder,
+) -> None:
+    """Settings pin the chunker and the embedder, so a change invalidates every vector."""
+    docs_path = tmp_path / "docs"
+    _write_corpus(docs_path, 3)
+    config = _config(tmp_path, docs_path)
+
+    await _manager(config).reindex_all()
+
+    rechunked = _config(tmp_path, docs_path, chunk_size=256, chunk_overlap=8)
+    embedder.embedded_texts.clear()
+
+    assert await _manager(rechunked).reindex_all() == 3, "vectors built under other settings were reused"
+    assert embedder.embedded_count("content 0") == 1
+
+
+@pytest.mark.asyncio
+async def test_published_vector_reuse_skips_paths_that_left_the_corpus(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A published path that is no longer managed must never enter the candidate."""
+    # One row per page, so the removed file's row is the only row of its page
+    # and the copy has to cope with a page that contributes nothing.
+    monkeypatch.setattr(knowledge_manager_module, "_PUBLISHED_VECTOR_COPY_PAGE_ROWS", 1)
+    docs_path = tmp_path / "docs"
+    names = _write_corpus(docs_path, 3)
+    config = _config(tmp_path, docs_path)
+
+    await _manager(config).reindex_all()
+    (docs_path / names[0]).unlink()
+
+    run = await _manager(config)._open_candidate_run()
+
+    assert sorted(run.completed) == [names[1], names[2]]
+    assert _stored_paths(run.checkpoint.collection) == [names[1], names[2]]
+
+
+@pytest.mark.asyncio
+async def test_published_vector_reuse_needs_a_completely_published_index(
+    tmp_path: Path,
+    embedder: _RecordingEmbedder,
+) -> None:
+    """Only a collection the metadata calls published is provably finished and stable.
+
+    The rest of the candidate lifecycle treats any other collection as an
+    abandoned candidate it may reclaim, so copying from one would read a
+    collection nothing keeps alive.
+    """
+    docs_path = tmp_path / "docs"
+    _write_corpus(docs_path, 3)
+    config = _config(tmp_path, docs_path)
+    runtime_paths = runtime_paths_for(config)
+
+    await _manager(config).reindex_all()
+    state = _published_state(config, runtime_paths)
+    assert state is not None
+    write_index_metadata_payload(
+        published_index_metadata_path(resolve_published_index_key("docs", config=config, runtime_paths=runtime_paths)),
+        settings=state.settings.to_metadata(),
+        status="indexing",
+        collection=state.collection,
+        indexed_count=state.indexed_count,
+        source_signature=state.source_signature,
+    )
+    embedder.embedded_texts.clear()
+
+    assert await _manager(config).reindex_all() == 3, "vectors from an unpublished collection were reused"
+
+
+@pytest.mark.asyncio
+async def test_published_vector_reuse_never_claims_a_path_the_published_index_cannot_serve(
+    tmp_path: Path,
+    embedder: _RecordingEmbedder,
+) -> None:
+    """A path is claimed by the rows copied for it, never by the corpus listing.
+
+    Copied paths skip the vector-existence probe because the copy already
+    proved them, so a path claimed without rows would publish a file that
+    semantic search cannot find.
+    """
+    docs_path = tmp_path / "docs"
+    names = _write_corpus(docs_path, 3)
+    config = _config(tmp_path, docs_path)
+    runtime_paths = runtime_paths_for(config)
+
+    await _manager(config).reindex_all()
+    first_state = _published_state(config, runtime_paths)
+    assert first_state is not None
+    assert first_state.collection is not None
+    _FakeVectorDb.store[first_state.collection] = [
+        record for record in _FakeVectorDb.store[first_state.collection] if record.metadata["source_path"] != names[2]
+    ]
+    embedder.embedded_texts.clear()
+
+    assert await _manager(config).reindex_all() == 1
+
+    assert embedder.embedded_count("content 2") == 1, "a path with no published rows was claimed as indexed"
+    state = _published_state(config, runtime_paths)
+    assert state is not None
+    assert state.collection is not None
+    assert _stored_paths(state.collection) == sorted(names)
+
+
+@pytest.mark.asyncio
+async def test_published_vector_copy_is_paged_so_no_query_exceeds_the_store_ceiling(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    embedder: _RecordingEmbedder,
+) -> None:
+    """Chroma binds one SQL variable per returned row, so only the page size bounds a copy.
+
+    An unpaged read of a published collection is refused outright once the
+    corpus is large enough, and no bound on files or paths can prevent that.
+    """
+    monkeypatch.setattr(knowledge_manager_module, "_PUBLISHED_VECTOR_COPY_PAGE_ROWS", 4)
+    docs_path = tmp_path / "docs"
+    names = _write_corpus(docs_path, 12)
+    config = _config(tmp_path, docs_path)
+
+    await _manager(config).reindex_all()
+    _FakeVectorDb.max_rows_per_query = 4
+    _FakeVectorDb.queries = []
+    (docs_path / names[0]).write_text("rewritten body", encoding="utf-8")
+    embedder.embedded_texts.clear()
+
+    assert await _manager(config).reindex_all() == 1
+
+    assert max(rows for rows, _where in _FakeVectorDb.queries) <= 4
+    assert [where for _rows, where in _FakeVectorDb.queries if where and "$in" in str(where)] == [], (
+        "copied paths were sent back through the vector-existence probe"
+    )
+
+
+@pytest.mark.asyncio
+async def test_published_vector_reuse_falls_back_when_the_published_collection_is_gone(
+    tmp_path: Path,
+    embedder: _RecordingEmbedder,
+) -> None:
+    """A vanished published collection must cost a full rebuild, never a failed refresh."""
+    docs_path = tmp_path / "docs"
+    _write_corpus(docs_path, 3)
+    config = _config(tmp_path, docs_path)
+    runtime_paths = runtime_paths_for(config)
+
+    await _manager(config).reindex_all()
+    first_state = _published_state(config, runtime_paths)
+    assert first_state is not None
+    assert first_state.collection is not None
+    _FakeVectorDb.store.pop(first_state.collection)
+    embedder.embedded_texts.clear()
+
+    assert await _manager(config).reindex_all() == 3
+
+    state = _published_state(config, runtime_paths)
+    assert state is not None
+    assert state.status == "complete"
+    assert state.indexed_count == 3
+
+
+@pytest.mark.asyncio
+async def test_a_failed_vector_copy_leaves_no_partial_candidate(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A copy that dies part-way must hand the rebuild an empty candidate.
+
+    Rows copied for a path the candidate never records are invisible to
+    reconciliation, so a later listing that drops that path would publish
+    vectors for a file the corpus no longer contains.
+    """
+    monkeypatch.setattr(knowledge_manager_module, "_PUBLISHED_VECTOR_COPY_PAGE_ROWS", 1)
+    docs_path = tmp_path / "docs"
+    _write_corpus(docs_path, 3)
+    config = _config(tmp_path, docs_path)
+
+    await _manager(config).reindex_all()
+    _FakeVectorDb.writes = []
+    _FakeVectorDb.max_writes = 1
+
+    run = await _manager(config)._open_candidate_run()
+
+    assert run.completed == {}, "a failed copy must claim nothing"
+    assert _FakeVectorDb.store[run.checkpoint.collection] == [], "partially copied rows survived the failure"
+
+
+@pytest.mark.asyncio
+async def test_published_vector_reuse_survives_a_checkout_that_only_rewrites_mtimes(
+    tmp_path: Path,
+    embedder: _RecordingEmbedder,
+) -> None:
+    """Copied rows carry the published mtime, which a checkout routinely invalidates.
+
+    Reconciliation adopts the new stamp for byte-identical content, so the
+    signature the copy records must survive that comparison rather than send
+    every reused file back through the embedder.
+    """
+    docs_path = tmp_path / "docs"
+    names = _write_corpus(docs_path, 3)
+    config = _config(tmp_path, docs_path)
+    runtime_paths = runtime_paths_for(config)
+
+    await _manager(config).reindex_all()
+    (docs_path / names[1]).write_text("rewritten body", encoding="utf-8")
+    for name in names:
+        path = docs_path / name
+        stat = path.stat()
+        os.utime(path, ns=(stat.st_atime_ns + 10**9, stat.st_mtime_ns + 10**9))
+    embedder.embedded_texts.clear()
+
+    assert await _manager(config).reindex_all() == 1, "an mtime rewrite re-embedded unchanged content"
+
+    assert embedder.embedded_count("content 0") == 0
+    assert embedder.embedded_count("content 2") == 0
+    state = _published_state(config, runtime_paths)
+    assert state is not None
+    assert state.collection is not None
+    assert _stored_paths(state.collection) == sorted(names)
+
+
+@pytest.mark.asyncio
+async def test_published_vector_reuse_rescans_an_empty_file_it_cannot_claim(
+    tmp_path: Path,
+    embedder: _RecordingEmbedder,
+) -> None:
+    """A zero-length file legitimately has no vectors, so no copy can prove it indexed."""
+    docs_path = tmp_path / "docs"
+    names = _write_corpus(docs_path, 2)
+    (docs_path / "empty.md").write_text("", encoding="utf-8")
+    config = _config(tmp_path, docs_path)
+    runtime_paths = runtime_paths_for(config)
+
+    await _manager(config).reindex_all()
+    (docs_path / names[0]).write_text("rewritten body", encoding="utf-8")
+    embedder.embedded_texts.clear()
+
+    assert await _manager(config).reindex_all() == 2, "the empty file was claimed or lost"
+
+    assert embedder.embedded_count("content 1") == 0
+    state = _published_state(config, runtime_paths)
+    assert state is not None
+    assert state.status == "complete"
+    assert state.indexed_count == 3
+    assert _stored_paths(state.collection or "") == sorted(names)
