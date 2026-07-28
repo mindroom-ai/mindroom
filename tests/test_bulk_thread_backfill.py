@@ -10,12 +10,13 @@ import pytest
 from structlog.testing import capture_logs
 
 from mindroom.matrix.client_thread_history import (
+    OpaqueEncryptedThreadHistoryError,
     bulk_refresh_room_thread_histories,
     fetch_thread_event_sources_via_room_messages,
     thread_ids_needing_refill,
 )
 from mindroom.matrix.thread_membership import ThreadRoomScanRootNotFoundError
-from tests.event_cache_test_support import replace_thread_unconditionally
+from tests.event_cache_test_support import raw_nio_event, replace_thread_unconditionally
 
 if TYPE_CHECKING:
     from mindroom.matrix.cache import ConversationEventCache
@@ -75,6 +76,31 @@ def _edit_event(
 
 def _messages_response(chunk: list[nio.Event], *, end: str | None) -> nio.RoomMessagesResponse:
     return nio.RoomMessagesResponse(room_id=_ROOM_ID, chunk=chunk, start="", end=end)
+
+
+def _opaque_reply_event(event_id: str, *, replies_to: str, timestamp: int) -> nio.Event:
+    """Return ciphertext this client could not decrypt, replying to an event the scan never saw.
+
+    A client holding the megolm session decrypts the same event and resolves the relation, so
+    whether this lands in ``unresolved_opaque_event_ids`` depends on which client ran the scan.
+    """
+    return raw_nio_event(
+        {
+            "event_id": event_id,
+            "sender": "@alice:localhost",
+            "origin_server_ts": timestamp,
+            "room_id": _ROOM_ID,
+            "type": "m.room.encrypted",
+            "content": {
+                "algorithm": "m.megolm.v1.aes-sha2",
+                "ciphertext": "opaque",
+                "device_id": "DEVICE",
+                "sender_key": "sender-key",
+                "session_id": "session",
+                "m.relates_to": {"m.in_reply_to": {"event_id": replies_to}},
+            },
+        },
+    )
 
 
 @pytest.mark.asyncio
@@ -238,7 +264,7 @@ async def test_scan_failure_log_names_the_acting_client() -> None:
 
     failures = [entry for entry in logs if entry["event"] == "Failed bulk thread history scan"]
     assert len(failures) == 1
-    assert failures[0]["client_user_id"] == "@agent:localhost"
+    assert failures[0]["user_id"] == "@agent:localhost"
     assert failures[0]["room_id"] == _ROOM_ID
     assert "M_FORBIDDEN" in failures[0]["error"]
 
@@ -264,7 +290,70 @@ async def test_root_not_found_log_names_the_acting_client() -> None:
 
     misses = [entry for entry in logs if entry["event"] == "Thread room scan ended without finding root"]
     assert len(misses) == 1
-    assert misses[0]["client_user_id"] == "@agent:localhost"
+    assert misses[0]["user_id"] == "@agent:localhost"
+
+
+@pytest.mark.asyncio
+async def test_unresolved_opaque_scan_log_names_the_acting_client() -> None:
+    """A scan blocked by undecryptable relations must name the client that could not decrypt them.
+
+    Whether ciphertext stays opaque is a property of the acting client's megolm store, not of the
+    room, so this is the failure where identity is the only thing separating a key-distribution
+    problem from a server one.
+    """
+    client = AsyncMock()
+    client.user_id = "@agent:localhost"
+    client.room_messages = AsyncMock(
+        return_value=_messages_response(
+            [
+                _opaque_reply_event("$opaque:localhost", replies_to="$unscanned:localhost", timestamp=2000),
+                _message_event("$root:localhost", "root", timestamp=1000),
+            ],
+            end=None,
+        ),
+    )
+
+    with capture_logs() as logs, pytest.raises(OpaqueEncryptedThreadHistoryError):
+        await fetch_thread_event_sources_via_room_messages(client, _ROOM_ID, "$root:localhost")
+
+    opaque = [entry for entry in logs if "opaque encrypted relations with unresolved impact" in entry["event"]]
+    assert len(opaque) == 1
+    assert opaque[0]["user_id"] == "@agent:localhost"
+    assert opaque[0]["unresolved_opaque_event_ids"] == ["$opaque:localhost"]
+
+
+@pytest.mark.asyncio
+async def test_bulk_refresh_unresolved_opaque_log_names_the_acting_client() -> None:
+    """The bulk path gap-marks the whole room on opaque relations, so it needs the identity too."""
+    client = AsyncMock()
+    client.user_id = "@agent:localhost"
+    client.room_messages = AsyncMock(
+        return_value=_messages_response(
+            [
+                _opaque_reply_event("$opaque:localhost", replies_to="$unscanned:localhost", timestamp=2000),
+                _message_event("$root:localhost", "root", timestamp=1000),
+            ],
+            end=None,
+        ),
+    )
+    event_cache = AsyncMock()
+    event_cache.room_membership_epoch = AsyncMock(return_value=7)
+
+    with capture_logs() as logs:
+        stats = await bulk_refresh_room_thread_histories(
+            client,
+            _ROOM_ID,
+            event_cache,
+            thread_root_ids=["$root:localhost"],
+            caller_label="test",
+        )
+
+    assert stats.usable_threads == 0
+    event_cache.replace_thread.assert_not_awaited()
+    opaque = [entry for entry in logs if "opaque encrypted relations with unresolved impact" in entry["event"]]
+    assert len(opaque) == 1
+    assert opaque[0]["user_id"] == "@agent:localhost"
+    assert opaque[0]["unresolved_opaque_event_ids"] == ["$opaque:localhost"]
 
 
 def _cached_message_source(event_id: str) -> dict[str, Any]:
