@@ -5,7 +5,13 @@ from typing import Any, cast
 
 import agno.tools.function as agno_function
 
+_PATCHED_VERSIONS: set[Any] = set()
+
 
 def apply_patch() -> None:
     """Cache Agno's Pydantic package-version lookup once per process."""
-    agno_function.version = cast("Any", lru_cache(maxsize=1)(agno_function.version))
+    if agno_function.version in _PATCHED_VERSIONS:
+        return
+    patched_version = cast("Any", lru_cache(maxsize=1)(agno_function.version))
+    _PATCHED_VERSIONS.add(patched_version)
+    agno_function.version = patched_version
