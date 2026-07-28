@@ -84,8 +84,13 @@ class MindRoomOpenAIEmbedder(OpenAIEmbedder):
         return self.dimensions is not None and (self._dimensions_explicit or self.id in OPENAI_EMBEDDING_DIMENSIONS)
 
     def _request_params(self, input_value: str | list[str]) -> dict[str, Any]:
+        # LiteLLM reserves files/... for Gemini file references; MindRoom inputs are text.
+        if isinstance(input_value, str):
+            request_input = f" {input_value}" if input_value.startswith("files/") else input_value
+        else:
+            request_input = [f" {text}" if text.startswith("files/") else text for text in input_value]
         request: dict[str, Any] = {
-            "input": input_value,
+            "input": request_input,
             "model": self.id,
             "encoding_format": self.encoding_format,
         }
