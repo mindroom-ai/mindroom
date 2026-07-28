@@ -19,7 +19,7 @@ from agno.knowledge.reader import ReaderFactory
 from agno.knowledge.reader.markdown_reader import MarkdownReader
 from agno.knowledge.reader.text_reader import TextReader
 from agno.vectordb.chroma import ChromaDb
-from chromadb.errors import NotFoundError
+from chromadb.errors import ChromaError, NotFoundError
 
 from mindroom.chunking import SafeFixedSizeChunking
 from mindroom.constants import (
@@ -86,6 +86,8 @@ if TYPE_CHECKING:
     from agno.knowledge.document.base import Document
     from agno.knowledge.embedder.base import Embedder
     from agno.knowledge.reader.base import Reader
+    from chromadb.api.models.Collection import Collection
+    from chromadb.api.types import GetResult, Metadata
 
     from mindroom.config.knowledge import KnowledgeGitConfig
     from mindroom.config.main import Config
@@ -299,6 +301,60 @@ def _iter_file_batches(files: Sequence[Path], batch_size: int) -> Iterator[list[
     size = max(batch_size, 1)
     for start in range(0, len(files), size):
         yield list(files[start : start + size])
+
+
+def _paths_with_vectors(collection: Collection, relative_paths: Sequence[str]) -> set[str]:
+    """Return which of `relative_paths` have at least one vector in the collection.
+
+    Chroma binds one SQL variable per *matched row*, not one per queried path,
+    so a fixed batch of paths does not bound the query at all: whether it fits
+    under SQLite's ceiling depends on how many chunks those particular files
+    produced. That makes any batch size chosen up front a gamble. Small files
+    leave a batch of 128 far below the ceiling, a handful of large ones puts
+    the same batch over it, and once over, every verification query for that
+    base fails identically and the candidate is stranded for good.
+
+    So the batch is not guessed, it is *adapted*: ask for the whole thing, and
+    on refusal halve it and ask again. Each split halves the matched rows too,
+    so it converges, and a store that can answer the batch pays nothing.
+
+    A single path is the floor, where splitting can no longer help, so it is
+    asked with ``limit=1`` instead: one row is all the proof of existence this
+    needs, and a one-row result stays under any ceiling no matter how many
+    chunks the file has. That floor is what makes the recursion total, and it
+    is also where a failure that was never about query size finally surfaces.
+    """
+    if not relative_paths:
+        return set()
+    if len(relative_paths) == 1:
+        relative_path = relative_paths[0]
+        result = collection.get(where={_SOURCE_PATH_KEY: relative_path}, include=["metadatas"], limit=1)
+        return {relative_path} if _result_metadatas(result) else set()
+
+    try:
+        result = collection.get(where={_SOURCE_PATH_KEY: {"$in": list(relative_paths)}}, include=["metadatas"])
+    except NotFoundError:
+        # A collection that is gone stays gone however small the query gets, and
+        # splitting would turn one honest failure into a storm of them per batch.
+        raise
+    except ChromaError:
+        midpoint = len(relative_paths) // 2
+        return _paths_with_vectors(collection, relative_paths[:midpoint]) | _paths_with_vectors(
+            collection,
+            relative_paths[midpoint:],
+        )
+
+    found: set[str] = set()
+    for metadata in _result_metadatas(result):
+        source_path = metadata.get(_SOURCE_PATH_KEY)
+        if isinstance(source_path, str):
+            found.add(source_path)
+    return found
+
+
+def _result_metadatas(result: GetResult) -> list[Metadata]:
+    """Return the metadata rows of a Chroma ``get`` result."""
+    return result.get("metadatas") or []
 
 
 def _require_chroma_vector_db(knowledge: Knowledge) -> ChromaDb:
@@ -1619,17 +1675,7 @@ class KnowledgeManager:
     ) -> set[str]:
         """Return which of the given source paths actually have candidate vectors."""
         collection = vector_db.client.get_collection(name=vector_db.collection_name)
-        result = collection.get(
-            where={_SOURCE_PATH_KEY: {"$in": list(relative_paths)}},
-            include=["metadatas"],
-        )
-        metadatas = result.get("metadatas") or []
-        found: set[str] = set()
-        for metadata in metadatas:
-            source_path = metadata.get(_SOURCE_PATH_KEY) if isinstance(metadata, dict) else None
-            if isinstance(source_path, str):
-                found.add(source_path)
-        return found
+        return _paths_with_vectors(collection, list(relative_paths))
 
     async def _candidate_paths_missing_vectors(self, run: _CandidateRun, relative_paths: Sequence[str]) -> set[str]:
         """Return completed entries the candidate cannot actually serve.
