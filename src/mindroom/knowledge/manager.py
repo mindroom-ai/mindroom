@@ -353,6 +353,12 @@ def _paths_with_vectors(collection: Collection, relative_paths: Sequence[str]) -
         # queries before raising exactly the same error from the first leaf.
         raise
     except ChromaError:
+        # Splitting stays correct but multiplies the queries, and how far it
+        # degrades depends on chunk counts nothing here can see. Without a
+        # trace, a base whose files outgrew the ceiling just gets quietly
+        # slower -- the same invisibility that let the unsplit query strand
+        # candidates undiagnosed.
+        logger.debug("Split a refused knowledge vector verification query", paths=len(relative_paths))
         midpoint = len(relative_paths) // 2
         return _paths_with_vectors(collection, relative_paths[:midpoint]) | _paths_with_vectors(
             collection,

@@ -3054,3 +3054,24 @@ def test_vector_verification_does_not_split_when_the_collection_is_gone(tmp_path
         manager._candidate_paths_with_vectors(vector_db, paths)
 
     assert _FakeVectorDb.get_calls == 1
+
+
+def test_vector_verification_records_that_it_had_to_split(tmp_path: Path) -> None:
+    """A store refusing batches must leave a trace, not degrade silently.
+
+    Splitting keeps verification correct but multiplies its queries, and how
+    far it degrades depends on chunk counts nothing here can see. A base whose
+    files grew past the ceiling would otherwise get quietly slower with no
+    signal anywhere, which is the same invisibility that let the original
+    failure go undiagnosed.
+    """
+    manager, vector_db = _verification_manager(tmp_path)
+    paths = [f"doc{index:02d}.md" for index in range(8)]
+    _seed_chunked_paths(vector_db.collection_name, paths, chunks_per_path=100)
+    _FakeVectorDb.max_rows_per_get = 250
+
+    with capture_logs() as logs:
+        assert manager._candidate_paths_with_vectors(vector_db, paths) == set(paths)
+
+    split_logs = [entry for entry in logs if entry["event"] == "Split a refused knowledge vector verification query"]
+    assert [entry["paths"] for entry in split_logs] == [8, 4, 4]
