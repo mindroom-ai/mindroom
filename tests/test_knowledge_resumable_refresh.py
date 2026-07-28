@@ -2981,8 +2981,16 @@ def test_vector_verification_splits_a_batch_the_store_cannot_answer(tmp_path: Pa
     paths = [f"doc{index:02d}.md" for index in range(8)]
     _seed_chunked_paths(vector_db.collection_name, paths, chunks_per_path=100)
     _FakeVectorDb.max_rows_per_get = 250
+    _FakeVectorDb.get_calls = 0
 
     assert manager._candidate_paths_with_vectors(vector_db, paths) == set(paths)
+
+    # Halving is the property that makes this affordable, and correctness alone
+    # does not pin it: splitting one path off at a time also terminates and also
+    # returns the right answer, while turning O(log n) queries into O(n).
+    # 8 (800 rows, refused) -> 4 (400, refused) -> 2 + 2 (200 each, answered),
+    # then the same on the right half: 7 queries.
+    assert _FakeVectorDb.get_calls == 7
 
 
 def test_vector_verification_confirms_a_file_larger_than_the_store_ceiling(tmp_path: Path) -> None:

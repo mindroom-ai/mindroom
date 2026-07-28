@@ -308,6 +308,18 @@ def _iter_file_batches(files: Sequence[Path], batch_size: int) -> Iterator[list[
         yield list(files[start : start + size])
 
 
+def _collection_has_source_path(collection: Collection, relative_path: str) -> bool:
+    """Return whether one source path has any vector, at one row of cost.
+
+    Chroma binds one SQL variable per *returned* row, so an unbounded probe on
+    a heavily chunked file exceeds SQLite's ceiling and fails outright. One row
+    is all existence needs, and ``limit=1`` is what keeps this answerable at
+    any file size. Do not widen it.
+    """
+    result = collection.get(where={_SOURCE_PATH_KEY: relative_path}, limit=1, include=[])
+    return bool(result.get("ids"))
+
+
 def _paths_with_vectors(collection: Collection, relative_paths: Sequence[str]) -> set[str]:
     """Return which of `relative_paths` have at least one vector in the collection.
 
@@ -353,18 +365,6 @@ def _paths_with_vectors(collection: Collection, relative_paths: Sequence[str]) -
         if isinstance(source_path, str):
             found.add(source_path)
     return found
-
-
-def _collection_has_source_path(collection: Collection, relative_path: str) -> bool:
-    """Return whether one source path has any vector, at one row of cost.
-
-    Chroma binds one SQL variable per *returned* row, so an unbounded probe on
-    a heavily chunked file exceeds SQLite's ceiling and fails outright. One row
-    is all existence needs, and ``limit=1`` is what keeps this answerable at
-    any file size. Do not widen it.
-    """
-    result = collection.get(where={_SOURCE_PATH_KEY: relative_path}, limit=1, include=[])
-    return bool(result.get("ids"))
 
 
 def _require_chroma_vector_db(knowledge: Knowledge) -> ChromaDb:
