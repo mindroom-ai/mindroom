@@ -3392,6 +3392,28 @@ async def test_shielded_write_finishes_before_repeated_cancellation_escapes() ->
 
 
 @pytest.mark.asyncio
+async def test_shielded_write_keeps_cancellation_authoritative_when_the_write_fails() -> None:
+    """A failed recoverable write must not replace the caller's cancellation."""
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def _write() -> None:
+        started.set()
+        await release.wait()
+        msg = "recoverable write failed"
+        raise RuntimeError(msg)
+
+    outer = asyncio.create_task(knowledge_manager_module._shielded_write(_write()))
+    await started.wait()
+    outer.cancel()
+    await asyncio.sleep(0)
+    release.set()
+
+    with pytest.raises(asyncio.CancelledError):
+        await outer
+
+
+@pytest.mark.asyncio
 async def test_a_cancelled_vector_copy_never_publishes_rows_it_could_not_claim(
     tmp_path: Path,
     embedder: _RecordingEmbedder,

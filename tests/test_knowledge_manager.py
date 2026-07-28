@@ -3379,6 +3379,45 @@ async def test_publish_metadata_save_finishes_before_repeated_cancellation_escap
 
 
 @pytest.mark.asyncio
+async def test_cancelled_publish_metadata_save_surfaces_a_failed_write(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A cancelled-but-failed metadata save must not report a publication."""
+    docs_path = tmp_path / "docs"
+    docs_path.mkdir()
+    config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
+    runtime_paths = runtime_paths_for(config)
+    manager = KnowledgeManager("docs", config=config, runtime_paths=runtime_paths)
+    candidate_vector_db = manager._build_vector_db(manager._candidate_collection_name())
+    loop = asyncio.get_running_loop()
+    save_started = asyncio.Event()
+    release_save = Event()
+
+    def _failed_save(_self: KnowledgeManager, *_args: object, **_kwargs: object) -> None:
+        loop.call_soon_threadsafe(save_started.set)
+        assert release_save.wait(timeout=5)
+        msg = "publish metadata write failed"
+        raise RuntimeError(msg)
+
+    monkeypatch.setattr(KnowledgeManager, "_save_persisted_index_state", _failed_save)
+    save = asyncio.create_task(
+        manager._save_candidate_publish_metadata(
+            candidate_vector_db=candidate_vector_db,
+            indexed_count=0,
+            source_signature="source-signature",
+        ),
+    )
+    await save_started.wait()
+    save.cancel()
+    await asyncio.sleep(0)
+    release_save.set()
+
+    with pytest.raises(RuntimeError, match="publish metadata write failed"):
+        await save
+
+
+@pytest.mark.asyncio
 async def test_refresh_never_publishes_while_source_keeps_changing(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
