@@ -1934,7 +1934,7 @@ class TestStreamingBehavior:
         assert final_text == _PROGRESS_PLACEHOLDER
         assert final_content["body"] == _PROGRESS_PLACEHOLDER
         assert final_content[STREAM_STATUS_KEY] == STREAM_STATUS_COMPLETED
-        assert final_content["m.relates_to"] == {"m.in_reply_to": {"event_id": "$original_123"}}
+        assert "m.relates_to" not in final_content
 
     @pytest.mark.asyncio
     async def test_send_streaming_response_records_outbound_send_and_edit(self) -> None:
