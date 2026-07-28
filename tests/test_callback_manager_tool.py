@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import stat
 import subprocess
 from pathlib import Path
@@ -158,8 +159,11 @@ def test_generated_script_posts_summary_and_deletes_itself(tmp_path: Path) -> No
         payload = _payload(CallbackManagerTools().mint_callback("quote-safe callback"))
     script_path = Path(payload["script_path"])
     script_text = script_path.read_text(encoding="utf-8")
-    assert "python3" not in script_text
-    assert "jq" not in script_text
+    # Matched on word boundaries against the script's own lines. The embedded bearer capability is
+    # a random urlsafe token, so a bare substring search over the whole file fails whenever those
+    # characters happen to land inside it - "jq" alone does that about once in a hundred runs.
+    assert not re.search(r"\bpython3\b", script_text)
+    assert not re.search(r"\bjq\b", script_text)
 
     fake_bin = tmp_path / "fake-bin"
     fake_bin.mkdir()

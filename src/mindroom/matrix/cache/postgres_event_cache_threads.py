@@ -123,7 +123,11 @@ WHERE thread_events.namespace = %(namespace)s
         )
         OR thread_events.event_id IN (SELECT edit_event_id FROM surviving_edits)
     )
-ORDER BY thread_events.origin_server_ts ASC, thread_events.write_seq ASC
+-- Ordered by the payload timestamp, not the thread index's copy of it. A cached event can be
+-- rewritten with an authoritative origin_server_ts after a provisional local one, and only the
+-- events row is updated, so the index copy can be stale. Both plans build a temp b-tree over one
+-- thread either way; this only widens it from one sort term to two.
+ORDER BY events.origin_server_ts ASC, thread_events.write_seq ASC
 """
 )
 
