@@ -652,7 +652,6 @@ def build_edit_event_content(
 ) -> dict[str, Any]:
     """Wrap replacement content in one Matrix m.replace edit envelope."""
     replacement_content = dict(new_content)
-    replacement_content.pop("m.relates_to", None)
     if extra_content:
         replacement_content.update(extra_content)
     edit_content = build_matrix_edit_content(event_id, replacement_content)

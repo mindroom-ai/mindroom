@@ -308,12 +308,6 @@ class ApprovalMatrixTransport:
             raise TypeError(msg)
 
         replacement_content = {key: value for key, value in new_content.items() if key != "thread_id"}
-        if isinstance(thread_id, str) and thread_id:
-            replacement_content["m.relates_to"] = await self._approval_thread_relation(
-                room_id,
-                thread_id,
-                _approval_relation_agent_name(new_content, fallback=bot.agent_name),
-            )
         response = await bot.client.room_send(
             room_id=room_id,
             message_type="io.mindroom.tool_approval",

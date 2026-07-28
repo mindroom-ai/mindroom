@@ -361,6 +361,54 @@ def test_delivery_snapshot_isolates_tool_trace(config: Config) -> None:
     assert snapshot.tool_trace[0].result_preview is None
 
 
+def test_delivery_preparation_builds_thread_relation_only_for_initial_send(config: Config) -> None:
+    """Edit payloads must not put dead thread or reply relations in m.new_content."""
+    streaming = StreamingResponse(
+        target=MessageTarget.resolve("!test:localhost", "$thread", "$reply"),
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+    )
+    streaming.accumulated_text = "Hello"
+    streaming.latest_thread_event_id = "$latest"
+    initial_snapshot = streaming._delivery_snapshot(
+        is_final=False,
+        allow_empty_progress=False,
+        stream_status=None,
+    )
+    assert initial_snapshot is not None
+
+    streaming.event_id = "$stream"
+    edit_snapshot = streaming._delivery_snapshot(
+        is_final=False,
+        allow_empty_progress=False,
+        stream_status=None,
+    )
+    assert edit_snapshot is not None
+
+    formatting_kwargs: list[dict[str, object]] = []
+
+    def recording_format(**kwargs: object) -> dict[str, str]:
+        formatting_kwargs.append(kwargs)
+        return {
+            "msgtype": "m.text",
+            "body": "Hello",
+            "format": "org.matrix.custom.html",
+            "formatted_body": "Hello",
+        }
+
+    with patch("mindroom.streaming.format_message_with_mentions", new=recording_format):
+        streaming_mod._prepare_delivery_from_snapshot(initial_snapshot)
+        streaming_mod._prepare_delivery_from_snapshot(edit_snapshot)
+
+    initial_kwargs, edit_kwargs = formatting_kwargs
+    assert initial_kwargs["thread_event_id"] == "$thread"
+    assert initial_kwargs["reply_to_event_id"] == "$reply"
+    assert initial_kwargs["latest_thread_event_id"] == "$latest"
+    assert edit_kwargs["thread_event_id"] is None
+    assert edit_kwargs["reply_to_event_id"] is None
+    assert edit_kwargs["latest_thread_event_id"] is None
+
+
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("fake_clock")
 async def test_cancellation_mid_stream_appends_cancelled_note(config: Config) -> None:
