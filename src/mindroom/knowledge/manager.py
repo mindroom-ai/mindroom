@@ -1896,6 +1896,27 @@ class KnowledgeManager:
         )
         return reused
 
+    def _candidate_holds_unclaimed_rows(self, checkpoint: CandidateCheckpoint) -> bool:
+        """Return whether a candidate holds vectors its checkpoint never claimed.
+
+        The candidate's invariant is that its collection only holds rows the
+        checkpoint accounts for, because reconciliation derives every deletion
+        from the checkpoint: rows outside it are invisible, and would ride into
+        the published index even for a path that has left the corpus.
+
+        A copy is the only thing that writes rows before recording them, and it
+        records every path in one write once the last row lands. Violating the
+        invariant therefore has exactly one shape -- no claims at all, and a
+        collection that is not empty -- which one bounded query answers.
+        """
+        if checkpoint.completed:
+            return False
+        vector_db = self._build_vector_db(checkpoint.collection)
+        if not vector_db.exists():
+            return False
+        collection = vector_db.client.get_collection(name=vector_db.collection_name)
+        return bool(collection.get(limit=1, include=[])["ids"])
+
     async def _rebuild_candidate_collection(
         self,
         checkpoint: CandidateCheckpoint,
@@ -1905,47 +1926,41 @@ class KnowledgeManager:
     ) -> _OpenedCandidate:
         """Empty one candidate collection, seeding it when a copy source is given.
 
-        Three orderings here are load-bearing, and the ``seeding`` marker is
-        what makes the middle one survive a crash.
+        Two orderings are load-bearing. The checkpoint names the collection
+        before ``Knowledge`` is built, because Agno creates a missing collection
+        on construction and a crash must never strand a collection nothing
+        references. And the copy's claims are recorded in one write after the
+        last row lands, never per page, because a file's chunks can span pages
+        and a claim covering only some of them would publish a silently
+        truncated file.
 
-        The checkpoint names the collection before ``Knowledge`` is built,
-        because Agno creates a missing collection on construction and a crash
-        must never strand a collection nothing references.
-
-        The marker is then set for the whole rebuild, not just the copy. A
-        rebuild inherits a collection whose rows the checkpoint has stopped
-        claiming, and only the reset makes that true; until the reset lands and
-        the new claims are recorded, the rows in there are attributable to
-        nothing. Reconciliation deletes only what the checkpoint records, so a
-        candidate resumed inside that window would carry rows for paths that
-        have since left the corpus straight into the published index.
-
-        The marker is therefore cleared last, once the collection is known
-        empty and whatever replaced its contents is durable.
+        Recording the claims last means a crash can leave rows the checkpoint
+        does not account for. That state is recoverable rather than prevented:
+        it is exactly ``completed`` empty with a non-empty collection, which
+        ``_candidate_holds_unclaimed_rows`` detects on the next open.
         """
         checkpoint = await asyncio.to_thread(
             save_candidate_checkpoint,
             self._base_storage_path,
-            replace(checkpoint, completed={}, failed={}, seeding=True),
+            replace(checkpoint, completed={}, failed={}),
         )
         knowledge = self._build_knowledge(checkpoint.collection, embedder=embedder)
         vector_db = _require_chroma_vector_db(knowledge)
         await asyncio.to_thread(self._reset_vector_db, vector_db)
-        reused = (
-            {}
-            if published_collection is None
-            else await self._seed_candidate_from_published(
-                candidate_vector_db=vector_db,
-                published_collection=published_collection,
+        if published_collection is None:
+            return _OpenedCandidate(checkpoint=checkpoint, knowledge=knowledge, vector_db=vector_db)
+        reused = await self._seed_candidate_from_published(
+            candidate_vector_db=vector_db,
+            published_collection=published_collection,
+        )
+        if reused:
+            checkpoint = await _shielded_write(
+                asyncio.to_thread(
+                    save_candidate_checkpoint,
+                    self._base_storage_path,
+                    replace(checkpoint, completed=reused),
+                ),
             )
-        )
-        checkpoint = await _shielded_write(
-            asyncio.to_thread(
-                save_candidate_checkpoint,
-                self._base_storage_path,
-                replace(checkpoint, completed=reused, seeding=False),
-            ),
-        )
         return _OpenedCandidate(checkpoint=checkpoint, knowledge=knowledge, vector_db=vector_db, reused=reused)
 
     async def _resume_candidate_collection(
@@ -1954,33 +1969,19 @@ class KnowledgeManager:
         *,
         embedder: BatchPrefetchEmbedder,
     ) -> _OpenedCandidate:
-        """Continue a candidate whose recorded work is still backed by its collection.
-
-        The collection is probed before ``Knowledge`` is built, because Agno
-        creates a missing collection on construction: asked afterwards, the
-        probe always answers yes and a candidate whose vectors are gone would
-        be resumed still carrying claims nothing backs.
-        """
-        if not await asyncio.to_thread(
-            chroma_collection_exists,
-            self._base_storage_path,
-            checkpoint.collection,
-        ):
-            logger.warning(
-                "Knowledge candidate collection is missing; rebuilding it from scratch",
-                base_id=self.base_id,
-                collection=checkpoint.collection,
-            )
-            # Rebuilt without a copy: whatever lost this collection may equally
-            # have damaged the published one, and a full rebuild is the safe repair.
-            return await self._rebuild_candidate_collection(checkpoint, embedder=embedder, published_collection=None)
+        """Continue a candidate whose recorded work is still backed by its collection."""
         knowledge = self._build_knowledge(checkpoint.collection, embedder=embedder)
-        return _OpenedCandidate(
-            checkpoint=checkpoint,
-            knowledge=knowledge,
-            vector_db=_require_chroma_vector_db(knowledge),
-            resumed=True,
+        vector_db = _require_chroma_vector_db(knowledge)
+        if await asyncio.to_thread(vector_db.exists):
+            return _OpenedCandidate(checkpoint=checkpoint, knowledge=knowledge, vector_db=vector_db, resumed=True)
+        logger.warning(
+            "Knowledge candidate collection is missing; rebuilding it from scratch",
+            base_id=self.base_id,
+            collection=checkpoint.collection,
         )
+        # Rebuilt without a copy: whatever lost this collection may equally have
+        # damaged the published one, and a full rebuild is the safe repair.
+        return await self._rebuild_candidate_collection(checkpoint, embedder=embedder, published_collection=None)
 
     async def _open_candidate_run(self, *, force_reindex: bool = False) -> _CandidateRun:
         """Resolve the durable candidate to continue, or start one clean candidate."""
@@ -2042,22 +2043,19 @@ class KnowledgeManager:
             checkpoint = None
 
         embedder = BatchPrefetchEmbedder(inner=create_configured_embedder(self.config, self.runtime_paths))
-        rebuild = checkpoint is None or checkpoint.seeding
+        rebuild = checkpoint is None
         if checkpoint is None:
             checkpoint = CandidateCheckpoint(
                 collection=self._candidate_collection_name(),
                 settings=self._indexing_settings,
             )
-        elif checkpoint.seeding:
-            # The collection holds rows a cancelled copy never claimed, and
-            # nothing downstream can attribute them: reconciliation deletes
-            # only what the checkpoint records, so rows for a path that has
-            # since left the corpus would survive into the published index.
+        elif await asyncio.to_thread(self._candidate_holds_unclaimed_rows, checkpoint):
             logger.warning(
-                "Rebuilding a knowledge candidate whose published-vector copy was interrupted",
+                "Rebuilding a knowledge candidate holding vectors it never claimed",
                 base_id=self.base_id,
                 collection=checkpoint.collection,
             )
+            rebuild = True
 
         if rebuild:
             opened = await self._rebuild_candidate_collection(

@@ -71,11 +71,6 @@ class CandidateCheckpoint:
     collection: str
     settings: IndexingSettings
     status: _CandidateStatus = "building"
-    #: Set while vectors are being copied into this candidate from a published
-    #: index, and cleared only once the copy's claims are durable. Rows written
-    #: by a copy that never got to record them are attributable to nothing, so a
-    #: candidate still carrying this marker is rebuilt rather than resumed.
-    seeding: bool = False
     target_revision: str | None = None
     total_files: int = 0
     completed: Mapping[str, FileSignature] = field(default_factory=dict)
@@ -138,7 +133,6 @@ def _snapshot_payload(checkpoint: CandidateCheckpoint) -> dict[str, object]:
         "schema_version": _CANDIDATE_CHECKPOINT_SCHEMA_VERSION,
         "collection": checkpoint.collection,
         "status": checkpoint.status,
-        "seeding": checkpoint.seeding,
         "settings": checkpoint.settings.to_metadata(),
         "target_revision": checkpoint.target_revision,
         "total_files": checkpoint.total_files,
@@ -212,9 +206,6 @@ def _parse_snapshot(payload: Mapping[str, object]) -> CandidateCheckpoint | None
         collection=collection,
         settings=settings,
         status="failed" if status == "failed" else "building",
-        # Absent in snapshots written before the marker existed, which is
-        # exactly right: no copy was ever in flight for those candidates.
-        seeding=payload.get("seeding") is True,
         target_revision=target_revision if isinstance(target_revision, str) and target_revision else None,
         total_files=total_files if isinstance(total_files, int) and not isinstance(total_files, bool) else 0,
         completed=completed,

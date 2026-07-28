@@ -283,21 +283,6 @@ class _FakeKnowledge:
         return self.vector_db.search(query=query, limit=max_results or self.max_results)
 
 
-class _AutoCreatingFakeKnowledge(_FakeKnowledge):
-    """Knowledge that creates a missing collection on construction, like Agno's.
-
-    ``Knowledge.__post_init__`` calls ``vector_db.create()`` whenever the
-    collection is absent, so any existence probe taken after building it always
-    answers yes. Tests that care whether a candidate's vectors really survived
-    have to model that, or they prove nothing about production.
-    """
-
-    def __init__(self, vector_db: _FakeVectorDb | None = None) -> None:
-        super().__init__(vector_db)
-        if vector_db is not None and not vector_db.exists():
-            vector_db.create()
-
-
 class _RecordingNonBatchEmbedder(Embedder):
     """Recording embedder with no batch surface at all, like Ollama.
 
@@ -3413,55 +3398,16 @@ async def test_a_cancelled_vector_copy_never_publishes_rows_it_could_not_claim(
 
 
 @pytest.mark.asyncio
-async def test_a_candidate_whose_collection_vanished_is_rebuilt_rather_than_resumed(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Existence has to be probed before Agno can auto-create the collection.
-
-    Agno creates a missing collection when ``Knowledge`` is built, so a probe
-    taken afterwards always answers yes. A candidate whose vectors are gone
-    would then be resumed still carrying claims nothing backs, and every one of
-    them would go through the vector-existence query to be dropped one batch at
-    a time instead of the candidate simply starting over.
-    """
-    monkeypatch.setattr(knowledge_manager_module, "Knowledge", _AutoCreatingFakeKnowledge)
-    docs_path = tmp_path / "docs"
-    names = _write_corpus(docs_path, 3)
-    config = _config(tmp_path, docs_path)
-    runtime_paths = runtime_paths_for(config)
-    original_index = KnowledgeManager._index_file_locked
-
-    async def _fail_last(self: KnowledgeManager, resolved_path: Path, **kwargs: object) -> bool:
-        if resolved_path.name == names[-1]:
-            return False
-        return await original_index(self, resolved_path, **kwargs)
-
-    monkeypatch.setattr(KnowledgeManager, "_index_file_locked", _fail_last)
-    await _manager(config).reindex_all()
-    monkeypatch.setattr(KnowledgeManager, "_index_file_locked", original_index)
-
-    checkpoint = load_candidate_checkpoint(_storage_path(config, runtime_paths))
-    assert checkpoint is not None
-    assert len(checkpoint.completed) == 2, "the candidate should have kept the files it did index"
-    _FakeVectorDb.store.pop(checkpoint.collection)
-
-    run = await _manager(config)._open_candidate_run()
-
-    assert run.resumed is False
-    assert run.completed == {}, "claims survived a collection that no longer holds their vectors"
-
-
-@pytest.mark.asyncio
 async def test_an_interruption_after_the_copy_still_resumes_the_work_it_finished(
     tmp_path: Path,
     embedder: _RecordingEmbedder,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Clearing the copy marker is what keeps the rest of the refresh resumable.
+    """A candidate that holds only rows it claims stays resumable.
 
-    A candidate that still claims a copy is in flight gets rebuilt on sight, so
-    a marker left set after the copy finished would throw away every file the
+    Rebuilding on sight of unclaimed rows is what keeps a cancelled copy from
+    publishing them, but the test for that has to be narrow: a check that
+    condemned any candidate holding vectors would throw away every file the
     refresh went on to embed.
     """
     monkeypatch.setenv("MINDROOM_KNOWLEDGE_FILE_INDEX_CONCURRENCY", "1")
@@ -3491,7 +3437,6 @@ async def test_an_interruption_after_the_copy_still_resumes_the_work_it_finished
 
     checkpoint = load_candidate_checkpoint(_storage_path(config, runtime_paths))
     assert checkpoint is not None
-    assert checkpoint.seeding is False, "a finished copy must stop claiming to be in flight"
     assert len(checkpoint.completed) == 2
     already_embedded = {f"revised {names.index(name)}" for name in checkpoint.completed}
 
@@ -3502,17 +3447,73 @@ async def test_an_interruption_after_the_copy_still_resumes_the_work_it_finished
 
 
 @pytest.mark.asyncio
+async def test_a_copy_records_its_claims_only_after_every_row_has_landed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Recovery is sound only because a copy's claims land in one write, last.
+
+    An interrupted copy is recoverable because it leaves exactly one shape: no
+    claims and a non-empty collection. A copy that recorded claims as it went
+    would instead leave a claim covering only part of a file, which
+    ``_candidate_paths_missing_vectors`` confirms on sight -- one row is enough
+    -- so the candidate would publish a silently truncated file.
+
+    Nothing else in the design notices that, and every other test here would
+    stay green, so this is the pin. Chunks are paged one row at a time to give
+    a per-page write somewhere to happen.
+    """
+    monkeypatch.setattr(knowledge_manager_module, "_PUBLISHED_VECTOR_COPY_PAGE_ROWS", 1)
+    docs_path = tmp_path / "docs"
+    names = _write_corpus(docs_path, 3)
+    config = _config(tmp_path, docs_path)
+    await _manager(config).reindex_all()
+
+    events: list[str] = []
+    original_save = knowledge_manager_module.save_candidate_checkpoint
+    original_add = _FakeCollection.add
+
+    def _record_save(base_storage_path: Path, checkpoint: CandidateCheckpoint) -> CandidateCheckpoint:
+        events.append(f"claims:{len(checkpoint.completed)}")
+        return original_save(base_storage_path, checkpoint)
+
+    def _record_add(
+        self: _FakeCollection,
+        *,
+        ids: list[str],
+        embeddings: list[list[float]],
+        documents: list[str],
+        metadatas: list[dict[str, Any]],
+    ) -> None:
+        events.append("rows")
+        original_add(self, ids=ids, embeddings=embeddings, documents=documents, metadatas=metadatas)
+
+    monkeypatch.setattr(knowledge_manager_module, "save_candidate_checkpoint", _record_save)
+    monkeypatch.setattr(_FakeCollection, "add", _record_add)
+    (docs_path / names[0]).write_text("rewritten body", encoding="utf-8")
+
+    await _manager(config).reindex_all()
+
+    copied_rows = [index for index, event in enumerate(events) if event == "rows"]
+    recorded_claims = [
+        index for index, event in enumerate(events) if event.startswith("claims:") and event != "claims:0"
+    ]
+    assert copied_rows, "the copy wrote no rows, so this proves nothing"
+    assert recorded_claims, "the copy never recorded its claims"
+    assert min(recorded_claims) > max(copied_rows), "claims were recorded before every copied row had landed"
+
+
+@pytest.mark.asyncio
 async def test_a_rebuild_that_dies_before_emptying_the_collection_still_recovers(
     tmp_path: Path,
     embedder: _RecordingEmbedder,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The copy marker has to outlive the reset, not just the copy.
+    """Dying part-way through a rebuild must not leave a resumable-looking candidate.
 
-    A rebuild inherits a collection whose rows the checkpoint no longer claims,
-    and only the reset makes that true. Clearing the marker before the reset
-    leaves a window where the checkpoint says the candidate is resumable while
-    it still holds unattributable rows.
+    A rebuild empties the collection and then records what replaced it, so a
+    crash between the two leaves rows the checkpoint does not account for --
+    the same shape a cancelled copy leaves, reached from the other direction.
     """
     docs_path = tmp_path / "docs"
     names = _write_corpus(docs_path, 3)
@@ -3545,8 +3546,6 @@ async def test_a_rebuild_that_dies_before_emptying_the_collection_still_recovers
         await _manager(config).reindex_all()
     cancel_copy = False
 
-    # A forced rebuild of that marked candidate copies nothing, so it takes the
-    # path where the marker used to be cleared before the collection was reset.
     (docs_path / names[0]).unlink()
     die_before_reset = True
     original_reset = KnowledgeManager._reset_vector_db
@@ -3559,12 +3558,13 @@ async def test_a_rebuild_that_dies_before_emptying_the_collection_still_recovers
 
     monkeypatch.setattr(KnowledgeManager, "_reset_vector_db", _maybe_die)
     with pytest.raises(RuntimeError):
-        await _manager(config).reindex_all(force_reindex=True)
+        await _manager(config).reindex_all()
     die_before_reset = False
 
     interrupted = load_candidate_checkpoint(_storage_path(config, runtime_paths))
     assert interrupted is not None
-    assert interrupted.seeding is True, "the marker was cleared while the collection still held rows"
+    assert interrupted.completed == {}
+    assert _stored_paths(interrupted.collection) == sorted(names), "the crash left rows nothing claims"
     embedder.embedded_texts.clear()
 
     indexed = await _manager(config).reindex_all()
