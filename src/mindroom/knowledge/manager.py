@@ -2074,30 +2074,41 @@ class KnowledgeManager:
             return None
         return await self._git_rev_parse("HEAD")
 
-    async def _source_moved_during_pass(
+    async def _candidate_matches_source(
         self,
         round_revision: str | None,
+        candidate_signatures: Mapping[str, FileSignature],
         candidate_source_signature: str,
     ) -> bool:
-        """Return whether the source changed while one indexing pass ran.
+        """Return whether the candidate still matches the source after one pass.
 
-        A Git checkout is program-owned and realigned with a hard reset, so its
-        tracked content is fully determined by HEAD: re-reading the revision the
-        round started at detects a mid-pass move without touching the corpus. A
-        source with no usable revision falls back to hashing every managed file,
-        which is the dominant cost of a refresh on a large or network-mounted
-        source.
+        Two independent things must hold. The source must not have moved while the
+        pass ran, and the candidate must cover every managed file: a file whose
+        signature scan or read failed is dropped from the pass's own completeness
+        accounting (``_file_signatures_for``, ``run.vanished``), so without a
+        coverage check a transient I/O error would publish a silently truncated
+        index -- and the unchanged fast path would then republish it at the same
+        revision forever.
+
+        Hashing the corpus proves both at once, but reads every byte. For a Git
+        checkout the revision proves content, because the checkout is
+        program-owned and realigned with a hard reset, and re-listing proves
+        coverage. Neither reads file contents.
         """
-        if round_revision is not None:
-            return await self._git_rev_parse("HEAD") != round_revision
-        live_source_signature = await asyncio.to_thread(
-            knowledge_source_signature,
-            self.config,
-            self.base_id,
-            self._knowledge_source_path(),
-            tracked_relative_paths=self._git_tracked_relative_paths,
-        )
-        return live_source_signature != candidate_source_signature
+        if round_revision is None:
+            live_source_signature = await asyncio.to_thread(
+                knowledge_source_signature,
+                self.config,
+                self.base_id,
+                self._knowledge_source_path(),
+                tracked_relative_paths=self._git_tracked_relative_paths,
+            )
+            return live_source_signature == candidate_source_signature
+
+        if await self._git_rev_parse("HEAD") != round_revision:
+            return False
+        current_files = await asyncio.to_thread(self.list_files)
+        return {self._relative_path(path) for path in current_files} == set(candidate_signatures)
 
     async def _advance_candidate(self, run: _CandidateRun, progress: _CandidateProgress) -> None:
         """Reconcile, index and publish until the candidate matches the live source."""
@@ -2160,7 +2171,11 @@ class KnowledgeManager:
                 return
 
             candidate_source_signature = _source_signature_from_file_signatures(candidate_signatures)
-            if await self._source_moved_during_pass(round_revision, candidate_source_signature):
+            if not await self._candidate_matches_source(
+                round_revision,
+                candidate_signatures,
+                candidate_source_signature,
+            ):
                 # The source moved while this pass ran. Keep every unchanged
                 # vector and reconcile the delta instead of discarding the
                 # candidate; only the changed files are re-embedded.

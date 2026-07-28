@@ -1711,31 +1711,22 @@ def test_knowledge_file_listing_filters_unsupported_extensions_before_filesystem
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Unsupported files should not pay per-file symlink or strict resolve checks."""
+    """Unsupported files should not pay the per-file filesystem safety check."""
     docs_path = tmp_path / "docs"
     docs_path.mkdir()
     ignored_path = docs_path / "ignored.bin"
     ignored_path.write_bytes(b"not semantic")
     config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
 
-    original_is_symlink = Path.is_symlink
-    original_resolve = Path.resolve
+    original_lstat = Path.lstat
 
-    def _is_symlink(self: Path) -> bool:
+    def _lstat(self: Path, *args: object, **kwargs: object) -> os.stat_result:
         if self.name == ignored_path.name:
-            msg = "unsupported files should be filtered before symlink checks"
+            msg = "unsupported files should be filtered before the safety check"
             raise AssertionError(msg)
-        return original_is_symlink(self)
+        return original_lstat(self, *args, **kwargs)
 
-    def _resolve(self: Path, *args: object, **kwargs: object) -> Path:
-        strict = bool(args[0]) if args else bool(kwargs.get("strict", False))
-        if self.name == ignored_path.name and strict:
-            msg = "unsupported files should be filtered before strict resolution"
-            raise AssertionError(msg)
-        return original_resolve(self, *args, **kwargs)
-
-    monkeypatch.setattr(Path, "is_symlink", _is_symlink)
-    monkeypatch.setattr(Path, "resolve", _resolve)
+    monkeypatch.setattr(Path, "lstat", _lstat)
 
     assert list_knowledge_files(config, "docs", docs_path) == []
 
@@ -6814,11 +6805,12 @@ async def test_git_refresh_syncs_before_reindex_and_publishes_revision_without_s
     assert "x-oauth-basic" not in metadata_text
 
 
-def _git_noop_config(tmp_path: Path) -> tuple[Config, RuntimePaths]:
-    """Build a Git-backed single-file base used by the revision-gating tests."""
+def _git_noop_config(tmp_path: Path, *, files: tuple[str, ...] = ("doc.md",)) -> tuple[Config, RuntimePaths]:
+    """Build a Git-backed base used by the revision-gating tests."""
     docs_path = tmp_path / "docs"
     docs_path.mkdir()
-    (docs_path / "doc.md").write_text("git index", encoding="utf-8")
+    for name in files:
+        (docs_path / name).write_text("git index", encoding="utf-8")
     config = _config(
         tmp_path,
         bases={"docs": docs_path},
@@ -6831,13 +6823,15 @@ def _git_noop_config(tmp_path: Path) -> tuple[Config, RuntimePaths]:
 def _install_git_sync_results(
     monkeypatch: pytest.MonkeyPatch,
     results: list[dict[str, object]],
+    *,
+    tracked: tuple[str, ...] = ("doc.md",),
 ) -> None:
     """Drive ``sync_git_source`` through a fixed sequence of poll outcomes."""
 
     async def _sync(self: KnowledgeManager) -> dict[str, object]:
         result = results.pop(0)
         self._git_last_successful_commit = str(result["commit"])
-        _set_git_tracked_files(self, "doc.md")
+        _set_git_tracked_files(self, *tracked)
         return result
 
     monkeypatch.setattr(KnowledgeManager, "sync_git_source", _sync)
@@ -7033,6 +7027,46 @@ async def test_reindex_skips_live_corpus_hash_when_revision_is_stable(
 
 
 @pytest.mark.asyncio
+async def test_reindex_does_not_publish_a_corpus_truncated_by_a_transient_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A file lost to a transient stat error must not publish as a complete index.
+
+    Files whose signature scan raises are dropped from the pass's own completeness
+    accounting, so the post-pass check is the only thing standing between a
+    truncated corpus and publication. Once published at a revision, the unchanged
+    fast path would keep republishing it, so the file would never come back.
+    """
+    config, runtime_paths = _git_noop_config(tmp_path, files=("keep.md", "flaky.md"))
+    _install_git_sync_results(
+        monkeypatch,
+        [{"updated": True, "changed_count": 2, "removed_count": 0, "commit": "rev-a"}],
+        tracked=("keep.md", "flaky.md"),
+    )
+    _install_git_revisions(monkeypatch, ["rev-a"])
+
+    original_file_signature = KnowledgeManager._file_signature
+    remaining_failures = {"flaky.md": 1}
+
+    def _flaky_signature(self: KnowledgeManager, file_path: Path) -> tuple[int, int, str]:
+        if remaining_failures.get(file_path.name):
+            remaining_failures[file_path.name] -= 1
+            raise OSError(116, "Stale file handle")
+        return original_file_signature(self, file_path)
+
+    monkeypatch.setattr(KnowledgeManager, "_file_signature", _flaky_signature)
+
+    result = await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+
+    assert result.indexed_count == 2
+    key = resolve_published_index_key("docs", config=config, runtime_paths=runtime_paths)
+    state = load_published_index_state(published_index_metadata_path(key))
+    assert state is not None
+    assert state.indexed_count == 2
+
+
+@pytest.mark.asyncio
 async def test_reindex_reconciles_when_revision_moves_mid_pass(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -7078,7 +7112,12 @@ async def test_git_noop_refresh_ignores_untracked_indexable_file_changes(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Git-backed corpora use tracked files only and ignore untracked checkout files."""
+    """Git-backed corpora use tracked files only and ignore untracked checkout files.
+
+    The second poll reports a moved revision on purpose. An unmoved revision
+    short-circuits change detection entirely, which would let this test pass
+    without ever exercising the tracked-only filtering it exists to pin.
+    """
     docs_path = tmp_path / "docs"
     docs_path.mkdir()
     (docs_path / "doc.md").write_text("git tracked index", encoding="utf-8")
@@ -7092,7 +7131,7 @@ async def test_git_noop_refresh_ignores_untracked_indexable_file_changes(
     runtime_paths = runtime_paths_for(config)
     sync_results = [
         {"updated": True, "changed_count": 1, "removed_count": 0, "commit": "rev-a"},
-        {"updated": False, "changed_count": 0, "removed_count": 0, "commit": "rev-a"},
+        {"updated": False, "changed_count": 0, "removed_count": 0, "commit": "rev-b"},
     ]
     reindex_count = 0
     original_reindex = KnowledgeManager.reindex_all
