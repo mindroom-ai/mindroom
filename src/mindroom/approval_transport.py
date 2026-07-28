@@ -302,11 +302,6 @@ class ApprovalMatrixTransport:
         if not can_send_to_encrypted_room(bot.client, room_id, operation="edit_approval_event"):
             return False
 
-        thread_id = new_content.get("thread_id")
-        if thread_id is not None and not isinstance(thread_id, str):
-            msg = "Approval thread_id must be a string when present."
-            raise TypeError(msg)
-
         replacement_content = {key: value for key, value in new_content.items() if key != "thread_id"}
         response = await bot.client.room_send(
             room_id=room_id,
