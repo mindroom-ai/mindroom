@@ -67,10 +67,10 @@ from mindroom.knowledge.utils import KnowledgeAvailabilityDetail
 from mindroom.knowledge.watch import KnowledgeSourceWatcher
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
-from tests.knowledge_test_support import metadata_matches
+from tests.knowledge_test_support import chroma_get_result, metadata_matches
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Coroutine, Iterable, Iterator
+    from collections.abc import AsyncIterator, Coroutine, Iterable, Iterator, Sequence
     from types import ModuleType
 
     from mindroom.constants import RuntimePaths
@@ -86,9 +86,9 @@ class _Collection:
     def get(
         self,
         *,
+        include: Sequence[str],
         limit: int | None = None,
         offset: int = 0,
-        include: list[str] | None = None,
         where: dict[str, object] | None = None,
     ) -> dict[str, object]:
         with _VectorDb.lock:
@@ -97,16 +97,13 @@ class _Collection:
             key, condition = next(iter(where.items()))
             selected_all = [item for item in selected_all if metadata_matches(item["metadata"], key, condition)]
         selected = selected_all[offset:] if limit is None else selected_all[offset : offset + limit]
-        included = set(include or [])
-        payload: dict[str, object] = {
-            "ids": [str(item["id"]) for item in selected],
-            "metadatas": [dict(item["metadata"]) for item in selected],
-        }
-        if "documents" in included:
-            payload["documents"] = [str(item["content"]) for item in selected]
-        if "embeddings" in included:
-            payload["embeddings"] = [list(item["embedding"]) for item in selected]
-        return payload
+        return chroma_get_result(
+            ids=[str(item["id"]) for item in selected],
+            metadatas=[dict(item["metadata"]) for item in selected],
+            documents=[str(item["content"]) for item in selected],
+            embeddings=[list(item["embedding"]) for item in selected],  # type: ignore[arg-type]
+            include=include,
+        )
 
     def add(
         self,

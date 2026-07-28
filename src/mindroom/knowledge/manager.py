@@ -19,7 +19,7 @@ from agno.knowledge.reader import ReaderFactory
 from agno.knowledge.reader.markdown_reader import MarkdownReader
 from agno.knowledge.reader.text_reader import TextReader
 from agno.vectordb.chroma import ChromaDb
-from chromadb.errors import NotFoundError
+from chromadb.errors import ChromaError, NotFoundError
 
 from mindroom.chunking import SafeFixedSizeChunking
 from mindroom.constants import (
@@ -86,6 +86,7 @@ if TYPE_CHECKING:
     from agno.knowledge.document.base import Document
     from agno.knowledge.embedder.base import Embedder
     from agno.knowledge.reader.base import Reader
+    from chromadb.api.models.Collection import Collection
     from chromadb.api.types import Embeddings, Metadata
 
     from mindroom.config.knowledge import KnowledgeGitConfig
@@ -119,7 +120,13 @@ _MAX_PREFETCH_TEXT_BYTES = 8_000_000
 #: still yields to the event loop and to cancellation while it is scanned.
 _SIGNATURE_SCAN_CHUNK = 512
 #: Completed candidate entries whose vectors are confirmed in one Chroma query.
+#: Only a starting point: the query splits itself when the store refuses it,
+#: because the real limit is matched rows, which this cannot know up front.
 _VECTOR_VERIFY_BATCH = 128
+#: Source paths whose vectors are dropped in one Chroma delete. Independent of
+#: the verify batch: a delete binds no variable per matched row, so this bounds
+#: only how much work one call does.
+_VECTOR_DELETE_BATCH = 128
 #: Published chunk rows read in one copy query. Chroma binds one SQL variable
 #: per *returned* row and SQLite caps a statement at 32,766, so nothing about
 #: the file or path count bounds a copy query -- only the rows it may return.
@@ -335,6 +342,71 @@ def _iter_file_batches(files: Sequence[Path], batch_size: int) -> Iterator[list[
     size = max(batch_size, 1)
     for start in range(0, len(files), size):
         yield list(files[start : start + size])
+
+
+def _collection_has_source_path(collection: Collection, relative_path: str) -> bool:
+    """Return whether one source path has any vector, at one row of cost.
+
+    Chroma binds one SQL variable per *returned* row, so an unbounded probe on
+    a heavily chunked file exceeds SQLite's ceiling and fails outright. One row
+    is all existence needs, and ``limit=1`` is what keeps this answerable at
+    any file size. Do not widen it.
+    """
+    result = collection.get(where={_SOURCE_PATH_KEY: relative_path}, limit=1, include=[])
+    return bool(result.get("ids"))
+
+
+def _paths_with_vectors(collection: Collection, relative_paths: Sequence[str]) -> set[str]:
+    """Return which of `relative_paths` have at least one vector in the collection.
+
+    Chroma binds one SQL variable per *matched row*, not one per queried path,
+    so a fixed batch of paths does not bound the query at all: whether it fits
+    under SQLite's ceiling depends on how many chunks those particular files
+    produced. That makes any batch size chosen up front a gamble. Small files
+    leave a batch of 128 far below the ceiling, a handful of large ones puts
+    the same batch over it, and once over, every verification query for that
+    base fails identically and the candidate is stranded for good.
+
+    So the batch is not guessed, it is *adapted*: ask for the whole thing, and
+    on refusal halve it and ask again. Each split halves the matched rows too,
+    so it converges, and a store that can answer the batch pays nothing.
+
+    A single path is the floor, where splitting can no longer help, so it is
+    asked for a single row instead, which stays under any ceiling however many
+    chunks the file has. That floor is what makes the recursion total, and it
+    is also where a failure that was never about query size finally surfaces.
+    """
+    if len(relative_paths) == 1:
+        relative_path = relative_paths[0]
+        return {relative_path} if _collection_has_source_path(collection, relative_path) else set()
+
+    try:
+        result = collection.get(where={_SOURCE_PATH_KEY: {"$in": list(relative_paths)}}, include=["metadatas"])
+    except NotFoundError:
+        # Splitting answers "the store refused this query for its size". A
+        # collection that is gone is not that, and stays gone however small the
+        # query gets, so descending would only cost log2(batch) + 1 doomed
+        # queries before raising exactly the same error from the first leaf.
+        raise
+    except ChromaError:
+        # Splitting stays correct but multiplies the queries, and how far it
+        # degrades depends on chunk counts nothing here can see. Without a
+        # trace, a base whose files outgrew the ceiling just gets quietly
+        # slower -- the same invisibility that let the unsplit query strand
+        # candidates undiagnosed.
+        logger.debug("Split a refused knowledge vector verification query", paths=len(relative_paths))
+        midpoint = len(relative_paths) // 2
+        return _paths_with_vectors(collection, relative_paths[:midpoint]) | _paths_with_vectors(
+            collection,
+            relative_paths[midpoint:],
+        )
+
+    found: set[str] = set()
+    for metadata in result.get("metadatas") or []:
+        source_path = metadata.get(_SOURCE_PATH_KEY)
+        if isinstance(source_path, str):
+            found.add(source_path)
+    return found
 
 
 def _require_chroma_vector_db(knowledge: Knowledge) -> ChromaDb:
@@ -1016,13 +1088,7 @@ class KnowledgeManager:
             return False
 
         collection = vector_db.client.get_collection(name=vector_db.collection_name)
-        result = collection.get(
-            where={_SOURCE_PATH_KEY: relative_path},
-            limit=1,
-            include=[],
-        )
-        ids = result.get("ids", []) or []
-        return bool(ids)
+        return _collection_has_source_path(collection, relative_path)
 
     async def _wait_for_source_vectors(
         self,
@@ -1675,17 +1741,7 @@ class KnowledgeManager:
     ) -> set[str]:
         """Return which of the given source paths actually have candidate vectors."""
         collection = vector_db.client.get_collection(name=vector_db.collection_name)
-        result = collection.get(
-            where={_SOURCE_PATH_KEY: {"$in": list(relative_paths)}},
-            include=["metadatas"],
-        )
-        metadatas = result.get("metadatas") or []
-        found: set[str] = set()
-        for metadata in metadatas:
-            source_path = metadata.get(_SOURCE_PATH_KEY) if isinstance(metadata, dict) else None
-            if isinstance(source_path, str):
-                found.add(source_path)
-        return found
+        return _paths_with_vectors(collection, relative_paths)
 
     async def _candidate_paths_missing_vectors(self, run: _CandidateRun, relative_paths: Sequence[str]) -> set[str]:
         """Return completed entries the candidate cannot actually serve.
@@ -2153,11 +2209,17 @@ class KnowledgeManager:
         Agno's ``delete_by_metadata`` wraps values in ``$eq`` and so can only
         take one path per call, which turns a large source update into one
         thread hop and one get+delete per file. The collection accepts ``$in``
-        directly, the same seam the vector verification query already uses.
+        directly.
+
+        Unlike the ``$in`` the verification query issues, this one needs no
+        ceiling protection: a delete does not bind one SQL variable per matched
+        row, so the batch size alone bounds it. Measured on ChromaDB 1.5.8,
+        deleting 51,200 rows across 128 paths in one call succeeds, where the
+        equivalent read fails with ``too many SQL variables``.
         """
         collection = vector_db.client.get_collection(name=vector_db.collection_name)
-        for start in range(0, len(relative_paths), _VECTOR_VERIFY_BATCH):
-            batch = list(relative_paths[start : start + _VECTOR_VERIFY_BATCH])
+        for start in range(0, len(relative_paths), _VECTOR_DELETE_BATCH):
+            batch = list(relative_paths[start : start + _VECTOR_DELETE_BATCH])
             collection.delete(where={_SOURCE_PATH_KEY: {"$in": batch}})
 
     async def _drop_candidate_paths(self, run: _CandidateRun, relative_paths: Sequence[str]) -> None:

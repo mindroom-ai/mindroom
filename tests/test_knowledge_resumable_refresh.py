@@ -21,7 +21,7 @@ from typing import TYPE_CHECKING, Any, ClassVar, Protocol
 import pytest
 from agno.knowledge.document.base import Document
 from agno.knowledge.embedder.base import Embedder
-from chromadb.errors import NotFoundError
+from chromadb.errors import InternalError, NotFoundError
 from structlog.testing import capture_logs
 
 import mindroom.knowledge.manager as knowledge_manager_module
@@ -62,10 +62,10 @@ from mindroom.knowledge.registry import (
 )
 from mindroom.knowledge.status import get_knowledge_index_status
 from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
-from tests.knowledge_test_support import metadata_matches
+from tests.knowledge_test_support import chroma_get_result, metadata_matches
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Iterator, Sequence
 
     from mindroom.constants import RuntimePaths
 
@@ -106,32 +106,29 @@ class _FakeCollection:
     def get(
         self,
         *,
+        include: Sequence[str],
         limit: int | None = None,
         offset: int = 0,
-        include: list[str] | None = None,
         where: dict[str, object] | None = None,
     ) -> dict[str, object]:
+        _FakeVectorDb.get_calls += 1
+        if self._name in _FakeVectorDb.vanished_on_get:
+            message = f"Collection {self._name!r} does not exist"
+            raise NotFoundError(message)
         records = list(_FakeVectorDb.store.get(self._name, []))
         if where:
             key, condition = next(iter(where.items()))
             records = [record for record in records if metadata_matches(record.metadata, key, condition)]
         selected = records[offset:] if limit is None else records[offset : offset + limit]
         _FakeVectorDb.queries.append((len(selected), where))
-        if len(selected) > _FakeVectorDb.max_rows_per_query:
-            # Chroma binds one SQL variable per *returned* row, so a query is
-            # refused for how much it hands back, not for how much it asks about.
-            message = f"too many SQL variables ({len(selected)})"
-            raise RuntimeError(message)
-        included = set(include or [])
-        payload: dict[str, object] = {
-            "ids": [record.identifier for record in selected],
-            "metadatas": [dict(record.metadata) for record in selected],
-        }
-        if "documents" in included:
-            payload["documents"] = [record.content for record in selected]
-        if "embeddings" in included:
-            payload["embeddings"] = [list(record.embedding) for record in selected]
-        return payload
+        _FakeVectorDb.enforce_row_ceiling(len(selected))
+        return chroma_get_result(
+            ids=[record.identifier for record in selected],
+            metadatas=[dict(record.metadata) for record in selected],
+            documents=[record.content for record in selected],
+            embeddings=[list(record.embedding) for record in selected],
+            include=include,
+        )
 
     def add(
         self,
@@ -176,9 +173,6 @@ class _FakeClient:
 
 class _FakeVectorDb:
     store: ClassVar[dict[str, list[_Record]]] = {}
-    #: Rows one ``get`` may return before the store refuses it, mirroring the
-    #: real backend's per-returned-row SQL variable ceiling.
-    max_rows_per_query: ClassVar[int] = 1_000_000
     #: Rows returned by each ``get``, with its filter, so tests can prove a copy
     #: query was paged and that a verification probe was or was not issued.
     queries: ClassVar[list[tuple[int, dict[str, object] | None]]] = []
@@ -186,6 +180,25 @@ class _FakeVectorDb:
     max_writes: ClassVar[int] = 1_000_000
     #: Rows handed to each accepted or refused ``add``.
     writes: ClassVar[list[int]] = []
+    #: Rows one ``get`` may return before the store rejects the whole query,
+    #: mirroring SQLite's bind-variable ceiling: Chroma binds one variable per
+    #: *returned row*, so the limit is a property of the result, not of the
+    #: ``$in`` list. ``None`` leaves the store unbounded.
+    max_rows_per_get: ClassVar[int | None] = None
+    #: ``get`` calls issued, so a test can prove a query was not needlessly split.
+    get_calls: ClassVar[int] = 0
+    #: Collections that still resolve through ``get_collection`` but are gone by
+    #: the time the query runs, as when a sweep deletes one mid-verification.
+    vanished_on_get: ClassVar[set[str]] = set()
+
+    @classmethod
+    def enforce_row_ceiling(cls, rows: int) -> None:
+        """Reject a query whose result would exceed the store's bind-variable ceiling."""
+        if cls.max_rows_per_get is not None and rows > cls.max_rows_per_get:
+            message = (
+                "Error executing plan: Internal error: error returned from database: (code: 1) too many SQL variables"
+            )
+            raise InternalError(message)
 
     def __init__(self, *, collection: str, embedder: Embedder | None = None, **_: object) -> None:
         self.collection_name = collection
@@ -389,7 +402,9 @@ def fake_vector_store(
 ) -> Iterator[None]:
     """Install the in-memory vector store, fake Knowledge and recording embedder."""
     _FakeVectorDb.store = {}
-    _FakeVectorDb.max_rows_per_query = 1_000_000
+    _FakeVectorDb.max_rows_per_get = None
+    _FakeVectorDb.get_calls = 0
+    _FakeVectorDb.vanished_on_get = set()
     _FakeVectorDb.queries = []
     _FakeVectorDb.max_writes = 1_000_000
     _FakeVectorDb.writes = []
@@ -3641,3 +3656,140 @@ async def test_forced_reindex_rebuilds_every_vector_instead_of_copying_it(
     assert result.indexed_count == 3, "a forced rebuild reused the vectors it was asked to replace"
     for index in range(3):
         assert embedder.embedded_count(f"content {index}") == 1
+
+
+# --------------------------------------------------------------------------
+# Vector verification against a store with a bind-variable ceiling
+# --------------------------------------------------------------------------
+
+
+def _seed_chunked_paths(collection: str, paths: Sequence[str], chunks_per_path: int) -> None:
+    """Fill one collection with `chunks_per_path` vectors for each of `paths`."""
+    _FakeVectorDb.store[collection] = [
+        _Record(
+            identifier=_next_record_id(),
+            content=f"{relative_path} chunk {index}",
+            embedding=[0.0],
+            metadata={"source_path": relative_path},
+        )
+        for relative_path in paths
+        for index in range(chunks_per_path)
+    ]
+
+
+def _verification_manager(tmp_path: Path) -> tuple[KnowledgeManager, _FakeVectorDb]:
+    """Return a manager and a created, empty candidate collection to verify against."""
+    docs_path = tmp_path / "docs"
+    docs_path.mkdir()
+    manager = _manager(_config(tmp_path, docs_path))
+    vector_db = _FakeVectorDb(collection="verification_target")
+    vector_db.create()
+    return manager, vector_db
+
+
+def test_vector_verification_splits_a_batch_the_store_cannot_answer(tmp_path: Path) -> None:
+    """A batch matching more rows than the store allows must still be verified.
+
+    Chroma binds one SQL variable per matched chunk row, so a fixed batch of
+    paths is not a bound at all: whether the query fits depends on how many
+    chunks those files produced. A corpus of large files makes every
+    verification query fail, which strands the candidate permanently.
+    """
+    manager, vector_db = _verification_manager(tmp_path)
+    paths = [f"doc{index:02d}.md" for index in range(8)]
+    _seed_chunked_paths(vector_db.collection_name, paths, chunks_per_path=100)
+    _FakeVectorDb.max_rows_per_get = 250
+
+    assert manager._candidate_paths_with_vectors(vector_db, paths) == set(paths)
+
+    # Halving is the property that makes this affordable, and correctness alone
+    # does not pin it: splitting one path off at a time also terminates and also
+    # returns the right answer, while turning O(log n) queries into O(n).
+    # 8 (800 rows, refused) -> 4 (400, refused) -> 2 + 2 (200 each, answered),
+    # then the same on the right half: 7 queries.
+    assert _FakeVectorDb.get_calls == 7
+
+
+def test_vector_verification_confirms_a_file_larger_than_the_store_ceiling(tmp_path: Path) -> None:
+    """One file with more chunks than the ceiling must still be confirmed.
+
+    Splitting alone cannot rescue this: a single path is the smallest batch
+    there is, so the query has to stop asking for every row it matches.
+    """
+    manager, vector_db = _verification_manager(tmp_path)
+    _seed_chunked_paths(vector_db.collection_name, ["huge.md"], chunks_per_path=500)
+    _FakeVectorDb.max_rows_per_get = 250
+
+    assert manager._candidate_paths_with_vectors(vector_db, ["huge.md"]) == {"huge.md"}
+
+
+def test_vector_verification_still_reports_paths_without_vectors_after_splitting(tmp_path: Path) -> None:
+    """Splitting must not turn an unverifiable path into a verified one."""
+    manager, vector_db = _verification_manager(tmp_path)
+    present = [f"present{index:02d}.md" for index in range(6)]
+    _seed_chunked_paths(vector_db.collection_name, present, chunks_per_path=100)
+    _FakeVectorDb.max_rows_per_get = 250
+    missing = ["missing0.md", "missing1.md"]
+
+    found = manager._candidate_paths_with_vectors(vector_db, [*present, *missing])
+
+    assert found == set(present)
+
+
+def test_vector_verification_uses_one_query_when_the_store_answers(tmp_path: Path) -> None:
+    """A store that can answer the whole batch must be asked exactly once.
+
+    Splitting is a fallback, not the normal path: verifying per file would turn
+    one query per 128 files into 128, which is the cost this batching exists to
+    avoid.
+    """
+    manager, vector_db = _verification_manager(tmp_path)
+    paths = [f"doc{index:02d}.md" for index in range(8)]
+    _seed_chunked_paths(vector_db.collection_name, paths, chunks_per_path=100)
+
+    assert manager._candidate_paths_with_vectors(vector_db, paths) == set(paths)
+    assert _FakeVectorDb.get_calls == 1
+
+
+def test_vector_verification_does_not_split_when_the_collection_is_gone(tmp_path: Path) -> None:
+    """A missing collection must surface at once instead of being re-asked per path.
+
+    Splitting exists to shrink a query the store found too large, and a missing
+    collection is not that: it stays missing however small the query gets.
+    Descending anyway costs ``log2(batch) + 1`` doomed queries before the
+    leftmost leaf raises the identical error, and the caller does not catch, so
+    verification aborts on this batch either way. Failing on the first query is
+    the cheaper of two identical outcomes, which is what the count below pins.
+    """
+    manager, vector_db = _verification_manager(tmp_path)
+    paths = [f"doc{index:02d}.md" for index in range(8)]
+    # No rows are seeded: every ``get`` raises before reading the store, so
+    # seeding would only suggest the contents mattered. ``create()`` in the
+    # helper is what registers the collection for ``get_collection``.
+    _FakeVectorDb.vanished_on_get = {vector_db.collection_name}
+
+    with pytest.raises(NotFoundError):
+        manager._candidate_paths_with_vectors(vector_db, paths)
+
+    assert _FakeVectorDb.get_calls == 1
+
+
+def test_vector_verification_records_that_it_had_to_split(tmp_path: Path) -> None:
+    """A store refusing batches must leave a trace, not degrade silently.
+
+    Splitting keeps verification correct but multiplies its queries, and how
+    far it degrades depends on chunk counts nothing here can see. A base whose
+    files grew past the ceiling would otherwise get quietly slower with no
+    signal anywhere, which is the same invisibility that let the original
+    failure go undiagnosed.
+    """
+    manager, vector_db = _verification_manager(tmp_path)
+    paths = [f"doc{index:02d}.md" for index in range(8)]
+    _seed_chunked_paths(vector_db.collection_name, paths, chunks_per_path=100)
+    _FakeVectorDb.max_rows_per_get = 250
+
+    with capture_logs() as logs:
+        assert manager._candidate_paths_with_vectors(vector_db, paths) == set(paths)
+
+    split_logs = [entry for entry in logs if entry["event"] == "Split a refused knowledge vector verification query"]
+    assert [entry["paths"] for entry in split_logs] == [8, 4, 4]
