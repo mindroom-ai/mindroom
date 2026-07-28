@@ -3338,6 +3338,47 @@ async def test_cancelled_publish_metadata_save_keeps_published_candidate_collect
 
 
 @pytest.mark.asyncio
+async def test_publish_metadata_save_finishes_before_repeated_cancellation_escapes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Repeated cancellation must not interrupt the metadata save drain."""
+    docs_path = tmp_path / "docs"
+    docs_path.mkdir()
+    config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
+    runtime_paths = runtime_paths_for(config)
+    manager = KnowledgeManager("docs", config=config, runtime_paths=runtime_paths)
+    candidate_vector_db = manager._build_vector_db(manager._candidate_collection_name())
+    loop = asyncio.get_running_loop()
+    save_started = asyncio.Event()
+    release_save = Event()
+
+    def _blocked_save(_self: KnowledgeManager, *_args: object, **_kwargs: object) -> None:
+        loop.call_soon_threadsafe(save_started.set)
+        assert release_save.wait(timeout=5)
+
+    monkeypatch.setattr(KnowledgeManager, "_save_persisted_index_state", _blocked_save)
+    save = asyncio.create_task(
+        manager._save_candidate_publish_metadata(
+            candidate_vector_db=candidate_vector_db,
+            indexed_count=0,
+            source_signature="source-signature",
+        ),
+    )
+    await save_started.wait()
+    try:
+        save.cancel()
+        await asyncio.sleep(0)
+        save.cancel()
+        await asyncio.sleep(0)
+        assert not save.done(), "repeated cancellation escaped before the metadata save finished"
+    finally:
+        release_save.set()
+
+    assert await save is True
+
+
+@pytest.mark.asyncio
 async def test_refresh_never_publishes_while_source_keeps_changing(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

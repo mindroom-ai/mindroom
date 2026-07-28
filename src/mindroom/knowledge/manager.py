@@ -42,6 +42,7 @@ from mindroom.knowledge.candidate_checkpoint import (
     FileSignature,
     append_candidate_journal,
     delete_candidate_checkpoint,
+    file_signature_from_fields,
     load_candidate_checkpoint,
     save_candidate_checkpoint,
 )
@@ -319,21 +320,24 @@ def _raise_cancelled() -> NoReturn:
     raise asyncio.CancelledError
 
 
-async def _complete_task_before_cancelling(task: asyncio.Task[_ShieldedResult]) -> _ShieldedResult:
-    """Drain one owned task before propagating cancellation, however often requested."""
-    try:
-        return await asyncio.shield(task)
-    except asyncio.CancelledError:
-        while not task.done():
-            try:
-                await asyncio.shield(task)
-            except asyncio.CancelledError:
-                continue
-            except Exception:
-                break
+async def _drain_owned_task_after_cancellation(
+    task: asyncio.Task[_ShieldedResult],
+    *,
+    suppress_errors: bool,
+) -> None:
+    """Drain one owned task despite repeated cancellation."""
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            continue
+        except Exception:
+            break
+    if suppress_errors:
         with suppress(Exception):
             task.result()
-        raise
+        return
+    task.result()
 
 
 async def _shielded_write(write: Coroutine[Any, Any, _ShieldedResult]) -> _ShieldedResult:
@@ -346,7 +350,12 @@ async def _shielded_write(write: Coroutine[Any, Any, _ShieldedResult]) -> _Shiel
     this treats a lost write as recoverable and cancellation as authoritative.
     The shared drain also defers repeated cancellation until the write finishes.
     """
-    return await _complete_task_before_cancelling(asyncio.create_task(write))
+    task = asyncio.create_task(write)
+    try:
+        return await asyncio.shield(task)
+    except asyncio.CancelledError:
+        await _drain_owned_task_after_cancellation(task, suppress_errors=True)
+        raise
 
 
 def _iter_file_batches(files: Sequence[Path], batch_size: int) -> Iterator[list[Path]]:
@@ -623,16 +632,14 @@ def _reusable_row_signature(
     source_path = metadata.get(_SOURCE_PATH_KEY)
     if not isinstance(source_path, str) or source_path not in managed_paths:
         return None
-    source_mtime_ns = metadata.get(_SOURCE_MTIME_NS_KEY)
-    source_size = metadata.get(_SOURCE_SIZE_KEY)
-    source_digest = metadata.get(_SOURCE_DIGEST_KEY)
-    if isinstance(source_mtime_ns, bool) or isinstance(source_size, bool):
+    signature = file_signature_from_fields(
+        metadata.get(_SOURCE_MTIME_NS_KEY),
+        metadata.get(_SOURCE_SIZE_KEY),
+        metadata.get(_SOURCE_DIGEST_KEY),
+    )
+    if signature is None:
         return None
-    if not isinstance(source_mtime_ns, int) or not isinstance(source_size, int) or source_size < 0:
-        return None
-    if not isinstance(source_digest, str) or not source_digest:
-        return None
-    return source_path, (source_mtime_ns, source_size, source_digest)
+    return source_path, signature
 
 
 def _source_signature_from_file_signatures(file_signatures: Mapping[str, FileSignature]) -> str:
@@ -1260,11 +1267,10 @@ class KnowledgeManager:
         try:
             await asyncio.shield(save_task)
         except asyncio.CancelledError:
-            # Drained without ``_shielded_write``'s suppression on purpose: the
-            # caller marks the index published on a cancelled-but-saved outcome,
-            # so a write that failed has to surface instead of being reported
-            # as a cancellation that saved.
-            await save_task
+            # Use the shared repeated-cancellation drain without suppressing
+            # task errors: the caller marks the index published on a
+            # cancelled-but-saved outcome, so a failed write must surface.
+            await _drain_owned_task_after_cancellation(save_task, suppress_errors=False)
             return True
         return False
 
@@ -1821,9 +1827,11 @@ class KnowledgeManager:
             offset += len(ids)
             # Chroma types every one of these optional because the caller may
             # not have asked for it; this one did, in the ``include`` above.
+            # The annotation keeps the TYPE_CHECKING-only Embeddings import
+            # visible to vulture; the string cast avoids a runtime import.
             embeddings: Embeddings = cast("Embeddings", page["embeddings"])
-            documents: list[str] = cast("list[str]", page["documents"])
-            metadatas: list[Metadata] = cast("list[Metadata]", page["metadatas"])
+            documents = cast("list[str]", page["documents"])
+            metadatas = cast("list[Metadata]", page["metadatas"])
             kept: list[int] = []
             for index, metadata in enumerate(metadatas):
                 entry = _reusable_row_signature(metadata, managed_paths)
@@ -1885,14 +1893,12 @@ class KnowledgeManager:
             self._relative_path(file_path) for file_path in await asyncio.to_thread(self.list_files)
         )
         try:
-            reused = await _complete_task_before_cancelling(
-                asyncio.create_task(
-                    asyncio.to_thread(
-                        self._copy_published_vectors,
-                        published_collection=published_collection,
-                        candidate_vector_db=candidate_vector_db,
-                        managed_paths=managed_paths,
-                    ),
+            reused = await _shielded_write(
+                asyncio.to_thread(
+                    self._copy_published_vectors,
+                    published_collection=published_collection,
+                    candidate_vector_db=candidate_vector_db,
+                    managed_paths=managed_paths,
                 ),
             )
         except Exception:
