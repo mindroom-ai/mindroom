@@ -19,7 +19,6 @@ from agno.knowledge.reader import ReaderFactory
 from agno.knowledge.reader.markdown_reader import MarkdownReader
 from agno.knowledge.reader.text_reader import TextReader
 from agno.vectordb.chroma import ChromaDb
-from chromadb.api.types import Embeddings, Metadata
 from chromadb.errors import NotFoundError
 
 from mindroom.chunking import SafeFixedSizeChunking
@@ -87,6 +86,7 @@ if TYPE_CHECKING:
     from agno.knowledge.document.base import Document
     from agno.knowledge.embedder.base import Embedder
     from agno.knowledge.reader.base import Reader
+    from chromadb.api.types import Embeddings, Metadata
 
     from mindroom.config.knowledge import KnowledgeGitConfig
     from mindroom.config.main import Config
@@ -214,6 +214,17 @@ class _CandidateRun:
     journal_appends: int = 0
     resumed: bool = False
     published: bool = False
+
+
+@dataclass(frozen=True)
+class _OpenedCandidate:
+    """One candidate collection made ready for a refresh to advance."""
+
+    checkpoint: CandidateCheckpoint
+    knowledge: Knowledge
+    vector_db: ChromaDb
+    reused: dict[str, FileSignature] = field(default_factory=dict)
+    resumed: bool = False
 
 
 @dataclass(frozen=True)
@@ -1713,9 +1724,7 @@ class KnowledgeManager:
             if not ids:
                 return reused
             offset += len(ids)
-            # Unquoted so the name is a runtime reference: quoting it would make
-            # the import look unused to the dead-code check.
-            embeddings = cast(Embeddings, page["embeddings"])  # noqa: TC006
+            embeddings: Embeddings = cast("Embeddings", page["embeddings"])
             documents = cast("list[str]", page["documents"])
             metadatas = cast("list[Metadata]", page["metadatas"])
             kept: list[int] = []
@@ -1734,11 +1743,36 @@ class KnowledgeManager:
                     metadatas=[dict(metadatas[index]) for index in kept],
                 )
 
+    def _reusable_published_collection(self, persisted_state: _PersistedIndexState | None) -> str | None:
+        """Return the published collection a fresh candidate may copy, if any.
+
+        Matching ``IndexingSettings`` is what makes a copy sound. They pin the
+        chunker, the embedder identity and every corpus filter, so identical
+        bytes under identical settings produce identical chunks and identical
+        vectors. Whether the bytes are still identical is not assumed here:
+        each copied path is recorded with the signature the published index
+        stored for it, and reconciliation compares that against the file on
+        disk, dropping and re-indexing whatever moved. Reuse is therefore an
+        optimization on top of the existing correctness check, not a new one.
+
+        Only a collection the metadata calls published is provably finished:
+        the rest of the candidate lifecycle treats any other collection as an
+        abandoned candidate it may reclaim.
+        """
+        if (
+            persisted_state is None
+            or persisted_state.status != _INDEXING_STATUS_COMPLETE
+            or persisted_state.collection is None
+            or persisted_state.settings != self._indexing_settings
+        ):
+            return None
+        return persisted_state.collection
+
     async def _seed_candidate_from_published(
         self,
         *,
         candidate_vector_db: ChromaDb,
-        persisted_state: _PersistedIndexState | None,
+        published_collection: str,
     ) -> dict[str, FileSignature]:
         """Start a fresh candidate from the published index instead of from zero.
 
@@ -1747,32 +1781,16 @@ class KnowledgeManager:
         reproduce chunks byte-identical to ones already stored: every refresh
         costs O(corpus) provider requests where the change was one file.
 
-        Matching ``IndexingSettings`` is what makes the copy sound. It pins the
-        chunker, the embedder identity and every corpus filter, so identical
-        bytes under identical settings produce identical chunks and identical
-        vectors. Whether the bytes are still identical is not assumed: each
-        copied path is recorded with the signature the published index stored
-        for it, and reconciliation compares that against the file on disk,
-        dropping and re-indexing whatever moved. Reuse is therefore an
-        optimization on top of the existing correctness check, not a new one.
-
         The published collection is only ever read. Publication stays an atomic
         swap into a separate collection.
         """
-        if (
-            persisted_state is None
-            or persisted_state.status != _INDEXING_STATUS_COMPLETE
-            or persisted_state.collection is None
-            or persisted_state.settings != self._indexing_settings
-        ):
-            return {}
         managed_paths = frozenset(
             self._relative_path(file_path) for file_path in await asyncio.to_thread(self.list_files)
         )
         try:
             reused = await asyncio.to_thread(
                 self._copy_published_vectors,
-                published_collection=persisted_state.collection,
+                published_collection=published_collection,
                 candidate_vector_db=candidate_vector_db,
                 managed_paths=managed_paths,
             )
@@ -1783,7 +1801,7 @@ class KnowledgeManager:
             logger.warning(
                 "Falling back to a full knowledge rebuild after the published index could not be copied",
                 base_id=self.base_id,
-                collection=persisted_state.collection,
+                collection=published_collection,
                 exc_info=True,
             )
             await asyncio.to_thread(self._reset_vector_db, candidate_vector_db)
@@ -1797,7 +1815,79 @@ class KnowledgeManager:
         )
         return reused
 
-    async def _open_candidate_run(self) -> _CandidateRun:
+    async def _record_seeded_candidate(self, checkpoint: CandidateCheckpoint) -> CandidateCheckpoint:
+        """Record a finished copy's claims even while the refresh is being cancelled.
+
+        The rows are already on disk; only this write makes them attributable.
+        Losing it is recoverable -- the seeding marker sends the next refresh
+        through a rebuild -- but that discards a whole corpus copy, so the write
+        is shielded and completed rather than abandoned.
+        """
+        save_task = asyncio.create_task(
+            asyncio.to_thread(save_candidate_checkpoint, self._base_storage_path, checkpoint),
+        )
+        try:
+            return await asyncio.shield(save_task)
+        except asyncio.CancelledError:
+            with suppress(Exception):
+                await save_task
+            raise
+
+    async def _rebuild_candidate_collection(
+        self,
+        checkpoint: CandidateCheckpoint,
+        *,
+        embedder: BatchPrefetchEmbedder,
+        published_collection: str | None,
+    ) -> _OpenedCandidate:
+        """Empty one candidate collection and seed it from the published index.
+
+        Two orderings here are load-bearing. The checkpoint names the
+        collection before ``Knowledge`` is built, because Agno creates a
+        missing collection on construction and a crash must never strand a
+        collection nothing references. And the checkpoint records that a copy
+        is in flight before the first row lands, because a crash between the
+        copy and its claims would leave rows nothing can attribute:
+        reconciliation deletes only what the checkpoint records.
+        """
+        checkpoint = await asyncio.to_thread(
+            save_candidate_checkpoint,
+            self._base_storage_path,
+            replace(checkpoint, completed={}, failed={}, seeding=published_collection is not None),
+        )
+        knowledge = self._build_knowledge(checkpoint.collection, embedder=embedder)
+        vector_db = _require_chroma_vector_db(knowledge)
+        await asyncio.to_thread(self._reset_vector_db, vector_db)
+        if published_collection is None:
+            return _OpenedCandidate(checkpoint=checkpoint, knowledge=knowledge, vector_db=vector_db)
+        reused = await self._seed_candidate_from_published(
+            candidate_vector_db=vector_db,
+            published_collection=published_collection,
+        )
+        checkpoint = await self._record_seeded_candidate(replace(checkpoint, completed=reused, seeding=False))
+        return _OpenedCandidate(checkpoint=checkpoint, knowledge=knowledge, vector_db=vector_db, reused=reused)
+
+    async def _resume_candidate_collection(
+        self,
+        checkpoint: CandidateCheckpoint,
+        *,
+        embedder: BatchPrefetchEmbedder,
+    ) -> _OpenedCandidate:
+        """Continue a candidate whose recorded work is still backed by its collection."""
+        knowledge = self._build_knowledge(checkpoint.collection, embedder=embedder)
+        vector_db = _require_chroma_vector_db(knowledge)
+        if await asyncio.to_thread(vector_db.exists):
+            return _OpenedCandidate(checkpoint=checkpoint, knowledge=knowledge, vector_db=vector_db, resumed=True)
+        logger.warning(
+            "Knowledge candidate collection is missing; rebuilding it from scratch",
+            base_id=self.base_id,
+            collection=checkpoint.collection,
+        )
+        # Rebuilt without a copy: whatever lost this collection may equally have
+        # damaged the published one, and a full rebuild is the safe repair.
+        return await self._rebuild_candidate_collection(checkpoint, embedder=embedder, published_collection=None)
+
+    async def _open_candidate_run(self, *, force_reindex: bool = False) -> _CandidateRun:
         """Resolve the durable candidate to continue, or start one clean candidate."""
         checkpoint = await asyncio.to_thread(load_candidate_checkpoint, self._base_storage_path)
         persisted_state = await asyncio.to_thread(self._load_persisted_index_state)
@@ -1843,55 +1933,45 @@ class KnowledgeManager:
             checkpoint = None
 
         embedder = BatchPrefetchEmbedder(inner=create_configured_embedder(self.config, self.runtime_paths))
-        resumed = False
-        reused: dict[str, FileSignature] = {}
+        rebuild = checkpoint is None or checkpoint.seeding
         if checkpoint is None:
             checkpoint = CandidateCheckpoint(
                 collection=self._candidate_collection_name(),
                 settings=self._indexing_settings,
             )
-            # Persist the candidate's identity before its collection exists, so
-            # a crash can never strand a collection nothing references.
-            checkpoint = await asyncio.to_thread(save_candidate_checkpoint, self._base_storage_path, checkpoint)
-            knowledge = self._build_knowledge(checkpoint.collection, embedder=embedder)
-            vector_db = _require_chroma_vector_db(knowledge)
-            await asyncio.to_thread(self._reset_vector_db, vector_db)
-            reused = await self._seed_candidate_from_published(
-                candidate_vector_db=vector_db,
-                persisted_state=persisted_state,
+        elif rebuild:
+            # The collection holds rows a cancelled copy never claimed, and
+            # nothing downstream can attribute them: reconciliation deletes
+            # only what the checkpoint records, so rows for a path that has
+            # since left the corpus would survive into the published index.
+            logger.warning(
+                "Rebuilding a knowledge candidate whose published-vector copy was interrupted",
+                base_id=self.base_id,
+                collection=checkpoint.collection,
             )
-            checkpoint = await asyncio.to_thread(
-                save_candidate_checkpoint,
-                self._base_storage_path,
-                replace(checkpoint, completed=reused),
+
+        if rebuild:
+            opened = await self._rebuild_candidate_collection(
+                checkpoint,
+                embedder=embedder,
+                published_collection=None if force_reindex else self._reusable_published_collection(persisted_state),
             )
         else:
-            knowledge = self._build_knowledge(checkpoint.collection, embedder=embedder)
-            vector_db = _require_chroma_vector_db(knowledge)
-            if await asyncio.to_thread(vector_db.exists):
-                resumed = True
-            else:
-                logger.warning(
-                    "Knowledge candidate collection is missing; rebuilding it from scratch",
-                    base_id=self.base_id,
-                    collection=checkpoint.collection,
-                )
-                checkpoint = replace(checkpoint, completed={}, failed={})
-                checkpoint = await asyncio.to_thread(save_candidate_checkpoint, self._base_storage_path, checkpoint)
-                await asyncio.to_thread(self._reset_vector_db, vector_db)
+            opened = await self._resume_candidate_collection(checkpoint, embedder=embedder)
+        checkpoint = opened.checkpoint
 
         run = _CandidateRun(
             checkpoint=checkpoint,
-            knowledge=knowledge,
-            vector_db=vector_db,
+            knowledge=opened.knowledge,
+            vector_db=opened.vector_db,
             embedder=embedder,
             completed=dict(checkpoint.completed),
             failed=dict(checkpoint.failed),
             # Rows this process just copied need no vector-existence probe: the
             # copy already reported which paths actually received them.
-            verified=set(reused),
+            verified=set(opened.reused),
             journal_appends=checkpoint.replayed_journal_entries,
-            resumed=resumed,
+            resumed=opened.resumed,
         )
         # Reconcile candidates abandoned by earlier crashed refreshes now, so
         # storage stays bounded even when a build never reaches publication.
@@ -2171,8 +2251,14 @@ class KnowledgeManager:
         )
         run.journal_appends = 0
 
-    async def reindex_all(self) -> int:
-        """Advance the durable candidate index and publish it when it matches the source."""
+    async def reindex_all(self, *, force_reindex: bool = False) -> int:
+        """Advance the durable candidate index and publish it when it matches the source.
+
+        ``force_reindex`` is the operator asking for vectors to be rebuilt
+        rather than trusted, so it suppresses copying them from the published
+        index. Every other reason a rebuild is forced -- changed settings, a
+        missing collection -- the reuse gates already reject on their own.
+        """
         if not _semantic_indexing_enabled(self.config, self.base_id):
             self._last_refresh_error = None
             return 0
@@ -2184,7 +2270,7 @@ class KnowledgeManager:
             self._file_index_errors.clear()
             self._embedder_failure_streak = 0
             self._global_embedder_failure = None
-            run = await self._open_candidate_run()
+            run = await self._open_candidate_run(force_reindex=force_reindex)
             progress = _CandidateProgress(
                 base_id=self.base_id,
                 resumed=run.resumed,

@@ -533,7 +533,7 @@ async def _refresh_knowledge_binding_locked(
         )
         if unchanged_result is not None:
             return unchanged_result
-        indexed_count = await manager.reindex_all()
+        indexed_count = await manager.reindex_all(force_reindex=force_reindex)
         if manager._last_refresh_error is not None:
             error = redact_credentials_in_text(manager._last_refresh_error)
             await asyncio.to_thread(mark_published_index_refresh_failed_preserving_last_good, key, error=error)

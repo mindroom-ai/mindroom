@@ -2992,6 +2992,16 @@ def _stored_paths(collection: str) -> list[str]:
     return sorted(record.metadata["source_path"] for record in _FakeVectorDb.store[collection])
 
 
+def _vector_existence_probes() -> int:
+    """Return how many ``$in`` source-path existence probes the store was asked."""
+    probes = 0
+    for _rows, where in _FakeVectorDb.queries:
+        condition = where.get("source_path") if isinstance(where, dict) else None
+        if isinstance(condition, dict) and "$in" in condition:
+            probes += 1
+    return probes
+
+
 @pytest.mark.asyncio
 async def test_refresh_after_publish_reuses_vectors_for_unchanged_files(
     tmp_path: Path,
@@ -3189,9 +3199,7 @@ async def test_published_vector_copy_is_paged_so_no_query_exceeds_the_store_ceil
     assert await _manager(config).reindex_all() == 1
 
     assert max(rows for rows, _where in _FakeVectorDb.queries) <= 4
-    assert [where for _rows, where in _FakeVectorDb.queries if where and "$in" in str(where)] == [], (
-        "copied paths were sent back through the vector-existence probe"
-    )
+    assert _vector_existence_probes() == 0, "copied paths were sent back through the vector-existence probe"
 
 
 @pytest.mark.asyncio
@@ -3303,4 +3311,142 @@ async def test_published_vector_reuse_rescans_an_empty_file_it_cannot_claim(
     assert state is not None
     assert state.status == "complete"
     assert state.indexed_count == 3
-    assert _stored_paths(state.collection or "") == sorted(names)
+    assert state.collection is not None
+    assert _stored_paths(state.collection) == sorted(names)
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_vector_copy_never_publishes_rows_it_could_not_claim(
+    tmp_path: Path,
+    embedder: _RecordingEmbedder,
+) -> None:
+    """A copy interrupted between writing rows and recording them must not survive.
+
+    ``asyncio.to_thread`` cannot be cancelled, so the copy finishes writing
+    while the awaiting refresh raises ``CancelledError`` -- which is a
+    ``BaseException`` and so escapes the copy's own error handling. Nothing
+    downstream can attribute the rows it left: reconciliation derives every
+    deletion from the checkpoint, and the checkpoint claims nothing. A path
+    that leaves the corpus before the next refresh would otherwise keep serving
+    its old content from the published index.
+    """
+    docs_path = tmp_path / "docs"
+    names = _write_corpus(docs_path, 3)
+    config = _config(tmp_path, docs_path)
+    runtime_paths = runtime_paths_for(config)
+
+    await _manager(config).reindex_all()
+    original_copy = KnowledgeManager._copy_published_vectors
+
+    def _copy_then_cancel(self: KnowledgeManager, **kwargs: object) -> dict[str, tuple[int, int, str]]:
+        # The copy runs to completion and then the await raises, which is what
+        # cancelling an uncancellable ``asyncio.to_thread`` call really does.
+        original_copy(self, **kwargs)  # type: ignore[arg-type]
+        raise asyncio.CancelledError
+
+    KnowledgeManager._copy_published_vectors = _copy_then_cancel  # type: ignore[method-assign]
+    try:
+        with pytest.raises(asyncio.CancelledError):
+            await _manager(config).reindex_all()
+    finally:
+        KnowledgeManager._copy_published_vectors = original_copy  # type: ignore[method-assign]
+
+    interrupted = load_candidate_checkpoint(_storage_path(config, runtime_paths))
+    assert interrupted is not None
+    assert interrupted.completed == {}, "a cancelled copy must claim nothing"
+    assert _stored_paths(interrupted.collection) == sorted(names), "the copy did write rows before cancelling"
+
+    (docs_path / names[0]).unlink()
+    embedder.embedded_texts.clear()
+
+    indexed = await _manager(config).reindex_all()
+
+    state = _published_state(config, runtime_paths)
+    assert state is not None
+    assert state.status == "complete"
+    assert state.collection is not None
+    assert _stored_paths(state.collection) == sorted(names[1:]), "a departed path survived in the published index"
+    # Recovery rebuilds the collection, so it must copy again rather than fall
+    # back to embedding: losing a corpus copy is the bug's secondary cost.
+    assert indexed == 0, "recovery re-embedded instead of copying the published vectors again"
+
+
+@pytest.mark.asyncio
+async def test_an_interruption_after_the_copy_still_resumes_the_work_it_finished(
+    tmp_path: Path,
+    embedder: _RecordingEmbedder,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Clearing the copy marker is what keeps the rest of the refresh resumable.
+
+    A candidate that still claims a copy is in flight gets rebuilt on sight, so
+    a marker left set after the copy finished would throw away every file the
+    refresh went on to embed.
+    """
+    monkeypatch.setenv("MINDROOM_KNOWLEDGE_FILE_INDEX_CONCURRENCY", "1")
+    docs_path = tmp_path / "docs"
+    names = _write_corpus(docs_path, 4)
+    config = _config(tmp_path, docs_path)
+    runtime_paths = runtime_paths_for(config)
+    await _manager(config).reindex_all()
+
+    for index, name in enumerate(names):
+        (docs_path / name).write_text(f"revised {index}", encoding="utf-8")
+    embedder.embedded_texts.clear()
+
+    indexed: list[str] = []
+    original_index = KnowledgeManager._index_file_locked
+
+    async def _stop_after_two(self: KnowledgeManager, resolved_path: Path, **kwargs: object) -> bool:
+        if len(indexed) >= 2:
+            raise asyncio.CancelledError
+        indexed.append(resolved_path.name)
+        return await original_index(self, resolved_path, **kwargs)
+
+    KnowledgeManager._index_file_locked = _stop_after_two  # type: ignore[method-assign]
+    try:
+        with pytest.raises(asyncio.CancelledError):
+            await _manager(config).reindex_all()
+    finally:
+        KnowledgeManager._index_file_locked = original_index  # type: ignore[method-assign]
+
+    checkpoint = load_candidate_checkpoint(_storage_path(config, runtime_paths))
+    assert checkpoint is not None
+    assert checkpoint.seeding is False, "a finished copy must stop claiming to be in flight"
+    assert len(checkpoint.completed) == 2
+    already_embedded = {f"revised {names.index(name)}" for name in checkpoint.completed}
+
+    assert await _manager(config).reindex_all() == len(names) - 2
+
+    for body in already_embedded:
+        assert embedder.embedded_count(body) == 1, "an interrupted refresh re-embedded work it had finished"
+
+
+@pytest.mark.asyncio
+async def test_forced_reindex_rebuilds_every_vector_instead_of_copying_it(
+    tmp_path: Path,
+    embedder: _RecordingEmbedder,
+) -> None:
+    """An operator forces a rebuild because the index is not trusted, so reuse must stop.
+
+    Every other reason a rebuild is forced -- changed settings, a missing
+    collection -- the reuse gates already reject. This one they cannot see.
+    """
+    docs_path = tmp_path / "docs"
+    _write_corpus(docs_path, 3)
+    config = _config(tmp_path, docs_path)
+    runtime_paths = runtime_paths_for(config)
+    await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+    embedder.embedded_texts.clear()
+
+    result = await refresh_knowledge_binding(
+        "docs",
+        config=config,
+        runtime_paths=runtime_paths,
+        force_reindex=True,
+    )
+
+    assert result.index_published is True
+    assert result.indexed_count == 3, "a forced rebuild reused the vectors it was asked to replace"
+    for index in range(3):
+        assert embedder.embedded_count(f"content {index}") == 1
