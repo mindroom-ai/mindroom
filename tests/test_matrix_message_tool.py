@@ -20,7 +20,7 @@ from mindroom.config.main import Config
 from mindroom.custom_tools.attachments import AttachmentTools
 from mindroom.custom_tools.matrix_message import MatrixMessageTools
 from mindroom.interactive import parse_and_format_interactive
-from mindroom.matrix.client import RoomThreadsPageError
+from mindroom.matrix.client import DeliveredMatrixEvent, RoomThreadsPageError
 from mindroom.matrix.message_extras import MINDROOM_MESSAGE_EXTRAS_KEY
 from mindroom.matrix.state import MatrixState, _load_matrix_state_file_cached
 from mindroom.message_target import MessageTarget
@@ -29,6 +29,7 @@ from mindroom.tool_system.metadata import TOOL_METADATA, get_tool_by_name
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
 from tests.conftest import (
     bind_runtime_paths,
+    delivered_matrix_event,
     delivered_matrix_side_effect,
     make_conversation_cache_mock,
     make_event_cache_mock,
@@ -2629,12 +2630,22 @@ async def test_matrix_message_edit_happy_path() -> None:
     event_cache = MagicMock()
     ctx = _make_context(thread_id="$ctx-thread:localhost", event_cache=event_cache)
     ctx.conversation_cache.get_latest_thread_event_id_if_needed = AsyncMock(return_value="$latest")
+    sent_content: dict[str, object] = {}
+
+    async def _deliver_edit(
+        _client: object,
+        _room_id: str,
+        content: dict[str, object],
+        **_kwargs: object,
+    ) -> DeliveredMatrixEvent:
+        sent_content.update(content)
+        return delivered_matrix_event("$edit_evt", content)
 
     with (
         patch(
-            "mindroom.custom_tools.matrix_conversation_operations.edit_message_result",
-            new=AsyncMock(side_effect=delivered_matrix_side_effect("$edit_evt")),
-        ) as mock_edit,
+            "mindroom.matrix.client_delivery.send_message_result",
+            new=AsyncMock(side_effect=_deliver_edit),
+        ),
         tool_runtime_context(ctx),
     ):
         payload = json.loads(await tool.matrix_message(action="edit", message="updated text", target="$target"))
@@ -2643,21 +2654,13 @@ async def test_matrix_message_edit_happy_path() -> None:
     assert payload["action"] == "edit"
     assert payload["target"] == "$target"
     assert payload["event_id"] == "$edit_evt"
-    mock_edit.assert_awaited_once()
-    args = mock_edit.await_args.args
-    assert args[1] == ctx.room_id
-    assert args[2] == "$target"
-    assert args[4] == "updated text"
-    assert args[3]["body"] == "updated text"
-    assert args[3]["m.relates_to"]["rel_type"] == "m.thread"
-    assert args[3]["m.relates_to"]["event_id"] == "$ctx-thread:localhost"
-    assert args[3]["m.relates_to"]["is_falling_back"] is True
-    assert args[3]["m.relates_to"]["m.in_reply_to"]["event_id"] == "$latest"
-    ctx.conversation_cache.get_latest_thread_event_id_if_needed.assert_awaited_once_with(
-        ctx.room_id,
-        "$ctx-thread:localhost",
-        caller_label="matrix_message_tool_edit",
-    )
+    relation = sent_content["m.relates_to"]
+    assert relation == {"rel_type": "m.replace", "event_id": "$target"}
+    replacement = sent_content["m.new_content"]
+    assert isinstance(replacement, dict)
+    assert replacement["body"] == "updated text"
+    assert "m.relates_to" not in replacement
+    ctx.conversation_cache.get_latest_thread_event_id_if_needed.assert_not_awaited()
     ctx.conversation_cache.get_thread_history.assert_not_awaited()
 
 

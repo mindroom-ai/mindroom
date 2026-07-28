@@ -36,7 +36,6 @@ async def _assert_sibling_threads_start_concurrently(coord: EventCacheWriteCoord
         THREAD_A_ID,
         thread_a_update,
         name="measure_thread_update_a",
-        log_exceptions=False,
         coordination_scope=PRINCIPAL_ID,
     )
     await asyncio.wait_for(started_a.wait(), timeout=1.0)
@@ -46,7 +45,6 @@ async def _assert_sibling_threads_start_concurrently(coord: EventCacheWriteCoord
         THREAD_B_ID,
         thread_b_update,
         name="measure_thread_update_b",
-        log_exceptions=False,
         coordination_scope=PRINCIPAL_ID,
     )
 
@@ -84,7 +82,6 @@ async def _assert_room_update_blocks_later_thread(coord: EventCacheWriteCoordina
         room_update,
         name="measure_room_update_a",
         coordination_scope=PRINCIPAL_ID,
-        log_exceptions=False,
     )
     await asyncio.wait_for(started_a.wait(), timeout=1.0)
 
@@ -93,7 +90,6 @@ async def _assert_room_update_blocks_later_thread(coord: EventCacheWriteCoordina
         THREAD_B_ID,
         thread_b_update,
         name="measure_thread_update_b",
-        log_exceptions=False,
         coordination_scope=PRINCIPAL_ID,
     )
 

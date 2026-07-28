@@ -1,8 +1,8 @@
-"""Tests for the file-mtime-keyed cache around the Matrix state YAML."""
+"""Tests for the generation-keyed cache around the Matrix state YAML."""
 
 from __future__ import annotations
 
-import os
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from mindroom import constants
@@ -11,7 +11,7 @@ from mindroom.matrix.state import MatrixState, _load_matrix_state_file_cached, m
 from tests.conftest import test_runtime_paths
 
 if TYPE_CHECKING:
-    from pathlib import Path
+    import os
 
 
 def _seed_state(runtime_paths: constants.RuntimePaths, room_key: str, room_id: str) -> Path:
@@ -37,10 +37,10 @@ def test_matrix_state_cache_hits_when_file_unchanged(tmp_path: Path) -> None:
     assert info.misses == 1
 
 
-def test_matrix_state_cache_invalidates_when_file_mtime_changes(tmp_path: Path) -> None:
-    """Touching the state file should bypass the cache and produce a fresh state."""
+def test_matrix_state_cache_invalidates_after_write(tmp_path: Path) -> None:
+    """Saving state should bypass the cache and make the next read fresh."""
     runtime_paths = test_runtime_paths(tmp_path)
-    state_file = _seed_state(runtime_paths, "dev", "!dev:localhost")
+    _seed_state(runtime_paths, "dev", "!dev:localhost")
     _load_matrix_state_file_cached.cache_clear()
 
     first = matrix_state_for_runtime(runtime_paths)
@@ -50,9 +50,6 @@ def test_matrix_state_cache_invalidates_when_file_mtime_changes(tmp_path: Path) 
     fresh = MatrixState.load(runtime_paths=runtime_paths)
     fresh.add_room("research", room_id="!research:localhost", alias="#research:localhost", name="research")
     fresh.save(runtime_paths=runtime_paths)
-
-    stat = state_file.stat()
-    os.utime(state_file, ns=(stat.st_atime_ns, stat.st_mtime_ns + 1_000_000))
 
     second = matrix_state_for_runtime(runtime_paths)
     assert second is not first
@@ -136,3 +133,72 @@ def test_resolve_room_aliases_does_not_reparse_yaml(
     matrix_state.resolve_room_aliases(["dev"], runtime_paths)
 
     assert safe_load_calls == 1
+
+
+def test_matrix_state_cached_reads_do_not_stat_the_file(tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
+    """Repeated reads of cached state must not stat the file."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    state_file = _seed_state(runtime_paths, "dev", "!dev:localhost")
+    _load_matrix_state_file_cached.cache_clear()
+    monkeypatch.setattr(matrix_state, "monotonic", lambda: 0.0)
+    first = matrix_state_for_runtime(runtime_paths)
+    stat_calls = 0
+    original_stat = Path.stat
+
+    def counting_stat(self: Path, *args: object, **kwargs: object) -> os.stat_result:
+        nonlocal stat_calls
+        if self == state_file:
+            stat_calls += 1
+        return original_stat(self, *args, **kwargs)
+
+    monkeypatch.setattr(matrix_state.Path, "stat", counting_stat)
+
+    second = matrix_state_for_runtime(runtime_paths)
+    third = matrix_state_for_runtime(runtime_paths)
+
+    assert second is first
+    assert third is first
+    assert stat_calls == 0
+
+
+def test_matrix_state_cache_observes_first_write_after_missing_read(tmp_path: Path) -> None:
+    """A write must invalidate a cached empty state for a previously missing file."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    _load_matrix_state_file_cached.cache_clear()
+
+    missing = matrix_state_for_runtime(runtime_paths)
+    assert missing.rooms == {}
+
+    _seed_state(runtime_paths, "dev", "!dev:localhost")
+
+    written = matrix_state_for_runtime(runtime_paths)
+    assert written is not missing
+    assert written.get_room("dev") is not None
+
+
+def test_matrix_state_cache_observes_external_write_after_stat_ttl(tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
+    """A write from another process must become visible after the stat TTL."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    state_file = _seed_state(runtime_paths, "dev", "!dev:localhost")
+    _load_matrix_state_file_cached.cache_clear()
+    now = 0.0
+    monkeypatch.setattr(matrix_state, "monotonic", lambda: now)
+    monkeypatch.setattr(matrix_state, "_MATRIX_STATE_STAT_TTL_SECONDS", 1.0)
+
+    first = matrix_state_for_runtime(runtime_paths)
+    external = first.model_copy(deep=True)
+    external.add_room("research", room_id="!research:localhost", alias="#research:localhost", name="research")
+    state_file.write_text(
+        matrix_state.yaml_io.safe_dump(
+            external.model_dump(mode="json"),
+            default_flow_style=False,
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+    now = 1.0
+
+    second = matrix_state_for_runtime(runtime_paths)
+
+    assert second is not first
+    assert second.get_room("research") is not None

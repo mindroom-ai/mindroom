@@ -5,6 +5,8 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any, LiteralString
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
+
     from psycopg import AsyncConnection
 
 
@@ -24,9 +26,9 @@ async def fetchone(
 async def fetchall(
     db: AsyncConnection,
     query: LiteralString,
-    params: tuple[object, ...],
+    params: tuple[object, ...] | Mapping[str, object],
 ) -> list[tuple[Any, ...]]:
-    """Execute one query, fetch all rows as tuples, and close the cursor."""
+    """Execute one positional- or named-parameter query, fetch all rows, and close the cursor."""
     cursor = await db.execute(query, params)
     try:
         rows = await cursor.fetchall()

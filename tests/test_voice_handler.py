@@ -5,8 +5,10 @@ from __future__ import annotations
 import asyncio
 import tempfile
 from pathlib import Path
+from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx
 import nio
 import pytest
 from agno.media import Audio
@@ -16,8 +18,12 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.voice import VoiceConfig, VoiceSTTConfig, _VoiceLLMConfig
 from mindroom.constants import ATTACHMENT_IDS_KEY
+from mindroom.model_defaults import LOCAL_OPENAI_API_KEY_DEFAULT
 from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
 from tests.identity_helpers import persist_actual_entity_accounts
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 TEST_VOICE_ACCOUNT_PASSWORD = "pw"  # noqa: S105
 
@@ -32,6 +38,23 @@ def _runtime_bound_config(config: Config) -> Config:
 def _persist_voice_handler_accounts(config: Config) -> None:
     runtime_paths = runtime_paths_for(config)
     persist_actual_entity_accounts(config, runtime_paths, password=TEST_VOICE_ACCOUNT_PASSWORD)
+
+
+def _recording_stt_client(response_text: str) -> tuple[Callable[[], httpx.AsyncClient], list[httpx.Request]]:
+    """Return an HTTP client factory and its captured STT requests."""
+    requests: list[httpx.Request] = []
+    async_client_type = httpx.AsyncClient
+
+    def handle_request(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, json={"text": response_text})
+
+    transport = httpx.MockTransport(handle_request)
+
+    def client_factory() -> httpx.AsyncClient:
+        return async_client_type(transport=transport)
+
+    return client_factory, requests
 
 
 def _matrix_room(
@@ -181,6 +204,7 @@ class TestVoiceHandler:
                 voice=VoiceConfig(
                     enabled=True,
                     stt=VoiceSTTConfig(
+                        provider="openai_compatible",
                         host="https://stt.example.test/v1",
                         model="whisper-1",
                         credentials_service="openai-voice",
@@ -249,6 +273,96 @@ class TestVoiceHandler:
                 "data": {"model": "whisper-1", "language": "nl", "temperature": 0},
             },
         ]
+
+    @pytest.mark.asyncio
+    async def test_transcribe_audio_uses_placeholder_for_keyless_openai_compatible_host(self) -> None:
+        """Keyless custom STT requests should use the non-secret local placeholder."""
+        config = _runtime_bound_config(
+            Config(
+                voice=VoiceConfig(
+                    enabled=True,
+                    stt=VoiceSTTConfig(
+                        provider="openai_compatible",
+                        host="http://localhost:10301",
+                        model="large-v3",
+                    ),
+                ),
+            ),
+        )
+        client_factory, requests = _recording_stt_client("local transcript")
+        with (
+            patch("mindroom.voice_handler.httpx.AsyncClient", side_effect=client_factory),
+            patch("mindroom.voice_handler.get_api_key_for_service", return_value=None) as get_key,
+        ):
+            transcription = await voice_handler._transcribe_audio(
+                b"audio-bytes",
+                config,
+                runtime_paths_for(config),
+            )
+
+        assert transcription == "local transcript"
+        get_key.assert_not_called()
+        assert len(requests) == 1
+        assert str(requests[0].url) == "http://localhost:10301/v1/audio/transcriptions"
+        assert requests[0].headers["Authorization"] == f"Bearer {LOCAL_OPENAI_API_KEY_DEFAULT}"
+
+    @pytest.mark.asyncio
+    async def test_transcribe_audio_rejects_keyless_cloud_openai(self) -> None:
+        """Cloud OpenAI STT should not send a request without resolved credentials."""
+        config = _runtime_bound_config(
+            Config(
+                voice=VoiceConfig(
+                    enabled=True,
+                    stt=VoiceSTTConfig(provider="openai", model="gpt-4o-transcribe"),
+                ),
+            ),
+        )
+
+        with (
+            patch("mindroom.voice_handler.httpx.AsyncClient") as async_client,
+            patch("mindroom.voice_handler.get_api_key_for_service", return_value=None) as get_key,
+        ):
+            transcription = await voice_handler._transcribe_audio(
+                b"audio-bytes",
+                config,
+                runtime_paths_for(config),
+            )
+
+        assert transcription is None
+        get_key.assert_called_once_with("openai", runtime_paths_for(config))
+        async_client.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_transcribe_audio_preserves_explicit_custom_api_key(self) -> None:
+        """Custom STT requests should preserve an explicitly configured API key."""
+        config = _runtime_bound_config(
+            Config(
+                voice=VoiceConfig(
+                    enabled=True,
+                    stt=VoiceSTTConfig(
+                        provider="openai_compatible",
+                        host="https://stt.example.test",
+                        model="large-v3",
+                        api_key="configured-test-placeholder",
+                    ),
+                ),
+            ),
+        )
+        client_factory, requests = _recording_stt_client("custom transcript")
+        with (
+            patch("mindroom.voice_handler.httpx.AsyncClient", side_effect=client_factory),
+            patch("mindroom.voice_handler.get_api_key_for_service") as get_key,
+        ):
+            transcription = await voice_handler._transcribe_audio(
+                b"audio-bytes",
+                config,
+                runtime_paths_for(config),
+            )
+
+        assert transcription == "custom transcript"
+        get_key.assert_not_called()
+        assert len(requests) == 1
+        assert requests[0].headers["Authorization"] == "Bearer configured-test-placeholder"
 
     def test_sanitize_unavailable_mentions_uses_exact_aliases(self) -> None:
         """Voice mention sanitizing should match exact Matrix mention aliases."""

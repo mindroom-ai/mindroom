@@ -4,8 +4,16 @@ from __future__ import annotations
 
 import json
 import time
+from typing import TYPE_CHECKING
+from uuid import uuid4
 
-from mindroom.redaction import REDACTED, redact_sensitive_data, redact_sensitive_text
+import pytest
+
+from mindroom import redaction
+from mindroom.redaction import REDACTED, redact_log_event, redact_sensitive_data, redact_sensitive_text
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 
 def test_redact_sensitive_data_redacts_nested_dicts_lists_and_header_variants() -> None:
@@ -295,3 +303,172 @@ def test_redact_sensitive_text_still_redacts_assignments_at_run_boundaries() -> 
     assert "hunter2" not in redacted
     assert "abc" not in redacted
     assert "api_key" in redacted
+
+
+def _count_key_normalizations(monkeypatch: pytest.MonkeyPatch) -> Callable[[], int]:
+    """Count how many keys get normalized from scratch rather than served from cache.
+
+    ``_classify_key_text`` resolves ``_normalize_key_text`` as a module global on
+    every call, so this probe sees the work even when it runs behind the cache.
+    """
+    calls = 0
+    original_normalize = redaction._normalize_key_text
+
+    def counting_normalize(key: str) -> str:
+        nonlocal calls
+        calls += 1
+        return original_normalize(key)
+
+    monkeypatch.setattr(redaction, "_normalize_key_text", counting_normalize)
+
+    def take() -> int:
+        nonlocal calls
+        count, calls = calls, 0
+        return count
+
+    return take
+
+
+def _key_normalization_cache_size() -> int:
+    """Return the cache size for test assertions."""
+    return redaction._classify_key_text_cached.cache_info().currsize
+
+
+def test_repeated_log_events_normalize_each_key_only_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    """High-frequency structured logs repeat the same keys and must not re-normalize them."""
+    # Unique keys keep the first event cold regardless of what earlier tests cached.
+    unique = uuid4().hex
+    event = {
+        f"event_{unique}": "dispatch delivery timing",
+        f"phase_{unique}": "queued",
+        f"queue_size_{unique}": 7,
+        f"progress_hint_{unique}": True,
+        f"boundary_refresh_{unique}": False,
+        f"timing_scope_{unique}": "scope-value",
+    }
+    take_count = _count_key_normalizations(monkeypatch)
+
+    redact_log_event(None, "debug", dict(event))
+    first_event_calls = take_count()
+    redact_log_event(None, "debug", dict(event))
+    second_event_calls = take_count()
+
+    assert first_event_calls == len(event)
+    assert second_event_calls == 0
+
+
+def test_key_normalization_cache_is_bounded() -> None:
+    """An unbounded cache keyed on arbitrary log keys would leak, so it must evict."""
+    distinct_keys = 50_000
+
+    redact_log_event(None, "debug", {f"field_{index}": index for index in range(distinct_keys)})
+
+    assert 0 < _key_normalization_cache_size() < distinct_keys
+
+
+def test_oversized_log_keys_are_not_cached_but_still_redact() -> None:
+    """Pathologically long keys must bypass the cache so its memory stays bounded."""
+    long_secret_key = "x" * 4096 + "_api_key"
+    before = _key_normalization_cache_size()
+
+    redacted = redact_sensitive_data({long_secret_key: "plain-secret"})
+
+    assert redacted == {long_secret_key: REDACTED}
+    assert _key_normalization_cache_size() == before
+
+
+# Key classification is security-relevant, so it is pinned explicitly rather than
+# derived: a cache that reclassified any of these would silently change redaction.
+_REDACTED_KEYS = (
+    "ACCESS-TOKEN",
+    "API_KEY",
+    "AUTHORIZATION",
+    "ApiKey",
+    "Bearer_Token",
+    "Cookie",
+    "HTTPAPIKey",
+    "Password",
+    "TOKEN",
+    "Token",
+    "X-Api-Key",
+    "accessToken",
+    "access_token",
+    "api-key",
+    "apiKey",
+    "api_key",
+    "api_keys",
+    "auth_token",
+    "authentication-info",
+    "authorization",
+    "backup_credentials",
+    "clientSecret",
+    "client_secret",
+    "cookie",
+    "credentials",
+    "has_credentials",
+    "id_token",
+    "num_secrets",
+    "oauth_tokens",
+    "openai_api_key",
+    "password",
+    "password_policy",
+    "refreshToken",
+    "secret_sauce_recipe",
+    "secrets",
+    "security_token",
+    "session_token",
+    "set-cookie",
+    "show_passwords",
+    "token",
+    "tokens",
+    "user-password",
+    "user.password",
+    "www-authenticate",
+    "x-api-key",
+    "x_token",
+)
+_KEPT_KEYS = (
+    "XMLHttpToken",
+    "input_tokens",
+    "max_tokens",
+    "message",
+    "my_token",
+    "name",
+    "next_token",
+    "output_tokens",
+    "queue_size",
+    "tokenCount",
+    "tokenizer",
+    "x-ratelimit-remaining-tokens",
+)
+
+
+@pytest.mark.parametrize("key", _REDACTED_KEYS)
+def test_secret_key_variants_redact_identically_when_cached_and_uncached(key: str) -> None:
+    """Memoized lookups must classify every case/format variant exactly as a cold lookup does."""
+    cold = redact_sensitive_data({key: "plain-secret"})
+    warm = redact_sensitive_data({key: "plain-secret"})
+
+    assert cold == {key: REDACTED}
+    assert warm == cold
+
+
+@pytest.mark.parametrize("key", _KEPT_KEYS)
+def test_non_secret_key_variants_survive_identically_when_cached_and_uncached(key: str) -> None:
+    """Memoization must not start redacting keys that a cold lookup keeps."""
+    cold = redact_sensitive_data({key: "kept-value"})
+    warm = redact_sensitive_data({key: "kept-value"})
+
+    assert cold == {key: "kept-value"}
+    assert warm == cold
+
+
+def test_cache_eviction_does_not_change_key_classification() -> None:
+    """Classification must survive eviction: a re-resolved key must match its first result."""
+    probe_keys = (*_REDACTED_KEYS, *_KEPT_KEYS)
+    before = {key: redact_sensitive_data({key: "probe-value"}) for key in probe_keys}
+
+    # Flood the cache with far more distinct keys than it can hold.
+    redact_log_event(None, "debug", {f"flood_{index}": index for index in range(50_000)})
+
+    assert {key: redact_sensitive_data({key: "probe-value"}) for key in probe_keys} == before

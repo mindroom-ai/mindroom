@@ -12,27 +12,27 @@ from .agent_message_snapshot import AgentMessageSnapshot, AgentMessageSnapshotUn
 from .agent_message_snapshot_semantics import (
     SnapshotLookupResult,
     event_matches_snapshot_scope,
+    reject_snapshot_scope_with_gap,
     snapshot_event_id,
     snapshot_lookup_result,
-    thread_cache_has_no_snapshot,
 )
 
 if TYPE_CHECKING:
     from psycopg import AsyncConnection, AsyncCursor
 
 
-async def _thread_scope_has_no_snapshot(
+async def _reject_thread_scope_with_gap(
     db: AsyncConnection,
     *,
     namespace: str,
     room_id: str,
     thread_id: str | None,
-) -> bool:
+) -> None:
     if thread_id is None:
-        return False
+        return
 
-    return thread_cache_has_no_snapshot(
-        await postgres_event_cache_threads.load_thread_cache_state(
+    reject_snapshot_scope_with_gap(
+        await postgres_event_cache_threads.load_thread_cache_gap(
             db,
             namespace=namespace,
             room_id=room_id,
@@ -162,13 +162,12 @@ async def load_postgres_agent_message_snapshot(
 ) -> AgentMessageSnapshot | None:
     """Return the latest visible message from ``sender`` in the given scope."""
     try:
-        if await _thread_scope_has_no_snapshot(
+        await _reject_thread_scope_with_gap(
             db,
             namespace=namespace,
             room_id=room_id,
             thread_id=thread_id,
-        ):
-            return None
+        )
         return await _load_scope_snapshot(
             db,
             namespace=namespace,

@@ -33,6 +33,7 @@ from mindroom.dynamic_workflows.service import DynamicWorkflowService
 from mindroom.dynamic_workflows.store import DynamicWorkflowStore
 from mindroom.dynamic_workflows.validation import DynamicWorkflowError
 from mindroom.entity_resolution import entity_identity_registry
+from mindroom.matrix.state import MatrixState
 from mindroom.message_target import MessageTarget
 from mindroom.tool_approval import ToolCallWorkflowOrigin, _matching_tool_approval_rule, _shutdown_approval_store
 from mindroom.tool_system.metadata import TOOL_METADATA
@@ -2010,12 +2011,9 @@ def test_room_agent_participant_rebinds_context_and_uses_isolated_state(tmp_path
         context.runtime_paths,
     )
     runtime_paths = runtime_paths_for(config)
-    (runtime_paths.storage_root / "matrix_state.yaml").write_text(
-        yaml.safe_dump(
-            {"rooms": {"lobby": {"room_id": "!room:localhost", "alias": "#lobby:localhost", "name": "Lobby"}}},
-        ),
-        encoding="utf-8",
-    )
+    state = MatrixState.load(runtime_paths=runtime_paths)
+    state.add_room("lobby", room_id="!room:localhost", alias="#lobby:localhost", name="Lobby")
+    state.save(runtime_paths=runtime_paths)
     persist_entity_accounts(config, runtime_paths)
     context = replace(context, config=config, runtime_paths=runtime_paths)
     parent_loop = asyncio.new_event_loop()
