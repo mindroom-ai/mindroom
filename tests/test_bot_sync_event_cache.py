@@ -401,7 +401,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         assert bot._sync_cache_trust.state is SyncTrustState.UNCERTAIN
         assert bot.client.next_batch is None
         assert _load_sync_token_value(bot.storage_path, bot.agent_name) is None
-        bot.event_cache.mark_room_threads_stale.assert_awaited_once_with(
+        bot.event_cache.mark_room_threads_gap.assert_awaited_once_with(
             "!test:localhost",
             reason="limited_sync_timeline",
         )
@@ -431,12 +431,12 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         assert result.certified is False
         assert result.limited_room_ids == (room_id,)
         assert result.errors == ()
-        event_cache.mark_room_threads_stale.assert_awaited_once_with(
+        event_cache.mark_room_threads_gap.assert_awaited_once_with(
             room_id,
             reason="limited_sync_timeline",
         )
         call_names = [name for name, _args, _kwargs in event_cache.mock_calls]
-        assert call_names.index("mark_room_threads_stale") < call_names.index("store_events_batch")
+        assert call_names.index("mark_room_threads_gap") < call_names.index("store_events_batch")
 
     @pytest.mark.asyncio
     async def test_limited_sync_stale_marker_failure_fails_certification_closed(self, bot: AgentBot) -> None:
@@ -444,7 +444,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         room_id = "!room:localhost"
         marker_error = RuntimeError("stale marker write failed")
         event_cache = _runtime_event_cache()
-        event_cache.mark_room_threads_stale = AsyncMock(side_effect=marker_error)
+        event_cache.mark_room_threads_gap = AsyncMock(side_effect=marker_error)
         event_cache.disable = Mock()
         bot.event_cache = event_cache
         _install_runtime_write_coordinator(bot)
@@ -457,7 +457,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         assert result.complete is False
         assert result.errors == (marker_error,)
         assert result.limited_room_ids == (room_id,)
-        assert bot.event_cache.mark_room_threads_stale.await_args_list[0] == call(
+        assert bot.event_cache.mark_room_threads_gap.await_args_list[0] == call(
             room_id,
             reason="limited_sync_timeline",
         )
@@ -491,7 +491,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
 
         assert result.complete is False
         assert result.errors == (write_error,)
-        event_cache.mark_room_threads_stale.assert_awaited_once_with(
+        event_cache.mark_room_threads_gap.assert_awaited_once_with(
             room_id,
             reason="limited_sync_timeline",
         )
@@ -541,8 +541,9 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
                     },
                 ],
             )
-            state_before = await bot.event_cache.get_thread_cache_state(room_id, thread_id)
-            assert state_before is not None
+            # No marker: the freshly installed snapshot is usable.
+            state_before = await bot.event_cache.get_thread_cache_gap(room_id, thread_id)
+            assert state_before is None
             assert thread_cache_rejection_reason(state_before) is None
 
             partial_reply = nio.RoomMessageText.from_dict(
@@ -563,7 +564,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
                 self._sync_response({room_id: MagicMock(timeline=MagicMock(events=[partial_reply], limited=True))}),
             )
             cached_event = await bot.event_cache.get_event(room_id, "$partial_reply:localhost")
-            state_after = await bot.event_cache.get_thread_cache_state(room_id, thread_id)
+            state_after = await bot.event_cache.get_thread_cache_gap(room_id, thread_id)
         finally:
             await _close_bound_runtime_support(bot, support)
 
@@ -573,8 +574,8 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         assert cached_event is not None
         assert cached_event["event_id"] == "$partial_reply:localhost"
         assert state_after is not None
-        assert state_after.room_invalidated_at is not None
-        assert state_after.room_invalidation_reason == "limited_sync_timeline"
+        assert state_after.gap_marked_at is not None
+        assert state_after.gap_reason == "limited_sync_timeline"
         assert thread_cache_rejection_reason(state_after) is not None
 
     @pytest.mark.asyncio
@@ -684,7 +685,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
 
         assert result.complete is False
         assert [type(error) for error in result.errors] == [RuntimeError]
-        event_cache.mark_room_threads_stale.assert_awaited_once_with(
+        event_cache.mark_room_threads_gap.assert_awaited_once_with(
             room_id,
             reason="sync_timeline_write_failed",
         )
@@ -699,12 +700,12 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         event_cache.store_events_batch = AsyncMock(side_effect=backend_error)
         event_cache.pending_durable_write_room_ids.side_effect = lambda: tuple(sorted(pending_room_ids))
 
-        async def mark_room_threads_stale(room_id_arg: str, *, reason: str) -> None:
+        async def mark_room_threads_gap(room_id_arg: str, *, reason: str) -> None:
             assert reason == "sync_timeline_write_failed"
             pending_room_ids.add(room_id_arg)
             raise backend_error
 
-        event_cache.mark_room_threads_stale = AsyncMock(side_effect=mark_room_threads_stale)
+        event_cache.mark_room_threads_gap = AsyncMock(side_effect=mark_room_threads_gap)
         event_cache.invalidate_room_threads = AsyncMock(side_effect=backend_error)
         event_cache.disable = Mock()
         bot.event_cache = event_cache
@@ -728,7 +729,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         assert result.errors == (backend_error,)
         assert result.runtime_diagnostics == {"cache_backend": "mock"}
         assert event_cache.pending_durable_write_room_ids() == (room_id,)
-        event_cache.mark_room_threads_stale.assert_awaited_once_with(
+        event_cache.mark_room_threads_gap.assert_awaited_once_with(
             room_id,
             reason="sync_timeline_write_failed",
         )
@@ -1054,7 +1055,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         await wait_for_background_tasks(timeout=1.0, owner=bot._runtime_view)
 
         event_cache.get_thread_id_for_event.assert_awaited_once_with("!test:localhost", "$room_msg:localhost")
-        event_cache.mark_room_threads_stale.assert_awaited_once_with(
+        event_cache.mark_room_threads_gap.assert_awaited_once_with(
             "!test:localhost",
             reason="sync_thread_lookup_unavailable",
         )
@@ -1105,7 +1106,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
 
         event_cache.get_thread_id_for_event.assert_awaited_once_with("!test:localhost", "$missing-room-msg:localhost")
         event_cache.get_event.assert_awaited_once_with("!test:localhost", "$missing-room-msg:localhost")
-        event_cache.mark_room_threads_stale.assert_awaited_once_with(
+        event_cache.mark_room_threads_gap.assert_awaited_once_with(
             "!test:localhost",
             reason="sync_thread_lookup_unavailable",
         )
@@ -1150,7 +1151,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         await wait_for_background_tasks(timeout=1.0, owner=bot._runtime_view)
 
         event_cache.redact_event.assert_awaited_once_with("!test:localhost", "$reaction:localhost")
-        event_cache.mark_room_threads_stale.assert_not_awaited()
+        event_cache.mark_room_threads_gap.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_cache_sync_timeline_unknown_thread_mutations_invalidate_room_threads_once_without_room_scan(
@@ -1216,7 +1217,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         bot._conversation_cache.cache_sync_timeline(sync_response)
         await wait_for_background_tasks(timeout=1.0, owner=bot._runtime_view)
 
-        event_cache.mark_room_threads_stale.assert_awaited_once_with(
+        event_cache.mark_room_threads_gap.assert_awaited_once_with(
             "!test:localhost",
             reason="sync_thread_lookup_unavailable",
         )
@@ -1279,7 +1280,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             call("!test:localhost", "$missing-room-msg-1:localhost"),
             call("!test:localhost", "$missing-room-msg-2:localhost"),
         ]
-        event_cache.mark_room_threads_stale.assert_awaited_once_with(
+        event_cache.mark_room_threads_gap.assert_awaited_once_with(
             "!test:localhost",
             reason="sync_redaction_lookup_unavailable",
         )

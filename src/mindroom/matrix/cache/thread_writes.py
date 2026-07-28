@@ -15,25 +15,23 @@ These three policies are the only writers of durable thread-cache state:
    Mutations whose identity remains unknown stay on the room barrier because earlier queued writes can
    create the lookup rows they depend on.
 
-4. UNKNOWN-impact mutations invalidate the whole room's cached threads eagerly, outside the per-thread
-   queue: concurrent per-thread writers cannot uphold the ``room_invalidated_at >= validated_at``
-   ordering that read-time revalidation relies on.
+4. UNKNOWN-impact mutations gap-mark the whole room's cached threads eagerly, outside the per-thread
+   queue: the mutation's thread is unknown, so no per-thread barrier can cover it.
 
-5. Within one sync batch, UNKNOWN impacts invalidate the room at most once per pass (once across the
+5. Within one sync batch, UNKNOWN impacts gap-mark the room at most once per pass (once across the
    message pass and once across the redaction pass); later UNKNOWN mutations in the same pass reuse
-   that invalidation instead of writing duplicate markers.
+   that marker instead of writing duplicates.
 
-6. A limited sync timeline invalidates the room before any partial-window event is admitted; a later
-   write failure preserves the specific ``limited_sync_timeline`` reason instead of replacing it.
+6. A limited sync timeline gap-marks the room before any partial-window event is admitted.
 
-7. A still-opaque ``m.room.encrypted`` mutation with a known thread never appends into the snapshot or
-   revalidates it; it only marks that thread stale under a non-incremental reason, so the snapshot
-   stays rejected until a decryption-capable refresh replaces it.
+7. A still-opaque ``m.room.encrypted`` mutation with a known thread never appends into the snapshot;
+   it only gap-marks that thread, so the snapshot stays rejected until a decryption-capable refresh
+   replaces it.
 
-8. Every other threaded mutation appends through one atomic cache operation that also settles the
-   thread's trust, so the snapshot is never observably rejected mid-append.
+8. Every other threaded mutation appends through one atomic cache operation that also records the gap
+   marker when the append cannot land, so a snapshot is never readable while missing the event.
    Point rows and explicit relation indexes are still persisted by the batch store, and unknown-impact
-   opaque mutations fail closed through the standard room-scope invalidation.
+   opaque mutations fail closed through the standard room-scope marker.
 """
 
 from __future__ import annotations
@@ -218,7 +216,7 @@ async def _apply_thread_message_mutation(
     assert event_source is not None
     if is_opaque_encrypted_event_source(event_source):
         # A still-undecryptable payload cannot make the visible snapshot complete, so the thread
-        # stays stale under a non-incremental reason until a decryption-capable refresh replaces it.
+        # stays gap-marked until a decryption-capable refresh replaces it.
         await cache_ops.invalidate_known_thread(
             room_id,
             impact.thread_id,
@@ -226,20 +224,11 @@ async def _apply_thread_message_mutation(
             raise_on_failure=raise_on_cache_write_failure,
         )
         return False
-    cache_ops.retain_thread_repair_delta(
-        room_id,
-        impact.thread_id,
-        event_source,
-    )
     await cache_ops.append_event_to_cache(
         room_id,
         impact.thread_id,
         event_source,
         context=context,
-        # Always a reason outside the incremental allowlist. A marker a later append could clear
-        # would let the next successful mutation return the thread to trusted while it is still
-        # missing this event, and the retained delta that would have caught it expires after a
-        # minute.
         append_failed_reason=_mutation_reason(context, "append_failed"),
         raise_on_failure=raise_on_cache_write_failure,
     )
@@ -517,11 +506,6 @@ class ThreadOutboundWritePolicy:
                 stream_status=stream_status,
             )
             if thread_id is not None:
-                self._cache_ops.retain_thread_repair_delta(
-                    room_id,
-                    thread_id,
-                    normalized_event_source,
-                )
                 self._emit_outbound_schedule_timing(
                     barrier_kind="thread",
                     event_type=event_type,
@@ -885,11 +869,9 @@ class ThreadLiveWritePolicy:
             )
             return
         if impact.state is MutationThreadImpactState.UNKNOWN:
-            # UNKNOWN-impact mutations must use the eager invalidate_room_threads
-            # path: the per-thread coordinator's concurrent writers cannot safely
-            # uphold the `room_invalidated_at >= validated_at` invariant that
-            # append_keeps_thread_valid relies on at read
-            # time. See ISSUE-189 for the architectural follow-up.
+            # UNKNOWN-impact mutations gap-mark the whole room eagerly, outside the per-thread
+            # queue: the mutation's thread is unknown, so no per-thread barrier can cover it.
+            # See ISSUE-189 for the architectural follow-up.
             await self._cache_ops.invalidate_room_threads(
                 room_id,
                 reason="live_thread_lookup_unavailable",
@@ -899,7 +881,6 @@ class ThreadLiveWritePolicy:
         thread_id = impact.thread_id
         assert thread_id is not None
         event_source = normalize_nio_event_for_cache(event)
-        self._cache_ops.retain_thread_repair_delta(room_id, thread_id, event_source)
 
         async def append_live_mutation() -> bool:
             return await _apply_thread_message_mutation(
@@ -932,7 +913,6 @@ class ThreadLiveWritePolicy:
         assert impact.thread_id is not None
         thread_id = impact.thread_id
         event_source = normalize_nio_event_for_cache(event)
-        self._cache_ops.retain_thread_repair_delta(room_id, thread_id, event_source)
         queue_started = time.perf_counter()
         append_metrics: dict[str, str | int | float | bool] = {}
 
@@ -1014,11 +994,9 @@ class ThreadLiveWritePolicy:
             return
         if impact.state is MutationThreadImpactState.UNKNOWN:
             invalidate_started = time.perf_counter()
-            # UNKNOWN-impact mutations must use the eager invalidate_room_threads
-            # path: the per-thread coordinator's concurrent writers cannot safely
-            # uphold the `room_invalidated_at >= validated_at` invariant that
-            # append_keeps_thread_valid relies on at read
-            # time. See ISSUE-189 for the architectural follow-up.
+            # UNKNOWN-impact mutations gap-mark the whole room eagerly, outside the per-thread
+            # queue: the mutation's thread is unknown, so no per-thread barrier can cover it.
+            # See ISSUE-189 for the architectural follow-up.
             await self._cache_ops.invalidate_room_threads(
                 room_id,
                 reason="live_thread_lookup_unavailable",

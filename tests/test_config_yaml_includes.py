@@ -6,7 +6,7 @@ import asyncio
 import os
 import time
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import pytest
 import yaml
@@ -20,6 +20,9 @@ from mindroom.config.yaml_includes import ConfigIncludeError, load_yaml_config_s
 from mindroom.constants import resolve_runtime_paths
 from mindroom.orchestration.config_lifecycle import ConfigReloadLifecycle
 from mindroom.response_admission import ResponseAdmissionGate
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 runner = CliRunner()
 
@@ -457,6 +460,34 @@ class TestRoundTripEquivalence:
 
 class TestWatchPaths:
     """The dynamic multi-file watcher backing include-aware hot reload."""
+
+    @pytest.mark.asyncio
+    async def test_scans_run_off_the_event_loop(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Stat scans must cross the thread offload boundary, not block the loop."""
+        monkeypatch.setattr(file_watcher, "_WATCH_SCAN_INTERVAL_SECONDS", 0.001)
+        path = _write(tmp_path / "config.yaml", "a: 1\n")
+        offloaded: list[str] = []
+        stop_event = asyncio.Event()
+
+        async def fake_to_thread(function: Callable[..., object], *args: object, **kwargs: object) -> object:
+            offloaded.append(getattr(function, "__name__", repr(function)))
+            return function(*args, **kwargs)
+
+        async def on_change() -> None:
+            return
+
+        monkeypatch.setattr(file_watcher.asyncio, "to_thread", fake_to_thread)
+        watch_task = asyncio.create_task(file_watcher.watch_paths(lambda: (path,), on_change, stop_event))
+        await asyncio.sleep(0.05)
+        stop_event.set()
+        await asyncio.wait_for(watch_task, timeout=2)
+
+        assert offloaded
+        assert set(offloaded) == {"paths_mtime_snapshot"}
 
     @pytest.mark.asyncio
     async def test_change_to_any_watched_file_triggers_callback(

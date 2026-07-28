@@ -24,11 +24,10 @@ from .sqlite_cache_maintenance import (
     with_sqlite_storage_bytes,
 )
 from .thread_cache_state import (
+    CACHE_GAP_UNAVAILABLE,
     THREAD_HISTORY_TRUST_METADATA_KEY,
     THREAD_HISTORY_TRUST_VERSION,
     ThreadAppendOutcome,
-    ThreadCacheReplaceOutcome,
-    replacement_validated_at,
 )
 
 if TYPE_CHECKING:
@@ -37,9 +36,9 @@ if TYPE_CHECKING:
 
     from .agent_message_snapshot import AgentMessageSnapshot
     from .cache_maintenance import CacheMaintenanceReport
-    from .event_cache import ThreadCacheState, ThreadRevision
+    from .thread_cache_state import ThreadCacheGap
 
-_EVENT_CACHE_SCHEMA_VERSION = 12
+_EVENT_CACHE_SCHEMA_VERSION = 16
 _EVENT_CACHE_TABLES = (
     "cache_metadata",
     "thread_events",
@@ -182,6 +181,7 @@ async def _create_event_cache_schema(db: aiosqlite.Connection) -> None:
             room_id TEXT NOT NULL,
             origin_server_ts INTEGER NOT NULL,
             event_json TEXT NOT NULL,
+            sender TEXT NOT NULL DEFAULT '',
             cached_at REAL NOT NULL,
             write_seq INTEGER NOT NULL,
             PRIMARY KEY (principal_id, room_id, event_id)
@@ -274,22 +274,28 @@ async def _create_event_cache_schema(db: aiosqlite.Connection) -> None:
             principal_id TEXT NOT NULL,
             room_id TEXT NOT NULL,
             thread_id TEXT NOT NULL,
-            validated_at REAL,
-            invalidated_at REAL,
-            invalidation_reason TEXT,
+            gap_marked_at REAL,
+            gap_reason TEXT,
+            -- The ``fetch_started_at`` of the fetch whose snapshot is currently installed. Orders
+            -- concurrent replacements so a slow older fetch cannot delete a newer fetch's events.
+            snapshot_fetch_started_at REAL,
             PRIMARY KEY (principal_id, room_id, thread_id)
         )
         """,
     )
+    # 🔒 ``room_cache_state`` carries the membership fence, and nothing else about trust.
     await db.execute(
         """
         CREATE TABLE IF NOT EXISTS room_cache_state (
             principal_id TEXT NOT NULL,
             room_id TEXT NOT NULL,
-            invalidated_at REAL,
-            invalidation_reason TEXT,
             membership_state TEXT NOT NULL DEFAULT 'joined',
             membership_epoch INTEGER NOT NULL DEFAULT 0,
+            -- The newest room-scoped gap. The fan-out across ``thread_cache_state`` covers every
+            -- thread that already had a row; this covers the one that did not yet, because its
+            -- fetch was still running. Read only when installing a snapshot, never on a read.
+            room_gap_marked_at REAL,
+            room_gap_reason TEXT,
             PRIMARY KEY (principal_id, room_id)
         )
         """,
@@ -851,8 +857,12 @@ class SqliteEventCache:
             and (allow_departed or not self._runtime.is_room_departed(self.principal_id, room_id))
         )
 
-    async def get_thread_events(self, room_id: str, thread_id: str) -> list[dict[str, Any]] | None:
-        """Return cached events for one thread sorted by timestamp."""
+    async def get_thread_events(
+        self,
+        room_id: str,
+        thread_id: str,
+    ) -> list[dict[str, Any]] | None:
+        """Return one thread's cached events oldest first, collapsed to one edit per message."""
         return await self._read_operation(
             room_id,
             operation="get_thread_events",
@@ -865,40 +875,27 @@ class SqliteEventCache:
             ),
         )
 
-    async def get_thread_events_written_between(
-        self,
-        room_id: str,
-        thread_id: str,
-        *,
-        after_write_seq: int,
-        through_write_seq: int,
-        after_thread_write_seq: int,
-        through_thread_write_seq: int,
-    ) -> list[dict[str, Any]]:
-        """Return thread events changed in bounded payload or thread-index intervals."""
+    async def get_thread_event_ids(self, room_id: str, thread_id: str) -> set[str]:
+        """Return every raw event ID this thread holds, superseded edits included."""
         return await self._read_operation(
             room_id,
-            operation="get_thread_events_written_between",
-            disabled_result=[],
-            reader=lambda db: sqlite_event_cache_threads.load_thread_events_written_between(
+            operation="get_thread_event_ids",
+            disabled_result=set(),
+            reader=lambda db: sqlite_event_cache_threads.load_thread_event_ids(
                 db,
                 principal_id=self.principal_id,
                 room_id=room_id,
                 thread_id=thread_id,
-                after_write_seq=after_write_seq,
-                through_write_seq=through_write_seq,
-                after_thread_write_seq=after_thread_write_seq,
-                through_thread_write_seq=through_thread_write_seq,
             ),
         )
 
-    async def get_thread_revision(self, room_id: str, thread_id: str) -> ThreadRevision | None:
-        """Return the durable revision identity of one non-empty cached thread."""
+    async def has_thread_snapshot(self, room_id: str, thread_id: str) -> bool:
+        """Return whether any snapshot rows exist for one thread."""
         return await self._read_operation(
             room_id,
-            operation="get_thread_revision",
-            disabled_result=None,
-            reader=lambda db: sqlite_event_cache_threads.load_thread_revision(
+            operation="has_thread_snapshot",
+            disabled_result=False,
+            reader=lambda db: sqlite_event_cache_threads.thread_snapshot_exists(
                 db,
                 principal_id=self.principal_id,
                 room_id=room_id,
@@ -920,13 +917,13 @@ class SqliteEventCache:
             ),
         )
 
-    async def get_thread_cache_state(self, room_id: str, thread_id: str) -> ThreadCacheState | None:
-        """Return durable freshness metadata for one cached thread."""
+    async def get_thread_cache_gap(self, room_id: str, thread_id: str) -> ThreadCacheGap | None:
+        """Return the durable gap marker recorded against one cached thread, if any."""
         return await self._read_operation(
             room_id,
-            operation="get_thread_cache_state",
-            disabled_result=None,
-            reader=lambda db: sqlite_event_cache_threads.load_thread_cache_state(
+            operation="get_thread_cache_gap",
+            disabled_result=CACHE_GAP_UNAVAILABLE,
+            reader=lambda db: sqlite_event_cache_threads.load_thread_cache_gap(
                 db,
                 principal_id=self.principal_id,
                 room_id=room_id,
@@ -1123,7 +1120,7 @@ class SqliteEventCache:
             ),
         )
 
-    async def replace_thread_if_not_newer(
+    async def replace_thread(
         self,
         room_id: str,
         thread_id: str,
@@ -1131,30 +1128,42 @@ class SqliteEventCache:
         *,
         expected_membership_epoch: int,
         fetch_started_at: float,
-        validated_at: float | None = None,
-    ) -> ThreadCacheReplaceOutcome:
-        """Replace a fetched snapshot and classify any guarded non-installation."""
-        replacement_timestamp = replacement_validated_at(
-            fetch_started_at=fetch_started_at,
-            validated_at=validated_at,
-        )
-
+    ) -> bool:
+        """Install one fetched snapshot, clearing a gap marker the fetch covers."""
         return await self._write_operation(
             room_id,
-            operation="replace_thread_if_not_newer",
-            disabled_result=ThreadCacheReplaceOutcome.WRITES_UNAVAILABLE,
-            writer=lambda db: sqlite_event_cache_threads.replace_thread_locked_if_not_newer(
+            operation="replace_thread",
+            disabled_result=False,
+            writer=lambda db: self._replace_thread_locked(
                 db,
-                principal_id=self.principal_id,
                 room_id=room_id,
                 thread_id=thread_id,
                 events=events,
                 fetch_started_at=fetch_started_at,
-                validated_at=replacement_timestamp,
             ),
             expected_membership_epoch=expected_membership_epoch,
-            membership_epoch_mismatch_result=ThreadCacheReplaceOutcome.RETRYABLE_CONFLICT,
+            membership_epoch_mismatch_result=False,
         )
+
+    async def _replace_thread_locked(
+        self,
+        db: aiosqlite.Connection,
+        *,
+        room_id: str,
+        thread_id: str,
+        events: list[dict[str, Any]],
+        fetch_started_at: float,
+    ) -> bool:
+        await sqlite_event_cache_threads.replace_thread_locked(
+            db,
+            principal_id=self.principal_id,
+            room_id=room_id,
+            thread_id=thread_id,
+            events=events,
+            stored_at=time.time(),
+            fetch_started_at=fetch_started_at,
+        )
+        return True
 
     async def invalidate_thread(self, room_id: str, thread_id: str) -> None:
         """Delete cached events for one thread."""
@@ -1183,14 +1192,14 @@ class SqliteEventCache:
             ),
         )
 
-    async def mark_thread_stale(self, room_id: str, thread_id: str, *, reason: str) -> None:
-        """Persist one durable thread invalidation marker."""
+    async def mark_thread_gap(self, room_id: str, thread_id: str, *, reason: str) -> None:
+        """Persist one durable thread gap marker."""
         try:
             await self._write_operation(
                 room_id,
-                operation="mark_thread_stale",
+                operation="mark_thread_gap",
                 disabled_result=None,
-                writer=lambda db: sqlite_event_cache_threads.mark_thread_stale_locked(
+                writer=lambda db: sqlite_event_cache_threads.mark_thread_gap_locked(
                     db,
                     principal_id=self.principal_id,
                     room_id=room_id,
@@ -1202,17 +1211,17 @@ class SqliteEventCache:
             if not _is_sqlite_lock_contention(exc):
                 raise
             self._runtime.record_pending_principal_purge(self.principal_id)
-            msg = "SQLite event cache unavailable while marking thread stale"
+            msg = "SQLite event cache unavailable while marking a thread gap"
             raise EventCacheBackendUnavailableError(msg) from exc
 
-    async def mark_room_threads_stale(self, room_id: str, *, reason: str) -> None:
-        """Persist a durable invalidate-and-refetch marker for every cached thread in one room."""
+    async def mark_room_threads_gap(self, room_id: str, *, reason: str) -> None:
+        """Record a durable gap marker against every cached thread in one room."""
         try:
             await self._write_operation(
                 room_id,
-                operation="mark_room_threads_stale",
+                operation="mark_room_threads_gap",
                 disabled_result=None,
-                writer=lambda db: sqlite_event_cache_threads.mark_room_stale_locked(
+                writer=lambda db: sqlite_event_cache_threads.mark_room_gap_locked(
                     db,
                     principal_id=self.principal_id,
                     room_id=room_id,
@@ -1223,7 +1232,7 @@ class SqliteEventCache:
             if not _is_sqlite_lock_contention(exc):
                 raise
             self._runtime.record_pending_principal_purge(self.principal_id)
-            msg = "SQLite event cache unavailable while marking room stale"
+            msg = "SQLite event cache unavailable while marking a room gap"
             raise EventCacheBackendUnavailableError(msg) from exc
 
     async def apply_thread_mutation_append(
@@ -1234,7 +1243,7 @@ class SqliteEventCache:
         *,
         append_failed_reason: str,
     ) -> ThreadAppendOutcome:
-        """Append one threaded mutation and settle this thread's trust atomically."""
+        """Append one threaded mutation, recording a gap marker when it cannot land."""
         normalized_event = normalize_event_source_for_cache(event)
         return await self._write_operation(
             room_id,

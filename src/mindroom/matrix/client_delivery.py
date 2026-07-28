@@ -18,13 +18,10 @@ from nio.exceptions import OlmTrustError
 from mindroom.logging_config import get_logger
 from mindroom.matrix.large_messages import prepare_large_message
 from mindroom.matrix.media import upload_content_uri, upload_media_bytes
-from mindroom.matrix.mentions import format_message_with_mentions
 from mindroom.matrix.message_builder import build_matrix_edit_content
 from mindroom.timing import emit_timing_event
 
 if TYPE_CHECKING:
-    from mindroom.config.main import Config
-    from mindroom.constants import RuntimePaths
     from mindroom.matrix.conversation_cache import ConversationCacheProtocol
     from mindroom.matrix.runtime_media import RuntimeEncryptedMediaAttachment
 
@@ -646,32 +643,6 @@ async def send_audio_message(
     return delivered.event_id if delivered is not None else None
 
 
-def build_threaded_edit_content(
-    *,
-    new_text: str,
-    thread_id: str | None,
-    config: Config,
-    runtime_paths: RuntimePaths,
-    tool_trace: list[Any] | None = None,
-    extra_content: dict[str, Any] | None = None,
-    latest_thread_event_id: str | None = None,
-) -> dict[str, Any]:
-    """Build edit content that preserves thread fallback semantics when needed."""
-    if thread_id is not None and latest_thread_event_id is None:
-        msg = "latest_thread_event_id is required for thread fallback"
-        raise ValueError(msg)
-
-    return format_message_with_mentions(
-        config,
-        runtime_paths,
-        new_text,
-        thread_event_id=thread_id,
-        latest_thread_event_id=latest_thread_event_id,
-        tool_trace=tool_trace,
-        extra_content=extra_content,
-    )
-
-
 def build_edit_event_content(
     *,
     event_id: str,
@@ -731,7 +702,6 @@ async def edit_message_result(
 __all__ = [
     "DeliveredMatrixEvent",
     "build_edit_event_content",
-    "build_threaded_edit_content",
     "cached_room",
     "can_send_to_encrypted_room",
     "edit_message_result",

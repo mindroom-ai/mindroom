@@ -792,13 +792,19 @@ def _resolved_module_file(module_file: str) -> Path | None:
         return None
 
 
+@functools.lru_cache(maxsize=8192)
+def _module_file_within_root(module_file: str, root: str) -> bool:
+    """Return whether one module file lives under one plugin root, cached across calls."""
+    resolved = _resolved_module_file(module_file)
+    return resolved is not None and resolved.is_relative_to(root)
+
+
 def _module_origin_within_root(module: ModuleType, root: Path) -> bool:
     """Return whether one loaded module originates from within one plugin root."""
     module_file = getattr(module, "__file__", None)
     if not isinstance(module_file, str):
         return False
-    resolved = _resolved_module_file(module_file)
-    return resolved is not None and resolved.is_relative_to(root)
+    return _module_file_within_root(module_file, str(root))
 
 
 def _execute_validation_plugin_module(

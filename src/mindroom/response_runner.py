@@ -1932,11 +1932,13 @@ class ResponseRunner:
                     existing_event_id=request.existing_event_id,
                     existing_event_is_placeholder=request.existing_event_is_placeholder,
                 )
-                progress.settle(
-                    await self.deps.delivery_gateway.finalize_streamed_response(finalize_request),
-                )
+                delivery = await self.deps.delivery_gateway.finalize_streamed_response(finalize_request)
+                progress.settle(delivery)
                 if request.pipeline_timing is not None:
-                    request.pipeline_timing.mark_first_visible_reply("final")
+                    request.pipeline_timing.mark_first_visible_reply(
+                        "final",
+                        substantive=delivery.delivered_substantive_content,
+                    )
                     request.pipeline_timing.mark("response_complete")
             else:
                 try:
@@ -2023,23 +2025,22 @@ class ResponseRunner:
 
                 progress.note_delivery_started(None)
                 try:
-                    progress.settle(
-                        await self.deps.delivery_gateway.deliver_final(
-                            FinalDeliveryRequest(
-                                target=delivery_target,
-                                existing_event_id=message_id,
-                                existing_event_is_placeholder=delivery_request.existing_event_is_placeholder,
-                                response_text=response_text,
-                                identity=response_identity,
-                                tool_trace=None,
-                                extra_content=_merge_response_extra_content(
-                                    team_run_metadata_content
-                                    or ai_run_extra_content_from_metadata(team_turn_recorder.run_metadata),
-                                    request.attachment_ids,
-                                ),
+                    delivery = await self.deps.delivery_gateway.deliver_final(
+                        FinalDeliveryRequest(
+                            target=delivery_target,
+                            existing_event_id=message_id,
+                            existing_event_is_placeholder=delivery_request.existing_event_is_placeholder,
+                            response_text=response_text,
+                            identity=response_identity,
+                            tool_trace=None,
+                            extra_content=_merge_response_extra_content(
+                                team_run_metadata_content
+                                or ai_run_extra_content_from_metadata(team_turn_recorder.run_metadata),
+                                request.attachment_ids,
                             ),
                         ),
                     )
+                    progress.settle(delivery)
                 except asyncio.CancelledError:
                     await self._persist_interrupted_recorder_off_loop(
                         recorder=team_turn_recorder,
@@ -2052,7 +2053,10 @@ class ResponseRunner:
                     )
                     raise
                 if request.pipeline_timing is not None:
-                    request.pipeline_timing.mark_first_visible_reply("final")
+                    request.pipeline_timing.mark_first_visible_reply(
+                        "final",
+                        substantive=delivery.delivered_substantive_content,
+                    )
                     request.pipeline_timing.mark("response_complete")
 
         async def settle_team_streaming_delivery_error(error: StreamingDeliveryError) -> FinalDeliveryOutcome:
@@ -2577,7 +2581,10 @@ class ResponseRunner:
             )
             raise
         if request.pipeline_timing is not None:
-            request.pipeline_timing.mark_first_visible_reply("final")
+            request.pipeline_timing.mark_first_visible_reply(
+                "final",
+                substantive=delivery.delivered_substantive_content,
+            )
             request.pipeline_timing.mark("response_complete")
         return build_outcome(delivery)
 
@@ -2760,7 +2767,10 @@ class ResponseRunner:
         )
         delivery = await self.deps.delivery_gateway.finalize_streamed_response(finalize_request)
         if request.pipeline_timing is not None:
-            request.pipeline_timing.mark_first_visible_reply("final")
+            request.pipeline_timing.mark_first_visible_reply(
+                "final",
+                substantive=delivery.delivered_substantive_content,
+            )
             request.pipeline_timing.mark("response_complete")
         return build_outcome(delivery)
 

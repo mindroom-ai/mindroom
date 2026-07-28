@@ -69,14 +69,14 @@ async def cache(
 
 
 async def _seed_valid_thread(cache: ConversationEventCache) -> None:
-    await cache.replace_thread_if_not_newer(
+    await cache.replace_thread(
         ROOM_ID,
         THREAD_ID,
         [_event(THREAD_ID, 1000), _event("$initial", 1500, thread_id=THREAD_ID)],
         expected_membership_epoch=await cache.room_membership_epoch(ROOM_ID),
         fetch_started_at=0.0,
     )
-    assert thread_cache_rejection_reason(await cache.get_thread_cache_state(ROOM_ID, THREAD_ID)) is None
+    assert thread_cache_rejection_reason(await cache.get_thread_cache_gap(ROOM_ID, THREAD_ID)) is None
 
 
 async def _collect_rejections_while(
@@ -89,7 +89,7 @@ async def _collect_rejections_while(
 
     async def read_until_stopped() -> None:
         while not stop_reading.is_set():
-            reason = thread_cache_rejection_reason(await cache.get_thread_cache_state(ROOM_ID, THREAD_ID))
+            reason = thread_cache_rejection_reason(await cache.get_thread_cache_gap(ROOM_ID, THREAD_ID))
             if reason is not None:
                 rejections.append(reason)
             await asyncio.sleep(0)
@@ -132,7 +132,7 @@ async def test_mutation_on_a_snapshotless_thread_reports_it_distinctly(cache: Co
         _event("$live", 2000, thread_id=THREAD_ID),
         append_failed_reason="sync_append_failed",
     )
-    state = await cache.get_thread_cache_state(ROOM_ID, THREAD_ID)
+    state = await cache.get_thread_cache_gap(ROOM_ID, THREAD_ID)
 
     assert outcome is ThreadAppendOutcome.SNAPSHOT_MISSING
     assert outcome.wrote_event is False
@@ -140,11 +140,32 @@ async def test_mutation_on_a_snapshotless_thread_reports_it_distinctly(cache: Co
 
 
 @pytest.mark.asyncio
-async def test_append_clears_an_invalidation_left_by_an_earlier_mutation(cache: ConversationEventCache) -> None:
-    """The incremental revalidation allowlist must still apply when a prior mutation left a marker."""
+@pytest.mark.parametrize(
+    ("mark", "reason"),
+    [
+        pytest.param("thread", "sync_thread_mutation", id="thread_marker_from_a_mutation"),
+        pytest.param("thread", "thread_history_opaque_encrypted_event", id="thread_marker_from_opaque_history"),
+        pytest.param("room", "limited_sync_timeline", id="room_scoped_marker"),
+    ],
+)
+async def test_an_append_lands_but_never_clears_a_gap_marker(
+    cache: ConversationEventCache,
+    mark: str,
+    reason: str,
+) -> None:
+    """An incremental append extends the rows; only a full refetch may clear the marker.
+
+    This replaces the incremental-revalidation allowlist. There is no longer a set of reasons an
+    append is permitted to clear and a set it is not: an append never clears one, whatever wrote
+    it and at whichever scope. The marker is what gates the read, so a thread that was gapped
+    stays gapped until a fetch that covers the gap replaces the snapshot.
+    """
     await _seed_valid_thread(cache)
-    await cache.mark_thread_stale(ROOM_ID, THREAD_ID, reason="sync_thread_mutation")
-    assert thread_cache_rejection_reason(await cache.get_thread_cache_state(ROOM_ID, THREAD_ID)) is not None
+    if mark == "thread":
+        await cache.mark_thread_gap(ROOM_ID, THREAD_ID, reason=reason)
+    else:
+        await cache.mark_room_threads_gap(ROOM_ID, reason=reason)
+    assert thread_cache_rejection_reason(await cache.get_thread_cache_gap(ROOM_ID, THREAD_ID)) == reason
 
     outcome = await cache.apply_thread_mutation_append(
         ROOM_ID,
@@ -152,47 +173,13 @@ async def test_append_clears_an_invalidation_left_by_an_earlier_mutation(cache: 
         _event("$live", 2000, thread_id=THREAD_ID),
         append_failed_reason="sync_append_failed",
     )
-    state = await cache.get_thread_cache_state(ROOM_ID, THREAD_ID)
+    state = await cache.get_thread_cache_gap(ROOM_ID, THREAD_ID)
 
+    # The event is durably appended -- refusing it would lose the mutation -- but the snapshot
+    # stays unusable, so the next read refetches and picks the append up from the homeserver.
     assert outcome is ThreadAppendOutcome.APPENDED
-    assert thread_cache_rejection_reason(state) is None
-
-
-@pytest.mark.asyncio
-async def test_append_does_not_clear_an_invalidation_outside_the_allowlist(cache: ConversationEventCache) -> None:
-    """A non-incremental reason must survive an append, exactly as it did before."""
-    await _seed_valid_thread(cache)
-    await cache.mark_thread_stale(ROOM_ID, THREAD_ID, reason="retained_thread_delta_missing")
-
-    outcome = await cache.apply_thread_mutation_append(
-        ROOM_ID,
-        THREAD_ID,
-        _event("$live", 2000, thread_id=THREAD_ID),
-        append_failed_reason="sync_append_failed",
-    )
-    state = await cache.get_thread_cache_state(ROOM_ID, THREAD_ID)
-
-    assert outcome is ThreadAppendOutcome.APPENDED_STALE
     assert outcome.wrote_event is True
-    assert thread_cache_rejection_reason(state) is not None
-
-
-@pytest.mark.asyncio
-async def test_room_invalidation_still_blocks_revalidation_after_append(cache: ConversationEventCache) -> None:
-    """A room-wide marker must keep outranking an incremental append."""
-    await _seed_valid_thread(cache)
-    await cache.mark_room_threads_stale(ROOM_ID, reason="limited_sync_timeline")
-
-    outcome = await cache.apply_thread_mutation_append(
-        ROOM_ID,
-        THREAD_ID,
-        _event("$live", 2000, thread_id=THREAD_ID),
-        append_failed_reason="sync_append_failed",
-    )
-    state = await cache.get_thread_cache_state(ROOM_ID, THREAD_ID)
-
-    assert outcome is ThreadAppendOutcome.APPENDED_STALE
-    assert thread_cache_rejection_reason(state) is not None
+    assert thread_cache_rejection_reason(state) == reason
 
 
 def _cache_ops(tmp_path: Path, cache: ConversationEventCache) -> ThreadMutationCacheOps:
@@ -295,13 +282,12 @@ async def test_a_failed_cache_write_never_leaves_a_trusted_snapshot(tmp_path: Pa
                 context="sync",
                 room_level_skip_message="skip",
             )
-        state = await cache.get_thread_cache_state(ROOM_ID, THREAD_ID)
+        state = await cache.get_thread_cache_gap(ROOM_ID, THREAD_ID)
     finally:
         await root_cache.close()
 
-    assert thread_cache_rejection_reason(state) == "thread_invalidated_after_validation"
     assert state is not None
-    assert state.invalidation_reason == "sync_append_failed"
+    assert thread_cache_rejection_reason(state) == "sync_append_failed"
 
 
 @pytest.mark.asyncio
@@ -333,13 +319,12 @@ async def test_a_cancelled_cache_write_never_leaves_a_trusted_snapshot(tmp_path:
                 context="sync",
                 room_level_skip_message="skip",
             )
-        state = await cache.get_thread_cache_state(ROOM_ID, THREAD_ID)
+        state = await cache.get_thread_cache_gap(ROOM_ID, THREAD_ID)
     finally:
         await root_cache.close()
 
-    assert thread_cache_rejection_reason(state) == "thread_invalidated_after_validation"
     assert state is not None
-    assert state.invalidation_reason == "sync_append_failed"
+    assert thread_cache_rejection_reason(state) == "sync_append_failed"
 
 
 @pytest.mark.asyncio
@@ -362,23 +347,23 @@ async def test_a_cancelled_appends_marker_is_owned_by_the_shutdown_drain(tmp_pat
     append_started = asyncio.Event()
     marker_started = asyncio.Event()
     release_marker = asyncio.Event()
-    real_mark_thread_stale = cache.mark_thread_stale
+    real_mark_thread_gap = cache.mark_thread_gap
 
     async def hanging_append(*_args: object, **_kwargs: object) -> ThreadAppendOutcome:
         append_started.set()
         await asyncio.Event().wait()
         raise AssertionError
 
-    async def blocked_mark_thread_stale(room_id: str, thread_id: str, *, reason: str) -> None:
+    async def blocked_mark_thread_gap(room_id: str, thread_id: str, *, reason: str) -> None:
         marker_started.set()
         await release_marker.wait()
-        await real_mark_thread_stale(room_id, thread_id, reason=reason)
+        await real_mark_thread_gap(room_id, thread_id, reason=reason)
 
     try:
         await _seed_valid_thread(cache)
         with (
             patch.object(cache, "apply_thread_mutation_append", hanging_append),
-            patch.object(cache, "mark_thread_stale", blocked_mark_thread_stale),
+            patch.object(cache, "mark_thread_gap", blocked_mark_thread_gap),
         ):
             mutation = asyncio.create_task(
                 _apply_thread_message_mutation(
@@ -405,20 +390,21 @@ async def test_a_cancelled_appends_marker_is_owned_by_the_shutdown_drain(tmp_pat
             with pytest.raises(asyncio.CancelledError):
                 await mutation
             await wait_for_background_tasks(timeout=5.0, owner=coordinator.failure_marker_task_owner)
-        state = await cache.get_thread_cache_state(ROOM_ID, THREAD_ID)
+        state = await cache.get_thread_cache_gap(ROOM_ID, THREAD_ID)
     finally:
         await root_cache.close()
 
-    assert thread_cache_rejection_reason(state) == "thread_invalidated_after_validation"
+    assert thread_cache_rejection_reason(state) == "sync_append_failed"
 
 
 @pytest.mark.asyncio
 async def test_a_later_outbound_append_cannot_erase_an_earlier_failed_one(cache: ConversationEventCache) -> None:
     """A failed append must not leave a marker the next successful append can clear.
 
-    The reason a failed append writes has to sit outside the incremental allowlist, or the next
-    outbound mutation revalidates the thread while it is still missing the earlier event -- and the
-    retained delta that would otherwise catch it expires after a minute.
+    Under the allowlist this depended on picking a reason outside it. It now holds unconditionally,
+    because no append clears a marker -- but the guarantee still matters: without it the next
+    outbound mutation would return a thread to readable while it is still missing the earlier
+    event, and nothing downstream would ever notice.
     """
     await _seed_valid_thread(cache)
     missed = _event("$missed", 2000, thread_id=THREAD_ID)
@@ -437,11 +423,11 @@ async def test_a_later_outbound_append_cannot_erase_an_earlier_failed_one(cache:
         _event("$later", 3000, thread_id=THREAD_ID),
         append_failed_reason="outbound_append_failed",
     )
-    state = await cache.get_thread_cache_state(ROOM_ID, THREAD_ID)
+    state = await cache.get_thread_cache_gap(ROOM_ID, THREAD_ID)
     cached_ids = {event["event_id"] for event in (await cache.get_thread_events(ROOM_ID, THREAD_ID) or [])}
 
     assert refused is ThreadAppendOutcome.APPEND_REFUSED
-    assert later is ThreadAppendOutcome.APPENDED_STALE
+    assert later is ThreadAppendOutcome.APPENDED
     assert "$missed" not in cached_ids
     assert thread_cache_rejection_reason(state) is not None, (
         "the thread went back to trusted while still missing the refused event"
@@ -462,22 +448,22 @@ async def test_the_drain_that_cancels_an_append_still_lands_its_marker(tmp_path:
     coordinator = cache_ops.runtime.event_cache_write_coordinator
     assert coordinator is not None
     event_source = _event("$live", 2000, thread_id=THREAD_ID)
-    real_mark_thread_stale = cache.mark_thread_stale
+    real_mark_thread_gap = cache.mark_thread_gap
 
     async def hanging_append(*_args: object, **_kwargs: object) -> ThreadAppendOutcome:
         await asyncio.Event().wait()
         raise AssertionError
 
-    async def slow_mark_thread_stale(room_id: str, thread_id: str, *, reason: str) -> None:
+    async def slow_mark_thread_gap(room_id: str, thread_id: str, *, reason: str) -> None:
         # Longer than one cancel round, which is what makes a shared owner lose the write.
         await asyncio.sleep(0.3)
-        await real_mark_thread_stale(room_id, thread_id, reason=reason)
+        await real_mark_thread_gap(room_id, thread_id, reason=reason)
 
     try:
         await _seed_valid_thread(cache)
         with (
             patch.object(cache, "apply_thread_mutation_append", hanging_append),
-            patch.object(cache, "mark_thread_stale", slow_mark_thread_stale),
+            patch.object(cache, "mark_thread_gap", slow_mark_thread_gap),
         ):
             create_background_task(
                 _apply_thread_message_mutation(
@@ -496,10 +482,9 @@ async def test_the_drain_that_cancels_an_append_still_lands_its_marker(tmp_path:
             )
             await asyncio.sleep(0.05)
             await coordinator.close()
-        state = await cache.get_thread_cache_state(ROOM_ID, THREAD_ID)
+        state = await cache.get_thread_cache_gap(ROOM_ID, THREAD_ID)
     finally:
         await root_cache.close()
 
-    assert thread_cache_rejection_reason(state) == "thread_invalidated_after_validation"
     assert state is not None
-    assert state.invalidation_reason == "sync_append_failed"
+    assert thread_cache_rejection_reason(state) == "sync_append_failed"

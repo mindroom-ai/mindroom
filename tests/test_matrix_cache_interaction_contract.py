@@ -524,7 +524,7 @@ async def _seed_thread(event_cache: ConversationEventCache) -> None:
                 relation=_thread_relation(),
             ),
         ],
-        validated_at=10.0,
+        fetch_started_at=10.0,
     )
 
 
@@ -543,7 +543,7 @@ async def _seed_other_thread(event_cache: ConversationEventCache) -> None:
                 relation=_thread_relation(_OTHER_THREAD_ID),
             ),
         ],
-        validated_at=10.0,
+        fetch_started_at=10.0,
     )
 
 
@@ -554,7 +554,7 @@ async def test_joined_timeline_room_level_interaction_matrix(
     """Room-level joined-timeline families are point-cached without changing thread state."""
     await _seed_thread(event_cache)
     before_events = await event_cache.get_thread_events(_ROOM_ID, _THREAD_ID)
-    before_state = await event_cache.get_thread_cache_state(_ROOM_ID, _THREAD_ID)
+    before_state = await event_cache.get_thread_cache_gap(_ROOM_ID, _THREAD_ID)
     sources = _room_level_timeline_sources()
 
     await _build_sync_harness(event_cache).apply(
@@ -566,7 +566,7 @@ async def test_joined_timeline_room_level_interaction_matrix(
         assert await event_cache.get_event(_ROOM_ID, event_id) == source
         assert await event_cache.get_thread_id_for_event(_ROOM_ID, event_id) is None
     assert await event_cache.get_thread_events(_ROOM_ID, _THREAD_ID) == before_events
-    assert await event_cache.get_thread_cache_state(_ROOM_ID, _THREAD_ID) == before_state
+    assert await event_cache.get_thread_cache_gap(_ROOM_ID, _THREAD_ID) == before_state
 
 
 @pytest.mark.asyncio
@@ -645,10 +645,10 @@ async def test_message_relations_through_non_message_ancestors_fail_closed(
         )
         is None
     )
-    state = await event_cache.get_thread_cache_state(_ROOM_ID, _THREAD_ID)
+    state = await event_cache.get_thread_cache_gap(_ROOM_ID, _THREAD_ID)
     assert state is not None
-    assert state.room_invalidation_reason == "sync_thread_lookup_unavailable"
-    assert thread_cache_rejection_reason(state) == "room_invalidated_after_validation"
+    assert state.gap_reason == "sync_thread_lookup_unavailable"
+    assert thread_cache_rejection_reason(state) == "sync_thread_lookup_unavailable"
 
 
 @pytest.mark.asyncio
@@ -816,9 +816,9 @@ async def test_persisted_non_message_index_is_not_trusted_by_relation_walks(
         )
 
     assert await event_cache.get_thread_id_for_event(_ROOM_ID, cast("str", dependent["event_id"])) is None
-    state = await event_cache.get_thread_cache_state(_ROOM_ID, _THREAD_ID)
+    state = await event_cache.get_thread_cache_gap(_ROOM_ID, _THREAD_ID)
     assert state is not None
-    assert state.room_invalidation_reason == "sync_thread_lookup_unavailable"
+    assert state.gap_reason == "sync_thread_lookup_unavailable"
 
 
 @pytest.mark.asyncio
@@ -907,10 +907,9 @@ async def test_joined_timeline_thread_relations_indexes_edits_and_visible_histor
         "$reply-edit",
         "$reference",
     }
-    state = await event_cache.get_thread_cache_state(_ROOM_ID, _THREAD_ID)
-    assert state is not None
-    assert state.validated_at is not None
-    assert state.validated_at > 10.0
+    # No marker at all is what a usable snapshot looks like.
+    state = await event_cache.get_thread_cache_gap(_ROOM_ID, _THREAD_ID)
+    assert state is None
     assert thread_cache_rejection_reason(state) is None
 
     client = cast("nio.AsyncClient", object())
@@ -1019,11 +1018,10 @@ async def test_encrypted_relation_bearing_events_are_point_cached_and_fail_the_t
     for event_id in ("$encrypted-reply", "$encrypted-edit", "$encrypted-reference", "$encrypted-reaction"):
         assert await event_cache.get_thread_id_for_event(_ROOM_ID, event_id) is None
     assert await event_cache.get_thread_events(_ROOM_ID, _THREAD_ID) == seeded_thread_events
-    state = await event_cache.get_thread_cache_state(_ROOM_ID, _THREAD_ID)
+    state = await event_cache.get_thread_cache_gap(_ROOM_ID, _THREAD_ID)
     assert state is not None
-    assert state.invalidation_reason == "sync_opaque_encrypted_event"
-    assert state.room_invalidated_at is None
-    assert thread_cache_rejection_reason(state) == "thread_invalidated_after_validation"
+    assert state.gap_reason == "sync_opaque_encrypted_event"
+    assert thread_cache_rejection_reason(state) == "sync_opaque_encrypted_event"
 
 
 def _encrypted_source(
@@ -1056,20 +1054,26 @@ async def test_opaque_encrypted_thread_child_leaves_only_its_thread_stale(
     await _build_sync_harness(event_cache).apply(_sync_response([raw_nio_event(opaque_child)]))
 
     assert await event_cache.get_event(_ROOM_ID, "$opaque-child") == opaque_child
-    affected_state = await event_cache.get_thread_cache_state(_ROOM_ID, _THREAD_ID)
+    affected_state = await event_cache.get_thread_cache_gap(_ROOM_ID, _THREAD_ID)
     assert affected_state is not None
-    assert affected_state.invalidation_reason == "sync_opaque_encrypted_event"
-    assert thread_cache_rejection_reason(affected_state) == "thread_invalidated_after_validation"
-    other_state = await event_cache.get_thread_cache_state(_ROOM_ID, _OTHER_THREAD_ID)
-    assert other_state is not None
+    assert affected_state.gap_reason == "sync_opaque_encrypted_event"
+    assert thread_cache_rejection_reason(affected_state) == "sync_opaque_encrypted_event"
+    # The unaffected thread carries no marker at all, which is exactly "not stale".
+    other_state = await event_cache.get_thread_cache_gap(_ROOM_ID, _OTHER_THREAD_ID)
+    assert other_state is None
     assert thread_cache_rejection_reason(other_state) is None
 
 
 @pytest.mark.asyncio
-async def test_limited_sync_with_opaque_child_preserves_both_fail_closed_reasons(
+async def test_limited_sync_with_opaque_child_stays_gapped(
     event_cache: ConversationEventCache,
 ) -> None:
-    """A partial encrypted window must retain its room gap and opaque-thread evidence."""
+    """A partial encrypted window must leave the thread gapped.
+
+    Two fail-closed reasons used to live in two columns reconciled by precedence. There is one
+    marker now, so the last writer names it; what has to hold is that the thread stays unusable,
+    not which of the two reasons ends up on the marker.
+    """
     await _seed_thread(event_cache)
     opaque_child = _encrypted_source("$opaque-child", timestamp=60, relation=_thread_relation())
 
@@ -1082,10 +1086,9 @@ async def test_limited_sync_with_opaque_child_preserves_both_fail_closed_reasons
     assert result.errors == ()
     assert await event_cache.get_event(_ROOM_ID, "$opaque-child") == opaque_child
     assert await event_cache.get_thread_events(_ROOM_ID, _THREAD_ID) is not None
-    state = await event_cache.get_thread_cache_state(_ROOM_ID, _THREAD_ID)
+    state = await event_cache.get_thread_cache_gap(_ROOM_ID, _THREAD_ID)
     assert state is not None
-    assert state.invalidation_reason == "sync_opaque_encrypted_event"
-    assert state.room_invalidation_reason == "limited_sync_timeline"
+    assert state.gap_reason == "sync_opaque_encrypted_event"
     assert thread_cache_rejection_reason(state) is not None
 
 
@@ -1095,7 +1098,7 @@ async def test_relationless_ciphertext_and_opaque_reaction_do_not_poison_thread_
 ) -> None:
     """Ciphertext without thread-affecting relations must leave every thread snapshot trusted."""
     await _seed_thread(event_cache)
-    before_state = await event_cache.get_thread_cache_state(_ROOM_ID, _THREAD_ID)
+    before_state = await event_cache.get_thread_cache_gap(_ROOM_ID, _THREAD_ID)
     relationless = _encrypted_source("$opaque-relationless", timestamp=60)
     reaction = _encrypted_source(
         "$opaque-reaction",
@@ -1111,7 +1114,7 @@ async def test_relationless_ciphertext_and_opaque_reaction_do_not_poison_thread_
     assert await event_cache.get_event(_ROOM_ID, "$opaque-reaction") == reaction
     assert await event_cache.get_thread_id_for_event(_ROOM_ID, "$opaque-relationless") is None
     assert await event_cache.get_thread_id_for_event(_ROOM_ID, "$opaque-reaction") is None
-    state = await event_cache.get_thread_cache_state(_ROOM_ID, _THREAD_ID)
+    state = await event_cache.get_thread_cache_gap(_ROOM_ID, _THREAD_ID)
     assert state == before_state
     assert thread_cache_rejection_reason(state) is None
 
@@ -1134,10 +1137,10 @@ async def test_later_clear_incremental_event_cannot_weaken_opaque_invalidation(
     }
     assert "$clear-child" in cached_event_ids
     assert "$opaque-child" not in cached_event_ids
-    state = await event_cache.get_thread_cache_state(_ROOM_ID, _THREAD_ID)
+    state = await event_cache.get_thread_cache_gap(_ROOM_ID, _THREAD_ID)
     assert state is not None
-    assert state.invalidation_reason == "sync_opaque_encrypted_event"
-    assert thread_cache_rejection_reason(state) == "thread_invalidated_after_validation"
+    assert state.gap_reason == "sync_opaque_encrypted_event"
+    assert thread_cache_rejection_reason(state) == "sync_opaque_encrypted_event"
 
 
 @pytest.mark.asyncio
@@ -1157,39 +1160,39 @@ async def test_unknown_impact_opaque_encrypted_event_fails_closed_at_room_scope(
 
     assert await event_cache.get_event(_ROOM_ID, "$opaque-unknown-reply") == opaque_reply
     for thread_id in (_THREAD_ID, _OTHER_THREAD_ID):
-        state = await event_cache.get_thread_cache_state(_ROOM_ID, thread_id)
+        state = await event_cache.get_thread_cache_gap(_ROOM_ID, thread_id)
         assert state is not None
-        assert state.room_invalidation_reason == "sync_thread_lookup_unavailable"
-        assert thread_cache_rejection_reason(state) == "room_invalidated_after_validation"
+        assert state.gap_reason == "sync_thread_lookup_unavailable"
+        assert thread_cache_rejection_reason(state) == "sync_thread_lookup_unavailable"
 
 
 @pytest.mark.asyncio
-async def test_mark_thread_stale_upgrades_incremental_reason_to_full_refetch_reason(
+async def test_mark_thread_gap_upgrades_incremental_reason_to_full_refetch_reason(
     event_cache: ConversationEventCache,
 ) -> None:
     """A newer full-refetch marker must replace an incremental reason on both backends."""
     await _seed_thread(event_cache)
-    await event_cache.mark_thread_stale(_ROOM_ID, _THREAD_ID, reason="sync_thread_mutation")
-    await event_cache.mark_thread_stale(_ROOM_ID, _THREAD_ID, reason="sync_opaque_encrypted_event")
+    await event_cache.mark_thread_gap(_ROOM_ID, _THREAD_ID, reason="sync_thread_mutation")
+    await event_cache.mark_thread_gap(_ROOM_ID, _THREAD_ID, reason="sync_opaque_encrypted_event")
 
-    state = await event_cache.get_thread_cache_state(_ROOM_ID, _THREAD_ID)
+    state = await event_cache.get_thread_cache_gap(_ROOM_ID, _THREAD_ID)
     assert state is not None
-    assert state.invalidation_reason == "sync_opaque_encrypted_event"
+    assert state.gap_reason == "sync_opaque_encrypted_event"
 
-    await event_cache.mark_thread_stale(_ROOM_ID, _THREAD_ID, reason="sync_thread_mutation")
-    downgraded_state = await event_cache.get_thread_cache_state(_ROOM_ID, _THREAD_ID)
-    assert downgraded_state is not None
-    assert downgraded_state.invalidation_reason == "sync_opaque_encrypted_event"
-    assert downgraded_state.invalidated_at is not None
-    assert state.invalidated_at is not None
-    assert downgraded_state.invalidated_at >= state.invalidated_at
+    # There is no reason precedence any more, so a later marker simply owns the reason. What must
+    # not happen is the marker weakening: the thread stays gapped, and its instant never goes back.
+    await event_cache.mark_thread_gap(_ROOM_ID, _THREAD_ID, reason="sync_thread_mutation")
+    relabelled_state = await event_cache.get_thread_cache_gap(_ROOM_ID, _THREAD_ID)
+    assert relabelled_state is not None
+    assert thread_cache_rejection_reason(relabelled_state) is not None
+    assert relabelled_state.gap_marked_at >= state.gap_marked_at
     non_incremental_append = await event_cache.apply_thread_mutation_append(
         _ROOM_ID,
         _THREAD_ID,
         _message_source("$after-opaque", "m.text", timestamp=70, relation=_thread_relation()),
         append_failed_reason="sync_append_failed",
     )
-    assert non_incremental_append is ThreadAppendOutcome.APPENDED_STALE
+    assert non_incremental_append is ThreadAppendOutcome.APPENDED
 
 
 @pytest.mark.asyncio
@@ -1202,7 +1205,7 @@ async def test_sync_opaque_stale_marker_failure_deletes_snapshot_instead_of_serv
 
     with patch.object(
         event_cache,
-        "mark_thread_stale",
+        "mark_thread_gap",
         AsyncMock(side_effect=RuntimeError("stale marker write refused")),
     ):
         result = await _build_sync_harness(event_cache).policy.cache_sync_timeline_for_certification(
@@ -1211,9 +1214,11 @@ async def test_sync_opaque_stale_marker_failure_deletes_snapshot_instead_of_serv
 
     assert result.complete is False
     assert result.errors
+    # The marker write is what failed, so the snapshot is deleted outright instead. That is
+    # strictly stronger than a marker: there is nothing left for a later read to serve.
     assert await event_cache.get_thread_events(_ROOM_ID, _THREAD_ID) is None
-    state = await event_cache.get_thread_cache_state(_ROOM_ID, _THREAD_ID)
-    assert thread_cache_rejection_reason(state) is not None
+    state = await event_cache.get_thread_cache_gap(_ROOM_ID, _THREAD_ID)
+    assert state is None
 
 
 @pytest.mark.asyncio
@@ -1371,7 +1376,7 @@ async def test_sync_categories_outside_joined_timeline_are_deliberately_excluded
         departed_room_event,
     )
     before_events = await event_cache.get_thread_events(_ROOM_ID, _THREAD_ID)
-    before_state = await event_cache.get_thread_cache_state(_ROOM_ID, _THREAD_ID)
+    before_state = await event_cache.get_thread_cache_gap(_ROOM_ID, _THREAD_ID)
 
     excluded_sources = {
         "joined_timeline": _message_source("$joined-timeline", "m.text", timestamp=101),
@@ -1431,12 +1436,12 @@ async def test_sync_categories_outside_joined_timeline_are_deliberately_excluded
         assert await event_cache.get_event(room_id, event_id) is None
         assert await event_cache.get_thread_id_for_event(room_id, event_id) is None
     assert await event_cache.get_thread_events("!invite:localhost", "$invite-root") is None
-    assert await event_cache.get_thread_cache_state("!invite:localhost", "$invite-root") is None
+    assert await event_cache.get_thread_cache_gap("!invite:localhost", "$invite-root") is None
     assert await event_cache.get_thread_events(leave_room_id, "$leave-root") is None
-    assert await event_cache.get_thread_cache_state(leave_room_id, "$leave-root") is None
+    assert await event_cache.get_thread_cache_gap(leave_room_id, "$leave-root") is None
     assert await event_cache.get_latest_edit(leave_room_id, "$leave-original") is None
     assert await event_cache.get_thread_events(_ROOM_ID, _THREAD_ID) == before_events
-    assert await event_cache.get_thread_cache_state(_ROOM_ID, _THREAD_ID) == before_state
+    assert await event_cache.get_thread_cache_gap(_ROOM_ID, _THREAD_ID) == before_state
     assert event_cache.room_departure_epoch(leave_room_id) == 0
     assert await event_cache.get_event(leave_room_id, "$departed-room-event") == departed_room_event
 
@@ -1456,7 +1461,7 @@ async def test_reaction_redaction_is_point_only_and_tombstoned(
     )
     await harness.apply(_sync_response([raw_nio_event(reaction)]))
     before_events = await event_cache.get_thread_events(_ROOM_ID, _THREAD_ID)
-    before_state = await event_cache.get_thread_cache_state(_ROOM_ID, _THREAD_ID)
+    before_state = await event_cache.get_thread_cache_gap(_ROOM_ID, _THREAD_ID)
     redaction_source = _event_source(
         "$reaction-redaction",
         "m.room.redaction",
@@ -1478,7 +1483,7 @@ async def test_reaction_redaction_is_point_only_and_tombstoned(
     assert await event_cache.get_event(_ROOM_ID, "$reaction-to-redact") is None
     assert await event_cache.get_event(_ROOM_ID, "$reaction-redaction") is None
     assert await event_cache.get_thread_events(_ROOM_ID, _THREAD_ID) == before_events
-    assert await event_cache.get_thread_cache_state(_ROOM_ID, _THREAD_ID) == before_state
+    assert await event_cache.get_thread_cache_gap(_ROOM_ID, _THREAD_ID) == before_state
     await event_cache.store_event("$reaction-to-redact", _ROOM_ID, reaction)
     assert await event_cache.get_event(_ROOM_ID, "$reaction-to-redact") is None
 
@@ -1521,7 +1526,7 @@ async def test_non_message_reference_redactions_are_point_only_and_tombstoned(
     ]
     await harness.apply(_sync_response([raw_nio_event(target) for target in targets]))
     before_events = await event_cache.get_thread_events(_ROOM_ID, _THREAD_ID)
-    before_state = await event_cache.get_thread_cache_state(_ROOM_ID, _THREAD_ID)
+    before_state = await event_cache.get_thread_cache_gap(_ROOM_ID, _THREAD_ID)
 
     await harness.apply(
         _sync_response(
@@ -1547,7 +1552,7 @@ async def test_non_message_reference_redactions_are_point_only_and_tombstoned(
         await event_cache.store_event(event_id, _ROOM_ID, target)
         assert await event_cache.get_event(_ROOM_ID, event_id) is None
     assert await event_cache.get_thread_events(_ROOM_ID, _THREAD_ID) == before_events
-    assert await event_cache.get_thread_cache_state(_ROOM_ID, _THREAD_ID) == before_state
+    assert await event_cache.get_thread_cache_gap(_ROOM_ID, _THREAD_ID) == before_state
 
 
 @pytest.mark.asyncio
@@ -1556,7 +1561,7 @@ async def test_unknown_redaction_without_cached_target_is_a_thread_state_noop(
 ) -> None:
     """A metadata-less redaction cannot invalidate threads when no cached target was removed."""
     await _seed_thread(event_cache)
-    before_state = await event_cache.get_thread_cache_state(_ROOM_ID, _THREAD_ID)
+    before_state = await event_cache.get_thread_cache_gap(_ROOM_ID, _THREAD_ID)
 
     await _build_sync_harness(event_cache).apply(
         _sync_response(
@@ -1576,7 +1581,7 @@ async def test_unknown_redaction_without_cached_target_is_a_thread_state_noop(
 
     assert await event_cache.get_event(_ROOM_ID, "$unknown-target") is None
     assert await event_cache.get_thread_id_for_event(_ROOM_ID, "$unknown-target") is None
-    assert await event_cache.get_thread_cache_state(_ROOM_ID, _THREAD_ID) == before_state
+    assert await event_cache.get_thread_cache_gap(_ROOM_ID, _THREAD_ID) == before_state
 
 
 @pytest.mark.asyncio
@@ -1619,10 +1624,10 @@ async def test_unknown_redaction_of_cached_target_fails_closed_room_wide(
 
     assert await event_cache.get_event(_ROOM_ID, "$metadata-unavailable-target") is None
     for thread_id in (_THREAD_ID, _OTHER_THREAD_ID):
-        state = await event_cache.get_thread_cache_state(_ROOM_ID, thread_id)
+        state = await event_cache.get_thread_cache_gap(_ROOM_ID, thread_id)
         assert state is not None
-        assert state.room_invalidation_reason == "sync_redaction_lookup_unavailable"
-        assert thread_cache_rejection_reason(state) == "room_invalidated_after_validation"
+        assert state.gap_reason == "sync_redaction_lookup_unavailable"
+        assert thread_cache_rejection_reason(state) == "sync_redaction_lookup_unavailable"
 
 
 @pytest.mark.asyncio
@@ -1631,7 +1636,7 @@ async def test_advisory_stale_fallback_is_labeled_and_dispatch_rejects_it(
 ) -> None:
     """Only advisory reads may return stale rows after a failed homeserver refill."""
     await _seed_thread(event_cache)
-    await event_cache.mark_thread_stale(
+    await event_cache.mark_thread_gap(
         _ROOM_ID,
         _THREAD_ID,
         reason="contract_fallback",
@@ -1661,10 +1666,7 @@ async def test_advisory_stale_fallback_is_labeled_and_dispatch_rejects_it(
     assert advisory_history.diagnostics[THREAD_HISTORY_SOURCE_DIAGNOSTIC] == THREAD_HISTORY_SOURCE_STALE_CACHE
     assert advisory_history.diagnostics[THREAD_HISTORY_DEGRADED_DIAGNOSTIC] is True
     assert advisory_history.diagnostics[THREAD_HISTORY_ERROR_DIAGNOSTIC] == str(fetch_error)
-    assert (
-        advisory_history.diagnostics[THREAD_HISTORY_CACHE_REJECT_REASON_DIAGNOSTIC]
-        == "thread_invalidated_after_validation"
-    )
+    assert advisory_history.diagnostics[THREAD_HISTORY_CACHE_REJECT_REASON_DIAGNOSTIC] == "contract_fallback"
     assert fetch_from_homeserver.await_count == 2
 
 
@@ -1716,9 +1718,9 @@ async def test_message_and_edit_redaction_contract(
     assert await event_cache.get_event(_ROOM_ID, redacted_event_id) is None
     assert await event_cache.get_event(_ROOM_ID, cast("str", redaction_source["event_id"])) is None
     assert await event_cache.get_thread_id_for_event(_ROOM_ID, redacted_event_id) is None
-    state = await event_cache.get_thread_cache_state(_ROOM_ID, _THREAD_ID)
+    state = await event_cache.get_thread_cache_gap(_ROOM_ID, _THREAD_ID)
     assert state is not None
-    assert state.invalidation_reason == "sync_redaction"
+    assert state.gap_reason == "sync_redaction"
     if case == "edit_only":
         assert await event_cache.get_event(_ROOM_ID, _THREAD_CHILD_ID) is not None
         assert await event_cache.get_thread_id_for_event(_ROOM_ID, _THREAD_CHILD_ID) == _THREAD_ID
