@@ -13,7 +13,7 @@ from dataclasses import dataclass, replace
 from itertools import count
 from pathlib import Path
 from threading import Event, Lock, get_ident
-from typing import TYPE_CHECKING, ClassVar
+from typing import TYPE_CHECKING, ClassVar, cast
 from unittest.mock import MagicMock
 
 import httpx
@@ -101,7 +101,7 @@ class _Collection:
             ids=[str(item["id"]) for item in selected],
             metadatas=[dict(item["metadata"]) for item in selected],
             documents=[str(item["content"]) for item in selected],
-            embeddings=[list(item["embedding"]) for item in selected],  # type: ignore[arg-type]
+            embeddings=[list(cast("list[float]", item["embedding"])) for item in selected],
             include=include,
         )
 
