@@ -19,7 +19,7 @@ from agno.knowledge.reader import ReaderFactory
 from agno.knowledge.reader.markdown_reader import MarkdownReader
 from agno.knowledge.reader.text_reader import TextReader
 from agno.vectordb.chroma import ChromaDb
-from chromadb.errors import ChromaError, NotFoundError
+from chromadb.errors import InternalError, NotFoundError
 
 from mindroom.chunking import SafeFixedSizeChunking
 from mindroom.constants import (
@@ -352,7 +352,9 @@ def _paths_with_vectors(collection: Collection, relative_paths: Sequence[str]) -
         # query gets, so descending would only cost log2(batch) + 1 doomed
         # queries before raising exactly the same error from the first leaf.
         raise
-    except ChromaError:
+    except InternalError as error:
+        if "too many SQL variables" not in str(error):
+            raise
         # Splitting stays correct but multiplies the queries, and how far it
         # degrades depends on chunk counts nothing here can see. Without a
         # trace, a base whose files outgrew the ceiling just gets quietly

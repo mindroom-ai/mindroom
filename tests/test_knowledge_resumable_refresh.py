@@ -3056,6 +3056,30 @@ def test_vector_verification_does_not_split_when_the_collection_is_gone(tmp_path
     assert _FakeVectorDb.get_calls == 1
 
 
+def test_vector_verification_does_not_split_unrelated_internal_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Only SQLite's bind-variable failure may trigger recursive splitting."""
+    _, vector_db = _verification_manager(tmp_path)
+    collection = vector_db.client.get_collection(vector_db.collection_name)
+    paths = [f"doc{index:02d}.md" for index in range(8)]
+    calls = 0
+
+    def refuse_query(**_: object) -> dict[str, object]:
+        nonlocal calls
+        calls += 1
+        message = "database connection unexpectedly closed"
+        raise InternalError(message)
+
+    monkeypatch.setattr(collection, "get", refuse_query)
+
+    with pytest.raises(InternalError, match="database connection unexpectedly closed"):
+        knowledge_manager_module._paths_with_vectors(collection, paths)
+
+    assert calls == 1
+
+
 def test_vector_verification_records_that_it_had_to_split(tmp_path: Path) -> None:
     """A store refusing batches must leave a trace, not degrade silently.
 
