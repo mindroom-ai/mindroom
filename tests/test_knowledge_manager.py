@@ -66,10 +66,10 @@ from mindroom.knowledge.utils import KnowledgeAvailabilityDetail
 from mindroom.knowledge.watch import KnowledgeSourceWatcher
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
-from tests.knowledge_test_support import metadata_matches
+from tests.knowledge_test_support import chroma_get_result, metadata_matches
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Coroutine, Iterable, Iterator
+    from collections.abc import AsyncIterator, Coroutine, Iterable, Iterator, Sequence
     from types import ModuleType
 
     from mindroom.constants import RuntimePaths
@@ -82,20 +82,22 @@ class _Collection:
     def get(
         self,
         *,
+        include: Sequence[str],
         limit: int | None = None,
         offset: int = 0,
-        include: list[str] | None = None,
         where: dict[str, object] | None = None,
     ) -> dict[str, object]:
-        _ = include
         with _VectorDb.lock:
             selected_all = list(_VectorDb.collections.get(self._name, []))
         if where:
             key, condition = next(iter(where.items()))
             selected_all = [item for item in selected_all if metadata_matches(item["metadata"], key, condition)]
         selected = selected_all[offset:] if limit is None else selected_all[offset : offset + limit]
-        ids = [str(index) for index in range(offset, offset + len(selected))]
-        return {"ids": ids, "metadatas": [dict(item["metadata"]) for item in selected]}
+        return chroma_get_result(
+            ids=[str(index) for index in range(offset, offset + len(selected))],
+            metadatas=[dict(item["metadata"]) for item in selected],
+            include=include,
+        )
 
     def delete(self, *, where: dict[str, object]) -> None:
         key, condition = next(iter(where.items()))

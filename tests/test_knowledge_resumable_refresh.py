@@ -60,7 +60,7 @@ from mindroom.knowledge.registry import (
 )
 from mindroom.knowledge.status import get_knowledge_index_status
 from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
-from tests.knowledge_test_support import metadata_matches
+from tests.knowledge_test_support import chroma_get_result, metadata_matches
 
 if TYPE_CHECKING:
     from collections.abc import Iterator, Sequence
@@ -95,9 +95,9 @@ class _FakeCollection:
     def get(
         self,
         *,
+        include: Sequence[str],
         limit: int | None = None,
         offset: int = 0,
-        include: list[str] | None = None,
         where: dict[str, object] | None = None,
     ) -> dict[str, object]:
         _FakeVectorDb.get_calls += 1
@@ -110,16 +110,11 @@ class _FakeCollection:
             records = [record for record in records if metadata_matches(record.metadata, key, condition)]
         selected = records[offset:] if limit is None else records[offset : offset + limit]
         _FakeVectorDb.enforce_row_ceiling(len(selected))
-        # Chroma omits whatever was not requested: ``include=[]`` returns
-        # ``metadatas: None`` while still returning ids. That asymmetry is why
-        # reading ids is the only safe existence check, so a fake that handed
-        # back metadatas regardless would let a probe reading them pass here
-        # and report "no vectors" for every file in production.
-        requested = include or []
-        return {
-            "ids": [str(index) for index in range(len(selected))],
-            "metadatas": ([dict(record.metadata) for record in selected] if "metadatas" in requested else None),
-        }
+        return chroma_get_result(
+            ids=[str(index) for index in range(len(selected))],
+            metadatas=[dict(record.metadata) for record in selected],
+            include=include,
+        )
 
     def delete(self, *, where: dict[str, object]) -> None:
         key, condition = next(iter(where.items()))
@@ -3050,7 +3045,9 @@ def test_vector_verification_does_not_split_when_the_collection_is_gone(tmp_path
     """
     manager, vector_db = _verification_manager(tmp_path)
     paths = [f"doc{index:02d}.md" for index in range(8)]
-    _seed_chunked_paths(vector_db.collection_name, paths, chunks_per_path=1)
+    # No rows are seeded: every ``get`` raises before reading the store, so
+    # seeding would only suggest the contents mattered. ``create()`` in the
+    # helper is what registers the collection for ``get_collection``.
     _FakeVectorDb.vanished_on_get = {vector_db.collection_name}
 
     with pytest.raises(NotFoundError):

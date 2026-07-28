@@ -336,7 +336,7 @@ def _paths_with_vectors(collection: Collection, relative_paths: Sequence[str]) -
     so it converges, and a store that can answer the batch pays nothing.
 
     A single path is the floor, where splitting can no longer help, so it is
-    asked one row at a time instead, which stays under any ceiling however many
+    asked for a single row instead, which stays under any ceiling however many
     chunks the file has. That floor is what makes the recursion total, and it
     is also where a failure that was never about query size finally surfaces.
     """
