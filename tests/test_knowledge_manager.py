@@ -7934,8 +7934,13 @@ async def test_git_query_and_fragment_tokens_stay_out_of_persistent_remote_and_m
 
 
 @pytest.mark.asyncio
-async def test_git_pull_that_changes_one_file_only_reindexes_that_file(tmp_path: Path) -> None:
+async def test_git_pull_that_changes_one_file_only_reindexes_that_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """A one-file commit must cost one file's indexing, not the whole checkout's."""
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", os.devnull)
+    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
     remote_work = tmp_path / "remote-work"
     remote_work.mkdir()
 
