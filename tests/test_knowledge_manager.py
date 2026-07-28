@@ -1531,6 +1531,60 @@ def test_tracked_path_listing_rejects_symlinked_directory_escape(tmp_path: Path)
     assert knowledge_files_from_relative_paths(config, "docs", docs_path, ["linked/secret.md"]) == []
 
 
+def test_bases_endpoint_counts_files_without_building_the_file_listing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The base list reports a count, so it must not build the whole file payload.
+
+    ``_list_file_info`` stats every managed file a second time (the listing itself
+    already checked each one) and materializes a dict per file. Both scale with the
+    corpus on every request, and ``/bases`` uses none of it beyond the count;
+    ``/bases/{base_id}/files`` still serves the full listing.
+    """
+    docs_path = tmp_path / "docs"
+    docs_path.mkdir()
+    for index in range(3):
+        (docs_path / f"doc{index}.md").write_text("body", encoding="utf-8")
+    config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
+    runtime_paths = runtime_paths_for(config)
+
+    async def _unexpected_list_file_info(*_args: object, **_kwargs: object) -> object:
+        msg = "the base list must not build the full file listing"
+        raise AssertionError(msg)
+
+    main.initialize_api_app(main.app, runtime_paths)
+    _publish_api_config(main.app, config)
+    monkeypatch.setattr(knowledge_api, "_list_file_info", _unexpected_list_file_info)
+    response = TestClient(main.app).get("/api/knowledge/bases")
+
+    assert response.status_code == 200
+    entry = next(base for base in response.json()["bases"] if base["name"] == "docs")
+    assert entry["file_count"] == 3
+    assert entry["file_listing_degraded"] is False
+
+
+def test_base_files_endpoint_still_returns_sizes_and_timestamps(tmp_path: Path) -> None:
+    """The dedicated listing endpoint keeps the per-file detail the base list dropped."""
+    docs_path = tmp_path / "docs"
+    docs_path.mkdir()
+    (docs_path / "doc.md").write_text("body", encoding="utf-8")
+    config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
+    runtime_paths = runtime_paths_for(config)
+
+    main.initialize_api_app(main.app, runtime_paths)
+    _publish_api_config(main.app, config)
+    response = TestClient(main.app).get("/api/knowledge/bases/docs/files")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["file_count"] == 1
+    assert payload["total_size"] == len(b"body")
+    assert payload["files"][0]["path"] == "doc.md"
+    assert payload["files"][0]["size"] == len(b"body")
+    assert payload["files"][0]["modified"]
+
+
 def test_directory_guard_rejects_parent_traversal(tmp_path: Path) -> None:
     """The guard must reject "..", which pathlib's lexical ``relative_to`` lets through.
 

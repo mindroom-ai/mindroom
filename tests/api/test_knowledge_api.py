@@ -612,11 +612,11 @@ async def test_git_status_probe_does_not_block_event_loop(
         time.sleep(0.2)
         return False
 
-    async def _empty_file_info(*_args: object, **_kwargs: object) -> knowledge_api._FileListInfo:
-        return knowledge_api._FileListInfo(files=[], total_size=0)
+    async def _empty_file_count(*_args: object, **_kwargs: object) -> knowledge_api._FileCountInfo:
+        return knowledge_api._FileCountInfo(count=0)
 
     monkeypatch.setattr(knowledge_api, "git_checkout_present", _slow_git_checkout_present)
-    monkeypatch.setattr(knowledge_api, "_list_file_info", _empty_file_info)
+    monkeypatch.setattr(knowledge_api, "_count_managed_files", _empty_file_count)
 
     status_task = asyncio.create_task(
         knowledge_api.knowledge_status(
