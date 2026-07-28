@@ -585,56 +585,31 @@ async def _upsert_point_lookup_rows(
     Payload quality is monotonic per event ID, so a repeated ID inside one batch must keep the
     sequential outcome: ``ON CONFLICT DO UPDATE`` cannot touch the same row twice in a single
     statement, and collapsing the duplicates first would change which payload survives. A batch
-    holding a repeated ID therefore replays the same statement one event at a time, which is what
-    the row-at-a-time path always did.
+    holding a repeated ID therefore degrades to one statement per event, which is what the
+    row-at-a-time path always did.
     """
     event_ids = [event.event_id for event in serialized_events]
-    if len(set(event_ids)) == len(event_ids):
-        return await _upsert_point_lookup_batch(
-            db,
-            namespace=namespace,
-            room_id=room_id,
-            serialized_events=serialized_events,
-            cached_at=cached_at,
-        )
+    duplicate_free_groups = (
+        [serialized_events] if len(set(event_ids)) == len(event_ids) else [[event] for event in serialized_events]
+    )
     accepted_events: list[SerializedCachedEvent] = []
-    for event in serialized_events:
-        accepted_events.extend(
-            await _upsert_point_lookup_batch(
-                db,
-                namespace=namespace,
-                room_id=room_id,
-                serialized_events=[event],
-                cached_at=cached_at,
+    for group in duplicate_free_groups:
+        accepted_rows = await fetchall(
+            db,
+            _POINT_LOOKUP_UPSERT,
+            (
+                namespace,
+                room_id,
+                cached_at,
+                [event.event_id for event in group],
+                [event.origin_server_ts for event in group],
+                [event.event_json for event in group],
+                [event.sender for event in group],
             ),
         )
+        accepted_event_ids = {str(row[0]) for row in accepted_rows}
+        accepted_events.extend(event for event in group if event.event_id in accepted_event_ids)
     return accepted_events
-
-
-async def _upsert_point_lookup_batch(
-    db: AsyncConnection,
-    *,
-    namespace: str,
-    room_id: str,
-    serialized_events: list[SerializedCachedEvent],
-    cached_at: float,
-) -> list[SerializedCachedEvent]:
-    """Upsert one duplicate-free event set and return the payloads the store accepted."""
-    accepted_rows = await fetchall(
-        db,
-        _POINT_LOOKUP_UPSERT,
-        (
-            namespace,
-            room_id,
-            cached_at,
-            [event.event_id for event in serialized_events],
-            [event.origin_server_ts for event in serialized_events],
-            [event.event_json for event in serialized_events],
-            [event.sender for event in serialized_events],
-        ),
-    )
-    accepted_event_ids = {str(row[0]) for row in accepted_rows}
-    return [event for event in serialized_events if event.event_id in accepted_event_ids]
 
 
 async def write_lookup_index_rows(
