@@ -18,8 +18,13 @@ import pytest
 
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
-from mindroom.constants import SKIP_MENTIONS_KEY
+from mindroom.constants import (
+    PER_FIRE_THREAD_ROOT_KEY,
+    SKIP_MENTIONS_KEY,
+    SOURCE_KIND_KEY,
+)
 from mindroom.conversation_resolver import ConversationResolver, ConversationResolverDeps
+from mindroom.dispatch_source import SCHEDULED_SOURCE_KIND
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.logging_config import get_logger
 from mindroom.matrix.cache.thread_history_result import thread_history_result
@@ -118,6 +123,44 @@ def _room() -> nio.MatrixRoom:
     return nio.MatrixRoom(_ROOM_ID, "@mindroom_general:localhost")
 
 
+@pytest.mark.parametrize("invalidity", ["wrong-event-id", "malformed-encrypted"])
+@pytest.mark.asyncio
+async def test_point_event_source_rejects_invalid_relation_envelopes(
+    config: Config,
+    invalidity: str,
+) -> None:
+    """Point ancestry accepts only the exact requested event with a valid envelope."""
+    source: dict[str, Any] = {
+        "content": {
+            "body": "thread child",
+            "msgtype": "m.text",
+            "m.relates_to": {"rel_type": "m.thread", "event_id": _THREAD_ROOT},
+        },
+        "event_id": _PARENT,
+        "sender": _SENDER,
+        "origin_server_ts": 1,
+        "room_id": _ROOM_ID,
+        "type": "m.room.message",
+    }
+    if invalidity == "wrong-event-id":
+        source["event_id"] = "$different:localhost"
+    else:
+        source["type"] = "m.room.encrypted"
+        source["content"] = {
+            "m.relates_to": {"rel_type": "m.thread", "event_id": _THREAD_ROOT},
+        }
+    response = nio.RoomGetEventResponse.from_dict(source)
+    if invalidity == "malformed-encrypted":
+        assert isinstance(response.event, nio.BadEvent)
+    cache = make_conversation_cache_mock()
+    cache.get_event = AsyncMock(return_value=response)
+    resolver = _resolver(config, conversation_cache=cache)
+
+    event_source = await resolver._event_source_for_event_id(_ROOM_ID, _PARENT)
+
+    assert event_source is None
+
+
 @pytest.mark.asyncio
 async def test_threaded_event_resolves_explicit_thread_root(config: Config) -> None:
     """An m.thread relation is authoritative for thread identity and the delivery target."""
@@ -135,11 +178,27 @@ async def test_threaded_event_resolves_explicit_thread_root(config: Config) -> N
 
 
 @pytest.mark.asyncio
-async def test_reply_chain_falls_back_to_cached_thread_membership(config: Config) -> None:
-    """A plain reply inherits the thread of its parent through the cached thread index."""
+async def test_reply_chain_uses_parent_thread_relation(config: Config) -> None:
+    """A plain reply inherits the explicit thread relation carried by its parent."""
     cache = make_conversation_cache_mock()
     cache.get_thread_id_for_event = AsyncMock(
         side_effect=lambda _room_id, event_id: _THREAD_ROOT if event_id == _PARENT else None,
+    )
+    cache.get_event = AsyncMock(
+        return_value=nio.RoomGetEventResponse.from_dict(
+            {
+                "content": {
+                    "body": "thread parent",
+                    "msgtype": "m.text",
+                    "m.relates_to": {"rel_type": "m.thread", "event_id": _THREAD_ROOT},
+                },
+                "event_id": _PARENT,
+                "sender": _SENDER,
+                "origin_server_ts": 999_999,
+                "room_id": _ROOM_ID,
+                "type": "m.room.message",
+            },
+        ),
     )
     resolver = _resolver(config, conversation_cache=cache)
 
@@ -209,7 +268,7 @@ async def test_reply_to_candidate_retries_strictly_after_degraded_dispatch_proof
 
 @pytest.mark.asyncio
 async def test_reply_to_plain_message_demotes_to_room_level(config: Config) -> None:
-    """Replying to a childless event stays room-level with a room-level delivery target."""
+    """A root-capable rich reply starts its own response thread even when its parent is room-level."""
     resolver = _resolver(config)
 
     result = await resolver.extract_dispatch_context(_room(), _reply_event())
@@ -218,9 +277,8 @@ async def test_reply_to_plain_message_demotes_to_room_level(config: Config) -> N
     assert result.context.thread_id is None
     assert result.thread_context is not None
     assert result.thread_context.candidate_thread_root_id is None
-    # A reply event carries a relation, so per MSC3440 it cannot become a thread root itself.
     assert result.thread_context.stable_target.source_thread_id is None
-    assert result.thread_context.stable_target.resolved_thread_id is None
+    assert result.thread_context.stable_target.resolved_thread_id == _EVENT_ID
     assert result.thread_context.stable_target.reply_to_event_id == _EVENT_ID
 
 
@@ -309,6 +367,50 @@ def test_build_message_target_starts_thread_at_rootable_room_message(config: Con
 
     assert target.source_thread_id is None
     assert target.resolved_thread_id == _EVENT_ID
+
+
+def test_build_message_target_starts_thread_at_rootable_rich_reply(config: Config) -> None:
+    """A rich reply without a primary relation type may become a new thread root."""
+    resolver = _resolver(config)
+    event = _reply_event()
+
+    target = resolver.build_message_target(
+        room_id=_ROOM_ID,
+        thread_id=None,
+        reply_to_event_id=_EVENT_ID,
+        event_source=event.source,
+    )
+
+    assert target.source_thread_id is None
+    assert target.resolved_thread_id == _EVENT_ID
+
+
+def test_trusted_automation_rich_reply_starts_thread_in_room_mode(tmp_path: Path) -> None:
+    """A trusted automation rich reply retains its per-fire root in room mode."""
+    config = bind_runtime_paths(
+        Config(agents={"general": AgentConfig(display_name="General", thread_mode="room")}),
+        test_runtime_paths(tmp_path),
+    )
+    registry = entity_identity_registry(config, runtime_paths_for(config))
+    resolver = _resolver(config)
+    event = _reply_event()
+    event.source["sender"] = registry.current_id("general").full_id
+    event.source["content"].update(
+        {
+            SOURCE_KIND_KEY: SCHEDULED_SOURCE_KIND,
+            PER_FIRE_THREAD_ROOT_KEY: True,
+        },
+    )
+
+    target = resolver.build_message_target(
+        room_id=_ROOM_ID,
+        thread_id=None,
+        reply_to_event_id=_EVENT_ID,
+        event_source=event.source,
+    )
+
+    assert target.resolved_thread_id == _EVENT_ID
+    assert target.session_id == f"{_ROOM_ID}:{_EVENT_ID}"
 
 
 def test_build_message_target_room_mode_override_stays_room_level(config: Config) -> None:

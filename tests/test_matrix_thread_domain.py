@@ -53,6 +53,84 @@ def _message_event_info(content: dict[str, object]) -> EventInfo:
     )
 
 
+@pytest.mark.parametrize("target", [123, [], {}, "", "   "])
+@pytest.mark.parametrize(
+    ("relation_type", "target_field"),
+    [
+        ("m.thread", "thread_id"),
+        ("m.replace", "original_event_id"),
+        ("m.annotation", "reaction_target_event_id"),
+    ],
+)
+def test_event_info_rejects_malformed_primary_relation_targets(
+    target: object,
+    relation_type: str,
+    target_field: str,
+) -> None:
+    """Relation targets must be non-empty Matrix event-ID strings."""
+    event_info = _message_event_info(
+        {
+            "body": "relation",
+            "msgtype": "m.text",
+            "m.relates_to": {
+                "event_id": target,
+                "rel_type": relation_type,
+            },
+        },
+    )
+
+    assert event_info.relates_to_event_id is None
+    assert getattr(event_info, target_field) is None
+
+
+@pytest.mark.parametrize("target", [123, [], {}, "", "   "])
+def test_event_info_rejects_malformed_reply_targets(target: object) -> None:
+    """Reply targets must be non-empty Matrix event-ID strings."""
+    event_info = _message_event_info(
+        {
+            "body": "reply",
+            "msgtype": "m.text",
+            "m.relates_to": {"m.in_reply_to": {"event_id": target}},
+        },
+    )
+
+    assert event_info.reply_to_event_id is None
+    assert not event_info.is_reply
+
+
+@pytest.mark.asyncio
+async def test_resolve_event_thread_membership_rejects_self_thread_relation() -> None:
+    """An event cannot make itself a threaded child by targeting its own event ID."""
+    event_id = "$self:localhost"
+    event_info = EventInfo.from_event(
+        {
+            "event_id": event_id,
+            "type": "m.room.message",
+            "content": {
+                "body": "self",
+                "msgtype": "m.text",
+                "m.relates_to": {
+                    "event_id": event_id,
+                    "rel_type": "m.thread",
+                },
+            },
+        },
+    )
+
+    resolution = await resolve_event_thread_membership(
+        "!room:localhost",
+        event_info,
+        event_id=event_id,
+        access=map_backed_thread_membership_access(
+            event_infos={},
+            resolved_thread_ids={},
+        ),
+    )
+
+    assert event_info.thread_id is None
+    assert resolution == ThreadResolution.room_level()
+
+
 def test_page_event_info_counts_as_thread_child_proof_preserves_thread_semantics() -> None:
     """Page-local root proof should count only non-root children of the candidate thread."""
     thread_root_id = "$thread-root:localhost"
@@ -123,7 +201,7 @@ def test_page_event_info_counts_as_thread_child_proof_preserves_thread_semantics
         event_id="$reply:localhost",
         event_info=explicit_child,
     )
-    assert page_event_info_counts_as_thread_child_proof(
+    assert not page_event_info_counts_as_thread_child_proof(
         thread_root_id,
         event_id="$reply-edit:localhost",
         event_info=edit_child,
@@ -280,8 +358,7 @@ async def test_resolve_related_event_thread_membership_terminates_on_relation_cy
         return event_infos[event_id]
 
     async def prove_thread_root(_room_id: str, _thread_root_id: str) -> ThreadRootProof:
-        msg = "events with relations can never become thread roots"
-        raise AssertionError(msg)
+        return ThreadRootProof.not_a_thread_root()
 
     resolution = await resolve_related_event_thread_membership(
         "!room:localhost",

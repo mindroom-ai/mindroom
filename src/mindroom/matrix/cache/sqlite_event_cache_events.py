@@ -3,20 +3,30 @@
 from __future__ import annotations
 
 import json
+import time
 from typing import TYPE_CHECKING, Any
 
 from .event_cache_events import (
     CachedEventRow,
     SerializedCachedEvent,
     batch_redaction_candidate_ids,
+    bundled_replacement_event_ids,
     cache_rows_were_deleted,
+    cached_event_owns_mxc,
+    conflicting_cached_bundled_event_ids,
+    decode_cached_event,
     event_edit_rows,
     event_mxc_urls,
-    event_redaction_candidate_ids,
     event_thread_rows,
     filter_redacted_events,
     redaction_removal_event_ids,
+    room_scoped_cache_events,
+    safe_cached_event_transitions,
+    scrub_bundled_replacement_json,
+    select_latest_cached_edit,
     serialize_cacheable_events,
+    serialized_event_observation_ids,
+    validated_mxc_text_rows,
 )
 
 if TYPE_CHECKING:
@@ -24,7 +34,10 @@ if TYPE_CHECKING:
 
     import aiosqlite
 
+    from mindroom.matrix.replacements import ReplacementValidator
+
 _MXC_TEXT_REFERENCE_BATCH_SIZE = 400
+_MAX_SQLITE_IDENTITY_QUERY_IDS = 900
 _ROOM_CONTENT_TABLES = (
     "thread_events",
     "events",
@@ -137,18 +150,20 @@ async def load_latest_edit(
     *,
     principal_id: str,
     room_id: str,
-    original_event_id: str,
-    sender: str | None = None,
+    original: dict[str, Any],
+    validator: ReplacementValidator,
+    excluded_event_ids: Collection[str] = (),
 ) -> dict[str, Any] | None:
-    """Return the latest principal- and room-scoped edit."""
-    row = await _load_latest_edit_row(
+    """Return the Matrix-latest replacement across the cached edit index and bundled metadata."""
+    selection = await load_latest_edit_row(
         db,
         principal_id=principal_id,
         room_id=room_id,
-        original_event_id=original_event_id,
-        sender=sender,
+        original=original,
+        validator=validator,
+        excluded_event_ids=excluded_event_ids,
     )
-    return None if row is None else row.event
+    return None if selection is None else selection.event
 
 
 async def load_latest_edit_row(
@@ -156,32 +171,36 @@ async def load_latest_edit_row(
     *,
     principal_id: str,
     room_id: str,
-    original_event_id: str,
-    sender: str,
+    original: dict[str, Any],
+    validator: ReplacementValidator,
+    excluded_event_ids: Collection[str] = (),
 ) -> CachedEventRow | None:
-    """Return the latest edit and its write time within one ownership scope."""
-    return await _load_latest_edit_row(
+    """Select the latest edit across explicit rows and bundled metadata.
+
+    Every candidate is read rather than only the top one, because the newest is not always usable:
+    a replacement carrying no readable ``m.new_content`` has to lose to the next valid candidate
+    instead of blanking the message. The sender rule is applied to the payload by the selector,
+    which is also why this query does not filter on the inline ``sender`` column.
+    """
+    original_event_id = original.get("event_id")
+    bundled_event_ids = bundled_replacement_event_ids(original)
+    rejected_event_ids = frozenset(excluded_event_ids) | await _redacted_event_ids_for_candidates(
+        db,
+        principal_id,
+        room_id,
+        event_ids=bundled_event_ids,
+    )
+    rejected_event_ids |= await _load_conflicting_bundled_event_ids(
         db,
         principal_id=principal_id,
         room_id=room_id,
-        original_event_id=original_event_id,
-        sender=sender,
+        original=original,
     )
-
-
-async def _load_latest_edit_row(
-    db: aiosqlite.Connection,
-    *,
-    principal_id: str,
-    room_id: str,
-    original_event_id: str,
-    sender: str | None,
-) -> CachedEventRow | None:
-    sender_predicate = "" if sender is None else "AND events.sender = ?"
-    parameters = (principal_id, room_id, original_event_id, *((sender,) if sender is not None else ()))
     cursor = await db.execute(
-        f"""
-        SELECT events.event_json, events.cached_at
+        """
+        SELECT
+            events.event_json,
+            events.cached_at
         FROM event_edits
         JOIN events
           ON events.principal_id = event_edits.principal_id
@@ -190,17 +209,72 @@ async def _load_latest_edit_row(
         WHERE event_edits.principal_id = ?
           AND event_edits.room_id = ?
           AND event_edits.original_event_id = ?
-          {sender_predicate}
-        ORDER BY event_edits.origin_server_ts DESC, event_edits.edit_event_id DESC
-        LIMIT 1
-        """,  # noqa: S608
-        parameters,
+        ORDER BY event_edits.origin_server_ts DESC, event_edits.edit_event_id COLLATE BINARY DESC
+        """,
+        (principal_id, room_id, original_event_id),
     )
-    row = await cursor.fetchone()
-    await cursor.close()
-    if row is None:
-        return None
-    return CachedEventRow(event=json.loads(row[0]), cached_at=None if row[1] is None else float(row[1]))
+    try:
+        rows = [decode_cached_event(event_json=row[0], cached_at=row[1]) for row in await cursor.fetchall()]
+    finally:
+        await cursor.close()
+    return select_latest_cached_edit(
+        original,
+        rows,
+        room_id=room_id,
+        validator=validator,
+        excluded_event_ids=rejected_event_ids,
+    )
+
+
+async def _load_conflicting_bundled_event_ids(
+    db: aiosqlite.Connection,
+    *,
+    principal_id: str,
+    room_id: str,
+    original: dict[str, Any],
+) -> frozenset[str]:
+    """Return bundled IDs contradicted by cached immutable event observations."""
+    bundled_event_ids = sorted(bundled_replacement_event_ids(original))
+    if not bundled_event_ids:
+        return frozenset()
+    placeholders = ",".join("?" for _event_id in bundled_event_ids)
+    cursor = await db.execute(
+        f"""
+        SELECT event_json
+        FROM events
+        WHERE principal_id = ? AND room_id = ? AND (
+            event_id IN ({placeholders})
+            OR json_extract(
+                event_json,
+                '$.unsigned."m.relations"."m.replace".event_id'
+            ) IN ({placeholders})
+            OR json_extract(
+                event_json,
+                '$.unsigned."m.relations"."m.replace".latest_event.event_id'
+            ) IN ({placeholders})
+            OR json_extract(
+                event_json,
+                '$.unsigned."m.relations"."m.replace".event.event_id'
+            ) IN ({placeholders})
+        )
+        """,  # noqa: S608
+        (
+            principal_id,
+            room_id,
+            *bundled_event_ids,
+            *bundled_event_ids,
+            *bundled_event_ids,
+            *bundled_event_ids,
+        ),
+    )
+    try:
+        return conflicting_cached_bundled_event_ids(
+            original,
+            (decode_cached_event(event_json=row[0]).event for row in await cursor.fetchall()),
+            room_id=room_id,
+        )
+    finally:
+        await cursor.close()
 
 
 async def load_mxc_text(
@@ -212,28 +286,13 @@ async def load_mxc_text(
     mxc_url: str,
 ) -> str | None:
     """Return plaintext only through a surviving visible event reference."""
-    cursor = await db.execute(
-        """
-        SELECT plaintext.text_content
-        FROM mxc_text_cache AS plaintext
-        JOIN event_mxc_references AS reference
-          ON reference.principal_id = plaintext.principal_id
-         AND reference.room_id = plaintext.room_id
-         AND reference.mxc_url = plaintext.mxc_url
-        JOIN events
-          ON events.principal_id = reference.principal_id
-         AND events.room_id = reference.room_id
-         AND events.event_id = reference.event_id
-        WHERE plaintext.principal_id = ?
-          AND plaintext.room_id = ?
-          AND reference.event_id = ?
-          AND plaintext.mxc_url = ?
-        """,
-        (principal_id, room_id, event_id, mxc_url),
+    texts = await load_mxc_texts(
+        db,
+        principal_id=principal_id,
+        room_id=room_id,
+        references=((event_id, mxc_url),),
     )
-    row = await cursor.fetchone()
-    await cursor.close()
-    return None if row is None else str(row[0])
+    return texts.get((event_id, mxc_url))
 
 
 async def load_mxc_texts(
@@ -256,7 +315,7 @@ async def load_mxc_texts(
         )
         cursor = await db.execute(
             f"""
-            SELECT reference.event_id, plaintext.mxc_url, plaintext.text_content
+            SELECT reference.event_id, plaintext.mxc_url, plaintext.text_content, events.event_json
             FROM mxc_text_cache AS plaintext
             JOIN event_mxc_references AS reference
               ON reference.principal_id = plaintext.principal_id
@@ -276,9 +335,7 @@ async def load_mxc_texts(
             rows = await cursor.fetchall()
         finally:
             await cursor.close()
-        resolved.update(
-            {(str(event_id), str(mxc_url)): str(text_content) for event_id, mxc_url, text_content in rows},
-        )
+        resolved.update(validated_mxc_text_rows(rows, room_id=room_id))
     return resolved
 
 
@@ -293,7 +350,7 @@ async def _event_owns_mxc_text(
     """Return whether one visible event currently owns the room-scoped MXC."""
     cursor = await db.execute(
         """
-        SELECT 1
+        SELECT events.event_json
         FROM events
         JOIN event_mxc_references AS reference
           ON reference.principal_id = events.principal_id
@@ -308,7 +365,13 @@ async def _event_owns_mxc_text(
     )
     owns_plaintext = await cursor.fetchone()
     await cursor.close()
-    return owns_plaintext is not None
+    # A surviving reference row is not ownership on its own: it can outlive the payload that
+    # created it, so the stored event has to still name this MXC in its own room scope.
+    return owns_plaintext is not None and cached_event_owns_mxc(
+        event_json=owns_plaintext[0],
+        room_id=room_id,
+        mxc_url=mxc_url,
+    )
 
 
 async def persist_mxc_text(
@@ -428,31 +491,61 @@ async def redact_event_locked(
         event_ids=removed_event_ids,
     )
     await _record_redacted_events(db, principal_id, room_id, event_ids=removed_event_ids)
+    scrubbed_rows = await _scrub_bundled_references_to(
+        db,
+        principal_id=principal_id,
+        room_id=room_id,
+        event_id=event_id,
+    )
     return cache_rows_were_deleted(
         deleted_thread_rows,
         deleted_event_rows,
         deleted_edit_rows,
         deleted_thread_index_rows,
+        scrubbed_rows,
     )
 
 
-async def event_or_original_is_redacted(
+async def _scrub_bundled_references_to(
     db: aiosqlite.Connection,
+    *,
     principal_id: str,
     room_id: str,
-    *,
     event_id: str,
-    event: dict[str, Any],
-) -> bool:
-    """Return whether this event or its edited original has a tombstone."""
-    return bool(
-        await _redacted_event_ids_for_candidates(
-            db,
-            principal_id,
-            room_id,
-            event_ids=event_redaction_candidate_ids(event_id, event),
-        ),
+) -> int:
+    """Strip a redacted event from every cached bundled aggregation naming it.
+
+    Deleting the event's own row is not enough: another cached event can carry it inside
+    ``unsigned.m.relations.m.replace``, and a read that trusted that aggregation would serve the
+    redacted body back.
+    """
+    cursor = await db.execute(
+        """SELECT event_id, event_json FROM events
+        WHERE principal_id = ? AND room_id = ? AND ? IN (
+            json_extract(event_json, '$.unsigned."m.relations"."m.replace".event_id'),
+            json_extract(event_json, '$.unsigned."m.relations"."m.replace".latest_event.event_id'),
+            json_extract(event_json, '$.unsigned."m.relations"."m.replace".event.event_id')
+        )""",
+        (principal_id, room_id, event_id),
     )
+    bundled_rows = list(await cursor.fetchall())
+    await cursor.close()
+    write_sequences = await allocate_write_sequences(db, len(bundled_rows))
+    await db.executemany(
+        """UPDATE events SET event_json = ?, write_seq = ?
+        WHERE principal_id = ? AND room_id = ? AND event_id = ?""",
+        [
+            (
+                scrub_bundled_replacement_json(event_json, event_id),
+                write_sequence,
+                principal_id,
+                room_id,
+                cached_event_id,
+            )
+            for (cached_event_id, event_json), write_sequence in zip(bundled_rows, write_sequences, strict=True)
+        ],
+    )
+    return len(bundled_rows)
 
 
 async def filter_cacheable_events(
@@ -462,13 +555,14 @@ async def filter_cacheable_events(
     room_events: list[tuple[str, dict[str, Any]]],
 ) -> list[tuple[str, dict[str, Any]]]:
     """Drop late events covered by durable ownership-scoped tombstones."""
+    room_events = room_scoped_cache_events(room_events, room_id)
     redacted_event_ids = await _redacted_event_ids_for_candidates(
         db,
         principal_id,
         room_id,
-        event_ids=batch_redaction_candidate_ids(room_events),
+        event_ids=batch_redaction_candidate_ids(room_events, room_id),
     )
-    return filter_redacted_events(room_events, redacted_event_ids=redacted_event_ids)
+    return filter_redacted_events(room_events, room_id=room_id, redacted_event_ids=redacted_event_ids)
 
 
 async def _thread_ids_for_events(
@@ -491,6 +585,47 @@ async def _thread_ids_for_events(
     rows = await cursor.fetchall()
     await cursor.close()
     return {str(row[0]) for row in rows}
+
+
+async def _gap_mark_displaced_root_threads(
+    db: aiosqlite.Connection,
+    principal_id: str,
+    room_id: str,
+    *,
+    root_ids: set[str],
+) -> None:
+    """Gap-mark threads that just lost a member to a newly proven root of its own.
+
+    An event promoted to a thread root stops being a member of whatever thread previously held
+    it, so that thread's stored snapshot no longer describes its contents and has to be refetched.
+    The marker is monotonic, matching ``mark_thread_gap_locked``.
+    """
+    if not root_ids:
+        return
+    placeholders = ",".join("?" for _root_id in root_ids)
+    await db.execute(
+        f"""
+        INSERT INTO thread_cache_state(principal_id, room_id, thread_id, gap_marked_at, gap_reason)
+        SELECT ?, ?, thread_id, ?, 'event_thread_membership_changed'
+        FROM event_threads
+        WHERE principal_id = ? AND room_id = ? AND event_id IN ({placeholders})
+            AND event_id <> thread_id
+        ON CONFLICT(principal_id, room_id, thread_id) DO UPDATE SET
+            gap_marked_at = CASE
+                WHEN thread_cache_state.gap_marked_at IS NULL
+                    OR excluded.gap_marked_at >= thread_cache_state.gap_marked_at
+                    THEN excluded.gap_marked_at
+                ELSE thread_cache_state.gap_marked_at
+            END,
+            gap_reason = CASE
+                WHEN thread_cache_state.gap_marked_at IS NULL
+                    OR excluded.gap_marked_at >= thread_cache_state.gap_marked_at
+                    THEN excluded.gap_reason
+                ELSE thread_cache_state.gap_reason
+            END
+        """,  # noqa: S608
+        (principal_id, room_id, time.time(), principal_id, room_id, *sorted(root_ids)),
+    )
 
 
 async def _reconcile_thread_root_self_rows(
@@ -532,6 +667,66 @@ async def _reconcile_thread_root_self_rows(
         )
 
 
+async def _safe_event_transitions(
+    db: aiosqlite.Connection,
+    principal_id: str,
+    room_id: str,
+    *,
+    serialized_events: list[SerializedCachedEvent],
+) -> tuple[list[SerializedCachedEvent], list[SerializedCachedEvent]]:
+    """Return payload-writable and thread-indexable events after quarantining conflicts."""
+    existing: dict[str, dict[str, Any]] = {}
+    event_ids = serialized_event_observation_ids(serialized_events)
+    # One batch can name arbitrarily many events and each is bound four times below, so the
+    # lookup is chunked to stay under SQLITE_MAX_VARIABLE_NUMBER (999 before SQLite 3.32).
+    identity_chunk_size = (_MAX_SQLITE_IDENTITY_QUERY_IDS - 2) // 4
+    for start in range(0, len(event_ids), identity_chunk_size):
+        chunk = event_ids[start : start + identity_chunk_size]
+        placeholders = ",".join("?" for _event_id in chunk)
+        cursor = await db.execute(
+            f"""
+            SELECT event_id, event_json
+            FROM events
+            WHERE principal_id = ? AND room_id = ? AND (
+                event_id IN ({placeholders})
+                OR json_extract(
+                    event_json,
+                    '$.unsigned."m.relations"."m.replace".event_id'
+                ) IN ({placeholders})
+                OR json_extract(
+                    event_json,
+                    '$.unsigned."m.relations"."m.replace".latest_event.event_id'
+                ) IN ({placeholders})
+                OR json_extract(
+                    event_json,
+                    '$.unsigned."m.relations"."m.replace".event.event_id'
+                ) IN ({placeholders})
+            )
+            """,  # noqa: S608
+            (principal_id, room_id, *chunk, *chunk, *chunk, *chunk),
+        )
+        rows = await cursor.fetchall()
+        await cursor.close()
+        existing.update((str(row[0]), decode_cached_event(event_json=row[1]).event) for row in rows)
+    return await safe_cached_event_transitions(
+        existing,
+        serialized_events,
+        room_id=room_id,
+        quarantine=lambda event_id: redact_event_locked(
+            db,
+            principal_id=principal_id,
+            room_id=room_id,
+            event_id=event_id,
+        ),
+        load_tombstones=lambda event_ids: redacted_event_ids(
+            db,
+            principal_id,
+            room_id,
+            event_ids=event_ids,
+        ),
+    )
+
+
 async def write_lookup_index_rows(
     db: aiosqlite.Connection,
     *,
@@ -550,9 +745,15 @@ async def write_lookup_index_rows(
     """
     if not serialized_events:
         return
-    write_sequences = await allocate_write_sequences(db, len(serialized_events))
+    writable_events, indexable_events = await _safe_event_transitions(
+        db,
+        principal_id,
+        room_id,
+        serialized_events=serialized_events,
+    )
+    write_sequences = await allocate_write_sequences(db, len(writable_events))
     accepted_events: list[SerializedCachedEvent] = []
-    for event, write_sequence in zip(serialized_events, write_sequences, strict=True):
+    for event, write_sequence in zip(writable_events, write_sequences, strict=True):
         cursor = await db.execute(
             """
             INSERT INTO events(
@@ -613,7 +814,7 @@ async def write_lookup_index_rows(
     reference_rows = [
         (principal_id, room_id, event.event_id, mxc_url)
         for event in accepted_events
-        for mxc_url in event_mxc_urls(event.event)
+        for mxc_url in event_mxc_urls(event.event, room_id=room_id)
     ]
     if reference_rows:
         await db.executemany(
@@ -655,7 +856,7 @@ async def write_lookup_index_rows(
                 for row in edit_rows
             ],
         )
-    thread_index_events = serialized_events if thread_id is not None else accepted_events
+    thread_index_events = indexable_events if thread_id is not None else accepted_events
     thread_index_event_ids = [event.event_id for event in thread_index_events]
     previous_thread_ids = (
         await _thread_ids_for_events(
@@ -668,6 +869,12 @@ async def write_lookup_index_rows(
         else set()
     )
     thread_rows = event_thread_rows(room_id, thread_index_events, thread_id=thread_id)
+    await _gap_mark_displaced_root_threads(
+        db,
+        principal_id,
+        room_id,
+        root_ids={row.thread_id for row in thread_rows if row.event_id == row.thread_id},
+    )
     await db.executemany(
         """
         DELETE FROM event_threads
@@ -933,6 +1140,28 @@ async def _record_redacted_events(
         """,
         [(principal_id, room_id, event_id) for event_id in event_ids],
     )
+
+
+async def redacted_event_ids(
+    db: aiosqlite.Connection,
+    principal_id: str,
+    room_id: str,
+    *,
+    event_ids: frozenset[str],
+) -> frozenset[str]:
+    """Return the subset of candidate event IDs that are durably tombstoned.
+
+    This is the public entry point and takes an arbitrary candidate set, so the lookup is issued in
+    bounded chunks. A whole-thread caller asks about one candidate per raw row, and a long agent
+    thread holds one ``m.replace`` row per streaming edit, which overruns SQLITE_MAX_VARIABLE_NUMBER
+    (999 before SQLite 3.32) in a single ``IN (...)``.
+    """
+    sorted_event_ids = sorted(event_ids)
+    tombstoned: set[str] = set()
+    for start in range(0, len(sorted_event_ids), _MAX_SQLITE_IDENTITY_QUERY_IDS):
+        chunk = frozenset(sorted_event_ids[start : start + _MAX_SQLITE_IDENTITY_QUERY_IDS])
+        tombstoned |= await _redacted_event_ids_for_candidates(db, principal_id, room_id, event_ids=chunk)
+    return frozenset(tombstoned)
 
 
 async def _redacted_event_ids_for_candidates(

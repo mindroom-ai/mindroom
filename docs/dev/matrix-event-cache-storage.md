@@ -16,6 +16,22 @@ Current PostgreSQL writes set that legacy column to `NULL`, and current reads jo
 
 Thread snapshot replacement, invalidation, redaction, edit projection, and point lookup continue to update or read the same active event rows transactionally.
 
+Latest-edit lookup narrows candidates through the edit index, validates each joined payload through the shared decoder and owning replacement validator, and falls back past malformed newer rows.
+
+The public lookup combines the surviving explicit candidate with any bundled candidates on the original and orders them by `origin_server_ts` followed by lexicographically greatest event ID.
+
+SQLite uses `BINARY` event-ID ordering, and PostgreSQL uses bytewise `COLLATE "C"` ordering.
+
+PostgreSQL latest-edit lookup uses a server-side cursor so an invalid newer replacement can fall back to the next candidate without loading the full candidate set.
+
+Recent-event reads on both backends apply the requested limit in SQL and eagerly decode only those bounded rows.
+
+`decode_cached_event` only decodes stored JSON, while the shared write policy rejects explicit wrong-room payloads before either backend writes the normalized event and its derived indexes.
+
+Room-scoped tombstone lookups chunk their candidate IDs, because resolving one thread can present more candidates than SQLite accepts host parameters in a single statement.
+
+PostgreSQL schema version 3 retains `idx_mindroom_event_cache_event_edits_room_original_ts` as its single latest-edit narrowing index because explicit query-level `COLLATE "C"` owns the equal-timestamp tie-break.
+
 ## Startup maintenance
 
 Startup maintenance runs inside the same transaction as schema migration.

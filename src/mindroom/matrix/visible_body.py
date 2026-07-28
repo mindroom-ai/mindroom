@@ -91,37 +91,3 @@ def visible_body_from_event_source(
         sender_id=event_source.get("sender"),
         trusted_sender_ids=trusted_sender_ids,
     )
-
-
-def _visible_preview_content(event_source: object) -> tuple[object, dict[str, object] | None]:
-    """Return one sender/content pair suitable for bundled preview resolution."""
-    if not isinstance(event_source, dict):
-        return None, None
-    event_source_dict = cast("dict[str, object]", event_source)
-    sender_id = event_source_dict.get("sender")
-    content = event_source_dict.get("content")
-    if not isinstance(content, dict):
-        return sender_id, None
-    content_dict = cast("dict[str, object]", content)
-    return sender_id, visible_content_from_content(content_dict)
-
-
-def bundled_visible_body_preview(
-    event_source: object,
-    *,
-    trusted_sender_ids: Collection[str] = (),
-) -> str | None:
-    """Return one trusted visible body for a bundled replacement candidate."""
-    sender_id, visible_content = _visible_preview_content(event_source)
-    if not isinstance(visible_content, dict):
-        return None
-    body = visible_body_from_content(
-        visible_content,
-        "",
-        sender_id=sender_id,
-        trusted_sender_ids=trusted_sender_ids,
-    )
-    has_explicit_body = isinstance(visible_content.get("body"), str)
-    if has_explicit_body or has_trusted_stream_body_metadata(visible_content):
-        return body
-    return None

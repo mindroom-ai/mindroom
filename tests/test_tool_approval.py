@@ -14,7 +14,7 @@ import pytest
 from pydantic import ValidationError
 
 import mindroom.tool_approval as approval_module
-from mindroom.approval_events import parse_approval_datetime
+from mindroom.approval_events import is_original_approval_card, parse_approval_datetime
 from mindroom.approval_inbound import handle_tool_approval_action
 from mindroom.approval_manager import (
     _MAX_REMEMBERED_TERMINAL_CARD_IDS,
@@ -34,6 +34,8 @@ from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.entity_resolution import entity_identity_registry, mindroom_user_id
 from mindroom.logging_config import get_logger
+from mindroom.matrix.cache.sqlite_event_cache import SqliteEventCache
+from mindroom.matrix.replacements import ReplacementValidator, ordered_replacements
 from mindroom.orchestrator import _MultiAgentOrchestrator
 from mindroom.tool_approval import (
     MatrixApprovalAction,
@@ -50,10 +52,11 @@ from mindroom.tool_approval import (
 from mindroom.tools import approved_egress as _approved_egress  # noqa: F401 - registers the approval exemption
 from tests.approval_test_support import resolve_pending_approval as _resolve_pending_approval
 from tests.conftest import bind_runtime_paths, test_runtime_paths
+from tests.event_cache_test_support import get_latest_edit
 from tests.identity_helpers import persist_entity_accounts
 
 if TYPE_CHECKING:
-    from collections.abc import Generator
+    from collections.abc import Collection, Generator
     from pathlib import Path
 
 
@@ -67,25 +70,19 @@ class FakeEventCache:
     async def get_latest_edit(
         self,
         room_id: str,
-        original_event_id: str,
+        original: dict[str, Any],
         *,
-        sender: str | None = None,
+        validator: ReplacementValidator,
+        excluded_event_ids: Collection[str] = (),
     ) -> dict[str, Any] | None:
-        edits: list[dict[str, Any]] = []
-        for (event_room_id, _), event in self.events.items():
-            if event_room_id != room_id or (sender is not None and event.get("sender") != sender):
-                continue
-            content = event.get("content")
-            if not isinstance(content, dict):
-                continue
-            relates_to = content.get("m.relates_to")
-            if not isinstance(relates_to, dict):
-                continue
-            if relates_to.get("rel_type") == "m.replace" and relates_to.get("event_id") == original_event_id:
-                edits.append(event)
-        if not edits:
-            return None
-        return max(edits, key=lambda event: int(event.get("origin_server_ts", 0)))
+        edits = ordered_replacements(
+            original,
+            (event for (event_room_id, _), event in self.events.items() if event_room_id == room_id),
+            room_id=room_id,
+            validator=validator,
+            excluded_event_ids=excluded_event_ids,
+        )
+        return edits[0] if edits else None
 
     async def get_recent_room_events(
         self,
@@ -2099,6 +2096,8 @@ def test_pending_approval_ignores_malformed_edit_status() -> None:
 
     assert pending.latest_status({"content": None}) == "approved"
     assert pending.latest_status({"content": {"status": "invalid"}}) == "approved"
+    assert pending.latest_status({"content": {"status": "denied"}}) == "approved"
+    assert pending.latest_status({"content": {"status": "denied", "m.new_content": []}}) == "approved"
 
 
 @pytest.mark.asyncio
@@ -2162,6 +2161,35 @@ async def test_startup_discard_ignores_cached_terminal_edit_from_different_sende
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("invalid_scope", ["state", "wrong-room"])
+async def test_startup_discard_ignores_cached_terminal_edit_with_invalid_scope(
+    tmp_path: Path,
+    invalid_scope: str,
+) -> None:
+    """The approval-cache fake must match production room and timeline scope."""
+    cache = FakeEventCache()
+    card = _approval_card(sender="@mindroom_router:localhost")
+    invalid_edit = _approval_edit(card, status="approved")
+    if invalid_scope == "state":
+        invalid_edit["state_key"] = ""
+    else:
+        invalid_edit["room_id"] = "!other:localhost"
+    await cache.store_event("$approval", "!room:localhost", card)
+    await cache.store_event("$invalid-edit", "!room:localhost", invalid_edit)
+    editor = AsyncMock(return_value=True)
+    store = _ApprovalManager(
+        test_runtime_paths(tmp_path),
+        editor=editor,
+        event_cache=cache,
+        approval_room_ids=lambda: {"!room:localhost"},
+        transport_sender=lambda: "@mindroom_router:localhost",
+    )
+
+    assert await store.discard_pending_on_startup() == 1
+    assert editor.await_args.args[:2] == ("!room:localhost", "$approval")
+
+
+@pytest.mark.asyncio
 async def test_startup_discard_uses_trusted_cached_terminal_edit_despite_newer_untrusted_edit(
     tmp_path: Path,
 ) -> None:
@@ -2184,6 +2212,45 @@ async def test_startup_discard_uses_trusted_cached_terminal_edit_despite_newer_u
 
     assert await store.discard_pending_on_startup() == 0
     editor.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_startup_discard_uses_bundled_terminal_status_over_invalid_cached_edit(
+    tmp_path: Path,
+) -> None:
+    """The production cache must not let a forged row hide a bundled terminal approval."""
+    cache = SqliteEventCache(tmp_path / "event-cache.db")
+    await cache.initialize()
+    try:
+        card = _approval_card(sender="@mindroom_router:localhost")
+        bundled_edit = _approval_edit(card, event_id="$bundled-approved", status="approved")
+        card["unsigned"] = {"m.relations": {"m.replace": bundled_edit}}
+        forged_pending = _approval_edit(
+            card,
+            event_id="$forged-pending",
+            sender="@attacker:localhost",
+            status="pending",
+        )
+        forged_pending["origin_server_ts"] = int(bundled_edit["origin_server_ts"]) + 1
+        await cache.store_events_batch(
+            [
+                ("$approval", "!room:localhost", card),
+                ("$forged-pending", "!room:localhost", forged_pending),
+            ],
+        )
+        editor = AsyncMock(return_value=True)
+        store = _ApprovalManager(
+            test_runtime_paths(tmp_path),
+            editor=editor,
+            event_cache=cache,
+            approval_room_ids=lambda: {"!room:localhost"},
+            transport_sender=lambda: "@mindroom_router:localhost",
+        )
+
+        assert await store.discard_pending_on_startup() == 0
+        editor.assert_not_awaited()
+    finally:
+        await cache.close()
 
 
 @pytest.mark.asyncio
@@ -2561,7 +2628,13 @@ async def test_discard_pending_on_startup_emits_replace_for_each_unresolved_card
 
     assert await store.discard_pending_on_startup() == 1
     assert await store.discard_pending_on_startup() == 0
-    latest_edit = await cache.get_latest_edit("!room:localhost", "$approval")
+    latest_edit = await get_latest_edit(
+        cache,
+        "!room:localhost",
+        "$approval",
+        sender="@mindroom_router:localhost",
+        event_type="io.mindroom.tool_approval",
+    )
     assert latest_edit is not None
     assert latest_edit["content"]["m.new_content"]["status"] == "expired"
     assert latest_edit["content"]["m.new_content"]["resolution_reason"] == (
@@ -2740,6 +2813,16 @@ def test_pending_approval_from_card_event_requires_approver_user_id() -> None:
     card["content"].pop("approver_user_id")
 
     with pytest.raises(ValueError, match="missing required approval fields"):
+        PendingApproval.from_card_event(card, room_id="!room:localhost")
+
+
+def test_state_approval_card_is_not_an_original_timeline_card() -> None:
+    """Approval parsing must reject state events before any cached edit is applied."""
+    card = _approval_card()
+    card["state_key"] = ""
+
+    assert is_original_approval_card(card) is False
+    with pytest.raises(ValueError, match="timeline event"):
         PendingApproval.from_card_event(card, room_id="!room:localhost")
 
 

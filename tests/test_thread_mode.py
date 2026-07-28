@@ -867,12 +867,12 @@ class TestExtractMessageContextRoomMode:
         assert room_mode_target.source_thread_id is None
         assert room_mode_target.resolved_thread_id is None
 
-    def test_build_message_target_plain_reply_does_not_infer_thread_identity(
+    def test_build_message_target_plain_reply_starts_reply_rooted_thread(
         self,
         assistant_user: AgentMatrixUser,
         tmp_path: Path,
     ) -> None:
-        """Resolver target building should keep plain replies out of thread/session routing."""
+        """A rich reply may become the root for the response thread and session."""
         config = _runtime_bound_config(
             Config(
                 agents={"assistant": AgentConfig(display_name="Assistant", rooms=["!room:localhost"])},
@@ -904,8 +904,8 @@ class TestExtractMessageContextRoomMode:
         )
 
         assert target.reply_to_event_id == "$reply-event:localhost"
-        assert target.resolved_thread_id is None
-        assert target.session_id == create_session_id("!room:localhost", None)
+        assert target.resolved_thread_id == "$reply-event:localhost"
+        assert target.session_id == create_session_id("!room:localhost", "$reply-event:localhost")
 
     def test_build_message_target_new_thread_root_uses_live_event_without_history_proof(
         self,
@@ -1577,6 +1577,8 @@ class TestExtractedModuleLoggerRebinding:
                 "event_id": "$event123",
                 "sender": "@user:localhost",
                 "origin_server_ts": 1234567890,
+                "room_id": "!room:localhost",
+                "type": "m.room.message",
                 "content": {
                     "msgtype": "m.text",
                     "body": "hello",

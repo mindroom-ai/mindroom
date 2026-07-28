@@ -7,8 +7,35 @@ from typing import TYPE_CHECKING, Any
 
 import nio
 
+from mindroom.approval_events import valid_approval_replacement
+from mindroom.matrix.media import valid_room_message_replacement
+
 if TYPE_CHECKING:
+    from collections.abc import Collection
+
     from mindroom.matrix.cache import ConversationEventCache
+
+
+async def get_latest_edit(
+    cache: ConversationEventCache,
+    room_id: str,
+    original_event_id: str,
+    *,
+    sender: str,
+    event_type: str,
+    excluded_event_ids: Collection[str] = (),
+) -> dict[str, Any] | None:
+    """Read an edit through the production original-event contract."""
+    validator = (
+        valid_approval_replacement if event_type == "io.mindroom.tool_approval" else valid_room_message_replacement
+    )
+    original = {"event_id": original_event_id, "room_id": room_id, "sender": sender, "type": event_type}
+    return await cache.get_latest_edit(
+        room_id,
+        original,
+        validator=validator,
+        excluded_event_ids=excluded_event_ids,
+    )
 
 
 async def replace_thread_unconditionally(

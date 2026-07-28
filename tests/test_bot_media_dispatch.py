@@ -645,11 +645,9 @@ class TestAgentBot(AgentBotTestBase):
         room.room_id = "!test:localhost"
 
         event = _room_image_event(sender="@user:localhost", event_id="$img_event_history", body="photo.png")
-        event.source = {
-            "content": {
-                "body": "photo.png",
-                "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread_root"},
-            },
+        event.source["content"]["m.relates_to"] = {
+            "rel_type": "m.thread",
+            "event_id": "$thread_root",
         }
 
         image = MagicMock()

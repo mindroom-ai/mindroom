@@ -124,8 +124,14 @@ class TestReplacementSenderRule:
         assert messages[_ORIGINAL_ID].latest_event_id == "$authored"
 
     @pytest.mark.asyncio
-    async def test_synthesized_missing_original_keeps_the_editors_own_sender(self) -> None:
-        """An unseen original cannot be impersonated: the synthesized message is the editor's."""
+    async def test_replacement_of_an_unseen_original_produces_no_message(self) -> None:
+        """An edit applies to nothing when the event it replaces is not here.
+
+        Every read that reaches this point sees a bounded window, so an absent original means
+        "outside this window" rather than "does not exist". Rendering the edit as a message of its
+        own would show its text at a position the reader never saw, attributed to whoever sent it,
+        with no original to check that sender - or its claimed thread - against.
+        """
         candidates = ThreadEditCandidates()
         _record(
             candidates,
@@ -142,8 +148,7 @@ class TestReplacementSenderRule:
 
         await _apply(candidates, messages)
 
-        assert messages[_ORIGINAL_ID].sender == _IMPOSTOR
-        assert messages[_ORIGINAL_ID].body == "orphaned"
+        assert messages == {}
 
 
 class TestReplacementWinnerSelection:
@@ -213,7 +218,13 @@ class TestReplacementWinnerSelection:
 
     @pytest.mark.asyncio
     async def test_contradictory_payloads_for_one_edit_id_resolve_deterministically(self) -> None:
-        """Two payloads claiming one edit event ID must not depend on arrival order."""
+        """Two payloads claiming one edit event ID must not depend on arrival order.
+
+        They resolve by being rejected. A Matrix event ID names one immutable event, so two
+        disagreeing payloads under it mean at most one is real and nothing here can tell which.
+        Ranking them would pick a winner deterministically but still had a coin-flip chance of
+        rendering the copy that was not sent, so the identity is retired and the original stands.
+        """
         first_payload = _text_event(
             event_id="$edit",
             body="* alpha",
@@ -244,7 +255,8 @@ class TestReplacementWinnerSelection:
         await _apply(backward_candidates, backward)
 
         assert forward[_ORIGINAL_ID].body == backward[_ORIGINAL_ID].body
-        assert forward[_ORIGINAL_ID].latest_event_id == "$edit"
+        assert forward[_ORIGINAL_ID].latest_event_id == _ORIGINAL_ID
+        assert forward[_ORIGINAL_ID].body == "original"
 
     @pytest.mark.asyncio
     async def test_malformed_newest_replacement_leaves_the_original_intact(self) -> None:

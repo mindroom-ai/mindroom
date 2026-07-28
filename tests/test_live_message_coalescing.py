@@ -46,7 +46,10 @@ from mindroom.dispatch_handoff import (
     _build_batch_dispatch_event,
     build_dispatch_handoff,
 )
-from mindroom.dispatch_replay_guard import has_newer_unresponded_in_thread
+from mindroom.dispatch_replay_guard import (
+    has_newer_unresponded_cached_thread_event,
+    has_newer_unresponded_in_thread,
+)
 from mindroom.dispatch_source import (
     ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
     IMAGE_SOURCE_KIND,
@@ -63,6 +66,7 @@ from mindroom.inbound_turn_normalizer import (
     _BatchMediaAttachmentResult,
 )
 from mindroom.matrix.cache import ThreadHistoryResult
+from mindroom.matrix.cache.sqlite_event_cache import SqliteEventCache
 from mindroom.matrix.client import ResolvedVisibleMessage
 from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.identity import MatrixID
@@ -3312,7 +3316,7 @@ def test_room_resolved_voice_batch_clears_stale_primary_thread_relation() -> Non
 
 
 def test_room_level_batch_preserves_plain_reply_relation_without_thread_target() -> None:
-    """Room-level batches should preserve plain reply shape without adding thread targeting."""
+    """Room-level batches preserve a root-capable rich reply without adding thread targeting."""
     room = _make_room()
     typed_reply = _reply_event(
         event_id="$typed",
@@ -3329,7 +3333,7 @@ def test_room_level_batch_preserves_plain_reply_relation_without_thread_target()
 
     assert isinstance(handoff.event, PreparedTextEvent)
     assert handoff.event.source["content"]["m.relates_to"] == {"m.in_reply_to": {"event_id": "$voice"}}
-    assert not EventInfo.from_event(handoff.event.source).can_be_thread_root
+    assert EventInfo.from_event(handoff.event.source).can_be_thread_root
 
 
 def test_room_level_batch_preserves_mentions_while_removing_stale_thread_relation() -> None:
@@ -3356,7 +3360,7 @@ def test_room_level_batch_preserves_mentions_while_removing_stale_thread_relatio
 
 
 def test_room_level_mention_batch_preserves_plain_reply_relation() -> None:
-    """Mention metadata must preserve plain reply shape without reintroducing thread targeting."""
+    """Mention metadata must preserve root-capable rich replies without explicit thread targeting."""
     room = _make_room()
     typed_reply = _reply_event(
         event_id="$typed",
@@ -3376,7 +3380,7 @@ def test_room_level_mention_batch_preserves_plain_reply_relation() -> None:
     content = handoff.event.source["content"]
     assert content["m.relates_to"] == {"m.in_reply_to": {"event_id": "$old-reply"}}
     assert content["m.mentions"] == {"user_ids": ["@agent:localhost"]}
-    assert not EventInfo.from_event(handoff.event.source).can_be_thread_root
+    assert EventInfo.from_event(handoff.event.source).can_be_thread_root
 
 
 @pytest.mark.asyncio
@@ -4814,6 +4818,139 @@ async def test_backlog_replay_degraded_thread_history_uses_cache_indexed_plain_r
     bot._conversation_cache.get_thread_id_for_event.assert_awaited_once_with(room.room_id, "$m2")
     action_mock.assert_not_awaited()
     assert bot._turn_store.is_handled("$m1")
+
+
+@pytest.mark.asyncio
+async def test_degraded_replay_guard_ignores_point_cached_state_relation(tmp_path: Path) -> None:
+    """A state message's raw relation cannot suppress a real thread turn during degraded replay."""
+    cache = SqliteEventCache(tmp_path / "event_cache.db")
+    await cache.initialize()
+    state_source = {
+        "event_id": "$state",
+        "sender": "@user:localhost",
+        "origin_server_ts": 2000,
+        "room_id": "!room:localhost",
+        "state_key": "",
+        "type": "m.room.message",
+        "content": {
+            "body": "forged state message",
+            "msgtype": "m.text",
+            "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread"},
+        },
+    }
+    try:
+        await cache.store_event("$state", "!room:localhost", state_source)
+        suppressed = await has_newer_unresponded_cached_thread_event(
+            room_id="!room:localhost",
+            event=PreparedTextEvent(
+                sender="@user:localhost",
+                event_id="$older",
+                body="real turn",
+                source={"content": {"body": "real turn", "msgtype": "m.text"}},
+                server_timestamp=1000,
+            ),
+            requester_user_id="@user:localhost",
+            thread_id="$thread",
+            may_be_superseded_by_newer_requester_turn=True,
+            get_recent_room_events=cache.get_recent_room_events,
+            get_thread_id_for_event=cache.get_thread_id_for_event,
+            requester_user_id_for_event=lambda sender, _source: sender,
+            is_visible_router_voice_echo=lambda _sender, _content: False,
+            sender_is_trusted_for_ingress_metadata=lambda _sender: False,
+            is_handled=lambda _event_id: False,
+            logger=MagicMock(),
+        )
+    finally:
+        await cache.close()
+
+    assert suppressed is False
+
+
+@pytest.mark.asyncio
+async def test_degraded_replay_guard_ignores_malformed_cached_relation() -> None:
+    """A malformed cached message's raw relation cannot suppress a real thread turn."""
+    get_thread_id_for_event = AsyncMock(return_value="$thread")
+    suppressed = await has_newer_unresponded_cached_thread_event(
+        room_id="!room:localhost",
+        event=PreparedTextEvent(
+            sender="@user:localhost",
+            event_id="$older",
+            body="real turn",
+            source={"content": {"body": "real turn", "msgtype": "m.text"}},
+            server_timestamp=1000,
+        ),
+        requester_user_id="@user:localhost",
+        thread_id="$thread",
+        may_be_superseded_by_newer_requester_turn=True,
+        get_recent_room_events=AsyncMock(
+            return_value=[
+                {
+                    "event_id": "$malformed",
+                    "sender": "@user:localhost",
+                    "origin_server_ts": 2000,
+                    "room_id": "!room:localhost",
+                    "type": "m.room.message",
+                    "content": {
+                        "body": "missing msgtype",
+                        "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread"},
+                    },
+                },
+            ],
+        ),
+        get_thread_id_for_event=get_thread_id_for_event,
+        requester_user_id_for_event=lambda sender, _source: sender,
+        is_visible_router_voice_echo=lambda _sender, _content: False,
+        sender_is_trusted_for_ingress_metadata=lambda _sender: False,
+        is_handled=lambda _event_id: False,
+        logger=MagicMock(),
+    )
+
+    assert suppressed is False
+    get_thread_id_for_event.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_degraded_replay_guard_ignores_legacy_wrong_room_cache_index() -> None:
+    """A stale room index cannot authorize an explicitly foreign-room payload."""
+    get_thread_id_for_event = AsyncMock(return_value="$thread")
+    suppressed = await has_newer_unresponded_cached_thread_event(
+        room_id="!room:localhost",
+        event=PreparedTextEvent(
+            sender="@user:localhost",
+            event_id="$older",
+            body="real turn",
+            source={"content": {"body": "real turn", "msgtype": "m.text"}},
+            server_timestamp=1000,
+        ),
+        requester_user_id="@user:localhost",
+        thread_id="$thread",
+        may_be_superseded_by_newer_requester_turn=True,
+        get_recent_room_events=AsyncMock(
+            return_value=[
+                {
+                    "event_id": "$wrong-room",
+                    "sender": "@user:localhost",
+                    "origin_server_ts": 2000,
+                    "room_id": "!other:localhost",
+                    "type": "m.room.message",
+                    "content": {
+                        "body": "forged",
+                        "msgtype": "m.text",
+                        "m.relates_to": {"m.in_reply_to": {"event_id": "$parent"}},
+                    },
+                },
+            ],
+        ),
+        get_thread_id_for_event=get_thread_id_for_event,
+        requester_user_id_for_event=lambda sender, _source: sender,
+        is_visible_router_voice_echo=lambda _sender, _content: False,
+        sender_is_trusted_for_ingress_metadata=lambda _sender: False,
+        is_handled=lambda _event_id: False,
+        logger=MagicMock(),
+    )
+
+    assert suppressed is False
+    get_thread_id_for_event.assert_not_awaited()
 
 
 @pytest.mark.asyncio

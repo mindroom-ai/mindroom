@@ -582,6 +582,7 @@ def _audio_event(
         "content": {
             "body": "voice.ogg",
             "msgtype": "m.audio",
+            "url": "mxc://localhost/voice",
             "m.relates_to": {"rel_type": "m.thread", "event_id": thread_id},
         },
     }

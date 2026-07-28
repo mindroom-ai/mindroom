@@ -933,9 +933,10 @@ class TestAgentBot(AgentBotTestBase):
                 "$thread-root" if (room_id, event_id) == ("!test:localhost", "$thread-reply") else None
             ),
         )
-        bot.client.room_get_event = AsyncMock(
-            return_value=nio.RoomGetEventResponse.from_dict(
-                {
+
+        async def lookup_target(_room_id: str, event_id: str) -> nio.RoomGetEventResponse:
+            if event_id == "$plain-reply":
+                source = {
                     "content": {
                         "body": "bridged plain reply",
                         "msgtype": "m.text",
@@ -946,9 +947,29 @@ class TestAgentBot(AgentBotTestBase):
                     "origin_server_ts": 1,
                     "room_id": "!test:localhost",
                     "type": "m.room.message",
-                },
-            ),
-        )
+                }
+            elif event_id == "$thread-reply":
+                source = {
+                    "content": {
+                        "body": "thread reply",
+                        "msgtype": "m.text",
+                        "m.relates_to": {
+                            "rel_type": "m.thread",
+                            "event_id": "$thread-root",
+                        },
+                    },
+                    "event_id": "$thread-reply",
+                    "sender": "@agent:localhost",
+                    "origin_server_ts": 2,
+                    "room_id": "!test:localhost",
+                    "type": "m.room.message",
+                }
+            else:
+                msg = f"unexpected event lookup: {event_id}"
+                raise AssertionError(msg)
+            return nio.RoomGetEventResponse.from_dict(source)
+
+        bot.client.room_get_event = AsyncMock(side_effect=lookup_target)
         bot.hook_registry = HookRegistry.from_plugins([_hook_plugin("hooked", [record_reaction])])
         room = MagicMock()
         room.room_id = "!test:localhost"

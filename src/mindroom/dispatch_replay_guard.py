@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any
 from mindroom.commands.parsing import command_parser
 from mindroom.dispatch_source import is_voice_event
 from mindroom.matrix.event_info import EventInfo
+from mindroom.matrix.media import event_source_supports_valid_thread_relations
 
 if TYPE_CHECKING:
     import structlog
@@ -91,8 +92,9 @@ async def _cached_event_is_in_thread(
     get_thread_id_for_event: _ThreadIdForEventLookup | None,
 ) -> bool:
     """Return whether raw event metadata or the cache index proves thread membership."""
-    event_info = EventInfo.from_event(event_source)
-    if thread_id in {event_info.thread_id, event_info.thread_id_from_edit}:
+    if not event_source_supports_valid_thread_relations(event_source, room_id):
+        return False
+    if EventInfo.from_event(event_source).thread_id == thread_id:
         return True
     if get_thread_id_for_event is None:
         return False

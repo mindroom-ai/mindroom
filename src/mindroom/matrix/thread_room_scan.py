@@ -18,6 +18,7 @@ from nio.responses import RoomGetEventError
 
 from mindroom.matrix.client_thread_history import fetch_thread_event_sources_via_room_messages
 from mindroom.matrix.event_info import EventInfo
+from mindroom.matrix.media import event_source_supports_valid_explicit_thread_relation
 from mindroom.matrix.thread_membership import ThreadMembershipAccess, room_scan_thread_membership_access
 
 if TYPE_CHECKING:
@@ -49,12 +50,20 @@ async def _scan_thread_event_sources(
 def _event_info_from_lookup_response(
     response: _EventLookupResult,
     *,
+    room_id: str,
     event_id: str,
     strict: bool,
 ) -> EventInfo | None:
     """Normalize one room-get-event style response into EventInfo when available."""
+    event_source = validated_event_source_from_lookup_response(
+        response,
+        room_id=room_id,
+        event_id=event_id,
+    )
+    if event_source is not None:
+        return EventInfo.from_event(event_source)
     if isinstance(response, nio.RoomGetEventResponse):
-        return EventInfo.from_event(response.event.source)
+        return None
     if not strict:
         return None
     if isinstance(response, nio.RoomGetEventError) and response.status_code == "M_NOT_FOUND":
@@ -62,6 +71,24 @@ def _event_info_from_lookup_response(
     detail = response.message if isinstance(response, nio.RoomGetEventError) else "unknown error"
     msg = f"Failed to resolve Matrix event {event_id}: {detail}"
     raise RuntimeError(msg)
+
+
+def validated_event_source_from_lookup_response(
+    response: _EventLookupResult,
+    *,
+    room_id: str,
+    event_id: str,
+) -> dict[str, object] | None:
+    """Return one exact, room-scoped event lookup result with a valid relation envelope."""
+    if not isinstance(response, nio.RoomGetEventResponse):
+        return None
+    event_source = response.event.source
+    if event_source.get("event_id") != event_id or not event_source_supports_valid_explicit_thread_relation(
+        event_source,
+        room_id,
+    ):
+        return None
+    return {key: value for key, value in event_source.items() if isinstance(key, str)}
 
 
 async def lookup_thread_id_from_conversation_cache(
@@ -86,6 +113,7 @@ async def fetch_event_info_for_client(
     response = await client.room_get_event(room_id, event_id)
     return _event_info_from_lookup_response(
         response,
+        room_id=room_id,
         event_id=event_id,
         strict=strict,
     )
@@ -102,6 +130,7 @@ async def fetch_event_info_from_conversation_cache(
     response = await conversation_cache.get_event(room_id, event_id)
     return _event_info_from_lookup_response(
         response,
+        room_id=room_id,
         event_id=event_id,
         strict=strict,
     )
@@ -112,8 +141,10 @@ def room_scan_membership_access_for_client(
     *,
     conversation_cache: RoomScanConversationCache | None,
     fetch_event_info: Callable[[str, str], Awaitable[EventInfo | None]] | None = None,
+    known_event_sources: Mapping[str, dict[str, object]] | None = None,
 ) -> ThreadMembershipAccess:
     """Build client-backed membership access without widening the cache protocol."""
+    event_sources = {} if known_event_sources is None else dict(known_event_sources)
 
     async def lookup_thread_id(lookup_room_id: str, lookup_event_id: str) -> str | None:
         return await lookup_thread_id_from_conversation_cache(
@@ -123,6 +154,9 @@ def room_scan_membership_access_for_client(
         )
 
     async def resolved_fetch_event_info(lookup_room_id: str, lookup_event_id: str) -> EventInfo | None:
+        known_source = event_sources.get(lookup_event_id)
+        if known_source is not None:
+            return EventInfo.from_event(known_source)
         if fetch_event_info is not None:
             return await fetch_event_info(lookup_room_id, lookup_event_id)
         if conversation_cache is None:
@@ -134,6 +168,27 @@ def room_scan_membership_access_for_client(
             strict=True,
         )
 
+    async def fetch_event_source(lookup_room_id: str, lookup_event_id: str) -> dict[str, object] | None:
+        known_source = event_sources.get(lookup_event_id)
+        if known_source is not None:
+            return known_source
+        response = (
+            await conversation_cache.get_event(lookup_room_id, lookup_event_id)
+            if conversation_cache is not None
+            else await client.room_get_event(lookup_room_id, lookup_event_id)
+        )
+        if not isinstance(response, nio.RoomGetEventResponse):
+            return None
+        normalized_source = validated_event_source_from_lookup_response(
+            response,
+            room_id=lookup_room_id,
+            event_id=lookup_event_id,
+        )
+        if normalized_source is None:
+            return None
+        event_sources[lookup_event_id] = normalized_source
+        return normalized_source
+
     return room_scan_thread_membership_access(
         lookup_thread_id=lookup_thread_id,
         fetch_event_info=resolved_fetch_event_info,
@@ -142,6 +197,7 @@ def room_scan_membership_access_for_client(
             room_id,
             thread_root_id,
         ),
+        fetch_event_source=fetch_event_source,
     )
 
 
@@ -151,4 +207,5 @@ __all__ = [
     "fetch_event_info_from_conversation_cache",
     "lookup_thread_id_from_conversation_cache",
     "room_scan_membership_access_for_client",
+    "validated_event_source_from_lookup_response",
 ]

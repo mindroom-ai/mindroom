@@ -14,15 +14,27 @@ The default constructor principal exists for standalone cache consumers and test
 
 An event lookup is keyed by principal, room, and event ID.
 
-A thread read returns each message with only the single edit that currently wins it, and an edit can win only against an original with the same sender, compared through the inline `sender` column rather than the payload.
+The shared write policy rejects explicit wrong-room payloads before normalized event rows and their derived indexes enter either backend.
 
-That comparison is an optimization rather than the authorization boundary: the fold rechecks every candidate against the payload sender, so a foreign replacement that reached the read would render the pre-edit body rather than the replacing account's text.
+A replacement is eligible only when the original and replacement are non-state events in the same room, use the same sender and event type, carry exact `m.replace` relation identity, and pass the owning surface validator.
+
+An original that is itself a replacement cannot become a visible message, and a malformed newest replacement falls back to the next valid candidate.
+
+Valid bundled and explicit cached replacements share canonical latest-first ordering by `origin_server_ts` and then lexicographically greatest event ID.
+
+A thread read returns each message with only the single edit that currently wins it under those rules.
+
+The same-sender comparison is the authorization boundary and is applied to the payload; where an inline `sender` column narrows the query first, that is an optimization, so a foreign replacement that reached the read would render the pre-edit body rather than the replacing account's text.
+
+A replacement naming an original this principal never cached cannot be attributed to that original's sender, so the message synthesized from it carries the editor's own sender and no thread membership, and a read scoped to a single thread declines to synthesize one at all.
 
 A decrypted sidecar row is keyed by principal, room, and MXC URL, and reads additionally require a surviving reference from the requested event ID.
 
 Reference rows are derived from version 2 `io.mindroom.long_text` metadata in top-level content and `m.new_content`.
 
 Both unencrypted `url` and encrypted `file.url` MXC representations are tracked.
+
+State events and events with an explicit conflicting room ID cannot create sidecar ownership references.
 
 Plaintext persistence succeeds only while the owning event and its reference are visible and not tombstoned.
 
@@ -32,7 +44,7 @@ No resolved thread projection is retained between turns; every thread read resol
 
 Hydration without complete principal, room, event, and MXC identity may return freshly downloaded content to the current call, but it cannot read or populate the durable cache.
 
-Every durable plaintext hit revalidates the requesting event's surviving room-scoped MXC reference.
+Every durable plaintext hit joins the requesting event to its surviving principal- and room-scoped MXC reference, then revalidates the decoded payload's non-state status, explicit room scope, and current sidecar metadata.
 
 Redaction runs in the same database transaction as event, dependent-edit, thread-index, edit-index, and reference removal.
 

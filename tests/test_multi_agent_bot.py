@@ -599,8 +599,14 @@ class TestAgentBot(AgentBotTestBase):
         mock_event.event_id = "event123"
         mock_event.server_timestamp = 1_774_019_700_000
         mock_event.source = {
+            "event_id": "event123",
+            "sender": "@user:localhost",
+            "origin_server_ts": mock_event.server_timestamp,
+            "room_id": "!test:localhost",
+            "type": "m.room.message",
             "content": {
                 "body": f"{mention_id}: What's 2+2?",
+                "msgtype": "m.text",
                 "m.mentions": {"user_ids": [mention_id]},
                 "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread_root_id"},
             },
@@ -1224,7 +1230,14 @@ class TestAgentBot(AgentBotTestBase):
         mock_event.event_id = "event123"
         mock_event.server_timestamp = 126
         mock_event.source = {
+            "event_id": "event123",
+            "sender": "@user:localhost",
+            "origin_server_ts": 126,
+            "room_id": "!test:localhost",
+            "type": "m.room.message",
             "content": {
+                "body": "Thread message without mention",
+                "msgtype": "m.text",
                 "m.relates_to": {
                     "rel_type": "m.thread",
                     "event_id": "thread_root",
@@ -1277,7 +1290,14 @@ class TestAgentBot(AgentBotTestBase):
         mock_event_2.event_id = "event456"  # Different event ID
         mock_event_2.server_timestamp = 127
         mock_event_2.source = {
+            "event_id": "event456",
+            "sender": "@user:localhost",
+            "origin_server_ts": 127,
+            "room_id": "!test:localhost",
+            "type": "m.room.message",
             "content": {
+                "body": "Thread message without mention",
+                "msgtype": "m.text",
                 "m.relates_to": {
                     "rel_type": "m.thread",
                     "event_id": "thread_root",

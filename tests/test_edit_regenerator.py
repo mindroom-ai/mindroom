@@ -97,6 +97,8 @@ def _turn_record(
     thread_id: str | None = THREAD_ID,
 ) -> TurnRecord:
     anchor = anchor_event_id or source_event_ids[-1]
+    if source_event_metadata is None and len(source_event_ids) > 1 and requester_id is not None:
+        source_event_metadata = {event_id: SourceEventMetadata(sender=requester_id) for event_id in source_event_ids}
     return TurnRecord(
         anchor_event_id=anchor,
         source_event_ids=source_event_ids,
@@ -243,6 +245,19 @@ def _assert_no_regeneration(harness: _Harness) -> None:
     harness.turn_store.record_turn.assert_not_called()
 
 
+def _tagged_record_prompt(record: TurnRecord, prompts: dict[str, str]) -> str:
+    """Render a production-shaped coalesced prompt for one durable test record."""
+    assert record.source_event_metadata is not None
+    prompt = tagged_coalesced_prompt(
+        record.replay_source_event_ids,
+        prompts,
+        dict(record.source_event_metadata),
+        timestamp_formatter=lambda _timestamp_ms: None,
+    )
+    assert prompt is not None
+    return prompt
+
+
 @pytest.mark.asyncio
 async def test_simple_edit_regenerates_and_records_new_response(tmp_path: Path) -> None:
     """An edited single-message turn regenerates with the edited body and records the new outcome."""
@@ -280,6 +295,75 @@ async def test_simple_edit_regenerates_and_records_new_response(tmp_path: Path) 
     assert recorded.response_owner == AGENT_NAME
     assert recorded.history_scope == record.history_scope
     assert recorded.conversation_target == record.conversation_target
+
+
+@pytest.mark.asyncio
+async def test_edit_from_another_requester_does_not_regenerate(tmp_path: Path) -> None:
+    """One authorized requester cannot regenerate another requester's handled turn."""
+    harness = _harness(tmp_path, turn_record=_turn_record())
+    mallory = "@mallory:example.org"
+    event, event_info = _edit_event(sender=mallory)
+
+    await harness.regenerator.handle_message_edit(harness.room, event, event_info, mallory)
+
+    _assert_no_regeneration(harness)
+
+
+@pytest.mark.asyncio
+async def test_coalesced_edit_uses_exact_source_requester(tmp_path: Path) -> None:
+    """Each member of a coalesced turn remains editable only by its own requester."""
+    alice = "@alice:example.org"
+    bob = "@bob:example.org"
+    first_event_id = "$m1:example.org"
+    second_event_id = "$m2:example.org"
+    record = _turn_record(
+        source_event_ids=(first_event_id, second_event_id),
+        source_event_prompts={first_event_id: "first message", second_event_id: "second message"},
+        source_event_metadata={
+            first_event_id: SourceEventMetadata(sender=alice),
+            second_event_id: SourceEventMetadata(sender=bob),
+        },
+        requester_id=bob,
+    )
+    harness = _harness(tmp_path, turn_record=record)
+    event, event_info = _edit_event(
+        original_event_id=first_event_id,
+        new_body="edited first message",
+        sender=alice,
+    )
+    harness.resolver.build_message_envelope.return_value = request_envelope(
+        room_id=ROOM_ID,
+        reply_to_event_id=first_event_id,
+        thread_id=THREAD_ID,
+        user_id=alice,
+        agent_name=AGENT_NAME,
+        source_kind=EDIT_SOURCE_KIND,
+    )
+
+    await harness.regenerator.handle_message_edit(harness.room, event, event_info, alice)
+
+    request = harness.generate_response.await_args.args[0]
+    assert request.user_id == alice
+    assert "edited first message" in request.prompt
+    assert "second message" in request.prompt
+
+
+@pytest.mark.asyncio
+async def test_coalesced_edit_without_source_requester_fails_closed(tmp_path: Path) -> None:
+    """Incomplete coalesced ownership metadata cannot fall back to the anchor requester."""
+    first_event_id = "$m1:example.org"
+    second_event_id = "$m2:example.org"
+    record = _turn_record(
+        source_event_ids=(first_event_id, second_event_id),
+        source_event_prompts={first_event_id: "first message", second_event_id: "second message"},
+        source_event_metadata={second_event_id: SourceEventMetadata(sender=USER_ID)},
+    )
+    harness = _harness(tmp_path, turn_record=record)
+    event, event_info = _edit_event(original_event_id=first_event_id)
+
+    await _handle_edit(harness, event, event_info)
+
+    _assert_no_regeneration(harness)
 
 
 @pytest.mark.asyncio
@@ -1000,8 +1084,8 @@ async def test_coalesced_edit_rebuilds_combined_prompt(tmp_path: Path) -> None:
 
     await _handle_edit(harness, event, event_info)
 
-    expected_prompt = _tagged_prompt(
-        (first_event_id, second_event_id),
+    expected_prompt = _tagged_record_prompt(
+        record,
         {first_event_id: "edited first message", second_event_id: "second message"},
     )
     assert harness.generate_response.await_args.args[0].prompt == expected_prompt
@@ -1040,8 +1124,8 @@ async def test_coalesced_sibling_edit_excludes_redacted_source_prompt(tmp_path: 
     await _handle_edit(harness, event, event_info)
 
     request = harness.generate_response.await_args.args[0]
-    assert request.prompt == _tagged_prompt(
-        (second_event_id,),
+    assert request.prompt == _tagged_record_prompt(
+        replace(record, source_event_metadata={second_event_id: record.source_event_metadata[second_event_id]}),
         {second_event_id: "edited second message"},
     )
     assert "REDACTED_SECRET" not in request.prompt
@@ -1724,6 +1808,30 @@ async def test_edit_without_resolved_body_is_skipped(tmp_path: Path) -> None:
     """An edit whose m.new_content has no resolvable body aborts before regeneration."""
     harness = _harness(tmp_path, turn_record=_turn_record())
     event, event_info = _edit_event(include_new_content=False)
+
+    await _handle_edit(harness, event, event_info)
+
+    _assert_no_regeneration(harness)
+
+
+@pytest.mark.asyncio
+async def test_malformed_inline_edit_is_skipped(tmp_path: Path) -> None:
+    """An inline edit with invalid replacement content cannot trigger regeneration."""
+    harness = _harness(tmp_path, turn_record=_turn_record())
+    event, event_info = _edit_event()
+    event.source["content"]["m.new_content"] = {"body": "malformed"}
+
+    await _handle_edit(harness, event, event_info)
+
+    _assert_no_regeneration(harness)
+
+
+@pytest.mark.asyncio
+async def test_wrong_room_inline_edit_is_skipped(tmp_path: Path) -> None:
+    """An edit carrying another room's explicit identity cannot trigger regeneration."""
+    harness = _harness(tmp_path, turn_record=_turn_record())
+    event, event_info = _edit_event()
+    event.source["room_id"] = "!other:example.org"
 
     await _handle_edit(harness, event, event_info)
 

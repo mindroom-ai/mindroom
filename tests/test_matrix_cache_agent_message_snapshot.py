@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import time
 from typing import TYPE_CHECKING, Any
 
@@ -9,6 +10,8 @@ import pytest
 
 from mindroom.matrix.cache import AgentMessageSnapshot, ConversationEventCache
 from mindroom.matrix.cache.agent_message_snapshot import AgentMessageSnapshotUnavailable
+from mindroom.matrix.cache.postgres_event_cache import PostgresEventCache
+from mindroom.matrix.cache.sqlite_event_cache import SqliteEventCache
 from tests.event_cache_test_support import replace_thread_unconditionally as _replace_thread
 
 if TYPE_CHECKING:
@@ -65,6 +68,40 @@ async def _read_snapshot(
         await cache.close()
 
 
+async def _overwrite_cached_event_payload(
+    cache: ConversationEventCache,
+    *,
+    room_id: str,
+    event_id: str,
+    event: dict[str, Any],
+) -> None:
+    """Model one legacy row whose indexed room disagrees with its stored payload."""
+    event_json = json.dumps(event, separators=(",", ":"))
+    if isinstance(cache, SqliteEventCache):
+        async with cache._runtime.acquire_db_operation() as db:
+            await db.execute(
+                """
+                UPDATE events
+                SET event_json = ?
+                WHERE principal_id = ? AND room_id = ? AND event_id = ?
+                """,
+                (event_json, cache.principal_id, room_id, event_id),
+            )
+            await db.commit()
+        return
+    assert isinstance(cache, PostgresEventCache)
+    async with cache._runtime.acquire_db_operation(operation="test_overwrite_cached_event_payload") as db:
+        await db.execute(
+            """
+            UPDATE mindroom_event_cache_events
+            SET event_json = %s
+            WHERE namespace = %s AND room_id = %s AND event_id = %s
+            """,
+            (event_json, cache.namespace, room_id, event_id),
+        )
+        await db.commit()
+
+
 @pytest.mark.asyncio
 async def test_get_latest_agent_message_snapshot_returns_unedited_thread_message(
     event_cache_factory: Callable[[], ConversationEventCache],
@@ -112,6 +149,474 @@ async def test_get_latest_agent_message_snapshot_returns_unedited_thread_message
         },
         origin_server_ts=2000,
     )
+
+
+@pytest.mark.asyncio
+async def test_get_latest_agent_message_snapshot_keeps_agent_thread_root(
+    event_cache_factory: Callable[[], ConversationEventCache],
+) -> None:
+    """The authoritative thread root remains eligible when the agent sent it."""
+    cache = event_cache_factory()
+    await cache.initialize()
+    try:
+        room_id = "!room:localhost"
+        thread_id = "$thread-root"
+        await _replace_thread(
+            cache,
+            room_id,
+            thread_id,
+            [
+                _message_event(
+                    event_id=thread_id,
+                    sender="@agent:localhost",
+                    body="Agent question",
+                    origin_server_ts=1000,
+                ),
+                _message_event(
+                    event_id="$reply",
+                    sender="@user:localhost",
+                    body="User answer",
+                    origin_server_ts=2000,
+                    relates_to={"rel_type": "m.thread", "event_id": thread_id},
+                ),
+            ],
+        )
+        snapshot = await cache.get_latest_agent_message_snapshot(
+            room_id,
+            thread_id,
+            "@agent:localhost",
+            runtime_started_at=None,
+        )
+    finally:
+        await cache.close()
+
+    assert snapshot is not None
+    assert snapshot.content["body"] == "Agent question"
+
+
+@pytest.mark.asyncio
+async def test_get_latest_agent_message_snapshot_ignores_wrong_thread_index_row(
+    event_cache_factory: Callable[[], ConversationEventCache],
+) -> None:
+    """A thread index cannot authorize a payload whose relation names another thread."""
+    cache = event_cache_factory()
+    await cache.initialize()
+    try:
+        room_id = "!room:localhost"
+        thread_id = "$thread-root"
+        await _replace_thread(
+            cache,
+            room_id,
+            thread_id,
+            [
+                _message_event(
+                    event_id=thread_id,
+                    sender="@user:localhost",
+                    body="Question",
+                    origin_server_ts=1000,
+                ),
+                _message_event(
+                    event_id="$reply",
+                    sender="@agent:localhost",
+                    body="Answer",
+                    origin_server_ts=2000,
+                    relates_to={"rel_type": "m.thread", "event_id": thread_id},
+                ),
+            ],
+        )
+        assert await cache.apply_thread_mutation_append(
+            room_id,
+            thread_id,
+            _message_event(
+                event_id="$wrong",
+                sender="@agent:localhost",
+                body="Wrong thread",
+                origin_server_ts=3000,
+                relates_to={"rel_type": "m.thread", "event_id": "$other-root"},
+            ),
+            append_failed_reason="test_wrong_thread_append",
+        )
+        snapshot = await cache.get_latest_agent_message_snapshot(
+            room_id,
+            thread_id,
+            "@agent:localhost",
+            runtime_started_at=None,
+        )
+    finally:
+        await cache.close()
+
+    assert snapshot is not None
+    assert snapshot.content["body"] == "Answer"
+
+
+@pytest.mark.parametrize(
+    "relation_type",
+    [
+        "reply",
+        "reference",
+    ],
+    ids=["reply", "reference"],
+)
+@pytest.mark.parametrize(
+    ("target_event_id", "expected_body"),
+    [
+        ("$direct-child", "Indirect answer"),
+        ("$other-thread-child", "Direct answer"),
+    ],
+    ids=["same-thread", "other-thread"],
+)
+@pytest.mark.asyncio
+async def test_get_latest_agent_message_snapshot_resolves_indexed_indirect_thread_member(
+    event_cache_factory: Callable[[], ConversationEventCache],
+    relation_type: str,
+    target_event_id: str,
+    expected_body: str,
+) -> None:
+    """Replies and references must resolve through their canonical relation graph."""
+    cache = event_cache_factory()
+    await cache.initialize()
+    try:
+        room_id = "!room:localhost"
+        thread_id = "$thread-root"
+        indirect_relation = (
+            {"m.in_reply_to": {"event_id": target_event_id}}
+            if relation_type == "reply"
+            else {"rel_type": "m.reference", "event_id": target_event_id}
+        )
+        await _replace_thread(
+            cache,
+            room_id,
+            thread_id,
+            [
+                _message_event(
+                    event_id=thread_id,
+                    sender="@user:localhost",
+                    body="Question",
+                    origin_server_ts=1000,
+                ),
+                _message_event(
+                    event_id="$direct-answer",
+                    sender="@agent:localhost",
+                    body="Direct answer",
+                    origin_server_ts=1500,
+                    relates_to={"rel_type": "m.thread", "event_id": thread_id},
+                ),
+                _message_event(
+                    event_id="$direct-child",
+                    sender="@user:localhost",
+                    body="Direct child",
+                    origin_server_ts=2000,
+                    relates_to={"rel_type": "m.thread", "event_id": thread_id},
+                ),
+                _message_event(
+                    event_id="$other-thread-child",
+                    sender="@user:localhost",
+                    body="Other thread child",
+                    origin_server_ts=2500,
+                    relates_to={"rel_type": "m.thread", "event_id": "$other-root"},
+                ),
+                _message_event(
+                    event_id="$indirect-agent-message",
+                    sender="@agent:localhost",
+                    body="Indirect answer",
+                    origin_server_ts=3000,
+                    relates_to=indirect_relation,
+                ),
+            ],
+        )
+        snapshot = await cache.get_latest_agent_message_snapshot(
+            room_id,
+            thread_id,
+            "@agent:localhost",
+            runtime_started_at=None,
+        )
+    finally:
+        await cache.close()
+
+    assert snapshot is not None
+    assert snapshot.content["body"] == expected_body
+
+
+@pytest.mark.asyncio
+async def test_get_latest_agent_message_snapshot_follows_reply_to_thread_child_edit(
+    event_cache_factory: Callable[[], ConversationEventCache],
+) -> None:
+    """An edit remains an ancestry node even though it is not a visible snapshot candidate."""
+    cache = event_cache_factory()
+    await cache.initialize()
+    try:
+        room_id = "!room:localhost"
+        thread_id = "$thread-root"
+        await _replace_thread(
+            cache,
+            room_id,
+            thread_id,
+            [
+                _message_event(
+                    event_id=thread_id,
+                    sender="@user:localhost",
+                    body="Question",
+                    origin_server_ts=1000,
+                ),
+                _message_event(
+                    event_id="$thread-child",
+                    sender="@user:localhost",
+                    body="Detail",
+                    origin_server_ts=1500,
+                    relates_to={"rel_type": "m.thread", "event_id": thread_id},
+                ),
+                _message_event(
+                    event_id="$thread-child-edit",
+                    sender="@user:localhost",
+                    body="* Updated detail",
+                    origin_server_ts=2000,
+                    relates_to={"rel_type": "m.replace", "event_id": "$thread-child"},
+                    new_content={"body": "Updated detail"},
+                ),
+                _message_event(
+                    event_id="$agent-reply",
+                    sender="@agent:localhost",
+                    body="Answer",
+                    origin_server_ts=2500,
+                    relates_to={"m.in_reply_to": {"event_id": "$thread-child-edit"}},
+                ),
+            ],
+        )
+        snapshot = await cache.get_latest_agent_message_snapshot(
+            room_id,
+            thread_id,
+            "@agent:localhost",
+            runtime_started_at=None,
+        )
+    finally:
+        await cache.close()
+
+    assert snapshot is not None
+    assert snapshot.content["body"] == "Answer"
+
+
+@pytest.mark.asyncio
+async def test_state_thread_child_cannot_authorize_indirect_snapshot_member(
+    event_cache_factory: Callable[[], ConversationEventCache],
+) -> None:
+    """A poisoned state row cannot seed a thread graph for an indirect agent reply."""
+    cache = event_cache_factory()
+    await cache.initialize()
+    try:
+        room_id = "!room:localhost"
+        thread_id = "$thread-root"
+        state_child = _message_event(
+            event_id="$state-child",
+            sender="@user:localhost",
+            body="Poisoned state child",
+            origin_server_ts=1500,
+            relates_to={"rel_type": "m.thread", "event_id": thread_id},
+        )
+        state_child["state_key"] = ""
+        await _replace_thread(
+            cache,
+            room_id,
+            thread_id,
+            [
+                _message_event(
+                    event_id=thread_id,
+                    sender="@user:localhost",
+                    body="Question",
+                    origin_server_ts=1000,
+                ),
+                state_child,
+                _message_event(
+                    event_id="$indirect-agent-message",
+                    sender="@agent:localhost",
+                    body="Forged membership",
+                    origin_server_ts=2000,
+                    relates_to={"m.in_reply_to": {"event_id": "$state-child"}},
+                ),
+            ],
+        )
+        snapshot = await cache.get_latest_agent_message_snapshot(
+            room_id,
+            thread_id,
+            "@agent:localhost",
+            runtime_started_at=None,
+        )
+    finally:
+        await cache.close()
+
+    assert snapshot is None
+
+
+@pytest.mark.asyncio
+async def test_malformed_original_edit_cannot_authorize_indirect_snapshot_member(
+    event_cache_factory: Callable[[], ConversationEventCache],
+) -> None:
+    """A raw-source lookup must not re-admit a filtered malformed relation ancestor."""
+    cache = event_cache_factory()
+    await cache.initialize()
+    try:
+        room_id = "!room:localhost"
+        thread_id = "$thread-root"
+        ancestor = _message_event(
+            event_id="$ancestor",
+            sender="@user:localhost",
+            body="Ancestor",
+            origin_server_ts=2000,
+            relates_to={"rel_type": "m.thread", "event_id": thread_id},
+        )
+        await _replace_thread(
+            cache,
+            room_id,
+            thread_id,
+            [
+                _message_event(
+                    event_id=thread_id,
+                    sender="@user:localhost",
+                    body="Question",
+                    origin_server_ts=1000,
+                ),
+                _message_event(
+                    event_id="$thread-child",
+                    sender="@user:localhost",
+                    body="Valid child",
+                    origin_server_ts=1500,
+                    relates_to={"rel_type": "m.thread", "event_id": thread_id},
+                ),
+                ancestor,
+                _message_event(
+                    event_id="$ancestor-edit",
+                    sender="@user:localhost",
+                    body="* Ancestor",
+                    origin_server_ts=2500,
+                    relates_to={"rel_type": "m.replace", "event_id": "$ancestor"},
+                    new_content={"body": "Edited ancestor"},
+                ),
+                _message_event(
+                    event_id="$indirect-agent-message",
+                    sender="@agent:localhost",
+                    body="Forged membership",
+                    origin_server_ts=3000,
+                    relates_to={"m.in_reply_to": {"event_id": "$ancestor"}},
+                ),
+            ],
+        )
+        malformed_ancestor = {
+            **ancestor,
+            "room_id": room_id,
+            "content": {
+                "body": "missing msgtype",
+                "m.relates_to": {"rel_type": "m.thread", "event_id": thread_id},
+            },
+        }
+        await _overwrite_cached_event_payload(
+            cache,
+            room_id=room_id,
+            event_id="$ancestor",
+            event=malformed_ancestor,
+        )
+        snapshot = await cache.get_latest_agent_message_snapshot(
+            room_id,
+            thread_id,
+            "@agent:localhost",
+            runtime_started_at=None,
+        )
+    finally:
+        await cache.close()
+
+    assert snapshot is None
+
+
+@pytest.mark.asyncio
+async def test_get_latest_agent_message_snapshot_rejects_legacy_wrong_room_payload(
+    event_cache_factory: Callable[[], ConversationEventCache],
+) -> None:
+    """A legacy row's indexed room cannot override explicit foreign-room evidence."""
+    cache = event_cache_factory()
+    await cache.initialize()
+    try:
+        room_id = "!room:localhost"
+        event_id = "$wrong-room"
+        event = _message_event(
+            event_id=event_id,
+            sender="@agent:localhost",
+            body="Forged",
+            origin_server_ts=2000,
+        )
+        await cache.store_event(event_id, room_id, event)
+        await _overwrite_cached_event_payload(
+            cache,
+            room_id=room_id,
+            event_id=event_id,
+            event={**event, "room_id": "!other:localhost"},
+        )
+        snapshot = await cache.get_latest_agent_message_snapshot(
+            room_id,
+            None,
+            "@agent:localhost",
+            runtime_started_at=0.0,
+        )
+    finally:
+        await cache.close()
+
+    assert snapshot is None
+
+
+@pytest.mark.parametrize(
+    "edit_sender",
+    ["@user:localhost", "@attacker:localhost"],
+    ids=["same-sender", "foreign-sender"],
+)
+@pytest.mark.asyncio
+async def test_replacement_relation_cannot_authorize_indirect_snapshot_member(
+    event_cache_factory: Callable[[], ConversationEventCache],
+    edit_sender: str,
+) -> None:
+    """A replacement row cannot create membership independently of its original event."""
+    cache = event_cache_factory()
+    await cache.initialize()
+    try:
+        room_id = "!room:localhost"
+        thread_id = "$thread-root"
+        await _replace_thread(
+            cache,
+            room_id,
+            thread_id,
+            [
+                _message_event(
+                    event_id=thread_id,
+                    sender="@user:localhost",
+                    body="Question",
+                    origin_server_ts=1000,
+                ),
+                _message_event(
+                    event_id="$root-edit",
+                    sender=edit_sender,
+                    body="* Question",
+                    origin_server_ts=1500,
+                    relates_to={"rel_type": "m.replace", "event_id": thread_id},
+                    new_content={
+                        "body": "Edited question",
+                        "m.relates_to": {"rel_type": "m.thread", "event_id": thread_id},
+                    },
+                ),
+                _message_event(
+                    event_id="$indirect-agent-message",
+                    sender="@agent:localhost",
+                    body="Forged membership",
+                    origin_server_ts=2000,
+                    relates_to={"m.in_reply_to": {"event_id": "$root-edit"}},
+                ),
+            ],
+        )
+        snapshot = await cache.get_latest_agent_message_snapshot(
+            room_id,
+            thread_id,
+            "@agent:localhost",
+            runtime_started_at=None,
+        )
+    finally:
+        await cache.close()
+
+    assert snapshot is None
 
 
 @pytest.mark.asyncio
@@ -169,8 +674,9 @@ async def test_get_latest_agent_message_snapshot_returns_streaming_status_for_th
             "body": "Still working",
             "msgtype": "m.text",
             "io.mindroom.stream_status": "streaming",
+            "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread-root"},
         },
-        origin_server_ts=3000,
+        origin_server_ts=2000,
     )
 
 
@@ -230,8 +736,12 @@ async def test_get_latest_agent_message_snapshot_ignores_foreign_sender_edits(
     )
 
     assert snapshot == AgentMessageSnapshot(
-        content={"body": "Finished", "msgtype": "m.text"},
-        origin_server_ts=3000,
+        content={
+            "body": "Finished",
+            "msgtype": "m.text",
+            "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread-root"},
+        },
+        origin_server_ts=2000,
     )
 
 
@@ -440,7 +950,157 @@ async def test_room_scope_keeps_visible_edit_cached_in_current_runtime(
             "msgtype": "m.text",
             "io.mindroom.stream_status": "streaming",
         },
+        origin_server_ts=2000,
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fresh_representation", ["bundled", "explicit"])
+async def test_room_scope_uses_freshest_equivalent_edit_representation(
+    event_cache_factory: Callable[[], ConversationEventCache],
+    *,
+    fresh_representation: str,
+) -> None:
+    """Equivalent explicit and bundled copies both refresh one visible edit."""
+    room_id = "!room:localhost"
+    original = _message_event(
+        event_id="$room-message",
+        sender="@agent:localhost",
+        body="Working...",
+        origin_server_ts=2000,
+    )
+    explicit_edit = _message_event(
+        event_id="$room-message-edit",
+        sender="@agent:localhost",
+        body="* Working...",
         origin_server_ts=3000,
+        relates_to={"rel_type": "m.replace", "event_id": "$room-message"},
+        new_content={"body": "Done"},
+    )
+    bundled_edit = {**explicit_edit, "room_id": room_id}
+    original_with_bundle = {
+        **original,
+        "unsigned": {"m.relations": {"m.replace": bundled_edit}},
+    }
+
+    cache = event_cache_factory()
+    await cache.initialize()
+    try:
+        initial_original = original_with_bundle if fresh_representation == "explicit" else original
+        initial_events = [("$room-message", room_id, initial_original)]
+        if fresh_representation == "bundled":
+            initial_events.append(("$room-message-edit", room_id, explicit_edit))
+        await cache.store_events_batch(initial_events)
+        runtime_started_at = time.time()
+        fresh_event = original_with_bundle if fresh_representation == "bundled" else explicit_edit
+        await cache.store_events_batch([(fresh_event["event_id"], room_id, fresh_event)])
+    finally:
+        await cache.close()
+
+    snapshot = await _read_snapshot(
+        event_cache_factory,
+        room_id=room_id,
+        thread_id=None,
+        sender="@agent:localhost",
+        runtime_started_at=runtime_started_at,
+    )
+
+    assert snapshot == AgentMessageSnapshot(
+        content={"body": "Done", "msgtype": "m.text"},
+        origin_server_ts=2000,
+    )
+
+
+@pytest.mark.asyncio
+async def test_room_scope_plain_original_refresh_does_not_revive_stale_edit(
+    event_cache_factory: Callable[[], ConversationEventCache],
+) -> None:
+    """Refreshing an original alone does not observe its old explicit edit."""
+    room_id = "!room:localhost"
+    original = _message_event(
+        event_id="$room-message",
+        sender="@agent:localhost",
+        body="Working...",
+        origin_server_ts=2000,
+    )
+    edit = _message_event(
+        event_id="$room-message-edit",
+        sender="@agent:localhost",
+        body="* Working...",
+        origin_server_ts=3000,
+        relates_to={"rel_type": "m.replace", "event_id": "$room-message"},
+        new_content={"body": "Done"},
+    )
+
+    cache = event_cache_factory()
+    await cache.initialize()
+    try:
+        await cache.store_events_batch(
+            [
+                ("$room-message", room_id, original),
+                ("$room-message-edit", room_id, edit),
+            ],
+        )
+        runtime_started_at = time.time()
+        await cache.store_events_batch([("$room-message", room_id, original)])
+    finally:
+        await cache.close()
+
+    snapshot = await _read_snapshot(
+        event_cache_factory,
+        room_id=room_id,
+        thread_id=None,
+        sender="@agent:localhost",
+        runtime_started_at=runtime_started_at,
+    )
+
+    assert snapshot is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("invalid_event_id", [[], {}], ids=["list", "mapping"])
+async def test_room_scope_ignores_unhashable_bundled_edit_event_id(
+    event_cache_factory: Callable[[], ConversationEventCache],
+    *,
+    invalid_event_id: object,
+) -> None:
+    """Malformed bundled identities cannot crash room-snapshot lookup."""
+    room_id = "!room:localhost"
+    original = _message_event(
+        event_id="$room-message",
+        sender="@agent:localhost",
+        body="Working...",
+        origin_server_ts=2000,
+    )
+    bundled_edit = _message_event(
+        event_id="$ignored",
+        sender="@agent:localhost",
+        body="* Working...",
+        origin_server_ts=3000,
+        relates_to={"rel_type": "m.replace", "event_id": "$room-message"},
+        new_content={"body": "Done"},
+    )
+    bundled_edit["event_id"] = invalid_event_id
+    original["unsigned"] = {"m.relations": {"m.replace": bundled_edit}}
+
+    cache = event_cache_factory()
+    await cache.initialize()
+    try:
+        await cache.store_events_batch([("$room-message", room_id, original)])
+    finally:
+        await cache.close()
+
+    snapshot = await _read_snapshot(
+        event_cache_factory,
+        room_id=room_id,
+        thread_id=None,
+        sender="@agent:localhost",
+        runtime_started_at=0.0,
+    )
+
+    assert snapshot == AgentMessageSnapshot(
+        content={"body": "Working...", "msgtype": "m.text"},
+        origin_server_ts=2000,
     )
 
 
@@ -698,6 +1358,73 @@ async def test_room_scope_returns_latest_by_origin_server_ts_not_cached_at(
 
     assert snapshot == AgentMessageSnapshot(
         content={"body": "Newest room message", "msgtype": "m.text"},
+        origin_server_ts=3000,
+    )
+
+
+@pytest.mark.asyncio
+async def test_thread_scope_uses_authoritative_event_timestamp_after_point_update(
+    event_cache_factory: Callable[[], ConversationEventCache],
+) -> None:
+    """A stale thread-index timestamp cannot keep an older event first."""
+    cache = event_cache_factory()
+    await cache.initialize()
+    try:
+        newest = _message_event(
+            event_id="$newest",
+            sender="@agent:localhost",
+            body="Initially newest",
+            origin_server_ts=4000,
+            relates_to={"rel_type": "m.thread", "event_id": "$thread-root"},
+        )
+        older = _message_event(
+            event_id="$older",
+            sender="@agent:localhost",
+            body="Actually newest",
+            origin_server_ts=3000,
+            relates_to={"rel_type": "m.thread", "event_id": "$thread-root"},
+        )
+        await _replace_thread(
+            cache,
+            "!room:localhost",
+            "$thread-root",
+            [
+                _message_event(
+                    event_id="$thread-root",
+                    sender="@user:localhost",
+                    body="Question",
+                    origin_server_ts=500,
+                ),
+                newest,
+                older,
+            ],
+            fetch_started_at=1000.0,
+        )
+        await cache.store_event(
+            "$newest",
+            "!room:localhost",
+            {
+                **newest,
+                "origin_server_ts": 1000,
+            },
+        )
+    finally:
+        await cache.close()
+
+    snapshot = await _read_snapshot(
+        event_cache_factory,
+        room_id="!room:localhost",
+        thread_id="$thread-root",
+        sender="@agent:localhost",
+        runtime_started_at=0.0,
+    )
+
+    assert snapshot == AgentMessageSnapshot(
+        content={
+            "body": "Actually newest",
+            "msgtype": "m.text",
+            "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread-root"},
+        },
         origin_server_ts=3000,
     )
 

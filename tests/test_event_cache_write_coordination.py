@@ -592,6 +592,11 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
                 coordinator=coordinator,
             ),
         )
+        access.reserve_outbound_thread(
+            "!test:localhost",
+            "$stream-original:localhost",
+            "$thread:localhost",
+        )
         blocker_started = asyncio.Event()
         release_blocker = asyncio.Event()
 
@@ -669,6 +674,11 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
                 coordinator=coordinator,
             ),
         )
+        access.reserve_outbound_thread(
+            "!test:localhost",
+            "$stream-original:localhost",
+            "$thread:localhost",
+        )
         blocker_started = asyncio.Event()
         release_blocker = asyncio.Event()
 
@@ -741,6 +751,11 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
                 event_cache=event_cache,
                 coordinator=coordinator,
             ),
+        )
+        access.reserve_outbound_thread(
+            "!test:localhost",
+            "$plain-original:localhost",
+            "$thread:localhost",
         )
         blocker_started = asyncio.Event()
         release_blocker = asyncio.Event()

@@ -11,6 +11,10 @@ import nio
 from nio import crypto
 
 from mindroom.logging_config import get_logger
+from mindroom.matrix.event_info import (
+    event_source_is_timeline_in_room,
+    event_source_supports_thread_relations,
+)
 
 logger = get_logger(__name__)
 
@@ -85,25 +89,82 @@ def is_encrypted_media_event_source(event_source: Mapping[str, Any]) -> bool:
     )
 
 
-def parse_matrix_media_event_source(
-    event_source: Mapping[str, Any],
-) -> MatrixMediaEvent | nio.BadEvent | None:
+def parse_matrix_media_event_source(event_source: Mapping[str, Any]) -> MatrixMediaEvent | nio.BadEvent | None:
     """Parse one Matrix event source through nio's correct media validation path."""
-    normalized_source = {key: value for key, value in event_source.items() if isinstance(key, str)}
-    try:
-        parsed_event = (
-            nio.RoomMessage.parse_decrypted_event(normalized_source)
-            if is_encrypted_media_event_source(normalized_source)
-            else nio.RoomMessage.parse_event(normalized_source)
-        )
-    except Exception:
-        return None
+    parsed_event = parse_room_message_event_source(event_source)
     return parsed_event if isinstance(parsed_event, (*MATRIX_MEDIA_EVENT_TYPES, nio.BadEvent)) else None
 
 
-def parse_matrix_media_dispatch_event_source(
-    event_source: Mapping[str, Any],
-) -> MatrixMediaDispatchEvent | None:
+def parse_room_message_event_source(event_source: Mapping[str, Any]) -> nio.RoomMessage | nio.BadEvent | None:
+    """Parse one room message through nio's plaintext or encrypted-media path."""
+    normalized_source = {key: value for key, value in event_source.items() if isinstance(key, str)}
+    try:
+        parser = nio.RoomMessage.parse_event
+        if is_encrypted_media_event_source(normalized_source):
+            parser = nio.RoomMessage.parse_decrypted_event
+        parsed_event = parser(normalized_source)
+    except Exception:
+        return None
+    return parsed_event if isinstance(parsed_event, (nio.RoomMessage, nio.BadEvent)) else None
+
+
+def valid_room_message_event_source(event_source: Mapping[str, Any]) -> bool:
+    """Return whether nio accepts one plaintext room-message envelope."""
+    return isinstance(parse_room_message_event_source(event_source), nio.RoomMessage)
+
+
+def _valid_encrypted_event_source(event_source: Mapping[str, object]) -> bool:
+    """Return whether nio accepts one opaque Megolm room-event envelope."""
+    normalized_source = {key: value for key, value in event_source.items() if isinstance(key, str)}
+    try:
+        parsed_event = nio.Event.parse_event(normalized_source)
+    except Exception:
+        return False
+    return isinstance(parsed_event, nio.MegolmEvent)
+
+
+def event_source_supports_valid_explicit_thread_relation(
+    event_source: Mapping[str, object],
+    room_id: str,
+) -> bool:
+    """Return whether a timeline event may supply its own explicit thread relation."""
+    event_type = event_source.get("type")
+    if not isinstance(event_type, str) or not event_type.strip():
+        return False
+    if not event_source_is_timeline_in_room(event_source, room_id):
+        return False
+    if event_type == "m.room.message":
+        return valid_room_message_event_source(event_source)
+    if event_type == "m.room.encrypted":
+        return _valid_encrypted_event_source(event_source)
+    return True
+
+
+def event_source_supports_valid_thread_relations(event_source: Mapping[str, object], room_id: str) -> bool:
+    """Return whether one valid room timeline event may supply thread relations."""
+    return event_source_supports_thread_relations(event_source, room_id) and (
+        valid_room_message_event_source(event_source)
+        if event_source.get("type") == "m.room.message"
+        else _valid_encrypted_event_source(event_source)
+    )
+
+
+def valid_room_message_replacement(event_source: Mapping[str, Any]) -> bool:
+    """Return whether nio accepts both layers of one room-message replacement."""
+    content = event_source.get("content")
+    new_content = content.get("m.new_content") if isinstance(content, Mapping) else None
+    if not isinstance(content, Mapping) or not isinstance(new_content, Mapping):
+        return False
+    for layer in (content, new_content):
+        parsed = parse_room_message_event_source({**event_source, "content": layer})
+        if not isinstance(parsed, nio.RoomMessage):
+            return False
+        if isinstance(parsed, MATRIX_MEDIA_EVENT_TYPES) and nio.Api.mxc_to_http(parsed.url) is None:
+            return False
+    return True
+
+
+def parse_matrix_media_dispatch_event_source(event_source: Mapping[str, Any]) -> MatrixMediaDispatchEvent | None:
     """Parse one Matrix event source into image/file/video media when possible."""
     parsed_event = parse_matrix_media_event_source(event_source)
     return parsed_event if is_matrix_media_dispatch_event(parsed_event) else None

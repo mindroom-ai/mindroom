@@ -1,8 +1,4 @@
-"""Comprehensive event relation analysis for Matrix events.
-
-This module provides a unified API for analyzing all Matrix event relations
-including threads (MSC3440), edits, replies, reactions, and more.
-"""
+"""Matrix event relation analysis."""
 
 from __future__ import annotations
 
@@ -13,9 +9,41 @@ from typing import cast
 _THREAD_RELATION_EVENT_TYPES = frozenset({"m.room.encrypted", "m.room.message"})
 
 
+def _normalized_event_id(value: object) -> str | None:
+    """Return one non-empty Matrix event ID string."""
+    if not isinstance(value, str) or not value or value != value.strip():
+        return None
+    return value
+
+
 def event_type_supports_thread_relations(event_type: object) -> bool:
     """Return whether this Matrix event family can affect conversation thread state."""
     return isinstance(event_type, str) and event_type in _THREAD_RELATION_EVENT_TYPES
+
+
+def event_source_is_state_event(event_source: Mapping[str, object]) -> bool:
+    """Return whether one raw Matrix event source carries a state key."""
+    return "state_key" in event_source
+
+
+def event_source_matches_room(event_source: Mapping[str, object], room_id: str) -> bool:
+    """Return whether explicit room evidence agrees with the authoritative room."""
+    return "room_id" not in event_source or event_source.get("room_id") == room_id
+
+
+def event_source_is_timeline_in_room(event_source: Mapping[str, object], room_id: str | None) -> bool:
+    """Return whether an event is non-state and belongs to the authoritative room."""
+    return not event_source_is_state_event(event_source) and (
+        room_id is None or event_source_matches_room(event_source, room_id)
+    )
+
+
+def event_source_supports_thread_relations(event_source: Mapping[str, object], room_id: str) -> bool:
+    """Return whether one room-scoped timeline event may affect thread relations."""
+    return event_type_supports_thread_relations(event_source.get("type")) and event_source_is_timeline_in_room(
+        event_source,
+        room_id,
+    )
 
 
 def origin_server_ts_from_event_source(event_source: object) -> int | float | None:
@@ -40,8 +68,7 @@ def reply_to_event_id_from_content(content: Mapping[str, object] | None) -> str 
     if not isinstance(in_reply_to, Mapping):
         return None
     in_reply_to = cast("Mapping[str, object]", in_reply_to)
-    reply_to_event_id = in_reply_to.get("event_id")
-    return reply_to_event_id if isinstance(reply_to_event_id, str) else None
+    return _normalized_event_id(in_reply_to.get("event_id"))
 
 
 @dataclass
@@ -92,9 +119,6 @@ class EventInfo:
     relates_to_event_id: str | None
     """The primary event ID this event relates to (if any)."""
 
-    thread_id_from_edit: str | None = None
-    """For edit events: the thread root event ID found in ``m.new_content``."""
-
     event_type: str | None = None
     """The Matrix event type carrying these relations, when known."""
 
@@ -111,10 +135,8 @@ class EventInfo:
             self.relates_to_event_id if self.relation_type == "m.reference" else None,
             self.reply_to_event_id,
         ):
-            if not isinstance(related_event_id, str):
-                continue
-            normalized_related_event_id = related_event_id.strip()
-            if not normalized_related_event_id or normalized_related_event_id == current_event_id:
+            normalized_related_event_id = _normalized_event_id(related_event_id)
+            if normalized_related_event_id is None or normalized_related_event_id == current_event_id:
                 continue
             return normalized_related_event_id
         return None
@@ -137,25 +159,7 @@ def is_thread_affecting_relation(
 
 
 def _analyze_event_relations(event_source: dict | None) -> EventInfo:
-    """Analyze complete relation information for a Matrix event.
-
-    This unified function provides all relation-related information in one place,
-    replacing manual extraction of m.relates_to throughout the codebase.
-
-    Per MSC3440:
-    - A thread can only be created from events that don't have any rel_type
-    - Thread messages use rel_type: m.thread
-    - Edits use rel_type: m.replace
-    - Reactions use rel_type: m.annotation
-    - Replies can be within threads or standalone
-
-    Args:
-        event_source: The event source dictionary (e.g., event.source for nio events)
-
-    Returns:
-        EventInfo object with complete relation analysis
-
-    """
+    """Analyze complete relation information for one Matrix event."""
     if not event_source:
         return EventInfo(
             is_thread=False,
@@ -171,7 +175,6 @@ def _analyze_event_relations(event_source: dict | None) -> EventInfo:
             has_relations=False,
             relation_type=None,
             relates_to_event_id=None,
-            thread_id_from_edit=None,
         )
 
     raw_event_type = event_source.get("type")
@@ -186,17 +189,17 @@ def _analyze_event_relations(event_source: dict | None) -> EventInfo:
     # Extract basic relation information
     relation_type = relates_to.get("rel_type")
     has_relations = bool(relates_to)
-    relates_to_event_id = relates_to.get("event_id")
+    relates_to_event_id = _normalized_event_id(relates_to.get("event_id"))
 
     # Thread analysis
     is_thread = relation_type == "m.thread"
     thread_id = relates_to_event_id if is_thread else None
+    if thread_id == _normalized_event_id(event_source.get("event_id")):
+        thread_id = None
 
     # Edit analysis
     is_edit = relation_type == "m.replace"
     original_event_id = relates_to_event_id if is_edit else None
-    thread_id_from_edit = _extract_thread_id_from_new_content(content) if is_edit else None
-
     # Reaction analysis
     is_reaction = relation_type == "m.annotation"
     reaction_key = relates_to.get("key") if is_reaction else None
@@ -206,9 +209,9 @@ def _analyze_event_relations(event_source: dict | None) -> EventInfo:
     reply_to_event_id = reply_to_event_id_from_content(content)
     is_reply = reply_to_event_id is not None
 
-    # Determine if this event can be a thread root (per MSC3440)
-    # An event can only be a thread root if it has NO relations
-    can_be_thread_root = not has_relations
+    # MSC3440 excludes only events with a primary relation type. Rich replies carry
+    # ``m.in_reply_to`` without ``rel_type`` and may therefore become thread roots.
+    can_be_thread_root = relation_type is None
 
     return EventInfo(
         event_type=event_type,
@@ -230,22 +233,4 @@ def _analyze_event_relations(event_source: dict | None) -> EventInfo:
         has_relations=has_relations,
         relation_type=relation_type,
         relates_to_event_id=relates_to_event_id,
-        thread_id_from_edit=thread_id_from_edit,
     )
-
-
-def _extract_thread_id_from_new_content(content: dict) -> str | None:
-    """Extract thread root event ID from edit ``m.new_content`` relation data."""
-    new_content = content.get("m.new_content", {})
-    if not isinstance(new_content, dict):
-        return None
-
-    new_relates_to = new_content.get("m.relates_to", {})
-    if not isinstance(new_relates_to, dict):
-        return None
-
-    if new_relates_to.get("rel_type") != "m.thread":
-        return None
-
-    event_id = new_relates_to.get("event_id")
-    return event_id if isinstance(event_id, str) else None

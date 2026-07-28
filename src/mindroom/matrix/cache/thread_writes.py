@@ -51,7 +51,11 @@ from mindroom.constants import (
     STREAM_STATUS_PENDING,
     STREAM_STATUS_STREAMING,
 )
-from mindroom.matrix.event_info import EventInfo, is_thread_affecting_relation
+from mindroom.matrix.event_info import (
+    EventInfo,
+    is_thread_affecting_relation,
+)
+from mindroom.matrix.media import event_source_supports_valid_thread_relations
 from mindroom.matrix.sync_certification import SyncCacheWriteResult
 from mindroom.matrix.thread_bookkeeping import (
     MutationResolutionContext,
@@ -64,6 +68,7 @@ from mindroom.timing import elapsed_ms_since, emit_timing_event, timing_enabled
 
 from .event_normalization import (
     is_opaque_encrypted_event_source,
+    mark_provisional_outbound_event,
     normalize_event_source_for_cache,
     normalize_nio_event_for_cache,
 )
@@ -108,7 +113,8 @@ def _collect_sync_timeline_cache_updates(
 
     event_info = EventInfo.from_event(event_source)
     event_type = event_source.get("type")
-    if is_thread_affecting_relation(
+    supports_relations = event_source_supports_valid_thread_relations(event_source, room_id)
+    if supports_relations and is_thread_affecting_relation(
         event_info,
         event_type=event_type if isinstance(event_type, str) else None,
     ):
@@ -344,6 +350,7 @@ class ThreadOutboundWritePolicy:
                 room_id,
                 event_info=event_info,
                 event_id=event_id,
+                event_source=event_source,
                 context="outbound",
             )
         )
@@ -373,7 +380,7 @@ class ThreadOutboundWritePolicy:
         stream_status: object,
     ) -> tuple[str | None, str | None, str | None]:
         """Resolve explicit or reserved thread scope before entering a write queue."""
-        explicit_thread_id = event_info.thread_id or event_info.thread_id_from_edit
+        explicit_thread_id = event_info.thread_id
         raw_reservation_event_id = event_info.original_event_id if event_info.is_edit else event_id
         reservation_event_id = raw_reservation_event_id if isinstance(raw_reservation_event_id, str) else None
         needs_reservation_scope = reservation_event_id is not None and (
@@ -480,10 +487,7 @@ class ThreadOutboundWritePolicy:
                     emit_timing=emit_timing,
                 )
                 return
-            if not is_thread_affecting_relation(
-                event_info,
-                event_type=event_type,
-            ):
+            if not is_thread_affecting_relation(event_info, event_type=event_type):
                 persisted_batch = [(event_id, room_id, normalized_event_source)]
                 self._schedule_fail_open_room_update(
                     room_id,
@@ -636,14 +640,16 @@ class ThreadOutboundWritePolicy:
         sender = client.user_id if isinstance(client.user_id, str) else None
         return typing.cast(
             "dict[str, object]",
-            normalize_event_source_for_cache(
-                {
-                    **event_source,
-                    "room_id": room_id,
-                },
-                event_id=event_id,
-                sender=sender,
-                origin_server_ts=int(time.time() * 1000),
+            mark_provisional_outbound_event(
+                normalize_event_source_for_cache(
+                    {
+                        **event_source,
+                        "room_id": room_id,
+                    },
+                    event_id=event_id,
+                    sender=sender,
+                    origin_server_ts=int(time.time() * 1000),
+                ),
             ),
         )
 
@@ -835,11 +841,13 @@ class ThreadLiveWritePolicy:
         *,
         event_id: str,
         event_info: EventInfo,
+        event_source: dict[str, object],
     ) -> MutationThreadImpact:
         return await self._resolver.resolve_thread_impact_for_mutation(
             room_id,
             event_info=event_info,
             event_id=event_id,
+            event_source=event_source,
             context="live",
         )
 
@@ -850,10 +858,12 @@ class ThreadLiveWritePolicy:
         *,
         event_info: EventInfo,
     ) -> None:
+        event_source = normalize_nio_event_for_cache(event)
         impact = await self._resolve_live_event_impact(
             room_id,
             event_id=event.event_id,
             event_info=event_info,
+            event_source=event_source,
         )
         room_level_skip_message = "Skipping live thread cache bookkeeping for known non-threaded message mutation"
         if impact.state is MutationThreadImpactState.ROOM_LEVEL:
@@ -880,7 +890,6 @@ class ThreadLiveWritePolicy:
 
         thread_id = impact.thread_id
         assert thread_id is not None
-        event_source = normalize_nio_event_for_cache(event)
 
         async def append_live_mutation() -> bool:
             return await _apply_thread_message_mutation(
@@ -968,10 +977,12 @@ class ThreadLiveWritePolicy:
     ) -> None:
         started = time.perf_counter()
         impact_started = time.perf_counter()
+        event_source = normalize_nio_event_for_cache(event)
         impact = await self._resolve_live_event_impact(
             room_id,
             event_id=event.event_id,
             event_info=event_info,
+            event_source=event_source,
         )
         impact_resolution_ms = elapsed_ms_since(impact_started, clock=time.perf_counter)
         room_level_skip_message = "Skipping live thread cache bookkeeping for known non-threaded message mutation"

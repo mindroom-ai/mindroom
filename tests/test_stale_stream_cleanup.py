@@ -512,6 +512,42 @@ async def test_cleanup_skips_completed_stream_status_even_with_trailing_marker(t
 
 
 @pytest.mark.asyncio
+async def test_cleanup_skips_bundled_completed_stream_replacement(tmp_path: Path) -> None:
+    """Cleanup must project a bundled terminal replacement before stale classification."""
+    config = _make_config(tmp_path)
+    client = AsyncMock(spec=nio.AsyncClient)
+    original = _make_message_event(
+        event_id="$original",
+        body="Partial answer",
+        timestamp_ms=NOW_MS - (STALE_AGE_MS + 10_000),
+        extra_content={STREAM_STATUS_KEY: "streaming"},
+    )
+    completed_edit = _make_message_event(
+        event_id="$completed-edit",
+        body="* Finished answer",
+        timestamp_ms=NOW_MS - STALE_AGE_MS,
+        relates_to={"rel_type": "m.replace", "event_id": "$original"},
+        new_content={
+            "body": "Finished answer",
+            "msgtype": "m.text",
+            STREAM_STATUS_KEY: "completed",
+        },
+    )
+    original.source["unsigned"] = {"m.relations": {"m.replace": completed_edit.source}}
+    client.room_messages.return_value = _room_messages_response(original)
+
+    with patch(
+        "mindroom.matrix.stale_stream_cleanup.edit_message_result",
+        new=AsyncMock(side_effect=delivered_matrix_side_effect("$cleanup-edit")),
+    ) as mock_edit:
+        cleaned, interrupted = await _run_cleanup(client, config, joined_rooms=[ROOM_ID])
+
+    assert cleaned == 0
+    assert interrupted == []
+    mock_edit.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_cleanup_scans_until_history_end_for_deep_stale_messages(tmp_path: Path) -> None:
     """Cleanup should keep paginating until history ends, not stop after an arbitrary page cap."""
     config = _make_config(tmp_path)
@@ -1377,6 +1413,71 @@ async def test_cleanup_skips_recent_in_progress_message_on_startup(tmp_path: Pat
 
 
 @pytest.mark.asyncio
+async def test_cleanup_skips_old_stream_with_recent_edit_on_startup(tmp_path: Path) -> None:
+    """Startup cleanup should use edit activity, not original creation time, for its recency guard."""
+    config = _make_config(tmp_path)
+    client = AsyncMock(spec=nio.AsyncClient)
+    original = _make_message_event(
+        event_id="$message",
+        body="Initial output",
+        timestamp_ms=NOW_MS - STALE_AGE_MS,
+    )
+    recent_edit = _make_message_event(
+        event_id="$recent-edit",
+        body="* Still streaming",
+        timestamp_ms=NOW_MS - 1_000,
+        relates_to={"rel_type": "m.replace", "event_id": "$message"},
+        new_content={"body": "Still streaming", "msgtype": "m.text", STREAM_STATUS_KEY: "streaming"},
+    )
+    client.room_messages.return_value = _room_messages_response(original, recent_edit)
+    client.room_get_event_relations = MagicMock(return_value=_aiter())
+
+    with (
+        patch(
+            "mindroom.matrix.stale_stream_cleanup.edit_message_result",
+            new=AsyncMock(side_effect=delivered_matrix_side_effect("$edit")),
+        ) as mock_edit,
+        patch("mindroom.matrix.stale_stream_cleanup.time.time", return_value=NOW_MS / 1000),
+    ):
+        cleaned, interrupted = await _run_cleanup(client, config, joined_rooms=[ROOM_ID])
+
+    assert cleaned == 0
+    assert interrupted == []
+    mock_edit.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_cleanup_uses_recent_edit_inside_restart_window(tmp_path: Path) -> None:
+    """A recent visible edit should keep an ancient original eligible for stale cleanup."""
+    config = _make_config(tmp_path)
+    client = AsyncMock(spec=nio.AsyncClient)
+    original = _make_message_event(
+        event_id="$message",
+        body="Initial output",
+        timestamp_ms=NOW_MS - OLD_STALE_AGE_MS,
+    )
+    stale_edit = _make_message_event(
+        event_id="$stale-edit",
+        body="* Needs cleanup",
+        timestamp_ms=NOW_MS - STALE_AGE_MS,
+        relates_to={"rel_type": "m.replace", "event_id": "$message"},
+        new_content={"body": "Needs cleanup", "msgtype": "m.text", STREAM_STATUS_KEY: "streaming"},
+    )
+    client.room_messages.return_value = _room_messages_response(original, stale_edit)
+    client.room_get_event_relations = MagicMock(return_value=_aiter())
+
+    with patch(
+        "mindroom.matrix.stale_stream_cleanup.edit_message_result",
+        new=AsyncMock(side_effect=delivered_matrix_side_effect("$edit")),
+    ) as mock_edit:
+        cleaned, interrupted = await _run_cleanup(client, config, joined_rooms=[ROOM_ID], now_ms=NOW_MS)
+
+    assert cleaned == 1
+    assert interrupted == []
+    assert mock_edit.await_args.args[2] == "$message"
+
+
+@pytest.mark.asyncio
 async def test_cleanup_returns_thread_requester_for_auto_resume(tmp_path: Path) -> None:
     """Cleanup should carry the exact replied-to requester into the auto-resume record."""
     config = _make_config(tmp_path)
@@ -1525,6 +1626,33 @@ async def test_cleanup_uses_scanned_history_when_edited_bot_message_lacks_visibl
 
 
 @pytest.mark.asyncio
+async def test_cleanup_does_not_synthesize_missing_original_from_edit_only_history(tmp_path: Path) -> None:
+    """A bounded scan containing only an edit must not create a visible cleanup target."""
+    config = _make_config(tmp_path)
+    client = AsyncMock(spec=nio.AsyncClient)
+    client.room_messages.return_value = _room_messages_response(
+        _make_message_event(
+            event_id="$latest-edit",
+            body="* Needs cleanup",
+            timestamp_ms=NOW_MS - STALE_AGE_MS,
+            relates_to={"rel_type": "m.replace", "event_id": "$outside-scan-original"},
+            new_content={"body": "Needs cleanup", "msgtype": "m.text", STREAM_STATUS_KEY: "streaming"},
+        ),
+    )
+    client.room_get_event_relations = MagicMock(return_value=_aiter())
+
+    with patch(
+        "mindroom.matrix.stale_stream_cleanup.edit_message_result",
+        new=AsyncMock(side_effect=delivered_matrix_side_effect("$edit")),
+    ) as mock_edit:
+        cleaned, interrupted = await _run_cleanup(client, config, joined_rooms=[ROOM_ID])
+
+    assert cleaned == 0
+    assert interrupted == []
+    mock_edit.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_cleanup_follows_agent_reply_chain_outside_scanned_history(tmp_path: Path) -> None:
     """Cleanup should fetch the exact reply chain until it reaches the original human requester."""
     config = _make_config(tmp_path)
@@ -1592,6 +1720,194 @@ async def test_cleanup_follows_agent_reply_chain_outside_scanned_history(tmp_pat
     ]
 
 
+@pytest.mark.parametrize(
+    "invalid_scope",
+    [{"state_key": ""}, {"room_id": "!other:example.com"}],
+    ids=["state", "wrong-room"],
+)
+@pytest.mark.asyncio
+async def test_cleanup_exact_event_fetch_rejects_invalid_timeline_scope(
+    invalid_scope: dict[str, str],
+) -> None:
+    """Exact requester lookup must reject state and explicit other-room events."""
+    event = _make_message_event(
+        event_id="$invalid",
+        body="invalid",
+        sender=USER_ID,
+        timestamp_ms=NOW_MS,
+        room_id=invalid_scope.get("room_id", ROOM_ID),
+    )
+    event.source.update(invalid_scope)
+    client = AsyncMock(spec=nio.AsyncClient)
+    client.room_get_event.return_value = _room_get_event_response(event)
+
+    message_data = await stale_stream_cleanup_module._fetch_message_data_for_event_id(
+        client,
+        room_id=ROOM_ID,
+        event_id="$invalid",
+        fetched_message_data_by_event_id={},
+        trusted_sender_ids=set(),
+    )
+
+    assert message_data is None
+
+
+@pytest.mark.parametrize(
+    "invalid_scope",
+    [{"state_key": ""}, {"room_id": "!other:example.com"}],
+    ids=["state", "wrong-room"],
+)
+@pytest.mark.asyncio
+async def test_cleanup_room_scan_excludes_invalid_timeline_scope(
+    invalid_scope: dict[str, str],
+) -> None:
+    """Scanned state and explicit other-room events must not enter requester ancestry."""
+    event = _make_message_event(
+        event_id="$invalid",
+        body="invalid",
+        sender=USER_ID,
+        timestamp_ms=NOW_MS,
+        room_id=invalid_scope.get("room_id", ROOM_ID),
+    )
+    event.source.update(invalid_scope)
+
+    message_data = await stale_stream_cleanup_module._scanned_message_data_by_event_id(
+        [event],
+        room_id=ROOM_ID,
+    )
+
+    assert message_data == {}
+
+
+@pytest.mark.asyncio
+async def test_cleanup_exact_edit_fetch_follows_valid_original_ancestry() -> None:
+    """A fetched replacement must inherit requester ancestry from its original event."""
+    edit = _make_message_event(
+        event_id="$edit",
+        body="* edited",
+        timestamp_ms=NOW_MS,
+        relates_to={"rel_type": "m.replace", "event_id": "$original"},
+        new_content={
+            "body": "edited",
+            "msgtype": "m.text",
+            "m.relates_to": {"m.in_reply_to": {"event_id": "$forged"}},
+        },
+    )
+    original = _make_message_event(
+        event_id="$original",
+        body="original",
+        timestamp_ms=NOW_MS - 1,
+        relates_to={"m.in_reply_to": {"event_id": "$actual-requester"}},
+    )
+    client = AsyncMock(spec=nio.AsyncClient)
+    client.room_get_event.side_effect = [
+        _room_get_event_response(edit),
+        _room_get_event_response(original),
+    ]
+
+    message_data = await stale_stream_cleanup_module._fetch_message_data_for_event_id(
+        client,
+        room_id=ROOM_ID,
+        event_id="$edit",
+        fetched_message_data_by_event_id={},
+        trusted_sender_ids=set(),
+    )
+
+    assert message_data is not None
+    assert message_data.reply_to_event_id == "$actual-requester"
+    assert [call.args[1] for call in client.room_get_event.await_args_list] == [
+        "$edit",
+        "$original",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_cleanup_exact_edit_fetch_rejects_malformed_original() -> None:
+    """A malformed fetched original must not supply requester ancestry."""
+    edit = _make_message_event(
+        event_id="$edit",
+        body="* edited",
+        timestamp_ms=NOW_MS,
+        relates_to={"rel_type": "m.replace", "event_id": "$original"},
+        new_content={"body": "edited", "msgtype": "m.text"},
+    )
+    original = nio.Event.parse_event(
+        {
+            "content": {
+                "body": "original",
+                "m.relates_to": {"m.in_reply_to": {"event_id": "$attacker-chosen-requester"}},
+            },
+            "event_id": "$original",
+            "sender": BOT_USER_ID,
+            "origin_server_ts": NOW_MS - 1,
+            "type": "m.room.message",
+            "room_id": ROOM_ID,
+        },
+    )
+    assert isinstance(original, nio.BadEvent)
+    client = AsyncMock(spec=nio.AsyncClient)
+    client.room_get_event.side_effect = [
+        _room_get_event_response(edit),
+        _room_get_event_response(original),
+    ]
+
+    message_data = await stale_stream_cleanup_module._fetch_message_data_for_event_id(
+        client,
+        room_id=ROOM_ID,
+        event_id="$edit",
+        fetched_message_data_by_event_id={},
+        trusted_sender_ids=set(),
+    )
+
+    assert message_data is None
+
+
+@pytest.mark.parametrize("target_kind", ["wrong-sender", "edit-of-edit"])
+@pytest.mark.asyncio
+async def test_cleanup_exact_edit_fetch_rejects_invalid_original(
+    target_kind: str,
+) -> None:
+    """Wrong-sender replacements and edit-of-edit targets must not supply ancestry."""
+    edit = _make_message_event(
+        event_id="$edit",
+        body="* edited",
+        timestamp_ms=NOW_MS,
+        relates_to={"rel_type": "m.replace", "event_id": "$target"},
+        new_content={
+            "body": "edited",
+            "msgtype": "m.text",
+            "m.relates_to": {"m.in_reply_to": {"event_id": "$forged"}},
+        },
+    )
+    target = _make_message_event(
+        event_id="$target",
+        body="target",
+        sender=OTHER_USER_ID if target_kind == "wrong-sender" else BOT_USER_ID,
+        timestamp_ms=NOW_MS - 1,
+        relates_to=(
+            {"rel_type": "m.replace", "event_id": "$base"}
+            if target_kind == "edit-of-edit"
+            else {"m.in_reply_to": {"event_id": "$actual-requester"}}
+        ),
+        new_content=({"body": "target", "msgtype": "m.text"} if target_kind == "edit-of-edit" else None),
+    )
+    client = AsyncMock(spec=nio.AsyncClient)
+    client.room_get_event.side_effect = [
+        _room_get_event_response(edit),
+        _room_get_event_response(target),
+    ]
+
+    message_data = await stale_stream_cleanup_module._fetch_message_data_for_event_id(
+        client,
+        room_id=ROOM_ID,
+        event_id="$edit",
+        fetched_message_data_by_event_id={},
+        trusted_sender_ids=set(),
+    )
+
+    assert message_data is None
+
+
 @pytest.mark.asyncio
 async def test_cleanup_uses_visible_content_for_fetched_edit_events(tmp_path: Path) -> None:
     """Requester resolution should use canonical visible content for fetched edit events."""
@@ -1616,25 +1932,36 @@ async def test_cleanup_uses_visible_content_for_fetched_edit_events(tmp_path: Pa
     )
     client.room_get_event_relations = MagicMock(return_value=_aiter())
     client.room_get_event = AsyncMock(
-        return_value=_room_get_event_response(
-            _make_message_event(
-                event_id="$agent-a-edit",
-                body="* Preview handoff",
-                sender=other_agent_user_id,
-                timestamp_ms=NOW_MS - (STALE_AGE_MS + 20_000),
-                relates_to={"rel_type": "m.replace", "event_id": "$agent-a-original"},
-                new_content={
-                    "body": "Preview handoff",
-                    "msgtype": "m.file",
-                    "info": {"mimetype": "application/json"},
-                    "io.mindroom.long_text": {
-                        "version": 2,
-                        "encoding": "matrix_event_content_json",
+        side_effect=[
+            _room_get_event_response(
+                _make_message_event(
+                    event_id="$agent-a-edit",
+                    body="* Preview handoff",
+                    sender=other_agent_user_id,
+                    timestamp_ms=NOW_MS - (STALE_AGE_MS + 20_000),
+                    relates_to={"rel_type": "m.replace", "event_id": "$agent-a-original"},
+                    new_content={
+                        "body": "Preview handoff",
+                        "msgtype": "m.file",
+                        "info": {"mimetype": "application/json"},
+                        "io.mindroom.long_text": {
+                            "version": 2,
+                            "encoding": "matrix_event_content_json",
+                        },
+                        "url": "mxc://server/agent-a-edit-sidecar",
                     },
-                    "url": "mxc://server/agent-a-edit-sidecar",
-                },
+                ),
             ),
-        ),
+            _room_get_event_response(
+                _make_message_event(
+                    event_id="$agent-a-original",
+                    body="Handoff",
+                    sender=other_agent_user_id,
+                    timestamp_ms=NOW_MS - (STALE_AGE_MS + 21_000),
+                    relates_to=_thread_reply_relation("$thread-root", "$user-root"),
+                ),
+            ),
+        ],
     )
     client.download = AsyncMock(
         return_value=MagicMock(
@@ -1728,6 +2055,15 @@ async def test_cleanup_fetches_exact_scanned_edit_ancestor_for_requester_resolut
             ),
             _room_get_event_response(
                 _make_message_event(
+                    event_id="$agent-a-original",
+                    body="Handoff",
+                    sender=other_agent_user_id,
+                    timestamp_ms=NOW_MS - (STALE_AGE_MS + 21_000),
+                    relates_to=_thread_reply_relation("$thread-root", "$user-root"),
+                ),
+            ),
+            _room_get_event_response(
+                _make_message_event(
                     event_id="$user-root",
                     body="Start here",
                     sender=USER_ID,
@@ -1756,6 +2092,7 @@ async def test_cleanup_fetches_exact_scanned_edit_ancestor_for_requester_resolut
     ]
     assert [call.args[1] for call in client.room_get_event.await_args_list] == [
         "$agent-a-edit",
+        "$agent-a-original",
         "$user-root",
     ]
 

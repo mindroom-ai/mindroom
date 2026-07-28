@@ -31,7 +31,11 @@ from mindroom.matrix.cache.thread_history_result import ThreadHistoryResult
 from mindroom.matrix.cache.thread_reads import ThreadReadMode
 from mindroom.matrix.client_delivery import cached_room as matrix_cached_room
 from mindroom.matrix.event_info import EventInfo
-from mindroom.matrix.media import MatrixMediaEvent, is_audio_message_event, is_image_message_event
+from mindroom.matrix.media import (
+    MatrixMediaEvent,
+    is_audio_message_event,
+    is_image_message_event,
+)
 from mindroom.matrix.message_content import resolve_event_source_content
 from mindroom.matrix.thread_diagnostics import is_thread_history_degraded
 from mindroom.matrix.thread_membership import (
@@ -42,13 +46,14 @@ from mindroom.matrix.thread_membership import (
     resolve_related_event_thread_id_best_effort,
     thread_messages_thread_membership_access,
 )
+from mindroom.matrix.thread_room_scan import validated_event_source_from_lookup_response
 from mindroom.message_target import MessageTarget
 from mindroom.runtime_protocols import SupportsClientConfig  # noqa: TC001
 from mindroom.thread_utils import check_agent_mentioned
 from mindroom.turn_origin import TurnOrigin, classify_turn_origin
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Sequence
+    from collections.abc import AsyncIterator, Mapping, Sequence
 
     import structlog
 
@@ -516,6 +521,7 @@ class ConversationResolver:
                 room.room_id,
                 event_info,
                 event_id=event.event_id,
+                event_source=event.source,
                 access=self.thread_membership_access(
                     mode=ThreadReadMode.DISPATCH_SNAPSHOT,
                     caller_label="coalescing_thread_id",
@@ -539,6 +545,7 @@ class ConversationResolver:
         event_id: str | None,
         event_info: EventInfo,
         *,
+        event_source: Mapping[str, Any] | None = None,
         mode: ThreadReadMode,
         caller_label: str,
     ) -> _ThreadIdLookup:
@@ -551,6 +558,7 @@ class ConversationResolver:
             room_id,
             event_info,
             event_id=event_id,
+            event_source=event_source,
             access=access,
         )
         thread_history = (
@@ -601,6 +609,7 @@ class ConversationResolver:
                 mode=mode,
                 caller_label=caller_label,
             ),
+            fetch_event_source=self._event_source_for_event_id,
         )
 
     async def _read_thread_messages(
@@ -625,6 +634,15 @@ class ConversationResolver:
         room_id: str,
         event_id: str,
     ) -> EventInfo | None:
+        event_source = await self._event_source_for_event_id(room_id, event_id)
+        return EventInfo.from_event(event_source) if event_source is not None else None
+
+    async def _event_source_for_event_id(
+        self,
+        room_id: str,
+        event_id: str,
+    ) -> dict[str, Any] | None:
+        """Return one valid room-scoped timeline source for thread resolution."""
         target_event = await self.deps.conversation_cache.get_event(room_id, event_id)
         if not isinstance(target_event, nio.RoomGetEventResponse):
             if isinstance(target_event, RoomGetEventError) and target_event.status_code == "M_NOT_FOUND":
@@ -636,7 +654,11 @@ class ConversationResolver:
             )
             msg = f"Failed to resolve related Matrix event {event_id}: {detail}"
             raise RuntimeError(msg)
-        return EventInfo.from_event(target_event.event.source)
+        return validated_event_source_from_lookup_response(
+            target_event,
+            room_id=room_id,
+            event_id=event_id,
+        )
 
     async def _resolve_thread_context(
         self,
@@ -644,6 +666,7 @@ class ConversationResolver:
         event_id: str | None,
         event_info: EventInfo,
         *,
+        event_source: Mapping[str, Any] | None = None,
         mode: ThreadReadMode,
         caller_label: str,
     ) -> _ThreadContextLookup:
@@ -652,6 +675,7 @@ class ConversationResolver:
             room_id,
             event_id,
             event_info,
+            event_source=event_source,
             mode=mode,
             caller_label=caller_label,
         )
@@ -775,7 +799,7 @@ class ConversationResolver:
             resolved_thread_id = None
         else:
             event_info = EventInfo.from_event(resolved_event_source)
-            resolved_thread_id = event_info.thread_id or event_info.thread_id_from_edit
+            resolved_thread_id = event_info.thread_id
         context = MessageContext(
             am_i_mentioned=am_i_mentioned,
             is_thread=resolved_thread_id is not None,
@@ -857,6 +881,7 @@ class ConversationResolver:
                 room.room_id,
                 event.event_id,
                 event_info,
+                event_source=resolved_event_source,
                 mode=mode,
                 caller_label=caller_label,
             )

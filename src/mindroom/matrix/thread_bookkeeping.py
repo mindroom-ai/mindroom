@@ -55,7 +55,11 @@ from dataclasses import dataclass, field
 from enum import Enum, auto
 from typing import TYPE_CHECKING, Literal, cast
 
-from mindroom.matrix.event_info import EventInfo, event_type_supports_thread_relations
+from mindroom.matrix.event_info import (
+    EventInfo,
+    event_type_supports_thread_relations,
+)
+from mindroom.matrix.media import event_source_supports_valid_thread_relations
 from mindroom.matrix.thread_membership import (
     ThreadMembershipAccess,
     ThreadMembershipLookupError,
@@ -128,6 +132,7 @@ class MutationResolutionContext:
     """Cache-backed lookup context reused across one mutation batch."""
 
     page_event_infos: dict[str, EventInfo]
+    page_event_sources: dict[str, dict[str, object]]
     page_resolved_thread_ids: dict[str, str]
     cached_thread_ids: dict[str, str | None] = field(default_factory=dict)
     cached_event_infos: dict[str, EventInfo] = field(default_factory=dict)
@@ -232,25 +237,38 @@ class ThreadMutationResolver:
     ) -> MutationResolutionContext:
         """Build one page-local resolution context for a sync batch."""
         page_event_infos: dict[str, EventInfo] = {}
+        page_event_sources: dict[str, dict[str, object]] = {}
+        relation_event_infos: dict[str, EventInfo] = {}
         ordered_event_ids: list[str] = []
         for event_source in [*plain_events, *threaded_events]:
             event_id = event_source.get("event_id")
             if not isinstance(event_id, str) or not event_id:
                 continue
-            page_event_infos[event_id] = EventInfo.from_event(event_source)
+            event_info = EventInfo.from_event(event_source)
+            page_event_sources[event_id] = event_source
+            supports_relations = event_type_supports_thread_relations(event_info.event_type)
+            valid_relation_source = event_source_supports_valid_thread_relations(event_source, room_id)
+            if supports_relations and not valid_relation_source:
+                # A state or wrong-room event claiming a message type must never contribute
+                # relations, but its ID still has to occupy the page so later resolution cannot
+                # fall through to an authoritative fetch and trust it. The relation-free
+                # placeholder carries no event type, which `conversation_relation_thread_membership_access`
+                # rejects as an unusable relation ancestor, so any walk reaching it stays indeterminate.
+                page_event_infos[event_id] = EventInfo.from_event(None)
+                continue
+            page_event_infos[event_id] = event_info
             ordered_event_ids.append(event_id)
-        relation_event_infos = {
-            event_id: event_info
-            for event_id, event_info in page_event_infos.items()
-            if event_type_supports_thread_relations(event_info.event_type)
-        }
+            if supports_relations:
+                relation_event_infos[event_id] = event_info
         page_resolved_thread_ids = await resolve_thread_ids_for_event_infos(
             room_id,
             event_infos=relation_event_infos,
+            event_sources_by_event_id=page_event_sources,
             ordered_event_ids=ordered_event_ids,
         )
         return MutationResolutionContext(
             page_event_infos=page_event_infos,
+            page_event_sources=page_event_sources,
             page_resolved_thread_ids=page_resolved_thread_ids,
         )
 
@@ -346,18 +364,25 @@ class ThreadMutationResolver:
         *,
         event_info: EventInfo,
         event_id: str | None,
+        event_source: Mapping[str, object] | None = None,
         context: MutationWriteContext,
         resolution_context: MutationResolutionContext | None = None,
     ) -> MutationThreadImpact:
         """Resolve how one message mutation should affect thread cache state."""
-        explicit_thread_id = event_info.thread_id or event_info.thread_id_from_edit
-        if explicit_thread_id is not None:
-            return MutationThreadImpact.threaded(explicit_thread_id)
+        if resolution_context is None:
+            resolution_context = MutationResolutionContext(
+                page_event_infos={},
+                page_event_sources={},
+                page_resolved_thread_ids={},
+            )
+        if event_id is not None and event_source is not None:
+            resolution_context.page_event_sources[event_id] = dict(event_source)
         try:
             resolution = await resolve_event_thread_membership(
                 room_id,
                 event_info,
                 event_id=event_id,
+                event_source=event_source,
                 access=self._thread_membership_access(
                     room_id=room_id,
                     resolution_context=resolution_context,
@@ -441,10 +466,34 @@ class ThreadMutationResolver:
         except Exception as exc:
             return ThreadRootProof.proof_unavailable(exc)
         if thread_events is None:
-            proof = ThreadRootProof.proof_unavailable(
-                ThreadMembershipLookupError(f"Thread root proof unavailable for {thread_root_id}"),
+            indexed_thread_id = await self._lookup_thread_id_for_mutation_context(
+                room_id,
+                thread_root_id,
+                resolution_context=resolution_context,
+            )
+            proof = (
+                ThreadRootProof.not_a_thread_root()
+                if indexed_thread_id is not None and indexed_thread_id != thread_root_id
+                else ThreadRootProof.proof_unavailable(
+                    ThreadMembershipLookupError(f"Thread root proof unavailable for {thread_root_id}"),
+                )
             )
         else:
+            if any(
+                not event_source_supports_valid_thread_relations(
+                    cast("dict[str, object]", event_source),
+                    room_id,
+                )
+                for event_source in thread_events
+            ):
+                proof = ThreadRootProof.proof_unavailable(
+                    ThreadMembershipLookupError(
+                        f"Cached thread root proof contains invalid room timeline events for {thread_root_id}",
+                    ),
+                )
+                if resolution_context is not None:
+                    resolution_context.cached_thread_root_proofs[thread_root_id] = proof
+                return proof
             has_children = any(
                 _event_source_counts_as_thread_child_proof(
                     thread_root_id,
@@ -486,11 +535,20 @@ class ThreadMutationResolver:
                 resolution_context=resolution_context,
             )
 
+        async def fetch_event_source(_room_id: str, event_id: str) -> dict[str, object] | None:
+            if resolution_context is not None:
+                page_source = resolution_context.page_event_sources.get(event_id)
+                if page_source is not None:
+                    return page_source
+            cached_source = await self.runtime.event_cache.get_event(room_id, event_id)
+            return cast("dict[str, object]", cached_source) if isinstance(cached_source, dict) else None
+
         return conversation_relation_thread_membership_access(
             ThreadMembershipAccess(
                 lookup_thread_id=lookup_thread_id,
                 fetch_event_info=fetch_event_info,
                 prove_thread_root=prove_thread_root,
+                fetch_event_source=fetch_event_source,
             ),
         )
 

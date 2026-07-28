@@ -45,19 +45,30 @@ from mindroom.matrix.client_thread_history import (
     refresh_thread_history_from_source,
     thread_ids_needing_refill,
 )
-from mindroom.matrix.event_info import EventInfo
+from mindroom.matrix.event_info import (
+    EventInfo,
+    event_source_is_state_event,
+    event_source_matches_room,
+)
 from mindroom.matrix.media import (
     is_encrypted_media_event_source,
     parse_matrix_media_event_source,
+    parse_room_message_event_source,
+    valid_room_message_replacement,
 )
 from mindroom.matrix.membership_fence import UNCERTIFIED_MEMBERSHIP_EPOCH
 from mindroom.matrix.message_content import extract_edit_body
+from mindroom.matrix.replacements import (
+    bundled_replacement_candidates,
+    replacement_content,
+)
 from mindroom.matrix.thread_bookkeeping import ThreadMutationResolver
 from mindroom.matrix.thread_membership import resolve_event_thread_membership
 from mindroom.matrix.thread_room_scan import (
     fetch_event_info_for_client,
     lookup_thread_id_from_conversation_cache,
     room_scan_membership_access_for_client,
+    validated_event_source_from_lookup_response,
 )
 from mindroom.timing import elapsed_ms_since
 
@@ -104,12 +115,18 @@ async def resolve_thread_root_event_id_for_client(
     if not normalized_event_id:
         return None
 
-    event_info = await fetch_event_info_for_client(
-        client,
-        room_id,
-        normalized_event_id,
-        strict=False,
-    )
+    response = await client.room_get_event(room_id, normalized_event_id)
+    if isinstance(response, nio.RoomGetEventResponse):
+        event_source = validated_event_source_from_lookup_response(
+            response,
+            room_id=room_id,
+            event_id=normalized_event_id,
+        )
+        if event_source is None:
+            return None
+        event_info = EventInfo.from_event(event_source)
+    else:
+        event_info = None
     if event_info is None:
         return await lookup_thread_id_from_conversation_cache(
             conversation_cache,
@@ -131,6 +148,9 @@ async def resolve_thread_root_event_id_for_client(
                 lookup_event_id,
                 strict=False,
             ),
+            known_event_sources={
+                normalized_event_id: {key: value for key, value in event_source.items() if isinstance(key, str)},
+            },
         ),
     )
     return resolution.thread_id
@@ -254,50 +274,48 @@ async def _apply_cached_latest_edit(
     trusted_sender_ids: Collection[str] = (),
 ) -> dict[str, Any]:
     """Project one cached original event into its latest visible edited state."""
-    if event_source.get("type") != "m.room.message":
+    if event_source.get("type") != "m.room.message" or event_source_is_state_event(event_source):
         return event_source
 
-    event_info = EventInfo.from_event(event_source)
-    event_id = event_source.get("event_id")
-    sender = event_source.get("sender")
-    if event_info.is_edit or not isinstance(event_id, str) or not event_id or not isinstance(sender, str):
-        return event_source
-
-    # Scoped to this event's own sender. A replacement is only legitimate from the sender of the
-    # event it replaces, and without this the newest edit from anyone wins - so this path would
-    # serve someone else's text under the author's event, while the collapsed thread read of the
-    # same cache correctly refuses it.
-    latest_edit_source = await event_cache.get_latest_edit(room_id, event_id, sender=sender)
-    if latest_edit_source is None:
-        return event_source
-
-    edited_body, edited_content = await extract_edit_body(
-        latest_edit_source,
-        client,
-        event_cache=event_cache,
-        room_id=room_id,
-        expected_membership_epoch=expected_membership_epoch,
-        trusted_sender_ids=trusted_sender_ids,
-    )
-    if edited_body is None or edited_content is None:
-        return event_source
-
-    original_content = event_source.get("content", {})
-    merged_content = (
-        {key: value for key, value in original_content.items() if isinstance(key, str)}
-        if isinstance(original_content, dict)
-        else {}
-    )
-    merged_content.update(edited_content)
-    merged_content.setdefault("body", edited_body)
-
-    updated_event_source = {key: value for key, value in event_source.items() if isinstance(key, str)}
-    updated_event_source["content"] = merged_content
-
-    latest_edit_timestamp = latest_edit_source.get("origin_server_ts")
-    if isinstance(latest_edit_timestamp, int) and not isinstance(latest_edit_timestamp, bool):
-        updated_event_source["origin_server_ts"] = latest_edit_timestamp
-    return updated_event_source
+    # A replacement can pass identity and envelope validation and still fail to resolve, for
+    # example when its sidecar cannot be hydrated. Each such candidate is excluded and the cache
+    # is asked for the next-newest one, so a broken newest edit never hides an older valid edit.
+    bundled_event_ids = {
+        event_id
+        for candidate in bundled_replacement_candidates(event_source)
+        if isinstance((event_id := candidate.get("event_id")), str)
+    }
+    rejected_event_ids = set(await event_cache.redacted_event_ids(room_id, bundled_event_ids))
+    while (
+        latest_replacement := await event_cache.get_latest_edit(
+            room_id,
+            event_source,
+            validator=valid_room_message_replacement,
+            excluded_event_ids=rejected_event_ids,
+        )
+    ) is not None:
+        edited_body, edited_content = await extract_edit_body(
+            latest_replacement,
+            client,
+            event_cache=event_cache,
+            room_id=room_id,
+            expected_membership_epoch=expected_membership_epoch,
+            trusted_sender_ids=trusted_sender_ids,
+            replacement_validator=valid_room_message_replacement,
+        )
+        if edited_body is None or edited_content is None:
+            rejected_event_ids.add(latest_replacement["event_id"])
+            continue
+        original_content = event_source.get("content", {})
+        projected_content = replacement_content(
+            original_content if isinstance(original_content, dict) else {},
+            edited_content,
+        )
+        projected_content.setdefault("body", edited_body)
+        updated_event_source = {key: value for key, value in event_source.items() if isinstance(key, str)}
+        updated_event_source["content"] = projected_content
+        return updated_event_source
+    return event_source
 
 
 async def _cached_room_get_event_response(
@@ -310,6 +328,17 @@ async def _cached_room_get_event_response(
     trusted_sender_ids: Collection[str] = (),
 ) -> nio.RoomGetEventResponse | None:
     """Reconstruct one cached room-get-event response, applying visible edits when present."""
+    if not event_source_matches_room(event_source, room_id):
+        return None
+    if (
+        event_source.get("type") == "m.room.message"
+        and not event_source_is_state_event(event_source)
+        and not isinstance(
+            parse_room_message_event_source(event_source),
+            nio.RoomMessage,
+        )
+    ):
+        return None
     visible_event_source = await _apply_cached_latest_edit(
         event_source,
         room_id=room_id,
@@ -375,10 +404,14 @@ async def _cached_room_get_event(
         return response, None
 
     event = response.event
+    if event.source.get("event_id") != normalized_event_id:
+        return RoomGetEventError("Matrix event lookup returned an unexpected event ID"), None
     normalized_event_source = normalize_nio_event_for_cache(
         event,
         event_id=normalized_event_id,
     )
+    if not event_source_matches_room(normalized_event_source, room_id):
+        return RoomGetEventError("Matrix event lookup returned an unexpected room ID"), None
     visible_response = await _cached_room_get_event_response(
         client,
         event_cache,
@@ -633,7 +666,12 @@ class MatrixConversationCache(ConversationCacheProtocol):
         )
         if not isinstance(response, nio.RoomGetEventResponse):
             return None
-        return EventInfo.from_event(response.event.source)
+        event_source = validated_event_source_from_lookup_response(
+            response,
+            room_id=room_id,
+            event_id=event_id,
+        )
+        return None if event_source is None else EventInfo.from_event(event_source)
 
     async def _fetch_thread_history_from_client(
         self,

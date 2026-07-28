@@ -172,8 +172,14 @@ async def test_unknown_command_in_thread(tmp_path: Path) -> None:
     event.body = "!schedule"  # Incomplete schedule command
     event.server_timestamp = 1234567890
     event.source = {
+        "event_id": "$test_event",
+        "sender": "@user:localhost",
+        "origin_server_ts": 1234567890,
+        "room_id": "!test:localhost",
+        "type": "m.room.message",
         "content": {
             "body": "!schedule",
+            "msgtype": "m.text",
             "m.relates_to": {
                 "rel_type": "m.thread",
                 "event_id": "$thread_root",

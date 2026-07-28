@@ -1,6 +1,7 @@
 """Tests for centralized message content extraction with large message support."""
 
 import json
+from functools import partial
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -21,6 +22,7 @@ from mindroom.matrix.client_visible_messages import (
     resolve_visible_event_source,
     thread_root_body_preview,
 )
+from mindroom.matrix.media import valid_room_message_replacement
 from mindroom.matrix.membership_fence import UNCERTIFIED_MEMBERSHIP_EPOCH
 from mindroom.matrix.message_content import (
     SidecarHydrationBatch,
@@ -37,7 +39,13 @@ from mindroom.matrix.visible_body import (
     visible_body_from_event_source,
     visible_content_from_content,
 )
-from tests.conftest import bind_runtime_paths, make_matrix_client_mock, runtime_paths_for, test_runtime_paths
+from tests.conftest import (
+    bind_runtime_paths,
+    make_event_cache_mock,
+    make_matrix_client_mock,
+    runtime_paths_for,
+    test_runtime_paths,
+)
 from tests.identity_helpers import persist_entity_accounts
 
 
@@ -92,7 +100,19 @@ class TestResolvedMessageExtraction:
         }
 
         assert sidecar_mxc_url(content) == "mxc://server/encrypted-sidecar"
-        assert event_mxc_urls({"content": content}) == frozenset({"mxc://server/encrypted-sidecar"})
+        assert event_mxc_urls(
+            {"type": "m.room.message", "content": content},
+            room_id="!room:example",
+        ) == frozenset(
+            {"mxc://server/encrypted-sidecar"},
+        )
+        assert (
+            event_mxc_urls(
+                {"type": "com.example.generic", "content": content},
+                room_id="!room:example",
+            )
+            == frozenset()
+        )
 
     @pytest.mark.parametrize("malformed_url", ["mxc://", "mxc://server"])
     def test_sidecar_url_validation_rejects_incomplete_mxc_uris(self, malformed_url: str) -> None:
@@ -112,8 +132,20 @@ class TestResolvedMessageExtraction:
 
         assert sidecar_mxc_url(direct_content) is None
         assert sidecar_mxc_url(encrypted_content) is None
-        assert event_mxc_urls({"content": direct_content}) == frozenset()
-        assert event_mxc_urls({"content": encrypted_content}) == frozenset()
+        assert (
+            event_mxc_urls(
+                {"type": "m.room.message", "content": direct_content},
+                room_id="!room:example",
+            )
+            == frozenset()
+        )
+        assert (
+            event_mxc_urls(
+                {"type": "m.room.message", "content": encrypted_content},
+                room_id="!room:example",
+            )
+            == frozenset()
+        )
 
     @pytest.mark.asyncio
     async def test_extract_and_resolve_message_hydrates_v2_sidecar_content(self) -> None:
@@ -226,6 +258,10 @@ class TestResolvedMessageExtraction:
 
         body, content = await extract_edit_body(
             {
+                "event_id": "$edit",
+                "sender": "@alice:example.com",
+                "origin_server_ts": 2000,
+                "type": "m.room.message",
                 "content": {
                     "msgtype": "m.text",
                     "body": "* Preview edit",
@@ -243,6 +279,7 @@ class TestResolvedMessageExtraction:
                 },
             },
             client,
+            replacement_validator=valid_room_message_replacement,
         )
 
         assert body == "Full edit body"
@@ -280,6 +317,10 @@ class TestResolvedMessageExtraction:
 
         body, content = await extract_edit_body(
             {
+                "event_id": "$legacy-edit",
+                "sender": "@alice:example.com",
+                "origin_server_ts": 2000,
+                "type": "m.room.message",
                 "content": {
                     "msgtype": "m.text",
                     "body": "* Preview edit",
@@ -296,6 +337,7 @@ class TestResolvedMessageExtraction:
                 },
             },
             client,
+            replacement_validator=valid_room_message_replacement,
         )
 
         assert body == "Preview edit"
@@ -631,7 +673,10 @@ class TestResolvedMessageExtraction:
 
         body, content = await extract_visible_edit_body(
             {
+                "event_id": "$edit",
                 "sender": f"@mindroom_general:{current_domain}",
+                "origin_server_ts": 2000,
+                "type": "m.room.message",
                 "content": {
                     "msgtype": "m.text",
                     "body": "* Preview edit",
@@ -676,7 +721,7 @@ class TestResolvedMessageExtraction:
             body="Original root",
             content={"msgtype": "m.text", "body": "Original root"},
             event_id="$thread-root",
-            sender="@user:example.com",
+            sender=f"@mindroom_general:{current_domain}",
         )
         event.source["unsigned"] = {
             "m.relations": {
@@ -704,9 +749,377 @@ class TestResolvedMessageExtraction:
             client=_make_client(),
             config=config,
             runtime_paths=runtime_paths,
+            event_cache=make_event_cache_mock(),
+            room_id="!room:example.com",
         )
 
         assert preview == "Edited body"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "invalidity",
+        [
+            "sender",
+            "type",
+            "missing-sender",
+            "missing-type",
+            "missing-timestamp",
+            "target",
+            "state-key",
+            "room",
+            "caller-room",
+            "edit-of-edit",
+            "missing-media-transport",
+        ],
+    )
+    async def test_thread_root_body_preview_ignores_invalid_bundled_replacement(
+        self,
+        tmp_path: Path,
+        invalidity: str,
+    ) -> None:
+        """Thread previews must enforce Matrix replacement validity on bundled edits."""
+        config = bind_runtime_paths(
+            Config(agents={"general": AgentConfig(display_name="General Agent")}),
+            test_runtime_paths(tmp_path),
+        )
+        runtime_paths = runtime_paths_for(config)
+        event = _make_message_event(
+            body="Original root",
+            content={"msgtype": "m.text", "body": "Original root"},
+            event_id="$thread-root",
+            sender="@alice:example.com",
+        )
+        replacement_relation: dict[str, object] = {
+            "rel_type": "m.replace",
+            "event_id": "$thread-root",
+        }
+        replacement_content: dict[str, object] = {
+            "body": "* Forged body",
+            "msgtype": "m.text",
+            "m.new_content": {
+                "body": "Forged body",
+                "msgtype": "m.text",
+            },
+            "m.relates_to": replacement_relation,
+        }
+        replacement: dict[str, object] = {
+            "event_id": "$thread-root-edit",
+            "sender": "@alice:example.com",
+            "origin_server_ts": 2000,
+            "type": "m.room.message",
+            "content": replacement_content,
+        }
+        if invalidity == "sender":
+            replacement["sender"] = "@mallory:example.com"
+        elif invalidity == "type":
+            replacement["type"] = "io.mindroom.tool_approval"
+        elif invalidity == "missing-media-transport":
+            replacement_content["msgtype"] = "m.image"
+            replacement_content["m.new_content"] = {
+                "body": "Forged body",
+                "msgtype": "m.image",
+            }
+        elif invalidity.startswith("missing-"):
+            field = invalidity.removeprefix("missing-").replace("timestamp", "origin_server_ts")
+            replacement.pop(field)
+        elif invalidity == "target":
+            replacement_relation["event_id"] = "$other"
+        elif invalidity == "state-key":
+            replacement["state_key"] = ""
+        elif invalidity == "room":
+            event.source["room_id"] = "!room:example.com"
+            replacement["room_id"] = "!other:example.com"
+        elif invalidity == "caller-room":
+            replacement["room_id"] = "!other:example.com"
+        elif invalidity == "edit-of-edit":
+            original_content = event.source["content"]
+            assert isinstance(original_content, dict)
+            original_content["m.relates_to"] = {
+                "rel_type": "m.replace",
+                "event_id": "$older",
+            }
+        event.source["unsigned"] = {
+            "m.relations": {
+                "m.replace": replacement,
+            },
+        }
+
+        preview = await thread_root_body_preview(
+            event,
+            client=_make_client(),
+            config=config,
+            runtime_paths=runtime_paths,
+            event_cache=make_event_cache_mock(),
+            room_id="!room:example.com",
+        )
+
+        assert preview == "Original root"
+
+    @pytest.mark.asyncio
+    async def test_thread_root_body_preview_requires_durable_redaction_context(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Bundled replacement previews must not run without durable redaction context."""
+        config = bind_runtime_paths(Config(), test_runtime_paths(tmp_path))
+        event = _make_message_event(
+            body="Original root",
+            content={"msgtype": "m.text", "body": "Original root"},
+            event_id="$thread-root",
+        )
+        preview_without_redaction_context = partial(
+            thread_root_body_preview,
+            event,
+            client=_make_client(),
+            config=config,
+            runtime_paths=runtime_paths_for(config),
+        )
+
+        with pytest.raises(TypeError, match="event_cache"):
+            await preview_without_redaction_context()
+
+    @pytest.mark.asyncio
+    async def test_thread_root_body_preview_rejects_bundled_edit_of_malformed_original(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """A valid bundled edit cannot synthesize a body for an invalid original message."""
+        room_id = "!room:example.com"
+        config = bind_runtime_paths(Config(), test_runtime_paths(tmp_path))
+        event_source = {
+            "event_id": "$thread-root",
+            "room_id": room_id,
+            "sender": "@alice:example.com",
+            "origin_server_ts": 1000,
+            "type": "m.room.message",
+            "content": {"msgtype": "m.text"},
+            "unsigned": {
+                "m.relations": {
+                    "m.replace": {
+                        "event_id": "$thread-root-edit",
+                        "sender": "@alice:example.com",
+                        "origin_server_ts": 2000,
+                        "type": "m.room.message",
+                        "content": {
+                            "body": "* Forged",
+                            "msgtype": "m.text",
+                            "m.new_content": {"body": "Forged", "msgtype": "m.text"},
+                            "m.relates_to": {
+                                "rel_type": "m.replace",
+                                "event_id": "$thread-root",
+                            },
+                        },
+                    },
+                },
+            },
+        }
+        event = nio.RoomMessage.parse_event(event_source)
+        assert isinstance(event, nio.BadEvent)
+
+        preview = await thread_root_body_preview(
+            event,
+            client=_make_client(),
+            config=config,
+            runtime_paths=runtime_paths_for(config),
+            event_cache=make_event_cache_mock(),
+            room_id=room_id,
+        )
+
+        assert preview == ""
+
+    @pytest.mark.asyncio
+    async def test_thread_root_body_preview_ignores_tombstoned_bundled_replacement(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Thread previews must not resurrect bundled replacements after durable redaction."""
+        room_id = "!room:localhost"
+        config = bind_runtime_paths(
+            Config(agents={"general": AgentConfig(display_name="General Agent")}),
+            test_runtime_paths(tmp_path),
+        )
+        cache = SqliteEventCache(tmp_path / "event-cache.db")
+        await cache.initialize()
+        event = _make_message_event(
+            body="Original root",
+            content={"msgtype": "m.text", "body": "Original root"},
+            event_id="$thread-root",
+            sender="@alice:example.com",
+        )
+        event.source["room_id"] = room_id
+        event.source["unsigned"] = {
+            "m.relations": {
+                "m.replace": {
+                    "event_id": "$thread-root-edit",
+                    "sender": "@alice:example.com",
+                    "origin_server_ts": 2000,
+                    "type": "m.room.message",
+                    "content": {
+                        "body": "* Redacted body",
+                        "msgtype": "m.text",
+                        "m.new_content": {"body": "Redacted body", "msgtype": "m.text"},
+                        "m.relates_to": {"rel_type": "m.replace", "event_id": "$thread-root"},
+                    },
+                },
+            },
+        }
+        try:
+            assert not await cache.redact_event(room_id, "$thread-root-edit")
+            preview = await thread_root_body_preview(
+                event,
+                client=_make_client(),
+                config=config,
+                runtime_paths=runtime_paths_for(config),
+                event_cache=cache,
+                room_id=room_id,
+            )
+        finally:
+            await cache.close()
+
+        assert preview == "Original root"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("latest_event_id", "latest_event_ts", "event_id", "event_ts", "expected_body"),
+        [
+            ("$structural-first", 2000, "$timestamp-winner", 3000, "Timestamp winner"),
+            ("$a", 3000, "$z", 3000, "Event ID winner"),
+        ],
+    )
+    async def test_thread_root_preview_uses_matrix_latest_replacement_order(
+        self,
+        tmp_path: Path,
+        latest_event_id: str,
+        latest_event_ts: int,
+        event_id: str,
+        event_ts: int,
+        expected_body: str,
+    ) -> None:
+        """Bundled preview selection must match full-history timestamp/event-ID ordering."""
+        config = bind_runtime_paths(
+            Config(agents={"general": AgentConfig(display_name="General Agent")}),
+            test_runtime_paths(tmp_path),
+        )
+        runtime_paths = runtime_paths_for(config)
+        root = _make_message_event(
+            body="Original root",
+            content={"body": "Original root", "msgtype": "m.text"},
+            event_id="$thread-root",
+            sender="@alice:example.com",
+        )
+
+        def replacement(candidate_event_id: str, timestamp: int, body: str) -> dict[str, object]:
+            return {
+                "event_id": candidate_event_id,
+                "sender": "@alice:example.com",
+                "origin_server_ts": timestamp,
+                "type": "m.room.message",
+                "content": {
+                    "body": f"* {body}",
+                    "msgtype": "m.text",
+                    "m.new_content": {"body": body, "msgtype": "m.text"},
+                    "m.relates_to": {
+                        "rel_type": "m.replace",
+                        "event_id": "$thread-root",
+                    },
+                },
+            }
+
+        root.source["unsigned"] = {
+            "m.relations": {
+                "m.replace": {
+                    "latest_event": replacement(
+                        latest_event_id,
+                        latest_event_ts,
+                        "Structural first",
+                    ),
+                    "event": replacement(event_id, event_ts, expected_body),
+                },
+            },
+        }
+
+        preview = await thread_root_body_preview(
+            root,
+            client=_make_client(),
+            config=config,
+            runtime_paths=runtime_paths,
+            event_cache=make_event_cache_mock(),
+            room_id="!room:example.com",
+        )
+
+        assert preview == expected_body
+
+    @pytest.mark.asyncio
+    async def test_thread_root_preview_falls_back_from_invalid_hydrated_replacement(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Bundled previews must use an older edit when the newest sidecar hydrates invalid."""
+        config = bind_runtime_paths(
+            Config(agents={"general": AgentConfig(display_name="General Agent")}),
+            test_runtime_paths(tmp_path),
+        )
+        root = _make_message_event(
+            body="Original root",
+            content={"body": "Original root", "msgtype": "m.text"},
+            event_id="$thread-root",
+            sender="@alice:example.com",
+        )
+
+        def replacement(event_id: str, timestamp: int, body: str) -> dict[str, object]:
+            return {
+                "event_id": event_id,
+                "sender": "@alice:example.com",
+                "origin_server_ts": timestamp,
+                "type": "m.room.message",
+                "content": {
+                    "body": f"* {body}",
+                    "msgtype": "m.text",
+                    "m.new_content": {"body": body, "msgtype": "m.text"},
+                    "m.relates_to": {"rel_type": "m.replace", "event_id": "$thread-root"},
+                },
+            }
+
+        newest = replacement("$newest", 3000, "Preview")
+        newest["content"]["m.new_content"] = {
+            "body": "Preview",
+            "msgtype": "m.file",
+            "url": "mxc://server/invalid-edit",
+            "io.mindroom.long_text": {"version": 2, "encoding": "matrix_event_content_json"},
+        }
+        root.source["unsigned"] = {
+            "m.relations": {
+                "m.replace": {
+                    "latest_event": newest,
+                    "event": replacement("$older", 2000, "Older valid"),
+                },
+            },
+        }
+        client = _make_client()
+        client.download = AsyncMock(
+            return_value=MagicMock(
+                spec=nio.DownloadResponse,
+                body=json.dumps(
+                    {
+                        "body": "* Invalid hydrated",
+                        "msgtype": "m.text",
+                        "m.new_content": {"body": "Invalid hydrated"},
+                        "m.relates_to": {"rel_type": "m.replace", "event_id": "$thread-root"},
+                    },
+                ).encode(),
+            ),
+        )
+
+        preview = await thread_root_body_preview(
+            root,
+            client=client,
+            config=config,
+            runtime_paths=runtime_paths_for(config),
+            event_cache=make_event_cache_mock(),
+            room_id="!room:example.com",
+        )
+
+        assert preview == "Older valid"
 
     @pytest.mark.asyncio
     async def test_thread_root_body_preview_passes_precomputed_trusted_sender_ids_to_nested_helpers(
@@ -731,6 +1144,7 @@ class TestResolvedMessageExtraction:
             sender="@user:example.com",
         )
         client = _make_client()
+        event_cache = make_event_cache_mock()
         trusted_sender_ids = frozenset({"@mindroom_general:localhost"})
 
         with (
@@ -748,6 +1162,8 @@ class TestResolvedMessageExtraction:
                 client=client,
                 config=config,
                 runtime_paths=runtime_paths,
+                event_cache=event_cache,
+                room_id="!room:example.com",
                 trusted_sender_ids=trusted_sender_ids,
             )
 
@@ -757,8 +1173,8 @@ class TestResolvedMessageExtraction:
             client=client,
             config=config,
             runtime_paths=runtime_paths,
-            event_cache=None,
-            room_id=None,
+            event_cache=event_cache,
+            room_id="!room:example.com",
             trusted_sender_ids=trusted_sender_ids,
         )
         mock_resolve.assert_awaited_once_with(
@@ -767,8 +1183,8 @@ class TestResolvedMessageExtraction:
             fallback_body="Original root",
             config=config,
             runtime_paths=runtime_paths,
-            event_cache=None,
-            room_id=None,
+            event_cache=event_cache,
+            room_id="!room:example.com",
             trusted_sender_ids=trusted_sender_ids,
         )
 
@@ -1279,10 +1695,15 @@ class TestCanonicalContentResolution:
         response = MagicMock(spec=nio.DownloadResponse)
         response.body = (
             b'{"msgtype":"m.text","body":"* Full edit wrapper","m.new_content":{"body":"Full edit body","msgtype":"m.text",'
-            b'"io.mindroom.tool_trace":{"version":1,"events":[{"tool":"web_search"}]}}}'
+            b'"io.mindroom.tool_trace":{"version":1,"events":[{"tool":"web_search"}]}},'
+            b'"m.relates_to":{"rel_type":"m.replace","event_id":"$original"}}'
         )
         client.download.return_value = response
         event_source = {
+            "event_id": "$edit",
+            "sender": "@alice:example.com",
+            "origin_server_ts": 2000,
+            "type": "m.room.message",
             "content": {
                 "body": "* Preview edit",
                 "msgtype": "m.text",
@@ -1297,7 +1718,11 @@ class TestCanonicalContentResolution:
             },
         }
 
-        body, resolved_content = await extract_edit_body(event_source, client)
+        body, resolved_content = await extract_edit_body(
+            event_source,
+            client,
+            replacement_validator=valid_room_message_replacement,
+        )
 
         assert body == "Full edit body"
         assert resolved_content == {
@@ -1310,7 +1735,10 @@ class TestCanonicalContentResolution:
     async def test_extract_edit_body_prefers_canonical_stream_body(self) -> None:
         """Edit extraction should drop transient warmup suffixes when canonical stream text is present."""
         event_source = {
+            "event_id": "$edit",
             "sender": "@mindroom_general:localhost",
+            "origin_server_ts": 2000,
+            "type": "m.room.message",
             "content": {
                 "body": "* hello",
                 "msgtype": "m.text",
@@ -1325,6 +1753,7 @@ class TestCanonicalContentResolution:
 
         body, resolved_content = await extract_edit_body(
             event_source,
+            replacement_validator=valid_room_message_replacement,
             trusted_sender_ids={"@mindroom_general:localhost"},
         )
 
@@ -1339,7 +1768,10 @@ class TestCanonicalContentResolution:
     async def test_extract_edit_body_ignores_untrusted_visible_body(self) -> None:
         """Edit extraction should not trust canonical-body overrides from arbitrary room senders."""
         event_source = {
+            "event_id": "$edit",
             "sender": "@alice:localhost",
+            "origin_server_ts": 2000,
+            "type": "m.room.message",
             "content": {
                 "body": "* hello",
                 "msgtype": "m.text",
@@ -1354,6 +1786,7 @@ class TestCanonicalContentResolution:
 
         body, resolved_content = await extract_edit_body(
             event_source,
+            replacement_validator=valid_room_message_replacement,
             trusted_sender_ids={"@mindroom_general:localhost"},
         )
 
@@ -1368,7 +1801,10 @@ class TestCanonicalContentResolution:
     async def test_extract_edit_body_preserves_explicit_empty_string_body(self) -> None:
         """Edit extraction should keep explicit empty-string bodies instead of dropping the edit."""
         event_source = {
+            "event_id": "$edit",
             "sender": "@mindroom_general:localhost",
+            "origin_server_ts": 2000,
+            "type": "m.room.message",
             "content": {
                 "body": "* Preview edit",
                 "msgtype": "m.text",
@@ -1382,6 +1818,7 @@ class TestCanonicalContentResolution:
 
         body, resolved_content = await extract_edit_body(
             event_source,
+            replacement_validator=valid_room_message_replacement,
             trusted_sender_ids={"@mindroom_general:localhost"},
         )
 

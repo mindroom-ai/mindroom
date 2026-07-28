@@ -9,7 +9,7 @@ from unittest.mock import patch
 import pytest
 
 from mindroom.matrix.cache import ConversationEventCache, ThreadAppendOutcome, thread_cache_rejection_reason
-from tests.event_cache_test_support import replace_thread_unconditionally
+from tests.event_cache_test_support import get_latest_edit, replace_thread_unconditionally
 
 
 def _sidecar_message_event(event_id: str, timestamp: int, *, mxc_url: str) -> dict[str, Any]:
@@ -143,12 +143,23 @@ class TestConversationEventCacheContract:
         assert cached_original is not None
         assert "com.mindroom.dispatch_pipeline_timing" not in cached_original
         assert [event["event_id"] for event in recent] == ["$latest-edit:localhost", "$other-edit:localhost"]
-        assert await event_cache.get_latest_edit("!room:localhost", "$original:localhost") == latest_edit
         assert (
-            await event_cache.get_latest_edit(
+            await get_latest_edit(
+                event_cache,
+                "!room:localhost",
+                "$original:localhost",
+                sender="@user:localhost",
+                event_type="m.room.message",
+            )
+            == latest_edit
+        )
+        assert (
+            await get_latest_edit(
+                event_cache,
                 "!room:localhost",
                 "$original:localhost",
                 sender="@other:localhost",
+                event_type="m.room.message",
             )
             == other_sender_edit
         )
@@ -698,7 +709,16 @@ class TestConversationEventCacheContract:
         assert await event_cache.redact_event(room_id, original_id) is True
         assert await event_cache.get_event(room_id, original_id) is None
         assert await event_cache.get_event(room_id, edit_id) is None
-        assert await event_cache.get_latest_edit(room_id, original_id) is None
+        assert (
+            await get_latest_edit(
+                event_cache,
+                room_id,
+                original_id,
+                sender="@user:localhost",
+                event_type="m.room.message",
+            )
+            is None
+        )
 
         await event_cache.store_events_batch(
             [
@@ -746,10 +766,10 @@ async def test_last_child_deletion_removes_unproven_thread_root_mapping_immediat
 
 
 @pytest.mark.asyncio
-async def test_runtime_deletion_removes_dependent_root_proof(
+async def test_runtime_deletion_keeps_orphan_edit_from_creating_root_proof(
     event_cache: ConversationEventCache,
 ) -> None:
-    """Runtime cleanup removes a root mapping whose dependent edit supplied its only proof."""
+    """An orphan edit creates no root proof, and deleting its target still removes the edit."""
     room_id = "!room:localhost"
     thread_id = "$unfetched-root:localhost"
     original_id = "$uncached-original:localhost"
@@ -758,7 +778,8 @@ async def test_runtime_deletion_removes_dependent_root_proof(
     assert isinstance(new_content, dict)
     new_content["m.relates_to"] = {"rel_type": "m.thread", "event_id": thread_id}
     await event_cache.store_event(str(edit["event_id"]), room_id, edit)
-    assert await event_cache.get_thread_id_for_event(room_id, thread_id) == thread_id
+    assert await event_cache.get_thread_id_for_event(room_id, thread_id) is None
 
     assert await event_cache.redact_event(room_id, original_id) is True
+    assert await event_cache.get_event(room_id, str(edit["event_id"])) is None
     assert await event_cache.get_thread_id_for_event(room_id, thread_id) is None

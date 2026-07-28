@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import AsyncMock, patch
 
+import nio
 import pytest
 
 from mindroom.logging_config import get_logger
@@ -28,6 +29,7 @@ from mindroom.matrix.thread_diagnostics import (
     THREAD_HISTORY_SOURCE_STALE_CACHE,
 )
 from tests.event_cache_test_support import (
+    get_latest_edit,
     raw_nio_event,
     raw_nio_redaction,
     replace_thread_unconditionally,
@@ -35,8 +37,6 @@ from tests.event_cache_test_support import (
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Sequence
-
-    import nio
 
     from mindroom.bot_runtime_view import BotRuntimeView
 
@@ -891,9 +891,36 @@ async def test_joined_timeline_thread_relations_indexes_edits_and_visible_histor
     }:
         assert await event_cache.get_thread_id_for_event(_ROOM_ID, event_id) == _THREAD_ID
     assert await event_cache.get_thread_id_for_event(_ROOM_ID, "$reaction") is None
-    assert await event_cache.get_latest_edit(_ROOM_ID, _THREAD_ID) == root_edit
-    assert await event_cache.get_latest_edit(_ROOM_ID, "$explicit-child") == child_edit
-    assert await event_cache.get_latest_edit(_ROOM_ID, "$plain-reply") == reply_edit
+    assert (
+        await get_latest_edit(
+            event_cache,
+            _ROOM_ID,
+            _THREAD_ID,
+            sender=_SENDER,
+            event_type="m.room.message",
+        )
+        == root_edit
+    )
+    assert (
+        await get_latest_edit(
+            event_cache,
+            _ROOM_ID,
+            "$explicit-child",
+            sender=_SENDER,
+            event_type="m.room.message",
+        )
+        == child_edit
+    )
+    assert (
+        await get_latest_edit(
+            event_cache,
+            _ROOM_ID,
+            "$plain-reply",
+            sender=_SENDER,
+            event_type="m.room.message",
+        )
+        == reply_edit
+    )
 
     cached_sources = await event_cache.get_thread_events(_ROOM_ID, _THREAD_ID)
     assert cached_sources is not None
@@ -1040,6 +1067,25 @@ def _encrypted_source(
     if relation is not None:
         content["m.relates_to"] = relation
     return _event_source(event_id, "m.room.encrypted", content, timestamp=timestamp)
+
+
+@pytest.mark.asyncio
+async def test_malformed_encrypted_thread_relation_is_never_indexed(
+    event_cache: ConversationEventCache,
+) -> None:
+    """A malformed encrypted envelope cannot create durable thread membership."""
+    malformed_child = _encrypted_source("$malformed-child", timestamp=59, relation=_thread_relation())
+    content = malformed_child["content"]
+    assert isinstance(content, dict)
+    del content["sender_key"]
+    parsed_event = nio.RoomGetEventResponse.from_dict(malformed_child).event
+    assert isinstance(parsed_event, nio.BadEvent)
+
+    await event_cache.store_event("$malformed-child", _ROOM_ID, malformed_child)
+
+    assert await event_cache.get_event(_ROOM_ID, "$malformed-child") == malformed_child
+    assert await event_cache.get_thread_id_for_event(_ROOM_ID, "$malformed-child") is None
+    assert await event_cache.get_thread_id_for_event(_ROOM_ID, _THREAD_ID) is None
 
 
 @pytest.mark.asyncio
@@ -1370,6 +1416,7 @@ async def test_sync_categories_outside_joined_timeline_are_deliberately_excluded
         {"body": "departed", "msgtype": "m.text"},
         timestamp=100,
     )
+    departed_room_event["room_id"] = leave_room_id
     await event_cache.store_event(
         "$departed-room-event",
         leave_room_id,
@@ -1439,7 +1486,16 @@ async def test_sync_categories_outside_joined_timeline_are_deliberately_excluded
     assert await event_cache.get_thread_cache_gap("!invite:localhost", "$invite-root") is None
     assert await event_cache.get_thread_events(leave_room_id, "$leave-root") is None
     assert await event_cache.get_thread_cache_gap(leave_room_id, "$leave-root") is None
-    assert await event_cache.get_latest_edit(leave_room_id, "$leave-original") is None
+    assert (
+        await get_latest_edit(
+            event_cache,
+            leave_room_id,
+            "$leave-original",
+            sender=_SENDER,
+            event_type="m.room.message",
+        )
+        is None
+    )
     assert await event_cache.get_thread_events(_ROOM_ID, _THREAD_ID) == before_events
     assert await event_cache.get_thread_cache_gap(_ROOM_ID, _THREAD_ID) == before_state
     assert event_cache.room_departure_epoch(leave_room_id) == 0
@@ -1736,4 +1792,13 @@ async def test_message_and_edit_redaction_contract(
             child_edit,
         )
         assert await event_cache.get_event(_ROOM_ID, "$child-edit-to-redact") is None
-    assert await event_cache.get_latest_edit(_ROOM_ID, _THREAD_CHILD_ID) is None
+    assert (
+        await get_latest_edit(
+            event_cache,
+            _ROOM_ID,
+            _THREAD_CHILD_ID,
+            sender=_SENDER,
+            event_type="m.room.message",
+        )
+        is None
+    )

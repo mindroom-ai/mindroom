@@ -33,6 +33,8 @@ if TYPE_CHECKING:
 
     from psycopg import AsyncConnection
 
+    from mindroom.matrix.replacements import ReplacementValidator
+
     from .agent_message_snapshot import AgentMessageSnapshot
     from .cache_maintenance import CacheMaintenanceReport
     from .thread_cache_state import ThreadCacheGap
@@ -1377,6 +1379,20 @@ class PostgresEventCache:
             ),
         )
 
+    async def redacted_event_ids(self, room_id: str, event_ids: Collection[str]) -> frozenset[str]:
+        """Return the requested event IDs that have durable room-scoped tombstones."""
+        return await self._operation(
+            room_id,
+            operation="redacted_event_ids",
+            disabled_result=frozenset(),
+            callback=lambda db: postgres_event_cache_events.redacted_event_ids(
+                db,
+                self._runtime.namespace,
+                room_id,
+                event_ids=frozenset(event_ids),
+            ),
+        )
+
     async def get_recent_room_events(
         self,
         room_id: str,
@@ -1403,11 +1419,12 @@ class PostgresEventCache:
     async def get_latest_edit(
         self,
         room_id: str,
-        original_event_id: str,
+        original: dict[str, Any],
         *,
-        sender: str | None = None,
+        validator: ReplacementValidator,
+        excluded_event_ids: Collection[str] = (),
     ) -> dict[str, Any] | None:
-        """Return the latest cached edit event for one original event."""
+        """Return the Matrix-latest replacement of one original, skipping excluded candidates."""
         return await self._operation(
             room_id,
             operation="get_latest_edit",
@@ -1416,8 +1433,9 @@ class PostgresEventCache:
                 db,
                 namespace=self._runtime.namespace,
                 room_id=room_id,
-                original_event_id=original_event_id,
-                sender=sender,
+                original=original,
+                validator=validator,
+                excluded_event_ids=excluded_event_ids,
             ),
         )
 

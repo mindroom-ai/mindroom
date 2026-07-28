@@ -3,20 +3,30 @@
 from __future__ import annotations
 
 import json
+import time
 from typing import TYPE_CHECKING, Any
 
 from .event_cache_events import (
     CachedEventRow,
     SerializedCachedEvent,
     batch_redaction_candidate_ids,
+    bundled_replacement_event_ids,
     cache_rows_were_deleted,
+    cached_event_owns_mxc,
+    conflicting_cached_bundled_event_ids,
+    decode_cached_event,
     event_edit_rows,
     event_mxc_urls,
-    event_redaction_candidate_ids,
     event_thread_rows,
     filter_redacted_events,
     redaction_removal_event_ids,
+    room_scoped_cache_events,
+    safe_cached_event_transitions,
+    scrub_bundled_replacement_json,
+    select_latest_cached_edit,
     serialize_cacheable_events,
+    serialized_event_observation_ids,
+    validated_mxc_text_rows,
 )
 from .postgres_cursor import fetchall, fetchone, rowcount
 
@@ -24,6 +34,8 @@ if TYPE_CHECKING:
     from collections.abc import Collection
 
     from psycopg import AsyncConnection
+
+    from mindroom.matrix.replacements import ReplacementValidator
 
 _ROOM_CONTENT_TABLES = (
     "mindroom_event_cache_thread_events",
@@ -136,18 +148,20 @@ async def load_latest_edit(
     *,
     namespace: str,
     room_id: str,
-    original_event_id: str,
-    sender: str | None = None,
+    original: dict[str, Any],
+    validator: ReplacementValidator,
+    excluded_event_ids: Collection[str] = (),
 ) -> dict[str, Any] | None:
-    """Return the latest cached edit event for one original event."""
-    row = await _load_latest_edit_row(
+    """Return the Matrix-latest replacement across the cached edit index and bundled metadata."""
+    selection = await load_latest_edit_row(
         db,
         namespace=namespace,
         room_id=room_id,
-        original_event_id=original_event_id,
-        sender=sender,
+        original=original,
+        validator=validator,
+        excluded_event_ids=excluded_event_ids,
     )
-    return None if row is None else row.event
+    return None if selection is None else selection.event
 
 
 async def load_latest_edit_row(
@@ -155,33 +169,37 @@ async def load_latest_edit_row(
     *,
     namespace: str,
     room_id: str,
-    original_event_id: str,
-    sender: str,
+    original: dict[str, Any],
+    validator: ReplacementValidator,
+    excluded_event_ids: Collection[str] = (),
 ) -> CachedEventRow | None:
-    """Return the latest cached edit event plus its lookup-row write time."""
-    return await _load_latest_edit_row(
+    """Select the latest edit across explicit rows and bundled metadata.
+
+    Every candidate is read rather than only the top one, because the newest is not always usable:
+    a replacement carrying no readable ``m.new_content`` has to lose to the next valid candidate
+    instead of blanking the message. The sender rule is applied to the payload by the selector,
+    which is also why this query does not filter on the inline ``sender`` column.
+    """
+    original_event_id = original.get("event_id")
+    bundled_event_ids = bundled_replacement_event_ids(original)
+    rejected_event_ids = frozenset(excluded_event_ids) | await _redacted_event_ids_for_candidates(
+        db,
+        namespace,
+        room_id,
+        event_ids=bundled_event_ids,
+    )
+    rejected_event_ids |= await _load_conflicting_bundled_event_ids(
         db,
         namespace=namespace,
         room_id=room_id,
-        original_event_id=original_event_id,
-        sender=sender,
+        original=original,
     )
-
-
-async def _load_latest_edit_row(
-    db: AsyncConnection,
-    *,
-    namespace: str,
-    room_id: str,
-    original_event_id: str,
-    sender: str | None,
-) -> CachedEventRow | None:
-    sender_predicate = "" if sender is None else "AND events.sender = %s"
-    parameters = (namespace, room_id, original_event_id, *((sender,) if sender is not None else ()))
-    row = await fetchone(
-        db,
-        f"""
-        SELECT events.event_json, events.cached_at
+    cursor = db.cursor(name="mindroom_latest_edit")
+    await cursor.execute(
+        """
+        SELECT
+            events.event_json,
+            events.cached_at
         FROM mindroom_event_cache_event_edits AS edits
         JOIN mindroom_event_cache_events AS events
             ON events.namespace = edits.namespace
@@ -190,17 +208,59 @@ async def _load_latest_edit_row(
         WHERE edits.namespace = %s
             AND edits.room_id = %s
             AND edits.original_event_id = %s
-            {sender_predicate}
         ORDER BY edits.origin_server_ts DESC, edits.edit_event_id COLLATE "C" DESC
-        LIMIT 1
-        """,  # noqa: S608
-        parameters,
+        """,
+        (namespace, room_id, original_event_id),
     )
-    if row is None:
-        return None
-    return CachedEventRow(
-        event=json.loads(row[0]),
-        cached_at=None if row[1] is None else float(row[1]),
+    try:
+        rows = [decode_cached_event(event_json=row[0], cached_at=row[1]) async for row in cursor]
+    finally:
+        await cursor.close()
+    return select_latest_cached_edit(
+        original,
+        rows,
+        room_id=room_id,
+        validator=validator,
+        excluded_event_ids=rejected_event_ids,
+    )
+
+
+async def _load_conflicting_bundled_event_ids(
+    db: AsyncConnection,
+    *,
+    namespace: str,
+    room_id: str,
+    original: dict[str, Any],
+) -> frozenset[str]:
+    """Return bundled IDs contradicted by cached immutable event observations."""
+    bundled_event_ids = bundled_replacement_event_ids(original)
+    if not bundled_event_ids:
+        return frozenset()
+    rows = await fetchall(
+        db,
+        """
+        SELECT event_json
+        FROM mindroom_event_cache_events
+        WHERE namespace = %s AND room_id = %s AND (
+            event_id = ANY(%s)
+            OR event_json::jsonb #>> '{unsigned,m.relations,m.replace,event_id}' = ANY(%s)
+            OR event_json::jsonb #>> '{unsigned,m.relations,m.replace,latest_event,event_id}' = ANY(%s)
+            OR event_json::jsonb #>> '{unsigned,m.relations,m.replace,event,event_id}' = ANY(%s)
+        )
+        """,
+        (
+            namespace,
+            room_id,
+            sorted(bundled_event_ids),
+            sorted(bundled_event_ids),
+            sorted(bundled_event_ids),
+            sorted(bundled_event_ids),
+        ),
+    )
+    return conflicting_cached_bundled_event_ids(
+        original,
+        (decode_cached_event(event_json=row[0]).event for row in rows),
+        room_id=room_id,
     )
 
 
@@ -212,28 +272,14 @@ async def load_mxc_text(
     event_id: str,
     mxc_url: str,
 ) -> str | None:
-    """Return one durably cached MXC text payload when present."""
-    row = await fetchone(
+    """Return plaintext only through a surviving visible event reference."""
+    texts = await load_mxc_texts(
         db,
-        """
-        SELECT plaintext.text_content
-        FROM mindroom_event_cache_mxc_text AS plaintext
-        JOIN mindroom_event_cache_event_mxc_references AS reference
-          ON reference.namespace = plaintext.namespace
-         AND reference.room_id = plaintext.room_id
-         AND reference.mxc_url = plaintext.mxc_url
-        JOIN mindroom_event_cache_events AS events
-          ON events.namespace = reference.namespace
-         AND events.room_id = reference.room_id
-         AND events.event_id = reference.event_id
-        WHERE plaintext.namespace = %s
-          AND plaintext.room_id = %s
-          AND reference.event_id = %s
-          AND plaintext.mxc_url = %s
-        """,
-        (namespace, room_id, event_id, mxc_url),
+        namespace=namespace,
+        room_id=room_id,
+        references=((event_id, mxc_url),),
     )
-    return None if row is None else str(row[0])
+    return texts.get((event_id, mxc_url))
 
 
 async def load_mxc_texts(
@@ -254,7 +300,7 @@ async def load_mxc_texts(
             SELECT *
             FROM unnest(%s::text[], %s::text[])
         )
-        SELECT reference.event_id, plaintext.mxc_url, plaintext.text_content
+        SELECT reference.event_id, plaintext.mxc_url, plaintext.text_content, events.event_json
         FROM requested
         JOIN mindroom_event_cache_event_mxc_references AS reference
           ON reference.event_id = requested.event_id
@@ -277,7 +323,7 @@ async def load_mxc_texts(
             room_id,
         ),
     )
-    return {(str(event_id), str(mxc_url)): str(text_content) for event_id, mxc_url, text_content in rows}
+    return validated_mxc_text_rows(rows, room_id=room_id)
 
 
 async def persist_mxc_text(
@@ -294,7 +340,7 @@ async def persist_mxc_text(
     owns_plaintext = await fetchone(
         db,
         """
-        SELECT 1
+        SELECT events.event_json
         FROM mindroom_event_cache_events AS events
         JOIN mindroom_event_cache_event_mxc_references AS reference
           ON reference.namespace = events.namespace
@@ -307,7 +353,13 @@ async def persist_mxc_text(
         """,
         (namespace, room_id, event_id, mxc_url),
     )
-    if owns_plaintext is None:
+    # A surviving reference row is not ownership on its own: it can outlive the payload that
+    # created it, so the stored event has to still name this MXC in its own room scope.
+    if owns_plaintext is None or not cached_event_owns_mxc(
+        event_json=owns_plaintext[0],
+        room_id=room_id,
+        mxc_url=mxc_url,
+    ):
         return False
     await db.execute(
         """
@@ -411,31 +463,60 @@ async def redact_event_locked(
         room_id,
         event_ids=removed_event_ids,
     )
+    scrubbed_rows = await _scrub_bundled_references_to(
+        db,
+        namespace=namespace,
+        room_id=room_id,
+        event_id=event_id,
+    )
     return cache_rows_were_deleted(
         deleted_thread_rows,
         deleted_event_rows,
         deleted_edit_rows,
         deleted_thread_index_rows,
+        scrubbed_rows,
     )
 
 
-async def event_or_original_is_redacted(
+async def _scrub_bundled_references_to(
     db: AsyncConnection,
+    *,
     namespace: str,
     room_id: str,
-    *,
     event_id: str,
-    event: dict[str, Any],
-) -> bool:
-    """Return whether this event or its edited original was durably redacted."""
-    return bool(
-        await _redacted_event_ids_for_candidates(
-            db,
-            namespace,
-            room_id,
-            event_ids=event_redaction_candidate_ids(event_id, event),
-        ),
+) -> int:
+    """Strip a redacted event from every cached bundled aggregation naming it.
+
+    Deleting the event's own row is not enough: another cached event can carry it inside
+    ``unsigned.m.relations.m.replace``, and a read that trusted that aggregation would serve the
+    redacted body back.
+    """
+    bundled_rows = await fetchall(
+        db,
+        """SELECT event_id, event_json FROM mindroom_event_cache_events
+        WHERE namespace = %s AND room_id = %s AND %s = ANY(ARRAY[
+            event_json::jsonb #>> '{unsigned,m.relations,m.replace,event_id}',
+            event_json::jsonb #>> '{unsigned,m.relations,m.replace,latest_event,event_id}',
+            event_json::jsonb #>> '{unsigned,m.relations,m.replace,event,event_id}'
+        ])
+        FOR UPDATE""",
+        (namespace, room_id, event_id),
     )
+    scrubbed_rows = 0
+    for cached_event_id, event_json in bundled_rows:
+        scrubbed_rows += await rowcount(
+            db,
+            """UPDATE mindroom_event_cache_events
+            SET event_json = %s, write_seq = nextval('mindroom_event_cache_write_seq')
+            WHERE namespace = %s AND room_id = %s AND event_id = %s""",
+            (
+                scrub_bundled_replacement_json(event_json, event_id),
+                namespace,
+                room_id,
+                cached_event_id,
+            ),
+        )
+    return scrubbed_rows
 
 
 async def filter_cacheable_events(
@@ -445,13 +526,14 @@ async def filter_cacheable_events(
     room_events: list[tuple[str, dict[str, Any]]],
 ) -> list[tuple[str, dict[str, Any]]]:
     """Drop events that target durable redaction tombstones before persisting them."""
+    room_events = room_scoped_cache_events(room_events, room_id)
     redacted_event_ids = await _redacted_event_ids_for_candidates(
         db,
         namespace,
         room_id,
-        event_ids=batch_redaction_candidate_ids(room_events),
+        event_ids=batch_redaction_candidate_ids(room_events, room_id),
     )
-    return filter_redacted_events(room_events, redacted_event_ids=redacted_event_ids)
+    return filter_redacted_events(room_events, room_id=room_id, redacted_event_ids=redacted_event_ids)
 
 
 async def _thread_ids_for_events(
@@ -472,6 +554,46 @@ async def _thread_ids_for_events(
         (namespace, room_id, event_ids),
     )
     return {str(row[0]) for row in rows}
+
+
+async def _gap_mark_displaced_root_threads(
+    db: AsyncConnection,
+    namespace: str,
+    room_id: str,
+    *,
+    root_ids: set[str],
+) -> None:
+    """Gap-mark threads that just lost a member to a newly proven root of its own.
+
+    An event promoted to a thread root stops being a member of whatever thread previously held
+    it, so that thread's stored snapshot no longer describes its contents and has to be refetched.
+    The marker is monotonic, matching ``mark_thread_gap_locked``.
+    """
+    if not root_ids:
+        return
+    await db.execute(
+        """
+        INSERT INTO mindroom_event_cache_thread_state(
+            namespace, room_id, thread_id, gap_marked_at, gap_reason
+        )
+        SELECT %s, %s, thread_id, %s, 'event_thread_membership_changed'
+        FROM mindroom_event_cache_event_threads
+        WHERE namespace = %s AND room_id = %s AND event_id = ANY(%s)
+            AND event_id <> thread_id
+        ON CONFLICT(namespace, room_id, thread_id) DO UPDATE SET
+            gap_marked_at = GREATEST(
+                mindroom_event_cache_thread_state.gap_marked_at,
+                excluded.gap_marked_at
+            ),
+            gap_reason = CASE
+                WHEN mindroom_event_cache_thread_state.gap_marked_at IS NULL
+                    OR excluded.gap_marked_at >= mindroom_event_cache_thread_state.gap_marked_at
+                    THEN excluded.gap_reason
+                ELSE mindroom_event_cache_thread_state.gap_reason
+            END
+        """,
+        (namespace, room_id, time.time(), namespace, room_id, sorted(root_ids)),
+    )
 
 
 async def _reconcile_thread_root_self_rows(
@@ -513,6 +635,50 @@ async def _reconcile_thread_root_self_rows(
         )
 
 
+async def _safe_event_transitions(
+    db: AsyncConnection,
+    namespace: str,
+    room_id: str,
+    *,
+    serialized_events: list[SerializedCachedEvent],
+) -> tuple[list[SerializedCachedEvent], list[SerializedCachedEvent]]:
+    """Return payload-writable and thread-indexable events after quarantining conflicts."""
+    event_ids = serialized_event_observation_ids(serialized_events)
+    rows = await fetchall(
+        db,
+        """
+        SELECT event_id, event_json
+        FROM mindroom_event_cache_events
+        WHERE namespace = %s AND room_id = %s AND (
+            event_id = ANY(%s)
+            OR event_json::jsonb #>> '{unsigned,m.relations,m.replace,event_id}' = ANY(%s)
+            OR event_json::jsonb #>> '{unsigned,m.relations,m.replace,latest_event,event_id}' = ANY(%s)
+            OR event_json::jsonb #>> '{unsigned,m.relations,m.replace,event,event_id}' = ANY(%s)
+        )
+        FOR UPDATE
+        """,
+        (namespace, room_id, event_ids, event_ids, event_ids, event_ids),
+    )
+    existing = {str(event_id): decode_cached_event(event_json=event_json).event for event_id, event_json in rows}
+    return await safe_cached_event_transitions(
+        existing,
+        serialized_events,
+        room_id=room_id,
+        quarantine=lambda event_id: redact_event_locked(
+            db,
+            namespace=namespace,
+            room_id=room_id,
+            event_id=event_id,
+        ),
+        load_tombstones=lambda event_ids: redacted_event_ids(
+            db,
+            namespace,
+            room_id,
+            event_ids=event_ids,
+        ),
+    )
+
+
 async def write_lookup_index_rows(
     db: AsyncConnection,
     *,
@@ -531,8 +697,14 @@ async def write_lookup_index_rows(
     """
     if not serialized_events:
         return
+    writable_events, indexable_events = await _safe_event_transitions(
+        db,
+        namespace,
+        room_id,
+        serialized_events=serialized_events,
+    )
     accepted_events: list[SerializedCachedEvent] = []
-    for event in serialized_events:
+    for event in writable_events:
         accepted_row = await fetchone(
             db,
             """
@@ -584,7 +756,7 @@ async def write_lookup_index_rows(
         (namespace, room_id, accepted_event_ids),
     )
     for event in accepted_events:
-        for mxc_url in event_mxc_urls(event.event):
+        for mxc_url in event_mxc_urls(event.event, room_id=room_id):
             await db.execute(
                 """
                 INSERT INTO mindroom_event_cache_event_mxc_references(
@@ -619,7 +791,7 @@ async def write_lookup_index_rows(
             (namespace, row.edit_event_id, row.room_id, row.original_event_id, row.origin_server_ts),
         )
 
-    thread_index_events = serialized_events if thread_id is not None else accepted_events
+    thread_index_events = indexable_events if thread_id is not None else accepted_events
     thread_index_event_ids = [event.event_id for event in thread_index_events]
     previous_thread_ids = await _thread_ids_for_events(
         db,
@@ -628,6 +800,12 @@ async def write_lookup_index_rows(
         event_ids=thread_index_event_ids,
     )
     thread_rows = event_thread_rows(room_id, thread_index_events, thread_id=thread_id)
+    await _gap_mark_displaced_root_threads(
+        db,
+        namespace,
+        room_id,
+        root_ids={row.thread_id for row in thread_rows if row.event_id == row.thread_id},
+    )
     await db.execute(
         """
         DELETE FROM mindroom_event_cache_event_threads
@@ -824,6 +1002,21 @@ async def _record_redacted_events(
             """,
             (namespace, room_id, event_id),
         )
+
+
+async def redacted_event_ids(
+    db: AsyncConnection,
+    namespace: str,
+    room_id: str,
+    *,
+    event_ids: frozenset[str],
+) -> frozenset[str]:
+    """Return the subset of candidate event IDs that are durably tombstoned.
+
+    Callers pass the bundled replacement identities of one event, so the candidate set is small
+    and bounded by what a single aggregation can name.
+    """
+    return await _redacted_event_ids_for_candidates(db, namespace, room_id, event_ids=event_ids)
 
 
 async def _redacted_event_ids_for_candidates(

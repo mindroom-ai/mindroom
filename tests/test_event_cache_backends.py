@@ -7,13 +7,14 @@ import sqlite3
 import uuid
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import AsyncMock, Mock
 from urllib.parse import quote
 
 import psycopg
 import pytest
 
+from mindroom.approval_events import valid_approval_replacement
 from mindroom.config.matrix import CacheConfig
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.logging_config import get_logger
@@ -25,6 +26,7 @@ from mindroom.matrix.cache import (
 )
 from mindroom.matrix.cache.event_cache import EventCacheBackendUnavailableError
 from mindroom.matrix.cache.postgres_event_cache import (
+    _POSTGRES_EVENT_CACHE_SCHEMA_VERSION,
     PostgresEventCache,
     _create_postgres_event_cache_schema,
     _FlushedPendingWrites,
@@ -38,6 +40,7 @@ from mindroom.matrix.cache.thread_cache_state import (
     THREAD_HISTORY_TRUST_VERSION,
 )
 from mindroom.matrix.cache.write_coordinator import EventCacheWriteCoordinator
+from mindroom.matrix.media import valid_room_message_replacement
 from mindroom.runtime_support import (
     OwnedRuntimeSupport,
     StartupThreadPrewarmRegistry,
@@ -47,10 +50,11 @@ from mindroom.runtime_support import (
     _initialize_event_cache_best_effort,
     sync_owned_runtime_support,
 )
+from tests.event_cache_test_support import get_latest_edit
 from tests.event_cache_test_support import replace_thread_unconditionally as _replace_thread
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
+    from collections.abc import AsyncIterator, Awaitable, Callable
     from pathlib import Path
 
     import aiosqlite
@@ -110,6 +114,178 @@ def _edit_event(
             },
         },
     }
+
+
+async def _assert_bundled_and_cached_edits_share_validation(
+    cache: ConversationEventCache,
+    *,
+    room_id: str,
+) -> None:
+    """Assert bundled candidates neither bless invalid rows nor hide older valid rows."""
+    original = _message_event(
+        event_id="$bundled-original",
+        sender="@alice:localhost",
+        body="Original",
+        origin_server_ts=1000,
+    )
+    bundled = _edit_event(
+        event_id="$bundled-edit",
+        sender="@alice:localhost",
+        original_event_id="$bundled-original",
+        body="Bundled",
+        origin_server_ts=3000,
+    )
+    original["unsigned"] = {"m.relations": {"m.replace": bundled}}
+    await cache.store_event("$bundled-original", room_id, original)
+
+    latest = await cache.get_latest_edit(
+        room_id,
+        cast("dict[str, Any]", original),
+        validator=valid_room_message_replacement,
+    )
+    assert latest is not None
+    assert latest["event_id"] == "$bundled-edit"
+
+    older = _edit_event(
+        event_id="$older-valid",
+        sender="@alice:localhost",
+        original_event_id="$bundled-original",
+        body="Older",
+        origin_server_ts=2000,
+    )
+    wrong_sender = _edit_event(
+        event_id="$wrong-sender",
+        sender="@mallory:localhost",
+        original_event_id="$bundled-original",
+        body="Forged",
+        origin_server_ts=5000,
+    )
+    malformed = _edit_event(
+        event_id="$malformed-newest",
+        sender="@alice:localhost",
+        original_event_id="$bundled-original",
+        body="Malformed",
+        origin_server_ts=6000,
+    )
+    cast("dict[str, Any]", malformed["content"])["m.new_content"].pop("msgtype")
+    await cache.store_events_batch(
+        [
+            ("$older-valid", room_id, older),
+            ("$wrong-sender", room_id, wrong_sender),
+            ("$malformed-newest", room_id, malformed),
+        ],
+    )
+
+    latest = await cache.get_latest_edit(
+        room_id,
+        cast("dict[str, Any]", original),
+        validator=valid_room_message_replacement,
+    )
+    assert latest is not None
+    assert latest["event_id"] == "$bundled-edit"
+
+    newer_valid = _edit_event(
+        event_id="$newer-valid",
+        sender="@alice:localhost",
+        original_event_id="$bundled-original",
+        body="Newer",
+        origin_server_ts=4000,
+    )
+    await cache.store_event("$newer-valid", room_id, newer_valid)
+    latest = await cache.get_latest_edit(
+        room_id,
+        cast("dict[str, Any]", original),
+        validator=valid_room_message_replacement,
+    )
+    assert latest is not None
+    assert latest["event_id"] == "$newer-valid"
+
+    approval = {
+        "event_id": "$approval",
+        "sender": "@router:localhost",
+        "origin_server_ts": 1000,
+        "type": "io.mindroom.tool_approval",
+        "content": {"status": "pending"},
+    }
+    valid_approval_edit = {
+        **approval,
+        "event_id": "$valid-approval-edit",
+        "origin_server_ts": 2000,
+        "content": {
+            "status": "denied",
+            "m.new_content": {"status": "denied"},
+            "m.relates_to": {"rel_type": "m.replace", "event_id": "$approval"},
+        },
+    }
+    malformed_approval_edits = [
+        {
+            **valid_approval_edit,
+            "event_id": event_id,
+            "origin_server_ts": timestamp,
+            "content": {
+                "status": "approved",
+                **({"m.new_content": []} if event_id == "$non-object" else {}),
+                "m.relates_to": {"rel_type": "m.replace", "event_id": "$approval"},
+            },
+        }
+        for event_id, timestamp in (("$missing", 3000), ("$non-object", 4000))
+    ]
+    await cache.store_events_batch(
+        [
+            ("$approval", room_id, approval),
+            ("$valid-approval-edit", room_id, valid_approval_edit),
+            *[(str(edit["event_id"]), room_id, edit) for edit in malformed_approval_edits],
+        ],
+    )
+    latest_approval_edit = await cache.get_latest_edit(
+        room_id,
+        approval,
+        validator=valid_approval_replacement,
+    )
+    assert latest_approval_edit is not None
+    assert latest_approval_edit["event_id"] == "$valid-approval-edit"
+
+
+async def _assert_invalid_sidecar_owners_are_rejected(
+    cache: ConversationEventCache,
+    *,
+    room_id: str,
+    seed_legacy_owner: Callable[[str, str], Awaitable[None]],
+) -> None:
+    """Assert non-message, state, and other-room events cannot own durable plaintext."""
+    mxc_url = "mxc://localhost/sidecar"
+    for event_id, invalid_scope in (
+        ("$generic-timeline", {"type": "com.example.generic"}),
+        ("$wrong-room", {"room_id": "!other:localhost"}),
+        ("$state", {"state_key": ""}),
+    ):
+        event = _message_event(
+            event_id=event_id,
+            sender="@alice:localhost",
+            body="Preview",
+            origin_server_ts=1000,
+        )
+        event.update(invalid_scope)
+        event["content"] = {
+            "body": "Preview",
+            "msgtype": "m.file",
+            "url": mxc_url,
+            "io.mindroom.long_text": {
+                "version": 2,
+                "encoding": "matrix_event_content_json",
+            },
+        }
+        await cache.store_event(event_id, room_id, event)
+        if "room_id" in invalid_scope and invalid_scope["room_id"] != room_id:
+            assert await cache.get_event(room_id, event_id) is None
+            assert not await cache.store_mxc_text(room_id, event_id, mxc_url, "plaintext")
+            assert await cache.get_mxc_text(room_id, event_id, mxc_url) is None
+            continue
+        assert not await cache.store_mxc_text(room_id, event_id, mxc_url, "plaintext")
+        assert await cache.get_mxc_text(room_id, event_id, mxc_url) is None
+        await seed_legacy_owner(event_id, mxc_url)
+        assert not await cache.store_mxc_text(room_id, event_id, mxc_url, "replacement")
+        assert await cache.get_mxc_text(room_id, event_id, mxc_url) is None
 
 
 def _postgres_schema_url(database_url: str, schema_name: str) -> str:
@@ -344,6 +520,34 @@ async def _seed_postgres_v2_schema(database_url: str, schema_name: str) -> str:
     return isolated_url
 
 
+async def _seed_postgres_v3_schema(database_url: str, schema_name: str) -> str:
+    """Create schema v3 with its existing narrowing latest-edit index."""
+    admin = await psycopg.AsyncConnection.connect(database_url)
+    await admin.execute(f'CREATE SCHEMA "{schema_name}"')
+    await admin.commit()
+    await admin.close()
+    isolated_url = _postgres_schema_url(database_url, schema_name)
+    db = await psycopg.AsyncConnection.connect(isolated_url)
+    await db.execute(
+        """
+        CREATE TABLE mindroom_event_cache_metadata (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        )
+        """,
+    )
+    await _create_postgres_event_cache_schema(db)
+    await db.execute(
+        """
+        INSERT INTO mindroom_event_cache_metadata(key, value)
+        VALUES ('schema_version', '3')
+        """,
+    )
+    await db.commit()
+    await db.close()
+    return isolated_url
+
+
 def _runtime_paths(tmp_path: Path, *, env: dict[str, str] | None = None) -> RuntimePaths:
     config_path = tmp_path / "config.yaml"
     config_path.write_text("router:\n  model: default\n", encoding="utf-8")
@@ -403,7 +607,16 @@ async def _assert_edit_snapshot_and_mxc_behavior(
             ("$edit-latest", room_id, latest_edit),
         ],
     )
-    assert await cache.get_latest_edit(room_id, "$reply") == latest_edit
+    assert (
+        await get_latest_edit(
+            cache,
+            room_id,
+            "$reply",
+            sender=sender,
+            event_type="m.room.message",
+        )
+        == latest_edit
+    )
     snapshot = await cache.get_latest_agent_message_snapshot(
         room_id,
         thread_id,
@@ -412,7 +625,7 @@ async def _assert_edit_snapshot_and_mxc_behavior(
     )
     assert snapshot is not None
     assert snapshot.content["body"] == "latest edit"
-    assert snapshot.origin_server_ts == 1030
+    assert snapshot.origin_server_ts == 1010
 
     mxc_owner = _message_event(
         event_id="$mxc-owner",
@@ -444,6 +657,7 @@ async def _assert_staleness_and_redaction_behavior(
     *,
     room_id: str,
     thread_id: str,
+    sender: str,
     latest_edit: dict[str, object],
 ) -> None:
     await cache.mark_thread_gap(room_id, thread_id, reason="live_thread_mutation")
@@ -467,13 +681,31 @@ async def _assert_staleness_and_redaction_behavior(
 
     assert await cache.redact_event(room_id, "$reply") is True
     assert await cache.get_event(room_id, "$reply") is None
-    assert await cache.get_latest_edit(room_id, "$reply") is None
+    assert (
+        await get_latest_edit(
+            cache,
+            room_id,
+            "$reply",
+            sender=sender,
+            event_type="m.room.message",
+        )
+        is None
+    )
     redacted_thread = await cache.get_thread_events(room_id, thread_id)
     assert redacted_thread is not None
     assert [event["event_id"] for event in redacted_thread] == [thread_id]
 
     await cache.store_event("$edit-latest", room_id, latest_edit)
-    assert await cache.get_latest_edit(room_id, "$reply") is None
+    assert (
+        await get_latest_edit(
+            cache,
+            room_id,
+            "$reply",
+            sender=sender,
+            event_type="m.room.message",
+        )
+        is None
+    )
 
 
 def test_cache_config_resolves_postgres_url_and_namespace_from_runtime_env(tmp_path: Path) -> None:
@@ -1676,12 +1908,201 @@ async def test_postgres_event_cache_round_trips_core_conversation_cache_behavior
             cache,
             room_id=room_id,
             thread_id=thread_id,
+            sender=sender,
             latest_edit=latest_edit,
         )
     finally:
         await cache.close()
         await shared_cache.close()
         await isolated_cache.close()
+
+
+@pytest.mark.asyncio
+async def test_postgres_v3_migration_retains_single_latest_edit_index(
+    postgres_event_cache_url: str,
+) -> None:
+    """Migrating a v3 database keeps one narrowing index; query collation owns correctness."""
+    schema_name = f"cache_migration_v3_{uuid.uuid4().hex}"
+    isolated_url = await _seed_postgres_v3_schema(postgres_event_cache_url, schema_name)
+    cache = PostgresEventCache(database_url=isolated_url, namespace="runtime")
+    await cache.initialize()
+    try:
+        assert cache.runtime_diagnostics()["cache_schema_migrated_from"] == 3
+        assert cache._runtime.db is not None
+        version_cursor = await cache._runtime.db.execute(
+            "SELECT value FROM mindroom_event_cache_metadata WHERE key = 'schema_version'",
+        )
+        version = await version_cursor.fetchone()
+        indexes_cursor = await cache._runtime.db.execute(
+            """
+            SELECT indexname
+            FROM pg_indexes
+            WHERE schemaname = current_schema()
+              AND indexname LIKE 'idx_mindroom_event_cache_event_edits_room_original_ts%'
+            ORDER BY indexname
+            """,
+        )
+        indexes = await indexes_cursor.fetchall()
+    finally:
+        await cache.close()
+
+    assert version == (str(_POSTGRES_EVENT_CACHE_SCHEMA_VERSION),)
+    assert indexes == [("idx_mindroom_event_cache_event_edits_room_original_ts",)]
+
+
+@pytest.mark.asyncio
+async def test_postgres_latest_edit_query_uses_bytewise_event_id_collation(
+    postgres_event_cache_url: str,
+) -> None:
+    """The production lookup must override a non-bytewise event-ID column collation."""
+    schema_name = f"collation_{uuid.uuid4().hex}"
+    admin = await psycopg.AsyncConnection.connect(postgres_event_cache_url)
+    await admin.execute(f'CREATE SCHEMA "{schema_name}"')
+    await admin.commit()
+    await admin.close()
+
+    room_id = "!room:localhost"
+    sender = "@alice:localhost"
+    namespace = f"tenant_{uuid.uuid4().hex}"
+    cache = PostgresEventCache(
+        database_url=_postgres_schema_url(postgres_event_cache_url, schema_name),
+        namespace=namespace,
+    )
+    await cache.initialize()
+    try:
+        assert cache._runtime.db is not None
+        await cache._runtime.db.execute(
+            """
+            ALTER TABLE mindroom_event_cache_event_edits
+            ALTER COLUMN edit_event_id TYPE TEXT COLLATE "und-x-icu"
+            """,
+        )
+        await cache._runtime.db.commit()
+        upper_edit = _edit_event(
+            event_id="$Z",
+            sender=sender,
+            original_event_id="$original",
+            body="Upper",
+            origin_server_ts=2000,
+        )
+        lower_edit = _edit_event(
+            event_id="$a",
+            sender=sender,
+            original_event_id="$original",
+            body="Lower",
+            origin_server_ts=2000,
+        )
+        await cache.store_events_batch(
+            [
+                ("$Z", room_id, upper_edit),
+                ("$a", room_id, lower_edit),
+            ],
+        )
+        cursor = await cache._runtime.db.execute(
+            """
+            SELECT edit_event_id
+            FROM mindroom_event_cache_event_edits
+            WHERE namespace = %s
+              AND room_id = %s
+              AND original_event_id = '$original'
+            ORDER BY origin_server_ts DESC, edit_event_id DESC
+            LIMIT 1
+            """,
+            (namespace, room_id),
+        )
+        locale_winner = await cursor.fetchone()
+        latest_edit = await get_latest_edit(
+            cache,
+            room_id,
+            "$original",
+            sender=sender,
+            event_type="m.room.message",
+        )
+    finally:
+        await cache.close()
+
+    assert locale_winner == ("$Z",)
+    assert latest_edit is not None
+    assert latest_edit["event_id"] == "$a"
+
+
+@pytest.mark.asyncio
+async def test_sqlite_cache_validates_bundled_edits_and_sidecar_owners(tmp_path: Path) -> None:
+    """SQLite must share replacement validity and reject non-timeline plaintext owners."""
+    room_id = "!room:localhost"
+    cache = SqliteEventCache(tmp_path / "event-cache.db")
+    await cache.initialize()
+    try:
+
+        async def seed_legacy_owner(event_id: str, mxc_url: str) -> None:
+            assert cache._runtime.db is not None
+            await cache._runtime.db.execute(
+                """
+                INSERT OR IGNORE INTO event_mxc_references(principal_id, room_id, event_id, mxc_url)
+                VALUES (?, ?, ?, ?)
+                """,
+                (cache.principal_id, room_id, event_id, mxc_url),
+            )
+            await cache._runtime.db.execute(
+                """
+                INSERT OR REPLACE INTO mxc_text_cache(principal_id, room_id, mxc_url, text_content, cached_at)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (cache.principal_id, room_id, mxc_url, "legacy plaintext", 1.0),
+            )
+            await cache._runtime.db.commit()
+
+        await _assert_bundled_and_cached_edits_share_validation(cache, room_id=room_id)
+        await _assert_invalid_sidecar_owners_are_rejected(
+            cache,
+            room_id=room_id,
+            seed_legacy_owner=seed_legacy_owner,
+        )
+    finally:
+        await cache.close()
+
+
+@pytest.mark.asyncio
+async def test_postgres_cache_validates_bundled_edits_and_sidecar_owners(
+    postgres_event_cache_url: str,
+) -> None:
+    """PostgreSQL must share replacement validity and reject non-timeline plaintext owners."""
+    room_id = "!room:localhost"
+    cache = PostgresEventCache(
+        database_url=postgres_event_cache_url,
+        namespace=f"tenant_{uuid.uuid4().hex}",
+    )
+    await cache.initialize()
+    try:
+
+        async def seed_legacy_owner(event_id: str, mxc_url: str) -> None:
+            assert cache._runtime.db is not None
+            await cache._runtime.db.execute(
+                """
+                INSERT INTO mindroom_event_cache_event_mxc_references(namespace, room_id, event_id, mxc_url)
+                VALUES (%s, %s, %s, %s)
+                ON CONFLICT DO NOTHING
+                """,
+                (cache.namespace, room_id, event_id, mxc_url),
+            )
+            await cache._runtime.db.execute(
+                """
+                INSERT INTO mindroom_event_cache_mxc_text(namespace, room_id, mxc_url, text_content, cached_at)
+                VALUES (%s, %s, %s, %s, %s)
+                ON CONFLICT(namespace, room_id, mxc_url) DO UPDATE SET text_content = excluded.text_content
+                """,
+                (cache.namespace, room_id, mxc_url, "legacy plaintext", 1.0),
+            )
+            await cache._runtime.db.commit()
+
+        await _assert_bundled_and_cached_edits_share_validation(cache, room_id=room_id)
+        await _assert_invalid_sidecar_owners_are_rejected(
+            cache,
+            room_id=room_id,
+            seed_legacy_owner=seed_legacy_owner,
+        )
+    finally:
+        await cache.close()
 
 
 @pytest.mark.asyncio
@@ -2191,3 +2612,43 @@ def test_event_cache_runtime_identity_uses_shared_postgres_redaction() -> None:
     )
 
     assert identity.redacted_location == "postgresql://db.internal/mindroom?user=cache&password=***"
+
+
+@pytest.mark.asyncio
+async def test_sqlite_tombstone_lookup_chunks_beyond_host_parameter_limit(tmp_path: Path) -> None:
+    """A whole-thread tombstone lookup must not exceed SQLite's host-parameter budget.
+
+    Thread resolution asks for one candidate per raw row, and long agent threads hold one
+    ``m.replace`` row per streaming edit, so the candidate set outgrows what SQLite accepts in a
+    single ``IN (...)`` statement. Without chunking this raises ``too many SQL variables`` and the
+    whole thread read fails.
+    """
+    room_id = "!room:localhost"
+    cache = SqliteEventCache(tmp_path / "event_cache.db")
+    await cache.initialize()
+    try:
+        redacted_event_id = "$redacted-late"
+        await cache.store_events_batch(
+            [
+                (
+                    redacted_event_id,
+                    room_id,
+                    {
+                        "event_id": redacted_event_id,
+                        "room_id": room_id,
+                        "sender": "@agent:localhost",
+                        "type": "m.room.message",
+                        "origin_server_ts": 1000,
+                        "content": {"body": "doomed", "msgtype": "m.text"},
+                    },
+                ),
+            ],
+        )
+        assert await cache.redact_event(room_id, redacted_event_id)
+
+        # Sorting places the tombstoned ID in a late chunk, so a lookup that silently dropped
+        # trailing chunks would report it as surviving.
+        candidate_event_ids = {f"$event-{index:06d}" for index in range(40_000)} | {redacted_event_id}
+        assert await cache.redacted_event_ids(room_id, candidate_event_ids) == frozenset({redacted_event_id})
+    finally:
+        await cache.close()

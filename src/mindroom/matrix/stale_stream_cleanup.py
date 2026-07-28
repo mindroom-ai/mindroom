@@ -39,10 +39,12 @@ from mindroom.logging_config import get_logger
 from mindroom.matrix.client_delivery import edit_message_result, send_message_result
 from mindroom.matrix.client_room_admin import get_joined_rooms
 from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage, resolve_latest_visible_messages
-from mindroom.matrix.event_info import EventInfo
+from mindroom.matrix.event_info import EventInfo, event_source_is_timeline_in_room
+from mindroom.matrix.media import valid_room_message_replacement
 from mindroom.matrix.mentions import format_message_with_mentions
 from mindroom.matrix.message_builder import build_message_content, markdown_to_html
 from mindroom.matrix.message_content import extract_and_resolve_message, extract_edit_body
+from mindroom.matrix.replacements import is_valid_replacement, replacement_content
 from mindroom.matrix.thread_diagnostics import (
     THREAD_HISTORY_SOURCE_DIAGNOSTIC,
     THREAD_HISTORY_SOURCE_HOMESERVER,
@@ -803,12 +805,16 @@ async def _scan_room_message_states(
     resolved_messages = await resolve_latest_visible_messages(
         bot_message_events,
         client,
+        room_id=room_id,
         trusted_sender_ids=trusted_sender_ids,
     )
     bot_resolved_messages = {
         event_id: message for event_id, message in resolved_messages.items() if message.sender in cleanup_bot_user_ids
     }
-    scanned_message_data_by_event_id = await _scanned_message_data_by_event_id(message_events)
+    scanned_message_data_by_event_id = await _scanned_message_data_by_event_id(
+        message_events,
+        room_id=room_id,
+    )
     auto_resume_target_event_ids = _auto_resume_target_event_ids(
         scanned_message_data_by_event_id.values(),
         bot_user_ids=bot_user_ids | set(trusted_sender_ids),
@@ -959,7 +965,7 @@ def _merge_resolved_message_state(
     # wrong clock for "is this stream still active": a placeholder posted eight hours ago and
     # edited seconds before a restart would read as older than the cleanup window and be
     # skipped, leaving it displaying ``streaming`` forever.
-    state.latest_timestamp = message.edited_timestamp or message.timestamp
+    state.latest_timestamp = message.visible_timestamp
     state.latest_event_id = message.visible_event_id
     state.latest_content = normalized_latest_content
     state.thread_id = message.thread_id or fallback_thread_id
@@ -970,8 +976,11 @@ def _merge_resolved_message_state(
 
 async def _scanned_message_data_by_event_id(
     message_events: list[nio.RoomMessageText | nio.RoomMessageNotice],
+    *,
+    room_id: str,
 ) -> dict[str, ResolvedVisibleMessage]:
     """Return raw scanned room-history messages keyed by exact event ID."""
+    message_events = [event for event in message_events if event_source_is_timeline_in_room(event.source, room_id)]
     event_infos = {
         event.event_id: EventInfo.from_event(event.source)
         for event in message_events
@@ -981,8 +990,11 @@ async def _scanned_message_data_by_event_id(
         [event.source for event in message_events],
     )
     resolved_thread_ids = await resolve_thread_ids_for_event_infos(
-        "",
+        room_id,
         event_infos=event_infos,
+        event_sources_by_event_id={
+            event.event_id: event.source for event in message_events if isinstance(event.event_id, str)
+        },
         ordered_event_ids=ordered_event_ids,
     )
 
@@ -1282,7 +1294,32 @@ async def _load_scanned_or_fetched_message_data(
     return scanned_message_data
 
 
-async def _fetch_message_data_for_event_id(
+def _validated_fetched_room_message(
+    response: object,
+    *,
+    room_id: str,
+    event_id: str,
+) -> tuple[nio.RoomMessage, dict[str, object], str] | None:
+    """Return one exact room-scoped timeline message response."""
+    if not isinstance(response, nio.RoomGetEventResponse):
+        return None
+    event = response.event
+    event_source = event.source if isinstance(event.source, dict) else None
+    sender = event.sender if isinstance(event.sender, str) else None
+    if (
+        not isinstance(event, nio.RoomMessage)
+        or event_source is None
+        or sender is None
+        or event_source.get("event_id") != event_id
+        or event_source.get("sender") != sender
+        or event_source.get("type") != "m.room.message"
+        or not event_source_is_timeline_in_room(event_source, room_id)
+    ):
+        return None
+    return event, event_source, sender
+
+
+async def _fetch_message_data_for_event_id(  # noqa: PLR0911
     client: nio.AsyncClient,
     *,
     room_id: str,
@@ -1295,39 +1332,63 @@ async def _fetch_message_data_for_event_id(
         return fetched_message_data_by_event_id[event_id]
 
     response = await client.room_get_event(room_id, event_id)
-    if not isinstance(response, nio.RoomGetEventResponse):
+    fetched_event = _validated_fetched_room_message(
+        response,
+        room_id=room_id,
+        event_id=event_id,
+    )
+    if fetched_event is None:
         fetched_message_data_by_event_id[event_id] = None
         return None
-
-    event = response.event
-    event_source = event.source if isinstance(event.source, dict) else None
-    sender = event.sender if isinstance(event.sender, str) else None
-    if event_source is None or sender is None:
-        fetched_message_data_by_event_id[event_id] = None
-        return None
+    event, event_source, sender = fetched_event
 
     event_info = EventInfo.from_event(event_source)
-    if isinstance(event, (nio.RoomMessageText, nio.RoomMessageNotice)):
-        if event_info.is_edit:
-            edited_body, edited_content = await extract_edit_body(
-                event_source,
-                client,
-                trusted_sender_ids=trusted_sender_ids,
+    if event_info.is_edit:
+        original_event_id = event_info.original_event_id
+        original = (
+            _validated_fetched_room_message(
+                await client.room_get_event(room_id, original_event_id),
+                room_id=room_id,
+                event_id=original_event_id,
             )
-            if edited_body is not None and edited_content is not None:
-                message_data = _requester_resolution_message(
-                    event_id=event_id,
-                    sender=sender,
-                    content=edited_content,
-                    body=edited_body,
-                    timestamp=event.server_timestamp if isinstance(event.server_timestamp, int) else None,
-                )
-                fetched_message_data_by_event_id[event_id] = message_data
-                return message_data
+            if original_event_id is not None
+            else None
+        )
+        original_source = original[1] if original is not None else None
+        if original_source is None or not is_valid_replacement(
+            original_source,
+            event_source,
+            room_id=room_id,
+            validator=valid_room_message_replacement,
+        ):
+            fetched_message_data_by_event_id[event_id] = None
+            return None
+        edited_body, edited_content = await extract_edit_body(
+            event_source,
+            client,
+            room_id=room_id,
+            trusted_sender_ids=trusted_sender_ids,
+            replacement_validator=valid_room_message_replacement,
+        )
+        original_content = _as_string_keyed_dict(original_source.get("content"))
+        if edited_body is None or edited_content is None or original_content is None:
+            fetched_message_data_by_event_id[event_id] = None
+            return None
+        message_data = _requester_resolution_message(
+            event_id=event_id,
+            sender=sender,
+            content=replacement_content(original_content, edited_content),
+            body=edited_body,
+            timestamp=event.server_timestamp if isinstance(event.server_timestamp, int) else None,
+        )
+        fetched_message_data_by_event_id[event_id] = message_data
+        return message_data
 
+    if isinstance(event, (nio.RoomMessageText, nio.RoomMessageNotice)):
         extracted_message = await extract_and_resolve_message(
             event,
             client,
+            room_id=room_id,
             trusted_sender_ids=trusted_sender_ids,
         )
         message_data = ResolvedVisibleMessage.from_message_data(
@@ -1338,9 +1399,9 @@ async def _fetch_message_data_for_event_id(
         fetched_message_data_by_event_id[event_id] = message_data
         return message_data
 
-    content = event_source.get("content")
+    content = _as_string_keyed_dict(event_source.get("content"))
     body: str | None = None
-    if isinstance(content, dict):
+    if content is not None:
         body_value = content.get("body")
         if isinstance(body_value, str):
             body = body_value
@@ -1348,7 +1409,7 @@ async def _fetch_message_data_for_event_id(
     message_data = _requester_resolution_message(
         event_id=event_id,
         sender=sender,
-        content=content if isinstance(content, dict) else {},
+        content=content or {},
         body=body,
         timestamp=event.server_timestamp if isinstance(event.server_timestamp, int) else None,
     )

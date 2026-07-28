@@ -6,11 +6,24 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Literal, cast
 
-from mindroom.matrix.event_info import EventInfo
+from mindroom.matrix.event_info import EventInfo, event_source_is_state_event, event_source_is_timeline_in_room
 from mindroom.matrix.large_messages import sidecar_upload_is_usable
-from mindroom.matrix.visible_body import visible_content_from_content
 
 PendingApprovalStatus = Literal["pending", "approved", "denied", "expired"]
+_APPROVAL_STATUSES = frozenset({"approved", "denied", "expired", "pending"})
+
+
+def _approval_status(content: dict[str, Any]) -> str | None:
+    """Return one valid approval-card status."""
+    status = content.get("status")
+    return status if isinstance(status, str) and status in _APPROVAL_STATUSES else None
+
+
+def valid_approval_replacement(event: dict[str, Any]) -> bool:
+    """Return whether one replacement carries a valid approval status."""
+    content = event.get("content")
+    new_content = content.get("m.new_content") if isinstance(content, dict) else None
+    return isinstance(new_content, dict) and _approval_status(new_content) is not None
 
 
 @dataclass(frozen=True, slots=True)
@@ -44,6 +57,9 @@ class PendingApproval:
         if event.get("type") != "io.mindroom.tool_approval":
             msg = "Approval card event has the wrong event type."
             raise ValueError(msg)
+        if not event_source_is_timeline_in_room(event, room_id):
+            msg = "Approval card event is not a room-scoped timeline event."
+            raise ValueError(msg)
         content = event.get("content")
         if not isinstance(content, dict):
             msg = "Approval card event is missing content."
@@ -60,8 +76,8 @@ class PendingApproval:
         if approval_id is None or tool_name is None or approver_user_id is None:
             msg = "Approval card event is missing required approval fields."
             raise ValueError(msg)
-        status = content.get("status")
-        if status not in {"pending", "approved", "denied", "expired"}:
+        status = _approval_status(content)
+        if status is None:
             msg = "Approval card event has an invalid status."
             raise ValueError(msg)
 
@@ -104,15 +120,9 @@ class PendingApproval:
 
     def latest_status(self, latest_edit: dict[str, Any] | None) -> PendingApprovalStatus:
         """Return the visible approval status after applying the latest cached edit."""
-        if latest_edit is None:
+        if latest_edit is None or not valid_approval_replacement(latest_edit):
             return self.initial_status
-        content = latest_edit.get("content")
-        if not isinstance(content, dict):
-            return self.initial_status
-        status = visible_content_from_content(cast("dict[str, object]", content)).get("status")
-        if status in {"pending", "approved", "denied", "expired"}:
-            return cast("PendingApprovalStatus", status)
-        return self.initial_status
+        return cast("PendingApprovalStatus", latest_edit["content"]["m.new_content"]["status"])
 
 
 def _approvable(content: dict[str, Any]) -> bool:
@@ -141,15 +151,9 @@ def is_original_approval_card(event: dict[str, Any]) -> bool:
     return (
         event.get("type") == "io.mindroom.tool_approval"
         and isinstance(content, dict)
+        and not event_source_is_state_event(event)
         and not _is_replace_content(content)
     )
-
-
-def terminal_edit_matches_card_sender(edit: dict[str, Any] | None, card_sender_id: str) -> bool:
-    """Return whether a cached terminal edit is trusted for one approval card."""
-    if edit is None:
-        return True
-    return edit.get("sender") == card_sender_id
 
 
 def _required_str(event: dict[str, Any], key: str) -> str:

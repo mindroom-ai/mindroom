@@ -38,7 +38,7 @@ from mindroom.matrix.cache import (
 )
 from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage, ThreadEditCandidates
 from mindroom.matrix.event_info import EventInfo
-from tests.event_cache_test_support import replace_thread_unconditionally
+from tests.event_cache_test_support import get_latest_edit, replace_thread_unconditionally
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -163,7 +163,6 @@ async def _folded_messages(rows: list[dict[str, Any]]) -> list[ResolvedVisibleMe
         cast("nio.AsyncClient", None),
         messages_by_event_id=messages,
         edit_candidates=candidates,
-        required_thread_id=_THREAD_ID,
     )
     ordered = list(messages.values())
     sort_thread_messages_root_first(ordered, thread_id=_THREAD_ID)
@@ -447,7 +446,7 @@ class TestSingleEventReadObeysTheSameSenderRule:
             ],
         )
 
-        scoped = await event_cache.get_latest_edit(_ROOM_ID, "$victim", sender=author)
+        scoped = await get_latest_edit(event_cache, _ROOM_ID, "$victim", sender=author, event_type="m.room.message")
         assert scoped is not None
         assert scoped["event_id"] == "$author-edit", "a foreign replacement was served as the latest edit"
 
@@ -475,7 +474,7 @@ class TestSingleEventReadObeysTheSameSenderRule:
             ],
         )
 
-        latest = await event_cache.get_latest_edit(_ROOM_ID, "$victim", sender=author)
+        latest = await get_latest_edit(event_cache, _ROOM_ID, "$victim", sender=author, event_type="m.room.message")
         read = await event_cache.get_thread_events(_ROOM_ID, _THREAD_ID)
         assert latest is not None
         assert read is not None
@@ -837,8 +836,11 @@ def _winning_edit_ids_by_original(rows: list[dict[str, Any]]) -> dict[str, str |
             senders[row["event_id"]] = row["sender"]
     winners: dict[str, str | None] = {}
     for original_event_id, sender in senders.items():
-        winner = candidates.winner_for(original_event_id, sender=sender)
-        winners[original_event_id] = None if winner is None else winner[0].event_id
+        ordered = candidates.ordered_for(
+            {"event_id": original_event_id, "sender": sender, "type": "m.room.message"},
+            room_id=_ROOM_ID,
+        )
+        winners[original_event_id] = ordered[0]["event_id"] if ordered else None
     return winners
 
 
@@ -1025,9 +1027,8 @@ class TestAnEditDoesNotMoveItsMessage:
 
         message.apply_edit(
             body="edited",
-            timestamp=999_000,
+            latest_event_timestamp=999_000,
             latest_event_id="$m0-late",
-            thread_id=None,
             content={"body": "edited", "msgtype": "m.text"},
         )
 
