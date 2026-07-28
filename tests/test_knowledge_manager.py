@@ -44,6 +44,7 @@ from mindroom.knowledge.availability import KnowledgeAvailability
 from mindroom.knowledge.candidate_checkpoint import load_candidate_checkpoint
 from mindroom.knowledge.file_listing import (
     git_checkout_present,
+    knowledge_files_from_relative_paths,
     list_git_tracked_knowledge_files,
     list_knowledge_files,
 )
@@ -58,6 +59,7 @@ from mindroom.knowledge.registry import (
     published_index_metadata_path,
     published_index_refresh_state,
     resolve_published_index_key,
+    save_published_index_state,
 )
 from mindroom.knowledge.utils import KnowledgeAvailabilityDetail
 from mindroom.knowledge.watch import KnowledgeSourceWatcher
@@ -1462,6 +1464,81 @@ def test_knowledge_file_listing_rejects_symlinked_directory_escape(tmp_path: Pat
     config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
 
     assert list_knowledge_files(config, "docs", docs_path) == []
+
+
+def test_tracked_path_listing_skips_per_file_strict_resolution(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Chain-vetted candidates must not pay a strict resolve walk per file.
+
+    ``resolve(strict=True)`` re-walks every path component and ignores the
+    directory guard's symlink cache, so on a network filesystem it turns one
+    listing pass into several round trips per file.
+    """
+    docs_path = tmp_path / "docs"
+    nested = docs_path / "guide"
+    nested.mkdir(parents=True)
+    (docs_path / "root.md").write_text("root", encoding="utf-8")
+    (nested / "deep.md").write_text("deep", encoding="utf-8")
+    config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
+    original_resolve = Path.resolve
+
+    def _resolve(self: Path, *args: object, **kwargs: object) -> Path:
+        strict = bool(args[0]) if args else bool(kwargs.get("strict", False))
+        if strict:
+            msg = "chain-vetted candidates must not be strictly resolved per file"
+            raise AssertionError(msg)
+        return original_resolve(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "resolve", _resolve)
+
+    files = knowledge_files_from_relative_paths(config, "docs", docs_path, ["root.md", "guide/deep.md"])
+
+    assert sorted(path.name for path in files) == ["deep.md", "root.md"]
+
+
+def test_tracked_path_listing_rejects_symlinked_file_escape(tmp_path: Path) -> None:
+    """A symlinked tracked path must not expose files outside the knowledge root."""
+    docs_path = tmp_path / "docs"
+    docs_path.mkdir()
+    secret = tmp_path / "secret.md"
+    secret.write_text("secret outside root", encoding="utf-8")
+    try:
+        (docs_path / "leak.md").symlink_to(secret)
+    except OSError as exc:
+        pytest.skip(f"symlinks unavailable: {exc}")
+    config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
+
+    assert knowledge_files_from_relative_paths(config, "docs", docs_path, ["leak.md"]) == []
+
+
+def test_tracked_path_listing_rejects_symlinked_directory_escape(tmp_path: Path) -> None:
+    """A tracked path reached through a symlinked directory must stay excluded."""
+    docs_path = tmp_path / "docs"
+    outside = tmp_path / "outside"
+    docs_path.mkdir()
+    outside.mkdir()
+    (outside / "secret.md").write_text("secret through directory", encoding="utf-8")
+    try:
+        (docs_path / "linked").symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlinks unavailable: {exc}")
+    config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
+
+    assert knowledge_files_from_relative_paths(config, "docs", docs_path, ["linked/secret.md"]) == []
+
+
+def test_tracked_path_listing_rejects_directories_and_missing_paths(tmp_path: Path) -> None:
+    """Only regular files survive the tracked-path safety checks."""
+    docs_path = tmp_path / "docs"
+    (docs_path / "directory.md").mkdir(parents=True)
+    (docs_path / "kept.md").write_text("kept", encoding="utf-8")
+    config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
+
+    files = knowledge_files_from_relative_paths(config, "docs", docs_path, ["kept.md", "directory.md", "gone.md"])
+
+    assert [path.name for path in files] == ["kept.md"]
 
 
 def test_knowledge_file_listing_skips_hidden_files_for_directory_bases(tmp_path: Path) -> None:
@@ -6703,6 +6780,132 @@ async def test_git_noop_refresh_skips_full_reindex_when_index_is_complete(
     assert state_after_noop.last_published_at is not None
     assert state_after_noop.last_published_at != state_before_noop.last_published_at
     assert reindex_count == 1
+
+
+def _git_noop_config(tmp_path: Path) -> tuple[Config, RuntimePaths, Path]:
+    """Build a Git-backed single-file base used by the revision-gating tests."""
+    docs_path = tmp_path / "docs"
+    docs_path.mkdir()
+    (docs_path / "doc.md").write_text("git index", encoding="utf-8")
+    config = _config(
+        tmp_path,
+        bases={"docs": docs_path},
+        agent_bases=["docs"],
+        git_configs={"docs": KnowledgeGitConfig(repo_url="https://example.com/org/repo.git", branch="main")},
+    )
+    return config, runtime_paths_for(config), docs_path
+
+
+def _install_git_sync_results(
+    monkeypatch: pytest.MonkeyPatch,
+    results: list[dict[str, object]],
+) -> None:
+    """Drive ``sync_git_source`` through a fixed sequence of poll outcomes."""
+
+    async def _sync(self: KnowledgeManager) -> dict[str, object]:
+        result = results.pop(0)
+        self._git_last_successful_commit = str(result["commit"])
+        _set_git_tracked_files(self, "doc.md")
+        return result
+
+    monkeypatch.setattr(KnowledgeManager, "sync_git_source", _sync)
+
+
+@pytest.mark.asyncio
+async def test_git_noop_refresh_skips_corpus_hash_when_revision_is_unchanged(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unmoved Git revision proves the corpus is unchanged without reading every file."""
+    config, runtime_paths, _ = _git_noop_config(tmp_path)
+    _install_git_sync_results(
+        monkeypatch,
+        [
+            {"updated": True, "changed_count": 1, "removed_count": 0, "commit": "rev-a"},
+            {"updated": False, "changed_count": 0, "removed_count": 0, "commit": "rev-a"},
+        ],
+    )
+    await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+
+    def _unexpected_signature(*_args: object, **_kwargs: object) -> str:
+        msg = "an unchanged Git revision must not re-hash the corpus"
+        raise AssertionError(msg)
+
+    monkeypatch.setattr(knowledge_refresh_runner, "knowledge_source_signature", _unexpected_signature)
+    result = await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+
+    key = resolve_published_index_key("docs", config=config, runtime_paths=runtime_paths)
+    state = load_published_index_state(published_index_metadata_path(key))
+    assert result.index_published is True
+    assert result.availability is KnowledgeAvailability.READY
+    assert state is not None
+    assert state.published_revision == "rev-a"
+
+
+@pytest.mark.asyncio
+async def test_git_noop_refresh_hashes_corpus_when_revision_moved(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A revision the published index was not built from still needs content verification."""
+    config, runtime_paths, _ = _git_noop_config(tmp_path)
+    _install_git_sync_results(
+        monkeypatch,
+        [
+            {"updated": True, "changed_count": 1, "removed_count": 0, "commit": "rev-a"},
+            {"updated": False, "changed_count": 0, "removed_count": 0, "commit": "rev-b"},
+        ],
+    )
+    await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+
+    signature_calls = 0
+    original_signature = knowledge_refresh_runner.knowledge_source_signature
+
+    def _counting_signature(*args: object, **kwargs: object) -> str:
+        nonlocal signature_calls
+        signature_calls += 1
+        return original_signature(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(knowledge_refresh_runner, "knowledge_source_signature", _counting_signature)
+    result = await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+
+    assert signature_calls == 1
+    assert result.index_published is True
+
+
+@pytest.mark.asyncio
+async def test_git_noop_refresh_hashes_corpus_when_index_predates_revision_tracking(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An index published without a recorded revision cannot be trusted by revision alone."""
+    config, runtime_paths, _ = _git_noop_config(tmp_path)
+    _install_git_sync_results(
+        monkeypatch,
+        [
+            {"updated": True, "changed_count": 1, "removed_count": 0, "commit": "rev-a"},
+            {"updated": False, "changed_count": 0, "removed_count": 0, "commit": "rev-a"},
+        ],
+    )
+    await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+    key = resolve_published_index_key("docs", config=config, runtime_paths=runtime_paths)
+    metadata_path = published_index_metadata_path(key)
+    published = load_published_index_state(metadata_path)
+    assert published is not None
+    save_published_index_state(metadata_path, replace(published, published_revision=None))
+
+    signature_calls = 0
+    original_signature = knowledge_refresh_runner.knowledge_source_signature
+
+    def _counting_signature(*args: object, **kwargs: object) -> str:
+        nonlocal signature_calls
+        signature_calls += 1
+        return original_signature(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(knowledge_refresh_runner, "knowledge_source_signature", _counting_signature)
+    await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+
+    assert signature_calls == 1
 
 
 @pytest.mark.asyncio

@@ -794,6 +794,19 @@ async def _refresh_result_from_persisted_state(
     )
 
 
+def _revision_proves_source_unchanged(state: PublishedIndexState, published_revision: str | None) -> bool:
+    """Return whether a matching Git revision already proves the indexed corpus is unchanged.
+
+    MindRoom owns the checkout and realigns it with ``git reset --hard``, so a tracked
+    file's content is fully determined by HEAD. Every corpus filter (branch, LFS, hidden
+    paths, include/exclude patterns and extensions) lives in ``IndexingSettings``, which
+    the caller has already compared. An unmoved revision therefore means byte-identical
+    indexed content, and hashing the corpus to learn the same thing costs a full read of
+    every file — the dominant cost on a large or network-mounted source.
+    """
+    return published_revision is not None and state.published_revision == published_revision
+
+
 async def _publish_unchanged_index(
     manager: KnowledgeManager,
     key: PublishedIndexKey,
@@ -812,13 +825,16 @@ async def _publish_unchanged_index(
     ):
         return None
 
-    current_source_signature = await asyncio.to_thread(
-        knowledge_source_signature,
-        manager.config,
-        manager.base_id,
-        manager._knowledge_source_path(),
-        tracked_relative_paths=manager._git_tracked_relative_paths,
-    )
+    if _revision_proves_source_unchanged(state, published_revision):
+        current_source_signature = state.source_signature
+    else:
+        current_source_signature = await asyncio.to_thread(
+            knowledge_source_signature,
+            manager.config,
+            manager.base_id,
+            manager._knowledge_source_path(),
+            tracked_relative_paths=manager._git_tracked_relative_paths,
+        )
     if current_source_signature != state.source_signature:
         if mark_stale_on_source_change:
             await mark_knowledge_source_changed_async(
