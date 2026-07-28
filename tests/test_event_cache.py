@@ -346,6 +346,11 @@ async def test_conversation_cache_thread_reads_forward_client_fetch_metadata(
         ("get_dispatch_thread_snapshot", "fetch_dispatch_thread_snapshot", False, 75.0),
         ("get_dispatch_thread_history", "fetch_dispatch_thread_history", True, 100.0),
     ]
+    post_coordinator_read_starts = {
+        "get_thread_history": 1.06,
+        "get_dispatch_thread_snapshot": 2.08,
+        "get_dispatch_thread_history": 3.11,
+    }
     fetchers = {
         name: AsyncMock(return_value=thread_history_result([], is_full_history=is_full_history))
         for _method_name, name, is_full_history, _queue_wait_ms in read_modes
@@ -364,7 +369,23 @@ async def test_conversation_cache_thread_reads_forward_client_fetch_metadata(
             ),
             patch(
                 "mindroom.matrix.cache.thread_reads.time.perf_counter",
-                side_effect=[1.0, 1.05, 2.0, 2.01, 2.075, 2.075, 2.075, 3.0, 3.01, 3.1, 3.1, 3.1],
+                side_effect=[
+                    1.0,
+                    1.05,
+                    1.06,
+                    2.0,
+                    2.01,
+                    2.075,
+                    2.075,
+                    2.075,
+                    2.08,
+                    3.0,
+                    3.01,
+                    3.1,
+                    3.1,
+                    3.1,
+                    3.11,
+                ],
             ),
         ):
             read_methods = {
@@ -389,6 +410,7 @@ async def test_conversation_cache_thread_reads_forward_client_fetch_metadata(
                 trusted_sender_ids=conversation_cache._trusted_sender_ids(),
                 caller_label=f"caller-{method_name}",
                 coordinator_queue_wait_ms=queue_wait_ms,
+                post_coordinator_read_started=post_coordinator_read_starts[method_name],
                 # Always supplied now: the refill no longer depends on a write coordinator.
                 refill=ANY,
             )
@@ -762,13 +784,17 @@ async def test_strict_thread_history_uses_no_stale_fetch_without_dispatch_timeou
     client = MagicMock()
     conversation_cache = _conversation_cache_for_thread_reads(tmp_path, event_cache, client=client)
 
-    coordinator = MagicMock()
-    coordinator.wait_for_thread_idle = AsyncMock(return_value=None)
+    coordinator = EventCacheWriteCoordinator(logger=conversation_cache.logger)
     conversation_cache.runtime.event_cache_write_coordinator = coordinator
     fetched_history = thread_history_result([], is_full_history=True)
 
     try:
         with (
+            patch.object(
+                coordinator,
+                "wait_for_thread_idle",
+                wraps=coordinator.wait_for_thread_idle,
+            ) as wait_for_thread_idle,
             patch(
                 "mindroom.matrix.conversation_cache.refresh_thread_history_from_source",
                 AsyncMock(return_value=fetched_history),
@@ -784,10 +810,11 @@ async def test_strict_thread_history_uses_no_stale_fetch_without_dispatch_timeou
                 caller_label="dispatch_post_lock_refresh",
             )
     finally:
+        await coordinator.close()
         await event_cache.close()
 
     assert result.is_full_history is True
-    coordinator.wait_for_thread_idle.assert_awaited_once()
+    wait_for_thread_idle.assert_awaited_once()
     refresh_thread_history.assert_awaited_once()
     assert refresh_thread_history.await_args.kwargs["allow_stale_fallback"] is False
 

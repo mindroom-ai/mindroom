@@ -12,7 +12,6 @@ import pytest
 
 import mindroom.matrix.cache as matrix_cache
 import mindroom.matrix.cache.sqlite_event_cache_threads as sqlite_event_cache_threads_module
-from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.matrix.cache.sqlite_event_cache import SqliteEventCache
 from mindroom.matrix.cache.thread_cache_state import ThreadAppendOutcome, ThreadCacheGap
 from mindroom.matrix.cache.write_coordinator import EventCacheWriteCoordinator
@@ -263,13 +262,11 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         await _wait_for_room_cache_idle(coordinator)
 
     @pytest.mark.asyncio
-    async def test_live_append_without_a_snapshot_is_recovered_by_the_next_read(self, tmp_path: Path) -> None:
-        """A live event arriving with no cached snapshot is not lost; the next read refetches it.
-
-        There is no scheduled repair and no retained delta any more. The append finds no snapshot,
-        records a gap, and the homeserver -- which has the event -- is what the next read rebuilds
-        from. Same guarantee, one mechanism instead of three.
-        """
+    async def test_live_append_during_snapshotless_refill_converges_without_second_scan(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """A refill owns the thread lane so a racing live append extends its installed snapshot."""
         room_id = "!test:localhost"
         thread_id = "$thread:localhost"
         event_cache = SqliteEventCache(tmp_path / "event_cache.db")
@@ -296,6 +293,21 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             thread_events=[live_event],
             next_batch="s_initial",
         )
+        room_messages_response = client.room_messages.return_value
+        fetch_started = asyncio.Event()
+        release_fetch = asyncio.Event()
+
+        async def blocking_room_messages(*_args: object, **_kwargs: object) -> nio.RoomMessagesResponse:
+            fetch_started.set()
+            await release_fetch.wait()
+            return room_messages_response
+
+        client.room_messages = AsyncMock(side_effect=blocking_room_messages)
+        different_thread_update_started = asyncio.Event()
+
+        async def different_thread_update() -> None:
+            different_thread_update_started.set()
+
         access = MatrixConversationCache(
             logger=MagicMock(),
             runtime=_conversation_runtime(
@@ -304,27 +316,57 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
                 coordinator=coordinator,
             ),
         )
+        read_task = asyncio.create_task(access.get_dispatch_thread_history(room_id, thread_id))
+        mutation_task: asyncio.Task[object] | None = None
 
         try:
-            await access.append_live_event(
+            await asyncio.wait_for(fetch_started.wait(), timeout=1.0)
+            access._write_cache_ops.queue_thread_cache_update(
                 room_id,
-                live_event,
-                event_info=EventInfo.from_event(live_event.source),
+                "$other-thread:localhost",
+                different_thread_update,
+                name="matrix_cache_test_different_thread_update",
             )
-            await wait_for_background_tasks(timeout=1.0, owner=coordinator.background_task_owner)
-            history = await access.get_dispatch_thread_history(room_id, thread_id)
+            await asyncio.wait_for(different_thread_update_started.wait(), timeout=1.0)
+            mutation_task = access._write_cache_ops.queue_thread_cache_update(
+                room_id,
+                thread_id,
+                lambda: event_cache.apply_thread_mutation_append(
+                    room_id,
+                    thread_id,
+                    live_event.source,
+                    append_failed_reason="live_append_failed",
+                ),
+                name="matrix_cache_test_live_append",
+            )
+            await asyncio.sleep(0)
+            assert mutation_task.done() is False
+
+            release_fetch.set()
+            history = await asyncio.wait_for(read_task, timeout=1.0)
+            mutation_outcome = await asyncio.wait_for(mutation_task, timeout=1.0)
+            cached_history = await access.get_dispatch_thread_history(room_id, thread_id)
             cached_rows = await event_cache.get_thread_events(room_id, thread_id)
             gap_after_read = await event_cache.get_thread_cache_gap(room_id, thread_id)
         finally:
-            await wait_for_background_tasks(timeout=1.0, owner=coordinator.background_task_owner)
+            release_fetch.set()
+            await asyncio.gather(
+                read_task,
+                *(task for task in [mutation_task] if task is not None),
+                return_exceptions=True,
+            )
+            await coordinator.close()
             await event_cache.close()
 
         expected_event_ids = [thread_id, "$live:localhost"]
         assert [message.event_id for message in history] == expected_event_ids
+        assert mutation_outcome is ThreadAppendOutcome.APPENDED
+        assert [message.event_id for message in cached_history] == expected_event_ids
+        assert cached_history.diagnostics[THREAD_HISTORY_SOURCE_DIAGNOSTIC] == THREAD_HISTORY_SOURCE_CACHE
         assert cached_rows is not None
         assert [event["event_id"] for event in cached_rows] == expected_event_ids
-        # The refetch covered the gap, so the rebuilt snapshot is usable.
         assert matrix_cache.thread_cache_rejection_reason(gap_after_read) is None
+        assert client.room_messages.await_count == 1
 
     @pytest.mark.asyncio
     async def test_live_redaction_resolution_does_not_block_same_room_read(self) -> None:

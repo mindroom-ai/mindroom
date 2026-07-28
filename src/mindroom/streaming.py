@@ -928,6 +928,7 @@ class StreamingResponse:
                 raise RuntimeError(msg)
             return False
 
+        self._mark_first_visible_reply_if_needed(prepared_delivery.committed_state)
         if not is_final:
             self._warmup_state.note_nonterminal_delivery(
                 had_warmup_suffix=prepared_delivery.had_warmup_suffix,
@@ -1077,10 +1078,10 @@ class StreamingResponse:
             return
         self.conversation_cache.release_outbound_thread(self.room_id, self.event_id)
 
-    def _mark_first_visible_reply_if_needed(self) -> None:
-        """Mark first visible reply timing once visible text exists."""
-        if self.pipeline_timing is not None and self.accumulated_text.strip():
-            self.pipeline_timing.mark_first_visible_reply("stream_update")
+    def _mark_first_visible_reply_if_needed(self, delivered_state: _CommittedDeliveryState) -> None:
+        """Mark first visible reply timing from the payload acknowledged by Matrix."""
+        if self.pipeline_timing is not None and delivered_state.visible_body_state == "visible_body":
+            self.pipeline_timing.mark_first_visible_reply("stream_update", substantive=True)
 
     async def _send_initial_content(
         self,
@@ -1103,7 +1104,6 @@ class StreamingResponse:
         if self.visible_event_id_callback is not None:
             self.visible_event_id_callback(delivered.event_id)
         await self._record_streaming_send(delivered.event_id, delivered.content_sent)
-        self._mark_first_visible_reply_if_needed()
         logger.debug("Initial streaming message sent", event_id=self.event_id)
         return True
 
@@ -1128,7 +1128,6 @@ class StreamingResponse:
         if delivered is None:
             return False
         await self._record_streaming_edit(delivered.event_id, content_sent=delivered.content_sent)
-        self._mark_first_visible_reply_if_needed()
         return True
 
     async def _send_content(

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import functools
 import inspect
+import logging
 import os
 import time
 from contextlib import contextmanager
@@ -31,6 +32,22 @@ _DISPATCH_PIPELINE_TIMING_KEY = "com.mindroom.dispatch_pipeline_timing"
 
 def _is_enabled() -> bool:
     return os.environ.get("MINDROOM_TIMING", "") == "1"
+
+
+def _debug_enabled(bound_logger: object) -> bool:
+    """Return whether one logger would keep a debug event.
+
+    Only used to skip work that would be discarded, so anything that cannot
+    answer the question counts as enabled: test doubles and non-stdlib structlog
+    loggers must never lose a diagnostic to this check.
+    """
+    is_enabled_for = getattr(bound_logger, "isEnabledFor", None)
+    if not callable(is_enabled_for):
+        return True
+    try:
+        return bool(is_enabled_for(logging.DEBUG))
+    except Exception:
+        return True
 
 
 def timing_enabled() -> bool:
@@ -66,6 +83,7 @@ _PRIMARY_SEGMENTS: tuple[tuple[str, str, str], ...] = (
 
 _PRIMARY_TOTALS: tuple[tuple[str, str, str], ...] = (
     ("time_to_first_visible_reply_ms", "message_received", "first_visible_reply"),
+    ("time_to_first_substantive_reply_ms", "message_received", "first_substantive_reply"),
     ("total_pipeline_ms", "message_received", "response_complete"),
 )
 
@@ -88,6 +106,16 @@ _DIAGNOSTIC_SPANS: tuple[tuple[str, str, str], ...] = (
     ("diag_prompt_assembly_ms", "prompt_assembly_start", "prompt_assembly_ready"),
     ("diag_history_ready_to_model_request_ms", "history_ready", "model_request_sent"),
     ("diag_provider_ttft_ms", "model_request_sent", "model_first_token"),
+    (
+        "diag_first_visible_to_first_substantive_reply_ms",
+        "first_visible_reply",
+        "first_substantive_reply",
+    ),
+    (
+        "diag_model_first_token_to_first_substantive_reply_ms",
+        "model_first_token",
+        "first_substantive_reply",
+    ),
     ("diag_first_visible_to_stream_complete_ms", "first_visible_reply", "streaming_complete"),
     ("diag_model_request_to_completion_ms", "model_request_sent", "response_complete"),
 )
@@ -114,12 +142,19 @@ class DispatchPipelineTiming:
             if value is not None:
                 self.metadata[key] = value
 
-    def mark_first_visible_reply(self, kind: str) -> None:
-        """Record the first user-visible response milestone once."""
-        if "first_visible_reply" in self.marks:
+    def mark_first_visible_reply(self, kind: str, *, substantive: bool = False) -> None:
+        """Record the first visible reply and, when confirmed, the first substantive reply."""
+        needs_visible = "first_visible_reply" not in self.marks
+        needs_substantive = substantive and "first_substantive_reply" not in self.marks
+        if not needs_visible and not needs_substantive:
             return
-        self.marks["first_visible_reply"] = time.perf_counter()
-        self.metadata["first_visible_kind"] = kind
+        now = time.perf_counter()
+        if needs_visible:
+            self.marks["first_visible_reply"] = now
+            self.metadata["first_visible_kind"] = kind
+        if needs_substantive:
+            self.marks["first_substantive_reply"] = now
+            self.metadata["first_substantive_kind"] = kind
 
     def elapsed_ms(self, start_label: str, end_label: str) -> float | None:
         """Return elapsed time between two recorded phase boundaries."""
@@ -134,6 +169,8 @@ class DispatchPipelineTiming:
         if self.summary_emitted:
             return
         self.summary_emitted = True
+        if not _debug_enabled(logger):
+            return
         summary: dict[str, Any] = {
             "source_event_id": self.source_event_id,
             "room_id": self.room_id,
@@ -190,11 +227,10 @@ def emit_timing_event(event_name: str, **event_data: object) -> None:
 
     Emitted at ``debug`` level so callers can keep ``MINDROOM_TIMING=1`` enabled
     in long-running processes and still flip emission off cheaply via the global
-    log level. With ``MINDROOM_TIMING=1`` and log level at INFO or above, the
-    stdlib ``isEnabledFor(DEBUG)`` check short-circuits before formatting and
-    handler dispatch.
+    log level. The ``isEnabledFor`` check runs before the payload is assembled,
+    so a dropped event costs one level lookup rather than a discarded dict.
     """
-    if not _is_enabled():
+    if not _is_enabled() or not _debug_enabled(logger):
         return
     scope = event_data.pop("timing_scope", None)
     if not isinstance(scope, str) or not scope:
