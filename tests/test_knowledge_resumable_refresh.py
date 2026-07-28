@@ -3447,6 +3447,43 @@ async def test_an_interruption_after_the_copy_still_resumes_the_work_it_finished
 
 
 @pytest.mark.asyncio
+async def test_a_candidate_with_no_vectors_and_no_claims_is_still_resumed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Claiming nothing is not itself a violation; holding unclaimed rows is.
+
+    A candidate whose every file failed to index claims nothing and holds no
+    vectors, which satisfies the invariant. Condemning it on the empty claim
+    map alone would rebuild it on every refresh and reset the retry ledger that
+    records how many attempts each file has cost.
+    """
+    docs_path = tmp_path / "docs"
+    names = _write_corpus(docs_path, 2)
+    config = _config(tmp_path, docs_path)
+    runtime_paths = runtime_paths_for(config)
+
+    async def _fail_everything(_self: KnowledgeManager, resolved_path: Path, **kwargs: object) -> bool:
+        _ = (resolved_path, kwargs)
+        return False
+
+    monkeypatch.setattr(KnowledgeManager, "_index_file_locked", _fail_everything)
+    await _manager(config).reindex_all()
+    first = load_candidate_checkpoint(_storage_path(config, runtime_paths))
+    assert first is not None
+    assert first.completed == {}
+    assert sorted(first.failed) == sorted(names)
+    assert _stored_paths(first.collection) == []
+
+    await _manager(config).reindex_all()
+
+    second = load_candidate_checkpoint(_storage_path(config, runtime_paths))
+    assert second is not None
+    assert second.collection == first.collection, "an empty candidate was needlessly rebuilt"
+    assert [second.failed[name].attempts for name in sorted(names)] == [2, 2], "the retry ledger was reset"
+
+
+@pytest.mark.asyncio
 async def test_a_copy_records_its_claims_only_after_every_row_has_landed(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
