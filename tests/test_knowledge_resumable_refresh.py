@@ -16,6 +16,7 @@ import itertools
 import os
 from dataclasses import dataclass, field, replace
 from pathlib import Path
+from threading import Event
 from typing import TYPE_CHECKING, Any, ClassVar, Protocol
 
 import pytest
@@ -281,6 +282,15 @@ class _FakeKnowledge:
     def search(self, query: str, max_results: int | None = None) -> list[Document]:
         assert self.vector_db is not None
         return self.vector_db.search(query=query, limit=max_results or self.max_results)
+
+
+class _AutoCreatingFakeKnowledge(_FakeKnowledge):
+    """Knowledge that creates a missing collection on construction, like Agno's."""
+
+    def __init__(self, vector_db: _FakeVectorDb | None = None) -> None:
+        super().__init__(vector_db)
+        if vector_db is not None and not vector_db.exists():
+            vector_db.create()
 
 
 class _RecordingNonBatchEmbedder(Embedder):
@@ -3018,6 +3028,28 @@ def _vector_existence_probe_count() -> int:
     return probes
 
 
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("source_mtime_ns", True),
+        ("source_size", True),
+        ("source_size", -1),
+        ("source_digest", ""),
+    ],
+)
+def test_reusable_row_signature_rejects_invalid_values(field: str, value: object) -> None:
+    """Published metadata must satisfy the same signature contract as checkpoints."""
+    metadata: dict[str, Any] = {
+        "source_path": "doc.md",
+        "source_mtime_ns": 1,
+        "source_size": 1,
+        "source_digest": "digest",
+    }
+    metadata[field] = value
+
+    assert knowledge_manager_module._reusable_row_signature(metadata, frozenset({"doc.md"})) is None
+
+
 @pytest.mark.asyncio
 async def test_refresh_after_publish_reuses_vectors_for_unchanged_files(
     tmp_path: Path,
@@ -3332,20 +3364,45 @@ async def test_published_vector_reuse_rescans_an_empty_file_it_cannot_claim(
 
 
 @pytest.mark.asyncio
+async def test_shielded_write_finishes_before_repeated_cancellation_escapes() -> None:
+    """A second cancellation must not interrupt the drain of a durable write."""
+    started = asyncio.Event()
+    release = asyncio.Event()
+    finished = False
+
+    async def _write() -> None:
+        nonlocal finished
+        started.set()
+        await release.wait()
+        finished = True
+
+    outer = asyncio.create_task(knowledge_manager_module._shielded_write(_write()))
+    await started.wait()
+    try:
+        outer.cancel()
+        await asyncio.sleep(0)
+        outer.cancel()
+        await asyncio.sleep(0)
+        assert not outer.done(), "repeated cancellation escaped before the durable write finished"
+    finally:
+        release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await outer
+    assert finished
+
+
+@pytest.mark.asyncio
 async def test_a_cancelled_vector_copy_never_publishes_rows_it_could_not_claim(
     tmp_path: Path,
     embedder: _RecordingEmbedder,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A copy interrupted between writing rows and recording them must not survive.
+    """Cancellation must wait for the copy worker before releasing the refresh lock.
 
-    ``asyncio.to_thread`` cannot be cancelled, so the copy finishes writing
-    while the awaiting refresh raises ``CancelledError`` -- which is a
-    ``BaseException`` and so escapes the copy's own error handling. Nothing
-    downstream can attribute the rows it left: reconciliation derives every
-    deletion from the checkpoint, and the checkpoint claims nothing. A path
-    that leaves the corpus before the next refresh would otherwise keep serving
-    its old content from the published index.
+    ``asyncio.to_thread`` cannot cancel its worker, so the coroutine must drain
+    that worker before propagating ``CancelledError``. Claims intentionally
+    remain empty after cancellation; shape recovery then rebuilds the completed
+    copy before a departed path can reach publication.
     """
     docs_path = tmp_path / "docs"
     names = _write_corpus(docs_path, 3)
@@ -3354,27 +3411,36 @@ async def test_a_cancelled_vector_copy_never_publishes_rows_it_could_not_claim(
 
     await _manager(config).reindex_all()
     original_copy = KnowledgeManager._copy_published_vectors
+    copy_started = Event()
+    release_copy = Event()
 
-    def _copy_then_cancel(
+    def _blocked_copy(
         self: KnowledgeManager,
         *,
         published_collection: str,
         candidate_vector_db: _FakeVectorDb,
         managed_paths: frozenset[str],
     ) -> dict[str, FileSignature]:
-        # The copy runs to completion and then the await raises, which is what
-        # cancelling an uncancellable ``asyncio.to_thread`` call really does.
-        original_copy(
+        copy_started.set()
+        release_copy.wait()
+        return original_copy(
             self,
             published_collection=published_collection,
             candidate_vector_db=candidate_vector_db,
             managed_paths=managed_paths,
         )
-        raise asyncio.CancelledError
 
-    monkeypatch.setattr(KnowledgeManager, "_copy_published_vectors", _copy_then_cancel)
+    monkeypatch.setattr(KnowledgeManager, "_copy_published_vectors", _blocked_copy)
+    refresh = asyncio.create_task(_manager(config).reindex_all())
+    assert await asyncio.to_thread(copy_started.wait, 5), "the vector copy never started"
+    try:
+        refresh.cancel()
+        await asyncio.sleep(0)
+        assert not refresh.done(), "the refresh lock escaped while its copy worker was still running"
+    finally:
+        release_copy.set()
     with pytest.raises(asyncio.CancelledError):
-        await _manager(config).reindex_all()
+        await refresh
     monkeypatch.setattr(KnowledgeManager, "_copy_published_vectors", original_copy)
 
     interrupted = load_candidate_checkpoint(_storage_path(config, runtime_paths))
@@ -3395,6 +3461,71 @@ async def test_a_cancelled_vector_copy_never_publishes_rows_it_could_not_claim(
     # Recovery rebuilds the collection, so it must copy again rather than fall
     # back to embedding: losing a corpus copy is the bug's secondary cost.
     assert indexed == 0, "recovery re-embedded instead of copying the published vectors again"
+
+
+@pytest.mark.asyncio
+async def test_a_candidate_whose_collection_vanished_is_rebuilt_rather_than_resumed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Probe existence before Agno can auto-create a vanished collection."""
+    monkeypatch.setattr(knowledge_manager_module, "Knowledge", _AutoCreatingFakeKnowledge)
+    docs_path = tmp_path / "docs"
+    names = _write_corpus(docs_path, 3)
+    config = _config(tmp_path, docs_path)
+    runtime_paths = runtime_paths_for(config)
+    original_index = KnowledgeManager._index_file_locked
+
+    async def _fail_last(self: KnowledgeManager, resolved_path: Path, **kwargs: object) -> bool:
+        if resolved_path.name == names[-1]:
+            return False
+        return await original_index(self, resolved_path, **kwargs)
+
+    monkeypatch.setattr(KnowledgeManager, "_index_file_locked", _fail_last)
+    await _manager(config).reindex_all()
+    monkeypatch.setattr(KnowledgeManager, "_index_file_locked", original_index)
+
+    checkpoint = load_candidate_checkpoint(_storage_path(config, runtime_paths))
+    assert checkpoint is not None
+    assert len(checkpoint.completed) == 2, "the candidate should have kept the files it did index"
+    _FakeVectorDb.store.pop(checkpoint.collection)
+
+    run = await _manager(config)._open_candidate_run()
+
+    assert run.resumed is False
+    assert run.completed == {}, "claims survived a collection that no longer holds their vectors"
+
+
+@pytest.mark.asyncio
+async def test_unclaimed_row_probe_reuses_the_refresh_embedder(
+    tmp_path: Path,
+    embedder: _RecordingEmbedder,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An empty-checkpoint probe must not construct a second configured embedder."""
+    docs_path = tmp_path / "docs"
+    docs_path.mkdir()
+    config = _config(tmp_path, docs_path)
+    runtime_paths = runtime_paths_for(config)
+    manager = _manager(config)
+    collection = manager._candidate_collection_name()
+    save_candidate_checkpoint(
+        _storage_path(config, runtime_paths),
+        CandidateCheckpoint(collection=collection, settings=manager._indexing_settings),
+    )
+    _FakeVectorDb(collection=collection, embedder=embedder).create()
+    created: list[Embedder] = []
+
+    def _record_factory(*_args: object, **_kwargs: object) -> Embedder:
+        created.append(embedder)
+        return embedder
+
+    monkeypatch.setattr(knowledge_manager_module, "create_configured_embedder", _record_factory)
+
+    run = await manager._open_candidate_run()
+
+    assert run.resumed is True
+    assert len(created) == 1, "the shape probe constructed another configured embedder"
 
 
 @pytest.mark.asyncio

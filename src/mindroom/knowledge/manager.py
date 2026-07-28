@@ -319,6 +319,23 @@ def _raise_cancelled() -> NoReturn:
     raise asyncio.CancelledError
 
 
+async def _complete_task_before_cancelling(task: asyncio.Task[_ShieldedResult]) -> _ShieldedResult:
+    """Drain one owned task before propagating cancellation, however often requested."""
+    try:
+        return await asyncio.shield(task)
+    except asyncio.CancelledError:
+        while not task.done():
+            try:
+                await asyncio.shield(task)
+            except asyncio.CancelledError:
+                continue
+            except Exception:
+                break
+        with suppress(Exception):
+            task.result()
+        raise
+
+
 async def _shielded_write(write: Coroutine[Any, Any, _ShieldedResult]) -> _ShieldedResult:
     """Run one durable write to completion even if the caller is cancelled.
 
@@ -327,14 +344,9 @@ async def _shielded_write(write: Coroutine[Any, Any, _ShieldedResult]) -> _Shiel
     racing process exit. Draining swallows the write's own failure so that
     cancellation, not the failure, is what the caller sees -- every user of
     this treats a lost write as recoverable and cancellation as authoritative.
+    The shared drain also defers repeated cancellation until the write finishes.
     """
-    task = asyncio.create_task(write)
-    try:
-        return await asyncio.shield(task)
-    except asyncio.CancelledError:
-        with suppress(Exception):
-            await task
-        raise
+    return await _complete_task_before_cancelling(asyncio.create_task(write))
 
 
 def _iter_file_batches(files: Sequence[Path], batch_size: int) -> Iterator[list[Path]]:
@@ -614,7 +626,11 @@ def _reusable_row_signature(
     source_mtime_ns = metadata.get(_SOURCE_MTIME_NS_KEY)
     source_size = metadata.get(_SOURCE_SIZE_KEY)
     source_digest = metadata.get(_SOURCE_DIGEST_KEY)
-    if not isinstance(source_mtime_ns, int) or not isinstance(source_size, int) or not isinstance(source_digest, str):
+    if isinstance(source_mtime_ns, bool) or isinstance(source_size, bool):
+        return None
+    if not isinstance(source_mtime_ns, int) or not isinstance(source_size, int) or source_size < 0:
+        return None
+    if not isinstance(source_digest, str) or not source_digest:
         return None
     return source_path, (source_mtime_ns, source_size, source_digest)
 
@@ -1869,11 +1885,15 @@ class KnowledgeManager:
             self._relative_path(file_path) for file_path in await asyncio.to_thread(self.list_files)
         )
         try:
-            reused = await asyncio.to_thread(
-                self._copy_published_vectors,
-                published_collection=published_collection,
-                candidate_vector_db=candidate_vector_db,
-                managed_paths=managed_paths,
+            reused = await _complete_task_before_cancelling(
+                asyncio.create_task(
+                    asyncio.to_thread(
+                        self._copy_published_vectors,
+                        published_collection=published_collection,
+                        candidate_vector_db=candidate_vector_db,
+                        managed_paths=managed_paths,
+                    ),
+                ),
             )
         except Exception:
             # Reuse is an optimization, so a vector store that cannot serve the
@@ -1896,22 +1916,24 @@ class KnowledgeManager:
         )
         return reused
 
-    def _candidate_holds_unclaimed_rows(self, checkpoint: CandidateCheckpoint) -> bool:
-        """Return whether a candidate holds vectors its checkpoint never claimed.
+    def _candidate_holds_unclaimed_rows(
+        self,
+        checkpoint: CandidateCheckpoint,
+        *,
+        embedder: Embedder,
+    ) -> bool:
+        """Return whether an interrupted bulk copy is visible from candidate shape.
 
-        The candidate's invariant is that its collection only holds rows the
-        checkpoint accounts for, because reconciliation derives every deletion
-        from the checkpoint: rows outside it are invisible, and would ride into
-        the published index even for a path that has left the corpus.
-
-        A copy is the only thing that writes rows before recording them, and it
-        records every path in one write once the last row lands. Violating the
-        invariant therefore has exactly one shape -- no claims at all, and a
-        collection that is not empty -- which one bounded query answers.
+        The published-vector copy writes many paths before recording any claim,
+        then records every copied path in one write after the last row lands.
+        Its interrupted shape is therefore no claims and a non-empty collection,
+        which one bounded query answers. Ordinary indexing records each file
+        immediately after its rows land, so its pre-existing unclaimed window is
+        bounded by the in-flight file rather than the whole copied corpus.
         """
         if checkpoint.completed:
             return False
-        vector_db = self._build_vector_db(checkpoint.collection)
+        vector_db = self._build_vector_db(checkpoint.collection, embedder=embedder)
         if not vector_db.exists():
             return False
         collection = vector_db.client.get_collection(name=vector_db.collection_name)
@@ -1934,10 +1956,10 @@ class KnowledgeManager:
         and a claim covering only some of them would publish a silently
         truncated file.
 
-        Recording the claims last means a crash can leave rows the checkpoint
-        does not account for. That state is recoverable rather than prevented:
-        it is exactly ``completed`` empty with a non-empty collection, which
-        ``_candidate_holds_unclaimed_rows`` detects on the next open.
+        An interrupted published copy can leave rows the checkpoint does not
+        account for. That copy-specific state is recoverable rather than
+        prevented: it leaves ``completed`` empty with a non-empty collection,
+        which ``_candidate_holds_unclaimed_rows`` detects on the next open.
         """
         checkpoint = await asyncio.to_thread(
             save_candidate_checkpoint,
@@ -1969,19 +1991,32 @@ class KnowledgeManager:
         *,
         embedder: BatchPrefetchEmbedder,
     ) -> _OpenedCandidate:
-        """Continue a candidate whose recorded work is still backed by its collection."""
+        """Continue a candidate whose recorded work is still backed by its collection.
+
+        Probe before building ``Knowledge`` because Agno creates a missing
+        collection on construction, after which an existence check always
+        answers yes.
+        """
+        if not await asyncio.to_thread(
+            chroma_collection_exists,
+            self._base_storage_path,
+            checkpoint.collection,
+        ):
+            logger.warning(
+                "Knowledge candidate collection is missing; rebuilding it from scratch",
+                base_id=self.base_id,
+                collection=checkpoint.collection,
+            )
+            # Rebuilt without a copy: whatever lost this collection may equally
+            # have damaged the published one, and a full rebuild is the safe repair.
+            return await self._rebuild_candidate_collection(checkpoint, embedder=embedder, published_collection=None)
         knowledge = self._build_knowledge(checkpoint.collection, embedder=embedder)
-        vector_db = _require_chroma_vector_db(knowledge)
-        if await asyncio.to_thread(vector_db.exists):
-            return _OpenedCandidate(checkpoint=checkpoint, knowledge=knowledge, vector_db=vector_db, resumed=True)
-        logger.warning(
-            "Knowledge candidate collection is missing; rebuilding it from scratch",
-            base_id=self.base_id,
-            collection=checkpoint.collection,
+        return _OpenedCandidate(
+            checkpoint=checkpoint,
+            knowledge=knowledge,
+            vector_db=_require_chroma_vector_db(knowledge),
+            resumed=True,
         )
-        # Rebuilt without a copy: whatever lost this collection may equally have
-        # damaged the published one, and a full rebuild is the safe repair.
-        return await self._rebuild_candidate_collection(checkpoint, embedder=embedder, published_collection=None)
 
     async def _open_candidate_run(self, *, force_reindex: bool = False) -> _CandidateRun:
         """Resolve the durable candidate to continue, or start one clean candidate."""
@@ -2049,7 +2084,7 @@ class KnowledgeManager:
                 collection=self._candidate_collection_name(),
                 settings=self._indexing_settings,
             )
-        elif await asyncio.to_thread(self._candidate_holds_unclaimed_rows, checkpoint):
+        elif await asyncio.to_thread(self._candidate_holds_unclaimed_rows, checkpoint, embedder=embedder):
             logger.warning(
                 "Rebuilding a knowledge candidate holding vectors it never claimed",
                 base_id=self.base_id,
