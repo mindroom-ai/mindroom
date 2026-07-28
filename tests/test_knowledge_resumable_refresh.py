@@ -3222,7 +3222,7 @@ async def test_published_vector_copy_is_paged_so_no_query_exceeds_the_store_ceil
     config = _config(tmp_path, docs_path)
 
     await _manager(config).reindex_all()
-    _FakeVectorDb.max_rows_per_query = 4
+    _FakeVectorDb.max_rows_per_get = 4
     _FakeVectorDb.queries = []
     (docs_path / names[0]).write_text("rewritten body", encoding="utf-8")
     embedder.embedded_texts.clear()
