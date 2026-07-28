@@ -100,7 +100,6 @@ class _FakeCollection:
         include: list[str] | None = None,
         where: dict[str, object] | None = None,
     ) -> dict[str, object]:
-        _ = include
         _FakeVectorDb.get_calls += 1
         if self._name in _FakeVectorDb.vanished_on_get:
             message = f"Collection {self._name!r} does not exist"
@@ -111,9 +110,15 @@ class _FakeCollection:
             records = [record for record in records if metadata_matches(record.metadata, key, condition)]
         selected = records[offset:] if limit is None else records[offset : offset + limit]
         _FakeVectorDb.enforce_row_ceiling(len(selected))
+        # Chroma omits whatever was not requested: ``include=[]`` returns
+        # ``metadatas: None`` while still returning ids. That asymmetry is why
+        # reading ids is the only safe existence check, so a fake that handed
+        # back metadatas regardless would let a probe reading them pass here
+        # and report "no vectors" for every file in production.
+        requested = include or []
         return {
             "ids": [str(index) for index in range(len(selected))],
-            "metadatas": [dict(record.metadata) for record in selected],
+            "metadatas": ([dict(record.metadata) for record in selected] if "metadatas" in requested else None),
         }
 
     def delete(self, *, where: dict[str, object]) -> None:
@@ -2981,7 +2986,6 @@ def test_vector_verification_splits_a_batch_the_store_cannot_answer(tmp_path: Pa
     paths = [f"doc{index:02d}.md" for index in range(8)]
     _seed_chunked_paths(vector_db.collection_name, paths, chunks_per_path=100)
     _FakeVectorDb.max_rows_per_get = 250
-    _FakeVectorDb.get_calls = 0
 
     assert manager._candidate_paths_with_vectors(vector_db, paths) == set(paths)
 
@@ -3029,7 +3033,6 @@ def test_vector_verification_uses_one_query_when_the_store_answers(tmp_path: Pat
     manager, vector_db = _verification_manager(tmp_path)
     paths = [f"doc{index:02d}.md" for index in range(8)]
     _seed_chunked_paths(vector_db.collection_name, paths, chunks_per_path=100)
-    _FakeVectorDb.get_calls = 0
 
     assert manager._candidate_paths_with_vectors(vector_db, paths) == set(paths)
     assert _FakeVectorDb.get_calls == 1
@@ -3038,16 +3041,17 @@ def test_vector_verification_uses_one_query_when_the_store_answers(tmp_path: Pat
 def test_vector_verification_does_not_split_when_the_collection_is_gone(tmp_path: Path) -> None:
     """A missing collection must surface at once instead of being re-asked per path.
 
-    Splitting exists to shrink a query the store found too large. A collection
-    that no longer exists stays missing however small the query gets, so
-    retrying the halves would turn one honest failure into a storm of them for
-    every batch of every base.
+    Splitting exists to shrink a query the store found too large, and a missing
+    collection is not that: it stays missing however small the query gets.
+    Descending anyway costs ``log2(batch) + 1`` doomed queries before the
+    leftmost leaf raises the identical error, and the caller does not catch, so
+    verification aborts on this batch either way. Failing on the first query is
+    the cheaper of two identical outcomes, which is what the count below pins.
     """
     manager, vector_db = _verification_manager(tmp_path)
     paths = [f"doc{index:02d}.md" for index in range(8)]
     _seed_chunked_paths(vector_db.collection_name, paths, chunks_per_path=1)
     _FakeVectorDb.vanished_on_get = {vector_db.collection_name}
-    _FakeVectorDb.get_calls = 0
 
     with pytest.raises(NotFoundError):
         manager._candidate_paths_with_vectors(vector_db, paths)
