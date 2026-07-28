@@ -1565,6 +1565,35 @@ async def test_chained_thread_relations_keep_the_middle_event_as_its_own_root(
 
 
 @pytest.mark.asyncio
+async def test_repeated_edit_ids_in_one_batch_keep_the_last_edit_index_row(
+    event_cache: ConversationEventCache,
+) -> None:
+    """A batch naming one edit event twice indexes that edit once, keeping the last payload.
+
+    Both occurrences are accepted -- clear content never loses to clear content -- so the derived
+    edit-index rows repeat the same ``edit_event_id``, which a batched upsert has to collapse.
+    """
+    room_id = "!room:localhost"
+    original_id = "$original:localhost"
+    edit_id = "$edit:localhost"
+
+    await event_cache.store_events_batch(
+        [(original_id, room_id, _clear_payload(original_id, body="original"))],
+    )
+    await event_cache.store_events_batch(
+        [
+            (edit_id, room_id, _clear_payload(edit_id, body="first edit", edit_of=original_id)),
+            (edit_id, room_id, _clear_payload(edit_id, body="second edit", edit_of=original_id)),
+        ],
+    )
+
+    latest_edit = await event_cache.get_latest_edit(room_id, original_id)
+    assert latest_edit is not None
+    assert latest_edit["event_id"] == edit_id
+    assert latest_edit["content"]["m.new_content"]["body"] == "second edit"
+
+
+@pytest.mark.asyncio
 async def test_one_write_settles_proven_and_unproven_thread_roots_together(
     event_cache: ConversationEventCache,
 ) -> None:
