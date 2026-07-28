@@ -12,7 +12,7 @@ from contextlib import suppress
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any, Literal, NoReturn, Protocol, cast, runtime_checkable
+from typing import TYPE_CHECKING, Any, Literal, NoReturn, Protocol, TypeVar, cast, runtime_checkable
 from urllib.parse import quote, urlparse, urlunparse
 
 from agno.knowledge.reader import ReaderFactory
@@ -80,7 +80,7 @@ from mindroom.logging_config import get_logger
 from mindroom.strict_knowledge import StrictInsertKnowledge as Knowledge
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Iterable, Iterator, Mapping, Sequence
+    from collections.abc import Awaitable, Callable, Coroutine, Iterable, Iterator, Mapping, Sequence
     from pathlib import Path
 
     from agno.knowledge.document.base import Document
@@ -137,6 +137,7 @@ _PROGRESS_LOG_INTERVAL_SECONDS = 30.0
 #: taken as proof the fault is global rather than specific to a few files.
 _GLOBAL_EMBEDDER_FAILURE_STREAK = 20
 _EMBEDDING_RETRY_POLICY = EmbeddingRetryPolicy()
+_ShieldedResult = TypeVar("_ShieldedResult")
 #: Indirection point so fault-injection tests can drive backoff without waiting.
 _EMBEDDING_RETRY_SLEEP: Callable[[float], Awaitable[None]] = asyncio.sleep
 
@@ -309,6 +310,24 @@ class _PermanentEmbeddingError(Exception):
 
 def _raise_cancelled() -> NoReturn:
     raise asyncio.CancelledError
+
+
+async def _shielded_write(write: Coroutine[Any, Any, _ShieldedResult]) -> _ShieldedResult:
+    """Run one durable write to completion even if the caller is cancelled.
+
+    ``asyncio.shield`` only detaches the wait: the shielded task keeps running
+    either way, so a cancelled caller that does not drain it leaves the write
+    racing process exit. Draining swallows the write's own failure so that
+    cancellation, not the failure, is what the caller sees -- every user of
+    this treats a lost write as recoverable and cancellation as authoritative.
+    """
+    task = asyncio.create_task(write)
+    try:
+        return await asyncio.shield(task)
+    except asyncio.CancelledError:
+        with suppress(Exception):
+            await task
+        raise
 
 
 def _iter_file_batches(files: Sequence[Path], batch_size: int) -> Iterator[list[Path]]:
@@ -1159,6 +1178,10 @@ class KnowledgeManager:
         try:
             await asyncio.shield(save_task)
         except asyncio.CancelledError:
+            # Drained without ``_shielded_write``'s suppression on purpose: the
+            # caller marks the index published on a cancelled-but-saved outcome,
+            # so a write that failed has to surface instead of being reported
+            # as a cancellation that saved.
             await save_task
             return True
         return False
@@ -1724,9 +1747,11 @@ class KnowledgeManager:
             if not ids:
                 return reused
             offset += len(ids)
+            # Chroma types every one of these optional because the caller may
+            # not have asked for it; this one did, in the ``include`` above.
             embeddings: Embeddings = cast("Embeddings", page["embeddings"])
-            documents = cast("list[str]", page["documents"])
-            metadatas = cast("list[Metadata]", page["metadatas"])
+            documents: list[str] = cast("list[str]", page["documents"])
+            metadatas: list[Metadata] = cast("list[Metadata]", page["metadatas"])
             kept: list[int] = []
             for index, metadata in enumerate(metadatas):
                 entry = _reusable_row_signature(metadata, managed_paths)
@@ -1815,24 +1840,6 @@ class KnowledgeManager:
         )
         return reused
 
-    async def _record_seeded_candidate(self, checkpoint: CandidateCheckpoint) -> CandidateCheckpoint:
-        """Record a finished copy's claims even while the refresh is being cancelled.
-
-        The rows are already on disk; only this write makes them attributable.
-        Losing it is recoverable -- the seeding marker sends the next refresh
-        through a rebuild -- but that discards a whole corpus copy, so the write
-        is shielded and completed rather than abandoned.
-        """
-        save_task = asyncio.create_task(
-            asyncio.to_thread(save_candidate_checkpoint, self._base_storage_path, checkpoint),
-        )
-        try:
-            return await asyncio.shield(save_task)
-        except asyncio.CancelledError:
-            with suppress(Exception):
-                await save_task
-            raise
-
     async def _rebuild_candidate_collection(
         self,
         checkpoint: CandidateCheckpoint,
@@ -1840,31 +1847,49 @@ class KnowledgeManager:
         embedder: BatchPrefetchEmbedder,
         published_collection: str | None,
     ) -> _OpenedCandidate:
-        """Empty one candidate collection and seed it from the published index.
+        """Empty one candidate collection, seeding it when a copy source is given.
 
-        Two orderings here are load-bearing. The checkpoint names the
-        collection before ``Knowledge`` is built, because Agno creates a
-        missing collection on construction and a crash must never strand a
-        collection nothing references. And the checkpoint records that a copy
-        is in flight before the first row lands, because a crash between the
-        copy and its claims would leave rows nothing can attribute:
-        reconciliation deletes only what the checkpoint records.
+        Three orderings here are load-bearing, and the ``seeding`` marker is
+        what makes the middle one survive a crash.
+
+        The checkpoint names the collection before ``Knowledge`` is built,
+        because Agno creates a missing collection on construction and a crash
+        must never strand a collection nothing references.
+
+        The marker is then set for the whole rebuild, not just the copy. A
+        rebuild inherits a collection whose rows the checkpoint has stopped
+        claiming, and only the reset makes that true; until the reset lands and
+        the new claims are recorded, the rows in there are attributable to
+        nothing. Reconciliation deletes only what the checkpoint records, so a
+        candidate resumed inside that window would carry rows for paths that
+        have since left the corpus straight into the published index.
+
+        The marker is therefore cleared last, once the collection is known
+        empty and whatever replaced its contents is durable.
         """
         checkpoint = await asyncio.to_thread(
             save_candidate_checkpoint,
             self._base_storage_path,
-            replace(checkpoint, completed={}, failed={}, seeding=published_collection is not None),
+            replace(checkpoint, completed={}, failed={}, seeding=True),
         )
         knowledge = self._build_knowledge(checkpoint.collection, embedder=embedder)
         vector_db = _require_chroma_vector_db(knowledge)
         await asyncio.to_thread(self._reset_vector_db, vector_db)
-        if published_collection is None:
-            return _OpenedCandidate(checkpoint=checkpoint, knowledge=knowledge, vector_db=vector_db)
-        reused = await self._seed_candidate_from_published(
-            candidate_vector_db=vector_db,
-            published_collection=published_collection,
+        reused = (
+            {}
+            if published_collection is None
+            else await self._seed_candidate_from_published(
+                candidate_vector_db=vector_db,
+                published_collection=published_collection,
+            )
         )
-        checkpoint = await self._record_seeded_candidate(replace(checkpoint, completed=reused, seeding=False))
+        checkpoint = await _shielded_write(
+            asyncio.to_thread(
+                save_candidate_checkpoint,
+                self._base_storage_path,
+                replace(checkpoint, completed=reused, seeding=False),
+            ),
+        )
         return _OpenedCandidate(checkpoint=checkpoint, knowledge=knowledge, vector_db=vector_db, reused=reused)
 
     async def _resume_candidate_collection(
@@ -1873,19 +1898,33 @@ class KnowledgeManager:
         *,
         embedder: BatchPrefetchEmbedder,
     ) -> _OpenedCandidate:
-        """Continue a candidate whose recorded work is still backed by its collection."""
+        """Continue a candidate whose recorded work is still backed by its collection.
+
+        The collection is probed before ``Knowledge`` is built, because Agno
+        creates a missing collection on construction: asked afterwards, the
+        probe always answers yes and a candidate whose vectors are gone would
+        be resumed still carrying claims nothing backs.
+        """
+        if not await asyncio.to_thread(
+            chroma_collection_exists,
+            self._base_storage_path,
+            checkpoint.collection,
+        ):
+            logger.warning(
+                "Knowledge candidate collection is missing; rebuilding it from scratch",
+                base_id=self.base_id,
+                collection=checkpoint.collection,
+            )
+            # Rebuilt without a copy: whatever lost this collection may equally
+            # have damaged the published one, and a full rebuild is the safe repair.
+            return await self._rebuild_candidate_collection(checkpoint, embedder=embedder, published_collection=None)
         knowledge = self._build_knowledge(checkpoint.collection, embedder=embedder)
-        vector_db = _require_chroma_vector_db(knowledge)
-        if await asyncio.to_thread(vector_db.exists):
-            return _OpenedCandidate(checkpoint=checkpoint, knowledge=knowledge, vector_db=vector_db, resumed=True)
-        logger.warning(
-            "Knowledge candidate collection is missing; rebuilding it from scratch",
-            base_id=self.base_id,
-            collection=checkpoint.collection,
+        return _OpenedCandidate(
+            checkpoint=checkpoint,
+            knowledge=knowledge,
+            vector_db=_require_chroma_vector_db(knowledge),
+            resumed=True,
         )
-        # Rebuilt without a copy: whatever lost this collection may equally have
-        # damaged the published one, and a full rebuild is the safe repair.
-        return await self._rebuild_candidate_collection(checkpoint, embedder=embedder, published_collection=None)
 
     async def _open_candidate_run(self, *, force_reindex: bool = False) -> _CandidateRun:
         """Resolve the durable candidate to continue, or start one clean candidate."""
@@ -1931,6 +1970,20 @@ class KnowledgeManager:
             await self._delete_candidate_collection(checkpoint.collection)
             await asyncio.to_thread(delete_candidate_checkpoint, self._base_storage_path)
             checkpoint = None
+        if checkpoint is not None and force_reindex:
+            # A refresh that never published leaves its candidate behind, and
+            # that candidate's claims are exactly the vectors a forced rebuild
+            # was asked to stop trusting. Suppressing the copy alone would keep
+            # every file the interrupted build had already embedded.
+            logger.info(
+                "Discarding knowledge candidate because a rebuild was forced",
+                base_id=self.base_id,
+                collection=checkpoint.collection,
+                completed=len(checkpoint.completed),
+            )
+            await self._delete_candidate_collection(checkpoint.collection)
+            await asyncio.to_thread(delete_candidate_checkpoint, self._base_storage_path)
+            checkpoint = None
 
         embedder = BatchPrefetchEmbedder(inner=create_configured_embedder(self.config, self.runtime_paths))
         rebuild = checkpoint is None or checkpoint.seeding
@@ -1939,7 +1992,7 @@ class KnowledgeManager:
                 collection=self._candidate_collection_name(),
                 settings=self._indexing_settings,
             )
-        elif rebuild:
+        elif checkpoint.seeding:
             # The collection holds rows a cancelled copy never claimed, and
             # nothing downstream can attribute them: reconciliation deletes
             # only what the checkpoint records, so rows for a path that has
@@ -2296,13 +2349,8 @@ class KnowledgeManager:
         Per-batch journal appends already made progress durable, so this is a
         compaction, not the write that protects the work.
         """
-        compact_task = asyncio.create_task(self._compact_candidate_checkpoint(run, force=True))
         try:
-            await asyncio.shield(compact_task)
-        except asyncio.CancelledError:
-            with suppress(Exception):
-                await compact_task
-            raise
+            await _shielded_write(self._compact_candidate_checkpoint(run, force=True))
         except Exception:
             logger.warning(
                 "Failed to compact knowledge candidate checkpoint",
