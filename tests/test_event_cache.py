@@ -1618,6 +1618,42 @@ async def test_one_write_settles_proven_and_unproven_thread_roots_together(
 
 
 @pytest.mark.asyncio
+async def test_repeated_event_in_a_snapshot_keeps_its_last_position_on_every_backend(
+    event_cache: ConversationEventCache,
+) -> None:
+    """A snapshot of ``A, B, A-last`` reads back as ``B, A`` on both backends.
+
+    Membership rows are ordered by ``origin_server_ts`` and then by the sequence value each write
+    draws, so when the timestamps tie the write order decides the read order. The sequential loop
+    rewrote ``A`` after ``B``, leaving ``A`` newer. A batched upsert that collapsed the repeat to
+    ``A``'s *first* position would draw ``A``'s sequence value before ``B``'s and silently reverse
+    the pair against SQLite.
+    """
+    room_id = "!room:localhost"
+    thread_id = "$root:localhost"
+    first_id = "$a:localhost"
+    second_id = "$b:localhost"
+    tied_ts = 1000
+
+    await _replace_thread(
+        event_cache,
+        room_id,
+        thread_id,
+        [
+            _clear_payload(thread_id, body="root", origin_server_ts=tied_ts),
+            _clear_payload(first_id, body="a-first", thread_root_id=thread_id, origin_server_ts=tied_ts),
+            _clear_payload(second_id, body="b", thread_root_id=thread_id, origin_server_ts=tied_ts),
+            _clear_payload(first_id, body="a-last", thread_root_id=thread_id, origin_server_ts=tied_ts),
+        ],
+    )
+
+    thread_events = await event_cache.get_thread_events(room_id, thread_id)
+    assert thread_events is not None
+    assert [event["event_id"] for event in thread_events] == [thread_id, second_id, first_id]
+    assert thread_events[-1]["content"]["body"] == "a-last"
+
+
+@pytest.mark.asyncio
 async def test_repeated_event_in_one_thread_snapshot_binds_the_thread_once(
     event_cache: ConversationEventCache,
 ) -> None:

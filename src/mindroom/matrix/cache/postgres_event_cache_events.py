@@ -475,14 +475,22 @@ async def _thread_ids_for_events(
 
 
 def last_row_per_key[RowT](rows: list[RowT], key: Callable[[RowT], str]) -> list[RowT]:
-    """Return one row per key, keeping the last occurrence in input order.
+    """Return one row per key, each at the position of its last occurrence.
 
     ``ON CONFLICT DO UPDATE`` refuses to touch the same row twice in one statement, so batched
     upserts must first collapse repeated keys the way the row-at-a-time loop resolved them.
+
+    Position matters as much as the value. A row that carries ``nextval`` is ordered by the
+    sequence it draws, so the collapsed list has to arrive in the order the sequential loop last
+    wrote each key -- for ``A, B, A-last`` the loop left ``A`` newer than ``B``. Assigning the key
+    its first position instead, which is what a plain dict insert does, would rank ``A`` before
+    ``B`` and diverge from SQLite whenever the timestamps tie.
     """
     latest: dict[str, RowT] = {}
     for row in rows:
-        latest[key(row)] = row
+        row_key = key(row)
+        latest.pop(row_key, None)
+        latest[row_key] = row
     return list(latest.values())
 
 
