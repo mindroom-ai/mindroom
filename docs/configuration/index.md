@@ -446,7 +446,9 @@ Sandbox-proxied execution is stricter than direct local execution: ordinary runt
 # while keeping the rest of defaults.tools for that agent.
 # See agents.md for the full per-agent tool configuration syntax.
 # These thresholds only affect automatic thread summaries; manual `set_thread_summary`
-# tool calls write immediately and reset the automatic baseline from the new message count.
+# tool calls write immediately and pin the thread by default, which stops automatic
+# summaries entirely until a `pin=False` call releases it.
+# Automatic summaries are also skipped on threads tagged `resolved`.
 
 # Memory system configuration (optional)
 memory:
