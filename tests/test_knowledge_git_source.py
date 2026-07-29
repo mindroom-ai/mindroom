@@ -882,3 +882,34 @@ async def test_run_git_cancellation_kills_subprocess(
 
     assert process.kill_called is True
     assert process.wait_called is True
+
+
+@pytest.mark.asyncio
+async def test_run_git_reports_the_git_failure_when_stderr_holds_an_unparseable_url(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Malformed URLs in Git output must not replace the failure with a parse error.
+
+    Redaction runs on whatever a remote or a local ``git`` chose to print, and an
+    unterminated IPv6 literal makes ``urlparse`` raise. Raising there would
+    destroy the diagnostic exactly when something has already gone wrong.
+    """
+    manager = _git_manager(tmp_path)
+
+    class _FailingProcess:
+        returncode = 128
+
+        async def communicate(self) -> tuple[bytes, bytes]:
+            return b"", b"fatal: unable to access 'http://[': bad address"
+
+    async def _fake_create_subprocess_exec(*args: object, **kwargs: object) -> _FailingProcess:
+        _ = args, kwargs
+        return _FailingProcess()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
+
+    with pytest.raises(RuntimeError, match="Git command failed with exit code 128") as exc_info:
+        await manager.git_source._run_git(["fetch", "origin", "main"])
+
+    assert "bad address" in str(exc_info.value)
