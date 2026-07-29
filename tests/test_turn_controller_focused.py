@@ -111,7 +111,7 @@ class _RecordingResponseRunner:
     requests: list[ResponseRequest] = field(default_factory=list)
     team_requests: list[ResponseRequest] = field(default_factory=list)
     inbox_tasks: list[asyncio.Task[None]] = field(default_factory=list)
-    recovery_handoff_checks: list[Callable[[], bool]] = field(default_factory=list)
+    recovery_proof_checks: list[Callable[[], bool]] = field(default_factory=list)
 
     def active_thread_ids_for_room(self, room_id: str) -> frozenset[str | None]:  # noqa: ARG002
         return frozenset()
@@ -133,10 +133,10 @@ class _RecordingResponseRunner:
         response: Coroutine[Any, Any, None],
         *,
         name: str,
-        recovery_handoff_ready: Callable[[], bool] | None = None,
+        recovery_proof_ready: Callable[[], bool] | None = None,
     ) -> asyncio.Task[None]:
-        assert recovery_handoff_ready is not None
-        self.recovery_handoff_checks.append(recovery_handoff_ready)
+        assert recovery_proof_ready is not None
+        self.recovery_proof_checks.append(recovery_proof_ready)
         task = asyncio.get_running_loop().create_task(response, name=name)
         self.inbox_tasks.append(task)
         return task
@@ -1287,6 +1287,24 @@ async def test_room_mode_plain_user_message_keeps_room_session(tmp_path: Path) -
     target = harness.runner.requests[0].response_envelope.target
     assert target.resolved_thread_id is None
     assert target.session_id == _ROOM_ID
+    harness.interrupted_turn_rooms.register(event.event_id, room_id=room.room_id)
+    assert harness.runner.recovery_proof_checks[0]() is False
+
+
+@pytest.mark.asyncio
+async def test_handled_thread_response_proves_recovery_without_restart_handoff(tmp_path: Path) -> None:
+    """Durable handled state proves an ordinary-shutdown thread response is settled."""
+    config = _single_agent_config(tmp_path, "thread")
+    harness = _build_harness(config, tmp_path)
+    room = _room_with_members(config, "general")
+    event = _text_event("hello there")
+
+    await harness.deliver(room, event)
+
+    assert harness.runner.requests[0].response_envelope.target.resolved_thread_id == event.event_id
+    assert harness.turn_store.is_handled(event.event_id)
+    assert not harness.interrupted_turn_rooms.pending_room_ids
+    assert harness.runner.recovery_proof_checks[0]() is True
 
 
 @pytest.mark.asyncio
@@ -1358,7 +1376,7 @@ async def test_deferred_sync_restart_records_handled_outcome_before_rethrow(
     monkeypatch.setattr(harness.runner, "generate_response", generate_with_barrier)
     delivery = asyncio.create_task(harness.deliver(room, event))
     await response_started.wait()
-    recovery_ready = harness.runner.recovery_handoff_checks[0]
+    recovery_ready = harness.runner.recovery_proof_checks[0]
     assert recovery_ready() is False
     harness.interrupted_turn_rooms.register("$different", room_id=room.room_id)
     assert recovery_ready() is False

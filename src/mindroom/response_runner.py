@@ -502,11 +502,11 @@ class ResponseRunner:
         response: Coroutine[Any, Any, None],
         *,
         name: str,
-        recovery_handoff_ready: Callable[[], bool] | None = None,
+        recovery_proof_ready: Callable[[], bool] | None = None,
     ) -> asyncio.Task[None]:
         """Own one detached inbox response until it completes or a drain settles it."""
         task = asyncio.create_task(response, name=name)
-        self._inbox_response_tasks[task] = recovery_handoff_ready
+        self._inbox_response_tasks[task] = recovery_proof_ready
         task.add_done_callback(self._finish_inbox_response_task)
         return task
 

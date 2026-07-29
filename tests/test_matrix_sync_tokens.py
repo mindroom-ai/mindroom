@@ -23,6 +23,7 @@ from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.dispatch_handoff import PendingDispatchMetadata
 from mindroom.dispatch_source import VOICE_SOURCE_KIND
+from mindroom.handled_turns import TurnRecord
 from mindroom.matrix.cache.event_cache import EventCacheBackendUnavailableError
 from mindroom.matrix.cache.postgres_event_cache import PostgresEventCache
 from mindroom.matrix.cache.sqlite_event_cache import SqliteEventCache
@@ -1793,7 +1794,7 @@ async def test_shutdown_preserves_checkpoint_only_when_each_cancelled_response_h
         bot._response_runner.track_inbox_response(
             interrupted_response(index, room_id),
             name=f"test_interrupted_response_{index}",
-            recovery_handoff_ready=lambda index=index: bot._interrupted_turn_rooms.contains(f"$source-{index}"),
+            recovery_proof_ready=lambda index=index: bot._interrupted_turn_rooms.contains(f"$source-{index}"),
         )
         for index, room_id in enumerate(response_rooms)
     ]
@@ -1833,7 +1834,7 @@ async def test_shutdown_discards_checkpoint_when_response_swallows_cancellation_
     response_task = bot._response_runner.track_inbox_response(
         swallowed_response_cancellation(),
         name="test_swallowed_response_cancellation",
-        recovery_handoff_ready=lambda: False,
+        recovery_proof_ready=lambda: False,
     )
     await response_started.wait()
     _install_fast_response_drain(bot)
@@ -1846,6 +1847,41 @@ async def test_shutdown_discards_checkpoint_when_response_swallows_cancellation_
     assert bot._response_runner.incomplete_inbox_responses_recoverable is False
     assert bot._sync_cache_trust.state is SyncTrustState.UNCERTAIN
     assert _load_sync_token_value(tmp_path, bot.agent_name) is None
+
+
+@pytest.mark.asyncio
+async def test_orderly_shutdown_preserves_checkpoint_after_cancelled_response_is_durably_handled(
+    tmp_path: Path,
+) -> None:
+    """A durable terminal response can preserve source continuity on process shutdown."""
+    bot = _certified_shutdown_bot(tmp_path)
+    source_event_id = "$orderly-source"
+    response_started = asyncio.Event()
+
+    async def durably_handled_cancellation() -> None:
+        response_started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            bot._turn_store.record_turn(
+                TurnRecord.create([source_event_id], response_event_id="$interrupted-response"),
+            )
+
+    response_task = bot._response_runner.track_inbox_response(
+        durably_handled_cancellation(),
+        name="test_durably_handled_orderly_cancellation",
+        recovery_proof_ready=lambda: bot._turn_store.is_handled(source_event_id),
+    )
+    await response_started.wait()
+    _install_fast_response_drain(bot)
+
+    await bot.prepare_for_sync_shutdown(shutdown_intent=ORDERLY_SHUTDOWN)
+
+    assert response_task.done()
+    assert not response_task.cancelled()
+    assert bot._response_runner.incomplete_inbox_responses_recoverable is True
+    assert bot._sync_cache_trust.state is SyncTrustState.CERTIFIED
+    assert _load_sync_token_value(tmp_path, bot.agent_name) == "s_shutdown"
 
 
 @pytest.mark.parametrize("source_failure", ["coalescing", "callback", "cache"])
