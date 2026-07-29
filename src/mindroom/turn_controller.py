@@ -1790,7 +1790,7 @@ class TurnController:
                                 target=dispatch.target,
                                 source_event_ids=handled_turn.indexed_event_ids,
                             ),
-                            on_sync_restart_cancelled=record_interrupted_turn,
+                            on_interrupted_response_recoverable=record_interrupted_turn,
                             on_deferred_outcome_handled=record_deferred_outcome,
                         ),
                         team_agents=action.form_team.eligible_members,
@@ -1817,7 +1817,7 @@ class TurnController:
                                 target=dispatch.target,
                                 source_event_ids=handled_turn.indexed_event_ids,
                             ),
-                            on_sync_restart_cancelled=record_interrupted_turn,
+                            on_interrupted_response_recoverable=record_interrupted_turn,
                             on_deferred_outcome_handled=record_deferred_outcome,
                         ),
                     )

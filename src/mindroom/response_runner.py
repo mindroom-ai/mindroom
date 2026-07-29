@@ -330,7 +330,7 @@ class ResponseRequest:
     prepare_source_turn: Callable[[], bool] | None = None
     pipeline_timing: DispatchPipelineTiming | None = None
     queued_notice_reservation: QueuedHumanNoticeReservation | None = None
-    on_sync_restart_cancelled: Callable[[], None] | None = None
+    on_interrupted_response_recoverable: Callable[[], None] | None = None
     sync_restart_retry_source_event_id: str | None = None
     on_deferred_outcome_handled: Callable[[str], None] | None = None
 
@@ -1173,26 +1173,25 @@ class ResponseRunner:
             scheduled_history_budget=request.scheduled_history_budget,
         )
 
-    def _notify_sync_restart_cancelled(
+    def _notify_interrupted_response_recoverable(
         self,
         request: ResponseRequest,
         final_outcome: FinalDeliveryOutcome,
     ) -> None:
-        """Tell the dispatcher when a bot replacement interrupted a marked-handled turn.
+        """Tell the dispatcher when a marked-handled interrupted turn is recoverable.
 
-        Only turns that end as a visible interrupted note are reported: they get
-        recorded in the handled-turn ledger, so the replacement runtime's sync
-        replay dedups them away and room-scoped recovery is their only route back.
-        Unmarked turns are recovered by that replay instead; recovering them too
-        would answer twice.
+        Only turns that end as a visible interrupted note are reported: Matrix
+        restart cleanup can discover that note, while the handled-turn ledger
+        prevents source replay from answering it twice. Explicit user stops are
+        terminal user intent and must never schedule recovery.
         """
-        if request.on_sync_restart_cancelled is None or final_outcome.terminal_status != "cancelled":
+        if request.on_interrupted_response_recoverable is None or final_outcome.terminal_status != "cancelled":
             return
         if not final_outcome.mark_handled:
             return
-        if cancel_source_from_failure_reason(final_outcome.failure_reason) != "sync_restart":
+        if cancel_source_from_failure_reason(final_outcome.failure_reason) == "user_stop":
             return
-        request.on_sync_restart_cancelled()
+        request.on_interrupted_response_recoverable()
 
     async def _begin_locked_turn(
         self,
@@ -1520,7 +1519,7 @@ class ResponseRunner:
             post_response_outcome=build_post_response_outcome(final_delivery_outcome),
             post_response_deps=post_response_deps,
         )
-        self._notify_sync_restart_cancelled(request, final_outcome)
+        self._notify_interrupted_response_recoverable(request, final_outcome)
         if deferred_error is not None:
             if final_outcome.mark_handled and request.on_deferred_outcome_handled is not None:
                 response_event_id = final_outcome.final_visible_event_id

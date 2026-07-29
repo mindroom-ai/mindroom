@@ -340,7 +340,7 @@ async def test_begin_locked_turn_waits_for_cancelled_source_preparation(tmp_path
         user_id="@user:localhost",
         response_envelope=_envelope(target, source_event_id="$event"),
         prepare_source_turn=prepare_source_turn,
-        on_sync_restart_cancelled=lambda: retries.append("retry"),
+        on_interrupted_response_recoverable=lambda: retries.append("retry"),
     )
     preparation_task = asyncio.create_task(
         runner._begin_locked_turn(
@@ -1106,7 +1106,7 @@ async def test_agent_streaming_sync_restart_cancelled_outcome_registers_retry(tm
         result = await coordinator.generate_response(
             replace(
                 _plain_request(_target()),
-                on_sync_restart_cancelled=lambda: retries.append("retry"),
+                on_interrupted_response_recoverable=lambda: retries.append("retry"),
             ),
         )
 
@@ -1394,7 +1394,7 @@ async def test_terminal_settlement_registers_retry_before_rethrowing_cancel(tmp_
     order: list[str] = []
     request = replace(
         _plain_request(_target()),
-        on_sync_restart_cancelled=lambda: order.append("retry"),
+        on_interrupted_response_recoverable=lambda: order.append("retry"),
         on_deferred_outcome_handled=lambda event_id: order.append(f"handled:{event_id}"),
     )
     delivery_outcome = FinalDeliveryOutcome(
@@ -1444,6 +1444,66 @@ async def test_terminal_settlement_registers_retry_before_rethrowing_cancel(tmp_
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
+    ("failure_reason", "expected_recoveries"),
+    [
+        ("interrupted", ["recovery"]),
+        ("cancelled_by_user", []),
+    ],
+)
+async def test_terminal_interruption_registers_recovery_unless_user_stopped(
+    tmp_path: Path,
+    failure_reason: str,
+    expected_recoveries: list[str],
+) -> None:
+    """A visible terminal interruption remains recoverable except after an explicit user stop."""
+    bot = _bot(tmp_path)
+    coordinator = unwrap_extracted_collaborator(bot._response_runner)
+    recoveries: list[str] = []
+    request = replace(
+        _plain_request(_target()),
+        on_interrupted_response_recoverable=lambda: recoveries.append("recovery"),
+    )
+    progress = response_runner._DeliveryProgress()
+    progress.settle(
+        FinalDeliveryOutcome(
+            terminal_status="cancelled",
+            event_id="$response",
+            is_visible_response=True,
+            failure_reason=failure_reason,
+        ),
+    )
+    lifecycle = coordinator._build_lifecycle(
+        identity=coordinator._response_identity(request, response_kind="ai"),
+        request=request,
+    )
+
+    with (
+        patch.object(
+            coordinator,
+            "run_cancellable_response",
+            new=AsyncMock(return_value="$response"),
+        ),
+        patch_response_runner_module(apply_post_response_effects=AsyncMock()),
+    ):
+        result = await coordinator._run_and_settle_locked_response(
+            request,
+            target=request.response_envelope.target,
+            lifecycle=lifecycle,
+            progress=progress,
+            response_function=AsyncMock(),
+            thinking_message=None,
+            user_id=request.user_id,
+            run_id="run-1",
+            build_post_response_outcome=lambda _outcome: ResponseOutcome(),
+            post_response_deps=PostResponseEffectsDeps(logger=get_logger("tests.post_response")),
+        )
+
+    assert result == "$response"
+    assert recoveries == expected_recoveries
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
     "delivery_outcome",
     [
         _completed_outcome(),
@@ -1466,7 +1526,7 @@ async def test_terminal_settlement_late_cancel_keeps_settled_outcome_canonical(
     order: list[str] = []
     request = replace(
         _plain_request(_target()),
-        on_sync_restart_cancelled=lambda: order.append("retry"),
+        on_interrupted_response_recoverable=lambda: order.append("retry"),
         on_deferred_outcome_handled=lambda event_id: order.append(f"handled:{event_id}"),
     )
     progress = response_runner._DeliveryProgress()

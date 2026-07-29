@@ -1756,14 +1756,43 @@ async def test_shutdown_in_flight_dispatch_cancellation_marks_drain_incomplete()
 
 
 @pytest.mark.parametrize(
-    ("response_rooms", "handoff_indexes", "remains_pending", "checkpoint_preserved"),
+    (
+        "response_rooms",
+        "handoff_indexes",
+        "remains_pending",
+        "checkpoint_preserved",
+        "shutdown_intent",
+        "restart_reason_category",
+    ),
     [
-        (("!one:localhost",), frozenset({0}), False, True),
-        (("!one:localhost",), frozenset(), False, False),
-        (("!one:localhost", "!two:localhost"), frozenset({0}), False, False),
-        (("!one:localhost", "!one:localhost"), frozenset({0}), False, False),
-        (("!one:localhost", "!one:localhost"), frozenset({0, 1}), False, True),
-        (("!one:localhost",), frozenset(), True, False),
+        (("!one:localhost",), frozenset({0}), False, True, SYNC_RESTART_SHUTDOWN, "config_reload"),
+        (("!one:localhost",), frozenset(), False, False, SYNC_RESTART_SHUTDOWN, "config_reload"),
+        (
+            ("!one:localhost", "!two:localhost"),
+            frozenset({0}),
+            False,
+            False,
+            SYNC_RESTART_SHUTDOWN,
+            "config_reload",
+        ),
+        (
+            ("!one:localhost", "!one:localhost"),
+            frozenset({0}),
+            False,
+            False,
+            SYNC_RESTART_SHUTDOWN,
+            "config_reload",
+        ),
+        (
+            ("!one:localhost", "!one:localhost"),
+            frozenset({0, 1}),
+            False,
+            True,
+            SYNC_RESTART_SHUTDOWN,
+            "config_reload",
+        ),
+        (("!one:localhost",), frozenset(), True, False, SYNC_RESTART_SHUTDOWN, "config_reload"),
+        (("!one:localhost",), frozenset({0}), False, True, ORDERLY_SHUTDOWN, "process_shutdown"),
     ],
 )
 @pytest.mark.asyncio
@@ -1773,6 +1802,8 @@ async def test_shutdown_preserves_checkpoint_only_when_each_cancelled_response_h
     handoff_indexes: frozenset[int],
     remains_pending: bool,
     checkpoint_preserved: bool,
+    shutdown_intent: RuntimeShutdownIntent,
+    restart_reason_category: str,
 ) -> None:
     """Every settled cancellation needs its exact source recovery handoff."""
     bot = _certified_shutdown_bot(tmp_path)
@@ -1802,7 +1833,7 @@ async def test_shutdown_preserves_checkpoint_only_when_each_cancelled_response_h
     await asyncio.gather(*(event.wait() for event in response_started))
     _install_fast_response_drain(bot)
     with capture_logs() as logs:
-        await bot.prepare_for_sync_shutdown(shutdown_intent=SYNC_RESTART_SHUTDOWN)
+        await bot.prepare_for_sync_shutdown(shutdown_intent=shutdown_intent)
 
     release_response.set()
     await asyncio.gather(*response_tasks, return_exceptions=True)
@@ -1813,7 +1844,7 @@ async def test_shutdown_preserves_checkpoint_only_when_each_cancelled_response_h
     assert _load_sync_token_value(tmp_path, bot.agent_name) == expected_token
     assert bot.pending_sync_restart_retry_room_ids == {response_rooms[index] for index in handoff_indexes}
     incomplete_log = next(entry for entry in logs if entry["event"] == "matrix_agent_response_drain_incomplete")
-    assert incomplete_log["restart_reason_category"] == "config_reload"
+    assert incomplete_log["restart_reason_category"] == restart_reason_category
     assert incomplete_log["response_recovery_complete"] is checkpoint_preserved
 
 

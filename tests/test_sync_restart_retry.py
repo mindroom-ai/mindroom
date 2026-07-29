@@ -212,7 +212,7 @@ async def test_team_resolution_fallback_sync_restart_registers_retry(tmp_path: P
         _plain_request(target, source_event_id="$source"),
         existing_event_id="$existing",
         sync_restart_retry_source_event_id="$source",
-        on_sync_restart_cancelled=lambda: retries.append("retry"),
+        on_interrupted_response_recoverable=lambda: retries.append("retry"),
     )
     edit_message = AsyncMock(
         side_effect=[asyncio.CancelledError("sync_restart"), delivered_matrix_event("$cancelled")],
@@ -234,12 +234,12 @@ async def test_team_resolution_fallback_sync_restart_registers_retry(tmp_path: P
     assert edit_message.await_count == 1
 
 
-def _request(on_sync_restart_cancelled: Callable[[], None] | None = None) -> ResponseRequest:
+def _request(on_interrupted_response_recoverable: Callable[[], None] | None = None) -> ResponseRequest:
     return ResponseRequest(
         thread_history=[],
         prompt="Hello",
         response_envelope=request_envelope(),
-        on_sync_restart_cancelled=on_sync_restart_cancelled,
+        on_interrupted_response_recoverable=on_interrupted_response_recoverable,
     )
 
 
@@ -257,7 +257,7 @@ def _notify(
     request: ResponseRequest,
     outcome: FinalDeliveryOutcome,
 ) -> None:
-    runner._notify_sync_restart_cancelled(request, outcome)
+    runner._notify_interrupted_response_recoverable(request, outcome)
 
 
 def test_notify_fires_for_marked_handled_sync_restart_cancellation() -> None:
@@ -265,7 +265,7 @@ def test_notify_fires_for_marked_handled_sync_restart_cancellation() -> None:
     calls: list[str] = []
     _notify(
         ResponseRunner(deps=MagicMock()),
-        _request(on_sync_restart_cancelled=lambda: calls.append("retry")),
+        _request(on_interrupted_response_recoverable=lambda: calls.append("retry")),
         _cancelled_outcome(failure_reason="sync_restart_cancelled"),
     )
     assert calls == ["retry"]
@@ -275,7 +275,7 @@ def test_notify_ignores_user_stop_and_unmarked_turns() -> None:
     """User stops and turns without a visible note must not request a retry."""
     calls: list[str] = []
     runner = ResponseRunner(deps=MagicMock())
-    request = _request(on_sync_restart_cancelled=lambda: calls.append("retry"))
+    request = _request(on_interrupted_response_recoverable=lambda: calls.append("retry"))
 
     _notify(runner, request, _cancelled_outcome(failure_reason="cancelled_by_user"))
     _notify(runner, request, _cancelled_outcome(failure_reason="sync_restart_cancelled", visible=False))
@@ -288,7 +288,7 @@ def test_notify_uses_only_the_canonical_final_delivery_outcome() -> None:
     calls: list[str] = []
     _notify(
         ResponseRunner(deps=MagicMock()),
-        _request(on_sync_restart_cancelled=lambda: calls.append("retry")),
+        _request(on_interrupted_response_recoverable=lambda: calls.append("retry")),
         FinalDeliveryOutcome(
             terminal_status="completed",
             event_id="$response",
@@ -331,7 +331,7 @@ def test_bot_replacement_cancellation_records_the_interrupted_room() -> None:
 
     _notify(
         runner,
-        _request(on_sync_restart_cancelled=record_interrupted_turn),
+        _request(on_interrupted_response_recoverable=record_interrupted_turn),
         _cancelled_outcome(failure_reason="sync_restart_cancelled"),
     )
 
@@ -349,7 +349,7 @@ async def test_user_stopped_response_is_not_recovered() -> None:
 
     _notify(
         runner,
-        _request(on_sync_restart_cancelled=record_interrupted_turn),
+        _request(on_interrupted_response_recoverable=record_interrupted_turn),
         _cancelled_outcome(failure_reason="cancelled_by_user"),
     )
 

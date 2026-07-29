@@ -156,9 +156,9 @@ class _RecordingResponseRunner:
             return None
         if self.deferred_sync_restart_error is not None:
             assert self.response_event_id is not None
-            assert request.on_sync_restart_cancelled is not None
+            assert request.on_interrupted_response_recoverable is not None
             assert request.on_deferred_outcome_handled is not None
-            request.on_sync_restart_cancelled()
+            request.on_interrupted_response_recoverable()
             request.on_deferred_outcome_handled(self.response_event_id)
             raise self.deferred_sync_restart_error
         return self.response_event_id
