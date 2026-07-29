@@ -80,12 +80,19 @@ class _QueuedUpdateState:
     coalesce_log_context: dict[str, object] = field(default_factory=dict)
 
 
+@dataclass(eq=False)
+class _ThreadIdleWaiter:
+    future: asyncio.Future[None]
+    thread_id: str
+    foreground: bool
+
+
 @dataclass
 class _RoomSchedulerState:
     entries: list[_RoomQueueEntry] = field(default_factory=list)
     active_room: _QueuedUpdate | None = None
     active_threads: dict[str, _QueuedUpdate] = field(default_factory=dict)
-    waiters: list[asyncio.Future[None]] = field(default_factory=list)
+    waiters: list[_ThreadIdleWaiter] = field(default_factory=list)
 
 
 @dataclass
@@ -167,16 +174,16 @@ class EventCacheWriteCoordinator:
         state = self._room_states.get(room_key)
         if state is None:
             return
-        waiters, state.waiters = state.waiters, []
-        for waiter in waiters:
-            if not waiter.done():
-                waiter.set_result(None)
+        for waiter in state.waiters:
+            if not waiter.future.done():
+                waiter.future.set_result(None)
 
-    def _discard_waiter(self, room_key: _CoordinationRoomKey, waiter: asyncio.Future[None]) -> None:
+    def _discard_waiter(self, room_key: _CoordinationRoomKey, waiter: _ThreadIdleWaiter) -> None:
         state = self._room_states.get(room_key)
         if state is None:
             return
         state.waiters = [existing for existing in state.waiters if existing is not waiter]
+        self._cleanup_room_state(room_key)
 
     def _cleanup_room_state(self, room_key: _CoordinationRoomKey) -> None:
         self._prune_done_task_maps(room_key)
@@ -229,14 +236,19 @@ class EventCacheWriteCoordinator:
         if entry.started:
             return room_barrier_pending or entry.kind == "room", cancelled_room_fence_pending
 
+        startup_update_blocked = self._startup_update_blocks_foreground_waiter(state, entry)
+        if startup_update_blocked and entry.task.cancelling() == 0:
+            entry.task.cancel()
+
         if entry.kind == "room":
-            if state.active_room is None and not state.active_threads:
+            if not startup_update_blocked and state.active_room is None and not state.active_threads:
                 self._start_entry(room_key, state, entry)
             return True, cancelled_room_fence_pending
 
         assert entry.thread_id is not None
         if (
-            room_barrier_pending
+            startup_update_blocked
+            or room_barrier_pending
             or cancelled_room_fence_pending
             or same_thread_predecessor_pending
             or state.active_room is not None
@@ -282,6 +294,17 @@ class EventCacheWriteCoordinator:
                 queued_thread_predecessors.add(entry.thread_id)
 
         self._cleanup_room_state(room_key)
+
+    def _startup_update_blocks_foreground_waiter(
+        self,
+        state: _RoomSchedulerState,
+        entry: _QueuedUpdate,
+    ) -> bool:
+        """Return whether a sleeping foreground waiter makes startup work yield."""
+        return entry.startup_priority and any(
+            waiter.foreground and (entry.kind == "room" or entry.thread_id == waiter.thread_id)
+            for waiter in state.waiters
+        )
 
     def _cancel_queued_startup_updates(
         self,
@@ -680,7 +703,11 @@ class EventCacheWriteCoordinator:
                     )
                 continue
 
-            waiter = asyncio.get_running_loop().create_future()
+            waiter = _ThreadIdleWaiter(
+                future=asyncio.get_running_loop().create_future(),
+                thread_id=thread_id,
+                foreground=not is_startup_cache_work(),
+            )
             state.waiters.append(waiter)
             self._reevaluate_room(room_key)
             if self._thread_is_idle(
@@ -691,10 +718,9 @@ class EventCacheWriteCoordinator:
                 self._discard_waiter(room_key, waiter)
                 return
             try:
-                await waiter
-            except asyncio.CancelledError:
+                await waiter.future
+            finally:
                 self._discard_waiter(room_key, waiter)
-                raise
 
     async def wait_for_prior_room_updates(
         self,

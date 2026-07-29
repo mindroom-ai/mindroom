@@ -2134,7 +2134,11 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             )
 
     @pytest.mark.asyncio
-    async def test_foreground_wait_does_not_wait_for_queued_startup_update(self) -> None:
+    @pytest.mark.parametrize("startup_before_foreground", [True, False])
+    async def test_foreground_wait_does_not_wait_for_queued_startup_update(
+        self,
+        startup_before_foreground: bool,
+    ) -> None:
         """Live work should bypass speculative startup work that has not started."""
         blocker_started = asyncio.Event()
         release_blocker = asyncio.Event()
@@ -2165,6 +2169,16 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         async def retry_startup_update() -> None:
             retry_started.set()
 
+        def queue_startup_update() -> asyncio.Task[object]:
+            with startup_cache_work():
+                return coordinator.queue_thread_update(
+                    "!test:localhost",
+                    "$thread:localhost",
+                    startup_update,
+                    name="matrix_cache_startup_update",
+                    coordination_scope="test-principal",
+                )
+
         blocker_task = coordinator.queue_thread_update(
             "!test:localhost",
             "$thread:localhost",
@@ -2173,16 +2187,11 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             coordination_scope="test-principal",
         )
         await asyncio.wait_for(blocker_started.wait(), timeout=1.0)
-        with startup_cache_work():
-            startup_task = coordinator.queue_thread_update(
-                "!test:localhost",
-                "$thread:localhost",
-                startup_update,
-                name="matrix_cache_startup_update",
-                coordination_scope="test-principal",
-            )
+        startup_task = queue_startup_update() if startup_before_foreground else None
         foreground_task = asyncio.create_task(wait_for_foreground())
         await asyncio.wait_for(foreground_waiting.wait(), timeout=1.0)
+        if startup_task is None:
+            startup_task = queue_startup_update()
         retry_task: asyncio.Task[object] | None = None
 
         try:
