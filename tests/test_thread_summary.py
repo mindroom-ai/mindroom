@@ -2964,3 +2964,40 @@ async def test_resolved_tag_transport_error_fails_open() -> None:
         new=AsyncMock(side_effect=TimeoutError("state timeout")),
     ):
         assert await _thread_is_resolved(client, "!room:x", "$thread1") is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("pinned", [True, False])
+async def test_pin_decision_survives_a_real_write_and_read_round_trip(pinned: bool) -> None:
+    """Bind the writer to the reader.
+
+    Every other pin test feeds _recover_pin_state a hand-built fixture, so the
+    key name and the generated_at format are asserted only against themselves.
+    This drives the real send path, then recovers from exactly what was sent.
+    """
+    client = _mock_client()
+    conversation_cache = MagicMock()
+    conversation_cache.get_latest_thread_event_id_if_needed = AsyncMock(return_value="$thread1")
+    conversation_cache.notify_outbound_message = Mock()
+
+    await send_thread_summary_event(
+        client,
+        "!room:x",
+        "$thread1",
+        "A deliberate title",
+        4,
+        "manual",
+        conversation_cache,
+        pinned=pinned,
+    )
+
+    sent_content = client.room_send.await_args.kwargs["content"]
+    delivered = ResolvedVisibleMessage.synthetic(
+        sender="@mindroom:localhost",
+        body=sent_content["body"],
+        event_id="$delivered",
+        content=sent_content,
+        thread_id="$thread1",
+    )
+
+    assert _recover_pin_state([delivered], trusted_sender_ids=_TRUSTED_SUMMARY_SENDERS) is pinned
