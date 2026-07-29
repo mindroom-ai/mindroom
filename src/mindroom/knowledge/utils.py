@@ -3,30 +3,26 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
-import hmac
-import secrets
 import time
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Protocol, cast, runtime_checkable
 
-from mindroom.credentials import get_runtime_shared_credentials_manager
 from mindroom.embedding_errors import extract_classified_embedder_detail
 from mindroom.knowledge.availability import KnowledgeAvailability
-from mindroom.knowledge.redaction import embedded_http_userinfo
-from mindroom.knowledge.registry import (
-    KnowledgeRefreshTarget,
-    PublishedIndexResolution,
-    get_published_index,
-    refresh_target_for_published_index_key,
+from mindroom.knowledge.bounded_map import BoundedMap
+from mindroom.knowledge.refresh_policy import (
+    RefreshCooldownKey,
+    decide_refresh,
+    ready_index_effective_availability,
+    scheduler_probe_required,
 )
+from mindroom.knowledge.registry import PublishedIndexResolution, get_published_index
 from mindroom.knowledge_source_descriptions import KnowledgeSourceDescription, KnowledgeWithSourceDescriptions
 from mindroom.logging_config import get_logger
 from mindroom.runtime_protocols import SupportsConfigOrchestrator  # noqa: TC001
 
 if TYPE_CHECKING:
-    from collections.abc import Hashable, Mapping
+    from collections.abc import Mapping
 
     from agno.knowledge.document import Document
     from agno.knowledge.knowledge import Knowledge
@@ -37,10 +33,10 @@ if TYPE_CHECKING:
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 logger = get_logger(__name__)
-_REFRESH_RETRY_COOLDOWN_SECONDS = 300.0
-_MAX_REFRESH_SCHEDULED_COOLDOWNS = 512
-_refresh_scheduled_at: dict[tuple[KnowledgeRefreshTarget, KnowledgeAvailability, Hashable | None], float] = {}
-_EMBEDDED_GIT_USERINFO_FINGERPRINT_KEY = secrets.token_bytes(32)
+_refresh_scheduled_at: BoundedMap[RefreshCooldownKey, float] = BoundedMap(
+    capacity=512,
+    eviction_order=lambda _key, scheduled_at: scheduled_at,
+)
 
 
 @dataclass(frozen=True)
@@ -131,160 +127,6 @@ def _lookup_knowledge_for_base(
         return None
 
 
-def _refresh_schedule_due(
-    key: KnowledgeRefreshTarget,
-    availability: KnowledgeAvailability,
-    *,
-    settings: Hashable | None = None,
-    cooldown_seconds: float = _REFRESH_RETRY_COOLDOWN_SECONDS,
-) -> bool:
-    now = time.monotonic()
-    cache_key = (key, availability, settings)
-    last_scheduled_at = _refresh_scheduled_at.get(cache_key)
-    if last_scheduled_at is not None and now - last_scheduled_at < cooldown_seconds:
-        return False
-    _refresh_scheduled_at[cache_key] = now
-    _prune_refresh_schedule_bookkeeping()
-    return True
-
-
-def _prune_refresh_schedule_bookkeeping() -> None:
-    """Bound refresh cooldown bookkeeping for private agent knowledge bindings."""
-    if len(_refresh_scheduled_at) <= _MAX_REFRESH_SCHEDULED_COOLDOWNS:
-        return
-    excess = len(_refresh_scheduled_at) - _MAX_REFRESH_SCHEDULED_COOLDOWNS
-    for cache_key, _scheduled_at in sorted(_refresh_scheduled_at.items(), key=lambda item: item[1])[:excess]:
-        _refresh_scheduled_at.pop(cache_key, None)
-
-
-def _published_index_age_seconds(value: str | None) -> float | None:
-    if value is None:
-        return None
-    try:
-        published_at = datetime.fromisoformat(value)
-    except ValueError:
-        return None
-    if published_at.tzinfo is None:
-        published_at = published_at.replace(tzinfo=UTC)
-    return max((datetime.now(tz=UTC) - published_at).total_seconds(), 0.0)
-
-
-def _git_poll_interval_seconds(lookup: PublishedIndexResolution, config: Config) -> float | None:
-    git_config = config.get_knowledge_base_config(lookup.key.base_id).git
-    if git_config is None:
-        return None
-    return max(float(git_config.poll_interval_seconds), 0.0)
-
-
-def _git_poll_due(lookup: PublishedIndexResolution, config: Config) -> bool:
-    if lookup.index is None:
-        return False
-    poll_interval_seconds = _git_poll_interval_seconds(lookup, config)
-    if poll_interval_seconds is None:
-        return False
-    published_age_seconds = _published_index_age_seconds(
-        lookup.index.state.last_refresh_at or lookup.index.state.last_published_at,
-    )
-    return published_age_seconds is None or published_age_seconds >= poll_interval_seconds
-
-
-def _ready_index_effective_availability(
-    lookup: PublishedIndexResolution,
-    config: Config,
-) -> KnowledgeAvailability:
-    """Return request-path availability for a ready index without eager rescans."""
-    availability = lookup.availability
-    if availability is KnowledgeAvailability.READY and lookup.index is not None and _git_poll_due(lookup, config):
-        availability = KnowledgeAvailability.STALE
-    return availability
-
-
-def _refresh_cooldown_seconds(
-    lookup: PublishedIndexResolution | None,
-    config: Config,
-    availability: KnowledgeAvailability,
-) -> float:
-    if lookup is None or availability is not KnowledgeAvailability.STALE:
-        return _REFRESH_RETRY_COOLDOWN_SECONDS
-    poll_interval_seconds = _git_poll_interval_seconds(lookup, config)
-    if poll_interval_seconds is None:
-        return _REFRESH_RETRY_COOLDOWN_SECONDS
-    return max(poll_interval_seconds, 1.0)
-
-
-def _failed_refresh_retry_fingerprint(
-    lookup: PublishedIndexResolution,
-    config: Config,
-    runtime_paths: RuntimePaths,
-) -> tuple[str, ...]:
-    """Return a secret-free fingerprint for Git refresh/auth settings that can fix a failed retry."""
-    git_config = config.get_knowledge_base_config(lookup.key.base_id).git
-    if git_config is None:
-        return ()
-
-    fingerprint = [
-        "git-refresh",
-        f"credentials_service:{git_config.credentials_service or ''}",
-        f"sync_timeout_seconds:{git_config.sync_timeout_seconds}",
-        f"embedded_userinfo:{_embedded_userinfo_fingerprint(git_config.repo_url)}",
-    ]
-    if git_config.credentials_service is None:
-        return tuple(fingerprint)
-
-    credentials_path = get_runtime_shared_credentials_manager(runtime_paths).get_credentials_path(
-        git_config.credentials_service,
-    )
-    try:
-        credentials_stat = credentials_path.stat()
-    except OSError:
-        fingerprint.extend(("credentials_mtime_ns:", "credentials_size:"))
-    else:
-        fingerprint.extend(
-            (
-                f"credentials_mtime_ns:{credentials_stat.st_mtime_ns}",
-                f"credentials_size:{credentials_stat.st_size}",
-            ),
-        )
-    return tuple(fingerprint)
-
-
-def _embedded_userinfo_fingerprint(repo_url: str) -> str:
-    userinfo = embedded_http_userinfo(repo_url)
-    if userinfo is None:
-        return ""
-    username, secret = userinfo
-    payload = f"{username}\0{secret}".encode()
-    return hmac.new(_EMBEDDED_GIT_USERINFO_FINGERPRINT_KEY, payload, hashlib.sha256).hexdigest()
-
-
-def _refresh_retry_settings(
-    lookup: PublishedIndexResolution,
-    config: Config,
-    runtime_paths: RuntimePaths,
-    availability: KnowledgeAvailability,
-) -> Hashable | None:
-    if availability is KnowledgeAvailability.CONFIG_MISMATCH:
-        return lookup.key.indexing_settings
-    if availability is KnowledgeAvailability.REFRESH_FAILED:
-        return (lookup.key.indexing_settings, *_failed_refresh_retry_fingerprint(lookup, config, runtime_paths))
-    return None
-
-
-def _schedule_refresh_on_access_cooldown_seconds(lookup: PublishedIndexResolution, config: Config) -> float:
-    """Return READY refresh throttle without request-path source scans."""
-    if config.get_knowledge_base_config(lookup.key.base_id).git is None:
-        return _REFRESH_RETRY_COOLDOWN_SECONDS
-    poll_interval_seconds = _git_poll_interval_seconds(lookup, config)
-    return max(poll_interval_seconds or _REFRESH_RETRY_COOLDOWN_SECONDS, 1.0)
-
-
-def _schedule_refresh_on_access_due(lookup: PublishedIndexResolution, config: Config) -> bool:
-    """Return whether READY on-access refresh should be scheduled without source scans."""
-    if config.get_knowledge_base_config(lookup.key.base_id).git is None:
-        return True
-    return _git_poll_due(lookup, config)
-
-
 def _schedule_refresh_for_availability(
     refresh_scheduler: KnowledgeRefreshScheduler,
     base_id: str,
@@ -295,75 +137,35 @@ def _schedule_refresh_for_availability(
     lookup: PublishedIndexResolution | None,
     availability: KnowledgeAvailability,
 ) -> KnowledgeAvailability:
-    if lookup is None:
+    """Apply the refresh policy decision for one resolved base and report its turn availability."""
+    if not scheduler_probe_required(lookup=lookup, availability=availability, config=config):
         return availability
 
-    refresh_target = refresh_target_for_published_index_key(lookup.key)
-    if availability is KnowledgeAvailability.READY:
-        if not lookup.schedule_refresh_on_access or not _schedule_refresh_on_access_due(lookup, config):
-            return availability
-
-        scheduler_is_refreshing = refresh_scheduler.is_refreshing(
-            base_id,
-            config=config,
-            runtime_paths=runtime_paths,
-            execution_identity=execution_identity,
-        )
-        schedule_due = (
-            False
-            if scheduler_is_refreshing
-            else _refresh_schedule_due(
-                refresh_target,
-                KnowledgeAvailability.READY,
-                settings=lookup.key.indexing_settings,
-                cooldown_seconds=_schedule_refresh_on_access_cooldown_seconds(lookup, config),
-            )
-        )
-        if schedule_due:
-            refresh_scheduler.schedule_refresh(
-                base_id,
-                config=config,
-                runtime_paths=runtime_paths,
-                execution_identity=execution_identity,
-            )
-        return KnowledgeAvailability.STALE if schedule_due or scheduler_is_refreshing else KnowledgeAvailability.READY
-
-    if availability is KnowledgeAvailability.INITIALIZING:
-        scheduler_is_refreshing = refresh_scheduler.is_refreshing(
-            base_id,
-            config=config,
-            runtime_paths=runtime_paths,
-            execution_identity=execution_identity,
-        )
-        if not scheduler_is_refreshing and _refresh_schedule_due(
-            refresh_target,
-            availability,
-            settings=lookup.key.indexing_settings,
-        ):
-            refresh_scheduler.schedule_refresh(
-                base_id,
-                config=config,
-                runtime_paths=runtime_paths,
-                execution_identity=execution_identity,
-            )
-    elif not refresh_scheduler.is_refreshing(
-        base_id,
+    now = time.monotonic()
+    decision = decide_refresh(
+        lookup=lookup,
+        availability=availability,
         config=config,
         runtime_paths=runtime_paths,
-        execution_identity=execution_identity,
-    ) and _refresh_schedule_due(
-        refresh_target,
-        availability,
-        settings=_refresh_retry_settings(lookup, config, runtime_paths, availability),
-        cooldown_seconds=_refresh_cooldown_seconds(lookup, config, availability),
-    ):
+        scheduler_is_refreshing=refresh_scheduler.is_refreshing(
+            base_id,
+            config=config,
+            runtime_paths=runtime_paths,
+            execution_identity=execution_identity,
+        ),
+        now=now,
+        scheduled_at=_refresh_scheduled_at,
+    )
+    cooldown_key = decision.cooldown_key
+    if cooldown_key is not None:
+        _refresh_scheduled_at[cooldown_key] = now
         refresh_scheduler.schedule_refresh(
             base_id,
             config=config,
             runtime_paths=runtime_paths,
             execution_identity=execution_identity,
         )
-    return availability
+    return decision.availability
 
 
 def _semantic_agent_knowledge_base_ids(agent_name: str, config: Config) -> tuple[str, ...]:
@@ -391,7 +193,7 @@ def _resolve_base_knowledge(
     )
     availability = lookup.availability if lookup is not None else KnowledgeAvailability.INITIALIZING
     if lookup is not None and availability is KnowledgeAvailability.READY:
-        availability = _ready_index_effective_availability(lookup, config)
+        availability = ready_index_effective_availability(lookup, config)
     knowledge = lookup.index.knowledge if lookup is not None and lookup.index is not None else None
     if knowledge is not None:
         _apply_knowledge_metadata(base_id, knowledge, config)
@@ -471,7 +273,7 @@ def resolve_knowledge_base_access(
     )
     availability = lookup.availability if lookup is not None else KnowledgeAvailability.INITIALIZING
     if lookup is not None and availability is KnowledgeAvailability.READY:
-        availability = _ready_index_effective_availability(lookup, config)
+        availability = ready_index_effective_availability(lookup, config)
     knowledge = lookup.index.knowledge if lookup is not None and lookup.index is not None else None
     if knowledge is not None:
         _apply_knowledge_metadata(base_id, knowledge, config)
