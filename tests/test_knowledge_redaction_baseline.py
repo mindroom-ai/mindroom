@@ -367,3 +367,33 @@ def test_schemeless_multi_colon_userinfo_keeps_its_leading_segments(baseline_red
 
     assert redact_credentials_in_text(with_scheme) == "https://***@host/x"
     assert baseline_redact(with_scheme) == "https://***@host/x", "a scheme makes both redact the authority whole"
+
+
+@pytest.mark.parametrize(
+    ("segments", "expected_prefix"),
+    [
+        # A one-segment password takes the username with it: the match is
+        # ``u:secret@``, so there is nothing left before the replacement.
+        (1, ""),
+        (2, "u:"),
+        (3, "u:seg00:"),
+        (6, "u:seg00:seg01:seg02:seg03:"),
+    ],
+)
+def test_two_colon_segments_are_removed_from_a_schemeless_password(segments: int, expected_prefix: str) -> None:
+    """Exactly two colon-separated segments go, not everything after the last colon.
+
+    The match is ``word:password@``, so the segment before the secret is
+    consumed with it. A password of two segments or fewer therefore disappears
+    entirely, and a longer one keeps a prefix that grows with its length. Pinned
+    because the surviving fraction is the whole cost of excluding ``:`` from the
+    password run, and a prose description of it has already been wrong twice.
+    """
+    secret = "S3CR3T-CANARY"  # noqa: S105
+    filler = [f"seg{index:02d}" for index in range(segments - 1)]
+    password = ":".join([*filler, secret])
+
+    redacted = redact_credentials_in_text(f"u:{password}@host")
+
+    assert secret not in redacted
+    assert redacted == f"{expected_prefix}***"

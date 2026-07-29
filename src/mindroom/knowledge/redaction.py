@@ -42,11 +42,17 @@ _AUTHORIZATION_HEADER_PATTERN: re.Pattern[str] = re.compile(
 #:
 #: The cost is precise, and smaller than "only the username survives": matching
 #: resumes after each colon, so a *schemeless* multi-colon userinfo keeps its
-#: leading segments and loses the tail -- ``user:pa:ss:secret@host`` becomes
-#: ``user:pa:***``. Everything from the last colon before the ``@`` is redacted,
-#: which is where a secret pasted into a URL actually sits, and the baseline
-#: preserved the whole string. A URL *with* a scheme is unaffected: the
-#: ``scheme://`` branch consumes it first and its authority is redacted whole.
+#: leading segments. What goes is the last **two** colon-separated segments,
+#: because the match is ``word:password@`` -- ``user:pa:ss:secret@host`` becomes
+#: ``user:pa:***``, losing ``ss`` as well as ``secret``. A password of two
+#: segments or fewer is therefore removed entirely, and the surviving fraction
+#: of a longer one approaches but never reaches the whole. The baseline
+#: preserved the entire string in every one of these cases.
+#:
+#: A URL *with* a scheme is unaffected: the ``scheme://`` branch consumes it
+#: first and its authority is redacted whole, identically to the baseline. Two
+#: schemeless shapes are redacted by neither: a password beginning with a colon,
+#: and one containing ``/``.
 _CREDENTIAL_CANDIDATE_PATTERN: re.Pattern[str] = re.compile(
     r"""(?<![A-Za-z0-9+._-])(?:
           [a-zA-Z][a-zA-Z0-9+.-]*://[^\s'"<>]*        # scheme://host/path
@@ -281,11 +287,17 @@ def redact_credentials_in_text(value: str) -> str:
 def credential_free_url_identity(value: str) -> str:
     """Return a stable repo URL identity that never persists secret-bearing userinfo.
 
-    Never raises. This is reached from ``indexing_settings_key`` on the ordinary
-    resolve path, not an error path, and ``urlsplit`` rejects a netloc holding a
-    codepoint that NFKC-normalises to a delimiter -- putting that netloc, with
-    its password, into the exception message. Hashing the raw string instead
-    keeps the identity stable and puts nothing recoverable in the output.
+    Reached from ``indexing_settings_key`` on the ordinary resolve path, not an
+    error path, so it must not raise on account of a URL's *contents*:
+    ``urlsplit`` rejects a netloc holding a codepoint that NFKC-normalises to a
+    delimiter, and puts that netloc -- password included -- into the exception
+    message. Hashing the raw string instead keeps the identity stable and puts
+    nothing recoverable in the output.
+
+    A lone surrogate still raises ``UnicodeEncodeError`` from the hash, which is
+    left alone deliberately: the message names no URL, and a config string that
+    cannot be UTF-8 encoded is broken in a way worth surfacing rather than
+    hashing into a stable-looking identity.
     """
     try:
         parsed = urlparse(value)

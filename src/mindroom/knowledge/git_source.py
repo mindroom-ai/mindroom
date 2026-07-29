@@ -95,7 +95,15 @@ def _git_auth_env(
     credentials_service: str | None,
     runtime_paths: RuntimePaths,
 ) -> dict[str, str] | None:
-    """Return process-local Git config that injects credentials without persisting them."""
+    """Return process-local Git config that injects credentials without persisting them.
+
+    Safe against a netloc ``urlsplit`` refuses -- one holding a codepoint that
+    NFKC-normalises to a delimiter -- only because every caller runs after
+    ``_ensure_repository`` has put the URL through ``_persistable_remote_url``,
+    which refuses those. That is a call-order invariant rather than a property
+    of this function: the bare ``urlparse`` below would raise with the password
+    in its message. Preserve the ordering, or guard here.
+    """
     clean_url = credential_free_repo_url(repo_url)
     parsed_clean_url = urlparse(clean_url)
 
@@ -200,14 +208,10 @@ def _persistable_remote_url(repo_url: str, base_id: str) -> str:
     what ``_git_auth_env`` is for; they must never be persisted. So this checks
     the string actually about to be written rather than classifying config.
     """
-    try:
-        clean_url = credential_free_repo_url(repo_url)
-    except ValueError as exc:
-        # ``urlsplit`` refuses a netloc containing a codepoint that NFKC-
-        # normalises to a delimiter, and quotes that netloc -- password and all
-        # -- in the exception. Convert it to a refusal here, before it can
-        # propagate into an error that gets persisted.
-        raise _unwritable_remote(base_id, "the URL contains a disallowed character") from exc
+    # ``credential_free_repo_url`` is total, so no guard is needed here; a URL
+    # whose netloc ``urlsplit`` refuses comes back unchanged and is rejected
+    # below by the authority checks, which is where it should be rejected.
+    clean_url = credential_free_repo_url(repo_url)
 
     # Before any shape is recognised: until the decoded form agrees with the raw
     # one, no branch below is reasoning about the string a client will use. This
