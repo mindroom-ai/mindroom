@@ -125,6 +125,11 @@ def test_current_google_and_openrouter_specialist_models() -> None:
     assert model_defaults.GOOGLE_AVATAR_IMAGE == "gemini-3.1-flash-image"
     assert model_defaults.GOOGLE_IMAGE == "gemini-3.1-flash-image"
     assert model_defaults.GOOGLE_VEO == "veo-3.1-generate-001"
+    assert model_defaults.GOOGLE_PROVIDER_DEFAULT_TEMPERATURE_MODEL_SUFFIXES == (
+        "gemini-3.6-flash",
+        "gemini-3.5-flash-lite",
+    )
+    assert model_defaults.CLAUDE_PROVIDER_DEFAULT_TEMPERATURE_MODEL_SUFFIXES == ("claude-fable-5",)
     assert openrouter_alternatives["gemini_flash"] == model_defaults.ModelPreset(
         "openrouter",
         "google/gemini-3.6-flash",

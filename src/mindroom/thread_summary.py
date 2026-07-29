@@ -20,7 +20,10 @@ from mindroom.entity_resolution import current_internal_sender_ids, resolve_room
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_delivery import send_message_result
 from mindroom.matrix.message_builder import build_message_content
-from mindroom.model_defaults import PROVIDER_DEFAULT_TEMPERATURE_MODEL_SUFFIXES
+from mindroom.model_defaults import (
+    CLAUDE_PROVIDER_DEFAULT_TEMPERATURE_MODEL_SUFFIXES,
+    GOOGLE_PROVIDER_DEFAULT_TEMPERATURE_MODEL_SUFFIXES,
+)
 from mindroom.model_instance_checks import isinstance_of_loaded
 from mindroom.thread_tag_vocabulary import (
     claim_vocabulary_check,
@@ -43,6 +46,7 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 _VERTEXAI_CLAUDE_CLASS = ("agno.models.vertexai.claude", "Claude")
+_GOOGLE_GEMINI_CLASS = ("mindroom.google_gemini", "MindRoomGoogleGemini")
 THREAD_SUMMARY_MAX_LENGTH = 300
 _MAX_INITIAL_TAGS = 3
 _MARKDOWN_LINK_RE = re.compile(r"!\[([^\]]*)\]\([^)]+\)|\[([^\]]+)\]\([^)]+\)")
@@ -112,7 +116,13 @@ def _summary_model_requires_provider_temperature(model: object) -> bool:
     """Return whether a summary model requires its provider sampling default."""
     return isinstance_of_loaded(model, _VERTEXAI_CLAUDE_CLASS) or (
         isinstance(model, _IdentifiedModel)
-        and model.id.casefold().endswith(PROVIDER_DEFAULT_TEMPERATURE_MODEL_SUFFIXES)
+        and (
+            model.id.casefold().endswith(CLAUDE_PROVIDER_DEFAULT_TEMPERATURE_MODEL_SUFFIXES)
+            or (
+                isinstance_of_loaded(model, _GOOGLE_GEMINI_CLASS)
+                and model.id.casefold().endswith(GOOGLE_PROVIDER_DEFAULT_TEMPERATURE_MODEL_SUFFIXES)
+            )
+        )
     )
 
 

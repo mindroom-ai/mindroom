@@ -413,7 +413,7 @@ defaults:
 
 MindRoom uses `defaults.thread_summary_temperature` for automatic thread summaries on providers that support runtime temperature overrides.
 Set it to `null` to omit the field and use provider defaults.
-MindRoom always uses provider temperature defaults for Vertex Claude, Claude Fable 5, Gemini 3.6 Flash, and Gemini 3.5 Flash-Lite thread summaries.
+MindRoom always uses provider temperature defaults for Vertex Claude, Claude Fable 5, and direct Google Gemini 3.6 Flash and Gemini 3.5 Flash-Lite thread summaries.
 Use `room_thread_summary_models` when automatic summaries in a specific room should use a different model from `defaults.thread_summary_model`.
 Keys can be managed room aliases such as `lobby` or raw Matrix room IDs such as `!room:example.org`.
 

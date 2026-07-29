@@ -18,6 +18,7 @@ from pydantic import ValidationError
 from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths
 from mindroom.entity_resolution import resolve_room_scoped_model_override
+from mindroom.google_gemini import MindRoomGoogleGemini
 from mindroom.logging_config import setup_logging
 from mindroom.matrix.client import ResolvedVisibleMessage
 from mindroom.prompts import THREAD_SUMMARY_INSTRUCTIONS
@@ -2345,13 +2346,10 @@ class TestGenerateSummary:
             "claude-fable-5",
             "anthropic.claude-fable-5",
             "anthropic/claude-fable-5",
-            "gemini-3.6-flash",
-            "google/gemini-3.6-flash",
-            "gemini-3.5-flash-lite",
         ],
     )
-    async def test_generate_summary_omits_deprecated_or_invalid_temperature(self, model_id: str) -> None:
-        """Current provider models must use their required default sampling behavior."""
+    async def test_generate_summary_omits_invalid_fable_temperature(self, model_id: str) -> None:
+        """Fable requests through each supported provider must omit invalid temperature."""
         model = _TemperatureAwareIdentifiedModel(model_id, temperature=0.9)
 
         _configure_summary_model_temperature(
@@ -2361,6 +2359,32 @@ class TestGenerateSummary:
         )
 
         assert model.temperature is None
+
+    @pytest.mark.parametrize("model_id", ["gemini-3.6-flash", "gemini-3.5-flash-lite"])
+    async def test_generate_summary_omits_deprecated_direct_google_temperature(self, model_id: str) -> None:
+        """Current direct Gemini requests must omit deprecated sampling controls."""
+        model = MindRoomGoogleGemini(id=model_id, api_key="dummy-key", temperature=0.9)
+
+        _configure_summary_model_temperature(
+            model,
+            summary_temperature=0.2,
+            model_name="summary",
+        )
+
+        assert model.temperature is None
+
+    @pytest.mark.parametrize("model_id", ["google/gemini-3.6-flash", "google/gemini-3.5-flash-lite"])
+    async def test_generate_summary_preserves_supported_openrouter_gemini_temperature(self, model_id: str) -> None:
+        """OpenRouter supports temperature for current Gemini request IDs."""
+        model = _TemperatureAwareIdentifiedModel(model_id, temperature=0.9)
+
+        _configure_summary_model_temperature(
+            model,
+            summary_temperature=0.2,
+            model_name="summary",
+        )
+
+        assert model.temperature == 0.2
 
     async def test_generate_summary_uses_explicit_model_name(self) -> None:
         """Callers can pass the resolved room-specific summary model to generation."""
