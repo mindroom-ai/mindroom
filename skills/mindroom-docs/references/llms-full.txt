@@ -3046,7 +3046,7 @@ That same reconciliation path also updates `m.room.power_levels` for managed roo
 Audio events are handled through the shared media pipeline on all bots.
 The router only posts a visible handoff when it must disambiguate between multiple eligible responders in a room.
 When the responder is already clear, normalized audio follows the normal direct agent or team dispatch rules without an extra router message.
-By default, `voice.visible_router_echo: true` also lets the router post an immediate display-only transcription placeholder and replace it with the normalized voice text when it is allowed to reply.
+By default, `voice.visible_router_echo: true` also lets the router post an immediate display-only transcription placeholder and replace it with the normalized transcript or fallback text when it is allowed to reply.
 Set `voice.visible_router_echo: false` to suppress that display-only echo.
 
 See [Voice Messages](https://docs.mindroom.chat/voice/) for the detailed dispatch behavior.
@@ -13684,10 +13684,10 @@ When a voice message is received:
 4. If STT is configured and succeeds, the audio is transcribed and lightly normalized for mentions and commands.
 5. If STT is unavailable, disabled, or fails, MindRoom falls back to `🎤 [Attached voice message]`.
 6. The router replaces its placeholder with the normalized transcript or fallback text.
-7. The normalized text plus attachment metadata is dispatched using the normal routing and thread logic.
+7. The normalized transcript or fallback prompt plus attachment metadata is dispatched using the normal routing and thread logic.
 8. If routing is ambiguous in a multi-responder room, the router posts a visible handoff message.
 9. Otherwise, no extra router message is posted and the chosen agent or team replies directly.
-10. The responding entity receives the original audio attachment alongside the normalized prompt.
+10. The responding entity receives the original audio attachment alongside the normalized transcript or fallback prompt.
 
 ## Configuration
 
@@ -13820,7 +13820,7 @@ If only one eligible agent or team is visible, that responder answers the normal
 If the audio caption or transcript explicitly mentions an agent or team, that targeted responder answers directly as well.
 In these cases, the router does not post an extra visible routing handoff.
 The transcript or fallback text is used internally for dispatch, not echoed to the room as a separate message.
-If `voice.visible_router_echo` is enabled, the router still posts a display-only placeholder and replaces it with the normalized voice text, but responders ignore that echo and continue responding to the original audio event.
+If `voice.visible_router_echo` is enabled, the router still posts a display-only placeholder and replaces it with the normalized transcript or fallback text, but responders ignore that echo and continue responding to the original audio event.
 
 ### Multi-responder rooms where the router must choose
 
@@ -13828,7 +13828,7 @@ If multiple agents or teams are available and the audio does not already target 
 The router then posts a normal handoff message such as `@home could you help with this?`.
 The selected agent or team responds to that router handoff, and the handoff carries the original audio attachment metadata forward.
 This is the case where a visible router message appears.
-If `voice.visible_router_echo` is also enabled, the router immediately posts a display-only transcription placeholder, replaces it with the normalized voice text, and then posts the normal handoff.
+If `voice.visible_router_echo` is also enabled, the router immediately posts a display-only transcription placeholder, replaces it with the normalized transcript or fallback text, and then posts the normal handoff.
 
 ### No router, or router cannot reply
 
@@ -13840,7 +13840,7 @@ If multiple eligible responders remain and the audio does not already target one
 
 ### Visibility rule
 
-By default, MindRoom immediately posts a display-only router transcription placeholder when the router is allowed to process the event, then replaces it with the normalized voice text.
+By default, MindRoom immediately posts a display-only router transcription placeholder when the router is allowed to process the event, then replaces it with the normalized transcript or fallback text.
 The router handoff message appears only when the router must disambiguate between multiple eligible responders.
 If the responder is already clear from room shape, thread context, or explicit targeting, the chosen agent or team replies directly to the original audio event.
 Set `voice.visible_router_echo: false` to suppress the display-only echo without changing which event responders actually answer.

@@ -690,17 +690,16 @@ async def test_voice_message_clears_active_turn_signal_when_post_stt_echo_fails(
 
 
 @pytest.mark.parametrize(
-    ("echo_side_effect", "echo_return"),
+    "echo_side_effect",
     [
-        pytest.param(RuntimeError("echo failed"), None, id="failed"),
-        pytest.param(None, None, id="disabled"),
+        pytest.param(RuntimeError("echo failed"), id="failed"),
+        pytest.param(None, id="disabled"),
     ],
 )
 @pytest.mark.asyncio
 async def test_failed_or_disabled_visible_echo_does_not_affect_canonical_voice_dispatch(
     mock_home_bot: AgentBot,
     echo_side_effect: BaseException | None,
-    echo_return: str | None,
 ) -> None:
     """Visible echo failures or disabled echo should not block canonical voice dispatch."""
     bot = mock_home_bot
@@ -738,7 +737,7 @@ async def test_failed_or_disabled_visible_echo_does_not_affect_canonical_voice_d
         patch.object(
             bot._turn_controller,
             "_send_visible_voice_transcription_placeholder",
-            new=AsyncMock(side_effect=echo_side_effect, return_value=echo_return),
+            new=AsyncMock(side_effect=echo_side_effect),
         ),
         patch.object(bot._turn_controller, "_dispatch_text_message", new=AsyncMock(side_effect=record_dispatch)),
         patch("mindroom.ingress_validation.is_authorized_sender", return_value=True),
