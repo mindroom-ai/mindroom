@@ -221,28 +221,38 @@ def test_bytes_that_are_not_utf8_are_no_state_at_all(tmp_path: Path) -> None:
         pytest.param("7", 7, id="ascii_digits"),
         pytest.param("١٢", 12, id="arabic_indic_digits"),
         pytest.param("²", None, id="superscript_int_refuses"),
+        pytest.param("1" * 5000, None, id="past_the_integer_conversion_limit"),
         pytest.param(-1, None, id="negative"),
         pytest.param(True, None, id="bool"),
         pytest.param(7.5, None, id="fractional"),
     ],
 )
 def test_counts_accept_only_values_int_can_take(tmp_path: Path, raw: object, expected: int | None) -> None:
-    """A digit ``int`` refuses must read as absent, not raise out of the loader.
+    """A number ``int`` refuses must read as absent, not raise out of the loader.
 
-    ``"²".isdigit()`` is true while ``int("²")`` raises, so the wider test
-    would turn one hostile byte in a state file into a failed manager
-    construction instead of a base that simply refreshes itself.
+    Two independent ways to be refused, neither of them a property of the
+    payload's shape: ``"²".isdigit()`` is true while ``int("²")`` raises, and a
+    perfectly well-formed decimal string raises once it is longer than
+    CPython's integer conversion limit. Either would turn one hostile field in
+    a state file into a failed manager construction instead of a base that
+    simply refreshes itself. Both counts are parsed by the same helper.
     """
     metadata_path = tmp_path / "indexing_settings.json"
     write_json_atomic(
         metadata_path,
-        {"settings": _settings().to_metadata(), "status": "indexing", "indexed_count": raw},
+        {
+            "settings": _settings().to_metadata(),
+            "status": "indexing",
+            "indexed_count": raw,
+            "consecutive_refresh_failures": raw,
+        },
     )
 
     state = load_published_index_state(metadata_path)
 
     assert state is not None
     assert state.indexed_count == expected
+    assert state.consecutive_refresh_failures == (expected or 0)
 
 
 def test_write_json_atomic_uses_unique_temp_and_cleans_failed_replace(

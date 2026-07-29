@@ -228,16 +228,35 @@ def _nonnegative_int(value: object) -> int | None:
             return None
         case int() if value >= 0:
             return value
+        # ``is_integer`` is false for both infinities and NaN, which are the
+        # only floats ``int`` refuses, and no finite float can exceed its
+        # reach: this conversion cannot raise.
         case float() if value.is_integer() and value >= 0:
             return int(value)
-        # ``isdecimal`` rather than ``isdigit``: superscripts such as "²" are
-        # digits that ``int`` refuses, so the wider test would raise out of a
-        # loader whose callers expect it to answer for any payload. Decimal
-        # digits outside ASCII, such as "١٢", stay accepted because ``int``
-        # takes them.
-        case str() if value.strip().isdecimal():
-            return int(value.strip())
+        case str():
+            return _nonnegative_int_from_text(value.strip())
     return None
+
+
+def _nonnegative_int_from_text(text: str) -> int | None:
+    """Parse a decimal count, treating anything ``int`` refuses as absent.
+
+    Catching the failure beats predicating on it. No property of the
+    characters decides whether ``int`` accepts them: ``isdigit`` admits
+    superscripts like "²" that it rejects, and even a well-formed all-ASCII
+    decimal string raises once it passes CPython's integer conversion limit,
+    which is not about characters at all. A caller of this loader treats it as
+    total, so one ``except`` covering both -- and whatever else ``int`` grows
+    -- is what makes that true. ``isdecimal`` still gates which shapes count
+    as a number, keeping "+1" and "1_000" out; it just no longer decides
+    whether converting is safe.
+    """
+    if not text.isdecimal():
+        return None
+    try:
+        return int(text)
+    except ValueError:
+        return None
 
 
 def _refresh_job(value: object) -> _RefreshJob:
