@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import re
 from base64 import b64decode
+from binascii import Error as BinasciiError
 from urllib.parse import unquote, urlparse, urlunparse
 
 from mindroom.git_urls import credential_free_repo_url
@@ -28,22 +29,8 @@ def _strip_path_params(path: str) -> str:
 
 
 def redact_url_credentials(value: str) -> str:
-    """Redact URL credentials for any parsed URL scheme.
-
-    Never raises. Callers redact free-form Git output, so the input is whatever
-    a remote or a local ``git`` chose to print, and a token that merely looks
-    like a URL can be unparseable (an unterminated IPv6 literal, say). Raising
-    there would replace the real Git failure with an unrelated ``ValueError``
-    and destroy the diagnostic the caller was trying to report.
-    """
-    try:
-        parsed = urlparse(value)
-    except ValueError:
-        # Unparseable is not the same as credential-free: userinfo can sit
-        # behind the part that failed to parse. This text reaches users and is
-        # persisted as ``last_error``, so drop the whole token rather than risk
-        # leaking a secret; the surrounding message survives intact.
-        return "***"
+    """Redact URL credentials for any parsed URL scheme."""
+    parsed = urlparse(value)
     if not parsed.scheme or not parsed.netloc:
         return value
 
@@ -73,11 +60,7 @@ def redact_credentials_in_text(value: str) -> str:
         if scheme.lower() == "basic":
             try:
                 decoded = b64decode(token, validate=True).decode("utf-8")
-            except ValueError:
-                # Covers every "this is not a decodable Basic token" outcome,
-                # including the non-ASCII token that makes b64decode raise a
-                # bare ValueError rather than binascii.Error. The header is
-                # redacted either way; only the decoded secret is unavailable.
+            except (BinasciiError, UnicodeDecodeError):
                 pass
             else:
                 if decoded:
