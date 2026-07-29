@@ -5,9 +5,15 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 from unittest.mock import patch
 
+import pytest
+from agno.models.message import Message as AgnoMessage
+from anthropic.types import Message as AnthropicMessage
+from anthropic.types import Usage
+
 from mindroom.azure_openai_model import MindRoomAzureOpenAI
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
+from mindroom.error_handling import ModelSafeguardRefusalError
 from mindroom.model_loading import get_model_instance
 from mindroom.openai_models import (
     MindRoomDeepSeek,
@@ -22,6 +28,19 @@ from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_p
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+
+def _safeguard_refusal_message() -> AnthropicMessage:
+    return AnthropicMessage(
+        id="msg-refusal",
+        content=[],
+        model="claude-fable-5",
+        role="assistant",
+        stop_reason="refusal",
+        stop_sequence=None,
+        type="message",
+        usage=Usage(input_tokens=100, output_tokens=4),
+    )
 
 
 def test_first_party_openai_gpt_5_4_and_newer_use_responses(tmp_path: Path) -> None:
@@ -166,6 +185,115 @@ def test_bedrock_claude_gets_explicit_timeout(tmp_path: Path) -> None:
     model = get_model_instance(config, runtime_paths_for(config), "bedrock")
 
     assert model.timeout == 3600.0
+
+
+def test_bedrock_current_claude_uses_mantle_endpoint(tmp_path: Path) -> None:
+    """Current Bedrock Claude models must use the Mantle Messages endpoint."""
+    config = bind_runtime_paths(
+        Config(
+            models={
+                "bedrock": ModelConfig(
+                    provider="bedrock_claude",
+                    id="anthropic.claude-opus-5",
+                    extra_kwargs={
+                        "aws_region": "us-east-1",
+                        "aws_access_key": "dummy-access",
+                        "aws_secret_key": "dummy-secret",
+                    },
+                ),
+            },
+        ),
+        test_runtime_paths(tmp_path),
+    )
+
+    model = get_model_instance(config, runtime_paths_for(config), "bedrock")
+    client = model.get_client()
+
+    assert str(client.base_url) == "https://bedrock-mantle.us-east-1.api.aws/anthropic/"
+
+
+@pytest.mark.parametrize(
+    ("provider", "model_id", "extra_kwargs"),
+    [
+        ("anthropic", "claude-fable-5", {"api_key": "dummy-key"}),
+        (
+            "bedrock_claude",
+            "anthropic.claude-fable-5",
+            {
+                "aws_region": "us-east-1",
+                "aws_access_key": "dummy-access",
+                "aws_secret_key": "dummy-secret",
+            },
+        ),
+    ],
+)
+def test_current_claude_safeguard_refusal_is_not_treated_as_empty_response(
+    tmp_path: Path,
+    provider: str,
+    model_id: str,
+    extra_kwargs: dict[str, str],
+) -> None:
+    """A successful HTTP refusal must surface as a typed terminal error."""
+    config = bind_runtime_paths(
+        Config(
+            models={
+                "claude": ModelConfig(
+                    provider=provider,
+                    id=model_id,
+                    extra_kwargs=extra_kwargs,
+                ),
+            },
+        ),
+        test_runtime_paths(tmp_path),
+    )
+    model = get_model_instance(config, runtime_paths_for(config), "claude")
+
+    with pytest.raises(ModelSafeguardRefusalError, match="stop_reason=refusal"):
+        model._parse_provider_response(_safeguard_refusal_message())
+
+
+def test_google_tool_loop_preserves_provider_call_ids(tmp_path: Path) -> None:
+    """Gemini 3.6 tool-result requests must retain the originating call ID."""
+    config = bind_runtime_paths(
+        Config(
+            models={
+                "gemini": ModelConfig(
+                    provider="google",
+                    id="gemini-3.6-flash",
+                    extra_kwargs={"api_key": "dummy-key"},
+                ),
+            },
+        ),
+        test_runtime_paths(tmp_path),
+    )
+    model = get_model_instance(config, runtime_paths_for(config), "gemini")
+    formatted_messages, _system_message = model._format_messages(
+        [
+            AgnoMessage(
+                role="assistant",
+                tool_calls=[
+                    {
+                        "id": "call-123",
+                        "type": "function",
+                        "function": {"name": "lookup", "arguments": "{}"},
+                    },
+                ],
+            ),
+            AgnoMessage(
+                role="tool",
+                tool_call_id="call-123",
+                tool_name="lookup",
+                content="result",
+            ),
+        ],
+    )
+
+    function_call = formatted_messages[0].parts[0].function_call
+    function_response = formatted_messages[1].parts[0].function_response
+    assert function_call is not None
+    assert function_call.id == "call-123"
+    assert function_response is not None
+    assert function_response.id == "call-123"
 
 
 def test_anthropic_timeout_override_is_preserved(tmp_path: Path) -> None:

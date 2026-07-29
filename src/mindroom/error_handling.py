@@ -16,7 +16,7 @@ logger = get_logger(__name__)
 # the Claude mid-stream SSE error case: the HTTP response was already committed
 # before the provider emitted an error event.
 TRANSIENT_PROVIDER_STATUS_CODES = frozenset({200, 408, 409, 429, 500, 502, 503, 504, 529})
-MODEL_SAFEGUARD_REFUSAL_MESSAGE = "Vertex Claude returned stop_reason=refusal"
+MODEL_SAFEGUARD_REFUSAL_MESSAGE = "Claude returned stop_reason=refusal"
 
 
 class AvatarGenerationError(RuntimeError):
