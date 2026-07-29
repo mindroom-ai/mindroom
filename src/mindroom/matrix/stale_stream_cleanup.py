@@ -324,7 +324,7 @@ async def _auto_resume_interrupted_threads(
     owner_actors: Mapping[str, StaleStreamCleanupActor],
     delay: float = 2.0,
     delay_before_first: bool = False,
-    retryable_room_ids: set[str] | None = None,
+    retryable_room_ids: set[str],
 ) -> int:
     """Send resume prompts for interrupted threaded conversations."""
     if not interrupted:
@@ -349,10 +349,7 @@ async def _auto_resume_interrupted_threads(
         )
         owner_actor = owner_actors.get(owner_user_id) if owner_user_id is not None else None
         if owner_actor is None or owner_actor.conversation_cache is None:
-            _mark_auto_resume_room_retryable(
-                retryable_room_ids,
-                room_id=interrupted_thread.room_id,
-            )
+            retryable_room_ids.add(interrupted_thread.room_id)
             logger.warning(
                 "Skipping auto-resume because owning actor is unavailable or not joined",
                 room_id=interrupted_thread.room_id,
@@ -422,26 +419,16 @@ async def _auto_resume_interrupted_threads(
     return resumed_count
 
 
-def _mark_auto_resume_room_retryable(
-    retryable_room_ids: set[str] | None,
-    *,
-    room_id: str,
-) -> None:
-    """Release a room so a later joined-membership wave can retry it."""
-    if retryable_room_ids is not None:
-        retryable_room_ids.add(room_id)
-
-
 def _mark_failed_auto_resume_delivery_retryable(
-    retryable_room_ids: set[str] | None,
+    retryable_room_ids: set[str],
     *,
     room_id: str,
     send_attempted: bool,
     delivered: object | None,
 ) -> None:
-    """Release rooms whose router delivery attempt produced no Matrix event."""
+    """Release a room when router delivery produced no Matrix event."""
     if send_attempted and delivered is None:
-        _mark_auto_resume_room_retryable(retryable_room_ids, room_id=room_id)
+        retryable_room_ids.add(room_id)
 
 
 async def _interrupted_target_remains_latest_human_work(
@@ -549,7 +536,7 @@ async def _cleanup_stale_streaming_room(
     runtime_paths: RuntimePaths,
     startup_cutoff_ms: int | None = None,
     terminal_interrupted_only: bool = False,
-    retryable_room_ids: set[str] | None = None,
+    retryable_room_ids: set[str],
 ) -> tuple[int, list[_InterruptedThread]]:
     """Scan one room once and let each bot account repair its own messages."""
     if not actors:
@@ -624,7 +611,7 @@ async def _cleanup_stale_streaming_room(
 
 
 def _mark_unavailable_cleanup_actor_retryable(
-    retryable_room_ids: set[str] | None,
+    retryable_room_ids: set[str],
     *,
     room_id: str,
     bot_user_id: str,
@@ -646,7 +633,7 @@ def _mark_unavailable_cleanup_actor_retryable(
         )
         is not None
     ):
-        _mark_auto_resume_room_retryable(retryable_room_ids, room_id=room_id)
+        retryable_room_ids.add(room_id)
 
 
 async def _process_stale_room_candidate(

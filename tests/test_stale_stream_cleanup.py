@@ -265,6 +265,7 @@ async def _run_cleanup(
             runtime_paths=runtime_paths_for(config),
             startup_cutoff_ms=startup_cutoff_ms,
             terminal_interrupted_only=terminal_interrupted_only,
+            retryable_room_ids=set(),
         )
 
 
@@ -809,6 +810,7 @@ async def test_auto_resume_sends_correctly_threaded_messages(tmp_path: Path) -> 
             owner_actors=_auto_resume_owner_actors(
                 _auto_resume_conversation_cache(interrupted),
             ),
+            retryable_room_ids=set(),
         )
 
     assert resumed_count == 2
@@ -862,6 +864,7 @@ async def test_auto_resume_router_interruption_uses_router_cache_without_self_me
             owner_actors={
                 router_user_id: StaleStreamCleanupActor(router_client, router_cache),
             },
+            retryable_room_ids=set(),
         )
 
     assert resumed_count == 1
@@ -891,6 +894,7 @@ async def test_auto_resume_skips_interruption_without_resolved_requester(tmp_pat
             owner_actors=_auto_resume_owner_actors(
                 _auto_resume_conversation_cache(interrupted),
             ),
+            retryable_room_ids=set(),
         )
 
     assert resumed_count == 0
@@ -951,6 +955,7 @@ async def test_auto_resume_classifies_later_activity_by_effective_sender_and_his
             runtime_paths=runtime_paths_for(config),
             conversation_cache=conversation_cache,
             owner_actors=_auto_resume_owner_actors(conversation_cache),
+            retryable_room_ids=set(),
         )
 
     assert resumed_count == expected_resumes
@@ -998,6 +1003,7 @@ async def test_prior_auto_resume_relay_does_not_suppress_sibling_resume(tmp_path
             runtime_paths=runtime_paths_for(config),
             conversation_cache=conversation_cache,
             owner_actors=_auto_resume_owner_actors(conversation_cache),
+            retryable_room_ids=set(),
         )
 
     assert resumed_count == 1
@@ -1070,6 +1076,7 @@ async def test_auto_resume_fails_closed_without_authoritative_target_history(
             runtime_paths=runtime_paths_for(config),
             conversation_cache=conversation_cache,
             owner_actors=_auto_resume_owner_actors(conversation_cache),
+            retryable_room_ids=set(),
         )
 
     assert resumed_count == 0
@@ -1111,6 +1118,7 @@ async def test_auto_resume_propagates_cancelled_source_refresh(tmp_path: Path) -
             runtime_paths=runtime_paths_for(config),
             conversation_cache=conversation_cache,
             owner_actors=_auto_resume_owner_actors(conversation_cache),
+            retryable_room_ids=set(),
         )
 
     mock_send.assert_not_awaited()
@@ -1147,6 +1155,7 @@ async def test_auto_resume_source_refresh_sees_newer_human_missing_from_startup_
             runtime_paths=runtime_paths_for(config),
             conversation_cache=conversation_cache,
             owner_actors=_auto_resume_owner_actors(conversation_cache),
+            retryable_room_ids=set(),
         )
 
     assert resumed_count == 0
@@ -1213,6 +1222,7 @@ async def test_auto_resume_checks_freshness_after_delay_before_each_delivery(tmp
             runtime_paths=runtime_paths_for(config),
             conversation_cache=conversation_cache,
             owner_actors=_auto_resume_owner_actors(conversation_cache),
+            retryable_room_ids=set(),
         )
 
     assert resumed_count == 3
@@ -1267,6 +1277,7 @@ async def test_auto_resume_target_mention_ignores_unprepared_unrelated_entity(tm
             owner_actors=_auto_resume_owner_actors(
                 _auto_resume_conversation_cache(interrupted),
             ),
+            retryable_room_ids=set(),
         )
 
     assert resumed_count == 1
@@ -1365,6 +1376,7 @@ async def test_auto_resume_skips_thread_id_none(tmp_path: Path) -> None:
             owner_actors=_auto_resume_owner_actors(
                 _auto_resume_conversation_cache(interrupted),
             ),
+            retryable_room_ids=set(),
         )
 
     assert resumed_count == 1
@@ -1401,6 +1413,7 @@ async def test_auto_resume_records_outbound_message_when_send_succeeds(tmp_path:
             runtime_paths=runtime_paths_for(config),
             conversation_cache=conversation_cache,
             owner_actors=_auto_resume_owner_actors(conversation_cache),
+            retryable_room_ids=set(),
         )
 
     assert resumed_count == 1
@@ -2105,6 +2118,7 @@ async def test_recent_mid_tool_shutdown_marker_resumes_only_without_newer_human_
             runtime_paths=runtime_paths_for(config),
             conversation_cache=conversation_cache,
             owner_actors=_auto_resume_owner_actors(conversation_cache),
+            retryable_room_ids=set(),
             delay=0,
         )
 
@@ -2952,6 +2966,7 @@ async def test_auto_resume_dedupes_same_agent_and_thread_using_newest_target(tmp
             owner_actors=_auto_resume_owner_actors(
                 _auto_resume_conversation_cache(interrupted),
             ),
+            retryable_room_ids=set(),
         )
 
     assert resumed_count == 1
@@ -3019,6 +3034,7 @@ async def test_auto_resume_sends_all_unique_threads_after_replacing_older_target
             owner_actors=_auto_resume_owner_actors(
                 _auto_resume_conversation_cache(interrupted),
             ),
+            retryable_room_ids=set(),
         )
 
     assert resumed_count == 3
@@ -3071,6 +3087,7 @@ async def test_auto_resume_sends_threads_from_every_room(tmp_path: Path) -> None
             owner_actors=_auto_resume_owner_actors(
                 _auto_resume_conversation_cache(interrupted),
             ),
+            retryable_room_ids=set(),
         )
 
     assert resumed_count == 2
@@ -3393,6 +3410,7 @@ async def test_auto_resume_uses_each_interrupted_owner_cache(tmp_path: Path) -> 
             runtime_paths=runtime_paths_for(config),
             conversation_cache=router_cache,
             owner_actors=owner_actors,
+            retryable_room_ids=set(),
         )
 
     assert resumed_count == 2
@@ -3662,6 +3680,7 @@ async def test_shared_room_cleanup_routes_edits_through_each_message_owner(tmp_p
             config=config,
             runtime_paths=runtime_paths_for(config),
             startup_cutoff_ms=NOW_MS,
+            retryable_room_ids=set(),
         )
 
     assert cleaned_count == 2
@@ -3886,6 +3905,7 @@ async def test_auto_resume_continues_after_send_exception(tmp_path: Path) -> Non
             owner_actors=_auto_resume_owner_actors(
                 _auto_resume_conversation_cache(interrupted),
             ),
+            retryable_room_ids=set(),
         )
 
     assert resumed_count == 2
