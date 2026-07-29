@@ -17,12 +17,17 @@ from .agent_message_snapshot import AgentMessageSnapshot, AgentMessageSnapshotUn
 from .thread_cache_helpers import thread_cache_rejection_reason
 
 if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
+
     from .event_cache_events import CachedEventRow
     from .thread_cache_state import ThreadCacheGap
 
+    type _LatestEditLookup = Callable[[dict[str, Any]], Awaitable[CachedEventRow | None]]
+    type _SnapshotScopeRowLookup = Callable[[], Awaitable[tuple[dict[str, Any], float | None] | None]]
+
 
 @dataclass(frozen=True, slots=True)
-class SnapshotLookupResult:
+class _SnapshotLookupResult:
     """Outcome for one matching scope event during latest-message lookup."""
 
     snapshot: AgentMessageSnapshot | None
@@ -41,7 +46,7 @@ def reject_snapshot_scope_with_gap(gap: ThreadCacheGap | None) -> None:
         raise AgentMessageSnapshotUnavailable(msg)
 
 
-def event_matches_snapshot_scope(
+def _event_matches_snapshot_scope(
     event: dict[str, Any],
     *,
     room_id: str,
@@ -66,7 +71,7 @@ def _event_is_snapshot_graph_member(event: dict[str, Any], *, room_id: str) -> b
     )
 
 
-async def resolved_snapshot_thread_event_ids(
+async def _resolved_snapshot_thread_event_ids(
     events: list[dict[str, Any]],
     *,
     room_id: str,
@@ -100,20 +105,20 @@ async def resolved_snapshot_thread_event_ids(
     return frozenset(event_id for event_id, resolved_thread_id in resolved.items() if resolved_thread_id == thread_id)
 
 
-def snapshot_event_id(event: dict[str, Any]) -> str | None:
+def _snapshot_event_id(event: dict[str, Any]) -> str | None:
     """Return one event's usable ID for snapshot edit lookup."""
     event_id = event.get("event_id")
     return event_id if isinstance(event_id, str) and event_id else None
 
 
-def snapshot_lookup_result(
+def _snapshot_lookup_result(
     event: dict[str, Any],
     *,
     latest_edit: CachedEventRow | None,
     thread_id: str | None,
     cached_at: float | None,
     runtime_started_at: float | None,
-) -> SnapshotLookupResult:
+) -> _SnapshotLookupResult:
     """Resolve one cached event and optional edit into a visible snapshot outcome."""
     latest_replacement = None if latest_edit is None else latest_edit.event
     original_observed_selected_edit = latest_replacement is None or any(
@@ -136,10 +141,139 @@ def snapshot_lookup_result(
         and runtime_started_at is not None
         and (visible_cached_at is None or visible_cached_at < runtime_started_at)
     ):
-        return SnapshotLookupResult(snapshot=None, stop_scanning=True)
+        return _SnapshotLookupResult(snapshot=None, stop_scanning=True)
 
     visible_content = dict(event["content"])
     if latest_replacement is not None:
         visible_content = replacement_content(visible_content, latest_replacement["content"]["m.new_content"])
     snapshot = AgentMessageSnapshot(content=visible_content, origin_server_ts=event["origin_server_ts"])
-    return SnapshotLookupResult(snapshot=snapshot)
+    return _SnapshotLookupResult(snapshot=snapshot)
+
+
+async def load_agent_message_snapshot(
+    *,
+    latest_edit_lookup: _LatestEditLookup,
+    next_row: _SnapshotScopeRowLookup,
+    room_id: str,
+    thread_id: str | None,
+    sender: str,
+    runtime_started_at: float | None,
+) -> AgentMessageSnapshot | None:
+    """Return the latest visible message from ``sender`` in one backend-neutral scope query.
+
+    Both backends stream the same rows through the same decisions, so the scan lives here and they
+    supply only the cursor. ``next_row`` yields ``(event, cached_at)`` newest-first until exhausted.
+    """
+    if thread_id is None:
+        return await _newest_room_scope_snapshot(
+            latest_edit_lookup=latest_edit_lookup,
+            next_row=next_row,
+            room_id=room_id,
+            sender=sender,
+            runtime_started_at=runtime_started_at,
+        )
+    return await _newest_thread_scope_snapshot(
+        latest_edit_lookup=latest_edit_lookup,
+        next_row=next_row,
+        room_id=room_id,
+        thread_id=thread_id,
+        sender=sender,
+        runtime_started_at=runtime_started_at,
+    )
+
+
+async def _snapshot_for_scope_row(
+    event: dict[str, Any],
+    cached_at: float | None,
+    *,
+    latest_edit_lookup: _LatestEditLookup,
+    room_id: str,
+    thread_id: str | None,
+    sender: str,
+    runtime_started_at: float | None,
+) -> _SnapshotLookupResult | None:
+    """Return one candidate row's outcome, or None when the row is out of scope."""
+    if not _event_matches_snapshot_scope(event, room_id=room_id, thread_id=thread_id, sender=sender):
+        return None
+    if _snapshot_event_id(event) is None:
+        return _SnapshotLookupResult(snapshot=None)
+    return _snapshot_lookup_result(
+        event,
+        latest_edit=await latest_edit_lookup(event),
+        thread_id=thread_id,
+        cached_at=cached_at,
+        runtime_started_at=runtime_started_at,
+    )
+
+
+async def _newest_room_scope_snapshot(
+    *,
+    latest_edit_lookup: _LatestEditLookup,
+    next_row: _SnapshotScopeRowLookup,
+    room_id: str,
+    sender: str,
+    runtime_started_at: float | None,
+) -> AgentMessageSnapshot | None:
+    """Stream the room scope, stopping at the first row that answers it."""
+    while (row := await next_row()) is not None:
+        event, cached_at = row
+        result = await _snapshot_for_scope_row(
+            event,
+            cached_at,
+            latest_edit_lookup=latest_edit_lookup,
+            room_id=room_id,
+            thread_id=None,
+            sender=sender,
+            runtime_started_at=runtime_started_at,
+        )
+        if result is None:
+            continue
+        if result.stop_scanning:
+            return None
+        if result.snapshot is not None:
+            return result.snapshot
+    return None
+
+
+async def _newest_thread_scope_snapshot(
+    *,
+    latest_edit_lookup: _LatestEditLookup,
+    next_row: _SnapshotScopeRowLookup,
+    room_id: str,
+    thread_id: str,
+    sender: str,
+    runtime_started_at: float | None,
+) -> AgentMessageSnapshot | None:
+    """Resolve one whole indexed thread graph, then take its newest proven member.
+
+    This cannot stop at the first scope match like the room scope: membership can be indirect, and
+    the ancestors that prove it are older than the candidate they prove, so they arrive later in a
+    newest-first scan. Materializing is bounded by one thread.
+    """
+    rows: list[tuple[dict[str, Any], float | None]] = []
+    while (row := await next_row()) is not None:
+        rows.append(row)
+    thread_event_ids = await _resolved_snapshot_thread_event_ids(
+        [event for event, _cached_at in rows],
+        room_id=room_id,
+        thread_id=thread_id,
+    )
+    for event, cached_at in rows:
+        if event.get("event_id") not in thread_event_ids:
+            continue
+        result = await _snapshot_for_scope_row(
+            event,
+            cached_at,
+            latest_edit_lookup=latest_edit_lookup,
+            room_id=room_id,
+            thread_id=thread_id,
+            sender=sender,
+            runtime_started_at=runtime_started_at,
+        )
+        if result is None:
+            continue
+        if result.stop_scanning:
+            return None
+        if result.snapshot is not None:
+            return result.snapshot
+    return None

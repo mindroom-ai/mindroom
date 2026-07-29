@@ -21,7 +21,6 @@ from mindroom.matrix.client_visible_messages import (
     ThreadEditCandidates,
     apply_latest_edits_to_messages,
 )
-from mindroom.matrix.event_info import EventInfo
 from tests.threading_helpers import _text_event
 
 if TYPE_CHECKING:
@@ -46,7 +45,7 @@ def _original_message(*, sender: str = _AUTHOR, body: str = "original") -> Resol
 
 
 def _record(candidates: ThreadEditCandidates, event: nio.RoomMessageText) -> None:
-    candidates.record(event, event_info=EventInfo.from_event(event.source))
+    candidates.record(event)
 
 
 async def _apply(

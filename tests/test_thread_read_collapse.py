@@ -148,7 +148,7 @@ async def _folded_messages(rows: list[dict[str, Any]]) -> list[ResolvedVisibleMe
     for row in rows:
         event = _nio_text_event(row)
         info = EventInfo.from_event(row)
-        if candidates.record(event, event_info=info):
+        if candidates.record(event):
             continue
         messages[event.event_id] = ResolvedVisibleMessage(
             sender=event.sender,
@@ -831,7 +831,7 @@ def _winning_edit_ids_by_original(rows: list[dict[str, Any]]) -> dict[str, str |
     senders: dict[str, str] = {}
     for row in rows:
         if _is_edit(row):
-            candidates.record(_nio_text_event(row), event_info=EventInfo.from_event(row))
+            candidates.record(_nio_text_event(row))
         else:
             senders[row["event_id"]] = row["sender"]
     winners: dict[str, str | None] = {}

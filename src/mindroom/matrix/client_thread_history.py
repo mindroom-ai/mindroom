@@ -464,7 +464,7 @@ async def _resolve_thread_history_from_event_sources_timed(
             excluded_event_ids=redacted_event_ids,
         ):
             edit_candidates.record_event_source(replacement_source)
-        if edit_candidates.record(event, event_info=event_info):
+        if edit_candidates.record(event):
             continue
         if event_info.is_edit or event.event_id in messages_by_event_id:
             continue
@@ -1391,7 +1391,7 @@ def _record_scanned_room_message_source(
         return None
 
     event_info = EventInfo.from_event(event.source)
-    recorded_as_edit = edit_candidates.record(event, event_info=event_info)
+    recorded_as_edit = edit_candidates.record(event)
     # An edit stays in the scanned sources even though it is not a visible message: the canonical
     # pass rebuilds the edit buckets from them once the whole scan is in, so removing it here would
     # drop the edit entirely.

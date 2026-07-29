@@ -404,31 +404,17 @@ class ThreadEditCandidates:
 
     _by_original: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
 
-    def record(
-        self,
-        event: nio.Event,
-        *,
-        event_info: EventInfo,
-    ) -> bool:
-        """Track one replacement candidate, returning whether the event was an edit at all.
+    def record(self, event: nio.Event) -> bool:
+        """Track one parsed replacement candidate, returning whether the event was an edit at all.
 
         Normalized rather than stored raw: a parsed event carries its ID, sender and timestamp as
         attributes, and ``source`` is not guaranteed to repeat them. Ranking reads those fields off
         the payload, so a raw copy would drop every candidate for want of an event ID.
         """
-        if not event_info.is_edit:
-            return False
-        if event_info.original_event_id:
-            self.record_source(
-                normalize_nio_event_for_cache(event),
-                original_event_id=event_info.original_event_id,
-            )
-        # A replacement naming no usable target is still a replacement, so it is consumed rather
-        # than falling through and rendering its own ``* `` fallback body as a message.
-        return True
+        return self.record_event_source(normalize_nio_event_for_cache(event))
 
     def record_source(self, event_source: dict[str, Any], *, original_event_id: str) -> None:
-        """Track one raw replacement payload, explicit or bundled."""
+        """Track one raw replacement payload against a caller-known original."""
         self._by_original.setdefault(original_event_id, []).append(event_source)
 
     def record_event_source(self, event_source: dict[str, Any]) -> bool:
@@ -438,6 +424,8 @@ class ThreadEditCandidates:
             return False
         if event_info.original_event_id:
             self.record_source(event_source, original_event_id=event_info.original_event_id)
+        # A replacement naming no usable target is still a replacement, so it is consumed rather
+        # than falling through and rendering its own ``* `` fallback body as a message.
         return True
 
     def original_event_ids(self) -> list[str]:
