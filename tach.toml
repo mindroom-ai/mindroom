@@ -3600,6 +3600,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.knowledge.refresh_policy"
 depends_on = [
+    "mindroom.credentials",
     "mindroom.knowledge.availability",
     "mindroom.knowledge.redaction",
     "mindroom.knowledge.registry",
