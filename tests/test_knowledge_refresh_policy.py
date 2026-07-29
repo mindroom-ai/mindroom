@@ -1,13 +1,11 @@
-"""Pure knowledge refresh policy and the bounded map the knowledge caches share.
+"""Knowledge refresh-policy decisions, taken with no scheduler and no globals.
 
-Every decision here is taken with no scheduler, no event loop, and no process-global
-cooldown state: the cooldown bookkeeping is passed in as a plain mapping and the
-clock as a plain float.
+Both clocks are injected, so the Git poll-interval boundary and the cooldown
+window are pinned to exact instants rather than approximated against wall time.
 """
 
 from __future__ import annotations
 
-import asyncio
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, cast
 
@@ -17,13 +15,12 @@ from mindroom.config.knowledge import KnowledgeBaseConfig, KnowledgeGitConfig
 from mindroom.config.main import AgentConfig, Config
 from mindroom.knowledge import registry as knowledge_registry
 from mindroom.knowledge.availability import KnowledgeAvailability
-from mindroom.knowledge.bounded_map import BoundedMap
 from mindroom.knowledge.refresh_policy import (
     RefreshCooldownKey,
-    _RefreshDecision,
-    decide_refresh,
+    cooldown_elapsed,
     ready_index_effective_availability,
-    scheduler_probe_required,
+    refresh_cooldown_key,
+    refresh_trigger,
 )
 from mindroom.knowledge.registry import (
     PublishedIndexResolution,
@@ -40,7 +37,7 @@ if TYPE_CHECKING:
 
     from mindroom.constants import RuntimePaths
 
-_NO_COOLDOWNS: dict[RefreshCooldownKey, float] = {}
+_WALL_NOW = datetime(2026, 7, 1, 12, 0, 0, tzinfo=UTC)
 
 
 def _config(tmp_path: Path, *, git: KnowledgeGitConfig | None = None) -> Config:
@@ -65,7 +62,7 @@ def _resolution(
     last_refresh_age: timedelta | None = None,
 ) -> PublishedIndexResolution:
     key = resolve_published_index_key("docs", config=config, runtime_paths=runtime_paths)
-    last_refresh_at = None if last_refresh_age is None else (datetime.now(tz=UTC) - last_refresh_age).isoformat()
+    last_refresh_at = None if last_refresh_age is None else (_WALL_NOW - last_refresh_age).isoformat()
     state = PublishedIndexState(
         settings=key.indexing_settings,
         status="complete",
@@ -87,134 +84,94 @@ def _resolution(
     )
 
 
-def _decide(
-    config: Config,
-    runtime_paths: RuntimePaths,
-    lookup: PublishedIndexResolution | None,
-    *,
-    availability: KnowledgeAvailability,
-    scheduler_is_refreshing: bool = False,
-    now: float = 1_000.0,
-    scheduled_at: dict[RefreshCooldownKey, float] | None = None,
-) -> _RefreshDecision:
-    return decide_refresh(
-        lookup=lookup,
-        availability=availability,
-        config=config,
-        runtime_paths=runtime_paths,
-        scheduler_is_refreshing=scheduler_is_refreshing,
-        now=now,
-        scheduled_at=_NO_COOLDOWNS if scheduled_at is None else scheduled_at,
-    )
-
-
-def test_unresolved_base_decides_nothing(tmp_path: Path) -> None:
-    """A base with no resolution cannot be scheduled and reports its resolved availability."""
-    config = _config(tmp_path)
-    runtime_paths = test_runtime_paths(tmp_path)
-
-    assert not scheduler_probe_required(
-        lookup=None,
-        availability=KnowledgeAvailability.INITIALIZING,
-        config=config,
-    )
-    decision = _decide(config, runtime_paths, None, availability=KnowledgeAvailability.INITIALIZING)
-    assert decision == _RefreshDecision(availability=KnowledgeAvailability.INITIALIZING)
-    assert not decision.schedule_refresh
-
-
-def test_ready_index_without_on_access_refresh_skips_the_scheduler_probe(tmp_path: Path) -> None:
-    """The common READY read must not pay for a scheduler probe to decide to do nothing."""
+def test_ready_index_without_on_access_refresh_wants_nothing(tmp_path: Path) -> None:
+    """The common READY read decides to do nothing before any scheduler probe."""
     config = _config(tmp_path)
     runtime_paths = test_runtime_paths(tmp_path)
     lookup = _resolution(config, runtime_paths, availability=KnowledgeAvailability.READY)
 
-    assert not scheduler_probe_required(
+    assert (
+        refresh_trigger(
+            lookup=lookup,
+            availability=KnowledgeAvailability.READY,
+            config=config,
+            wall_now=_WALL_NOW,
+        )
+        is None
+    )
+
+
+def test_ready_index_due_for_on_access_refresh_reports_stale_while_refreshing(tmp_path: Path) -> None:
+    """A due on-access refresh downgrades the turn's view of a READY index to STALE."""
+    config = _config(tmp_path)
+    runtime_paths = test_runtime_paths(tmp_path)
+    lookup = _resolution(
+        config,
+        runtime_paths,
+        availability=KnowledgeAvailability.READY,
+        schedule_refresh_on_access=True,
+    )
+
+    trigger = refresh_trigger(
         lookup=lookup,
         availability=KnowledgeAvailability.READY,
         config=config,
+        wall_now=_WALL_NOW,
     )
-    decision = _decide(config, runtime_paths, lookup, availability=KnowledgeAvailability.READY)
-    assert decision == _RefreshDecision(availability=KnowledgeAvailability.READY)
+    assert trigger is not None
+    assert trigger.availability_while_refreshing is KnowledgeAvailability.STALE
+    assert trigger.cooldown_seconds == 300.0
 
 
-def test_ready_index_due_for_on_access_refresh_schedules_and_reports_stale(tmp_path: Path) -> None:
-    """A due on-access refresh is scheduled, and the turn is told the index may be stale."""
+@pytest.mark.parametrize(
+    "availability",
+    [
+        KnowledgeAvailability.INITIALIZING,
+        KnowledgeAvailability.STALE,
+        KnowledgeAvailability.CONFIG_MISMATCH,
+        KnowledgeAvailability.REFRESH_FAILED,
+    ],
+)
+def test_unusable_index_wants_a_refresh_without_changing_availability(
+    tmp_path: Path,
+    availability: KnowledgeAvailability,
+) -> None:
+    """Every non-READY availability warrants a refresh and is reported to the turn unchanged."""
     config = _config(tmp_path)
+    runtime_paths = test_runtime_paths(tmp_path)
+    lookup = _resolution(config, runtime_paths, availability=availability)
+
+    trigger = refresh_trigger(lookup=lookup, availability=availability, config=config, wall_now=_WALL_NOW)
+    assert trigger is not None
+    assert trigger.availability_while_refreshing is availability
+    assert trigger.cooldown_seconds == 300.0
+
+
+@pytest.mark.parametrize(
+    ("age_seconds", "expected_due"),
+    [(59, False), (60, True), (61, True)],
+)
+def test_git_poll_interval_boundary_is_exact(tmp_path: Path, age_seconds: int, expected_due: bool) -> None:
+    """The poll interval fires exactly at its boundary, not a second early or late."""
+    config = _config(tmp_path, git=KnowledgeGitConfig(repo_url="https://example.com/x.git", poll_interval_seconds=60))
     runtime_paths = test_runtime_paths(tmp_path)
     lookup = _resolution(
         config,
         runtime_paths,
         availability=KnowledgeAvailability.READY,
         schedule_refresh_on_access=True,
+        last_refresh_age=timedelta(seconds=age_seconds),
     )
 
-    assert scheduler_probe_required(lookup=lookup, availability=KnowledgeAvailability.READY, config=config)
-    decision = _decide(config, runtime_paths, lookup, availability=KnowledgeAvailability.READY)
-    assert decision.availability is KnowledgeAvailability.STALE
-    assert decision.schedule_refresh
-    assert decision.cooldown_key == (
-        knowledge_registry.refresh_target_for_published_index_key(lookup.key),
-        KnowledgeAvailability.READY,
-        lookup.key.indexing_settings,
-    )
-
-
-def test_refresh_already_in_flight_reports_stale_without_scheduling_again(tmp_path: Path) -> None:
-    """An in-flight refresh still downgrades READY to STALE but must not queue a duplicate."""
-    config = _config(tmp_path)
-    runtime_paths = test_runtime_paths(tmp_path)
-    lookup = _resolution(
-        config,
-        runtime_paths,
+    trigger = refresh_trigger(
+        lookup=lookup,
         availability=KnowledgeAvailability.READY,
-        schedule_refresh_on_access=True,
+        config=config,
+        wall_now=_WALL_NOW,
     )
-
-    decision = _decide(
-        config,
-        runtime_paths,
-        lookup,
-        availability=KnowledgeAvailability.READY,
-        scheduler_is_refreshing=True,
-    )
-    assert decision == _RefreshDecision(availability=KnowledgeAvailability.STALE)
-    assert not decision.schedule_refresh
-
-
-def test_cooldown_window_suppresses_a_second_on_access_refresh(tmp_path: Path) -> None:
-    """Within the cooldown the index reads READY again; past it the refresh is rescheduled."""
-    config = _config(tmp_path)
-    runtime_paths = test_runtime_paths(tmp_path)
-    lookup = _resolution(
-        config,
-        runtime_paths,
-        availability=KnowledgeAvailability.READY,
-        schedule_refresh_on_access=True,
-    )
-    first = _decide(config, runtime_paths, lookup, availability=KnowledgeAvailability.READY, now=1_000.0)
-    assert first.cooldown_key is not None
-    scheduled_at = {first.cooldown_key: 1_000.0}
-
-    within = _decide(
-        config,
-        runtime_paths,
-        lookup,
-        availability=KnowledgeAvailability.READY,
-        now=1_299.0,
-        scheduled_at=scheduled_at,
-    )
-    assert within == _RefreshDecision(availability=KnowledgeAvailability.READY)
-
-    elapsed = _decide(
-        config,
-        runtime_paths,
-        lookup,
-        availability=KnowledgeAvailability.READY,
-        now=1_300.0,
-        scheduled_at=scheduled_at,
-    )
-    assert elapsed.schedule_refresh
+    assert (trigger is not None) is expected_due
+    effective = ready_index_effective_availability(lookup, config, wall_now=_WALL_NOW)
+    assert (effective is KnowledgeAvailability.STALE) is expected_due
 
 
 def test_git_poll_interval_replaces_the_default_cooldown(tmp_path: Path) -> None:
@@ -228,83 +185,28 @@ def test_git_poll_interval_replaces_the_default_cooldown(tmp_path: Path) -> None
         schedule_refresh_on_access=True,
         last_refresh_age=timedelta(seconds=600),
     )
-    first = _decide(config, runtime_paths, lookup, availability=KnowledgeAvailability.READY, now=1_000.0)
-    assert first.cooldown_key is not None
-    scheduled_at = {first.cooldown_key: 1_000.0}
 
-    assert not _decide(
-        config,
-        runtime_paths,
-        lookup,
+    trigger = refresh_trigger(
+        lookup=lookup,
         availability=KnowledgeAvailability.READY,
-        now=1_059.0,
-        scheduled_at=scheduled_at,
-    ).schedule_refresh
-    assert _decide(
-        config,
-        runtime_paths,
-        lookup,
-        availability=KnowledgeAvailability.READY,
-        now=1_060.0,
-        scheduled_at=scheduled_at,
-    ).schedule_refresh
-
-
-def test_freshly_polled_git_index_is_not_due_for_a_refresh(tmp_path: Path) -> None:
-    """An index refreshed inside its poll interval stays READY and needs no probe."""
-    config = _config(tmp_path, git=KnowledgeGitConfig(repo_url="https://example.com/x.git", poll_interval_seconds=600))
-    runtime_paths = test_runtime_paths(tmp_path)
-    lookup = _resolution(
-        config,
-        runtime_paths,
-        availability=KnowledgeAvailability.READY,
-        schedule_refresh_on_access=True,
-        last_refresh_age=timedelta(seconds=30),
+        config=config,
+        wall_now=_WALL_NOW,
     )
-
-    assert ready_index_effective_availability(lookup, config) is KnowledgeAvailability.READY
-    assert not scheduler_probe_required(lookup=lookup, availability=KnowledgeAvailability.READY, config=config)
-
-
-def test_git_index_past_its_poll_interval_reads_stale(tmp_path: Path) -> None:
-    """A Git index older than its poll interval is reported stale before any refresh runs."""
-    config = _config(tmp_path, git=KnowledgeGitConfig(repo_url="https://example.com/x.git", poll_interval_seconds=60))
-    runtime_paths = test_runtime_paths(tmp_path)
-    lookup = _resolution(
-        config,
-        runtime_paths,
-        availability=KnowledgeAvailability.READY,
-        last_refresh_age=timedelta(seconds=600),
-    )
-
-    assert ready_index_effective_availability(lookup, config) is KnowledgeAvailability.STALE
+    assert trigger is not None
+    assert trigger.cooldown_seconds == 60.0
 
 
-@pytest.mark.parametrize(
-    "availability",
-    [
-        KnowledgeAvailability.INITIALIZING,
-        KnowledgeAvailability.STALE,
-        KnowledgeAvailability.CONFIG_MISMATCH,
-        KnowledgeAvailability.REFRESH_FAILED,
-    ],
-)
-def test_unusable_index_schedules_a_refresh_without_changing_availability(
-    tmp_path: Path,
-    availability: KnowledgeAvailability,
-) -> None:
-    """Every non-READY availability schedules a refresh and is reported to the turn unchanged."""
+def test_cooldown_window_boundary_is_exact(tmp_path: Path) -> None:
+    """A cooldown suppresses rescheduling right up to its boundary, then allows it."""
     config = _config(tmp_path)
     runtime_paths = test_runtime_paths(tmp_path)
-    lookup = _resolution(config, runtime_paths, availability=availability)
+    lookup = _resolution(config, runtime_paths, availability=KnowledgeAvailability.STALE)
+    key = refresh_cooldown_key(lookup, config, runtime_paths, KnowledgeAvailability.STALE)
+    scheduled_at: dict[RefreshCooldownKey, float] = {key: 1_000.0}
 
-    assert scheduler_probe_required(lookup=lookup, availability=availability, config=config)
-    decision = _decide(config, runtime_paths, lookup, availability=availability)
-    assert decision.availability is availability
-    assert decision.schedule_refresh
-
-    in_flight = _decide(config, runtime_paths, lookup, availability=availability, scheduler_is_refreshing=True)
-    assert in_flight == _RefreshDecision(availability=availability)
+    assert not cooldown_elapsed(scheduled_at, key, monotonic_now=1_299.0, cooldown_seconds=300.0)
+    assert cooldown_elapsed(scheduled_at, key, monotonic_now=1_300.0, cooldown_seconds=300.0)
+    assert cooldown_elapsed({}, key, monotonic_now=0.0, cooldown_seconds=300.0)
 
 
 def test_changed_git_credentials_retry_a_failed_refresh_before_the_cooldown(tmp_path: Path) -> None:
@@ -313,116 +215,43 @@ def test_changed_git_credentials_retry_a_failed_refresh_before_the_cooldown(tmp_
     config = _config(tmp_path, git=git)
     runtime_paths = test_runtime_paths(tmp_path)
     lookup = _resolution(config, runtime_paths, availability=KnowledgeAvailability.REFRESH_FAILED)
+    failed_key = refresh_cooldown_key(lookup, config, runtime_paths, KnowledgeAvailability.REFRESH_FAILED)
+    scheduled_at: dict[RefreshCooldownKey, float] = {failed_key: 1_000.0}
 
-    failed = _decide(config, runtime_paths, lookup, availability=KnowledgeAvailability.REFRESH_FAILED, now=1_000.0)
-    assert failed.cooldown_key is not None
-    scheduled_at = {failed.cooldown_key: 1_000.0}
-
-    assert not _decide(
-        config,
-        runtime_paths,
-        lookup,
-        availability=KnowledgeAvailability.REFRESH_FAILED,
-        now=1_100.0,
-        scheduled_at=scheduled_at,
-    ).schedule_refresh
+    assert not cooldown_elapsed(scheduled_at, failed_key, monotonic_now=1_100.0, cooldown_seconds=300.0)
 
     rotated_config = _config(
         tmp_path,
         git=git.model_copy(update={"repo_url": "https://user:new-secret@example.com/x.git"}),
     )
     rotated_lookup = _resolution(rotated_config, runtime_paths, availability=KnowledgeAvailability.REFRESH_FAILED)
-    rotated = _decide(
+    rotated_key = refresh_cooldown_key(
+        rotated_lookup,
         rotated_config,
         runtime_paths,
-        rotated_lookup,
-        availability=KnowledgeAvailability.REFRESH_FAILED,
-        now=1_100.0,
-        scheduled_at=scheduled_at,
+        KnowledgeAvailability.REFRESH_FAILED,
     )
-    assert rotated.schedule_refresh
-    assert "new-secret" not in repr(rotated.cooldown_key)
-    assert "old-secret" not in repr(rotated.cooldown_key)
+
+    assert rotated_key != failed_key
+    assert cooldown_elapsed(scheduled_at, rotated_key, monotonic_now=1_100.0, cooldown_seconds=300.0)
+    assert "new-secret" not in repr(rotated_key)
+    assert "old-secret" not in repr(rotated_key)
 
 
-def test_bounded_map_evicts_its_oldest_entries_on_insert() -> None:
-    """Inserting past the capacity drops the entries inserted longest ago."""
-    entries: BoundedMap[str, int] = BoundedMap(capacity=3)
-    for index in range(5):
-        entries[f"key{index}"] = index
+def test_cooldown_keys_separate_availabilities_for_one_base(tmp_path: Path) -> None:
+    """A throttle on one availability must not suppress a refresh for a different one."""
+    config = _config(tmp_path)
+    runtime_paths = test_runtime_paths(tmp_path)
+    lookup = _resolution(config, runtime_paths, availability=KnowledgeAvailability.STALE)
 
-    assert list(entries) == ["key2", "key3", "key4"]
-
-
-def test_bounded_map_bounds_only_tracked_entries() -> None:
-    """Untracked entries neither consume capacity nor get evicted."""
-    entries: BoundedMap[str, int] = BoundedMap(capacity=2, tracked=lambda key, _value: key.startswith("private:"))
-    entries["shared:a"] = 0
-    entries["shared:b"] = 1
-    for index in range(4):
-        entries[f"private:{index}"] = index
-
-    assert list(entries) == ["shared:a", "shared:b", "private:2", "private:3"]
-
-
-def test_bounded_map_never_evicts_a_pinned_entry() -> None:
-    """A pinned entry survives eviction as the oldest entry, and still consumes capacity."""
-    entries: BoundedMap[str, int] = BoundedMap(capacity=2, pinned=lambda _key, value: value < 0)
-    entries["held"] = -1
-    for index in range(4):
-        entries[f"idle{index}"] = index
-
-    assert list(entries) == ["held", "idle3"]
-
-
-def test_bounded_map_evicts_by_eviction_order_not_insertion_order() -> None:
-    """A timestamped cache evicts its stalest entries, not the ones inserted first."""
-    entries: BoundedMap[str, float] = BoundedMap(
-        capacity=2,
-        eviction_order=lambda _key, scheduled_at: scheduled_at,
-    )
-    entries["first"] = 30.0
-    entries["second"] = 10.0
-    entries["third"] = 20.0
-
-    assert sorted(entries) == ["first", "third"]
-
-
-def test_bounded_map_prune_reclaims_entries_once_they_unpin() -> None:
-    """Releasing a pinned entry lets the next prune reclaim the space it held."""
-    released: set[str] = set()
-    entries: BoundedMap[str, int] = BoundedMap(capacity=1, pinned=lambda key, _value: key not in released)
-    entries["a"] = 0
-    entries["b"] = 1
-    assert len(entries) == 2
-
-    released.add("a")
-    entries.prune()
-    assert list(entries) == ["b"]
-
-
-def test_refresh_lock_entries_stay_stable_while_a_borrower_holds_them() -> None:
-    """The shared cap must never hand two callers different locks for one source root."""
-    from mindroom.knowledge import refresh_runner  # noqa: PLC0415
-
-    async def _exercise() -> None:
-        held = refresh_runner.KnowledgeSourceRoot(storage_root="/root", knowledge_path="/root/docs")
-        entry = refresh_runner._borrow_refresh_lock_for_key(held)
-        await entry.lock.acquire()
-        try:
-            for index in range(refresh_runner._refresh_locks.capacity + 5):
-                idle = refresh_runner.KnowledgeSourceRoot(
-                    storage_root=f"/other{index}",
-                    knowledge_path=f"/other{index}/docs",
-                )
-                refresh_runner._release_refresh_lock_for_key(idle, refresh_runner._borrow_refresh_lock_for_key(idle))
-            assert refresh_runner._refresh_locks.get(held) is entry
-        finally:
-            entry.lock.release()
-            refresh_runner._release_refresh_lock_for_key(held, entry)
-
-    refresh_runner._refresh_locks.clear()
-    try:
-        asyncio.run(_exercise())
-    finally:
-        refresh_runner._refresh_locks.clear()
+    keys = {
+        availability: refresh_cooldown_key(lookup, config, runtime_paths, availability)
+        for availability in (
+            KnowledgeAvailability.READY,
+            KnowledgeAvailability.INITIALIZING,
+            KnowledgeAvailability.STALE,
+            KnowledgeAvailability.CONFIG_MISMATCH,
+            KnowledgeAvailability.REFRESH_FAILED,
+        )
+    }
+    assert len(set(keys.values())) == len(keys)

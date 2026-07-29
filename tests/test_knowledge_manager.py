@@ -2166,7 +2166,7 @@ async def test_refresh_lock_pruning_keeps_queued_waiter_entry(
     holder_entered = asyncio.Event()
     release_holder = asyncio.Event()
     waiter_entered = asyncio.Event()
-    monkeypatch.setattr(knowledge_refresh_runner._refresh_locks, "capacity", 1)
+    monkeypatch.setattr(knowledge_refresh_runner, "_MAX_REFRESH_LOCKS", 1)
 
     async def _hold_lock() -> None:
         async with knowledge_binding_mutation_lock("docs", config=config, runtime_paths=runtime_paths):
@@ -6501,9 +6501,9 @@ def test_private_agent_knowledge_bookkeeping_is_bounded(tmp_path: Path) -> None:
     base_id = config.resolve_entity("helper").private_knowledge_base_id
     assert base_id is not None
     max_entries = max(
-        knowledge_registry._published_indexes.capacity,
-        knowledge_utils._refresh_scheduled_at.capacity,
-        knowledge_refresh_runner._refresh_locks.capacity,
+        knowledge_registry._MAX_PRIVATE_PUBLISHED_INDEXES,
+        knowledge_utils._MAX_REFRESH_SCHEDULED_COOLDOWNS,
+        knowledge_refresh_runner._MAX_REFRESH_LOCKS,
     )
 
     for index in range(max_entries + 40):
@@ -6531,14 +6531,15 @@ def test_private_agent_knowledge_bookkeeping_is_bounded(tmp_path: Path) -> None:
         knowledge_utils._refresh_scheduled_at[(refresh_target, KnowledgeAvailability.READY, key.indexing_settings)] = (
             float(index)
         )
+        knowledge_utils._prune_refresh_schedule_bookkeeping()
         _create_idle_refresh_lock(knowledge_registry.source_root_for_refresh_target(refresh_target))
 
     private_index_count = sum(
         key.base_id.startswith(config.PRIVATE_KNOWLEDGE_BASE_ID_PREFIX) for key in knowledge_registry._published_indexes
     )
-    assert private_index_count <= knowledge_registry._published_indexes.capacity
-    assert len(knowledge_utils._refresh_scheduled_at) <= knowledge_utils._refresh_scheduled_at.capacity
-    assert len(knowledge_refresh_runner._refresh_locks) <= knowledge_refresh_runner._refresh_locks.capacity
+    assert private_index_count <= knowledge_registry._MAX_PRIVATE_PUBLISHED_INDEXES
+    assert len(knowledge_utils._refresh_scheduled_at) <= knowledge_utils._MAX_REFRESH_SCHEDULED_COOLDOWNS
+    assert len(knowledge_refresh_runner._refresh_locks) <= knowledge_refresh_runner._MAX_REFRESH_LOCKS
 
 
 def test_private_index_read_path_cache_insertion_is_bounded(tmp_path: Path) -> None:
@@ -6562,7 +6563,7 @@ def test_private_index_read_path_cache_insertion_is_bounded(tmp_path: Path) -> N
     )
     base_id = config.resolve_entity("helper").private_knowledge_base_id
     assert base_id is not None
-    count = knowledge_registry._published_indexes.capacity + 10
+    count = knowledge_registry._MAX_PRIVATE_PUBLISHED_INDEXES + 10
 
     for index in range(count):
         identity = _identity(f"@user{index}:localhost")
@@ -6603,7 +6604,7 @@ def test_private_index_read_path_cache_insertion_is_bounded(tmp_path: Path) -> N
     private_index_count = sum(
         key.base_id.startswith(config.PRIVATE_KNOWLEDGE_BASE_ID_PREFIX) for key in knowledge_registry._published_indexes
     )
-    assert private_index_count <= knowledge_registry._published_indexes.capacity
+    assert private_index_count <= knowledge_registry._MAX_PRIVATE_PUBLISHED_INDEXES
 
 
 def test_publish_knowledge_index_caches_handle_without_collection_leases(tmp_path: Path) -> None:

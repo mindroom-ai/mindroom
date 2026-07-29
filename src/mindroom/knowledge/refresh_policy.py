@@ -1,12 +1,20 @@
-"""Pure refresh policy for one resolved knowledge availability.
+"""Refresh policy decisions for one resolved knowledge availability.
 
 Resolving an agent's knowledge for a query is a read, but a stale or failed index
-also has to get itself rescheduled. This module owns the decision half of that:
-given a resolved index, the current availability, and the cooldown bookkeeping,
-it returns what should happen. It performs no scheduling and reads no globals, so
-cooldowns, Git poll intervals, and failed-refresh retry fingerprints are testable
-without a live scheduler. ``knowledge/utils.py`` owns the effect half: it probes
-the scheduler, stamps the cooldown, and submits the refresh.
+also has to get itself rescheduled. This module owns the decision half of that;
+``knowledge/utils.py`` owns the effect half, driving these functions in order:
+
+1. ``refresh_trigger`` -- pure and cheap. Does this availability warrant a refresh
+   at all, and what should the turn report while one is in flight? Returns None
+   when nothing should happen, which is the common READY case.
+2. The caller probes the scheduler, then samples the cooldown clock. That order
+   matters: sampling first would subtract probe latency from every cooldown.
+3. ``refresh_cooldown_key`` -- the one step that touches the filesystem. Deferred
+   to here so an already-in-flight refresh never pays for it.
+4. ``cooldown_elapsed`` -- pure. Has this key's throttle window expired?
+
+Splitting it this way keeps a single source of truth for "should this refresh":
+there is no second predicate that can drift out of sync with the first.
 """
 
 from __future__ import annotations
@@ -40,26 +48,20 @@ RefreshCooldownKey = tuple[KnowledgeRefreshTarget, KnowledgeAvailability, "Hasha
 
 
 @dataclass(frozen=True)
-class _RefreshDecision:
-    """What one resolved availability implies for background refresh scheduling.
+class _RefreshTrigger:
+    """A refresh this availability warrants, pending a scheduler probe and its cooldown.
 
-    ``availability`` is what the turn should report, which can differ from the
-    resolved availability: a READY index whose refresh is pending or in flight is
-    reported STALE so the agent does not claim to have searched the latest
-    contents. ``cooldown_key`` is set only when a refresh should be scheduled, and
-    is the key the caller stamps to start the next cooldown window.
+    ``availability_while_refreshing`` is what the turn should report once the
+    refresh is in flight or newly queued. It differs from the resolved
+    availability only for READY, which is downgraded to STALE so the agent does
+    not claim to have searched contents a pending refresh may replace.
     """
 
-    availability: KnowledgeAvailability
-    cooldown_key: RefreshCooldownKey | None = None
-
-    @property
-    def schedule_refresh(self) -> bool:
-        """Return whether the caller should submit a refresh for this decision."""
-        return self.cooldown_key is not None
+    availability_while_refreshing: KnowledgeAvailability
+    cooldown_seconds: float
 
 
-def _published_index_age_seconds(value: str | None) -> float | None:
+def _published_index_age_seconds(value: str | None, *, wall_now: datetime) -> float | None:
     """Return how long ago an ISO timestamp was, or None when it is absent or unparsable."""
     if value is None:
         return None
@@ -69,7 +71,7 @@ def _published_index_age_seconds(value: str | None) -> float | None:
         return None
     if published_at.tzinfo is None:
         published_at = published_at.replace(tzinfo=UTC)
-    return max((datetime.now(tz=UTC) - published_at).total_seconds(), 0.0)
+    return max((wall_now - published_at).total_seconds(), 0.0)
 
 
 def _git_poll_interval_seconds(lookup: PublishedIndexResolution, config: Config) -> float | None:
@@ -79,7 +81,7 @@ def _git_poll_interval_seconds(lookup: PublishedIndexResolution, config: Config)
     return max(float(git_config.poll_interval_seconds), 0.0)
 
 
-def _git_poll_due(lookup: PublishedIndexResolution, config: Config) -> bool:
+def _git_poll_due(lookup: PublishedIndexResolution, config: Config, *, wall_now: datetime) -> bool:
     if lookup.index is None:
         return False
     poll_interval_seconds = _git_poll_interval_seconds(lookup, config)
@@ -87,6 +89,7 @@ def _git_poll_due(lookup: PublishedIndexResolution, config: Config) -> bool:
         return False
     age_seconds = _published_index_age_seconds(
         lookup.index.state.last_refresh_at or lookup.index.state.last_published_at,
+        wall_now=wall_now,
     )
     return age_seconds is None or age_seconds >= poll_interval_seconds
 
@@ -94,10 +97,16 @@ def _git_poll_due(lookup: PublishedIndexResolution, config: Config) -> bool:
 def ready_index_effective_availability(
     lookup: PublishedIndexResolution,
     config: Config,
+    *,
+    wall_now: datetime,
 ) -> KnowledgeAvailability:
     """Return request-path availability for a ready index without eager rescans."""
     availability = lookup.availability
-    if availability is KnowledgeAvailability.READY and lookup.index is not None and _git_poll_due(lookup, config):
+    if (
+        availability is KnowledgeAvailability.READY
+        and lookup.index is not None
+        and _git_poll_due(lookup, config, wall_now=wall_now)
+    ):
         availability = KnowledgeAvailability.STALE
     return availability
 
@@ -113,6 +122,95 @@ def _refresh_cooldown_seconds(
     if poll_interval_seconds is None:
         return _REFRESH_RETRY_COOLDOWN_SECONDS
     return max(poll_interval_seconds, 1.0)
+
+
+def _refresh_on_access_cooldown_seconds(lookup: PublishedIndexResolution, config: Config) -> float:
+    """Return READY refresh throttle without request-path source scans."""
+    if config.get_knowledge_base_config(lookup.key.base_id).git is None:
+        return _REFRESH_RETRY_COOLDOWN_SECONDS
+    poll_interval_seconds = _git_poll_interval_seconds(lookup, config)
+    return max(poll_interval_seconds or _REFRESH_RETRY_COOLDOWN_SECONDS, 1.0)
+
+
+def _refresh_on_access_due(lookup: PublishedIndexResolution, config: Config, *, wall_now: datetime) -> bool:
+    """Return whether READY on-access refresh should be scheduled without source scans."""
+    if config.get_knowledge_base_config(lookup.key.base_id).git is None:
+        return True
+    return _git_poll_due(lookup, config, wall_now=wall_now)
+
+
+def refresh_trigger(
+    *,
+    lookup: PublishedIndexResolution,
+    availability: KnowledgeAvailability,
+    config: Config,
+    wall_now: datetime,
+) -> _RefreshTrigger | None:
+    """Return the refresh this resolved availability warrants, or None to do nothing.
+
+    Pure, and cheap enough to run on every knowledge read: a READY index that is
+    not yet due for an on-access refresh returns None here, before the caller pays
+    for a scheduler probe.
+    """
+    if availability is KnowledgeAvailability.READY:
+        if not lookup.schedule_refresh_on_access or not _refresh_on_access_due(lookup, config, wall_now=wall_now):
+            return None
+        return _RefreshTrigger(
+            availability_while_refreshing=KnowledgeAvailability.STALE,
+            cooldown_seconds=_refresh_on_access_cooldown_seconds(lookup, config),
+        )
+
+    cooldown_seconds = (
+        _REFRESH_RETRY_COOLDOWN_SECONDS
+        if availability is KnowledgeAvailability.INITIALIZING
+        else _refresh_cooldown_seconds(lookup, config, availability)
+    )
+    return _RefreshTrigger(availability_while_refreshing=availability, cooldown_seconds=cooldown_seconds)
+
+
+def refresh_cooldown_key(
+    lookup: PublishedIndexResolution,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    availability: KnowledgeAvailability,
+) -> RefreshCooldownKey:
+    """Return the throttle key identifying one refresh attempt.
+
+    A REFRESH_FAILED key folds in a fingerprint of the Git credential that could
+    fix the retry, so rotating that credential retries immediately instead of
+    waiting out the cooldown. Building it reads the credentials-manager memo and
+    ``stat()``s a file, which is why the caller defers this until after the
+    scheduler probe rules out an in-flight refresh.
+    """
+    refresh_target = refresh_target_for_published_index_key(lookup.key)
+    if availability in (KnowledgeAvailability.READY, KnowledgeAvailability.INITIALIZING):
+        return (refresh_target, availability, lookup.key.indexing_settings)
+    return (refresh_target, availability, _refresh_retry_settings(lookup, config, runtime_paths, availability))
+
+
+def cooldown_elapsed(
+    scheduled_at: Mapping[RefreshCooldownKey, float],
+    key: RefreshCooldownKey,
+    *,
+    monotonic_now: float,
+    cooldown_seconds: float,
+) -> bool:
+    """Return whether this key's throttle window has expired."""
+    last_scheduled_at = scheduled_at.get(key)
+    return last_scheduled_at is None or monotonic_now - last_scheduled_at >= cooldown_seconds
+
+
+def _refresh_retry_settings(
+    lookup: PublishedIndexResolution,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    availability: KnowledgeAvailability,
+) -> Hashable | None:
+    if availability is KnowledgeAvailability.CONFIG_MISMATCH:
+        return lookup.key.indexing_settings
+    if availability is KnowledgeAvailability.REFRESH_FAILED:
+        return (lookup.key.indexing_settings, *_failed_refresh_retry_fingerprint(lookup, config, runtime_paths))
+    return None
 
 
 def _failed_refresh_retry_fingerprint(
@@ -158,127 +256,3 @@ def _embedded_userinfo_fingerprint(repo_url: str) -> str:
     username, secret = userinfo
     payload = f"{username}\0{secret}".encode()
     return hmac.new(_EMBEDDED_GIT_USERINFO_FINGERPRINT_KEY, payload, hashlib.sha256).hexdigest()
-
-
-def _refresh_retry_settings(
-    lookup: PublishedIndexResolution,
-    config: Config,
-    runtime_paths: RuntimePaths,
-    availability: KnowledgeAvailability,
-) -> Hashable | None:
-    if availability is KnowledgeAvailability.CONFIG_MISMATCH:
-        return lookup.key.indexing_settings
-    if availability is KnowledgeAvailability.REFRESH_FAILED:
-        return (lookup.key.indexing_settings, *_failed_refresh_retry_fingerprint(lookup, config, runtime_paths))
-    return None
-
-
-def _refresh_on_access_cooldown_seconds(lookup: PublishedIndexResolution, config: Config) -> float:
-    """Return READY refresh throttle without request-path source scans."""
-    if config.get_knowledge_base_config(lookup.key.base_id).git is None:
-        return _REFRESH_RETRY_COOLDOWN_SECONDS
-    poll_interval_seconds = _git_poll_interval_seconds(lookup, config)
-    return max(poll_interval_seconds or _REFRESH_RETRY_COOLDOWN_SECONDS, 1.0)
-
-
-def _refresh_on_access_due(lookup: PublishedIndexResolution, config: Config) -> bool:
-    """Return whether READY on-access refresh should be scheduled without source scans."""
-    if config.get_knowledge_base_config(lookup.key.base_id).git is None:
-        return True
-    return _git_poll_due(lookup, config)
-
-
-def _cooldown_elapsed(
-    scheduled_at: Mapping[RefreshCooldownKey, float],
-    key: RefreshCooldownKey,
-    *,
-    now: float,
-    cooldown_seconds: float,
-) -> bool:
-    last_scheduled_at = scheduled_at.get(key)
-    return last_scheduled_at is None or now - last_scheduled_at >= cooldown_seconds
-
-
-def scheduler_probe_required(
-    *,
-    lookup: PublishedIndexResolution | None,
-    availability: KnowledgeAvailability,
-    config: Config,
-) -> bool:
-    """Return whether deciding this availability needs a scheduler-activity probe.
-
-    A READY index that is not due for an on-access refresh decides to do nothing,
-    so the request path must not pay for a scheduler probe to learn that.
-    """
-    if lookup is None:
-        return False
-    if availability is KnowledgeAvailability.READY:
-        return lookup.schedule_refresh_on_access and _refresh_on_access_due(lookup, config)
-    return True
-
-
-def decide_refresh(
-    *,
-    lookup: PublishedIndexResolution | None,
-    availability: KnowledgeAvailability,
-    config: Config,
-    runtime_paths: RuntimePaths,
-    scheduler_is_refreshing: bool,
-    now: float,
-    scheduled_at: Mapping[RefreshCooldownKey, float],
-) -> _RefreshDecision:
-    """Decide whether one resolved availability should schedule a refresh, and what the turn sees."""
-    if lookup is None:
-        return _RefreshDecision(availability=availability)
-
-    refresh_target = refresh_target_for_published_index_key(lookup.key)
-    if availability is KnowledgeAvailability.READY:
-        return _decide_ready_refresh(
-            lookup=lookup,
-            config=config,
-            refresh_target=refresh_target,
-            scheduler_is_refreshing=scheduler_is_refreshing,
-            now=now,
-            scheduled_at=scheduled_at,
-        )
-
-    if scheduler_is_refreshing:
-        return _RefreshDecision(availability=availability)
-
-    if availability is KnowledgeAvailability.INITIALIZING:
-        settings: Hashable | None = lookup.key.indexing_settings
-        cooldown_seconds = _REFRESH_RETRY_COOLDOWN_SECONDS
-    else:
-        settings = _refresh_retry_settings(lookup, config, runtime_paths, availability)
-        cooldown_seconds = _refresh_cooldown_seconds(lookup, config, availability)
-
-    cooldown_key = (refresh_target, availability, settings)
-    if not _cooldown_elapsed(scheduled_at, cooldown_key, now=now, cooldown_seconds=cooldown_seconds):
-        return _RefreshDecision(availability=availability)
-    return _RefreshDecision(availability=availability, cooldown_key=cooldown_key)
-
-
-def _decide_ready_refresh(
-    *,
-    lookup: PublishedIndexResolution,
-    config: Config,
-    refresh_target: KnowledgeRefreshTarget,
-    scheduler_is_refreshing: bool,
-    now: float,
-    scheduled_at: Mapping[RefreshCooldownKey, float],
-) -> _RefreshDecision:
-    """Decide on-access refresh for an index that resolved READY."""
-    if not lookup.schedule_refresh_on_access or not _refresh_on_access_due(lookup, config):
-        return _RefreshDecision(availability=KnowledgeAvailability.READY)
-    if scheduler_is_refreshing:
-        return _RefreshDecision(availability=KnowledgeAvailability.STALE)
-
-    cooldown_key = (refresh_target, KnowledgeAvailability.READY, lookup.key.indexing_settings)
-    if not _cooldown_elapsed(
-        scheduled_at,
-        cooldown_key,
-        now=now,
-        cooldown_seconds=_refresh_on_access_cooldown_seconds(lookup, config),
-    ):
-        return _RefreshDecision(availability=KnowledgeAvailability.READY)
-    return _RefreshDecision(availability=KnowledgeAvailability.STALE, cooldown_key=cooldown_key)

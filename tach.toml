@@ -3512,20 +3512,10 @@ depends_on = ["mindroom.embedding_errors"]
 visibility = ["mindroom.knowledge.manager"]
 
 [[modules]]
-path = "mindroom.knowledge.bounded_map"
-depends_on = []
-visibility = [
-    "mindroom.knowledge.refresh_runner",
-    "mindroom.knowledge.registry",
-    "mindroom.knowledge.utils",
-]
-
-[[modules]]
 path = "mindroom.knowledge.registry"
 depends_on = [
     "mindroom.embedding_factory",
     "mindroom.knowledge.availability",
-    "mindroom.knowledge.bounded_map",
     "mindroom.knowledge.index_metadata",
     "mindroom.knowledge.indexing_config",
     "mindroom.runtime_resolution",
@@ -3589,7 +3579,6 @@ depends_on = [
     "mindroom.config.main",
     "mindroom.constants",
     "mindroom.knowledge.availability",
-    "mindroom.knowledge.bounded_map",
     "mindroom.knowledge.manager",
     "mindroom.knowledge.redaction",
     "mindroom.knowledge.registry",
@@ -3612,7 +3601,6 @@ path = "mindroom.knowledge.utils"
 depends_on = [
     "mindroom.embedding_errors",
     "mindroom.knowledge.availability",
-    "mindroom.knowledge.bounded_map",
     "mindroom.knowledge.refresh_policy",
     "mindroom.knowledge.registry",
     "mindroom.knowledge_source_descriptions",

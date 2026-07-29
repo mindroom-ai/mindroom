@@ -22,7 +22,6 @@ from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths, resolve_runtime_paths, runtime_env_values
 from mindroom.file_locks import async_exclusive_file_lock
 from mindroom.knowledge.availability import KnowledgeAvailability
-from mindroom.knowledge.bounded_map import BoundedMap
 from mindroom.knowledge.manager import KnowledgeManager, knowledge_source_signature
 from mindroom.knowledge.redaction import redact_credentials_in_text
 from mindroom.knowledge.registry import (
@@ -92,10 +91,12 @@ class _SubprocessSessionKwargs(TypedDict, total=False):
 
 
 _refresh_locks_guard = Lock()
-# Deliberately uncapped: entries are refcounts that clear when a refresh finishes, and
-# evicting a live one would report an in-flight refresh as idle.
+# Deliberately uncapped, unlike the lock and cooldown tables below: entries are
+# refcounts that clear when a refresh finishes, so evicting a live one would
+# report an in-flight refresh as idle and mask the leak a crashed refresh means.
 _active_refresh_counts: dict[KnowledgeRefreshTarget, int] = {}
 _active_refresh_counts_guard = Lock()
+_MAX_REFRESH_LOCKS = 512
 _REFRESH_FILE_LOCK_POLL_SECONDS = 0.1
 _REFRESH_SUBPROCESS_THREAD_ENV = {
     "OMP_NUM_THREADS": "1",
@@ -113,28 +114,17 @@ class _RefreshLockEntry:
     borrowers: int = 0
 
 
-def _refresh_lock_in_use(_key: KnowledgeSourceRoot, entry: _RefreshLockEntry) -> bool:
-    """Return whether a borrower holds this entry or a waiter is queued on its lock."""
-    return entry.borrowers > 0 or entry.lock.locked()
-
-
-# Every entry counts against the cap, but in-use ones cannot be dropped: replacing a
-# held lock would hand a second caller a different lock for the same source root.
-_refresh_locks: BoundedMap[KnowledgeSourceRoot, _RefreshLockEntry] = BoundedMap(
-    capacity=512,
-    pinned=_refresh_lock_in_use,
-)
+_refresh_locks: dict[KnowledgeSourceRoot, _RefreshLockEntry] = {}
 
 
 def _borrow_refresh_lock_for_key(key: KnowledgeSourceRoot) -> _RefreshLockEntry:
     with _refresh_locks_guard:
         entry = _refresh_locks.get(key)
         if entry is None:
-            # Borrowed before insertion so the pin protects it from its own prune.
-            entry = _RefreshLockEntry(borrowers=1)
+            _prune_refresh_locks_locked(reserve_slots=1)
+            entry = _RefreshLockEntry()
             _refresh_locks[key] = entry
-        else:
-            entry.borrowers += 1
+        entry.borrowers += 1
         return entry
 
 
@@ -144,7 +134,21 @@ def _release_refresh_lock_for_key(key: KnowledgeSourceRoot, entry: _RefreshLockE
             return
         entry.borrowers -= 1
         if _refresh_locks.get(key) is entry:
-            _refresh_locks.prune()
+            _prune_refresh_locks_locked()
+
+
+def _prune_refresh_locks_locked(*, reserve_slots: int = 0) -> None:
+    target_size = max(_MAX_REFRESH_LOCKS - reserve_slots, 0)
+    if len(_refresh_locks) <= target_size:
+        return
+    excess = len(_refresh_locks) - target_size
+    for key, entry in tuple(_refresh_locks.items()):
+        if excess <= 0:
+            break
+        if entry.borrowers > 0 or entry.lock.locked():
+            continue
+        _refresh_locks.pop(key, None)
+        excess -= 1
 
 
 @asynccontextmanager

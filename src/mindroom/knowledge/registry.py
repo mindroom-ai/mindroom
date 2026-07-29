@@ -17,7 +17,6 @@ from agno.vectordb.chroma import ChromaDb
 
 from mindroom.embedding_factory import create_configured_embedder, embedder_client_signature
 from mindroom.knowledge.availability import KnowledgeAvailability
-from mindroom.knowledge.bounded_map import BoundedMap
 from mindroom.knowledge.index_metadata import (
     coerce_nonnegative_metadata_int,
     load_index_metadata_payload,
@@ -129,22 +128,11 @@ class _PublishedIndexVectorDb(Protocol):
         ...
 
 
+_published_indexes: dict[PublishedIndexKey, _PublishedIndexHandle] = {}
 _CONSECUTIVE_REFRESH_FAILURE_ALERT_THRESHOLD = 3
 _PRIVATE_KNOWLEDGE_BASE_ID_PREFIX = "__agent_private__:"
+_MAX_PRIVATE_PUBLISHED_INDEXES = 128
 _PUBLISHED_INDEX_STATUSES = {"resetting", "indexing", "complete", "failed"}
-
-
-def _is_private_published_index(key: PublishedIndexKey, _index: _PublishedIndexHandle) -> bool:
-    """Return whether one cached handle belongs to a PrivateAgentKnowledge binding."""
-    return key.base_id.startswith(_PRIVATE_KNOWLEDGE_BASE_ID_PREFIX)
-
-
-# Only PrivateAgentKnowledge handles are capped: their key carries the requester, so
-# their cardinality grows with users, while configured bases are bounded by config.
-_published_indexes: BoundedMap[PublishedIndexKey, _PublishedIndexHandle] = BoundedMap(
-    capacity=128,
-    tracked=_is_private_published_index,
-)
 _P = ParamSpec("_P")
 _T = TypeVar("_T")
 
@@ -711,7 +699,7 @@ def get_published_index(
         metadata_path=published_index_metadata_path(key),
         embedder_client_signature=current_embedder_client_signature,
     )
-    _published_indexes[index.key] = index
+    _cache_published_index(index)
     return PublishedIndexResolution(
         key=key,
         index=index,
@@ -738,7 +726,7 @@ def _publish_knowledge_index(
         metadata_path=metadata_path or published_index_metadata_path(key),
         embedder_client_signature=embedder_client_signature,
     )
-    _published_indexes[index.key] = index
+    _cache_published_index(index)
     return index
 
 
@@ -775,9 +763,20 @@ def _same_physical_source(left: PublishedIndexKey, right: PublishedIndexKey) -> 
     return left.storage_root == right.storage_root and left.knowledge_path == right.knowledge_path
 
 
+def _published_index_key_is_private(key: PublishedIndexKey) -> bool:
+    return key.base_id.startswith(_PRIVATE_KNOWLEDGE_BASE_ID_PREFIX)
+
+
 def prune_private_index_bookkeeping() -> None:
     """Bound PrivateAgentKnowledge in-process published index handles."""
-    _published_indexes.prune()
+    private_index_keys = [key for key in _published_indexes if _published_index_key_is_private(key)]
+    for key in private_index_keys[:-_MAX_PRIVATE_PUBLISHED_INDEXES]:
+        _published_indexes.pop(key, None)
+
+
+def _cache_published_index(index: _PublishedIndexHandle) -> None:
+    _published_indexes[index.key] = index
+    prune_private_index_bookkeeping()
 
 
 def _evict_published_indexes_for_refresh_target(refresh_target: KnowledgeRefreshTarget) -> None:

@@ -5,16 +5,17 @@ from __future__ import annotations
 import asyncio
 import time
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Protocol, cast, runtime_checkable
 
 from mindroom.embedding_errors import extract_classified_embedder_detail
 from mindroom.knowledge.availability import KnowledgeAvailability
-from mindroom.knowledge.bounded_map import BoundedMap
 from mindroom.knowledge.refresh_policy import (
     RefreshCooldownKey,
-    decide_refresh,
+    cooldown_elapsed,
     ready_index_effective_availability,
-    scheduler_probe_required,
+    refresh_cooldown_key,
+    refresh_trigger,
 )
 from mindroom.knowledge.registry import PublishedIndexResolution, get_published_index
 from mindroom.knowledge_source_descriptions import KnowledgeSourceDescription, KnowledgeWithSourceDescriptions
@@ -33,10 +34,8 @@ if TYPE_CHECKING:
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 logger = get_logger(__name__)
-_refresh_scheduled_at: BoundedMap[RefreshCooldownKey, float] = BoundedMap(
-    capacity=512,
-    eviction_order=lambda _key, scheduled_at: scheduled_at,
-)
+_MAX_REFRESH_SCHEDULED_COOLDOWNS = 512
+_refresh_scheduled_at: dict[RefreshCooldownKey, float] = {}
 
 
 @dataclass(frozen=True)
@@ -137,35 +136,56 @@ def _schedule_refresh_for_availability(
     lookup: PublishedIndexResolution | None,
     availability: KnowledgeAvailability,
 ) -> KnowledgeAvailability:
-    """Apply the refresh policy decision for one resolved base and report its turn availability."""
-    if not scheduler_probe_required(lookup=lookup, availability=availability, config=config):
+    """Apply the refresh policy for one resolved base: probe, throttle, schedule, report."""
+    if lookup is None:
         return availability
-
-    now = time.monotonic()
-    decision = decide_refresh(
+    trigger = refresh_trigger(
         lookup=lookup,
         availability=availability,
         config=config,
-        runtime_paths=runtime_paths,
-        scheduler_is_refreshing=refresh_scheduler.is_refreshing(
-            base_id,
-            config=config,
-            runtime_paths=runtime_paths,
-            execution_identity=execution_identity,
-        ),
-        now=now,
-        scheduled_at=_refresh_scheduled_at,
+        wall_now=datetime.now(tz=UTC),
     )
-    cooldown_key = decision.cooldown_key
-    if cooldown_key is not None:
-        _refresh_scheduled_at[cooldown_key] = now
-        refresh_scheduler.schedule_refresh(
-            base_id,
-            config=config,
-            runtime_paths=runtime_paths,
-            execution_identity=execution_identity,
-        )
-    return decision.availability
+    if trigger is None:
+        return availability
+
+    if refresh_scheduler.is_refreshing(
+        base_id,
+        config=config,
+        runtime_paths=runtime_paths,
+        execution_identity=execution_identity,
+    ):
+        return trigger.availability_while_refreshing
+
+    # Key first, then the clock: the stamp should record when the refresh was
+    # actually scheduled, so nothing slow may run between sampling and stamping.
+    cooldown_key = refresh_cooldown_key(lookup, config, runtime_paths, availability)
+    monotonic_now = time.monotonic()
+    if not cooldown_elapsed(
+        _refresh_scheduled_at,
+        cooldown_key,
+        monotonic_now=monotonic_now,
+        cooldown_seconds=trigger.cooldown_seconds,
+    ):
+        return availability
+
+    _refresh_scheduled_at[cooldown_key] = monotonic_now
+    _prune_refresh_schedule_bookkeeping()
+    refresh_scheduler.schedule_refresh(
+        base_id,
+        config=config,
+        runtime_paths=runtime_paths,
+        execution_identity=execution_identity,
+    )
+    return trigger.availability_while_refreshing
+
+
+def _prune_refresh_schedule_bookkeeping() -> None:
+    """Bound refresh cooldown bookkeeping for private agent knowledge bindings."""
+    if len(_refresh_scheduled_at) <= _MAX_REFRESH_SCHEDULED_COOLDOWNS:
+        return
+    excess = len(_refresh_scheduled_at) - _MAX_REFRESH_SCHEDULED_COOLDOWNS
+    for cache_key, _scheduled_at in sorted(_refresh_scheduled_at.items(), key=lambda item: item[1])[:excess]:
+        _refresh_scheduled_at.pop(cache_key, None)
 
 
 def _semantic_agent_knowledge_base_ids(agent_name: str, config: Config) -> tuple[str, ...]:
@@ -193,7 +213,7 @@ def _resolve_base_knowledge(
     )
     availability = lookup.availability if lookup is not None else KnowledgeAvailability.INITIALIZING
     if lookup is not None and availability is KnowledgeAvailability.READY:
-        availability = ready_index_effective_availability(lookup, config)
+        availability = ready_index_effective_availability(lookup, config, wall_now=datetime.now(tz=UTC))
     knowledge = lookup.index.knowledge if lookup is not None and lookup.index is not None else None
     if knowledge is not None:
         _apply_knowledge_metadata(base_id, knowledge, config)
@@ -273,7 +293,7 @@ def resolve_knowledge_base_access(
     )
     availability = lookup.availability if lookup is not None else KnowledgeAvailability.INITIALIZING
     if lookup is not None and availability is KnowledgeAvailability.READY:
-        availability = ready_index_effective_availability(lookup, config)
+        availability = ready_index_effective_availability(lookup, config, wall_now=datetime.now(tz=UTC))
     knowledge = lookup.index.knowledge if lookup is not None and lookup.index is not None else None
     if knowledge is not None:
         _apply_knowledge_metadata(base_id, knowledge, config)
