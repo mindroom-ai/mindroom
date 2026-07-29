@@ -797,6 +797,47 @@ async def test_auto_resume_sends_correctly_threaded_messages(tmp_path: Path) -> 
 
 
 @pytest.mark.asyncio
+async def test_auto_resume_router_interruption_uses_router_cache_without_self_mention(tmp_path: Path) -> None:
+    """A router-owned stream should refresh through the router and keep its generic relay."""
+    config = _make_config(tmp_path)
+    router_user_id = entity_ids(config, runtime_paths_for(config))[ROUTER_AGENT_NAME].full_id
+    router_client = make_matrix_client_mock(user_id=router_user_id)
+    interrupted = [
+        InterruptedThread(
+            room_id=ROOM_ID,
+            thread_id="$thread",
+            target_event_id="$target",
+            partial_text="Partial",
+            agent_name=ROUTER_AGENT_NAME,
+            original_sender_id=USER_ID,
+        ),
+    ]
+    router_cache = _auto_resume_conversation_cache(interrupted)
+
+    with patch(
+        "mindroom.matrix.stale_stream_cleanup.send_message_result",
+        new=AsyncMock(return_value=delivered_matrix_event("$resume")),
+    ) as mock_send:
+        resumed_count = await auto_resume_interrupted_threads(
+            router_client,
+            interrupted,
+            config=config,
+            runtime_paths=runtime_paths_for(config),
+            conversation_cache=router_cache,
+            owner_actors={
+                router_user_id: StaleStreamCleanupActor(router_client, router_cache),
+            },
+        )
+
+    assert resumed_count == 1
+    router_cache.refresh_strict_thread_history_from_source.assert_awaited_once()
+    mock_send.assert_awaited_once()
+    content = mock_send.await_args.args[2]
+    assert content["body"] == AUTO_RESUME_MESSAGE
+    assert "m.mentions" not in content
+
+
+@pytest.mark.asyncio
 async def test_auto_resume_skips_interruption_without_resolved_requester(tmp_path: Path) -> None:
     """Auto-resume should fail closed when restart recovery cannot resolve requester identity."""
     config = _make_config(tmp_path)

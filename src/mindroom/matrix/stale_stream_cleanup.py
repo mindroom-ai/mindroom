@@ -13,6 +13,7 @@ from nio.api import RelationshipType
 from mindroom.authorization import get_effective_sender_id_for_reply_permissions
 from mindroom.constants import (
     ORIGINAL_SENDER_KEY,
+    ROUTER_AGENT_NAME,
     SOURCE_KIND_KEY,
     STREAM_STATUS_CANCELLED,
     STREAM_STATUS_COMPLETED,
@@ -1920,7 +1921,11 @@ def _build_auto_resume_content(
     runtime_paths: RuntimePaths,
 ) -> dict[str, object]:
     """Build the router-authored visible resume relay for one interrupted agent."""
-    target_user_id = _current_configured_entity_user_id(interrupted_thread.agent_name, config, runtime_paths)
+    target_user_id = (
+        None
+        if interrupted_thread.agent_name == ROUTER_AGENT_NAME
+        else _current_configured_entity_user_id(interrupted_thread.agent_name, config, runtime_paths)
+    )
     display_name = _entity_display_name(interrupted_thread.agent_name, config)
 
     body = AUTO_RESUME_MESSAGE
@@ -1956,7 +1961,7 @@ def _current_configured_entity_user_id(
     runtime_paths: RuntimePaths,
 ) -> str | None:
     """Return one configured entity user ID without resolving unrelated entities."""
-    if entity_name not in config.agents and entity_name not in config.teams:
+    if entity_name != ROUTER_AGENT_NAME and entity_name not in config.agents and entity_name not in config.teams:
         return None
     try:
         return current_entity_id(entity_name, runtime_paths).full_id
