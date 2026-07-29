@@ -41,9 +41,13 @@ if TYPE_CHECKING:
 
     from _pytest.mark import ParameterSet
 
-#: The redactor this branch must not regress against, pinned to a commit rather
-#: than a branch name so the comparison cannot drift when main moves.
-_BASELINE_REV = "8d17749ca154910477ecd601bc02ebd47e0b1c49"
+#: The redactor this branch must not regress against, vendored rather than read
+#: out of Git history: CI checks out shallow, so a ``git show`` of a pinned SHA
+#: is unavailable exactly where this test matters most. A frozen copy is also
+#: the more honest artifact -- a baseline that can be resolved differently in
+#: different environments is not pinned.
+_BASELINE_SHA = "8d17749ca154910477ecd601bc02ebd47e0b1c49"
+_BASELINE_DIR = Path(__file__).resolve().parent / "baselines"
 
 _SECRET = "SUPERSECRETCANARY"  # noqa: S105
 
@@ -53,32 +57,47 @@ class _Redactor(Protocol):
 
 
 def _load_baseline_redactor() -> _Redactor:
-    """Load the pinned redaction module without disturbing the real import graph."""
-    repository = Path(__file__).resolve().parent.parent
-
-    def _blob(path: str) -> str:
-        return subprocess.run(
-            ["git", "-C", str(repository), "show", f"{_BASELINE_REV}:{path}"],
-            capture_output=True,
-            text=True,
-            check=True,
-        ).stdout
-
+    """Load the vendored baseline redactor without touching the real import graph."""
     # ``redaction`` imports ``mindroom.git_urls``; give it the baseline's copy in
     # a throwaway module so nothing here can shadow the installed package.
     git_urls = types.ModuleType("mindroom.git_urls")
-    exec(compile(_blob("src/mindroom/git_urls.py"), "<baseline git_urls>", "exec"), git_urls.__dict__)  # noqa: S102
+    git_urls_source = (_BASELINE_DIR / f"git_urls_{_BASELINE_SHA[:8]}.py.txt").read_text(encoding="utf-8")
+    exec(compile(git_urls_source, "<baseline git_urls>", "exec"), git_urls.__dict__)  # noqa: S102
+
     baseline = types.ModuleType("_baseline_redaction")
+    redaction_source = (_BASELINE_DIR / f"redaction_{_BASELINE_SHA[:8]}.py.txt").read_text(encoding="utf-8")
     saved = sys.modules.get("mindroom.git_urls")
     sys.modules["mindroom.git_urls"] = git_urls
     try:
-        exec(compile(_blob("src/mindroom/knowledge/redaction.py"), "<baseline redaction>", "exec"), baseline.__dict__)  # noqa: S102
+        exec(compile(redaction_source, "<baseline redaction>", "exec"), baseline.__dict__)  # noqa: S102
     finally:
         if saved is None:
             del sys.modules["mindroom.git_urls"]
         else:
             sys.modules["mindroom.git_urls"] = saved
     return baseline.redact_credentials_in_text  # type: ignore[no-any-return]
+
+
+def test_the_vendored_baseline_still_matches_the_commit_it_claims() -> None:
+    """The frozen copy must be the file that shipped, not a copy that drifted.
+
+    Skipped where the history is unavailable -- a shallow CI clone -- because
+    the baseline's value does not depend on Git being able to confirm it.
+    """
+    repository = Path(__file__).resolve().parent.parent
+    for module, vendored in (
+        ("src/mindroom/git_urls.py", f"git_urls_{_BASELINE_SHA[:8]}.py.txt"),
+        ("src/mindroom/knowledge/redaction.py", f"redaction_{_BASELINE_SHA[:8]}.py.txt"),
+    ):
+        shown = subprocess.run(
+            ["git", "-C", str(repository), "show", f"{_BASELINE_SHA}:{module}"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if shown.returncode != 0:
+            pytest.skip(f"{_BASELINE_SHA} is not present in this clone")
+        assert (_BASELINE_DIR / vendored).read_text(encoding="utf-8") == shown.stdout
 
 
 @pytest.fixture(scope="module")
