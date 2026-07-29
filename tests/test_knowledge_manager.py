@@ -30,6 +30,7 @@ from watchfiles import Change
 import mindroom.knowledge.file_listing as knowledge_file_listing_module
 import mindroom.knowledge.git_source as knowledge_git_source_module
 import mindroom.knowledge.manager as knowledge_manager_module
+import mindroom.knowledge.readers as knowledge_readers_module
 import mindroom.knowledge.refresh_runner as knowledge_refresh_runner
 import mindroom.knowledge.refresh_scheduler as knowledge_refresh_scheduler
 import mindroom.knowledge.registry as knowledge_registry
@@ -1906,7 +1907,7 @@ async def test_reindex_skips_files_whose_reader_dependency_is_missing(
         path=str(docs_path),
         extra_extensions=[".pptx"],
     )
-    original_get_reader = knowledge_manager_module.ReaderFactory.get_reader_for_extension
+    original_get_reader = knowledge_readers_module.ReaderFactory.get_reader_for_extension
 
     def failing_get_reader(extension: str) -> object:
         if extension == ".pptx":
@@ -1914,7 +1915,7 @@ async def test_reindex_skips_files_whose_reader_dependency_is_missing(
             raise ImportError(msg)
         return original_get_reader(extension)
 
-    monkeypatch.setattr(knowledge_manager_module.ReaderFactory, "get_reader_for_extension", failing_get_reader)
+    monkeypatch.setattr(knowledge_readers_module.ReaderFactory, "get_reader_for_extension", failing_get_reader)
     manager = KnowledgeManager("docs", config=config, runtime_paths=runtime_paths_for(config))
 
     assert await manager.reindex_all() == RefreshOutcome(

@@ -4,25 +4,16 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import json
 import os
 import time
-import uuid
 from contextlib import suppress
-from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from functools import partial
-from typing import IO, TYPE_CHECKING, Any, NoReturn, TypeVar, cast
+from typing import TYPE_CHECKING, Any, NoReturn, TypeVar, cast
 
-from agno.knowledge.document.base import Document
-from agno.knowledge.reader import ReaderFactory
-from agno.knowledge.reader.json_reader import JSONReader
-from agno.knowledge.reader.markdown_reader import MarkdownReader
-from agno.knowledge.reader.text_reader import TextReader
 from agno.vectordb.chroma import ChromaDb
 
-from mindroom.chunking import SafeFixedSizeChunking
 from mindroom.constants import (
     DEFAULT_MAX_CONCURRENT_KNOWLEDGE_FILE_INDEXES,
     KNOWLEDGE_FILE_INDEX_CONCURRENCY_ENV,
@@ -89,6 +80,13 @@ from mindroom.knowledge.indexing_config import (
     indexing_settings_key,
     storage_key_for_base,
 )
+from mindroom.knowledge.readers import (
+    MalformedJSONSourceError,
+    build_reader,
+    chunking_strategy_for_base,
+    reader_uses_configured_chunking,
+    text_fallback_reader,
+)
 from mindroom.knowledge.redaction import redact_credentials_in_text
 from mindroom.knowledge.refresh_outcome import RefreshOutcome
 from mindroom.logging_config import get_logger
@@ -98,57 +96,15 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Coroutine, Iterable, Iterator, Mapping, Sequence
     from pathlib import Path
 
+    from agno.knowledge.document.base import Document
     from agno.knowledge.embedder.base import Embedder
     from agno.knowledge.reader.base import Reader
     from chromadb.api.types import Embeddings, Metadata
 
+    from mindroom.chunking import SafeFixedSizeChunking
     from mindroom.config.main import Config
 
 logger = get_logger(__name__)
-
-
-class _MalformedJSONSourceError(Exception):
-    """A JSON parser failure carrying the already-read source text."""
-
-    def __init__(self, source_text: str, *, line: int, column: int) -> None:
-        super().__init__("Malformed JSON knowledge source")
-        self.source_text = source_text
-        self.line = line
-        self.column = column
-
-
-class _FallbackAwareJSONReader(JSONReader):
-    """Tag only JSON decoding failures raised inside the source reader."""
-
-    def read(self, path: Path | IO[Any], name: str | None = None) -> list[Document]:
-        try:
-            return super().read(path, name=name)
-        except json.JSONDecodeError as error:
-            raise _MalformedJSONSourceError(error.doc, line=error.lineno, column=error.colno) from error
-
-
-class _InMemoryTextReader(TextReader):
-    """Read the malformed JSON text already retained by its parse error.
-
-    Only ``read`` is overridden, because indexing goes through the synchronous
-    ``Knowledge.insert`` path. ``TextReader.async_read`` does not delegate to
-    ``read``, so anything switching this to ``Knowledge.ainsert`` must override
-    it too or it will re-read the source instead of serving the retained text.
-    """
-
-    def __init__(self, source_text: str) -> None:
-        super().__init__()
-        self._source_text = source_text
-
-    def read(self, file: Path | IO[Any], name: str | None = None) -> list[Document]:
-        document = Document(
-            name=name or str(file),
-            id=str(uuid.uuid4()),
-            content=self._source_text,
-        )
-        if not self.chunk:
-            return [document]
-        return self.chunk_document(document)
 
 
 _POST_INDEX_VECTOR_VISIBILITY_RETRY_DELAYS_SECONDS = (0.0, 0.01, 0.05)
@@ -676,37 +632,8 @@ class KnowledgeManager:
         return False
 
     def _chunking_strategy(self) -> SafeFixedSizeChunking:
-        """Build the chunking strategy every text-like read of this base uses."""
-        base_config = self.config.get_knowledge_base_config(self.base_id)
-        return SafeFixedSizeChunking(
-            chunk_size=base_config.chunk_size,
-            overlap=base_config.chunk_overlap,
-        )
-
-    def _configure_text_reader(self, reader: TextReader | MarkdownReader) -> TextReader | MarkdownReader:
-        """Apply this base's text chunking policy to ``reader`` in place."""
-        chunking_strategy = self._chunking_strategy()
-        reader.chunk = True
-        reader.chunk_size = chunking_strategy.chunk_size
-        reader.chunking_strategy = chunking_strategy
-        return reader
-
-    def _build_reader(self, file_path: Path) -> Reader:
-        """Build a per-file reader with conservative chunking for text-like content."""
-        reader = ReaderFactory.get_reader_for_extension(file_path.suffix.lower())
-
-        # ReaderFactory hands out cached shared instances, so any branch that
-        # configures a reader copies it first instead of mutating the cache.
-        if isinstance(reader, JSONReader):
-            # Carry the factory reader's configuration (encoding, chunking) onto
-            # the subclass that tags its own decode failures for the text fallback.
-            return _FallbackAwareJSONReader(**deepcopy(vars(reader)))
-
-        # Large markdown/plain-text files are the common source of oversized embed requests.
-        if not isinstance(reader, (TextReader, MarkdownReader)):
-            return reader
-
-        return self._configure_text_reader(deepcopy(reader))
+        """Return this base's chunking policy for reads and prefetch budgeting."""
+        return chunking_strategy_for_base(self.config, self.base_id)
 
     async def _insert_with_malformed_json_fallback(
         self,
@@ -727,7 +654,7 @@ class KnowledgeManager:
 
         try:
             await _insert_with_retry(reader)
-        except _MalformedJSONSourceError as error:
+        except MalformedJSONSourceError as error:
             logger.warning(
                 "Malformed JSON knowledge file; indexing as text",
                 base_id=self.base_id,
@@ -735,7 +662,7 @@ class KnowledgeManager:
                 line=error.line,
                 column=error.column,
             )
-            fallback_reader = self._configure_text_reader(_InMemoryTextReader(error.source_text))
+            fallback_reader = text_fallback_reader(error.source_text, chunking=self._chunking_strategy())
             await _insert_with_retry(fallback_reader)
 
     async def _save_candidate_publish_metadata(
@@ -805,7 +732,7 @@ class KnowledgeManager:
             SOURCE_DIGEST_KEY: source_digest,
         }
         try:
-            reader = self._build_reader(resolved_path)
+            reader = build_reader(resolved_path, chunking=self._chunking_strategy())
         except ImportError as exc:
             logger.warning(
                 "Skipping knowledge file because its reader dependency is not installed",
@@ -923,10 +850,10 @@ class KnowledgeManager:
         error reporting for this file.
         """
         try:
-            reader = self._build_reader(resolved_path)
+            reader = build_reader(resolved_path, chunking=self._chunking_strategy())
         except Exception:
             return ()
-        if not isinstance(reader, (TextReader, MarkdownReader)):
+        if not reader_uses_configured_chunking(reader):
             return ()
         try:
             documents: Sequence[Document] = reader.read(resolved_path, name=resolved_path.name)

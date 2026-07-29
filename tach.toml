@@ -3558,7 +3558,6 @@ depends_on = []
 [[modules]]
 path = "mindroom.knowledge.manager"
 depends_on = [
-    "mindroom.chunking",
     "mindroom.constants",
     "mindroom.embedding_errors",
     "mindroom.embedding_factory",
@@ -3570,10 +3569,16 @@ depends_on = [
     "mindroom.knowledge.index_metadata",
     "mindroom.knowledge.index_retry",
     "mindroom.knowledge.indexing_config",
+    "mindroom.knowledge.readers",
     "mindroom.knowledge.redaction",
     "mindroom.knowledge.refresh_outcome",
     "mindroom.strict_knowledge",
 ]
+
+[[modules]]
+path = "mindroom.knowledge.readers"
+depends_on = ["mindroom.chunking"]
+visibility = ["mindroom.knowledge.manager"]
 
 [[modules]]
 path = "mindroom.knowledge.redaction"
