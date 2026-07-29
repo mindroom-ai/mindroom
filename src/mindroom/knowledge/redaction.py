@@ -38,9 +38,15 @@ _AUTHORIZATION_HEADER_PATTERN: re.Pattern[str] = re.compile(
 #: crossing the next separator on colon-dense input -- ``a:a:a:…`` cost 36 s at
 #: 195 KB when it did -- and the length cap makes the per-position work constant
 #: regardless. The cap is ``_MAX_REDACTABLE_TOKEN_LENGTH``, so a run long enough
-#: to exceed it would be dropped unread anyway. A password containing a colon
-#: still has every byte of the secret redacted; only the username before the
-#: first colon survives, and a username is not the secret.
+#: to exceed it would be dropped unread anyway.
+#:
+#: The cost is precise, and smaller than "only the username survives": matching
+#: resumes after each colon, so a *schemeless* multi-colon userinfo keeps its
+#: leading segments and loses the tail -- ``user:pa:ss:secret@host`` becomes
+#: ``user:pa:***``. Everything from the last colon before the ``@`` is redacted,
+#: which is where a secret pasted into a URL actually sits, and the baseline
+#: preserved the whole string. A URL *with* a scheme is unaffected: the
+#: ``scheme://`` branch consumes it first and its authority is redacted whole.
 _CREDENTIAL_CANDIDATE_PATTERN: re.Pattern[str] = re.compile(
     r"""(?<![A-Za-z0-9+._-])(?:
           [a-zA-Z][a-zA-Z0-9+.-]*://[^\s'"<>]*        # scheme://host/path

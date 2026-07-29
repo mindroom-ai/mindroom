@@ -138,6 +138,7 @@ _INTENTIONAL_IMPROVEMENTS = frozenset(
         "userinfo-no-scheme",
         "spaced-auth-header",
         "scp-with-path",
+        "multi-colon-userinfo",
     },
 )
 
@@ -174,6 +175,8 @@ def _credential_urls() -> Iterator[tuple[str, str]]:
     yield "userinfo-no-scheme", f"oauth2:{_SECRET}@gitlab.com:org/repo.git"
     yield "userinfo-no-scheme", f"x-access-token:{_SECRET}@github.com/org/repo.git"
     yield "scp-with-path", f"{_SECRET}@github.com:org/repo.git"
+    yield "multi-colon-userinfo", f"user:pa:ss:{_SECRET}@host"
+    yield "multi-colon-userinfo", f"https://user:pa:ss:{_SECRET}@host/x"
     for depth in (1, 2, 3):
         userinfo = _encoded(f"user:{_SECRET}@", depth)
         yield "encoded-authority", f"https://{userinfo}example.com/org/repo.git"
@@ -342,3 +345,25 @@ def test_scp_remotes_lose_their_username_in_diagnostics(baseline_redact: _Redact
     assert redact_credentials_in_text(submodule_line) == (
         "Submodule 'vendor/x' (***@github.com:example/x.git) registered for path 'vendor/x'"
     )
+
+
+def test_schemeless_multi_colon_userinfo_keeps_its_leading_segments(baseline_redact: _Redactor) -> None:
+    """Pin exactly how much a multi-colon userinfo gives up, and how much it keeps.
+
+    Excluding ``:`` from the password run is what makes the scan linear, and it
+    means matching resumes after each colon rather than spanning the whole
+    userinfo. So a schemeless ``user:pa:ss:secret@host`` keeps its leading
+    segments -- the claim is *not* that only the username survives.
+
+    What matters is that the tail is always redacted, and that the baseline
+    preserved the entire string. A URL with a scheme is unaffected either way.
+    """
+    secret = "S3CR3T-CANARY"  # noqa: S105
+    schemeless = f"user:pa:ss:{secret}@host"
+    with_scheme = f"https://user:pa:ss:{secret}@host/x"
+
+    assert redact_credentials_in_text(schemeless) == "user:pa:***"
+    assert baseline_redact(schemeless) == schemeless, "the baseline leaked the whole string"
+
+    assert redact_credentials_in_text(with_scheme) == "https://***@host/x"
+    assert baseline_redact(with_scheme) == "https://***@host/x", "a scheme makes both redact the authority whole"
