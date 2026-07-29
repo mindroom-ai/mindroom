@@ -22,6 +22,7 @@ import random
 import secrets
 import signal
 import socket
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -48,6 +49,7 @@ INSTANCE_REGISTRY = PROJECT_ROOT / "local" / "instances" / "deploy" / "instances
 MODEL_ID = "mindroom-live-fuzz"
 AGENT_NAME = "general"
 ROOM_KEY = "lobby"
+RESTART_SEED = 20_260_729
 
 
 def _required_int(value: Mapping[str, object], key: str) -> int:
@@ -81,16 +83,17 @@ class LiveOperationKind(StrEnum):
 def restart_failure(
     invariant: str,
     *,
-    seed: int,
     event_category: str,
     phase: str,
-    observed: object,
-    step: int = -1,
-    thread: int = -1,
+    observed: int | bool,
+    step: int,
 ) -> str:
     """Format replay coordinates without accepting message content."""
+    if not isinstance(observed, (bool, int)):
+        msg = "restart output observation must be a count or boolean"
+        raise TypeError(msg)
     return (
-        f"invariant={invariant} seed={seed} step={step} thread={thread} "
+        f"invariant={invariant} seed={RESTART_SEED} step={step} thread=0 "
         f"event_category={event_category} phase={phase} observed={observed}"
     )
 
@@ -172,7 +175,7 @@ class LiveFuzzScenario:
         if self.thread_count < 1:
             msg = "live Matrix fuzz trace must contain at least one thread"
             raise ValueError(msg)
-        if self.profile not in {"fuzz", "saturation"}:
+        if self.profile not in {"fuzz", "restart-regression", "saturation"}:
             msg = f"unsupported live Matrix fuzz profile {self.profile!r}"
             raise ValueError(msg)
         known_events = {f"root:{thread}" for thread in range(self.thread_count)}
@@ -468,6 +471,9 @@ def saturation_scenario(
     return scenario
 
 
+RESTART_SCENARIO = LiveFuzzScenario(thread_count=1, batches=(), profile="restart-regression")
+
+
 class _ModelHandler(BaseHTTPRequestHandler):
     """Small deterministic OpenAI-compatible endpoint for live transport tests."""
 
@@ -702,6 +708,33 @@ class ManagedTuwunelStack:
             "event_loop_stalls": log.count("event_loop_stall_detected"),
         }
 
+    def log_count(self, marker: str) -> int:
+        """Count one content-free lifecycle marker."""
+        return self.log_path.read_text(encoding="utf-8", errors="replace").count(marker)
+
+    def wait_for_log_count(self, marker: str, minimum: int, timeout: float = 60) -> None:
+        """Wait for a bounded lifecycle milestone."""
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if self.log_count(marker) >= minimum:
+                return
+            time.sleep(0.1)
+        msg = f"restart profile lifecycle marker missing: {marker}"
+        raise TimeoutError(msg)
+
+    def add_restart_room(self, room_id: str) -> None:
+        """Trigger a real entity replacement that adds one dormant room."""
+        config = yaml.safe_load(self.config_path.read_text(encoding="utf-8"))
+        config["agents"][AGENT_NAME]["rooms"].append(room_id)
+        self.config_path.write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
+
+    def cached_restart_event_count(self, event_ids: tuple[str, str]) -> int:
+        """Count distinct restart fixtures accepted by the durable event cache."""
+        with sqlite3.connect(self.storage_path / "event_cache.db") as database:
+            query = "SELECT COUNT(DISTINCT event_id) FROM events WHERE event_id IN (?, ?)"
+            row = database.execute(query, event_ids).fetchone()
+        return int(row[0]) if row is not None else 0
+
     def _start_model_server(self) -> int:
         _ModelHandler.stream_segments = self._stream_segments
         _ModelHandler.stream_delay = self._stream_delay
@@ -872,6 +905,20 @@ class LiveMatrixClient:
         """Join the managed public room."""
         room_id = quote(self.room_id, safe="")
         await self._request("POST", f"/_matrix/client/v3/join/{room_id}", json_body={})
+
+    async def create_public_room(self) -> str:
+        """Create and select one disposable public room."""
+        data = await self._request(
+            "POST",
+            "/_matrix/client/v3/createRoom",
+            json_body={"preset": "public_chat", "visibility": "public"},
+        )
+        room_id = data.get("room_id")
+        if not isinstance(room_id, str):
+            msg = "Matrix createRoom omitted room_id"
+            raise TypeError(msg)
+        self.room_id = room_id
+        return room_id
 
     async def send_event(
         self,
@@ -1132,6 +1179,8 @@ class LiveFuzzRunner:
         """Execute every batch and enforce the reply invariant after each."""
         await asyncio.gather(*(client.register() for client in self.clients))
         await asyncio.gather(*(client.join_room() for client in self.clients))
+        if self.scenario.profile == "restart-regression":
+            return await self._run_restart_regression()
         if self.scenario.profile == "saturation":
             await asyncio.gather(
                 *(client.sync_incremental(timeout_ms=0, allow_limited=True) for client in self.clients),
@@ -1143,6 +1192,81 @@ class LiveFuzzRunner:
         return await self._run_batches(
             self.scenario.batches,
         )
+
+    async def _run_restart_regression(self) -> dict[str, int | str]:
+        """Exercise real replacement recovery while observing only Matrix output."""
+        dormant = self.client
+        await dormant.create_public_room()
+        historical_text = await dormant.send_event(
+            "m.room.message",
+            "restart-old-text",
+            {"body": "Synthetic historical text", "msgtype": "m.text"},
+        )
+        historical_media = await dormant.send_event(
+            "m.room.message",
+            "restart-old-media",
+            {
+                "body": "Synthetic historical audio",
+                "info": {"mimetype": "audio/ogg", "size": 1},
+                "m.mentions": {"user_ids": [self.stack.agent_id]},
+                "msgtype": "m.audio",
+                "url": "mxc://localhost/synthetic",
+            },
+        )
+        setup_count = self.stack.log_count("agent_setup_complete")
+        update_count = self.stack.log_count("configuration_update_complete")
+        self.stack.add_restart_room(dormant.room_id)
+        await asyncio.to_thread(self.stack.wait_for_log_count, "agent_setup_complete", setup_count + 2)
+        fresh = await dormant.send_event(
+            "m.room.message",
+            "restart-fresh",
+            self._message_content("Synthetic fresh startup request"),
+        )
+        await asyncio.to_thread(
+            self.stack.wait_for_log_count,
+            "configuration_update_complete",
+            update_count + 1,
+        )
+
+        deadline = time.monotonic() + self.reply_timeout
+        counts = (0, 0, 0)
+        cached_history = 0
+        settled = 0
+        while time.monotonic() < deadline:
+            await dormant.sync_incremental(timeout_ms=250, allow_limited=True)
+            agent = self._canonical_response_ids(dormant.seen_events.values())
+            router = self._canonical_response_ids(dormant.seen_events.values(), sender_id=self.stack.router_id)
+            counts = (
+                len(agent.get(historical_text, set())) + len(router.get(historical_text, set())),
+                len(agent.get(historical_media, set())) + len(router.get(historical_media, set())),
+                len(agent.get(fresh, set())),
+            )
+            cached_history = self.stack.cached_restart_event_count((historical_text, historical_media))
+            settled = settled + 1 if counts[2] == 1 and cached_history == 2 else 0
+            if settled == 2:
+                break
+            if settled:
+                await asyncio.sleep(self.settle_seconds)
+        checks = (
+            ("historical_output_suppressed", counts[0], 0, "historical_text", "replacement_sync", 1),
+            ("historical_output_suppressed", counts[1], 0, "historical_media", "replacement_sync", 2),
+            ("historical_events_cached", cached_history, 2, "historical_events", "replacement_sync", 3),
+            ("fresh_event_exactly_once", counts[2], 1, "fresh_user", "replacement_startup", 4),
+        )
+        failures = [
+            restart_failure(
+                invariant,
+                event_category=category,
+                phase=phase,
+                observed=observed,
+                step=step,
+            )
+            for invariant, observed, expected, category, phase, step in checks
+            if observed != expected
+        ]
+        if failures:
+            raise AssertionError("restart regression invariant failures:\n" + "\n".join(failures))
+        return {"historical_events_cached": cached_history, "historical_outputs": 0, "status": "PASS"}
 
     async def _run_saturation(self) -> dict[str, int | str]:
         """Run hot and parallel turns without cross-thread barriers."""
@@ -1294,11 +1418,12 @@ class LiveFuzzRunner:
         events: Collection[Mapping[str, Any]],
         *,
         root_event_id: str | None = None,
+        sender_id: str | None = None,
     ) -> dict[str, set[str]]:
         """Index canonical agent originals by their direct source event."""
         response_ids: dict[str, set[str]] = defaultdict(set)
         for event in events:
-            if event.get("type") != "m.room.message" or event.get("sender") != self.stack.agent_id:
+            if event.get("type") != "m.room.message" or event.get("sender") != (sender_id or self.stack.agent_id):
                 continue
             event_id = event.get("event_id")
             content = event.get("content")
@@ -1538,7 +1663,7 @@ def _non_negative_int(value: str) -> int:
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--profile", choices=("fuzz", "saturation"), default="fuzz")
+    parser.add_argument("--profile", choices=("fuzz", "restart-regression", "saturation"), default="fuzz")
     parser.add_argument("--seed", type=int, default=1)
     parser.add_argument("--steps", type=_positive_int, default=200)
     parser.add_argument("--threads", type=_positive_int, default=45)
@@ -1586,12 +1711,16 @@ def main() -> None:
         else (
             saturation_scenario()
             if args.profile == "saturation"
-            else live_scenario_from_seed(
-                args.seed,
-                steps=args.steps,
-                thread_count=args.threads,
-                max_batch_size=args.max_batch_size,
-                restart_interval=args.restart_interval,
+            else (
+                RESTART_SCENARIO
+                if args.profile == "restart-regression"
+                else live_scenario_from_seed(
+                    args.seed,
+                    steps=args.steps,
+                    thread_count=args.threads,
+                    max_batch_size=args.max_batch_size,
+                    restart_interval=args.restart_interval,
+                )
             )
         )
     )
@@ -1615,7 +1744,9 @@ def main() -> None:
                 settle_seconds=args.settle_seconds,
             ),
         )
-        result["seed"] = args.seed if args.trace is None else "trace"
+        result["seed"] = (
+            RESTART_SEED if scenario.profile == "restart-regression" else args.seed if args.trace is None else "trace"
+        )
         result.update(stack.diagnostic_counts())
         print(json.dumps(result, sort_keys=True))
     except Exception:
