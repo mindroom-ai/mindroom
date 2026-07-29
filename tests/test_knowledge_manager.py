@@ -52,8 +52,9 @@ from mindroom.knowledge.file_listing import (
 )
 from mindroom.knowledge.index_metadata import write_index_metadata_payload
 from mindroom.knowledge.indexing_config import IndexingSettings
-from mindroom.knowledge.manager import KnowledgeManager, RefreshOutcome, knowledge_source_signature
+from mindroom.knowledge.manager import KnowledgeManager, knowledge_source_signature
 from mindroom.knowledge.redaction import credential_free_repo_url, credential_free_url_identity, redact_url_credentials
+from mindroom.knowledge.refresh_outcome import RefreshOutcome
 from mindroom.knowledge.refresh_runner import knowledge_binding_mutation_lock, refresh_knowledge_binding
 from mindroom.knowledge.registry import (
     get_published_index,

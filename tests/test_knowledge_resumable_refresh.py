@@ -51,7 +51,8 @@ from mindroom.knowledge.candidate_checkpoint import (
 from mindroom.knowledge.embedding_batch import BatchPrefetchEmbedder, plan_embedding_batches
 from mindroom.knowledge.index_metadata import write_index_metadata_payload
 from mindroom.knowledge.index_retry import EmbeddingRetryPolicy, run_with_embedding_retry
-from mindroom.knowledge.manager import KnowledgeManager, RefreshOutcome
+from mindroom.knowledge.manager import KnowledgeManager
+from mindroom.knowledge.refresh_outcome import RefreshOutcome
 from mindroom.knowledge.refresh_runner import refresh_knowledge_binding
 from mindroom.knowledge.registry import (
     PublishedIndexState,

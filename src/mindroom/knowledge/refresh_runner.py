@@ -22,7 +22,7 @@ from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths, resolve_runtime_paths, runtime_env_values
 from mindroom.file_locks import async_exclusive_file_lock
 from mindroom.knowledge.availability import KnowledgeAvailability
-from mindroom.knowledge.manager import KnowledgeManager, RefreshOutcome, knowledge_source_signature
+from mindroom.knowledge.manager import KnowledgeManager, knowledge_source_signature
 from mindroom.knowledge.redaction import redact_credentials_in_text
 from mindroom.knowledge.registry import (
     KnowledgeRefreshTarget,
@@ -532,11 +532,7 @@ async def _refresh_knowledge_binding_locked(
         )
         if unchanged_result is not None:
             return unchanged_result
-        # The annotation is load-bearing, not decoration: privata treats
-        # RefreshOutcome as legitimately public because this module imports it
-        # by name, and without a use here ruff would delete that import. Do not
-        # "simplify" it away.
-        outcome: RefreshOutcome = await manager.reindex_all(force_reindex=force_reindex)
+        outcome = await manager.reindex_all(force_reindex=force_reindex)
         if outcome.error is not None:
             await asyncio.to_thread(
                 mark_published_index_refresh_failed_preserving_last_good,
