@@ -35,6 +35,7 @@ from mindroom.thread_summary import (
     _next_threshold,
     _recover_initial_enrichment_complete,
     _recover_last_summary_count,
+    _recover_pin_state,
     _resolve_thread_summary_model_name,
     _thread_locks,
     _thread_summary_cache_key,
@@ -49,7 +50,12 @@ from mindroom.thread_summary import (
     update_last_summary_count,
 )
 from mindroom.thread_tag_vocabulary import _TagUsage, _TagVocabularySnapshot
-from mindroom.thread_tags import SetThreadTagsIfEmptyResult, ThreadTagsError
+from mindroom.thread_tags import (
+    SetThreadTagsIfEmptyResult,
+    ThreadTagRecord,
+    ThreadTagsError,
+    ThreadTagsState,
+)
 from tests.conftest import make_matrix_client_mock
 
 if TYPE_CHECKING:
@@ -85,6 +91,7 @@ def _make_summary_notice_message(
     initial_enrichment_complete: bool | None = True,
     model: str = "manual",
     sender: str = "@mindroom:localhost",
+    pinned: bool | None = None,
 ) -> ResolvedVisibleMessage:
     """Build a synthetic thread summary notice for history-counting regressions."""
     summary = "🧵 Existing thread summary"
@@ -96,6 +103,8 @@ def _make_summary_notice_message(
     }
     if initial_enrichment_complete is not None:
         summary_metadata["initial_enrichment_complete"] = initial_enrichment_complete
+    if pinned is not None:
+        summary_metadata["pinned"] = pinned
     return ResolvedVisibleMessage.synthetic(
         sender=sender,
         body=summary,
@@ -654,9 +663,15 @@ class TestMaybeGenerateThreadSummary:
         self.conversation_cache = MagicMock()
         self.conversation_cache.get_latest_thread_event_id_if_needed = AsyncMock(return_value="$thread1")
         self.conversation_cache.notify_outbound_message = Mock()
-        with patch(
-            "mindroom.thread_summary.maybe_rebuild_tag_vocabulary",
-            new=AsyncMock(return_value=None),
+        with (
+            patch(
+                "mindroom.thread_summary.maybe_rebuild_tag_vocabulary",
+                new=AsyncMock(return_value=None),
+            ),
+            patch(
+                "mindroom.thread_summary.get_thread_tags",
+                new=AsyncMock(return_value=None),
+            ),
         ):
             yield
 
@@ -675,6 +690,173 @@ class TestMaybeGenerateThreadSummary:
             rp,
             conversation_cache=self.conversation_cache,
         )
+
+    async def test_pinned_thread_skips_generation(self) -> None:
+        """A pinned thread past the threshold must not call the LLM."""
+        client = _mock_client()
+        config = _mock_config()
+        rp = _mock_runtime_paths()
+        history = [
+            *_make_thread_history(12),
+            _make_summary_notice_message("$thread1", message_count=2, pinned=True),
+        ]
+
+        with (
+            patch(
+                "mindroom.thread_summary.current_internal_sender_ids",
+                return_value=_TRUSTED_SUMMARY_SENDERS,
+            ),
+            patch("mindroom.thread_summary._load_thread_history", return_value=history),
+            patch("mindroom.thread_summary._generate_summary") as mock_gen,
+        ):
+            await self._maybe_generate(client, config, rp)
+
+        mock_gen.assert_not_awaited()
+
+    async def test_pinned_bail_advances_baseline(self) -> None:
+        """Bailing must advance the baseline so the pre-check stops firing every turn."""
+        client = _mock_client()
+        config = _mock_config()
+        rp = _mock_runtime_paths()
+        history = [
+            *_make_thread_history(12),
+            _make_summary_notice_message("$thread1", message_count=2, pinned=True),
+        ]
+
+        with (
+            patch(
+                "mindroom.thread_summary.current_internal_sender_ids",
+                return_value=_TRUSTED_SUMMARY_SENDERS,
+            ),
+            patch("mindroom.thread_summary._load_thread_history", return_value=history),
+            patch("mindroom.thread_summary._generate_summary"),
+        ):
+            await self._maybe_generate(client, config, rp)
+
+        assert _last_summary_counts[_thread_summary_cache_key("!room:x", "$thread1")] == 12
+        with patch("mindroom.thread_summary.claim_vocabulary_check", return_value=False):
+            assert not should_queue_thread_summary(
+                "!room:x",
+                "$thread1",
+                config,
+                rp,
+                message_count_hint=12,
+            )
+
+    async def test_released_thread_resumes_generation(self) -> None:
+        """A later pinned=False summary lets automatic generation resume."""
+        client = _mock_client()
+        config = _mock_config()
+        rp = _mock_runtime_paths()
+        # 15 messages clears the threshold that the recovered baseline of 3
+        # pushes to 13, so only the pin state decides whether generation runs.
+        history = [
+            *_make_thread_history(15),
+            _make_summary_notice_message("$thread1", message_count=2, event_id="$s1", pinned=True),
+            _make_summary_notice_message("$thread1", message_count=3, event_id="$s2", pinned=False),
+        ]
+
+        with (
+            patch(
+                "mindroom.thread_summary.current_internal_sender_ids",
+                return_value=_TRUSTED_SUMMARY_SENDERS,
+            ),
+            patch("mindroom.thread_summary._load_thread_history", return_value=history),
+            patch(
+                "mindroom.thread_summary._generate_summary",
+                return_value="Fresh summary",
+            ) as mock_gen,
+        ):
+            await self._maybe_generate(client, config, rp)
+
+        mock_gen.assert_awaited_once()
+
+    async def test_resolved_thread_skips_generation(self) -> None:
+        """A resolved thread should stop burning LLM calls on re-titling."""
+        client = _mock_client()
+        config = _mock_config()
+        rp = _mock_runtime_paths()
+        tags_state = ThreadTagsState(
+            room_id="!room:x",
+            thread_root_id="$thread1",
+            tags={
+                "resolved": ThreadTagRecord(
+                    set_by="@user:localhost",
+                    set_at=datetime.now(UTC),
+                ),
+            },
+        )
+
+        with (
+            patch(
+                "mindroom.thread_summary.current_internal_sender_ids",
+                return_value=_TRUSTED_SUMMARY_SENDERS,
+            ),
+            patch(
+                "mindroom.thread_summary._load_thread_history",
+                return_value=_make_thread_history(12),
+            ),
+            patch(
+                "mindroom.thread_summary.get_thread_tags",
+                new=AsyncMock(return_value=tags_state),
+            ),
+            patch("mindroom.thread_summary._generate_summary") as mock_gen,
+        ):
+            await self._maybe_generate(client, config, rp)
+
+        mock_gen.assert_not_awaited()
+        assert _last_summary_counts[_thread_summary_cache_key("!room:x", "$thread1")] == 12
+
+    async def test_tag_read_failure_still_generates(self) -> None:
+        """The tag read fails open; a state blip must not suppress summaries."""
+        client = _mock_client()
+        config = _mock_config()
+        rp = _mock_runtime_paths()
+
+        with (
+            patch(
+                "mindroom.thread_summary.current_internal_sender_ids",
+                return_value=_TRUSTED_SUMMARY_SENDERS,
+            ),
+            patch(
+                "mindroom.thread_summary._load_thread_history",
+                return_value=_make_thread_history(12),
+            ),
+            patch(
+                "mindroom.thread_summary.get_thread_tags",
+                new=AsyncMock(side_effect=ThreadTagsError("state fetch failed")),
+            ),
+            patch(
+                "mindroom.thread_summary._generate_summary",
+                return_value="Fresh summary",
+            ) as mock_gen,
+        ):
+            await self._maybe_generate(client, config, rp)
+
+        mock_gen.assert_awaited_once()
+
+    async def test_below_threshold_does_not_read_tags(self) -> None:
+        """The tag read must sit behind the threshold test to stay cheap."""
+        client = _mock_client()
+        config = _mock_config()
+        rp = _mock_runtime_paths()
+        get_tags = AsyncMock(return_value=None)
+
+        with (
+            patch(
+                "mindroom.thread_summary.current_internal_sender_ids",
+                return_value=_TRUSTED_SUMMARY_SENDERS,
+            ),
+            patch(
+                "mindroom.thread_summary._load_thread_history",
+                return_value=_make_thread_history(3),
+            ),
+            patch("mindroom.thread_summary.get_thread_tags", new=get_tags),
+            patch("mindroom.thread_summary._generate_summary"),
+        ):
+            await self._maybe_generate(client, config, rp)
+
+        get_tags.assert_not_awaited()
 
     async def test_below_threshold_skips(self) -> None:
         """No LLM call when message count is below the first threshold."""
@@ -2063,6 +2245,7 @@ class TestSetManualThreadSummary:
             4,
             "manual",
             conversation_cache,
+            pinned=True,
         )
         assert _last_summary_counts[_thread_summary_cache_key("!room:x", "$root1")] == 4
 
@@ -2560,5 +2743,57 @@ class TestSummaryNoticeFiltering:
         assert "Existing thread summary" in text
         assert not _is_thread_summary_message(
             forged,
+            trusted_sender_ids=_TRUSTED_SUMMARY_SENDERS,
+        )
+
+
+class TestRecoverPinState:
+    """Pin recovery from durable summary metadata."""
+
+    def test_absent_pinned_key_is_not_pinned(self) -> None:
+        """Summaries written before pinning existed must not pin retroactively."""
+        history = [_make_summary_notice_message("$thread1", message_count=2)]
+        assert _recover_pin_state(history, trusted_sender_ids=_TRUSTED_SUMMARY_SENDERS) is False
+
+    def test_latest_pin_wins_over_earlier_release(self) -> None:
+        """A later pin overrides an earlier release."""
+        history = [
+            _make_summary_notice_message("$thread1", message_count=2, event_id="$s1", pinned=False),
+            _make_summary_notice_message("$thread1", message_count=4, event_id="$s2", pinned=True),
+        ]
+        assert _recover_pin_state(history, trusted_sender_ids=_TRUSTED_SUMMARY_SENDERS)
+
+    def test_latest_release_wins_over_earlier_pin(self) -> None:
+        """Release must be possible; any-wins recovery would make it impossible."""
+        history = [
+            _make_summary_notice_message("$thread1", message_count=2, event_id="$s1", pinned=True),
+            _make_summary_notice_message("$thread1", message_count=4, event_id="$s2", pinned=False),
+        ]
+        assert _recover_pin_state(history, trusted_sender_ids=_TRUSTED_SUMMARY_SENDERS) is False
+
+    def test_untrusted_sender_cannot_pin(self) -> None:
+        """Only runtime-owned senders may set pin state."""
+        history = [
+            _make_summary_notice_message(
+                "$thread1",
+                message_count=2,
+                pinned=True,
+                sender="@stranger:elsewhere",
+            ),
+        ]
+        assert _recover_pin_state(history, trusted_sender_ids=_TRUSTED_SUMMARY_SENDERS) is False
+
+    def test_non_bool_pinned_value_does_not_change_state(self) -> None:
+        """A malformed value must not silently unpin."""
+        pinned_message = _make_summary_notice_message(
+            "$thread1",
+            message_count=2,
+            event_id="$s1",
+            pinned=True,
+        )
+        malformed = _make_summary_notice_message("$thread1", message_count=4, event_id="$s2")
+        malformed.content["io.mindroom.thread_summary"]["pinned"] = "yes"
+        assert _recover_pin_state(
+            [pinned_message, malformed],
             trusted_sender_ids=_TRUSTED_SUMMARY_SENDERS,
         )

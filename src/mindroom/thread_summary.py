@@ -27,7 +27,14 @@ from mindroom.thread_tag_vocabulary import (
     load_tag_vocabulary_snapshot,
     maybe_rebuild_tag_vocabulary,
 )
-from mindroom.thread_tags import AUTOMATIC_THREAD_TAG_EXCLUSIONS, coerce_tag_name, set_thread_tags_if_empty
+from mindroom.thread_tags import (
+    AUTOMATIC_THREAD_TAG_EXCLUSIONS,
+    RESOLVED_THREAD_TAG,
+    ThreadTagsError,
+    coerce_tag_name,
+    get_thread_tags,
+    set_thread_tags_if_empty,
+)
 from mindroom.timing import timed
 
 if TYPE_CHECKING:
@@ -288,6 +295,29 @@ def _recover_last_summary_count(
     return best_count
 
 
+def _recover_pin_state(
+    thread_history: Sequence[ResolvedVisibleMessage],
+    *,
+    trusted_sender_ids: Collection[str],
+) -> bool:
+    """Return the latest durable pin decision recorded in summary metadata.
+
+    Unlike the enrichment flag this is last-wins, so a later ``pinned: false``
+    summary releases a thread that an earlier summary pinned. Values that are
+    absent or not booleans leave the running decision untouched rather than
+    silently unpinning.
+    """
+    pinned = False
+    for message in thread_history:
+        metadata = _thread_summary_metadata(message, trusted_sender_ids=trusted_sender_ids)
+        if metadata is None:
+            continue
+        recorded = metadata.get("pinned")
+        if isinstance(recorded, bool):
+            pinned = recorded
+    return pinned
+
+
 def _recover_initial_enrichment_complete(
     thread_history: Sequence[ResolvedVisibleMessage],
     *,
@@ -432,6 +462,29 @@ async def _generate_summary(
     if isinstance(content, _ThreadSummary):
         return content.summary
     return None
+
+
+async def _thread_is_resolved(
+    client: nio.AsyncClient,
+    room_id: str,
+    thread_id: str,
+) -> bool:
+    """Return whether a thread carries the resolved lifecycle tag.
+
+    Fails open: a transient room-state read error must not suppress summaries
+    room-wide, and the cost of being wrong is one summary on a resolved thread.
+    """
+    try:
+        tags_state = await get_thread_tags(client, room_id, thread_id)
+    except ThreadTagsError as exc:
+        logger.warning(
+            "Thread tag read failed; continuing with automatic summary",
+            room_id=room_id,
+            thread_id=thread_id,
+            error=str(exc),
+        )
+        return False
+    return tags_state is not None and RESOLVED_THREAD_TAG in tags_state.tags
 
 
 @timed("maybe_generate_thread_summary")
@@ -579,6 +632,7 @@ async def send_thread_summary_event(
     conversation_cache: ConversationCacheProtocol,
     *,
     initial_enrichment_complete: bool | None = None,
+    pinned: bool = False,
     known_latest_thread_event_id: str | None = None,
 ) -> str | None:
     """Send a thread summary as a standard Matrix notice event.
@@ -587,6 +641,10 @@ async def send_thread_summary_event(
     event in the thread (for example the creator of a brand-new thread) supply it
     directly, skipping the history read that would otherwise scan the homeserver
     for a thread with no cache snapshot yet.
+
+    ``pinned`` records whether this summary should stop automatic
+    re-summarization. It defaults to ``False`` so that callers writing summaries
+    directly, such as the subagent spawn path, never pin a thread implicitly.
     """
     normalized_summary = normalize_thread_summary_text(summary)
     if not normalized_summary:
@@ -625,6 +683,9 @@ async def send_thread_summary_event(
         "message_count": message_count,
         "generated_at": datetime.now(UTC).isoformat(),
         "model": model_name,
+        # Always recorded, including False: pin recovery is last-wins, so an
+        # explicit release has to be representable in the metadata.
+        "pinned": pinned,
     }
     if initial_enrichment_complete is not None:
         summary_metadata["initial_enrichment_complete"] = initial_enrichment_complete
@@ -665,8 +726,14 @@ async def set_manual_thread_summary(
     config: Config,
     runtime_paths: RuntimePaths,
     conversation_cache: ConversationCacheProtocol,
+    pin: bool = True,
 ) -> _ThreadSummaryWriteResult:
-    """Write one validated manual summary for a canonical thread root."""
+    """Write one validated manual summary for a canonical thread root.
+
+    Pins the thread by default so the written title survives automatic
+    re-summarization. ``pin=False`` writes the summary and releases any pin an
+    earlier manual write established.
+    """
     if not isinstance(summary, str) or not summary.strip():
         msg = "summary must be a non-empty string."
         raise ThreadSummaryWriteError(msg)
@@ -703,6 +770,7 @@ async def set_manual_thread_summary(
                 message_count,
                 "manual",
                 conversation_cache,
+                pinned=pin,
             )
         except Exception as exc:
             msg = "Failed to send thread summary event."
@@ -719,7 +787,7 @@ async def set_manual_thread_summary(
         )
 
 
-async def maybe_generate_thread_summary(
+async def maybe_generate_thread_summary(  # noqa: PLR0911
     client: nio.AsyncClient,
     room_id: str,
     thread_id: str,
@@ -756,7 +824,27 @@ async def maybe_generate_thread_summary(
             thread_history,
             trusted_sender_ids=trusted_sender_ids,
         )
+        if _recover_pin_state(thread_history, trusted_sender_ids=trusted_sender_ids):
+            logger.debug(
+                "Skipping automatic thread summary for a pinned thread",
+                room_id=room_id,
+                thread_id=thread_id,
+                message_count=message_count,
+            )
+            # Advance the baseline so the cheap pre-check stops firing, and
+            # therefore stops spawning a history-loading pass, on every turn.
+            update_last_summary_count(room_id, thread_id, message_count)
+            return
         if message_count < threshold:
+            return
+        if await _thread_is_resolved(client, room_id, thread_id):
+            logger.debug(
+                "Skipping automatic thread summary for a resolved thread",
+                room_id=room_id,
+                thread_id=thread_id,
+                message_count=message_count,
+            )
+            update_last_summary_count(room_id, thread_id, message_count)
             return
 
         initial_enrichment = recovered_summary_count > 0 and not _recover_initial_enrichment_complete(
