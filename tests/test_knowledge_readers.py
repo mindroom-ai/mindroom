@@ -12,6 +12,7 @@ inferring them from attributes.
 from __future__ import annotations
 
 import codecs
+import json
 from itertools import pairwise
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -282,10 +283,37 @@ def test_json_keeps_structured_chunking_and_tags_its_parse_failures(
     assert (raised.value.line, raised.value.column) == (3, 6)
 
     # The other direction: tagging must be reached only by a parse failure, or
-    # every JSON file in the corpus would divert to the text fallback.
+    # every JSON file in the corpus would divert to the text fallback. The
+    # caller's name has to reach every document too -- Chroma stores it as the
+    # `name` metadata field and queries by it, so dropping it renames every
+    # chunk of the file in search results.
     valid = tmp_path / "valid.json"
     valid.write_text('[{"claim": "one"}, {"claim": "two"}]', encoding="utf-8")
-    assert [document.content for document in reader.read(valid)] == ['{"claim": "one"}', '{"claim": "two"}']
+    documents = reader.read(valid, name="valid.json")
+    assert [document.content for document in documents] == ['{"claim": "one"}', '{"claim": "two"}']
+    assert {document.name for document in documents} == {"valid.json"}
+
+
+def test_json_elements_above_the_factory_chunk_size_are_still_split(
+    tmp_path: Path,
+    chunking: SafeFixedSizeChunking,
+) -> None:
+    """JSON keeps the factory's 5000-character chunking, so a larger value must split.
+
+    Every other JSON case here uses a short document, which cannot tell
+    chunking-enabled from chunking-disabled: both emit one document. Copying
+    the factory reader with chunking off would put a single oversized element
+    into one vector.
+    """
+    source = tmp_path / "big.json"
+    source.write_text(json.dumps({"claim": "x" * 6013}), encoding="utf-8")
+    reader = build_reader(source, chunking=chunking)
+
+    documents = reader.read(source)
+
+    assert reader.chunk is True
+    assert len(documents) > 1
+    assert max(len(document.content) for document in documents) <= 5000
 
 
 def test_malformed_json_fallback_reader_chunks_like_this_bases_text(chunking: SafeFixedSizeChunking) -> None:
@@ -302,20 +330,23 @@ def test_malformed_json_fallback_reader_chunks_like_this_bases_text(chunking: Sa
     assert [len(chunk) for chunk in chunks] == [137, 137, 137, 22]
 
 
-def test_fallback_documents_are_identified_per_file(chunking: SafeFixedSizeChunking) -> None:
-    """Two malformed files in one base must not collide in the vector store.
+def test_fallback_documents_keep_the_callers_name(chunking: SafeFixedSizeChunking) -> None:
+    """The name the caller passed must reach every chunk of the fallback read.
 
-    Agno derives a chunk's id from its document's id, so a fallback document
-    carrying a fixed id would make the second malformed file's chunks overwrite
-    the first's -- losing content that the fallback exists to keep searchable.
-    The caller's name has to survive too, since that is what identifies the
-    chunk when no id is set.
+    Chroma stores it as the ``name`` metadata field and looks documents up by
+    it, so a fallback that substituted its own would make the file's chunks
+    findable under the wrong identifier.
+
+    Deliberately not asserted here: that two fallback documents carry distinct
+    ids. Agno mixes the document id with a per-file content hash before it
+    reaches the store, so a fixed id collides at this level and still yields
+    distinct vector ids -- there is no overwrite to protect against, and an
+    assertion implying otherwise would be documenting a hazard that does not
+    exist.
     """
-    first = text_fallback_reader("first source", chunking=chunking).read(Path("a.json"), name="a")
-    second = text_fallback_reader("second source", chunking=chunking).read(Path("b.json"), name="b")
+    documents = text_fallback_reader("retained source text", chunking=chunking).read(Path("a.json"), name="a")
 
-    assert {document.name for document in first} == {"a"}
-    assert {document.id for document in first}.isdisjoint({document.id for document in second})
+    assert {document.name for document in documents} == {"a"}
 
 
 @pytest.mark.parametrize("suffix", _CHUNKED_SUFFIXES)

@@ -2844,6 +2844,32 @@ async def test_unchanged_publish_stays_ready_when_checkpoint_cleanup_fails(
     assert load_candidate_checkpoint(storage) is not None, "failed cleanup unexpectedly removed the checkpoint"
 
 
+def test_prefetch_admits_a_file_that_exactly_fills_the_remaining_budget(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A file whose worst case exactly equals the remaining budget still fits.
+
+    The neighbouring cases cover comfortably-inside and far-too-large, so the
+    comparison could be off by one at the boundary without any of them
+    noticing: two 2,000-byte files under a 4,000-byte budget would prefetch
+    only the first.
+    """
+    monkeypatch.setattr(knowledge_manager_module, "_MAX_PREFETCH_TEXT_BYTES", 4_000)
+    docs_path = tmp_path / "docs"
+    docs_path.mkdir()
+    files = []
+    for index in range(2):
+        path = docs_path / f"exact{index}.md"
+        path.write_text("x" * 2_000, encoding="utf-8")
+        files.append(path)
+    config = _config(tmp_path, docs_path, chunk_size=100_000)
+
+    texts = _manager(config)._chunk_texts_for_batch(files)
+
+    assert len(texts) == 2, "a file that exactly fills the remaining budget was skipped"
+
+
 def test_prefetch_reads_text_sources_and_skips_parsed_ones(tmp_path: Path) -> None:
     """The prefetch gate has to be exercised in both directions, not just the open one.
 
