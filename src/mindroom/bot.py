@@ -1083,6 +1083,8 @@ class AgentBot:
     def _set_historical_dispatch_fence(self, *, armed: bool) -> None:
         """Set tokenless-window admission and its matching decrypt-notice floor."""
         self._historical_dispatch_fence.set_armed(armed=armed)
+        if armed:
+            self._room_member_join_hooks_armed = False
         client = self.client
         if armed and client is not None and client.user_id:
             raise_notice_floor(
@@ -1192,7 +1194,7 @@ class AgentBot:
         decision: SyncCertificationDecision,
     ) -> _RoomMemberJoinSyncHookPlan:
         """Return room-member join hook actions for one certified sync response."""
-        if decision.reset_client_token:
+        if decision.reset_client_token or self._historical_dispatch_fence.armed:
             return _RoomMemberJoinSyncHookPlan(arm_after_response=False)
         # The first restored-token sync is requested with full_state=True, so its
         # state block is a current snapshot. Only the timeline is a catch-up stream.
@@ -1319,7 +1321,6 @@ class AgentBot:
                 self._set_historical_dispatch_fence(armed=True)
                 if self.client is not None:
                     cast("Any", self.client).next_batch = None
-            self._room_member_join_hooks_armed = False
             self.logger.warning(
                 "matrix_sync_token_rejected",
                 status_code=_response.status_code,

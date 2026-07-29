@@ -425,6 +425,10 @@ async def test_missing_next_batch_keeps_historical_dispatch_fence_armed(tmp_path
     client.next_batch = None
 
     await _start_bot_with_client(bot, client)
+    bot._first_sync_done = True
+    bot._room_member_join_hooks_armed = True
+    bot._sync_cache_trust.state = SyncTrustState.CERTIFIED
+    bot._sync_cache_trust.checkpoint = SyncCheckpoint("s_before_missing_token")
     response = MagicMock(spec=nio.SyncResponse)
     response.next_batch = None
     response.rooms = MagicMock(join={}, leave={})
@@ -439,6 +443,7 @@ async def test_missing_next_batch_keeps_historical_dispatch_fence_armed(tmp_path
         await bot._on_sync_response(response)
 
     assert bot._historical_dispatch_fence.armed is True
+    assert bot._room_member_join_hooks_armed is False
 
 
 @pytest.mark.asyncio
@@ -524,12 +529,14 @@ def test_redaction_rewind_without_retry_token_rearms_historical_dispatch_fence(t
     client.next_batch = "s_uncertified"
     bot.client = client
     assert not bot._historical_dispatch_fence.armed
+    bot._room_member_join_hooks_armed = True
 
     with patch("mindroom.bot.raise_notice_floor") as notice_floor:
         bot._rewind_sync_after_redaction_failure()
 
     assert client.next_batch is None
     assert bot._historical_dispatch_fence.armed
+    assert not bot._room_member_join_hooks_armed
     notice_floor.assert_called_once_with(
         client.user_id,
         floor_timestamp_ms=bot._historical_dispatch_fence.startup_cutoff_ms,
@@ -684,6 +691,34 @@ async def test_sliding_receive_loop_restart_fences_history_after_success(tmp_pat
     ):
         await bot._on_sync_response(nio.SlidingSyncResponse("pos"))
         await bot.sync_forever()
+        await callback(room, event)
+        await wait_for_background_tasks(timeout=1.0, owner=bot._runtime_view)
+
+    handle_text_event.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_sliding_unknown_pos_fences_history_before_next_response(tmp_path: Path) -> None:
+    """An expired Sliding position must immediately restore historical callback fencing."""
+    with patch("mindroom.bot.time.time", return_value=2.0):
+        bot = _agent_bot(tmp_path)
+    bot.config.matrix_sync.mode = "sliding"
+    client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
+    event = _text_event("$history-after-unknown-pos", "historical", 1_500)
+    room = nio.MatrixRoom("!room:localhost", bot.agent_user.user_id)
+
+    await _start_bot_with_client(bot, client)
+    callback = cast("Callable[..., Awaitable[None]]", _registered_event_callback(client, nio.RoomMessageText))
+    with patch.object(bot, "_run_sync_response_side_effects", AsyncMock()):
+        await bot._on_sync_response(nio.SlidingSyncResponse("pos"))
+    assert not bot._historical_dispatch_fence.armed
+
+    await bot._on_sync_error(nio.SlidingSyncError("connection expired", "M_UNKNOWN_POS"))
+    assert bot._historical_dispatch_fence.armed
+    assert not bot._room_member_join_hooks_armed
+
+    handle_text_event = AsyncMock()
+    with patch.object(bot._turn_controller, "handle_text_event", handle_text_event):
         await callback(room, event)
         await wait_for_background_tasks(timeout=1.0, owner=bot._runtime_view)
 
