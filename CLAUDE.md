@@ -115,6 +115,7 @@ Matrix sync callback
 | `memory/` | Mem0 memory: agent and team-scoped |
 | `knowledge/` | Knowledge base / RAG file indexing with watcher |
 | `knowledge/file_listing.py` | Which files belong to a knowledge base: include patterns, traversal, symlink-safe inclusion rules |
+| `knowledge/git_source.py` | The Git checkout a knowledge base indexes: clone, fetch, force-align, LFS hydration, credential injection |
 | `tool_system/skills.py` | Skill integration system (OpenClaw-compatible) |
 | `tool_system/plugins.py` | Plugin loading and tool/skill extension |
 | `scheduling.py` | Cron and natural-language task scheduling |
