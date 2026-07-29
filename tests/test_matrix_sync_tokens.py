@@ -41,6 +41,7 @@ from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
     install_runtime_cache_support,
+    install_shutdown_drain_mocks,
     make_matrix_client_mock,
     runtime_paths_for,
     test_runtime_paths,
@@ -1058,6 +1059,42 @@ async def test_shutdown_timeout_does_not_save_checkpoint_for_cancelled_ingress(t
     await bot.prepare_for_sync_shutdown()
 
     assert _load_sync_token_value(tmp_path, bot.agent_name) is None
+
+
+@pytest.mark.parametrize(
+    ("coalescing_drain_completed", "responses_drained", "response_recovery_complete"),
+    [
+        (True, False, False),
+        (False, True, True),
+    ],
+)
+@pytest.mark.asyncio
+async def test_shutdown_discard_warning_logs_exact_drain_predicates(
+    tmp_path: Path,
+    coalescing_drain_completed: bool,
+    responses_drained: bool,
+    response_recovery_complete: bool,
+) -> None:
+    """Checkpoint-discard logs should identify which content-free drain predicate failed."""
+    bot = _agent_bot(tmp_path)
+    install_shutdown_drain_mocks(
+        bot,
+        coalescing_drain_completed=coalescing_drain_completed,
+        responses_drained=responses_drained,
+        response_recovery_complete=response_recovery_complete,
+    )
+
+    with capture_logs() as logs:
+        await bot.prepare_for_sync_shutdown()
+
+    warnings = [
+        entry for entry in logs if entry["event"] == "sync_checkpoint_not_saved_after_incomplete_coalescing_drain"
+    ]
+    assert len(warnings) == 1
+    assert warnings[0]["coalescing_drain_completed"] is coalescing_drain_completed
+    assert warnings[0]["responses_drained"] is responses_drained
+    assert warnings[0]["response_recovery_complete"] is response_recovery_complete
+    assert not {"body", "content", "formatted_body", "message_content"} & warnings[0].keys()
 
 
 @pytest.mark.asyncio

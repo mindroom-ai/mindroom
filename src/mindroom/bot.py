@@ -1752,7 +1752,7 @@ class AgentBot:
         )
         # The checkpoint certifies source ingestion, not response completion.
         # Incomplete response work is safe only after clean settlement or an
-        # explicit room-scoped recovery handoff for every cancelled task.
+        # explicit source-event recovery handoff for every cancelled task.
         checkpoint_recovery_safe = (
             source_checkpoint_safe
             and pending_response_count == 0
@@ -1767,7 +1767,7 @@ class AgentBot:
                 agent_name=self.agent_name,
                 callback_failure_count=callback_failure_count,
                 background_tasks_completed=background_tasks_completed,
-                coalescing_completed=drain_result.completed,
+                coalescing_drain_completed=drain_result.completed,
                 pending_response_count=pending_response_count,
                 response_recovery_complete=self._response_runner.incomplete_inbox_responses_recoverable,
                 post_drain_background_tasks_completed=post_drain_background_tasks_completed,
