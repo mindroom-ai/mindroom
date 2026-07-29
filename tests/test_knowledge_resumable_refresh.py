@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import itertools
+import json
 import os
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -57,7 +58,7 @@ from mindroom.knowledge.collections import (
     paths_with_vectors,
 )
 from mindroom.knowledge.embedding_batch import BatchPrefetchEmbedder, plan_embedding_batches
-from mindroom.knowledge.index_metadata import write_index_metadata_payload
+from mindroom.knowledge.index_metadata import write_json_atomic
 from mindroom.knowledge.index_retry import EmbeddingRetryPolicy, run_with_embedding_retry
 from mindroom.knowledge.manager import KnowledgeManager
 from mindroom.knowledge.refresh_outcome import RefreshOutcome
@@ -69,6 +70,7 @@ from mindroom.knowledge.registry import (
     published_index_metadata_path,
     published_index_storage_path,
     resolve_published_index_key,
+    save_published_index_state,
 )
 from mindroom.knowledge.status import get_knowledge_index_status
 from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
@@ -1050,6 +1052,7 @@ async def test_concurrent_refreshes_share_one_candidate_and_do_not_rebuild_twice
 @pytest.mark.asyncio
 async def test_cancellation_around_publication_never_produces_a_false_complete(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
     cancel_before_metadata_save: bool,
 ) -> None:
     """Cancelling at either side of the metadata write leaves consistent state."""
@@ -1058,23 +1061,19 @@ async def test_cancellation_around_publication_never_produces_a_false_complete(
     config = _config(tmp_path, docs_path)
     runtime_paths = runtime_paths_for(config)
     manager = _manager(config)
-    original_save = KnowledgeManager._save_persisted_index_state
 
-    def _cancelling_save(self: KnowledgeManager, *args: object, **kwargs: object) -> None:
+    def _cancelling_save(metadata_path: Path, state: PublishedIndexState) -> None:
         if cancel_before_metadata_save:
             msg = "metadata save failed"
             raise OSError(msg)
-        original_save(self, *args, **kwargs)
+        save_published_index_state(metadata_path, state)
 
-    KnowledgeManager._save_persisted_index_state = _cancelling_save  # type: ignore[method-assign]
-    try:
-        if cancel_before_metadata_save:
-            with pytest.raises(OSError, match="metadata save failed"):
-                await manager.reindex_all()
-        else:
+    monkeypatch.setattr("mindroom.knowledge.manager.save_published_index_state", _cancelling_save)
+    if cancel_before_metadata_save:
+        with pytest.raises(OSError, match="metadata save failed"):
             await manager.reindex_all()
-    finally:
-        KnowledgeManager._save_persisted_index_state = original_save  # type: ignore[method-assign]
+    else:
+        await manager.reindex_all()
 
     state = _published_state(config, runtime_paths)
     if cancel_before_metadata_save:
@@ -1481,15 +1480,23 @@ async def test_legacy_published_metadata_without_candidate_fields_stays_queryabl
     published_collection = state.collection
 
     # Strip every field this change introduced, leaving pre-candidate metadata.
+    # Written as raw JSON on purpose: the current writer always emits the newer
+    # keys, so only a hand-built payload can be the shape an old version left.
     key = resolve_published_index_key("docs", config=config, runtime_paths=runtime_paths)
-    write_index_metadata_payload(
-        published_index_metadata_path(key),
-        settings=state.settings.to_metadata(),
-        status="complete",
-        collection=published_collection,
-        indexed_count=state.indexed_count,
-        source_signature=state.source_signature,
-        last_published_at=state.last_published_at,
+    metadata_path = published_index_metadata_path(key)
+    write_json_atomic(
+        metadata_path,
+        {
+            "settings": state.settings.to_metadata(),
+            "status": "complete",
+            "collection": published_collection,
+            "indexed_count": state.indexed_count,
+            "source_signature": state.source_signature,
+            "last_published_at": state.last_published_at,
+        },
+    )
+    assert not {"refresh_job", "reason", "last_error", "updated_at", "last_refresh_at"} & set(
+        json.loads(metadata_path.read_text(encoding="utf-8")),
     )
     delete_candidate_checkpoint(_storage_path(config, runtime_paths))
 
@@ -1817,10 +1824,16 @@ async def test_unreadable_published_metadata_never_reuses_live_collection_checkp
 
 
 @pytest.mark.asyncio
-async def test_incomplete_published_metadata_still_preserves_its_collection(
+async def test_an_unfinished_refresh_record_still_protects_the_collection_it_names(
     tmp_path: Path,
 ) -> None:
-    """A parseable-but-incomplete metadata file still names the live collection."""
+    """An unfinished record names the live collection, and cleanup keeps running.
+
+    Skipping cleanup whenever a record is not a finished publication would be
+    safe but would strand every abandoned candidate. The record still names the
+    collection the last publication left live, so cleanup can tell the live
+    index from the candidates it is there to reclaim.
+    """
     docs_path = tmp_path / "docs"
     _write_corpus(docs_path, 2)
     config = _config(tmp_path, docs_path)
@@ -1829,19 +1842,29 @@ async def test_incomplete_published_metadata_still_preserves_its_collection(
     state = _published_state(config, runtime_paths)
     assert state is not None
     published_collection = state.collection
+    manager = _manager(config)
+    abandoned_collection = f"{manager._collections.default_collection}_candidate_abandoned"
+    _FakeVectorDb.store[abandoned_collection] = []
 
-    # Drop the fields the strict parser demands, keeping the collection name.
+    # A publication followed by a refresh that is running and has not published
+    # again yet: the shape older versions wrote for every in-progress refresh.
     key = resolve_published_index_key("docs", config=config, runtime_paths=runtime_paths)
-    write_index_metadata_payload(
+    save_published_index_state(
         published_index_metadata_path(key),
-        settings=state.settings.to_metadata(),
-        status="complete",
-        collection=published_collection,
+        PublishedIndexState(
+            settings=state.settings,
+            status="indexing",
+            collection=published_collection,
+            refresh_job="running",
+            reason="refreshing",
+        ),
     )
+    assert load_published_index_state(published_index_metadata_path(key)) is not None
 
-    await _manager(config)._open_candidate_run()
+    await manager._open_candidate_run()
 
     assert published_collection in _FakeVectorDb.store
+    assert abandoned_collection not in _FakeVectorDb.store, "cleanup was skipped instead of sparing the live index"
 
 
 @pytest.mark.asyncio
@@ -2357,16 +2380,15 @@ async def test_vectors_prefetched_before_a_later_fallback_are_still_reused(
 
 
 @pytest.mark.asyncio
-async def test_checkpoint_naming_a_published_collection_is_rejected_even_if_metadata_is_incomplete(
+async def test_checkpoint_naming_a_published_collection_is_rejected_during_a_running_refresh(
     tmp_path: Path,
 ) -> None:
     """The published collection must never be reopened as a candidate.
 
-    The guard compared only the strictly parsed collection name. Metadata that
-    is parseable but missing a required field makes that name null while the
-    raw payload still names the live collection, so a surviving checkpoint
-    could reopen the published collection and write candidate reconciliation
-    into it.
+    The guard used to compare only a name the strict parser dropped whenever
+    the record was not a finished publication, while the live collection kept
+    serving under it. A surviving checkpoint could then reopen the published
+    collection and write candidate reconciliation into it.
     """
     docs_path = tmp_path / "docs"
     _write_corpus(docs_path, 2)
@@ -2379,11 +2401,15 @@ async def test_checkpoint_naming_a_published_collection_is_rejected_even_if_meta
     assert published_collection is not None
 
     key = resolve_published_index_key("docs", config=config, runtime_paths=runtime_paths)
-    write_index_metadata_payload(
+    save_published_index_state(
         published_index_metadata_path(key),
-        settings=state.settings.to_metadata(),
-        status="complete",
-        collection=published_collection,
+        PublishedIndexState(
+            settings=state.settings,
+            status="indexing",
+            collection=published_collection,
+            refresh_job="running",
+            reason="refreshing",
+        ),
     )
     manager = _manager(config)
     save_candidate_checkpoint(
@@ -2414,11 +2440,15 @@ async def test_incompatible_checkpoint_never_deletes_a_published_collection(
     assert published_collection is not None
 
     key = resolve_published_index_key("docs", config=config, runtime_paths=runtime_paths)
-    write_index_metadata_payload(
+    save_published_index_state(
         published_index_metadata_path(key),
-        settings=state.settings.to_metadata(),
-        status="complete",
-        collection=published_collection,
+        PublishedIndexState(
+            settings=state.settings,
+            status="indexing",
+            collection=published_collection,
+            refresh_job="running",
+            reason="refreshing",
+        ),
     )
     # A checkpoint naming the published collection, recorded under settings the
     # current runtime no longer matches.
@@ -3189,13 +3219,15 @@ async def test_published_vector_reuse_needs_a_completely_published_index(
     await _manager(config).reindex_all()
     state = _published_state(config, runtime_paths)
     assert state is not None
-    write_index_metadata_payload(
+    save_published_index_state(
         published_index_metadata_path(resolve_published_index_key("docs", config=config, runtime_paths=runtime_paths)),
-        settings=state.settings.to_metadata(),
-        status="indexing",
-        collection=state.collection,
-        indexed_count=state.indexed_count,
-        source_signature=state.source_signature,
+        PublishedIndexState(
+            settings=state.settings,
+            status="indexing",
+            collection=state.collection,
+            indexed_count=state.indexed_count,
+            source_signature=state.source_signature,
+        ),
     )
     embedder.embedded_texts.clear()
 

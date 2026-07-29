@@ -3481,10 +3481,11 @@ depends_on = [
 
 [[modules]]
 path = "mindroom.knowledge.index_metadata"
-depends_on = []
+depends_on = ["mindroom.knowledge.indexing_config"]
 visibility = [
     "mindroom.knowledge.candidate_checkpoint",
     "mindroom.knowledge.manager",
+    "mindroom.knowledge.refresh_runner",
     "mindroom.knowledge.registry",
 ]
 
@@ -3604,6 +3605,7 @@ depends_on = [
     "mindroom.config.main",
     "mindroom.constants",
     "mindroom.knowledge.availability",
+    "mindroom.knowledge.index_metadata",
     "mindroom.knowledge.manager",
     "mindroom.knowledge.redaction",
     "mindroom.knowledge.registry",

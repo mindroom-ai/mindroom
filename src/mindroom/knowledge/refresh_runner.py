@@ -22,6 +22,7 @@ from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths, resolve_runtime_paths, runtime_env_values
 from mindroom.file_locks import async_exclusive_file_lock
 from mindroom.knowledge.availability import KnowledgeAvailability
+from mindroom.knowledge.index_metadata import state_for_publication
 from mindroom.knowledge.manager import KnowledgeManager
 from mindroom.knowledge.redaction import redact_credentials_in_text
 from mindroom.knowledge.registry import (
@@ -569,23 +570,15 @@ async def _publish_file_mode_source_metadata(
 ) -> KnowledgeRefreshResult:
     """Publish current source metadata for a file-only base without building vectors."""
     source_signature = await manager.source_signature()
-    now = datetime.now(tz=UTC).isoformat()
     await asyncio.to_thread(
         save_published_index_state,
         published_index_metadata_path(key),
-        PublishedIndexState(
+        state_for_publication(
             settings=key.indexing_settings,
-            status="complete",
             collection=None,
-            last_published_at=now,
-            published_revision=published_revision,
             indexed_count=0,
             source_signature=source_signature,
-            refresh_job="idle",
-            reason=None,
-            last_error=None,
-            updated_at=now,
-            last_refresh_at=now,
+            published_revision=published_revision,
         ),
     )
     return KnowledgeRefreshResult(

@@ -55,7 +55,6 @@ from mindroom.knowledge.file_listing import (
     list_knowledge_files,
 )
 from mindroom.knowledge.git_source import GitKnowledgeSource, GitSyncResult
-from mindroom.knowledge.index_metadata import write_index_metadata_payload
 from mindroom.knowledge.indexing_config import IndexingSettings
 from mindroom.knowledge.manager import KnowledgeManager, _knowledge_source_signature
 from mindroom.knowledge.redaction import (
@@ -67,6 +66,7 @@ from mindroom.knowledge.redaction import (
 from mindroom.knowledge.refresh_outcome import RefreshOutcome
 from mindroom.knowledge.refresh_runner import knowledge_binding_mutation_lock, refresh_knowledge_binding
 from mindroom.knowledge.registry import (
+    PublishedIndexState,
     get_published_index,
     load_published_index_state,
     published_index_metadata_path,
@@ -428,12 +428,9 @@ def test_load_published_index_state_preserves_file_mode_from_settings(tmp_path: 
     """Published file-mode metadata derives mode from indexing settings."""
     metadata_path = tmp_path / "indexing_settings.json"
     settings = replace(_test_indexing_settings(), mode="files")
-    write_index_metadata_payload(
+    save_published_index_state(
         metadata_path,
-        settings=settings.to_metadata(),
-        status="complete",
-        indexed_count=0,
-        source_signature="source-signature",
+        PublishedIndexState(settings=settings, status="complete", indexed_count=0, source_signature="source-signature"),
     )
 
     state = load_published_index_state(metadata_path)
@@ -3340,19 +3337,17 @@ async def test_cancelled_publish_metadata_save_keeps_published_candidate_collect
     loop = asyncio.get_running_loop()
     metadata_saved = asyncio.Event()
     release_metadata_save = Event()
-    original_save = KnowledgeManager._save_persisted_index_state
 
-    def _block_after_candidate_metadata_save(
-        self: KnowledgeManager,
-        status: object,
-        **kwargs: object,
-    ) -> None:
-        original_save(self, status, **kwargs)
-        if status == "complete" and "_candidate_" in str(kwargs.get("collection")):
+    def _block_after_candidate_metadata_save(metadata_path: Path, state: PublishedIndexState) -> None:
+        save_published_index_state(metadata_path, state)
+        if state.status == "complete" and "_candidate_" in str(state.collection):
             loop.call_soon_threadsafe(metadata_saved.set)
             assert release_metadata_save.wait(timeout=5)
 
-    monkeypatch.setattr(KnowledgeManager, "_save_persisted_index_state", _block_after_candidate_metadata_save)
+    monkeypatch.setattr(
+        "mindroom.knowledge.manager.save_published_index_state",
+        _block_after_candidate_metadata_save,
+    )
 
     refresh_task = asyncio.create_task(refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths))
     await metadata_saved.wait()
@@ -3394,11 +3389,11 @@ async def test_publish_metadata_save_finishes_before_repeated_cancellation_escap
     save_started = asyncio.Event()
     release_save = Event()
 
-    def _blocked_save(_self: KnowledgeManager, *_args: object, **_kwargs: object) -> None:
+    def _blocked_save(*_args: object, **_kwargs: object) -> None:
         loop.call_soon_threadsafe(save_started.set)
         assert release_save.wait(timeout=5)
 
-    monkeypatch.setattr(KnowledgeManager, "_save_persisted_index_state", _blocked_save)
+    monkeypatch.setattr("mindroom.knowledge.manager.save_published_index_state", _blocked_save)
     save = asyncio.create_task(
         manager._save_candidate_publish_metadata(
             candidate_vector_db=candidate_vector_db,
@@ -3435,13 +3430,13 @@ async def test_cancelled_publish_metadata_save_surfaces_a_failed_write(
     save_started = asyncio.Event()
     release_save = Event()
 
-    def _failed_save(_self: KnowledgeManager, *_args: object, **_kwargs: object) -> None:
+    def _failed_save(*_args: object, **_kwargs: object) -> None:
         loop.call_soon_threadsafe(save_started.set)
         assert release_save.wait(timeout=5)
         msg = "publish metadata write failed"
         raise RuntimeError(msg)
 
-    monkeypatch.setattr(KnowledgeManager, "_save_persisted_index_state", _failed_save)
+    monkeypatch.setattr("mindroom.knowledge.manager.save_published_index_state", _failed_save)
     save = asyncio.create_task(
         manager._save_candidate_publish_metadata(
             candidate_vector_db=candidate_vector_db,
@@ -3456,6 +3451,71 @@ async def test_cancelled_publish_metadata_save_surfaces_a_failed_write(
 
     with pytest.raises(RuntimeError, match="publish metadata write failed"):
         await save
+
+
+@pytest.mark.asyncio
+async def test_publishing_states_every_field_of_the_state_file(tmp_path: Path) -> None:
+    """Publishing writes a whole state instead of dropping the fields it does not own.
+
+    The publish path used to hand a writer only the seven publication fields,
+    so the six the refresh job owns reverted to defaults nobody chose: the
+    timestamps went missing entirely and the failure streak silently reset,
+    and only the caller that marks the refresh succeeded put them back. The
+    writer now takes a whole state, so publication has to say what it means.
+    """
+    docs_path = tmp_path / "docs"
+    docs_path.mkdir()
+    config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
+    runtime_paths = runtime_paths_for(config)
+    manager = KnowledgeManager("docs", config=config, runtime_paths=runtime_paths)
+    key = resolve_published_index_key("docs", config=config, runtime_paths=runtime_paths)
+    metadata_path = published_index_metadata_path(key)
+    earlier = "2026-01-02T03:04:05+00:00"
+    save_published_index_state(
+        metadata_path,
+        PublishedIndexState(
+            settings=key.indexing_settings,
+            status="complete",
+            collection="docs_previous",
+            last_published_at=earlier,
+            published_revision="cafebabe",
+            indexed_count=1,
+            source_signature="previous-signature",
+            refresh_job="running",
+            reason="refreshing",
+            last_error="boom",
+            updated_at=earlier,
+            last_refresh_at=earlier,
+            consecutive_refresh_failures=3,
+        ),
+    )
+    candidate_vector_db = build_vector_db(manager._collections, candidate_collection_name(manager._collections))
+
+    assert (
+        await manager._save_candidate_publish_metadata(
+            candidate_vector_db=candidate_vector_db,
+            indexed_count=4,
+            source_signature="new-signature",
+        )
+        is False
+    )
+
+    payload = json.loads(metadata_path.read_text(encoding="utf-8"))
+    assert {"refresh_job", "consecutive_refresh_failures", "updated_at", "last_refresh_at"} <= set(payload)
+    state = load_published_index_state(metadata_path)
+    assert state is not None
+    assert (state.collection, state.indexed_count, state.source_signature) == (
+        candidate_vector_db.collection_name,
+        4,
+        "new-signature",
+    )
+    # Publication resolves the refresh job it belongs to, and stamps the write.
+    assert (state.refresh_job, state.reason, state.last_error) == ("idle", None, None)
+    assert state.consecutive_refresh_failures == 0
+    assert state.updated_at is not None
+    assert state.last_refresh_at is not None
+    assert state.updated_at > earlier
+    assert state.last_refresh_at > earlier
 
 
 @pytest.mark.asyncio
@@ -4002,19 +4062,14 @@ async def test_metadata_save_failure_after_candidate_index_keeps_serving_last_go
     runtime_paths = runtime_paths_for(config)
     await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
     doc.write_text("uncommitted candidate index", encoding="utf-8")
-    original_save = KnowledgeManager._save_persisted_index_state
 
-    def _fail_candidate_metadata_save(
-        self: KnowledgeManager,
-        status: object,
-        **kwargs: object,
-    ) -> None:
-        if status == "complete" and "_candidate_" in str(kwargs.get("collection")):
+    def _fail_candidate_metadata_save(metadata_path: Path, state: PublishedIndexState) -> None:
+        if state.status == "complete" and "_candidate_" in str(state.collection):
             msg = "metadata commit failed"
             raise OSError(msg)
-        original_save(self, status, **kwargs)
+        save_published_index_state(metadata_path, state)
 
-    monkeypatch.setattr(KnowledgeManager, "_save_persisted_index_state", _fail_candidate_metadata_save)
+    monkeypatch.setattr("mindroom.knowledge.manager.save_published_index_state", _fail_candidate_metadata_save)
     with pytest.raises(OSError, match="metadata commit failed"):
         await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
 
@@ -4787,13 +4842,15 @@ def test_refresh_failure_counter_increments_and_resets_preserving_last_good(tmp_
     runtime_paths = runtime_paths_for(config)
     key = resolve_published_index_key("docs", config=config, runtime_paths=runtime_paths)
     metadata_path = published_index_metadata_path(key)
-    write_index_metadata_payload(
+    save_published_index_state(
         metadata_path,
-        settings=key.indexing_settings.to_metadata(),
-        status="complete",
-        collection="docs_live",
-        indexed_count=1,
-        source_signature="sig",
+        PublishedIndexState(
+            settings=key.indexing_settings,
+            status="complete",
+            collection="docs_live",
+            indexed_count=1,
+            source_signature="sig",
+        ),
     )
 
     knowledge_registry.mark_published_index_refresh_failed_preserving_last_good(key, error="boom 1")
