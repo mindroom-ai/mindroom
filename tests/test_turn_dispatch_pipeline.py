@@ -822,6 +822,7 @@ class TestAgentBot(AgentBotTestBase):
                 response_event_id="$voice_echo",
                 completed=False,
                 visible_echo_event_id="$voice_echo",
+                visible_echo_is_fallback=False,
             )
             if source_event_id in {"$voice", "$text"}
             else None
@@ -884,6 +885,7 @@ class TestAgentBot(AgentBotTestBase):
                     response_event_id="$voice_echo",
                     source_event_prompts={"$voice": "voice prompt", "$text": "text prompt"},
                     visible_echo_event_id="$voice_echo",
+                    visible_echo_is_fallback=False,
                     requester_id="@user:localhost",
                     correlation_id="corr-visible-echo",
                 ),

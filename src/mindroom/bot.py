@@ -118,6 +118,7 @@ from .sync_restart_retry import InterruptedTurnRooms
 from .turn_controller import TurnController, TurnControllerDeps
 from .turn_policy import IngressHookRunner, TurnPolicy, TurnPolicyDeps
 from .turn_store import TurnStore, TurnStoreDeps
+from .visible_voice_echo import VisibleVoiceEchoDeps, VisibleVoiceEchoLifecycle
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -299,6 +300,7 @@ class AgentBot:
     _response_runner: ResponseRunner
     _redacted_turn_cleanup: RedactedTurnCleanup
     _turn_store: TurnStore
+    _visible_voice_echo: VisibleVoiceEchoLifecycle
     _tool_runtime_support: ToolRuntimeSupport
     _post_response_effects_support: PostResponseEffectsSupport
     _ingress_hook_runner: IngressHookRunner
@@ -565,6 +567,16 @@ class AgentBot:
                 turn_store=self._turn_store,
             ),
         )
+        self._visible_voice_echo = VisibleVoiceEchoLifecycle(
+            VisibleVoiceEchoDeps(
+                runtime=self._runtime_view,
+                logger=self.logger,
+                agent_name=self.agent_name,
+                delivery_gateway=self._delivery_gateway,
+                turn_store=self._turn_store,
+                ingress=self._ingress_validator,
+            ),
+        )
         self._turn_controller = TurnController(
             TurnControllerDeps(
                 runtime=self._runtime_view,
@@ -585,6 +597,7 @@ class AgentBot:
                 edit_regenerator=self._edit_regenerator,
                 ingress=self._ingress_validator,
                 interrupted_turn_rooms=self._interrupted_turn_rooms,
+                visible_voice_echo=self._visible_voice_echo,
             ),
         )
 

@@ -61,6 +61,7 @@ from mindroom.turn_controller import TurnController, TurnControllerDeps
 from mindroom.turn_origin import TurnIntent
 from mindroom.turn_policy import IngressHookRunner, TurnPolicy, TurnPolicyDeps
 from mindroom.turn_store import TurnStore, TurnStoreDeps
+from mindroom.visible_voice_echo import VisibleVoiceEchoDeps, VisibleVoiceEchoLifecycle
 from tests.conftest import (
     bind_runtime_paths,
     make_conversation_cache_mock,
@@ -399,6 +400,16 @@ def _build_harness(
             edit_regenerator=_UnusedEditRegenerator(),
             ingress=ingress_validator,
             interrupted_turn_rooms=interrupted_turn_rooms,
+            visible_voice_echo=VisibleVoiceEchoLifecycle(
+                VisibleVoiceEchoDeps(
+                    runtime=runtime,
+                    logger=logger,
+                    agent_name=agent_name,
+                    delivery_gateway=cast("DeliveryGateway", gateway),
+                    turn_store=turn_store,
+                    ingress=ingress_validator,
+                ),
+            ),
         ),
     )
     controller_ref.append(controller)

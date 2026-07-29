@@ -297,7 +297,7 @@ Enable voice message processing with speech-to-text:
 ```yaml
 voice:
   enabled: false
-  visible_router_echo: true  # Show placeholder, then replace with transcript or fallback text
+  visible_router_echo: true  # Show STT placeholder or direct fallback when STT is disabled
   stt:
     provider: openai
     model: gpt-4o-transcribe

@@ -91,6 +91,7 @@ from mindroom.turn_controller import TurnController, _DispatchPreparation, _Repl
 from mindroom.turn_origin import TurnOrigin, classify_turn_origin
 from mindroom.turn_policy import PreparedDispatch, TurnPolicy
 from mindroom.turn_store import TurnStore
+from mindroom.visible_voice_echo import VisibleVoiceEchoLifecycle
 from tests.identity_helpers import persist_entity_accounts
 
 if TYPE_CHECKING:
@@ -1179,6 +1180,7 @@ def wrap_extracted_collaborators(bot: RuntimeBot, *names: str) -> RuntimeBot:
         "_delivery_gateway",
         "_response_runner",
         "_turn_store",
+        "_visible_voice_echo",
         "_edit_regenerator",
         "_inbound_turn_normalizer",
         "_conversation_resolver",
@@ -1364,6 +1366,20 @@ def replace_turn_controller_deps(bot: RuntimeBot, **changes: object) -> TurnCont
             ),
         )
     bot._ingress_validator = rebuilt_changes["ingress"]
+    visible_voice_echo = unwrap_extracted_collaborator(bot._visible_voice_echo)
+    bot._visible_voice_echo = VisibleVoiceEchoLifecycle(
+        replace(
+            visible_voice_echo.deps,
+            runtime=rebuilt_changes.get("runtime", controller.deps.runtime),
+            logger=rebuilt_changes.get("logger", controller.deps.logger),
+            agent_name=rebuilt_changes.get("agent_name", controller.deps.agent_name),
+            delivery_gateway=rebuilt_changes["delivery_gateway"],
+            turn_store=rebuilt_changes["turn_store"],
+            ingress=rebuilt_changes["ingress"],
+        ),
+    )
+    wrap_extracted_collaborators(bot, "_visible_voice_echo")
+    rebuilt_changes["visible_voice_echo"] = bot._visible_voice_echo
     rebuilt = TurnController(replace(controller.deps, **rebuilt_changes))
     bot._turn_controller = rebuilt
     edit_changes = {
