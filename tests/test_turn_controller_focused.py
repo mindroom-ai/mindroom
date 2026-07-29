@@ -111,6 +111,7 @@ class _RecordingResponseRunner:
     requests: list[ResponseRequest] = field(default_factory=list)
     team_requests: list[ResponseRequest] = field(default_factory=list)
     inbox_tasks: list[asyncio.Task[None]] = field(default_factory=list)
+    recovery_handoff_checks: list[Callable[[], bool]] = field(default_factory=list)
 
     def active_thread_ids_for_room(self, room_id: str) -> frozenset[str | None]:  # noqa: ARG002
         return frozenset()
@@ -134,7 +135,8 @@ class _RecordingResponseRunner:
         name: str,
         recovery_handoff_ready: Callable[[], bool] | None = None,
     ) -> asyncio.Task[None]:
-        del recovery_handoff_ready
+        assert recovery_handoff_ready is not None
+        self.recovery_handoff_checks.append(recovery_handoff_ready)
         task = asyncio.get_running_loop().create_task(response, name=name)
         self.inbox_tasks.append(task)
         return task
@@ -1337,16 +1339,35 @@ async def test_user_message_cannot_spoof_scheduled_thread_promotion(tmp_path: Pa
 async def test_deferred_sync_restart_records_handled_outcome_before_rethrow(
     config: Config,
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A turn interrupted by bot replacement must settle durably before rethrowing."""
     harness = _build_harness(config, tmp_path)
     harness.runner.deferred_sync_restart_error = asyncio.CancelledError("sync_restart")
     room = _room_with_members(config, "general")
     event = _text_event("please survive the sync restart")
+    response_started = asyncio.Event()
+    release_response = asyncio.Event()
+    generate_response = harness.runner.generate_response
 
+    async def generate_with_barrier(request: ResponseRequest) -> str | None:
+        response_started.set()
+        await release_response.wait()
+        return await generate_response(request)
+
+    monkeypatch.setattr(harness.runner, "generate_response", generate_with_barrier)
+    delivery = asyncio.create_task(harness.deliver(room, event))
+    await response_started.wait()
+    recovery_ready = harness.runner.recovery_handoff_checks[0]
+    assert recovery_ready() is False
+    harness.interrupted_turn_rooms.register("$different", room_id=room.room_id)
+    assert recovery_ready() is False
+
+    release_response.set()
     with pytest.raises(asyncio.CancelledError, match="sync_restart"):
-        await harness.deliver(room, event)
+        await delivery
 
+    assert recovery_ready() is True
     assert harness.interrupted_turn_rooms.contains(event.event_id)
     assert harness.interrupted_turn_rooms.pending_room_ids == {room.room_id}
     assert harness.runner.requests[0].sync_restart_retry_source_event_id is None
