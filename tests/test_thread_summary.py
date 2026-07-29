@@ -27,6 +27,7 @@ from mindroom.thread_summary import (
     THREAD_SUMMARY_MAX_LENGTH,
     ThreadSummaryWriteError,
     _build_conversation_text,
+    _configure_summary_model_temperature,
     _count_non_summary_thread_messages,
     _generate_summary,
     _is_thread_summary_message,
@@ -502,6 +503,14 @@ class _TemperatureAwareModel:
 
     def __init__(self, temperature: float | None = None) -> None:
         self.temperature = temperature
+
+
+class _TemperatureAwareIdentifiedModel(_TemperatureAwareModel):
+    """Temperature-capable stub with one configured provider model ID."""
+
+    def __init__(self, model_id: str, temperature: float | None = None) -> None:
+        super().__init__(temperature)
+        self.id = model_id
 
 
 class _ModelWithoutTemperature:
@@ -2329,6 +2338,29 @@ class TestGenerateSummary:
 
         assert result == "🧪 ISSUE-148 matrix cache invalidate-and-refetch live test"
         assert mock_model.temperature == 0.1
+
+    @pytest.mark.parametrize(
+        "model_id",
+        [
+            "claude-fable-5",
+            "anthropic.claude-fable-5",
+            "anthropic/claude-fable-5",
+            "gemini-3.6-flash",
+            "google/gemini-3.6-flash",
+            "gemini-3.5-flash-lite",
+        ],
+    )
+    async def test_generate_summary_omits_deprecated_or_invalid_temperature(self, model_id: str) -> None:
+        """Current provider models must use their required default sampling behavior."""
+        model = _TemperatureAwareIdentifiedModel(model_id, temperature=0.9)
+
+        _configure_summary_model_temperature(
+            model,
+            summary_temperature=0.2,
+            model_name="summary",
+        )
+
+        assert model.temperature is None
 
     async def test_generate_summary_uses_explicit_model_name(self) -> None:
         """Callers can pass the resolved room-specific summary model to generation."""

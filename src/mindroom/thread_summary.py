@@ -20,6 +20,7 @@ from mindroom.entity_resolution import current_internal_sender_ids, resolve_room
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_delivery import send_message_result
 from mindroom.matrix.message_builder import build_message_content
+from mindroom.model_defaults import PROVIDER_DEFAULT_TEMPERATURE_MODEL_SUFFIXES
 from mindroom.model_instance_checks import isinstance_of_loaded
 from mindroom.thread_tag_vocabulary import (
     claim_vocabulary_check,
@@ -100,6 +101,21 @@ class _SupportsTemperature(Protocol):
     temperature: float | None
 
 
+@runtime_checkable
+class _IdentifiedModel(Protocol):
+    """Protocol for model instances exposing their provider request ID."""
+
+    id: str
+
+
+def _summary_model_requires_provider_temperature(model: object) -> bool:
+    """Return whether a summary model requires its provider sampling default."""
+    return isinstance_of_loaded(model, _VERTEXAI_CLAUDE_CLASS) or (
+        isinstance(model, _IdentifiedModel)
+        and model.id.casefold().endswith(PROVIDER_DEFAULT_TEMPERATURE_MODEL_SUFFIXES)
+    )
+
+
 def _configure_summary_model_temperature(
     model: object,
     *,
@@ -108,8 +124,7 @@ def _configure_summary_model_temperature(
 ) -> None:
     """Prepare the summary model's temperature setting for one request."""
     if isinstance(model, _SupportsTemperature):
-        if isinstance_of_loaded(model, _VERTEXAI_CLAUDE_CLASS):
-            # Vertex Claude's rawPredict helper rejects a temperature field entirely.
+        if _summary_model_requires_provider_temperature(model):
             model.temperature = None
         else:
             model.temperature = summary_temperature
