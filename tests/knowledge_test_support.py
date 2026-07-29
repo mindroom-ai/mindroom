@@ -8,6 +8,23 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
 
 
+def validate_where_operands(where: dict[str, Any] | None) -> None:
+    """Reject the ``where`` shapes ChromaDB refuses before it reaches the store.
+
+    Chroma validates an empty ``$in`` operand and raises, so a fake that only
+    filtered records would answer "nothing matched" for a query production
+    cannot issue at all -- and would answer it most convincingly on an empty
+    collection, where no record is ever tested. Checking the operand rather
+    than the records is what makes that case visible.
+    """
+    if not where:
+        return
+    for condition in where.values():
+        if isinstance(condition, dict) and "$in" in condition and not condition["$in"]:
+            msg = "empty $in operand: ChromaDB rejects this before querying the store"
+            raise AssertionError(msg)
+
+
 def metadata_matches(metadata: dict[str, Any], key: str, condition: object) -> bool:
     """Mirror the subset of ChromaDB ``where`` matching the indexer relies on.
 

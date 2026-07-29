@@ -308,8 +308,11 @@ def test_status_reports_persisted_count_without_loading_collection(tmp_path: Pat
             msg = "corrupt collection"
             raise RuntimeError(msg)
 
+    # One tripwire per module that can construct a collection handle. The
+    # manager builds none: it narrows types against ChromaDb but delegates
+    # construction to mindroom.knowledge.collections.
     with (
-        patch("mindroom.knowledge.manager.ChromaDb", _BrokenVectorDb),
+        patch("mindroom.knowledge.collections.ChromaDb", _BrokenVectorDb),
         patch("mindroom.knowledge.registry.ChromaDb", _BrokenVectorDb),
         patch("mindroom.knowledge.indexing_config.ChromaDb", _BrokenVectorDb),
         patch(
