@@ -72,7 +72,7 @@ from tests.conftest import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Coroutine
+    from collections.abc import AsyncIterator, Callable, Coroutine
     from pathlib import Path
     from unittest.mock import AsyncMock
 
@@ -127,7 +127,14 @@ class _RecordingResponseRunner:
         msg = "Queued-notice reservations are not part of these focused turn tests"
         raise AssertionError(msg)
 
-    def track_inbox_response(self, response: Coroutine[Any, Any, None], *, name: str) -> asyncio.Task[None]:
+    def track_inbox_response(
+        self,
+        response: Coroutine[Any, Any, None],
+        *,
+        name: str,
+        recovery_handoff_ready: Callable[[], bool] | None = None,
+    ) -> asyncio.Task[None]:
+        del recovery_handoff_ready
         task = asyncio.get_running_loop().create_task(response, name=name)
         self.inbox_tasks.append(task)
         return task

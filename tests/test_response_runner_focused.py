@@ -19,6 +19,7 @@ import pytest
 from mindroom import background_tasks as background_tasks_module
 from mindroom import response_runner
 from mindroom.background_tasks import wait_for_background_tasks
+from mindroom.cancellation import request_task_cancel
 from mindroom.constants import STREAM_STATUS_KEY, STREAM_STATUS_PENDING
 from mindroom.conversation_resolver import ConversationResolver, MessageContext
 from mindroom.delivery_gateway import DeliveryGateway, SendTextRequest
@@ -326,6 +327,7 @@ async def test_begin_locked_turn_waits_for_cancelled_source_preparation(tmp_path
     runner = unwrap_extracted_collaborator(bot._response_runner)
     preparation_started = threading.Event()
     allow_preparation_finish = threading.Event()
+    retries: list[str] = []
 
     def prepare_source_turn() -> bool:
         preparation_started.set()
@@ -338,6 +340,7 @@ async def test_begin_locked_turn_waits_for_cancelled_source_preparation(tmp_path
         user_id="@user:localhost",
         response_envelope=_envelope(target, source_event_id="$event"),
         prepare_source_turn=prepare_source_turn,
+        on_sync_restart_cancelled=lambda: retries.append("retry"),
     )
     preparation_task = asyncio.create_task(
         runner._begin_locked_turn(
@@ -352,13 +355,14 @@ async def test_begin_locked_turn_waits_for_cancelled_source_preparation(tmp_path
     )
     await asyncio.wait_for(asyncio.to_thread(preparation_started.wait, 1), timeout=2)
 
-    preparation_task.cancel()
+    request_task_cancel(preparation_task, cancel_source="sync_restart")
     await asyncio.sleep(0)
 
     assert preparation_task.done() is False
     allow_preparation_finish.set()
     with pytest.raises(asyncio.CancelledError):
         await preparation_task
+    assert retries == []
 
 
 @pytest.mark.asyncio

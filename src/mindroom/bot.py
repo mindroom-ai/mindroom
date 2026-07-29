@@ -1735,6 +1735,7 @@ class AgentBot:
                 agent_name=self.agent_name,
                 active_response_count=self.in_flight_response_count,
                 pending_response_count=pending_response_count,
+                response_recovery_complete=self._response_runner.incomplete_inbox_responses_recoverable,
                 restart_reason_category=restart_reason_category_for(shutdown_intent),
             )
         post_drain_background_tasks_completed = await wait_for_background_tasks(
@@ -1750,9 +1751,13 @@ class AgentBot:
             and callback_failure_count == 0
         )
         # The checkpoint certifies source ingestion, not response completion.
-        # Cancelled-and-settled response work does not weaken source trust, but
-        # a still-running task has not established its explicit recovery handoff.
-        checkpoint_recovery_safe = source_checkpoint_safe and pending_response_count == 0
+        # Incomplete response work is safe only after clean settlement or an
+        # explicit room-scoped recovery handoff for every cancelled task.
+        checkpoint_recovery_safe = (
+            source_checkpoint_safe
+            and pending_response_count == 0
+            and self._response_runner.incomplete_inbox_responses_recoverable
+        )
         if checkpoint_recovery_safe and self._sync_cache_trust.state is SyncTrustState.CERTIFIED:
             self._sync_cache_trust.persist_current()
         elif not checkpoint_recovery_safe:
@@ -1764,6 +1769,7 @@ class AgentBot:
                 background_tasks_completed=background_tasks_completed,
                 coalescing_completed=drain_result.completed,
                 pending_response_count=pending_response_count,
+                response_recovery_complete=self._response_runner.incomplete_inbox_responses_recoverable,
                 post_drain_background_tasks_completed=post_drain_background_tasks_completed,
                 responses_drained=responses_drained,
                 released_reservation_count=drain_result.released_reservation_count,
