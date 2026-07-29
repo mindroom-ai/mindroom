@@ -1135,6 +1135,60 @@ class TurnController:
         )
         return visible_echo_event_id if edited else None
 
+    async def _finish_visible_voice_echo_best_effort(
+        self,
+        event: AudioMessageEvent,
+        *,
+        target: MessageTarget,
+        placeholder_task: asyncio.Task[str | None] | None,
+        normalized_event: PreparedTextEvent,
+        requester_user_id: str,
+    ) -> None:
+        """Replace a started voice placeholder without blocking canonical dispatch on failure."""
+        if placeholder_task is None:
+            return
+        try:
+            finish_task = self._start_visible_voice_echo_finish(
+                event,
+                target=target,
+                placeholder_task=placeholder_task,
+                text=normalized_event.body,
+                requester_user_id=requester_user_id,
+                normalized_source=normalized_event.source,
+            )
+            await asyncio.shield(finish_task)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            self.deps.logger.warning(
+                "Visible voice echo failed; continuing canonical voice dispatch",
+                event_id=event.event_id,
+                room_id=target.room_id,
+                exception_type=exc.__class__.__name__,
+                error=str(exc),
+            )
+
+    def _schedule_cancelled_visible_voice_echo_finish(
+        self,
+        event: AudioMessageEvent,
+        *,
+        target: MessageTarget,
+        placeholder_task: asyncio.Task[str | None] | None,
+        requester_user_id: str,
+    ) -> None:
+        """Leave a terminal raw-audio fallback when voice readiness is cancelled."""
+        if placeholder_task is None:
+            return
+        fallback_event = _raw_voice_fallback_event(event, thread_id=target.resolved_thread_id)
+        self._start_visible_voice_echo_finish(
+            event,
+            target=target,
+            placeholder_task=placeholder_task,
+            text=fallback_event.body,
+            requester_user_id=requester_user_id,
+            normalized_source=fallback_event.source,
+        )
+
     def _visible_router_voice_echo_extra_content(
         self,
         *,
@@ -2423,27 +2477,13 @@ class TurnController:
                 dispatch_timing=dispatch_timing,
             )
 
-            try:
-                if visible_echo_task is not None:
-                    finish_task = self._start_visible_voice_echo_finish(
-                        event,
-                        target=voice_target,
-                        placeholder_task=visible_echo_task,
-                        text=normalized_event.body,
-                        requester_user_id=prechecked_event.requester_user_id,
-                        normalized_source=normalized_event.source,
-                    )
-                    await asyncio.shield(finish_task)
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
-                self.deps.logger.warning(
-                    "Visible voice echo failed; continuing canonical voice dispatch",
-                    event_id=event.event_id,
-                    room_id=room.room_id,
-                    exception_type=exc.__class__.__name__,
-                    error=str(exc),
-                )
+            await self._finish_visible_voice_echo_best_effort(
+                event,
+                target=voice_target,
+                placeholder_task=visible_echo_task,
+                normalized_event=normalized_event,
+                requester_user_id=prechecked_event.requester_user_id,
+            )
 
             normalized_target = self.deps.resolver.build_message_target(
                 room_id=room.room_id,
@@ -2478,19 +2518,43 @@ class TurnController:
                 ),
             )
         except asyncio.CancelledError:
+            self._schedule_cancelled_visible_voice_echo_finish(
+                event,
+                target=voice_target,
+                placeholder_task=visible_echo_task,
+                requester_user_id=prechecked_event.requester_user_id,
+            )
             raise
         except Exception as exc:
             if queued_notice_reservation is not None:
                 queued_notice_reservation.cancel()
                 queued_notice_reservation = None
-            return await self._ready_voice_fallback_event(
-                room=room,
-                event=event,
+            try:
+                fallback_ready = await self._ready_voice_fallback_event(
+                    room=room,
+                    event=event,
+                    requester_user_id=prechecked_event.requester_user_id,
+                    thread_id=voice_target.resolved_thread_id,
+                    dispatch_timing=dispatch_timing,
+                    error=exc,
+                )
+            except asyncio.CancelledError:
+                self._schedule_cancelled_visible_voice_echo_finish(
+                    event,
+                    target=voice_target,
+                    placeholder_task=visible_echo_task,
+                    requester_user_id=prechecked_event.requester_user_id,
+                )
+                raise
+            fallback_event = cast("PreparedTextEvent", fallback_ready.pending_event.event)
+            await self._finish_visible_voice_echo_best_effort(
+                event,
+                target=voice_target,
+                placeholder_task=visible_echo_task,
+                normalized_event=fallback_event,
                 requester_user_id=prechecked_event.requester_user_id,
-                thread_id=voice_target.resolved_thread_id,
-                dispatch_timing=dispatch_timing,
-                error=exc,
             )
+            return fallback_ready
         finally:
             if not reservation_released_or_handed_off and queued_notice_reservation is not None:
                 queued_notice_reservation.cancel()

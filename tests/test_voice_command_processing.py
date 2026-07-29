@@ -1179,6 +1179,86 @@ async def test_voice_echo_edit_failure_does_not_post_second_message(tmp_path) ->
 
 
 @pytest.mark.asyncio
+async def test_voice_readiness_failure_replaces_placeholder_with_fallback(tmp_path) -> None:  # noqa: ANN001
+    """A readiness failure after placeholder delivery should leave terminal fallback text."""
+    bot, room, event = _make_visible_router_echo_scenario(tmp_path)
+
+    with (
+        patch.object(
+            bot._turn_controller.deps.resolver,
+            "build_ingress_envelope",
+            side_effect=RuntimeError("readiness failed"),
+        ),
+        patch("mindroom.ingress_validation.is_authorized_sender", return_value=True),
+    ):
+        await bot._turn_controller.handle_media_event(room, event)
+        await drain_coalescing(bot)
+
+    bot._delivery_gateway.send_text.assert_awaited_once()
+    bot._delivery_gateway.edit_text.assert_awaited_once()
+    edit_request = bot._delivery_gateway.edit_text.await_args.args[0]
+    assert edit_request.event_id == "$voice_echo"
+    assert edit_request.new_text == f"{VOICE_PREFIX}[Attached voice message]"
+    assert edit_request.extra_content is not None
+    assert edit_request.extra_content[VOICE_RAW_AUDIO_FALLBACK_KEY] is True
+
+
+@pytest.mark.asyncio
+async def test_voice_readiness_cancellation_schedules_terminal_placeholder_fallback(tmp_path) -> None:  # noqa: ANN001
+    """Cancelling readiness should schedule terminal fallback replacement before escaping."""
+    bot, room, event = _make_visible_router_echo_scenario(tmp_path)
+    normalization_started = asyncio.Event()
+    placeholder_sent = asyncio.Event()
+
+    async def wait_for_cancellation(*_args: object, **_kwargs: object) -> None:
+        normalization_started.set()
+        await asyncio.Event().wait()
+
+    async def send_placeholder(_request: object) -> str:
+        placeholder_sent.set()
+        return "$voice_echo"
+
+    bot._delivery_gateway.send_text.side_effect = send_placeholder
+    with (
+        patch.object(
+            bot._turn_controller.deps.normalizer,
+            "prepare_voice_event",
+            side_effect=wait_for_cancellation,
+        ),
+        patch("mindroom.ingress_validation.is_authorized_sender", return_value=True),
+    ):
+        prechecked_event = bot._turn_controller._precheck_dispatch_event(room, event)
+        assert prechecked_event is not None
+        voice_target = bot._turn_controller.deps.resolver.build_message_target(
+            room_id=room.room_id,
+            thread_id=event.event_id,
+            reply_to_event_id=event.event_id,
+            event_source=event.source,
+        )
+        ready_task = asyncio.create_task(
+            bot._turn_controller._ready_voice_event(
+                room=room,
+                prechecked_event=prechecked_event,
+                voice_target=voice_target,
+                dispatch_timing=None,
+            ),
+        )
+        await asyncio.wait_for(normalization_started.wait(), timeout=1)
+        await asyncio.wait_for(placeholder_sent.wait(), timeout=1)
+        ready_task.cancel()
+        result = await asyncio.gather(ready_task, return_exceptions=True)
+
+    assert isinstance(result[0], asyncio.CancelledError)
+    assert await wait_for_background_tasks(timeout=1, owner=bot._runtime_view) is True
+    bot._delivery_gateway.edit_text.assert_awaited_once()
+    edit_request = bot._delivery_gateway.edit_text.await_args.args[0]
+    assert edit_request.event_id == "$voice_echo"
+    assert edit_request.new_text == f"{VOICE_PREFIX}[Attached voice message]"
+    assert edit_request.extra_content is not None
+    assert edit_request.extra_content[VOICE_RAW_AUDIO_FALLBACK_KEY] is True
+
+
+@pytest.mark.asyncio
 async def test_voice_placeholder_is_owned_by_runtime_shutdown(tmp_path) -> None:  # noqa: ANN001
     """Runtime shutdown should find and cancel a blocked voice-placeholder send."""
     bot, room, event = _make_visible_router_echo_scenario(tmp_path)

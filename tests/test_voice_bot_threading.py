@@ -22,6 +22,7 @@ from mindroom.config.main import Config
 from mindroom.constants import (
     ATTACHMENT_IDS_KEY,
     ORIGINAL_SENDER_KEY,
+    ROUTER_AGENT_NAME,
     SOURCE_KIND_KEY,
     VISIBLE_ROUTER_VOICE_ECHO_KEY,
     VOICE_RAW_AUDIO_FALLBACK_KEY,
@@ -37,8 +38,10 @@ from tests.conftest import (
     bind_runtime_paths,
     dispatch_context_result,
     drain_coalescing,
+    install_edit_message_mock,
     install_generate_response_mock,
     install_runtime_cache_support,
+    install_send_response_mock,
     replace_turn_controller_deps,
     runtime_paths_for,
     sync_bot_runtime_state,
@@ -660,6 +663,9 @@ async def test_voice_message_clears_active_turn_signal_when_post_stt_echo_fails(
         assert queued_signal.pending_human_messages == 1
         raise echo_error
 
+    replace_turn_controller_deps(bot, agent_name=ROUTER_AGENT_NAME)
+    install_send_response_mock(bot, AsyncMock(return_value="$voice-placeholder"))
+    install_edit_message_mock(bot, AsyncMock(side_effect=fail_visible_echo))
     turn_active = True
     queued_signal.begin_response_turn()
     try:
@@ -668,21 +674,6 @@ async def test_voice_message_clears_active_turn_signal_when_post_stt_echo_fails(
                 bot._turn_controller.deps.normalizer,
                 "prepare_voice_event",
                 new=AsyncMock(return_value=normalized_voice),
-            ),
-            patch.object(
-                bot._turn_controller,
-                "_visible_router_voice_echo_enabled",
-                return_value=True,
-            ),
-            patch.object(
-                bot._turn_controller,
-                "_send_visible_voice_transcription_placeholder",
-                new=AsyncMock(return_value="$voice-placeholder"),
-            ),
-            patch.object(
-                bot._turn_controller,
-                "_finish_visible_voice_echo",
-                new=AsyncMock(side_effect=fail_visible_echo),
             ),
             patch("mindroom.ingress_validation.is_authorized_sender", return_value=True),
         ):
