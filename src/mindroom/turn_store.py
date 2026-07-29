@@ -146,16 +146,12 @@ class TurnStore:
 
     def record_finalized_visible_echo(self, source_event_id: str, echo_event_id: str) -> None:
         """Mark a tracked visible echo as successfully replaced."""
+        tracked_record = self.get_turn_record(source_event_id)
+        if tracked_record is None or tracked_record.visible_echo_event_id != echo_event_id:
+            return
 
         def finalized_visible_echo_record(existing_records: Mapping[str, TurnRecord]) -> TurnRecord:
-            existing = existing_records.get(source_event_id)
-            if existing is None:
-                return TurnRecord.create(
-                    [source_event_id],
-                    response_event_id=echo_event_id,
-                    completed=False,
-                    visible_echo_event_id=echo_event_id,
-                )
+            existing = existing_records[source_event_id]
             if existing.completed or existing.visible_echo_event_id != echo_event_id:
                 return existing
             return replace(

@@ -1524,6 +1524,15 @@ def test_visible_echo_is_finalized_only_after_replacement_acknowledgement(tmp_pa
     assert store.finalized_visible_echo_for_sources(("$event",)) == "$echo"
 
 
+def test_visible_echo_finalization_requires_tracked_placeholder(tmp_path: Path) -> None:
+    """An acknowledgement alone must not create a finalized visible echo."""
+    store = _store(tmp_path)
+
+    store.record_finalized_visible_echo("$event", "$echo")
+
+    assert store.get_turn_record("$event") is None
+
+
 def test_visible_echo_finalization_cannot_overwrite_terminal_outcome(tmp_path: Path) -> None:
     """A late edit acknowledgement should preserve a concurrently completed turn."""
     store = _store(tmp_path)
