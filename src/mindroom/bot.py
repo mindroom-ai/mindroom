@@ -163,6 +163,7 @@ class _RoomMemberJoinSyncHookPlan:
     arm_after_response: bool = True
     emit_state: bool = False
     emit_timeline: bool = False
+    emit_fenced_timeline: bool = False
     record_state_seen: bool = False
 
 
@@ -1083,8 +1084,6 @@ class AgentBot:
     def _set_historical_dispatch_fence(self, *, armed: bool) -> None:
         """Set tokenless-window admission and its matching decrypt-notice floor."""
         self._historical_dispatch_fence.set_armed(armed=armed)
-        if armed:
-            self._room_member_join_hooks_armed = False
         client = self.client
         if armed and client is not None and client.user_id:
             raise_notice_floor(
@@ -1105,9 +1104,8 @@ class AgentBot:
             cache_result=cache_result,
             first_sync=first_sync,
         )
-        self._set_historical_dispatch_fence(
-            armed=decision.reset_client_token or decision.reason == "missing_next_batch",
-        )
+        if decision.reset_client_token or decision.reason == "missing_next_batch":
+            self._set_historical_dispatch_fence(armed=True)
         if decision.reset_client_token and self.client is not None:
             cast("Any", self.client).next_batch = None
         return decision
@@ -1134,7 +1132,10 @@ class AgentBot:
         async def wrapper(room: nio.MatrixRoom, event: nio.Event) -> None:
             if not isinstance(event, nio.RoomMemberEvent):
                 return
-            hooks_armed_at_delivery = self._first_sync_done and self._room_member_join_hooks_armed
+            fence_armed = self._historical_dispatch_fence.armed
+            if fence_armed and not self._historical_dispatch_fence.classify(event.source).dispatchable:
+                return
+            hooks_armed_at_delivery = self._first_sync_done and (fence_armed or self._room_member_join_hooks_armed)
 
             async def error_handler() -> None:
                 try:
@@ -1168,7 +1169,7 @@ class AgentBot:
 
         async def wrapper(room: nio.MatrixRoom, event: nio.Event) -> None:
             decision = self._historical_dispatch_fence.classify(event.source)
-            if not decision.dispatchable:
+            if not decision.dispatchable and not self._turn_store.has_pending_turn(event.event_id):
                 assert decision.reason is not None
                 assert decision.log_level is not None
                 log_fenced_event = self.logger.debug if decision.log_level == "debug" else self.logger.info
@@ -1194,17 +1195,22 @@ class AgentBot:
         decision: SyncCertificationDecision,
     ) -> _RoomMemberJoinSyncHookPlan:
         """Return room-member join hook actions for one certified sync response."""
-        if decision.reset_client_token or self._historical_dispatch_fence.armed:
+        if decision.reset_client_token or decision.reason == "missing_next_batch":
             return _RoomMemberJoinSyncHookPlan(arm_after_response=False)
+        emit_fenced_timeline = self._historical_dispatch_fence.armed and decision.state is SyncTrustState.CERTIFIED
         # The first restored-token sync is requested with full_state=True, so its
         # state block is a current snapshot. Only the timeline is a catch-up stream.
         emit_certified_state = (
-            decision.state is SyncTrustState.CERTIFIED and not first_sync_response and hooks_were_armed
+            decision.state is SyncTrustState.CERTIFIED
+            and not first_sync_response
+            and hooks_were_armed
+            and not emit_fenced_timeline
         )
         return _RoomMemberJoinSyncHookPlan(
             arm_after_response=True,
             emit_state=emit_certified_state,
             emit_timeline=restored_token_first_sync_response,
+            emit_fenced_timeline=emit_fenced_timeline,
             record_state_seen=decision.state is SyncTrustState.CERTIFIED and not emit_certified_state,
         )
 
@@ -1218,6 +1224,8 @@ class AgentBot:
         """Run sync-response side effects that must poison certification on failure."""
         # The emit flags are only set by the classic-sync certification path.
         if isinstance(response, nio.SyncResponse):
+            if room_member_join_hook_plan.emit_fenced_timeline:
+                await self._emit_room_member_joined_sync_timeline_hooks(response, apply_historical_fence=True)
             if room_member_join_hook_plan.record_state_seen:
                 await self._emit_room_member_joined_sync_state_hooks(response, record_only=True)
             if room_member_join_hook_plan.emit_timeline:
@@ -1241,6 +1249,7 @@ class AgentBot:
         first_sync_response = not self._first_sync_done
         room_member_join_hooks_were_armed = self._room_member_join_hooks_armed
         room_member_join_hook_plan = _RoomMemberJoinSyncHookPlan()
+        certification_decision: SyncCertificationDecision | None = None
         self.last_sync_time = mark_matrix_sync_success(self.agent_name)
         self._last_sync_monotonic = time.monotonic()
 
@@ -1262,7 +1271,7 @@ class AgentBot:
                     first_sync=first_sync_response,
                 )
                 raise
-            decision = self._certify_sync_response(
+            certification_decision = self._certify_sync_response(
                 next_batch=_response.next_batch,
                 cache_result=cache_result,
                 first_sync=first_sync_response,
@@ -1271,13 +1280,12 @@ class AgentBot:
                 first_sync_response=first_sync_response,
                 restored_token_first_sync_response=restored_token_first_sync_response,
                 hooks_were_armed=room_member_join_hooks_were_armed,
-                decision=decision,
+                decision=certification_decision,
             )
         elif isinstance(_response, nio.SlidingSyncResponse):
             # Sliding sync never certifies the classic checkpoint, but the
             # account's own kicks and bans still must fence and purge rooms.
             await self._apply_own_room_membership_from_sliding_sync(_response)
-            self._set_historical_dispatch_fence(armed=False)
         self._first_sync_done = True
         self._room_member_join_hooks_armed = room_member_join_hook_plan.arm_after_response
 
@@ -1293,6 +1301,12 @@ class AgentBot:
         except Exception:
             self._sync_cache_trust.mark_callback_failed()
             raise
+        if isinstance(_response, nio.SlidingSyncResponse) or (
+            certification_decision is not None
+            and not certification_decision.reset_client_token
+            and certification_decision.reason != "missing_next_batch"
+        ):
+            self._set_historical_dispatch_fence(armed=False)
         if self._calls_reconcile_pending:
             self._calls_reconcile_pending = False
             call_manager = self._call_manager
@@ -1982,7 +1996,12 @@ class AgentBot:
         ):
             await self._emit_room_member_joined_hooks(join)
 
-    async def _emit_room_member_joined_sync_timeline_hooks(self, response: nio.SyncResponse) -> None:
+    async def _emit_room_member_joined_sync_timeline_hooks(
+        self,
+        response: nio.SyncResponse,
+        *,
+        apply_historical_fence: bool = False,
+    ) -> None:
         """Expose human joins from a restored-token catch-up sync timeline."""
         if self.agent_name != ROUTER_AGENT_NAME or not self._first_sync_done or not self._room_member_join_hooks_armed:
             return
@@ -1998,6 +2017,11 @@ class AgentBot:
             config=self.config,
             runtime_paths=self.runtime_paths,
             storage_root=self.runtime_paths.storage_root,
+            event_admitted=(
+                (lambda event: self._historical_dispatch_fence.classify(event.source).dispatchable)
+                if apply_historical_fence
+                else None
+            ),
         ):
             await self._emit_room_member_joined_hooks(join)
 

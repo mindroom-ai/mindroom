@@ -16,7 +16,7 @@ from mindroom.entity_resolution import entity_identity_registry, mindroom_user_i
 from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator, Mapping
+    from collections.abc import Callable, Iterator, Mapping
     from pathlib import Path
 
     from mindroom.config.main import Config
@@ -255,6 +255,7 @@ def room_member_joins_from_sync_timeline(
     config: Config,
     runtime_paths: RuntimePaths,
     storage_root: Path,
+    event_admitted: Callable[[nio.RoomMemberEvent], bool] | None = None,
 ) -> tuple[RoomMemberJoin, ...]:
     """Return hook payloads for human joins delivered through sync timeline events."""
     joins: list[RoomMemberJoin] = []
@@ -264,6 +265,8 @@ def room_member_joins_from_sync_timeline(
             continue
         for event in join_info.timeline.events:
             if not isinstance(event, nio.RoomMemberEvent):
+                continue
+            if event_admitted is not None and not event_admitted(event):
                 continue
             join = room_member_join_from_event(
                 room,

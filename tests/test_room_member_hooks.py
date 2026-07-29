@@ -58,6 +58,7 @@ def _room_member_event(
     event_id: str = "$join",
     user_id: str = "@alice:localhost",
     sender: str | None = None,
+    origin_server_ts: int = 1,
     membership: str = "join",
     prev_membership: str | None = "leave",
     display_name: str | None = "Alice",
@@ -73,7 +74,7 @@ def _room_member_event(
         "event_id": event_id,
         "sender": sender or user_id,
         "state_key": user_id,
-        "origin_server_ts": 1,
+        "origin_server_ts": origin_server_ts,
         "content": content,
     }
     if prev_membership is not None:
@@ -133,6 +134,17 @@ def _agent_bot(tmp_path: Path) -> AgentBot:
         password=TEST_PASSWORD,
     )
     return install_runtime_cache_support(AgentBot(agent_user, tmp_path, config=config, runtime_paths=runtime_paths))
+
+
+def _record_join_event_ids(bot: AgentBot) -> list[str]:
+    seen: list[str] = []
+
+    @hook(EVENT_ROOM_MEMBER_JOINED)
+    async def joined(ctx: RoomMemberJoinedContext) -> None:
+        seen.append(ctx.event_id)
+
+    bot.hook_registry = HookRegistry.from_plugins([_plugin("onboarding", [joined])])
+    return seen
 
 
 def test_room_member_joined_is_a_builtin_hook_event() -> None:
@@ -475,6 +487,8 @@ async def test_unknown_pos_resync_does_not_emit_room_member_joined_snapshot(
     bot.client.rooms = {room.room_id: room}
     bot.client.next_batch = "s_rejected"
     bot.hook_registry = HookRegistry.from_plugins([_plugin("onboarding", [joined])])
+    bot._register_room_member_callback_after_initial_sync()
+    room_member_callback = bot.client.add_event_callback.call_args.args[0]
     monkeypatch.setattr(
         bot._conversation_cache,
         "cache_sync_timeline_for_certification",
@@ -484,13 +498,14 @@ async def test_unknown_pos_resync_does_not_emit_room_member_joined_snapshot(
     sync_error.status_code = "M_UNKNOWN_POS"
 
     await bot._on_sync_error(sync_error)
-    await bot._on_room_member(room, _room_member_event(event_id="$timeline-snapshot"))
+    await room_member_callback(room, _room_member_event(event_id="$timeline-snapshot"))
     await bot._on_sync_response(
         _sync_response_with_state(
             room.room_id,
             [_room_member_event(event_id="$state-snapshot")],
         ),
     )
+    await wait_for_background_tasks(timeout=1.0, owner=bot._runtime_view)
 
     assert seen == []
 
@@ -537,6 +552,83 @@ async def test_registered_room_member_callback_uses_delivery_time_arming_state(
     await wait_for_background_tasks(timeout=1.0, owner=bot._runtime_view)
 
     assert seen == ["$live"]
+
+
+@pytest.mark.asyncio
+async def test_classic_recovery_emits_only_post_cutoff_timeline_join_before_state_snapshot(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A recovery timeline must expose its fresh join before state records the user seen."""
+    bot = _router_bot(tmp_path)
+    seen = _record_join_event_ids(bot)
+    room = _room()
+    bot.client.rooms = {room.room_id: room}
+    bot._historical_dispatch_fence.startup_cutoff_ms = 2_000
+    bot._set_historical_dispatch_fence(armed=True)
+    monkeypatch.setattr(
+        bot._conversation_cache,
+        "cache_sync_timeline_for_certification",
+        AsyncMock(return_value=SyncCacheWriteResult(complete=True)),
+    )
+    historical_join = _room_member_event(
+        event_id="$historical-join",
+        origin_server_ts=1_500,
+    )
+    fresh_join = _room_member_event(
+        event_id="$fresh-join",
+        user_id="@bob:localhost",
+        origin_server_ts=2_500,
+    )
+    fresh_state = _room_member_event(
+        event_id="$fresh-state",
+        user_id="@bob:localhost",
+        origin_server_ts=2_500,
+        prev_membership=None,
+    )
+
+    await bot._on_sync_response(
+        _sync_response_with_state(
+            room.room_id,
+            [fresh_state],
+            timeline_events=[historical_join, fresh_join],
+        ),
+    )
+
+    assert seen == ["$fresh-join"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("sync_mode", ["classic", "sliding"])
+async def test_restarted_sync_member_callback_filters_history_but_keeps_fresh_join(
+    tmp_path: Path,
+    sync_mode: str,
+) -> None:
+    """A positionless retry must filter members by timestamp, not disable hooks."""
+    bot = _router_bot(tmp_path)
+    seen = _record_join_event_ids(bot)
+    bot.config.matrix_sync.mode = sync_mode
+    room = _room()
+    bot._register_room_member_callback_after_initial_sync()
+    room_member_callback = bot.client.add_event_callback.call_args.args[0]
+    bot._historical_dispatch_fence.startup_cutoff_ms = 2_000
+    if sync_mode == "sliding":
+        await bot._on_sync_error(nio.SlidingSyncError("connection expired", "M_UNKNOWN_POS"))
+    else:
+        bot._set_historical_dispatch_fence(armed=True)
+
+    await room_member_callback(room, _room_member_event(event_id="$historical", origin_server_ts=1_500))
+    await room_member_callback(
+        room,
+        _room_member_event(
+            event_id="$fresh",
+            user_id="@bob:localhost",
+            origin_server_ts=2_500,
+        ),
+    )
+    await wait_for_background_tasks(timeout=1.0, owner=bot._runtime_view)
+
+    assert seen == ["$fresh"]
 
 
 @pytest.mark.asyncio

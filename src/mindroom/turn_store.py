@@ -135,6 +135,11 @@ class TurnStore:
         """Return whether one source event already has a terminal outcome."""
         return self._ledger.has_responded(event_id)
 
+    def has_pending_turn(self, event_id: str) -> bool:
+        """Return whether one exact event belongs to a durable incomplete turn."""
+        turn_record = self.get_turn_record(event_id)
+        return turn_record is not None and not turn_record.completed
+
     def visible_echo_for_source(self, source_event_id: str) -> str | None:
         """Return the tracked visible echo for one source event."""
         return self._ledger.get_visible_echo_event_id(source_event_id)

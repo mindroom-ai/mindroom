@@ -23,6 +23,7 @@ from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.dispatch_handoff import PendingDispatchMetadata
 from mindroom.dispatch_source import VOICE_SOURCE_KIND
+from mindroom.handled_turns import TurnRecord
 from mindroom.matrix.cache.event_cache import EventCacheBackendUnavailableError
 from mindroom.matrix.cache.postgres_event_cache import PostgresEventCache
 from mindroom.matrix.cache.sqlite_event_cache import SqliteEventCache
@@ -293,6 +294,59 @@ async def test_tokenless_initial_sync_caches_old_text_without_dispatch(tmp_path:
 
 
 @pytest.mark.asyncio
+async def test_tokenless_sync_replays_only_exact_durable_pending_events(tmp_path: Path) -> None:
+    """Cold history may resume an exact pending turn without reopening unrelated events."""
+    with patch("mindroom.bot.time.time", return_value=2.0):
+        bot = _agent_bot(tmp_path)
+    client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
+    client.next_batch = None
+    room = nio.MatrixRoom("!room:localhost", bot.agent_user.user_id)
+    pending_text = _text_event("$pending-text", "resume me", 1_500)
+    unrelated_text = _text_event("$unrelated-text", "ignore me", 1_500)
+    pending_reaction = nio.Event.parse_event(
+        {
+            "type": "m.reaction",
+            "event_id": "$pending-reaction",
+            "sender": "@user:localhost",
+            "origin_server_ts": 1_500,
+            "content": {
+                "m.relates_to": {
+                    "rel_type": "m.annotation",
+                    "event_id": "$question",
+                    "key": "1",
+                },
+            },
+        },
+    )
+    assert isinstance(pending_reaction, nio.ReactionEvent)
+    bot._turn_store.record_pending_turn(TurnRecord.create([pending_text.event_id], completed=False))
+    bot._turn_store.record_pending_turn(
+        TurnRecord.create(
+            ["$question"],
+            discovery_event_ids=(pending_reaction.event_id,),
+            completed=False,
+        ),
+    )
+
+    await _start_bot_with_client(bot, client)
+    text_callback = cast("Callable[..., Awaitable[None]]", _registered_event_callback(client, nio.RoomMessageText))
+    reaction_callback = cast("Callable[..., Awaitable[None]]", _registered_event_callback(client, nio.ReactionEvent))
+    handle_text_event = AsyncMock()
+    handle_reaction_inner = AsyncMock()
+    with (
+        patch.object(bot._turn_controller, "handle_text_event", handle_text_event),
+        patch.object(bot, "_handle_reaction_inner", handle_reaction_inner),
+    ):
+        await text_callback(room, pending_text)
+        await text_callback(room, unrelated_text)
+        await reaction_callback(room, pending_reaction)
+        await wait_for_background_tasks(timeout=1.0, owner=bot._runtime_view)
+
+    assert [call.args[1].event_id for call in handle_text_event.await_args_list] == [pending_text.event_id]
+    handle_reaction_inner.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_tokenless_initial_sync_drops_old_media_before_processing(tmp_path: Path) -> None:
     """Cold-sync media must not enter attachment, transcription, or routing work."""
     with patch("mindroom.bot.time.time", return_value=2.0):
@@ -443,7 +497,6 @@ async def test_missing_next_batch_keeps_historical_dispatch_fence_armed(tmp_path
         await bot._on_sync_response(response)
 
     assert bot._historical_dispatch_fence.armed is True
-    assert bot._room_member_join_hooks_armed is False
 
 
 @pytest.mark.asyncio
@@ -536,7 +589,6 @@ def test_redaction_rewind_without_retry_token_rearms_historical_dispatch_fence(t
 
     assert client.next_batch is None
     assert bot._historical_dispatch_fence.armed
-    assert not bot._room_member_join_hooks_armed
     notice_floor.assert_called_once_with(
         client.user_id,
         floor_timestamp_ms=bot._historical_dispatch_fence.startup_cutoff_ms,
@@ -715,7 +767,6 @@ async def test_sliding_unknown_pos_fences_history_before_next_response(tmp_path:
 
     await bot._on_sync_error(nio.SlidingSyncError("connection expired", "M_UNKNOWN_POS"))
     assert bot._historical_dispatch_fence.armed
-    assert not bot._room_member_join_hooks_armed
 
     handle_text_event = AsyncMock()
     with patch.object(bot._turn_controller, "handle_text_event", handle_text_event):
