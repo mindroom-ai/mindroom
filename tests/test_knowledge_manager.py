@@ -7737,6 +7737,135 @@ _LEAKING_CREDENTIAL_SHAPES = [
 ]
 
 
+#: Shapes whose credentials survive into the *command echo* rather than stderr.
+#: ``_run_git`` redacts each argument separately, so a shape can be safe in one
+#: path and leak in the other; these were verbatim in the raised command line
+#: while the same string in stderr was already redacted.
+_LEAKING_COMMAND_ARGUMENT_SHAPES = [
+    pytest.param("//user:{secret}@example.com/repo.git", id="protocol-relative"),
+    pytest.param("///user:{secret}@example.com/repo.git", id="protocol-relative-empty-authority"),
+    pytest.param("//user:{secret}@[::1]/repo.git", id="protocol-relative-ipv6"),
+    pytest.param("//user:{secret}@host:8443/repo.git", id="protocol-relative-port"),
+    pytest.param("//{secret}@github.com/repo.git", id="protocol-relative-token-as-username"),
+]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("argument_template", _LEAKING_COMMAND_ARGUMENT_SHAPES)
+async def test_git_command_arguments_never_leak_credentials_into_error_text(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    argument_template: str,
+) -> None:
+    """A credential in a Git *argument* must not survive into the command echo.
+
+    ``_run_git`` rebuilds the failed command for its error message, redacting
+    each argument in isolation. Injecting only through stderr leaves that path
+    untested, which is how the protocol-relative shapes stayed readable in the
+    raised ``RuntimeError`` while the identical string in stderr was redacted.
+    """
+    secret = "S3CR3T-CANARY"  # noqa: S105
+    manager = _git_manager(tmp_path)
+    leaking_argument = argument_template.format(secret=secret)
+
+    class _FailingProcess:
+        returncode = 128
+
+        async def communicate(self) -> tuple[bytes, bytes]:
+            return b"", b"fatal: could not read remote"
+
+    async def _fake_create_subprocess_exec(*args: object, **kwargs: object) -> _FailingProcess:
+        _ = args, kwargs
+        return _FailingProcess()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
+
+    with pytest.raises(RuntimeError, match="Git command failed") as exc_info:
+        await manager.git_source._run_git(["clone", leaking_argument, "dest"])
+
+    assert secret not in str(exc_info.value)
+
+
+@pytest.mark.asyncio
+async def test_git_timeout_message_never_leaks_credentials_from_arguments(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The timeout message rebuilds the same command echo and must redact it too."""
+    secret = "S3CR3T-CANARY"  # noqa: S105
+    manager = _git_manager(tmp_path)
+
+    class _HangingProcess:
+        returncode = None
+
+        async def communicate(self) -> tuple[bytes, bytes]:
+            return b"", b""
+
+        def kill(self) -> None:
+            return None
+
+        async def wait(self) -> None:
+            return None
+
+    async def _fake_create_subprocess_exec(*args: object, **kwargs: object) -> _HangingProcess:
+        _ = args, kwargs
+        return _HangingProcess()
+
+    async def _fake_wait_for(awaitable: Coroutine[object, object, object], **kwargs: object) -> object:
+        _ = kwargs["timeout"]
+        awaitable.close()
+        raise TimeoutError
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
+    monkeypatch.setattr(asyncio, "wait_for", _fake_wait_for)
+    monkeypatch.setattr(manager.git_source, "_sync_timeout_seconds", lambda: 1.0)
+
+    with pytest.raises(RuntimeError, match="Git command timed out") as exc_info:
+        await manager.git_source._run_git(["clone", f"//user:{secret}@example.com/repo.git", "dest"])
+
+    assert secret not in str(exc_info.value)
+
+
+def test_credential_bearing_remote_url_is_never_persisted(tmp_path: Path) -> None:
+    """A URL whose credentials outlive stripping must not reach ``.git/config``.
+
+    ``credential_free_repo_url`` only strips userinfo from the authority
+    ``urlparse`` reports, so these shapes passed through it verbatim and were
+    written to disk as the checkout's remote. Credentials may transit as a
+    process-local header; they must never be persisted.
+    """
+    _ = tmp_path
+    secret = "S3CR3T-CANARY"  # noqa: S105
+    refused = [
+        f"http:///git-user:{secret}@example.com/org/repo.git",
+        f"https:///git-user:{secret}@example.com/org/repo.git",
+        f"//git-user:{secret}@example.com/org/repo.git",
+        f"https://user%3A{secret}%40example.com/repo.git",
+    ]
+    for repo_url in refused:
+        with pytest.raises(RuntimeError, match="Refusing to write a credential-bearing remote URL") as exc_info:
+            knowledge_git_source_module._persistable_remote_url(repo_url, "docs")
+        assert secret not in str(exc_info.value)
+
+    # Supported forms must keep working: a stripped password, an SSH bare
+    # username, and scp-style syntax that urlparse reports as a bare path.
+    assert (
+        knowledge_git_source_module._persistable_remote_url(
+            f"https://user:{secret}@example.com/org/repo.git",
+            "docs",
+        )
+        == "https://example.com/org/repo.git"
+    )
+    assert (
+        knowledge_git_source_module._persistable_remote_url("ssh://git@example.com/org/repo.git", "docs")
+        == "ssh://git@example.com/org/repo.git"
+    )
+    assert (
+        knowledge_git_source_module._persistable_remote_url("git@github.com:org/repo.git", "docs")
+        == "git@github.com:org/repo.git"
+    )
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("stderr_template", _LEAKING_CREDENTIAL_SHAPES)
 async def test_malformed_credential_url_never_reaches_error_text_or_metadata(
