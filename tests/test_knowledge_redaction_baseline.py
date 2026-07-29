@@ -23,6 +23,7 @@ this one.
 
 from __future__ import annotations
 
+import hashlib
 import itertools
 import subprocess
 import sys
@@ -48,6 +49,11 @@ if TYPE_CHECKING:
 #: different environments is not pinned.
 _BASELINE_SHA = "8d17749ca154910477ecd601bc02ebd47e0b1c49"
 _BASELINE_DIR = Path(__file__).resolve().parent / "baselines"
+#: Digests of the vendored copies, so the integrity check needs no history.
+_BASELINE_DIGESTS = {
+    "git_urls_8d17749c.py.txt": "f19615d937fe2909e223774a4e3d662e06e6887ac950f53c90431b033851b1d1",
+    "redaction_8d17749c.py.txt": "b55c6e32a1cebd97028b8a96565aa8f66152f5ec1685aa2cee5ac16aef5b7759",
+}
 
 _SECRET = "SUPERSECRETCANARY"  # noqa: S105
 
@@ -78,11 +84,24 @@ def _load_baseline_redactor() -> _Redactor:
     return baseline.redact_credentials_in_text  # type: ignore[no-any-return]
 
 
-def test_the_vendored_baseline_still_matches_the_commit_it_claims() -> None:
-    """The frozen copy must be the file that shipped, not a copy that drifted.
+def test_the_vendored_baseline_is_the_file_it_claims_to_be() -> None:
+    """The frozen copies must be unmodified, checkable without Git history.
 
-    Skipped where the history is unavailable -- a shallow CI clone -- because
-    the baseline's value does not depend on Git being able to confirm it.
+    A digest rather than a ``git show``: CI checks out shallow, so a comparison
+    against the commit skips exactly where it matters, and a skipped integrity
+    check reads as proof while permitting the baseline to be edited into a
+    no-op redactor that leaves all of the assertions above green.
+    """
+    for filename, expected in _BASELINE_DIGESTS.items():
+        actual = hashlib.sha256((_BASELINE_DIR / filename).read_bytes()).hexdigest()
+        assert actual == expected, f"{filename} has been modified since it was vendored"
+
+
+def test_the_vendored_baseline_matches_the_commit_it_names() -> None:
+    """Corroborate the digests against Git where the history is available.
+
+    Skipped in a shallow clone. This proves the *provenance* the digests only
+    freeze, so it is the weaker of the two checks and the one allowed to skip.
     """
     repository = Path(__file__).resolve().parent.parent
     for module, vendored in (
@@ -168,13 +187,29 @@ def _credential_headers() -> Iterator[tuple[str, str]]:
         yield "spaced-auth-header", f"Authorization{separator} Bearer {_SECRET}"
 
 
-#: Diagnostics with no credential in them. The baseline leaves every one alone,
-#: so this branch must too -- these are what an operator reads when a sync fails.
-_CLEAN_DIAGNOSTICS = [
-    "fatal: repository 'https://github.com/example/repo.git/' not found",
-    "fatal: unable to access 'https://host/@scope/pkg.git': 404",
-    "fatal: unable to access 'https://host:8443/a@b': 404",
-    "fatal: could not read 'https://host/org/repo.git@v1'",
+#: Credential-free strings that Git and Git LFS really emit, generated against
+#: the same framings as the leak corpus rather than hand-listed. A hand-written
+#: list's escape hatch is *omission*: a diagnostic this branch started mangling
+#: would simply never appear in it, and nothing would say so.
+_CLEAN_URLS = [
+    "https://github.com/example/repo.git",
+    "https://host/@scope/pkg.git",
+    "https://host:8443/a@b",
+    "https://host/org/repo.git@v1",
+    "https://[::1]:8080/repo.git",
+    "http://[fe80::1%25eth0]/x",
+    "ssh://git@example.com/org/repo.git",
+    "git@github.com:org/repo.git",
+    "file:///srv/repos/repo.git",
+    "/srv/repos/repo.git",
+    # The string this codebase builds itself in ``_git_auth_env``, and the shape
+    # ``git config --list`` prints back.
+    "url.https://example.com/a@b.insteadOf=https://x/y",
+]
+
+#: Diagnostics with no URL to find, which must survive verbatim.
+_CLEAN_PROSE = [
+    "error: pathspec 'main' did not match any file(s) known to git",
     "git@github.com: Permission denied (publickey).",
     "fatal: invalid refspec '+refs/heads/main:refs/remotes/origin/@{upstream}'",
     "git merge-base HEAD:@{upstream} HEAD",
@@ -184,10 +219,39 @@ _CLEAN_DIAGNOSTICS = [
     "git config --global user.email you@example.com",
     "error: RPC failed; curl 92 HTTP/2 stream 5 was not closed cleanly",
     "Cloning into '/srv/knowledge/docs'...",
-    "https://[::1]:8080/repo.git",
-    "http://[fe80::1%25eth0]/x",
     "Note: switching to 'origin/main'.",
+    "remote: Support for password authentication was removed on August 13, 2021.",
+    "Submodule 'vendor/x' (git@github.com:example/x.git) registered for path 'vendor/x'",
 ]
+
+#: Credential-free shapes this branch deliberately says less about than the
+#: baseline. Each costs a diagnostic, so each needs a reason, and the companion
+#: test below fails if one stops diverging so the list cannot rot.
+_INTENTIONAL_LOSSES = frozenset(
+    {
+        # An scp remote's userinfo is an SSH username rather than a password --
+        # but nothing distinguishes ``git@`` from a token pasted into the same
+        # position, and that token would be a credential.
+        "git@github.com:org/repo.git",
+        "Submodule 'vendor/x' (git@github.com:example/x.git) registered for path 'vendor/x'",
+        # Two URLs in one token. The second could carry userinfo the first's
+        # authority check cannot see, and telling them apart needs the parse
+        # this shape is precisely too malformed to support.
+        "url.https://example.com/a@b.insteadOf=https://x/y",
+    },
+)
+
+
+def _clean_texts() -> Iterator[tuple[str, str]]:
+    """Yield every generated (shape id, credential-free text)."""
+    for url, (_frame_id, frame) in itertools.product(_CLEAN_URLS, _FRAMES):
+        yield url, frame.format(url=url)
+    for prose in _CLEAN_PROSE:
+        yield prose, prose
+
+
+def _clean_corpus() -> list[ParameterSet]:
+    return [pytest.param(shape, text, id=f"{shape[:44]}-{index}") for index, (shape, text) in enumerate(_clean_texts())]
 
 
 def _credential_corpus() -> list[ParameterSet]:
@@ -224,13 +288,29 @@ def test_credential_shapes_are_never_worse_than_the_baseline(
         )
 
 
-@pytest.mark.parametrize("diagnostic", _CLEAN_DIAGNOSTICS)
-def test_clean_diagnostics_are_not_mangled_relative_to_the_baseline(
-    diagnostic: str,
+@pytest.mark.parametrize(("shape", "text"), _clean_corpus())
+def test_clean_output_is_never_mangled_relative_to_the_baseline(
+    shape: str,
+    text: str,
     baseline_redact: _Redactor,
 ) -> None:
     """Redaction must not cost a diagnostic the baseline preserves."""
-    assert redact_credentials_in_text(diagnostic) == baseline_redact(diagnostic)
+    here = redact_credentials_in_text(text)
+    there = baseline_redact(text)
+    if here != there and shape not in _INTENTIONAL_LOSSES:
+        pytest.fail(f"undeclared loss for {shape!r}\n  here: {here!r}\n  base: {there!r}")
+
+
+def test_every_declared_loss_is_still_a_loss(baseline_redact: _Redactor) -> None:
+    """A declared loss that stopped diverging must be removed, not left to rot.
+
+    The improvement allowlist already had a test like this; the loss direction
+    did not, which is how a diagnostic could start being mangled with nothing to
+    say so.
+    """
+    diverging = {shape for shape, text in _clean_texts() if redact_credentials_in_text(text) != baseline_redact(text)}
+
+    assert diverging == _INTENTIONAL_LOSSES
 
 
 def test_every_allowlisted_improvement_is_still_an_improvement(baseline_redact: _Redactor) -> None:

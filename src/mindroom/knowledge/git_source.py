@@ -173,12 +173,10 @@ def _parsed_remote_url(clean_url: str, base_id: str) -> str:
     if parsed.netloc.count("@") > 1:
         raise _unwritable_remote(base_id, "the URL has an ambiguous authority")
 
-    if ":" in parsed.netloc.rpartition("@")[0]:
-        # A password in the authority. The bare ``user@host`` that
-        # ``credential_free_repo_url`` deliberately keeps for SSH has no colon
-        # and is still allowed.
-        raise _unwritable_remote(base_id, "the URL embeds a password")
-
+    # No check for a password in the authority: ``credential_free_repo_url`` has
+    # already stripped one, and the bare ``user@host`` it deliberately keeps for
+    # SSH has no colon. A 400k-case fuzz reached this point with a password zero
+    # times, so a branch here would be untested code guarding nothing.
     return clean_url
 
 
@@ -202,7 +200,14 @@ def _persistable_remote_url(repo_url: str, base_id: str) -> str:
     what ``_git_auth_env`` is for; they must never be persisted. So this checks
     the string actually about to be written rather than classifying config.
     """
-    clean_url = credential_free_repo_url(repo_url)
+    try:
+        clean_url = credential_free_repo_url(repo_url)
+    except ValueError as exc:
+        # ``urlsplit`` refuses a netloc containing a codepoint that NFKC-
+        # normalises to a delimiter, and quotes that netloc -- password and all
+        # -- in the exception. Convert it to a refusal here, before it can
+        # propagate into an error that gets persisted.
+        raise _unwritable_remote(base_id, "the URL contains a disallowed character") from exc
 
     # Before any shape is recognised: until the decoded form agrees with the raw
     # one, no branch below is reasoning about the string a client will use. This

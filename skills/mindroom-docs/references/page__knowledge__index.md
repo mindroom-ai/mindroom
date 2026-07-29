@@ -298,10 +298,10 @@ MindRoom writes `repo_url` into the checkout's `origin` remote, so it accepts on
 | Absolute local path | `/srv/repos/repo.git` |
 | `file:` URL | `file:///srv/repos/repo.git` |
 
-Refused, with an error naming the reason: relative and home-relative paths (`./repo.git`, `../repo.git`, `~/repo.git`, `repo.git`), URLs with no resolvable host (`https:///org/repo.git`, `https:/org/repo.git`), and anything embedding a second URL.
+Refused, with an error naming the reason: relative and home-relative paths (`./repo.git`, `../repo.git`, `~/repo.git`, `repo.git`), URLs with an empty authority (`https:///org/repo.git`), URLs whose separator is percent-encoded or written as a lookalike codepoint, and anything embedding a second URL.
 
-**Do not embed credentials in `repo_url`.** A URL carrying a password is refused outright, because it would otherwise be written to `.git/config` in plaintext and persist there across syncs.
-That includes forms where the scheme has been dropped, such as `oauth2:TOKEN@gitlab.com:org/repo.git` or `x-access-token:TOKEN@github.com/org/repo.git`.
+**Do not embed credentials in `repo_url`.** A password in a well-formed URL is stripped before the remote is written, so it never reaches `.git/config` — but it is still in your config file, and still handed to Git for every command.
+A password MindRoom cannot strip with confidence is refused outright rather than written: that covers forms where the scheme has been dropped, such as `oauth2:TOKEN@gitlab.com:org/repo.git` or `x-access-token:TOKEN@github.com/org/repo.git`.
 Use `credentials_service` instead: those credentials are passed to Git for the duration of one command and are never written to disk.
 
 If a checkout already holds a credential-bearing remote from before this check existed, the refusal cannot clean it — delete the checkout directory so the next sync clones afresh.

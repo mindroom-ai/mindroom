@@ -9429,7 +9429,12 @@ def test_redacting_hostile_stderr_does_not_stall_the_event_loop() -> None:
         ),
         # Long identifier runs, which is what makes a scheme prefix backtrack.
         "a" * (64 * 1024),
-        ("word:" + "b" * 400) * 100,
+        # Colon-dense, and every position a legal start. An earlier version
+        # padded this with 400 filler characters, which left 101 legal starts
+        # instead of 8100 and made the payload cost 0.0086 s against a 1 s
+        # budget -- toothless while reading as coverage. The unpadded form cost
+        # 36 s before the password run was bounded.
+        "a:" * (195 * 1024 // 2),
         # One oversized token: rejected unread rather than decoded.
         f"https://user:{secret}@" + "%" + "25" * (128 * 1024) + "40example.com/x",
     ]

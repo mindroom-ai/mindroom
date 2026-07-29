@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+import unicodedata
 from base64 import b64decode
 from urllib.parse import ParseResult, unquote, urlparse, urlunparse
 
@@ -30,14 +31,22 @@ _AUTHORIZATION_HEADER_PATTERN: re.Pattern[str] = re.compile(
 #: branch that consumes a long run and then demands a character it never finds
 #: costs O(n) per position. The protocol-relative branch therefore consumes and
 #: lets the classifier decide, and the leading look-behind stops any branch
-#: being retried in the middle of an identifier it already rejected. Measured
-#: linear on 40 KB of slashes, of letters, and of ``word:`` runs.
+#: being retried in the middle of an identifier it already rejected.
+#:
+#: The ``user:password@host`` branch is the one that must still demand a
+#: character, so it is bounded twice. Excluding ``:`` from the password stops it
+#: crossing the next separator on colon-dense input -- ``a:a:a:…`` cost 36 s at
+#: 195 KB when it did -- and the length cap makes the per-position work constant
+#: regardless. The cap is ``_MAX_REDACTABLE_TOKEN_LENGTH``, so a run long enough
+#: to exceed it would be dropped unread anyway. A password containing a colon
+#: still has every byte of the secret redacted; only the username before the
+#: first colon survives, and a username is not the secret.
 _CREDENTIAL_CANDIDATE_PATTERN: re.Pattern[str] = re.compile(
     r"""(?<![A-Za-z0-9+._-])(?:
           [a-zA-Z][a-zA-Z0-9+.-]*://[^\s'"<>]*        # scheme://host/path
         | //[^\s'"<>]*                                # protocol-relative
         | (?:https?|ssh|git|git\+[a-z]+|ftps?|file):[^\s'"<>]*   # transport, no //
-        | [A-Za-z0-9._-]+:[^/@\s'"<>]+@[^\s'"<>]*     # user:password@host
+        | [A-Za-z0-9._-]+:[^/@:\s'"<>]{1,2048}+@[^\s'"<>]*  # user:password@host
         | [A-Za-z0-9._-]+@[A-Za-z0-9._-]+:[^@\s'"<>]+ # scp-style user@host:path
     )""",
     re.VERBOSE | re.IGNORECASE,
@@ -83,7 +92,7 @@ _MAX_REDACTABLE_TOKEN_LENGTH = 2048
 
 
 def fully_unquoted(value: str) -> str:
-    """Percent-decode `value` repeatedly until it stops changing.
+    """Return `value` percent-decoded to a fixed point and NFKC-normalised.
 
     A separator can be hidden under any number of encoding layers -- ``%40``,
     ``%2540``, ``%252540`` -- so testing one layer only buys one layer, and
@@ -91,11 +100,17 @@ def fully_unquoted(value: str) -> str:
     limit to beat: every pass that changes anything replaces a three-character
     escape with one character, so the string strictly shortens and the loop
     terminates with no escapes left to hide behind.
+
+    It can also be hidden as a *different codepoint*: U+FF20 and U+FE6B both
+    NFKC-normalise to ``@``, which is why ``urlsplit`` rejects them outright.
+    Normalising here means the separator counts below see one ``@`` either way,
+    so such a URL is judged as the credential-bearing thing it is rather than as
+    an unrecognised token.
     """
     while True:
         decoded = unquote(value)
         if decoded == value:
-            return value
+            return unicodedata.normalize("NFKC", value)
         value = decoded
 
 
@@ -258,8 +273,18 @@ def redact_credentials_in_text(value: str) -> str:
 
 
 def credential_free_url_identity(value: str) -> str:
-    """Return a stable repo URL identity that never persists secret-bearing userinfo."""
-    parsed = urlparse(value)
+    """Return a stable repo URL identity that never persists secret-bearing userinfo.
+
+    Never raises. This is reached from ``indexing_settings_key`` on the ordinary
+    resolve path, not an error path, and ``urlsplit`` rejects a netloc holding a
+    codepoint that NFKC-normalises to a delimiter -- putting that netloc, with
+    its password, into the exception message. Hashing the raw string instead
+    keeps the identity stable and puts nothing recoverable in the output.
+    """
+    try:
+        parsed = urlparse(value)
+    except ValueError:
+        return f"repo-url-sha256:{hashlib.sha256(value.encode('utf-8')).hexdigest()}"
     if parsed.scheme and parsed.netloc:
         netloc = parsed.netloc.rsplit("@", 1)[-1].lower()
         if parsed.scheme == "ssh" and "@" in parsed.netloc and parsed.password is None:
@@ -283,8 +308,15 @@ def credential_free_url_identity(value: str) -> str:
 
 
 def embedded_http_userinfo(value: str) -> tuple[str, str] | None:
-    """Return embedded HTTP(S) URL userinfo, if present."""
-    parsed = urlparse(value)
+    """Return embedded HTTP(S) URL userinfo, if present.
+
+    Never raises: a URL ``urlsplit`` refuses has no userinfo this can use, and
+    its exception message would carry the very credential being looked for.
+    """
+    try:
+        parsed = urlparse(value)
+    except ValueError:
+        return None
     if parsed.scheme not in {"http", "https"} or not parsed.netloc or "@" not in parsed.netloc:
         return None
     if not parsed.username:
