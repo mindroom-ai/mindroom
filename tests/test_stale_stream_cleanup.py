@@ -25,7 +25,7 @@ from mindroom.dispatch_source import AUTO_RESUME_MESSAGE, TRUSTED_INTERNAL_RELAY
 from mindroom.entity_resolution import MissingManagedEntityAccountError, entity_identity_registry
 from mindroom.matrix import stale_stream_cleanup as stale_stream_cleanup_module
 from mindroom.matrix.cache import ThreadHistoryResult, thread_history_result
-from mindroom.matrix.cache_work_priority import is_startup_cache_work
+from mindroom.matrix.cache.write_coordinator import _is_startup_cache_work
 from mindroom.matrix.client import ResolvedVisibleMessage
 from mindroom.matrix.client_thread_history import OpaqueEncryptedThreadHistoryError
 from mindroom.matrix.identity import managed_account_key
@@ -720,10 +720,19 @@ async def test_cleanup_returns_interrupted_thread_for_transitive_plain_reply(tmp
 
 @pytest.mark.asyncio
 async def test_auto_resume_sends_correctly_threaded_messages(tmp_path: Path) -> None:
-    """Auto-resume should send the requested system message into each interrupted thread."""
+    """An internally yielded check must not stop later correctly threaded resumes."""
     config = _make_config(tmp_path)
     client = AsyncMock(spec=nio.AsyncClient)
     interrupted = [
+        InterruptedThread(
+            room_id=ROOM_ID,
+            thread_id="$thread-yielded",
+            target_event_id="$target-yielded",
+            partial_text="Yielded",
+            agent_name="test_agent",
+            original_sender_id=USER_ID,
+            timestamp_ms=-1,
+        ),
         InterruptedThread(
             room_id=ROOM_ID,
             thread_id="$thread-one",
@@ -746,7 +755,9 @@ async def test_auto_resume_sends_correctly_threaded_messages(tmp_path: Path) -> 
     history_for_thread = conversation_cache.refresh_strict_thread_history_from_source.side_effect
 
     def observed_history_for_thread(*args: object, **kwargs: object) -> ThreadHistoryResult:
-        startup_markers.append(is_startup_cache_work())
+        startup_markers.append(_is_startup_cache_work())
+        if len(startup_markers) == 1:
+            raise asyncio.CancelledError
         return history_for_thread(*args, **kwargs)
 
     conversation_cache.refresh_strict_thread_history_from_source.side_effect = observed_history_for_thread
@@ -772,7 +783,7 @@ async def test_auto_resume_sends_correctly_threaded_messages(tmp_path: Path) -> 
         )
 
     assert resumed_count == 2
-    assert startup_markers == [True, True]
+    assert startup_markers == [True, True, True]
     assert mock_send.await_count == 2
     first_content = mock_send.await_args_list[0].args[2]
     second_content = mock_send.await_args_list[1].args[2]
@@ -1012,19 +1023,29 @@ async def test_auto_resume_propagates_cancelled_source_refresh(tmp_path: Path) -
         ),
     ]
     conversation_cache = _auto_resume_conversation_cache(interrupted)
-    conversation_cache.refresh_strict_thread_history_from_source.side_effect = asyncio.CancelledError
+    refresh_started = asyncio.Event()
 
-    with (
-        patch("mindroom.matrix.stale_stream_cleanup.send_message_result", new=AsyncMock()) as mock_send,
-        pytest.raises(asyncio.CancelledError),
-    ):
-        await auto_resume_interrupted_threads(
-            client,
-            interrupted,
-            config=config,
-            runtime_paths=runtime_paths_for(config),
-            conversation_cache=conversation_cache,
+    async def blocked_refresh(*_args: object, **_kwargs: object) -> ThreadHistoryResult:
+        refresh_started.set()
+        await asyncio.Event().wait()
+        raise AssertionError
+
+    conversation_cache.refresh_strict_thread_history_from_source.side_effect = blocked_refresh
+
+    with patch("mindroom.matrix.stale_stream_cleanup.send_message_result", new=AsyncMock()) as mock_send:
+        resume_task = asyncio.create_task(
+            auto_resume_interrupted_threads(
+                client,
+                interrupted,
+                config=config,
+                runtime_paths=runtime_paths_for(config),
+                conversation_cache=conversation_cache,
+            ),
         )
+        await asyncio.wait_for(refresh_started.wait(), timeout=1.0)
+        resume_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await resume_task
 
     mock_send.assert_not_awaited()
     conversation_cache.refresh_strict_thread_history_from_source.assert_awaited_once()

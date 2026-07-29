@@ -1924,15 +1924,7 @@ visibility = ["mindroom.runtime_support"]
 
 [[modules]]
 path = "mindroom.matrix.cache.write_coordinator"
-depends_on = ["mindroom.matrix.cache_work_priority"]
-
-[[modules]]
-path = "mindroom.matrix.cache_work_priority"
 depends_on = []
-visibility = [
-    "mindroom.matrix.cache.write_coordinator",
-    "mindroom.matrix.stale_stream_cleanup",
-]
 
 [[modules]]
 path = "mindroom.matrix.cache.outbound_thread_reservations"
@@ -2581,7 +2573,7 @@ path = "mindroom.matrix.stale_stream_cleanup"
 depends_on = [
     "mindroom.constants",
     "mindroom.entity_resolution",
-    "mindroom.matrix.cache_work_priority",
+    "mindroom.matrix.cache.write_coordinator",
     "mindroom.matrix.client_delivery",
     "mindroom.matrix.client_room_admin",
     "mindroom.matrix.client_visible_messages",
@@ -3894,9 +3886,13 @@ visibility = ["mindroom.runtime_support"]
 exclusive = true
 
 [[interfaces]]
-expose = ["EventCacheWriteCoordinator"]
+expose = ["EventCacheWriteCoordinator", "startup_cache_work"]
 from = ["mindroom.matrix.cache.write_coordinator"]
-visibility = ["mindroom.matrix.cache", "mindroom.runtime_support"]
+visibility = [
+    "mindroom.matrix.cache",
+    "mindroom.matrix.stale_stream_cleanup",
+    "mindroom.runtime_support",
+]
 exclusive = true
 
 [[interfaces]]

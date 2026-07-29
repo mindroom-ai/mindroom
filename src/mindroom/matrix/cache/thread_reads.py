@@ -255,7 +255,7 @@ class ThreadReadPolicy:
                 fetch_started=fetch_started,
             )
 
-    async def read_thread(
+    async def _read_thread(
         self,
         room_id: str,
         thread_id: str,
@@ -302,6 +302,25 @@ class ThreadReadPolicy:
             caller_label=caller_label,
             queue_wait_started=queue_wait_started,
         )
+
+    async def read_thread(
+        self,
+        room_id: str,
+        thread_id: str,
+        *,
+        mode: ThreadReadMode,
+        caller_label: str,
+    ) -> ThreadHistoryResult:
+        """Keep foreground priority reserved through the fetch that follows the write barrier."""
+        coordinator = self._coordinator()
+        if coordinator is None:
+            return await self._read_thread(room_id, thread_id, mode=mode, caller_label=caller_label)
+        async with coordinator.foreground_thread_read(
+            room_id,
+            thread_id,
+            coordination_scope=self.runtime.event_cache.principal_id,
+        ):
+            return await self._read_thread(room_id, thread_id, mode=mode, caller_label=caller_label)
 
     async def get_latest_thread_event_id_if_needed(
         self,

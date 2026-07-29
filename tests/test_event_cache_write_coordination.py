@@ -22,8 +22,7 @@ from mindroom.constants import (
 from mindroom.matrix.cache import ThreadHistoryResult, thread_writes
 from mindroom.matrix.cache.outbound_thread_reservations import OutboundThreadReservations
 from mindroom.matrix.cache.thread_cache_state import ThreadAppendOutcome
-from mindroom.matrix.cache.write_coordinator import EventCacheWriteCoordinator
-from mindroom.matrix.cache_work_priority import startup_cache_work
+from mindroom.matrix.cache.write_coordinator import EventCacheWriteCoordinator, startup_cache_work
 from mindroom.matrix.conversation_cache import MatrixConversationCache
 from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.thread_bookkeeping import MutationThreadImpact
@@ -2143,10 +2142,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         blocker_started = asyncio.Event()
         release_blocker = asyncio.Event()
         startup_started = asyncio.Event()
-        release_startup = asyncio.Event()
         foreground_waiting = asyncio.Event()
-        foreground_started = asyncio.Event()
-        retry_started = asyncio.Event()
         coordinator = _runtime_write_coordinator()
 
         async def blocking_update() -> None:
@@ -2155,7 +2151,6 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
 
         async def startup_update() -> None:
             startup_started.set()
-            await release_startup.wait()
 
         async def wait_for_foreground() -> None:
             foreground_waiting.set()
@@ -2164,10 +2159,6 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
                 "$thread:localhost",
                 coordination_scope="test-principal",
             )
-            foreground_started.set()
-
-        async def retry_startup_update() -> None:
-            retry_started.set()
 
         def queue_startup_update() -> asyncio.Task[object]:
             with startup_cache_work():
@@ -2192,37 +2183,16 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         await asyncio.wait_for(foreground_waiting.wait(), timeout=1.0)
         if startup_task is None:
             startup_task = queue_startup_update()
-        retry_task: asyncio.Task[object] | None = None
 
         try:
             release_blocker.set()
-            await asyncio.wait_for(blocker_task, timeout=1.0)
-            await asyncio.wait_for(foreground_started.wait(), timeout=1.0)
-
+            await asyncio.wait_for(asyncio.gather(blocker_task, foreground_task), timeout=1.0)
             assert startup_task.cancelled()
             assert startup_started.is_set() is False
-
-            with startup_cache_work():
-                retry_task = coordinator.queue_thread_update(
-                    "!test:localhost",
-                    "$thread:localhost",
-                    retry_startup_update,
-                    name="matrix_cache_retry_startup_update",
-                    coordination_scope="test-principal",
-                )
-            await asyncio.wait_for(retry_started.wait(), timeout=1.0)
-            await asyncio.wait_for(retry_task, timeout=1.0)
         finally:
             release_blocker.set()
-            release_startup.set()
-            pending_tasks = [blocker_task, startup_task, foreground_task]
-            if retry_task is not None:
-                pending_tasks.append(retry_task)
             await asyncio.wait_for(
-                asyncio.gather(
-                    *pending_tasks,
-                    return_exceptions=True,
-                ),
+                asyncio.gather(blocker_task, startup_task, foreground_task, return_exceptions=True),
                 timeout=1.0,
             )
 
@@ -2233,8 +2203,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         release_startup = asyncio.Event()
         normal_started = asyncio.Event()
         release_normal = asyncio.Event()
-        foreground_waiting = [asyncio.Event(), asyncio.Event()]
-        foreground_started = [asyncio.Event(), asyncio.Event()]
+        foreground_waiting = asyncio.Event()
         coordinator = _runtime_write_coordinator()
 
         async def running_startup_update() -> None:
@@ -2245,14 +2214,13 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             normal_started.set()
             await release_normal.wait()
 
-        async def wait_for_foreground(index: int) -> None:
-            foreground_waiting[index].set()
+        async def wait_for_foreground() -> None:
+            foreground_waiting.set()
             await coordinator.wait_for_thread_idle(
                 "!test:localhost",
                 "$thread:localhost",
                 coordination_scope="test-principal",
             )
-            foreground_started[index].set()
 
         with startup_cache_work():
             startup_task = coordinator.queue_thread_update(
@@ -2270,27 +2238,20 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             name="matrix_cache_normal_update",
             coordination_scope="test-principal",
         )
-        foreground_tasks = [asyncio.create_task(wait_for_foreground(index)) for index in range(len(foreground_waiting))]
-        await asyncio.wait_for(
-            asyncio.gather(*(waiting.wait() for waiting in foreground_waiting)),
-            timeout=1.0,
-        )
+        foreground_task = asyncio.create_task(wait_for_foreground())
+        await asyncio.wait_for(foreground_waiting.wait(), timeout=1.0)
 
         try:
             assert startup_task.cancelled() is False
             assert normal_started.is_set() is False
-            assert all(started.is_set() is False for started in foreground_started)
+            assert foreground_task.done() is False
 
             release_startup.set()
             await asyncio.wait_for(normal_started.wait(), timeout=1.0)
-            assert all(started.is_set() is False for started in foreground_started)
+            assert foreground_task.done() is False
 
             release_normal.set()
-            await asyncio.wait_for(
-                asyncio.gather(*(started.wait() for started in foreground_started)),
-                timeout=1.0,
-            )
-            assert all(started.is_set() for started in foreground_started)
+            await asyncio.wait_for(foreground_task, timeout=1.0)
         finally:
             release_startup.set()
             release_normal.set()
@@ -2298,7 +2259,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
                 asyncio.gather(
                     startup_task,
                     normal_task,
-                    *foreground_tasks,
+                    foreground_task,
                     return_exceptions=True,
                 ),
                 timeout=1.0,

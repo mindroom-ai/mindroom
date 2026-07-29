@@ -36,7 +36,7 @@ from mindroom.entity_resolution import (
     entity_identity_registry,
 )
 from mindroom.logging_config import get_logger
-from mindroom.matrix.cache_work_priority import startup_cache_work
+from mindroom.matrix.cache.write_coordinator import startup_cache_work
 from mindroom.matrix.client_delivery import edit_message_result, send_message_result
 from mindroom.matrix.client_room_admin import get_joined_rooms
 from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage, resolve_latest_visible_messages
@@ -410,6 +410,15 @@ async def _interrupted_target_remains_latest_human_work(
             config=config,
             runtime_paths=runtime_paths,
         )
+    except asyncio.CancelledError:
+        current_task = asyncio.current_task()
+        if current_task is not None and current_task.cancelling():
+            raise
+        logger.info(
+            "Skipping auto-resume after startup cache work yielded",
+            target_event_id=interrupted_thread.target_event_id,
+        )
+        return False
     except Exception as exc:
         logger.warning(
             "Skipping auto-resume because authoritative freshness check failed",

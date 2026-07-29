@@ -17,9 +17,6 @@ All ordering is scoped to one ``(principal, room)`` lane.
 
 4. Readers establish the write-read barrier with ``wait_for_thread_idle``: a thread read started after a
    mutation was queued in the same lane never observes cache state older than that mutation.
-
-5. Foreground readers cancel only queued, not-yet-started startup work in their lane. Active updates
-   remain transaction-safe, and normal-priority updates retain the ordering rules above.
 """
 
 from __future__ import annotations
@@ -27,12 +24,13 @@ from __future__ import annotations
 import asyncio
 import time
 import typing
+from contextlib import asynccontextmanager, contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from mindroom.background_tasks import create_background_task, wait_for_background_tasks
 from mindroom.logging_config import bound_log_context
-from mindroom.matrix.cache_work_priority import is_startup_cache_work
 from mindroom.timing import elapsed_ms_between, emit_timing_event, timing_enabled
 
 if TYPE_CHECKING:
@@ -43,6 +41,22 @@ _UpdateTask = asyncio.Task[Any]
 _UpdateCoroFactory = typing.Callable[[], typing.Coroutine[Any, Any, object]]
 _CoalesceKey = tuple[str, str]
 _CoordinationRoomKey = tuple[str, str]
+_STARTUP_CACHE_WORK = ContextVar("startup_cache_work", default=False)
+
+
+@contextmanager
+def startup_cache_work() -> typing.Iterator[None]:
+    """Mark cache work queued in this scope as cancellable startup work."""
+    token = _STARTUP_CACHE_WORK.set(True)
+    try:
+        yield
+    finally:
+        _STARTUP_CACHE_WORK.reset(token)
+
+
+def _is_startup_cache_work() -> bool:
+    """Return whether current task is running speculative startup cache work."""
+    return _STARTUP_CACHE_WORK.get()
 
 
 def _coordination_room_key(room_id: str, coordination_scope: str) -> _CoordinationRoomKey:
@@ -80,19 +94,13 @@ class _QueuedUpdateState:
     coalesce_log_context: dict[str, object] = field(default_factory=dict)
 
 
-@dataclass(eq=False)
-class _ThreadIdleWaiter:
-    future: asyncio.Future[None]
-    thread_id: str
-    foreground: bool
-
-
 @dataclass
 class _RoomSchedulerState:
     entries: list[_RoomQueueEntry] = field(default_factory=list)
     active_room: _QueuedUpdate | None = None
     active_threads: dict[str, _QueuedUpdate] = field(default_factory=dict)
-    waiters: list[_ThreadIdleWaiter] = field(default_factory=list)
+    waiters: list[asyncio.Future[None]] = field(default_factory=list)
+    foreground_readers: dict[str, int] = field(default_factory=dict)
 
 
 @dataclass
@@ -174,23 +182,29 @@ class EventCacheWriteCoordinator:
         state = self._room_states.get(room_key)
         if state is None:
             return
-        for waiter in state.waiters:
-            if not waiter.future.done():
-                waiter.future.set_result(None)
+        waiters, state.waiters = state.waiters, []
+        for waiter in waiters:
+            if not waiter.done():
+                waiter.set_result(None)
 
-    def _discard_waiter(self, room_key: _CoordinationRoomKey, waiter: _ThreadIdleWaiter) -> None:
+    def _discard_waiter(self, room_key: _CoordinationRoomKey, waiter: asyncio.Future[None]) -> None:
         state = self._room_states.get(room_key)
         if state is None:
             return
         state.waiters = [existing for existing in state.waiters if existing is not waiter]
-        self._cleanup_room_state(room_key)
 
     def _cleanup_room_state(self, room_key: _CoordinationRoomKey) -> None:
         self._prune_done_task_maps(room_key)
         state = self._room_states.get(room_key)
         if state is None:
             return
-        if state.entries or state.active_room is not None or state.active_threads or state.waiters:
+        if (
+            state.entries
+            or state.active_room is not None
+            or state.active_threads
+            or state.waiters
+            or state.foreground_readers
+        ):
             return
         self._room_states.pop(room_key, None)
 
@@ -236,7 +250,7 @@ class EventCacheWriteCoordinator:
         if entry.started:
             return room_barrier_pending or entry.kind == "room", cancelled_room_fence_pending
 
-        startup_update_blocked = self._startup_update_blocks_foreground_waiter(state, entry)
+        startup_update_blocked = self._startup_update_blocks_foreground_reader(state, entry)
         if startup_update_blocked and entry.task.cancelling() == 0:
             entry.task.cancel()
 
@@ -295,15 +309,14 @@ class EventCacheWriteCoordinator:
 
         self._cleanup_room_state(room_key)
 
-    def _startup_update_blocks_foreground_waiter(
+    def _startup_update_blocks_foreground_reader(
         self,
         state: _RoomSchedulerState,
         entry: _QueuedUpdate,
     ) -> bool:
-        """Return whether a sleeping foreground waiter makes startup work yield."""
-        return entry.startup_priority and any(
-            waiter.foreground and (entry.kind == "room" or entry.thread_id == waiter.thread_id)
-            for waiter in state.waiters
+        """Return whether an active foreground reader makes startup work yield."""
+        return entry.startup_priority and (
+            (entry.kind == "room" and bool(state.foreground_readers)) or entry.thread_id in state.foreground_readers
         )
 
     def _cancel_queued_startup_updates(
@@ -550,7 +563,7 @@ class EventCacheWriteCoordinator:
             update_state=update_state,
             thread_id=thread_id,
             coalesce_key=coalesce_key,
-            startup_priority=is_startup_cache_work(),
+            startup_priority=_is_startup_cache_work(),
         )
 
         room_state.entries.append(entry)
@@ -666,7 +679,7 @@ class EventCacheWriteCoordinator:
             coordination_scope=coordination_scope,
         )
 
-    async def wait_for_thread_idle(
+    async def _wait_for_thread_idle(
         self,
         room_id: str,
         thread_id: str,
@@ -682,9 +695,6 @@ class EventCacheWriteCoordinator:
         room_key = _coordination_room_key(room_id, coordination_scope)
         while True:
             self._reevaluate_room(room_key)
-            state = self._room_states.get(room_key)
-            if state is not None and not is_startup_cache_work():
-                self._cancel_queued_startup_updates(state, thread_id)
             if self._thread_is_idle(
                 room_key,
                 thread_id,
@@ -703,11 +713,7 @@ class EventCacheWriteCoordinator:
                     )
                 continue
 
-            waiter = _ThreadIdleWaiter(
-                future=asyncio.get_running_loop().create_future(),
-                thread_id=thread_id,
-                foreground=not is_startup_cache_work(),
-            )
+            waiter = asyncio.get_running_loop().create_future()
             state.waiters.append(waiter)
             self._reevaluate_room(room_key)
             if self._thread_is_idle(
@@ -718,9 +724,53 @@ class EventCacheWriteCoordinator:
                 self._discard_waiter(room_key, waiter)
                 return
             try:
-                await waiter.future
-            finally:
+                await waiter
+            except asyncio.CancelledError:
                 self._discard_waiter(room_key, waiter)
+                raise
+
+    @asynccontextmanager
+    async def foreground_thread_read(
+        self,
+        room_id: str,
+        thread_id: str,
+        *,
+        coordination_scope: str,
+    ) -> typing.AsyncIterator[None]:
+        """Reserve foreground priority until one thread read finishes fetching."""
+        if _is_startup_cache_work():
+            yield
+            return
+        room_key, state = self._coordination_room_state(room_id, coordination_scope)
+        state.foreground_readers[thread_id] = state.foreground_readers.get(thread_id, 0) + 1
+        self._cancel_queued_startup_updates(state, thread_id)
+        self._reevaluate_room(room_key)
+        try:
+            yield
+        finally:
+            remaining = state.foreground_readers[thread_id] - 1
+            if remaining:
+                state.foreground_readers[thread_id] = remaining
+            else:
+                state.foreground_readers.pop(thread_id)
+            self._cleanup_room_state(room_key)
+
+    async def wait_for_thread_idle(
+        self,
+        room_id: str,
+        thread_id: str,
+        *,
+        ignore_cancelled_room_fences: bool = False,
+        coordination_scope: str,
+    ) -> None:
+        """Wait for prior writes while reserving foreground priority for later startup work."""
+        async with self.foreground_thread_read(room_id, thread_id, coordination_scope=coordination_scope):
+            await self._wait_for_thread_idle(
+                room_id,
+                thread_id,
+                ignore_cancelled_room_fences=ignore_cancelled_room_fences,
+                coordination_scope=coordination_scope,
+            )
 
     async def wait_for_prior_room_updates(
         self,
