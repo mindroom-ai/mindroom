@@ -109,25 +109,25 @@ def _decodes_within_file_size(encoding: str | None) -> bool:
 def reader_rereads_within_file_size(reader: Reader) -> bool:
     """Return whether a file may be re-read through ``reader`` under a size-on-disk budget.
 
-    This is checked, not inferred, because both halves have to hold and the
-    reader's type only settles the first:
+    Two things must hold, and the type settles only the first: the second read
+    has to be cheap next to one embedding round trip (a decode is, a document
+    parse or archive extraction is not), and the decoded text has to fit the
+    file's size on disk, which is what makes
+    :meth:`~mindroom.chunking.SafeFixedSizeChunking.max_chunk_text_bytes` --
+    documented against a size on disk -- a valid budget.
 
-    * the second read must be cheap next to one embedding round trip, which
-      holds for a decode but not for a document parse or an archive
-      extraction -- so a compressed container (``.docx``, ``.xlsx``, ``.pdf``)
-      is refused;
-    * the decoded text must fit the file's size on disk, which is what makes
-      :meth:`~mindroom.chunking.SafeFixedSizeChunking.max_chunk_text_bytes`
-      -- documented against a size on disk -- a valid budget. That depends on
-      the encoding rather than the type: a UTF-16 text reader is perfectly
-      cheap to re-read and still decodes to more UTF-8 bytes than the file
-      holds.
+    The encoding half is checked rather than inferred because no reader type
+    implies it, and it is currently reachable only from code that does not
+    exist yet: nothing in MindRoom passes ``encoding`` to a reader and no
+    config exposes it, so today every admitted reader takes the ``None``
+    branch. It is kept because the failure it prevents is silent -- adding an
+    encoding option later would quietly under-budget prefetch memory rather
+    than fail.
 
-    The admitted types happen to be the ones :func:`build_reader` reconfigures,
-    and that is a coincidence of the readers Agno ships rather than one fact.
-    Do not merge the two: MindRoom's chunking says nothing about what a read
-    costs, and the first binary format to need a chunking override would need
-    this to keep refusing it.
+    The admitted types happen to be the ones :func:`build_reader` reconfigures.
+    Do not merge the two: chunking says nothing about what a read costs, and
+    the first binary format to need a chunking override would need this to keep
+    refusing it.
     """
     return isinstance(reader, (TextReader, MarkdownReader)) and _decodes_within_file_size(reader.encoding)
 

@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 from agno.knowledge.chunking.fixed import FixedSizeChunking
+from agno.knowledge.reader import ReaderFactory
 from agno.knowledge.reader.markdown_reader import MarkdownReader
 from agno.knowledge.reader.text_reader import TextReader
 
@@ -176,6 +177,56 @@ def test_a_second_base_moves_the_reader_and_its_boundaries(tmp_path: Path) -> No
         assert later[:64] == earlier[-64:]
 
 
+def test_two_bases_neither_share_a_reader_nor_poison_the_factory_cache(tmp_path: Path) -> None:
+    """Configuring a reader must copy it first, because the factory's instance is shared.
+
+    ``ReaderFactory`` hands out one cached reader per extension. Configuring
+    that instance in place would give two bases the same object: whichever
+    refreshed second would silently re-chunk the other's corpus at its own
+    size, and the cache would keep serving that size for the rest of the
+    process. The two refreshes are not even ordered -- the source-root lock is
+    per root, so bases on different roots overlap, and prefetch reads run on
+    worker threads.
+    """
+    cached = ReaderFactory.get_reader_for_extension(".md")
+    cached_strategy = cached.chunking_strategy
+    cached_chunk_size = cached.chunk_size
+
+    small = build_reader(
+        Path("a.md"),
+        chunking=chunking_strategy_for_base(_config_for(tmp_path, chunk_size=137, chunk_overlap=11), "docs"),
+    )
+    large = build_reader(
+        Path("b.md"),
+        chunking=chunking_strategy_for_base(_config_for(tmp_path, chunk_size=2000, chunk_overlap=0), "docs"),
+    )
+
+    assert small is not large
+    assert (small.chunk_size, large.chunk_size) == (137, 2000)
+    assert small.chunking_strategy is not large.chunking_strategy
+    # The shared cache entry must be exactly as it was found.
+    assert cached is not small
+    assert cached is not large
+    assert cached.chunking_strategy is cached_strategy
+    assert cached.chunk_size == cached_chunk_size
+
+
+def test_the_json_reader_does_not_borrow_the_cached_chunking_strategy(chunking: SafeFixedSizeChunking) -> None:
+    """The JSON subclass must copy the factory's chunker, not alias it.
+
+    Nothing mutates a JSON reader's strategy today, so this pins the same
+    copy-before-use rule one branch over rather than a present defect: an
+    aliased strategy would put the shared cache one in-place edit away from
+    every base that reads JSON.
+    """
+    cached = ReaderFactory.get_reader_for_extension(".json")
+
+    reader = build_reader(Path("source.json"), chunking=chunking)
+
+    assert reader is not cached
+    assert reader.chunking_strategy is not cached.chunking_strategy
+
+
 def test_a_factory_reader_with_chunking_disabled_is_turned_back_on(
     monkeypatch: pytest.MonkeyPatch,
     chunking: SafeFixedSizeChunking,
@@ -221,12 +272,14 @@ def test_json_keeps_structured_chunking_and_tags_its_parse_failures(
     assert reader.chunking_strategy.chunk_size == 5000
     assert reader.chunking_strategy is not chunking
 
+    # The broken key is indented so line and column differ; equal values would
+    # make the assertion below blind to the two being swapped.
     malformed = tmp_path / "claim.json"
-    malformed.write_text('{\n  "claim": "kept",\n  “broken”: true\n}\n', encoding="utf-8")
+    malformed.write_text('{\n  "claim": "kept",\n     “broken”: true\n}\n', encoding="utf-8")
     with pytest.raises(MalformedJSONSourceError) as raised:
         reader.read(malformed)
     assert raised.value.source_text.startswith('{\n  "claim": "kept"')
-    assert (raised.value.line, raised.value.column) == (3, 3)
+    assert (raised.value.line, raised.value.column) == (3, 6)
 
     # The other direction: tagging must be reached only by a parse failure, or
     # every JSON file in the corpus would divert to the text fallback.
@@ -247,6 +300,22 @@ def test_malformed_json_fallback_reader_chunks_like_this_bases_text(chunking: Sa
     chunks = [document.content for document in reader.read(Path("claim.json"), name="claim")]
 
     assert [len(chunk) for chunk in chunks] == [137, 137, 137, 22]
+
+
+def test_fallback_documents_are_identified_per_file(chunking: SafeFixedSizeChunking) -> None:
+    """Two malformed files in one base must not collide in the vector store.
+
+    Agno derives a chunk's id from its document's id, so a fallback document
+    carrying a fixed id would make the second malformed file's chunks overwrite
+    the first's -- losing content that the fallback exists to keep searchable.
+    The caller's name has to survive too, since that is what identifies the
+    chunk when no id is set.
+    """
+    first = text_fallback_reader("first source", chunking=chunking).read(Path("a.json"), name="a")
+    second = text_fallback_reader("second source", chunking=chunking).read(Path("b.json"), name="b")
+
+    assert {document.name for document in first} == {"a"}
+    assert {document.id for document in first}.isdisjoint({document.id for document in second})
 
 
 @pytest.mark.parametrize("suffix", _CHUNKED_SUFFIXES)

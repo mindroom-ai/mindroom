@@ -843,14 +843,16 @@ class KnowledgeManager:
     def _chunk_texts_for_prefetch(self, resolved_path: Path) -> tuple[str, ...]:
         """Return the chunk texts Agno will embed for one file, or ``()``.
 
-        Only files whose reader decodes them as text are pre-read, for two
-        reasons that both belong to the read and not to chunking: decoding
-        twice is negligible next to one embedding round trip per chunk, where
-        parsing a document or unpacking an archive twice is not, and the byte
-        budget in :meth:`_chunk_texts_for_batch` is computed from a size on
-        disk, which only bounds the text of a file that is text. The chunks
-        themselves match the insert path by construction, because that path
-        reads through a reader from this same :func:`build_reader` call.
+        Only files whose reader decodes them as size-preserving text are
+        pre-read, for two reasons that both belong to the read and not to
+        chunking: decoding twice is negligible next to one embedding round trip
+        per chunk, where parsing a document or unpacking an archive twice is
+        not, and the byte budget in :meth:`_chunk_texts_for_batch` is computed
+        from a size on disk, which bounds decoded text only when the decode
+        cannot expand. The chunks themselves match the insert path by
+        construction: that path builds its reader from an identical
+        :func:`build_reader` call, so the two readers are separate objects
+        carrying the same configuration.
 
         Any reader failure here is swallowed on purpose because prefetching is
         an optimization; the real insert path below owns error reporting for
