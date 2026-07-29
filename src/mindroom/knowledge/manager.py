@@ -244,6 +244,23 @@ class _CandidateReconciliation:
     pending: tuple[Path, ...]
 
 
+@dataclass(frozen=True, slots=True)
+class RefreshOutcome:
+    """What one ``KnowledgeManager.reindex_all`` call actually did.
+
+    A refresh either publishes a candidate that matches the source or explains
+    why it could not, so callers need both facts and the file count. ``error``
+    is already credential-redacted and is safe to persist or show.
+    """
+
+    #: Files this pass embedded, as opposed to reused from an earlier candidate.
+    indexed_count: int
+    #: Whether this pass swapped a complete candidate in as the published index.
+    published: bool
+    #: Why the refresh finished without publishing, or ``None`` on success.
+    error: str | None
+
+
 @dataclass
 class _CandidateProgress:
     """Throttled progress accounting for one candidate build."""
@@ -298,12 +315,12 @@ class _CandidateProgress:
         self._last_logged_completed = self.completed
         logger.info("knowledge_candidate_progress", **self._fields())
 
-    def log_summary(self, *, published: bool, error: str | None) -> None:
+    def log_summary(self, outcome: RefreshOutcome) -> None:
         """Emit the single terminal summary for this refresh."""
         logger.info(
             "knowledge_candidate_finished",
-            published=published,
-            error=error,
+            published=outcome.published,
+            error=outcome.error,
             **self._fields(),
         )
 
@@ -2407,7 +2424,7 @@ class KnowledgeManager:
         )
         run.journal_appends = 0
 
-    async def reindex_all(self, *, force_reindex: bool = False) -> int:
+    async def reindex_all(self, *, force_reindex: bool = False) -> RefreshOutcome:
         """Advance the durable candidate index and publish it when it matches the source.
 
         ``force_reindex`` is the operator asking for vectors to be rebuilt
@@ -2417,7 +2434,7 @@ class KnowledgeManager:
         """
         if not _semantic_indexing_enabled(self.config, self.base_id):
             self._last_refresh_error = None
-            return 0
+            return RefreshOutcome(indexed_count=0, published=False, error=None)
 
         async with self._lock:
             self._last_refresh_error = None
@@ -2442,9 +2459,18 @@ class KnowledgeManager:
                 raise
             finally:
                 progress.retrying = self._embedding_retry_count
-                progress.log_summary(published=run.published, error=self._last_refresh_error)
+                # The accumulator carries provider text, so redact once here:
+                # everything that reads the failure -- the log line, the caller,
+                # the persisted metadata -- reads this one string.
+                raw_error = self._last_refresh_error
+                outcome = RefreshOutcome(
+                    indexed_count=progress.indexed_this_run,
+                    published=run.published,
+                    error=None if raw_error is None else redact_credentials_in_text(raw_error),
+                )
+                progress.log_summary(outcome)
                 await self._finalize_candidate_checkpoint(run)
-            return progress.indexed_this_run
+            return outcome
 
     async def _finalize_candidate_checkpoint(self, run: _CandidateRun) -> None:
         """Compact the candidate snapshot even when the refresh is being cancelled.
