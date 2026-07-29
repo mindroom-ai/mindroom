@@ -1765,14 +1765,14 @@ async def test_shutdown_in_flight_dispatch_cancellation_marks_drain_incomplete()
     ],
 )
 @pytest.mark.asyncio
-async def test_shutdown_preserves_checkpoint_only_when_each_cancelled_response_has_room_recovery(
+async def test_shutdown_preserves_checkpoint_only_when_each_cancelled_response_has_source_recovery(
     tmp_path: Path,
     response_rooms: tuple[str, ...],
     handoff_indexes: frozenset[int],
     remains_pending: bool,
     checkpoint_preserved: bool,
 ) -> None:
-    """Every settled cancellation needs a room-scoped recovery handoff."""
+    """Every settled cancellation needs its exact source recovery handoff."""
     bot = _certified_shutdown_bot(tmp_path)
     response_started = [asyncio.Event() for _room_id in response_rooms]
     release_response = asyncio.Event()
