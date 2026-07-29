@@ -1744,8 +1744,15 @@ async def test_reindex_files_locked_records_files_vanishing_during_refresh(tmp_p
 
     vanished = (docs_path / "gone.md").resolve()
     vanished_files: set[str] = set()
-    indexed = await manager._reindex_files_locked([vanished], vanished_files=vanished_files)
+    indexed_signatures: dict[str, tuple[int, int, str]] = {}
+    indexed = await manager._reindex_files_locked(
+        [vanished],
+        knowledge=manager._knowledge,
+        indexed_signatures=indexed_signatures,
+        vanished_files=vanished_files,
+    )
     assert indexed == 0
+    assert indexed_signatures == {}
     assert vanished_files == {"gone.md"}
 
 
@@ -1778,8 +1785,8 @@ async def test_reindex_publishes_surviving_files_when_one_vanishes_mid_refresh(
 
     assert await manager.reindex_all() == 1
     assert manager._last_refresh_error is None
-    assert "kept.md" in manager._indexed_files
-    assert "doomed.md" not in manager._indexed_files
+    assert manager._has_vectors_for_source_path("kept.md", knowledge=manager._knowledge)
+    assert not manager._has_vectors_for_source_path("doomed.md", knowledge=manager._knowledge)
 
 
 def test_knowledge_file_listing_filters_unsupported_extensions_before_filesystem_safety_checks(
@@ -3214,11 +3221,10 @@ async def test_existing_published_index_is_used_while_refresh_runs(
         resolved_path: Path,
         *,
         upsert: bool,
-        knowledge: object | None = None,
-        indexed_files: set[str] | None = None,
-        indexed_signatures: dict[str, tuple[int, int, str] | None] | None = None,
+        knowledge: object,
+        indexed_signatures: dict[str, tuple[int, int, str]],
     ) -> bool:
-        if knowledge is not None and knowledge is not self._knowledge and not started.is_set():
+        if knowledge is not self._knowledge and not started.is_set():
             started.set()
             await release.wait()
         return await original_index_file_locked(
@@ -3226,7 +3232,6 @@ async def test_existing_published_index_is_used_while_refresh_runs(
             resolved_path,
             upsert=upsert,
             knowledge=knowledge,
-            indexed_files=indexed_files,
             indexed_signatures=indexed_signatures,
         )
 
@@ -3268,11 +3273,10 @@ async def test_cancelled_refresh_keeps_unpublished_candidate_for_resume(
         resolved_path: Path,
         *,
         upsert: bool,
-        knowledge: object | None = None,
-        indexed_files: set[str] | None = None,
-        indexed_signatures: dict[str, tuple[int, int, str] | None] | None = None,
+        knowledge: object,
+        indexed_signatures: dict[str, tuple[int, int, str]],
     ) -> bool:
-        if knowledge is not None and knowledge is not self._knowledge:
+        if knowledge is not self._knowledge:
             candidate_started.set()
             await asyncio.Event().wait()
         return await original_index_file_locked(
@@ -3280,7 +3284,6 @@ async def test_cancelled_refresh_keeps_unpublished_candidate_for_resume(
             resolved_path,
             upsert=upsert,
             knowledge=knowledge,
-            indexed_files=indexed_files,
             indexed_signatures=indexed_signatures,
         )
 
@@ -3947,11 +3950,10 @@ async def test_failed_refresh_preserves_last_good_index(tmp_path: Path, monkeypa
         resolved_path: Path,
         *,
         upsert: bool,
-        knowledge: object | None = None,
-        indexed_files: set[str] | None = None,
-        indexed_signatures: dict[str, tuple[int, int, str] | None] | None = None,
+        knowledge: object,
+        indexed_signatures: dict[str, tuple[int, int, str]],
     ) -> bool:
-        if knowledge is not None and knowledge is not self._knowledge:
+        if knowledge is not self._knowledge:
             msg = "candidate failed"
             raise RuntimeError(msg)
         return await original_index_file_locked(
@@ -3959,7 +3961,6 @@ async def test_failed_refresh_preserves_last_good_index(tmp_path: Path, monkeypa
             resolved_path,
             upsert=upsert,
             knowledge=knowledge,
-            indexed_files=indexed_files,
             indexed_signatures=indexed_signatures,
         )
 
@@ -4048,9 +4049,8 @@ async def test_partial_refresh_after_cached_index_updates_failed_availability(
         resolved_path: Path,
         *,
         upsert: bool,
-        knowledge: object | None = None,
-        indexed_files: set[str] | None = None,
-        indexed_signatures: dict[str, tuple[int, int, str] | None] | None = None,
+        knowledge: object,
+        indexed_signatures: dict[str, tuple[int, int, str]],
     ) -> bool:
         if resolved_path.name == "bad.md":
             return False
@@ -4059,7 +4059,6 @@ async def test_partial_refresh_after_cached_index_updates_failed_availability(
             resolved_path,
             upsert=upsert,
             knowledge=knowledge,
-            indexed_files=indexed_files,
             indexed_signatures=indexed_signatures,
         )
 
@@ -4477,11 +4476,10 @@ async def test_failed_refresh_after_config_change_preserves_published_settings(
         resolved_path: Path,
         *,
         upsert: bool,
-        knowledge: object | None = None,
-        indexed_files: set[str] | None = None,
-        indexed_signatures: dict[str, tuple[int, int, str] | None] | None = None,
+        knowledge: object,
+        indexed_signatures: dict[str, tuple[int, int, str]],
     ) -> bool:
-        _ = (self, resolved_path, upsert, knowledge, indexed_files, indexed_signatures)
+        _ = (self, resolved_path, upsert, knowledge, indexed_signatures)
         msg = "candidate failed"
         raise RuntimeError(msg)
 
@@ -4655,9 +4653,8 @@ async def test_first_time_partial_refresh_does_not_publish_ready_index(
         resolved_path: Path,
         *,
         upsert: bool,
-        knowledge: object | None = None,
-        indexed_files: set[str] | None = None,
-        indexed_signatures: dict[str, tuple[int, int, str] | None] | None = None,
+        knowledge: object,
+        indexed_signatures: dict[str, tuple[int, int, str]],
     ) -> bool:
         if resolved_path.name == "bad.md":
             return False
@@ -4666,7 +4663,6 @@ async def test_first_time_partial_refresh_does_not_publish_ready_index(
             resolved_path,
             upsert=upsert,
             knowledge=knowledge,
-            indexed_files=indexed_files,
             indexed_signatures=indexed_signatures,
         )
 
@@ -4937,11 +4933,10 @@ async def test_embedder_changing_partial_refresh_does_not_publish_old_index_unde
         resolved_path: Path,
         *,
         upsert: bool,
-        knowledge: object | None = None,
-        indexed_files: set[str] | None = None,
-        indexed_signatures: dict[str, tuple[int, int, str] | None] | None = None,
+        knowledge: object,
+        indexed_signatures: dict[str, tuple[int, int, str]],
     ) -> bool:
-        _ = (self, resolved_path, upsert, knowledge, indexed_files, indexed_signatures)
+        _ = (self, resolved_path, upsert, knowledge, indexed_signatures)
         return False
 
     monkeypatch.setattr(KnowledgeManager, "_index_file_locked", _partial_candidate)
