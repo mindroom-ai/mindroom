@@ -22,6 +22,7 @@ from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths, resolve_runtime_paths, runtime_env_values
 from mindroom.file_locks import async_exclusive_file_lock
 from mindroom.knowledge.availability import KnowledgeAvailability
+from mindroom.knowledge.index_metadata import state_for_publication
 from mindroom.knowledge.manager import KnowledgeManager, knowledge_source_signature
 from mindroom.knowledge.redaction import redact_credentials_in_text
 from mindroom.knowledge.registry import (
@@ -568,23 +569,15 @@ async def _publish_file_mode_source_metadata(
         manager._knowledge_source_path(),
         tracked_relative_paths=manager._git_tracked_relative_paths,
     )
-    now = datetime.now(tz=UTC).isoformat()
     await asyncio.to_thread(
         save_published_index_state,
         published_index_metadata_path(key),
-        PublishedIndexState(
+        state_for_publication(
             settings=key.indexing_settings,
-            status="complete",
             collection=None,
-            last_published_at=now,
-            published_revision=manager._git_last_successful_commit,
             indexed_count=0,
             source_signature=source_signature,
-            refresh_job="idle",
-            reason=None,
-            last_error=None,
-            updated_at=now,
-            last_refresh_at=now,
+            published_revision=manager._git_last_successful_commit,
         ),
     )
     return KnowledgeRefreshResult(

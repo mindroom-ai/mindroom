@@ -18,7 +18,8 @@ import json
 import os
 import uuid
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Literal, cast
+from datetime import UTC, datetime
+from typing import TYPE_CHECKING, Literal, cast, get_args
 
 from mindroom.knowledge.indexing_config import IndexingSettings
 
@@ -30,8 +31,11 @@ if TYPE_CHECKING:
 _PublishedIndexStatus = Literal["resetting", "indexing", "complete", "failed"]
 _RefreshJob = Literal["idle", "pending", "running", "failed"]
 
-_PUBLISHED_INDEX_STATUSES: frozenset[str] = frozenset({"resetting", "indexing", "complete", "failed"})
-_REFRESH_JOBS: frozenset[str] = frozenset({"idle", "pending", "running", "failed"})
+# Derived, never restated: a hand-written copy that drifts from the Literal
+# makes the loader silently refuse every record carrying the new value, or
+# makes the cast that follows the membership test a lie.
+_PUBLISHED_INDEX_STATUSES: frozenset[str] = frozenset(get_args(_PublishedIndexStatus))
+_REFRESH_JOBS: frozenset[str] = frozenset(get_args(_RefreshJob))
 
 
 @dataclass(frozen=True)
@@ -117,6 +121,44 @@ def _records_a_publication(state: PublishedIndexState) -> bool:
     )
 
 
+def state_for_publication(
+    *,
+    settings: IndexingSettings,
+    collection: str | None,
+    indexed_count: int,
+    source_signature: str,
+    published_revision: str | None,
+) -> PublishedIndexState:
+    """Return the whole state one successful publication leaves on disk.
+
+    Both publish paths -- the semantic one that swaps in a candidate
+    collection, and the file-mode one that publishes source metadata with no
+    collection at all -- differ only in those two values, so they share this.
+    Building the state twice is how a field gets left to its default by
+    omission, which is the failure this module exists to make impossible.
+
+    Publication also resolves the refresh job it belongs to: the work that job
+    tracked has just landed, so its reason, error and failure streak are
+    cleared by the same write rather than surviving into a ``complete`` record.
+    """
+    now = datetime.now(tz=UTC).isoformat()
+    return PublishedIndexState(
+        settings=settings,
+        status="complete",
+        collection=collection,
+        last_published_at=now,
+        published_revision=published_revision,
+        indexed_count=indexed_count,
+        source_signature=source_signature,
+        refresh_job="idle",
+        reason=None,
+        last_error=None,
+        updated_at=now,
+        last_refresh_at=now,
+        consecutive_refresh_failures=0,
+    )
+
+
 def save_published_index_state(metadata_path: Path, state: PublishedIndexState) -> None:
     """Atomically persist one whole state, so no field is lost by omission."""
     optional_fields: dict[str, object | None] = {
@@ -155,9 +197,12 @@ def write_json_atomic(path: Path, payload: Mapping[str, object]) -> None:
 
 
 def _load_payload(metadata_path: Path) -> dict[str, object] | None:
+    # ``ValueError`` rather than ``JSONDecodeError``: invalid UTF-8 bytes raise
+    # ``UnicodeDecodeError``, which is a ``ValueError`` and not an ``OSError``,
+    # and every caller of the loader treats an unreadable file as "no state".
     try:
         payload = json.loads(metadata_path.read_text(encoding="utf-8")) if metadata_path.exists() else None
-    except (OSError, json.JSONDecodeError):
+    except (OSError, ValueError):
         return None
     return dict(payload) if isinstance(payload, dict) else None
 
@@ -185,7 +230,12 @@ def _nonnegative_int(value: object) -> int | None:
             return value
         case float() if value.is_integer() and value >= 0:
             return int(value)
-        case str() if value.strip().isdigit():
+        # ``isdecimal`` rather than ``isdigit``: superscripts such as "²" are
+        # digits that ``int`` refuses, so the wider test would raise out of a
+        # loader whose callers expect it to answer for any payload. Decimal
+        # digits outside ASCII, such as "١٢", stay accepted because ``int``
+        # takes them.
+        case str() if value.strip().isdecimal():
             return int(value.strip())
     return None
 

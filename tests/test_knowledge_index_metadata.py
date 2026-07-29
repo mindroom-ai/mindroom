@@ -95,12 +95,13 @@ def test_an_unfinished_record_keeps_the_collection_the_last_publication_left(tmp
 
     The collection name is the only on-disk proof of which candidate-prefixed
     collection candidate cleanup must spare, so a record that carries nothing
-    else must still carry that.
+    else must still carry that. ``indexing`` with a collection is the shape
+    older versions wrote for every in-progress refresh.
     """
     metadata_path = tmp_path / "indexing_settings.json"
     write_json_atomic(
         metadata_path,
-        {"settings": _settings().to_metadata(), "status": "failed", "collection": "published_collection"},
+        {"settings": _settings().to_metadata(), "status": "indexing", "collection": "published_collection"},
     )
 
     state = load_published_index_state(metadata_path)
@@ -202,6 +203,46 @@ def test_a_torn_or_missing_file_is_no_state_at_all(tmp_path: Path) -> None:
 
     assert load_published_index_state(missing_path) is None
     assert load_published_index_state(torn_path) is None
+
+
+def test_bytes_that_are_not_utf8_are_no_state_at_all(tmp_path: Path) -> None:
+    """Undecodable bytes raise ``UnicodeDecodeError``, which is not an ``OSError``."""
+    metadata_path = tmp_path / "indexing_settings.json"
+    metadata_path.write_bytes(b'{"status": "\xff\xfe"}')
+
+    assert load_published_index_state(metadata_path) is None
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        pytest.param(7, 7, id="int"),
+        pytest.param(7.0, 7, id="whole_float"),
+        pytest.param("7", 7, id="ascii_digits"),
+        pytest.param("١٢", 12, id="arabic_indic_digits"),
+        pytest.param("²", None, id="superscript_int_refuses"),
+        pytest.param(-1, None, id="negative"),
+        pytest.param(True, None, id="bool"),
+        pytest.param(7.5, None, id="fractional"),
+    ],
+)
+def test_counts_accept_only_values_int_can_take(tmp_path: Path, raw: object, expected: int | None) -> None:
+    """A digit ``int`` refuses must read as absent, not raise out of the loader.
+
+    ``"²".isdigit()`` is true while ``int("²")`` raises, so the wider test
+    would turn one hostile byte in a state file into a failed manager
+    construction instead of a base that simply refreshes itself.
+    """
+    metadata_path = tmp_path / "indexing_settings.json"
+    write_json_atomic(
+        metadata_path,
+        {"settings": _settings().to_metadata(), "status": "indexing", "indexed_count": raw},
+    )
+
+    state = load_published_index_state(metadata_path)
+
+    assert state is not None
+    assert state.indexed_count == expected
 
 
 def test_write_json_atomic_uses_unique_temp_and_cleans_failed_replace(

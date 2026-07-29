@@ -1811,7 +1811,7 @@ async def test_unreadable_published_metadata_never_reuses_live_collection_checkp
 
 
 @pytest.mark.asyncio
-async def test_a_failed_refresh_record_still_protects_the_collection_it_names(
+async def test_an_unfinished_refresh_record_still_protects_the_collection_it_names(
     tmp_path: Path,
 ) -> None:
     """An unfinished record names the live collection, and cleanup keeps running.
@@ -1833,16 +1833,17 @@ async def test_a_failed_refresh_record_still_protects_the_collection_it_names(
     abandoned_collection = f"{manager._default_collection_name()}_candidate_abandoned"
     _FakeVectorDb.store[abandoned_collection] = []
 
-    # A publication followed by a refresh that failed before publishing again.
+    # A publication followed by a refresh that is running and has not published
+    # again yet: the shape older versions wrote for every in-progress refresh.
     key = resolve_published_index_key("docs", config=config, runtime_paths=runtime_paths)
     save_published_index_state(
         published_index_metadata_path(key),
         PublishedIndexState(
             settings=state.settings,
-            status="failed",
+            status="indexing",
             collection=published_collection,
-            refresh_job="failed",
-            last_error="boom",
+            refresh_job="running",
+            reason="refreshing",
         ),
     )
     assert load_published_index_state(published_index_metadata_path(key)) is not None
@@ -2366,7 +2367,7 @@ async def test_vectors_prefetched_before_a_later_fallback_are_still_reused(
 
 
 @pytest.mark.asyncio
-async def test_checkpoint_naming_a_published_collection_is_rejected_after_a_failed_refresh(
+async def test_checkpoint_naming_a_published_collection_is_rejected_during_a_running_refresh(
     tmp_path: Path,
 ) -> None:
     """The published collection must never be reopened as a candidate.
@@ -2391,10 +2392,10 @@ async def test_checkpoint_naming_a_published_collection_is_rejected_after_a_fail
         published_index_metadata_path(key),
         PublishedIndexState(
             settings=state.settings,
-            status="failed",
+            status="indexing",
             collection=published_collection,
-            refresh_job="failed",
-            last_error="boom",
+            refresh_job="running",
+            reason="refreshing",
         ),
     )
     manager = _manager(config)
@@ -2430,10 +2431,10 @@ async def test_incompatible_checkpoint_never_deletes_a_published_collection(
         published_index_metadata_path(key),
         PublishedIndexState(
             settings=state.settings,
-            status="failed",
+            status="indexing",
             collection=published_collection,
-            refresh_job="failed",
-            last_error="boom",
+            refresh_job="running",
+            reason="refreshing",
         ),
     )
     # A checkpoint naming the published collection, recorded under settings the

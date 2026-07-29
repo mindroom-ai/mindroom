@@ -67,6 +67,7 @@ from mindroom.knowledge.index_metadata import (
     PublishedIndexState,
     load_published_index_state,
     save_published_index_state,
+    state_for_publication,
 )
 from mindroom.knowledge.index_retry import EmbeddingRetryPolicy, run_with_embedding_retry
 from mindroom.knowledge.indexing_config import (
@@ -1256,38 +1257,6 @@ class KnowledgeManager:
         vector_db.delete()
         vector_db.create()
 
-    def _state_for_publication(
-        self,
-        *,
-        collection: str,
-        indexed_count: int,
-        source_signature: str,
-    ) -> PublishedIndexState:
-        """Build the whole state one successful publication leaves on disk.
-
-        The writer takes a whole state, so every field is chosen here rather
-        than reverting to a default nobody asked for. Publication also resolves
-        the refresh job it belongs to -- the work that job tracked has just
-        landed -- so its reason, error and failure streak are cleared with the
-        same write instead of surviving into a state that says ``complete``.
-        """
-        now = datetime.now(tz=UTC).isoformat()
-        return PublishedIndexState(
-            settings=self._indexing_settings,
-            status="complete",
-            collection=collection,
-            last_published_at=now,
-            published_revision=self._git_last_successful_commit,
-            indexed_count=indexed_count,
-            source_signature=source_signature,
-            refresh_job="idle",
-            reason=None,
-            last_error=None,
-            updated_at=now,
-            last_refresh_at=now,
-            consecutive_refresh_failures=0,
-        )
-
     async def _save_candidate_publish_metadata(
         self,
         *,
@@ -1295,10 +1264,12 @@ class KnowledgeManager:
         indexed_count: int,
         source_signature: str,
     ) -> bool:
-        state = self._state_for_publication(
+        state = state_for_publication(
+            settings=self._indexing_settings,
             collection=candidate_vector_db.collection_name,
             indexed_count=indexed_count,
             source_signature=source_signature,
+            published_revision=self._git_last_successful_commit,
         )
         save_task = asyncio.create_task(
             asyncio.to_thread(save_published_index_state, self._indexing_settings_path, state),
@@ -2024,7 +1995,6 @@ class KnowledgeManager:
         # Trusting a narrower reading would let a surviving checkpoint reopen
         # the published collection, or delete it as an incompatible candidate.
         published_collection = None if persisted_state is None else persisted_state.collection
-        published_collections: set[str] = set() if published_collection is None else {published_collection}
 
         if checkpoint is not None and not cleanup_is_safe:
             # The checkpoint may name the live collection whose identity was
@@ -2036,7 +2006,7 @@ class KnowledgeManager:
                 collection=checkpoint.collection,
             )
             checkpoint = None
-        if checkpoint is not None and checkpoint.collection in published_collections:
+        if checkpoint is not None and checkpoint.collection == published_collection:
             # The candidate already became the published index and the process
             # died before its checkpoint was cleaned up. Writing into it again
             # would mutate a live queryable index.
@@ -2110,10 +2080,10 @@ class KnowledgeManager:
         # Reconcile candidates abandoned by earlier crashed refreshes now, so
         # storage stays bounded even when a build never reaches publication.
         if cleanup_is_safe:
-            preserved = {checkpoint.collection, *published_collections}
+            preserved = {checkpoint.collection, published_collection} - {None}
             await asyncio.to_thread(
                 self._cleanup_superseded_collections,
-                preserved=frozenset(preserved),
+                preserved=frozenset(cast("set[str]", preserved)),
                 candidates_only=True,
             )
         else:
