@@ -1580,7 +1580,7 @@ class KnowledgeManager:
         *,
         knowledge: Knowledge,
         indexed_signatures: dict[str, FileSignature],
-        vanished_files: set[str] | None = None,
+        vanished_files: set[str],
         embedder: BatchPrefetchEmbedder | None = None,
         on_file_result: Callable[[Path], Awaitable[None]] | None = None,
         on_batch_complete: Callable[[Sequence[Path]], Awaitable[None]] | None = None,
@@ -1630,7 +1630,7 @@ class KnowledgeManager:
         *,
         knowledge: Knowledge,
         indexed_signatures: dict[str, FileSignature],
-        vanished_files: set[str] | None,
+        vanished_files: set[str],
     ) -> bool:
         try:
             return await self._index_file_locked(
@@ -1652,8 +1652,7 @@ class KnowledgeManager:
                 base_id=self.base_id,
                 path=relative_path,
             )
-            if vanished_files is not None:
-                vanished_files.add(relative_path)
+            vanished_files.add(relative_path)
             return False
 
     async def _index_file_batch(
@@ -1662,7 +1661,7 @@ class KnowledgeManager:
         *,
         knowledge: Knowledge,
         indexed_signatures: dict[str, FileSignature],
-        vanished_files: set[str] | None,
+        vanished_files: set[str],
         on_file_result: Callable[[Path], Awaitable[None]] | None = None,
     ) -> int:
         """Index one bounded batch, capping live tasks at the concurrency limit."""
