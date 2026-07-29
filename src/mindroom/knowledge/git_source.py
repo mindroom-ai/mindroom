@@ -16,10 +16,11 @@ from __future__ import annotations
 import asyncio
 import base64
 import os
+import re
 from contextlib import suppress
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
-from urllib.parse import quote, urlparse, urlunparse
+from urllib.parse import urlparse
 
 from mindroom.credentials import get_runtime_shared_credentials_manager
 from mindroom.knowledge.file_listing import (
@@ -28,8 +29,10 @@ from mindroom.knowledge.file_listing import (
     include_knowledge_relative_path,
 )
 from mindroom.knowledge.redaction import (
+    MAX_REDACTABLE_TOKEN_LENGTH,
     credential_free_repo_url,
     embedded_http_userinfo,
+    fully_unquoted,
     redact_credentials_in_text,
     redact_url_credentials,
 )
@@ -79,26 +82,6 @@ def _http_credentials(
     return None
 
 
-def _authenticated_repo_url(
-    repo_url: str,
-    credentials_service: str | None,
-    runtime_paths: RuntimePaths,
-) -> str:
-    """Inject HTTPS credentials from CredentialsManager into a repository URL."""
-    userinfo = _http_credentials(credentials_service, runtime_paths)
-    if userinfo is None:
-        return repo_url
-
-    parsed = urlparse(repo_url)
-    if parsed.scheme not in {"http", "https"}:
-        return repo_url
-
-    username, secret = userinfo
-    hostname = parsed.netloc.split("@")[-1]
-    auth_netloc = f"{quote(username, safe='')}:{quote(secret, safe='')}@{hostname}"
-    return urlunparse(parsed._replace(netloc=auth_netloc))
-
-
 def _git_http_basic_auth_env(clean_url: str, username: str, secret: str) -> dict[str, str]:
     encoded = base64.b64encode(f"{username}:{secret}".encode()).decode("ascii")
     return {
@@ -113,9 +96,27 @@ def _git_auth_env(
     credentials_service: str | None,
     runtime_paths: RuntimePaths,
 ) -> dict[str, str] | None:
-    """Return process-local Git config that injects credentials without persisting them."""
+    """Return process-local Git config that injects credentials without persisting them.
+
+    Returns None rather than raising for a URL ``urlsplit`` refuses -- one whose
+    netloc holds a codepoint that NFKC-normalises to a delimiter. Such a URL
+    would raise here with the password quoted in the exception message, and no
+    redactor can clean that: there is no ASCII ``@`` for one to anchor on.
+
+    Every caller today reaches this only after ``_persistable_remote_url`` has
+    already refused those URLs, so the guard is unreachable in the current call
+    order. It is here anyway because that ordering is not a property of this
+    function, and the recurring failure in this area has been protection that
+    turned out to hold only under assumptions the next edit was free to break.
+    Returning None is the right answer regardless: a URL that will be refused
+    needs no credentials injected for it.
+    """
     clean_url = credential_free_repo_url(repo_url)
-    parsed_clean_url = urlparse(clean_url)
+    try:
+        parsed_clean_url = urlparse(clean_url)
+        parsed_repo_url = urlparse(repo_url)
+    except ValueError:
+        return None
 
     embedded_userinfo = embedded_http_userinfo(repo_url)
     if embedded_userinfo is not None:
@@ -127,19 +128,136 @@ def _git_auth_env(
     if credentials_userinfo is not None:
         return _git_http_basic_auth_env(clean_url, *credentials_userinfo)
 
-    authenticated_url = (
-        repo_url if clean_url != repo_url else _authenticated_repo_url(clean_url, credentials_service, runtime_paths)
-    )
-    if authenticated_url == clean_url:
+    if clean_url == repo_url:
+        # Nothing was stripped, so there is nothing to restore process-locally.
         return None
-    parsed_authenticated_url = urlparse(authenticated_url)
-    if parsed_authenticated_url.netloc and "@" in parsed_authenticated_url.netloc:
+    if parsed_repo_url.netloc and "@" in parsed_repo_url.netloc:
+        # Userinfo in the authority is handled by the two branches above; it must
+        # not be rebuilt into a config key, which Git echoes verbatim on error.
         return None
+    # What remains is a secret carried in the query or fragment, which
+    # ``credential_free_repo_url`` strips. Restore it for this process only.
     return {
         "GIT_CONFIG_COUNT": "1",
-        "GIT_CONFIG_KEY_0": f"url.{authenticated_url}.insteadOf",
+        "GIT_CONFIG_KEY_0": f"url.{repo_url}.insteadOf",
         "GIT_CONFIG_VALUE_0": clean_url,
     }
+
+
+#: scp-style SSH syntax (``git@github.com:org/repo.git``), which ``urlparse``
+#: reports as a bare path rather than a URL, plus the same form with the
+#: username left off (``github.com:org/repo.git``), which Git clones as the
+#: local user. Matched positively and narrowly: the ``(?!//)`` is what stops it
+#: swallowing an ordinary ``scheme://host/path``. Underscores are not valid in
+#: hostnames but ssh and Git accept them, and internal hosts use them.
+_SCP_STYLE_REMOTE_URL: re.Pattern[str] = re.compile(
+    r"^(?:[A-Za-z0-9._-]+@)?(?:[A-Za-z0-9._-]+|\[[0-9A-Fa-f:]+\]):(?!//)[^@]*$",
+)
+
+
+def _unwritable_remote(base_id: str, reason: str) -> RuntimeError:
+    """Build the refusal raised instead of writing a remote URL to disk.
+
+    Names no URL. This is raised into an error path that is persisted and shown
+    in the dashboard, which is the very thing being prevented.
+    """
+    return RuntimeError(
+        f"Refusing to write an unsafe remote URL for knowledge base '{base_id}' ({reason}). "
+        "Use a well-formed URL such as https://host/org/repo.git or git@host:org/repo.git, "
+        "and move any secret to a credentials_service instead of embedding it in repo_url. "
+        "An existing checkout may still hold a remote written before this check; "
+        "delete the checkout directory to clear it.",
+    )
+
+
+def _parsed_remote_url(clean_url: str, base_id: str) -> str:
+    """Return `clean_url` when its authority resolves and carries no password."""
+    try:
+        parsed = urlparse(clean_url)
+    except ValueError:
+        # ``from None`` deliberately. ``urlsplit`` quotes the offending netloc --
+        # password included -- in its message, and the scheduled refresh
+        # subprocess logs failures with ``logger.exception``, which prints the
+        # whole chain. The refusal above names no URL; chaining would undo that.
+        raise _unwritable_remote(base_id, "the URL cannot be parsed") from None
+
+    if not parsed.scheme:
+        raise _unwritable_remote(base_id, "the URL has no scheme")
+
+    if not parsed.netloc:
+        # ``file:`` is the one scheme with no authority by design, so it has no
+        # userinfo to hide; any other empty authority means the string only
+        # looked like a URL.
+        if parsed.scheme == "file" and "@" not in clean_url:
+            return clean_url
+        raise _unwritable_remote(base_id, "the URL has no host")
+
+    if parsed.netloc.count("@") > 1:
+        raise _unwritable_remote(base_id, "the URL has an ambiguous authority")
+
+    # No check for a password in the authority: ``credential_free_repo_url`` has
+    # already stripped one, and the bare ``user@host`` it deliberately keeps for
+    # SSH has no colon. A 400k-case fuzz reached this point with a password zero
+    # times, so a branch here would be untested code guarding nothing.
+    return clean_url
+
+
+def _persistable_remote_url(repo_url: str, base_id: str) -> str:
+    """Return the remote URL safe to write to disk, or refuse to write one.
+
+    Parse or refuse. Four shapes are accepted, each positively matched: a URL
+    whose authority ``urlparse`` actually resolves, scp-style SSH syntax, an
+    absolute local path, and ``file:`` with no authority. Anything else is
+    refused rather than sanitized.
+
+    The distinction matters because classifying by string surgery does not work
+    here. A URL scheme and a username share a grammar, so
+    ``oauth2:glpat_XXX@gitlab.com:org/repo.git`` -- GitLab's documented
+    credential form with ``https://`` dropped -- is reported by ``urlparse`` as
+    scheme ``oauth2`` with no authority at all. Stripping that "scheme" removes
+    the password separator before anything can look for it. Requiring the parse
+    to succeed makes that class unrepresentable instead of merely unmatched.
+
+    Credentials may transit as a process-local ``GIT_CONFIG_*`` header, which is
+    what ``_git_auth_env`` is for; they must never be persisted. So this checks
+    the string actually about to be written rather than classifying config.
+    """
+    # ``credential_free_repo_url`` is total, so no guard is needed here; a URL
+    # whose netloc ``urlsplit`` refuses comes back unchanged and is rejected
+    # below by the authority checks, which is where it should be rejected.
+    clean_url = credential_free_repo_url(repo_url)
+
+    # Before any shape is recognised: until the decoded form agrees with the raw
+    # one, no branch below is reasoning about the string a client will use. This
+    # sat after the scp branch, so an encoded separator reached disk by taking a
+    # different route than the one it was written to block.
+    if len(clean_url) > MAX_REDACTABLE_TOKEN_LENGTH:
+        # Decoding to a fixed point is quadratic in the nesting depth of the
+        # input, and nothing above this call bounds it: 195 KiB of nested
+        # ``%25`` took 16.8 s. Unlike the redactor's copy of this bound, the
+        # input here is operator-authored config rather than remote output, so
+        # this is a guard against a foot-gun rather than an attacker -- but a
+        # repository URL is never this long, so refusing costs nothing real.
+        raise _unwritable_remote(base_id, "the URL is implausibly long")
+
+    if fully_unquoted(clean_url).count("@") != clean_url.count("@"):
+        raise _unwritable_remote(base_id, "a percent-encoded separator hides part of the URL")
+
+    if clean_url.count("://") > 1:
+        # A second URL nested in the path carries its own userinfo, which the
+        # authority checks below cannot see.
+        raise _unwritable_remote(base_id, "the URL embeds a second URL")
+
+    if _SCP_STYLE_REMOTE_URL.match(clean_url):
+        return clean_url
+
+    if clean_url.startswith("/") and not clean_url.startswith("//"):
+        # An absolute local path, which Git accepts as a remote for a local
+        # clone. It has no authority and therefore no userinfo; the single
+        # leading slash is what separates it from a protocol-relative URL.
+        return clean_url
+
+    return _parsed_remote_url(clean_url, base_id)
 
 
 def _merge_git_env(*envs: dict[str, str] | None) -> dict[str, str] | None:
@@ -398,7 +516,7 @@ class GitKnowledgeSource:
         if await self._checkout_present():
             await self._ensure_lfs_repository_ready(knowledge_root)
             current_remote = (await self._run_git(["remote", "get-url", "origin"])).strip()
-            expected_remote = credential_free_repo_url(git_config.repo_url)
+            expected_remote = _persistable_remote_url(git_config.repo_url, self.base_id)
             if current_remote != expected_remote:
                 await self._run_git(["remote", "set-url", "origin", expected_remote])
             return False
@@ -413,7 +531,7 @@ class GitKnowledgeSource:
         knowledge_root.parent.mkdir(parents=True, exist_ok=True)
         if git_config.lfs:
             await self._ensure_lfs_available(cwd=knowledge_root.parent)
-        clone_url = credential_free_repo_url(git_config.repo_url)
+        clone_url = _persistable_remote_url(git_config.repo_url, self.base_id)
         await self._run_git(
             [
                 "clone",
