@@ -310,6 +310,7 @@ def test_status_reports_persisted_count_without_loading_collection(tmp_path: Pat
 
     with (
         patch("mindroom.knowledge.manager.ChromaDb", _BrokenVectorDb),
+        patch("mindroom.knowledge.collections.ChromaDb", _BrokenVectorDb),
         patch("mindroom.knowledge.registry.ChromaDb", _BrokenVectorDb),
         patch("mindroom.knowledge.indexing_config.ChromaDb", _BrokenVectorDb),
         patch(

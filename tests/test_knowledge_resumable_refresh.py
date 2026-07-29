@@ -25,6 +25,7 @@ from agno.knowledge.embedder.base import Embedder
 from chromadb.errors import InternalError, NotFoundError
 from structlog.testing import capture_logs
 
+import mindroom.knowledge.collections as knowledge_collections_module
 import mindroom.knowledge.manager as knowledge_manager_module
 import mindroom.knowledge.registry as knowledge_registry
 from mindroom.config.agent import AgentConfig
@@ -47,6 +48,11 @@ from mindroom.knowledge.candidate_checkpoint import (
     delete_candidate_checkpoint,
     load_candidate_checkpoint,
     save_candidate_checkpoint,
+)
+from mindroom.knowledge.collections import (
+    _collection_paths_with_vectors,
+    candidate_collection_name,
+    paths_with_vectors,
 )
 from mindroom.knowledge.embedding_batch import BatchPrefetchEmbedder, plan_embedding_batches
 from mindroom.knowledge.index_metadata import write_index_metadata_payload
@@ -404,7 +410,9 @@ def fake_vector_store(
     _FakeVectorDb.max_writes = 1_000_000
     _FakeVectorDb.writes = []
     monkeypatch.setattr(knowledge_manager_module, "ChromaDb", _FakeVectorDb)
+    monkeypatch.setattr(knowledge_collections_module, "ChromaDb", _FakeVectorDb)
     monkeypatch.setattr(knowledge_manager_module, "Knowledge", _FakeKnowledge)
+    monkeypatch.setattr(knowledge_collections_module, "Knowledge", _FakeKnowledge)
     monkeypatch.setattr(knowledge_manager_module, "create_configured_embedder", lambda *_a, **_k: embedder)
     monkeypatch.setattr("mindroom.knowledge.indexing_config.ChromaDb", _FakeVectorDb)
     monkeypatch.setattr(knowledge_registry, "ChromaDb", _FakeVectorDb)
@@ -859,7 +867,7 @@ async def test_incompatible_candidate_delete_failure_does_not_block_refresh(
     config = _config(tmp_path, docs_path)
     runtime_paths = runtime_paths_for(config)
     manager = _manager(config)
-    stale_candidate = f"{manager._default_collection_name()}_candidate_stale"
+    stale_candidate = f"{manager._collections.default_collection}_candidate_stale"
     _FakeVectorDb.store[stale_candidate] = []
     save_candidate_checkpoint(
         _storage_path(config, runtime_paths),
@@ -894,7 +902,7 @@ async def test_incompatible_missing_candidate_is_already_deleted(tmp_path: Path)
     config = _config(tmp_path, docs_path)
     runtime_paths = runtime_paths_for(config)
     manager = _manager(config)
-    missing_candidate = f"{manager._default_collection_name()}_candidate_missing"
+    missing_candidate = f"{manager._collections.default_collection}_candidate_missing"
     save_candidate_checkpoint(
         _storage_path(config, runtime_paths),
         CandidateCheckpoint(
@@ -1115,7 +1123,7 @@ async def test_cleanup_preserves_published_active_and_unknown_collections(
     runtime_paths = runtime_paths_for(config)
     await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
     published_collection = _published_state(config, runtime_paths).collection
-    default_collection = _manager(config)._default_collection_name()
+    default_collection = _manager(config)._collections.default_collection
 
     abandoned = f"{default_collection}_candidate_abandonedabandoned"
     unknown = "some_other_service_collection"
@@ -1845,7 +1853,7 @@ async def test_candidate_cleanup_does_not_report_the_bases_own_default_collectio
     _write_corpus(docs_path, 2)
     config = _config(tmp_path, docs_path)
     manager = _manager(config)
-    default_collection = manager._default_collection_name()
+    default_collection = manager._collections.default_collection
     _FakeVectorDb.store[default_collection] = []
     _FakeVectorDb.store["some_unrelated_collection"] = []
 
@@ -3491,7 +3499,7 @@ async def test_a_candidate_whose_collection_vanished_is_rebuilt_rather_than_resu
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Probe existence before Agno can auto-create a vanished collection."""
-    monkeypatch.setattr(knowledge_manager_module, "Knowledge", _AutoCreatingFakeKnowledge)
+    monkeypatch.setattr(knowledge_collections_module, "Knowledge", _AutoCreatingFakeKnowledge)
     docs_path = tmp_path / "docs"
     names = _write_corpus(docs_path, 3)
     config = _config(tmp_path, docs_path)
@@ -3530,7 +3538,7 @@ async def test_unclaimed_row_probe_reuses_the_refresh_embedder(
     config = _config(tmp_path, docs_path)
     runtime_paths = runtime_paths_for(config)
     manager = _manager(config)
-    collection = manager._candidate_collection_name()
+    collection = candidate_collection_name(manager._collections)
     save_candidate_checkpoint(
         _storage_path(config, runtime_paths),
         CandidateCheckpoint(collection=collection, settings=manager._indexing_settings),
@@ -3738,15 +3746,15 @@ async def test_a_rebuild_that_dies_before_emptying_the_collection_still_recovers
 
     (docs_path / names[0]).unlink()
     die_before_reset = True
-    original_reset = KnowledgeManager._reset_vector_db
+    original_reset = knowledge_manager_module.reset_vector_db
 
-    def _maybe_die(self: KnowledgeManager, vector_db: _FakeVectorDb) -> None:
+    def _maybe_die(vector_db: _FakeVectorDb) -> None:
         if die_before_reset:
             message = "host lost power before the collection was emptied"
             raise RuntimeError(message)
-        original_reset(self, vector_db)
+        original_reset(vector_db)
 
-    monkeypatch.setattr(KnowledgeManager, "_reset_vector_db", _maybe_die)
+    monkeypatch.setattr(knowledge_manager_module, "reset_vector_db", _maybe_die)
     with pytest.raises(RuntimeError):
         await _manager(config).reindex_all()
     die_before_reset = False
@@ -3867,17 +3875,14 @@ def _seed_chunked_paths(collection: str, paths: Sequence[str], chunks_per_path: 
     ]
 
 
-def _verification_manager(tmp_path: Path) -> tuple[KnowledgeManager, _FakeVectorDb]:
-    """Return a manager and a created, empty candidate collection to verify against."""
-    docs_path = tmp_path / "docs"
-    docs_path.mkdir()
-    manager = _manager(_config(tmp_path, docs_path))
+def _verification_collection() -> _FakeVectorDb:
+    """Return a created, empty candidate collection to verify against."""
     vector_db = _FakeVectorDb(collection="verification_target")
     vector_db.create()
-    return manager, vector_db
+    return vector_db
 
 
-def test_vector_verification_splits_a_batch_the_store_cannot_answer(tmp_path: Path) -> None:
+def test_vector_verification_splits_a_batch_the_store_cannot_answer() -> None:
     """A batch matching more rows than the store allows must still be verified.
 
     Chroma binds one SQL variable per matched chunk row, so a fixed batch of
@@ -3885,12 +3890,12 @@ def test_vector_verification_splits_a_batch_the_store_cannot_answer(tmp_path: Pa
     chunks those files produced. A corpus of large files makes every
     verification query fail, which strands the candidate permanently.
     """
-    manager, vector_db = _verification_manager(tmp_path)
+    vector_db = _verification_collection()
     paths = [f"doc{index:02d}.md" for index in range(8)]
     _seed_chunked_paths(vector_db.collection_name, paths, chunks_per_path=100)
     _FakeVectorDb.max_rows_per_get = 250
 
-    assert manager._candidate_paths_with_vectors(vector_db, paths) == set(paths)
+    assert paths_with_vectors(vector_db, paths) == set(paths)
 
     # Halving is the property that makes this affordable, and correctness alone
     # does not pin it: splitting one path off at a time also terminates and also
@@ -3900,48 +3905,48 @@ def test_vector_verification_splits_a_batch_the_store_cannot_answer(tmp_path: Pa
     assert _FakeVectorDb.get_calls == 7
 
 
-def test_vector_verification_confirms_a_file_larger_than_the_store_ceiling(tmp_path: Path) -> None:
+def test_vector_verification_confirms_a_file_larger_than_the_store_ceiling() -> None:
     """One file with more chunks than the ceiling must still be confirmed.
 
     Splitting alone cannot rescue this: a single path is the smallest batch
     there is, so the query has to stop asking for every row it matches.
     """
-    manager, vector_db = _verification_manager(tmp_path)
+    vector_db = _verification_collection()
     _seed_chunked_paths(vector_db.collection_name, ["huge.md"], chunks_per_path=500)
     _FakeVectorDb.max_rows_per_get = 250
 
-    assert manager._candidate_paths_with_vectors(vector_db, ["huge.md"]) == {"huge.md"}
+    assert paths_with_vectors(vector_db, ["huge.md"]) == {"huge.md"}
 
 
-def test_vector_verification_still_reports_paths_without_vectors_after_splitting(tmp_path: Path) -> None:
+def test_vector_verification_still_reports_paths_without_vectors_after_splitting() -> None:
     """Splitting must not turn an unverifiable path into a verified one."""
-    manager, vector_db = _verification_manager(tmp_path)
+    vector_db = _verification_collection()
     present = [f"present{index:02d}.md" for index in range(6)]
     _seed_chunked_paths(vector_db.collection_name, present, chunks_per_path=100)
     _FakeVectorDb.max_rows_per_get = 250
     missing = ["missing0.md", "missing1.md"]
 
-    found = manager._candidate_paths_with_vectors(vector_db, [*present, *missing])
+    found = paths_with_vectors(vector_db, [*present, *missing])
 
     assert found == set(present)
 
 
-def test_vector_verification_uses_one_query_when_the_store_answers(tmp_path: Path) -> None:
+def test_vector_verification_uses_one_query_when_the_store_answers() -> None:
     """A store that can answer the whole batch must be asked exactly once.
 
     Splitting is a fallback, not the normal path: verifying per file would turn
     one query per 128 files into 128, which is the cost this batching exists to
     avoid.
     """
-    manager, vector_db = _verification_manager(tmp_path)
+    vector_db = _verification_collection()
     paths = [f"doc{index:02d}.md" for index in range(8)]
     _seed_chunked_paths(vector_db.collection_name, paths, chunks_per_path=100)
 
-    assert manager._candidate_paths_with_vectors(vector_db, paths) == set(paths)
+    assert paths_with_vectors(vector_db, paths) == set(paths)
     assert _FakeVectorDb.get_calls == 1
 
 
-def test_vector_verification_does_not_split_when_the_collection_is_gone(tmp_path: Path) -> None:
+def test_vector_verification_does_not_split_when_the_collection_is_gone() -> None:
     """A missing collection must surface at once instead of being re-asked per path.
 
     Splitting exists to shrink a query the store found too large, and a missing
@@ -3951,7 +3956,7 @@ def test_vector_verification_does_not_split_when_the_collection_is_gone(tmp_path
     verification aborts on this batch either way. Failing on the first query is
     the cheaper of two identical outcomes, which is what the count below pins.
     """
-    manager, vector_db = _verification_manager(tmp_path)
+    vector_db = _verification_collection()
     paths = [f"doc{index:02d}.md" for index in range(8)]
     # No rows are seeded: every ``get`` raises before reading the store, so
     # seeding would only suggest the contents mattered. ``create()`` in the
@@ -3959,17 +3964,14 @@ def test_vector_verification_does_not_split_when_the_collection_is_gone(tmp_path
     _FakeVectorDb.vanished_on_get = {vector_db.collection_name}
 
     with pytest.raises(NotFoundError):
-        manager._candidate_paths_with_vectors(vector_db, paths)
+        paths_with_vectors(vector_db, paths)
 
     assert _FakeVectorDb.get_calls == 1
 
 
-def test_vector_verification_does_not_split_unrelated_internal_error(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_vector_verification_does_not_split_unrelated_internal_error(monkeypatch: pytest.MonkeyPatch) -> None:
     """Only SQLite's bind-variable failure may trigger recursive splitting."""
-    _, vector_db = _verification_manager(tmp_path)
+    vector_db = _verification_collection()
     collection = vector_db.client.get_collection(vector_db.collection_name)
     paths = [f"doc{index:02d}.md" for index in range(8)]
     calls = 0
@@ -3983,12 +3985,12 @@ def test_vector_verification_does_not_split_unrelated_internal_error(
     monkeypatch.setattr(collection, "get", refuse_query)
 
     with pytest.raises(InternalError, match="database connection unexpectedly closed"):
-        knowledge_manager_module._paths_with_vectors(collection, paths)
+        _collection_paths_with_vectors(collection, paths)
 
     assert calls == 1
 
 
-def test_vector_verification_records_that_it_had_to_split(tmp_path: Path) -> None:
+def test_vector_verification_records_that_it_had_to_split() -> None:
     """A store refusing batches must leave a trace, not degrade silently.
 
     Splitting keeps verification correct but multiplies its queries, and how
@@ -3997,13 +3999,13 @@ def test_vector_verification_records_that_it_had_to_split(tmp_path: Path) -> Non
     signal anywhere, which is the same invisibility that let the original
     failure go undiagnosed.
     """
-    manager, vector_db = _verification_manager(tmp_path)
+    vector_db = _verification_collection()
     paths = [f"doc{index:02d}.md" for index in range(8)]
     _seed_chunked_paths(vector_db.collection_name, paths, chunks_per_path=100)
     _FakeVectorDb.max_rows_per_get = 250
 
     with capture_logs() as logs:
-        assert manager._candidate_paths_with_vectors(vector_db, paths) == set(paths)
+        assert paths_with_vectors(vector_db, paths) == set(paths)
 
     split_logs = [entry for entry in logs if entry["event"] == "Split a refused knowledge vector verification query"]
     assert [entry["paths"] for entry in split_logs] == [8, 4, 4]

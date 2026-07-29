@@ -44,6 +44,7 @@ from mindroom.credentials_sync import get_embedder_api_key
 from mindroom.knowledge import KnowledgeRefreshScheduler, resolve_agent_knowledge_access
 from mindroom.knowledge.availability import KnowledgeAvailability
 from mindroom.knowledge.candidate_checkpoint import load_candidate_checkpoint
+from mindroom.knowledge.collections import build_vector_db, candidate_collection_name
 from mindroom.knowledge.file_listing import (
     git_checkout_present,
     knowledge_files_from_relative_paths,
@@ -269,7 +270,9 @@ def patch_vector_store(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     """Use an in-memory vector store for published knowledge index tests."""
     _VectorDb.collections = {}
     monkeypatch.setattr("mindroom.knowledge.manager.ChromaDb", _VectorDb)
+    monkeypatch.setattr("mindroom.knowledge.collections.ChromaDb", _VectorDb)
     monkeypatch.setattr("mindroom.knowledge.manager.Knowledge", _Knowledge)
+    monkeypatch.setattr("mindroom.knowledge.collections.Knowledge", _Knowledge)
     monkeypatch.setattr(
         "mindroom.knowledge.manager.create_configured_embedder",
         lambda *_args, **_kwargs: _FakeEmbedder(),
@@ -643,7 +646,7 @@ async def test_file_mode_git_refresh_marks_same_source_semantic_alias_stale(
         "semantic_docs",
         config=config,
         runtime_paths=runtime_paths,
-    )._default_collection_name()
+    )._collections.default_collection
     _VectorDb.collections[semantic_collection] = [
         {"content": "Use grep for this source.", "metadata": {"source_path": "guide.md"}},
     ]
@@ -2175,7 +2178,7 @@ def test_source_changed_updates_refresh_state_without_changing_index(tmp_path: P
     runtime_paths = runtime_paths_for(config)
     key = resolve_published_index_key("docs", config=config, runtime_paths=runtime_paths)
     manager = KnowledgeManager("docs", config=config, runtime_paths=runtime_paths)
-    default_collection = manager._default_collection_name()
+    default_collection = manager._collections.default_collection
     _VectorDb.collections[default_collection] = [
         {"content": "published old", "metadata": {"source_path": "guide.md"}},
     ]
@@ -3348,7 +3351,7 @@ async def test_publish_metadata_save_finishes_before_repeated_cancellation_escap
     config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
     runtime_paths = runtime_paths_for(config)
     manager = KnowledgeManager("docs", config=config, runtime_paths=runtime_paths)
-    candidate_vector_db = manager._build_vector_db(manager._candidate_collection_name())
+    candidate_vector_db = build_vector_db(manager._collections, candidate_collection_name(manager._collections))
     loop = asyncio.get_running_loop()
     save_started = asyncio.Event()
     release_save = Event()
@@ -3389,7 +3392,7 @@ async def test_cancelled_publish_metadata_save_surfaces_a_failed_write(
     config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
     runtime_paths = runtime_paths_for(config)
     manager = KnowledgeManager("docs", config=config, runtime_paths=runtime_paths)
-    candidate_vector_db = manager._build_vector_db(manager._candidate_collection_name())
+    candidate_vector_db = build_vector_db(manager._collections, candidate_collection_name(manager._collections))
     loop = asyncio.get_running_loop()
     save_started = asyncio.Event()
     release_save = Event()
@@ -3845,7 +3848,7 @@ async def test_refresh_rebuilds_malformed_metadata_without_serving_old_collectio
     runtime_paths = runtime_paths_for(config)
     key = resolve_published_index_key("docs", config=config, runtime_paths=runtime_paths)
     manager = KnowledgeManager("docs", config=config, runtime_paths=runtime_paths)
-    default_collection = manager._default_collection_name()
+    default_collection = manager._collections.default_collection
     _VectorDb.collections[default_collection] = [
         {"content": "stale list old", "metadata": {"source_path": "doc.md"}},
     ]
@@ -4697,7 +4700,7 @@ async def test_partial_refresh_error_includes_first_classified_file_error(
                 raise _embedder_auth_error()
             super().insert(path=path, metadata=metadata, upsert=upsert, reader=reader)
 
-    monkeypatch.setattr("mindroom.knowledge.manager.Knowledge", _AuthFailingKnowledge)
+    monkeypatch.setattr("mindroom.knowledge.collections.Knowledge", _AuthFailingKnowledge)
     manager = KnowledgeManager("docs", config=config, runtime_paths=runtime_paths_for(config))
 
     assert await manager.reindex_all() == 1
@@ -4731,7 +4734,7 @@ async def test_vectorless_file_does_not_inherit_process_global_embedder_health(
             del path, metadata, upsert, reader
             embedder_health.capture_embedder_health_recorder().record("embedder authentication failed (HTTP 401)")
 
-    monkeypatch.setattr("mindroom.knowledge.manager.Knowledge", _SwallowingKnowledge)
+    monkeypatch.setattr("mindroom.knowledge.collections.Knowledge", _SwallowingKnowledge)
     embedder_health.capture_embedder_health_recorder().record(None)
     manager = KnowledgeManager("docs", config=config, runtime_paths=runtime_paths_for(config))
     try:
@@ -4866,7 +4869,7 @@ async def test_cold_refresh_publishes_when_empty_file_produces_no_vectors(
             if Path(path).read_text(encoding="utf-8"):
                 super().insert(path=path, metadata=metadata, upsert=upsert, reader=reader)
 
-    monkeypatch.setattr("mindroom.knowledge.manager.Knowledge", _SkipEmptyKnowledge)
+    monkeypatch.setattr("mindroom.knowledge.collections.Knowledge", _SkipEmptyKnowledge)
 
     result = await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
     key = resolve_published_index_key("docs", config=config, runtime_paths=runtime_paths)
@@ -7296,7 +7299,7 @@ async def test_git_noop_refresh_rebuilds_when_collection_is_missing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """An unchanged Git poll must not let Agno auto-create a Chroma collection for a missing index."""
-    monkeypatch.setattr("mindroom.knowledge.manager.Knowledge", _AutoCreatingKnowledge)
+    monkeypatch.setattr("mindroom.knowledge.collections.Knowledge", _AutoCreatingKnowledge)
     docs_path = tmp_path / "docs"
     docs_path.mkdir()
     (docs_path / "doc.md").write_text("git repaired", encoding="utf-8")
