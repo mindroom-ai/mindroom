@@ -312,6 +312,18 @@ def _auto_resume_conversation_cache(interrupted: list[InterruptedThread]) -> Asy
     return conversation_cache
 
 
+def _auto_resume_owner_actors(
+    conversation_cache: AsyncMock | None,
+) -> dict[str, StaleStreamCleanupActor]:
+    return {
+        BOT_USER_ID: StaleStreamCleanupActor(_make_client(), conversation_cache),
+        OTHER_BOT_USER_ID: StaleStreamCleanupActor(
+            make_matrix_client_mock(user_id=OTHER_BOT_USER_ID),
+            conversation_cache,
+        ),
+    }
+
+
 def _assert_preserved_edit_payload(content: dict[str, object], expected_keys: dict[str, object]) -> None:
     """Assert io.mindroom.* keys are present in both edit payload layers."""
     new_content = cast("dict[str, object]", content["m.new_content"])
@@ -759,6 +771,9 @@ async def test_auto_resume_sends_correctly_threaded_messages(tmp_path: Path) -> 
             config=config,
             runtime_paths=runtime_paths_for(config),
             conversation_cache=_auto_resume_conversation_cache(interrupted),
+            owner_actors=_auto_resume_owner_actors(
+                _auto_resume_conversation_cache(interrupted),
+            ),
         )
 
     assert resumed_count == 2
@@ -797,6 +812,9 @@ async def test_auto_resume_skips_interruption_without_resolved_requester(tmp_pat
             config=config,
             runtime_paths=runtime_paths_for(config),
             conversation_cache=_auto_resume_conversation_cache(interrupted),
+            owner_actors=_auto_resume_owner_actors(
+                _auto_resume_conversation_cache(interrupted),
+            ),
         )
 
     assert resumed_count == 0
@@ -856,6 +874,7 @@ async def test_auto_resume_classifies_later_activity_by_effective_sender_and_his
             config=config,
             runtime_paths=runtime_paths_for(config),
             conversation_cache=conversation_cache,
+            owner_actors=_auto_resume_owner_actors(conversation_cache),
         )
 
     assert resumed_count == expected_resumes
@@ -902,6 +921,7 @@ async def test_prior_auto_resume_relay_does_not_suppress_sibling_resume(tmp_path
             config=config,
             runtime_paths=runtime_paths_for(config),
             conversation_cache=conversation_cache,
+            owner_actors=_auto_resume_owner_actors(conversation_cache),
         )
 
     assert resumed_count == 1
@@ -973,6 +993,7 @@ async def test_auto_resume_fails_closed_without_authoritative_target_history(
             config=config,
             runtime_paths=runtime_paths_for(config),
             conversation_cache=conversation_cache,
+            owner_actors=_auto_resume_owner_actors(conversation_cache),
         )
 
     assert resumed_count == 0
@@ -1013,6 +1034,7 @@ async def test_auto_resume_propagates_cancelled_source_refresh(tmp_path: Path) -
             config=config,
             runtime_paths=runtime_paths_for(config),
             conversation_cache=conversation_cache,
+            owner_actors=_auto_resume_owner_actors(conversation_cache),
         )
 
     mock_send.assert_not_awaited()
@@ -1048,6 +1070,7 @@ async def test_auto_resume_source_refresh_sees_newer_human_missing_from_startup_
             config=config,
             runtime_paths=runtime_paths_for(config),
             conversation_cache=conversation_cache,
+            owner_actors=_auto_resume_owner_actors(conversation_cache),
         )
 
     assert resumed_count == 0
@@ -1113,6 +1136,7 @@ async def test_auto_resume_checks_freshness_after_delay_before_each_delivery(tmp
             config=config,
             runtime_paths=runtime_paths_for(config),
             conversation_cache=conversation_cache,
+            owner_actors=_auto_resume_owner_actors(conversation_cache),
         )
 
     assert resumed_count == 3
@@ -1164,6 +1188,9 @@ async def test_auto_resume_target_mention_ignores_unprepared_unrelated_entity(tm
             config=config,
             runtime_paths=runtime_paths,
             conversation_cache=_auto_resume_conversation_cache(interrupted),
+            owner_actors=_auto_resume_owner_actors(
+                _auto_resume_conversation_cache(interrupted),
+            ),
         )
 
     assert resumed_count == 1
@@ -1259,6 +1286,9 @@ async def test_auto_resume_skips_thread_id_none(tmp_path: Path) -> None:
             config=config,
             runtime_paths=runtime_paths_for(config),
             conversation_cache=_auto_resume_conversation_cache(interrupted),
+            owner_actors=_auto_resume_owner_actors(
+                _auto_resume_conversation_cache(interrupted),
+            ),
         )
 
     assert resumed_count == 1
@@ -1294,6 +1324,7 @@ async def test_auto_resume_records_outbound_message_when_send_succeeds(tmp_path:
             config=config,
             runtime_paths=runtime_paths_for(config),
             conversation_cache=conversation_cache,
+            owner_actors=_auto_resume_owner_actors(conversation_cache),
         )
 
     assert resumed_count == 1
@@ -1997,6 +2028,7 @@ async def test_recent_mid_tool_shutdown_marker_resumes_only_without_newer_human_
             config=config,
             runtime_paths=runtime_paths_for(config),
             conversation_cache=conversation_cache,
+            owner_actors=_auto_resume_owner_actors(conversation_cache),
             delay=0,
         )
 
@@ -2841,6 +2873,9 @@ async def test_auto_resume_dedupes_same_agent_and_thread_using_newest_target(tmp
             config=config,
             runtime_paths=runtime_paths_for(config),
             conversation_cache=_auto_resume_conversation_cache(interrupted),
+            owner_actors=_auto_resume_owner_actors(
+                _auto_resume_conversation_cache(interrupted),
+            ),
         )
 
     assert resumed_count == 1
@@ -2905,6 +2940,9 @@ async def test_auto_resume_sends_all_unique_threads_after_replacing_older_target
             config=config,
             runtime_paths=runtime_paths_for(config),
             conversation_cache=_auto_resume_conversation_cache(interrupted),
+            owner_actors=_auto_resume_owner_actors(
+                _auto_resume_conversation_cache(interrupted),
+            ),
         )
 
     assert resumed_count == 3
@@ -2954,6 +2992,9 @@ async def test_auto_resume_sends_threads_from_every_room(tmp_path: Path) -> None
             config=config,
             runtime_paths=runtime_paths_for(config),
             conversation_cache=_auto_resume_conversation_cache(interrupted),
+            owner_actors=_auto_resume_owner_actors(
+                _auto_resume_conversation_cache(interrupted),
+            ),
         )
 
     assert resumed_count == 2
@@ -2961,6 +3002,142 @@ async def test_auto_resume_sends_threads_from_every_room(tmp_path: Path) -> None
         "$thread-old",
         "$thread-new",
     ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("router_joined", "owner_joined", "expected_resumed"),
+    [
+        (False, True, 1),
+        (True, True, 1),
+        (True, False, 0),
+    ],
+    ids=["router-not-joined", "router-joined-late", "owner-not-joined"],
+)
+async def test_recovery_selects_joined_owner_for_freshness_and_router_for_relay(
+    tmp_path: Path,
+    router_joined: bool,
+    owner_joined: bool,
+    expected_resumed: int,
+) -> None:
+    """Strict freshness needs the joined owner; successful delivery stays router-authored."""
+    config = _make_config(tmp_path)
+    config.defaults.auto_resume_after_restart = True
+    router_client = make_matrix_client_mock(user_id="@actual_router:localhost")
+    owner_client = make_matrix_client_mock(user_id=BOT_USER_ID)
+    interrupted = InterruptedThread(ROOM_ID, "$thread", "$target", "Partial", "test_agent", original_sender_id=USER_ID)
+    router_cache = _auto_resume_conversation_cache([interrupted])
+    router_cache.refresh_strict_thread_history_from_source.side_effect = None
+    router_cache.refresh_strict_thread_history_from_source.return_value = _authoritative_history()
+    owner_cache = _auto_resume_conversation_cache([interrupted])
+    actors = {
+        "@actual_router:localhost": StaleStreamCleanupActor(router_client, router_cache),
+        BOT_USER_ID: StaleStreamCleanupActor(owner_client, owner_cache),
+    }
+
+    async def joined_rooms(client: object) -> list[str]:
+        if client is router_client:
+            return [ROOM_ID] if router_joined else []
+        assert client is owner_client
+        return [ROOM_ID] if owner_joined else []
+
+    with (
+        patch("mindroom.matrix.stale_stream_cleanup.get_joined_rooms", side_effect=joined_rooms),
+        patch(
+            "mindroom.matrix.stale_stream_cleanup._cleanup_stale_streaming_room",
+            new=AsyncMock(return_value=(0, [interrupted])),
+        ),
+        patch(
+            "mindroom.matrix.stale_stream_cleanup.send_message_result",
+            new=AsyncMock(side_effect=delivered_matrix_side_effect("$resume")),
+        ) as mock_send,
+        patch.object(stale_stream_cleanup_module.logger, "warning") as mock_warning,
+    ):
+        result = await recover_stale_streaming_messages(
+            actors,
+            resume_client=router_client,
+            resume_conversation_cache=router_cache,
+            config=config,
+            runtime_paths=runtime_paths_for(config),
+            startup_cutoff_ms=NOW_MS,
+            scanned_room_ids=set(),
+        )
+
+    assert result.resumed_count == expected_resumed
+    assert owner_cache.refresh_strict_thread_history_from_source.await_count == expected_resumed
+    router_cache.refresh_strict_thread_history_from_source.assert_not_awaited()
+    assert mock_send.await_count == expected_resumed
+    if expected_resumed:
+        assert mock_send.await_args.args[0] is router_client
+        mock_warning.assert_not_called()
+    else:
+        mock_warning.assert_called_once_with(
+            "Skipping auto-resume because owning actor is unavailable or not joined",
+            room_id=ROOM_ID,
+            agent_name="test_agent",
+            target_event_id="$target",
+        )
+
+
+@pytest.mark.asyncio
+async def test_auto_resume_uses_each_interrupted_owner_cache(tmp_path: Path) -> None:
+    """Interrupted threads from different agents should refresh through their own caches."""
+    config = _make_config(tmp_path)
+    router_client = make_matrix_client_mock(user_id="@actual_router:localhost")
+    first_interrupted = InterruptedThread(
+        ROOM_ID,
+        "$first-thread",
+        "$first-target",
+        "First",
+        "test_agent",
+        original_sender_id=USER_ID,
+    )
+    second_interrupted = InterruptedThread(
+        ROOM_ID,
+        "$second-thread",
+        "$second-target",
+        "Second",
+        "other",
+        original_sender_id=USER_ID,
+    )
+    router_cache = _auto_resume_conversation_cache([])
+    first_cache = _auto_resume_conversation_cache([first_interrupted])
+    second_cache = _auto_resume_conversation_cache([second_interrupted])
+    owner_actors = {
+        BOT_USER_ID: StaleStreamCleanupActor(_make_client(), first_cache),
+        OTHER_BOT_USER_ID: StaleStreamCleanupActor(
+            make_matrix_client_mock(user_id=OTHER_BOT_USER_ID),
+            second_cache,
+        ),
+    }
+
+    with (
+        patch(
+            "mindroom.matrix.stale_stream_cleanup.send_message_result",
+            new=AsyncMock(
+                side_effect=[
+                    delivered_matrix_event("$first-resume"),
+                    delivered_matrix_event("$second-resume"),
+                ],
+            ),
+        ) as mock_send,
+        patch("mindroom.matrix.stale_stream_cleanup.asyncio.sleep", new=AsyncMock()),
+    ):
+        resumed_count = await auto_resume_interrupted_threads(
+            router_client,
+            [first_interrupted, second_interrupted],
+            config=config,
+            runtime_paths=runtime_paths_for(config),
+            conversation_cache=router_cache,
+            owner_actors=owner_actors,
+        )
+
+    assert resumed_count == 2
+    first_cache.refresh_strict_thread_history_from_source.assert_awaited_once()
+    second_cache.refresh_strict_thread_history_from_source.assert_awaited_once()
+    router_cache.refresh_strict_thread_history_from_source.assert_not_awaited()
+    assert mock_send.await_count == 2
+    assert all(item.args[0] is router_client for item in mock_send.await_args_list)
 
 
 @pytest.mark.asyncio
@@ -3443,6 +3620,9 @@ async def test_auto_resume_continues_after_send_exception(tmp_path: Path) -> Non
             config=config,
             runtime_paths=runtime_paths_for(config),
             conversation_cache=_auto_resume_conversation_cache(interrupted),
+            owner_actors=_auto_resume_owner_actors(
+                _auto_resume_conversation_cache(interrupted),
+            ),
         )
 
     assert resumed_count == 2

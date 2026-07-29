@@ -60,7 +60,7 @@ from mindroom.streaming import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Iterable, Sequence
+    from collections.abc import AsyncIterator, Iterable, Mapping, Sequence
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
@@ -220,13 +220,13 @@ async def recover_stale_streaming_messages(
     async def recover_room(
         room_id: str,
         joined_actors: dict[str, StaleStreamCleanupActor],
-    ) -> tuple[int, list[_InterruptedThread]]:
+    ) -> tuple[int, list[_InterruptedThread], dict[str, StaleStreamCleanupActor]]:
         scan_actor = joined_actors.get(resume_user_id) if isinstance(resume_user_id, str) else None
         if scan_actor is None:
             scan_actor = joined_actors[min(joined_actors)]
         async with semaphore:
             try:
-                return await _cleanup_stale_streaming_room(
+                cleaned_count, interrupted_threads = await _cleanup_stale_streaming_room(
                     scan_actor.client,
                     room_id=room_id,
                     actors=joined_actors,
@@ -239,7 +239,9 @@ async def recover_stale_streaming_messages(
             except Exception:
                 scanned_room_ids.discard(room_id)
                 logger.warning("Failed stale stream recovery for room", room_id=room_id, exc_info=True)
-                return 0, []
+                return 0, [], joined_actors
+            else:
+                return cleaned_count, interrupted_threads, joined_actors
 
     tasks = [
         asyncio.create_task(recover_room(room_id, joined_actors), name=f"stale_stream_recovery:{room_id}")
@@ -249,7 +251,7 @@ async def recover_stale_streaming_messages(
     resumed_count = 0
     try:
         for completed in asyncio.as_completed(tasks):
-            room_cleaned_count, interrupted_threads = await completed
+            room_cleaned_count, interrupted_threads, joined_actors = await completed
             cleaned_count += room_cleaned_count
             if resume_client is None or not config.defaults.auto_resume_after_restart or not interrupted_threads:
                 continue
@@ -259,6 +261,7 @@ async def recover_stale_streaming_messages(
                 config=config,
                 runtime_paths=runtime_paths,
                 conversation_cache=resume_conversation_cache,
+                owner_actors=joined_actors,
                 delay_before_first=resumed_count > 0,
             )
     finally:
@@ -311,6 +314,7 @@ async def _auto_resume_interrupted_threads(
     config: Config,
     runtime_paths: RuntimePaths,
     conversation_cache: ConversationCacheProtocol | None = None,
+    owner_actors: Mapping[str, StaleStreamCleanupActor],
     delay: float = 2.0,
     delay_before_first: bool = False,
 ) -> int:
@@ -330,6 +334,20 @@ async def _auto_resume_interrupted_threads(
                 target_event_id=interrupted_thread.target_event_id,
             )
             continue
+        owner_user_id = _current_configured_entity_user_id(
+            interrupted_thread.agent_name,
+            config,
+            runtime_paths,
+        )
+        owner_actor = owner_actors.get(owner_user_id) if owner_user_id is not None else None
+        if owner_actor is None or owner_actor.conversation_cache is None:
+            logger.warning(
+                "Skipping auto-resume because owning actor is unavailable or not joined",
+                room_id=interrupted_thread.room_id,
+                agent_name=interrupted_thread.agent_name,
+                target_event_id=interrupted_thread.target_event_id,
+            )
+            continue
         if delay_due:
             await asyncio.sleep(delay)
             delay_due = False
@@ -337,7 +355,7 @@ async def _auto_resume_interrupted_threads(
             interrupted_thread,
             config=config,
             runtime_paths=runtime_paths,
-            conversation_cache=conversation_cache,
+            conversation_cache=owner_actor.conversation_cache,
         ):
             continue
         try:
