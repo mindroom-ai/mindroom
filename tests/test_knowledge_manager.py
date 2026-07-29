@@ -8,6 +8,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
 from itertools import count
@@ -53,7 +54,12 @@ from mindroom.knowledge.file_listing import (
 from mindroom.knowledge.index_metadata import write_index_metadata_payload
 from mindroom.knowledge.indexing_config import IndexingSettings
 from mindroom.knowledge.manager import KnowledgeManager, knowledge_source_signature
-from mindroom.knowledge.redaction import credential_free_repo_url, credential_free_url_identity, redact_url_credentials
+from mindroom.knowledge.redaction import (
+    credential_free_repo_url,
+    credential_free_url_identity,
+    redact_credentials_in_text,
+    redact_url_credentials,
+)
 from mindroom.knowledge.refresh_outcome import RefreshOutcome
 from mindroom.knowledge.refresh_runner import knowledge_binding_mutation_lock, refresh_knowledge_binding
 from mindroom.knowledge.registry import (
@@ -9000,3 +9006,430 @@ async def test_valid_json_does_not_hide_downstream_json_decode_error(
         == "Indexed 0 of 1 managed knowledge files (first error: knowledge indexing failed (JSONDecodeError))"
     )
     assert all(entry["event"] != "Malformed JSON knowledge file; indexing as text" for entry in logs)
+
+
+#: fixed; ``ambiguous-authority`` was already redacted by luck, because its last
+#: ``@`` happens to fall after the secret, and is pinned so it stays that way.
+_LEAKING_CREDENTIAL_SHAPES = [
+    pytest.param("https:///user:{secret}@example.com/repo.git", id="empty-authority"),
+    pytest.param("https://outer/https://user:{secret}@inner/repo", id="nested-scheme"),
+    pytest.param("https://user%3A{secret}%40example.com/repo", id="percent-encoded-userinfo"),
+    pytest.param("https:/user:{secret}@example.com/repo", id="single-slash"),
+    pytest.param("https:@example.com/user:{secret}@host", id="no-slash"),
+    pytest.param("https://a@b:{secret}@example.com/repo", id="ambiguous-authority"),
+    pytest.param("https:/user%3A{secret}%40example.com/repo.git", id="slashless-percent-encoded"),
+    pytest.param("https://user%253A{secret}%2540example.com/repo.git", id="double-encoded"),
+    pytest.param("https://user%25253A{secret}%252540example.com/repo.git", id="triple-encoded"),
+]
+
+
+#: Shapes whose credentials survive into the *command echo* rather than stderr.
+#: ``_run_git`` redacts each argument separately, so a shape can be safe in one
+#: path and leak in the other; these were verbatim in the raised command line
+#: while the same string in stderr was already redacted.
+_LEAKING_COMMAND_ARGUMENT_SHAPES = [
+    pytest.param("//user:{secret}@example.com/repo.git", id="protocol-relative"),
+    pytest.param("///user:{secret}@example.com/repo.git", id="protocol-relative-empty-authority"),
+    pytest.param("//user:{secret}@[::1]/repo.git", id="protocol-relative-ipv6"),
+    pytest.param("//user:{secret}@host:8443/repo.git", id="protocol-relative-port"),
+    pytest.param("//{secret}@github.com/repo.git", id="protocol-relative-token-as-username"),
+    pytest.param("https:/user%3A{secret}%40example.com/repo.git", id="slashless-percent-encoded"),
+    pytest.param("https://user%253A{secret}%2540example.com/repo.git", id="double-encoded"),
+]
+
+
+#: Git revision and refspec syntax that contains an ``@`` but is not a URL.
+#: ``_run_git`` really does run ``fetch origin +refs/heads/<branch>:...``, so a
+#: branch named ``@{upstream}`` produces the first of these; redacting it left
+#: the operator with ``+refs/heads/***`` and no way to see what was wrong.
+_REVISION_SYNTAX_ARGUMENTS = [
+    "+refs/heads/main:refs/remotes/origin/@{upstream}",
+    "+refs/heads/@{u}:refs/remotes/origin/@{u}",
+    "HEAD:@{upstream}",
+    "main:refs/remotes/origin/main",
+]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("revision_argument", _REVISION_SYNTAX_ARGUMENTS)
+async def test_git_revision_arguments_survive_the_error_command_echo(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    revision_argument: str,
+) -> None:
+    """Refspec syntax is not a URL and must stay readable in the failed command.
+
+    Redaction has to distinguish "contains an ``@``" from "is a URL". Getting
+    that wrong replaces the one part of the message that says what was actually
+    attempted.
+    """
+    manager = _git_manager(tmp_path)
+
+    class _FailingProcess:
+        returncode = 128
+
+        async def communicate(self) -> tuple[bytes, bytes]:
+            return b"", b"fatal: invalid refspec"
+
+    async def _fake_create_subprocess_exec(*args: object, **kwargs: object) -> _FailingProcess:
+        _ = args, kwargs
+        return _FailingProcess()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
+
+    with pytest.raises(RuntimeError, match="Git command failed") as exc_info:
+        await manager._run_git(["fetch", "origin", revision_argument])
+
+    assert revision_argument in str(exc_info.value)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("argument_template", _LEAKING_COMMAND_ARGUMENT_SHAPES)
+async def test_git_command_arguments_never_leak_credentials_into_error_text(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    argument_template: str,
+) -> None:
+    """A credential in a Git *argument* must not survive into the command echo.
+
+    ``_run_git`` rebuilds the failed command for its error message, redacting
+    each argument in isolation. Injecting only through stderr leaves that path
+    untested, which is how the protocol-relative shapes stayed readable in the
+    raised ``RuntimeError`` while the identical string in stderr was redacted.
+    """
+    secret = "S3CR3T-CANARY"  # noqa: S105
+    manager = _git_manager(tmp_path)
+    leaking_argument = argument_template.format(secret=secret)
+
+    class _FailingProcess:
+        returncode = 128
+
+        async def communicate(self) -> tuple[bytes, bytes]:
+            return b"", b"fatal: could not read remote"
+
+    async def _fake_create_subprocess_exec(*args: object, **kwargs: object) -> _FailingProcess:
+        _ = args, kwargs
+        return _FailingProcess()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
+
+    with pytest.raises(RuntimeError, match="Git command failed") as exc_info:
+        await manager._run_git(["clone", leaking_argument, "dest"])
+
+    assert secret not in str(exc_info.value)
+
+
+@pytest.mark.asyncio
+async def test_git_timeout_message_never_leaks_credentials_from_arguments(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The timeout message rebuilds the same command echo and must redact it too."""
+    secret = "S3CR3T-CANARY"  # noqa: S105
+    manager = _git_manager(tmp_path)
+
+    class _HangingProcess:
+        returncode = None
+
+        async def communicate(self) -> tuple[bytes, bytes]:
+            return b"", b""
+
+        def kill(self) -> None:
+            return None
+
+        async def wait(self) -> None:
+            return None
+
+    async def _fake_create_subprocess_exec(*args: object, **kwargs: object) -> _HangingProcess:
+        _ = args, kwargs
+        return _HangingProcess()
+
+    async def _fake_wait_for(awaitable: Coroutine[object, object, object], **kwargs: object) -> object:
+        _ = kwargs["timeout"]
+        awaitable.close()
+        raise TimeoutError
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
+    monkeypatch.setattr(asyncio, "wait_for", _fake_wait_for)
+    monkeypatch.setattr(manager, "_git_sync_timeout_seconds", lambda: 1.0)
+
+    with pytest.raises(RuntimeError, match="Git command timed out") as exc_info:
+        await manager._run_git(["clone", f"//user:{secret}@example.com/repo.git", "dest"])
+
+    assert secret not in str(exc_info.value)
+
+
+#: Strings that must never be written to ``.git/config``. The first four are
+#: documented provider credential forms with the scheme mistyped or dropped --
+#: ``urlparse`` reads the username as a scheme and reports no authority, so
+#: string surgery on the "scheme" removed the password separator before anything
+#: looked for it, and the secret was persisted verbatim.
+_UNPERSISTABLE_REPO_URLS = [
+    pytest.param("oauth2:{secret}@gitlab.com:org/repo.git", id="gitlab-oauth2-form"),
+    pytest.param("x-access-token:{secret}@github.com/org/repo.git", id="github-token-form"),
+    pytest.param("user:{secret}@github.com:org/repo.git", id="userinfo-without-scheme"),
+    pytest.param("user%3A{secret}@github.com:org/repo.git", id="encoded-colon-without-scheme"),
+    pytest.param("https:{secret}@host/x", id="scheme-without-slashes"),
+    pytest.param("HTTPS:{secret}@host/x", id="uppercase-scheme-without-slashes"),
+    pytest.param("http:///git-user:{secret}@example.com/org/repo.git", id="empty-authority"),
+    pytest.param("//git-user:{secret}@example.com/org/repo.git", id="protocol-relative"),
+    pytest.param("https://user%3A{secret}%40example.com/repo.git", id="percent-encoded-authority"),
+    pytest.param("https://user%253A{secret}%2540example.com/repo.git", id="double-encoded-authority"),
+]
+
+#: Remote forms that must keep working. Refusing any of these would break a
+#: supported configuration, so parse-or-refuse has to admit them positively.
+_PERSISTABLE_REPO_URLS = [
+    ("https://example.com/org/repo.git", "https://example.com/org/repo.git"),
+    ("https://user:{secret}@example.com/org/repo.git", "https://example.com/org/repo.git"),
+    ("ssh://git@example.com/org/repo.git", "ssh://git@example.com/org/repo.git"),
+    ("ssh://git:{secret}@example.com/org/repo.git", "ssh://example.com/org/repo.git"),
+    ("git@github.com:org/repo.git", "git@github.com:org/repo.git"),
+    ("https://[::1]:8443/org/repo.git", "https://[::1]:8443/org/repo.git"),
+    ("file:///srv/repos/x.git", "file:///srv/repos/x.git"),
+    ("/srv/repos/x.git", "/srv/repos/x.git"),
+    # An ``@`` outside the authority is not userinfo and must not be refused.
+    ("https://host:8443/a@b", "https://host:8443/a@b"),
+    ("https://host/@scope/pkg.git", "https://host/@scope/pkg.git"),
+]
+
+
+@pytest.mark.parametrize("repo_url_template", _UNPERSISTABLE_REPO_URLS)
+def test_unsafe_remote_url_is_refused_rather_than_persisted(repo_url_template: str) -> None:
+    """A remote URL that cannot be parsed must be refused, not sanitized.
+
+    Writing the checkout's ``origin`` is the one place a secret would land on
+    disk and stay there across syncs, so the rule is parse-or-refuse: accept
+    only shapes whose authority actually resolves, and reject the rest instead
+    of guessing where their userinfo is.
+    """
+    secret = "S3CR3T-CANARY"  # noqa: S105
+    repo_url = repo_url_template.format(secret=secret)
+
+    with pytest.raises(RuntimeError, match="Refusing to write an unsafe remote URL") as exc_info:
+        knowledge_manager_module._persistable_remote_url(repo_url, "docs")
+
+    assert secret not in str(exc_info.value)
+
+
+@pytest.mark.parametrize(("repo_url_template", "expected"), _PERSISTABLE_REPO_URLS)
+def test_supported_remote_url_forms_are_still_persistable(repo_url_template: str, expected: str) -> None:
+    """Parse-or-refuse must not cost any supported remote form."""
+    secret = "S3CR3T-CANARY"  # noqa: S105
+    persisted = knowledge_manager_module._persistable_remote_url(repo_url_template.format(secret=secret), "docs")
+
+    assert persisted == expected
+    assert secret not in persisted
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stderr_template", _LEAKING_CREDENTIAL_SHAPES)
+async def test_malformed_credential_url_never_reaches_error_text_or_metadata(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    stderr_template: str,
+) -> None:
+    """A secret Git prints must not survive into the raised or persisted error.
+
+    ``KnowledgeGitConfig.repo_url`` accepts any string, so a malformed clone URL
+    is a real path from operator config into Git's output, and from there into
+    the raised ``RuntimeError``, the persisted ``last_error``, and the knowledge
+    API. Redaction must fail closed on shapes it cannot parse into userinfo.
+    """
+    secret = "S3CR3T-CANARY"  # noqa: S105
+    docs_path = tmp_path / "docs"
+    docs_path.mkdir()
+    config = _config(
+        tmp_path,
+        bases={"docs": docs_path},
+        agent_bases=["docs"],
+        git_configs={"docs": KnowledgeGitConfig(repo_url="https://example.com/org/repo.git", branch="main")},
+    )
+    runtime_paths = runtime_paths_for(config)
+    stderr = f"fatal: unable to access '{stderr_template.format(secret=secret)}': failed"
+
+    class _FailedGitProcess:
+        returncode = 128
+
+        async def communicate(self) -> tuple[bytes, bytes]:
+            return b"", stderr.encode()
+
+    async def _fail_git_command(*args: object, **kwargs: object) -> _FailedGitProcess:
+        _ = (args, kwargs)
+        return _FailedGitProcess()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", _fail_git_command)
+
+    with pytest.raises(RuntimeError) as exc_info:
+        await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+
+    key = resolve_published_index_key("docs", config=config, runtime_paths=runtime_paths)
+    state = load_published_index_state(published_index_metadata_path(key))
+    assert state is not None
+    metadata_text = published_index_metadata_path(key).read_text(encoding="utf-8")
+    error_texts = [str(exc_info.value), state.last_error or "", metadata_text]
+
+    assert state.last_error is not None
+    for error_text in error_texts:
+        assert secret not in error_text
+
+
+@pytest.mark.asyncio
+async def test_spaced_authorization_header_is_redacted_in_error_text_and_metadata(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Whitespace before the header colon must not carry a Basic token through.
+
+    HTTP allows it, so a proxy or credential helper that reformats a header it
+    echoes back would otherwise publish a reusable credential in plaintext.
+    """
+    secret = "S3CR3T-CANARY"  # noqa: S105
+    token = base64.b64encode(f"x-access-token:{secret}".encode()).decode("ascii")
+    docs_path = tmp_path / "docs"
+    docs_path.mkdir()
+    config = _config(
+        tmp_path,
+        bases={"docs": docs_path},
+        agent_bases=["docs"],
+        git_configs={"docs": KnowledgeGitConfig(repo_url="https://example.com/org/repo.git", branch="main")},
+    )
+    runtime_paths = runtime_paths_for(config)
+    stderr = f"fatal: rejected\nAuthorization : Basic {token}\n"
+
+    class _FailedGitProcess:
+        returncode = 128
+
+        async def communicate(self) -> tuple[bytes, bytes]:
+            return b"", stderr.encode()
+
+    async def _fail_git_command(*args: object, **kwargs: object) -> _FailedGitProcess:
+        _ = (args, kwargs)
+        return _FailedGitProcess()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", _fail_git_command)
+
+    with pytest.raises(RuntimeError) as exc_info:
+        await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+
+    key = resolve_published_index_key("docs", config=config, runtime_paths=runtime_paths)
+    state = load_published_index_state(published_index_metadata_path(key))
+    assert state is not None
+    metadata_text = published_index_metadata_path(key).read_text(encoding="utf-8")
+    error_texts = [str(exc_info.value), state.last_error or "", metadata_text]
+
+    assert "Authorization: Basic ***" in str(exc_info.value)
+    for error_text in error_texts:
+        assert token not in error_text
+        assert secret not in error_text
+
+
+@pytest.mark.asyncio
+async def test_run_git_reports_the_git_failure_when_stderr_holds_an_unparseable_url(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Malformed URLs in Git output must not replace the failure with a parse error.
+
+    Redaction runs on whatever a remote or a local ``git`` chose to print, and an
+    unterminated IPv6 literal makes ``urlparse`` raise. Raising there would
+    destroy the diagnostic exactly when something has already gone wrong.
+    """
+    manager = _git_manager(tmp_path)
+
+    class _FailingProcess:
+        returncode = 128
+
+        async def communicate(self) -> tuple[bytes, bytes]:
+            return b"", b"fatal: unable to access 'http://[': bad address"
+
+    async def _fake_create_subprocess_exec(*args: object, **kwargs: object) -> _FailingProcess:
+        _ = args, kwargs
+        return _FailingProcess()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
+
+    with pytest.raises(RuntimeError, match="Git command failed with exit code 128") as exc_info:
+        await manager._run_git(["fetch", "origin", "main"])
+
+    assert "bad address" in str(exc_info.value)
+
+
+def test_redacting_hostile_stderr_does_not_stall_the_event_loop() -> None:
+    """Redaction cost must not be something a remote can choose.
+
+    This runs inline in the coroutine reading Git's stderr, and a remote drives
+    that through sideband packets Git concatenates without newlines. Recognising
+    URL shapes with a pattern per shape meant several scans over the same text,
+    each able to start at many positions; the protocol-relative one could start
+    at every ``//`` and took 148 s on 195 KB of slashes. A single tokenizer
+    visits each character once, and the per-token bound is applied before any
+    classification rather than inside it.
+    """
+    secret = "S3CR3T-CANARY"  # noqa: S105
+    slash_payload = "/" * (195 * 1024)
+    nested_escape_token = f"https://user:{secret}@" + "%" + "25" * (128 * 1024) + "40example.com/x"
+
+    started = time.perf_counter()
+    for payload in (slash_payload, f"fatal: unable to access '{nested_escape_token}': failed"):
+        redacted = redact_credentials_in_text(payload)
+        assert secret not in redacted
+    elapsed = time.perf_counter() - started
+
+    assert elapsed < 1.0
+
+
+def test_redacting_a_non_ascii_basic_token_does_not_raise() -> None:
+    """A Basic token that is not decodable must still redact, not blow up.
+
+    ``b64decode`` raises a bare ``ValueError`` for non-ASCII input rather than
+    the ``binascii.Error`` a narrower ``except`` would catch, so this pins the
+    breadth of that handler: the header is still redacted, and redaction never
+    replaces the Git failure it was called to sanitize.
+    """
+    assert redact_credentials_in_text("Authorization: Basic éééé") == "Authorization: Basic ***"
+
+
+#: Finding 2: the API surface and the error path must not give opposite answers
+#: about one string. ``redact_url_credentials`` already dropped scp userinfo, but
+#: free text never routed scp tokens to it, so ``last_error`` and the dashboard
+#: kept the token that the API field removed.
+_SCP_TOKENS_IN_FREE_TEXT = [
+    "{secret}@github.com:org/repo.git",
+    "fatal: could not read from '{secret}@github.com:org/repo.git'",
+    "Submodule 'v' ({secret}@github.com:org/x.git) registered",
+]
+
+
+@pytest.mark.parametrize("template", _SCP_TOKENS_IN_FREE_TEXT)
+def test_scp_style_tokens_are_redacted_in_free_text_too(template: str) -> None:
+    """Both redactors must agree about an scp-style remote."""
+    secret = "S3CR3T-CANARY"  # noqa: S105
+    value = template.format(secret=secret)
+
+    redacted = redact_credentials_in_text(value)
+
+    assert secret not in redacted
+    assert redact_url_credentials(f"{secret}@github.com:org/repo.git") == "***@github.com:org/repo.git"
+
+
+#: Diagnostics that must survive untouched. Redaction has to distinguish
+#: "contains an ``@`` or a colon" from "is a URL"; getting that wrong replaces
+#: the only part of a message that says what was attempted.
+_UNTOUCHED_GIT_DIAGNOSTICS = [
+    "fatal: repository 'https://github.com/example/repo.git/' not found",
+    "warning: refname 'HEAD@{upstream}' is ambiguous",
+    "main@{0}: commit: initial import",
+    "Author: Bas Nijholt <bas@example.com>",
+    "fatal: invalid refspec '+refs/heads/main:refs/remotes/origin/@{upstream}'",
+    "git merge-base HEAD:@{upstream} HEAD",
+    "git config --global user.email you@example.com",
+    "https://[::1]:8080/repo.git",
+    "http://[fe80::1%25eth0]/x",
+]
+
+
+@pytest.mark.parametrize("diagnostic", _UNTOUCHED_GIT_DIAGNOSTICS)
+def test_realistic_git_diagnostics_are_not_over_redacted(diagnostic: str) -> None:
+    """Fail-closed redaction must still leave ordinary Git output readable."""
+    assert redact_credentials_in_text(diagnostic) == diagnostic

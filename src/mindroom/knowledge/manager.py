@@ -7,6 +7,7 @@ import base64
 import hashlib
 import json
 import os
+import re
 import time
 import uuid
 from contextlib import suppress
@@ -15,7 +16,7 @@ from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from functools import partial
 from typing import IO, TYPE_CHECKING, Any, Literal, NoReturn, Protocol, TypeVar, cast, runtime_checkable
-from urllib.parse import quote, urlparse, urlunparse
+from urllib.parse import urlparse
 
 from agno.knowledge.document.base import Document
 from agno.knowledge.reader import ReaderFactory
@@ -78,6 +79,7 @@ from mindroom.knowledge.indexing_config import (
 from mindroom.knowledge.redaction import (
     credential_free_repo_url,
     embedded_http_userinfo,
+    fully_unquoted,
     redact_credentials_in_text,
     redact_url_credentials,
 )
@@ -511,46 +513,6 @@ def _semantic_indexing_enabled(config: Config, base_id: str) -> bool:
     return config.get_knowledge_base_config(base_id).mode == "semantic"
 
 
-def _authenticated_repo_url(
-    repo_url: str,
-    credentials_service: str | None,
-    runtime_paths: RuntimePaths,
-) -> str:
-    """Inject HTTPS credentials from CredentialsManager into a repository URL."""
-    if not credentials_service:
-        return repo_url
-
-    credentials = get_runtime_shared_credentials_manager(runtime_paths).load_credentials(credentials_service) or {}
-    username = credentials.get("username")
-    token = credentials.get("token") or credentials.get("api_key")
-    password = credentials.get("password")
-
-    if not isinstance(username, str) and token and not password:
-        username = "x-access-token"
-
-    if not isinstance(username, str) or not username:
-        return repo_url
-
-    secret: str | None
-    if isinstance(password, str) and password:
-        secret = password
-    elif isinstance(token, str) and token:
-        secret = token
-    else:
-        secret = None
-
-    if secret is None:
-        return repo_url
-
-    parsed = urlparse(repo_url)
-    if parsed.scheme not in {"http", "https"}:
-        return repo_url
-
-    hostname = parsed.netloc.split("@")[-1]
-    auth_netloc = f"{quote(username, safe='')}:{quote(secret, safe='')}@{hostname}"
-    return urlunparse(parsed._replace(netloc=auth_netloc))
-
-
 def _credentials_service_http_userinfo(
     credentials_service: str | None,
     runtime_paths: RuntimePaths,
@@ -606,19 +568,122 @@ def _git_auth_env(
     if credentials_userinfo is not None:
         return _git_http_basic_auth_env(clean_url, *credentials_userinfo)
 
-    authenticated_url = (
-        repo_url if clean_url != repo_url else _authenticated_repo_url(clean_url, credentials_service, runtime_paths)
-    )
-    if authenticated_url == clean_url:
+    if clean_url == repo_url:
+        # Nothing was stripped, so there is nothing to restore process-locally.
         return None
-    parsed_authenticated_url = urlparse(authenticated_url)
-    if parsed_authenticated_url.netloc and "@" in parsed_authenticated_url.netloc:
+    parsed_repo_url = urlparse(repo_url)
+    if parsed_repo_url.netloc and "@" in parsed_repo_url.netloc:
+        # Userinfo in the authority is handled by the two branches above; it must
+        # not be rebuilt into a config key, which Git echoes verbatim on error.
         return None
+    # What remains is a secret carried in the query or fragment, which
+    # ``credential_free_repo_url`` strips. Restore it for this process only.
     return {
         "GIT_CONFIG_COUNT": "1",
-        "GIT_CONFIG_KEY_0": f"url.{authenticated_url}.insteadOf",
+        "GIT_CONFIG_KEY_0": f"url.{repo_url}.insteadOf",
         "GIT_CONFIG_VALUE_0": clean_url,
     }
+
+
+#: scp-style SSH syntax (``git@github.com:org/repo.git``), which ``urlparse``
+#: reports as a bare path rather than a URL, plus the same form with the
+#: username left off (``github.com:org/repo.git``), which Git clones as the
+#: local user. Matched positively and narrowly: the ``(?!//)`` is what stops it
+#: swallowing an ordinary ``scheme://host/path``. Underscores are not valid in
+#: hostnames but ssh and Git accept them, and internal hosts use them.
+_SCP_STYLE_REMOTE_URL: re.Pattern[str] = re.compile(
+    r"^(?:[A-Za-z0-9._-]+@)?(?:[A-Za-z0-9._-]+|\[[0-9A-Fa-f:]+\]):(?!//)[^@]*$",
+)
+
+
+def _unwritable_remote(base_id: str, reason: str) -> RuntimeError:
+    """Build the refusal raised instead of writing a remote URL to disk.
+
+    Names no URL. This is raised into an error path that is persisted and shown
+    in the dashboard, which is the very thing being prevented.
+    """
+    return RuntimeError(
+        f"Refusing to write an unsafe remote URL for knowledge base '{base_id}' ({reason}). "
+        "Use a well-formed URL such as https://host/org/repo.git or git@host:org/repo.git, "
+        "and move any secret to a credentials_service instead of embedding it in repo_url. "
+        "An existing checkout may still hold a remote written before this check; "
+        "delete the checkout directory to clear it.",
+    )
+
+
+def _persistable_remote_url(repo_url: str, base_id: str) -> str:
+    """Return the remote URL safe to write to disk, or refuse to write one.
+
+    Parse or refuse. Four shapes are accepted, each positively matched: a URL
+    whose authority ``urlparse`` actually resolves, scp-style SSH syntax, an
+    absolute local path, and ``file:`` with no authority. Anything else is
+    refused rather than sanitized.
+
+    The distinction matters because classifying by string surgery does not work
+    here. A URL scheme and a username share a grammar, so
+    ``oauth2:glpat_XXX@gitlab.com:org/repo.git`` -- GitLab's documented
+    credential form with ``https://`` dropped -- is reported by ``urlparse`` as
+    scheme ``oauth2`` with no authority at all. Stripping that "scheme" removes
+    the password separator before anything can look for it. Requiring the parse
+    to succeed makes that class unrepresentable instead of merely unmatched.
+
+    Credentials may transit as a process-local ``GIT_CONFIG_*`` header, which is
+    what ``_git_auth_env`` is for; they must never be persisted. So this checks
+    the string actually about to be written rather than classifying config.
+    """
+    clean_url = credential_free_repo_url(repo_url)
+
+    if _SCP_STYLE_REMOTE_URL.match(clean_url):
+        return clean_url
+
+    if clean_url.startswith("/") and not clean_url.startswith("//"):
+        # An absolute local path, which Git accepts as a remote for a local
+        # clone. It has no authority and therefore no userinfo; the single
+        # leading slash is what separates it from a protocol-relative URL.
+        return clean_url
+
+    try:
+        parsed = urlparse(clean_url)
+    except ValueError as exc:
+        raise _unwritable_remote(base_id, "the URL cannot be parsed") from exc
+
+    if not parsed.scheme:
+        raise _unwritable_remote(base_id, "the URL has no scheme")
+
+    if fully_unquoted(clean_url).count("@") != clean_url.count("@"):
+        raise _unwritable_remote(base_id, "a percent-encoded separator hides part of the URL")
+
+    if not parsed.netloc:
+        # ``file:`` is the one scheme with no authority by design, so it has no
+        # userinfo to hide; any other empty authority means the string only
+        # looked like a URL.
+        if parsed.scheme == "file" and "@" not in clean_url:
+            return clean_url
+        raise _unwritable_remote(base_id, "the URL has no host")
+
+    if parsed.netloc.count("@") > 1:
+        raise _unwritable_remote(base_id, "the URL has an ambiguous authority")
+
+    if ":" in parsed.netloc.rpartition("@")[0]:
+        # A password in the authority. The bare ``user@host`` that
+        # ``credential_free_repo_url`` deliberately keeps for SSH has no colon
+        # and is still allowed.
+        raise _unwritable_remote(base_id, "the URL embeds a password")
+
+    return clean_url
+
+
+def _redacted_command(args: list[str]) -> str:
+    """Render a failed Git command for an error message, with credentials removed.
+
+    Deliberately the same redactor the caller applies to stderr. Redacting each
+    argument in isolation gave the two halves of one error message different
+    answers about the same string, and treating every argument as a candidate
+    URL also mangled Git revision syntax: an argument like
+    ``+refs/heads/main:refs/remotes/origin/@{upstream}`` is not a URL, but it
+    has an ``@``. Sharing one function means the two cannot disagree.
+    """
+    return redact_credentials_in_text(" ".join(["git", *args]))
 
 
 def _merge_git_env(*envs: dict[str, str] | None) -> dict[str, str] | None:
@@ -953,7 +1018,7 @@ class KnowledgeManager:
                 process.kill()
             with suppress(ProcessLookupError):
                 await process.wait()
-            command = " ".join(["git", *(redact_url_credentials(arg) for arg in args)])
+            command = _redacted_command(args)
             msg = f"Git command timed out after {timeout_seconds:.0f}s: {command}"
             raise RuntimeError(msg) from exc
 
@@ -963,7 +1028,7 @@ class KnowledgeManager:
         stdout_text = stdout.decode("utf-8", errors="replace").strip()
         stderr_text = stderr.decode("utf-8", errors="replace").strip()
         details = redact_credentials_in_text(stderr_text or stdout_text)
-        command = " ".join(["git", *(redact_url_credentials(arg) for arg in args)])
+        command = _redacted_command(args)
         msg = f"Git command failed with exit code {process.returncode}: {command}"
         if details:
             msg = f"{msg}\n{details}"
@@ -1038,7 +1103,7 @@ class KnowledgeManager:
         if await self._git_checkout_present():
             await self._ensure_git_lfs_repository_ready(knowledge_root)
             current_remote = (await self._run_git(["remote", "get-url", "origin"])).strip()
-            expected_remote = credential_free_repo_url(git_config.repo_url)
+            expected_remote = _persistable_remote_url(git_config.repo_url, self.base_id)
             if current_remote != expected_remote:
                 await self._run_git(["remote", "set-url", "origin", expected_remote])
             return False
@@ -1053,7 +1118,7 @@ class KnowledgeManager:
         knowledge_root.parent.mkdir(parents=True, exist_ok=True)
         if git_config.lfs:
             await self._ensure_git_lfs_available(cwd=knowledge_root.parent)
-        clone_url = credential_free_repo_url(git_config.repo_url)
+        clone_url = _persistable_remote_url(git_config.repo_url, self.base_id)
         await self._run_git(
             [
                 "clone",
