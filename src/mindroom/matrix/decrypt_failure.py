@@ -84,15 +84,24 @@ def e2ee_stats() -> E2EEStats:
 _notice_floors: dict[tuple[str, str | None], int] = {}
 
 
-def raise_notice_floor(user_id: str, room_id: str | None = None) -> None:
-    """Suppress visible decrypt-failure notices for events older than now.
+def raise_notice_floor(
+    user_id: str,
+    room_id: str | None = None,
+    *,
+    floor_timestamp_ms: int | None = None,
+) -> None:
+    """Suppress visible decrypt-failure notices for events older than a floor.
 
     Bots call this when they join a room mid-flight (pre-join encrypted
     history is expected to be undecryptable) and when they start without sync
     continuity (a tokenless initial sync replays events an earlier device may
     already have handled). ``room_id=None`` applies to every room for the bot.
+    The current wall clock is used unless the caller preserves an earlier
+    startup cutoff across continuity retries.
     """
-    _notice_floors[(user_id, room_id)] = int(time.time() * 1000)
+    floor = int(time.time() * 1000) if floor_timestamp_ms is None else floor_timestamp_ms
+    key = (user_id, room_id)
+    _notice_floors[key] = max(_notice_floors.get(key, 0), floor)
 
 
 def _below_notice_floor(user_id: str | None, room_id: str, server_timestamp: int) -> bool:

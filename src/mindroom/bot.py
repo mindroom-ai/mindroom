@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import math
 import time
 from dataclasses import dataclass, replace
 from functools import cached_property
@@ -286,6 +287,8 @@ class AgentBot:
     _last_sync_monotonic: float | None
     _first_sync_done: bool
     _sync_shutting_down: bool
+    _startup_cutoff_ms: int
+    _historical_dispatch_fence_armed: bool
 
     # Shared runtime state and extracted collaborators
     _hook_registry_state: HookRegistryState
@@ -343,6 +346,8 @@ class AgentBot:
         self._last_sync_monotonic = None
         self._first_sync_done = False
         self._sync_shutting_down = False
+        self._startup_cutoff_ms = int(time.time() * 1000)
+        self._historical_dispatch_fence_armed = False
         self._hook_registry_state = HookRegistryState(HookRegistry.empty())
         self._room_member_callback_registered = False
         self._room_member_join_hooks_armed = False
@@ -1072,9 +1077,15 @@ class AgentBot:
         assert client is not None
         sync_token = await self._sync_cache_trust.prepare_startup()
         cast("Any", client).next_batch = sync_token
-        if sync_token is None and client.user_id:
-            # A cold sync replays history handled by an older device.
-            raise_notice_floor(client.user_id)
+        starts_without_continuity = self.config.matrix_sync.mode == "sliding" or sync_token is None
+        self._set_historical_dispatch_fence(armed=starts_without_continuity)
+
+    def _set_historical_dispatch_fence(self, *, armed: bool) -> None:
+        """Set tokenless-window admission and its matching decrypt-notice floor."""
+        self._historical_dispatch_fence_armed = armed
+        client = self.client
+        if armed and client is not None and client.user_id:
+            raise_notice_floor(client.user_id, floor_timestamp_ms=self._startup_cutoff_ms)
 
     def _certify_sync_response(
         self,
@@ -1088,6 +1099,9 @@ class AgentBot:
             next_batch=next_batch,
             cache_result=cache_result,
             first_sync=first_sync,
+        )
+        self._set_historical_dispatch_fence(
+            armed=decision.reset_client_token or decision.reason == "missing_next_batch",
         )
         if decision.reset_client_token and self.client is not None:
             cast("Any", self.client).next_batch = None
@@ -1133,6 +1147,59 @@ class AgentBot:
             create_background_task(error_handler(), owner=self._runtime_view)
 
         return wrapper
+
+    def _create_dispatch_task_wrapper(
+        self,
+        callback: Callable[..., Awaitable[None]],
+        *,
+        callback_name: str,
+    ) -> Callable[..., Awaitable[None]]:
+        """Fence cold-sync history before dispatch work becomes a background task."""
+        task_wrapper = _create_task_wrapper(
+            callback,
+            owner=self._runtime_view,
+            on_error=self._sync_cache_trust.mark_callback_failed,
+        )
+
+        async def wrapper(room: nio.MatrixRoom, event: nio.Event) -> None:
+            if not self._initial_sync_event_is_dispatchable(room, event, callback_name=callback_name):
+                return
+            await task_wrapper(room, event)
+
+        return wrapper
+
+    def _initial_sync_event_is_dispatchable(
+        self,
+        room: nio.MatrixRoom,
+        event: nio.Event,
+        *,
+        callback_name: str,
+    ) -> bool:
+        """Return whether one callback may enter user-visible dispatch."""
+        if not self._historical_dispatch_fence_armed:
+            return True
+
+        origin_server_ts = origin_server_ts_from_event_source(event.source)
+        timestamp_is_finite = isinstance(origin_server_ts, int) or (
+            isinstance(origin_server_ts, float) and math.isfinite(origin_server_ts)
+        )
+        if timestamp_is_finite:
+            assert origin_server_ts is not None
+            if origin_server_ts >= self._startup_cutoff_ms:
+                return True
+            reason = "predates_startup_cutoff"
+        else:
+            reason = "missing_origin_server_ts" if origin_server_ts is None else "invalid_origin_server_ts"
+
+        self.logger.info(
+            "matrix_initial_sync_dispatch_fenced",
+            callback=callback_name,
+            event_id=event.event_id,
+            room_id=room.room_id,
+            agent_name=self.agent_name,
+            reason=reason,
+        )
+        return False
 
     def _room_member_join_sync_hook_plan(
         self,
@@ -1226,6 +1293,7 @@ class AgentBot:
             # Sliding sync never certifies the classic checkpoint, but the
             # account's own kicks and bans still must fence and purge rooms.
             await self._apply_own_room_membership_from_sliding_sync(_response)
+            self._set_historical_dispatch_fence(armed=False)
         self._first_sync_done = True
         self._room_member_join_hooks_armed = room_member_join_hook_plan.arm_after_response
 
@@ -1259,12 +1327,16 @@ class AgentBot:
             # nio restarts expired sliding connections (M_UNKNOWN_POS)
             # transparently, and sliding errors say nothing about the classic
             # sync checkpoint, so classic token rejection must not run here.
+            if _response.status_code == "M_UNKNOWN_POS":
+                self._set_historical_dispatch_fence(armed=True)
             self._warn_if_sliding_sync_never_succeeded(_response)
             return
         if _response.status_code == "M_UNKNOWN_POS":
             decision = self._sync_cache_trust.reject_unknown_pos()
-            if decision.reset_client_token and self.client is not None:
-                cast("Any", self.client).next_batch = None
+            if decision.reset_client_token:
+                self._set_historical_dispatch_fence(armed=True)
+                if self.client is not None:
+                    cast("Any", self.client).next_batch = None
             self._room_member_join_hooks_armed = False
             self.logger.warning(
                 "matrix_sync_token_rejected",
@@ -1466,7 +1538,7 @@ class AgentBot:
                 nio.InviteEvent,  # ty: ignore[invalid-argument-type]  # InviteEvent doesn't inherit Event
             )
             client.add_event_callback(
-                _create_task_wrapper(self._on_message, owner=self._runtime_view, on_error=callback_failed),
+                self._create_dispatch_task_wrapper(self._on_message, callback_name="message"),
                 nio.RoomMessageText,
             )
             client.add_event_callback(
@@ -1474,23 +1546,21 @@ class AgentBot:
                 nio.RedactionEvent,
             )
             client.add_event_callback(
-                _create_task_wrapper(self._on_reaction, owner=self._runtime_view, on_error=callback_failed),
+                self._create_dispatch_task_wrapper(self._on_reaction, callback_name="reaction"),
                 nio.ReactionEvent,
             )
 
             # Register media callbacks on all agents (each agent handles its own routing)
-            media_callback = _create_task_wrapper(
+            media_callback = self._create_dispatch_task_wrapper(
                 self._on_media_message,
-                owner=self._runtime_view,
-                on_error=callback_failed,
+                callback_name="media",
             )
             for event_type in MATRIX_MEDIA_EVENT_TYPES:
                 client.add_event_callback(media_callback, event_type)
             client.add_event_callback(
-                _create_task_wrapper(
+                self._create_dispatch_task_wrapper(
                     self._on_unknown_event,
-                    owner=self._runtime_view,
-                    on_error=callback_failed,
+                    callback_name="approval",
                 ),
                 nio.UnknownEvent,
             )

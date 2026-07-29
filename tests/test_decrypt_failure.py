@@ -289,6 +289,32 @@ async def test_global_floor_suppresses_notices_in_every_room(tmp_path: Path) -> 
 
 
 @pytest.mark.asyncio
+async def test_explicit_notice_floor_preserves_post_start_failures(tmp_path: Path) -> None:
+    """A continuity reset reuses the startup cutoff instead of hiding newer failures."""
+    client = _mock_client()
+    raise_notice_floor(client.user_id, floor_timestamp_ms=2_000)
+    notice = AsyncMock(return_value=True)
+
+    with patch.object(decrypt_failure, "_send_decrypt_failure_notice", new=notice):
+        await handle_decrypt_failure(
+            client,
+            _mock_room(),
+            _megolm_event(session_id="historical", server_timestamp=1_999),
+            agent_name="assistant",
+            runtime_paths=_runtime_paths(tmp_path),
+        )
+        await handle_decrypt_failure(
+            client,
+            _mock_room(),
+            _megolm_event(session_id="post-start", server_timestamp=2_000),
+            agent_name="assistant",
+            runtime_paths=_runtime_paths(tmp_path),
+        )
+
+    notice.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_event_newer_than_floor_still_notifies(tmp_path: Path) -> None:
     """Fresh messages arriving after a floor was raised must still notify."""
     client = _mock_client()

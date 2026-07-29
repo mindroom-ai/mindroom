@@ -26,7 +26,7 @@ from mindroom.dispatch_source import VOICE_SOURCE_KIND
 from mindroom.matrix.cache.event_cache import EventCacheBackendUnavailableError
 from mindroom.matrix.cache.postgres_event_cache import PostgresEventCache
 from mindroom.matrix.cache.sqlite_event_cache import SqliteEventCache
-from mindroom.matrix.sync_certification import SyncCheckpoint, SyncTrustState
+from mindroom.matrix.sync_certification import SyncCacheWriteResult, SyncCheckpoint, SyncTrustState
 from mindroom.matrix.sync_tokens import clear_sync_token, load_sync_checkpoint, save_sync_token
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.response_admission import ResponseAdmissionGate
@@ -47,6 +47,7 @@ from tests.conftest import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
     from pathlib import Path
 
     from mindroom.coalescing import LaneSlot, _GateEntry
@@ -105,6 +106,48 @@ def _text_event(event_id: str, body: str, origin_server_ts: int) -> nio.RoomMess
             "type": "m.room.message",
         },
     )
+
+
+def _image_event(event_id: str, origin_server_ts: int) -> nio.RoomMessageImage:
+    event = nio.RoomMessage.parse_event(
+        {
+            "content": {"body": "image.png", "msgtype": "m.image", "url": "mxc://localhost/image"},
+            "event_id": event_id,
+            "sender": "@user:localhost",
+            "origin_server_ts": origin_server_ts,
+            "room_id": "!room:localhost",
+            "type": "m.room.message",
+        },
+    )
+    assert isinstance(event, nio.RoomMessageImage)
+    return event
+
+
+def _sync_response_with_event(event: nio.Event, *, next_batch: str = "s_after_cold_sync") -> nio.SyncResponse:
+    response = MagicMock(spec=nio.SyncResponse)
+    response.next_batch = next_batch
+    response.rooms = MagicMock(
+        join={
+            "!room:localhost": MagicMock(
+                timeline=MagicMock(events=[event], limited=False),
+            ),
+        },
+        leave={},
+    )
+    return response
+
+
+async def _start_bot_with_client(bot: AgentBot, client: AsyncMock) -> None:
+    with (
+        patch("mindroom.bot.login_agent_user", AsyncMock(return_value=client)),
+        patch.object(bot, "_set_presence_with_model_info", AsyncMock()),
+        patch("mindroom.bot.interactive.init_persistence"),
+    ):
+        await bot.start()
+
+
+def _registered_event_callback(client: AsyncMock, event_type: type[nio.Event]) -> object:
+    return next(call.args[0] for call in client.add_event_callback.call_args_list if call.args[1] is event_type)
 
 
 def _room_member_event(event_id: str = "$member-join") -> nio.RoomMemberEvent:
@@ -215,6 +258,383 @@ async def test_bot_start_restores_saved_sync_token(tmp_path: Path) -> None:
         await bot.start()
 
     assert client.next_batch == "s_saved"
+
+
+@pytest.mark.asyncio
+async def test_tokenless_initial_sync_caches_old_text_without_dispatch(tmp_path: Path) -> None:
+    """Cold-sync history must reach cache certification without becoming a new turn."""
+    with patch("mindroom.bot.time.time", return_value=2.0):
+        bot = _agent_bot(tmp_path)
+    cache_root = SqliteEventCache(tmp_path / "cold-sync-event-cache.db")
+    bot.event_cache = cache_root.for_principal(bot.agent_user.user_id or "@mindroom_code:localhost")
+    client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
+    client.next_batch = None
+    event = _text_event("$historical-text", "historical", 1_999)
+    room = nio.MatrixRoom("!room:localhost", bot.agent_user.user_id)
+
+    try:
+        await _start_bot_with_client(bot, client)
+        bot.config.agents["code"].startup_thread_prewarm = False
+        callback = cast("Callable[..., Awaitable[None]]", _registered_event_callback(client, nio.RoomMessageText))
+        handle_text_event = AsyncMock()
+        with patch.object(bot._turn_controller, "handle_text_event", handle_text_event):
+            await callback(room, event)
+            await wait_for_background_tasks(timeout=1.0, owner=bot._runtime_view)
+
+        await bot._on_sync_response(_sync_response_with_event(event))
+        cached_event = await bot.event_cache.get_event(room.room_id, event.event_id)
+    finally:
+        await cache_root.close()
+
+    assert cached_event is not None
+    assert cached_event["event_id"] == "$historical-text"
+    assert _load_sync_token_value(tmp_path, bot.agent_name) == "s_after_cold_sync"
+    handle_text_event.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_tokenless_initial_sync_drops_old_media_before_processing(tmp_path: Path) -> None:
+    """Cold-sync media must not enter attachment, transcription, or routing work."""
+    with patch("mindroom.bot.time.time", return_value=2.0):
+        bot = _agent_bot(tmp_path)
+    client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
+    client.next_batch = None
+    event = _image_event("$historical-media", 1_999)
+    room = nio.MatrixRoom("!room:localhost", bot.agent_user.user_id)
+
+    await _start_bot_with_client(bot, client)
+    callback = cast("Callable[..., Awaitable[None]]", _registered_event_callback(client, nio.RoomMessageImage))
+    handle_media_event = AsyncMock()
+    with patch.object(bot._turn_controller, "handle_media_event", handle_media_event):
+        await callback(room, event)
+        await wait_for_background_tasks(timeout=1.0, owner=bot._runtime_view)
+
+    handle_media_event.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_tokenless_initial_sync_dispatches_event_at_startup_cutoff_once(tmp_path: Path) -> None:
+    """An event sent while startup begins remains eligible on the inclusive cutoff."""
+    with patch("mindroom.bot.time.time", return_value=2.0):
+        bot = _agent_bot(tmp_path)
+    client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
+    client.next_batch = None
+    event = _text_event("$startup-live", "live", 2_000)
+    room = nio.MatrixRoom("!room:localhost", bot.agent_user.user_id)
+
+    await _start_bot_with_client(bot, client)
+    callback = cast("Callable[..., Awaitable[None]]", _registered_event_callback(client, nio.RoomMessageText))
+    handle_text_event = AsyncMock()
+    with patch.object(bot._turn_controller, "handle_text_event", handle_text_event):
+        await callback(room, event)
+        await wait_for_background_tasks(timeout=1.0, owner=bot._runtime_view)
+
+    handle_text_event.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_restored_checkpoint_keeps_incremental_dispatch_unchanged(tmp_path: Path) -> None:
+    """Restored-token catch-up events must retain existing dispatch behavior."""
+    with patch("mindroom.bot.time.time", return_value=2.0):
+        bot = _agent_bot(tmp_path)
+    save_sync_token(
+        tmp_path,
+        bot.agent_name,
+        "s_restored",
+        cache_generation=bot.event_cache.cache_generation,
+    )
+    client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
+    client.next_batch = None
+    event = _text_event("$incremental", "incremental", 1_000)
+    room = nio.MatrixRoom("!room:localhost", bot.agent_user.user_id)
+
+    await _start_bot_with_client(bot, client)
+    callback = cast("Callable[..., Awaitable[None]]", _registered_event_callback(client, nio.RoomMessageText))
+    handle_text_event = AsyncMock()
+    with patch.object(bot._turn_controller, "handle_text_event", handle_text_event):
+        await callback(room, event)
+        await wait_for_background_tasks(timeout=1.0, owner=bot._runtime_view)
+
+    handle_text_event.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_sliding_initial_sync_fences_history_despite_classic_checkpoint(tmp_path: Path) -> None:
+    """Sliding Sync starts without a reusable position even if a classic checkpoint exists."""
+    with patch("mindroom.bot.time.time", return_value=2.0):
+        bot = _agent_bot(tmp_path)
+    bot.config.matrix_sync.mode = "sliding"
+    save_sync_token(
+        tmp_path,
+        bot.agent_name,
+        "s_classic",
+        cache_generation=bot.event_cache.cache_generation,
+    )
+    client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
+    client.next_batch = None
+    event = _text_event("$sliding-history", "historical", 1_999)
+    room = nio.MatrixRoom("!room:localhost", bot.agent_user.user_id)
+
+    await _start_bot_with_client(bot, client)
+    callback = cast("Callable[..., Awaitable[None]]", _registered_event_callback(client, nio.RoomMessageText))
+    handle_text_event = AsyncMock()
+    with patch.object(bot._turn_controller, "handle_text_event", handle_text_event):
+        await callback(room, event)
+        await wait_for_background_tasks(timeout=1.0, owner=bot._runtime_view)
+
+    handle_text_event.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_sliding_initial_sync_raises_decrypt_notice_floor_despite_classic_checkpoint(tmp_path: Path) -> None:
+    """Sliding history needs the existing decrypt-notice floor because no position is reusable."""
+    bot = _agent_bot(tmp_path)
+    bot.config.matrix_sync.mode = "sliding"
+    save_sync_token(
+        tmp_path,
+        bot.agent_name,
+        "s_classic",
+        cache_generation=bot.event_cache.cache_generation,
+    )
+    client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
+    client.next_batch = None
+
+    with patch("mindroom.bot.raise_notice_floor") as notice_floor:
+        await _start_bot_with_client(bot, client)
+
+    notice_floor.assert_called_once_with(client.user_id, floor_timestamp_ms=bot._startup_cutoff_ms)
+
+
+@pytest.mark.asyncio
+async def test_missing_next_batch_keeps_historical_dispatch_fence_armed(tmp_path: Path) -> None:
+    """A successful response without a continuation token leaves the next request tokenless."""
+    with patch("mindroom.bot.time.time", return_value=2.0):
+        bot = _agent_bot(tmp_path)
+    client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
+    client.next_batch = None
+    event = _text_event("$missing-token-history", "historical", 1_999)
+    room = nio.MatrixRoom("!room:localhost", bot.agent_user.user_id)
+
+    await _start_bot_with_client(bot, client)
+    response = MagicMock(spec=nio.SyncResponse)
+    response.next_batch = None
+    response.rooms = MagicMock(join={}, leave={})
+    with (
+        patch.object(
+            bot._conversation_cache,
+            "cache_sync_timeline_for_certification",
+            AsyncMock(return_value=SyncCacheWriteResult(complete=True)),
+        ),
+        patch.object(bot, "_run_sync_response_side_effects", AsyncMock()),
+    ):
+        await bot._on_sync_response(response)
+
+    callback = cast("Callable[..., Awaitable[None]]", _registered_event_callback(client, nio.RoomMessageText))
+    handle_text_event = AsyncMock()
+    with patch.object(bot._turn_controller, "handle_text_event", handle_text_event):
+        await callback(room, event)
+        await wait_for_background_tasks(timeout=1.0, owner=bot._runtime_view)
+
+    handle_text_event.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_post_start_unknown_pos_rearms_historical_dispatch_fence(tmp_path: Path) -> None:
+    """A rejected live checkpoint makes the next classic request tokenless again."""
+    with patch("mindroom.bot.time.time", return_value=2.0):
+        bot = _agent_bot(tmp_path)
+    save_sync_token(
+        tmp_path,
+        bot.agent_name,
+        "s_restored",
+        cache_generation=bot.event_cache.cache_generation,
+    )
+    client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
+    client.next_batch = None
+    event = _text_event("$unknown-pos-history", "historical", 1_999)
+    room = nio.MatrixRoom("!room:localhost", bot.agent_user.user_id)
+
+    with patch("mindroom.bot.raise_notice_floor") as notice_floor:
+        await _start_bot_with_client(bot, client)
+        bot._first_sync_done = True
+        sync_error = MagicMock(spec=nio.SyncError)
+        sync_error.status_code = "M_UNKNOWN_POS"
+        await bot._on_sync_error(sync_error)
+
+    notice_floor.assert_called_once_with(client.user_id, floor_timestamp_ms=bot._startup_cutoff_ms)
+
+    callback = cast("Callable[..., Awaitable[None]]", _registered_event_callback(client, nio.RoomMessageText))
+    handle_text_event = AsyncMock()
+    with patch.object(bot._turn_controller, "handle_text_event", handle_text_event):
+        await callback(room, event)
+        await wait_for_background_tasks(timeout=1.0, owner=bot._runtime_view)
+
+    handle_text_event.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_post_start_certification_reset_rearms_historical_dispatch_fence(tmp_path: Path) -> None:
+    """A certification rewind makes the following classic request tokenless."""
+    with patch("mindroom.bot.time.time", return_value=2.0):
+        bot = _agent_bot(tmp_path)
+    save_sync_token(
+        tmp_path,
+        bot.agent_name,
+        "s_restored",
+        cache_generation=bot.event_cache.cache_generation,
+    )
+    client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
+    client.next_batch = None
+    event = _text_event("$rewind-history", "historical", 1_999)
+    room = nio.MatrixRoom("!room:localhost", bot.agent_user.user_id)
+
+    await _start_bot_with_client(bot, client)
+    bot._first_sync_done = True
+    response = MagicMock(spec=nio.SyncResponse)
+    response.next_batch = "s_limited"
+    response.rooms = MagicMock(join={}, leave={})
+    with patch.object(
+        bot._conversation_cache,
+        "cache_sync_timeline_for_certification",
+        AsyncMock(return_value=SyncCacheWriteResult(complete=True, limited_room_ids=(room.room_id,))),
+    ):
+        await bot._on_sync_response(response)
+    assert client.next_batch is None
+
+    callback = cast("Callable[..., Awaitable[None]]", _registered_event_callback(client, nio.RoomMessageText))
+    handle_text_event = AsyncMock()
+    with patch.object(bot._turn_controller, "handle_text_event", handle_text_event):
+        await callback(room, event)
+        await wait_for_background_tasks(timeout=1.0, owner=bot._runtime_view)
+
+    handle_text_event.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    ("origin_server_ts", "expected_reason"),
+    [
+        pytest.param(None, "missing_origin_server_ts", id="missing"),
+        pytest.param(float("inf"), "invalid_origin_server_ts", id="non-finite"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_tokenless_initial_sync_unusable_timestamp_fails_closed(
+    tmp_path: Path,
+    origin_server_ts: float | None,
+    expected_reason: str,
+) -> None:
+    """An untrusted timestamp must not license user-visible cold-sync dispatch."""
+    with patch("mindroom.bot.time.time", return_value=2.0):
+        bot = _agent_bot(tmp_path)
+    client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
+    client.next_batch = None
+    event = MagicMock(spec=nio.RoomMessageText)
+    event.event_id = "$missing-timestamp"
+    event.sender = "@user:localhost"
+    event.source = {
+        "content": {"body": "missing timestamp", "msgtype": "m.text"},
+        "event_id": event.event_id,
+        "sender": event.sender,
+        "type": "m.room.message",
+    }
+    if origin_server_ts is not None:
+        event.source["origin_server_ts"] = origin_server_ts
+    room = nio.MatrixRoom("!room:localhost", bot.agent_user.user_id)
+
+    await _start_bot_with_client(bot, client)
+    callback = cast("Callable[..., Awaitable[None]]", _registered_event_callback(client, nio.RoomMessageText))
+    handle_text_event = AsyncMock()
+    with (
+        patch.object(bot._turn_controller, "handle_text_event", handle_text_event),
+        capture_logs() as logs,
+    ):
+        await callback(room, event)
+        await wait_for_background_tasks(timeout=1.0, owner=bot._runtime_view)
+
+    handle_text_event.assert_not_awaited()
+    assert any(
+        entry.get("event") == "matrix_initial_sync_dispatch_fenced" and entry.get("reason") == expected_reason
+        for entry in logs
+    )
+
+
+@pytest.mark.asyncio
+async def test_tokenless_initial_sync_fences_old_reaction_and_approval_action(tmp_path: Path) -> None:
+    """Replayed reactions and custom approval responses must have no action side effects."""
+    with patch("mindroom.bot.time.time", return_value=2.0):
+        bot = _agent_bot(tmp_path)
+    client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
+    client.next_batch = None
+    room = nio.MatrixRoom("!room:localhost", bot.agent_user.user_id)
+    reaction = nio.Event.parse_event(
+        {
+            "type": "m.reaction",
+            "event_id": "$historical-reaction",
+            "sender": "@user:localhost",
+            "origin_server_ts": 1_999,
+            "content": {
+                "m.relates_to": {
+                    "rel_type": "m.annotation",
+                    "event_id": "$approval-card",
+                    "key": "✅",
+                },
+            },
+        },
+    )
+    approval_response = nio.Event.parse_event(
+        {
+            "type": "io.mindroom.tool_approval_response",
+            "event_id": "$historical-approval",
+            "sender": "@user:localhost",
+            "origin_server_ts": 1_999,
+            "content": {"approval_id": "approval-1", "status": "approved"},
+        },
+    )
+    assert isinstance(reaction, nio.ReactionEvent)
+    assert isinstance(approval_response, nio.UnknownEvent)
+
+    await _start_bot_with_client(bot, client)
+    reaction_callback = cast(
+        "Callable[..., Awaitable[None]]",
+        _registered_event_callback(client, nio.ReactionEvent),
+    )
+    approval_callback = cast(
+        "Callable[..., Awaitable[None]]",
+        _registered_event_callback(client, nio.UnknownEvent),
+    )
+    approval_action = AsyncMock(return_value=True)
+    with patch("mindroom.bot.handle_tool_approval_action", approval_action):
+        await reaction_callback(room, reaction)
+        await approval_callback(room, approval_response)
+        await wait_for_background_tasks(timeout=1.0, owner=bot._runtime_view)
+
+    approval_action.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_tokenless_initial_sync_retry_reuses_original_cutoff(tmp_path: Path) -> None:
+    """Watchdog retry must keep post-start events eligible and old history fenced."""
+    with patch("mindroom.bot.time.time", return_value=2.0):
+        bot = _agent_bot(tmp_path)
+    client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
+    client.next_batch = None
+    room = nio.MatrixRoom("!room:localhost", bot.agent_user.user_id)
+    post_start_event = _text_event("$post-start", "post-start", 2_500)
+    historical_event = _text_event("$historical-after-retry", "historical", 1_500)
+
+    await _start_bot_with_client(bot, client)
+    callback = cast("Callable[..., Awaitable[None]]", _registered_event_callback(client, nio.RoomMessageText))
+    with patch("mindroom.bot.time.time", return_value=2.5):
+        await bot.sync_forever()
+    with patch("mindroom.bot.time.time", return_value=3.0):
+        await bot.sync_forever()
+    handle_text_event = AsyncMock()
+    with patch.object(bot._turn_controller, "handle_text_event", handle_text_event):
+        await callback(room, post_start_event)
+        await callback(room, historical_event)
+        await wait_for_background_tasks(timeout=1.0, owner=bot._runtime_view)
+
+    assert [call.args[1].event_id for call in handle_text_event.await_args_list] == ["$post-start"]
 
 
 @pytest.mark.asyncio
