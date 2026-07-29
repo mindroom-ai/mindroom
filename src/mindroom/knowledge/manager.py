@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import hashlib
+import json
 import os
 import time
 import uuid
@@ -12,10 +13,13 @@ from contextlib import suppress
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any, Literal, NoReturn, Protocol, TypeVar, cast, runtime_checkable
+from functools import partial
+from typing import IO, TYPE_CHECKING, Any, Literal, NoReturn, Protocol, TypeVar, cast, runtime_checkable
 from urllib.parse import quote, urlparse, urlunparse
 
+from agno.knowledge.document.base import Document
 from agno.knowledge.reader import ReaderFactory
+from agno.knowledge.reader.json_reader import JSONReader
 from agno.knowledge.reader.markdown_reader import MarkdownReader
 from agno.knowledge.reader.text_reader import TextReader
 from agno.vectordb.chroma import ChromaDb
@@ -84,7 +88,6 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Coroutine, Iterable, Iterator, Mapping, Sequence
     from pathlib import Path
 
-    from agno.knowledge.document.base import Document
     from agno.knowledge.embedder.base import Embedder
     from agno.knowledge.reader.base import Reader
     from chromadb.api.models.Collection import Collection
@@ -94,6 +97,51 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
 
 logger = get_logger(__name__)
+
+
+class _MalformedJSONSourceError(Exception):
+    """A JSON parser failure carrying the already-read source text."""
+
+    def __init__(self, source_text: str, *, line: int, column: int) -> None:
+        super().__init__("Malformed JSON knowledge source")
+        self.source_text = source_text
+        self.line = line
+        self.column = column
+
+
+class _FallbackAwareJSONReader(JSONReader):
+    """Tag only JSON decoding failures raised inside the source reader."""
+
+    def read(self, path: Path | IO[Any], name: str | None = None) -> list[Document]:
+        try:
+            return super().read(path, name=name)
+        except json.JSONDecodeError as error:
+            raise _MalformedJSONSourceError(error.doc, line=error.lineno, column=error.colno) from error
+
+
+class _InMemoryTextReader(TextReader):
+    """Read the malformed JSON text already retained by its parse error.
+
+    Only ``read`` is overridden, because indexing goes through the synchronous
+    ``Knowledge.insert`` path. ``TextReader.async_read`` does not delegate to
+    ``read``, so anything switching this to ``Knowledge.ainsert`` must override
+    it too or it will re-read the source instead of serving the retained text.
+    """
+
+    def __init__(self, source_text: str) -> None:
+        super().__init__()
+        self._source_text = source_text
+
+    def read(self, file: Path | IO[Any], name: str | None = None) -> list[Document]:
+        document = Document(
+            name=name or str(file),
+            id=str(uuid.uuid4()),
+            content=self._source_text,
+        )
+        if not self.chunk:
+            return [document]
+        return self.chunk_document(document)
+
 
 _COLLECTION_PREFIX = "mindroom_knowledge"
 _SOURCE_PATH_KEY = "source_path"
@@ -673,10 +721,7 @@ class KnowledgeManager:
     _indexing_settings_path: Path = field(init=False)
     _git_lfs_hydrated_head_path: Path = field(init=False)
     _knowledge: Knowledge = field(init=False)
-    _indexed_files: set[str] = field(default_factory=set, init=False)
-    _indexed_signatures: dict[str, FileSignature] = field(default_factory=dict, init=False)
     _lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False)
-    _state_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False)
     _git_sync_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False)
     _git_last_successful_commit: str | None = field(default=None, init=False)
     _last_refresh_error: str | None = field(default=None, init=False)
@@ -1103,10 +1148,9 @@ class KnowledgeManager:
         self,
         relative_path: str,
         *,
-        knowledge: Knowledge | None = None,
+        knowledge: Knowledge,
     ) -> bool:
-        target_knowledge = knowledge or self._knowledge
-        vector_db = target_knowledge.vector_db
+        vector_db = knowledge.vector_db
         if not isinstance(vector_db, ChromaDb):
             return True
         if not vector_db.exists():
@@ -1119,7 +1163,7 @@ class KnowledgeManager:
         self,
         relative_path: str,
         *,
-        knowledge: Knowledge | None = None,
+        knowledge: Knowledge,
     ) -> bool:
         """Retry post-insert visibility checks to tolerate brief vector-store lag."""
         for attempt, delay_seconds in enumerate(_POST_INDEX_VECTOR_VISIBILITY_RETRY_DELAYS_SECONDS):
@@ -1142,20 +1186,60 @@ class KnowledgeManager:
             overlap=base_config.chunk_overlap,
         )
 
+    def _configure_text_reader(self, reader: TextReader | MarkdownReader) -> TextReader | MarkdownReader:
+        """Apply this base's text chunking policy to ``reader`` in place."""
+        chunking_strategy = self._chunking_strategy()
+        reader.chunk = True
+        reader.chunk_size = chunking_strategy.chunk_size
+        reader.chunking_strategy = chunking_strategy
+        return reader
+
     def _build_reader(self, file_path: Path) -> Reader:
         """Build a per-file reader with conservative chunking for text-like content."""
         reader = ReaderFactory.get_reader_for_extension(file_path.suffix.lower())
+
+        # ReaderFactory hands out cached shared instances, so any branch that
+        # configures a reader copies it first instead of mutating the cache.
+        if isinstance(reader, JSONReader):
+            # Carry the factory reader's configuration (encoding, chunking) onto
+            # the subclass that tags its own decode failures for the text fallback.
+            return _FallbackAwareJSONReader(**deepcopy(vars(reader)))
 
         # Large markdown/plain-text files are the common source of oversized embed requests.
         if not isinstance(reader, (TextReader, MarkdownReader)):
             return reader
 
-        chunking_strategy = self._chunking_strategy()
-        configured_reader = deepcopy(reader)
-        configured_reader.chunk = True
-        configured_reader.chunk_size = chunking_strategy.chunk_size
-        configured_reader.chunking_strategy = chunking_strategy
-        return configured_reader
+        return self._configure_text_reader(deepcopy(reader))
+
+    async def _insert_with_malformed_json_fallback(
+        self,
+        insert: Callable[[Reader], Awaitable[None]],
+        *,
+        relative_path: str,
+        reader: Reader,
+    ) -> None:
+        """Insert through the selected reader, falling back only for malformed source JSON."""
+
+        async def _insert_with_retry(selected_reader: Reader) -> None:
+            await run_with_embedding_retry(
+                partial(insert, selected_reader),
+                policy=_EMBEDDING_RETRY_POLICY,
+                sleep=_EMBEDDING_RETRY_SLEEP,
+                on_retry=self._record_embedding_retry,
+            )
+
+        try:
+            await _insert_with_retry(reader)
+        except _MalformedJSONSourceError as error:
+            logger.warning(
+                "Malformed JSON knowledge file; indexing as text",
+                base_id=self.base_id,
+                path=relative_path,
+                line=error.line,
+                column=error.column,
+            )
+            fallback_reader = self._configure_text_reader(_InMemoryTextReader(error.source_text))
+            await _insert_with_retry(fallback_reader)
 
     def _default_collection_name(self) -> str:
         return _collection_name(self.base_id, self._knowledge_source_path())
@@ -1276,24 +1360,10 @@ class KnowledgeManager:
             return True
         return False
 
-    async def _adopt_candidate_vector_db(
-        self,
-        *,
-        candidate_vector_db: ChromaDb,
-        indexed_files: set[str],
-        indexed_signatures: dict[str, FileSignature],
-    ) -> None:
-        self._knowledge.vector_db = candidate_vector_db
-        async with self._state_lock:
-            self._indexed_files = indexed_files
-            self._indexed_signatures = indexed_signatures
-
     async def _publish_candidate_after_metadata_save(
         self,
         *,
         candidate_vector_db: ChromaDb,
-        indexed_files: set[str],
-        indexed_signatures: dict[str, FileSignature],
         indexed_count: int,
         source_signature: str,
         publish_state: _CandidatePublishState,
@@ -1304,11 +1374,10 @@ class KnowledgeManager:
             source_signature=source_signature,
         )
         publish_state.index_published = True
-        await self._adopt_candidate_vector_db(
-            candidate_vector_db=candidate_vector_db,
-            indexed_files=indexed_files,
-            indexed_signatures=indexed_signatures,
-        )
+        # Adopt the candidate as this manager's live vector database:
+        # `_cleanup_superseded_collections` runs right after publish and reads
+        # `self._knowledge.vector_db` to obtain the Chroma client it lists with.
+        self._knowledge.vector_db = candidate_vector_db
         if publish_cancelled:
             _raise_cancelled()
 
@@ -1344,9 +1413,8 @@ class KnowledgeManager:
         resolved_path: Path,
         *,
         upsert: bool,
-        knowledge: Knowledge | None = None,
-        indexed_files: set[str] | None = None,
-        indexed_signatures: dict[str, FileSignature] | None = None,
+        knowledge: Knowledge,
+        indexed_signatures: dict[str, FileSignature],
     ) -> bool:
         """Index one file while the caller owns the operation lock."""
         relative_path = self._relative_path(resolved_path)
@@ -1368,13 +1436,12 @@ class KnowledgeManager:
                 error=str(exc),
             )
             return False
-        target_knowledge = knowledge or self._knowledge
 
-        async def _insert_once() -> None:
+        async def _insert_once(selected_reader: Reader) -> None:
             if upsert:
                 # Agno/Chroma upsert keys by content hash, so stale chunks from an older
                 # version of the same file can remain unless we clear by source metadata first.
-                await asyncio.to_thread(target_knowledge.remove_vectors_by_metadata, {_SOURCE_PATH_KEY: relative_path})
+                await asyncio.to_thread(knowledge.remove_vectors_by_metadata, {_SOURCE_PATH_KEY: relative_path})
             # Knowledge.ainsert is async by name only: it eventually calls into the
             # vector database's synchronous batch upsert (e.g. ChromaDB's Rust
             # _upsert) on the running event loop, blocking every other coroutine
@@ -1383,21 +1450,20 @@ class KnowledgeManager:
             # worker thread and the loop stays responsive to Matrix sync, tool
             # calls, and cache writes.
             await asyncio.to_thread(
-                target_knowledge.insert,
+                knowledge.insert,
                 path=str(resolved_path),
                 metadata=metadata,
                 upsert=upsert,
-                reader=reader,
+                reader=selected_reader,
             )
 
         try:
             # Remove-then-insert is idempotent, so a transient embedding fault
             # costs one retry of this file instead of the whole refresh.
-            await run_with_embedding_retry(
+            await self._insert_with_malformed_json_fallback(
                 _insert_once,
-                policy=_EMBEDDING_RETRY_POLICY,
-                sleep=_EMBEDDING_RETRY_SLEEP,
-                on_retry=self._record_embedding_retry,
+                relative_path=relative_path,
+                reader=reader,
             )
         except Exception as exc:
             classified = classified_embedder_error(exc)
@@ -1411,24 +1477,16 @@ class KnowledgeManager:
 
         has_vectors = await self._wait_for_source_vectors(
             relative_path,
-            knowledge=target_knowledge,
+            knowledge=knowledge,
         )
         if not has_vectors:
-            return await self._handle_vectorless_file(
+            return self._handle_vectorless_file(
                 relative_path,
                 (source_mtime_ns, source_size, source_digest),
-                indexed_files=indexed_files,
                 indexed_signatures=indexed_signatures,
             )
 
-        if indexed_signatures is not None:
-            if indexed_files is not None:
-                indexed_files.add(relative_path)
-            indexed_signatures[relative_path] = (source_mtime_ns, source_size, source_digest)
-        else:
-            async with self._state_lock:
-                self._indexed_files.add(relative_path)
-                self._indexed_signatures[relative_path] = (source_mtime_ns, source_size, source_digest)
+        indexed_signatures[relative_path] = (source_mtime_ns, source_size, source_digest)
         self._file_index_errors.pop(relative_path, None)
         self._note_embedder_success()
         # DEBUG, not INFO: a large corpus is 10^5 of these lines per refresh.
@@ -1436,37 +1494,22 @@ class KnowledgeManager:
         logger.debug("Indexed knowledge file", base_id=self.base_id, path=relative_path)
         return True
 
-    async def _handle_vectorless_file(
+    def _handle_vectorless_file(
         self,
         relative_path: str,
         signature: FileSignature,
         *,
-        indexed_files: set[str] | None,
-        indexed_signatures: dict[str, FileSignature] | None,
+        indexed_signatures: dict[str, FileSignature],
     ) -> bool:
         """Record one insert that produced no vectors; success only for empty sources."""
         source_size = signature[1]
         if source_size == 0:
-            if indexed_signatures is not None:
-                if indexed_files is not None:
-                    indexed_files.add(relative_path)
-                indexed_signatures[relative_path] = signature
-            else:
-                async with self._state_lock:
-                    self._indexed_files.add(relative_path)
-                    self._indexed_signatures[relative_path] = signature
+            indexed_signatures[relative_path] = signature
             logger.debug("Scanned empty knowledge file with no vectors", base_id=self.base_id, path=relative_path)
             return True
 
         logger.warning("Indexing produced no vectors for file", base_id=self.base_id, path=relative_path)
-        if indexed_signatures is not None:
-            if indexed_files is not None:
-                indexed_files.discard(relative_path)
-            indexed_signatures.pop(relative_path, None)
-        else:
-            async with self._state_lock:
-                self._indexed_files.discard(relative_path)
-                self._indexed_signatures.pop(relative_path, None)
+        indexed_signatures.pop(relative_path, None)
         return False
 
     def _record_embedding_retry(self) -> None:
@@ -1622,10 +1665,9 @@ class KnowledgeManager:
         self,
         files: list[Path],
         *,
-        knowledge: Knowledge | None = None,
-        indexed_files: set[str] | None = None,
-        indexed_signatures: dict[str, FileSignature] | None = None,
-        vanished_files: set[str] | None = None,
+        knowledge: Knowledge,
+        indexed_signatures: dict[str, FileSignature],
+        vanished_files: set[str],
         embedder: BatchPrefetchEmbedder | None = None,
         on_file_result: Callable[[Path], Awaitable[None]] | None = None,
         on_batch_complete: Callable[[Sequence[Path]], Awaitable[None]] | None = None,
@@ -1650,7 +1692,6 @@ class KnowledgeManager:
             indexed_count += await self._index_file_batch(
                 batch,
                 knowledge=knowledge,
-                indexed_files=indexed_files,
                 indexed_signatures=indexed_signatures,
                 vanished_files=vanished_files,
                 on_file_result=on_file_result,
@@ -1674,17 +1715,15 @@ class KnowledgeManager:
         self,
         file_path: Path,
         *,
-        knowledge: Knowledge | None,
-        indexed_files: set[str] | None,
-        indexed_signatures: dict[str, FileSignature] | None,
-        vanished_files: set[str] | None,
+        knowledge: Knowledge,
+        indexed_signatures: dict[str, FileSignature],
+        vanished_files: set[str],
     ) -> bool:
         try:
             return await self._index_file_locked(
                 file_path,
                 upsert=True,
                 knowledge=knowledge,
-                indexed_files=indexed_files,
                 indexed_signatures=indexed_signatures,
             )
         except FileNotFoundError:
@@ -1700,18 +1739,16 @@ class KnowledgeManager:
                 base_id=self.base_id,
                 path=relative_path,
             )
-            if vanished_files is not None:
-                vanished_files.add(relative_path)
+            vanished_files.add(relative_path)
             return False
 
     async def _index_file_batch(
         self,
         batch: Sequence[Path],
         *,
-        knowledge: Knowledge | None,
-        indexed_files: set[str] | None,
-        indexed_signatures: dict[str, FileSignature] | None,
-        vanished_files: set[str] | None,
+        knowledge: Knowledge,
+        indexed_signatures: dict[str, FileSignature],
+        vanished_files: set[str],
         on_file_result: Callable[[Path], Awaitable[None]] | None = None,
     ) -> int:
         """Index one bounded batch, capping live tasks at the concurrency limit."""
@@ -1722,7 +1759,6 @@ class KnowledgeManager:
             indexed = await self._index_file_or_skip_vanished(
                 file_path,
                 knowledge=knowledge,
-                indexed_files=indexed_files,
                 indexed_signatures=indexed_signatures,
                 vanished_files=vanished_files,
             )
@@ -2534,7 +2570,6 @@ class KnowledgeManager:
                 progress.indexed_this_run += await self._reindex_files_locked(
                     list(plan.pending),
                     knowledge=run.knowledge,
-                    indexed_files=None,
                     indexed_signatures=run.completed,
                     vanished_files=run.vanished,
                     embedder=run.embedder,
@@ -2595,8 +2630,6 @@ class KnowledgeManager:
         try:
             await self._publish_candidate_after_metadata_save(
                 candidate_vector_db=run.vector_db,
-                indexed_files=set(run.completed),
-                indexed_signatures=dict(run.completed),
                 indexed_count=len(run.completed),
                 source_signature=source_signature,
                 publish_state=publish_state,
