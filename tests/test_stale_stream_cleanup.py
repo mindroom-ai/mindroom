@@ -3144,7 +3144,7 @@ async def test_failed_router_relay_keeps_room_retryable_for_post_join_recovery(t
 
 @pytest.mark.asyncio
 async def test_missing_owner_keeps_room_retryable_for_post_join_recovery(tmp_path: Path) -> None:
-    """A missing owner should let the membership wave retry after that owner joins."""
+    """Real cleanup should let the membership wave retry after a message owner joins."""
     config = _make_config(tmp_path)
     config.defaults.auto_resume_after_restart = True
     router_client = make_matrix_client_mock(user_id="@actual_router:localhost")
@@ -3164,6 +3164,23 @@ async def test_missing_owner_keeps_room_retryable_for_post_join_recovery(tmp_pat
         BOT_USER_ID: StaleStreamCleanupActor(owner_client, owner_cache),
     }
     owner_joined = False
+    router_client.room_messages.return_value = _room_messages_response(
+        _make_message_event(
+            event_id="$thread",
+            body="Question",
+            sender=USER_ID,
+            timestamp_ms=NOW_MS - (STALE_AGE_MS + 20_000),
+        ),
+        _make_message_event(
+            event_id="$target",
+            body=build_restart_interrupted_body("Partial"),
+            timestamp_ms=NOW_MS - STALE_AGE_MS,
+            relates_to=_thread_reply_relation("$thread", "$thread"),
+            extra_content={STREAM_STATUS_KEY: "error"},
+        ),
+    )
+    router_client.room_get_event_relations = MagicMock(return_value=_aiter())
+    owner_client.room_get_event_relations = MagicMock(return_value=_aiter())
 
     async def joined_rooms(client: object) -> list[str]:
         if client is router_client:
@@ -3173,10 +3190,6 @@ async def test_missing_owner_keeps_room_retryable_for_post_join_recovery(tmp_pat
 
     with (
         patch("mindroom.matrix.stale_stream_cleanup.get_joined_rooms", side_effect=joined_rooms),
-        patch(
-            "mindroom.matrix.stale_stream_cleanup._cleanup_stale_streaming_room",
-            new=AsyncMock(return_value=(0, [interrupted])),
-        ),
         patch(
             "mindroom.matrix.stale_stream_cleanup.send_message_result",
             new=AsyncMock(return_value=delivered_matrix_event("$resume")),

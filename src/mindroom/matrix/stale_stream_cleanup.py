@@ -220,10 +220,11 @@ async def recover_stale_streaming_messages(
     async def recover_room(
         room_id: str,
         joined_actors: dict[str, StaleStreamCleanupActor],
-    ) -> tuple[int, list[_InterruptedThread], dict[str, StaleStreamCleanupActor]]:
+    ) -> tuple[int, list[_InterruptedThread], dict[str, StaleStreamCleanupActor], set[str]]:
         scan_actor = joined_actors.get(resume_user_id) if isinstance(resume_user_id, str) else None
         if scan_actor is None:
             scan_actor = joined_actors[min(joined_actors)]
+        retryable_room_ids: set[str] = set()
         async with semaphore:
             try:
                 cleaned_count, interrupted_threads = await _cleanup_stale_streaming_room(
@@ -235,13 +236,14 @@ async def recover_stale_streaming_messages(
                     runtime_paths=runtime_paths,
                     startup_cutoff_ms=startup_cutoff_ms,
                     terminal_interrupted_only=target_room_ids is not None,
+                    retryable_room_ids=retryable_room_ids,
                 )
             except Exception:
                 scanned_room_ids.discard(room_id)
                 logger.warning("Failed stale stream recovery for room", room_id=room_id, exc_info=True)
-                return 0, [], joined_actors
+                return 0, [], joined_actors, set()
             else:
-                return cleaned_count, interrupted_threads, joined_actors
+                return cleaned_count, interrupted_threads, joined_actors, retryable_room_ids
 
     tasks = [
         asyncio.create_task(recover_room(room_id, joined_actors), name=f"stale_stream_recovery:{room_id}")
@@ -251,11 +253,11 @@ async def recover_stale_streaming_messages(
     resumed_count = 0
     try:
         for completed in asyncio.as_completed(tasks):
-            room_cleaned_count, interrupted_threads, joined_actors = await completed
+            room_cleaned_count, interrupted_threads, joined_actors, retryable_room_ids = await completed
             cleaned_count += room_cleaned_count
+            scanned_room_ids.difference_update(retryable_room_ids)
             if resume_client is None or not config.defaults.auto_resume_after_restart or not interrupted_threads:
                 continue
-            retryable_room_ids: set[str] = set()
             resumed_count += await _auto_resume_interrupted_threads(
                 resume_client,
                 interrupted_threads,
@@ -545,6 +547,7 @@ async def _cleanup_stale_streaming_room(
     runtime_paths: RuntimePaths,
     startup_cutoff_ms: int | None = None,
     terminal_interrupted_only: bool = False,
+    retryable_room_ids: set[str] | None = None,
 ) -> tuple[int, list[_InterruptedThread]]:
     """Scan one room once and let each bot account repair its own messages."""
     if not actors:
@@ -558,7 +561,7 @@ async def _cleanup_stale_streaming_room(
     scanned_state = await _scan_room_message_states(
         scan_client,
         room_id=room_id,
-        cleanup_bot_user_ids=set(actors),
+        cleanup_bot_user_ids=bot_user_ids,
         bot_user_ids=bot_user_ids,
         config=config,
         runtime_paths=runtime_paths,
@@ -580,8 +583,20 @@ async def _cleanup_stale_streaming_room(
     for target_event_id, state in candidate_items:
         assert state.latest_body is not None  # guaranteed by filter above
         bot_user_id = state.bot_user_id
-        actor = actors.get(bot_user_id) if bot_user_id is not None else None
-        if bot_user_id is None or actor is None:
+        if bot_user_id is None:
+            continue
+        actor = actors.get(bot_user_id)
+        if actor is None:
+            _mark_unavailable_cleanup_actor_retryable(
+                retryable_room_ids,
+                room_id=room_id,
+                bot_user_id=bot_user_id,
+                state=state,
+                config=config,
+                runtime_paths=runtime_paths,
+                current_time_ms=current_time_ms,
+                scan_policy=scan_policy,
+            )
             continue
         edited, interrupted = await _process_stale_room_candidate(
             actor,
@@ -606,6 +621,32 @@ async def _cleanup_stale_streaming_room(
     return cleaned_count, interrupted_threads
 
 
+def _mark_unavailable_cleanup_actor_retryable(
+    retryable_room_ids: set[str] | None,
+    *,
+    room_id: str,
+    bot_user_id: str,
+    state: _MessageState,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    current_time_ms: int,
+    scan_policy: _CleanupScanPolicy,
+) -> None:
+    """Release a room when its recoverable message owner is not joined yet."""
+    if (
+        _cleanup_candidate_agent_name(
+            bot_user_id,
+            state=state,
+            config=config,
+            runtime_paths=runtime_paths,
+            current_time_ms=current_time_ms,
+            scan_policy=scan_policy,
+        )
+        is not None
+    ):
+        _mark_auto_resume_room_retryable(retryable_room_ids, room_id=room_id)
+
+
 async def _process_stale_room_candidate(
     actor: StaleStreamCleanupActor,
     *,
@@ -623,14 +664,15 @@ async def _process_stale_room_candidate(
 ) -> tuple[bool, _InterruptedThread | None]:
     """Repair or classify one bot-owned candidate from a shared room scan."""
     assert state.latest_body is not None
-    agent_name = _agent_name_for_bot_user_id(bot_user_id, config, runtime_paths)
-    if agent_name is None or _should_skip_for_startup_cleanup_window(
-        state,
-        now_ms=current_time_ms,
+    agent_name = _cleanup_candidate_agent_name(
+        bot_user_id,
+        state=state,
+        config=config,
+        runtime_paths=runtime_paths,
+        current_time_ms=current_time_ms,
         scan_policy=scan_policy,
-    ):
-        return False, None
-    if scan_policy.terminal_interrupted_only and not _has_resumable_interrupted_note(state):
+    )
+    if agent_name is None:
         return False, None
     if _is_cleanup_candidate(state):
         return await _cleanup_candidate_message(
@@ -661,6 +703,32 @@ async def _process_stale_room_candidate(
         agent_name=agent_name,
         prior_edit_succeeded=prior_edit_succeeded,
     )
+
+
+def _cleanup_candidate_agent_name(
+    bot_user_id: str,
+    *,
+    state: _MessageState,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    current_time_ms: int,
+    scan_policy: _CleanupScanPolicy,
+) -> str | None:
+    """Return the owner name when one message belongs in this cleanup pass."""
+    assert state.latest_body is not None
+    agent_name = _agent_name_for_bot_user_id(bot_user_id, config, runtime_paths)
+    if agent_name is None or _should_skip_for_startup_cleanup_window(
+        state,
+        now_ms=current_time_ms,
+        scan_policy=scan_policy,
+    ):
+        return None
+    if scan_policy.terminal_interrupted_only and not _has_resumable_interrupted_note(state):
+        return None
+    has_interrupted_note = _has_restart_interrupted_note(state.latest_body) or _has_resumable_interrupted_note(state)
+    if _is_cleanup_candidate(state) or has_interrupted_note:
+        return agent_name
+    return None
 
 
 async def _handle_interrupted_message(
