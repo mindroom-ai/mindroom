@@ -225,7 +225,7 @@ def delete_source_path_vectors(vector_db: ChromaDb, relative_paths: Sequence[str
 
 
 async def delete_collection(space: CollectionSpace, collection_name: str) -> bool:
-    """Delete one candidate collection, reporting whether it is really gone.
+    """Delete one collection this base owns, reporting whether it is really gone.
 
     Agno's ``ChromaDb.delete`` swallows the provider error and returns
     ``False`` rather than raising, so catching exceptions alone would
@@ -237,7 +237,7 @@ async def delete_collection(space: CollectionSpace, collection_name: str) -> boo
         deleted = await asyncio.to_thread(_delete_collection_sync, space, collection_name)
     except Exception:
         logger.warning(
-            "Failed to delete knowledge candidate collection",
+            "Failed to delete knowledge collection",
             base_id=space.base_id,
             collection=collection_name,
             exc_info=True,
@@ -246,7 +246,7 @@ async def delete_collection(space: CollectionSpace, collection_name: str) -> boo
     if deleted:
         return True
     logger.warning(
-        "Knowledge candidate collection still exists after deletion failed",
+        "Knowledge collection still exists after deletion failed",
         base_id=space.base_id,
         collection=collection_name,
     )
@@ -254,7 +254,7 @@ async def delete_collection(space: CollectionSpace, collection_name: str) -> boo
 
 
 def _delete_collection_sync(space: CollectionSpace, collection_name: str) -> bool:
-    """Delete one candidate, treating an already-absent collection as success."""
+    """Delete one collection, treating an already-absent one as success."""
     vector_db = build_vector_db(space, collection_name)
     if vector_db.delete():
         return True

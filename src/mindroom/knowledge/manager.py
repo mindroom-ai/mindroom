@@ -671,8 +671,11 @@ class KnowledgeManager:
             base_id=self.base_id,
             storage_path=self._base_storage_path,
             default_collection=collection_name_for_base(self.base_id, self.knowledge_path),
-            # A factory, not an embedder: opening a handle purely to delete a
-            # collection must not construct one.
+            # A factory, not an embedder: this runs for every base, including
+            # non-semantic ones that never open a collection, and a status read
+            # must construct no embedder at all. Deferring puts the cost only
+            # where a handle is really built -- for a cleanup sweep, once per
+            # collection it actually deletes, and nothing when it deletes none.
             embedder_factory=lambda: create_configured_embedder(self.config, self.runtime_paths),
         )
         persisted_state = self._load_persisted_index_state()
@@ -1202,8 +1205,9 @@ class KnowledgeManager:
         )
         publish_state.index_published = True
         # Adopt the candidate as this manager's live vector database:
-        # `_cleanup_superseded_collections` runs right after publish and reads
-        # `self._knowledge.vector_db` to obtain the Chroma client it lists with.
+        # `cleanup_superseded_collections` runs right after publish and is handed
+        # `self._knowledge.vector_db` as the Chroma client it lists with, so the
+        # adoption has to land before that call reads the attribute.
         self._knowledge.vector_db = candidate_vector_db
         if publish_cancelled:
             _raise_cancelled()
