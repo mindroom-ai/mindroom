@@ -305,11 +305,20 @@ async def test_tokenless_initial_sync_drops_old_media_before_processing(tmp_path
     await _start_bot_with_client(bot, client)
     callback = cast("Callable[..., Awaitable[None]]", _registered_event_callback(client, nio.RoomMessageImage))
     handle_media_event = AsyncMock()
-    with patch.object(bot._turn_controller, "handle_media_event", handle_media_event):
+    with (
+        patch.object(bot._turn_controller, "handle_media_event", handle_media_event),
+        capture_logs() as logs,
+    ):
         await callback(room, event)
         await wait_for_background_tasks(timeout=1.0, owner=bot._runtime_view)
 
     handle_media_event.assert_not_awaited()
+    assert any(
+        entry.get("event") == "matrix_initial_sync_dispatch_fenced"
+        and entry.get("reason") == "predates_startup_cutoff"
+        and entry.get("log_level") == "debug"
+        for entry in logs
+    )
 
 
 @pytest.mark.asyncio
@@ -553,7 +562,9 @@ async def test_tokenless_initial_sync_unusable_timestamp_fails_closed(
 
     handle_text_event.assert_not_awaited()
     assert any(
-        entry.get("event") == "matrix_initial_sync_dispatch_fenced" and entry.get("reason") == expected_reason
+        entry.get("event") == "matrix_initial_sync_dispatch_fenced"
+        and entry.get("reason") == expected_reason
+        and entry.get("log_level") == "info"
         for entry in logs
     )
 

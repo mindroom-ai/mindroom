@@ -1191,7 +1191,8 @@ class AgentBot:
         else:
             reason = "missing_origin_server_ts" if origin_server_ts is None else "invalid_origin_server_ts"
 
-        self.logger.info(
+        log_fenced_event = self.logger.debug if reason == "predates_startup_cutoff" else self.logger.info
+        log_fenced_event(
             "matrix_initial_sync_dispatch_fenced",
             callback=callback_name,
             event_id=event.event_id,
