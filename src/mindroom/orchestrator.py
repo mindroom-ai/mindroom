@@ -6,7 +6,7 @@ import asyncio
 import signal
 import time
 from collections.abc import Awaitable, Callable
-from contextlib import suppress
+from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass, field, replace
 from functools import partial
 from typing import TYPE_CHECKING, NoReturn, cast, overload
@@ -124,7 +124,7 @@ from .runtime_support import (
 
 if TYPE_CHECKING:
     import socket
-    from collections.abc import Awaitable, Callable, Iterable
+    from collections.abc import AsyncIterator, Awaitable, Callable, Iterable
     from pathlib import Path
     from types import FrameType
 
@@ -320,6 +320,12 @@ class _MultiAgentOrchestrator:
         if bot is None:
             return None
         return bot.running and bot.first_sync_complete
+
+    @asynccontextmanager
+    async def entity_first_sync_readiness_guard(self, entity_name: str) -> AsyncIterator[bool | None]:
+        """Keep the sampled entity generation current through one guarded delivery."""
+        async with self._config_update_lock:
+            yield self.entity_first_sync_complete(entity_name)
 
     async def _stop_memory_auto_flush_worker(self) -> None:
         """Stop the background memory auto-flush worker if running."""

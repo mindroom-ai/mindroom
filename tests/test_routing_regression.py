@@ -7,6 +7,7 @@ These tests ensure that fixed bugs don't resurface, particularly:
 
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -158,28 +159,13 @@ def _router_readiness_runtime(
     )
     runtime_paths = runtime_paths_for(config)
     ids = entity_ids(config, runtime_paths)
-    router_bot = setup_test_bot(
-        AgentMatrixUser(
-            agent_name="router",
-            password=TEST_PASSWORD,
-            display_name="Router",
-            user_id=ids["router"].full_id,
-        ),
-        tmp_path,
-        room_id,
-        config=config,
-    )
-    target_bot = setup_test_bot(
-        AgentMatrixUser(
-            agent_name="general",
-            password=TEST_PASSWORD,
-            display_name="General",
-            user_id=ids["general"].full_id,
-        ),
-        tmp_path,
-        room_id,
-        config=config,
-    )
+
+    def make_bot(entity_name: str) -> AgentBot:
+        user = AgentMatrixUser(entity_name, ids[entity_name].full_id, entity_name.title(), TEST_PASSWORD)
+        return setup_test_bot(user, tmp_path, room_id, config=config)
+
+    router_bot = make_bot("router")
+    target_bot = make_bot("general")
     orchestrator = _MultiAgentOrchestrator(runtime_paths)
     orchestrator.config = config
     orchestrator.agent_bots = {"router": router_bot, "general": target_bot}
@@ -191,9 +177,7 @@ def _router_readiness_runtime(
     )
     room = nio.MatrixRoom(room_id=room_id, own_user_id=ids["router"].full_id)
     room.users = {
-        ids["router"].full_id: MagicMock(),
-        ids["general"].full_id: MagicMock(),
-        "@user:localhost": MagicMock(),
+        user_id: MagicMock() for user_id in (*[identity.full_id for identity in ids.values()], "@user:localhost")
     }
     return router_bot, target_bot, orchestrator, room
 
@@ -446,14 +430,9 @@ class TestRoutingRegression:
         """A newly registered bot generation must not inherit readiness."""
         router_bot, target_bot, orchestrator, room = _router_readiness_runtime(tmp_path)
         target_bot._first_sync_done = True
-        replacement = setup_test_bot(
-            target_bot.agent_user,
-            tmp_path,
-            room.room_id,
-            config=target_bot.config,
-        )
+        replacement = MagicMock(spec=AgentBot)
         replacement.running = True
-        replacement.orchestrator = orchestrator
+        replacement.first_sync_complete = False
         orchestrator.agent_bots["general"] = replacement
 
         await router_bot._turn_controller._execute_router_relay(
@@ -466,6 +445,45 @@ class TestRoutingRegression:
         content = router_bot.client.room_send.await_args.kwargs["content"]
         assert content["body"] == "That agent is still starting. Please try again shortly."
         assert SOURCE_KIND_KEY not in content
+
+    @pytest.mark.asyncio
+    async def test_router_relay_keeps_ready_generation_current_through_delivery(self, tmp_path: Path) -> None:
+        """A replacement cannot become current while its predecessor's relay is sending."""
+        router_bot, target_bot, orchestrator, room = _router_readiness_runtime(tmp_path)
+        target_bot._first_sync_done = True
+        replacement = MagicMock(spec=AgentBot)
+        send_started = asyncio.Event()
+        release_send = asyncio.Event()
+
+        async def blocking_room_send(**_: object) -> nio.RoomSendResponse:
+            send_started.set()
+            await release_send.wait()
+            return nio.RoomSendResponse.from_dict({"event_id": "$router-response"}, room_id=room.room_id)
+
+        async def replace_target() -> None:
+            async with orchestrator._config_update_lock:
+                orchestrator.agent_bots["general"] = replacement
+
+        router_bot.client.room_send.side_effect = blocking_room_send
+        relay_task = asyncio.create_task(
+            router_bot._turn_controller._execute_router_relay(
+                room,
+                _router_readiness_event("$replacement-during-send"),
+                [],
+                requester_user_id="@user:localhost",
+            ),
+        )
+        await send_started.wait()
+        replacement_task = asyncio.create_task(replace_target())
+        try:
+            await asyncio.sleep(0)
+            assert orchestrator.agent_bots["general"] is target_bot
+        finally:
+            release_send.set()
+            await relay_task
+            await replacement_task
+
+        assert orchestrator.agent_bots["general"] is replacement
 
     @pytest.mark.asyncio
     async def test_router_removed_target_keeps_existing_no_responder_behavior(self, tmp_path: Path) -> None:
@@ -1032,6 +1050,7 @@ class TestRoutingRegression:
             "router": SimpleNamespace(running=True),
         }
         orchestrator.entity_first_sync_complete.return_value = True
+        orchestrator.entity_first_sync_readiness_guard.return_value.__aenter__.return_value = True
         router_bot.orchestrator = orchestrator
 
         mock_suggest_responder.side_effect = AssertionError("AI router should not see unavailable candidates")
