@@ -15,7 +15,7 @@ from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from functools import partial
-from typing import IO, TYPE_CHECKING, Any, Literal, NoReturn, Protocol, TypeVar, cast, runtime_checkable
+from typing import IO, TYPE_CHECKING, Any, Literal, NoReturn, TypeVar, cast
 from urllib.parse import urlparse
 
 from agno.knowledge.document.base import Document
@@ -24,7 +24,6 @@ from agno.knowledge.reader.json_reader import JSONReader
 from agno.knowledge.reader.markdown_reader import MarkdownReader
 from agno.knowledge.reader.text_reader import TextReader
 from agno.vectordb.chroma import ChromaDb
-from chromadb.errors import InternalError, NotFoundError
 
 from mindroom.chunking import SafeFixedSizeChunking
 from mindroom.constants import (
@@ -50,6 +49,24 @@ from mindroom.knowledge.candidate_checkpoint import (
     file_signature_from_fields,
     load_candidate_checkpoint,
     save_candidate_checkpoint,
+)
+from mindroom.knowledge.collections import (
+    SOURCE_DIGEST_KEY,
+    SOURCE_MTIME_NS_KEY,
+    SOURCE_PATH_KEY,
+    SOURCE_SIZE_KEY,
+    VECTOR_VERIFY_BATCH,
+    CollectionSpace,
+    build_knowledge,
+    build_vector_db,
+    candidate_collection_name,
+    cleanup_superseded_collections,
+    collection_has_source_path,
+    delete_collection,
+    delete_source_path_vectors,
+    paths_with_vectors,
+    require_chroma_vector_db,
+    reset_vector_db,
 )
 from mindroom.knowledge.embedding_batch import (
     DEFAULT_MAX_EMBEDDING_BATCH_ITEMS,
@@ -93,7 +110,6 @@ if TYPE_CHECKING:
 
     from agno.knowledge.embedder.base import Embedder
     from agno.knowledge.reader.base import Reader
-    from chromadb.api.models.Collection import Collection
     from chromadb.api.types import Embeddings, Metadata
 
     from mindroom.config.knowledge import KnowledgeGitConfig
@@ -146,11 +162,6 @@ class _InMemoryTextReader(TextReader):
         return self.chunk_document(document)
 
 
-_COLLECTION_PREFIX = "mindroom_knowledge"
-_SOURCE_PATH_KEY = "source_path"
-_SOURCE_MTIME_NS_KEY = "source_mtime_ns"
-_SOURCE_SIZE_KEY = "source_size"
-_SOURCE_DIGEST_KEY = "source_digest"
 _POST_INDEX_VECTOR_VISIBILITY_RETRY_DELAYS_SECONDS = (0.0, 0.01, 0.05)
 _INDEXING_STATUS_RESETTING = "resetting"
 _INDEXING_STATUS_INDEXING = "indexing"
@@ -171,14 +182,6 @@ _MAX_PREFETCH_TEXT_BYTES = 8_000_000
 #: Source files whose signatures are computed per thread hop, so a huge corpus
 #: still yields to the event loop and to cancellation while it is scanned.
 _SIGNATURE_SCAN_CHUNK = 512
-#: Completed candidate entries whose vectors are confirmed in one Chroma query.
-#: Only a starting point: the query splits itself when the store refuses it,
-#: because the real limit is matched rows, which this cannot know up front.
-_VECTOR_VERIFY_BATCH = 128
-#: Source paths whose vectors are dropped in one Chroma delete. Independent of
-#: the verify batch: a delete binds no variable per matched row, so this bounds
-#: only how much work one call does.
-_VECTOR_DELETE_BATCH = 128
 #: Published chunk rows read in one copy query. Chroma binds one SQL variable
 #: per *returned* row and SQLite caps a statement at 32,766, so nothing about
 #: the file or path count bounds a copy query -- only the rows it may return.
@@ -218,22 +221,6 @@ def _max_concurrent_knowledge_file_indexes() -> int:
         )
         raise ValueError(msg)
     return value
-
-
-@runtime_checkable
-class _CollectionListingClient(Protocol):
-    """Vector client surface needed for best-effort collection cleanup."""
-
-    def list_collections(self) -> list[object]:
-        """Return collection names or collection objects."""
-        ...
-
-
-@runtime_checkable
-class _NamedCollection(Protocol):
-    """Collection object shape returned by Chroma clients."""
-
-    name: str
 
 
 @dataclass(frozen=True)
@@ -416,81 +403,6 @@ def _iter_file_batches(files: Sequence[Path], batch_size: int) -> Iterator[list[
         yield list(files[start : start + size])
 
 
-def _collection_has_source_path(collection: Collection, relative_path: str) -> bool:
-    """Return whether one source path has any vector, at one row of cost.
-
-    Chroma binds one SQL variable per *returned* row, so an unbounded probe on
-    a heavily chunked file exceeds SQLite's ceiling and fails outright. One row
-    is all existence needs, and ``limit=1`` is what keeps this answerable at
-    any file size. Do not widen it.
-    """
-    result = collection.get(where={_SOURCE_PATH_KEY: relative_path}, limit=1, include=[])
-    return bool(result.get("ids"))
-
-
-def _paths_with_vectors(collection: Collection, relative_paths: Sequence[str]) -> set[str]:
-    """Return which of `relative_paths` have at least one vector in the collection.
-
-    Chroma binds one SQL variable per *matched row*, not one per queried path,
-    so a fixed batch of paths does not bound the query at all: whether it fits
-    under SQLite's ceiling depends on how many chunks those particular files
-    produced. That makes any batch size chosen up front a gamble. Small files
-    leave a batch of 128 far below the ceiling, a handful of large ones puts
-    the same batch over it, and once over, every verification query for that
-    base fails identically and the candidate is stranded for good.
-
-    So the batch is not guessed, it is *adapted*: ask for the whole thing, and
-    on refusal halve it and ask again. Each split halves the matched rows too,
-    so it converges, and a store that can answer the batch pays nothing.
-
-    A single path is the floor, where splitting can no longer help, so it is
-    asked for a single row instead, which stays under any ceiling however many
-    chunks the file has. That floor is what makes the recursion total, and it
-    is also where a failure that was never about query size finally surfaces.
-    """
-    if len(relative_paths) == 1:
-        relative_path = relative_paths[0]
-        return {relative_path} if _collection_has_source_path(collection, relative_path) else set()
-
-    try:
-        result = collection.get(where={_SOURCE_PATH_KEY: {"$in": list(relative_paths)}}, include=["metadatas"])
-    except NotFoundError:
-        # Splitting answers "the store refused this query for its size". A
-        # collection that is gone is not that, and stays gone however small the
-        # query gets, so descending would only cost log2(batch) + 1 doomed
-        # queries before raising exactly the same error from the first leaf.
-        raise
-    except InternalError as error:
-        if "too many SQL variables" not in str(error):
-            raise
-        # Splitting stays correct but multiplies the queries, and how far it
-        # degrades depends on chunk counts nothing here can see. Without a
-        # trace, a base whose files outgrew the ceiling just gets quietly
-        # slower -- the same invisibility that let the unsplit query strand
-        # candidates undiagnosed.
-        logger.debug("Split a refused knowledge vector verification query", paths=len(relative_paths))
-        midpoint = len(relative_paths) // 2
-        return _paths_with_vectors(collection, relative_paths[:midpoint]) | _paths_with_vectors(
-            collection,
-            relative_paths[midpoint:],
-        )
-
-    found: set[str] = set()
-    for metadata in result.get("metadatas") or []:
-        source_path = metadata.get(_SOURCE_PATH_KEY)
-        if isinstance(source_path, str):
-            found.add(source_path)
-    return found
-
-
-def _require_chroma_vector_db(knowledge: Knowledge) -> ChromaDb:
-    vector_db = knowledge.vector_db
-    if not isinstance(vector_db, ChromaDb):
-        msg = "Knowledge reindex candidate collection requires a ChromaDb vector database"
-        raise TypeError(msg)
-    return vector_db
-
-
 def _resolve_knowledge_path(
     path: str,
     runtime_paths: RuntimePaths,
@@ -503,10 +415,6 @@ def _ensure_knowledge_directory_ready(knowledge_path: Path) -> None:
         msg = f"Knowledge path {knowledge_path} must be a directory"
         raise ValueError(msg)
     knowledge_path.mkdir(parents=True, exist_ok=True)
-
-
-def _collection_name(base_id: str, knowledge_path: Path) -> str:
-    return f"{_COLLECTION_PREFIX}_{storage_key_for_base(base_id, knowledge_path)}"
 
 
 def _semantic_indexing_enabled(config: Config, base_id: str) -> bool:
@@ -745,13 +653,13 @@ def _reusable_row_signature(
     managed_paths: frozenset[str],
 ) -> tuple[str, FileSignature] | None:
     """Return the managed source path and signature one published chunk carries."""
-    source_path = metadata.get(_SOURCE_PATH_KEY)
+    source_path = metadata.get(SOURCE_PATH_KEY)
     if not isinstance(source_path, str) or source_path not in managed_paths:
         return None
     signature = file_signature_from_fields(
-        metadata.get(_SOURCE_MTIME_NS_KEY),
-        metadata.get(_SOURCE_SIZE_KEY),
-        metadata.get(_SOURCE_DIGEST_KEY),
+        metadata.get(SOURCE_MTIME_NS_KEY),
+        metadata.get(SOURCE_SIZE_KEY),
+        metadata.get(SOURCE_DIGEST_KEY),
     )
     if signature is None:
         return None
@@ -786,6 +694,7 @@ class KnowledgeManager:
     _base_storage_path: Path = field(init=False)
     _indexing_settings_path: Path = field(init=False)
     _git_lfs_hydrated_head_path: Path = field(init=False)
+    _collections: CollectionSpace = field(init=False, repr=False)
     _knowledge: Knowledge = field(init=False)
     _lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False)
     _git_sync_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False)
@@ -823,6 +732,17 @@ class KnowledgeManager:
         self._base_storage_path.mkdir(parents=True, exist_ok=True)
         self._indexing_settings_path = self._base_storage_path / "indexing_settings.json"
         self._git_lfs_hydrated_head_path = self._base_storage_path / "git_lfs_hydrated_head.txt"
+        self._collections = CollectionSpace(
+            base_id=self.base_id,
+            knowledge_path=self.knowledge_path,
+            storage_path=self._base_storage_path,
+            # A factory, not an embedder: this runs for every base, including
+            # non-semantic ones that never open a collection, and a status read
+            # must construct no embedder at all. Deferring puts the cost only
+            # where a handle is really built -- for a cleanup sweep, once per
+            # collection it actually deletes, and nothing when it deletes none.
+            embedder_factory=lambda: create_configured_embedder(self.config, self.runtime_paths),
+        )
         persisted_state = self._load_persisted_index_state()
         if not _semantic_indexing_enabled(self.config, self.base_id):
             self._persisted_collection_missing_on_init = False
@@ -836,9 +756,9 @@ class KnowledgeManager:
                 and persisted_state.collection is not None
                 and not self._persisted_collection_missing_on_init
             )
-            else self._default_collection_name()
+            else self._collections.default_collection
         )
-        self._knowledge = self._build_knowledge(collection_name)
+        self._knowledge = build_knowledge(self._collections, collection_name)
 
     def _set_settings(
         self,
@@ -868,7 +788,7 @@ class KnowledgeManager:
     def _persisted_collection_missing(self, persisted_state: _PersistedIndexState | None) -> bool:
         if persisted_state is None or persisted_state.status != _INDEXING_STATUS_COMPLETE:
             return False
-        collection_name = persisted_state.collection or self._default_collection_name()
+        collection_name = persisted_state.collection or self._collections.default_collection
         try:
             return not chroma_collection_exists(self._base_storage_path, collection_name)
         except Exception:
@@ -1223,7 +1143,7 @@ class KnowledgeManager:
             return False
 
         collection = vector_db.client.get_collection(name=vector_db.collection_name)
-        return _collection_has_source_path(collection, relative_path)
+        return collection_has_source_path(collection, relative_path)
 
     async def _wait_for_source_vectors(
         self,
@@ -1307,97 +1227,6 @@ class KnowledgeManager:
             fallback_reader = self._configure_text_reader(_InMemoryTextReader(error.source_text))
             await _insert_with_retry(fallback_reader)
 
-    def _default_collection_name(self) -> str:
-        return _collection_name(self.base_id, self._knowledge_source_path())
-
-    def _candidate_collection_name(self) -> str:
-        return f"{self._default_collection_name()}_candidate_{uuid.uuid4().hex[:16]}"
-
-    def _build_vector_db(self, collection_name: str, *, embedder: Embedder | None = None) -> ChromaDb:
-        return ChromaDb(
-            collection=collection_name,
-            path=str(self._base_storage_path),
-            persistent_client=True,
-            embedder=embedder if embedder is not None else create_configured_embedder(self.config, self.runtime_paths),
-        )
-
-    def _build_knowledge(self, collection_name: str, *, embedder: Embedder | None = None) -> Knowledge:
-        return Knowledge(vector_db=self._build_vector_db(collection_name, embedder=embedder))
-
-    def _cleanup_superseded_collections(
-        self,
-        *,
-        preserved: frozenset[str],
-        candidates_only: bool = False,
-    ) -> None:
-        """Delete this base's superseded collections, preserving proven-live ones.
-
-        Ownership is proven by name: both the default collection and the
-        candidate prefix embed this base's identity and resolved source path,
-        and both live in this base's own private storage directory. Anything
-        else in that directory is left alone and reported rather than deleted,
-        because nothing here can prove who owns it.
-        """
-        vector_db = self._knowledge.vector_db
-        if not isinstance(vector_db, ChromaDb):
-            return
-        client = vector_db.client
-        if client is None or not isinstance(client, _CollectionListingClient):
-            return
-
-        default_collection = self._default_collection_name()
-        candidate_prefix = f"{default_collection}_candidate_"
-
-        try:
-            collection_names = self._listed_collection_names(client)
-        except Exception:
-            logger.warning(
-                "Failed to list superseded knowledge collections for cleanup",
-                base_id=self.base_id,
-                exc_info=True,
-            )
-            return
-
-        unowned: list[str] = []
-        for collection_name in collection_names:
-            if collection_name in preserved:
-                continue
-            is_candidate = collection_name.startswith(candidate_prefix)
-            if not is_candidate and (candidates_only or collection_name != default_collection):
-                # Reclaiming abandoned candidates must never race a legacy
-                # published collection whose metadata predates this layout.
-                if collection_name != default_collection:
-                    unowned.append(collection_name)
-                continue
-            try:
-                self._build_vector_db(collection_name).delete()
-            except Exception:
-                logger.warning(
-                    "Failed to clean superseded knowledge collection",
-                    base_id=self.base_id,
-                    collection=collection_name,
-                    exc_info=True,
-                )
-        if unowned:
-            logger.info(
-                "Preserved knowledge collections with unprovable ownership",
-                base_id=self.base_id,
-                collections=sorted(unowned),
-            )
-
-    def _listed_collection_names(self, client: _CollectionListingClient) -> tuple[str, ...]:
-        names: list[str] = []
-        for collection in client.list_collections():
-            if isinstance(collection, str):
-                names.append(collection)
-            elif isinstance(collection, _NamedCollection):
-                names.append(collection.name)
-        return tuple(dict.fromkeys(names))
-
-    def _reset_vector_db(self, vector_db: ChromaDb) -> None:
-        vector_db.delete()
-        vector_db.create()
-
     async def _save_candidate_publish_metadata(
         self,
         *,
@@ -1441,8 +1270,9 @@ class KnowledgeManager:
         )
         publish_state.index_published = True
         # Adopt the candidate as this manager's live vector database:
-        # `_cleanup_superseded_collections` runs right after publish and reads
-        # `self._knowledge.vector_db` to obtain the Chroma client it lists with.
+        # `cleanup_superseded_collections` runs right after publish and is handed
+        # `self._knowledge.vector_db` as the Chroma client it lists with, so the
+        # adoption has to land before that call reads the attribute.
         self._knowledge.vector_db = candidate_vector_db
         if publish_cancelled:
             _raise_cancelled()
@@ -1486,10 +1316,10 @@ class KnowledgeManager:
         relative_path = self._relative_path(resolved_path)
         source_mtime_ns, source_size, source_digest = await asyncio.to_thread(self._file_signature, resolved_path)
         metadata = {
-            _SOURCE_PATH_KEY: relative_path,
-            _SOURCE_MTIME_NS_KEY: source_mtime_ns,
-            _SOURCE_SIZE_KEY: source_size,
-            _SOURCE_DIGEST_KEY: source_digest,
+            SOURCE_PATH_KEY: relative_path,
+            SOURCE_MTIME_NS_KEY: source_mtime_ns,
+            SOURCE_SIZE_KEY: source_size,
+            SOURCE_DIGEST_KEY: source_digest,
         }
         try:
             reader = self._build_reader(resolved_path)
@@ -1507,7 +1337,7 @@ class KnowledgeManager:
             if upsert:
                 # Agno/Chroma upsert keys by content hash, so stale chunks from an older
                 # version of the same file can remain unless we clear by source metadata first.
-                await asyncio.to_thread(knowledge.remove_vectors_by_metadata, {_SOURCE_PATH_KEY: relative_path})
+                await asyncio.to_thread(knowledge.remove_vectors_by_metadata, {SOURCE_PATH_KEY: relative_path})
             # Knowledge.ainsert is async by name only: it eventually calls into the
             # vector database's synchronous batch upsert (e.g. ChromaDB's Rust
             # _upsert) on the running event loop, blocking every other coroutine
@@ -1860,15 +1690,6 @@ class KnowledgeManager:
             raise first_error
         return sum(1 for result in results if result is True)
 
-    def _candidate_paths_with_vectors(
-        self,
-        vector_db: ChromaDb,
-        relative_paths: Sequence[str],
-    ) -> set[str]:
-        """Return which of the given source paths actually have candidate vectors."""
-        collection = vector_db.client.get_collection(name=vector_db.collection_name)
-        return _paths_with_vectors(collection, relative_paths)
-
     async def _candidate_paths_missing_vectors(self, run: _CandidateRun, relative_paths: Sequence[str]) -> set[str]:
         """Return completed entries the candidate cannot actually serve.
 
@@ -1884,9 +1705,9 @@ class KnowledgeManager:
         ]
         run.verified.update(set(relative_paths) - set(verifiable))
         missing: set[str] = set()
-        for start in range(0, len(verifiable), _VECTOR_VERIFY_BATCH):
-            batch = verifiable[start : start + _VECTOR_VERIFY_BATCH]
-            found = await asyncio.to_thread(self._candidate_paths_with_vectors, run.vector_db, batch)
+        for start in range(0, len(verifiable), VECTOR_VERIFY_BATCH):
+            batch = verifiable[start : start + VECTOR_VERIFY_BATCH]
+            found = await asyncio.to_thread(paths_with_vectors, run.vector_db, batch)
             missing.update(set(batch) - found)
             run.verified.update(found)
         return missing
@@ -2015,7 +1836,7 @@ class KnowledgeManager:
                 collection=published_collection,
                 exc_info=True,
             )
-            await asyncio.to_thread(self._reset_vector_db, candidate_vector_db)
+            await asyncio.to_thread(reset_vector_db, candidate_vector_db)
             return {}
         logger.info(
             "Reused published knowledge vectors in a new candidate",
@@ -2043,7 +1864,7 @@ class KnowledgeManager:
         """
         if checkpoint.completed:
             return False
-        vector_db = self._build_vector_db(checkpoint.collection, embedder=embedder)
+        vector_db = build_vector_db(self._collections, checkpoint.collection, embedder=embedder)
         if not vector_db.exists():
             return False
         collection = vector_db.client.get_collection(name=vector_db.collection_name)
@@ -2076,9 +1897,9 @@ class KnowledgeManager:
             self._base_storage_path,
             replace(checkpoint, completed={}, failed={}),
         )
-        knowledge = self._build_knowledge(checkpoint.collection, embedder=embedder)
-        vector_db = _require_chroma_vector_db(knowledge)
-        await asyncio.to_thread(self._reset_vector_db, vector_db)
+        knowledge = build_knowledge(self._collections, checkpoint.collection, embedder=embedder)
+        vector_db = require_chroma_vector_db(knowledge)
+        await asyncio.to_thread(reset_vector_db, vector_db)
         if published_collection is None:
             return _OpenedCandidate(checkpoint=checkpoint, knowledge=knowledge, vector_db=vector_db)
         reused = await self._seed_candidate_from_published(
@@ -2120,11 +1941,11 @@ class KnowledgeManager:
             # Rebuilt without a copy: whatever lost this collection may equally
             # have damaged the published one, and a full rebuild is the safe repair.
             return await self._rebuild_candidate_collection(checkpoint, embedder=embedder, published_collection=None)
-        knowledge = self._build_knowledge(checkpoint.collection, embedder=embedder)
+        knowledge = build_knowledge(self._collections, checkpoint.collection, embedder=embedder)
         return _OpenedCandidate(
             checkpoint=checkpoint,
             knowledge=knowledge,
-            vector_db=_require_chroma_vector_db(knowledge),
+            vector_db=require_chroma_vector_db(knowledge),
             resumed=True,
         )
 
@@ -2169,7 +1990,7 @@ class KnowledgeManager:
             # A failed delete must not block indexing: an incompatible candidate
             # is never published or resumed, and the superseded-collection sweep
             # below reclaims it on this same run, or on a later one.
-            await self._delete_candidate_collection(checkpoint.collection)
+            await delete_collection(self._collections, checkpoint.collection)
             await asyncio.to_thread(delete_candidate_checkpoint, self._base_storage_path)
             checkpoint = None
         if checkpoint is not None and force_reindex:
@@ -2183,7 +2004,7 @@ class KnowledgeManager:
                 collection=checkpoint.collection,
                 completed=len(checkpoint.completed),
             )
-            await self._delete_candidate_collection(checkpoint.collection)
+            await delete_collection(self._collections, checkpoint.collection)
             await asyncio.to_thread(delete_candidate_checkpoint, self._base_storage_path)
             checkpoint = None
 
@@ -2191,7 +2012,7 @@ class KnowledgeManager:
         rebuild = checkpoint is None
         if checkpoint is None:
             checkpoint = CandidateCheckpoint(
-                collection=self._candidate_collection_name(),
+                collection=candidate_collection_name(self._collections),
                 settings=self._indexing_settings,
             )
         elif await asyncio.to_thread(self._candidate_holds_unclaimed_rows, checkpoint, embedder=embedder):
@@ -2230,7 +2051,9 @@ class KnowledgeManager:
         if cleanup_is_safe:
             preserved = {checkpoint.collection, *published_collections}
             await asyncio.to_thread(
-                self._cleanup_superseded_collections,
+                cleanup_superseded_collections,
+                self._collections,
+                vector_db=self._knowledge.vector_db,
                 preserved=frozenset(preserved),
                 candidates_only=True,
             )
@@ -2272,7 +2095,8 @@ class KnowledgeManager:
         checkpoint = await asyncio.to_thread(load_candidate_checkpoint, self._base_storage_path)
         if checkpoint is None:
             return
-        if checkpoint.collection != published_collection and not await self._delete_candidate_collection(
+        if checkpoint.collection != published_collection and not await delete_collection(
+            self._collections,
             checkpoint.collection,
         ):
             return
@@ -2283,45 +2107,6 @@ class KnowledgeManager:
             collection=checkpoint.collection,
             completed=len(checkpoint.completed),
         )
-
-    async def _delete_candidate_collection(self, collection_name: str) -> bool:
-        """Delete one candidate collection, reporting whether it is really gone.
-
-        Agno's ``ChromaDb.delete`` swallows the provider error and returns
-        ``False`` rather than raising, so catching exceptions alone would
-        report every real failure as a success. A ``False`` result is also
-        returned when the collection simply was not there, which is the
-        outcome we want, so the two are told apart by probing existence.
-        """
-        try:
-            deleted = await asyncio.to_thread(self._delete_candidate_collection_sync, collection_name)
-        except Exception:
-            logger.warning(
-                "Failed to delete knowledge candidate collection",
-                base_id=self.base_id,
-                collection=collection_name,
-                exc_info=True,
-            )
-            return False
-        if deleted:
-            return True
-        logger.warning(
-            "Knowledge candidate collection still exists after deletion failed",
-            base_id=self.base_id,
-            collection=collection_name,
-        )
-        return False
-
-    def _delete_candidate_collection_sync(self, collection_name: str) -> bool:
-        """Delete one candidate, treating an already-absent collection as success."""
-        vector_db = self._build_vector_db(collection_name)
-        if vector_db.delete():
-            return True
-        try:
-            vector_db.client.get_collection(name=vector_db.collection_name)
-        except NotFoundError:
-            return True
-        return False
 
     async def _file_signatures_for(self, files: Sequence[Path]) -> dict[str, tuple[FileSignature, Path]]:
         """Return current signatures for the listed files, skipping vanished ones."""
@@ -2346,30 +2131,11 @@ class KnowledgeManager:
                 signatures[relative_path] = (signature, file_path)
         return signatures
 
-    def _delete_candidate_vectors(self, vector_db: ChromaDb, relative_paths: Sequence[str]) -> None:
-        """Delete vectors for many source paths in one vector-store round trip.
-
-        Agno's ``delete_by_metadata`` wraps values in ``$eq`` and so can only
-        take one path per call, which turns a large source update into one
-        thread hop and one get+delete per file. The collection accepts ``$in``
-        directly.
-
-        Unlike the ``$in`` the verification query issues, this one needs no
-        ceiling protection: a delete does not bind one SQL variable per matched
-        row, so the batch size alone bounds it. Measured on ChromaDB 1.5.8,
-        deleting 51,200 rows across 128 paths in one call succeeds, where the
-        equivalent read fails with ``too many SQL variables``.
-        """
-        collection = vector_db.client.get_collection(name=vector_db.collection_name)
-        for start in range(0, len(relative_paths), _VECTOR_DELETE_BATCH):
-            batch = list(relative_paths[start : start + _VECTOR_DELETE_BATCH])
-            collection.delete(where={_SOURCE_PATH_KEY: {"$in": batch}})
-
     async def _drop_candidate_paths(self, run: _CandidateRun, relative_paths: Sequence[str]) -> None:
         """Remove candidate vectors and checkpoint entries for gone or stale paths."""
         if not relative_paths:
             return
-        await asyncio.to_thread(self._delete_candidate_vectors, run.vector_db, relative_paths)
+        await asyncio.to_thread(delete_source_path_vectors, run.vector_db, relative_paths)
         for relative_path in relative_paths:
             run.completed.pop(relative_path, None)
             run.failed.pop(relative_path, None)
@@ -2723,6 +2489,8 @@ class KnowledgeManager:
             run.published = publish_state.index_published
         await asyncio.to_thread(delete_candidate_checkpoint, self._base_storage_path)
         await asyncio.to_thread(
-            self._cleanup_superseded_collections,
+            cleanup_superseded_collections,
+            self._collections,
+            vector_db=self._knowledge.vector_db,
             preserved=frozenset({run.vector_db.collection_name}),
         )
