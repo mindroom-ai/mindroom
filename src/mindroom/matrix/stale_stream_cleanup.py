@@ -127,6 +127,7 @@ class _MessageState:
 
     latest_body: str | None = None
     latest_timestamp: int = 0
+    original_timestamp: int | None = None
     latest_event_id: str = ""
     latest_content: dict[str, Any] | None = None
     thread_id: str | None = None
@@ -1081,6 +1082,7 @@ def _merge_resolved_message_state(
     normalized_latest_content = {key: value for key, value in message.content.items() if isinstance(key, str)}
     state = message_states.setdefault(target_event_id, _MessageState())
     state.latest_body = message.body
+    state.original_timestamp = message.timestamp
     # The last time this message changed, not when it was created. ``timestamp`` deliberately
     # stays the original event's so an edit cannot reorder a thread, which means it is the
     # wrong clock for "is this stream still active": a placeholder posted eight hours ago and
@@ -1858,17 +1860,24 @@ def _should_skip_for_startup_cleanup_window(
 ) -> bool:
     """Return whether startup cleanup should ignore one candidate by age."""
     timestamp_ms = state.latest_timestamp
-    if _is_at_or_after_startup_cutoff(timestamp_ms, startup_cutoff_ms=scan_policy.startup_cutoff_ms):
+    is_resumable_interruption = scan_policy.collect_terminal_interrupted_for_resume and _has_resumable_interrupted_note(
+        state,
+    )
+    cutoff_timestamp_ms = (
+        state.original_timestamp if is_resumable_interruption and state.original_timestamp is not None else timestamp_ms
+    )
+    if _is_at_or_after_startup_cutoff(
+        cutoff_timestamp_ms,
+        startup_cutoff_ms=scan_policy.startup_cutoff_ms,
+    ):
         return True
     # A terminal interruption cannot still be receiving chunks. Targeted
     # replacement recovery passes no cutoff because local and Matrix clocks
     # are not comparable.
-    if _is_recent_timestamp(timestamp_ms, now_ms=now_ms) and not (
-        scan_policy.collect_terminal_interrupted_for_resume and _has_resumable_interrupted_note(state)
-    ):
+    if _is_recent_timestamp(timestamp_ms, now_ms=now_ms) and not is_resumable_interruption:
         return True
     if _is_older_than_cleanup_window(timestamp_ms, now_ms=now_ms):
-        return not (scan_policy.collect_terminal_interrupted_for_resume and _has_resumable_interrupted_note(state))
+        return not is_resumable_interruption
     return False
 
 

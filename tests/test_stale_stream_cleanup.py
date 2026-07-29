@@ -638,6 +638,41 @@ async def test_cleanup_skips_streaming_messages_at_or_after_startup_cutoff(tmp_p
 
 
 @pytest.mark.asyncio
+async def test_cleanup_skips_restart_interrupted_message_created_after_startup_cutoff(tmp_path: Path) -> None:
+    """Auto-resume must not claim a terminal message created by this process."""
+    config = _make_config(tmp_path)
+    config.defaults.auto_resume_after_restart = True
+    client = _make_client()
+    startup_cutoff_ms = NOW_MS - 120_000
+    client.room_messages.return_value = _room_messages_response(
+        _make_message_event(
+            event_id="$thread-root",
+            body="Question",
+            sender=USER_ID,
+            timestamp_ms=startup_cutoff_ms - 1,
+        ),
+        _make_message_event(
+            event_id="$current-process-interruption",
+            body=build_restart_interrupted_body("Partial"),
+            timestamp_ms=startup_cutoff_ms + 1,
+            relates_to=_thread_reply_relation("$thread-root", "$thread-root"),
+            extra_content={STREAM_STATUS_KEY: "error"},
+        ),
+    )
+    client.room_get_event_relations = MagicMock(return_value=_aiter())
+
+    cleaned, interrupted = await _run_cleanup(
+        client,
+        config,
+        joined_rooms=[ROOM_ID],
+        startup_cutoff_ms=startup_cutoff_ms,
+    )
+
+    assert cleaned == 0
+    assert interrupted == []
+
+
+@pytest.mark.asyncio
 async def test_cleanup_returns_interrupted_thread_per_cleaned_threaded_message(tmp_path: Path) -> None:
     """Cleanup should return one interrupted-thread record per cleaned threaded message."""
     config = _make_config(tmp_path)
@@ -3113,7 +3148,7 @@ async def test_recovery_selects_joined_owner_for_freshness_and_router_for_relay(
 
 @pytest.mark.asyncio
 async def test_failed_router_relay_keeps_room_retryable_for_post_join_recovery(tmp_path: Path) -> None:
-    """A failed router relay should let the joined-room delta retry after router membership."""
+    """A failed relay after cleanup should remain retryable after router membership."""
     config = _make_config(tmp_path)
     config.defaults.auto_resume_after_restart = True
     router_client = make_matrix_client_mock(user_id="@actual_router:localhost")
@@ -3133,6 +3168,40 @@ async def test_failed_router_relay_keeps_room_retryable_for_post_join_recovery(t
         BOT_USER_ID: StaleStreamCleanupActor(owner_client, owner_cache),
     }
     router_joined = False
+    startup_cutoff_ms = int(stale_stream_cleanup_module.time.time() * 1000)
+    restart_body = build_restart_interrupted_body("Partial")
+    original_history = _room_messages_response(
+        _make_message_event(
+            event_id="$thread",
+            body="Question",
+            sender=USER_ID,
+            timestamp_ms=startup_cutoff_ms - (STALE_AGE_MS + 20_000),
+        ),
+        _make_message_event(
+            event_id="$target",
+            body="Partial",
+            timestamp_ms=startup_cutoff_ms - STALE_AGE_MS,
+            relates_to=_thread_reply_relation("$thread", "$thread"),
+            extra_content={STREAM_STATUS_KEY: "streaming"},
+        ),
+    )
+    edited_history = _room_messages_response(
+        *original_history.chunk,
+        _make_message_event(
+            event_id="$cleanup-edit",
+            body=f"* {restart_body}",
+            timestamp_ms=startup_cutoff_ms + 1,
+            relates_to={"rel_type": "m.replace", "event_id": "$target"},
+            new_content={
+                "body": restart_body,
+                "msgtype": "m.text",
+                STREAM_STATUS_KEY: "error",
+            },
+        ),
+    )
+    owner_client.room_messages.return_value = original_history
+    owner_client.room_get_event_relations = MagicMock(return_value=_aiter())
+    router_client.room_get_event_relations = MagicMock(return_value=_aiter())
 
     async def joined_rooms(client: object) -> list[str]:
         if client is router_client:
@@ -3140,16 +3209,20 @@ async def test_failed_router_relay_keeps_room_retryable_for_post_join_recovery(t
         assert client is owner_client
         return [ROOM_ID]
 
+    async def cleanup_edit(*_: object, **__: object) -> object:
+        router_client.room_messages.return_value = edited_history
+        return delivered_matrix_event("$cleanup-edit")
+
     with (
         patch("mindroom.matrix.stale_stream_cleanup.get_joined_rooms", side_effect=joined_rooms),
-        patch(
-            "mindroom.matrix.stale_stream_cleanup._cleanup_stale_streaming_room",
-            new=AsyncMock(return_value=(0, [interrupted])),
-        ),
         patch(
             "mindroom.matrix.stale_stream_cleanup.send_message_result",
             new=AsyncMock(side_effect=[None, delivered_matrix_event("$resume")]),
         ) as mock_send,
+        patch(
+            "mindroom.matrix.stale_stream_cleanup.edit_message_result",
+            new=AsyncMock(side_effect=cleanup_edit),
+        ) as mock_edit,
     ):
         scanned_room_ids: set[str] = set()
         failed_result = await recover_stale_streaming_messages(
@@ -3158,10 +3231,10 @@ async def test_failed_router_relay_keeps_room_retryable_for_post_join_recovery(t
             resume_conversation_cache=router_cache,
             config=config,
             runtime_paths=runtime_paths_for(config),
-            startup_cutoff_ms=NOW_MS,
+            startup_cutoff_ms=startup_cutoff_ms,
             scanned_room_ids=scanned_room_ids,
         )
-        assert failed_result == StaleStreamRecoveryResult(room_count=1, cleaned_count=0, resumed_count=0)
+        assert failed_result == StaleStreamRecoveryResult(room_count=1, cleaned_count=1, resumed_count=0)
         assert scanned_room_ids == set()
 
         router_joined = True
@@ -3171,7 +3244,7 @@ async def test_failed_router_relay_keeps_room_retryable_for_post_join_recovery(t
             resume_conversation_cache=router_cache,
             config=config,
             runtime_paths=runtime_paths_for(config),
-            startup_cutoff_ms=NOW_MS,
+            startup_cutoff_ms=startup_cutoff_ms,
             scanned_room_ids=scanned_room_ids,
         )
 
@@ -3179,6 +3252,7 @@ async def test_failed_router_relay_keeps_room_retryable_for_post_join_recovery(t
     assert scanned_room_ids == {ROOM_ID}
     assert owner_cache.refresh_strict_thread_history_from_source.await_count == 2
     router_cache.refresh_strict_thread_history_from_source.assert_not_awaited()
+    mock_edit.assert_awaited_once()
     assert mock_send.await_count == 2
     assert all(call.args[0] is router_client for call in mock_send.await_args_list)
 
