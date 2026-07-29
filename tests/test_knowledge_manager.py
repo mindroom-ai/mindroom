@@ -8905,10 +8905,21 @@ async def test_malformed_json_falls_back_to_text_and_publishes(
     docs_path = tmp_path / "docs"
     docs_path.mkdir()
     malformed = '{\n  "claim": "still useful",\n  “broken”: true\n}\n'
-    (docs_path / "claim.json").write_text(malformed, encoding="utf-8")
+    source_path = docs_path / "claim.json"
+    source_path.write_text(malformed, encoding="utf-8")
     config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
     runtime_paths = runtime_paths_for(config)
     monkeypatch.setattr(_Knowledge, "insert", _insert_with_real_reader)
+    original_read_text = Path.read_text
+    source_reads = 0
+
+    def _count_source_reads(path: Path, *args: object, **kwargs: object) -> str:
+        nonlocal source_reads
+        if path == source_path:
+            source_reads += 1
+        return original_read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", _count_source_reads)
 
     with capture_logs() as logs:
         result = await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
@@ -8922,6 +8933,7 @@ async def test_malformed_json_falls_back_to_text_and_publishes(
     assert "“broken”: true" in documents[0].content
     fallback = [entry for entry in logs if entry["event"] == "Malformed JSON knowledge file; indexing as text"]
     assert [(entry["path"], entry["line"], entry["column"]) for entry in fallback] == [("claim.json", 3, 3)]
+    assert source_reads == 1
 
 
 @pytest.mark.asyncio
@@ -8970,7 +8982,9 @@ async def test_valid_json_does_not_hide_downstream_json_decode_error(
         upsert: bool,
         reader: object | None = None,
     ) -> None:
-        _ = (self, path, metadata, upsert, reader)
+        _ = (self, metadata, upsert)
+        selected_reader = cast("Reader", reader)
+        selected_reader.read(Path(path), name=Path(path).name)
         message = "downstream response was not JSON"
         raise json.JSONDecodeError(message, "<html>", 0)
 

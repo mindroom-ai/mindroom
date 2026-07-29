@@ -13,9 +13,10 @@ from contextlib import suppress
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any, Literal, NoReturn, Protocol, TypeVar, cast, runtime_checkable
+from typing import IO, TYPE_CHECKING, Any, Literal, NoReturn, Protocol, TypeVar, cast, runtime_checkable
 from urllib.parse import quote, urlparse, urlunparse
 
+from agno.knowledge.document.base import Document
 from agno.knowledge.reader import ReaderFactory
 from agno.knowledge.reader.json_reader import JSONReader
 from agno.knowledge.reader.markdown_reader import MarkdownReader
@@ -86,7 +87,6 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Coroutine, Iterable, Iterator, Mapping, Sequence
     from pathlib import Path
 
-    from agno.knowledge.document.base import Document
     from agno.knowledge.embedder.base import Embedder
     from agno.knowledge.reader.base import Reader
     from chromadb.api.models.Collection import Collection
@@ -96,6 +96,51 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
 
 logger = get_logger(__name__)
+
+
+class _MalformedJSONSourceError(Exception):
+    """A JSON parser failure carrying the already-read source text."""
+
+    def __init__(self, source_text: str, *, line: int, column: int) -> None:
+        super().__init__("Malformed JSON knowledge source")
+        self.source_text = source_text
+        self.line = line
+        self.column = column
+
+
+class _FallbackAwareJSONReader(JSONReader):
+    """Tag only JSON decoding failures raised inside the source reader."""
+
+    def read(self, path: Path | IO[Any], name: str | None = None) -> list[Document]:
+        malformed_error: _MalformedJSONSourceError | None = None
+        try:
+            return super().read(path, name=name)
+        except json.JSONDecodeError as error:
+            malformed_error = _MalformedJSONSourceError(
+                error.doc,
+                line=error.lineno,
+                column=error.colno,
+            )
+        raise malformed_error
+
+
+class _InMemoryTextReader(TextReader):
+    """Read the malformed JSON text already retained by its parse error."""
+
+    def __init__(self, source_text: str) -> None:
+        super().__init__()
+        self._source_text = source_text
+
+    def read(self, file: Path | IO[Any], name: str | None = None) -> list[Document]:
+        document = Document(
+            name=name or str(file),
+            id=str(uuid.uuid4()),
+            content=self._source_text,
+        )
+        if not self.chunk:
+            return [document]
+        return self.chunk_document(document)
+
 
 _COLLECTION_PREFIX = "mindroom_knowledge"
 _SOURCE_PATH_KEY = "source_path"
@@ -1144,14 +1189,8 @@ class KnowledgeManager:
             overlap=base_config.chunk_overlap,
         )
 
-    def _build_reader(self, file_path: Path) -> Reader:
-        """Build a per-file reader with conservative chunking for text-like content."""
-        reader = ReaderFactory.get_reader_for_extension(file_path.suffix.lower())
-
-        # Large markdown/plain-text files are the common source of oversized embed requests.
-        if not isinstance(reader, (TextReader, MarkdownReader)):
-            return reader
-
+    def _configure_text_reader(self, reader: TextReader | MarkdownReader) -> TextReader | MarkdownReader:
+        """Apply this base's text chunking policy to a private reader copy."""
         chunking_strategy = self._chunking_strategy()
         configured_reader = deepcopy(reader)
         configured_reader.chunk = True
@@ -1159,10 +1198,22 @@ class KnowledgeManager:
         configured_reader.chunking_strategy = chunking_strategy
         return configured_reader
 
+    def _build_reader(self, file_path: Path) -> Reader:
+        """Build a per-file reader with conservative chunking for text-like content."""
+        reader = ReaderFactory.get_reader_for_extension(file_path.suffix.lower())
+
+        if isinstance(reader, JSONReader):
+            return _FallbackAwareJSONReader(**deepcopy(vars(reader)))
+
+        # Large markdown/plain-text files are the common source of oversized embed requests.
+        if not isinstance(reader, (TextReader, MarkdownReader)):
+            return reader
+
+        return self._configure_text_reader(reader)
+
     async def _insert_with_malformed_json_fallback(
         self,
         insert: Callable[[Reader], Awaitable[None]],
-        file_path: Path,
         relative_path: str,
         reader: Reader,
     ) -> None:
@@ -1181,25 +1232,15 @@ class KnowledgeManager:
 
         try:
             await _insert_with_retry(reader)
-        except json.JSONDecodeError as error:
-            if not isinstance(reader, JSONReader):
-                raise
-            source_text = await asyncio.to_thread(file_path.read_text, encoding=reader.encoding or "utf-8")
-            if error.doc != source_text:
-                raise
+        except _MalformedJSONSourceError as error:
             logger.warning(
                 "Malformed JSON knowledge file; indexing as text",
                 base_id=self.base_id,
                 path=relative_path,
-                line=error.lineno,
-                column=error.colno,
+                line=error.line,
+                column=error.column,
             )
-            chunking_strategy = self._chunking_strategy()
-            fallback_reader = TextReader(
-                chunk=True,
-                chunk_size=chunking_strategy.chunk_size,
-                chunking_strategy=chunking_strategy,
-            )
+            fallback_reader = self._configure_text_reader(_InMemoryTextReader(error.source_text))
             await _insert_with_retry(fallback_reader)
 
     def _default_collection_name(self) -> str:
@@ -1440,7 +1481,6 @@ class KnowledgeManager:
             # costs one retry of this file instead of the whole refresh.
             await self._insert_with_malformed_json_fallback(
                 _insert_once,
-                resolved_path,
                 relative_path,
                 reader,
             )
