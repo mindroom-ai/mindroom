@@ -1840,10 +1840,9 @@ class KnowledgeManager:
         Redacting here rather than when the outcome is built keeps the stored
         string and the reported one identical, so an operator reading the
         attribute in a debugger sees exactly what was logged and persisted. It
-        also keeps redaction out of the ``finally`` that owns checkpoint
-        compaction, where a raise would both mask the real failure and skip
-        durability work -- ``redact_credentials_in_text`` is total now, so that
-        is defence in depth rather than the load-bearing reason it once was.
+        also keeps ``redact_credentials_in_text`` -- which is not total -- out
+        of the ``finally`` that owns checkpoint compaction, where a raise would
+        both mask the real failure and skip durability work.
         """
         self._last_refresh_error = redact_credentials_in_text(detail)
 
