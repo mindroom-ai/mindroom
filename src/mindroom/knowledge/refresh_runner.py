@@ -22,7 +22,7 @@ from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths, resolve_runtime_paths, runtime_env_values
 from mindroom.file_locks import async_exclusive_file_lock
 from mindroom.knowledge.availability import KnowledgeAvailability
-from mindroom.knowledge.manager import KnowledgeManager, knowledge_source_signature
+from mindroom.knowledge.manager import KnowledgeManager
 from mindroom.knowledge.redaction import redact_credentials_in_text
 from mindroom.knowledge.registry import (
     KnowledgeRefreshTarget,
@@ -564,15 +564,11 @@ async def _refresh_knowledge_binding_locked(
 async def _publish_file_mode_source_metadata(
     key: PublishedIndexKey,
     manager: KnowledgeManager,
+    *,
+    published_revision: str | None = None,
 ) -> KnowledgeRefreshResult:
     """Publish current source metadata for a file-only base without building vectors."""
-    source_signature = await asyncio.to_thread(
-        knowledge_source_signature,
-        manager.config,
-        manager.base_id,
-        manager._knowledge_source_path(),
-        tracked_relative_paths=manager._git_tracked_relative_paths,
-    )
+    source_signature = await manager.source_signature()
     now = datetime.now(tz=UTC).isoformat()
     await asyncio.to_thread(
         save_published_index_state,
@@ -582,7 +578,7 @@ async def _publish_file_mode_source_metadata(
             status="complete",
             collection=None,
             last_published_at=now,
-            published_revision=manager._git_last_successful_commit,
+            published_revision=published_revision,
             indexed_count=0,
             source_signature=source_signature,
             refresh_job="idle",
@@ -673,9 +669,11 @@ async def _refresh_file_mode_binding_locked(
         storage_path=binding.storage_root,
         knowledge_path=binding.knowledge_path,
     )
-    if manager._git_config() is not None:
-        git_sync_result = await manager.sync_git_source()
-        if git_sync_result.get("updated", False):
+    published_revision: str | None = None
+    if manager.git_source.is_configured():
+        git_sync_result = await manager.git_source.sync()
+        published_revision = git_sync_result.head
+        if git_sync_result.updated:
             await mark_knowledge_source_changed_async(
                 key.base_id,
                 config=manager.config,
@@ -684,7 +682,7 @@ async def _refresh_file_mode_binding_locked(
                 reason="git_source_updated",
             )
 
-    return await _publish_file_mode_source_metadata(key, manager)
+    return await _publish_file_mode_source_metadata(key, manager, published_revision=published_revision)
 
 
 async def _maybe_publish_unchanged_index(
@@ -694,11 +692,11 @@ async def _maybe_publish_unchanged_index(
     execution_identity: ToolExecutionIdentity | None,
     force_reindex: bool,
 ) -> KnowledgeRefreshResult | None:
-    force_reindex = force_reindex or manager._needs_full_reindex_on_create()
-    if manager._git_config() is not None:
-        git_sync_result = await manager.sync_git_source()
-        if force_reindex or git_sync_result.get("updated", False):
-            if git_sync_result.get("updated", False):
+    force_reindex = force_reindex or manager.needs_full_reindex_on_create()
+    if manager.git_source.is_configured():
+        git_sync_result = await manager.git_source.sync()
+        if force_reindex or git_sync_result.updated:
+            if git_sync_result.updated:
                 await mark_knowledge_source_changed_async(
                     key.base_id,
                     config=manager.config,
@@ -710,7 +708,7 @@ async def _maybe_publish_unchanged_index(
         return await _publish_unchanged_index(
             manager,
             key,
-            published_revision=manager._git_last_successful_commit,
+            published_revision=git_sync_result.head,
         )
     if force_reindex:
         await mark_knowledge_source_changed_async(
@@ -833,13 +831,7 @@ async def _publish_unchanged_index(
     if _revision_proves_source_unchanged(state, published_revision):
         current_source_signature = state.source_signature
     else:
-        current_source_signature = await asyncio.to_thread(
-            knowledge_source_signature,
-            manager.config,
-            manager.base_id,
-            manager._knowledge_source_path(),
-            tracked_relative_paths=manager._git_tracked_relative_paths,
-        )
+        current_source_signature = await manager.source_signature()
     if current_source_signature != state.source_signature:
         if mark_stale_on_source_change:
             await mark_knowledge_source_changed_async(

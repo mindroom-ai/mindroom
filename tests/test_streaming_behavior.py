@@ -2303,7 +2303,7 @@ class TestStreamingBehavior:
                 ),
             ),
             patch(
-                "mindroom.knowledge.manager.KnowledgeManager.sync_git_source",
+                "mindroom.knowledge.git_source.GitKnowledgeSource.sync",
                 new=AsyncMock(),
             ) as sync_git_source,
             patch(
