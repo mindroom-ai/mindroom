@@ -3512,6 +3512,14 @@ depends_on = ["mindroom.embedding_errors"]
 visibility = ["mindroom.knowledge.manager"]
 
 [[modules]]
+path = "mindroom.knowledge.git_source"
+depends_on = [
+    "mindroom.knowledge.file_listing",
+    "mindroom.knowledge.redaction",
+]
+visibility = ["mindroom.knowledge.manager"]
+
+[[modules]]
 path = "mindroom.knowledge.registry"
 depends_on = [
     "mindroom.embedding_factory",
@@ -3540,6 +3548,7 @@ depends_on = [
     "mindroom.knowledge.candidate_checkpoint",
     "mindroom.knowledge.embedding_batch",
     "mindroom.knowledge.file_listing",
+    "mindroom.knowledge.git_source",
     "mindroom.knowledge.index_metadata",
     "mindroom.knowledge.index_retry",
     "mindroom.knowledge.indexing_config",

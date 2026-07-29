@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import base64
 import hashlib
 import os
 import time
@@ -13,7 +12,6 @@ from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Literal, NoReturn, Protocol, TypeVar, cast, runtime_checkable
-from urllib.parse import quote, urlparse, urlunparse
 
 from agno.knowledge.reader import ReaderFactory
 from agno.knowledge.reader.markdown_reader import MarkdownReader
@@ -29,7 +27,6 @@ from mindroom.constants import (
     RuntimePaths,
     resolve_config_relative_path,
 )
-from mindroom.credentials import get_runtime_shared_credentials_manager
 from mindroom.embedding_errors import (
     classified_embedder_error,
     embedder_failure_is_transient,
@@ -53,12 +50,11 @@ from mindroom.knowledge.embedding_batch import (
     plan_embedding_batches,
 )
 from mindroom.knowledge.file_listing import (
-    git_checkout_present,
     git_tracked_relative_paths_from_checkout,
-    include_knowledge_relative_path,
     knowledge_files_from_relative_paths,
     list_knowledge_files,
 )
+from mindroom.knowledge.git_source import GitKnowledgeSource
 from mindroom.knowledge.index_metadata import (
     load_index_metadata_payload,
     parse_index_metadata_fields,
@@ -71,12 +67,7 @@ from mindroom.knowledge.indexing_config import (
     indexing_settings_key,
     storage_key_for_base,
 )
-from mindroom.knowledge.redaction import (
-    credential_free_repo_url,
-    embedded_http_userinfo,
-    redact_credentials_in_text,
-    redact_url_credentials,
-)
+from mindroom.knowledge.redaction import redact_credentials_in_text
 from mindroom.logging_config import get_logger
 from mindroom.strict_knowledge import StrictInsertKnowledge as Knowledge
 
@@ -90,7 +81,6 @@ if TYPE_CHECKING:
     from chromadb.api.models.Collection import Collection
     from chromadb.api.types import Embeddings, Metadata
 
-    from mindroom.config.knowledge import KnowledgeGitConfig
     from mindroom.config.main import Config
 
 logger = get_logger(__name__)
@@ -462,124 +452,6 @@ def _semantic_indexing_enabled(config: Config, base_id: str) -> bool:
     return config.get_knowledge_base_config(base_id).mode == "semantic"
 
 
-def _authenticated_repo_url(
-    repo_url: str,
-    credentials_service: str | None,
-    runtime_paths: RuntimePaths,
-) -> str:
-    """Inject HTTPS credentials from CredentialsManager into a repository URL."""
-    if not credentials_service:
-        return repo_url
-
-    credentials = get_runtime_shared_credentials_manager(runtime_paths).load_credentials(credentials_service) or {}
-    username = credentials.get("username")
-    token = credentials.get("token") or credentials.get("api_key")
-    password = credentials.get("password")
-
-    if not isinstance(username, str) and token and not password:
-        username = "x-access-token"
-
-    if not isinstance(username, str) or not username:
-        return repo_url
-
-    secret: str | None
-    if isinstance(password, str) and password:
-        secret = password
-    elif isinstance(token, str) and token:
-        secret = token
-    else:
-        secret = None
-
-    if secret is None:
-        return repo_url
-
-    parsed = urlparse(repo_url)
-    if parsed.scheme not in {"http", "https"}:
-        return repo_url
-
-    hostname = parsed.netloc.split("@")[-1]
-    auth_netloc = f"{quote(username, safe='')}:{quote(secret, safe='')}@{hostname}"
-    return urlunparse(parsed._replace(netloc=auth_netloc))
-
-
-def _credentials_service_http_userinfo(
-    credentials_service: str | None,
-    runtime_paths: RuntimePaths,
-) -> tuple[str, str] | None:
-    if not credentials_service:
-        return None
-
-    credentials = get_runtime_shared_credentials_manager(runtime_paths).load_credentials(credentials_service) or {}
-    username = credentials.get("username")
-    token = credentials.get("token") or credentials.get("api_key")
-    password = credentials.get("password")
-
-    if not isinstance(username, str) and token and not password:
-        username = "x-access-token"
-
-    if not isinstance(username, str) or not username:
-        return None
-
-    if isinstance(password, str) and password:
-        return username, password
-    if isinstance(token, str) and token:
-        return username, token
-    return None
-
-
-def _git_http_basic_auth_env(clean_url: str, username: str, secret: str) -> dict[str, str]:
-    encoded = base64.b64encode(f"{username}:{secret}".encode()).decode("ascii")
-    return {
-        "GIT_CONFIG_COUNT": "1",
-        "GIT_CONFIG_KEY_0": f"http.{clean_url}.extraHeader",
-        "GIT_CONFIG_VALUE_0": f"Authorization: Basic {encoded}",
-    }
-
-
-def _git_auth_env(
-    repo_url: str,
-    credentials_service: str | None,
-    runtime_paths: RuntimePaths,
-) -> dict[str, str] | None:
-    """Return process-local Git config that injects credentials without persisting them."""
-    clean_url = credential_free_repo_url(repo_url)
-    parsed_clean_url = urlparse(clean_url)
-
-    embedded_userinfo = embedded_http_userinfo(repo_url)
-    if embedded_userinfo is not None:
-        return _git_http_basic_auth_env(clean_url, *embedded_userinfo)
-
-    credentials_userinfo = (
-        _credentials_service_http_userinfo(credentials_service, runtime_paths)
-        if parsed_clean_url.scheme in {"http", "https"}
-        else None
-    )
-    if credentials_userinfo is not None:
-        return _git_http_basic_auth_env(clean_url, *credentials_userinfo)
-
-    authenticated_url = (
-        repo_url if clean_url != repo_url else _authenticated_repo_url(clean_url, credentials_service, runtime_paths)
-    )
-    if authenticated_url == clean_url:
-        return None
-    parsed_authenticated_url = urlparse(authenticated_url)
-    if parsed_authenticated_url.netloc and "@" in parsed_authenticated_url.netloc:
-        return None
-    return {
-        "GIT_CONFIG_COUNT": "1",
-        "GIT_CONFIG_KEY_0": f"url.{authenticated_url}.insteadOf",
-        "GIT_CONFIG_VALUE_0": clean_url,
-    }
-
-
-def _merge_git_env(*envs: dict[str, str] | None) -> dict[str, str] | None:
-    merged: dict[str, str] = {}
-    for env in envs:
-        if env:
-            merged.update(env)
-    return merged or None
-
-
 def _file_content_digest(file_path: Path) -> str:
     digest = hashlib.sha256()
     with file_path.open("rb") as handle:
@@ -588,7 +460,7 @@ def _file_content_digest(file_path: Path) -> str:
     return digest.hexdigest()
 
 
-def knowledge_source_signature(
+def _knowledge_source_signature(
     config: Config,
     base_id: str,
     knowledge_root: Path,
@@ -668,22 +540,19 @@ class KnowledgeManager:
     runtime_paths: RuntimePaths
     storage_path: Path | None = None
     knowledge_path: Path | None = None
+    #: Collaborator that owns the Git checkout this base indexes, when one is
+    #: configured. Always present: it answers ``is_configured()`` for itself.
+    git_source: GitKnowledgeSource = field(init=False)
     _indexing_settings: IndexingSettings = field(init=False)
     _base_storage_path: Path = field(init=False)
     _indexing_settings_path: Path = field(init=False)
-    _git_lfs_hydrated_head_path: Path = field(init=False)
     _knowledge: Knowledge = field(init=False)
     _indexed_files: set[str] = field(default_factory=set, init=False)
     _indexed_signatures: dict[str, FileSignature] = field(default_factory=dict, init=False)
     _lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False)
     _state_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False)
-    _git_sync_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False)
-    _git_last_successful_commit: str | None = field(default=None, init=False)
     _last_refresh_error: str | None = field(default=None, init=False)
     _last_file_index_error: str | None = field(default=None, init=False)
-    _git_lfs_checked: bool = field(default=False, init=False)
-    _git_lfs_repository_ready: bool = field(default=False, init=False)
-    _git_tracked_relative_paths: set[str] | None = field(default=None, init=False, repr=False)
     _persisted_collection_missing_on_init: bool = field(default=False, init=False, repr=False)
     _max_concurrent_file_indexes: int = field(init=False, repr=False)
     _embedding_retry_count: int = field(default=0, init=False, repr=False)
@@ -711,7 +580,13 @@ class KnowledgeManager:
         ).resolve()
         self._base_storage_path.mkdir(parents=True, exist_ok=True)
         self._indexing_settings_path = self._base_storage_path / "indexing_settings.json"
-        self._git_lfs_hydrated_head_path = self._base_storage_path / "git_lfs_hydrated_head.txt"
+        self.git_source = GitKnowledgeSource(
+            base_id=self.base_id,
+            config=self.config,
+            runtime_paths=self.runtime_paths,
+            source_path=self.knowledge_path,
+            lfs_hydrated_head_path=self._base_storage_path / "git_lfs_hydrated_head.txt",
+        )
         persisted_state = self._load_persisted_index_state()
         if not _semantic_indexing_enabled(self.config, self.base_id):
             self._persisted_collection_missing_on_init = False
@@ -824,24 +699,12 @@ class KnowledgeManager:
             source_signature=source_signature,
         )
 
-    def _load_git_lfs_hydrated_head(self) -> str | None:
-        try:
-            hydrated_head = self._git_lfs_hydrated_head_path.read_text(encoding="utf-8").strip()
-        except OSError:
-            return None
-        return hydrated_head or None
-
-    def _save_git_lfs_hydrated_head(self, head: str) -> None:
-        self._git_lfs_hydrated_head_path.write_text(head, encoding="utf-8")
-
-    def _clear_git_lfs_hydrated_head(self) -> None:
-        self._git_lfs_hydrated_head_path.unlink(missing_ok=True)
-
     def _has_existing_index(self) -> bool:
         vector_db = self._knowledge.vector_db
         return isinstance(vector_db, ChromaDb) and vector_db.exists()
 
-    def _needs_full_reindex_on_create(self) -> bool:
+    def needs_full_reindex_on_create(self) -> bool:
+        """Return whether persisted metadata forces a full rebuild for this base."""
         if self._persisted_collection_missing_on_init:
             return True
         persisted_state = self._load_persisted_index_state()
@@ -851,246 +714,34 @@ class KnowledgeManager:
             persisted_state.settings != self._indexing_settings or persisted_state.status == _INDEXING_STATUS_RESETTING
         )
 
-    def _git_config(self) -> KnowledgeGitConfig | None:
-        return self.config.get_knowledge_base_config(self.base_id).git
-
-    def _git_uses_lfs(self) -> bool:
-        git_config = self._git_config()
-        return bool(git_config and git_config.lfs)
-
-    def _git_sync_timeout_seconds(self) -> float | None:
-        git_config = self._git_config()
-        if git_config is None:
-            return None
-        return float(git_config.sync_timeout_seconds)
-
-    async def _git_checkout_present(self) -> bool:
-        return await asyncio.to_thread(
-            git_checkout_present,
-            self._knowledge_source_path(),
-            timeout_seconds=self._git_sync_timeout_seconds(),
-        )
-
-    def _include_active_relative_path(self, relative_path: str) -> bool:
-        return include_knowledge_relative_path(self.config, self.base_id, relative_path)
-
-    async def _run_git(
-        self,
-        args: list[str],
-        *,
-        cwd: Path | None = None,
-        env: dict[str, str] | None = None,
-    ) -> str:
-        repo_root = cwd or self._knowledge_source_path()
-        process = await asyncio.create_subprocess_exec(
-            "git",
-            *args,
-            cwd=str(repo_root),
-            env=None if env is None else {**os.environ, **env},
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        try:
-            timeout_seconds = self._git_sync_timeout_seconds()
-            if timeout_seconds is None:
-                stdout, stderr = await process.communicate()
-            else:
-                stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=timeout_seconds)
-        except asyncio.CancelledError:
-            with suppress(ProcessLookupError):
-                process.kill()
-            with suppress(ProcessLookupError):
-                await process.wait()
-            raise
-        except TimeoutError as exc:
-            with suppress(ProcessLookupError):
-                process.kill()
-            with suppress(ProcessLookupError):
-                await process.wait()
-            command = " ".join(["git", *(redact_url_credentials(arg) for arg in args)])
-            msg = f"Git command timed out after {timeout_seconds:.0f}s: {command}"
-            raise RuntimeError(msg) from exc
-
-        if process.returncode == 0:
-            return stdout.decode("utf-8", errors="replace")
-
-        stdout_text = stdout.decode("utf-8", errors="replace").strip()
-        stderr_text = stderr.decode("utf-8", errors="replace").strip()
-        details = redact_credentials_in_text(stderr_text or stdout_text)
-        command = " ".join(["git", *(redact_url_credentials(arg) for arg in args)])
-        msg = f"Git command failed with exit code {process.returncode}: {command}"
-        if details:
-            msg = f"{msg}\n{details}"
-        raise RuntimeError(msg)
-
-    async def _ensure_git_lfs_available(self, *, cwd: Path) -> None:
-        if not self._git_uses_lfs() or self._git_lfs_checked:
-            return
-        try:
-            await self._run_git(["lfs", "version"], cwd=cwd)
-        except RuntimeError as exc:
-            msg = "Git LFS is required for this knowledge base but is not available in the runtime image"
-            raise RuntimeError(msg) from exc
-        self._git_lfs_checked = True
-
-    async def _ensure_git_lfs_repository_ready(self, repo_root: Path) -> None:
-        if not self._git_uses_lfs() or self._git_lfs_repository_ready:
-            return
-        await self._ensure_git_lfs_available(cwd=repo_root)
-        await self._run_git(["lfs", "install", "--local"], cwd=repo_root)
-        self._git_lfs_repository_ready = True
-
-    def _git_lfs_skip_smudge_env(self, git_config: KnowledgeGitConfig) -> dict[str, str] | None:
-        if not git_config.lfs:
-            return None
-        return {"GIT_LFS_SKIP_SMUDGE": "1"}
-
-    def _git_lfs_pull_args(self, git_config: KnowledgeGitConfig) -> list[str]:
-        return ["lfs", "pull", "origin", git_config.branch]
-
-    async def _hydrate_git_lfs_worktree(
-        self,
-        git_config: KnowledgeGitConfig,
-        *,
-        repo_root: Path | None = None,
-        current_head: str | None = None,
-    ) -> None:
-        if not git_config.lfs:
-            return
-        resolved_head = current_head or await self._git_rev_parse("HEAD")
-        if resolved_head is not None:
-            hydrated_head = await asyncio.to_thread(self._load_git_lfs_hydrated_head)
-            if hydrated_head == resolved_head:
-                return
-        await self._run_git(
-            self._git_lfs_pull_args(git_config),
-            cwd=repo_root or self._knowledge_source_path(),
-            env=_git_auth_env(git_config.repo_url, git_config.credentials_service, self.runtime_paths),
-        )
-        if resolved_head is None:
-            resolved_head = await self._git_rev_parse("HEAD")
-        if resolved_head is not None:
-            await asyncio.to_thread(self._save_git_lfs_hydrated_head, resolved_head)
-
-    async def _git_rev_parse(self, ref: str) -> str | None:
-        try:
-            output = await self._run_git(["rev-parse", ref])
-        except RuntimeError:
-            return None
-        return output.strip() or None
-
-    async def _git_list_tracked_files(self) -> set[str]:
-        output = await self._run_git(["ls-files", "-z"])
-        raw_paths = [entry for entry in output.split("\x00") if entry]
-        tracked_files = {path for path in raw_paths if self._include_active_relative_path(path)}
-        self._git_tracked_relative_paths = set(tracked_files)
-        return tracked_files
-
-    async def _ensure_git_repository(self, git_config: KnowledgeGitConfig) -> bool:
-        runtime_paths = self.runtime_paths
-        knowledge_root = self._knowledge_source_path()
-        if await self._git_checkout_present():
-            await self._ensure_git_lfs_repository_ready(knowledge_root)
-            current_remote = (await self._run_git(["remote", "get-url", "origin"])).strip()
-            expected_remote = credential_free_repo_url(git_config.repo_url)
-            if current_remote != expected_remote:
-                await self._run_git(["remote", "set-url", "origin", expected_remote])
-            return False
-
-        if knowledge_root.exists() and any(knowledge_root.iterdir()):
-            msg = (
-                f"Cannot clone knowledge git repository into non-empty path {knowledge_root}. "
-                "Clear the folder or use a dedicated path."
-            )
-            raise RuntimeError(msg)
-
-        knowledge_root.parent.mkdir(parents=True, exist_ok=True)
-        if git_config.lfs:
-            await self._ensure_git_lfs_available(cwd=knowledge_root.parent)
-        clone_url = credential_free_repo_url(git_config.repo_url)
-        await self._run_git(
-            [
-                "clone",
-                "--single-branch",
-                "--branch",
-                git_config.branch,
-                clone_url,
-                str(knowledge_root),
-            ],
-            cwd=knowledge_root.parent,
-            env=_merge_git_env(
-                _git_auth_env(git_config.repo_url, git_config.credentials_service, runtime_paths),
-                self._git_lfs_skip_smudge_env(git_config),
-            ),
-        )
-        await self._run_git(["remote", "set-url", "origin", clone_url], cwd=knowledge_root)
-        await asyncio.to_thread(self._clear_git_lfs_hydrated_head)
-        await self._ensure_git_lfs_repository_ready(knowledge_root)
-        await self._hydrate_git_lfs_worktree(git_config, repo_root=knowledge_root)
-        return True
-
-    async def _sync_git_source_once(self, git_config: KnowledgeGitConfig) -> tuple[set[str], set[str], bool]:
-        cloned = await self._ensure_git_repository(git_config)
-        if cloned:
-            return await self._git_list_tracked_files(), set(), True
-
-        before_head = await self._git_rev_parse("HEAD")
-
-        remote_ref = f"origin/{git_config.branch}"
-        await self._run_git(
-            ["fetch", "origin", f"+refs/heads/{git_config.branch}:refs/remotes/{remote_ref}"],
-            env=_git_auth_env(git_config.repo_url, git_config.credentials_service, self.runtime_paths),
-        )
-        remote_head = await self._git_rev_parse(remote_ref)
-        if remote_head is None:
-            msg = f"Could not resolve remote ref '{remote_ref}' for knowledge base '{self.base_id}'"
-            raise RuntimeError(msg)
-
-        if before_head == remote_head:
-            await self._hydrate_git_lfs_worktree(git_config, current_head=remote_head)
-            return set(), set(), False
-
-        before_files = await self._git_list_tracked_files()
-
-        await self._run_git(
-            ["checkout", "--force", "-B", git_config.branch, remote_ref],
-            env=self._git_lfs_skip_smudge_env(git_config),
-        )
-        # Reviewed with Bas (2026-04-17): program-owned checkout, hard reset is the
-        # intentional way to realign it with the configured remote state.
-        await self._run_git(["reset", "--hard", remote_ref], env=self._git_lfs_skip_smudge_env(git_config))
-        await self._hydrate_git_lfs_worktree(git_config, current_head=remote_head)
-
-        after_files = await self._git_list_tracked_files()
-        if before_head is None:
-            changed_paths = after_files
-        else:
-            diff_output = await self._run_git(["diff", "--name-only", "--no-renames", f"{before_head}..HEAD"])
-            changed_paths = {path for path in diff_output.splitlines() if self._include_active_relative_path(path)}
-
-        removed_files = before_files - after_files
-        changed_files = {path for path in changed_paths if path in after_files} | (after_files - before_files)
-        return changed_files, removed_files, True
-
     def list_files(self) -> list[Path]:
         """List all files currently present in the knowledge folder."""
         knowledge_root = self._knowledge_source_path()
-        if self._git_config() is not None:
-            if self._git_tracked_relative_paths is None:
-                if not git_checkout_present(knowledge_root, timeout_seconds=self._git_sync_timeout_seconds()):
-                    return []
-                self._git_tracked_relative_paths = git_tracked_relative_paths_from_checkout(
-                    self.config,
-                    self.base_id,
-                    knowledge_root,
-                )
+        if self.git_source.is_configured():
+            tracked_relative_paths = self.git_source.tracked_relative_paths()
+            if tracked_relative_paths is None:
+                return []
             return knowledge_files_from_relative_paths(
                 self.config,
                 self.base_id,
                 knowledge_root,
-                self._git_tracked_relative_paths,
+                tracked_relative_paths,
             )
         return list_knowledge_files(self.config, self.base_id, knowledge_root)
+
+    async def source_signature(self) -> str:
+        """Return the signature of the corpus this base currently manages.
+
+        Git-backed bases hand over the tracked paths this process already
+        listed, so an unchanged checkout is not re-listed just to hash it.
+        """
+        return await asyncio.to_thread(
+            _knowledge_source_signature,
+            self.config,
+            self.base_id,
+            self._knowledge_source_path(),
+            tracked_relative_paths=self.git_source.cached_tracked_relative_paths(),
+        )
 
     def _relative_path(self, file_path: Path) -> str:
         return file_path.relative_to(self._knowledge_source_path()).as_posix()
@@ -1261,7 +912,7 @@ class KnowledgeManager:
                 _INDEXING_STATUS_COMPLETE,
                 collection=candidate_vector_db.collection_name,
                 last_published_at=datetime.now(tz=UTC).isoformat(),
-                published_revision=self._git_last_successful_commit,
+                published_revision=self.git_source.last_synced_head,
                 indexed_count=indexed_count,
                 source_signature=source_signature,
             ),
@@ -1311,33 +962,6 @@ class KnowledgeManager:
         )
         if publish_cancelled:
             _raise_cancelled()
-
-    async def sync_git_source(self) -> dict[str, Any]:
-        """Fetch and force-align one configured Git repository checkout."""
-        git_config = self._git_config()
-        if git_config is None:
-            return {"updated": False, "changed_count": 0, "removed_count": 0}
-
-        async with self._git_sync_lock:
-            changed_files, removed_files, updated = await self._sync_git_source_once(git_config)
-            current_head = await self._git_rev_parse("HEAD")
-            self._git_last_successful_commit = current_head
-
-        if updated:
-            logger.info(
-                "Knowledge Git repository synchronized",
-                base_id=self.base_id,
-                repo_url=redact_url_credentials(git_config.repo_url),
-                branch=git_config.branch,
-                changed_count=len(changed_files),
-                removed_count=len(removed_files),
-                commit=current_head,
-            )
-        return {
-            "updated": updated,
-            "changed_count": len(changed_files),
-            "removed_count": len(removed_files),
-        }
 
     async def _index_file_locked(
         self,
@@ -2398,7 +2022,7 @@ class KnowledgeManager:
                 failed=dict(run.failed),
                 # The target revision advances only once the reconciled state
                 # it describes is about to be durable.
-                target_revision=self._git_last_successful_commit,
+                target_revision=self.git_source.last_synced_head,
                 # The corpus this candidate targets, not a high-water mark of
                 # completed files: status subtracts completed from this to
                 # report how much work is still outstanding.
@@ -2464,9 +2088,9 @@ class KnowledgeManager:
 
     async def _source_revision(self) -> str | None:
         """Return the current Git revision, or None when the source is not Git-backed."""
-        if self._git_config() is None:
+        if not self.git_source.is_configured():
             return None
-        return await self._git_rev_parse("HEAD")
+        return await self.git_source.head()
 
     async def _candidate_matches_source(
         self,
@@ -2490,16 +2114,9 @@ class KnowledgeManager:
         coverage. Neither reads file contents.
         """
         if round_revision is None:
-            live_source_signature = await asyncio.to_thread(
-                knowledge_source_signature,
-                self.config,
-                self.base_id,
-                self._knowledge_source_path(),
-                tracked_relative_paths=self._git_tracked_relative_paths,
-            )
-            return live_source_signature == candidate_source_signature
+            return await self.source_signature() == candidate_source_signature
 
-        if await self._git_rev_parse("HEAD") != round_revision:
+        if await self.git_source.head() != round_revision:
             return False
         current_files = await asyncio.to_thread(self.list_files)
         return {self._relative_path(path) for path in current_files} == set(candidate_signatures)

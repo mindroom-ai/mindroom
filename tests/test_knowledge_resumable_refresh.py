@@ -976,7 +976,7 @@ async def test_source_change_during_final_verification_reconciles_without_losing
     config = _config(tmp_path, docs_path)
     runtime_paths = runtime_paths_for(config)
     manager = _manager(config)
-    original_signature = knowledge_manager_module.knowledge_source_signature
+    original_signature = knowledge_manager_module._knowledge_source_signature
     mutated = False
 
     def _mutate_during_verification(*args: object, **kwargs: object) -> str:
@@ -986,11 +986,11 @@ async def test_source_change_during_final_verification_reconciles_without_losing
             (docs_path / "late.md").write_text("late body", encoding="utf-8")
         return original_signature(*args, **kwargs)  # type: ignore[arg-type]
 
-    knowledge_manager_module.knowledge_source_signature = _mutate_during_verification  # type: ignore[assignment]
+    knowledge_manager_module._knowledge_source_signature = _mutate_during_verification  # type: ignore[assignment]
     try:
         indexed = await manager.reindex_all()
     finally:
-        knowledge_manager_module.knowledge_source_signature = original_signature  # type: ignore[assignment]
+        knowledge_manager_module._knowledge_source_signature = original_signature  # type: ignore[assignment]
 
     assert indexed == 4
     assert manager._last_refresh_error is None
