@@ -185,8 +185,8 @@ def test_kimi_chat_client_params_use_kimi_endpoint_and_borrowed_token(tmp_path: 
     assert params["base_url"] == _KIMI_BASE_URL
 
 
-def test_kimi_chat_fresh_clients_refresh_expired_tokens(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Each new client should re-read the OAuth state so expired tokens refresh between requests."""
+def test_kimi_chat_client_params_refresh_expired_tokens(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Each client-params build should re-read the OAuth state so expired tokens refresh between requests."""
     kimi_home = tmp_path / ".kimi-code"
     _write_kimi_credentials(kimi_home, "first-access", "refresh-value", expires_at=int(time.time()) + 3600)
     model = KimiChat(id="k3", kimi_home=str(kimi_home))

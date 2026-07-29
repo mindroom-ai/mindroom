@@ -93,8 +93,6 @@ _PROVIDER_PRESET_ALIASES: dict[str, _ProviderPreset] = {
     "claude": "anthropic",
     "codex": "codex",
     "kimi": "kimi",
-    "kimi-code": "kimi",
-    "kimi_code": "kimi",
     "llama.cpp": "llama_cpp",
     "llama-cpp": "llama_cpp",
     "llama_cpp": "llama_cpp",

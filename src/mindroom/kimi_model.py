@@ -16,7 +16,6 @@ from openai import AsyncOpenAI, OpenAI
 from mindroom.file_locks import advisory_file_lock
 from mindroom.model_defaults import KIMI_K3
 from mindroom.openai_models import MindRoomOpenAIChat
-from mindroom.prompt_cache_key import derive_session_prompt_cache_key
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -25,15 +24,12 @@ if TYPE_CHECKING:
     from agno.run.team import TeamRunOutput
     from pydantic import BaseModel
 
-    from mindroom.tool_system.worker_routing import ToolExecutionIdentity
-
 _KIMI_BASE_URL = "https://api.kimi.com/coding/v1"
 _KIMI_REFRESH_URL = "https://auth.kimi.com/api/oauth/token"
 _KIMI_CLIENT_ID = "17e5f671-d194-4dfb-9706-5516cb48c098"
 _KIMI_REFRESH_SKEW_SECONDS = 30
 _KIMI_MODEL_PREFIX = "kimi-code/"
 _KIMI_CREDENTIALS_RELATIVE_PATH = Path("credentials") / "kimi-code.json"
-_KIMI_PROMPT_CACHE_KEY_PREFIX = "mindroom"
 
 
 class _KimiAuthError(ValueError):
@@ -157,11 +153,6 @@ def _update_credentials(credentials: dict[str, Any], refreshed: dict[str, Any]) 
     elif isinstance(refreshed.get("expires_in"), int | float):
         credentials["expires_in"] = refreshed["expires_in"]
         credentials["expires_at"] = int(time.time()) + int(refreshed["expires_in"])
-
-
-def derive_kimi_prompt_cache_key(identity: ToolExecutionIdentity) -> str | None:
-    """Derive a stable Kimi prompt-cache routing key for one active execution."""
-    return derive_session_prompt_cache_key(identity, prefix=_KIMI_PROMPT_CACHE_KEY_PREFIX)
 
 
 @dataclass

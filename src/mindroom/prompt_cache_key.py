@@ -10,8 +10,10 @@ if TYPE_CHECKING:
 
 __all__ = ["derive_session_prompt_cache_key"]
 
+_PROMPT_CACHE_KEY_PREFIX = "mindroom"
 
-def derive_session_prompt_cache_key(identity: ToolExecutionIdentity, *, prefix: str) -> str | None:
+
+def derive_session_prompt_cache_key(identity: ToolExecutionIdentity) -> str | None:
     """Derive a stable prompt-cache routing key for one active execution."""
     if identity.session_id is None:
         return None
@@ -26,4 +28,4 @@ def derive_session_prompt_cache_key(identity: ToolExecutionIdentity, *, prefix: 
         ),
     )
     digest = hashlib.sha256(source.encode("utf-8")).hexdigest()[:32]
-    return f"{prefix}-{digest}"
+    return f"{_PROMPT_CACHE_KEY_PREFIX}-{digest}"
