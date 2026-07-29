@@ -10,10 +10,24 @@ from urllib.parse import unquote, urlparse, urlunparse
 from mindroom.git_urls import credential_free_repo_url
 
 _URL_PATTERN: re.Pattern[str] = re.compile(r"[a-zA-Z][a-zA-Z0-9+.-]*://[^\s'\"<>]+")
+#: Scheme-prefixed tokens that are missing the ``//`` and so never reach
+#: ``_URL_PATTERN`` -- ``https:/user:secret@host/x``, ``https:@host/u:secret@h``.
+#: Restricted to tokens that actually contain an ``@`` so ordinary Git output
+#: (``fatal: ...``, ``main:refs/heads/main``) is not swept up; the token still
+#: has to convince ``redact_url_credentials`` before anything is replaced.
+_SLASHLESS_CREDENTIAL_URL_PATTERN: re.Pattern[str] = re.compile(
+    r"[a-zA-Z][a-zA-Z0-9+.-]*:(?!//)[^\s'\"<>]*@[^\s'\"<>]*",
+)
+#: Whitespace is allowed around the colon: HTTP permits it, and a proxy or Git
+#: helper that reformats a header it echoes back must not slip the credential
+#: past this pattern.
 _AUTHORIZATION_HEADER_PATTERN: re.Pattern[str] = re.compile(
-    r"\bAuthorization:\s*(Basic|Bearer)\s+([^\s'\"<>]+)",
+    r"\bAuthorization\s*:\s*(Basic|Bearer)\s+([^\s'\"<>]+)",
     re.IGNORECASE,
 )
+#: Percent-encoded ``@``. Its presence means the authority ``urlparse`` reported
+#: is not the authority a client will use, so the userinfo split cannot be trusted.
+_ENCODED_USERINFO_SEPARATOR = "%40"
 __all__ = [
     "credential_free_repo_url",
     "credential_free_url_identity",
@@ -44,7 +58,28 @@ def redact_url_credentials(value: str) -> str:
         # persisted as ``last_error``, so drop the whole token rather than risk
         # leaking a secret; the surrounding message survives intact.
         return "***"
-    if not parsed.scheme or not parsed.netloc:
+
+    if not parsed.scheme:
+        # Not a URL. Bare Git arguments and scp-style remotes (``git@host:path``)
+        # reach this helper too; neither carries a password, so keep them readable.
+        return value
+
+    # Everything below assumes userinfo lives where ``urlparse`` says it does.
+    # When it does not, redacting the authority leaves the secret in the text,
+    # so these shapes are dropped wholesale instead:
+    #   https:///user:secret@host/repo   empty authority, credentials in the path
+    #   https://host/https://u:s@in/x    a second URL nested in the path
+    #   https://u%3As%40host/repo        the separator is percent-encoded
+    #   https://a@b@host/x               which ``@`` splits userinfo is ambiguous
+    authority_separators = parsed.netloc.count("@")
+    if (
+        _ENCODED_USERINFO_SEPARATOR in value.lower()
+        or value.count("@") != authority_separators
+        or authority_separators > 1
+    ):
+        return "***"
+
+    if not parsed.netloc:
         return value
 
     if "@" in parsed.netloc:
@@ -93,7 +128,12 @@ def redact_credentials_in_text(value: str) -> str:
     unique_decoded_values.sort(key=len, reverse=True)
     for decoded_value in unique_decoded_values:
         redacted = redacted.replace(decoded_value, "***")
-    return _URL_PATTERN.sub(lambda match: redact_url_credentials(match.group(0)), redacted)
+
+    def _redact_url(match: re.Match[str]) -> str:
+        return redact_url_credentials(match.group(0))
+
+    redacted = _URL_PATTERN.sub(_redact_url, redacted)
+    return _SLASHLESS_CREDENTIAL_URL_PATTERN.sub(_redact_url, redacted)
 
 
 def credential_free_url_identity(value: str) -> str:

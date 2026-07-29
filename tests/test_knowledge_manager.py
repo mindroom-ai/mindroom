@@ -7716,6 +7716,123 @@ async def test_git_refresh_marks_duplicate_source_sibling_stale(
     ]
 
 
+#: Credential-bearing shapes whose secret does not sit where ``urlparse`` puts
+#: userinfo, so redacting the parsed authority alone leaves the secret in the
+#: text. Every one but the last survived redaction verbatim before this was
+#: fixed; ``ambiguous-authority`` was already redacted by luck, because its last
+#: ``@`` happens to fall after the secret, and is pinned so it stays that way.
+_LEAKING_CREDENTIAL_SHAPES = [
+    pytest.param("https:///user:{secret}@example.com/repo.git", id="empty-authority"),
+    pytest.param("https://outer/https://user:{secret}@inner/repo", id="nested-scheme"),
+    pytest.param("https://user%3A{secret}%40example.com/repo", id="percent-encoded-userinfo"),
+    pytest.param("https:/user:{secret}@example.com/repo", id="single-slash"),
+    pytest.param("https:@example.com/user:{secret}@host", id="no-slash"),
+    pytest.param("https://a@b:{secret}@example.com/repo", id="ambiguous-authority"),
+]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stderr_template", _LEAKING_CREDENTIAL_SHAPES)
+async def test_malformed_credential_url_never_reaches_error_text_or_metadata(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    stderr_template: str,
+) -> None:
+    """A secret Git prints must not survive into the raised or persisted error.
+
+    ``KnowledgeGitConfig.repo_url`` accepts any string, so a malformed clone URL
+    is a real path from operator config into Git's output, and from there into
+    the raised ``RuntimeError``, the persisted ``last_error``, and the knowledge
+    API. Redaction must fail closed on shapes it cannot parse into userinfo.
+    """
+    secret = "S3CR3T-CANARY"  # noqa: S105
+    docs_path = tmp_path / "docs"
+    docs_path.mkdir()
+    config = _config(
+        tmp_path,
+        bases={"docs": docs_path},
+        agent_bases=["docs"],
+        git_configs={"docs": KnowledgeGitConfig(repo_url="https://example.com/org/repo.git", branch="main")},
+    )
+    runtime_paths = runtime_paths_for(config)
+    stderr = f"fatal: unable to access '{stderr_template.format(secret=secret)}': failed"
+
+    class _FailedGitProcess:
+        returncode = 128
+
+        async def communicate(self) -> tuple[bytes, bytes]:
+            return b"", stderr.encode()
+
+    async def _fail_git_command(*args: object, **kwargs: object) -> _FailedGitProcess:
+        _ = (args, kwargs)
+        return _FailedGitProcess()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", _fail_git_command)
+
+    with pytest.raises(RuntimeError) as exc_info:
+        await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+
+    key = resolve_published_index_key("docs", config=config, runtime_paths=runtime_paths)
+    state = load_published_index_state(published_index_metadata_path(key))
+    assert state is not None
+    metadata_text = published_index_metadata_path(key).read_text(encoding="utf-8")
+    error_texts = [str(exc_info.value), state.last_error or "", metadata_text]
+
+    assert state.last_error is not None
+    for error_text in error_texts:
+        assert secret not in error_text
+
+
+@pytest.mark.asyncio
+async def test_spaced_authorization_header_is_redacted_in_error_text_and_metadata(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Whitespace before the header colon must not carry a Basic token through.
+
+    HTTP allows it, so a proxy or credential helper that reformats a header it
+    echoes back would otherwise publish a reusable credential in plaintext.
+    """
+    secret = "S3CR3T-CANARY"  # noqa: S105
+    token = base64.b64encode(f"x-access-token:{secret}".encode()).decode("ascii")
+    docs_path = tmp_path / "docs"
+    docs_path.mkdir()
+    config = _config(
+        tmp_path,
+        bases={"docs": docs_path},
+        agent_bases=["docs"],
+        git_configs={"docs": KnowledgeGitConfig(repo_url="https://example.com/org/repo.git", branch="main")},
+    )
+    runtime_paths = runtime_paths_for(config)
+    stderr = f"fatal: rejected\nAuthorization : Basic {token}\n"
+
+    class _FailedGitProcess:
+        returncode = 128
+
+        async def communicate(self) -> tuple[bytes, bytes]:
+            return b"", stderr.encode()
+
+    async def _fail_git_command(*args: object, **kwargs: object) -> _FailedGitProcess:
+        _ = (args, kwargs)
+        return _FailedGitProcess()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", _fail_git_command)
+
+    with pytest.raises(RuntimeError) as exc_info:
+        await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+
+    key = resolve_published_index_key("docs", config=config, runtime_paths=runtime_paths)
+    state = load_published_index_state(published_index_metadata_path(key))
+    assert state is not None
+    metadata_text = published_index_metadata_path(key).read_text(encoding="utf-8")
+    error_texts = [str(exc_info.value), state.last_error or "", metadata_text]
+
+    assert "Authorization: Basic ***" in str(exc_info.value)
+    for error_text in error_texts:
+        assert token not in error_text
+        assert secret not in error_text
+
+
 @pytest.mark.asyncio
 async def test_git_credentials_service_token_stays_out_of_git_config_and_metadata(
     tmp_path: Path,
