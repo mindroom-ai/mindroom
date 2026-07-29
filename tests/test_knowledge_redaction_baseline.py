@@ -252,32 +252,73 @@ _INTENTIONAL_LOSSES = frozenset(
         # authority check cannot see, and telling them apart needs the parse
         # this shape is precisely too malformed to support.
         "url.https://example.com/a@b.insteadOf=https://x/y",
-        # A path segment shaped like ``user:password@host``. These are redacted
-        # deliberately, and it costs a real diagnostic, so the reasoning is
-        # recorded rather than assumed:
+        # Anything shaped ``x:y@z``, wherever it appears. Not only in a URL
+        # path: a bare token in prose is redacted too, because the rule that
+        # catches a scheme-dropped credential cannot tell the two apart.
         #
-        # ``https://host/a:b@c`` (benign) and ``https://host/u:SECRET@inner/x``
-        # (a credential in a path) are *grammatically identical* -- same
-        # delimiters, same shape, nothing in either that distinguishes them.
-        # The nested-scheme form is separable because it contains ``://``; this
-        # one is not. So the choice is which way to be wrong, and for a
-        # credential redactor that is settled: over-redacting a rare URL-path
-        # grammar beats leaving a credential-shaped path readable. The baseline
-        # leaks the second of those two, which is why the same rule is also one
-        # of this branch's improvements.
+        #     note: see a:b@c for details       -> note: see *** for details
+        #     .../v2/app:1.4@sha256:abc123      -> ***   (an OCI reference)
+        #
+        # That is the real blast radius, and it is wider than "URL paths". It is
+        # kept because ``oauth2:TOKEN@gitlab.com:org/repo.git`` -- GitLab's
+        # documented form with the scheme dropped, and the likeliest operator
+        # mistype -- is grammatically identical to ``a:b@c``, and the baseline
+        # leaks it entirely.
+        #
+        # Every discriminator tried costs more than it saves. Requiring the host
+        # to look like a hostname restores all three prose shapes but loses
+        # three of six credential redactions, including ``user:SECRET@host`` and
+        # ``user:SECRET@internalhost/x`` -- internal hostnames are single labels,
+        # and the baseline leaks those in full. Trading three credential leaks
+        # for three diagnostics is the wrong direction for a redactor.
+        #
+        # Scope note: within a URL path this is genuinely undecidable
+        # (``https://host/a:b@c`` versus ``https://host/u:SECRET@inner/x``). The
+        # nested-scheme form is separable by its ``://``; these are not.
         "https://host/a:b@c",
         "https://host/a:b@c/repo.git",
         "https://host:8443/a:b@c",
         "https://host/p/a:b@c/q",
         "ssh://host/a:b@c",
+        "a:b@c",
+        "app:1.4@sha256:abc123",
+        "refs/notes/a:b@c",
     },
 )
+
+
+#: Non-URL token grammars that appear in Git output. The hand-listed prose
+#: below covers remembered messages; this covers the *shapes*, which is where
+#: the omissions were -- four regressions sat in tokens nobody had listed.
+_PROSE_TOKENS = [
+    "a:b@c",  # the minimal shape that collides with a scheme-dropped credential
+    "app:1.4@sha256:abc123",  # an OCI/docker reference, common in real logs
+    "refs/notes/a:b@c",  # a ref-like path carrying the same shape
+    "HEAD@{2}",  # revision syntax: an ``@`` with no colon before it
+    "main@{0}",
+    "bas@example.com",  # an email address
+    "host:1234",  # host:port, a colon with no ``@``
+    "a:b",  # colon alone
+    "a@b",  # at-sign alone
+]
+
+#: Where such a token turns up. Position matters: a leading frame is what broke
+#: an anchored matcher, and quoting is how Git actually prints these.
+_PROSE_TEMPLATES = [
+    "{token}",
+    "note: see {token} for details",
+    "error: pathspec '{token}' did not match",
+    "fatal: unable to access '{token}'",
+    "Submodule 'x' (https://host/repo.git) registered for path '{token}'",
+]
 
 
 def _clean_texts() -> Iterator[tuple[str, str]]:
     """Yield every generated (shape id, credential-free text)."""
     for url, (_frame_id, frame) in itertools.product(_CLEAN_URLS, _FRAMES):
         yield url, frame.format(url=url)
+    for token, template in itertools.product(_PROSE_TOKENS, _PROSE_TEMPLATES):
+        yield token, template.format(token=token)
     for prose in _CLEAN_PROSE:
         yield prose, prose
 
