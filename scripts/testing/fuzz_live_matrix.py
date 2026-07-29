@@ -127,14 +127,10 @@ class LiveOperation:
         )
 
 
-def _restart_prompt_observation(
-    log: str,
-    fresh_event_id: str,
-    historical_event_ids: tuple[str, str],
-) -> tuple[bool, bool]:
+def _restart_prompt_observation(log: str, fresh_event_id: str, old_event_ids: tuple[str, str]) -> tuple[bool, bool]:
     """Report fresh prompt presence and any historical-event overlap."""
     fresh_lines = [line for line in log.splitlines() if "Preparing agent and prompt" in line and fresh_event_id in line]
-    return bool(fresh_lines), any(event_id in line for line in fresh_lines for event_id in historical_event_ids)
+    return bool(fresh_lines), any(event_id in line for line in fresh_lines for event_id in old_event_ids)
 
 
 @dataclass(frozen=True, slots=True)
@@ -720,15 +716,14 @@ class ManagedTuwunelStack:
         log = self.log_path.read_text(encoding="utf-8", errors="replace")
         return sum(all(marker in line for marker in markers) for line in log.splitlines())
 
-    def wait_for_log_count(self, markers: tuple[str, ...], minimum: int, timeout: float = 60) -> None:
+    def wait_for_log_count(self, markers: tuple[str, ...], minimum: int, timeout: float = 60) -> bool:
         """Wait for a bounded lifecycle milestone."""
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             if self.log_count(*markers) >= minimum:
-                return
+                return True
             time.sleep(0.1)
-        msg = "restart profile lifecycle marker missing"
-        raise TimeoutError(msg)
+        return False
 
     def add_restart_room(self, room_id: str) -> None:
         """Trigger a real entity replacement that adds one dormant room."""
@@ -818,7 +813,7 @@ class ManagedTuwunelStack:
         deadline = time.monotonic() + 60
         while time.monotonic() < deadline:
             if self._mindroom_process.poll() is not None:
-                msg = f"MindRoom exited during startup:\n{self.log_tail()}"
+                msg = "MindRoom exited during startup"
                 raise RuntimeError(msg)
             if state_path.exists():
                 state = yaml.safe_load(state_path.read_text(encoding="utf-8"))
@@ -828,7 +823,7 @@ class ManagedTuwunelStack:
                     self.room_id = room_id
                     return
             time.sleep(0.2)
-        msg = f"MindRoom did not create {ROOM_KEY!r}:\n{self.log_tail()}"
+        msg = f"MindRoom did not create {ROOM_KEY!r}"
         raise TimeoutError(msg)
 
     def _stop_mindroom(self) -> None:
@@ -1225,15 +1220,16 @@ class LiveFuzzRunner:
         setup_counts = tuple(self.stack.log_count(*markers) for markers in setup_markers)
         update_count = self.stack.log_count("configuration_update_complete")
         self.stack.add_restart_room(dormant.room_id)
+        setup_complete = True
         for markers, count in zip(setup_markers, setup_counts, strict=True):
-            await asyncio.to_thread(self.stack.wait_for_log_count, markers, count + 1)
+            setup_complete &= await asyncio.to_thread(self.stack.wait_for_log_count, markers, count + 1)
         fresh = await dormant.send_event(
             "m.room.message",
             "restart-fresh",
             self._message_content("Synthetic fresh startup request"),
         )
         fresh_sent_before_update_complete = self.stack.log_count("configuration_update_complete") == update_count
-        await asyncio.to_thread(
+        update_complete = await asyncio.to_thread(
             self.stack.wait_for_log_count,
             ("configuration_update_complete",),
             update_count + 1,
@@ -1270,9 +1266,11 @@ class LiveFuzzRunner:
         checks = (
             ("historical_output_suppressed", counts[0], 0, "historical_text", "replacement_sync", 1),
             ("historical_output_suppressed", counts[1], 0, "historical_media", "replacement_sync", 2),
+            ("replacement_principals_setup", setup_complete, True, "lifecycle", "reload", 3),
             ("historical_event_pairs_cached", cached_event_pairs, 4, "historical_events", "replacement_sync", 3),
             ("fresh_event_exactly_once", counts[2], 1, "fresh_user", "replacement_startup", 4),
             ("fresh_sent_before_update_complete", fresh_sent_before_update_complete, True, "fresh_user", "reload", 4),
+            ("configuration_update_completed", update_complete, True, "lifecycle", "reload", 4),
             ("fresh_prompt_observed", fresh_prompt_observed, True, "fresh_user", "execution", 4),
             (
                 "historical_events_absent_from_fresh_prompt",
