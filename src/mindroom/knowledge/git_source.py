@@ -28,9 +28,9 @@ from mindroom.knowledge.file_listing import (
     include_knowledge_relative_path,
 )
 from mindroom.knowledge.redaction import (
-    ENCODED_USERINFO_SEPARATOR,
     credential_free_repo_url,
     embedded_http_userinfo,
+    fully_unquoted,
     redact_credentials_in_text,
     redact_url_credentials,
 )
@@ -169,15 +169,32 @@ def _persistable_remote_url(repo_url: str, base_id: str) -> str:
     # empty one, or in scp-style syntax that ``urlparse`` reports as a bare path.
     # A colon in there is a password; without one it is a bare username, which
     # SSH remotes legitimately persist.
-    remainder = clean_url.removeprefix(f"{urlparse(clean_url).scheme}:")
+    # Decoded to a fixed point first, so a separator hidden under any number of
+    # percent-encoding layers is judged the same as a literal one.
+    normalized = fully_unquoted(clean_url)
+    remainder = normalized.removeprefix(f"{urlparse(normalized).scheme}:")
     userinfo = remainder.rsplit("@", 1)[0] if "@" in remainder else ""
-    if ENCODED_USERINFO_SEPARATOR in clean_url.lower() or remainder.count("@") > 1 or ":" in userinfo:
+    if remainder.count("@") > 1 or ":" in userinfo:
         msg = (
             f"Refusing to write a credential-bearing remote URL for knowledge base '{base_id}'. "
             "Move the secret to a credentials_service instead of embedding it in repo_url."
         )
         raise RuntimeError(msg)
     return clean_url
+
+
+def _redacted_command(args: list[str]) -> str:
+    """Render a failed Git command for an error message, with credentials removed.
+
+    Deliberately the same redactor the caller applies to stderr. Redacting each
+    argument in isolation gave the two halves of one error message different
+    answers about the same string, and treating every argument as a candidate
+    URL also mangled Git revision syntax: an argument like
+    ``+refs/heads/main:refs/remotes/origin/@{upstream}`` is not a URL, but it
+    has an ``@``, and it came back as ``***``. Sharing one function means the
+    two paths cannot disagree, and URL detection lives in exactly one place.
+    """
+    return redact_credentials_in_text(" ".join(["git", *args]))
 
 
 def _merge_git_env(*envs: dict[str, str] | None) -> dict[str, str] | None:
@@ -351,7 +368,7 @@ class GitKnowledgeSource:
                 process.kill()
             with suppress(ProcessLookupError):
                 await process.wait()
-            command = " ".join(["git", *(redact_url_credentials(arg) for arg in args)])
+            command = _redacted_command(args)
             msg = f"Git command timed out after {timeout_seconds:.0f}s: {command}"
             raise RuntimeError(msg) from exc
 
@@ -361,7 +378,7 @@ class GitKnowledgeSource:
         stdout_text = stdout.decode("utf-8", errors="replace").strip()
         stderr_text = stderr.decode("utf-8", errors="replace").strip()
         details = redact_credentials_in_text(stderr_text or stdout_text)
-        command = " ".join(["git", *(redact_url_credentials(arg) for arg in args)])
+        command = _redacted_command(args)
         msg = f"Git command failed with exit code {process.returncode}: {command}"
         if details:
             msg = f"{msg}\n{details}"
