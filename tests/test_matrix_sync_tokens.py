@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
 import uuid
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, cast
@@ -1850,15 +1851,28 @@ async def test_shutdown_discards_checkpoint_when_response_swallows_cancellation_
 
 
 @pytest.mark.asyncio
-async def test_orderly_shutdown_preserves_checkpoint_after_cancelled_response_is_durably_handled(
+async def test_orderly_shutdown_discards_checkpoint_for_write_behind_handled_response_without_handoff(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A durable terminal response can preserve source continuity on process shutdown."""
+    """Write-behind handled state alone cannot preserve source continuity."""
     bot = _certified_shutdown_bot(tmp_path)
     source_event_id = "$orderly-source"
     response_started = asyncio.Event()
+    persist_started = threading.Event()
+    release_persist = threading.Event()
+    real_persist = bot._turn_store._ledger._persist_records
 
-    async def durably_handled_cancellation() -> None:
+    def persist_with_barrier(turn_records: tuple[TurnRecord, ...]) -> None:
+        persist_started.set()
+        if not release_persist.wait(timeout=5):
+            msg = "test did not release terminal-turn persistence"
+            raise TimeoutError(msg)
+        real_persist(turn_records)
+
+    monkeypatch.setattr(bot._turn_store._ledger, "_persist_records", persist_with_barrier)
+
+    async def write_behind_handled_cancellation() -> None:
         response_started.set()
         try:
             await asyncio.Event().wait()
@@ -1868,20 +1882,25 @@ async def test_orderly_shutdown_preserves_checkpoint_after_cancelled_response_is
             )
 
     response_task = bot._response_runner.track_inbox_response(
-        durably_handled_cancellation(),
-        name="test_durably_handled_orderly_cancellation",
-        recovery_proof_ready=lambda: bot._turn_store.is_handled(source_event_id),
+        write_behind_handled_cancellation(),
+        name="test_write_behind_handled_orderly_cancellation",
+        recovery_proof_ready=lambda: bot._interrupted_turn_rooms.contains(source_event_id),
     )
     await response_started.wait()
     _install_fast_response_drain(bot)
 
-    await bot.prepare_for_sync_shutdown(shutdown_intent=ORDERLY_SHUTDOWN)
-
-    assert response_task.done()
-    assert not response_task.cancelled()
-    assert bot._response_runner.incomplete_inbox_responses_recoverable is True
-    assert bot._sync_cache_trust.state is SyncTrustState.CERTIFIED
-    assert _load_sync_token_value(tmp_path, bot.agent_name) == "s_shutdown"
+    try:
+        await bot.prepare_for_sync_shutdown(shutdown_intent=ORDERLY_SHUTDOWN)
+        assert await asyncio.to_thread(persist_started.wait, 5)
+        assert response_task.done()
+        assert not response_task.cancelled()
+        assert bot._turn_store.is_handled(source_event_id)
+        assert bot._response_runner.incomplete_inbox_responses_recoverable is False
+        assert bot._sync_cache_trust.state is SyncTrustState.UNCERTAIN
+        assert _load_sync_token_value(tmp_path, bot.agent_name) is None
+    finally:
+        release_persist.set()
+        await asyncio.to_thread(bot._turn_store._ledger.flush)
 
 
 @pytest.mark.parametrize("source_failure", ["coalescing", "callback", "cache"])

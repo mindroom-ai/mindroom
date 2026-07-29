@@ -1292,19 +1292,52 @@ async def test_room_mode_plain_user_message_keeps_room_session(tmp_path: Path) -
 
 
 @pytest.mark.asyncio
-async def test_handled_thread_response_proves_recovery_without_restart_handoff(tmp_path: Path) -> None:
-    """Durable handled state proves an ordinary-shutdown thread response is settled."""
+async def test_write_behind_handled_thread_does_not_prove_recovery(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """In-memory handled state cannot prove that shutdown recovery is durable."""
     config = _single_agent_config(tmp_path, "thread")
     harness = _build_harness(config, tmp_path)
     room = _room_with_members(config, "general")
     event = _text_event("hello there")
+    response_started = asyncio.Event()
+    release_response = asyncio.Event()
+    generate_response = harness.runner.generate_response
 
-    await harness.deliver(room, event)
+    async def generate_with_barrier(request: ResponseRequest) -> str | None:
+        response_started.set()
+        await release_response.wait()
+        return await generate_response(request)
 
-    assert harness.runner.requests[0].response_envelope.target.resolved_thread_id == event.event_id
-    assert harness.turn_store.is_handled(event.event_id)
-    assert not harness.interrupted_turn_rooms.pending_room_ids
-    assert harness.runner.recovery_proof_checks[0]() is True
+    monkeypatch.setattr(harness.runner, "generate_response", generate_with_barrier)
+    delivery = asyncio.create_task(harness.deliver(room, event))
+    await response_started.wait()
+
+    real_persist = harness.turn_store._ledger._persist_records
+    persist_started = threading.Event()
+    release_persist = threading.Event()
+
+    def persist_with_barrier(turn_records: tuple[TurnRecord, ...]) -> None:
+        persist_started.set()
+        if not release_persist.wait(timeout=5):
+            msg = "test did not release terminal-turn persistence"
+            raise TimeoutError(msg)
+        real_persist(turn_records)
+
+    monkeypatch.setattr(harness.turn_store._ledger, "_persist_records", persist_with_barrier)
+    release_response.set()
+
+    try:
+        await delivery
+        assert await asyncio.to_thread(persist_started.wait, 5)
+        assert harness.runner.requests[0].response_envelope.target.resolved_thread_id == event.event_id
+        assert harness.turn_store.is_handled(event.event_id)
+        assert not harness.interrupted_turn_rooms.pending_room_ids
+        assert harness.runner.recovery_proof_checks[0]() is False
+    finally:
+        release_persist.set()
+        await asyncio.to_thread(harness.turn_store._ledger.flush)
 
 
 @pytest.mark.asyncio
