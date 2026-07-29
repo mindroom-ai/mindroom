@@ -305,6 +305,8 @@ def test_interrupted_turn_rooms_record_each_source_once() -> None:
 
     assert rooms.register("$event", room_id="!room:localhost") is True
     assert rooms.register("$event", room_id="!other:localhost") is False
+    assert rooms.contains("$event") is True
+    assert rooms.contains("$missing") is False
     assert rooms.pending_room_ids == {"!room:localhost"}
 
 

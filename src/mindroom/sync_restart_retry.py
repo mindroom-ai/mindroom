@@ -94,6 +94,10 @@ class InterruptedTurnRooms:
         """Return rooms whose interrupted turns still await replacement recovery."""
         return frozenset(self._pending.values())
 
+    def contains(self, key: str) -> bool:
+        """Return whether one source already has an explicit recovery handoff."""
+        return key in self._pending
+
     def register(self, key: str, *, room_id: str) -> bool:
         """Record one interrupted source event; refuse anything already seen."""
         if key in self._pending:

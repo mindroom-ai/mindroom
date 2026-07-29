@@ -1717,12 +1717,13 @@ async def test_shutdown_in_flight_dispatch_cancellation_marks_drain_incomplete()
 
 
 @pytest.mark.parametrize(
-    ("response_rooms", "handoff_rooms", "remains_pending", "checkpoint_preserved"),
+    ("response_rooms", "handoff_indexes", "remains_pending", "checkpoint_preserved"),
     [
-        (("!one:localhost",), frozenset({"!one:localhost"}), False, True),
+        (("!one:localhost",), frozenset({0}), False, True),
         (("!one:localhost",), frozenset(), False, False),
-        (("!one:localhost", "!two:localhost"), frozenset({"!one:localhost"}), False, False),
-        (("!one:localhost", "!one:localhost"), frozenset({"!one:localhost"}), False, True),
+        (("!one:localhost", "!two:localhost"), frozenset({0}), False, False),
+        (("!one:localhost", "!one:localhost"), frozenset({0}), False, False),
+        (("!one:localhost", "!one:localhost"), frozenset({0, 1}), False, True),
         (("!one:localhost",), frozenset(), True, False),
     ],
 )
@@ -1730,7 +1731,7 @@ async def test_shutdown_in_flight_dispatch_cancellation_marks_drain_incomplete()
 async def test_shutdown_preserves_checkpoint_only_when_each_cancelled_response_has_room_recovery(
     tmp_path: Path,
     response_rooms: tuple[str, ...],
-    handoff_rooms: frozenset[str],
+    handoff_indexes: frozenset[int],
     remains_pending: bool,
     checkpoint_preserved: bool,
 ) -> None:
@@ -1746,7 +1747,7 @@ async def test_shutdown_preserves_checkpoint_only_when_each_cancelled_response_h
         except asyncio.CancelledError:
             if remains_pending:
                 await release_response.wait()
-            if room_id in handoff_rooms:
+            if index in handoff_indexes:
                 bot._interrupted_turn_rooms.register(f"$source-{index}", room_id=room_id)
             if not remains_pending:
                 raise
@@ -1755,7 +1756,7 @@ async def test_shutdown_preserves_checkpoint_only_when_each_cancelled_response_h
         bot._response_runner.track_inbox_response(
             interrupted_response(index, room_id),
             name=f"test_interrupted_response_{index}",
-            recovery_handoff_ready=lambda room_id=room_id: room_id in bot.pending_sync_restart_retry_room_ids,
+            recovery_handoff_ready=lambda index=index: bot._interrupted_turn_rooms.contains(f"$source-{index}"),
         )
         for index, room_id in enumerate(response_rooms)
     ]
@@ -1771,7 +1772,7 @@ async def test_shutdown_preserves_checkpoint_only_when_each_cancelled_response_h
     assert bot._sync_cache_trust.state is expected_state
     expected_token = "s_shutdown" if checkpoint_preserved else None
     assert _load_sync_token_value(tmp_path, bot.agent_name) == expected_token
-    assert bot.pending_sync_restart_retry_room_ids == handoff_rooms
+    assert bot.pending_sync_restart_retry_room_ids == {response_rooms[index] for index in handoff_indexes}
     incomplete_log = next(entry for entry in logs if entry["event"] == "matrix_agent_response_drain_incomplete")
     assert incomplete_log["restart_reason_category"] == "config_reload"
     assert incomplete_log["response_recovery_complete"] is checkpoint_preserved
