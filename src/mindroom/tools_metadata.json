@@ -3509,7 +3509,7 @@
         },
         {
           "authored_override": true,
-          "default": "imagen-4.0-generate-001",
+          "default": "gemini-3.1-flash-image",
           "description": null,
           "label": "Image Generation Model",
           "name": "image_generation_model",
@@ -3521,7 +3521,7 @@
         },
         {
           "authored_override": true,
-          "default": "veo-2.0-generate-001",
+          "default": "veo-3.1-generate-preview",
           "description": null,
           "label": "Video Generation Model",
           "name": "video_generation_model",

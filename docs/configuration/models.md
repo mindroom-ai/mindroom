@@ -47,6 +47,16 @@ models:
     id: claude-sonnet-5
     context_window: 1000000
 
+  fable:
+    provider: anthropic
+    id: claude-fable-5
+    context_window: 1000000
+
+  opus:
+    provider: anthropic
+    id: claude-opus-5
+    context_window: 1000000
+
   haiku:
     provider: anthropic
     id: claude-haiku-4-5
@@ -55,7 +65,7 @@ models:
   # Anthropic Claude on Amazon Bedrock
   bedrock_opus:
     provider: bedrock_claude
-    id: anthropic.claude-opus-4-8
+    id: anthropic.claude-opus-5
     context_window: 1000000
 
   # OpenAI
@@ -84,7 +94,8 @@ models:
   # Google Gemini (both 'google' and 'gemini' work as provider names)
   gemini:
     provider: google
-    id: gemini-3.1-pro-preview
+    id: gemini-3.6-flash
+    context_window: 1048576
 
   # Anthropic Claude on Vertex AI
   vertex_claude:
@@ -118,7 +129,8 @@ models:
   # DeepSeek
   deepseek:
     provider: deepseek
-    id: deepseek-chat
+    id: deepseek-v4-pro
+    context_window: 1048576
 
   # Z.ai (GLM models)
   glm:
@@ -299,13 +311,14 @@ For starter config generation, use `mindroom config init --provider azure`.
 Use `provider: bedrock_claude` when you want MindRoom to call Anthropic Claude through Amazon Bedrock.
 MindRoom uses Agno's AWS Bedrock Claude model wrapper and auto-installs the `aws_bedrock` optional extra on first use unless `MINDROOM_NO_AUTO_INSTALL_TOOLS=1` is set.
 The `id` field should be the Bedrock model ID or inference profile ID enabled in your AWS account and region.
-Use Opus when you want the highest Claude tier available through Bedrock.
+Use Fable when you need Anthropic's highest-capability tier and your Bedrock account has access to it.
+The generated Bedrock starter config defaults to the broadly available Opus 5 flagship.
 
 ```yaml
 models:
   default:
     provider: bedrock_claude
-    id: anthropic.claude-opus-4-8
+    id: anthropic.claude-opus-5
     context_window: 1000000
 ```
 

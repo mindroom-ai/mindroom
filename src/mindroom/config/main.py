@@ -1824,7 +1824,7 @@ class Config(BaseModel):
             entity_name: Name of the entity (agent, team, or router)
 
         Returns:
-            Model name (e.g., "default", "gpt-4", etc.)
+            Model alias (e.g., "default", "fast", etc.)
 
         Raises:
             ValueError: If entity_name is not found in configuration

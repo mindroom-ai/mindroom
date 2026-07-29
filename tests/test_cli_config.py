@@ -1268,10 +1268,12 @@ class TestConfigInit:
 
         config = yaml.safe_load(target.read_text())
         assert config["models"]["default"]["provider"] == "bedrock_claude"
-        assert config["models"]["default"]["id"] == "anthropic.claude-opus-4-8"
+        assert config["models"]["default"]["id"] == "anthropic.claude-opus-5"
         assert config["models"]["default"]["context_window"] == 1_000_000
 
         config_text = target.read_text(encoding="utf-8")
+        assert "# fable:" in config_text
+        assert "#   id: anthropic.claude-fable-5" in config_text
         assert "# sonnet:" in config_text
         assert "#   id: global.anthropic.claude-sonnet-5" in config_text
         assert "# haiku:" in config_text
