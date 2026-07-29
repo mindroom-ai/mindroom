@@ -52,6 +52,7 @@ from mindroom.knowledge.embedding_batch import BatchPrefetchEmbedder, plan_embed
 from mindroom.knowledge.index_metadata import write_index_metadata_payload
 from mindroom.knowledge.index_retry import EmbeddingRetryPolicy, run_with_embedding_retry
 from mindroom.knowledge.manager import KnowledgeManager
+from mindroom.knowledge.refresh_outcome import RefreshOutcome
 from mindroom.knowledge.refresh_runner import refresh_knowledge_binding
 from mindroom.knowledge.registry import (
     PublishedIndexState,
@@ -544,7 +545,7 @@ async def test_interrupted_cold_build_resumes_same_candidate_without_reembedding
 
     # A brand new manager models a process restart: nothing survives in memory.
     resumed_manager = _manager(config)
-    assert await resumed_manager.reindex_all() == len(names) - interrupt_after
+    assert (await resumed_manager.reindex_all()).indexed_count == len(names) - interrupt_after
 
     resumed_checkpoint = load_candidate_checkpoint(_storage_path(config, runtime_paths))
     assert resumed_checkpoint is None, "publication retires the checkpoint"
@@ -629,8 +630,7 @@ async def test_transient_embedding_failure_retries_only_the_failed_work(
     embedder.failures["content 4"] = [EmbedderRequestError("embedder request failed (HTTP 503)")]
 
     manager = _manager(config)
-    assert await manager.reindex_all() == 5
-    assert manager._last_refresh_error is None
+    assert await manager.reindex_all() == RefreshOutcome(indexed_count=5, published=True, error=None)
 
     state = _published_state(config, runtime_paths)
     assert state is not None
@@ -665,9 +665,11 @@ async def test_exhausted_transient_retries_keep_candidate_and_resume_only_unreso
     embedder.failures["content 3"] = [EmbedderRequestError("embedder request failed (HTTP 503)") for _ in range(20)]
 
     manager = _manager(config)
-    assert await manager.reindex_all() == 3
-    assert manager._last_refresh_error is not None
-    assert "Indexed 3 of 4" in manager._last_refresh_error
+    outcome = await manager.reindex_all()
+    assert outcome.indexed_count == 3
+    assert not outcome.published
+    assert outcome.error is not None
+    assert "Indexed 3 of 4" in outcome.error
     assert _published_state(config, runtime_paths) is None
 
     checkpoint = load_candidate_checkpoint(_storage_path(config, runtime_paths))
@@ -679,7 +681,7 @@ async def test_exhausted_transient_retries_keep_candidate_and_resume_only_unreso
 
     embedder.failures.pop("content 3")
     embedded_before = dict.fromkeys(embedder.embedded_texts)
-    assert await _manager(config).reindex_all() == 1
+    assert (await _manager(config).reindex_all()).indexed_count == 1
     for text in embedded_before:
         assert embedder.embedded_count(text) == 1, "resume must not re-embed resolved files"
     state = _published_state(config, runtime_paths)
@@ -952,7 +954,7 @@ async def test_source_revision_advancement_reuses_unchanged_candidate_work(
     (docs_path / "added.md").write_text("added body", encoding="utf-8")
     embedder.embedded_texts.clear()
 
-    assert await _manager(config).reindex_all() == 2
+    assert (await _manager(config).reindex_all()).indexed_count == 2
 
     assert embedder.embedded_count("keep me") == 0, "unchanged work is reused"
     assert embedder.embedded_count("new body") == 1
@@ -988,12 +990,11 @@ async def test_source_change_during_final_verification_reconciles_without_losing
 
     knowledge_manager_module.knowledge_source_signature = _mutate_during_verification  # type: ignore[assignment]
     try:
-        indexed = await manager.reindex_all()
+        outcome = await manager.reindex_all()
     finally:
         knowledge_manager_module.knowledge_source_signature = original_signature  # type: ignore[assignment]
 
-    assert indexed == 4
-    assert manager._last_refresh_error is None
+    assert outcome == RefreshOutcome(indexed_count=4, published=True, error=None)
     assert embedder.embedded_count("content 0") == 1, "the racing change costs no re-embedding"
     state = _published_state(config, runtime_paths)
     assert state is not None
@@ -1187,7 +1188,7 @@ async def test_embedding_request_count_scales_with_batches_not_files(
     _write_corpus(docs_path, file_count)
     config = _config(tmp_path, docs_path)
 
-    assert await _manager(config).reindex_all() == file_count
+    assert (await _manager(config).reindex_all()).indexed_count == file_count
 
     assert embedder.single_requests == [], "every chunk was served from a batch prefetch"
     assert len(embedder.batch_requests) <= 4, f"expected batched requests, got {len(embedder.batch_requests)}"
@@ -1213,7 +1214,7 @@ async def test_batch_failure_falls_back_to_per_file_without_reembedding_successe
     # "content 1" poisons the batch twice, exhausting the batch-level retry.
     embedder.failures["content 1"] = [EmbedderRequestError("embedder request failed (HTTP 503)") for _ in range(2)]
 
-    assert await _manager(config).reindex_all() == 3
+    assert (await _manager(config).reindex_all()).indexed_count == 3
 
     assert embedder.single_requests, "the fallback path re-embedded per file"
     for index in range(3):
@@ -1264,7 +1265,7 @@ async def test_large_corpus_keeps_live_tasks_bounded(
 
     KnowledgeManager._index_file_locked = _observe  # type: ignore[method-assign]
     try:
-        assert await manager.reindex_all() == file_count
+        assert (await manager.reindex_all()).indexed_count == file_count
     finally:
         KnowledgeManager._index_file_locked = original_index  # type: ignore[method-assign]
 
@@ -1359,7 +1360,7 @@ async def test_refresh_logs_aggregate_progress_instead_of_one_line_per_file(
     config = _config(tmp_path, docs_path)
 
     with capture_logs() as logs:
-        assert await _manager(config).reindex_all() == 128
+        assert (await _manager(config).reindex_all()).indexed_count == 128
 
     info_events = [entry["event"] for entry in logs if entry.get("log_level") == "info"]
     assert "Indexed knowledge file" not in info_events
@@ -1415,7 +1416,7 @@ async def test_completed_checkpoint_entry_without_vectors_is_requeued(
     (docs_path / "blocker.md").unlink()
     embedder.embedded_texts.clear()
 
-    assert await _manager(config).reindex_all() == 1
+    assert (await _manager(config).reindex_all()).indexed_count == 1
     assert embedder.embedded_count("lost body") == 1
     assert embedder.embedded_count("kept body") == 0
     stored = sorted(record.metadata["source_path"] for record in _FakeVectorDb.store[checkpoint.collection])
@@ -1586,7 +1587,7 @@ async def test_scale_refresh_resumes_after_ninety_percent_and_stays_bounded(
     embedder.batch_requests.clear()
     embedder.single_requests.clear()
 
-    assert await _manager(config).reindex_all() == file_count - completed_after_interrupt
+    assert (await _manager(config).reindex_all()).indexed_count == file_count - completed_after_interrupt
 
     remaining = file_count - completed_after_interrupt
     assert len(embedder.embedded_texts) == remaining, "resume embeds only the outstanding files"
@@ -1618,7 +1619,7 @@ async def test_scale_refresh_issues_batched_requests_for_a_large_corpus(
     _write_corpus(docs_path, file_count)
     config = _config(tmp_path, docs_path)
 
-    assert await _manager(config).reindex_all() == file_count
+    assert (await _manager(config).reindex_all()).indexed_count == file_count
 
     assert embedder.single_requests == []
     assert embedder.request_count == pytest.approx(file_count / 64, abs=2)
@@ -1736,7 +1737,7 @@ async def test_compaction_decision_does_not_reread_the_journal(
     _write_corpus(docs_path, 40)
     config = _config(tmp_path, docs_path)
 
-    assert await _manager(config).reindex_all() == 40
+    assert (await _manager(config).reindex_all()).indexed_count == 40
 
     # Ten batches, none of which may parse the journal just to decide.
     assert reads == 0, f"journal was re-read {reads} times while deciding whether to compact"
@@ -1888,7 +1889,7 @@ async def test_candidate_pending_count_is_visible_while_the_build_runs(
 
     KnowledgeManager._index_file_locked = _observe_status  # type: ignore[method-assign]
     try:
-        assert await _manager(config).reindex_all() == 6
+        assert (await _manager(config).reindex_all()).indexed_count == 6
     finally:
         KnowledgeManager._index_file_locked = original_index  # type: ignore[method-assign]
 
@@ -1985,7 +1986,7 @@ async def test_short_batch_response_falls_back_to_per_item_and_publishes(
     runtime_paths = runtime_paths_for(config)
     embedder.short_batch = True
 
-    assert await _manager(config).reindex_all() == 5
+    assert (await _manager(config).reindex_all()).indexed_count == 5
 
     state = _published_state(config, runtime_paths)
     assert state is not None
@@ -2008,7 +2009,7 @@ async def test_batch_capability_failure_disables_batching_for_the_rest_of_the_ru
     config = _config(tmp_path, docs_path)
     embedder.short_batch = True
 
-    assert await _manager(config).reindex_all() == 16
+    assert (await _manager(config).reindex_all()).indexed_count == 16
 
     multi_input_requests = [batch for batch in embedder.batch_requests if len(batch) > 1]
     assert len(multi_input_requests) == 1, (
@@ -2034,10 +2035,10 @@ async def test_ordinary_permanent_batch_error_fails_fast_without_a_request_storm
     embedder.batch_error = EmbedderRequestError("embedder request failed (HTTP 400)")
 
     manager = _manager(config)
-    await manager.reindex_all()
+    outcome = await manager.reindex_all()
 
-    assert manager._last_refresh_error is not None
-    assert "embedder request failed (HTTP 400)" in manager._last_refresh_error
+    assert outcome.error is not None
+    assert "embedder request failed (HTTP 400)" in outcome.error
     assert _published_state(config, runtime_paths) is None
     assert embedder.request_count <= 4, f"degraded into a request storm: {embedder.request_count}"
 
@@ -2079,10 +2080,10 @@ async def test_single_input_wrong_cardinality_still_fails_and_does_not_publish(
     ]
 
     manager = _manager(config)
-    await manager.reindex_all()
+    outcome = await manager.reindex_all()
 
-    assert manager._last_refresh_error is not None
-    assert "Indexed 1 of 2" in manager._last_refresh_error
+    assert outcome.error is not None
+    assert "Indexed 1 of 2" in outcome.error
     assert _published_state(config, runtime_paths) is None
     checkpoint = load_candidate_checkpoint(_storage_path(config, runtime_paths))
     assert checkpoint is not None
@@ -2140,11 +2141,11 @@ async def test_permanent_per_item_failure_after_fallback_is_recorded_per_file(
     embedder.failures["content 2"] = [EmbedderRequestError("embedder request failed (HTTP 422)") for _ in range(10)]
 
     manager = _manager(config)
-    await manager.reindex_all()
+    outcome = await manager.reindex_all()
 
-    assert manager._last_refresh_error is not None
-    assert "Indexed 3 of 4" in manager._last_refresh_error
-    assert "embedder request failed (HTTP 422)" in manager._last_refresh_error
+    assert outcome.error is not None
+    assert "Indexed 3 of 4" in outcome.error
+    assert "embedder request failed (HTTP 422)" in outcome.error
     assert _published_state(config, runtime_paths) is None, "an incomplete snapshot must not publish"
     checkpoint = load_candidate_checkpoint(_storage_path(config, runtime_paths))
     assert checkpoint is not None
@@ -2166,10 +2167,10 @@ async def test_credential_rejection_during_fallback_still_fails_fast(
     embedder.fail_everything = EmbedderRequestError("embedder authentication failed (HTTP 401)")
 
     manager = _manager(config)
-    await manager.reindex_all()
+    outcome = await manager.reindex_all()
 
-    assert manager._last_refresh_error is not None
-    assert "embedder authentication failed (HTTP 401)" in manager._last_refresh_error
+    assert outcome.error is not None
+    assert "embedder authentication failed (HTTP 401)" in outcome.error
     assert _published_state(config, runtime_paths) is None
     assert embedder.request_count <= 4, f"kept probing a rejected credential: {embedder.request_count}"
     assert load_candidate_checkpoint(_storage_path(config, runtime_paths)) is not None
@@ -2205,7 +2206,7 @@ async def test_restart_during_batch_fallback_resumes_the_same_candidate(
     assert len(checkpoint.completed) == 5
     embedder.embedded_texts.clear()
 
-    assert await _manager(config).reindex_all() == 1
+    assert (await _manager(config).reindex_all()).indexed_count == 1
 
     for index in range(5):
         assert embedder.embedded_count(f"content {index}") == 0, "checkpointed files were re-embedded"
@@ -2326,7 +2327,7 @@ async def test_vectors_prefetched_before_a_later_fallback_are_still_reused(
 
     monkeypatch.setattr(_RecordingEmbedder, "get_embeddings_batch", _short_after_first_batch)
 
-    assert await _manager(config).reindex_all() == 12
+    assert (await _manager(config).reindex_all()).indexed_count == 12
 
     multi_input = [batch for batch in embedder.batch_requests if len(batch) > 1]
     assert len(multi_input) == 2, "batching stopped after the batch that proved it broken"
@@ -2463,7 +2464,7 @@ async def test_mtime_only_change_keeps_completed_vectors(
         os.utime(path, ns=(stat.st_atime_ns + 10**9, stat.st_mtime_ns + 10**9))
     embedder.embedded_texts.clear()
 
-    assert await _manager(config).reindex_all() == 1, "only the previously failed file is indexed"
+    assert (await _manager(config).reindex_all()).indexed_count == 1, "only the previously failed file is indexed"
 
     for index in range(4):
         assert embedder.embedded_count(f"content {index}") == 0, "an mtime change re-embedded unchanged content"
@@ -2493,10 +2494,10 @@ async def test_globally_failing_embedder_stops_a_non_batching_refresh(
     embedder.fail_everything = EmbedderRequestError("embedder authentication failed (HTTP 401)")
 
     manager = _manager(config)
-    await manager.reindex_all()
+    outcome = await manager.reindex_all()
 
-    assert manager._last_refresh_error is not None
-    assert "embedder authentication failed (HTTP 401)" in manager._last_refresh_error
+    assert outcome.error is not None
+    assert "embedder authentication failed (HTTP 401)" in outcome.error
     assert _published_state(config, runtime_paths) is None
     assert embedder.request_count <= 4, f"issued one doomed request per file: {embedder.request_count}"
     assert load_candidate_checkpoint(_storage_path(config, runtime_paths)) is not None
@@ -2610,7 +2611,7 @@ async def test_candidate_path_removal_is_batched(
     monkeypatch.setattr(_FakeCollection, "delete", _counting_delete)
     monkeypatch.setattr(_FakeKnowledge, "remove_vectors_by_metadata", _counting_remove)
 
-    assert await _manager(config).reindex_all() == 40
+    assert (await _manager(config).reindex_all()).indexed_count == 40
 
     # 39 dropped paths must not cost 39 round trips; the upsert path still
     # clears each file it rewrites, so allow one per re-indexed file plus a
@@ -2899,7 +2900,7 @@ async def test_oversized_file_still_indexes_and_publishes(
     config = _config(tmp_path, docs_path, chunk_size=100_000)
     runtime_paths = runtime_paths_for(config)
 
-    assert await _manager(config).reindex_all() == 4
+    assert (await _manager(config).reindex_all()).indexed_count == 4
 
     state = _published_state(config, runtime_paths)
     assert state is not None
@@ -2968,7 +2969,7 @@ async def test_overlapping_chunks_are_batch_prefetched_and_published(
     config = _config(tmp_path, docs_path, chunk_size=1_000, chunk_overlap=100)
     runtime_paths = runtime_paths_for(config)
 
-    assert await _manager(config).reindex_all() == 1
+    assert (await _manager(config).reindex_all()).indexed_count == 1
 
     assert [batch for batch in embedder.batch_requests if len(batch) > 1], "no multi-input request was issued"
     assert embedder.single_requests == [], "every overlapping chunk was served from the batch prefetch"
@@ -2998,7 +2999,7 @@ async def test_file_skipped_by_overlap_expansion_still_indexes_and_publishes(
     config = _config(tmp_path, docs_path, chunk_size=1_000, chunk_overlap=100)
     runtime_paths = runtime_paths_for(config)
 
-    assert await _manager(config).reindex_all() == 4
+    assert (await _manager(config).reindex_all()).indexed_count == 4
 
     state = _published_state(config, runtime_paths)
     assert state is not None
@@ -3060,7 +3061,7 @@ async def test_refresh_after_publish_reuses_vectors_for_unchanged_files(
     config = _config(tmp_path, docs_path)
     runtime_paths = runtime_paths_for(config)
 
-    assert await _manager(config).reindex_all() == 3
+    assert (await _manager(config).reindex_all()).indexed_count == 3
     first_state = _published_state(config, runtime_paths)
     assert first_state is not None
     first_collection = first_state.collection
@@ -3070,7 +3071,7 @@ async def test_refresh_after_publish_reuses_vectors_for_unchanged_files(
     (docs_path / names[1]).write_text("rewritten body", encoding="utf-8")
     embedder.embedded_texts.clear()
 
-    assert await _manager(config).reindex_all() == 1, "the whole corpus was embedded again"
+    assert (await _manager(config).reindex_all()).indexed_count == 1, "the whole corpus was embedded again"
 
     assert embedder.embedded_count("content 0") == 0
     assert embedder.embedded_count("content 2") == 0
@@ -3129,7 +3130,9 @@ async def test_published_vector_reuse_requires_matching_indexing_settings(
     rechunked = _config(tmp_path, docs_path, chunk_size=256, chunk_overlap=8)
     embedder.embedded_texts.clear()
 
-    assert await _manager(rechunked).reindex_all() == 3, "vectors built under other settings were reused"
+    assert (await _manager(rechunked).reindex_all()).indexed_count == 3, (
+        "vectors built under other settings were reused"
+    )
     assert embedder.embedded_count("content 0") == 1
 
 
@@ -3184,7 +3187,9 @@ async def test_published_vector_reuse_needs_a_completely_published_index(
     )
     embedder.embedded_texts.clear()
 
-    assert await _manager(config).reindex_all() == 3, "vectors from an unpublished collection were reused"
+    assert (await _manager(config).reindex_all()).indexed_count == 3, (
+        "vectors from an unpublished collection were reused"
+    )
 
 
 @pytest.mark.asyncio
@@ -3212,7 +3217,7 @@ async def test_published_vector_reuse_never_claims_a_path_the_published_index_ca
     ]
     embedder.embedded_texts.clear()
 
-    assert await _manager(config).reindex_all() == 1
+    assert (await _manager(config).reindex_all()).indexed_count == 1
 
     assert embedder.embedded_count("content 2") == 1, "a path with no published rows was claimed as indexed"
     state = _published_state(config, runtime_paths)
@@ -3243,7 +3248,7 @@ async def test_published_vector_copy_is_paged_so_no_query_exceeds_the_store_ceil
     (docs_path / names[0]).write_text("rewritten body", encoding="utf-8")
     embedder.embedded_texts.clear()
 
-    assert await _manager(config).reindex_all() == 1
+    assert (await _manager(config).reindex_all()).indexed_count == 1
 
     assert max(rows for rows, _where in _FakeVectorDb.queries) <= 4
     assert _vector_existence_probe_count() == 0, "copied paths were sent back through the vector-existence probe"
@@ -3267,7 +3272,7 @@ async def test_published_vector_reuse_falls_back_when_the_published_collection_i
     _FakeVectorDb.store.pop(first_state.collection)
     embedder.embedded_texts.clear()
 
-    assert await _manager(config).reindex_all() == 3
+    assert (await _manager(config).reindex_all()).indexed_count == 3
 
     state = _published_state(config, runtime_paths)
     assert state is not None
@@ -3325,7 +3330,7 @@ async def test_published_vector_reuse_survives_a_checkout_that_only_rewrites_mti
         os.utime(path, ns=(stat.st_atime_ns + 10**9, stat.st_mtime_ns + 10**9))
     embedder.embedded_texts.clear()
 
-    assert await _manager(config).reindex_all() == 1, "an mtime rewrite re-embedded unchanged content"
+    assert (await _manager(config).reindex_all()).indexed_count == 1, "an mtime rewrite re-embedded unchanged content"
 
     assert embedder.embedded_count("content 0") == 0
     assert embedder.embedded_count("content 2") == 0
@@ -3351,7 +3356,7 @@ async def test_published_vector_reuse_rescans_an_empty_file_it_cannot_claim(
     (docs_path / names[0]).write_text("rewritten body", encoding="utf-8")
     embedder.embedded_texts.clear()
 
-    assert await _manager(config).reindex_all() == 2, "the empty file was claimed or lost"
+    assert (await _manager(config).reindex_all()).indexed_count == 2, "the empty file was claimed or lost"
 
     assert embedder.embedded_count("content 1") == 0
     state = _published_state(config, runtime_paths)
@@ -3472,7 +3477,7 @@ async def test_a_cancelled_vector_copy_never_publishes_rows_it_could_not_claim(
     (docs_path / names[0]).unlink()
     embedder.embedded_texts.clear()
 
-    indexed = await _manager(config).reindex_all()
+    indexed = (await _manager(config).reindex_all()).indexed_count
 
     state = _published_state(config, runtime_paths)
     assert state is not None
@@ -3592,7 +3597,7 @@ async def test_an_interruption_after_the_copy_still_resumes_the_work_it_finished
     assert len(checkpoint.completed) == 2
     already_embedded = {f"revised {names.index(name)}" for name in checkpoint.completed}
 
-    assert await _manager(config).reindex_all() == len(names) - 2
+    assert (await _manager(config).reindex_all()).indexed_count == len(names) - 2
 
     for body in already_embedded:
         assert embedder.embedded_count(body) == 1, "an interrupted refresh re-embedded work it had finished"
@@ -3756,7 +3761,7 @@ async def test_a_rebuild_that_dies_before_emptying_the_collection_still_recovers
     assert _stored_paths(interrupted.collection) == sorted(names), "the crash left rows nothing claims"
     embedder.embedded_texts.clear()
 
-    indexed = await _manager(config).reindex_all()
+    indexed = (await _manager(config).reindex_all()).indexed_count
 
     state = _published_state(config, runtime_paths)
     assert state is not None

@@ -81,6 +81,7 @@ from mindroom.knowledge.redaction import (
     redact_credentials_in_text,
     redact_url_credentials,
 )
+from mindroom.knowledge.refresh_outcome import RefreshOutcome
 from mindroom.logging_config import get_logger
 from mindroom.strict_knowledge import StrictInsertKnowledge as Knowledge
 
@@ -346,12 +347,12 @@ class _CandidateProgress:
         self._last_logged_completed = self.completed
         logger.info("knowledge_candidate_progress", **self._fields())
 
-    def log_summary(self, *, published: bool, error: str | None) -> None:
+    def log_summary(self, outcome: RefreshOutcome) -> None:
         """Emit the single terminal summary for this refresh."""
         logger.info(
             "knowledge_candidate_finished",
-            published=published,
-            error=error,
+            published=outcome.published,
+            error=outcome.error,
             **self._fields(),
         )
 
@@ -2443,7 +2444,19 @@ class KnowledgeManager:
         )
         run.journal_appends = 0
 
-    async def reindex_all(self, *, force_reindex: bool = False) -> int:
+    def _record_refresh_error(self, detail: str) -> None:
+        """Store why this refresh failed, redacted once at the point of record.
+
+        Redacting here rather than when the outcome is built keeps the stored
+        string and the reported one identical, so an operator reading the
+        attribute in a debugger sees exactly what was logged and persisted. It
+        also keeps ``redact_credentials_in_text`` -- which is not total -- out
+        of the ``finally`` that owns checkpoint compaction, where a raise would
+        both mask the real failure and skip durability work.
+        """
+        self._last_refresh_error = redact_credentials_in_text(detail)
+
+    async def reindex_all(self, *, force_reindex: bool = False) -> RefreshOutcome:
         """Advance the durable candidate index and publish it when it matches the source.
 
         ``force_reindex`` is the operator asking for vectors to be rebuilt
@@ -2452,8 +2465,7 @@ class KnowledgeManager:
         missing collection -- the reuse gates already reject on their own.
         """
         if not _semantic_indexing_enabled(self.config, self.base_id):
-            self._last_refresh_error = None
-            return 0
+            return RefreshOutcome(indexed_count=0, published=False, error=None)
 
         async with self._lock:
             self._last_refresh_error = None
@@ -2474,13 +2486,18 @@ class KnowledgeManager:
                 await self._advance_candidate(run, progress)
             except Exception as exc:
                 if self._last_refresh_error is None:
-                    self._last_refresh_error = redact_credentials_in_text(str(exc))
+                    self._record_refresh_error(str(exc))
                 raise
             finally:
                 progress.retrying = self._embedding_retry_count
-                progress.log_summary(published=run.published, error=self._last_refresh_error)
+                outcome = RefreshOutcome(
+                    indexed_count=progress.indexed_this_run,
+                    published=run.published,
+                    error=self._last_refresh_error,
+                )
+                progress.log_summary(outcome)
                 await self._finalize_candidate_checkpoint(run)
-            return progress.indexed_this_run
+            return outcome
 
     async def _finalize_candidate_checkpoint(self, run: _CandidateRun) -> None:
         """Compact the candidate snapshot even when the refresh is being cancelled.
@@ -2585,7 +2602,7 @@ class KnowledgeManager:
                 summary = f"Indexed {len(run.completed)} of {len(plan.expected)} managed knowledge files"
                 if self._last_file_index_error is not None:
                     summary = f"{summary} (first error: {self._last_file_index_error})"
-                self._last_refresh_error = summary
+                self._record_refresh_error(summary)
                 return
 
             candidate_signatures = {
@@ -2594,8 +2611,8 @@ class KnowledgeManager:
                 if relative_path in expected_paths
             }
             if set(candidate_signatures) != expected_paths:
-                self._last_refresh_error = (
-                    f"Indexed signatures covered {len(candidate_signatures)} of {len(expected_paths)} managed files"
+                self._record_refresh_error(
+                    f"Indexed signatures covered {len(candidate_signatures)} of {len(expected_paths)} managed files",
                 )
                 return
 
@@ -2618,8 +2635,8 @@ class KnowledgeManager:
             await self._publish_candidate(run, candidate_source_signature)
             return
 
-        self._last_refresh_error = (
-            "Knowledge source kept changing during refresh; candidate progress was kept for the next refresh"
+        self._record_refresh_error(
+            "Knowledge source kept changing during refresh; candidate progress was kept for the next refresh",
         )
 
     async def _publish_candidate(self, run: _CandidateRun, source_signature: str) -> None:
