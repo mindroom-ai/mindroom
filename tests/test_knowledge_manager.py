@@ -9376,21 +9376,34 @@ def test_redacting_hostile_stderr_does_not_stall_the_event_loop() -> None:
     """Redaction cost must not be something a remote can choose.
 
     This runs inline in the coroutine reading Git's stderr, and a remote drives
-    that through sideband packets Git concatenates without newlines. Recognising
-    URL shapes with a pattern per shape meant several scans over the same text,
-    each able to start at many positions; the protocol-relative one could start
-    at every ``//`` and took 148 s on 195 KB of slashes. A single tokenizer
-    visits each character once, and the per-token bound is applied before any
-    classification rather than inside it.
+    that through sideband packets Git concatenates without newlines.
+
+    The payloads matter more than the assertion. A single oversized token is the
+    easy case -- the length bound rejects it unread -- so the interesting inputs
+    are the ones that stay *under* the bound and make the scan itself expensive:
+    many sub-bound URLs, and a long run of the character a pattern can restart
+    on. An earlier version measured only the easy case, and passed while the
+    scan degraded to 148 s on 195 KB of slashes.
     """
     secret = "S3CR3T-CANARY"  # noqa: S105
-    slash_payload = "/" * (195 * 1024)
-    nested_escape_token = f"https://user:{secret}@" + "%" + "25" * (128 * 1024) + "40example.com/x"
+    payloads = [
+        # A run every position of which could start a protocol-relative match.
+        "/" * (195 * 1024),
+        # 500 credential-bearing URLs, each comfortably under the length bound,
+        # so every one is classified rather than skipped.
+        " ".join(
+            f"fatal: cannot access 'https://user:{secret}@host{index}.example.com/o/r.git'" for index in range(500)
+        ),
+        # Long identifier runs, which is what makes a scheme prefix backtrack.
+        "a" * (64 * 1024),
+        ("word:" + "b" * 400) * 100,
+        # One oversized token: rejected unread rather than decoded.
+        f"https://user:{secret}@" + "%" + "25" * (128 * 1024) + "40example.com/x",
+    ]
 
     started = time.perf_counter()
-    for payload in (slash_payload, f"fatal: unable to access '{nested_escape_token}': failed"):
-        redacted = redact_credentials_in_text(payload)
-        assert secret not in redacted
+    for payload in payloads:
+        assert secret not in redact_credentials_in_text(payload)
     elapsed = time.perf_counter() - started
 
     assert elapsed < 1.0

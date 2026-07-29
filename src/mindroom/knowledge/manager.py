@@ -519,6 +519,36 @@ def _unwritable_remote(base_id: str, reason: str) -> RuntimeError:
     )
 
 
+def _parsed_remote_url(clean_url: str, base_id: str) -> str:
+    """Return `clean_url` when its authority resolves and carries no password."""
+    try:
+        parsed = urlparse(clean_url)
+    except ValueError as exc:
+        raise _unwritable_remote(base_id, "the URL cannot be parsed") from exc
+
+    if not parsed.scheme:
+        raise _unwritable_remote(base_id, "the URL has no scheme")
+
+    if not parsed.netloc:
+        # ``file:`` is the one scheme with no authority by design, so it has no
+        # userinfo to hide; any other empty authority means the string only
+        # looked like a URL.
+        if parsed.scheme == "file" and "@" not in clean_url:
+            return clean_url
+        raise _unwritable_remote(base_id, "the URL has no host")
+
+    if parsed.netloc.count("@") > 1:
+        raise _unwritable_remote(base_id, "the URL has an ambiguous authority")
+
+    if ":" in parsed.netloc.rpartition("@")[0]:
+        # A password in the authority. The bare ``user@host`` that
+        # ``credential_free_repo_url`` deliberately keeps for SSH has no colon
+        # and is still allowed.
+        raise _unwritable_remote(base_id, "the URL embeds a password")
+
+    return clean_url
+
+
 def _persistable_remote_url(repo_url: str, base_id: str) -> str:
     """Return the remote URL safe to write to disk, or refuse to write one.
 
@@ -541,6 +571,18 @@ def _persistable_remote_url(repo_url: str, base_id: str) -> str:
     """
     clean_url = credential_free_repo_url(repo_url)
 
+    # Before any shape is recognised: until the decoded form agrees with the raw
+    # one, no branch below is reasoning about the string a client will use. This
+    # sat after the scp branch, so an encoded separator reached disk by taking a
+    # different route than the one it was written to block.
+    if fully_unquoted(clean_url).count("@") != clean_url.count("@"):
+        raise _unwritable_remote(base_id, "a percent-encoded separator hides part of the URL")
+
+    if clean_url.count("://") > 1:
+        # A second URL nested in the path carries its own userinfo, which the
+        # authority checks below cannot see.
+        raise _unwritable_remote(base_id, "the URL embeds a second URL")
+
     if _SCP_STYLE_REMOTE_URL.match(clean_url):
         return clean_url
 
@@ -550,35 +592,7 @@ def _persistable_remote_url(repo_url: str, base_id: str) -> str:
         # leading slash is what separates it from a protocol-relative URL.
         return clean_url
 
-    try:
-        parsed = urlparse(clean_url)
-    except ValueError as exc:
-        raise _unwritable_remote(base_id, "the URL cannot be parsed") from exc
-
-    if not parsed.scheme:
-        raise _unwritable_remote(base_id, "the URL has no scheme")
-
-    if fully_unquoted(clean_url).count("@") != clean_url.count("@"):
-        raise _unwritable_remote(base_id, "a percent-encoded separator hides part of the URL")
-
-    if not parsed.netloc:
-        # ``file:`` is the one scheme with no authority by design, so it has no
-        # userinfo to hide; any other empty authority means the string only
-        # looked like a URL.
-        if parsed.scheme == "file" and "@" not in clean_url:
-            return clean_url
-        raise _unwritable_remote(base_id, "the URL has no host")
-
-    if parsed.netloc.count("@") > 1:
-        raise _unwritable_remote(base_id, "the URL has an ambiguous authority")
-
-    if ":" in parsed.netloc.rpartition("@")[0]:
-        # A password in the authority. The bare ``user@host`` that
-        # ``credential_free_repo_url`` deliberately keeps for SSH has no colon
-        # and is still allowed.
-        raise _unwritable_remote(base_id, "the URL embeds a password")
-
-    return clean_url
+    return _parsed_remote_url(clean_url, base_id)
 
 
 def _redacted_command(args: list[str]) -> str:
