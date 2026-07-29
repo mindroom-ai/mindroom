@@ -7,11 +7,15 @@ also has to get itself rescheduled. This module owns the decision half of that;
 1. ``refresh_trigger`` -- pure and cheap. Does this availability warrant a refresh
    at all, and what should the turn report while one is in flight? Returns None
    when nothing should happen, which is the common READY case.
-2. The caller probes the scheduler, then samples the cooldown clock. That order
-   matters: sampling first would subtract probe latency from every cooldown.
+2. The caller probes the scheduler, reached only when a trigger exists.
 3. ``refresh_cooldown_key`` -- the one step that touches the filesystem. Deferred
    to here so an already-in-flight refresh never pays for it.
-4. ``cooldown_elapsed`` -- pure. Has this key's throttle window expired?
+4. The caller samples the cooldown clock, and ``cooldown_elapsed`` -- pure -- says
+   whether this key's throttle window has expired. The clock is sampled last, after
+   the probe and the key, so that the timestamp the caller stamps records when the
+   refresh was actually scheduled rather than some instant before it. Cadence does
+   not depend on this: probe latency lands on both the stamp and the next
+   comparison and cancels out.
 
 Splitting it this way keeps a single source of truth for "should this refresh":
 there is no second predicate that can drift out of sync with the first.

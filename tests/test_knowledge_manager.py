@@ -10,6 +10,7 @@ import subprocess
 import sys
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
+from datetime import UTC, datetime
 from itertools import count
 from pathlib import Path
 from threading import Event, Lock, get_ident
@@ -6505,6 +6506,9 @@ def test_private_agent_knowledge_bookkeeping_is_bounded(tmp_path: Path) -> None:
         knowledge_utils._MAX_REFRESH_SCHEDULED_COOLDOWNS,
         knowledge_refresh_runner._MAX_REFRESH_LOCKS,
     )
+    scheduler = MagicMock()
+    scheduler.is_refreshing = MagicMock(return_value=False)
+    scheduler.schedule_refresh = MagicMock()
 
     for index in range(max_entries + 40):
         identity = _identity(f"@user{index}:localhost")
@@ -6528,10 +6532,22 @@ def test_private_agent_knowledge_bookkeeping_is_bounded(tmp_path: Path) -> None:
             ),
             metadata_path=published_index_metadata_path(key),
         )
-        knowledge_utils._refresh_scheduled_at[(refresh_target, KnowledgeAvailability.READY, key.indexing_settings)] = (
-            float(index)
+        # Stamp through the production path, so deleting its prune call fails here.
+        knowledge_utils._schedule_refresh_for_availability(
+            scheduler,
+            base_id,
+            config=config,
+            runtime_paths=runtime_paths,
+            execution_identity=identity,
+            lookup=get_published_index(
+                base_id,
+                config=config,
+                runtime_paths=runtime_paths,
+                execution_identity=identity,
+            ),
+            availability=KnowledgeAvailability.STALE,
+            wall_now=datetime.now(tz=UTC),
         )
-        knowledge_utils._prune_refresh_schedule_bookkeeping()
         _create_idle_refresh_lock(knowledge_registry.source_root_for_refresh_target(refresh_target))
 
     private_index_count = sum(

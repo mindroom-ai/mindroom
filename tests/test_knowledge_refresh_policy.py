@@ -238,20 +238,55 @@ def test_changed_git_credentials_retry_a_failed_refresh_before_the_cooldown(tmp_
     assert "old-secret" not in repr(rotated_key)
 
 
-def test_cooldown_keys_separate_availabilities_for_one_base(tmp_path: Path) -> None:
-    """A throttle on one availability must not suppress a refresh for a different one."""
+@pytest.mark.parametrize(
+    "availability",
+    [
+        KnowledgeAvailability.READY,
+        KnowledgeAvailability.INITIALIZING,
+        KnowledgeAvailability.CONFIG_MISMATCH,
+    ],
+)
+def test_cooldown_key_carries_indexing_settings(tmp_path: Path, availability: KnowledgeAvailability) -> None:
+    """These availabilities fold indexing settings in, so newer config bypasses the cooldown."""
+    config = _config(tmp_path)
+    runtime_paths = test_runtime_paths(tmp_path)
+    lookup = _resolution(config, runtime_paths, availability=availability)
+
+    _target, keyed_availability, settings = refresh_cooldown_key(lookup, config, runtime_paths, availability)
+    assert keyed_availability is availability
+    assert settings == lookup.key.indexing_settings
+
+
+def test_stale_cooldown_key_omits_indexing_settings(tmp_path: Path) -> None:
+    """STALE means the settings already matched, so the key deliberately carries none."""
     config = _config(tmp_path)
     runtime_paths = test_runtime_paths(tmp_path)
     lookup = _resolution(config, runtime_paths, availability=KnowledgeAvailability.STALE)
 
-    keys = {
-        availability: refresh_cooldown_key(lookup, config, runtime_paths, availability)
-        for availability in (
-            KnowledgeAvailability.READY,
-            KnowledgeAvailability.INITIALIZING,
-            KnowledgeAvailability.STALE,
-            KnowledgeAvailability.CONFIG_MISMATCH,
-            KnowledgeAvailability.REFRESH_FAILED,
-        )
-    }
-    assert len(set(keys.values())) == len(keys)
+    _target, keyed_availability, settings = refresh_cooldown_key(
+        lookup,
+        config,
+        runtime_paths,
+        KnowledgeAvailability.STALE,
+    )
+    assert keyed_availability is KnowledgeAvailability.STALE
+    assert settings is None
+
+
+def test_failed_cooldown_key_extends_indexing_settings_with_a_fingerprint(tmp_path: Path) -> None:
+    """A failed retry keys on settings plus the Git credential that could fix it."""
+    config = _config(tmp_path, git=KnowledgeGitConfig(repo_url="https://user:secret@example.com/x.git"))
+    runtime_paths = test_runtime_paths(tmp_path)
+    lookup = _resolution(config, runtime_paths, availability=KnowledgeAvailability.REFRESH_FAILED)
+
+    _target, keyed_availability, settings = refresh_cooldown_key(
+        lookup,
+        config,
+        runtime_paths,
+        KnowledgeAvailability.REFRESH_FAILED,
+    )
+    assert keyed_availability is KnowledgeAvailability.REFRESH_FAILED
+    assert isinstance(settings, tuple)
+    assert settings[0] == lookup.key.indexing_settings
+    assert len(settings) > 1
+    assert "secret" not in repr(settings)

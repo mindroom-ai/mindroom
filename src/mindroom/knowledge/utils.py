@@ -135,6 +135,7 @@ def _schedule_refresh_for_availability(
     execution_identity: ToolExecutionIdentity | None,
     lookup: PublishedIndexResolution | None,
     availability: KnowledgeAvailability,
+    wall_now: datetime,
 ) -> KnowledgeAvailability:
     """Apply the refresh policy for one resolved base: probe, throttle, schedule, report."""
     if lookup is None:
@@ -143,7 +144,7 @@ def _schedule_refresh_for_availability(
         lookup=lookup,
         availability=availability,
         config=config,
-        wall_now=datetime.now(tz=UTC),
+        wall_now=wall_now,
     )
     if trigger is None:
         return availability
@@ -211,9 +212,12 @@ def _resolve_base_knowledge(
         runtime_paths=runtime_paths,
         execution_identity=execution_identity,
     )
+    # One instant per resolve: the poll-interval boundary must not be evaluated
+    # against two different clock readings within a single turn.
+    wall_now = datetime.now(tz=UTC)
     availability = lookup.availability if lookup is not None else KnowledgeAvailability.INITIALIZING
     if lookup is not None and availability is KnowledgeAvailability.READY:
-        availability = ready_index_effective_availability(lookup, config, wall_now=datetime.now(tz=UTC))
+        availability = ready_index_effective_availability(lookup, config, wall_now=wall_now)
     knowledge = lookup.index.knowledge if lookup is not None and lookup.index is not None else None
     if knowledge is not None:
         _apply_knowledge_metadata(base_id, knowledge, config)
@@ -226,6 +230,7 @@ def _resolve_base_knowledge(
             execution_identity=execution_identity,
             lookup=lookup,
             availability=availability,
+            wall_now=wall_now,
         )
     last_error = lookup.state.last_error if lookup is not None and lookup.state is not None else None
     return knowledge, availability, last_error
