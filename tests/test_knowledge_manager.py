@@ -61,6 +61,7 @@ from mindroom.knowledge.redaction import (
     redact_credentials_in_text,
     redact_url_credentials,
 )
+from mindroom.knowledge.refresh_outcome import RefreshOutcome
 from mindroom.knowledge.refresh_runner import knowledge_binding_mutation_lock, refresh_knowledge_binding
 from mindroom.knowledge.registry import (
     get_published_index,
@@ -751,8 +752,8 @@ async def test_file_mode_cancelled_refresh_after_metadata_publish_stays_complete
 
 
 @pytest.mark.asyncio
-async def test_file_mode_reindex_noop_clears_previous_manager_refresh_error(tmp_path: Path) -> None:
-    """File-only reindex no-ops should not leave stale manager-local errors."""
+async def test_file_mode_reindex_reports_an_empty_unpublished_outcome(tmp_path: Path) -> None:
+    """A file-only base builds no vectors, so its refresh publishes nothing and reports no failure."""
     docs_path = tmp_path / "docs"
     docs_path.mkdir()
     config = _config(
@@ -763,10 +764,8 @@ async def test_file_mode_reindex_noop_clears_previous_manager_refresh_error(tmp_
     )
     runtime_paths = runtime_paths_for(config)
     manager = KnowledgeManager("docs", config=config, runtime_paths=runtime_paths)
-    manager._last_refresh_error = "previous semantic failure"
 
-    assert await manager.reindex_all() == 0
-    assert manager._last_refresh_error is None
+    assert await manager.reindex_all() == RefreshOutcome(indexed_count=0, published=False, error=None)
 
 
 def test_file_mode_source_signature_tracks_non_semantic_files(tmp_path: Path) -> None:
@@ -1788,8 +1787,7 @@ async def test_reindex_publishes_surviving_files_when_one_vanishes_mid_refresh(
 
     monkeypatch.setattr(KnowledgeManager, "_file_signature", vanishing_signature)
 
-    assert await manager.reindex_all() == 1
-    assert manager._last_refresh_error is None
+    assert await manager.reindex_all() == RefreshOutcome(indexed_count=1, published=True, error=None)
     assert manager._has_vectors_for_source_path("kept.md", knowledge=manager._knowledge)
     assert not manager._has_vectors_for_source_path("doomed.md", knowledge=manager._knowledge)
 
@@ -1919,8 +1917,11 @@ async def test_reindex_skips_files_whose_reader_dependency_is_missing(
     monkeypatch.setattr(knowledge_manager_module.ReaderFactory, "get_reader_for_extension", failing_get_reader)
     manager = KnowledgeManager("docs", config=config, runtime_paths=runtime_paths_for(config))
 
-    assert await manager.reindex_all() == 1
-    assert manager._last_refresh_error == "Indexed 1 of 2 managed knowledge files"
+    assert await manager.reindex_all() == RefreshOutcome(
+        indexed_count=1,
+        published=False,
+        error="Indexed 1 of 2 managed knowledge files",
+    )
 
 
 @pytest.mark.asyncio
@@ -2096,7 +2097,7 @@ async def test_cancelled_refresh_waiting_for_source_lock_does_not_touch_running_
         original_save_refreshing(*args, **kwargs)
         refreshing_write_count += 1
 
-    async def _blocked_reindex(self: KnowledgeManager, *, force_reindex: bool = False) -> int:
+    async def _blocked_reindex(self: KnowledgeManager, *, force_reindex: bool = False) -> RefreshOutcome:
         _ = force_reindex
         first_entered.set()
         await release_first.wait()
@@ -3562,7 +3563,7 @@ async def test_same_physical_binding_refreshes_are_serialized_across_config_chan
     max_active_refreshes = 0
     call_count = 0
 
-    async def _blocked_reindex(self: KnowledgeManager, *, force_reindex: bool = False) -> int:
+    async def _blocked_reindex(self: KnowledgeManager, *, force_reindex: bool = False) -> RefreshOutcome:
         _ = force_reindex
         _ = self
         nonlocal active_refreshes, max_active_refreshes, call_count
@@ -3575,7 +3576,7 @@ async def test_same_physical_binding_refreshes_are_serialized_across_config_chan
                 await release_first.wait()
             else:
                 second_entered.set()
-            return 0
+            return RefreshOutcome(indexed_count=0, published=False, error=None)
         finally:
             active_refreshes -= 1
 
@@ -3614,12 +3615,12 @@ async def test_shared_source_mutation_waits_for_duplicate_base_refresh(
     release_refresh = asyncio.Event()
     mutation_entered = asyncio.Event()
 
-    async def _blocked_reindex(self: KnowledgeManager, *, force_reindex: bool = False) -> int:
+    async def _blocked_reindex(self: KnowledgeManager, *, force_reindex: bool = False) -> RefreshOutcome:
         _ = force_reindex
         _ = self
         refresh_entered.set()
         await release_refresh.wait()
-        return 0
+        return RefreshOutcome(indexed_count=0, published=False, error=None)
 
     async def _mutate_shared_source() -> None:
         async with knowledge_binding_mutation_lock("beta", config=config, runtime_paths=runtime_paths):
@@ -4726,9 +4727,10 @@ async def test_partial_refresh_error_includes_first_classified_file_error(
     monkeypatch.setattr("mindroom.knowledge.manager.Knowledge", _AuthFailingKnowledge)
     manager = KnowledgeManager("docs", config=config, runtime_paths=runtime_paths_for(config))
 
-    assert await manager.reindex_all() == 1
-    assert manager._last_refresh_error == (
-        "Indexed 1 of 2 managed knowledge files (first error: embedder authentication failed (HTTP 401))"
+    assert await manager.reindex_all() == RefreshOutcome(
+        indexed_count=1,
+        published=False,
+        error="Indexed 1 of 2 managed knowledge files (first error: embedder authentication failed (HTTP 401))",
     )
 
 
@@ -4761,11 +4763,15 @@ async def test_vectorless_file_does_not_inherit_process_global_embedder_health(
     embedder_health.capture_embedder_health_recorder().record(None)
     manager = KnowledgeManager("docs", config=config, runtime_paths=runtime_paths_for(config))
     try:
-        assert await manager.reindex_all() == 0
+        outcome = await manager.reindex_all()
     finally:
         embedder_health.capture_embedder_health_recorder().record(None)
 
-    assert manager._last_refresh_error == "Indexed 0 of 1 managed knowledge files"
+    assert outcome == RefreshOutcome(
+        indexed_count=0,
+        published=False,
+        error="Indexed 0 of 1 managed knowledge files",
+    )
 
 
 def test_refresh_failure_counter_increments_and_resets_preserving_last_good(tmp_path: Path) -> None:
@@ -4962,7 +4968,7 @@ async def test_cold_refresh_exception_surfaces_failed_availability_and_backoff(
     config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
     runtime_paths = runtime_paths_for(config)
 
-    async def _raise_reindex(self: KnowledgeManager, *, force_reindex: bool = False) -> int:
+    async def _raise_reindex(self: KnowledgeManager, *, force_reindex: bool = False) -> RefreshOutcome:
         _ = force_reindex
         _ = self
         msg = "cold refresh failed"
@@ -5172,12 +5178,12 @@ async def test_api_status_reports_direct_refresh_runner_reindex(
     started = asyncio.Event()
     release = asyncio.Event()
 
-    async def _blocked_reindex(self: KnowledgeManager, *, force_reindex: bool = False) -> int:
+    async def _blocked_reindex(self: KnowledgeManager, *, force_reindex: bool = False) -> RefreshOutcome:
         _ = force_reindex
         _ = self
         started.set()
         await release.wait()
-        return 0
+        return RefreshOutcome(indexed_count=0, published=False, error=None)
 
     monkeypatch.setattr(KnowledgeManager, "reindex_all", _blocked_reindex)
     refresh_task = asyncio.create_task(
@@ -6780,7 +6786,7 @@ async def test_local_noop_refresh_reports_published_index(tmp_path: Path, monkey
     reindex_count = 0
     original_reindex = KnowledgeManager.reindex_all
 
-    async def _track_reindex(self: KnowledgeManager, *, force_reindex: bool = False) -> int:
+    async def _track_reindex(self: KnowledgeManager, *, force_reindex: bool = False) -> RefreshOutcome:
         nonlocal reindex_count
         reindex_count += 1
         if reindex_count > 1:
@@ -6814,7 +6820,7 @@ async def test_local_refresh_reindexes_when_content_changes_with_same_mtime_and_
     reindex_count = 0
     original_reindex = KnowledgeManager.reindex_all
 
-    async def _track_reindex(self: KnowledgeManager, *, force_reindex: bool = False) -> int:
+    async def _track_reindex(self: KnowledgeManager, *, force_reindex: bool = False) -> RefreshOutcome:
         nonlocal reindex_count
         reindex_count += 1
         return await original_reindex(self, force_reindex=force_reindex)
@@ -6848,10 +6854,10 @@ async def test_refresh_does_not_synthesize_missing_published_metadata(
     runtime_paths = runtime_paths_for(config)
     original_reindex = KnowledgeManager.reindex_all
 
-    async def _delete_metadata_after_reindex(self: KnowledgeManager, *, force_reindex: bool = False) -> int:
-        indexed_count = await original_reindex(self, force_reindex=force_reindex)
+    async def _delete_metadata_after_reindex(self: KnowledgeManager, *, force_reindex: bool = False) -> RefreshOutcome:
+        outcome = await original_reindex(self, force_reindex=force_reindex)
         self._indexing_settings_path.unlink()
-        return indexed_count
+        return outcome
 
     monkeypatch.setattr(KnowledgeManager, "reindex_all", _delete_metadata_after_reindex)
 
@@ -6929,7 +6935,7 @@ async def test_git_refresh_syncs_before_reindex_and_publishes_revision_without_s
         order.append("sync")
         return _record_git_sync(self, GitSyncResult(head="rev-git", updated=True), "doc.md")
 
-    async def _track_reindex(self: KnowledgeManager, *, force_reindex: bool = False) -> int:
+    async def _track_reindex(self: KnowledgeManager, *, force_reindex: bool = False) -> RefreshOutcome:
         order.append("reindex")
         return await original_reindex(self, force_reindex=force_reindex)
 
@@ -7038,7 +7044,7 @@ async def test_git_noop_refresh_skips_full_reindex_when_index_is_complete(
     reindex_count = 0
     original_reindex = KnowledgeManager.reindex_all
 
-    async def _track_reindex(self: KnowledgeManager, *, force_reindex: bool = False) -> int:
+    async def _track_reindex(self: KnowledgeManager, *, force_reindex: bool = False) -> RefreshOutcome:
         nonlocal reindex_count
         reindex_count += 1
         if reindex_count > 1:
@@ -7286,7 +7292,7 @@ async def test_git_noop_refresh_ignores_untracked_indexable_file_changes(
     async def _sync(self: GitKnowledgeSource) -> GitSyncResult:
         return _record_git_sync(self, sync_results.pop(0), "doc.md")
 
-    async def _track_reindex(self: KnowledgeManager, *, force_reindex: bool = False) -> int:
+    async def _track_reindex(self: KnowledgeManager, *, force_reindex: bool = False) -> RefreshOutcome:
         nonlocal reindex_count
         reindex_count += 1
         return await original_reindex(self, force_reindex=force_reindex)
@@ -7335,7 +7341,7 @@ async def test_git_noop_refresh_rebuilds_when_collection_is_missing(
     async def _sync(self: GitKnowledgeSource) -> GitSyncResult:
         return _record_git_sync(self, sync_results.pop(0), "doc.md")
 
-    async def _track_reindex(self: KnowledgeManager, *, force_reindex: bool = False) -> int:
+    async def _track_reindex(self: KnowledgeManager, *, force_reindex: bool = False) -> RefreshOutcome:
         nonlocal reindex_count
         reindex_count += 1
         return await original_reindex(self, force_reindex=force_reindex)
@@ -7423,7 +7429,7 @@ async def test_git_noop_refresh_rebuilds_after_chunking_config_change(
     async def _sync(self: GitKnowledgeSource) -> GitSyncResult:
         return _record_git_sync(self, sync_results.pop(0), "doc.md")
 
-    async def _track_reindex(self: KnowledgeManager, *, force_reindex: bool = False) -> int:
+    async def _track_reindex(self: KnowledgeManager, *, force_reindex: bool = False) -> RefreshOutcome:
         nonlocal reindex_count
         reindex_count += 1
         return await original_reindex(self, force_reindex=force_reindex)
@@ -7472,7 +7478,7 @@ async def test_force_git_reindex_bypasses_noop_fast_path(
     async def _sync(self: GitKnowledgeSource) -> GitSyncResult:
         return _record_git_sync(self, sync_results.pop(0), "doc.md")
 
-    async def _track_reindex(self: KnowledgeManager, *, force_reindex: bool = False) -> int:
+    async def _track_reindex(self: KnowledgeManager, *, force_reindex: bool = False) -> RefreshOutcome:
         nonlocal reindex_count
         reindex_count += 1
         return await original_reindex(self, force_reindex=force_reindex)
