@@ -118,6 +118,7 @@ Matrix sync callback
 | `knowledge/file_listing.py` | Which files belong to a knowledge base: include patterns, traversal, symlink-safe inclusion rules |
 | `knowledge/collections.py` | Chroma collection lifecycle for one knowledge base: naming, opening, probing, deleting, reclaiming |
 | `knowledge/git_source.py` | The Git checkout a knowledge base indexes: clone, fetch, force-align, LFS hydration, credential injection |
+| `knowledge/readers.py` | How a knowledge file becomes chunks: per-extension reader selection, this base's chunking policy, malformed-JSON text fallback |
 | `tool_system/skills.py` | Skill integration system (OpenClaw-compatible) |
 | `tool_system/plugins.py` | Plugin loading and tool/skill extension |
 | `scheduling.py` | Cron and natural-language task scheduling |
