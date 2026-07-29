@@ -30,6 +30,7 @@ from watchfiles import Change
 import mindroom.knowledge.file_listing as knowledge_file_listing_module
 import mindroom.knowledge.git_source as knowledge_git_source_module
 import mindroom.knowledge.manager as knowledge_manager_module
+import mindroom.knowledge.refresh_locks as knowledge_refresh_locks
 import mindroom.knowledge.refresh_runner as knowledge_refresh_runner
 import mindroom.knowledge.refresh_scheduler as knowledge_refresh_scheduler
 import mindroom.knowledge.registry as knowledge_registry
@@ -317,13 +318,13 @@ def patch_vector_store(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     monkeypatch.setattr("mindroom.knowledge.registry.create_configured_embedder", lambda *_args, **_kwargs: object())
     knowledge_registry._published_indexes.clear()
     knowledge_utils._refresh_scheduled_at.clear()
-    knowledge_refresh_runner._refresh_locks.clear()
-    knowledge_refresh_runner._active_refresh_counts.clear()
+    knowledge_refresh_locks._refresh_locks.clear()
+    knowledge_refresh_locks._active_refresh_counts.clear()
     yield
     knowledge_registry._published_indexes.clear()
     knowledge_utils._refresh_scheduled_at.clear()
-    knowledge_refresh_runner._refresh_locks.clear()
-    knowledge_refresh_runner._active_refresh_counts.clear()
+    knowledge_refresh_locks._refresh_locks.clear()
+    knowledge_refresh_locks._active_refresh_counts.clear()
     _VectorDb.collections = {}
 
 
@@ -332,7 +333,7 @@ async def _wait_for_refresh_lock_borrowers(
     expected: int,
 ) -> None:
     for _ in range(50):
-        entry = knowledge_refresh_runner._refresh_locks.get(key)
+        entry = knowledge_refresh_locks._refresh_locks.get(key)
         if entry is not None and entry.borrowers == expected:
             return
         await asyncio.sleep(0)
@@ -340,8 +341,8 @@ async def _wait_for_refresh_lock_borrowers(
 
 
 def _create_idle_refresh_lock(key: knowledge_registry.KnowledgeSourceRoot) -> None:
-    entry = knowledge_refresh_runner._borrow_refresh_lock_for_key(key)
-    knowledge_refresh_runner._release_refresh_lock_for_key(key, entry)
+    entry = knowledge_refresh_locks._borrow_refresh_lock_for_key(key)
+    knowledge_refresh_locks._release_refresh_lock_for_key(key, entry)
 
 
 def _base_storage_path(config: Config, runtime_paths: RuntimePaths, base_id: str = "docs") -> Path:
@@ -614,7 +615,7 @@ def test_real_refresh_scheduler_without_running_loop_does_not_mark_active(tmp_pa
     scheduler.schedule_refresh("docs", config=config, runtime_paths=runtime_paths)
     refresh_target = knowledge_registry.resolve_refresh_target("docs", config=config, runtime_paths=runtime_paths)
 
-    assert knowledge_refresh_runner.is_refresh_active(refresh_target) is False
+    assert knowledge_refresh_locks.is_refresh_active(refresh_target) is False
     assert scheduler.is_refreshing("docs", config=config, runtime_paths=runtime_paths) is False
 
 
@@ -2023,7 +2024,7 @@ async def test_refreshing_state_cancellation_clears_active_refresh_count(
         await refresh_task
 
     refresh_target = knowledge_registry.resolve_refresh_target("docs", config=config, runtime_paths=runtime_paths)
-    assert knowledge_refresh_runner.is_refresh_active(refresh_target) is False
+    assert knowledge_refresh_locks.is_refresh_active(refresh_target) is False
 
 
 @pytest.mark.asyncio
@@ -2179,7 +2180,7 @@ async def test_refresh_lock_pruning_keeps_queued_waiter_entry(
     holder_entered = asyncio.Event()
     release_holder = asyncio.Event()
     waiter_entered = asyncio.Event()
-    monkeypatch.setattr(knowledge_refresh_runner, "_MAX_REFRESH_LOCKS", 1)
+    monkeypatch.setattr(knowledge_refresh_locks, "_MAX_REFRESH_LOCKS", 1)
 
     async def _hold_lock() -> None:
         async with knowledge_binding_mutation_lock("docs", config=config, runtime_paths=runtime_paths):
@@ -2194,7 +2195,7 @@ async def test_refresh_lock_pruning_keeps_queued_waiter_entry(
     await holder_entered.wait()
     waiter_task = asyncio.create_task(_queued_waiter())
     await _wait_for_refresh_lock_borrowers(source_root, 2)
-    original_entry = knowledge_refresh_runner._refresh_locks[source_root]
+    original_entry = knowledge_refresh_locks._refresh_locks[source_root]
 
     for index in range(5):
         _create_idle_refresh_lock(
@@ -2204,7 +2205,7 @@ async def test_refresh_lock_pruning_keeps_queued_waiter_entry(
             ),
         )
 
-    assert knowledge_refresh_runner._refresh_locks.get(source_root) is original_entry
+    assert knowledge_refresh_locks._refresh_locks.get(source_root) is original_entry
 
     release_holder.set()
     async with asyncio.timeout(1):
@@ -3731,7 +3732,7 @@ async def test_refresh_uses_cross_process_source_lock(
         locked_roots.append(source_root)
         yield
 
-    monkeypatch.setattr(knowledge_refresh_runner, "_acquire_refresh_file_lock", _record_file_lock)
+    monkeypatch.setattr(knowledge_refresh_runner, "acquire_refresh_file_lock", _record_file_lock)
 
     await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
 
@@ -3757,7 +3758,7 @@ async def test_mutation_lock_uses_cross_process_source_lock(
         locked_roots.append(source_root)
         yield
 
-    monkeypatch.setattr(knowledge_refresh_runner, "_acquire_refresh_file_lock", _record_file_lock)
+    monkeypatch.setattr(knowledge_refresh_runner, "acquire_refresh_file_lock", _record_file_lock)
 
     async with knowledge_binding_mutation_lock("docs", config=config, runtime_paths=runtime_paths):
         pass
@@ -6573,7 +6574,7 @@ def test_private_agent_knowledge_bookkeeping_is_bounded(tmp_path: Path) -> None:
     max_entries = max(
         knowledge_registry._MAX_PRIVATE_PUBLISHED_INDEXES,
         knowledge_utils._MAX_REFRESH_SCHEDULED_COOLDOWNS,
-        knowledge_refresh_runner._MAX_REFRESH_LOCKS,
+        knowledge_refresh_locks._MAX_REFRESH_LOCKS,
     )
     scheduler = MagicMock()
     scheduler.is_refreshing = MagicMock(return_value=False)
@@ -6624,7 +6625,7 @@ def test_private_agent_knowledge_bookkeeping_is_bounded(tmp_path: Path) -> None:
     )
     assert private_index_count <= knowledge_registry._MAX_PRIVATE_PUBLISHED_INDEXES
     assert len(knowledge_utils._refresh_scheduled_at) <= knowledge_utils._MAX_REFRESH_SCHEDULED_COOLDOWNS
-    assert len(knowledge_refresh_runner._refresh_locks) <= knowledge_refresh_runner._MAX_REFRESH_LOCKS
+    assert len(knowledge_refresh_locks._refresh_locks) <= knowledge_refresh_locks._MAX_REFRESH_LOCKS
 
 
 def test_private_index_read_path_cache_insertion_is_bounded(tmp_path: Path) -> None:
