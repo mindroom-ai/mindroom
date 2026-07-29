@@ -140,6 +140,8 @@ def test_restart_regression_evidence_rejects_false_passes() -> None:
     stack = ManagedTuwunelStack()
     try:
         stack.agent_id, stack.router_id = "@agent:example", "@router:example"
+        stack.log_path.write_text("agent_setup_complete @agent:example\nagent_setup_complete @router:example\n")
+        assert stack.log_count("agent_setup_complete", stack.agent_id) == 1
         stack.storage_path.mkdir()
         with sqlite3.connect(stack.storage_path / "event_cache.db") as database:
             database.executescript(

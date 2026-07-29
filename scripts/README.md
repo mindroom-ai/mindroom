@@ -48,6 +48,7 @@ uv run python scripts/testing/benchmark_tool_call_overhead.py --iterations 1000 
 ```bash
 uv run python scripts/testing/fuzz_matrix_event_cache.py --seed 42 --steps 500
 uv run python scripts/testing/fuzz_live_matrix.py --seed 42 --steps 200 --threads 45
+uv run python scripts/testing/fuzz_live_matrix.py --profile restart-regression
 uv run python scripts/testing/fuzz_live_matrix.py --profile saturation
 ```
 

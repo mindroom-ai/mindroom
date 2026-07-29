@@ -481,9 +481,6 @@ def saturation_scenario(
     return scenario
 
 
-RESTART_SCENARIO = LiveFuzzScenario(thread_count=1, batches=(), profile="restart-regression")
-
-
 class _ModelHandler(BaseHTTPRequestHandler):
     """Small deterministic OpenAI-compatible endpoint for live transport tests."""
 
@@ -718,18 +715,19 @@ class ManagedTuwunelStack:
             "event_loop_stalls": log.count("event_loop_stall_detected"),
         }
 
-    def log_count(self, marker: str) -> int:
-        """Count one content-free lifecycle marker."""
-        return self.log_path.read_text(encoding="utf-8", errors="replace").count(marker)
+    def log_count(self, *markers: str) -> int:
+        """Count lines containing every content-free lifecycle marker."""
+        log = self.log_path.read_text(encoding="utf-8", errors="replace")
+        return sum(all(marker in line for marker in markers) for line in log.splitlines())
 
-    def wait_for_log_count(self, marker: str, minimum: int, timeout: float = 60) -> None:
+    def wait_for_log_count(self, markers: tuple[str, ...], minimum: int, timeout: float = 60) -> None:
         """Wait for a bounded lifecycle milestone."""
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
-            if self.log_count(marker) >= minimum:
+            if self.log_count(*markers) >= minimum:
                 return
             time.sleep(0.1)
-        msg = f"restart profile lifecycle marker missing: {marker}"
+        msg = "restart profile lifecycle marker missing"
         raise TimeoutError(msg)
 
     def add_restart_room(self, room_id: str) -> None:
@@ -741,10 +739,7 @@ class ManagedTuwunelStack:
     def cached_restart_event_pair_count(self, room_id: str, event_ids: tuple[str, str]) -> int:
         """Count exact principal/event pairs cached for the restart room."""
         with sqlite3.connect(self.storage_path / "event_cache.db") as database:
-            query = """
-                SELECT COUNT(*) FROM events
-                WHERE principal_id IN (?, ?) AND room_id = ? AND event_id IN (?, ?)
-            """
+            query = "SELECT COUNT(*) FROM events WHERE principal_id IN (?, ?) AND room_id = ? AND event_id IN (?, ?)"
             row = database.execute(query, (self.agent_id, self.router_id, room_id, *event_ids)).fetchone()
         return int(row[0]) if row is not None else 0
 
@@ -1226,18 +1221,21 @@ class LiveFuzzRunner:
                 "url": "mxc://localhost/synthetic",
             },
         )
-        setup_count = self.stack.log_count("agent_setup_complete")
+        setup_markers = (("agent_setup_complete", self.stack.agent_id), ("agent_setup_complete", self.stack.router_id))
+        setup_counts = tuple(self.stack.log_count(*markers) for markers in setup_markers)
         update_count = self.stack.log_count("configuration_update_complete")
         self.stack.add_restart_room(dormant.room_id)
-        await asyncio.to_thread(self.stack.wait_for_log_count, "agent_setup_complete", setup_count + 2)
+        for markers, count in zip(setup_markers, setup_counts, strict=True):
+            await asyncio.to_thread(self.stack.wait_for_log_count, markers, count + 1)
         fresh = await dormant.send_event(
             "m.room.message",
             "restart-fresh",
             self._message_content("Synthetic fresh startup request"),
         )
+        fresh_sent_before_update_complete = self.stack.log_count("configuration_update_complete") == update_count
         await asyncio.to_thread(
             self.stack.wait_for_log_count,
-            "configuration_update_complete",
+            ("configuration_update_complete",),
             update_count + 1,
         )
 
@@ -1274,6 +1272,7 @@ class LiveFuzzRunner:
             ("historical_output_suppressed", counts[1], 0, "historical_media", "replacement_sync", 2),
             ("historical_event_pairs_cached", cached_event_pairs, 4, "historical_events", "replacement_sync", 3),
             ("fresh_event_exactly_once", counts[2], 1, "fresh_user", "replacement_startup", 4),
+            ("fresh_sent_before_update_complete", fresh_sent_before_update_complete, True, "fresh_user", "reload", 4),
             ("fresh_prompt_observed", fresh_prompt_observed, True, "fresh_user", "execution", 4),
             (
                 "historical_events_absent_from_fresh_prompt",
@@ -1472,10 +1471,7 @@ class LiveFuzzRunner:
         return response_ids
 
     @staticmethod
-    def _combined_response_count(
-        source_event_id: str,
-        *response_indexes: Mapping[str, set[str]],
-    ) -> int:
+    def _combined_response_count(source_event_id: str, *response_indexes: Mapping[str, set[str]]) -> int:
         """Count canonical bot responses across every configured sender."""
         return sum(len(response_ids.get(source_event_id, set())) for response_ids in response_indexes)
 
@@ -1751,7 +1747,7 @@ def main() -> None:
             saturation_scenario()
             if args.profile == "saturation"
             else (
-                RESTART_SCENARIO
+                LiveFuzzScenario(thread_count=1, batches=(), profile="restart-regression")
                 if args.profile == "restart-regression"
                 else live_scenario_from_seed(
                     args.seed,
@@ -1798,7 +1794,7 @@ def main() -> None:
                 encoding="utf-8",
             )
         log_tail = stack.log_tail()
-        if log_tail:
+        if log_tail and scenario.profile != "restart-regression":
             print("MindRoom log tail:", file=sys.stderr)
             print(log_tail, file=sys.stderr)
         raise
