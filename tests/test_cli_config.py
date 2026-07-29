@@ -1910,7 +1910,7 @@ class TestConfigValidate:
         """Config validate should warn about missing Bedrock region settings."""
         cfg = tmp_path / "config.yaml"
         cfg.write_text(
-            "models:\n  default:\n    provider: bedrock_claude\n    id: anthropic.claude-opus-4-8\n"
+            "models:\n  default:\n    provider: bedrock_claude\n    id: anthropic.claude-opus-5\n"
             "agents:\n  assistant:\n    display_name: Assistant\n    model: default\n"
             "router:\n  model: default\n",
         )
@@ -1939,7 +1939,7 @@ class TestConfigValidate:
             "models:\n"
             "  default:\n"
             "    provider: bedrock_claude\n"
-            "    id: anthropic.claude-opus-4-8\n"
+            "    id: anthropic.claude-opus-5\n"
             "    extra_kwargs:\n"
             "      aws_region: us-west-2\n"
             "agents:\n  assistant:\n    display_name: Assistant\n    model: default\n"
@@ -1968,7 +1968,7 @@ class TestConfigValidate:
             "models:\n"
             "  default:\n"
             "    provider: bedrock_claude\n"
-            "    id: anthropic.claude-opus-4-8\n"
+            "    id: anthropic.claude-opus-5\n"
             "    extra_kwargs:\n"
             "      aws_profile: dev-profile\n"
             "agents:\n  assistant:\n    display_name: Assistant\n    model: default\n"
@@ -1994,7 +1994,7 @@ class TestConfigValidate:
         """Config validate should accept Bedrock AWS_PROFILE without explicit region."""
         cfg = tmp_path / "config.yaml"
         cfg.write_text(
-            "models:\n  default:\n    provider: bedrock_claude\n    id: anthropic.claude-opus-4-8\n"
+            "models:\n  default:\n    provider: bedrock_claude\n    id: anthropic.claude-opus-5\n"
             "agents:\n  assistant:\n    display_name: Assistant\n    model: default\n"
             "router:\n  model: default\n",
         )

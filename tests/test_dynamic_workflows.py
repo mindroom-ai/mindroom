@@ -1721,7 +1721,7 @@ def test_dynamic_workflow_tool_rejects_ephemeral_model_outside_caller_policy(tmp
             agents={"general": AgentConfig(display_name="General Agent", tools=["dynamic_workflow"], model="default")},
             models={
                 "default": ModelConfig(provider="anthropic", id="claude-sonnet-4-6"),
-                "opus": ModelConfig(provider="anthropic", id="claude-opus-4-8"),
+                "opus": ModelConfig(provider="anthropic", id="claude-opus-5"),
             },
         ),
         context.runtime_paths,
@@ -1741,7 +1741,7 @@ def test_dynamic_workflow_tool_rejects_ephemeral_model_outside_caller_policy(tmp
                             "tools": [],
                         },
                     ],
-                    permissions={"models": ["claude-opus-4-8"], "tools": []},
+                    permissions={"models": ["claude-opus-5"], "tools": []},
                 ),
             ),
         )
@@ -1759,7 +1759,7 @@ def test_dynamic_workflow_tool_enforces_permission_models_for_default_participan
             agents={"general": AgentConfig(display_name="General Agent", tools=["dynamic_workflow"], model="default")},
             models={
                 "default": ModelConfig(provider="anthropic", id="claude-sonnet-4-6"),
-                "opus": ModelConfig(provider="anthropic", id="claude-opus-4-8"),
+                "opus": ModelConfig(provider="anthropic", id="claude-opus-5"),
             },
         ),
         context.runtime_paths,
@@ -1778,7 +1778,7 @@ def test_dynamic_workflow_tool_enforces_permission_models_for_default_participan
                             "tools": [],
                         },
                     ],
-                    permissions={"models": ["claude-opus-4-8"], "tools": []},
+                    permissions={"models": ["claude-opus-5"], "tools": []},
                 ),
             ),
         )
@@ -1796,7 +1796,7 @@ def test_dynamic_workflow_tool_defaults_ephemeral_model_to_caller_runtime_model(
             agents={"general": AgentConfig(display_name="General Agent", tools=["dynamic_workflow"], model="opus")},
             models={
                 "default": ModelConfig(provider="anthropic", id="claude-sonnet-4-6"),
-                "opus": ModelConfig(provider="anthropic", id="claude-opus-4-8"),
+                "opus": ModelConfig(provider="anthropic", id="claude-opus-5"),
             },
         ),
         context.runtime_paths,
@@ -1901,7 +1901,7 @@ def test_dynamic_workflow_tool_revalidates_saved_revision_policy_before_run(tmp_
             agents={"general": AgentConfig(display_name="General Agent", tools=["dynamic_workflow"], model="default")},
             models={
                 "default": ModelConfig(provider="anthropic", id="claude-sonnet-4-6"),
-                "opus": ModelConfig(provider="anthropic", id="claude-opus-4-8"),
+                "opus": ModelConfig(provider="anthropic", id="claude-opus-5"),
             },
         ),
         context.runtime_paths,
@@ -2003,7 +2003,7 @@ def test_room_agent_participant_rebinds_context_and_uses_isolated_state(tmp_path
             },
             models={
                 "default": ModelConfig(provider="anthropic", id="claude-sonnet-4-6"),
-                "large": ModelConfig(provider="anthropic", id="claude-opus-4-8"),
+                "large": ModelConfig(provider="anthropic", id="claude-opus-5"),
             },
             room_models={"lobby": "large"},
             knowledge_bases={"reference": {"path": str(tmp_path / "knowledge")}},

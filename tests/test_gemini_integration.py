@@ -31,7 +31,7 @@ class TestGeminiIntegration:
         config.models = {
             "test_model": MagicMock(
                 provider="gemini",
-                id="gemini-2.0-flash-001",
+                id="gemini-3.6-flash",
                 host=None,
             ),
         }
@@ -39,7 +39,7 @@ class TestGeminiIntegration:
         with patch.dict("os.environ", {"GOOGLE_API_KEY": "test-key"}):
             model = get_model_instance(config, runtime_paths, "test_model")
             assert isinstance(model, MindRoomGoogleGemini)
-            assert model.id == "gemini-2.0-flash-001"
+            assert model.id == "gemini-3.6-flash"
             assert model.provider == "Google"
 
     def test_google_provider_creates_gemini_instance(self) -> None:
@@ -48,7 +48,7 @@ class TestGeminiIntegration:
         config.models = {
             "test_model": MagicMock(
                 provider="google",
-                id="gemini-2.0-pro-001",
+                id="gemini-3.5-flash-lite",
                 host=None,
             ),
         }
@@ -56,7 +56,7 @@ class TestGeminiIntegration:
         with patch.dict("os.environ", {"GOOGLE_API_KEY": "test-key"}):
             model = get_model_instance(config, runtime_paths, "test_model")
             assert isinstance(model, MindRoomGoogleGemini)
-            assert model.id == "gemini-2.0-pro-001"
+            assert model.id == "gemini-3.5-flash-lite"
             assert model.provider == "Google"
 
     def test_gemini_api_key_environment_variable(self) -> None:
@@ -65,7 +65,7 @@ class TestGeminiIntegration:
         config.models = {
             "test_model": MagicMock(
                 provider="gemini",
-                id="gemini-2.0-flash-001",
+                id="gemini-3.6-flash",
                 host=None,
             ),
         }
@@ -97,10 +97,10 @@ class TestGeminiIntegration:
 
         # Test various Gemini model configurations
         gemini_configs = [
-            ("gemini", "gemini-2.0-flash-001"),
-            ("gemini", "gemini-2.0-pro-001"),
-            ("google", "gemini-2.5-flash"),
-            ("google", "gemini-1.5-pro-latest"),
+            ("gemini", "gemini-3.6-flash"),
+            ("gemini", "gemini-3.5-flash-lite"),
+            ("google", "gemini-3.1-pro-preview"),
+            ("google", "gemini-3.1-flash-image"),
         ]
 
         for provider, model_id in gemini_configs:

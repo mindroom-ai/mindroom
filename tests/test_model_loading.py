@@ -7,8 +7,9 @@ from unittest.mock import patch
 
 import pytest
 from agno.models.message import Message as AgnoMessage
+from anthropic.lib.streaming import ParsedMessageStopEvent
 from anthropic.types import Message as AnthropicMessage
-from anthropic.types import Usage
+from anthropic.types import ParsedMessage, Usage
 
 from mindroom.azure_openai_model import MindRoomAzureOpenAI
 from mindroom.config.main import Config
@@ -126,7 +127,7 @@ def test_vertexai_claude_gets_explicit_timeout_so_large_outputs_can_run_non_stre
             models={
                 "opus": ModelConfig(
                     provider="vertexai_claude",
-                    id="claude-opus-4-8",
+                    id="claude-opus-5",
                     extra_kwargs={
                         "project_id": "dummy-project",
                         "region": "us-east1",
@@ -150,7 +151,7 @@ def test_anthropic_gets_explicit_timeout(tmp_path: Path) -> None:
             models={
                 "claude": ModelConfig(
                     provider="anthropic",
-                    id="claude-opus-4-8",
+                    id="claude-opus-5",
                     extra_kwargs={"api_key": "dummy-key"},
                 ),
             },
@@ -170,7 +171,7 @@ def test_bedrock_claude_gets_explicit_timeout(tmp_path: Path) -> None:
             models={
                 "bedrock": ModelConfig(
                     provider="bedrock_claude",
-                    id="anthropic.claude-opus-4-8",
+                    id="anthropic.claude-opus-5",
                     extra_kwargs={
                         "aws_region": "us-east-1",
                         "aws_access_key": "dummy-access",
@@ -227,13 +228,13 @@ def test_bedrock_current_claude_uses_mantle_endpoint(tmp_path: Path) -> None:
         ),
     ],
 )
-def test_current_claude_safeguard_refusal_is_not_treated_as_empty_response(
+def test_current_claude_safeguard_refusal_is_terminal_in_all_response_modes(
     tmp_path: Path,
     provider: str,
     model_id: str,
     extra_kwargs: dict[str, str],
 ) -> None:
-    """A successful HTTP refusal must surface as a typed terminal error."""
+    """Successful-HTTP refusals must terminate streaming and non-streaming calls."""
     config = bind_runtime_paths(
         Config(
             models={
@@ -250,6 +251,11 @@ def test_current_claude_safeguard_refusal_is_not_treated_as_empty_response(
 
     with pytest.raises(ModelSafeguardRefusalError, match="stop_reason=refusal"):
         model._parse_provider_response(_safeguard_refusal_message())
+
+    parsed_message = ParsedMessage[object].model_validate(_safeguard_refusal_message().model_dump())
+    stop_event = ParsedMessageStopEvent(type="message_stop", message=parsed_message)
+    with pytest.raises(ModelSafeguardRefusalError, match="stop_reason=refusal"):
+        model._parse_provider_response_delta(stop_event)
 
 
 def test_google_tool_loop_preserves_provider_call_ids(tmp_path: Path) -> None:
@@ -303,7 +309,7 @@ def test_anthropic_timeout_override_is_preserved(tmp_path: Path) -> None:
             models={
                 "claude": ModelConfig(
                     provider="anthropic",
-                    id="claude-opus-4-8",
+                    id="claude-opus-5",
                     extra_kwargs={
                         "api_key": "dummy-key",
                         "timeout": 120.0,

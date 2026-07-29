@@ -491,7 +491,7 @@ class _FakeCodexClient:
         ("codex", "gpt-4.1", False),
         ("codex", "codex-mini-latest", False),
         ("openai", "gpt-5.6", True),
-        ("anthropic", "claude-opus-4-8", False),
+        ("anthropic", "claude-opus-5", False),
     ],
 )
 def test_openai_native_tool_search_supported_gating(provider: str, model_id: str, *, expected: bool) -> None:
@@ -517,7 +517,7 @@ def test_openai_native_tool_search_rejects_custom_compatible_base_url() -> None:
 
 def test_install_openai_deferred_tool_search_ignores_non_responses_models_and_empty_sets() -> None:
     """The installer is a no-op for non-Responses models and empty name sets."""
-    claude = Claude(id="claude-opus-4-8", api_key="test-key")
+    claude = Claude(id="claude-opus-5", api_key="test-key")
     install_openai_deferred_tool_search(claude, deferred_tool_names=frozenset({"alpha_tool"}))
     assert _DEFERRED_TOOL_NAMES_ATTR not in vars(claude)
 

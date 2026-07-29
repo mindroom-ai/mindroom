@@ -34,8 +34,8 @@ def test_load_request_rows_handles_concatenated_json_objects(tmp_path: Path) -> 
     module = _load_prompt_cache_review_module()
     jsonl_path = tmp_path / "requests.jsonl"
     jsonl_path.write_text(
-        '{"timestamp":"2026-04-11T11:00:00-07:00","agent_name":"opus","model_id":"claude-opus-4-8","system_prompt":"S","messages":[{"role":"user","content":"a"}],"message_count":1}'
-        '{"timestamp":"2026-04-11T11:00:01-07:00","agent_name":"opus","model_id":"claude-opus-4-8","system_prompt":"S","messages":[{"role":"user","content":"b"}],"message_count":1}\n',
+        '{"timestamp":"2026-04-11T11:00:00-07:00","agent_name":"opus","model_id":"claude-opus-5","system_prompt":"S","messages":[{"role":"user","content":"a"}],"message_count":1}'
+        '{"timestamp":"2026-04-11T11:00:01-07:00","agent_name":"opus","model_id":"claude-opus-5","system_prompt":"S","messages":[{"role":"user","content":"b"}],"message_count":1}\n',
         encoding="utf-8",
     )
 
@@ -55,7 +55,7 @@ def test_load_request_rows_skips_rows_with_corrupt_tool_call_arguments(tmp_path:
     corrupt_row = {
         "timestamp": "2026-04-11T11:00:00-07:00",
         "agent_name": "opus",
-        "model_id": "claude-opus-4-8",
+        "model_id": "claude-opus-5",
         "system_prompt": "S",
         "messages": [
             {
@@ -68,7 +68,7 @@ def test_load_request_rows_skips_rows_with_corrupt_tool_call_arguments(tmp_path:
     healthy_row = {
         "timestamp": "2026-04-11T11:00:01-07:00",
         "agent_name": "opus",
-        "model_id": "claude-opus-4-8",
+        "model_id": "claude-opus-5",
         "system_prompt": "S",
         "messages": [{"role": "user", "content": "hello"}],
         "message_count": 1,
@@ -97,7 +97,7 @@ def test_build_session_reviews_detects_prefix_extension_with_two_appended_messag
             session_id="room:$thread",
             room_id="room",
             agent_name="opus",
-            model_id="claude-opus-4-8",
+            model_id="claude-opus-5",
             system_prompt="S",
             message_count=2,
             message_blobs=("m1", "m2"),
@@ -109,7 +109,7 @@ def test_build_session_reviews_detects_prefix_extension_with_two_appended_messag
             session_id="room:$thread",
             room_id="room",
             agent_name="opus",
-            model_id="claude-opus-4-8",
+            model_id="claude-opus-5",
             system_prompt="S",
             message_count=4,
             message_blobs=("m1", "m2", "m3", "m4"),
@@ -138,7 +138,7 @@ def test_prefix_extension_ignores_moving_cache_control_marker() -> None:
             session_id="room:$thread",
             room_id="room",
             agent_name="opus",
-            model_id="claude-opus-4-8",
+            model_id="claude-opus-5",
             system_prompt="S",
             message_count=1,
             message_blobs=('{"content":[{"text":"a","cache_control":{"type":"ephemeral"}}],"role":"user"}',),
@@ -150,7 +150,7 @@ def test_prefix_extension_ignores_moving_cache_control_marker() -> None:
             session_id="room:$thread",
             room_id="room",
             agent_name="opus",
-            model_id="claude-opus-4-8",
+            model_id="claude-opus-5",
             system_prompt="S",
             message_count=2,
             message_blobs=(
@@ -178,7 +178,7 @@ def test_raw_prefix_extension_detects_moving_cache_control_marker() -> None:
         session_id="room:$thread",
         room_id="room",
         agent_name="opus",
-        model_id="claude-opus-4-8",
+        model_id="claude-opus-5",
         system_prompt="S",
         message_count=1,
         message_blobs=('{"content":[{"text":"a","cache_control":{"type":"ephemeral"}}],"role":"user"}',),
@@ -190,7 +190,7 @@ def test_raw_prefix_extension_detects_moving_cache_control_marker() -> None:
         session_id="room:$thread",
         room_id="room",
         agent_name="opus",
-        model_id="claude-opus-4-8",
+        model_id="claude-opus-5",
         system_prompt="S",
         message_count=2,
         message_blobs=(
@@ -244,7 +244,7 @@ def _simulation_row(
     blobs: tuple[str, ...],
     marked: frozenset[int],
     agent_name: str = "agent",
-    model_id: str = "claude-opus-4-8",
+    model_id: str = "claude-opus-5",
     system_prompt: str = "S" * 40,
     tools_blob: str = "T" * 40,
     cache_enabled: bool = True,
@@ -399,12 +399,12 @@ def test_load_request_rows_joins_response_usage_records(tmp_path: Path) -> None:
     jsonl_path = tmp_path / "requests.jsonl"
     jsonl_path.write_text(
         '{"timestamp":"2026-04-11T11:00:00-07:00","request_log_id":"req-1","agent_id":"opus",'
-        '"model_id":"claude-opus-4-8","system_prompt":"S","messages":[{"role":"user","content":"a"}]}\n'
+        '"model_id":"claude-opus-5","system_prompt":"S","messages":[{"role":"user","content":"a"}]}\n'
         '{"timestamp":"2026-04-11T11:00:02-07:00","record":"response","request_log_id":"req-1",'
-        '"agent_id":"opus","model_id":"claude-opus-4-8","usage":{"input_tokens":10,"output_tokens":4,'
+        '"agent_id":"opus","model_id":"claude-opus-5","usage":{"input_tokens":10,"output_tokens":4,'
         '"cache_read_tokens":900,"cache_write_tokens":25}}\n'
         '{"timestamp":"2026-04-11T11:00:03-07:00","request_log_id":"req-2","agent_id":"opus",'
-        '"model_id":"claude-opus-4-8","system_prompt":"S","messages":[{"role":"user","content":"b"}]}\n',
+        '"model_id":"claude-opus-5","system_prompt":"S","messages":[{"role":"user","content":"b"}]}\n',
         encoding="utf-8",
     )
 
@@ -424,7 +424,7 @@ def test_response_records_are_not_parsed_as_request_rows() -> None:
         "record": "response",
         "request_log_id": "req-1",
         "agent_id": "opus",
-        "model_id": "claude-opus-4-8",
+        "model_id": "claude-opus-5",
         "usage": {"cache_read_tokens": 1},
     }
     assert module.parse_request_row(payload) is None
@@ -438,7 +438,7 @@ def test_print_cache_actuals_reports_reuse_and_cold_requests(capsys: pytest.Capt
         session_id=None,
         room_id=None,
         agent_name="opus",
-        model_id="claude-opus-4-8",
+        model_id="claude-opus-5",
         system_prompt="S",
         message_count=1,
         message_blobs=("{}",),
@@ -453,7 +453,7 @@ def test_print_cache_actuals_reports_reuse_and_cold_requests(capsys: pytest.Capt
         session_id=None,
         room_id=None,
         agent_name="opus",
-        model_id="claude-opus-4-8",
+        model_id="claude-opus-5",
         system_prompt="S",
         message_count=1,
         message_blobs=("{}",),
@@ -471,7 +471,7 @@ def test_print_cache_actuals_reports_reuse_and_cold_requests(capsys: pytest.Capt
     assert "cache_read=900" in output
     assert "actual prefix reuse: 45.0% of prompt tokens" in output
     assert "cache-enabled requests that read nothing: 1" in output
-    assert "agent=opus model=claude-opus-4-8 requests=2" in output
+    assert "agent=opus model=claude-opus-5 requests=2" in output
 
 
 def test_print_cache_actuals_without_usage_records(capsys: pytest.CaptureFixture[str]) -> None:
