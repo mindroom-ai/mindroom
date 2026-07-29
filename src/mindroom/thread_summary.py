@@ -27,7 +27,13 @@ from mindroom.thread_tag_vocabulary import (
     load_tag_vocabulary_snapshot,
     maybe_rebuild_tag_vocabulary,
 )
-from mindroom.thread_tags import AUTOMATIC_THREAD_TAG_EXCLUSIONS, coerce_tag_name, set_thread_tags_if_empty
+from mindroom.thread_tags import (
+    AUTOMATIC_THREAD_TAG_EXCLUSIONS,
+    RESOLVED_THREAD_TAG,
+    coerce_tag_name,
+    get_thread_tags,
+    set_thread_tags_if_empty,
+)
 from mindroom.timing import timed
 
 if TYPE_CHECKING:
@@ -288,6 +294,55 @@ def _recover_last_summary_count(
     return best_count
 
 
+def _parse_summary_generated_at(metadata: dict[str, object]) -> datetime | None:
+    """Return the ISO-8601 ``generated_at`` recorded on one summary, when usable."""
+    raw = metadata.get("generated_at")
+    if not isinstance(raw, str):
+        return None
+    try:
+        parsed = datetime.fromisoformat(raw)
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
+
+
+def _recover_pin_state(
+    thread_history: Sequence[ResolvedVisibleMessage],
+    *,
+    trusted_sender_ids: Collection[str],
+) -> bool:
+    """Return the newest durable pin decision recorded in summary metadata.
+
+    A later ``pinned: false`` summary releases a thread that an earlier summary
+    pinned, so the newest decision has to win. Summaries that omit the key state
+    no intent and are ignored entirely.
+
+    Ordering comes from ``generated_at`` rather than the position of the message
+    in the history, because history position does not always reflect Matrix
+    order: ``_sort_thread_items_root_first`` breaks equal ``origin_server_ts``
+    ties with backward-scan input order, which is newest-first. ``generated_at``
+    is also what the client uses to choose the summary it displays, so the pin
+    decision and the visible title are resolved by the same clock.
+    """
+    newest_decision: tuple[datetime, int] | None = None
+    pinned = False
+    for position, message in enumerate(thread_history):
+        metadata = _thread_summary_metadata(message, trusted_sender_ids=trusted_sender_ids)
+        if metadata is None:
+            continue
+        recorded = metadata.get("pinned")
+        if not isinstance(recorded, bool):
+            continue
+        generated_at = _parse_summary_generated_at(metadata)
+        if generated_at is None:
+            continue
+        decision = (generated_at, position)
+        if newest_decision is None or decision > newest_decision:
+            newest_decision = decision
+            pinned = recorded
+    return pinned
+
+
 def _recover_initial_enrichment_complete(
     thread_history: Sequence[ResolvedVisibleMessage],
     *,
@@ -434,6 +489,78 @@ async def _generate_summary(
     return None
 
 
+async def _thread_is_resolved(
+    client: nio.AsyncClient,
+    room_id: str,
+    thread_id: str,
+) -> bool:
+    """Return whether a thread carries the resolved lifecycle tag.
+
+    Fails open, matching ``_refresh_tag_vocabulary`` and the history load in this
+    module: this is a best-effort background read, and the cost of being wrong is
+    one summary on a resolved thread. Letting a transport error escape instead
+    would abort the pass before it advances the baseline, so a persistently
+    failing room-state read would re-run the full state and history reads on
+    every turn.
+    """
+    try:
+        tags_state = await get_thread_tags(client, room_id, thread_id)
+    except Exception as exc:
+        # Keep the type and traceback: this catch is broad, and intermittent
+        # Matrix failures are otherwise indistinguishable from each other.
+        logger.exception(
+            "Thread tag read failed; continuing with automatic summary",
+            room_id=room_id,
+            thread_id=thread_id,
+            error_type=type(exc).__name__,
+        )
+        return False
+    return tags_state is not None and RESOLVED_THREAD_TAG in tags_state.tags
+
+
+async def _pinned_since_generation_started(
+    conversation_cache: ConversationCacheProtocol,
+    room_id: str,
+    thread_id: str,
+    *,
+    trusted_sender_ids: Collection[str],
+) -> bool:
+    """Return whether a pin landed while this pass was generating a summary.
+
+    The gate before generation cannot cover the generation window itself. The
+    per-thread lock is process-local, so another runtime can write a manual pin
+    while this process is waiting on the model, and the finished automatic
+    summary would then land on top of a title the user just fixed.
+
+    Reads from source rather than through ``get_strict_thread_history``. That
+    read is strict about staleness but still accepts a valid local cache hit, so
+    it cannot observe a pin another runtime just wrote — which is the only case
+    this guard exists for. Costs one homeserver read per generated summary, so
+    once per interval rather than per turn.
+
+    Fails open, like the other background reads here: if the re-read fails the
+    pass delivers, which is the same exposure the pre-generation gate already
+    has. An automatic summary carries no ``pinned`` key, so the worst case is a
+    single superseded title and the next pass bails at the gate.
+    """
+    try:
+        thread_history = list(
+            await conversation_cache.refresh_strict_thread_history_from_source(
+                room_id,
+                thread_id,
+                caller_label="thread_summary_pin_recheck",
+            ),
+        )
+    except Exception:
+        logger.exception(
+            "Pin re-check before summary delivery failed; delivering anyway",
+            room_id=room_id,
+            thread_id=thread_id,
+        )
+        return False
+    return _recover_pin_state(thread_history, trusted_sender_ids=trusted_sender_ids)
+
+
 @timed("maybe_generate_thread_summary")
 async def _timed_generate_summary(
     thread_history: Sequence[ResolvedVisibleMessage],
@@ -543,8 +670,31 @@ async def _deliver_generated_summary(
     message_count: int,
     model_name: str,
     conversation_cache: ConversationCacheProtocol,
+    *,
+    trusted_sender_ids: Collection[str],
 ) -> None:
-    """Apply initial tags, then independently deliver the generated summary."""
+    """Apply initial tags, then independently deliver the generated summary.
+
+    Re-reads pin state first. The gate before generation cannot cover the
+    generation window, and the per-thread lock is process-local, so another
+    runtime can write a manual pin while this process waits on the model. That
+    check belongs here rather than in the caller because it is a delivery-time
+    question: a superseded summary should apply neither its tags nor its title.
+    """
+    if await _pinned_since_generation_started(
+        conversation_cache,
+        room_id,
+        thread_id,
+        trusted_sender_ids=trusted_sender_ids,
+    ):
+        logger.info(
+            "Discarding an automatic thread summary that a pin superseded during generation",
+            room_id=room_id,
+            thread_id=thread_id,
+            message_count=message_count,
+        )
+        return
+
     initial_enrichment_complete: bool | None = None
     if isinstance(generated, _ThreadEnrichment):
         initial_enrichment_complete = await _apply_initial_tags(
@@ -579,6 +729,7 @@ async def send_thread_summary_event(
     conversation_cache: ConversationCacheProtocol,
     *,
     initial_enrichment_complete: bool | None = None,
+    pinned: bool | None = None,
     known_latest_thread_event_id: str | None = None,
 ) -> str | None:
     """Send a thread summary as a standard Matrix notice event.
@@ -587,6 +738,13 @@ async def send_thread_summary_event(
     event in the thread (for example the creator of a brand-new thread) supply it
     directly, skipping the history read that would otherwise scan the homeserver
     for a thread with no cache snapshot yet.
+
+    ``pinned`` records an explicit decision about whether this summary should
+    stop automatic re-summarization. It defaults to ``None``, which omits the
+    key entirely and leaves any existing pin decision untouched. Only callers
+    acting on a user's intent should pass a boolean: writers that summarize as a
+    side effect, such as the subagent spawn path, must not disturb pin state on
+    a thread the user already pinned.
     """
     normalized_summary = normalize_thread_summary_text(summary)
     if not normalized_summary:
@@ -628,6 +786,8 @@ async def send_thread_summary_event(
     }
     if initial_enrichment_complete is not None:
         summary_metadata["initial_enrichment_complete"] = initial_enrichment_complete
+    if pinned is not None:
+        summary_metadata["pinned"] = pinned
 
     content = build_message_content(
         truncated_summary,
@@ -665,8 +825,14 @@ async def set_manual_thread_summary(
     config: Config,
     runtime_paths: RuntimePaths,
     conversation_cache: ConversationCacheProtocol,
+    pin: bool = True,
 ) -> _ThreadSummaryWriteResult:
-    """Write one validated manual summary for a canonical thread root."""
+    """Write one validated manual summary for a canonical thread root.
+
+    Pins the thread by default so the written title survives automatic
+    re-summarization. ``pin=False`` writes the summary and releases any pin an
+    earlier manual write established.
+    """
     if not isinstance(summary, str) or not summary.strip():
         msg = "summary must be a non-empty string."
         raise ThreadSummaryWriteError(msg)
@@ -703,6 +869,7 @@ async def set_manual_thread_summary(
                 message_count,
                 "manual",
                 conversation_cache,
+                pinned=pin,
             )
         except Exception as exc:
             msg = "Failed to send thread summary event."
@@ -719,7 +886,7 @@ async def set_manual_thread_summary(
         )
 
 
-async def maybe_generate_thread_summary(
+async def maybe_generate_thread_summary(  # noqa: PLR0911
     client: nio.AsyncClient,
     room_id: str,
     thread_id: str,
@@ -756,7 +923,27 @@ async def maybe_generate_thread_summary(
             thread_history,
             trusted_sender_ids=trusted_sender_ids,
         )
+        if _recover_pin_state(thread_history, trusted_sender_ids=trusted_sender_ids):
+            logger.debug(
+                "Skipping automatic thread summary for a pinned thread",
+                room_id=room_id,
+                thread_id=thread_id,
+                message_count=message_count,
+            )
+            # Advance the baseline so the cheap pre-check stops firing, and
+            # therefore stops spawning a history-loading pass, on every turn.
+            update_last_summary_count(room_id, thread_id, message_count)
+            return
         if message_count < threshold:
+            return
+        if await _thread_is_resolved(client, room_id, thread_id):
+            logger.debug(
+                "Skipping automatic thread summary for a resolved thread",
+                room_id=room_id,
+                thread_id=thread_id,
+                message_count=message_count,
+            )
+            update_last_summary_count(room_id, thread_id, message_count)
             return
 
         initial_enrichment = recovered_summary_count > 0 and not _recover_initial_enrichment_complete(
@@ -815,6 +1002,7 @@ async def maybe_generate_thread_summary(
             message_count,
             model_name,
             conversation_cache,
+            trusted_sender_ids=trusted_sender_ids,
         )
         # Record after the delivery attempt so cancellation cannot leave a
         # partially delivered initial enrichment marked complete.
