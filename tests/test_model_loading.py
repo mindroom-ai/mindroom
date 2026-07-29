@@ -209,8 +209,10 @@ def test_bedrock_current_claude_uses_mantle_endpoint(tmp_path: Path) -> None:
 
     model = get_model_instance(config, runtime_paths_for(config), "bedrock")
     client = model.get_client()
-
-    assert str(client.base_url) == "https://bedrock-mantle.us-east-1.api.aws/anthropic/"
+    try:
+        assert str(client.base_url) == "https://bedrock-mantle.us-east-1.api.aws/anthropic/"
+    finally:
+        client.close()
 
 
 @pytest.mark.parametrize(
