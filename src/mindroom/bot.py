@@ -1756,6 +1756,8 @@ class AgentBot:
                 agent_name=self.agent_name,
                 callback_failure_count=callback_failure_count,
                 background_tasks_completed=background_tasks_completed,
+                coalescing_drain_completed=drain_result.completed,
+                responses_drained=responses_drained,
                 post_drain_background_tasks_completed=post_drain_background_tasks_completed,
                 released_reservation_count=drain_result.released_reservation_count,
                 cancelled_unready_count=drain_result.cancelled_unready_count,
