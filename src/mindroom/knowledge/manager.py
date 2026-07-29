@@ -12,7 +12,7 @@ from contextlib import suppress
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any, Literal, NoReturn, Protocol, TypeVar, cast, runtime_checkable
+from typing import TYPE_CHECKING, Any, NoReturn, Protocol, TypeVar, cast, runtime_checkable
 from urllib.parse import quote, urlparse, urlunparse
 
 from agno.knowledge.reader import ReaderFactory
@@ -60,9 +60,9 @@ from mindroom.knowledge.file_listing import (
     list_knowledge_files,
 )
 from mindroom.knowledge.index_metadata import (
-    load_index_metadata_payload,
-    parse_index_metadata_fields,
-    write_index_metadata_payload,
+    PublishedIndexState,
+    load_published_index_state,
+    save_published_index_state,
 )
 from mindroom.knowledge.index_retry import EmbeddingRetryPolicy, run_with_embedding_retry
 from mindroom.knowledge.indexing_config import (
@@ -101,14 +101,6 @@ _SOURCE_MTIME_NS_KEY = "source_mtime_ns"
 _SOURCE_SIZE_KEY = "source_size"
 _SOURCE_DIGEST_KEY = "source_digest"
 _POST_INDEX_VECTOR_VISIBILITY_RETRY_DELAYS_SECONDS = (0.0, 0.01, 0.05)
-_INDEXING_STATUS_RESETTING = "resetting"
-_INDEXING_STATUS_INDEXING = "indexing"
-_INDEXING_STATUS_COMPLETE = "complete"
-_INDEXING_STATUSES = {
-    _INDEXING_STATUS_RESETTING,
-    _INDEXING_STATUS_INDEXING,
-    _INDEXING_STATUS_COMPLETE,
-}
 #: Files pulled into one prepare/embed/write batch. This bounds live asyncio
 #: tasks and peak memory independently of corpus size; the provider request
 #: bounds are applied separately when the batch's chunks are planned.
@@ -183,17 +175,6 @@ class _NamedCollection(Protocol):
     """Collection object shape returned by Chroma clients."""
 
     name: str
-
-
-@dataclass(frozen=True)
-class _PersistedIndexState:
-    settings: IndexingSettings
-    status: Literal["resetting", "indexing", "complete"]
-    collection: str | None = None
-    last_published_at: str | None = None
-    published_revision: str | None = None
-    indexed_count: int | None = None
-    source_signature: str | None = None
 
 
 @dataclass
@@ -712,7 +693,7 @@ class KnowledgeManager:
         self._base_storage_path.mkdir(parents=True, exist_ok=True)
         self._indexing_settings_path = self._base_storage_path / "indexing_settings.json"
         self._git_lfs_hydrated_head_path = self._base_storage_path / "git_lfs_hydrated_head.txt"
-        persisted_state = self._load_persisted_index_state()
+        persisted_state = load_published_index_state(self._indexing_settings_path)
         if not _semantic_indexing_enabled(self.config, self.base_id):
             self._persisted_collection_missing_on_init = False
             self._knowledge = Knowledge()
@@ -754,8 +735,8 @@ class KnowledgeManager:
             raise RuntimeError(msg)
         return knowledge_path
 
-    def _persisted_collection_missing(self, persisted_state: _PersistedIndexState | None) -> bool:
-        if persisted_state is None or persisted_state.status != _INDEXING_STATUS_COMPLETE:
+    def _persisted_collection_missing(self, persisted_state: PublishedIndexState | None) -> bool:
+        if persisted_state is None or persisted_state.status != "complete":
             return False
         collection_name = persisted_state.collection or self._default_collection_name()
         try:
@@ -768,61 +749,6 @@ class KnowledgeManager:
                 exc_info=True,
             )
             return True
-
-    def _load_persisted_index_state(self) -> _PersistedIndexState | None:
-        payload = load_index_metadata_payload(self._indexing_settings_path)
-        if payload is None:
-            return None
-        fields = parse_index_metadata_fields(
-            payload,
-            allowed_statuses=_INDEXING_STATUSES,
-            require_complete_fields_for_all_statuses=True,
-        )
-        if fields is None:
-            return None
-        (
-            settings,
-            status,
-            collection,
-            last_published_at,
-            published_revision,
-            indexed_count,
-            source_signature,
-        ) = fields
-        indexing_settings = IndexingSettings.from_metadata(settings)
-        if indexing_settings is None:
-            return None
-        return _PersistedIndexState(
-            indexing_settings,
-            cast('Literal["resetting", "indexing", "complete"]', status),
-            collection=collection,
-            last_published_at=last_published_at,
-            published_revision=published_revision,
-            indexed_count=indexed_count,
-            source_signature=source_signature,
-        )
-
-    def _save_persisted_index_state(
-        self,
-        status: Literal["resetting", "indexing", "complete"],
-        *,
-        settings: IndexingSettings | None = None,
-        collection: str | None = None,
-        last_published_at: str | None = None,
-        published_revision: str | None = None,
-        indexed_count: int | None = None,
-        source_signature: str | None = None,
-    ) -> None:
-        write_index_metadata_payload(
-            self._indexing_settings_path,
-            settings=(settings or self._indexing_settings).to_metadata(),
-            status=status,
-            collection=collection,
-            last_published_at=last_published_at,
-            published_revision=published_revision,
-            indexed_count=indexed_count,
-            source_signature=source_signature,
-        )
 
     def _load_git_lfs_hydrated_head(self) -> str | None:
         try:
@@ -844,12 +770,10 @@ class KnowledgeManager:
     def _needs_full_reindex_on_create(self) -> bool:
         if self._persisted_collection_missing_on_init:
             return True
-        persisted_state = self._load_persisted_index_state()
+        persisted_state = load_published_index_state(self._indexing_settings_path)
         if persisted_state is None:
             return self._indexing_settings_path.exists() and self._has_existing_index()
-        return (
-            persisted_state.settings != self._indexing_settings or persisted_state.status == _INDEXING_STATUS_RESETTING
-        )
+        return persisted_state.settings != self._indexing_settings or persisted_state.status == "resetting"
 
     def _git_config(self) -> KnowledgeGitConfig | None:
         return self.config.get_knowledge_base_config(self.base_id).git
@@ -1248,6 +1172,38 @@ class KnowledgeManager:
         vector_db.delete()
         vector_db.create()
 
+    def _state_for_publication(
+        self,
+        *,
+        collection: str,
+        indexed_count: int,
+        source_signature: str,
+    ) -> PublishedIndexState:
+        """Build the whole state one successful publication leaves on disk.
+
+        The writer takes a whole state, so every field is chosen here rather
+        than reverting to a default nobody asked for. Publication also resolves
+        the refresh job it belongs to -- the work that job tracked has just
+        landed -- so its reason, error and failure streak are cleared with the
+        same write instead of surviving into a state that says ``complete``.
+        """
+        now = datetime.now(tz=UTC).isoformat()
+        return PublishedIndexState(
+            settings=self._indexing_settings,
+            status="complete",
+            collection=collection,
+            last_published_at=now,
+            published_revision=self._git_last_successful_commit,
+            indexed_count=indexed_count,
+            source_signature=source_signature,
+            refresh_job="idle",
+            reason=None,
+            last_error=None,
+            updated_at=now,
+            last_refresh_at=now,
+            consecutive_refresh_failures=0,
+        )
+
     async def _save_candidate_publish_metadata(
         self,
         *,
@@ -1255,16 +1211,13 @@ class KnowledgeManager:
         indexed_count: int,
         source_signature: str,
     ) -> bool:
+        state = self._state_for_publication(
+            collection=candidate_vector_db.collection_name,
+            indexed_count=indexed_count,
+            source_signature=source_signature,
+        )
         save_task = asyncio.create_task(
-            asyncio.to_thread(
-                self._save_persisted_index_state,
-                _INDEXING_STATUS_COMPLETE,
-                collection=candidate_vector_db.collection_name,
-                last_published_at=datetime.now(tz=UTC).isoformat(),
-                published_revision=self._git_last_successful_commit,
-                indexed_count=indexed_count,
-                source_signature=source_signature,
-            ),
+            asyncio.to_thread(save_published_index_state, self._indexing_settings_path, state),
         )
         try:
             await asyncio.shield(save_task)
@@ -1850,7 +1803,7 @@ class KnowledgeManager:
                     metadatas=[dict(metadatas[index]) for index in kept],
                 )
 
-    def _reusable_published_collection(self, persisted_state: _PersistedIndexState | None) -> str | None:
+    def _reusable_published_collection(self, persisted_state: PublishedIndexState | None) -> str | None:
         """Return the published collection a fresh candidate may copy, if any.
 
         Matching ``IndexingSettings`` is what makes a copy sound. They pin the
@@ -1868,7 +1821,7 @@ class KnowledgeManager:
         """
         if (
             persisted_state is None
-            or persisted_state.status != _INDEXING_STATUS_COMPLETE
+            or persisted_state.status != "complete"
             or persisted_state.collection is None
             or persisted_state.settings != self._indexing_settings
         ):
@@ -2029,18 +1982,13 @@ class KnowledgeManager:
     async def _open_candidate_run(self, *, force_reindex: bool = False) -> _CandidateRun:
         """Resolve the durable candidate to continue, or start one clean candidate."""
         checkpoint = await asyncio.to_thread(load_candidate_checkpoint, self._base_storage_path)
-        persisted_state = await asyncio.to_thread(self._load_persisted_index_state)
-        published_collection = (
-            persisted_state.collection
-            if persisted_state is not None and persisted_state.status == _INDEXING_STATUS_COMPLETE
-            else None
-        )
-        live_collection, cleanup_is_safe = await asyncio.to_thread(self._published_collection_for_cleanup)
-        # Both names matter: the strict parser drops the collection when any
-        # required field is missing, while the raw payload still records it.
-        # Trusting only the strict one would let a surviving checkpoint reopen
+        persisted_state, cleanup_is_safe = await asyncio.to_thread(self._published_state_and_cleanup_safety)
+        # A collection name is only ever recorded by a publication, so whatever
+        # the state names is the live index whatever its current status says.
+        # Trusting a narrower reading would let a surviving checkpoint reopen
         # the published collection, or delete it as an incompatible candidate.
-        published_collections = {name for name in (published_collection, live_collection) if name is not None}
+        published_collection = None if persisted_state is None else persisted_state.collection
+        published_collections: set[str] = set() if published_collection is None else {published_collection}
 
         if checkpoint is not None and not cleanup_is_safe:
             # The checkpoint may name the live collection whose identity was
@@ -2139,22 +2087,21 @@ class KnowledgeManager:
             )
         return run
 
-    def _published_collection_for_cleanup(self) -> tuple[str | None, bool]:
-        """Return the live collection to protect, and whether cleanup may run at all.
+    def _published_state_and_cleanup_safety(self) -> tuple[PublishedIndexState | None, bool]:
+        """Return the persisted state, and whether candidate cleanup may run at all.
 
         A published collection is itself candidate-named, so the only proof of
-        which candidate-prefixed collections are superseded is the published
-        metadata. The strict state parser rejects metadata that is merely
-        incomplete, which would silently drop that proof, so the collection
-        name is read straight from the payload. If the file exists but yields
-        no payload at all, nothing can be proven and cleanup is skipped rather
-        than risking the last good index.
+        which candidate-prefixed collections are superseded is this state file.
+        If it exists but yields no state, nothing about the live index can be
+        proven, and cleanup is skipped rather than guessing from a rawer read
+        of the same bytes and risking the last good index.
+
+        One read answers both questions: an in-progress or failed record still
+        parses and still names whatever collection the last publication left
+        live, so protecting it never needs a second, looser look.
         """
-        payload = load_index_metadata_payload(self._indexing_settings_path)
-        if payload is None:
-            return None, not self._indexing_settings_path.exists()
-        collection = payload.get("collection")
-        return (collection if isinstance(collection, str) and collection else None), True
+        state = load_published_index_state(self._indexing_settings_path)
+        return state, state is not None or not self._indexing_settings_path.exists()
 
     async def discard_superseded_candidate(self, *, published_collection: str | None) -> None:
         """Drop candidate state that publishing an unchanged index made obsolete.

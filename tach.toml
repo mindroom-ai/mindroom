@@ -3480,7 +3480,7 @@ depends_on = [
 
 [[modules]]
 path = "mindroom.knowledge.index_metadata"
-depends_on = []
+depends_on = ["mindroom.knowledge.indexing_config"]
 visibility = [
     "mindroom.knowledge.candidate_checkpoint",
     "mindroom.knowledge.manager",
