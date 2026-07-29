@@ -13,6 +13,7 @@ from contextlib import suppress
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
+from functools import partial
 from typing import IO, TYPE_CHECKING, Any, Literal, NoReturn, Protocol, TypeVar, cast, runtime_checkable
 from urllib.parse import quote, urlparse, urlunparse
 
@@ -112,20 +113,20 @@ class _FallbackAwareJSONReader(JSONReader):
     """Tag only JSON decoding failures raised inside the source reader."""
 
     def read(self, path: Path | IO[Any], name: str | None = None) -> list[Document]:
-        malformed_error: _MalformedJSONSourceError | None = None
         try:
             return super().read(path, name=name)
         except json.JSONDecodeError as error:
-            malformed_error = _MalformedJSONSourceError(
-                error.doc,
-                line=error.lineno,
-                column=error.colno,
-            )
-        raise malformed_error
+            raise _MalformedJSONSourceError(error.doc, line=error.lineno, column=error.colno) from error
 
 
 class _InMemoryTextReader(TextReader):
-    """Read the malformed JSON text already retained by its parse error."""
+    """Read the malformed JSON text already retained by its parse error.
+
+    Only ``read`` is overridden, because indexing goes through the synchronous
+    ``Knowledge.insert`` path. ``TextReader.async_read`` does not delegate to
+    ``read``, so anything switching this to ``Knowledge.ainsert`` must override
+    it too or it will re-read the source instead of serving the retained text.
+    """
 
     def __init__(self, source_text: str) -> None:
         super().__init__()
@@ -1190,41 +1191,42 @@ class KnowledgeManager:
         )
 
     def _configure_text_reader(self, reader: TextReader | MarkdownReader) -> TextReader | MarkdownReader:
-        """Apply this base's text chunking policy to a private reader copy."""
+        """Apply this base's text chunking policy to ``reader`` in place."""
         chunking_strategy = self._chunking_strategy()
-        configured_reader = deepcopy(reader)
-        configured_reader.chunk = True
-        configured_reader.chunk_size = chunking_strategy.chunk_size
-        configured_reader.chunking_strategy = chunking_strategy
-        return configured_reader
+        reader.chunk = True
+        reader.chunk_size = chunking_strategy.chunk_size
+        reader.chunking_strategy = chunking_strategy
+        return reader
 
     def _build_reader(self, file_path: Path) -> Reader:
         """Build a per-file reader with conservative chunking for text-like content."""
         reader = ReaderFactory.get_reader_for_extension(file_path.suffix.lower())
 
+        # ReaderFactory hands out cached shared instances, so any branch that
+        # configures a reader copies it first instead of mutating the cache.
         if isinstance(reader, JSONReader):
+            # Carry the factory reader's configuration (encoding, chunking) onto
+            # the subclass that tags its own decode failures for the text fallback.
             return _FallbackAwareJSONReader(**deepcopy(vars(reader)))
 
         # Large markdown/plain-text files are the common source of oversized embed requests.
         if not isinstance(reader, (TextReader, MarkdownReader)):
             return reader
 
-        return self._configure_text_reader(reader)
+        return self._configure_text_reader(deepcopy(reader))
 
     async def _insert_with_malformed_json_fallback(
         self,
         insert: Callable[[Reader], Awaitable[None]],
+        *,
         relative_path: str,
         reader: Reader,
     ) -> None:
         """Insert through the selected reader, falling back only for malformed source JSON."""
 
         async def _insert_with_retry(selected_reader: Reader) -> None:
-            async def _insert_once() -> None:
-                await insert(selected_reader)
-
             await run_with_embedding_retry(
-                _insert_once,
+                partial(insert, selected_reader),
                 policy=_EMBEDDING_RETRY_POLICY,
                 sleep=_EMBEDDING_RETRY_SLEEP,
                 on_retry=self._record_embedding_retry,
@@ -1456,7 +1458,7 @@ class KnowledgeManager:
             return False
         target_knowledge = knowledge or self._knowledge
 
-        async def _insert_once(reader: Reader) -> None:
+        async def _insert_once(selected_reader: Reader) -> None:
             if upsert:
                 # Agno/Chroma upsert keys by content hash, so stale chunks from an older
                 # version of the same file can remain unless we clear by source metadata first.
@@ -1473,7 +1475,7 @@ class KnowledgeManager:
                 path=str(resolved_path),
                 metadata=metadata,
                 upsert=upsert,
-                reader=reader,
+                reader=selected_reader,
             )
 
         try:
@@ -1481,8 +1483,8 @@ class KnowledgeManager:
             # costs one retry of this file instead of the whole refresh.
             await self._insert_with_malformed_json_fallback(
                 _insert_once,
-                relative_path,
-                reader,
+                relative_path=relative_path,
+                reader=reader,
             )
         except Exception as exc:
             classified = classified_embedder_error(exc)
