@@ -78,6 +78,23 @@ class LiveOperationKind(StrEnum):
     RESTART_MINDROOM = "restart_mindroom"
 
 
+def restart_failure(
+    invariant: str,
+    *,
+    seed: int,
+    event_category: str,
+    phase: str,
+    observed: object,
+    step: int = -1,
+    thread: int = -1,
+) -> str:
+    """Format replay coordinates without accepting message content."""
+    return (
+        f"invariant={invariant} seed={seed} step={step} thread={thread} "
+        f"event_category={event_category} phase={phase} observed={observed}"
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class LiveOperation:
     """One replayable live Matrix action."""
