@@ -499,8 +499,10 @@ async def _run_admitted_router_relay(
 ) -> None:
     """Keep config application outside one router selection and relay delivery."""
     admission_gate = controller.deps.runtime.response_admission_gate
-    if not admission_gate.admit():
-        raise ResponseAdmissionRefusedError
+    while not admission_gate.admit():
+        if not await controller.deps.response_runner.wait_for_admission_or_shutdown():
+            controller.deps.runtime.mark_callback_failed()
+            raise ResponseAdmissionRefusedError
     try:
         await relay()
     finally:
