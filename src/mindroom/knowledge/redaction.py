@@ -10,18 +10,13 @@ from urllib.parse import unquote, urlparse, urlunparse
 from mindroom.git_urls import credential_free_repo_url
 
 _URL_PATTERN: re.Pattern[str] = re.compile(r"[a-zA-Z][a-zA-Z0-9+.-]*://[^\s'\"<>]+")
-#: Transport URLs missing the ``//`` and so never reached by ``_URL_PATTERN``:
-#: ``https:/user:secret@host/x``, ``https:@host/u:secret@h``.
-#:
-#: Keyed on an actual transport scheme rather than any ``word:`` prefix. Git
-#: revision and refspec syntax is full of colons -- ``HEAD:@{upstream}``,
-#: ``+refs/heads/main:refs/remotes/origin/@{upstream}`` -- and a generic prefix
-#: swallowed those, replacing a real diagnostic with ``***``. A scheme keeps
-#: this to things that are actually URLs; the token still has to convince
-#: ``redact_url_credentials`` before anything is replaced.
-_SLASHLESS_TRANSPORT_URL_PATTERN: re.Pattern[str] = re.compile(
-    r"\b(?:https?|ssh|git|git\+[a-z]+|ftps?|file):(?!//)[^\s'\"<>]*",
-    re.IGNORECASE,
+#: Scheme-prefixed tokens that are missing the ``//`` and so never reach
+#: ``_URL_PATTERN`` -- ``https:/user:secret@host/x``, ``https:@host/u:secret@h``.
+#: Restricted to tokens that actually contain an ``@`` so ordinary Git output
+#: (``fatal: ...``, ``main:refs/heads/main``) is not swept up; the token still
+#: has to convince ``redact_url_credentials`` before anything is replaced.
+_SLASHLESS_CREDENTIAL_URL_PATTERN: re.Pattern[str] = re.compile(
+    r"[a-zA-Z][a-zA-Z0-9+.-]*:(?!//)[^\s'\"<>]*@[^\s'\"<>]*",
 )
 #: Whitespace is allowed around the colon: HTTP permits it, and a proxy or Git
 #: helper that reformats a header it echoes back must not slip the credential
@@ -32,11 +27,13 @@ _AUTHORIZATION_HEADER_PATTERN: re.Pattern[str] = re.compile(
 )
 #: Protocol-relative tokens (``//user:secret@host/x``). They have no scheme, so
 #: neither pattern above finds them, and they are the one credential-bearing
-#: shape that cannot be confused with an email address. A percent escape counts
-#: as well as a literal ``@``, because an encoded separator is still a separator.
+#: shape that cannot be confused with an email address.
 _PROTOCOL_RELATIVE_CREDENTIAL_URL_PATTERN: re.Pattern[str] = re.compile(
-    r"//[^\s'\"<>]*(?:@|%[0-9A-Fa-f]{2})[^\s'\"<>]*",
+    r"//[^\s'\"<>]*@[^\s'\"<>]*",
 )
+#: Percent-encoded ``@``. Its presence means the authority ``urlparse`` reported
+#: is not the authority a client will use, so the userinfo split cannot be trusted.
+ENCODED_USERINFO_SEPARATOR = "%40"
 #: ``git@github.com:org/repo.git``. SSH has no URL password field, so the
 #: userinfo here is a username; it is dropped anyway, and only the host and path
 #: are kept so the remote stays identifiable in an error message.
@@ -44,10 +41,10 @@ _SCP_STYLE_REMOTE: re.Pattern[str] = re.compile(
     r"^[A-Za-z0-9._-]+@(?P<rest>(?:[A-Za-z0-9.-]+|\[[0-9A-Fa-f:]+\]):[^@]*)$",
 )
 __all__ = [
+    "ENCODED_USERINFO_SEPARATOR",
     "credential_free_repo_url",
     "credential_free_url_identity",
     "embedded_http_userinfo",
-    "fully_unquoted",
     "redact_credentials_in_text",
     "redact_url_credentials",
 ]
@@ -55,23 +52,6 @@ __all__ = [
 
 def _strip_path_params(path: str) -> str:
     return path.split(";", 1)[0]
-
-
-def fully_unquoted(value: str) -> str:
-    """Percent-decode `value` repeatedly until it stops changing.
-
-    A separator can be hidden under any number of encoding layers -- ``%40``,
-    ``%2540``, ``%252540`` -- so testing one layer only buys one layer, and
-    picking a depth limit just invites depth+1. Decoding to a fixed point has no
-    limit to beat: every pass that changes anything replaces a three-character
-    escape with one character, so the string strictly shortens and the loop
-    terminates with no escapes left to hide behind.
-    """
-    while True:
-        decoded = unquote(value)
-        if decoded == value:
-            return value
-        value = decoded
 
 
 def redact_url_credentials(value: str) -> str:
@@ -100,11 +80,7 @@ def redact_url_credentials(value: str) -> str:
         # leaking a secret; the surrounding message survives intact.
         return "***"
 
-    # Every separator test below runs on the fully decoded form, so an encoded
-    # separator is caught at any depth rather than one layer at a time.
-    normalized = fully_unquoted(value)
-
-    if "@" not in normalized:
+    if "@" not in value and ENCODED_USERINFO_SEPARATOR not in value.lower():
         # Shape 1: no userinfo separator anywhere, so there is nothing to hide.
         # Bare Git arguments and credential-free URLs both land here.
         if not parsed.scheme or not parsed.netloc:
@@ -119,12 +95,10 @@ def redact_url_credentials(value: str) -> str:
         # remote identifiable; the userinfo goes regardless of what it holds.
         return f"***@{scp_style.group('rest')}"
 
-    if normalized.count("@") == 1 and parsed.netloc.count("@") == 1:
+    if ENCODED_USERINFO_SEPARATOR not in value.lower() and value.count("@") == 1 and parsed.netloc.count("@") == 1:
         # Shape 3: the one separator in the token is the one splitting userinfo
         # from host in the authority ``urlparse`` found, so the split is
-        # trustworthy and the host can be kept. Counting on the decoded form but
-        # locating on the raw authority also rejects a URL whose authority only
-        # looks credential-free because its separator is still encoded.
+        # trustworthy and the host can be kept.
         _userinfo, host = parsed.netloc.rsplit("@", 1)
         return urlunparse(
             parsed._replace(
@@ -177,7 +151,7 @@ def redact_credentials_in_text(value: str) -> str:
         return redact_url_credentials(match.group(0))
 
     redacted = _URL_PATTERN.sub(_redact_url, redacted)
-    redacted = _SLASHLESS_TRANSPORT_URL_PATTERN.sub(_redact_url, redacted)
+    redacted = _SLASHLESS_CREDENTIAL_URL_PATTERN.sub(_redact_url, redacted)
     return _PROTOCOL_RELATIVE_CREDENTIAL_URL_PATTERN.sub(_redact_url, redacted)
 
 

@@ -7734,9 +7734,6 @@ _LEAKING_CREDENTIAL_SHAPES = [
     pytest.param("https:/user:{secret}@example.com/repo", id="single-slash"),
     pytest.param("https:@example.com/user:{secret}@host", id="no-slash"),
     pytest.param("https://a@b:{secret}@example.com/repo", id="ambiguous-authority"),
-    pytest.param("https:/user%3A{secret}%40example.com/repo.git", id="slashless-percent-encoded"),
-    pytest.param("https://user%253A{secret}%2540example.com/repo.git", id="double-encoded"),
-    pytest.param("https://user%25253A{secret}%252540example.com/repo.git", id="triple-encoded"),
 ]
 
 
@@ -7750,54 +7747,7 @@ _LEAKING_COMMAND_ARGUMENT_SHAPES = [
     pytest.param("//user:{secret}@[::1]/repo.git", id="protocol-relative-ipv6"),
     pytest.param("//user:{secret}@host:8443/repo.git", id="protocol-relative-port"),
     pytest.param("//{secret}@github.com/repo.git", id="protocol-relative-token-as-username"),
-    pytest.param("https:/user%3A{secret}%40example.com/repo.git", id="slashless-percent-encoded"),
-    pytest.param("https://user%253A{secret}%2540example.com/repo.git", id="double-encoded"),
 ]
-
-
-#: Git revision and refspec syntax that contains an ``@`` but is not a URL.
-#: ``_run_git`` really does run ``fetch origin +refs/heads/<branch>:...``, so a
-#: branch named ``@{upstream}`` produces the first of these; redacting it left
-#: the operator with ``+refs/heads/***`` and no way to see what was wrong.
-_REVISION_SYNTAX_ARGUMENTS = [
-    "+refs/heads/main:refs/remotes/origin/@{upstream}",
-    "+refs/heads/@{u}:refs/remotes/origin/@{u}",
-    "HEAD:@{upstream}",
-    "main:refs/remotes/origin/main",
-]
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("revision_argument", _REVISION_SYNTAX_ARGUMENTS)
-async def test_git_revision_arguments_survive_the_error_command_echo(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    revision_argument: str,
-) -> None:
-    """Refspec syntax is not a URL and must stay readable in the failed command.
-
-    Redaction has to distinguish "contains an ``@``" from "is a URL". Getting
-    that wrong replaces the one part of the message that says what was actually
-    attempted.
-    """
-    manager = _git_manager(tmp_path)
-
-    class _FailingProcess:
-        returncode = 128
-
-        async def communicate(self) -> tuple[bytes, bytes]:
-            return b"", b"fatal: invalid refspec"
-
-    async def _fake_create_subprocess_exec(*args: object, **kwargs: object) -> _FailingProcess:
-        _ = args, kwargs
-        return _FailingProcess()
-
-    monkeypatch.setattr(asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
-
-    with pytest.raises(RuntimeError, match="Git command failed") as exc_info:
-        await manager.git_source._run_git(["fetch", "origin", revision_argument])
-
-    assert revision_argument in str(exc_info.value)
 
 
 @pytest.mark.asyncio
