@@ -162,7 +162,7 @@ def _gate_router_target_readiness(
     return (suggested_entity if first_sync_complete is True else None, first_sync_complete is False)
 
 
-async def _send_router_relay_with_readiness_guard(
+async def _send_router_relay_after_readiness_recheck(
     *,
     orchestrator: OrchestratorRuntime | None,
     delivery_gateway: DeliveryGateway,
@@ -170,23 +170,21 @@ async def _send_router_relay_with_readiness_guard(
     suggested_entity: str | None,
     delivery_request: SendTextRequest,
 ) -> tuple[str | None, str | None]:
-    """Send one relay while preventing its sampled target generation from changing."""
+    """Recheck one sampled target immediately before sending its relay."""
     if selected_entity is None or orchestrator is None:
         return await delivery_gateway.send_text(delivery_request), suggested_entity
-    async with orchestrator.entity_first_sync_readiness_guard(selected_entity) as final_readiness:
-        if final_readiness is True:
-            return await delivery_gateway.send_text(delivery_request), suggested_entity
-        fallback_extra_content = dict(delivery_request.extra_content or {})
-        fallback_extra_content.pop(ORIGINAL_SENDER_KEY, None)
-        fallback_extra_content.pop(SOURCE_KIND_KEY, None)
-        fallback_request = replace(
-            delivery_request,
-            response_text=(
-                _ROUTER_TARGET_STARTING_TEXT if final_readiness is False else _ROUTER_TARGET_UNAVAILABLE_TEXT
-            ),
-            extra_content=fallback_extra_content or None,
-        )
-        return await delivery_gateway.send_text(fallback_request), None
+    final_readiness = orchestrator.entity_first_sync_complete(selected_entity)
+    if final_readiness is True:
+        return await delivery_gateway.send_text(delivery_request), suggested_entity
+    fallback_extra_content = dict(delivery_request.extra_content or {})
+    fallback_extra_content.pop(ORIGINAL_SENDER_KEY, None)
+    fallback_extra_content.pop(SOURCE_KIND_KEY, None)
+    fallback_request = replace(
+        delivery_request,
+        response_text=_ROUTER_TARGET_STARTING_TEXT if final_readiness is False else _ROUTER_TARGET_UNAVAILABLE_TEXT,
+        extra_content=fallback_extra_content or None,
+    )
+    return await delivery_gateway.send_text(fallback_request), None
 
 
 def _room_level_context_event(event: TextDispatchEvent) -> TextDispatchEvent:
@@ -1587,7 +1585,7 @@ class TurnController:
             response_text=response_text,
             extra_content=routed_extra_content or None,
         )
-        event_id, suggested_entity = await _send_router_relay_with_readiness_guard(
+        event_id, suggested_entity = await _send_router_relay_after_readiness_recheck(
             orchestrator=self.deps.runtime.orchestrator,
             delivery_gateway=self.deps.delivery_gateway,
             selected_entity=selected_entity,

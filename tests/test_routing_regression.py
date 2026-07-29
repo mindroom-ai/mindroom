@@ -30,8 +30,10 @@ from mindroom.matrix.state import MatrixState
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.orchestrator import _MultiAgentOrchestrator
+from mindroom.response_admission import ResponseAdmissionRefusedError
 from mindroom.routing import suggest_responder_for_message
 from mindroom.teams import TeamOutcome, TeamResolution
+from mindroom.text_ingress_dispatch import _run_admitted_router_relay
 from mindroom.thread_utils import AgentResponseDecision
 from mindroom.turn_policy import PreparedDispatch, TurnPolicy, TurnPolicyDeps, _ResponderAvailability
 from tests.conftest import (
@@ -48,6 +50,7 @@ from tests.conftest import (
 from tests.identity_helpers import actual_entity_usernames, entity_ids, entity_name_for_id, persist_entity_accounts
 
 if TYPE_CHECKING:
+    from collections.abc import Awaitable
     from pathlib import Path
 
     from mindroom.turn_origin import TurnOrigin
@@ -426,64 +429,63 @@ class TestRoutingRegression:
         assert relay_contents[0][ORIGINAL_SENDER_KEY] == "@user:localhost"
 
     @pytest.mark.asyncio
-    async def test_router_target_replacement_resets_first_sync_readiness(self, tmp_path: Path) -> None:
-        """A newly registered bot generation must not inherit readiness."""
+    async def test_router_relay_keeps_ready_generation_current_through_delivery(self, tmp_path: Path) -> None:
+        """Config apply waits for relay delivery, and replacement readiness starts fresh."""
         router_bot, target_bot, orchestrator, room = _router_readiness_runtime(tmp_path)
         target_bot._first_sync_done = True
         replacement = MagicMock(spec=AgentBot)
         replacement.running = True
         replacement.first_sync_complete = False
-        orchestrator.agent_bots["general"] = replacement
-
-        await router_bot._turn_controller._execute_router_relay(
-            room,
-            _router_readiness_event("$replacement-starting"),
-            [],
-            requester_user_id="@user:localhost",
-        )
-
-        content = router_bot.client.room_send.await_args.kwargs["content"]
-        assert content["body"] == "That agent is still starting. Please try again shortly."
-        assert SOURCE_KIND_KEY not in content
-
-    @pytest.mark.asyncio
-    async def test_router_relay_keeps_ready_generation_current_through_delivery(self, tmp_path: Path) -> None:
-        """A replacement cannot become current while its predecessor's relay is sending."""
-        router_bot, target_bot, orchestrator, room = _router_readiness_runtime(tmp_path)
-        target_bot._first_sync_done = True
-        replacement = MagicMock(spec=AgentBot)
         send_started = asyncio.Event()
         release_send = asyncio.Event()
+
+        def relay(event_id: str) -> Awaitable[None]:
+            return router_bot._turn_controller._execute_router_relay(
+                room,
+                _router_readiness_event(event_id),
+                [],
+                requester_user_id="@user:localhost",
+            )
 
         async def blocking_room_send(**_: object) -> nio.RoomSendResponse:
             send_started.set()
             await release_send.wait()
             return nio.RoomSendResponse.from_dict({"event_id": "$router-response"}, room_id=room.room_id)
 
-        async def replace_target() -> None:
-            async with orchestrator._config_update_lock:
-                orchestrator.agent_bots["general"] = replacement
+        async def replace_target(relay_task: asyncio.Task[None]) -> None:
+            await relay_task
+            assert router_bot.admission_gate.close_if_idle()
+            try:
+                async with orchestrator._config_update_lock:
+                    orchestrator.agent_bots["general"] = replacement
+            finally:
+                router_bot.admission_gate.reopen()
 
         router_bot.client.room_send.side_effect = blocking_room_send
+        router_bot.admission_gate.close()
+        with pytest.raises(ResponseAdmissionRefusedError):
+            await _run_admitted_router_relay(
+                router_bot._turn_controller,
+                lambda: relay("$config-already-applying"),
+            )
+        router_bot.admission_gate.reopen()
         relay_task = asyncio.create_task(
-            router_bot._turn_controller._execute_router_relay(
-                room,
-                _router_readiness_event("$replacement-during-send"),
-                [],
-                requester_user_id="@user:localhost",
+            _run_admitted_router_relay(
+                router_bot._turn_controller,
+                lambda: relay("$replacement-during-send"),
             ),
         )
         await send_started.wait()
-        replacement_task = asyncio.create_task(replace_target())
-        try:
-            await asyncio.sleep(0)
-            assert orchestrator.agent_bots["general"] is target_bot
-        finally:
-            release_send.set()
-            await relay_task
-            await replacement_task
+        assert not router_bot.admission_gate.close_if_idle()
+        replacement_task = asyncio.create_task(replace_target(relay_task))
+        release_send.set()
+        await asyncio.gather(relay_task, replacement_task)
 
         assert orchestrator.agent_bots["general"] is replacement
+        await _run_admitted_router_relay(router_bot._turn_controller, lambda: relay("$replacement-starting"))
+        content = router_bot.client.room_send.await_args.kwargs["content"]
+        assert content["body"] == "That agent is still starting. Please try again shortly."
+        assert SOURCE_KIND_KEY not in content
 
     @pytest.mark.asyncio
     async def test_router_removed_target_keeps_existing_no_responder_behavior(self, tmp_path: Path) -> None:

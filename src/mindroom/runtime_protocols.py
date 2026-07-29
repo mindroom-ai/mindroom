@@ -6,7 +6,6 @@ from typing import TYPE_CHECKING, Protocol
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable
-    from contextlib import AbstractAsyncContextManager
 
     import nio
 
@@ -64,13 +63,6 @@ class OrchestratorRuntime(Protocol):
 
     def entity_first_sync_complete(self, entity_name: str) -> bool | None:
         """Return first-sync readiness for the current entity generation."""
-        ...
-
-    def entity_first_sync_readiness_guard(
-        self,
-        entity_name: str,
-    ) -> AbstractAsyncContextManager[bool | None]:
-        """Keep the sampled entity generation current through one guarded delivery."""
         ...
 
     def handle_bot_ready(self, bot: AgentBot | TeamBot) -> Awaitable[None]:
