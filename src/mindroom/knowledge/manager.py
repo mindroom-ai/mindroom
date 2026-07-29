@@ -61,7 +61,6 @@ from mindroom.knowledge.collections import (
     candidate_collection_name,
     cleanup_superseded_collections,
     collection_has_source_path,
-    collection_name_for_base,
     delete_collection,
     delete_source_path_vectors,
     paths_with_vectors,
@@ -669,8 +668,8 @@ class KnowledgeManager:
         self._git_lfs_hydrated_head_path = self._base_storage_path / "git_lfs_hydrated_head.txt"
         self._collections = CollectionSpace(
             base_id=self.base_id,
+            knowledge_path=self.knowledge_path,
             storage_path=self._base_storage_path,
-            default_collection=collection_name_for_base(self.base_id, self.knowledge_path),
             # A factory, not an embedder: this runs for every base, including
             # non-semantic ones that never open a collection, and a status read
             # must construct no embedder at all. Deferring puts the cost only

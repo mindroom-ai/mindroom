@@ -70,18 +70,29 @@ class _NamedCollection(Protocol):
 class CollectionSpace:
     """One knowledge base's private storage directory and the names it owns.
 
-    ``embedder_factory`` stays a factory rather than an embedder because a
-    handle opened only to delete a collection should not cost an embedder
-    unless one is really built.
+    ``default_collection`` is *derived*, never accepted. Cleanup treats it as
+    proof of ownership -- a collection is deletable only if it matches that
+    name or carries its candidate prefix -- so a space that could be handed the
+    name would be able to authorize deleting a collection this base does not
+    own. Computing it from ``base_id`` and the resolved source path keeps the
+    answer to "is this mine?" a function of identity rather than an assertion.
+
+    ``embedder_factory`` stays a factory rather than an embedder so that a base
+    which never opens a collection never constructs one.
     """
 
     base_id: str
+    knowledge_path: Path
     storage_path: Path
-    default_collection: str
     embedder_factory: Callable[[], Embedder]
 
+    @property
+    def default_collection(self) -> str:
+        """Return the published collection name this base's identity owns."""
+        return _collection_name_for_base(self.base_id, self.knowledge_path)
 
-def collection_name_for_base(base_id: str, knowledge_path: Path) -> str:
+
+def _collection_name_for_base(base_id: str, knowledge_path: Path) -> str:
     """Return the published collection name one base's resolved source path owns."""
     return f"{_COLLECTION_PREFIX}_{storage_key_for_base(base_id, knowledge_path)}"
 
@@ -162,7 +173,15 @@ def _collection_paths_with_vectors(collection: Collection, relative_paths: Seque
     asked for a single row instead, which stays under any ceiling however many
     chunks the file has. That floor is what makes the recursion total, and it
     is also where a failure that was never about query size finally surfaces.
+
+    No paths is answerable without asking: Chroma rejects an empty ``$in``
+    operand outright, so the empty case has to be a base case rather than a
+    query. Splitting never reaches it -- every half of a batch of two or more
+    is non-empty -- but a caller can.
     """
+    if not relative_paths:
+        return set()
+
     if len(relative_paths) == 1:
         relative_path = relative_paths[0]
         return {relative_path} if collection_has_source_path(collection, relative_path) else set()
@@ -200,6 +219,10 @@ def _collection_paths_with_vectors(collection: Collection, relative_paths: Seque
 
 def paths_with_vectors(vector_db: ChromaDb, relative_paths: Sequence[str]) -> set[str]:
     """Return which of the given source paths actually have vectors in one collection."""
+    if not relative_paths:
+        # Answered before resolving a handle: asking about no paths has one
+        # obvious answer, and resolving would raise if the collection is gone.
+        return set()
     collection = vector_db.client.get_collection(name=vector_db.collection_name)
     return _collection_paths_with_vectors(collection, relative_paths)
 

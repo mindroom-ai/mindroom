@@ -50,6 +50,8 @@ from mindroom.knowledge.candidate_checkpoint import (
     save_candidate_checkpoint,
 )
 from mindroom.knowledge.collections import (
+    CollectionSpace,
+    _collection_name_for_base,
     _collection_paths_with_vectors,
     candidate_collection_name,
     paths_with_vectors,
@@ -69,7 +71,7 @@ from mindroom.knowledge.registry import (
 )
 from mindroom.knowledge.status import get_knowledge_index_status
 from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
-from tests.knowledge_test_support import chroma_get_result, metadata_matches
+from tests.knowledge_test_support import chroma_get_result, metadata_matches, validate_where_operands
 
 if TYPE_CHECKING:
     from collections.abc import Iterator, Sequence
@@ -118,6 +120,7 @@ class _FakeCollection:
         offset: int = 0,
         where: dict[str, object] | None = None,
     ) -> dict[str, object]:
+        validate_where_operands(where)
         _FakeVectorDb.get_calls += 1
         if self._name in _FakeVectorDb.vanished_on_get:
             message = f"Collection {self._name!r} does not exist"
@@ -159,6 +162,7 @@ class _FakeCollection:
         )
 
     def delete(self, *, where: dict[str, object]) -> None:
+        validate_where_operands(where)
         key, condition = next(iter(where.items()))
         _FakeVectorDb.store[self._name] = [
             record
@@ -4008,3 +4012,52 @@ def test_vector_verification_records_that_it_had_to_split() -> None:
 
     split_logs = [entry for entry in logs if entry["event"] == "Split a refused knowledge vector verification query"]
     assert [entry["paths"] for entry in split_logs] == [8, 4, 4]
+
+
+def test_vector_verification_answers_an_empty_batch_without_asking_the_store() -> None:
+    """No paths has an answer the store cannot give.
+
+    Chroma rejects an empty ``$in`` operand outright, so asking would raise
+    rather than return nothing. Splitting never reaches this case -- both
+    halves of a batch of two or more are non-empty -- but the query is a public
+    entry point and its recursion is documented as total, so the floor has to
+    exist. Resolving the collection handle is skipped too: the answer does not
+    depend on it, and an absent collection would otherwise turn a question with
+    an obvious answer into a ``NotFoundError``.
+    """
+    uncreated = _FakeVectorDb(collection="never_created")
+
+    assert paths_with_vectors(uncreated, []) == set()
+    assert _FakeVectorDb.get_calls == 0
+
+    created = _verification_collection()
+    collection = created.client.get_collection(created.collection_name)
+    assert _collection_paths_with_vectors(collection, []) == set()
+    assert _FakeVectorDb.get_calls == 0
+
+
+def test_collection_ownership_is_derived_from_identity_not_supplied() -> None:
+    """The name cleanup deletes by must be computed from the base's identity.
+
+    ``default_collection`` is what proves a collection is this base's to delete,
+    so it is derived from ``base_id`` and the resolved source path rather than
+    accepted as a field. A space that could be handed the name could authorize
+    deleting a collection the base does not own.
+    """
+    docs = Path("/srv/knowledge/docs")
+    space = CollectionSpace(
+        base_id="docs",
+        knowledge_path=docs,
+        storage_path=Path("/srv/state/docs"),
+        embedder_factory=lambda: pytest.fail("ownership must not need an embedder"),
+    )
+
+    assert space.default_collection == _collection_name_for_base("docs", docs)
+    assert "default_collection" not in CollectionSpace.__dataclass_fields__, (
+        "default_collection is a constructor field again, so it can be supplied instead of derived"
+    )
+
+    other_base = replace(space, base_id="wiki")
+    other_path = replace(space, knowledge_path=Path("/srv/knowledge/wiki"))
+    assert other_base.default_collection != space.default_collection
+    assert other_path.default_collection != space.default_collection
