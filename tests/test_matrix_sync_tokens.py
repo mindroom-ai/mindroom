@@ -516,6 +516,26 @@ async def test_post_start_certification_reset_rearms_historical_dispatch_fence(t
     handle_text_event.assert_not_awaited()
 
 
+def test_redaction_rewind_without_retry_token_rearms_historical_dispatch_fence(tmp_path: Path) -> None:
+    """A failed critical callback without a checkpoint makes the retry tokenless."""
+    with patch("mindroom.bot.time.time", return_value=2.0):
+        bot = _agent_bot(tmp_path)
+    client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
+    client.next_batch = "s_uncertified"
+    bot.client = client
+    assert not bot._historical_dispatch_fence.armed
+
+    with patch("mindroom.bot.raise_notice_floor") as notice_floor:
+        bot._rewind_sync_after_redaction_failure()
+
+    assert client.next_batch is None
+    assert bot._historical_dispatch_fence.armed
+    notice_floor.assert_called_once_with(
+        client.user_id,
+        floor_timestamp_ms=bot._historical_dispatch_fence.startup_cutoff_ms,
+    )
+
+
 @pytest.mark.parametrize(
     ("origin_server_ts", "expected_reason"),
     [

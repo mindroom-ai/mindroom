@@ -1916,6 +1916,8 @@ class AgentBot:
             return
         retry_token = self._sync_cache_trust.retry_token()
         cast("Any", client).next_batch = retry_token
+        if retry_token is None:
+            self._set_historical_dispatch_fence(armed=True)
         self.logger.warning(
             "matrix_redaction_callback_failed_replaying_sync",
             has_retry_token=retry_token is not None,
