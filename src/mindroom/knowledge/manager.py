@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import hashlib
+import json
 import os
 import time
 import uuid
@@ -16,6 +17,7 @@ from typing import TYPE_CHECKING, Any, Literal, NoReturn, Protocol, TypeVar, cas
 from urllib.parse import quote, urlparse, urlunparse
 
 from agno.knowledge.reader import ReaderFactory
+from agno.knowledge.reader.json_reader import JSONReader
 from agno.knowledge.reader.markdown_reader import MarkdownReader
 from agno.knowledge.reader.text_reader import TextReader
 from agno.vectordb.chroma import ChromaDb
@@ -1157,6 +1159,49 @@ class KnowledgeManager:
         configured_reader.chunking_strategy = chunking_strategy
         return configured_reader
 
+    async def _insert_with_malformed_json_fallback(
+        self,
+        insert: Callable[[Reader], Awaitable[None]],
+        file_path: Path,
+        relative_path: str,
+        reader: Reader,
+    ) -> None:
+        """Insert through the selected reader, falling back only for malformed source JSON."""
+
+        async def _insert_with_retry(selected_reader: Reader) -> None:
+            async def _insert_once() -> None:
+                await insert(selected_reader)
+
+            await run_with_embedding_retry(
+                _insert_once,
+                policy=_EMBEDDING_RETRY_POLICY,
+                sleep=_EMBEDDING_RETRY_SLEEP,
+                on_retry=self._record_embedding_retry,
+            )
+
+        try:
+            await _insert_with_retry(reader)
+        except json.JSONDecodeError as error:
+            if not isinstance(reader, JSONReader):
+                raise
+            source_text = await asyncio.to_thread(file_path.read_text, encoding=reader.encoding or "utf-8")
+            if error.doc != source_text:
+                raise
+            logger.warning(
+                "Malformed JSON knowledge file; indexing as text",
+                base_id=self.base_id,
+                path=relative_path,
+                line=error.lineno,
+                column=error.colno,
+            )
+            chunking_strategy = self._chunking_strategy()
+            fallback_reader = TextReader(
+                chunk=True,
+                chunk_size=chunking_strategy.chunk_size,
+                chunking_strategy=chunking_strategy,
+            )
+            await _insert_with_retry(fallback_reader)
+
     def _default_collection_name(self) -> str:
         return _collection_name(self.base_id, self._knowledge_source_path())
 
@@ -1370,7 +1415,7 @@ class KnowledgeManager:
             return False
         target_knowledge = knowledge or self._knowledge
 
-        async def _insert_once() -> None:
+        async def _insert_once(reader: Reader) -> None:
             if upsert:
                 # Agno/Chroma upsert keys by content hash, so stale chunks from an older
                 # version of the same file can remain unless we clear by source metadata first.
@@ -1393,11 +1438,11 @@ class KnowledgeManager:
         try:
             # Remove-then-insert is idempotent, so a transient embedding fault
             # costs one retry of this file instead of the whole refresh.
-            await run_with_embedding_retry(
+            await self._insert_with_malformed_json_fallback(
                 _insert_once,
-                policy=_EMBEDDING_RETRY_POLICY,
-                sleep=_EMBEDDING_RETRY_SLEEP,
-                on_retry=self._record_embedding_retry,
+                resolved_path,
+                relative_path,
+                reader,
             )
         except Exception as exc:
             classified = classified_embedder_error(exc)
