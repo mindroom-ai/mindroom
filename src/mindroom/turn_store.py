@@ -144,9 +144,40 @@ class TurnStore:
 
         self._ledger.update_handled_turn((source_event_id,), visible_echo_record)
 
-    def visible_echo_for_sources(self, source_event_ids: tuple[str, ...]) -> str | None:
-        """Return the first visible echo already tracked for one or more source events."""
-        return self._ledger.visible_echo_event_id_for_sources(source_event_ids)
+    def record_finalized_visible_echo(self, source_event_id: str, echo_event_id: str) -> None:
+        """Mark a tracked visible echo as successfully replaced."""
+
+        def finalized_visible_echo_record(existing_records: Mapping[str, TurnRecord]) -> TurnRecord:
+            existing = existing_records.get(source_event_id)
+            if existing is None:
+                return TurnRecord.create(
+                    [source_event_id],
+                    response_event_id=echo_event_id,
+                    completed=False,
+                    visible_echo_event_id=echo_event_id,
+                )
+            if existing.completed or existing.visible_echo_event_id != echo_event_id:
+                return existing
+            return replace(
+                existing,
+                response_event_id=echo_event_id,
+                completed=False,
+                timestamp=0.0,
+            )
+
+        self._ledger.update_handled_turn((source_event_id,), finalized_visible_echo_record)
+
+    def finalized_visible_echo_for_sources(self, source_event_ids: tuple[str, ...]) -> str | None:
+        """Return the first visible echo whose replacement succeeded."""
+        for source_event_id in source_event_ids:
+            record = self.get_turn_record(source_event_id)
+            if (
+                record is not None
+                and record.visible_echo_event_id is not None
+                and record.response_event_id == record.visible_echo_event_id
+            ):
+                return record.visible_echo_event_id
+        return None
 
     def get_turn_record(self, source_event_id: str) -> TurnRecord | None:
         """Return the ledger-backed canonical record for one source event."""

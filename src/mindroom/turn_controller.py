@@ -992,10 +992,6 @@ class TurnController:
         )
         return _IngressAdmissionOutcome.ADMITTED
 
-    def _visible_router_voice_echo_enabled(self) -> bool:
-        """Return whether this bot owns the visible voice-transcription lifecycle."""
-        return self.deps.agent_name == ROUTER_AGENT_NAME and self.deps.runtime.config.voice.visible_router_echo
-
     def _start_visible_voice_transcription_placeholder(
         self,
         event: AudioMessageEvent,
@@ -1004,7 +1000,7 @@ class TurnController:
         requester_user_id: str,
     ) -> asyncio.Task[str | None] | None:
         """Start or share the placeholder send for one raw voice event."""
-        if not self._visible_router_voice_echo_enabled():
+        if self.deps.agent_name != ROUTER_AGENT_NAME or not self.deps.runtime.config.voice.visible_router_echo:
             return None
         existing_task = self._visible_voice_placeholder_tasks.get(event.event_id)
         if existing_task is not None:
@@ -1079,6 +1075,7 @@ class TurnController:
             return existing_task
         task = create_background_task(
             self._finish_visible_voice_echo(
+                source_event_id=event.event_id,
                 target=target,
                 placeholder_task=placeholder_task,
                 text=text,
@@ -1109,6 +1106,7 @@ class TurnController:
     async def _finish_visible_voice_echo(
         self,
         *,
+        source_event_id: str,
         target: MessageTarget,
         placeholder_task: asyncio.Task[str | None],
         text: str,
@@ -1133,7 +1131,10 @@ class TurnController:
                 retry_sync_recovery=True,
             ),
         )
-        return visible_echo_event_id if edited else None
+        if not edited:
+            return None
+        self.deps.turn_store.record_finalized_visible_echo(source_event_id, visible_echo_event_id)
+        return visible_echo_event_id
 
     async def _finish_visible_voice_echo_best_effort(
         self,
@@ -1797,11 +1798,8 @@ class TurnController:
         handled_turn: TurnRecord,
     ) -> TurnRecord | None:
         """Return the terminal handled-turn outcome for one ignored router turn."""
-        visible_router_echo_event_id = (
-            handled_turn.visible_echo_event_id
-            or self.deps.turn_store.visible_echo_for_sources(
-                handled_turn.source_event_ids,
-            )
+        visible_router_echo_event_id = self.deps.turn_store.finalized_visible_echo_for_sources(
+            handled_turn.source_event_ids,
         )
         if visible_router_echo_event_id is None:
             return None

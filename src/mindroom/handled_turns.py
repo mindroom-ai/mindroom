@@ -594,16 +594,6 @@ class HandledTurnLedger:
             record = self._responses.get(source_event_id)
             return record.visible_echo_event_id if record is not None else None
 
-    def visible_echo_event_id_for_sources(self, source_event_ids: Sequence[str]) -> str | None:
-        """Return the first visible echo already tracked for one or more source events."""
-        with self._state.lock:
-            self._ensure_loaded_locked()
-            for event_id in _normalize_source_event_ids(source_event_ids):
-                record = self._responses.get(event_id)
-                if record is not None and record.visible_echo_event_id is not None:
-                    return record.visible_echo_event_id
-        return None
-
     def get_turn_record(self, source_event_id: str) -> TurnRecord | None:
         """Return the canonical record for one source event."""
         with self._state.lock:

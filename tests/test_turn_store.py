@@ -1508,6 +1508,36 @@ def test_terminal_turn_can_replace_a_provisional_source_identity(tmp_path: Path)
     assert first_record.visible_echo_event_id == "$echo"
 
 
+def test_visible_echo_is_finalized_only_after_replacement_acknowledgement(tmp_path: Path) -> None:
+    """A posted placeholder should not become a terminal router outcome before its edit succeeds."""
+    store = _store(tmp_path)
+    store.record_visible_echo("$event", "$echo")
+
+    assert store.finalized_visible_echo_for_sources(("$event",)) is None
+
+    store.record_finalized_visible_echo("$event", "$echo")
+
+    record = store.get_turn_record("$event")
+    assert record is not None
+    assert not record.completed
+    assert record.response_event_id == "$echo"
+    assert store.finalized_visible_echo_for_sources(("$event",)) == "$echo"
+
+
+def test_visible_echo_finalization_cannot_overwrite_terminal_outcome(tmp_path: Path) -> None:
+    """A late edit acknowledgement should preserve a concurrently completed turn."""
+    store = _store(tmp_path)
+    store.record_visible_echo("$event", "$echo")
+    store.record_turn(TurnRecord.create(["$event"], response_event_id="$response"))
+
+    store.record_finalized_visible_echo("$event", "$echo")
+
+    record = store.get_turn_record("$event")
+    assert record is not None
+    assert record.completed
+    assert record.response_event_id == "$response"
+
+
 def test_terminal_turn_rejects_conflicting_completed_canonical_source(tmp_path: Path) -> None:
     """A completed source cannot be reassigned into a different canonical turn."""
     store = _store(tmp_path)

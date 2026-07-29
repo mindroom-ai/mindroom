@@ -1157,8 +1157,8 @@ async def test_voice_echo_finishes_after_config_is_disabled_mid_transcription(tm
 
 
 @pytest.mark.asyncio
-async def test_voice_echo_edit_failure_does_not_post_second_message(tmp_path) -> None:  # noqa: ANN001
-    """A failed replacement should not orphan the placeholder beside a second echo."""
+async def test_voice_echo_edit_failure_retries_existing_placeholder(tmp_path) -> None:  # noqa: ANN001
+    """A failed replacement should retry the same placeholder on redelivery."""
     bot, room, event = _make_visible_router_echo_scenario(tmp_path)
     bot._delivery_gateway.edit_text.side_effect = None
     bot._delivery_gateway.edit_text.return_value = False
@@ -1172,9 +1172,15 @@ async def test_voice_echo_edit_failure_does_not_post_second_message(tmp_path) ->
         mock_voice.return_value = f"{VOICE_PREFIX}@home turn on the lights"
         await bot._turn_controller.handle_media_event(room, event)
         await drain_coalescing(bot)
+        assert not bot._turn_store.is_handled(event.event_id)
+
+        bot._delivery_gateway.edit_text.return_value = True
+        await bot._turn_controller.handle_media_event(room, event)
+        await drain_coalescing(bot)
 
     bot._delivery_gateway.send_text.assert_awaited_once()
-    bot._delivery_gateway.edit_text.assert_awaited_once()
+    assert bot._delivery_gateway.edit_text.await_count == 2
+    assert bot._turn_store.is_handled(event.event_id)
     assert bot._turn_store.visible_echo_for_source(event.event_id) == "$voice_echo"
 
 
