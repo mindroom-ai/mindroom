@@ -532,13 +532,25 @@ async def _pinned_since_generation_started(
     while this process is waiting on the model, and the finished automatic
     summary would then land on top of a title the user just fixed.
 
+    Reads from source rather than through ``get_strict_thread_history``. That
+    read is strict about staleness but still accepts a valid local cache hit, so
+    it cannot observe a pin another runtime just wrote — which is the only case
+    this guard exists for. Costs one homeserver read per generated summary, so
+    once per interval rather than per turn.
+
     Fails open, like the other background reads here: if the re-read fails the
     pass delivers, which is the same exposure the pre-generation gate already
     has. An automatic summary carries no ``pinned`` key, so the worst case is a
     single superseded title and the next pass bails at the gate.
     """
     try:
-        thread_history = await _load_thread_history(conversation_cache, room_id, thread_id)
+        thread_history = list(
+            await conversation_cache.refresh_strict_thread_history_from_source(
+                room_id,
+                thread_id,
+                caller_label="thread_summary_pin_recheck",
+            ),
+        )
     except Exception:
         logger.exception(
             "Pin re-check before summary delivery failed; delivering anyway",

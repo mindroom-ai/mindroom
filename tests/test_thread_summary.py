@@ -666,6 +666,8 @@ class TestMaybeGenerateThreadSummary:
         self.conversation_cache = MagicMock()
         self.conversation_cache.get_latest_thread_event_id_if_needed = AsyncMock(return_value="$thread1")
         self.conversation_cache.notify_outbound_message = Mock()
+        # The pre-delivery pin guard reads from source; default it to "no pin".
+        self.conversation_cache.refresh_strict_thread_history_from_source = AsyncMock(return_value=[])
         with (
             patch(
                 "mindroom.thread_summary.maybe_rebuild_tag_vocabulary",
@@ -943,10 +945,7 @@ class TestMaybeGenerateThreadSummary:
         ):
             await self._maybe_generate(client, config, rp)
 
-        # Two reads per generated summary: the pre-generation gate, then the
-        # pin re-check immediately before delivery.
-        assert load.await_count == 2
-        load.assert_awaited_with(self.conversation_cache, "!room:x", "$thread1")
+        load.assert_awaited_once_with(self.conversation_cache, "!room:x", "$thread1")
         generate.assert_awaited_once_with(
             thread_history,
             config,
@@ -2048,10 +2047,7 @@ class TestMaybeGenerateThreadSummary:
             release_fetch.set()
             await asyncio.gather(first, second)
 
-        # Three reads: both passes gate, then only the first reaches generation
-        # and re-checks the pin before delivery. The second sees the baseline
-        # the first advanced and returns at the threshold.
-        assert fetch_calls == 3
+        assert fetch_calls == 2
         mock_send.assert_awaited_once()
 
 
@@ -3013,10 +3009,15 @@ async def test_pin_decision_survives_a_real_write_and_read_round_trip(pinned: bo
 class TestPinLandingDuringGeneration:
     """A pin written while the model runs must supersede the in-flight summary."""
 
-    def _cache(self) -> MagicMock:
+    def _cache(self, source_history: list | None = None) -> MagicMock:
         conversation_cache = MagicMock()
         conversation_cache.get_latest_thread_event_id_if_needed = AsyncMock(return_value="$thread1")
         conversation_cache.notify_outbound_message = Mock()
+        # The guard must read from source, not through the cache: a pin written
+        # by another runtime is not in this runtime's cache yet.
+        conversation_cache.refresh_strict_thread_history_from_source = AsyncMock(
+            return_value=source_history if source_history is not None else [],
+        )
         return conversation_cache
 
     async def _run(self, conversation_cache: MagicMock, histories: list) -> AsyncMock:
@@ -3048,31 +3049,43 @@ class TestPinLandingDuringGeneration:
             )
         return deliver
 
-    async def test_pin_during_generation_discards_the_summary(self) -> None:
-        """The pre-generation gate cannot see a pin that lands mid-generation."""
+    async def test_pin_visible_only_at_source_discards_the_summary(self) -> None:
+        """A pin another runtime wrote is not in this runtime's cache yet.
+
+        get_strict_thread_history is strict about staleness but still accepts a
+        valid local cache hit, so reading through it would miss the pin and
+        deliver the stale title anyway.
+        """
         unpinned = _make_thread_history(12)
-        pinned_later = [
+        pinned_at_source = [
             *_make_thread_history(12),
             _make_summary_notice_message("$thread1", message_count=12, pinned=True),
         ]
+        conversation_cache = self._cache(source_history=pinned_at_source)
 
-        deliver = await self._run(self._cache(), [unpinned, pinned_later])
+        # Cache reads stay unpinned for the whole pass.
+        deliver = await self._run(conversation_cache, [unpinned, unpinned])
 
         deliver.assert_not_awaited()
+        conversation_cache.refresh_strict_thread_history_from_source.assert_awaited_once()
         assert _last_summary_counts[_thread_summary_cache_key("!room:x", "$thread1")] == 12
 
     async def test_still_delivers_when_no_pin_landed(self) -> None:
         """The re-check must not suppress ordinary summaries."""
         unpinned = _make_thread_history(12)
 
-        deliver = await self._run(self._cache(), [unpinned, list(unpinned)])
+        deliver = await self._run(self._cache(source_history=list(unpinned)), [unpinned, unpinned])
 
         deliver.assert_awaited_once()
 
     async def test_recheck_failure_still_delivers(self) -> None:
-        """A failed re-read falls back to the pre-generation decision."""
+        """A failed source re-read falls back to the pre-generation decision."""
         unpinned = _make_thread_history(12)
+        conversation_cache = self._cache()
+        conversation_cache.refresh_strict_thread_history_from_source = AsyncMock(
+            side_effect=RuntimeError("source read failed"),
+        )
 
-        deliver = await self._run(self._cache(), [unpinned, RuntimeError("history read failed")])
+        deliver = await self._run(conversation_cache, [unpinned, unpinned])
 
         deliver.assert_awaited_once()
