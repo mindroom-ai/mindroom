@@ -9,6 +9,7 @@ Models define the AI providers and model IDs used by agents.
 - `azure` - OpenAI models through Azure OpenAI deployments
 - `openai` - GPT models and OpenAI-compatible endpoints
 - `codex` or `openai_codex` - OpenAI models available through a local Codex CLI ChatGPT login
+- `kimi` or `kimi_code` - Kimi models available through a local Kimi Code CLI login
 - `google` or `gemini` - Google Gemini models
 - `vertexai_claude` - Anthropic Claude models on Google Vertex AI
 - `ollama` - Local models via Ollama
@@ -69,6 +70,12 @@ models:
     provider: codex
     id: gpt-5.6
     context_window: 258000
+
+  # Kimi K3 via a Kimi Code CLI login
+  kimi:
+    provider: kimi
+    id: k3
+    context_window: 1048576
 
   # Google Gemini (both 'google' and 'gemini' work as provider names)
   gemini:
@@ -210,6 +217,37 @@ You can set `extra_kwargs.prompt_cache_key` to override that derived key for a m
 Live testing against the Codex ChatGPT endpoint reported `cached_tokens` only when the request included Codex CLI-style session headers tied to the prompt-cache key.
 Repeated long requests then reported cache hits, while requests without those headers stayed at `cached_tokens: 0`, and `prompt_cache_retention` was rejected.
 Treat Codex prompt caching as best-effort rather than guaranteed.
+
+## Kimi Models with Kimi Code Login
+
+Use `provider: kimi` when you want MindRoom to call Kimi models through an authenticated local Kimi Code CLI session (Kimi Code subscription) instead of the billed Moonshot API.
+Run `kimi` and `/login` first so `~/.kimi-code/credentials/kimi-code.json` contains OAuth tokens.
+MindRoom refreshes the access token when needed and sends requests to the Kimi Code OpenAI-compatible endpoint at `https://api.kimi.com/coding/v1`.
+
+| Model | Model ID | Best fit |
+|-------|----------|----------|
+| Kimi K3 | `k3` | Flagship reasoning, long-horizon coding, and agent work with a 1M-token context |
+| Kimi K3 256k | `k3-256k` | The same K3 generation with a 256k-token context |
+| Kimi for Coding | `kimi-for-coding` | Coding-tuned tier exposed by the Kimi Code CLI |
+
+The CLI-config-style form `kimi-code/k3` is accepted as an alternative to the bare slug.
+If you keep Kimi Code state outside `~/.kimi-code`, set `KIMI_CODE_HOME` or pass `extra_kwargs.kimi_home`; user-home prefixes such as `~/custom-kimi` are expanded.
+For starter config generation, use `mindroom config init --provider kimi`.
+
+```yaml
+models:
+  default:
+    provider: kimi
+    id: k3
+    context_window: 1048576
+```
+
+Kimi K3 always reasons before replying, so responses include reasoning tokens even for short answers.
+This adapter follows the local Kimi Code CLI authentication-file and backend contracts, so upstream Kimi Code changes can require a MindRoom update.
+
+Prompt caching is automatic on the Kimi Code endpoint: repeated request prefixes come back as `cached_tokens` with no opt-in.
+Like the Kimi Code CLI, MindRoom pins each active agent session to a stable `prompt_cache_key` derived from the execution identity (the same derivation the Codex provider uses), which keeps cache routing stable per Matrix thread.
+You can set `extra_kwargs.prompt_cache_key` to override the derived key for a model.
 
 ## OpenRouter Provider Routing
 

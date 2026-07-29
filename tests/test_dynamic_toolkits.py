@@ -1041,6 +1041,37 @@ def test_native_tool_search_attaches_deferred_toolkits_and_skips_homegrown_machi
     assert ("code", "thread-a") not in dynamic_toolkits_module._loaded_tools
 
 
+@pytest.mark.parametrize(
+    ("provider", "model_id"),
+    [
+        ("anthropic", "claude-opus-4-8"),
+        ("openai", "gpt-5.6"),
+    ],
+)
+def test_native_tool_search_prompt_lists_deferred_capability_domains(
+    tmp_path: Path,
+    provider: str,
+    model_id: str,
+) -> None:
+    """Native tool search should tell the model which capability domains it can discover."""
+    raw = _base_config_data()
+    raw["models"]["native"] = {"provider": provider, "id": model_id}  # type: ignore[index]
+    raw["agents"]["code"]["model"] = "native"  # type: ignore[index]
+    raw["agents"]["code"]["tools"] = [  # type: ignore[index]
+        {"sleep": {"defer": True}},
+        {"calculator": {"defer": True, "initial": True}},
+    ]
+    config = _validated_config(tmp_path, raw)
+
+    agent = create_agent("code", config, _runtime_paths(tmp_path), execution_identity=None, session_id="thread-a")
+
+    discovery_block = next(block for block in agent.instructions if block.startswith("## Deferred Tool Discovery"))
+    assert discovery_block in _render_system_prompt(agent)
+    assert "Deferred capability domains available through native tool search: sleep." in discovery_block
+    assert "search the deferred tool catalog before concluding that the capability is unavailable" in discovery_block
+    assert "calculator" not in discovery_block
+
+
 def test_native_tool_search_omits_fully_deferred_toolkit_instructions(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

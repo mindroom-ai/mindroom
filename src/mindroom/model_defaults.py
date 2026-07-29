@@ -25,6 +25,7 @@ __all__ = (
     "GOOGLE_VEO",
     "GROQ_TRANSCRIPTION",
     "GROQ_TTS",
+    "KIMI_K3",
     "LLAMA_CPP_BASE_URL_DEFAULT",
     "LLAMA_CPP_GEMMA",
     "LLAMA_CPP_QWEN",
@@ -95,6 +96,7 @@ _AWS_BEDROCK_CLAUDE_SONNET = "global.anthropic.claude-sonnet-5"
 _AWS_BEDROCK_CLAUDE_HAIKU = "global.anthropic.claude-haiku-4-5"
 CODEX_GPT = "gpt-5.6"
 CODEX_GPT_ENDPOINT = "gpt-5.6-sol"
+KIMI_K3 = "k3"
 _OPENAI_GPT = "gpt-5.6"
 # OpenAI's Responses-API tool_search tool requires gpt-5.4 or newer; gating
 # parses the gpt-N.M version from the model id so new releases take the
@@ -159,6 +161,7 @@ CONFIG_INIT_MODEL_PRESETS: Mapping[str, ModelPreset] = MappingProxyType(
         "bedrock_claude": ModelPreset("bedrock_claude", AWS_BEDROCK_CLAUDE_OPUS, 1_000_000),
         "azure": ModelPreset("azure", AZURE_OPENAI_DEFAULT_DEPLOYMENT),
         "codex": ModelPreset("codex", CODEX_GPT, 258_000),
+        "kimi": ModelPreset("kimi", KIMI_K3, 1_048_576),
         "llama_cpp": ModelPreset("llama_cpp", LLAMA_CPP_GEMMA, 128_000),
         "ollama": ModelPreset("ollama", OLLAMA_GEMMA, 128_000),
         "openai": ModelPreset("openai", _OPENAI_GPT, 1_050_000),

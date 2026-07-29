@@ -46,6 +46,7 @@ from mindroom.response_runner import (
 from mindroom.stop import StopManager
 from mindroom.streaming import StreamingDeliveryError
 from mindroom.thread_summary import thread_summary_message_count_hint
+from mindroom.timing import DispatchPipelineTiming
 from mindroom.turn_policy import PreparedDispatch
 from tests.conftest import (
     make_matrix_client_mock,
@@ -798,6 +799,69 @@ async def test_non_streaming_response_delivers_through_deliver_final(tmp_path: P
 
 
 @pytest.mark.asyncio
+async def test_non_streaming_invisible_delivery_does_not_mark_substantive_reply(tmp_path: Path) -> None:
+    """A failed final delivery must not turn a thinking placeholder into a substantive reply."""
+    bot = _bot(tmp_path)
+    coordinator = unwrap_extracted_collaborator(bot._response_runner)
+    delivery = FinalDeliveryOutcome(
+        terminal_status="error",
+        event_id=None,
+        failure_reason="delivery_failed",
+    )
+    timing = DispatchPipelineTiming(source_event_id="$request", room_id="!room:localhost")
+    timing.mark_first_visible_reply("placeholder")
+    request = replace(_plain_request(_target()), pipeline_timing=timing)
+
+    with (
+        patch.object(DeliveryGateway, "deliver_final", new=AsyncMock(return_value=delivery)),
+        patch_response_runner_module(
+            ai_response=AsyncMock(return_value="final text"),
+            typing_indicator=_noop_typing,
+        ),
+    ):
+        generation = await coordinator.process_and_respond(request)
+
+    assert generation.delivery is delivery
+    assert timing.metadata["first_visible_kind"] == "placeholder"
+    assert "first_substantive_reply" not in timing.marks
+    assert "first_substantive_kind" not in timing.metadata
+
+
+@pytest.mark.asyncio
+async def test_non_streaming_failed_edit_preserving_old_body_does_not_mark_substantive_reply(
+    tmp_path: Path,
+) -> None:
+    """A preserved old answer must not count as newly delivered substantive content."""
+    bot = _bot(tmp_path)
+    coordinator = unwrap_extracted_collaborator(bot._response_runner)
+    delivery = FinalDeliveryOutcome(
+        terminal_status="error",
+        event_id="$existing",
+        is_visible_response=True,
+        failure_reason="delivery_failed",
+    )
+    timing = DispatchPipelineTiming(source_event_id="$request", room_id="!room:localhost")
+    request = replace(
+        _plain_request(_target()),
+        existing_event_id="$existing",
+        pipeline_timing=timing,
+    )
+
+    with (
+        patch.object(DeliveryGateway, "deliver_final", new=AsyncMock(return_value=delivery)),
+        patch_response_runner_module(
+            ai_response=AsyncMock(return_value="replacement text"),
+            typing_indicator=_noop_typing,
+        ),
+    ):
+        generation = await coordinator.process_and_respond(request)
+
+    assert generation.delivery is delivery
+    assert "first_substantive_reply" not in timing.marks
+    assert "first_substantive_kind" not in timing.metadata
+
+
+@pytest.mark.asyncio
 async def test_streaming_response_streams_then_finalizes_through_gateway(tmp_path: Path) -> None:
     """The streaming path delivers via deliver_stream, then finalizes the same transport outcome."""
     bot = _bot(tmp_path)
@@ -832,6 +896,44 @@ async def test_streaming_response_streams_then_finalizes_through_gateway(tmp_pat
     assert finalize_request.stream_transport_outcome is transport
     assert finalize_request.initial_delivery_kind == "sent"
     assert finalize_request.identity.response_kind == "ai"
+
+
+@pytest.mark.asyncio
+async def test_streaming_placeholder_only_delivery_does_not_mark_substantive_reply(tmp_path: Path) -> None:
+    """Placeholder-only stream finalization must not report visible answer text."""
+    bot = _bot(tmp_path)
+    coordinator = unwrap_extracted_collaborator(bot._response_runner)
+    transport = StreamTransportOutcome(
+        last_physical_stream_event_id="$placeholder",
+        terminal_status="completed",
+        rendered_body="Thinking...",
+        visible_body_state="placeholder_only",
+    )
+    delivery = FinalDeliveryOutcome(
+        terminal_status="completed",
+        event_id=None,
+    )
+    timing = DispatchPipelineTiming(source_event_id="$request", room_id="!room:localhost")
+    timing.mark_first_visible_reply("placeholder")
+    request = replace(_plain_request(_target()), pipeline_timing=timing)
+
+    async def fake_stream(*_args: object, **_kwargs: object) -> AsyncIterator[str]:
+        yield ""
+
+    with (
+        patch.object(DeliveryGateway, "deliver_stream", new=AsyncMock(return_value=transport)),
+        patch.object(DeliveryGateway, "finalize_streamed_response", new=AsyncMock(return_value=delivery)),
+        patch_response_runner_module(
+            stream_agent_response=fake_stream,
+            typing_indicator=_noop_typing,
+        ),
+    ):
+        generation = await coordinator.process_and_respond_streaming(request)
+
+    assert generation.delivery is delivery
+    assert timing.metadata["first_visible_kind"] == "placeholder"
+    assert "first_substantive_reply" not in timing.marks
+    assert "first_substantive_kind" not in timing.metadata
 
 
 @pytest.mark.asyncio

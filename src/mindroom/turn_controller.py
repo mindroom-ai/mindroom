@@ -1728,7 +1728,7 @@ class TurnController:
                 )
                 self._mark_source_events_responded(replace(handled_turn, response_event_id=response_event_id))
                 if dispatch_timing is not None and response_event_id is not None:
-                    dispatch_timing.mark_first_visible_reply("final")
+                    dispatch_timing.mark_first_visible_reply("final", substantive=True)
                     dispatch_timing.mark("response_complete")
                     dispatch_timing.emit_summary(self.deps.logger, outcome="reject")
                 return

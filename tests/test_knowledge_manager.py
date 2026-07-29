@@ -9,10 +9,12 @@ import os
 import subprocess
 import sys
 from contextlib import asynccontextmanager
-from dataclasses import replace
+from dataclasses import dataclass, replace
+from datetime import UTC, datetime
+from itertools import count
 from pathlib import Path
 from threading import Event, Lock, get_ident
-from typing import TYPE_CHECKING, ClassVar
+from typing import TYPE_CHECKING, ClassVar, cast
 from unittest.mock import MagicMock
 
 import httpx
@@ -21,10 +23,12 @@ from agno.knowledge.document.base import Document
 from agno.knowledge.embedder.base import Embedder
 from fastapi.testclient import TestClient
 from openai import AuthenticationError
+from pydantic import ValidationError
 from structlog.testing import capture_logs
 from watchfiles import Change
 
 import mindroom.knowledge.file_listing as knowledge_file_listing_module
+import mindroom.knowledge.git_source as knowledge_git_source_module
 import mindroom.knowledge.manager as knowledge_manager_module
 import mindroom.knowledge.refresh_runner as knowledge_refresh_runner
 import mindroom.knowledge.refresh_scheduler as knowledge_refresh_scheduler
@@ -42,33 +46,48 @@ from mindroom.credentials_sync import get_embedder_api_key
 from mindroom.knowledge import KnowledgeRefreshScheduler, resolve_agent_knowledge_access
 from mindroom.knowledge.availability import KnowledgeAvailability
 from mindroom.knowledge.candidate_checkpoint import load_candidate_checkpoint
+from mindroom.knowledge.collections import build_vector_db, candidate_collection_name
 from mindroom.knowledge.file_listing import (
     git_checkout_present,
+    knowledge_files_from_relative_paths,
     list_git_tracked_knowledge_files,
     list_knowledge_files,
 )
-from mindroom.knowledge.index_metadata import write_index_metadata_payload
+from mindroom.knowledge.git_source import GitKnowledgeSource, GitSyncResult
 from mindroom.knowledge.indexing_config import IndexingSettings
-from mindroom.knowledge.manager import KnowledgeManager, knowledge_source_signature
-from mindroom.knowledge.redaction import credential_free_repo_url, credential_free_url_identity, redact_url_credentials
+from mindroom.knowledge.manager import KnowledgeManager, _knowledge_source_signature
+from mindroom.knowledge.redaction import (
+    credential_free_repo_url,
+    credential_free_url_identity,
+    redact_url_credentials,
+)
+from mindroom.knowledge.refresh_outcome import RefreshOutcome
 from mindroom.knowledge.refresh_runner import knowledge_binding_mutation_lock, refresh_knowledge_binding
 from mindroom.knowledge.registry import (
+    PublishedIndexState,
     get_published_index,
     load_published_index_state,
     published_index_metadata_path,
     published_index_refresh_state,
     resolve_published_index_key,
+    save_published_index_state,
 )
 from mindroom.knowledge.utils import KnowledgeAvailabilityDetail
 from mindroom.knowledge.watch import KnowledgeSourceWatcher
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
-from tests.knowledge_test_support import metadata_matches
+from tests.knowledge_test_support import chroma_get_result, metadata_matches
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Coroutine, Iterator
+    from collections.abc import AsyncIterator, Coroutine, Iterable, Iterator, Sequence
+    from types import ModuleType
+
+    from agno.knowledge.reader.base import Reader
 
     from mindroom.constants import RuntimePaths
+
+
+_vector_row_ids = count()
 
 
 class _Collection:
@@ -78,20 +97,53 @@ class _Collection:
     def get(
         self,
         *,
+        include: Sequence[str],
         limit: int | None = None,
         offset: int = 0,
-        include: list[str] | None = None,
         where: dict[str, object] | None = None,
     ) -> dict[str, object]:
-        _ = include
         with _VectorDb.lock:
             selected_all = list(_VectorDb.collections.get(self._name, []))
         if where:
             key, condition = next(iter(where.items()))
             selected_all = [item for item in selected_all if metadata_matches(item["metadata"], key, condition)]
         selected = selected_all[offset:] if limit is None else selected_all[offset : offset + limit]
-        ids = [str(index) for index in range(offset, offset + len(selected))]
-        return {"ids": ids, "metadatas": [dict(item["metadata"]) for item in selected]}
+        return chroma_get_result(
+            ids=[str(item["id"]) for item in selected],
+            metadatas=[dict(item["metadata"]) for item in selected],
+            documents=[str(item["content"]) for item in selected],
+            embeddings=[list(cast("list[float]", item["embedding"])) for item in selected],
+            include=include,
+        )
+
+    def add(
+        self,
+        *,
+        ids: list[str],
+        embeddings: list[list[float]],
+        documents: list[str],
+        metadatas: list[dict[str, object]],
+    ) -> None:
+        if not ids:
+            # Chroma rejects an empty write rather than treating it as a no-op.
+            message = "Expected Embeddings to be non-empty list or numpy array, got [] in add."
+            raise ValueError(message)
+        with _VectorDb.lock:
+            _VectorDb.collections.setdefault(self._name, []).extend(
+                {
+                    "id": identifier,
+                    "content": document,
+                    "embedding": list(embedding),
+                    "metadata": dict(metadata),
+                }
+                for identifier, embedding, document, metadata in zip(
+                    ids,
+                    embeddings,
+                    documents,
+                    metadatas,
+                    strict=True,
+                )
+            )
 
     def delete(self, *, where: dict[str, object]) -> None:
         key, condition = next(iter(where.items()))
@@ -170,7 +222,12 @@ class _Knowledge:
         _ = (upsert, reader)
         with _VectorDb.lock:
             _VectorDb.collections.setdefault(self.vector_db.collection_name, []).append(
-                {"content": Path(path).read_text(encoding="utf-8"), "metadata": dict(metadata)},
+                {
+                    "id": f"row-{next(_vector_row_ids)}",
+                    "content": Path(path).read_text(encoding="utf-8"),
+                    "embedding": [1.0],
+                    "metadata": dict(metadata),
+                },
             )
 
     async def ainsert(
@@ -195,6 +252,30 @@ class _Knowledge:
 
     def search(self, query: str, max_results: int | None = None) -> list[Document]:
         return self.vector_db.search(query=query, limit=max_results or 5)
+
+
+def _insert_with_real_reader(
+    self: _Knowledge,
+    *,
+    path: str,
+    metadata: dict[str, object],
+    upsert: bool,
+    reader: object | None = None,
+) -> None:
+    """Exercise the selected Agno reader while keeping vectors in the test store."""
+    _ = upsert
+    selected_reader = cast("Reader", reader)
+    documents = selected_reader.read(Path(path), name=Path(path).name)
+    with _VectorDb.lock:
+        _VectorDb.collections.setdefault(self.vector_db.collection_name, []).extend(
+            {
+                "id": f"row-{next(_vector_row_ids)}",
+                "content": document.content,
+                "embedding": [1.0],
+                "metadata": {**metadata, **document.meta_data},
+            }
+            for document in documents
+        )
 
 
 class _FakeEmbedder(Embedder):
@@ -223,7 +304,9 @@ def patch_vector_store(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     """Use an in-memory vector store for published knowledge index tests."""
     _VectorDb.collections = {}
     monkeypatch.setattr("mindroom.knowledge.manager.ChromaDb", _VectorDb)
+    monkeypatch.setattr("mindroom.knowledge.collections.ChromaDb", _VectorDb)
     monkeypatch.setattr("mindroom.knowledge.manager.Knowledge", _Knowledge)
+    monkeypatch.setattr("mindroom.knowledge.collections.Knowledge", _Knowledge)
     monkeypatch.setattr(
         "mindroom.knowledge.manager.create_configured_embedder",
         lambda *_args, **_kwargs: _FakeEmbedder(),
@@ -343,12 +426,9 @@ def test_load_published_index_state_preserves_file_mode_from_settings(tmp_path: 
     """Published file-mode metadata derives mode from indexing settings."""
     metadata_path = tmp_path / "indexing_settings.json"
     settings = replace(_test_indexing_settings(), mode="files")
-    write_index_metadata_payload(
+    save_published_index_state(
         metadata_path,
-        settings=settings.to_metadata(),
-        status="complete",
-        indexed_count=0,
-        source_signature="source-signature",
+        PublishedIndexState(settings=settings, status="complete", indexed_count=0, source_signature="source-signature"),
     )
 
     state = load_published_index_state(metadata_path)
@@ -370,8 +450,15 @@ def _identity(requester_id: str, *, agent_name: str = "helper") -> ToolExecution
     )
 
 
-def _set_git_tracked_files(manager: KnowledgeManager, *relative_paths: str) -> None:
-    manager._git_tracked_relative_paths = set(relative_paths)
+def _record_git_sync(
+    source: GitKnowledgeSource,
+    result: GitSyncResult,
+    *relative_paths: str,
+) -> GitSyncResult:
+    """Record a faked sync's outcome the way a real one would, then return it."""
+    source._last_synced_head = result.head
+    source._tracked_relative_paths = set(relative_paths)
+    return result
 
 
 def _git_manager(
@@ -432,7 +519,7 @@ async def test_git_manager_construction_does_not_probe_checkout_on_event_loop(
     )
 
     checkout_probe = MagicMock(return_value=True)
-    monkeypatch.setattr(knowledge_manager_module, "git_checkout_present", checkout_probe)
+    monkeypatch.setattr(knowledge_git_source_module, "git_checkout_present", checkout_probe)
 
     await asyncio.sleep(0)
     KnowledgeManager("docs", config=config, runtime_paths=runtime_paths_for(config))
@@ -597,7 +684,7 @@ async def test_file_mode_git_refresh_marks_same_source_semantic_alias_stale(
         "semantic_docs",
         config=config,
         runtime_paths=runtime_paths,
-    )._default_collection_name()
+    )._collections.default_collection
     _VectorDb.collections[semantic_collection] = [
         {"content": "Use grep for this source.", "metadata": {"source_path": "guide.md"}},
     ]
@@ -613,13 +700,11 @@ async def test_file_mode_git_refresh_marks_same_source_semantic_alias_stale(
     )
     knowledge_registry.mark_published_index_refresh_succeeded(semantic_key)
 
-    async def _sync_updated(self: KnowledgeManager) -> dict[str, object]:
+    async def _sync_updated(self: GitKnowledgeSource) -> GitSyncResult:
         assert self.base_id == "file_docs"
-        self._git_last_successful_commit = "rev-updated"
-        _set_git_tracked_files(self, "guide.md")
-        return {"updated": True, "changed_count": 1, "removed_count": 0}
+        return _record_git_sync(self, GitSyncResult(head="rev-updated", updated=True), "guide.md")
 
-    monkeypatch.setattr(KnowledgeManager, "sync_git_source", _sync_updated)
+    monkeypatch.setattr(GitKnowledgeSource, "sync", _sync_updated)
 
     result = await refresh_knowledge_binding("file_docs", config=config, runtime_paths=runtime_paths)
     semantic_state = load_published_index_state(published_index_metadata_path(semantic_key))
@@ -667,8 +752,8 @@ async def test_file_mode_cancelled_refresh_after_metadata_publish_stays_complete
 
 
 @pytest.mark.asyncio
-async def test_file_mode_reindex_noop_clears_previous_manager_refresh_error(tmp_path: Path) -> None:
-    """File-only reindex no-ops should not leave stale manager-local errors."""
+async def test_file_mode_reindex_reports_an_empty_unpublished_outcome(tmp_path: Path) -> None:
+    """A file-only base builds no vectors, so its refresh publishes nothing and reports no failure."""
     docs_path = tmp_path / "docs"
     docs_path.mkdir()
     config = _config(
@@ -679,10 +764,8 @@ async def test_file_mode_reindex_noop_clears_previous_manager_refresh_error(tmp_
     )
     runtime_paths = runtime_paths_for(config)
     manager = KnowledgeManager("docs", config=config, runtime_paths=runtime_paths)
-    manager._last_refresh_error = "previous semantic failure"
 
-    assert await manager.reindex_all() == 0
-    assert manager._last_refresh_error is None
+    assert await manager.reindex_all() == RefreshOutcome(indexed_count=0, published=False, error=None)
 
 
 def test_file_mode_source_signature_tracks_non_semantic_files(tmp_path: Path) -> None:
@@ -701,7 +784,7 @@ def test_file_mode_source_signature_tracks_non_semantic_files(tmp_path: Path) ->
         modes={"docs": "files"},
     )
 
-    before = knowledge_source_signature(
+    before = _knowledge_source_signature(
         config,
         "docs",
         docs_path,
@@ -710,7 +793,7 @@ def test_file_mode_source_signature_tracks_non_semantic_files(tmp_path: Path) ->
     diagram.write_bytes(b"after")
 
     assert (
-        knowledge_source_signature(
+        _knowledge_source_signature(
             config,
             "docs",
             docs_path,
@@ -1427,7 +1510,7 @@ async def test_ready_index_access_never_recomputes_source_signature(
         msg = "READY request lookup must not recompute knowledge source signatures"
         raise AssertionError(msg)
 
-    monkeypatch.setattr("mindroom.knowledge.manager.knowledge_source_signature", _unexpected_signature)
+    monkeypatch.setattr("mindroom.knowledge.manager._knowledge_source_signature", _unexpected_signature)
 
     assert resolve_agent_knowledge_access("helper", config, runtime_paths).knowledge is not None
     assert resolve_agent_knowledge_access("helper", config, runtime_paths).knowledge is not None
@@ -1462,6 +1545,171 @@ def test_knowledge_file_listing_rejects_symlinked_directory_escape(tmp_path: Pat
     config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
 
     assert list_knowledge_files(config, "docs", docs_path) == []
+
+
+def test_tracked_path_listing_skips_per_file_strict_resolution(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Chain-vetted candidates must not pay a strict resolve walk per file.
+
+    ``resolve(strict=True)`` re-walks every path component and ignores the
+    directory guard's symlink cache, so on a network filesystem it turns one
+    listing pass into several round trips per file.
+    """
+    docs_path = tmp_path / "docs"
+    nested = docs_path / "guide"
+    nested.mkdir(parents=True)
+    (docs_path / "root.md").write_text("root", encoding="utf-8")
+    (nested / "deep.md").write_text("deep", encoding="utf-8")
+    config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
+    original_resolve = Path.resolve
+
+    def _resolve(self: Path, *args: object, **kwargs: object) -> Path:
+        strict = bool(args[0]) if args else bool(kwargs.get("strict", False))
+        if strict:
+            msg = "chain-vetted candidates must not be strictly resolved per file"
+            raise AssertionError(msg)
+        return original_resolve(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "resolve", _resolve)
+
+    files = knowledge_files_from_relative_paths(config, "docs", docs_path, ["root.md", "guide/deep.md"])
+
+    assert sorted(path.name for path in files) == ["deep.md", "root.md"]
+
+
+def test_tracked_path_listing_rejects_symlinked_file_escape(tmp_path: Path) -> None:
+    """A symlinked tracked path must not expose files outside the knowledge root."""
+    docs_path = tmp_path / "docs"
+    docs_path.mkdir()
+    secret = tmp_path / "secret.md"
+    secret.write_text("secret outside root", encoding="utf-8")
+    try:
+        (docs_path / "leak.md").symlink_to(secret)
+    except OSError as exc:
+        pytest.skip(f"symlinks unavailable: {exc}")
+    config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
+
+    assert knowledge_files_from_relative_paths(config, "docs", docs_path, ["leak.md"]) == []
+
+
+def test_tracked_path_listing_rejects_symlinked_directory_escape(tmp_path: Path) -> None:
+    """A tracked path reached through a symlinked directory must stay excluded."""
+    docs_path = tmp_path / "docs"
+    outside = tmp_path / "outside"
+    docs_path.mkdir()
+    outside.mkdir()
+    (outside / "secret.md").write_text("secret through directory", encoding="utf-8")
+    try:
+        (docs_path / "linked").symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlinks unavailable: {exc}")
+    config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
+
+    assert knowledge_files_from_relative_paths(config, "docs", docs_path, ["linked/secret.md"]) == []
+
+
+def test_bases_endpoint_counts_files_without_building_the_file_listing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The base list reports a count, so it must not build the whole file payload.
+
+    ``_list_file_info`` stats every managed file a second time (the listing itself
+    already checked each one) and materializes a dict per file. Both scale with the
+    corpus on every request, and ``/bases`` uses none of it beyond the count;
+    ``/bases/{base_id}/files`` still serves the full listing.
+    """
+    docs_path = tmp_path / "docs"
+    docs_path.mkdir()
+    for index in range(3):
+        (docs_path / f"doc{index}.md").write_text("body", encoding="utf-8")
+    config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
+    runtime_paths = runtime_paths_for(config)
+
+    async def _unexpected_list_file_info(*_args: object, **_kwargs: object) -> object:
+        msg = "the base list must not build the full file listing"
+        raise AssertionError(msg)
+
+    main.initialize_api_app(main.app, runtime_paths)
+    _publish_api_config(main.app, config)
+    monkeypatch.setattr(knowledge_api, "_list_file_info", _unexpected_list_file_info)
+    response = TestClient(main.app).get("/api/knowledge/bases")
+
+    assert response.status_code == 200
+    entry = next(base for base in response.json()["bases"] if base["name"] == "docs")
+    assert entry["file_count"] == 3
+    assert entry["file_listing_degraded"] is False
+
+
+def test_base_files_endpoint_still_returns_sizes_and_timestamps(tmp_path: Path) -> None:
+    """The dedicated listing endpoint keeps the per-file detail the base list dropped."""
+    docs_path = tmp_path / "docs"
+    docs_path.mkdir()
+    (docs_path / "doc.md").write_text("body", encoding="utf-8")
+    config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
+    runtime_paths = runtime_paths_for(config)
+
+    main.initialize_api_app(main.app, runtime_paths)
+    _publish_api_config(main.app, config)
+    response = TestClient(main.app).get("/api/knowledge/bases/docs/files")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["file_count"] == 1
+    assert payload["total_size"] == len(b"body")
+    assert payload["files"][0]["path"] == "doc.md"
+    assert payload["files"][0]["size"] == len(b"body")
+    assert payload["files"][0]["modified"]
+
+
+def test_directory_guard_rejects_parent_traversal(tmp_path: Path) -> None:
+    """The guard must reject "..", which pathlib's lexical ``relative_to`` lets through.
+
+    This is the containment control that replaced ``resolve(strict=True)``. Without
+    it a "../*.md" include pattern yields a listing target at the parent directory
+    whose candidates pass every remaining per-file safety check.
+    """
+    root = tmp_path / "docs"
+    root.mkdir()
+    guard = knowledge_file_listing_module._DirectoryGuard(root=root)
+
+    assert guard.is_safe(root) is True
+    assert guard.is_safe(root / "..") is False
+    assert guard.is_safe(root / ".." / "..") is False
+    assert guard.is_safe(root / "nested" / ".." / ".." / "outside") is False
+
+
+def test_tracked_path_listing_rejects_parent_traversal_escape(tmp_path: Path) -> None:
+    """A tracked relative path that walks out of the knowledge root must stay excluded."""
+    docs_path = tmp_path / "docs"
+    docs_path.mkdir()
+    (tmp_path / "secret.md").write_text("secret outside root", encoding="utf-8")
+    (docs_path / "kept.md").write_text("kept", encoding="utf-8")
+    config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
+
+    files = knowledge_files_from_relative_paths(config, "docs", docs_path, ["kept.md", "../secret.md"])
+
+    assert [path.name for path in files] == ["kept.md"]
+
+
+def test_knowledge_base_config_rejects_parent_traversal_patterns() -> None:
+    """Config validation is the first containment layer, so the guard is never reached this way."""
+    with pytest.raises(ValidationError):
+        KnowledgeBaseConfig(path="./docs", include_patterns=["../*.md"])
+
+
+def test_tracked_path_listing_rejects_directories_and_missing_paths(tmp_path: Path) -> None:
+    """Only regular files survive the tracked-path safety checks."""
+    docs_path = tmp_path / "docs"
+    (docs_path / "directory.md").mkdir(parents=True)
+    (docs_path / "kept.md").write_text("kept", encoding="utf-8")
+    config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
+
+    files = knowledge_files_from_relative_paths(config, "docs", docs_path, ["kept.md", "directory.md", "gone.md"])
+
+    assert [path.name for path in files] == ["kept.md"]
 
 
 def test_knowledge_file_listing_skips_hidden_files_for_directory_bases(tmp_path: Path) -> None:
@@ -1500,8 +1748,15 @@ async def test_reindex_files_locked_records_files_vanishing_during_refresh(tmp_p
 
     vanished = (docs_path / "gone.md").resolve()
     vanished_files: set[str] = set()
-    indexed = await manager._reindex_files_locked([vanished], vanished_files=vanished_files)
+    indexed_signatures: dict[str, tuple[int, int, str]] = {}
+    indexed = await manager._reindex_files_locked(
+        [vanished],
+        knowledge=manager._knowledge,
+        indexed_signatures=indexed_signatures,
+        vanished_files=vanished_files,
+    )
     assert indexed == 0
+    assert indexed_signatures == {}
     assert vanished_files == {"gone.md"}
 
 
@@ -1532,41 +1787,31 @@ async def test_reindex_publishes_surviving_files_when_one_vanishes_mid_refresh(
 
     monkeypatch.setattr(KnowledgeManager, "_file_signature", vanishing_signature)
 
-    assert await manager.reindex_all() == 1
-    assert manager._last_refresh_error is None
-    assert "kept.md" in manager._indexed_files
-    assert "doomed.md" not in manager._indexed_files
+    assert await manager.reindex_all() == RefreshOutcome(indexed_count=1, published=True, error=None)
+    assert manager._has_vectors_for_source_path("kept.md", knowledge=manager._knowledge)
+    assert not manager._has_vectors_for_source_path("doomed.md", knowledge=manager._knowledge)
 
 
 def test_knowledge_file_listing_filters_unsupported_extensions_before_filesystem_safety_checks(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Unsupported files should not pay per-file symlink or strict resolve checks."""
+    """Unsupported files should not pay the per-file filesystem safety check."""
     docs_path = tmp_path / "docs"
     docs_path.mkdir()
     ignored_path = docs_path / "ignored.bin"
     ignored_path.write_bytes(b"not semantic")
     config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
 
-    original_is_symlink = Path.is_symlink
-    original_resolve = Path.resolve
+    original_lstat = Path.lstat
 
-    def _is_symlink(self: Path) -> bool:
+    def _lstat(self: Path, *args: object, **kwargs: object) -> os.stat_result:
         if self.name == ignored_path.name:
-            msg = "unsupported files should be filtered before symlink checks"
+            msg = "unsupported files should be filtered before the safety check"
             raise AssertionError(msg)
-        return original_is_symlink(self)
+        return original_lstat(self, *args, **kwargs)
 
-    def _resolve(self: Path, *args: object, **kwargs: object) -> Path:
-        strict = bool(args[0]) if args else bool(kwargs.get("strict", False))
-        if self.name == ignored_path.name and strict:
-            msg = "unsupported files should be filtered before strict resolution"
-            raise AssertionError(msg)
-        return original_resolve(self, *args, **kwargs)
-
-    monkeypatch.setattr(Path, "is_symlink", _is_symlink)
-    monkeypatch.setattr(Path, "resolve", _resolve)
+    monkeypatch.setattr(Path, "lstat", _lstat)
 
     assert list_knowledge_files(config, "docs", docs_path) == []
 
@@ -1672,8 +1917,11 @@ async def test_reindex_skips_files_whose_reader_dependency_is_missing(
     monkeypatch.setattr(knowledge_manager_module.ReaderFactory, "get_reader_for_extension", failing_get_reader)
     manager = KnowledgeManager("docs", config=config, runtime_paths=runtime_paths_for(config))
 
-    assert await manager.reindex_all() == 1
-    assert manager._last_refresh_error == "Indexed 1 of 2 managed knowledge files"
+    assert await manager.reindex_all() == RefreshOutcome(
+        indexed_count=1,
+        published=False,
+        error="Indexed 1 of 2 managed knowledge files",
+    )
 
 
 @pytest.mark.asyncio
@@ -1849,10 +2097,11 @@ async def test_cancelled_refresh_waiting_for_source_lock_does_not_touch_running_
         original_save_refreshing(*args, **kwargs)
         refreshing_write_count += 1
 
-    async def _blocked_reindex(self: KnowledgeManager) -> int:
+    async def _blocked_reindex(self: KnowledgeManager, *, force_reindex: bool = False) -> RefreshOutcome:
+        _ = force_reindex
         first_entered.set()
         await release_first.wait()
-        return await original_reindex(self)
+        return await original_reindex(self, force_reindex=force_reindex)
 
     monkeypatch.setattr(knowledge_refresh_runner, "mark_published_index_refresh_running", _track_refreshing_state)
     monkeypatch.setattr(KnowledgeManager, "reindex_all", _blocked_reindex)
@@ -1972,7 +2221,7 @@ def test_source_changed_updates_refresh_state_without_changing_index(tmp_path: P
     runtime_paths = runtime_paths_for(config)
     key = resolve_published_index_key("docs", config=config, runtime_paths=runtime_paths)
     manager = KnowledgeManager("docs", config=config, runtime_paths=runtime_paths)
-    default_collection = manager._default_collection_name()
+    default_collection = manager._collections.default_collection
     _VectorDb.collections[default_collection] = [
         {"content": "published old", "metadata": {"source_path": "guide.md"}},
     ]
@@ -2728,12 +2977,10 @@ async def test_git_ready_index_schedules_refresh_after_poll_interval(
     )
     runtime_paths = runtime_paths_for(config)
 
-    async def _sync_success(self: KnowledgeManager) -> dict[str, object]:
-        self._git_last_successful_commit = "rev-a"
-        _set_git_tracked_files(self, "doc.md")
-        return {"updated": False, "changed_count": 0, "removed_count": 0}
+    async def _sync_success(self: GitKnowledgeSource) -> GitSyncResult:
+        return _record_git_sync(self, GitSyncResult(head="rev-a", updated=False), "doc.md")
 
-    monkeypatch.setattr(KnowledgeManager, "sync_git_source", _sync_success)
+    monkeypatch.setattr(GitKnowledgeSource, "sync", _sync_success)
     await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
     key = resolve_published_index_key("docs", config=config, runtime_paths=runtime_paths)
     metadata_path = published_index_metadata_path(key)
@@ -2751,7 +2998,7 @@ async def test_git_ready_index_schedules_refresh_after_poll_interval(
         msg = "git ready access should not scan the local corpus"
         raise AssertionError(msg)
 
-    monkeypatch.setattr("mindroom.knowledge.manager.knowledge_source_signature", _unexpected_signature)
+    monkeypatch.setattr("mindroom.knowledge.manager._knowledge_source_signature", _unexpected_signature)
     _resolution = resolve_agent_knowledge_access(
         "helper",
         config,
@@ -2805,12 +3052,10 @@ async def test_private_git_schedule_refresh_on_access_honors_poll_interval(
     knowledge_path.mkdir(parents=True, exist_ok=True)
     (knowledge_path / "note.md").write_text("alice private git note", encoding="utf-8")
 
-    async def _sync_success(self: KnowledgeManager) -> dict[str, object]:
-        self._git_last_successful_commit = "rev-a"
-        _set_git_tracked_files(self, "note.md")
-        return {"updated": False, "changed_count": 0, "removed_count": 0}
+    async def _sync_success(self: GitKnowledgeSource) -> GitSyncResult:
+        return _record_git_sync(self, GitSyncResult(head="rev-a", updated=False), "note.md")
 
-    monkeypatch.setattr(KnowledgeManager, "sync_git_source", _sync_success)
+    monkeypatch.setattr(GitKnowledgeSource, "sync", _sync_success)
     await refresh_knowledge_binding(base_id, config=config, runtime_paths=runtime_paths, execution_identity=identity)
     scheduler = MagicMock()
     scheduler.is_refreshing = MagicMock(return_value=False)
@@ -2893,12 +3138,10 @@ async def test_private_git_updated_refresh_preserves_execution_identity(
     knowledge_path.mkdir(parents=True, exist_ok=True)
     (knowledge_path / "note.md").write_text("alice private git updated", encoding="utf-8")
 
-    async def _sync_updated(self: KnowledgeManager) -> dict[str, object]:
-        self._git_last_successful_commit = "rev-private"
-        _set_git_tracked_files(self, "note.md")
-        return {"updated": True, "changed_count": 1, "removed_count": 0}
+    async def _sync_updated(self: GitKnowledgeSource) -> GitSyncResult:
+        return _record_git_sync(self, GitSyncResult(head="rev-private", updated=True), "note.md")
 
-    monkeypatch.setattr(KnowledgeManager, "sync_git_source", _sync_updated)
+    monkeypatch.setattr(GitKnowledgeSource, "sync", _sync_updated)
 
     result = await refresh_knowledge_binding(
         base_id,
@@ -2943,16 +3186,16 @@ async def test_git_source_sync_does_not_mutate_index_directly(
     async def _git_checkout_present() -> bool:
         return True
 
-    monkeypatch.setattr(manager, "_sync_git_source_once", _sync_once)
-    monkeypatch.setattr(manager, "_git_rev_parse", _git_rev_parse)
-    monkeypatch.setattr(manager, "_git_checkout_present", _git_checkout_present)
+    monkeypatch.setattr(manager.git_source, "_sync_once", _sync_once)
+    monkeypatch.setattr(manager.git_source, "_rev_parse", _git_rev_parse)
+    monkeypatch.setattr(manager.git_source, "_checkout_present", _git_checkout_present)
 
-    result = await manager.sync_git_source()
+    result = await manager.git_source.sync()
 
     assert not hasattr(manager, "remove_file")
     assert not hasattr(manager, "index_file")
-    assert result == {"updated": True, "changed_count": 1, "removed_count": 1}
-    assert manager._git_last_successful_commit == "rev-source-only"
+    assert result == GitSyncResult(head="rev-source-only", updated=True)
+    assert manager.git_source.last_synced_head == "rev-source-only"
 
 
 @pytest.mark.asyncio
@@ -2979,11 +3222,10 @@ async def test_existing_published_index_is_used_while_refresh_runs(
         resolved_path: Path,
         *,
         upsert: bool,
-        knowledge: object | None = None,
-        indexed_files: set[str] | None = None,
-        indexed_signatures: dict[str, tuple[int, int, str] | None] | None = None,
+        knowledge: object,
+        indexed_signatures: dict[str, tuple[int, int, str]],
     ) -> bool:
-        if knowledge is not None and knowledge is not self._knowledge and not started.is_set():
+        if knowledge is not self._knowledge and not started.is_set():
             started.set()
             await release.wait()
         return await original_index_file_locked(
@@ -2991,7 +3233,6 @@ async def test_existing_published_index_is_used_while_refresh_runs(
             resolved_path,
             upsert=upsert,
             knowledge=knowledge,
-            indexed_files=indexed_files,
             indexed_signatures=indexed_signatures,
         )
 
@@ -3033,11 +3274,10 @@ async def test_cancelled_refresh_keeps_unpublished_candidate_for_resume(
         resolved_path: Path,
         *,
         upsert: bool,
-        knowledge: object | None = None,
-        indexed_files: set[str] | None = None,
-        indexed_signatures: dict[str, tuple[int, int, str] | None] | None = None,
+        knowledge: object,
+        indexed_signatures: dict[str, tuple[int, int, str]],
     ) -> bool:
-        if knowledge is not None and knowledge is not self._knowledge:
+        if knowledge is not self._knowledge:
             candidate_started.set()
             await asyncio.Event().wait()
         return await original_index_file_locked(
@@ -3045,7 +3285,6 @@ async def test_cancelled_refresh_keeps_unpublished_candidate_for_resume(
             resolved_path,
             upsert=upsert,
             knowledge=knowledge,
-            indexed_files=indexed_files,
             indexed_signatures=indexed_signatures,
         )
 
@@ -3096,19 +3335,17 @@ async def test_cancelled_publish_metadata_save_keeps_published_candidate_collect
     loop = asyncio.get_running_loop()
     metadata_saved = asyncio.Event()
     release_metadata_save = Event()
-    original_save = KnowledgeManager._save_persisted_index_state
 
-    def _block_after_candidate_metadata_save(
-        self: KnowledgeManager,
-        status: object,
-        **kwargs: object,
-    ) -> None:
-        original_save(self, status, **kwargs)
-        if status == "complete" and "_candidate_" in str(kwargs.get("collection")):
+    def _block_after_candidate_metadata_save(metadata_path: Path, state: PublishedIndexState) -> None:
+        save_published_index_state(metadata_path, state)
+        if state.status == "complete" and "_candidate_" in str(state.collection):
             loop.call_soon_threadsafe(metadata_saved.set)
             assert release_metadata_save.wait(timeout=5)
 
-    monkeypatch.setattr(KnowledgeManager, "_save_persisted_index_state", _block_after_candidate_metadata_save)
+    monkeypatch.setattr(
+        "mindroom.knowledge.manager.save_published_index_state",
+        _block_after_candidate_metadata_save,
+    )
 
     refresh_task = asyncio.create_task(refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths))
     await metadata_saved.wait()
@@ -3132,6 +3369,151 @@ async def test_cancelled_publish_metadata_save_keeps_published_candidate_collect
     assert [document.content for document in lookup.index.knowledge.search("metadata", max_results=5)] == [
         "candidate metadata",
     ]
+
+
+@pytest.mark.asyncio
+async def test_publish_metadata_save_finishes_before_repeated_cancellation_escapes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Repeated cancellation must not interrupt the metadata save drain."""
+    docs_path = tmp_path / "docs"
+    docs_path.mkdir()
+    config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
+    runtime_paths = runtime_paths_for(config)
+    manager = KnowledgeManager("docs", config=config, runtime_paths=runtime_paths)
+    candidate_vector_db = build_vector_db(manager._collections, candidate_collection_name(manager._collections))
+    loop = asyncio.get_running_loop()
+    save_started = asyncio.Event()
+    release_save = Event()
+
+    def _blocked_save(*_args: object, **_kwargs: object) -> None:
+        loop.call_soon_threadsafe(save_started.set)
+        assert release_save.wait(timeout=5)
+
+    monkeypatch.setattr("mindroom.knowledge.manager.save_published_index_state", _blocked_save)
+    save = asyncio.create_task(
+        manager._save_candidate_publish_metadata(
+            candidate_vector_db=candidate_vector_db,
+            indexed_count=0,
+            source_signature="source-signature",
+        ),
+    )
+    await save_started.wait()
+    try:
+        save.cancel()
+        await asyncio.sleep(0)
+        save.cancel()
+        await asyncio.sleep(0)
+        assert not save.done(), "repeated cancellation escaped before the metadata save finished"
+    finally:
+        release_save.set()
+
+    assert await save is True
+
+
+@pytest.mark.asyncio
+async def test_cancelled_publish_metadata_save_surfaces_a_failed_write(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A cancelled-but-failed metadata save must not report a publication."""
+    docs_path = tmp_path / "docs"
+    docs_path.mkdir()
+    config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
+    runtime_paths = runtime_paths_for(config)
+    manager = KnowledgeManager("docs", config=config, runtime_paths=runtime_paths)
+    candidate_vector_db = build_vector_db(manager._collections, candidate_collection_name(manager._collections))
+    loop = asyncio.get_running_loop()
+    save_started = asyncio.Event()
+    release_save = Event()
+
+    def _failed_save(*_args: object, **_kwargs: object) -> None:
+        loop.call_soon_threadsafe(save_started.set)
+        assert release_save.wait(timeout=5)
+        msg = "publish metadata write failed"
+        raise RuntimeError(msg)
+
+    monkeypatch.setattr("mindroom.knowledge.manager.save_published_index_state", _failed_save)
+    save = asyncio.create_task(
+        manager._save_candidate_publish_metadata(
+            candidate_vector_db=candidate_vector_db,
+            indexed_count=0,
+            source_signature="source-signature",
+        ),
+    )
+    await save_started.wait()
+    save.cancel()
+    await asyncio.sleep(0)
+    release_save.set()
+
+    with pytest.raises(RuntimeError, match="publish metadata write failed"):
+        await save
+
+
+@pytest.mark.asyncio
+async def test_publishing_states_every_field_of_the_state_file(tmp_path: Path) -> None:
+    """Publishing writes a whole state instead of dropping the fields it does not own.
+
+    The publish path used to hand a writer only the seven publication fields,
+    so the six the refresh job owns reverted to defaults nobody chose: the
+    timestamps went missing entirely and the failure streak silently reset,
+    and only the caller that marks the refresh succeeded put them back. The
+    writer now takes a whole state, so publication has to say what it means.
+    """
+    docs_path = tmp_path / "docs"
+    docs_path.mkdir()
+    config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
+    runtime_paths = runtime_paths_for(config)
+    manager = KnowledgeManager("docs", config=config, runtime_paths=runtime_paths)
+    key = resolve_published_index_key("docs", config=config, runtime_paths=runtime_paths)
+    metadata_path = published_index_metadata_path(key)
+    earlier = "2026-01-02T03:04:05+00:00"
+    save_published_index_state(
+        metadata_path,
+        PublishedIndexState(
+            settings=key.indexing_settings,
+            status="complete",
+            collection="docs_previous",
+            last_published_at=earlier,
+            published_revision="cafebabe",
+            indexed_count=1,
+            source_signature="previous-signature",
+            refresh_job="running",
+            reason="refreshing",
+            last_error="boom",
+            updated_at=earlier,
+            last_refresh_at=earlier,
+            consecutive_refresh_failures=3,
+        ),
+    )
+    candidate_vector_db = build_vector_db(manager._collections, candidate_collection_name(manager._collections))
+
+    assert (
+        await manager._save_candidate_publish_metadata(
+            candidate_vector_db=candidate_vector_db,
+            indexed_count=4,
+            source_signature="new-signature",
+        )
+        is False
+    )
+
+    payload = json.loads(metadata_path.read_text(encoding="utf-8"))
+    assert {"refresh_job", "consecutive_refresh_failures", "updated_at", "last_refresh_at"} <= set(payload)
+    state = load_published_index_state(metadata_path)
+    assert state is not None
+    assert (state.collection, state.indexed_count, state.source_signature) == (
+        candidate_vector_db.collection_name,
+        4,
+        "new-signature",
+    )
+    # Publication resolves the refresh job it belongs to, and stamps the write.
+    assert (state.refresh_job, state.reason, state.last_error) == ("idle", None, None)
+    assert state.consecutive_refresh_failures == 0
+    assert state.updated_at is not None
+    assert state.last_refresh_at is not None
+    assert state.updated_at > earlier
+    assert state.last_refresh_at > earlier
 
 
 @pytest.mark.asyncio
@@ -3244,7 +3626,8 @@ async def test_same_physical_binding_refreshes_are_serialized_across_config_chan
     max_active_refreshes = 0
     call_count = 0
 
-    async def _blocked_reindex(self: KnowledgeManager) -> int:
+    async def _blocked_reindex(self: KnowledgeManager, *, force_reindex: bool = False) -> RefreshOutcome:
+        _ = force_reindex
         _ = self
         nonlocal active_refreshes, max_active_refreshes, call_count
         active_refreshes += 1
@@ -3256,7 +3639,7 @@ async def test_same_physical_binding_refreshes_are_serialized_across_config_chan
                 await release_first.wait()
             else:
                 second_entered.set()
-            return 0
+            return RefreshOutcome(indexed_count=0, published=False, error=None)
         finally:
             active_refreshes -= 1
 
@@ -3295,11 +3678,12 @@ async def test_shared_source_mutation_waits_for_duplicate_base_refresh(
     release_refresh = asyncio.Event()
     mutation_entered = asyncio.Event()
 
-    async def _blocked_reindex(self: KnowledgeManager) -> int:
+    async def _blocked_reindex(self: KnowledgeManager, *, force_reindex: bool = False) -> RefreshOutcome:
+        _ = force_reindex
         _ = self
         refresh_entered.set()
         await release_refresh.wait()
-        return 0
+        return RefreshOutcome(indexed_count=0, published=False, error=None)
 
     async def _mutate_shared_source() -> None:
         async with knowledge_binding_mutation_lock("beta", config=config, runtime_paths=runtime_paths):
@@ -3560,7 +3944,7 @@ async def test_refresh_rebuilds_malformed_metadata_without_serving_old_collectio
     runtime_paths = runtime_paths_for(config)
     key = resolve_published_index_key("docs", config=config, runtime_paths=runtime_paths)
     manager = KnowledgeManager("docs", config=config, runtime_paths=runtime_paths)
-    default_collection = manager._default_collection_name()
+    default_collection = manager._collections.default_collection
     _VectorDb.collections[default_collection] = [
         {"content": "stale list old", "metadata": {"source_path": "doc.md"}},
     ]
@@ -3630,11 +4014,10 @@ async def test_failed_refresh_preserves_last_good_index(tmp_path: Path, monkeypa
         resolved_path: Path,
         *,
         upsert: bool,
-        knowledge: object | None = None,
-        indexed_files: set[str] | None = None,
-        indexed_signatures: dict[str, tuple[int, int, str] | None] | None = None,
+        knowledge: object,
+        indexed_signatures: dict[str, tuple[int, int, str]],
     ) -> bool:
-        if knowledge is not None and knowledge is not self._knowledge:
+        if knowledge is not self._knowledge:
             msg = "candidate failed"
             raise RuntimeError(msg)
         return await original_index_file_locked(
@@ -3642,7 +4025,6 @@ async def test_failed_refresh_preserves_last_good_index(tmp_path: Path, monkeypa
             resolved_path,
             upsert=upsert,
             knowledge=knowledge,
-            indexed_files=indexed_files,
             indexed_signatures=indexed_signatures,
         )
 
@@ -3678,19 +4060,14 @@ async def test_metadata_save_failure_after_candidate_index_keeps_serving_last_go
     runtime_paths = runtime_paths_for(config)
     await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
     doc.write_text("uncommitted candidate index", encoding="utf-8")
-    original_save = KnowledgeManager._save_persisted_index_state
 
-    def _fail_candidate_metadata_save(
-        self: KnowledgeManager,
-        status: object,
-        **kwargs: object,
-    ) -> None:
-        if status == "complete" and "_candidate_" in str(kwargs.get("collection")):
+    def _fail_candidate_metadata_save(metadata_path: Path, state: PublishedIndexState) -> None:
+        if state.status == "complete" and "_candidate_" in str(state.collection):
             msg = "metadata commit failed"
             raise OSError(msg)
-        original_save(self, status, **kwargs)
+        save_published_index_state(metadata_path, state)
 
-    monkeypatch.setattr(KnowledgeManager, "_save_persisted_index_state", _fail_candidate_metadata_save)
+    monkeypatch.setattr("mindroom.knowledge.manager.save_published_index_state", _fail_candidate_metadata_save)
     with pytest.raises(OSError, match="metadata commit failed"):
         await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
 
@@ -3731,9 +4108,8 @@ async def test_partial_refresh_after_cached_index_updates_failed_availability(
         resolved_path: Path,
         *,
         upsert: bool,
-        knowledge: object | None = None,
-        indexed_files: set[str] | None = None,
-        indexed_signatures: dict[str, tuple[int, int, str] | None] | None = None,
+        knowledge: object,
+        indexed_signatures: dict[str, tuple[int, int, str]],
     ) -> bool:
         if resolved_path.name == "bad.md":
             return False
@@ -3742,7 +4118,6 @@ async def test_partial_refresh_after_cached_index_updates_failed_availability(
             resolved_path,
             upsert=upsert,
             knowledge=knowledge,
-            indexed_files=indexed_files,
             indexed_signatures=indexed_signatures,
         )
 
@@ -4082,12 +4457,10 @@ async def test_corpus_changing_config_mismatch_returns_no_index(
     )
     runtime_paths = runtime_paths_for(config)
 
-    async def _sync_success(self: KnowledgeManager) -> dict[str, object]:
-        self._git_last_successful_commit = "rev-a"
-        _set_git_tracked_files(self, "doc.md")
-        return {"updated": True, "changed_count": 1, "removed_count": 0}
+    async def _sync_success(self: GitKnowledgeSource) -> GitSyncResult:
+        return _record_git_sync(self, GitSyncResult(head="rev-a", updated=True), "doc.md")
 
-    monkeypatch.setattr(KnowledgeManager, "sync_git_source", _sync_success)
+    monkeypatch.setattr(GitKnowledgeSource, "sync", _sync_success)
     await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
     changed_config = config.model_copy(deep=True)
     mutate(changed_config)
@@ -4162,11 +4535,10 @@ async def test_failed_refresh_after_config_change_preserves_published_settings(
         resolved_path: Path,
         *,
         upsert: bool,
-        knowledge: object | None = None,
-        indexed_files: set[str] | None = None,
-        indexed_signatures: dict[str, tuple[int, int, str] | None] | None = None,
+        knowledge: object,
+        indexed_signatures: dict[str, tuple[int, int, str]],
     ) -> bool:
-        _ = (self, resolved_path, upsert, knowledge, indexed_files, indexed_signatures)
+        _ = (self, resolved_path, upsert, knowledge, indexed_signatures)
         msg = "candidate failed"
         raise RuntimeError(msg)
 
@@ -4340,9 +4712,8 @@ async def test_first_time_partial_refresh_does_not_publish_ready_index(
         resolved_path: Path,
         *,
         upsert: bool,
-        knowledge: object | None = None,
-        indexed_files: set[str] | None = None,
-        indexed_signatures: dict[str, tuple[int, int, str] | None] | None = None,
+        knowledge: object,
+        indexed_signatures: dict[str, tuple[int, int, str]],
     ) -> bool:
         if resolved_path.name == "bad.md":
             return False
@@ -4351,7 +4722,6 @@ async def test_first_time_partial_refresh_does_not_publish_ready_index(
             resolved_path,
             upsert=upsert,
             knowledge=knowledge,
-            indexed_files=indexed_files,
             indexed_signatures=indexed_signatures,
         )
 
@@ -4412,12 +4782,13 @@ async def test_partial_refresh_error_includes_first_classified_file_error(
                 raise _embedder_auth_error()
             super().insert(path=path, metadata=metadata, upsert=upsert, reader=reader)
 
-    monkeypatch.setattr("mindroom.knowledge.manager.Knowledge", _AuthFailingKnowledge)
+    monkeypatch.setattr("mindroom.knowledge.collections.Knowledge", _AuthFailingKnowledge)
     manager = KnowledgeManager("docs", config=config, runtime_paths=runtime_paths_for(config))
 
-    assert await manager.reindex_all() == 1
-    assert manager._last_refresh_error == (
-        "Indexed 1 of 2 managed knowledge files (first error: embedder authentication failed (HTTP 401))"
+    assert await manager.reindex_all() == RefreshOutcome(
+        indexed_count=1,
+        published=False,
+        error="Indexed 1 of 2 managed knowledge files (first error: embedder authentication failed (HTTP 401))",
     )
 
 
@@ -4446,15 +4817,19 @@ async def test_vectorless_file_does_not_inherit_process_global_embedder_health(
             del path, metadata, upsert, reader
             embedder_health.capture_embedder_health_recorder().record("embedder authentication failed (HTTP 401)")
 
-    monkeypatch.setattr("mindroom.knowledge.manager.Knowledge", _SwallowingKnowledge)
+    monkeypatch.setattr("mindroom.knowledge.collections.Knowledge", _SwallowingKnowledge)
     embedder_health.capture_embedder_health_recorder().record(None)
     manager = KnowledgeManager("docs", config=config, runtime_paths=runtime_paths_for(config))
     try:
-        assert await manager.reindex_all() == 0
+        outcome = await manager.reindex_all()
     finally:
         embedder_health.capture_embedder_health_recorder().record(None)
 
-    assert manager._last_refresh_error == "Indexed 0 of 1 managed knowledge files"
+    assert outcome == RefreshOutcome(
+        indexed_count=0,
+        published=False,
+        error="Indexed 0 of 1 managed knowledge files",
+    )
 
 
 def test_refresh_failure_counter_increments_and_resets_preserving_last_good(tmp_path: Path) -> None:
@@ -4465,13 +4840,15 @@ def test_refresh_failure_counter_increments_and_resets_preserving_last_good(tmp_
     runtime_paths = runtime_paths_for(config)
     key = resolve_published_index_key("docs", config=config, runtime_paths=runtime_paths)
     metadata_path = published_index_metadata_path(key)
-    write_index_metadata_payload(
+    save_published_index_state(
         metadata_path,
-        settings=key.indexing_settings.to_metadata(),
-        status="complete",
-        collection="docs_live",
-        indexed_count=1,
-        source_signature="sig",
+        PublishedIndexState(
+            settings=key.indexing_settings,
+            status="complete",
+            collection="docs_live",
+            indexed_count=1,
+            source_signature="sig",
+        ),
     )
 
     knowledge_registry.mark_published_index_refresh_failed_preserving_last_good(key, error="boom 1")
@@ -4581,7 +4958,7 @@ async def test_cold_refresh_publishes_when_empty_file_produces_no_vectors(
             if Path(path).read_text(encoding="utf-8"):
                 super().insert(path=path, metadata=metadata, upsert=upsert, reader=reader)
 
-    monkeypatch.setattr("mindroom.knowledge.manager.Knowledge", _SkipEmptyKnowledge)
+    monkeypatch.setattr("mindroom.knowledge.collections.Knowledge", _SkipEmptyKnowledge)
 
     result = await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
     key = resolve_published_index_key("docs", config=config, runtime_paths=runtime_paths)
@@ -4622,11 +4999,10 @@ async def test_embedder_changing_partial_refresh_does_not_publish_old_index_unde
         resolved_path: Path,
         *,
         upsert: bool,
-        knowledge: object | None = None,
-        indexed_files: set[str] | None = None,
-        indexed_signatures: dict[str, tuple[int, int, str] | None] | None = None,
+        knowledge: object,
+        indexed_signatures: dict[str, tuple[int, int, str]],
     ) -> bool:
-        _ = (self, resolved_path, upsert, knowledge, indexed_files, indexed_signatures)
+        _ = (self, resolved_path, upsert, knowledge, indexed_signatures)
         return False
 
     monkeypatch.setattr(KnowledgeManager, "_index_file_locked", _partial_candidate)
@@ -4652,7 +5028,8 @@ async def test_cold_refresh_exception_surfaces_failed_availability_and_backoff(
     config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
     runtime_paths = runtime_paths_for(config)
 
-    async def _raise_reindex(self: KnowledgeManager) -> int:
+    async def _raise_reindex(self: KnowledgeManager, *, force_reindex: bool = False) -> RefreshOutcome:
+        _ = force_reindex
         _ = self
         msg = "cold refresh failed"
         raise RuntimeError(msg)
@@ -4861,11 +5238,12 @@ async def test_api_status_reports_direct_refresh_runner_reindex(
     started = asyncio.Event()
     release = asyncio.Event()
 
-    async def _blocked_reindex(self: KnowledgeManager) -> int:
+    async def _blocked_reindex(self: KnowledgeManager, *, force_reindex: bool = False) -> RefreshOutcome:
+        _ = force_reindex
         _ = self
         started.set()
         await release.wait()
-        return 0
+        return RefreshOutcome(indexed_count=0, published=False, error=None)
 
     monkeypatch.setattr(KnowledgeManager, "reindex_all", _blocked_reindex)
     refresh_task = asyncio.create_task(
@@ -6146,8 +6524,8 @@ async def test_private_agent_knowledge_schedules_refresh_when_source_changes(
         msg = "private READY access should not scan the local corpus"
         raise AssertionError(msg)
 
-    monkeypatch.setattr("mindroom.knowledge.manager.knowledge_source_signature", _unexpected_signature)
-    monkeypatch.setattr(knowledge_utils, "knowledge_source_signature", _unexpected_signature, raising=False)
+    monkeypatch.setattr("mindroom.knowledge.manager._knowledge_source_signature", _unexpected_signature)
+    monkeypatch.setattr(knowledge_utils, "_knowledge_source_signature", _unexpected_signature, raising=False)
     _resolution = resolve_agent_knowledge_access(
         "helper",
         config,
@@ -6197,6 +6575,9 @@ def test_private_agent_knowledge_bookkeeping_is_bounded(tmp_path: Path) -> None:
         knowledge_utils._MAX_REFRESH_SCHEDULED_COOLDOWNS,
         knowledge_refresh_runner._MAX_REFRESH_LOCKS,
     )
+    scheduler = MagicMock()
+    scheduler.is_refreshing = MagicMock(return_value=False)
+    scheduler.schedule_refresh = MagicMock()
 
     for index in range(max_entries + 40):
         identity = _identity(f"@user{index}:localhost")
@@ -6220,11 +6601,21 @@ def test_private_agent_knowledge_bookkeeping_is_bounded(tmp_path: Path) -> None:
             ),
             metadata_path=published_index_metadata_path(key),
         )
-        knowledge_utils._refresh_schedule_due(
-            refresh_target,
-            KnowledgeAvailability.READY,
-            settings=key.indexing_settings,
-            cooldown_seconds=300,
+        # Stamp through the production path, so deleting its prune call fails here.
+        knowledge_utils._schedule_refresh_for_availability(
+            scheduler,
+            base_id,
+            config=config,
+            runtime_paths=runtime_paths,
+            execution_identity=identity,
+            lookup=get_published_index(
+                base_id,
+                config=config,
+                runtime_paths=runtime_paths,
+                execution_identity=identity,
+            ),
+            availability=KnowledgeAvailability.STALE,
+            wall_now=datetime.now(tz=UTC),
         )
         _create_idle_refresh_lock(knowledge_registry.source_root_for_refresh_target(refresh_target))
 
@@ -6468,13 +6859,13 @@ async def test_local_noop_refresh_reports_published_index(tmp_path: Path, monkey
     reindex_count = 0
     original_reindex = KnowledgeManager.reindex_all
 
-    async def _track_reindex(self: KnowledgeManager) -> int:
+    async def _track_reindex(self: KnowledgeManager, *, force_reindex: bool = False) -> RefreshOutcome:
         nonlocal reindex_count
         reindex_count += 1
         if reindex_count > 1:
             msg = "unchanged local refresh should not reindex"
             raise AssertionError(msg)
-        return await original_reindex(self)
+        return await original_reindex(self, force_reindex=force_reindex)
 
     monkeypatch.setattr(KnowledgeManager, "reindex_all", _track_reindex)
 
@@ -6502,10 +6893,10 @@ async def test_local_refresh_reindexes_when_content_changes_with_same_mtime_and_
     reindex_count = 0
     original_reindex = KnowledgeManager.reindex_all
 
-    async def _track_reindex(self: KnowledgeManager) -> int:
+    async def _track_reindex(self: KnowledgeManager, *, force_reindex: bool = False) -> RefreshOutcome:
         nonlocal reindex_count
         reindex_count += 1
-        return await original_reindex(self)
+        return await original_reindex(self, force_reindex=force_reindex)
 
     monkeypatch.setattr(KnowledgeManager, "reindex_all", _track_reindex)
 
@@ -6536,10 +6927,10 @@ async def test_refresh_does_not_synthesize_missing_published_metadata(
     runtime_paths = runtime_paths_for(config)
     original_reindex = KnowledgeManager.reindex_all
 
-    async def _delete_metadata_after_reindex(self: KnowledgeManager) -> int:
-        indexed_count = await original_reindex(self)
+    async def _delete_metadata_after_reindex(self: KnowledgeManager, *, force_reindex: bool = False) -> RefreshOutcome:
+        outcome = await original_reindex(self, force_reindex=force_reindex)
         self._indexing_settings_path.unlink()
-        return indexed_count
+        return outcome
 
     monkeypatch.setattr(KnowledgeManager, "reindex_all", _delete_metadata_after_reindex)
 
@@ -6613,17 +7004,15 @@ async def test_git_refresh_syncs_before_reindex_and_publishes_revision_without_s
     order: list[str] = []
     original_reindex = KnowledgeManager.reindex_all
 
-    async def _sync_success(self: KnowledgeManager) -> dict[str, object]:
+    async def _sync_success(self: GitKnowledgeSource) -> GitSyncResult:
         order.append("sync")
-        self._git_last_successful_commit = "rev-git"
-        _set_git_tracked_files(self, "doc.md")
-        return {"updated": True, "changed_count": 1, "removed_count": 0}
+        return _record_git_sync(self, GitSyncResult(head="rev-git", updated=True), "doc.md")
 
-    async def _track_reindex(self: KnowledgeManager) -> int:
+    async def _track_reindex(self: KnowledgeManager, *, force_reindex: bool = False) -> RefreshOutcome:
         order.append("reindex")
-        return await original_reindex(self)
+        return await original_reindex(self, force_reindex=force_reindex)
 
-    monkeypatch.setattr(KnowledgeManager, "sync_git_source", _sync_success)
+    monkeypatch.setattr(GitKnowledgeSource, "sync", _sync_success)
     monkeypatch.setattr(KnowledgeManager, "reindex_all", _track_reindex)
 
     result = await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
@@ -6635,7 +7024,7 @@ async def test_git_refresh_syncs_before_reindex_and_publishes_revision_without_s
     assert order == ["sync", "reindex"]
     assert state is not None
     assert state.published_revision == "rev-git"
-    assert state.source_signature == knowledge_source_signature(
+    assert state.source_signature == _knowledge_source_signature(
         config,
         "docs",
         docs_path,
@@ -6645,45 +7034,97 @@ async def test_git_refresh_syncs_before_reindex_and_publishes_revision_without_s
     assert "x-oauth-basic" not in metadata_text
 
 
+def _git_noop_config(tmp_path: Path, *, files: tuple[str, ...] = ("doc.md",)) -> tuple[Config, RuntimePaths]:
+    """Build a Git-backed base used by the revision-gating tests."""
+    docs_path = tmp_path / "docs"
+    docs_path.mkdir()
+    for name in files:
+        (docs_path / name).write_text("git index", encoding="utf-8")
+    config = _config(
+        tmp_path,
+        bases={"docs": docs_path},
+        agent_bases=["docs"],
+        git_configs={"docs": KnowledgeGitConfig(repo_url="https://example.com/org/repo.git", branch="main")},
+    )
+    return config, runtime_paths_for(config)
+
+
+def _install_git_sync_results(
+    monkeypatch: pytest.MonkeyPatch,
+    results: list[GitSyncResult],
+    *,
+    tracked: tuple[str, ...] = ("doc.md",),
+) -> None:
+    """Drive Git source sync through a fixed sequence of poll outcomes."""
+
+    async def _sync(self: GitKnowledgeSource) -> GitSyncResult:
+        return _record_git_sync(self, results.pop(0), *tracked)
+
+    monkeypatch.setattr(GitKnowledgeSource, "sync", _sync)
+
+
+def _install_git_revisions(monkeypatch: pytest.MonkeyPatch, revisions: list[str | None]) -> None:
+    """Return a fixed sequence of ``git rev-parse`` results, repeating the last."""
+    pending = list(revisions)
+
+    async def _rev_parse(self: KnowledgeManager, ref: str) -> str | None:
+        del self, ref
+        return pending.pop(0) if len(pending) > 1 else pending[0]
+
+    monkeypatch.setattr(GitKnowledgeSource, "_rev_parse", _rev_parse)
+
+
+@dataclass
+class _SignatureCounter:
+    """Count corpus-hash calls made through one module's imported binding."""
+
+    calls: int = 0
+
+
+def _install_counting_signature(monkeypatch: pytest.MonkeyPatch, module: ModuleType) -> _SignatureCounter:
+    """Count ``_knowledge_source_signature`` calls without changing its behavior."""
+    counter = _SignatureCounter()
+    original_signature = module._knowledge_source_signature
+
+    def _counting_signature(
+        config: Config,
+        base_id: str,
+        knowledge_root: Path,
+        *,
+        tracked_relative_paths: Iterable[str] | None = None,
+    ) -> str:
+        counter.calls += 1
+        return original_signature(config, base_id, knowledge_root, tracked_relative_paths=tracked_relative_paths)
+
+    monkeypatch.setattr(module, "_knowledge_source_signature", _counting_signature)
+    return counter
+
+
 @pytest.mark.asyncio
 async def test_git_noop_refresh_skips_full_reindex_when_index_is_complete(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """An unchanged Git poll should update sync metadata without rebuilding the collection."""
-    docs_path = tmp_path / "docs"
-    docs_path.mkdir()
-    (docs_path / "doc.md").write_text("git index", encoding="utf-8")
-    git_config = KnowledgeGitConfig(repo_url="https://example.com/org/repo.git", branch="main")
-    config = _config(
-        tmp_path,
-        bases={"docs": docs_path},
-        agent_bases=["docs"],
-        git_configs={"docs": git_config},
+    config, runtime_paths = _git_noop_config(tmp_path)
+    _install_git_sync_results(
+        monkeypatch,
+        [
+            GitSyncResult(head="rev-a", updated=True),
+            GitSyncResult(head="rev-b", updated=False),
+        ],
     )
-    runtime_paths = runtime_paths_for(config)
-    sync_results = [
-        {"updated": True, "changed_count": 1, "removed_count": 0, "commit": "rev-a"},
-        {"updated": False, "changed_count": 0, "removed_count": 0, "commit": "rev-b"},
-    ]
     reindex_count = 0
     original_reindex = KnowledgeManager.reindex_all
 
-    async def _sync(self: KnowledgeManager) -> dict[str, object]:
-        result = sync_results.pop(0)
-        self._git_last_successful_commit = str(result["commit"])
-        _set_git_tracked_files(self, "doc.md")
-        return result
-
-    async def _track_reindex(self: KnowledgeManager) -> int:
+    async def _track_reindex(self: KnowledgeManager, *, force_reindex: bool = False) -> RefreshOutcome:
         nonlocal reindex_count
         reindex_count += 1
         if reindex_count > 1:
             msg = "unchanged git poll should not reindex"
             raise AssertionError(msg)
-        return await original_reindex(self)
+        return await original_reindex(self, force_reindex=force_reindex)
 
-    monkeypatch.setattr(KnowledgeManager, "sync_git_source", _sync)
     monkeypatch.setattr(KnowledgeManager, "reindex_all", _track_reindex)
 
     await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
@@ -6706,11 +7147,203 @@ async def test_git_noop_refresh_skips_full_reindex_when_index_is_complete(
 
 
 @pytest.mark.asyncio
+async def test_git_noop_refresh_skips_corpus_hash_when_revision_is_unchanged(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unmoved Git revision proves the corpus is unchanged without reading every file."""
+    config, runtime_paths = _git_noop_config(tmp_path)
+    _install_git_sync_results(
+        monkeypatch,
+        [
+            GitSyncResult(head="rev-a", updated=True),
+            GitSyncResult(head="rev-a", updated=False),
+        ],
+    )
+    await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+
+    def _unexpected_signature(*_args: object, **_kwargs: object) -> str:
+        msg = "an unchanged Git revision must not re-hash the corpus"
+        raise AssertionError(msg)
+
+    monkeypatch.setattr(knowledge_manager_module, "_knowledge_source_signature", _unexpected_signature)
+    result = await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+
+    key = resolve_published_index_key("docs", config=config, runtime_paths=runtime_paths)
+    state = load_published_index_state(published_index_metadata_path(key))
+    assert result.index_published is True
+    assert result.availability is KnowledgeAvailability.READY
+    assert state is not None
+    assert state.published_revision == "rev-a"
+
+
+@pytest.mark.asyncio
+async def test_git_noop_refresh_hashes_corpus_when_revision_moved(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A revision the published index was not built from still needs content verification."""
+    config, runtime_paths = _git_noop_config(tmp_path)
+    _install_git_sync_results(
+        monkeypatch,
+        [
+            GitSyncResult(head="rev-a", updated=True),
+            GitSyncResult(head="rev-b", updated=False),
+        ],
+    )
+    await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+
+    counter = _install_counting_signature(monkeypatch, knowledge_manager_module)
+    result = await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+
+    assert counter.calls == 1
+    assert result.index_published is True
+
+
+@pytest.mark.asyncio
+async def test_git_noop_refresh_hashes_corpus_when_index_predates_revision_tracking(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An index published without a recorded revision cannot be trusted by revision alone."""
+    config, runtime_paths = _git_noop_config(tmp_path)
+    _install_git_sync_results(
+        monkeypatch,
+        [
+            GitSyncResult(head="rev-a", updated=True),
+            GitSyncResult(head="rev-a", updated=False),
+        ],
+    )
+    await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+    key = resolve_published_index_key("docs", config=config, runtime_paths=runtime_paths)
+    metadata_path = published_index_metadata_path(key)
+    published = load_published_index_state(metadata_path)
+    assert published is not None
+    save_published_index_state(metadata_path, replace(published, published_revision=None))
+
+    counter = _install_counting_signature(monkeypatch, knowledge_manager_module)
+    await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+
+    assert counter.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_reindex_skips_live_corpus_hash_when_revision_is_stable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A Git revision that held still proves the source did not move while the pass ran."""
+    config, runtime_paths = _git_noop_config(tmp_path)
+    _install_git_sync_results(
+        monkeypatch,
+        [GitSyncResult(head="rev-a", updated=True)],
+    )
+    _install_git_revisions(monkeypatch, ["rev-a"])
+
+    def _unexpected_signature(*_args: object, **_kwargs: object) -> str:
+        msg = "a stable Git revision must not re-hash the corpus after indexing"
+        raise AssertionError(msg)
+
+    monkeypatch.setattr(knowledge_manager_module, "_knowledge_source_signature", _unexpected_signature)
+
+    result = await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+
+    assert result.index_published is True
+    assert result.indexed_count == 1
+
+
+@pytest.mark.asyncio
+async def test_reindex_does_not_publish_a_corpus_truncated_by_a_transient_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A file lost to a transient stat error must not publish as a complete index.
+
+    Files whose signature scan raises are dropped from the pass's own completeness
+    accounting, so the post-pass check is the only thing standing between a
+    truncated corpus and publication. Once published at a revision, the unchanged
+    fast path would keep republishing it, so the file would never come back.
+    """
+    config, runtime_paths = _git_noop_config(tmp_path, files=("keep.md", "flaky.md"))
+    _install_git_sync_results(
+        monkeypatch,
+        [GitSyncResult(head="rev-a", updated=True)],
+        tracked=("keep.md", "flaky.md"),
+    )
+    _install_git_revisions(monkeypatch, ["rev-a"])
+
+    original_file_signature = KnowledgeManager._file_signature
+    remaining_failures = {"flaky.md": 1}
+
+    def _flaky_signature(self: KnowledgeManager, file_path: Path) -> tuple[int, int, str]:
+        if remaining_failures.get(file_path.name):
+            remaining_failures[file_path.name] -= 1
+            raise OSError(116, "Stale file handle")
+        return original_file_signature(self, file_path)
+
+    monkeypatch.setattr(KnowledgeManager, "_file_signature", _flaky_signature)
+
+    result = await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+
+    assert result.indexed_count == 2
+    key = resolve_published_index_key("docs", config=config, runtime_paths=runtime_paths)
+    state = load_published_index_state(published_index_metadata_path(key))
+    assert state is not None
+    assert state.indexed_count == 2
+
+
+@pytest.mark.asyncio
+async def test_reindex_reconciles_when_revision_moves_mid_pass(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A revision that moved while the pass ran must reconcile before publishing."""
+    config, runtime_paths = _git_noop_config(tmp_path)
+    _install_git_sync_results(
+        monkeypatch,
+        [GitSyncResult(head="rev-a", updated=True)],
+    )
+    # Round one starts at rev-a and finds rev-b after indexing; round two is stable.
+    _install_git_revisions(monkeypatch, ["rev-a", "rev-b", "rev-b"])
+
+    with capture_logs() as logs:
+        result = await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+
+    events = [entry.get("event") for entry in logs]
+    assert "Knowledge source changed during refresh; reconciling candidate" in events
+    assert result.index_published is True
+
+
+@pytest.mark.asyncio
+async def test_reindex_hashes_live_corpus_for_non_git_bases(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A local base has no revision to trust, so it still verifies by content."""
+    docs_path = tmp_path / "docs"
+    docs_path.mkdir()
+    (docs_path / "doc.md").write_text("local index", encoding="utf-8")
+    config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
+    runtime_paths = runtime_paths_for(config)
+
+    counter = _install_counting_signature(monkeypatch, knowledge_manager_module)
+    result = await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+
+    assert counter.calls >= 1
+    assert result.index_published is True
+
+
+@pytest.mark.asyncio
 async def test_git_noop_refresh_ignores_untracked_indexable_file_changes(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Git-backed corpora use tracked files only and ignore untracked checkout files."""
+    """Git-backed corpora use tracked files only and ignore untracked checkout files.
+
+    The second poll reports a moved revision on purpose. An unmoved revision
+    short-circuits change detection entirely, which would let this test pass
+    without ever exercising the tracked-only filtering it exists to pin.
+    """
     docs_path = tmp_path / "docs"
     docs_path.mkdir()
     (docs_path / "doc.md").write_text("git tracked index", encoding="utf-8")
@@ -6723,24 +7356,21 @@ async def test_git_noop_refresh_ignores_untracked_indexable_file_changes(
     )
     runtime_paths = runtime_paths_for(config)
     sync_results = [
-        {"updated": True, "changed_count": 1, "removed_count": 0, "commit": "rev-a"},
-        {"updated": False, "changed_count": 0, "removed_count": 0, "commit": "rev-a"},
+        GitSyncResult(head="rev-a", updated=True),
+        GitSyncResult(head="rev-b", updated=False),
     ]
     reindex_count = 0
     original_reindex = KnowledgeManager.reindex_all
 
-    async def _sync(self: KnowledgeManager) -> dict[str, object]:
-        result = sync_results.pop(0)
-        self._git_last_successful_commit = str(result["commit"])
-        _set_git_tracked_files(self, "doc.md")
-        return result
+    async def _sync(self: GitKnowledgeSource) -> GitSyncResult:
+        return _record_git_sync(self, sync_results.pop(0), "doc.md")
 
-    async def _track_reindex(self: KnowledgeManager) -> int:
+    async def _track_reindex(self: KnowledgeManager, *, force_reindex: bool = False) -> RefreshOutcome:
         nonlocal reindex_count
         reindex_count += 1
-        return await original_reindex(self)
+        return await original_reindex(self, force_reindex=force_reindex)
 
-    monkeypatch.setattr(KnowledgeManager, "sync_git_source", _sync)
+    monkeypatch.setattr(GitKnowledgeSource, "sync", _sync)
     monkeypatch.setattr(KnowledgeManager, "reindex_all", _track_reindex)
 
     await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
@@ -6762,7 +7392,7 @@ async def test_git_noop_refresh_rebuilds_when_collection_is_missing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """An unchanged Git poll must not let Agno auto-create a Chroma collection for a missing index."""
-    monkeypatch.setattr("mindroom.knowledge.manager.Knowledge", _AutoCreatingKnowledge)
+    monkeypatch.setattr("mindroom.knowledge.collections.Knowledge", _AutoCreatingKnowledge)
     docs_path = tmp_path / "docs"
     docs_path.mkdir()
     (docs_path / "doc.md").write_text("git repaired", encoding="utf-8")
@@ -6775,24 +7405,21 @@ async def test_git_noop_refresh_rebuilds_when_collection_is_missing(
     )
     runtime_paths = runtime_paths_for(config)
     sync_results = [
-        {"updated": True, "changed_count": 1, "removed_count": 0, "commit": "rev-a"},
-        {"updated": False, "changed_count": 0, "removed_count": 0, "commit": "rev-a"},
+        GitSyncResult(head="rev-a", updated=True),
+        GitSyncResult(head="rev-a", updated=False),
     ]
     reindex_count = 0
     original_reindex = KnowledgeManager.reindex_all
 
-    async def _sync(self: KnowledgeManager) -> dict[str, object]:
-        result = sync_results.pop(0)
-        self._git_last_successful_commit = str(result["commit"])
-        _set_git_tracked_files(self, "doc.md")
-        return result
+    async def _sync(self: GitKnowledgeSource) -> GitSyncResult:
+        return _record_git_sync(self, sync_results.pop(0), "doc.md")
 
-    async def _track_reindex(self: KnowledgeManager) -> int:
+    async def _track_reindex(self: KnowledgeManager, *, force_reindex: bool = False) -> RefreshOutcome:
         nonlocal reindex_count
         reindex_count += 1
-        return await original_reindex(self)
+        return await original_reindex(self, force_reindex=force_reindex)
 
-    monkeypatch.setattr(KnowledgeManager, "sync_git_source", _sync)
+    monkeypatch.setattr(GitKnowledgeSource, "sync", _sync)
     monkeypatch.setattr(KnowledgeManager, "reindex_all", _track_reindex)
 
     await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
@@ -6866,24 +7493,21 @@ async def test_git_noop_refresh_rebuilds_after_chunking_config_change(
     changed_config = config.model_copy(deep=True)
     changed_config.knowledge_bases["docs"].chunk_size = 1024
     sync_results = [
-        {"updated": True, "changed_count": 1, "removed_count": 0, "commit": "rev-a"},
-        {"updated": False, "changed_count": 0, "removed_count": 0, "commit": "rev-a"},
+        GitSyncResult(head="rev-a", updated=True),
+        GitSyncResult(head="rev-a", updated=False),
     ]
     reindex_count = 0
     original_reindex = KnowledgeManager.reindex_all
 
-    async def _sync(self: KnowledgeManager) -> dict[str, object]:
-        result = sync_results.pop(0)
-        self._git_last_successful_commit = str(result["commit"])
-        _set_git_tracked_files(self, "doc.md")
-        return result
+    async def _sync(self: GitKnowledgeSource) -> GitSyncResult:
+        return _record_git_sync(self, sync_results.pop(0), "doc.md")
 
-    async def _track_reindex(self: KnowledgeManager) -> int:
+    async def _track_reindex(self: KnowledgeManager, *, force_reindex: bool = False) -> RefreshOutcome:
         nonlocal reindex_count
         reindex_count += 1
-        return await original_reindex(self)
+        return await original_reindex(self, force_reindex=force_reindex)
 
-    monkeypatch.setattr(KnowledgeManager, "sync_git_source", _sync)
+    monkeypatch.setattr(GitKnowledgeSource, "sync", _sync)
     monkeypatch.setattr(KnowledgeManager, "reindex_all", _track_reindex)
 
     await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
@@ -6918,24 +7542,21 @@ async def test_force_git_reindex_bypasses_noop_fast_path(
     )
     runtime_paths = runtime_paths_for(config)
     sync_results = [
-        {"updated": True, "changed_count": 1, "removed_count": 0, "commit": "rev-a"},
-        {"updated": False, "changed_count": 0, "removed_count": 0, "commit": "rev-a"},
+        GitSyncResult(head="rev-a", updated=True),
+        GitSyncResult(head="rev-a", updated=False),
     ]
     reindex_count = 0
     original_reindex = KnowledgeManager.reindex_all
 
-    async def _sync(self: KnowledgeManager) -> dict[str, object]:
-        result = sync_results.pop(0)
-        self._git_last_successful_commit = str(result["commit"])
-        _set_git_tracked_files(self, "doc.md")
-        return result
+    async def _sync(self: GitKnowledgeSource) -> GitSyncResult:
+        return _record_git_sync(self, sync_results.pop(0), "doc.md")
 
-    async def _track_reindex(self: KnowledgeManager) -> int:
+    async def _track_reindex(self: KnowledgeManager, *, force_reindex: bool = False) -> RefreshOutcome:
         nonlocal reindex_count
         reindex_count += 1
-        return await original_reindex(self)
+        return await original_reindex(self, force_reindex=force_reindex)
 
-    monkeypatch.setattr(KnowledgeManager, "sync_git_source", _sync)
+    monkeypatch.setattr(GitKnowledgeSource, "sync", _sync)
     monkeypatch.setattr(KnowledgeManager, "reindex_all", _track_reindex)
 
     await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
@@ -6977,20 +7598,18 @@ async def test_git_sync_failure_preserves_last_good_index_and_redacts_error(
     )
     runtime_paths = runtime_paths_for(config)
 
-    async def _sync_success(self: KnowledgeManager) -> dict[str, object]:
-        self._git_last_successful_commit = "rev-ok"
-        _set_git_tracked_files(self, "doc.md")
-        return {"updated": True, "changed_count": 1, "removed_count": 0}
+    async def _sync_success(self: GitKnowledgeSource) -> GitSyncResult:
+        return _record_git_sync(self, GitSyncResult(head="rev-ok", updated=True), "doc.md")
 
-    monkeypatch.setattr(KnowledgeManager, "sync_git_source", _sync_success)
+    monkeypatch.setattr(GitKnowledgeSource, "sync", _sync_success)
     await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
 
-    async def _sync_failure(self: KnowledgeManager) -> dict[str, object]:
+    async def _sync_failure(self: GitKnowledgeSource) -> GitSyncResult:
         _ = self
         msg = "fetch failed https://ghp_secret:x-oauth-basic@example.com/org/repo.git"
         raise RuntimeError(msg)
 
-    monkeypatch.setattr(KnowledgeManager, "sync_git_source", _sync_failure)
+    monkeypatch.setattr(GitKnowledgeSource, "sync", _sync_failure)
     with pytest.raises(RuntimeError, match="fetch failed"):
         await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
 
@@ -7030,12 +7649,12 @@ async def test_cold_git_sync_failure_records_failed_availability_and_redacted_er
     )
     runtime_paths = runtime_paths_for(config)
 
-    async def _sync_failure(self: KnowledgeManager) -> dict[str, object]:
+    async def _sync_failure(self: GitKnowledgeSource) -> GitSyncResult:
         _ = self
         msg = "clone failed https://ghp_secret:x-oauth-basic@example.com/org/repo.git"
         raise RuntimeError(msg)
 
-    monkeypatch.setattr(KnowledgeManager, "sync_git_source", _sync_failure)
+    monkeypatch.setattr(GitKnowledgeSource, "sync", _sync_failure)
 
     with pytest.raises(RuntimeError, match="clone failed"):
         await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
@@ -7147,12 +7766,10 @@ async def test_git_refresh_marks_duplicate_source_sibling_stale(
     )
     runtime_paths = runtime_paths_for(config)
 
-    async def _sync_updated(self: KnowledgeManager) -> dict[str, object]:
-        self._git_last_successful_commit = f"rev-{self.base_id}"
-        _set_git_tracked_files(self, "doc.md")
-        return {"updated": True, "changed_count": 1, "removed_count": 0}
+    async def _sync_updated(self: GitKnowledgeSource) -> GitSyncResult:
+        return _record_git_sync(self, GitSyncResult(head=f"rev-{self.base_id}", updated=True), "doc.md")
 
-    monkeypatch.setattr(KnowledgeManager, "sync_git_source", _sync_updated)
+    monkeypatch.setattr(GitKnowledgeSource, "sync", _sync_updated)
 
     await refresh_knowledge_binding("alpha", config=config, runtime_paths=runtime_paths)
     await refresh_knowledge_binding("beta", config=config, runtime_paths=runtime_paths)
@@ -7252,7 +7869,7 @@ async def test_git_credentials_service_token_stays_out_of_git_config_and_metadat
             return "rev-auth\n"
         return ""
 
-    monkeypatch.setattr(KnowledgeManager, "_run_git", _fake_run_git)
+    monkeypatch.setattr(GitKnowledgeSource, "_run_git", _fake_run_git)
 
     result = await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
     key = resolve_published_index_key("docs", config=config, runtime_paths=runtime_paths)
@@ -7314,7 +7931,7 @@ async def test_git_embedded_userinfo_url_is_not_reused_in_git_auth_env(
             return "rev-userinfo\n"
         return ""
 
-    monkeypatch.setattr(KnowledgeManager, "_run_git", _fake_run_git)
+    monkeypatch.setattr(GitKnowledgeSource, "_run_git", _fake_run_git)
 
     result = await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
     clone_env = clone_envs[0]
@@ -7376,7 +7993,7 @@ async def test_git_unsupported_scheme_userinfo_is_not_copied_to_git_config_env(
             return "rev-unsupported-userinfo\n"
         return ""
 
-    monkeypatch.setattr(KnowledgeManager, "_run_git", _fake_run_git)
+    monkeypatch.setattr(GitKnowledgeSource, "_run_git", _fake_run_git)
 
     result = await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
     key = resolve_published_index_key("docs", config=config, runtime_paths=runtime_paths)
@@ -7460,7 +8077,7 @@ async def test_git_query_and_fragment_tokens_stay_out_of_persistent_remote_and_m
             return "rev-query\n"
         return ""
 
-    monkeypatch.setattr(KnowledgeManager, "_run_git", _fake_run_git)
+    monkeypatch.setattr(GitKnowledgeSource, "_run_git", _fake_run_git)
 
     result = await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
     key = resolve_published_index_key("docs", config=config, runtime_paths=runtime_paths)
@@ -7477,6 +8094,74 @@ async def test_git_query_and_fragment_tokens_stay_out_of_persistent_remote_and_m
     assert "query-secret" not in metadata_text
     assert "frag-secret" not in metadata_text
     assert redact_url_credentials(config.knowledge_bases["docs"].git.repo_url) == clean_url
+
+
+@pytest.mark.asyncio
+async def test_git_pull_that_changes_one_file_only_reindexes_that_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A one-file commit must cost one file's indexing, not the whole checkout's."""
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", os.devnull)
+    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
+    remote_work = tmp_path / "remote-work"
+    remote_work.mkdir()
+
+    async def _git(cwd: Path, *args: str) -> None:
+        await asyncio.to_thread(
+            subprocess.run,
+            ["git", *args],
+            cwd=cwd,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
+    await _git(remote_work, "init", "-b", "main")
+    await _git(remote_work, "config", "user.email", "tests@example.com")
+    await _git(remote_work, "config", "user.name", "MindRoom Tests")
+    for index in range(5):
+        (remote_work / f"doc{index}.md").write_text(f"original body {index}", encoding="utf-8")
+    await _git(remote_work, "add", ".")
+    await _git(remote_work, "commit", "-m", "seed")
+    remote_bare = tmp_path / "remote.git"
+    await asyncio.to_thread(
+        subprocess.run,
+        ["git", "clone", "--bare", str(remote_work), str(remote_bare)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    docs_path = tmp_path / "checkout"
+    config = _config(
+        tmp_path,
+        bases={"docs": docs_path},
+        agent_bases=["docs"],
+        git_configs={"docs": KnowledgeGitConfig(repo_url=str(remote_bare), branch="main")},
+    )
+    runtime_paths = runtime_paths_for(config)
+    first = await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+    assert first.indexed_count == 5
+
+    (remote_work / "doc2.md").write_text("rewritten body 2", encoding="utf-8")
+    await _git(remote_work, "commit", "-am", "change one file")
+    await _git(remote_work, "push", str(remote_bare), "main")
+
+    second = await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+
+    assert second.index_published is True
+    assert second.indexed_count == 1, "the whole checkout was reindexed for a one-file commit"
+    lookup = get_published_index("docs", config=config, runtime_paths=runtime_paths)
+    assert lookup.index is not None
+    contents = sorted(document.content for document in lookup.index.knowledge.search("body", max_results=10))
+    assert contents == [
+        "original body 0",
+        "original body 1",
+        "original body 3",
+        "original body 4",
+        "rewritten body 2",
+    ]
 
 
 @pytest.mark.asyncio
@@ -7600,10 +8285,10 @@ async def test_git_worktree_checkout_file_is_detected_for_sync_listing_and_api_s
     )
     runtime_paths = runtime_paths_for(config)
     manager = KnowledgeManager("docs", config=config, runtime_paths=runtime_paths)
-    resolved_git_config = manager._git_config()
+    resolved_git_config = manager.git_source._git_config()
     assert resolved_git_config is not None
 
-    cloned = await manager._ensure_git_repository(resolved_git_config)
+    cloned = await manager.git_source._ensure_repository(resolved_git_config)
 
     assert cloned is False
     assert git_checkout_present(docs_path)
@@ -7665,16 +8350,14 @@ async def test_git_updated_stale_registry_mark_uses_async_registry_path(
     event_loop_thread = get_ident()
     mark_threads: list[int] = []
 
-    async def _sync_updated(self: KnowledgeManager) -> dict[str, object]:
-        self._git_last_successful_commit = "rev-updated"
-        _set_git_tracked_files(self, "doc.md")
-        return {"updated": True, "changed_count": 1, "removed_count": 0}
+    async def _sync_updated(self: GitKnowledgeSource) -> GitSyncResult:
+        return _record_git_sync(self, GitSyncResult(head="rev-updated", updated=True), "doc.md")
 
     async def _record_mark_thread(*_args: object, **_kwargs: object) -> tuple[str, ...]:
         mark_threads.append(get_ident())
         return ("docs",)
 
-    monkeypatch.setattr(KnowledgeManager, "sync_git_source", _sync_updated)
+    monkeypatch.setattr(GitKnowledgeSource, "sync", _sync_updated)
     monkeypatch.setattr(knowledge_refresh_runner, "mark_knowledge_source_changed_async", _record_mark_thread)
 
     await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
@@ -7762,12 +8445,12 @@ async def test_sync_git_source_once_unchanged_head_skips_worktree_scan(
         git_calls.append(args)
         return ""
 
-    monkeypatch.setattr(manager, "_ensure_git_repository", _fake_ensure_git_repository)
-    monkeypatch.setattr(manager, "_git_rev_parse", _fake_git_rev_parse)
-    monkeypatch.setattr(manager, "_git_list_tracked_files", _unexpected_git_list_tracked_files)
-    monkeypatch.setattr(manager, "_run_git", _fake_run_git)
+    monkeypatch.setattr(manager.git_source, "_ensure_repository", _fake_ensure_git_repository)
+    monkeypatch.setattr(manager.git_source, "_rev_parse", _fake_git_rev_parse)
+    monkeypatch.setattr(manager.git_source, "_list_tracked_files", _unexpected_git_list_tracked_files)
+    monkeypatch.setattr(manager.git_source, "_run_git", _fake_run_git)
 
-    changed_files, removed_files, updated = await manager._sync_git_source_once(manager._git_config())
+    changed_files, removed_files, updated = await manager.git_source._sync_once(manager.git_source._git_config())
 
     assert updated is False
     assert changed_files == set()
@@ -7801,12 +8484,12 @@ async def test_sync_git_source_once_skips_repeated_lfs_pull_for_already_hydrated
         git_calls.append(args)
         return ""
 
-    monkeypatch.setattr(manager, "_ensure_git_repository", _fake_ensure_git_repository)
-    monkeypatch.setattr(manager, "_git_rev_parse", _fake_git_rev_parse)
-    monkeypatch.setattr(manager, "_git_list_tracked_files", _fake_git_list_tracked_files)
-    monkeypatch.setattr(manager, "_run_git", _fake_run_git)
+    monkeypatch.setattr(manager.git_source, "_ensure_repository", _fake_ensure_git_repository)
+    monkeypatch.setattr(manager.git_source, "_rev_parse", _fake_git_rev_parse)
+    monkeypatch.setattr(manager.git_source, "_list_tracked_files", _fake_git_list_tracked_files)
+    monkeypatch.setattr(manager.git_source, "_run_git", _fake_run_git)
 
-    changed_files, removed_files, updated = await manager._sync_git_source_once(manager._git_config())
+    changed_files, removed_files, updated = await manager.git_source._sync_once(manager.git_source._git_config())
 
     assert updated is False
     assert changed_files == set()
@@ -7820,13 +8503,13 @@ async def test_sync_git_source_once_skips_repeated_lfs_pull_for_already_hydrated
         repeated_git_calls.append(args)
         return ""
 
-    monkeypatch.setattr(hydrated_manager, "_ensure_git_repository", _fake_ensure_git_repository)
-    monkeypatch.setattr(hydrated_manager, "_git_rev_parse", _fake_git_rev_parse)
-    monkeypatch.setattr(hydrated_manager, "_git_list_tracked_files", _fake_git_list_tracked_files)
-    monkeypatch.setattr(hydrated_manager, "_run_git", _fake_run_git_second)
+    monkeypatch.setattr(hydrated_manager.git_source, "_ensure_repository", _fake_ensure_git_repository)
+    monkeypatch.setattr(hydrated_manager.git_source, "_rev_parse", _fake_git_rev_parse)
+    monkeypatch.setattr(hydrated_manager.git_source, "_list_tracked_files", _fake_git_list_tracked_files)
+    monkeypatch.setattr(hydrated_manager.git_source, "_run_git", _fake_run_git_second)
 
-    changed_files, removed_files, updated = await hydrated_manager._sync_git_source_once(
-        hydrated_manager._git_config(),
+    changed_files, removed_files, updated = await hydrated_manager.git_source._sync_once(
+        hydrated_manager.git_source._git_config(),
     )
 
     assert updated is False
@@ -7872,12 +8555,12 @@ async def test_sync_git_source_once_pulls_lfs_after_reset(
             return "doc.md\n"
         return ""
 
-    monkeypatch.setattr(manager, "_ensure_git_repository", _fake_ensure_git_repository)
-    monkeypatch.setattr(manager, "_git_rev_parse", _fake_git_rev_parse)
-    monkeypatch.setattr(manager, "_git_list_tracked_files", _fake_git_list_tracked_files)
-    monkeypatch.setattr(manager, "_run_git", _fake_run_git)
+    monkeypatch.setattr(manager.git_source, "_ensure_repository", _fake_ensure_git_repository)
+    monkeypatch.setattr(manager.git_source, "_rev_parse", _fake_git_rev_parse)
+    monkeypatch.setattr(manager.git_source, "_list_tracked_files", _fake_git_list_tracked_files)
+    monkeypatch.setattr(manager.git_source, "_run_git", _fake_run_git)
 
-    changed_files, removed_files, updated = await manager._sync_git_source_once(manager._git_config())
+    changed_files, removed_files, updated = await manager.git_source._sync_once(manager.git_source._git_config())
 
     assert updated is True
     assert changed_files == {"doc.md"}
@@ -7906,10 +8589,10 @@ async def test_hydrate_git_lfs_worktree_ignores_index_extension_filters(
     async def _fake_git_rev_parse(_ref: str) -> str | None:
         return "head"
 
-    monkeypatch.setattr(manager, "_run_git", _fake_run_git)
-    monkeypatch.setattr(manager, "_git_rev_parse", _fake_git_rev_parse)
+    monkeypatch.setattr(manager.git_source, "_run_git", _fake_run_git)
+    monkeypatch.setattr(manager.git_source, "_rev_parse", _fake_git_rev_parse)
 
-    await manager._hydrate_git_lfs_worktree(manager._git_config())
+    await manager.git_source._hydrate_lfs_worktree(manager.git_source._git_config())
 
     assert ["lfs", "pull", "origin", "main"] in git_calls
 
@@ -7928,10 +8611,10 @@ async def test_ensure_git_lfs_available_raises_clear_runtime_error(
             raise RuntimeError(msg)
         return ""
 
-    monkeypatch.setattr(manager, "_run_git", _fake_run_git)
+    monkeypatch.setattr(manager.git_source, "_run_git", _fake_run_git)
 
     with pytest.raises(RuntimeError, match="Git LFS is required for this knowledge base"):
-        await manager._ensure_git_lfs_available(cwd=manager.knowledge_path)
+        await manager.git_source._ensure_lfs_available(cwd=manager.knowledge_path)
 
 
 @pytest.mark.asyncio
@@ -7943,7 +8626,7 @@ async def test_ensure_git_repository_clones_lfs_repo_with_skip_smudge_env(
     manager = _git_manager(tmp_path, lfs=True)
     clone_envs: list[dict[str, str] | None] = []
     git_calls: list[list[str]] = []
-    manager._git_lfs_hydrated_head_path.write_text("same", encoding="utf-8")
+    manager.git_source.lfs_hydrated_head_path.write_text("same", encoding="utf-8")
 
     async def _fake_run_git(
         args: list[str],
@@ -7960,10 +8643,10 @@ async def test_ensure_git_repository_clones_lfs_repo_with_skip_smudge_env(
     async def _fake_git_rev_parse(_ref: str) -> str | None:
         return "same"
 
-    monkeypatch.setattr(manager, "_run_git", _fake_run_git)
-    monkeypatch.setattr(manager, "_git_rev_parse", _fake_git_rev_parse)
+    monkeypatch.setattr(manager.git_source, "_run_git", _fake_run_git)
+    monkeypatch.setattr(manager.git_source, "_rev_parse", _fake_git_rev_parse)
 
-    cloned = await manager._ensure_git_repository(manager._git_config())
+    cloned = await manager.git_source._ensure_repository(manager.git_source._git_config())
 
     assert cloned is True
     assert clone_envs == [{"GIT_LFS_SKIP_SMUDGE": "1"}]
@@ -7998,7 +8681,7 @@ async def test_run_git_redacts_credentials_in_error_message(
     monkeypatch.setattr(asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
 
     with pytest.raises(RuntimeError, match="Git command failed") as exc_info:
-        await manager._run_git(
+        await manager.git_source._run_git(
             [
                 "clone",
                 "https://x-access-token:secret-token@github.com/example/private.git",
@@ -8053,10 +8736,10 @@ async def test_run_git_timeout_kills_subprocess_and_raises_runtime_error(
 
     monkeypatch.setattr(asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
     monkeypatch.setattr(asyncio, "wait_for", _fake_wait_for)
-    monkeypatch.setattr(manager, "_git_sync_timeout_seconds", lambda: 1.0)
+    monkeypatch.setattr(manager.git_source, "_sync_timeout_seconds", lambda: 1.0)
 
     with pytest.raises(RuntimeError, match=r"Git command timed out after 1s: git fetch origin main"):
-        await manager._run_git(["fetch", "origin", "main"])
+        await manager.git_source._run_git(["fetch", "origin", "main"])
 
     assert process.kill_called is True
     assert process.wait_called is True
@@ -8097,7 +8780,7 @@ async def test_run_git_preserves_index_lock_and_does_not_retry(
     monkeypatch.setattr(asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
 
     with pytest.raises(RuntimeError, match=r"index\.lock"):
-        await manager._run_git(["checkout", "main"], cwd=repo_root)
+        await manager.git_source._run_git(["checkout", "main"], cwd=repo_root)
 
     assert recorded_cwds == [str(repo_root)]
     assert lock_path.exists() is True
@@ -8139,7 +8822,7 @@ async def test_run_git_cancellation_kills_subprocess(
 
     monkeypatch.setattr(asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
 
-    task = asyncio.create_task(manager._run_git(["fetch", "origin", "main"]))
+    task = asyncio.create_task(manager.git_source._run_git(["fetch", "origin", "main"]))
     await asyncio.sleep(0)
     task.cancel()
 
@@ -8266,3 +8949,108 @@ async def test_index_file_locked_runs_off_event_loop_thread(
             f"Knowledge.insert ran on the asyncio main thread (id={thread_id}); "
             "it must run on a worker thread via asyncio.to_thread."
         )
+
+
+@pytest.mark.asyncio
+async def test_malformed_json_falls_back_to_text_and_publishes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Malformed JSON remains searchable instead of blocking the whole candidate."""
+    docs_path = tmp_path / "docs"
+    docs_path.mkdir()
+    malformed = '{\n  "claim": "still useful",\n  “broken”: true\n}\n'
+    source_path = docs_path / "claim.json"
+    source_path.write_text(malformed, encoding="utf-8")
+    config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
+    runtime_paths = runtime_paths_for(config)
+    monkeypatch.setattr(_Knowledge, "insert", _insert_with_real_reader)
+    original_read_text = Path.read_text
+    source_reads = 0
+
+    def _count_source_reads(path: Path, *args: object, **kwargs: object) -> str:
+        nonlocal source_reads
+        if path == source_path:
+            source_reads += 1
+        return original_read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", _count_source_reads)
+
+    with capture_logs() as logs:
+        result = await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+    lookup = get_published_index("docs", config=config, runtime_paths=runtime_paths)
+
+    assert result.index_published is True
+    assert lookup.index is not None
+    documents = lookup.index.knowledge.search("still useful", max_results=5)
+    assert len(documents) == 1
+    assert '"claim": "still useful"' in documents[0].content
+    assert "“broken”: true" in documents[0].content
+    fallback = [entry for entry in logs if entry["event"] == "Malformed JSON knowledge file; indexing as text"]
+    assert [(entry["path"], entry["line"], entry["column"]) for entry in fallback] == [("claim.json", 3, 3)]
+    assert source_reads == 1
+
+
+@pytest.mark.asyncio
+async def test_valid_json_keeps_structured_reader(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Valid JSON lists remain separate structured documents."""
+    docs_path = tmp_path / "docs"
+    docs_path.mkdir()
+    (docs_path / "claims.json").write_text('[{"claim": "one"}, {"claim": "two"}]', encoding="utf-8")
+    config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
+    runtime_paths = runtime_paths_for(config)
+    monkeypatch.setattr(_Knowledge, "insert", _insert_with_real_reader)
+
+    with capture_logs() as logs:
+        result = await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+    lookup = get_published_index("docs", config=config, runtime_paths=runtime_paths)
+
+    assert result.index_published is True
+    assert lookup.index is not None
+    assert [document.content for document in lookup.index.knowledge.search("claim", max_results=5)] == [
+        '{"claim": "one"}',
+        '{"claim": "two"}',
+    ]
+    assert all(entry["event"] != "Malformed JSON knowledge file; indexing as text" for entry in logs)
+
+
+@pytest.mark.asyncio
+async def test_valid_json_does_not_hide_downstream_json_decode_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A downstream JSONDecodeError remains a failure when source JSON is valid."""
+    docs_path = tmp_path / "docs"
+    docs_path.mkdir()
+    (docs_path / "claim.json").write_text('{"claim": "valid"}', encoding="utf-8")
+    config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
+    runtime_paths = runtime_paths_for(config)
+
+    def _fail_after_read(
+        self: _Knowledge,
+        *,
+        path: str,
+        metadata: dict[str, object],
+        upsert: bool,
+        reader: object | None = None,
+    ) -> None:
+        _ = (self, metadata, upsert)
+        selected_reader = cast("Reader", reader)
+        selected_reader.read(Path(path), name=Path(path).name)
+        message = "downstream response was not JSON"
+        raise json.JSONDecodeError(message, "<html>", 0)
+
+    monkeypatch.setattr(_Knowledge, "insert", _fail_after_read)
+
+    with capture_logs() as logs:
+        result = await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+
+    assert result.index_published is False
+    assert (
+        result.last_error
+        == "Indexed 0 of 1 managed knowledge files (first error: knowledge indexing failed (JSONDecodeError))"
+    )
+    assert all(entry["event"] != "Malformed JSON knowledge file; indexing as text" for entry in logs)

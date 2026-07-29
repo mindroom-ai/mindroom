@@ -31,7 +31,7 @@ from mindroom.hooks import (
     emit_final_response_transform,
     emit_transform,
 )
-from mindroom.matrix.client_delivery import build_threaded_edit_content, edit_message_result, send_message_result
+from mindroom.matrix.client_delivery import edit_message_result, send_message_result
 from mindroom.matrix.mentions import format_message_with_mentions
 from mindroom.matrix.message_builder import build_message_content
 from mindroom.runtime_protocols import SupportsClientConfig  # noqa: TC001
@@ -538,39 +538,14 @@ class DeliveryGateway:
         client = self._client()
         config = self.deps.runtime.config
         target = request.target
-        if (
-            config.get_entity_thread_mode(
-                self.deps.agent_name,
-                self.deps.runtime_paths,
-                room_id=target.room_id,
-            )
-            == "room"
-        ):
-            content = format_message_with_mentions(
-                config,
-                self.deps.runtime_paths,
-                request.new_text,
-                reply_to_event_id=target.reply_to_event_id,
-                tool_trace=request.tool_trace,
-                extra_content=request.extra_content,
-            )
-        else:
-            latest_thread_event_id = (
-                await self.deps.resolver.deps.conversation_cache.get_latest_thread_event_id_if_needed(
-                    target.room_id,
-                    target.resolved_thread_id,
-                    caller_label="delivery_edit_text",
-                )
-            )
-            content = build_threaded_edit_content(
-                new_text=request.new_text,
-                thread_id=target.resolved_thread_id,
-                config=config,
-                runtime_paths=self.deps.runtime_paths,
-                tool_trace=request.tool_trace,
-                extra_content=request.extra_content,
-                latest_thread_event_id=latest_thread_event_id,
-            )
+        # The edit envelope discards any pre-existing relation before adding m.replace.
+        content = format_message_with_mentions(
+            config,
+            self.deps.runtime_paths,
+            request.new_text,
+            tool_trace=request.tool_trace,
+            extra_content=request.extra_content,
+        )
 
         failure_reason = "edit_message_result returned None"
         try:
@@ -963,19 +938,14 @@ class DeliveryGateway:
         body: str,
         metadata: dict[str, object],
     ) -> None:
-        latest_thread_event_id = await self.deps.resolver.deps.conversation_cache.get_latest_thread_event_id_if_needed(
-            target.room_id,
-            target.resolved_thread_id,
-            target.reply_to_event_id,
-            event_id,
-            caller_label="delivery_compaction_lifecycle_edit",
-        )
+        # Same as ``edit_text``: this content is wrapped by ``build_edit_event_content``,
+        # which discards ``m.relates_to``, so neither the thread relation nor the
+        # latest-thread lookup that completes it survives to the wire. Passing
+        # ``thread_event_id`` without a resolved fallback would also trip the thread-relation
+        # assertion in ``build_thread_relation``.
         content = build_message_content(
             body,
             formatted_body=f"<em>{html_escape(body).replace(chr(10), '<br/>')}</em>",
-            thread_event_id=target.resolved_thread_id,
-            reply_to_event_id=target.reply_to_event_id,
-            latest_thread_event_id=latest_thread_event_id,
             extra_content={
                 "msgtype": "m.notice",
                 constants.COMPACTION_NOTICE_CONTENT_KEY: metadata,

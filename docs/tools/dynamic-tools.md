@@ -36,6 +36,7 @@ Claude models since Opus 4.5 / Sonnet 4.5 / Haiku 4.5 on the `anthropic` and `ve
 On this path every deferred tool ships in every request tagged `defer_loading: true` together with the provider's tool-search entry, so deferred schemas stay out of the model's rendered context until the model searches for them.
 Tool discovery never invalidates the prompt cache: Anthropic expands discovered tool references inline in the message stream, and OpenAI loads discovered tools at the end of the context window.
 The `dynamic_tools` manager, its prompt blocks, and session loaded-tool state are not used on this path; all deferred toolkits are attached at agent build, so discovered calls execute directly.
+MindRoom adds a compact system-prompt hint listing the deferred toolkit names and tells the model to search those capability domains before concluding that a tool is unavailable.
 `defer: true, initial: true` tools stay in the rendered schema list as plain non-deferred tools.
 Instructions attached to a toolkit or its functions remain inline when any function in that toolkit is initially active.
 MindRoom omits those instructions only when every function is deferred and non-initial because native tool search cannot extend the already-sent system prompt when it discovers a tool.

@@ -56,6 +56,9 @@ agents:
 Place files in `./knowledge_docs/`, then trigger a reindex from the dashboard/API or let MindRoom watch shared local bases with `watch: true`.
 Chat uses the last successfully published index and continues without blocking when a base is missing, stale, or failed.
 When a watched file changes, MindRoom marks the published index stale, refreshes in the background, and atomically publishes the replacement when it succeeds.
+A refresh builds that replacement by reusing the published index's stored vectors for every file whose content is unchanged, so it only embeds files that were added or edited.
+Changing `chunk_size`, `chunk_overlap`, the embedder, or any corpus filter invalidates the stored vectors, and the next refresh re-embeds the whole base.
+An explicit reindex from the dashboard or API rebuilds every vector instead of reusing any, which is how you replace an index you no longer trust.
 When `watch: false`, direct external file edits require explicit reindex, while dashboard/API upload and delete actions still schedule refresh after a successful mutation.
 Knowledge base IDs are the keys under `knowledge_bases`.
 Use a non-empty single path component such as `docs` or `company_docs`, not `""`, `.`, `..`, names containing `/` or `\`, or names containing line breaks.
@@ -146,6 +149,11 @@ The allowed set is always explicit configuration and never changes based on the 
 Non-text formats such as `.pdf`, `.docx`, or `.pptx` require their reader package (for example `pypdf`, `python-docx`, or `python-pptx`) in the MindRoom environment.
 When a reader package is missing, the refresh indexes every other file, logs a warning naming the file and the missing package, and records a partial-index error instead of publishing an index without the opted-in content.
 Extension filtering does not apply in `files` mode, which exposes every managed file.
+
+A `.json` file is normally split into one document per top-level JSON value, which keeps structured entries separately searchable.
+When such a file is not valid JSON, the refresh indexes its raw text instead of failing the file, and logs a warning naming the file and the line and column of the parse error.
+The file then counts as successfully indexed, so its content stays searchable, but it is chunked like plain text rather than split per JSON value.
+Fix the reported parse error to get structured chunking back.
 
 ### Private Agent Knowledge
 
@@ -291,6 +299,9 @@ Bundled container images already include it.
 - Semantic Git refresh then advances a candidate index, while files-only Git refresh publishes source metadata.
 - When `lfs: true`, MindRoom disables implicit LFS smudge during clone/checkout/reset and explicitly hydrates the checkout after sync, keeping the working tree complete even when indexing filters only include some file types.
 - Local edits to Git-tracked files are discarded during refresh sync, and tracked deletions are restored from the remote checkout.
+- Change detection for Git-backed bases is the tracked revision, not file contents: while the checkout stays on the revision the index was published from, MindRoom republishes the existing index without reading the corpus.
+- Consequently an out-of-band edit to a Git-backed checkout is not indexed while the revision is unchanged.
+- The checkout is MindRoom-owned; edit the repository and sync, or force a reindex, instead of editing the working tree.
 - Git-backed bases reject dashboard/API file upload and delete mutations; update the repository and sync or reindex instead.
 - Successful refresh publishes a new last successfully published index while failed refresh preserves the previous one and records the error in status metadata.
 - Semantic refresh is resumable: an interrupted or failed build keeps its private candidate index and continues it on the next refresh instead of restarting from zero.
@@ -405,7 +416,8 @@ File-mode refreshes may write lightweight source metadata, but local file-only b
 
 While a semantic build is in progress, that directory also holds `candidate_index.json` and `candidate_index.jsonl`, the durable record of which files the in-progress candidate has already indexed.
 Those files are removed once the candidate is published.
-At most one owned candidate collection per knowledge base is retained, and superseded owned candidates are deleted.
+At most one active candidate is retained for resumption.
+Each reclaim sweep attempts at least one superseded collection and stops starting further deletions after its wall-clock budget is consumed, while later changed or unchanged refreshes continue draining the backlog.
 Collections whose ownership cannot be proven from the base identity are preserved and reported rather than removed, so unrelated collections in that directory may remain.
 
 The storage path defaults to `mindroom_data/` next to your `config.yaml`, or can be set with `MINDROOM_STORAGE_PATH`.

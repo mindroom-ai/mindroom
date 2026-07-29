@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Collection, Mapping, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any
 
 import nio
@@ -35,6 +36,7 @@ class ResolvedVisibleMessage:
     thread_id: str | None
     latest_event_id: str
     stream_status: str | None = None
+    edited_timestamp: int | None = None
 
     @classmethod
     def from_message_data(
@@ -94,9 +96,18 @@ class ResolvedVisibleMessage:
         thread_id: str | None,
         content: dict[str, Any] | None,
     ) -> None:
-        """Apply the newest visible edit state to this message."""
+        """Apply the newest visible edit state to this message.
+
+        ``timestamp`` deliberately stays the original event's. It is the thread's ordering key, and
+        an edit is a correction to a message rather than a new position in the conversation - a
+        reply from an hour ago does not become the newest thing in the room because its author
+        fixed a typo. It also has to stay immutable for the collapsed read to agree with the raw
+        read: the query orders by the original timestamp, so a fold that moved edited messages to
+        the end would disagree with it about the order of the thread itself. The edit's own time
+        is kept separately for callers that want it.
+        """
         self.body = body
-        self.timestamp = timestamp
+        self.edited_timestamp = timestamp
         self.latest_event_id = latest_event_id
         if thread_id is not None:
             self.thread_id = thread_id
@@ -125,6 +136,11 @@ class ResolvedVisibleMessage:
             "thread_id": self.thread_id,
             "latest_event_id": self.latest_event_id,
         }
+        # Position and edit time are separate facts now that an edit no longer moves the message.
+        # Emitting the edit time keeps it available to consumers that used to read it off
+        # "timestamp" before that field became the immutable ordering key.
+        if self.edited_timestamp is not None:
+            message_data["edited_timestamp"] = self.edited_timestamp
         msgtype = self.content.get("msgtype")
         if isinstance(msgtype, str) and msgtype != "m.text":
             message_data["msgtype"] = msgtype
@@ -364,32 +380,101 @@ def _stream_status_from_content(content: dict[str, Any] | None) -> str | None:
     return status if isinstance(status, str) else None
 
 
-def record_latest_thread_edit(
-    event: nio.RoomMessageText | nio.RoomMessageNotice,
-    *,
-    event_info: EventInfo,
-    latest_edits_by_original_event_id: dict[str, tuple[nio.RoomMessageText | nio.RoomMessageNotice, str | None]],
-) -> bool:
-    """Track latest edit candidate, returning True if event is an edit."""
-    if not (event_info.is_edit and event_info.original_event_id):
-        return False
+type _EditCandidate = tuple[nio.RoomMessageText | nio.RoomMessageNotice, str | None]
 
-    original_event_id = event_info.original_event_id
-    current_latest_edit_data = latest_edits_by_original_event_id.get(original_event_id)
-    current_latest_edit = current_latest_edit_data[0] if current_latest_edit_data else None
-    if current_latest_edit is None or (event.server_timestamp, event.event_id) > (
-        current_latest_edit.server_timestamp,
-        current_latest_edit.event_id,
-    ):
-        latest_edits_by_original_event_id[original_event_id] = (event, event_info.thread_id_from_edit)
-    return True
+
+def _edit_candidate_is_newer(
+    candidate: nio.RoomMessageText | nio.RoomMessageNotice,
+    current: nio.RoomMessageText | nio.RoomMessageNotice,
+) -> bool:
+    """Return whether one replacement candidate outranks another from the same sender.
+
+    Timestamp then event ID is the Matrix rule and decides every real comparison, so it is checked
+    first and alone. The payload terms exist only for the case those two tie, which means two
+    payloads claiming the same event ID - one event observed both bundled and standalone, with the
+    copies disagreeing. Ordering on the payload rather than on arrival keeps a reconstruction from
+    depending on which copy the scan saw first, and prefers the copy carrying replacement content
+    over an abridged one.
+
+    Serialization is deferred into that tie because streaming emits tens to hundreds of
+    replacements per response and each is compared against its bucket's running winner; doing it
+    eagerly would put a JSON dump of every edit payload on the event loop.
+    """
+    if (candidate.server_timestamp, candidate.event_id) != (current.server_timestamp, current.event_id):
+        return (candidate.server_timestamp, candidate.event_id) > (current.server_timestamp, current.event_id)
+    return _edit_payload_rank(candidate) > _edit_payload_rank(current)
+
+
+def _edit_payload_rank(event: nio.RoomMessageText | nio.RoomMessageNotice) -> tuple[bool, int, str]:
+    """Return the content-derived tiebreak for two payloads claiming one event ID."""
+    content = event.source.get("content") if isinstance(event.source, dict) else None
+    normalized_content = content if isinstance(content, dict) else {}
+    serialized_content = json.dumps(normalized_content, sort_keys=True, separators=(",", ":"))
+    return (
+        isinstance(normalized_content.get("m.new_content"), dict),
+        len(serialized_content),
+        serialized_content,
+    )
+
+
+@dataclass(slots=True)
+class ThreadEditCandidates:
+    """Replacement candidates for one reconstruction, kept per original and per sender.
+
+    Matrix replacement events are only legitimate from the sender of the event they replace, but a
+    thread is reconstructed from raw timeline events rather than from the homeserver's bundled
+    relations, so nothing upstream has applied that rule. Candidates are therefore kept per sender
+    and the sender check is applied when an edit is matched to its original, which is the first
+    point where the original's sender is known. Keeping only a single global newest candidate
+    would let one foreign edit hide the newest legitimate one.
+    """
+
+    _by_original_and_sender: dict[str, dict[str, _EditCandidate]] = field(default_factory=dict)
+
+    def record(
+        self,
+        event: nio.RoomMessageText | nio.RoomMessageNotice,
+        *,
+        event_info: EventInfo,
+    ) -> bool:
+        """Track one replacement candidate, returning whether the event was an edit at all."""
+        if not (event_info.is_edit and event_info.original_event_id):
+            return False
+
+        by_sender = self._by_original_and_sender.setdefault(event_info.original_event_id, {})
+        current = by_sender.get(event.sender)
+        if current is None or _edit_candidate_is_newer(event, current[0]):
+            by_sender[event.sender] = (event, event_info.thread_id_from_edit)
+        return True
+
+    def original_event_ids(self) -> list[str]:
+        """Return every original event ID some candidate claims to replace."""
+        return list(self._by_original_and_sender)
+
+    def winner_for(self, original_event_id: str, *, sender: str | None) -> _EditCandidate | None:
+        """Return the newest legitimate replacement for one original.
+
+        ``sender`` is the original's sender, or ``None`` when the original was never seen. An
+        unseen original cannot be impersonated - the synthesized message carries the edit's own
+        sender - so the newest candidate across senders wins in that case only.
+        """
+        by_sender = self._by_original_and_sender.get(original_event_id)
+        if not by_sender:
+            return None
+        if sender is not None:
+            return by_sender.get(sender)
+        newest = next(iter(by_sender.values()))
+        for candidate in by_sender.values():
+            if _edit_candidate_is_newer(candidate[0], newest[0]):
+                newest = candidate
+        return newest
 
 
 async def apply_latest_edits_to_messages(
     client: nio.AsyncClient,
     *,
     messages_by_event_id: dict[str, ResolvedVisibleMessage],
-    latest_edits_by_original_event_id: dict[str, tuple[nio.RoomMessageText | nio.RoomMessageNotice, str | None]],
+    edit_candidates: ThreadEditCandidates,
     required_thread_id: str | None = None,
     event_cache: ConversationEventCache | None = None,
     room_id: str | None = None,
@@ -398,8 +483,16 @@ async def apply_latest_edits_to_messages(
     trusted_sender_ids: Collection[str] = (),
 ) -> None:
     """Apply latest edits to message records and synthesize missing originals when allowed."""
-    for original_event_id, (edit_event, edit_thread_id) in latest_edits_by_original_event_id.items():
+    for original_event_id in edit_candidates.original_event_ids():
         existing_message = messages_by_event_id.get(original_event_id)
+        winner = edit_candidates.winner_for(
+            original_event_id,
+            sender=None if existing_message is None else existing_message.sender,
+        )
+        # A replacement from anyone but the original's sender is not an edit of that message.
+        if winner is None:
+            continue
+        edit_event, edit_thread_id = winner
 
         # Ignore missing originals unrelated to this thread before resolving
         # potentially large edit payloads from sidecar storage.
@@ -450,18 +543,14 @@ async def resolve_latest_visible_messages(
 ) -> dict[str, ResolvedVisibleMessage]:
     """Resolve the latest visible message state by original event ID for a set of message events."""
     messages_by_event_id: dict[str, ResolvedVisibleMessage] = {}
-    latest_edits_by_original_event_id: dict[str, tuple[nio.RoomMessageText | nio.RoomMessageNotice, str | None]] = {}
+    edit_candidates = ThreadEditCandidates()
 
     for event in events:
         if sender is not None and event.sender != sender:
             continue
 
         event_info = EventInfo.from_event(event.source)
-        if record_latest_thread_edit(
-            event,
-            event_info=event_info,
-            latest_edits_by_original_event_id=latest_edits_by_original_event_id,
-        ):
+        if edit_candidates.record(event, event_info=event_info):
             continue
 
         if event.event_id in messages_by_event_id:
@@ -481,7 +570,7 @@ async def resolve_latest_visible_messages(
     await apply_latest_edits_to_messages(
         client,
         messages_by_event_id=messages_by_event_id,
-        latest_edits_by_original_event_id=latest_edits_by_original_event_id,
+        edit_candidates=edit_candidates,
         trusted_sender_ids=trusted_sender_ids,
     )
     return messages_by_event_id
@@ -489,12 +578,12 @@ async def resolve_latest_visible_messages(
 
 __all__ = [
     "ResolvedVisibleMessage",
+    "ThreadEditCandidates",
     "apply_latest_edits_to_messages",
     "bundled_replacement_body",
     "extract_visible_edit_body",
     "extract_visible_message",
     "message_preview",
-    "record_latest_thread_edit",
     "replace_visible_message",
     "resolve_latest_visible_messages",
     "resolve_visible_event_source",

@@ -22,7 +22,8 @@ from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths, resolve_runtime_paths, runtime_env_values
 from mindroom.file_locks import async_exclusive_file_lock
 from mindroom.knowledge.availability import KnowledgeAvailability
-from mindroom.knowledge.manager import KnowledgeManager, knowledge_source_signature
+from mindroom.knowledge.index_metadata import state_for_publication
+from mindroom.knowledge.manager import KnowledgeManager
 from mindroom.knowledge.redaction import redact_credentials_in_text
 from mindroom.knowledge.registry import (
     KnowledgeRefreshTarget,
@@ -91,6 +92,9 @@ class _SubprocessSessionKwargs(TypedDict, total=False):
 
 
 _refresh_locks_guard = Lock()
+# Deliberately uncapped, unlike the lock and cooldown tables below: entries are
+# refcounts that clear when a refresh finishes, so evicting a live one would
+# report an in-flight refresh as idle and mask the leak a crashed refresh means.
 _active_refresh_counts: dict[KnowledgeRefreshTarget, int] = {}
 _active_refresh_counts_guard = Lock()
 _MAX_REFRESH_LOCKS = 512
@@ -500,7 +504,6 @@ async def _refresh_knowledge_binding_locked(
     force_reindex: bool = False,
 ) -> KnowledgeRefreshResult:
     base_id = key.base_id
-    manager: KnowledgeManager | None = None
     try:
         if config.get_knowledge_base_config(base_id).mode == "files":
             return await _refresh_file_mode_binding_locked(
@@ -533,16 +536,19 @@ async def _refresh_knowledge_binding_locked(
         )
         if unchanged_result is not None:
             return unchanged_result
-        indexed_count = await manager.reindex_all()
-        if manager._last_refresh_error is not None:
-            error = redact_credentials_in_text(manager._last_refresh_error)
-            await asyncio.to_thread(mark_published_index_refresh_failed_preserving_last_good, key, error=error)
+        outcome = await manager.reindex_all(force_reindex=force_reindex)
+        if outcome.error is not None:
+            await asyncio.to_thread(
+                mark_published_index_refresh_failed_preserving_last_good,
+                key,
+                error=outcome.error,
+            )
             return KnowledgeRefreshResult(
                 key=key,
-                indexed_count=indexed_count,
+                indexed_count=outcome.indexed_count,
                 index_published=False,
                 availability=KnowledgeAvailability.REFRESH_FAILED,
-                last_error=error,
+                last_error=outcome.error,
             )
     except Exception as exc:
         error = redact_credentials_in_text(str(exc))
@@ -550,7 +556,7 @@ async def _refresh_knowledge_binding_locked(
         raise
     return await _refresh_result_from_persisted_state(
         key,
-        indexed_count=indexed_count,
+        indexed_count=outcome.indexed_count,
         config=config,
         runtime_paths=runtime_paths,
     )
@@ -559,32 +565,20 @@ async def _refresh_knowledge_binding_locked(
 async def _publish_file_mode_source_metadata(
     key: PublishedIndexKey,
     manager: KnowledgeManager,
+    *,
+    published_revision: str | None = None,
 ) -> KnowledgeRefreshResult:
     """Publish current source metadata for a file-only base without building vectors."""
-    source_signature = await asyncio.to_thread(
-        knowledge_source_signature,
-        manager.config,
-        manager.base_id,
-        manager._knowledge_source_path(),
-        tracked_relative_paths=manager._git_tracked_relative_paths,
-    )
-    now = datetime.now(tz=UTC).isoformat()
+    source_signature = await manager.source_signature()
     await asyncio.to_thread(
         save_published_index_state,
         published_index_metadata_path(key),
-        PublishedIndexState(
+        state_for_publication(
             settings=key.indexing_settings,
-            status="complete",
             collection=None,
-            last_published_at=now,
-            published_revision=manager._git_last_successful_commit,
             indexed_count=0,
             source_signature=source_signature,
-            refresh_job="idle",
-            reason=None,
-            last_error=None,
-            updated_at=now,
-            last_refresh_at=now,
+            published_revision=published_revision,
         ),
     )
     return KnowledgeRefreshResult(
@@ -668,9 +662,11 @@ async def _refresh_file_mode_binding_locked(
         storage_path=binding.storage_root,
         knowledge_path=binding.knowledge_path,
     )
-    if manager._git_config() is not None:
-        git_sync_result = await manager.sync_git_source()
-        if git_sync_result.get("updated", False):
+    published_revision: str | None = None
+    if manager.git_source.is_configured():
+        git_sync_result = await manager.git_source.sync()
+        published_revision = git_sync_result.head
+        if git_sync_result.updated:
             await mark_knowledge_source_changed_async(
                 key.base_id,
                 config=manager.config,
@@ -679,7 +675,7 @@ async def _refresh_file_mode_binding_locked(
                 reason="git_source_updated",
             )
 
-    return await _publish_file_mode_source_metadata(key, manager)
+    return await _publish_file_mode_source_metadata(key, manager, published_revision=published_revision)
 
 
 async def _maybe_publish_unchanged_index(
@@ -689,11 +685,11 @@ async def _maybe_publish_unchanged_index(
     execution_identity: ToolExecutionIdentity | None,
     force_reindex: bool,
 ) -> KnowledgeRefreshResult | None:
-    force_reindex = force_reindex or manager._needs_full_reindex_on_create()
-    if manager._git_config() is not None:
-        git_sync_result = await manager.sync_git_source()
-        if force_reindex or git_sync_result.get("updated", False):
-            if git_sync_result.get("updated", False):
+    force_reindex = force_reindex or manager.needs_full_reindex_on_create()
+    if manager.git_source.is_configured():
+        git_sync_result = await manager.git_source.sync()
+        if force_reindex or git_sync_result.updated:
+            if git_sync_result.updated:
                 await mark_knowledge_source_changed_async(
                     key.base_id,
                     config=manager.config,
@@ -705,7 +701,7 @@ async def _maybe_publish_unchanged_index(
         return await _publish_unchanged_index(
             manager,
             key,
-            published_revision=manager._git_last_successful_commit,
+            published_revision=git_sync_result.head,
         )
     if force_reindex:
         await mark_knowledge_source_changed_async(
@@ -794,6 +790,19 @@ async def _refresh_result_from_persisted_state(
     )
 
 
+def _revision_proves_source_unchanged(state: PublishedIndexState, published_revision: str | None) -> bool:
+    """Return whether a matching Git revision already proves the indexed corpus is unchanged.
+
+    MindRoom owns the checkout and realigns it with ``git reset --hard``, so a tracked
+    file's content is fully determined by HEAD. Every corpus filter (branch, LFS, hidden
+    paths, include/exclude patterns and extensions) lives in ``IndexingSettings``, which
+    the caller has already compared. An unmoved revision therefore means byte-identical
+    indexed content, and hashing the corpus to learn the same thing costs a full read of
+    every file — the dominant cost on a large or network-mounted source.
+    """
+    return published_revision is not None and state.published_revision == published_revision
+
+
 async def _publish_unchanged_index(
     manager: KnowledgeManager,
     key: PublishedIndexKey,
@@ -812,13 +821,10 @@ async def _publish_unchanged_index(
     ):
         return None
 
-    current_source_signature = await asyncio.to_thread(
-        knowledge_source_signature,
-        manager.config,
-        manager.base_id,
-        manager._knowledge_source_path(),
-        tracked_relative_paths=manager._git_tracked_relative_paths,
-    )
+    if _revision_proves_source_unchanged(state, published_revision):
+        current_source_signature = state.source_signature
+    else:
+        current_source_signature = await manager.source_signature()
     if current_source_signature != state.source_signature:
         if mark_stale_on_source_change:
             await mark_knowledge_source_changed_async(
@@ -830,9 +836,9 @@ async def _publish_unchanged_index(
             )
         return None
 
+    # Settings already matched at the top of this function, so only the revision
+    # and publish stamp can still move.
     updated_state = state
-    if state.settings != key.indexing_settings:
-        updated_state = replace(updated_state, settings=key.indexing_settings)
     if published_revision is not None:
         updated_state = replace(
             updated_state,
@@ -859,13 +865,13 @@ async def _publish_unchanged_index(
             last_error=error,
         )
     await asyncio.to_thread(mark_published_index_refresh_succeeded, key)
-    # This path returns before any candidate is opened, so it is the only place
-    # that can retire candidate state left by an interrupted forced rebuild.
+    # This path returns before any candidate is opened. It therefore retires
+    # interrupted candidate state and advances bounded collection cleanup here.
     try:
-        await manager.discard_superseded_candidate(published_collection=updated_state.collection)
+        await manager.reclaim_superseded_collections(published_collection=updated_state.collection)
     except Exception:
         logger.warning(
-            "Failed to retire candidate after unchanged knowledge index publish",
+            "Failed to reclaim superseded collections after unchanged knowledge index publish",
             base_id=manager.base_id,
             collection=updated_state.collection,
             exc_info=True,

@@ -1157,8 +1157,73 @@ async def test_sessions_spawn_sets_summary_after_spawn(
         1,
         "manual",
         ctx.conversation_cache,
+        known_latest_thread_event_id="$event",
     )
     update_mock.assert_called_once_with(ctx.room_id, "$event", 1)
+
+
+@pytest.mark.asyncio
+async def test_sessions_spawn_summary_does_not_read_the_new_thread(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The initial spawn summary should relate to the new root without reading thread history.
+
+    A freshly created thread has no cache snapshot, so a latest-event lookup here
+    starts a homeserver scan that races the spawned agent's first outbound event.
+    """
+    monkeypatch.setattr(subagents_module, "_send_matrix_text", AsyncMock(return_value="$spawn-root:localhost"))
+    monkeypatch.setattr(subagents_module, "set_thread_tag", AsyncMock(return_value=SimpleNamespace()))
+    monkeypatch.setattr(subagents_module, "update_last_summary_count", MagicMock())
+    ctx = _make_context(tmp_path)
+    ctx.client.room_send = AsyncMock(
+        return_value=nio.RoomSendResponse(event_id="$summary:localhost", room_id=ctx.room_id),
+    )
+    ctx.conversation_cache.get_latest_thread_event_id_if_needed = AsyncMock(return_value="$never-read:localhost")
+
+    with tool_runtime_context(ctx):
+        payload = json.loads(
+            await SubAgentsTools().sessions_spawn(task="do thing", summary=TEST_SUMMARY, tag=TEST_TAG),
+        )
+
+    assert payload["status"] == "ok"
+    ctx.conversation_cache.get_latest_thread_event_id_if_needed.assert_not_awaited()
+    relates_to = ctx.client.room_send.call_args.kwargs["content"]["m.relates_to"]
+    assert relates_to["rel_type"] == "m.thread"
+    assert relates_to["event_id"] == "$spawn-root:localhost"
+    assert relates_to["m.in_reply_to"] == {"event_id": "$spawn-root:localhost"}
+
+
+@pytest.mark.asyncio
+async def test_sessions_spawn_reuse_still_resolves_the_latest_thread_event(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reusing a labelled session targets an existing thread, so its tail must still be resolved."""
+    summary_mock, _, _ = _stub_spawn_followups(monkeypatch)
+    ctx = _make_context(tmp_path)
+    monkeypatch.setattr(
+        subagents_module,
+        "_resolve_by_label",
+        lambda *_args, **_kwargs: (
+            create_session_id(ctx.room_id, "$existing-root:localhost"),
+            {"target_agent": "code"},
+        ),
+    )
+
+    with tool_runtime_context(ctx):
+        payload = json.loads(
+            await SubAgentsTools().sessions_spawn(
+                task="do thing",
+                summary=TEST_SUMMARY,
+                tag=TEST_TAG,
+                label="worklog",
+            ),
+        )
+
+    assert payload["status"] == "ok"
+    assert payload["reused"] is True
+    assert summary_mock.await_args.kwargs["known_latest_thread_event_id"] is None
 
 
 @pytest.mark.asyncio
@@ -1417,6 +1482,7 @@ async def test_sessions_spawn_dedup_returns_existing_for_duplicate_label(
         1,
         "manual",
         ctx.conversation_cache,
+        known_latest_thread_event_id="$event",
     )
     tag_mock.assert_awaited_once_with(
         ctx.client,
@@ -1458,6 +1524,7 @@ async def test_sessions_spawn_dedup_returns_existing_for_duplicate_label(
         0,
         "manual",
         ctx.conversation_cache,
+        known_latest_thread_event_id=None,
     )
     tag_mock.assert_awaited_once_with(
         ctx.client,
@@ -1509,6 +1576,7 @@ async def test_sessions_spawn_skips_reuse_when_registry_entry_lacks_thread_id(
         1,
         "manual",
         ctx.conversation_cache,
+        known_latest_thread_event_id="$new-event",
     )
     tag_mock.assert_awaited_once_with(
         ctx.client,
@@ -1560,6 +1628,7 @@ async def test_sessions_spawn_reuse_derives_thread_id_from_session_key(
         0,
         "manual",
         ctx.conversation_cache,
+        known_latest_thread_event_id=None,
     )
     tag_mock.assert_awaited_once_with(
         ctx.client,
@@ -1605,6 +1674,7 @@ async def test_sessions_spawn_skips_room_level_reuse_candidates(
         1,
         "manual",
         ctx.conversation_cache,
+        known_latest_thread_event_id="$event",
     )
     tag_mock.assert_awaited_once_with(
         ctx.client,

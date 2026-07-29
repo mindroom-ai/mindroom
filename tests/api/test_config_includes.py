@@ -543,3 +543,97 @@ async def test_watch_config_recovers_after_fixing_a_broken_new_include(
 
     stop_event.set()
     await watch_task
+
+
+@pytest.mark.asyncio
+async def test_watched_config_mtimes_retries_when_snapshot_changes_during_scan(
+    monkeypatch: pytest.MonkeyPatch,
+    split_app: FastAPI,
+    tmp_path: Path,
+) -> None:
+    """A completed scan must belong to the snapshot returned with it."""
+    replacement_config_path = _write_split_config(tmp_path / "replacement")
+    replacement_runtime_paths = constants.resolve_primary_runtime_paths(
+        config_path=replacement_config_path,
+        storage_path=tmp_path / "replacement-storage",
+        process_env={},
+    )
+    scanned_paths: list[frozenset[Path]] = []
+
+    async def fake_to_thread(function: Callable[..., object], paths: frozenset[Path]) -> object:
+        scanned_paths.append(paths)
+        if len(scanned_paths) == 1:
+            main.initialize_api_app(split_app, replacement_runtime_paths)
+        return function(paths)
+
+    monkeypatch.setattr(main.asyncio, "to_thread", fake_to_thread)
+
+    runtime_paths, mtimes = await main._watched_config_mtimes(split_app)
+
+    assert runtime_paths == replacement_runtime_paths
+    assert set(mtimes) == {replacement_config_path}
+    assert len(scanned_paths) == 2
+
+
+@pytest.mark.asyncio
+async def test_watched_config_mtimes_retries_when_same_generation_snapshot_replaces_sources(
+    monkeypatch: pytest.MonkeyPatch,
+    split_app: FastAPI,
+) -> None:
+    """A source-set replacement must invalidate an in-flight scan even without a generation bump."""
+    initial_snapshot = _snapshot(split_app)
+    runtime_config = initial_snapshot.runtime_config
+    assert runtime_config is not None
+    flattened_source = yaml.safe_dump(runtime_config.authored_model_dump(), sort_keys=True)
+    scanned_paths: list[frozenset[Path]] = []
+
+    async def fake_to_thread(function: Callable[..., object], paths: frozenset[Path]) -> object:
+        scanned_paths.append(paths)
+        if len(scanned_paths) == 1:
+            initial_snapshot.runtime_paths.config_path.write_text(flattened_source, encoding="utf-8")
+            assert config_lifecycle._publish_runtime_config_into_app(
+                runtime_config,
+                initial_snapshot.runtime_paths,
+                split_app,
+            )
+            replacement_snapshot = _snapshot(split_app)
+            assert replacement_snapshot is not initial_snapshot
+            assert replacement_snapshot.generation == initial_snapshot.generation
+            assert replacement_snapshot.source_files == frozenset(
+                {initial_snapshot.runtime_paths.config_path.resolve()},
+            )
+        return function(paths)
+
+    monkeypatch.setattr(main.asyncio, "to_thread", fake_to_thread)
+
+    runtime_paths, mtimes = await main._watched_config_mtimes(split_app)
+
+    assert runtime_paths == initial_snapshot.runtime_paths
+    assert set(mtimes) == {initial_snapshot.runtime_paths.config_path.resolve()}
+    assert len(scanned_paths) == 2
+
+
+@pytest.mark.asyncio
+async def test_api_config_watcher_scans_off_the_event_loop(
+    monkeypatch: pytest.MonkeyPatch,
+    split_runtime_paths: constants.RuntimePaths,
+) -> None:
+    """The API watcher stats every config source each poll, so it must offload the scan."""
+    main.initialize_api_app(main.app, split_runtime_paths)
+    assert config_lifecycle.load_config_into_app(split_runtime_paths, main.app) is True
+
+    offloaded: list[str] = []
+    stop_event = asyncio.Event()
+
+    async def fake_to_thread(function: Callable[..., object], *args: object, **kwargs: object) -> object:
+        offloaded.append(getattr(function, "__name__", repr(function)))
+        return function(*args, **kwargs)
+
+    monkeypatch.setattr(main.asyncio, "to_thread", fake_to_thread)
+
+    watch_task = asyncio.create_task(main._watch_config(stop_event, main.app, poll_interval_seconds=0.01))
+    await asyncio.sleep(0.05)
+    stop_event.set()
+    await asyncio.wait_for(watch_task, timeout=2)
+
+    assert offloaded.count("paths_mtime_snapshot") >= 2

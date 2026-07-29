@@ -189,7 +189,13 @@ async def mark_knowledge_source_changed_async(
     execution_identity: ToolExecutionIdentity | None = None,
     reason: str = "source_mutated",
 ) -> tuple[str, ...]:
-    """Mark same-source published indexes stale without exposing registry internals to callers."""
+    """Mark same-source published indexes stale without exposing registry internals to callers.
+
+    ``mindroom.api.knowledge`` is the caller this exists for: Tach does not let it
+    depend on ``mindroom.knowledge.registry``, so the status facade is its only
+    route to this operation. Callers inside the knowledge package use the registry
+    function directly.
+    """
     return await registry.mark_knowledge_source_changed_async(
         base_id,
         config=config,

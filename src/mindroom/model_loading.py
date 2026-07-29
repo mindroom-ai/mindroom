@@ -13,6 +13,7 @@ from mindroom.google_adc import load_google_application_credentials
 from mindroom.llm_request_logging import install_llm_request_logging
 from mindroom.logging_config import get_logger
 from mindroom.model_defaults import OLLAMA_HOST_DEFAULT, ZAI_BASE_URL_DEFAULT
+from mindroom.prompt_cache_key import derive_session_prompt_cache_key
 from mindroom.runtime_env_policy import (
     AWS_BEDROCK_CLAUDE_ENV_BY_KEY,
     AZURE_OPENAI_ENV_BY_KEY,
@@ -137,6 +138,18 @@ def _set_bedrock_claude_session(extra_kwargs: dict[str, Any], aws_profile: str |
     extra_kwargs["session"] = boto3.session.Session(**session_kwargs)
 
 
+def _set_session_prompt_cache_key(
+    extra_kwargs: dict[str, Any],
+    execution_identity: ToolExecutionIdentity | None,
+) -> None:
+    """Pin the model to a stable per-session prompt-cache key unless explicitly overridden."""
+    if "prompt_cache_key" in extra_kwargs or execution_identity is None:
+        return
+    prompt_cache_key = derive_session_prompt_cache_key(execution_identity)
+    if prompt_cache_key is not None:
+        extra_kwargs["prompt_cache_key"] = prompt_cache_key
+
+
 def _create_model_for_provider(  # noqa: C901, PLR0911, PLR0912, PLR0915
     provider: str,
     model_id: str,
@@ -162,6 +175,8 @@ def _create_model_for_provider(  # noqa: C901, PLR0911, PLR0912, PLR0915
             "codex",
             "openai_codex",
             "synthetic",
+            "kimi",
+            "kimi_code",
             _BEDROCK_CLAUDE_PROVIDER,
         }
         and "api_key" not in extra_kwargs
@@ -248,16 +263,19 @@ def _create_model_for_provider(  # noqa: C901, PLR0911, PLR0912, PLR0915
     if canonical_provider_key in {"codex", "openai_codex"}:
         from mindroom.codex_model import (  # noqa: PLC0415
             CodexResponses,
-            derive_codex_prompt_cache_key,
             normalize_codex_model_id,
         )
 
         extra_kwargs.pop("api_key", None)
-        if "prompt_cache_key" not in extra_kwargs and execution_identity is not None:
-            prompt_cache_key = derive_codex_prompt_cache_key(execution_identity)
-            if prompt_cache_key is not None:
-                extra_kwargs["prompt_cache_key"] = prompt_cache_key
+        _set_session_prompt_cache_key(extra_kwargs, execution_identity)
         return CodexResponses(id=normalize_codex_model_id(model_id), **extra_kwargs)
+
+    if canonical_provider_key in {"kimi", "kimi_code"}:
+        from mindroom.kimi_model import KimiChat, normalize_kimi_model_id  # noqa: PLC0415
+
+        extra_kwargs.pop("api_key", None)
+        _set_session_prompt_cache_key(extra_kwargs, execution_identity)
+        return KimiChat(id=normalize_kimi_model_id(model_id), **extra_kwargs)
 
     if canonical_provider_key == _BEDROCK_CLAUDE_PROVIDER:
         extra_kwargs.pop("api_key", None)

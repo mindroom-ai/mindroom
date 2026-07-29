@@ -13,6 +13,11 @@ from mindroom.model_defaults import OPENAI_TRANSCRIPTION
 _RESERVED_SPEECH_OPTION_NAMES = frozenset({"api_key", "base_url", "client", "model"})
 
 
+def _default_voice_stt_credentials_service(validated_data: dict[str, Any]) -> str | None:
+    """Use the OpenAI credential service only for cloud STT."""
+    return "openai" if validated_data["provider"] == "openai" else None
+
+
 def normalize_speech_base_url(host: str | None) -> str | None:
     """Normalize a speech service root to an OpenAI-compatible ``/v1`` URL."""
     normalized = host.strip().rstrip("/") if host else ""
@@ -96,7 +101,10 @@ class VoiceSTTConfig(SpeechServiceConfig):
     """Voice-message STT configuration with its historical model default."""
 
     model: str = Field(default=OPENAI_TRANSCRIPTION, description="STT model name")
-    credentials_service: str | None = Field(default="openai", description="Named speech credential service")
+    credentials_service: str | None = Field(
+        default_factory=_default_voice_stt_credentials_service,
+        description="Named speech credential service, defaulting to OpenAI for cloud STT",
+    )
 
 
 class _VoiceLLMConfig(BaseModel):

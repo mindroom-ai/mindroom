@@ -5,7 +5,8 @@ from __future__ import annotations
 import math
 import re
 from collections.abc import Mapping
-from dataclasses import asdict, is_dataclass
+from dataclasses import asdict, dataclass, is_dataclass
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, cast
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
@@ -13,7 +14,12 @@ from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 from pydantic import BaseModel
 
 REDACTED = "***redacted***"
-__all__ = ["REDACTED", "redact_log_event", "redact_sensitive_data", "redact_sensitive_text"]
+__all__ = [
+    "REDACTED",
+    "redact_log_event",
+    "redact_sensitive_data",
+    "redact_sensitive_text",
+]
 _TRUNCATED = "... [truncated]"
 _URL_PATTERN = re.compile(r"https?://[^\s'\"<>]+")
 _BEARER_TOKEN_PATTERN = re.compile(
@@ -143,15 +149,41 @@ def _safe_repr(value: object) -> str:
         return f"<unrepresentable: {type(value).__name__}>"
 
 
-def _normalize_key(value: object) -> str:
-    key = _safe_str(value)
-    key = re.sub(r"([A-Z]+)([A-Z][a-z])", r"\1_\2", key.strip())
-    key = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", key)
-    return re.sub(r"[^a-z0-9]+", "_", key.lower()).strip("_")
+_ACRONYM_BOUNDARY_PATTERN = re.compile(r"([A-Z]+)([A-Z][a-z])")
+_CAMEL_BOUNDARY_PATTERN = re.compile(r"([a-z0-9])([A-Z])")
+_NON_ALPHANUMERIC_RUN_PATTERN = re.compile(r"[^a-z0-9]+")
+
+# Structured logs repeat a small set of keys at very high frequency, so classifying
+# each distinct key once and reusing the result removes the dominant per-event cost.
+# The cache is bounded on both axes: entry count, and the key length allowed in.
+# Oversized keys bypass it entirely rather than evicting real keys or pinning
+# arbitrarily large strings in memory.
+_KEY_CLASSIFICATION_CACHE_SIZE = 4096
+_MAX_CACHED_KEY_LENGTH = 256
 
 
-def _is_secret_key(value: object) -> bool:
-    normalized = _normalize_key(value)
+@dataclass(frozen=True, slots=True)
+class _KeyClassification:
+    """Every redaction decision that depends only on one key's normalized spelling."""
+
+    normalized: str
+    is_secret: bool
+    is_secret_container: bool
+    is_secret_container_suffix: bool
+    is_query_container: bool
+    is_redacted_query: bool
+    is_context_secret_label: bool
+    is_context_secret_value: bool
+
+
+def _normalize_key_text(key: str) -> str:
+    """Return the canonical snake_case spelling of one key."""
+    collapsed = _ACRONYM_BOUNDARY_PATTERN.sub(r"\1_\2", key.strip())
+    collapsed = _CAMEL_BOUNDARY_PATTERN.sub(r"\1_\2", collapsed)
+    return _NON_ALPHANUMERIC_RUN_PATTERN.sub("_", collapsed.lower()).strip("_")
+
+
+def _normalized_key_is_secret(normalized: str) -> bool:
     parts = tuple(part for part in normalized.split("_") if part)
     compact = normalized.replace("_", "")
     for key, compact_key, key_parts in _SECRET_KEY_VARIANTS:
@@ -172,39 +204,51 @@ def _is_secret_key(value: object) -> bool:
     return False
 
 
-def _is_secret_container_key(value: object) -> bool:
-    normalized = _normalize_key(value)
-    if normalized in _SECRET_CONTAINER_KEYS:
-        return True
-    return _is_secret_container_suffix_key(value)
+def _classify_key_text(key: str) -> _KeyClassification:
+    """Resolve every key-derived redaction predicate in one pass."""
+    normalized = _normalize_key_text(key)
+    is_secret = _normalized_key_is_secret(normalized)
+    is_container_suffix = normalized not in _SECRET_CONTAINER_KEYS and any(
+        container_key != "tokens" and normalized.endswith(f"_{container_key}")
+        for container_key in _SECRET_CONTAINER_KEYS
+    )
+    return _KeyClassification(
+        normalized=normalized,
+        is_secret=is_secret,
+        is_secret_container=normalized in _SECRET_CONTAINER_KEYS or is_container_suffix,
+        is_secret_container_suffix=is_container_suffix,
+        is_query_container=normalized in _QUERY_CONTAINER_KEYS,
+        is_redacted_query=is_secret or normalized in _OAUTH_QUERY_KEYS or normalized in _URL_QUERY_SECRET_KEYS,
+        is_context_secret_label=normalized in _CONTEXT_SECRET_LABEL_KEYS,
+        is_context_secret_value=normalized in _CONTEXT_SECRET_VALUE_KEYS,
+    )
 
 
-def _is_secret_container_suffix_key(value: object) -> bool:
-    normalized = _normalize_key(value)
-    if normalized in _SECRET_CONTAINER_KEYS:
-        return False
-    return any(key != "tokens" and normalized.endswith(f"_{key}") for key in _SECRET_CONTAINER_KEYS)
+_classify_key_text_cached = lru_cache(maxsize=_KEY_CLASSIFICATION_CACHE_SIZE)(_classify_key_text)
+
+
+def _classify_key(value: object) -> _KeyClassification:
+    key = _safe_str(value)
+    if len(key) > _MAX_CACHED_KEY_LENGTH:
+        return _classify_key_text(key)
+    return _classify_key_text_cached(key)
 
 
 def _is_sensitive_key(value: object) -> bool:
-    return _is_secret_key(value) or _is_secret_container_key(value)
+    classification = _classify_key(value)
+    return classification.is_secret or classification.is_secret_container
 
 
 def _is_query_container(value: str | None) -> bool:
-    return value is not None and _normalize_key(value) in _QUERY_CONTAINER_KEYS
+    return value is not None and _classify_key(value).is_query_container
 
 
 def _is_redacted_query_key(value: object) -> bool:
-    normalized = _normalize_key(value)
-    return _is_secret_key(value) or normalized in _OAUTH_QUERY_KEYS or normalized in _URL_QUERY_SECRET_KEYS
+    return _classify_key(value).is_redacted_query
 
 
 def _is_context_secret_label_key(value: object) -> bool:
-    return _normalize_key(value) in _CONTEXT_SECRET_LABEL_KEYS
-
-
-def _is_context_secret_value_key(value: object) -> bool:
-    return _normalize_key(value) in _CONTEXT_SECRET_VALUE_KEYS
+    return _classify_key(value).is_context_secret_label
 
 
 def _mapping_has_secret_context_label(value: Mapping[object, object]) -> bool:
@@ -221,11 +265,12 @@ def _should_force_redact_container_value(value: object) -> bool:
 
 
 def _should_redact_value_for_key(key: object, value: object) -> bool:
-    if _is_secret_key(key):
+    classification = _classify_key(key)
+    if classification.is_secret:
         return True
-    if _is_secret_container_suffix_key(key):
+    if classification.is_secret_container_suffix:
         return _should_force_redact_container_value(value)
-    return _is_secret_container_key(key)
+    return classification.is_secret_container
 
 
 def _redact_matched_token(match: re.Match[str], group_name: str = "token") -> str:
@@ -251,8 +296,9 @@ def _redact_nested_assignment_value(match: re.Match[str]) -> str:
 
 def _redact_secret_assignment(match: re.Match[str]) -> str:
     key = match.group("key")
-    normalized_key = _normalize_key(key)
-    if not _is_secret_key(key):
+    classification = _classify_key(key)
+    normalized_key = classification.normalized
+    if not classification.is_secret:
         return _redact_nested_assignment_value(match)
     value = match.group("value")
     if (
@@ -375,15 +421,17 @@ def _redact_mapping(
 ) -> dict[str, _RedactedValue]:
     redacted: dict[str, _RedactedValue] = {}
     has_secret_context_label = _mapping_has_secret_context_label(value)
+    parent_is_query_container = _is_query_container(parent_key)
     for index, (key, item) in enumerate(value.items()):
         if max_collection_items is not None and index >= max_collection_items:
             redacted["__truncated__"] = f"{len(value) - max_collection_items} more items"
             break
         key_text = _safe_str(key)
+        classification = _classify_key(key)
         redact_key = (
             _should_redact_value_for_key(key, item)
-            or (_is_query_container(parent_key) and _is_redacted_query_key(key))
-            or (has_secret_context_label and _is_context_secret_value_key(key))
+            or (parent_is_query_container and classification.is_redacted_query)
+            or (has_secret_context_label and classification.is_context_secret_value)
         )
         redacted[key_text] = redact_sensitive_data(
             item,

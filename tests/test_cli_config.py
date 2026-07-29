@@ -765,6 +765,33 @@ class TestConfigInit:
         assert "mindroom connect --pair-code" in output
         assert "codex login" in output
 
+    def test_init_mindroom_chat_kimi_writes_hosted_kimi_defaults(self, tmp_path: Path) -> None:
+        """Hosted Kimi config should use Kimi defaults and hosted Matrix settings."""
+        target = tmp_path / "config.yaml"
+        result = runner.invoke(
+            app,
+            ["config", "init", "--path", str(target), "--matrix-server", "mindroom.chat", "--provider", "kimi"],
+        )
+        assert result.exit_code == 0
+
+        config = yaml.safe_load(target.read_text())
+        assert "mindroom_user" not in config
+        assert config["models"]["default"]["provider"] == "kimi"
+        assert config["models"]["default"]["id"] == CONFIG_INIT_MODEL_PRESETS["kimi"].id
+        assert config["models"]["default"]["context_window"] == CONFIG_INIT_MODEL_PRESETS["kimi"].context_window
+
+        env_content = (tmp_path / ".env").read_text()
+        assert "MATRIX_HOMESERVER=https://mindroom.chat" in env_content
+        assert "Run `kimi` and `/login` before starting MindRoom." in env_content
+        assert "# KIMI_CODE_HOME=~/.kimi-code" in env_content
+        assert "\nANTHROPIC_API_KEY=" not in env_content
+        assert "\nOPENAI_API_KEY=" not in env_content
+        assert "\nOPENROUTER_API_KEY=" not in env_content
+
+        output = normalize_console_output(result.output)
+        assert "mindroom connect --pair-code" in output
+        assert "/login" in output
+
     def test_init_mindroom_chat_ollama_writes_hosted_ollama_defaults(
         self,
         tmp_path: Path,
@@ -1299,6 +1326,30 @@ class TestConfigInit:
         assert "Run `codex login` before starting MindRoom." in env_content
         assert "# CODEX_HOME=~/.codex" in env_content
         assert "OPENAI_API_KEY=your-openai-key-here" not in env_content
+
+    def test_init_kimi_preset_uses_kimi_models(self, tmp_path: Path) -> None:
+        """Config init --provider kimi uses Kimi Code CLI login defaults."""
+        target = tmp_path / "config.yaml"
+        result = runner.invoke(app, ["config", "init", "--path", str(target), "--provider", "kimi"])
+        assert result.exit_code == 0
+
+        config = yaml.safe_load(target.read_text())
+        assert config["models"]["default"]["provider"] == "kimi"
+        assert config["models"]["default"]["id"] == CONFIG_INIT_MODEL_PRESETS["kimi"].id
+        assert config["models"]["default"]["context_window"] == CONFIG_INIT_MODEL_PRESETS["kimi"].context_window
+
+        env_content = (tmp_path / ".env").read_text()
+        assert "Run `kimi` and `/login` before starting MindRoom." in env_content
+        assert "# KIMI_CODE_HOME=~/.kimi-code" in env_content
+        assert "OPENAI_API_KEY=your-openai-key-here" not in env_content
+
+    @pytest.mark.parametrize("provider", ["kimi-code", "kimi_code"])
+    def test_init_rejects_kimi_provider_aliases(self, tmp_path: Path, provider: str) -> None:
+        """Config init should accept kimi as the provider preset without extra aliases."""
+        target = tmp_path / "config.yaml"
+        result = runner.invoke(app, ["config", "init", "--path", str(target), "--provider", provider])
+        assert result.exit_code == 1
+        assert "Invalid --provider value" in normalize_console_output(result.output)
 
     @pytest.mark.parametrize("provider", ["openai-codex", "openai_codex", "c"])
     def test_init_rejects_openai_codex_provider_aliases(self, tmp_path: Path, provider: str) -> None:
@@ -2017,7 +2068,7 @@ class TestRunErrorHandling:
         assert "No config found" in result.output
         assert "mindroom config init" in result.output
         provider_guidance = (
-            "mindroom config init --provider {openrouter,ollama,openai,azure,bedrock_claude,codex,claude"
+            "mindroom config init --provider {openrouter,ollama,openai,azure,bedrock_claude,codex,kimi,claude"
         )
         assert provider_guidance in result.output
         mock_main.assert_not_awaited()
