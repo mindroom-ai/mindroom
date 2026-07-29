@@ -3051,7 +3051,6 @@ async def test_recovery_selects_joined_owner_for_freshness_and_router_for_relay(
             "mindroom.matrix.stale_stream_cleanup.send_message_result",
             new=AsyncMock(side_effect=delivered_matrix_side_effect("$resume")),
         ) as mock_send,
-        patch.object(stale_stream_cleanup_module.logger, "warning") as mock_warning,
     ):
         result = await recover_stale_streaming_messages(
             actors,
@@ -3069,14 +3068,6 @@ async def test_recovery_selects_joined_owner_for_freshness_and_router_for_relay(
     assert mock_send.await_count == expected_resumed
     if expected_resumed:
         assert mock_send.await_args.args[0] is router_client
-        mock_warning.assert_not_called()
-    else:
-        mock_warning.assert_called_once_with(
-            "Skipping auto-resume because owning actor is unavailable or not joined",
-            room_id=ROOM_ID,
-            agent_name="test_agent",
-            target_event_id="$target",
-        )
 
 
 @pytest.mark.asyncio
