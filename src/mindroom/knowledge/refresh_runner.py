@@ -500,7 +500,6 @@ async def _refresh_knowledge_binding_locked(
     force_reindex: bool = False,
 ) -> KnowledgeRefreshResult:
     base_id = key.base_id
-    manager: KnowledgeManager | None = None
     try:
         if config.get_knowledge_base_config(base_id).mode == "files":
             return await _refresh_file_mode_binding_locked(
@@ -533,16 +532,19 @@ async def _refresh_knowledge_binding_locked(
         )
         if unchanged_result is not None:
             return unchanged_result
-        indexed_count = await manager.reindex_all(force_reindex=force_reindex)
-        if manager._last_refresh_error is not None:
-            error = redact_credentials_in_text(manager._last_refresh_error)
-            await asyncio.to_thread(mark_published_index_refresh_failed_preserving_last_good, key, error=error)
+        outcome = await manager.reindex_all(force_reindex=force_reindex)
+        if outcome.error is not None:
+            await asyncio.to_thread(
+                mark_published_index_refresh_failed_preserving_last_good,
+                key,
+                error=outcome.error,
+            )
             return KnowledgeRefreshResult(
                 key=key,
-                indexed_count=indexed_count,
+                indexed_count=outcome.indexed_count,
                 index_published=False,
                 availability=KnowledgeAvailability.REFRESH_FAILED,
-                last_error=error,
+                last_error=outcome.error,
             )
     except Exception as exc:
         error = redact_credentials_in_text(str(exc))
@@ -550,7 +552,7 @@ async def _refresh_knowledge_binding_locked(
         raise
     return await _refresh_result_from_persisted_state(
         key,
-        indexed_count=indexed_count,
+        indexed_count=outcome.indexed_count,
         config=config,
         runtime_paths=runtime_paths,
     )
