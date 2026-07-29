@@ -150,6 +150,11 @@ Non-text formats such as `.pdf`, `.docx`, or `.pptx` require their reader packag
 When a reader package is missing, the refresh indexes every other file, logs a warning naming the file and the missing package, and records a partial-index error instead of publishing an index without the opted-in content.
 Extension filtering does not apply in `files` mode, which exposes every managed file.
 
+A `.json` file is normally split into one document per top-level JSON value, which keeps structured entries separately searchable.
+When such a file is not valid JSON, the refresh indexes its raw text instead of failing the file, and logs a warning naming the file and the line and column of the parse error.
+The file then counts as successfully indexed, so its content stays searchable, but it is chunked like plain text rather than split per JSON value.
+Fix the reported parse error to get structured chunking back.
+
 ### Private Agent Knowledge
 
 Use `agents.<name>.private.knowledge` when one shared agent definition should index PrivateAgentKnowledge from that requester's private root.
