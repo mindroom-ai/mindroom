@@ -1723,6 +1723,25 @@ async def test_shutdown_response_timeout_preserves_certified_checkpoint_and_inte
 
 
 @pytest.mark.asyncio
+async def test_shutdown_logs_incomplete_response_drain_when_checkpoint_is_preserved(tmp_path: Path) -> None:
+    """A retained checkpoint must not hide response work abandoned during shutdown."""
+    bot = _agent_bot(tmp_path)
+    bot._sync_cache_trust.state = SyncTrustState.CERTIFIED
+    bot._sync_cache_trust.checkpoint = SyncCheckpoint("s_shutdown")
+    bot._coalescing_gate.drain_all = AsyncMock(return_value=CoalescingDrainResult(completed=True))
+    bot._response_runner.drain_inbox_responses = AsyncMock(return_value=False)
+
+    with capture_logs() as logs:
+        await bot.prepare_for_sync_shutdown(shutdown_intent=SYNC_RESTART_SHUTDOWN)
+
+    incomplete_logs = [entry for entry in logs if entry["event"] == "matrix_agent_response_drain_incomplete"]
+    assert len(incomplete_logs) == 1
+    assert incomplete_logs[0]["agent_name"] == bot.agent_name
+    assert incomplete_logs[0]["active_response_count"] == 0
+    assert incomplete_logs[0]["restart_reason_category"] == "config_reload"
+
+
+@pytest.mark.asyncio
 async def test_response_timeout_discards_checkpoint_when_coalescing_is_incomplete(tmp_path: Path) -> None:
     """Response cancellation cannot preserve continuity across incomplete source admission."""
     bot = _agent_bot(tmp_path)
