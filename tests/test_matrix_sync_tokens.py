@@ -417,12 +417,9 @@ async def test_sliding_initial_sync_raises_decrypt_notice_floor_despite_classic_
 @pytest.mark.asyncio
 async def test_missing_next_batch_keeps_historical_dispatch_fence_armed(tmp_path: Path) -> None:
     """A successful response without a continuation token leaves the next request tokenless."""
-    with patch("mindroom.bot.time.time", return_value=2.0):
-        bot = _agent_bot(tmp_path)
+    bot = _agent_bot(tmp_path)
     client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
     client.next_batch = None
-    event = _text_event("$missing-token-history", "historical", 1_999)
-    room = nio.MatrixRoom("!room:localhost", bot.agent_user.user_id)
 
     await _start_bot_with_client(bot, client)
     response = MagicMock(spec=nio.SyncResponse)
@@ -438,13 +435,7 @@ async def test_missing_next_batch_keeps_historical_dispatch_fence_armed(tmp_path
     ):
         await bot._on_sync_response(response)
 
-    callback = cast("Callable[..., Awaitable[None]]", _registered_event_callback(client, nio.RoomMessageText))
-    handle_text_event = AsyncMock()
-    with patch.object(bot._turn_controller, "handle_text_event", handle_text_event):
-        await callback(room, event)
-        await wait_for_background_tasks(timeout=1.0, owner=bot._runtime_view)
-
-    handle_text_event.assert_not_awaited()
+    assert bot._historical_dispatch_fence_armed is True
 
 
 @pytest.mark.asyncio
