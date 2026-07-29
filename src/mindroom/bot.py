@@ -1728,11 +1728,13 @@ class AgentBot:
             cancel_after_seconds=5.0,
             shutdown_intent=shutdown_intent,
         )
+        pending_response_count = self._response_runner.pending_inbox_response_count
         if not responses_drained:
             self.logger.warning(
                 "matrix_agent_response_drain_incomplete",
                 agent_name=self.agent_name,
                 active_response_count=self.in_flight_response_count,
+                pending_response_count=pending_response_count,
                 restart_reason_category=restart_reason_category_for(shutdown_intent),
             )
         post_drain_background_tasks_completed = await wait_for_background_tasks(
@@ -1747,11 +1749,13 @@ class AgentBot:
             and post_drain_background_tasks_completed
             and callback_failure_count == 0
         )
-        # A certified checkpoint covers durable Matrix source ingestion, not
-        # completion of detached response generation.
-        if source_checkpoint_safe and self._sync_cache_trust.state is SyncTrustState.CERTIFIED:
+        # The checkpoint certifies source ingestion, not response completion.
+        # Cancelled-and-settled response work does not weaken source trust, but
+        # a still-running task has not established its explicit recovery handoff.
+        checkpoint_recovery_safe = source_checkpoint_safe and pending_response_count == 0
+        if checkpoint_recovery_safe and self._sync_cache_trust.state is SyncTrustState.CERTIFIED:
             self._sync_cache_trust.persist_current()
-        elif not source_checkpoint_safe:
+        elif not checkpoint_recovery_safe:
             self._sync_cache_trust.discard()
             self.logger.warning(
                 "sync_checkpoint_not_saved_after_incomplete_coalescing_drain",
@@ -1759,6 +1763,7 @@ class AgentBot:
                 callback_failure_count=callback_failure_count,
                 background_tasks_completed=background_tasks_completed,
                 coalescing_completed=drain_result.completed,
+                pending_response_count=pending_response_count,
                 post_drain_background_tasks_completed=post_drain_background_tasks_completed,
                 responses_drained=responses_drained,
                 released_reservation_count=drain_result.released_reservation_count,

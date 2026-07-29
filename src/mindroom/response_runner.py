@@ -503,6 +503,11 @@ class ResponseRunner:
         task.add_done_callback(self._finish_inbox_response_task)
         return task
 
+    @property
+    def pending_inbox_response_count(self) -> int:
+        """Return an event-loop-local snapshot of runner-owned unsettled responses."""
+        return sum(not task.done() for task in self._inbox_response_tasks)
+
     def _finish_inbox_response_task(self, task: asyncio.Task[None]) -> None:
         self._inbox_response_tasks.discard(task)
         if task.cancelled():
