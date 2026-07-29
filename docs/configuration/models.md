@@ -309,10 +309,10 @@ For starter config generation, use `mindroom config init --provider azure`.
 ## Amazon Bedrock Claude
 
 Use `provider: bedrock_claude` when you want MindRoom to call Anthropic Claude through Amazon Bedrock.
-MindRoom uses Agno's AWS Bedrock Claude model wrapper and auto-installs the `aws_bedrock` optional extra on first use unless `MINDROOM_NO_AUTO_INSTALL_TOOLS=1` is set.
+MindRoom uses Anthropic's Bedrock Mantle Messages client and auto-installs the `aws_bedrock` optional extra on first use unless `MINDROOM_NO_AUTO_INSTALL_TOOLS=1` is set.
 The `id` field should be the Bedrock model ID or inference profile ID enabled in your AWS account and region.
-Use Fable when you need Anthropic's highest-capability tier and your Bedrock account has access to it.
-The generated Bedrock starter config defaults to the broadly available Opus 5 flagship.
+Bedrock lists Fable 5 as open access, while Opus 5 access can depend on the AWS account and region.
+The generated Bedrock starter config defaults to Opus 5, so confirm access or choose Fable 5 or Sonnet 5 instead.
 
 ```yaml
 models:

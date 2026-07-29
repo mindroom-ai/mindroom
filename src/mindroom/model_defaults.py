@@ -92,8 +92,8 @@ TOOL_SEARCH_UNSUPPORTED_MODEL_ID_PREFIXES = (
 )
 _AWS_BEDROCK_CLAUDE_FABLE = "anthropic.claude-fable-5"
 AWS_BEDROCK_CLAUDE_OPUS = "anthropic.claude-opus-5"
-_AWS_BEDROCK_CLAUDE_SONNET = "global.anthropic.claude-sonnet-5"
-_AWS_BEDROCK_CLAUDE_HAIKU = "global.anthropic.claude-haiku-4-5"
+_AWS_BEDROCK_CLAUDE_SONNET = "anthropic.claude-sonnet-5"
+_AWS_BEDROCK_CLAUDE_HAIKU = "anthropic.claude-haiku-4-5"
 CODEX_GPT = "gpt-5.6"
 CODEX_GPT_ENDPOINT = "gpt-5.6-sol"
 KIMI_K3 = "k3"
@@ -109,7 +109,7 @@ AZURE_OPENAI_DEFAULT_DEPLOYMENT = "your-azure-openai-deployment"
 GOOGLE_AVATAR_PROMPT = "gemini-3.5-flash-lite"
 GOOGLE_IMAGE = "gemini-3.1-flash-image"
 GOOGLE_AVATAR_IMAGE = GOOGLE_IMAGE
-GOOGLE_VEO = "veo-3.1-generate-preview"
+GOOGLE_VEO = "veo-3.1-generate-001"
 
 _OPENROUTER_CLAUDE_FABLE = "anthropic/claude-fable-5"
 _OPENROUTER_CLAUDE_OPUS = "anthropic/claude-opus-5"

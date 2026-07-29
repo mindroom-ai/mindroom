@@ -124,7 +124,7 @@ def test_current_google_and_openrouter_specialist_models() -> None:
     assert model_defaults.GOOGLE_AVATAR_PROMPT == "gemini-3.5-flash-lite"
     assert model_defaults.GOOGLE_AVATAR_IMAGE == "gemini-3.1-flash-image"
     assert model_defaults.GOOGLE_IMAGE == "gemini-3.1-flash-image"
-    assert model_defaults.GOOGLE_VEO == "veo-3.1-generate-preview"
+    assert model_defaults.GOOGLE_VEO == "veo-3.1-generate-001"
     assert openrouter_alternatives["gemini_flash"] == model_defaults.ModelPreset(
         "openrouter",
         "google/gemini-3.6-flash",
@@ -151,13 +151,15 @@ def test_sonnet_presets_use_current_generation() -> None:
     assert model_defaults.CONFIG_INIT_MODEL_PRESETS["vertexai_claude"].id == "claude-sonnet-5"
     assert model_defaults.CONFIG_INIT_MODEL_PRESETS["openrouter"].id == "anthropic/claude-sonnet-5"
     assert model_defaults.SAAS_MODEL_PRESETS["sonnet"].id == "anthropic/claude-sonnet-5"
-    assert bedrock_alternatives["sonnet"].id == "global.anthropic.claude-sonnet-5"
+    assert bedrock_alternatives["sonnet"].id == "anthropic.claude-sonnet-5"
+    assert bedrock_alternatives["haiku"].id == "anthropic.claude-haiku-4-5"
     assert "claude-sonnet-4-6" not in {
         model_defaults.CONFIG_INIT_MODEL_PRESETS["anthropic"].id,
         model_defaults.CONFIG_INIT_MODEL_PRESETS["vertexai_claude"].id,
         model_defaults.CONFIG_INIT_MODEL_PRESETS["openrouter"].id,
         model_defaults.SAAS_MODEL_PRESETS["sonnet"].id,
         bedrock_alternatives["sonnet"].id,
+        bedrock_alternatives["haiku"].id,
     }
 
 

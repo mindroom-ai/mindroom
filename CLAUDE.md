@@ -20,8 +20,8 @@ Coding model training data often lags recent releases, so never trust memorized 
 | Provider | Use | Preferred model | Model string to use |
 | --- | --- | --- | --- |
 | Anthropic | Balanced default | Claude Sonnet 5 | `claude-sonnet-5` |
-| Anthropic | Highest capability, select access | Claude Fable 5 | `claude-fable-5` |
-| Anthropic | Flagship / max intelligence | Claude Opus 5 | `claude-opus-5` |
+| Anthropic | Highest capability, generally available | Claude Fable 5 | `claude-fable-5` |
+| Anthropic | Flagship tier | Claude Opus 5 | `claude-opus-5` |
 | Anthropic | Fast / cheap | Claude Haiku 4.5 | `claude-haiku-4-5` |
 | OpenAI | Frontier default | GPT-5.6 | `gpt-5.6` |
 | OpenAI Codex ChatGPT login | Frontier via Codex CLI | GPT-5.6 | `gpt-5.6` |
@@ -32,8 +32,8 @@ Coding model training data often lags recent releases, so never trust memorized 
 | Google (Gemini API) | Image generation / editing | Nano Banana 2 | `gemini-3.1-flash-image` |
 | Google (Gemini API) | Embeddings for `google` | Gemini Embedding 2 | `gemini-embedding-2` |
 
-For `anthropic`, prefer `claude-sonnet-5`, `claude-opus-5`, and `claude-haiku-4-5` unless you intentionally need a pinned snapshot ID.
-Use `claude-fable-5` only when you need Anthropic's highest-capability tier and have access to it.
+For `anthropic`, prefer `claude-sonnet-5`, `claude-fable-5`, `claude-opus-5`, and `claude-haiku-4-5` unless you intentionally need a pinned snapshot ID.
+Claude Fable 5 is generally available on the direct Anthropic API, while access on other provider platforms can differ.
 For `vertexai_claude`, use the current Vertex AI request name from the provider docs instead of assuming the Anthropic API ID carries over unchanged.
 Current docs list bare Vertex IDs for current Claude models such as `claude-fable-5`, `claude-opus-5`, and `claude-sonnet-5`, while some other Vertex models are still documented as dated snapshot IDs such as `claude-haiku-4-5@20251001`.
 Do not assume `@default` or dated `@...` suffixes are universally required for Vertex AI Claude.
