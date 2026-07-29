@@ -84,7 +84,7 @@ from mindroom.knowledge.readers import (
     MalformedJSONSourceError,
     build_reader,
     chunking_strategy_for_base,
-    reader_uses_configured_chunking,
+    reader_decodes_plain_text,
     text_fallback_reader,
 )
 from mindroom.knowledge.redaction import redact_credentials_in_text
@@ -843,17 +843,24 @@ class KnowledgeManager:
     def _chunk_texts_for_prefetch(self, resolved_path: Path) -> tuple[str, ...]:
         """Return the chunk texts Agno will embed for one file, or ``()``.
 
-        Only the text-like readers MindRoom configures chunking for are
-        pre-read: for those, reading twice is negligible next to one embedding
-        round trip per chunk. Any reader failure here is swallowed on purpose
-        because prefetching is an optimization; the real insert path below owns
-        error reporting for this file.
+        Only files whose reader decodes them as text are pre-read, for two
+        reasons that both belong to the read and not to chunking: decoding
+        twice is negligible next to one embedding round trip per chunk, where
+        parsing a document or unpacking an archive twice is not, and the byte
+        budget in :meth:`_chunk_texts_for_batch` is computed from a size on
+        disk, which only bounds the text of a file that is text. The chunks
+        themselves match the insert path by construction, because that path
+        reads through a reader from this same :func:`build_reader` call.
+
+        Any reader failure here is swallowed on purpose because prefetching is
+        an optimization; the real insert path below owns error reporting for
+        this file.
         """
         try:
             reader = build_reader(resolved_path, chunking=self._chunking_strategy())
         except Exception:
             return ()
-        if not reader_uses_configured_chunking(reader):
+        if not reader_decodes_plain_text(reader):
             return ()
         try:
             documents: Sequence[Document] = reader.read(resolved_path, name=resolved_path.name)

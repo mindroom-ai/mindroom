@@ -3,8 +3,9 @@
 One knowledge base's chunk boundaries are decided here and nowhere else: this
 module owns which Agno reader answers for a file extension, which of those
 readers MindRoom reconfigures with its own chunking, and how a malformed JSON
-source is replayed as text. The indexing manager consumes the readers this
-module builds; it does not know the Agno reader types.
+source is replayed as text. It also answers what a reader costs to re-read,
+which is a question about the reader rather than about chunking. The indexing
+manager consumes what this module builds and never names an Agno reader type.
 """
 
 from __future__ import annotations
@@ -12,7 +13,7 @@ from __future__ import annotations
 import json
 import uuid
 from copy import deepcopy
-from typing import IO, TYPE_CHECKING, Any, Final
+from typing import IO, TYPE_CHECKING, Any
 
 from agno.knowledge.document.base import Document
 from agno.knowledge.reader import ReaderFactory
@@ -83,22 +84,27 @@ def chunking_strategy_for_base(config: Config, base_id: str) -> SafeFixedSizeChu
     )
 
 
-#: The reader types :func:`build_reader` reconfigures with a base's own
-#: chunking policy. Every decision that depends on "did MindRoom chunk this
-#: reader" reads this one tuple, because a caller that disagrees with
-#: ``build_reader`` about the answer chunks the same file two different ways.
-_CHUNK_CONFIGURED_READER_TYPES: Final = (TextReader, MarkdownReader)
+def reader_decodes_plain_text(reader: Reader) -> bool:
+    """Return whether ``reader`` decodes its source as text instead of unpacking it.
 
+    Two independent preconditions for re-reading a file rest on this property
+    and on nothing else:
 
-def reader_uses_configured_chunking(reader: Reader) -> bool:
-    """Return whether :func:`build_reader` applies this base's chunking to ``reader``.
+    * the second read is cheap next to one embedding round trip, because it is
+      a decode rather than a document parse or an archive extraction;
+    * the file's size on disk bounds its decoded text, which is what makes
+      :meth:`~mindroom.chunking.SafeFixedSizeChunking.max_chunk_text_bytes`
+      -- documented against a size on disk -- a valid budget for it. A
+      compressed container (``.docx``, ``.xlsx``, ``.pdf``) breaks that: its
+      extracted text can dwarf the archive it came out of.
 
-    Callers that re-read a file to predict the chunks indexing will embed have
-    to gate on this: a reader left with its factory chunking splits the same
-    file differently, so those predictions would describe chunks nothing
-    inserts.
+    This is currently the same set of types :func:`build_reader` reconfigures,
+    and that is a coincidence of the readers Agno ships, not one fact. Do not
+    merge the two: giving a reader MindRoom's chunking says nothing about what
+    reading it costs, and the first binary format to need a chunking override
+    would need this to keep answering ``False``.
     """
-    return isinstance(reader, _CHUNK_CONFIGURED_READER_TYPES)
+    return isinstance(reader, (TextReader, MarkdownReader))
 
 
 def _configure_text_reader(
@@ -124,8 +130,11 @@ def build_reader(file_path: Path, *, chunking: SafeFixedSizeChunking) -> Reader:
         # the subclass that tags its own decode failures for the text fallback.
         return _FallbackAwareJSONReader(**deepcopy(vars(reader)))
 
-    # Large markdown/plain-text files are the common source of oversized embed requests.
-    if not isinstance(reader, _CHUNK_CONFIGURED_READER_TYPES):
+    # Large markdown/plain-text files are the common source of oversized embed
+    # requests. This decision is deliberately spelled out here rather than
+    # shared with `reader_decodes_plain_text`: the two coincide today but
+    # answer different questions, and see that function for why.
+    if not isinstance(reader, (TextReader, MarkdownReader)):
         return reader
 
     return _configure_text_reader(deepcopy(reader), chunking=chunking)
