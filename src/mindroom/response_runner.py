@@ -560,14 +560,17 @@ class ResponseRunner:
         _done, pending = await asyncio.wait(tasks, timeout=cancel_after_seconds)
         if not pending:
             return True
+        cancellation_requested: set[asyncio.Task[None]] = set()
         for task in pending:
             if not task.done():
                 request_task_cancel(task, cancel_source=shutdown_intent.cancel_source)
+                if task.cancelling() > 0:
+                    cancellation_requested.add(task)
         await asyncio.wait(pending, timeout=cancel_after_seconds)
         self._incomplete_inbox_responses_recoverable = all(
             task.done()
             and (
-                (not task.cancelled() and task.exception() is None)
+                (task not in cancellation_requested and not task.cancelled() and task.exception() is None)
                 or ((recovery_check := recovery_checks[task]) is not None and recovery_check())
             )
             for task in pending

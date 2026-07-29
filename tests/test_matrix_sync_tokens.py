@@ -1815,6 +1815,39 @@ async def test_shutdown_preserves_checkpoint_only_when_each_cancelled_response_h
     assert incomplete_log["response_recovery_complete"] is checkpoint_preserved
 
 
+@pytest.mark.asyncio
+async def test_shutdown_discards_checkpoint_when_response_swallows_cancellation_without_handoff(
+    tmp_path: Path,
+) -> None:
+    """An accepted cancellation needs exact recovery even if the task returns cleanly."""
+    bot = _certified_shutdown_bot(tmp_path)
+    response_started = asyncio.Event()
+
+    async def swallowed_response_cancellation() -> None:
+        response_started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            return
+
+    response_task = bot._response_runner.track_inbox_response(
+        swallowed_response_cancellation(),
+        name="test_swallowed_response_cancellation",
+        recovery_handoff_ready=lambda: False,
+    )
+    await response_started.wait()
+    _install_fast_response_drain(bot)
+
+    await bot.prepare_for_sync_shutdown(shutdown_intent=SYNC_RESTART_SHUTDOWN)
+
+    assert response_task.done()
+    assert not response_task.cancelled()
+    assert response_task.exception() is None
+    assert bot._response_runner.incomplete_inbox_responses_recoverable is False
+    assert bot._sync_cache_trust.state is SyncTrustState.UNCERTAIN
+    assert _load_sync_token_value(tmp_path, bot.agent_name) is None
+
+
 @pytest.mark.parametrize("source_failure", ["coalescing", "callback", "cache"])
 @pytest.mark.asyncio
 async def test_response_timeout_discards_checkpoint_when_source_is_unsafe(
