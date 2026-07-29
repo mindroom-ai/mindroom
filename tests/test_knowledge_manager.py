@@ -75,6 +75,8 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Coroutine, Iterable, Iterator, Sequence
     from types import ModuleType
 
+    from agno.knowledge.reader.base import Reader
+
     from mindroom.constants import RuntimePaths
 
 
@@ -243,6 +245,30 @@ class _Knowledge:
 
     def search(self, query: str, max_results: int | None = None) -> list[Document]:
         return self.vector_db.search(query=query, limit=max_results or 5)
+
+
+def _insert_with_real_reader(
+    self: _Knowledge,
+    *,
+    path: str,
+    metadata: dict[str, object],
+    upsert: bool,
+    reader: object | None = None,
+) -> None:
+    """Exercise the selected Agno reader while keeping vectors in the test store."""
+    _ = upsert
+    selected_reader = cast("Reader", reader)
+    documents = selected_reader.read(Path(path), name=Path(path).name)
+    with _VectorDb.lock:
+        _VectorDb.collections.setdefault(self.vector_db.collection_name, []).extend(
+            {
+                "id": f"row-{next(_vector_row_ids)}",
+                "content": document.content,
+                "embedding": [1.0],
+                "metadata": {**metadata, **document.meta_data},
+            }
+            for document in documents
+        )
 
 
 class _FakeEmbedder(Embedder):
@@ -8849,3 +8875,108 @@ async def test_index_file_locked_runs_off_event_loop_thread(
             f"Knowledge.insert ran on the asyncio main thread (id={thread_id}); "
             "it must run on a worker thread via asyncio.to_thread."
         )
+
+
+@pytest.mark.asyncio
+async def test_malformed_json_falls_back_to_text_and_publishes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Malformed JSON remains searchable instead of blocking the whole candidate."""
+    docs_path = tmp_path / "docs"
+    docs_path.mkdir()
+    malformed = '{\n  "claim": "still useful",\n  “broken”: true\n}\n'
+    source_path = docs_path / "claim.json"
+    source_path.write_text(malformed, encoding="utf-8")
+    config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
+    runtime_paths = runtime_paths_for(config)
+    monkeypatch.setattr(_Knowledge, "insert", _insert_with_real_reader)
+    original_read_text = Path.read_text
+    source_reads = 0
+
+    def _count_source_reads(path: Path, *args: object, **kwargs: object) -> str:
+        nonlocal source_reads
+        if path == source_path:
+            source_reads += 1
+        return original_read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", _count_source_reads)
+
+    with capture_logs() as logs:
+        result = await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+    lookup = get_published_index("docs", config=config, runtime_paths=runtime_paths)
+
+    assert result.index_published is True
+    assert lookup.index is not None
+    documents = lookup.index.knowledge.search("still useful", max_results=5)
+    assert len(documents) == 1
+    assert '"claim": "still useful"' in documents[0].content
+    assert "“broken”: true" in documents[0].content
+    fallback = [entry for entry in logs if entry["event"] == "Malformed JSON knowledge file; indexing as text"]
+    assert [(entry["path"], entry["line"], entry["column"]) for entry in fallback] == [("claim.json", 3, 3)]
+    assert source_reads == 1
+
+
+@pytest.mark.asyncio
+async def test_valid_json_keeps_structured_reader(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Valid JSON lists remain separate structured documents."""
+    docs_path = tmp_path / "docs"
+    docs_path.mkdir()
+    (docs_path / "claims.json").write_text('[{"claim": "one"}, {"claim": "two"}]', encoding="utf-8")
+    config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
+    runtime_paths = runtime_paths_for(config)
+    monkeypatch.setattr(_Knowledge, "insert", _insert_with_real_reader)
+
+    with capture_logs() as logs:
+        result = await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+    lookup = get_published_index("docs", config=config, runtime_paths=runtime_paths)
+
+    assert result.index_published is True
+    assert lookup.index is not None
+    assert [document.content for document in lookup.index.knowledge.search("claim", max_results=5)] == [
+        '{"claim": "one"}',
+        '{"claim": "two"}',
+    ]
+    assert all(entry["event"] != "Malformed JSON knowledge file; indexing as text" for entry in logs)
+
+
+@pytest.mark.asyncio
+async def test_valid_json_does_not_hide_downstream_json_decode_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A downstream JSONDecodeError remains a failure when source JSON is valid."""
+    docs_path = tmp_path / "docs"
+    docs_path.mkdir()
+    (docs_path / "claim.json").write_text('{"claim": "valid"}', encoding="utf-8")
+    config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
+    runtime_paths = runtime_paths_for(config)
+
+    def _fail_after_read(
+        self: _Knowledge,
+        *,
+        path: str,
+        metadata: dict[str, object],
+        upsert: bool,
+        reader: object | None = None,
+    ) -> None:
+        _ = (self, metadata, upsert)
+        selected_reader = cast("Reader", reader)
+        selected_reader.read(Path(path), name=Path(path).name)
+        message = "downstream response was not JSON"
+        raise json.JSONDecodeError(message, "<html>", 0)
+
+    monkeypatch.setattr(_Knowledge, "insert", _fail_after_read)
+
+    with capture_logs() as logs:
+        result = await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+
+    assert result.index_published is False
+    assert (
+        result.last_error
+        == "Indexed 0 of 1 managed knowledge files (first error: knowledge indexing failed (JSONDecodeError))"
+    )
+    assert all(entry["event"] != "Malformed JSON knowledge file; indexing as text" for entry in logs)
