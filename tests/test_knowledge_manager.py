@@ -8,6 +8,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
 from itertools import count
@@ -7876,44 +7877,67 @@ async def test_git_timeout_message_never_leaks_credentials_from_arguments(
     assert secret not in str(exc_info.value)
 
 
-def test_credential_bearing_remote_url_is_never_persisted(tmp_path: Path) -> None:
-    """A URL whose credentials outlive stripping must not reach ``.git/config``.
+#: Strings that must never be written to ``.git/config``. The first four are
+#: documented provider credential forms with the scheme mistyped or dropped --
+#: ``urlparse`` reads the username as a scheme and reports no authority, so
+#: string surgery on the "scheme" removed the password separator before anything
+#: looked for it, and the secret was persisted verbatim.
+_UNPERSISTABLE_REPO_URLS = [
+    pytest.param("oauth2:{secret}@gitlab.com:org/repo.git", id="gitlab-oauth2-form"),
+    pytest.param("x-access-token:{secret}@github.com/org/repo.git", id="github-token-form"),
+    pytest.param("user:{secret}@github.com:org/repo.git", id="userinfo-without-scheme"),
+    pytest.param("user%3A{secret}@github.com:org/repo.git", id="encoded-colon-without-scheme"),
+    pytest.param("https:{secret}@host/x", id="scheme-without-slashes"),
+    pytest.param("HTTPS:{secret}@host/x", id="uppercase-scheme-without-slashes"),
+    pytest.param("http:///git-user:{secret}@example.com/org/repo.git", id="empty-authority"),
+    pytest.param("//git-user:{secret}@example.com/org/repo.git", id="protocol-relative"),
+    pytest.param("https://user%3A{secret}%40example.com/repo.git", id="percent-encoded-authority"),
+    pytest.param("https://user%253A{secret}%2540example.com/repo.git", id="double-encoded-authority"),
+]
 
-    ``credential_free_repo_url`` only strips userinfo from the authority
-    ``urlparse`` reports, so these shapes passed through it verbatim and were
-    written to disk as the checkout's remote. Credentials may transit as a
-    process-local header; they must never be persisted.
+#: Remote forms that must keep working. Refusing any of these would break a
+#: supported configuration, so parse-or-refuse has to admit them positively.
+_PERSISTABLE_REPO_URLS = [
+    ("https://example.com/org/repo.git", "https://example.com/org/repo.git"),
+    ("https://user:{secret}@example.com/org/repo.git", "https://example.com/org/repo.git"),
+    ("ssh://git@example.com/org/repo.git", "ssh://git@example.com/org/repo.git"),
+    ("ssh://git:{secret}@example.com/org/repo.git", "ssh://example.com/org/repo.git"),
+    ("git@github.com:org/repo.git", "git@github.com:org/repo.git"),
+    ("https://[::1]:8443/org/repo.git", "https://[::1]:8443/org/repo.git"),
+    ("file:///srv/repos/x.git", "file:///srv/repos/x.git"),
+    ("/srv/repos/x.git", "/srv/repos/x.git"),
+    # An ``@`` outside the authority is not userinfo and must not be refused.
+    ("https://host:8443/a@b", "https://host:8443/a@b"),
+    ("https://host/@scope/pkg.git", "https://host/@scope/pkg.git"),
+]
+
+
+@pytest.mark.parametrize("repo_url_template", _UNPERSISTABLE_REPO_URLS)
+def test_unsafe_remote_url_is_refused_rather_than_persisted(repo_url_template: str) -> None:
+    """A remote URL that cannot be parsed must be refused, not sanitized.
+
+    Writing the checkout's ``origin`` is the one place a secret would land on
+    disk and stay there across syncs, so the rule is parse-or-refuse: accept
+    only shapes whose authority actually resolves, and reject the rest instead
+    of guessing where their userinfo is.
     """
-    _ = tmp_path
     secret = "S3CR3T-CANARY"  # noqa: S105
-    refused = [
-        f"http:///git-user:{secret}@example.com/org/repo.git",
-        f"https:///git-user:{secret}@example.com/org/repo.git",
-        f"//git-user:{secret}@example.com/org/repo.git",
-        f"https://user%3A{secret}%40example.com/repo.git",
-    ]
-    for repo_url in refused:
-        with pytest.raises(RuntimeError, match="Refusing to write a credential-bearing remote URL") as exc_info:
-            knowledge_git_source_module._persistable_remote_url(repo_url, "docs")
-        assert secret not in str(exc_info.value)
+    repo_url = repo_url_template.format(secret=secret)
 
-    # Supported forms must keep working: a stripped password, an SSH bare
-    # username, and scp-style syntax that urlparse reports as a bare path.
-    assert (
-        knowledge_git_source_module._persistable_remote_url(
-            f"https://user:{secret}@example.com/org/repo.git",
-            "docs",
-        )
-        == "https://example.com/org/repo.git"
-    )
-    assert (
-        knowledge_git_source_module._persistable_remote_url("ssh://git@example.com/org/repo.git", "docs")
-        == "ssh://git@example.com/org/repo.git"
-    )
-    assert (
-        knowledge_git_source_module._persistable_remote_url("git@github.com:org/repo.git", "docs")
-        == "git@github.com:org/repo.git"
-    )
+    with pytest.raises(RuntimeError, match="Refusing to write an unsafe remote URL") as exc_info:
+        knowledge_git_source_module._persistable_remote_url(repo_url, "docs")
+
+    assert secret not in str(exc_info.value)
+
+
+@pytest.mark.parametrize(("repo_url_template", "expected"), _PERSISTABLE_REPO_URLS)
+def test_supported_remote_url_forms_are_still_persistable(repo_url_template: str, expected: str) -> None:
+    """Parse-or-refuse must not cost any supported remote form."""
+    secret = "S3CR3T-CANARY"  # noqa: S105
+    persisted = knowledge_git_source_module._persistable_remote_url(repo_url_template.format(secret=secret), "docs")
+
+    assert persisted == expected
+    assert secret not in persisted
 
 
 @pytest.mark.asyncio
@@ -8946,6 +8970,26 @@ async def test_run_git_reports_the_git_failure_when_stderr_holds_an_unparseable_
         await manager.git_source._run_git(["fetch", "origin", "main"])
 
     assert "bad address" in str(exc_info.value)
+
+
+def test_redacting_a_huge_nested_escape_token_stays_cheap_and_closed() -> None:
+    """A remote must not stall the event loop through the redactor.
+
+    Decoding percent-escapes to a fixed point is quadratic in the nesting depth
+    the *sender* chooses, and this runs inline in the coroutine reading Git's
+    stderr, which a remote controls via sideband output. Measured before the
+    bound: 64 KB took ~1.8 s and 1 MB roughly seven minutes.
+    """
+    secret = "S3CR3T-CANARY"  # noqa: S105
+    depth = 128 * 1024
+    token = f"https://user:{secret}@" + "%" + "25" * depth + "40" + "example.com/repo.git"
+
+    started = time.perf_counter()
+    redacted = redact_credentials_in_text(f"fatal: unable to access '{token}': failed")
+    elapsed = time.perf_counter() - started
+
+    assert secret not in redacted
+    assert elapsed < 1.0
 
 
 def test_redacting_a_non_ascii_basic_token_does_not_raise() -> None:

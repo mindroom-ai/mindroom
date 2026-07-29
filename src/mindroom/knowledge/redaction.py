@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import re
 from base64 import b64decode
-from urllib.parse import unquote, urlparse, urlunparse
+from urllib.parse import ParseResult, unquote, urlparse, urlunparse
 
 from mindroom.git_urls import credential_free_repo_url
 
@@ -57,6 +57,15 @@ def _strip_path_params(path: str) -> str:
     return path.split(";", 1)[0]
 
 
+#: Longest token `redact_url_credentials` will inspect. Decoding to a fixed
+#: point is quadratic in the nesting depth an attacker chooses -- a 64 KB
+#: single-token payload of nested escapes takes ~1.8 s -- and it runs inline in
+#: the coroutine that reads Git's stderr, which a remote controls via sideband
+#: output. A real URL is orders of magnitude shorter, so anything past this is
+#: replaced unread: fail closed, and bound the cost at the same time.
+_MAX_REDACTABLE_TOKEN_LENGTH = 2048
+
+
 def fully_unquoted(value: str) -> str:
     """Percent-decode `value` repeatedly until it stops changing.
 
@@ -72,6 +81,16 @@ def fully_unquoted(value: str) -> str:
         if decoded == value:
             return value
         value = decoded
+
+
+def _inspectable_url(value: str) -> ParseResult | None:
+    """Return the parsed token, or None when it must be dropped unread."""
+    if len(value) > _MAX_REDACTABLE_TOKEN_LENGTH:
+        return None
+    try:
+        return urlparse(value)
+    except ValueError:
+        return None
 
 
 def redact_url_credentials(value: str) -> str:
@@ -91,13 +110,13 @@ def redact_url_credentials(value: str) -> str:
     there would replace the real Git failure with an unrelated ``ValueError``
     and destroy the diagnostic the caller was trying to report.
     """
-    try:
-        parsed = urlparse(value)
-    except ValueError:
-        # Unparseable is not the same as credential-free: userinfo can sit
-        # behind the part that failed to parse. This text reaches users and is
-        # persisted as ``last_error``, so drop the whole token rather than risk
-        # leaking a secret; the surrounding message survives intact.
+    parsed = _inspectable_url(value)
+    if parsed is None:
+        # Too long to inspect, or unparseable. Unparseable is not the same as
+        # credential-free -- userinfo can sit behind the part that failed to
+        # parse -- and this text reaches users and is persisted as
+        # ``last_error``, so drop the whole token rather than risk leaking a
+        # secret. The surrounding message survives intact.
         return "***"
 
     # Every separator test below runs on the fully decoded form, so an encoded
