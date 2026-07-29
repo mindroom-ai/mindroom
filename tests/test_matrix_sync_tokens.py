@@ -1054,18 +1054,18 @@ async def test_shutdown_discard_warning_logs_exact_drain_predicates(
 ) -> None:
     """Checkpoint-discard logs should identify which content-free drain predicate failed."""
     bot = _agent_bot(tmp_path)
-    install_shutdown_drain_mocks(
+    drain_result = install_shutdown_drain_mocks(
         bot,
         coalescing_drain_completed=coalescing_drain_completed,
         responses_drained=responses_drained,
     )
+    assert drain_result.completed is coalescing_drain_completed
+    assert bool(drain_result.cancelled_unready_count) is not coalescing_drain_completed
 
     with capture_logs() as logs:
         await bot.prepare_for_sync_shutdown()
 
-    warnings = [
-        entry for entry in logs if entry["event"] == "sync_checkpoint_not_saved_after_incomplete_coalescing_drain"
-    ]
+    warnings = [entry for entry in logs if entry["event"] == "sync_checkpoint_not_saved_after_incomplete_shutdown"]
     assert len(warnings) == 1
     assert warnings[0]["coalescing_drain_completed"] is coalescing_drain_completed
     assert warnings[0]["responses_drained"] is responses_drained

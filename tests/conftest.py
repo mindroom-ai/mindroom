@@ -1411,13 +1411,18 @@ def install_shutdown_drain_mocks(
     *,
     coalescing_drain_completed: bool,
     responses_drained: bool,
-) -> None:
+) -> CoalescingDrainResult:
     """Install exact shutdown drain outcomes through stable collaborator seams."""
     wrap_extracted_collaborators(bot, "_coalescing_gate", "_response_runner")
+    drain_result = CoalescingDrainResult(
+        completed=coalescing_drain_completed,
+        cancelled_unready_count=int(not coalescing_drain_completed),
+    )
     bot._coalescing_gate.drain_all = AsyncMock(
-        return_value=CoalescingDrainResult(completed=coalescing_drain_completed),
+        return_value=drain_result,
     )
     bot._response_runner.drain_inbox_responses = AsyncMock(return_value=responses_drained)
+    return drain_result
 
 
 def install_send_response_mock(bot: RuntimeBot, send_response: AsyncMock) -> None:
