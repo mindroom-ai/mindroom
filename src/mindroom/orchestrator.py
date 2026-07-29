@@ -1854,7 +1854,8 @@ class _MultiAgentOrchestrator:
         self._external_trigger_runtime.unbind()
         await shutdown_approval_runtime()
         await self.config_reload.cancel()
-        await wait_for_background_tasks(owner=self._mcp_catalog_change_task_owner)
+        owner = self._mcp_catalog_change_task_owner
+        await wait_for_background_tasks(5.0, owner=owner, shutdown_intent=ORDERLY_SHUTDOWN)
         await self._startup_maintenance.cancel()
         await self._todo_poke_runtime.stop()
         await self._stop_memory_auto_flush_worker()

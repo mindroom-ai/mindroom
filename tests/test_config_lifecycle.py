@@ -46,8 +46,8 @@ def _make_lifecycle(
     )
 
 
-def test_drain_state_tracks_wait_warning_force_and_reset() -> None:
-    """Drain-state helpers should model wait, warning, force, and reset transitions."""
+def test_drain_state_tracks_wait_warning_and_force() -> None:
+    """Drain-state helpers should model wait, warning, and force transitions."""
     state = _ConfigReloadDrainState()
 
     assert state.waiting_for_idle is False
@@ -92,11 +92,6 @@ def test_drain_state_tracks_wait_warning_force_and_reset() -> None:
     )
     assert state.should_force_reload(now=11.9, force_after_seconds=2.0) is False
     assert state.should_force_reload(now=12.0, force_after_seconds=2.0) is True
-
-    state.reset()
-
-    assert state.waiting_for_idle is False
-    assert state.should_force_reload(now=1e9, force_after_seconds=2.0) is False
 
 
 @pytest.mark.asyncio

@@ -47,12 +47,6 @@ class _ConfigReloadDrainState:
     wait_started_at: float | None = None
     last_warning_at: float | None = None
 
-    def reset(self) -> None:
-        """Clear all drain tracking state."""
-        self.waiting_for_idle = False
-        self.wait_started_at = None
-        self.last_warning_at = None
-
     def begin_wait(self, *, now: float) -> None:
         """Start a fresh response-drain window."""
         self.waiting_for_idle = True

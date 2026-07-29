@@ -2134,7 +2134,10 @@ async def test_new_agent_not_started_twice(tmp_path: Path) -> None:
 @pytest.mark.asyncio
 async def test_orchestrator_stop_cancels_all_tasks(tmp_path: Path) -> None:
     """Test that stop() cancels all sync tasks."""
-    with patch("mindroom.orchestrator.cancel_sync_task") as mock_cancel:
+    with (
+        patch("mindroom.orchestrator.cancel_sync_task") as mock_cancel,
+        patch("mindroom.orchestrator.wait_for_background_tasks", new=AsyncMock()) as mock_wait,
+    ):
         orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
 
         # Track which tasks are cancelled
@@ -2176,6 +2179,8 @@ async def test_orchestrator_stop_cancels_all_tasks(tmp_path: Path) -> None:
         # Verify bots were stopped with public shutdown metadata and no restart cancellation source.
         mock_bot1.stop.assert_awaited_once_with(shutdown_intent=ORDERLY_SHUTDOWN)
         mock_bot2.stop.assert_awaited_once_with(shutdown_intent=ORDERLY_SHUTDOWN)
+        owner = orchestrator._mcp_catalog_change_task_owner
+        mock_wait.assert_awaited_once_with(5.0, owner=owner, shutdown_intent=ORDERLY_SHUTDOWN)
 
 
 # ---------------------------------------------------------------------------

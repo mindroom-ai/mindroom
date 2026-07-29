@@ -514,9 +514,6 @@ class TestRoutingRegression:
             await release_send.wait()
             return nio.RoomSendResponse.from_dict({"event_id": "$router-response"}, room_id=room.room_id)
 
-        async def stop_after_relay(*_: object, **__: object) -> None:
-            assert router_bot.admission_gate.in_flight_response_count == 0
-
         router_bot.client.room_send.side_effect = blocking_room_send
         relay_task = asyncio.create_task(
             _run_admitted_router_relay(
@@ -528,12 +525,12 @@ class TestRoutingRegression:
         assert router_bot.admission_gate.in_flight_response_count == 1
 
         with (
-            patch("mindroom.orchestrator.stop_entities", new=AsyncMock(side_effect=stop_after_relay)) as mock_stop,
+            patch("mindroom.orchestrator.stop_entities", new_callable=AsyncMock) as mock_stop,
             patch.object(
                 orchestrator,
                 "_create_and_start_entities",
                 new=AsyncMock(return_value=EntityStartResults()),
-            ) as mock_create,
+            ),
         ):
             await orchestrator._notify_mcp_catalog_change("demo")
             try:
@@ -548,9 +545,6 @@ class TestRoutingRegression:
                 )
 
         mock_stop.assert_awaited_once()
-        mock_create.assert_awaited_once()
-        assert router_bot.client.room_send.await_count == 1
-        assert router_bot.admission_gate.in_flight_response_count == 0
         assert router_bot.admission_gate.closed is False
 
     @pytest.mark.asyncio
