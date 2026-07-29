@@ -60,8 +60,6 @@ from mindroom.tool_system.worker_routing import (
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
-    from mindroom.knowledge.git_source import GitSyncResult
-
 
 logger = get_logger(__name__)
 
@@ -668,7 +666,7 @@ async def _refresh_file_mode_binding_locked(
     )
     published_revision: str | None = None
     if manager.git_source.is_configured():
-        git_sync_result: GitSyncResult = await manager.git_source.sync()
+        git_sync_result = await manager.git_source.sync()
         published_revision = git_sync_result.head
         if git_sync_result.updated:
             await mark_knowledge_source_changed_async(
@@ -691,7 +689,7 @@ async def _maybe_publish_unchanged_index(
 ) -> KnowledgeRefreshResult | None:
     force_reindex = force_reindex or manager.needs_full_reindex_on_create()
     if manager.git_source.is_configured():
-        git_sync_result: GitSyncResult = await manager.git_source.sync()
+        git_sync_result = await manager.git_source.sync()
         if force_reindex or git_sync_result.updated:
             if git_sync_result.updated:
                 await mark_knowledge_source_changed_async(

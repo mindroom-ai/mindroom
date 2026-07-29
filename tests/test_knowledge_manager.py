@@ -55,7 +55,12 @@ from mindroom.knowledge.git_source import GitKnowledgeSource, GitSyncResult
 from mindroom.knowledge.index_metadata import write_index_metadata_payload
 from mindroom.knowledge.indexing_config import IndexingSettings
 from mindroom.knowledge.manager import KnowledgeManager, _knowledge_source_signature
-from mindroom.knowledge.redaction import credential_free_repo_url, credential_free_url_identity, redact_url_credentials
+from mindroom.knowledge.redaction import (
+    credential_free_repo_url,
+    credential_free_url_identity,
+    redact_credentials_in_text,
+    redact_url_credentials,
+)
 from mindroom.knowledge.refresh_runner import knowledge_binding_mutation_lock, refresh_knowledge_binding
 from mindroom.knowledge.registry import (
     get_published_index,
@@ -3188,12 +3193,7 @@ async def test_git_source_sync_does_not_mutate_index_directly(
 
     assert not hasattr(manager, "remove_file")
     assert not hasattr(manager, "index_file")
-    assert result == GitSyncResult(
-        head="rev-source-only",
-        updated=True,
-        changed=frozenset({"changed.md"}),
-        removed=frozenset({"removed.md"}),
-    )
+    assert result == GitSyncResult(head="rev-source-only", updated=True)
     assert manager.git_source.last_synced_head == "rev-source-only"
 
 
@@ -8644,6 +8644,17 @@ async def test_run_git_reports_the_git_failure_when_stderr_holds_an_unparseable_
         await manager.git_source._run_git(["fetch", "origin", "main"])
 
     assert "bad address" in str(exc_info.value)
+
+
+def test_redacting_a_non_ascii_basic_token_does_not_raise() -> None:
+    """A Basic token that is not decodable must still redact, not blow up.
+
+    ``b64decode`` raises a bare ``ValueError`` for non-ASCII input rather than
+    the ``binascii.Error`` a narrower ``except`` would catch, so this pins the
+    breadth of that handler: the header is still redacted, and redaction never
+    replaces the Git failure it was called to sanitize.
+    """
+    assert redact_credentials_in_text("Authorization: Basic éééé") == "Authorization: Basic ***"
 
 
 @pytest.mark.asyncio

@@ -44,6 +44,8 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
+__all__ = ["GitKnowledgeSource", "GitSyncResult"]
+
 
 def _http_credentials(
     credentials_service: str | None,
@@ -150,14 +152,18 @@ def _merge_git_env(*envs: dict[str, str] | None) -> dict[str, str] | None:
 
 @dataclass(frozen=True)
 class GitSyncResult:
-    """Outcome of one Git source synchronization."""
+    """Outcome of one Git source synchronization.
+
+    Deliberately only what callers act on. The changed and removed path sets a
+    sync computes are reported in its log line and then dropped: no caller reads
+    them, and carrying them would copy every tracked path in the repository on
+    the initial-clone branch, where "changed" is the whole corpus.
+    """
 
     #: Revision the checkout sits at afterwards, or None when it cannot be read.
     head: str | None
     #: Whether this sync moved the checkout, the initial clone included.
     updated: bool
-    changed: frozenset[str] = frozenset()
-    removed: frozenset[str] = frozenset()
 
 
 @dataclass
@@ -236,12 +242,7 @@ class GitKnowledgeSource:
                 removed_count=len(removed_files),
                 commit=current_head,
             )
-        return GitSyncResult(
-            head=current_head,
-            updated=updated,
-            changed=frozenset(changed_files),
-            removed=frozenset(removed_files),
-        )
+        return GitSyncResult(head=current_head, updated=updated)
 
     def _git_config(self) -> KnowledgeGitConfig | None:
         return self.config.get_knowledge_base_config(self.base_id).git
