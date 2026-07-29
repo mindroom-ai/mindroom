@@ -1041,16 +1041,15 @@ class TestRoutingRegression:
             user_id=ids["router"].full_id,
         )
         router_bot = setup_test_bot(router_agent, tmp_path, test_room_id, config=test_config)
-        orchestrator = MagicMock(spec=_MultiAgentOrchestrator)
+        orchestrator = _MultiAgentOrchestrator(runtime_paths)
+        orchestrator.config = test_config
         orchestrator.agent_bots = {
-            "alpha": SimpleNamespace(running=True),
-            "beta": SimpleNamespace(running=False),
-            "writer": SimpleNamespace(running=True),
-            "ops": SimpleNamespace(running=True),
-            "router": SimpleNamespace(running=True),
+            "alpha": MagicMock(spec=AgentBot, running=True, first_sync_complete=True),
+            "beta": MagicMock(spec=AgentBot, running=False, first_sync_complete=False),
+            "writer": MagicMock(spec=AgentBot, running=True, first_sync_complete=True),
+            "ops": MagicMock(spec=TeamBot, running=True, first_sync_complete=True),
+            "router": MagicMock(spec=AgentBot, running=True, first_sync_complete=True),
         }
-        orchestrator.entity_first_sync_complete.return_value = True
-        orchestrator.entity_first_sync_readiness_guard.return_value.__aenter__.return_value = True
         router_bot.orchestrator = orchestrator
 
         mock_suggest_responder.side_effect = AssertionError("AI router should not see unavailable candidates")
