@@ -9244,6 +9244,28 @@ _PERSISTABLE_REPO_URLS = [
 ]
 
 
+#: Netloc codepoints that NFKC-normalise to ``@``. ``urlsplit`` rejects these
+#: and quotes the offending netloc -- password included -- in the exception, and
+#: no redactor can clean that message because it holds no ASCII ``@`` to anchor
+#: on. Both are reachable from ``repo_url``, which is an unvalidated string.
+_LOOKALIKE_SEPARATORS = ["\uff20", "\ufe6b"]
+
+
+@pytest.mark.parametrize("separator", _LOOKALIKE_SEPARATORS)
+def test_git_auth_env_refuses_a_lookalike_separator_without_raising(separator: str, tmp_path: Path) -> None:
+    """``_git_auth_env`` must be safe on its own, not because of when it is called.
+
+    Every caller reaches it only after ``_persistable_remote_url`` has refused
+    such URLs, so this is unreachable in the current ordering. It is pinned
+    because that ordering is not a property of the function, and an exception
+    escaping here would carry the password into whatever logs it.
+    """
+    secret = "S3CR3T-CANARY"  # noqa: S105
+    repo_url = f"https://user:{secret}{separator}example.com/org/repo.git"
+
+    assert knowledge_git_source_module._git_auth_env(repo_url, None, test_runtime_paths(tmp_path)) is None
+
+
 @pytest.mark.parametrize("repo_url_template", _UNPERSISTABLE_REPO_URLS)
 def test_unsafe_remote_url_is_refused_rather_than_persisted(repo_url_template: str) -> None:
     """A remote URL that cannot be parsed must be refused, not sanitized.

@@ -97,15 +97,25 @@ def _git_auth_env(
 ) -> dict[str, str] | None:
     """Return process-local Git config that injects credentials without persisting them.
 
-    Safe against a netloc ``urlsplit`` refuses -- one holding a codepoint that
-    NFKC-normalises to a delimiter -- only because every caller runs after
-    ``_ensure_repository`` has put the URL through ``_persistable_remote_url``,
-    which refuses those. That is a call-order invariant rather than a property
-    of this function: the bare ``urlparse`` below would raise with the password
-    in its message. Preserve the ordering, or guard here.
+    Returns None rather than raising for a URL ``urlsplit`` refuses -- one whose
+    netloc holds a codepoint that NFKC-normalises to a delimiter. Such a URL
+    would raise here with the password quoted in the exception message, and no
+    redactor can clean that: there is no ASCII ``@`` for one to anchor on.
+
+    Every caller today reaches this only after ``_persistable_remote_url`` has
+    already refused those URLs, so the guard is unreachable in the current call
+    order. It is here anyway because that ordering is not a property of this
+    function, and the recurring failure in this area has been protection that
+    turned out to hold only under assumptions the next edit was free to break.
+    Returning None is the right answer regardless: a URL that will be refused
+    needs no credentials injected for it.
     """
     clean_url = credential_free_repo_url(repo_url)
-    parsed_clean_url = urlparse(clean_url)
+    try:
+        parsed_clean_url = urlparse(clean_url)
+        parsed_repo_url = urlparse(repo_url)
+    except ValueError:
+        return None
 
     embedded_userinfo = embedded_http_userinfo(repo_url)
     if embedded_userinfo is not None:
@@ -120,7 +130,6 @@ def _git_auth_env(
     if clean_url == repo_url:
         # Nothing was stripped, so there is nothing to restore process-locally.
         return None
-    parsed_repo_url = urlparse(repo_url)
     if parsed_repo_url.netloc and "@" in parsed_repo_url.netloc:
         # Userinfo in the authority is handled by the two branches above; it must
         # not be rebuilt into a config key, which Git echoes verbatim on error.
