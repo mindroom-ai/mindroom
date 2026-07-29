@@ -28,6 +28,7 @@ from mindroom.matrix.identity import MatrixID, managed_account_key
 from mindroom.matrix.state import MatrixState
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
+from mindroom.orchestrator import _MultiAgentOrchestrator
 from mindroom.routing import suggest_responder_for_message
 from mindroom.teams import TeamOutcome, TeamResolution
 from mindroom.thread_utils import AgentResponseDecision
@@ -141,6 +142,71 @@ def setup_test_bot(
     )
     bot.client = make_matrix_client_mock(user_id=agent.user_id)
     return install_runtime_cache_support(bot)
+
+
+def _router_readiness_runtime(
+    tmp_path: Path,
+) -> tuple[AgentBot, AgentBot, _MultiAgentOrchestrator, nio.MatrixRoom]:
+    """Return a live router and one running target that has not completed first sync."""
+    room_id = "!router-readiness:localhost"
+    config = _runtime_bound_config(
+        Config(
+            agents={"general": AgentConfig(display_name="General", rooms=[room_id])},
+            authorization={"default_room_access": True},
+        ),
+        tmp_path,
+    )
+    runtime_paths = runtime_paths_for(config)
+    ids = entity_ids(config, runtime_paths)
+    router_bot = setup_test_bot(
+        AgentMatrixUser(
+            agent_name="router",
+            password=TEST_PASSWORD,
+            display_name="Router",
+            user_id=ids["router"].full_id,
+        ),
+        tmp_path,
+        room_id,
+        config=config,
+    )
+    target_bot = setup_test_bot(
+        AgentMatrixUser(
+            agent_name="general",
+            password=TEST_PASSWORD,
+            display_name="General",
+            user_id=ids["general"].full_id,
+        ),
+        tmp_path,
+        room_id,
+        config=config,
+    )
+    orchestrator = _MultiAgentOrchestrator(runtime_paths)
+    orchestrator.config = config
+    orchestrator.agent_bots = {"router": router_bot, "general": target_bot}
+    router_bot.orchestrator = orchestrator
+    router_bot.running = target_bot.running = True
+    router_bot.client.room_send.return_value = nio.RoomSendResponse.from_dict(
+        {"event_id": "$router-response"},
+        room_id=room_id,
+    )
+    room = nio.MatrixRoom(room_id=room_id, own_user_id=ids["router"].full_id)
+    room.users = {
+        ids["router"].full_id: MagicMock(),
+        ids["general"].full_id: MagicMock(),
+        "@user:localhost": MagicMock(),
+    }
+    return router_bot, target_bot, orchestrator, room
+
+
+def _router_readiness_event(event_id: str) -> nio.RoomMessageText:
+    return nio.RoomMessageText.from_dict(
+        {
+            "event_id": event_id,
+            "sender": "@user:localhost",
+            "origin_server_ts": 1_000,
+            "content": {"msgtype": "m.text", "body": "Please route this"},
+        },
+    )
 
 
 @pytest.mark.asyncio
@@ -344,6 +410,77 @@ def mock_news_agent() -> AgentMatrixUser:
 
 class TestRoutingRegression:
     """Regression tests for routing behavior."""
+
+    @pytest.mark.asyncio
+    async def test_router_relay_waits_for_target_first_sync(self, tmp_path: Path) -> None:
+        """An unavailable target gets a visible status, then one relay after readiness."""
+        router_bot, target_bot, _, room = _router_readiness_runtime(tmp_path)
+
+        await router_bot._turn_controller._execute_router_relay(
+            room,
+            _router_readiness_event("$before-ready"),
+            [],
+            requester_user_id="@user:localhost",
+        )
+        target_bot._first_sync_done = True
+        await router_bot._turn_controller._execute_router_relay(
+            room,
+            _router_readiness_event("$after-ready"),
+            [],
+            requester_user_id="@user:localhost",
+        )
+
+        sent_contents = [call.kwargs["content"] for call in router_bot.client.room_send.await_args_list]
+        assert sent_contents[0]["body"] == "That agent is still starting. Please try again shortly."
+        assert ORIGINAL_SENDER_KEY not in sent_contents[0]
+        assert SOURCE_KIND_KEY not in sent_contents[0]
+        relay_contents = [
+            content for content in sent_contents if content.get(SOURCE_KIND_KEY) == TRUSTED_INTERNAL_RELAY_SOURCE_KIND
+        ]
+        assert len(relay_contents) == 1
+        assert relay_contents[0]["body"] == "@mindroom_general:localhost could you help with this?"
+        assert relay_contents[0][ORIGINAL_SENDER_KEY] == "@user:localhost"
+
+    @pytest.mark.asyncio
+    async def test_router_target_replacement_resets_first_sync_readiness(self, tmp_path: Path) -> None:
+        """A newly registered bot generation must not inherit readiness."""
+        router_bot, target_bot, orchestrator, room = _router_readiness_runtime(tmp_path)
+        target_bot._first_sync_done = True
+        replacement = setup_test_bot(
+            target_bot.agent_user,
+            tmp_path,
+            room.room_id,
+            config=target_bot.config,
+        )
+        replacement.running = True
+        replacement.orchestrator = orchestrator
+        orchestrator.agent_bots["general"] = replacement
+
+        await router_bot._turn_controller._execute_router_relay(
+            room,
+            _router_readiness_event("$replacement-starting"),
+            [],
+            requester_user_id="@user:localhost",
+        )
+
+        content = router_bot.client.room_send.await_args.kwargs["content"]
+        assert content["body"] == "That agent is still starting. Please try again shortly."
+        assert SOURCE_KIND_KEY not in content
+
+    @pytest.mark.asyncio
+    async def test_router_removed_target_keeps_existing_no_responder_behavior(self, tmp_path: Path) -> None:
+        """A removed target stays unavailable instead of gaining a false-ready path."""
+        router_bot, _, orchestrator, room = _router_readiness_runtime(tmp_path)
+        del orchestrator.agent_bots["general"]
+
+        await router_bot._turn_controller._execute_router_relay(
+            room,
+            _router_readiness_event("$removed"),
+            [],
+            requester_user_id="@user:localhost",
+        )
+
+        router_bot.client.room_send.assert_not_awaited()
 
     @pytest.mark.asyncio
     @patch("mindroom.response_attempt.is_user_online")
@@ -886,15 +1023,16 @@ class TestRoutingRegression:
             user_id=ids["router"].full_id,
         )
         router_bot = setup_test_bot(router_agent, tmp_path, test_room_id, config=test_config)
-        router_bot.orchestrator = SimpleNamespace(
-            agent_bots={
-                "alpha": SimpleNamespace(running=True),
-                "beta": SimpleNamespace(running=False),
-                "writer": SimpleNamespace(running=True),
-                "ops": SimpleNamespace(running=True),
-                "router": SimpleNamespace(running=True),
-            },
-        )
+        orchestrator = MagicMock(spec=_MultiAgentOrchestrator)
+        orchestrator.agent_bots = {
+            "alpha": SimpleNamespace(running=True),
+            "beta": SimpleNamespace(running=False),
+            "writer": SimpleNamespace(running=True),
+            "ops": SimpleNamespace(running=True),
+            "router": SimpleNamespace(running=True),
+        }
+        orchestrator.entity_first_sync_complete.return_value = True
+        router_bot.orchestrator = orchestrator
 
         mock_suggest_responder.side_effect = AssertionError("AI router should not see unavailable candidates")
         mock_send_response = MagicMock()

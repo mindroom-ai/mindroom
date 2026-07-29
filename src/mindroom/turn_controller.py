@@ -135,6 +135,7 @@ if TYPE_CHECKING:
     from mindroom.message_target import MessageTarget
     from mindroom.response_lifecycle import QueuedHumanNoticeReservation
     from mindroom.response_runner import ResponseRunner
+    from mindroom.runtime_protocols import OrchestratorRuntime
     from mindroom.sync_restart_retry import InterruptedTurnRooms
     from mindroom.tool_system.runtime_context import ToolRuntimeSupport
     from mindroom.turn_store import TurnStore
@@ -143,6 +144,17 @@ if TYPE_CHECKING:
 
 _QUEUED_NOTICE_METADATA_KIND = "queued_notice_reservation"
 _PENDING_TURN_CLAIM_METADATA_KIND = "pending_turn_claim"
+
+
+def _gate_router_target_readiness(
+    orchestrator: OrchestratorRuntime | None,
+    suggested_entity: str | None,
+) -> tuple[str | None, bool]:
+    """Drop a known unready or stale router selection before relay delivery."""
+    if suggested_entity is None or orchestrator is None:
+        return suggested_entity, False
+    first_sync_complete = orchestrator.entity_first_sync_complete(suggested_entity)
+    return (suggested_entity if first_sync_complete is True else None, first_sync_complete is False)
 
 
 def _room_level_context_event(event: TextDispatchEvent) -> TextDispatchEvent:
@@ -1469,7 +1481,14 @@ class TurnController:
                     thread_history,
                 )
 
-        if not suggested_entity:
+        suggested_entity, target_starting = _gate_router_target_readiness(
+            self.deps.runtime.orchestrator,
+            suggested_entity,
+        )
+
+        if target_starting:
+            response_text = "That agent is still starting. Please try again shortly."
+        elif not suggested_entity:
             response_text = (
                 "⚠️ I couldn't determine which agent or team should help with this. "
                 "Please try mentioning an agent or team directly with @ or rephrase your request."

@@ -643,6 +643,11 @@ class AgentBot:
         self._runtime_view.client = value
 
     @property
+    def first_sync_complete(self) -> bool:
+        """Return whether this bot generation completed its first sync."""
+        return self._first_sync_done
+
+    @property
     def config(self) -> Config:
         """Return the canonical live config."""
         return self._runtime_view.config

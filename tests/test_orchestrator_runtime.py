@@ -843,6 +843,25 @@ class TestMultiAgentOrchestrator:
         assert orchestrator.agent_bots == {}
         assert not orchestrator.running
 
+    def test_entity_first_sync_complete_tracks_current_generation(self, tmp_path: Path) -> None:
+        """Readiness must follow the bot currently registered for an entity."""
+        orchestrator = _MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path))
+        ready_bot = MagicMock(spec=AgentBot)
+        ready_bot.running = True
+        ready_bot.first_sync_complete = True
+        replacement_bot = MagicMock(spec=AgentBot)
+        replacement_bot.running = True
+        replacement_bot.first_sync_complete = False
+
+        orchestrator.agent_bots["general"] = ready_bot
+        assert orchestrator.entity_first_sync_complete("general") is True
+
+        orchestrator.agent_bots["general"] = replacement_bot
+        assert orchestrator.entity_first_sync_complete("general") is False
+
+        del orchestrator.agent_bots["general"]
+        assert orchestrator.entity_first_sync_complete("general") is None
+
     @pytest.mark.asyncio
     async def test_ensure_room_invitations_invites_authorized_users(self, tmp_path: Path) -> None:
         """Global users and room-permitted users should be invited to managed rooms."""
