@@ -4,13 +4,14 @@ from __future__ import annotations
 
 import asyncio
 import time
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from enum import Enum
 from typing import TYPE_CHECKING, Any, Protocol, cast
 
 from mindroom import interactive
 from mindroom.attachment_ids import merge_attachment_ids
 from mindroom.attachments import parse_attachment_ids_from_event_source
+from mindroom.background_tasks import create_background_task
 from mindroom.coalescing import CoalescingGate, IngressAdmissionClosedError, ReadyPendingEvent
 from mindroom.coalescing_batch import (
     CoalescedBatch,
@@ -144,6 +145,7 @@ if TYPE_CHECKING:
 
 _QUEUED_NOTICE_METADATA_KIND = "queued_notice_reservation"
 _PENDING_TURN_CLAIM_METADATA_KIND = "pending_turn_claim"
+_VOICE_TRANSCRIPTION_PLACEHOLDER = "Router agent is transcribing…"
 
 
 def _room_level_context_event(event: TextDispatchEvent) -> TextDispatchEvent:
@@ -335,6 +337,16 @@ class TurnController:
     """Own sequencing for one inbound text or media turn."""
 
     deps: TurnControllerDeps
+    _visible_voice_placeholder_tasks: dict[str, asyncio.Task[str | None]] = field(
+        default_factory=dict,
+        init=False,
+        repr=False,
+    )
+    _visible_voice_finish_tasks: dict[str, asyncio.Task[str | None]] = field(
+        default_factory=dict,
+        init=False,
+        repr=False,
+    )
 
     def _client(self) -> nio.AsyncClient:
         client = self.deps.runtime.client
@@ -980,44 +992,148 @@ class TurnController:
         )
         return _IngressAdmissionOutcome.ADMITTED
 
-    async def _maybe_send_visible_voice_echo(
+    def _visible_router_voice_echo_enabled(self) -> bool:
+        """Return whether this bot owns the visible voice-transcription lifecycle."""
+        return self.deps.agent_name == ROUTER_AGENT_NAME and self.deps.runtime.config.voice.visible_router_echo
+
+    def _start_visible_voice_transcription_placeholder(
         self,
-        room: nio.MatrixRoom,
         event: AudioMessageEvent,
         *,
-        text: str,
-        thread_id: str | None,
+        target: MessageTarget,
         requester_user_id: str,
-        normalized_source: dict[str, Any],
-    ) -> str | None:
-        """Optionally post a visible router echo for normalized audio."""
-        if self.deps.agent_name != ROUTER_AGENT_NAME or not self.deps.runtime.config.voice.visible_router_echo:
+    ) -> asyncio.Task[str | None] | None:
+        """Start or share the placeholder send for one raw voice event."""
+        if not self._visible_router_voice_echo_enabled():
             return None
+        existing_task = self._visible_voice_placeholder_tasks.get(event.event_id)
+        if existing_task is not None:
+            return existing_task
+        task = create_background_task(
+            self._send_visible_voice_transcription_placeholder(
+                event,
+                target=target,
+                requester_user_id=requester_user_id,
+            ),
+            name=f"voice_placeholder:{target.room_id}:{event.event_id}",
+            owner=self.deps.runtime,
+        )
+        self._visible_voice_placeholder_tasks[event.event_id] = task
+        task.add_done_callback(
+            lambda completed_task: self._clear_visible_voice_placeholder_task(
+                event.event_id,
+                completed_task,
+            ),
+        )
+        return task
 
+    def _clear_visible_voice_placeholder_task(
+        self,
+        source_event_id: str,
+        completed_task: asyncio.Task[str | None],
+    ) -> None:
+        """Forget a completed placeholder task without evicting a newer retry."""
+        if self._visible_voice_placeholder_tasks.get(source_event_id) is completed_task:
+            self._visible_voice_placeholder_tasks.pop(source_event_id)
+
+    async def _send_visible_voice_transcription_placeholder(
+        self,
+        event: AudioMessageEvent,
+        *,
+        target: MessageTarget,
+        requester_user_id: str,
+    ) -> str | None:
+        """Post the router's visible voice placeholder before normalization finishes."""
         existing_visible_echo_event_id = self.deps.turn_store.visible_echo_for_source(event.event_id)
         if existing_visible_echo_event_id is not None:
             return existing_visible_echo_event_id
 
-        target = self.deps.resolver.build_message_target(
-            room_id=room.room_id,
-            thread_id=thread_id,
-            reply_to_event_id=event.event_id,
-            event_source=event.source,
-        )
         visible_echo_event_id = await self.deps.delivery_gateway.send_text(
             SendTextRequest(
                 target=target,
-                response_text=text,
+                response_text=_VOICE_TRANSCRIPTION_PLACEHOLDER,
                 skip_mentions=True,
                 extra_content=self._visible_router_voice_echo_extra_content(
                     requester_user_id=requester_user_id,
-                    normalized_source=normalized_source,
+                    normalized_source=event.source,
                 ),
             ),
         )
         if visible_echo_event_id is not None:
             self.deps.turn_store.record_visible_echo(event.event_id, visible_echo_event_id)
         return visible_echo_event_id
+
+    def _start_visible_voice_echo_finish(
+        self,
+        event: AudioMessageEvent,
+        *,
+        target: MessageTarget,
+        placeholder_task: asyncio.Task[str | None],
+        text: str,
+        requester_user_id: str,
+        normalized_source: dict[str, Any],
+    ) -> asyncio.Task[str | None]:
+        """Start or share replacement of one voice event's placeholder."""
+        existing_task = self._visible_voice_finish_tasks.get(event.event_id)
+        if existing_task is not None:
+            return existing_task
+        task = create_background_task(
+            self._finish_visible_voice_echo(
+                target=target,
+                placeholder_task=placeholder_task,
+                text=text,
+                requester_user_id=requester_user_id,
+                normalized_source=normalized_source,
+            ),
+            name=f"voice_placeholder_finish:{target.room_id}:{event.event_id}",
+            owner=self.deps.runtime,
+        )
+        self._visible_voice_finish_tasks[event.event_id] = task
+        task.add_done_callback(
+            lambda completed_task: self._clear_visible_voice_finish_task(
+                event.event_id,
+                completed_task,
+            ),
+        )
+        return task
+
+    def _clear_visible_voice_finish_task(
+        self,
+        source_event_id: str,
+        completed_task: asyncio.Task[str | None],
+    ) -> None:
+        """Forget a completed finish task without evicting a newer retry."""
+        if self._visible_voice_finish_tasks.get(source_event_id) is completed_task:
+            self._visible_voice_finish_tasks.pop(source_event_id)
+
+    async def _finish_visible_voice_echo(
+        self,
+        *,
+        target: MessageTarget,
+        placeholder_task: asyncio.Task[str | None],
+        text: str,
+        requester_user_id: str,
+        normalized_source: dict[str, Any],
+    ) -> str | None:
+        """Replace the router's voice placeholder with its normalized text."""
+        visible_echo_event_id = await asyncio.shield(placeholder_task)
+        if visible_echo_event_id is None:
+            return None
+
+        extra_content = self._visible_router_voice_echo_extra_content(
+            requester_user_id=requester_user_id,
+            normalized_source=normalized_source,
+        )
+        edited = await self.deps.delivery_gateway.edit_text(
+            EditTextRequest(
+                target=target,
+                event_id=visible_echo_event_id,
+                new_text=text,
+                extra_content=extra_content,
+                retry_sync_recovery=True,
+            ),
+        )
+        return visible_echo_event_id if edited else None
 
     def _visible_router_voice_echo_extra_content(
         self,
@@ -2283,6 +2399,11 @@ class TurnController:
         """Normalize a raw voice event after its conversation key is fixed."""
         event = prechecked_event.event
         queued_notice_reservation = None
+        visible_echo_task = self._start_visible_voice_transcription_placeholder(
+            event,
+            target=voice_target,
+            requester_user_id=prechecked_event.requester_user_id,
+        )
         reservation_released_or_handed_off = False
         try:
             envelope = self.deps.resolver.build_ingress_envelope(
@@ -2303,14 +2424,16 @@ class TurnController:
             )
 
             try:
-                await self._maybe_send_visible_voice_echo(
-                    room,
-                    event,
-                    text=normalized_event.body,
-                    thread_id=effective_thread_id,
-                    requester_user_id=prechecked_event.requester_user_id,
-                    normalized_source=normalized_event.source,
-                )
+                if visible_echo_task is not None:
+                    finish_task = self._start_visible_voice_echo_finish(
+                        event,
+                        target=voice_target,
+                        placeholder_task=visible_echo_task,
+                        text=normalized_event.body,
+                        requester_user_id=prechecked_event.requester_user_id,
+                        normalized_source=normalized_event.source,
+                    )
+                    await asyncio.shield(finish_task)
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
