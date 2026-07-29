@@ -500,7 +500,6 @@ async def _refresh_knowledge_binding_locked(
     force_reindex: bool = False,
 ) -> KnowledgeRefreshResult:
     base_id = key.base_id
-    manager: KnowledgeManager | None = None
     try:
         if config.get_knowledge_base_config(base_id).mode == "files":
             return await _refresh_file_mode_binding_locked(
@@ -533,6 +532,10 @@ async def _refresh_knowledge_binding_locked(
         )
         if unchanged_result is not None:
             return unchanged_result
+        # The annotation is load-bearing, not decoration: privata treats
+        # RefreshOutcome as legitimately public because this module imports it
+        # by name, and without a use here ruff would delete that import. Do not
+        # "simplify" it away.
         outcome: RefreshOutcome = await manager.reindex_all(force_reindex=force_reindex)
         if outcome.error is not None:
             await asyncio.to_thread(

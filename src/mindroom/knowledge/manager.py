@@ -2433,7 +2433,6 @@ class KnowledgeManager:
         missing collection -- the reuse gates already reject on their own.
         """
         if not _semantic_indexing_enabled(self.config, self.base_id):
-            self._last_refresh_error = None
             return RefreshOutcome(indexed_count=0, published=False, error=None)
 
         async with self._lock:
@@ -2459,9 +2458,12 @@ class KnowledgeManager:
                 raise
             finally:
                 progress.retrying = self._embedding_retry_count
-                # The accumulator carries provider text, so redact once here:
-                # everything that reads the failure -- the log line, the caller,
-                # the persisted metadata -- reads this one string.
+                # Redact at the seam rather than at each assignment site. Every
+                # source feeding the accumulator today is already safe --
+                # describe_embedder_error never echoes provider text, the git
+                # path redacts before raising, and the raising path below
+                # redacts -- so this pins the property for future error sources
+                # instead of cleaning up a known leak.
                 raw_error = self._last_refresh_error
                 outcome = RefreshOutcome(
                     indexed_count=progress.indexed_this_run,

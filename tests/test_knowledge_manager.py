@@ -713,8 +713,8 @@ async def test_file_mode_cancelled_refresh_after_metadata_publish_stays_complete
 
 
 @pytest.mark.asyncio
-async def test_file_mode_reindex_noop_clears_previous_manager_refresh_error(tmp_path: Path) -> None:
-    """File-only reindex no-ops should not leave stale manager-local errors."""
+async def test_file_mode_reindex_reports_an_empty_unpublished_outcome(tmp_path: Path) -> None:
+    """A file-only base builds no vectors, so its refresh publishes nothing and reports no failure."""
     docs_path = tmp_path / "docs"
     docs_path.mkdir()
     config = _config(
@@ -725,7 +725,6 @@ async def test_file_mode_reindex_noop_clears_previous_manager_refresh_error(tmp_
     )
     runtime_paths = runtime_paths_for(config)
     manager = KnowledgeManager("docs", config=config, runtime_paths=runtime_paths)
-    manager._last_refresh_error = "previous semantic failure"
 
     assert await manager.reindex_all() == RefreshOutcome(indexed_count=0, published=False, error=None)
 
