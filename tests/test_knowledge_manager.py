@@ -89,7 +89,8 @@ from tests.knowledge_test_support import (
 pytestmark = pytest.mark.usefixtures("patch_vector_store")
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Coroutine, Iterable
+    from collections.abc import AsyncIterator, Callable, Coroutine, Iterable
+    from contextlib import AbstractAsyncContextManager
     from types import ModuleType
 
     from agno.knowledge.reader.base import Reader
@@ -1957,6 +1958,78 @@ async def test_refresh_lock_pruning_keeps_queued_waiter_entry(
     assert waiter_entered.is_set()
 
 
+@pytest.mark.asyncio
+async def test_source_root_lock_takes_the_in_loop_half_before_the_cross_process_half(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The in-loop half must nest outside the file lock, so the two unwind in reverse."""
+    source_root = knowledge_registry.KnowledgeSourceRoot(
+        storage_root=str(tmp_path),
+        knowledge_path=str(tmp_path / "docs"),
+    )
+    events: list[str] = []
+
+    def _recorder(half: str) -> Callable[[knowledge_registry.KnowledgeSourceRoot], AbstractAsyncContextManager[None]]:
+        @asynccontextmanager
+        async def _record(key: knowledge_registry.KnowledgeSourceRoot) -> AsyncIterator[None]:
+            assert key == source_root
+            events.append(f"acquire {half}")
+            try:
+                yield
+            finally:
+                events.append(f"release {half}")
+
+        return _record
+
+    monkeypatch.setattr(knowledge_refresh_locks, "_acquire_refresh_lock", _recorder("in_loop"))
+    monkeypatch.setattr(knowledge_refresh_locks, "_acquire_refresh_file_lock", _recorder("file"))
+
+    async with knowledge_refresh_locks.refresh_source_root_lock(source_root):
+        events.append("body")
+
+    assert events == ["acquire in_loop", "acquire file", "body", "release file", "release in_loop"]
+
+
+@pytest.mark.asyncio
+async def test_cancelling_while_the_cross_process_half_is_pending_frees_the_in_loop_half(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Taking the pair in two stages must not strand the first half when the second is cancelled."""
+    source_root = knowledge_registry.KnowledgeSourceRoot(
+        storage_root=str(tmp_path),
+        knowledge_path=str(tmp_path / "docs"),
+    )
+    file_lock_reached = asyncio.Event()
+    release_file_lock = asyncio.Event()
+
+    @asynccontextmanager
+    async def _blocked_file_lock(_key: knowledge_registry.KnowledgeSourceRoot) -> AsyncIterator[None]:
+        file_lock_reached.set()
+        await release_file_lock.wait()
+        yield
+
+    monkeypatch.setattr(knowledge_refresh_locks, "_acquire_refresh_file_lock", _blocked_file_lock)
+
+    async def _take_the_pair() -> None:
+        async with knowledge_refresh_locks.refresh_source_root_lock(source_root):
+            pass
+
+    blocked_task = asyncio.create_task(_take_the_pair())
+    await file_lock_reached.wait()
+    await _wait_for_refresh_lock_borrowers(source_root, 1)
+    entry = knowledge_refresh_locks._refresh_locks[source_root]
+    assert entry.lock.locked()
+
+    blocked_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await blocked_task
+
+    assert not entry.lock.locked()
+    assert entry.borrowers == 0
+
+
 def test_source_changed_updates_refresh_state_without_changing_index(tmp_path: Path) -> None:
     """Source mutation records source changes without mutating published index data."""
     docs_path = tmp_path / "docs"
@@ -3437,7 +3510,7 @@ async def test_refresh_uses_cross_process_source_lock(
         locked_roots.append(source_root)
         yield
 
-    monkeypatch.setattr(knowledge_refresh_runner, "acquire_refresh_file_lock", _record_file_lock)
+    monkeypatch.setattr(knowledge_refresh_locks, "_acquire_refresh_file_lock", _record_file_lock)
 
     await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
 
@@ -3463,7 +3536,7 @@ async def test_mutation_lock_uses_cross_process_source_lock(
         locked_roots.append(source_root)
         yield
 
-    monkeypatch.setattr(knowledge_refresh_runner, "acquire_refresh_file_lock", _record_file_lock)
+    monkeypatch.setattr(knowledge_refresh_locks, "_acquire_refresh_file_lock", _record_file_lock)
 
     async with knowledge_binding_mutation_lock("docs", config=config, runtime_paths=runtime_paths):
         pass

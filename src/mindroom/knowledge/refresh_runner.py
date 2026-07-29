@@ -22,10 +22,9 @@ from mindroom.knowledge.index_metadata import state_for_publication
 from mindroom.knowledge.manager import KnowledgeManager
 from mindroom.knowledge.redaction import redact_credentials_in_text
 from mindroom.knowledge.refresh_locks import (
-    acquire_refresh_file_lock,
-    acquire_refresh_lock,
     mark_refresh_active,
     mark_refresh_inactive,
+    refresh_source_root_lock,
 )
 from mindroom.knowledge.registry import (
     PublishedIndexKey,
@@ -246,7 +245,7 @@ async def _cleanup_cancelled_refresh_subprocess(
     try:
         await _terminate_refresh_subprocess(process)
         source_root = source_root_for_published_index_key(key)
-        async with acquire_refresh_lock(source_root), acquire_refresh_file_lock(source_root):
+        async with refresh_source_root_lock(source_root):
             await _reconcile_cancelled_refresh(
                 key,
                 initial_state=initial_state,
@@ -265,7 +264,7 @@ async def _reconcile_failed_refresh_subprocess(
 ) -> None:
     try:
         source_root = source_root_for_published_index_key(key)
-        async with acquire_refresh_lock(source_root), acquire_refresh_file_lock(source_root):
+        async with refresh_source_root_lock(source_root):
             state = await asyncio.to_thread(load_published_index_state, published_index_metadata_path(key))
             if not _failed_subprocess_state_can_be_reconciled(key, state, initial_state):
                 return
@@ -292,7 +291,7 @@ async def knowledge_binding_mutation_lock(
         create=create,
     )
     source_root = source_root_for_refresh_target(key)
-    async with acquire_refresh_lock(source_root), acquire_refresh_file_lock(source_root):
+    async with refresh_source_root_lock(source_root):
         yield
 
 
@@ -333,7 +332,7 @@ async def _refresh_resolved_knowledge_binding(
     source_root = source_root_for_published_index_key(key)
     mark_refresh_active(refresh_target)
     try:
-        async with acquire_refresh_lock(source_root), acquire_refresh_file_lock(source_root):
+        async with refresh_source_root_lock(source_root):
             initial_state = await asyncio.to_thread(
                 load_published_index_state,
                 published_index_metadata_path(key),

@@ -1,9 +1,9 @@
 """Process-wide serialization and activity bookkeeping for knowledge refreshes.
 
-Refresh work for one source root must not overlap, neither inside this event loop
-(``acquire_refresh_lock``) nor across the refresh subprocesses that share the same
-checkout (``acquire_refresh_file_lock``). Callers acquire the pair; this module owns
-the tables behind them, which are process-wide singletons.
+Refresh work for one source root must not overlap, neither inside this event loop nor
+across the refresh subprocesses that share the same checkout. Both exclusions are
+required, so ``refresh_source_root_lock`` is the only way to take either one, and this
+module owns the tables behind them, which are process-wide singletons.
 """
 
 from __future__ import annotations
@@ -84,7 +84,7 @@ def _prune_refresh_locks_locked(*, reserve_slots: int = 0) -> None:
 
 
 @asynccontextmanager
-async def acquire_refresh_lock(key: KnowledgeSourceRoot) -> AsyncIterator[None]:
+async def _acquire_refresh_lock(key: KnowledgeSourceRoot) -> AsyncIterator[None]:
     """Serialize source-root refresh and mutation work in this runtime event loop."""
     entry = _borrow_refresh_lock_for_key(key)
     acquired = False
@@ -104,9 +104,31 @@ def _refresh_file_lock_path(key: KnowledgeSourceRoot) -> Path:
 
 
 @asynccontextmanager
-async def acquire_refresh_file_lock(key: KnowledgeSourceRoot) -> AsyncIterator[None]:
+async def _acquire_refresh_file_lock(key: KnowledgeSourceRoot) -> AsyncIterator[None]:
     """Serialize source-root refresh and mutation work across processes."""
     async with async_exclusive_file_lock(_refresh_file_lock_path(key), poll_seconds=_REFRESH_FILE_LOCK_POLL_SECONDS):
+        yield
+
+
+@asynccontextmanager
+async def refresh_source_root_lock(key: KnowledgeSourceRoot) -> AsyncIterator[None]:
+    """Hold every exclusion one source root's refresh and mutation work needs.
+
+    The two halves cover different concurrency domains and neither substitutes for the
+    other, so taking them as one unit is what makes the pairing checkable instead of a
+    convention every new call site has to remember.
+
+    Dropping the cross-process half corrupts data: a scheduled refresh runs in a child
+    interpreter, where the parent's ``asyncio.Lock`` is invisible, so nothing would stop
+    it from indexing a source tree while an API upload or delete rewrites it and then
+    publishing that half-written corpus as the last-good index.
+
+    Dropping the in-loop half degrades instead: tasks in one event loop would contend on
+    ``flock`` alone, polling every ``_REFRESH_FILE_LOCK_POLL_SECONDS`` in arrival-blind
+    order rather than queueing, and the borrow counts that keep the lock table from
+    evicting a live entry would never be recorded.
+    """
+    async with _acquire_refresh_lock(key), _acquire_refresh_file_lock(key):
         yield
 
 
