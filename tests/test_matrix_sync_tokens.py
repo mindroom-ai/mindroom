@@ -411,7 +411,10 @@ async def test_sliding_initial_sync_raises_decrypt_notice_floor_despite_classic_
     with patch("mindroom.bot.raise_notice_floor") as notice_floor:
         await _start_bot_with_client(bot, client)
 
-    notice_floor.assert_called_once_with(client.user_id, floor_timestamp_ms=bot._startup_cutoff_ms)
+    notice_floor.assert_called_once_with(
+        client.user_id,
+        floor_timestamp_ms=bot._historical_dispatch_fence.startup_cutoff_ms,
+    )
 
 
 @pytest.mark.asyncio
@@ -435,7 +438,7 @@ async def test_missing_next_batch_keeps_historical_dispatch_fence_armed(tmp_path
     ):
         await bot._on_sync_response(response)
 
-    assert bot._historical_dispatch_fence_armed is True
+    assert bot._historical_dispatch_fence.armed is True
 
 
 @pytest.mark.asyncio
@@ -461,7 +464,10 @@ async def test_post_start_unknown_pos_rearms_historical_dispatch_fence(tmp_path:
         sync_error.status_code = "M_UNKNOWN_POS"
         await bot._on_sync_error(sync_error)
 
-    notice_floor.assert_called_once_with(client.user_id, floor_timestamp_ms=bot._startup_cutoff_ms)
+    notice_floor.assert_called_once_with(
+        client.user_id,
+        floor_timestamp_ms=bot._historical_dispatch_fence.startup_cutoff_ms,
+    )
 
     callback = cast("Callable[..., Awaitable[None]]", _registered_event_callback(client, nio.RoomMessageText))
     handle_text_event = AsyncMock()
@@ -637,6 +643,31 @@ async def test_tokenless_initial_sync_retry_reuses_original_cutoff(tmp_path: Pat
         await wait_for_background_tasks(timeout=1.0, owner=bot._runtime_view)
 
     assert [call.args[1].event_id for call in handle_text_event.await_args_list] == ["$post-start"]
+
+
+@pytest.mark.asyncio
+async def test_sliding_receive_loop_restart_fences_history_after_success(tmp_path: Path) -> None:
+    """A fresh positionless Sliding Sync loop must fence history after an earlier success."""
+    with patch("mindroom.bot.time.time", return_value=2.0):
+        bot = _agent_bot(tmp_path)
+    bot.config.matrix_sync.mode = "sliding"
+    client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
+    event = _text_event("$historical-after-sliding-restart", "historical", 1_500)
+    room = nio.MatrixRoom("!room:localhost", bot.agent_user.user_id)
+
+    await _start_bot_with_client(bot, client)
+    callback = cast("Callable[..., Awaitable[None]]", _registered_event_callback(client, nio.RoomMessageText))
+    handle_text_event = AsyncMock()
+    with (
+        patch.object(bot, "_run_sync_response_side_effects", AsyncMock()),
+        patch.object(bot._turn_controller, "handle_text_event", handle_text_event),
+    ):
+        await bot._on_sync_response(nio.SlidingSyncResponse("pos"))
+        await bot.sync_forever()
+        await callback(room, event)
+        await wait_for_background_tasks(timeout=1.0, owner=bot._runtime_view)
+
+    handle_text_event.assert_not_awaited()
 
 
 @pytest.mark.asyncio

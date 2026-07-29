@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import math
 import time
 from dataclasses import dataclass, replace
 from functools import cached_property
@@ -22,6 +21,7 @@ from mindroom.bot_room_lifecycle import BotRoomLifecycle, BotRoomLifecycleDeps
 from mindroom.bot_runtime_view import BotRuntimeState
 from mindroom.desktop.pairing_receiver import register_desktop_pairing_receiver
 from mindroom.entity_resolution import entity_identity_registry
+from mindroom.historical_dispatch_fence import HistoricalDispatchFence
 from mindroom.hooks import (
     EVENT_AGENT_STARTED,
     EVENT_AGENT_STOPPED,
@@ -287,8 +287,7 @@ class AgentBot:
     _last_sync_monotonic: float | None
     _first_sync_done: bool
     _sync_shutting_down: bool
-    _startup_cutoff_ms: int
-    _historical_dispatch_fence_armed: bool
+    _historical_dispatch_fence: HistoricalDispatchFence
 
     # Shared runtime state and extracted collaborators
     _hook_registry_state: HookRegistryState
@@ -346,8 +345,9 @@ class AgentBot:
         self._last_sync_monotonic = None
         self._first_sync_done = False
         self._sync_shutting_down = False
-        self._startup_cutoff_ms = int(time.time() * 1000)
-        self._historical_dispatch_fence_armed = False
+        self._historical_dispatch_fence = HistoricalDispatchFence(
+            startup_cutoff_ms=int(time.time() * 1000),
+        )
         self._hook_registry_state = HookRegistryState(HookRegistry.empty())
         self._room_member_callback_registered = False
         self._room_member_join_hooks_armed = False
@@ -1082,10 +1082,13 @@ class AgentBot:
 
     def _set_historical_dispatch_fence(self, *, armed: bool) -> None:
         """Set tokenless-window admission and its matching decrypt-notice floor."""
-        self._historical_dispatch_fence_armed = armed
+        self._historical_dispatch_fence.set_armed(armed=armed)
         client = self.client
         if armed and client is not None and client.user_id:
-            raise_notice_floor(client.user_id, floor_timestamp_ms=self._startup_cutoff_ms)
+            raise_notice_floor(
+                client.user_id,
+                floor_timestamp_ms=self._historical_dispatch_fence.startup_cutoff_ms,
+            )
 
     def _certify_sync_response(
         self,
@@ -1162,45 +1165,23 @@ class AgentBot:
         )
 
         async def wrapper(room: nio.MatrixRoom, event: nio.Event) -> None:
-            if not self._initial_sync_event_is_dispatchable(room, event, callback_name=callback_name):
+            decision = self._historical_dispatch_fence.classify(event.source)
+            if not decision.dispatchable:
+                assert decision.reason is not None
+                assert decision.log_level is not None
+                log_fenced_event = self.logger.debug if decision.log_level == "debug" else self.logger.info
+                log_fenced_event(
+                    "matrix_initial_sync_dispatch_fenced",
+                    callback=callback_name,
+                    event_id=event.event_id,
+                    room_id=room.room_id,
+                    agent_name=self.agent_name,
+                    reason=decision.reason,
+                )
                 return
             await task_wrapper(room, event)
 
         return wrapper
-
-    def _initial_sync_event_is_dispatchable(
-        self,
-        room: nio.MatrixRoom,
-        event: nio.Event,
-        *,
-        callback_name: str,
-    ) -> bool:
-        """Return whether one callback may enter user-visible dispatch."""
-        if not self._historical_dispatch_fence_armed:
-            return True
-
-        origin_server_ts = origin_server_ts_from_event_source(event.source)
-        timestamp_is_finite = isinstance(origin_server_ts, int) or (
-            isinstance(origin_server_ts, float) and math.isfinite(origin_server_ts)
-        )
-        if timestamp_is_finite:
-            assert origin_server_ts is not None
-            if origin_server_ts >= self._startup_cutoff_ms:
-                return True
-            reason = "predates_startup_cutoff"
-        else:
-            reason = "missing_origin_server_ts" if origin_server_ts is None else "invalid_origin_server_ts"
-
-        log_fenced_event = self.logger.debug if reason == "predates_startup_cutoff" else self.logger.info
-        log_fenced_event(
-            "matrix_initial_sync_dispatch_fenced",
-            callback=callback_name,
-            event_id=event.event_id,
-            room_id=room.room_id,
-            agent_name=self.agent_name,
-            reason=reason,
-        )
-        return False
 
     def _room_member_join_sync_hook_plan(
         self,
@@ -1839,6 +1820,8 @@ class AgentBot:
     async def sync_forever(self) -> None:
         """Run the sync loop for this agent."""
         assert self.client is not None
+        if self.config.matrix_sync.mode == "sliding":
+            self._set_historical_dispatch_fence(armed=True)
         await run_matrix_sync_forever(
             self.client,
             config=self.config,

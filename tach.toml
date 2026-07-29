@@ -2371,6 +2371,11 @@ path = "mindroom.matrix.event_info"
 depends_on = []
 
 [[modules]]
+path = "mindroom.historical_dispatch_fence"
+depends_on = ["mindroom.matrix.event_info"]
+visibility = ["mindroom.bot"]
+
+[[modules]]
 path = "mindroom.matrix.visible_body"
 depends_on = [
     "mindroom.constants",
@@ -2714,6 +2719,7 @@ depends_on = [
     "mindroom.edit_regenerator",
     "mindroom.entity_resolution",
     "mindroom.hooks",
+    "mindroom.historical_dispatch_fence",
     "mindroom.inbound_turn_normalizer",
     "mindroom.knowledge",
     "mindroom.matrix.client_room_admin",
