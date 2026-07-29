@@ -278,7 +278,7 @@ knowledge_bases:
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `repo_url` | string | *required* | HTTPS repository URL to clone/fetch |
+| `repo_url` | string | *required* | Repository URL to clone/fetch. See the accepted forms below |
 | `branch` | string | `main` | Branch to track |
 | `poll_interval_seconds` | int | `300` | Interval for scheduling background Git refreshes |
 | `credentials_service` | string | `null` | Service name in CredentialsManager for private repos |
@@ -290,6 +290,25 @@ knowledge_bases:
 
 When `lfs: true`, install `git-lfs` on the runtime host for `uv run` or `uvx` flows.
 Bundled container images already include it.
+
+#### Accepted `repo_url` forms
+
+MindRoom writes `repo_url` into the checkout's `origin` remote, so a network form is accepted only when its host resolves; hostless local forms are accepted on their own terms. Anything else is refused rather than guessed at.
+
+| Form | Example |
+|------|---------|
+| URL with a host | `https://github.com/org/repo.git`, `ssh://git@host/org/repo.git` |
+| scp-style SSH | `git@github.com:org/repo.git`, `github.com:org/repo.git` |
+| Absolute local path | `/srv/repos/repo.git` |
+| `file:` URL | `file:///srv/repos/repo.git` |
+
+Refused, with an error naming the reason: relative and home-relative paths (`./repo.git`, `../repo.git`, `~/repo.git`, `repo.git`), URLs with an empty authority (`https:///org/repo.git`), URLs whose separator is percent-encoded or written as a lookalike codepoint, and anything embedding a second URL.
+
+**Do not embed credentials in `repo_url`.** A password in a well-formed URL is stripped before the remote is written, so it never reaches `.git/config` — but it is still in your config file, and still handed to Git for every command.
+A password MindRoom cannot strip with confidence is refused outright rather than written: that covers forms where the scheme has been dropped, such as `oauth2:TOKEN@gitlab.com:org/repo.git` or `x-access-token:TOKEN@github.com/org/repo.git`.
+Use `credentials_service` instead: those credentials are passed to Git for the duration of one command and are never written to disk.
+
+If a checkout already holds a credential-bearing remote from before this check existed, the refusal cannot clean it — delete the checkout directory so the next sync clones afresh.
 
 ### Sync Behavior
 

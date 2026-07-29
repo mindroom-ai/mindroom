@@ -4,30 +4,29 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import hashlib
 import json
 import os
 import signal
 import sys
-import tempfile
 from contextlib import asynccontextmanager, suppress
-from dataclasses import asdict, dataclass, field, replace
+from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
-from threading import Lock
 from typing import TYPE_CHECKING, TypedDict, cast
 
 from mindroom.config.knowledge import KnowledgeBaseConfig
 from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths, resolve_runtime_paths, runtime_env_values
-from mindroom.file_locks import async_exclusive_file_lock
 from mindroom.knowledge.availability import KnowledgeAvailability
 from mindroom.knowledge.index_metadata import state_for_publication
 from mindroom.knowledge.manager import KnowledgeManager
 from mindroom.knowledge.redaction import redact_credentials_in_text
+from mindroom.knowledge.refresh_locks import (
+    mark_refresh_active,
+    mark_refresh_inactive,
+    refresh_source_root_lock,
+)
 from mindroom.knowledge.registry import (
-    KnowledgeRefreshTarget,
-    KnowledgeSourceRoot,
     PublishedIndexKey,
     PublishedIndexState,
     load_published_index_state,
@@ -91,14 +90,6 @@ class _SubprocessSessionKwargs(TypedDict, total=False):
     start_new_session: bool
 
 
-_refresh_locks_guard = Lock()
-# Deliberately uncapped, unlike the lock and cooldown tables below: entries are
-# refcounts that clear when a refresh finishes, so evicting a live one would
-# report an in-flight refresh as idle and mask the leak a crashed refresh means.
-_active_refresh_counts: dict[KnowledgeRefreshTarget, int] = {}
-_active_refresh_counts_guard = Lock()
-_MAX_REFRESH_LOCKS = 512
-_REFRESH_FILE_LOCK_POLL_SECONDS = 0.1
 _REFRESH_SUBPROCESS_THREAD_ENV = {
     "OMP_NUM_THREADS": "1",
     "OPENBLAS_NUM_THREADS": "1",
@@ -107,106 +98,6 @@ _REFRESH_SUBPROCESS_THREAD_ENV = {
     "VECLIB_MAXIMUM_THREADS": "1",
     "TOKENIZERS_PARALLELISM": "false",
 }
-
-
-@dataclass
-class _RefreshLockEntry:
-    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
-    borrowers: int = 0
-
-
-_refresh_locks: dict[KnowledgeSourceRoot, _RefreshLockEntry] = {}
-
-
-def _borrow_refresh_lock_for_key(key: KnowledgeSourceRoot) -> _RefreshLockEntry:
-    with _refresh_locks_guard:
-        entry = _refresh_locks.get(key)
-        if entry is None:
-            _prune_refresh_locks_locked(reserve_slots=1)
-            entry = _RefreshLockEntry()
-            _refresh_locks[key] = entry
-        entry.borrowers += 1
-        return entry
-
-
-def _release_refresh_lock_for_key(key: KnowledgeSourceRoot, entry: _RefreshLockEntry) -> None:
-    with _refresh_locks_guard:
-        if entry.borrowers <= 0:
-            return
-        entry.borrowers -= 1
-        if _refresh_locks.get(key) is entry:
-            _prune_refresh_locks_locked()
-
-
-def _prune_refresh_locks_locked(*, reserve_slots: int = 0) -> None:
-    target_size = max(_MAX_REFRESH_LOCKS - reserve_slots, 0)
-    if len(_refresh_locks) <= target_size:
-        return
-    excess = len(_refresh_locks) - target_size
-    for key, entry in tuple(_refresh_locks.items()):
-        if excess <= 0:
-            break
-        if entry.borrowers > 0 or entry.lock.locked():
-            continue
-        _refresh_locks.pop(key, None)
-        excess -= 1
-
-
-@asynccontextmanager
-async def _acquire_refresh_lock(key: KnowledgeSourceRoot) -> AsyncIterator[None]:
-    entry = _borrow_refresh_lock_for_key(key)
-    acquired = False
-    try:
-        await entry.lock.acquire()
-        acquired = True
-        yield
-    finally:
-        if acquired:
-            entry.lock.release()
-        _release_refresh_lock_for_key(key, entry)
-
-
-def mark_refresh_active(key: KnowledgeRefreshTarget) -> None:
-    """Record scheduler-level refresh activity before a task reaches the runner."""
-    with _active_refresh_counts_guard:
-        _active_refresh_counts[key] = _active_refresh_counts.get(key, 0) + 1
-
-
-def mark_refresh_inactive(key: KnowledgeRefreshTarget) -> None:
-    """Clear scheduler-level refresh activity after a scheduled task finishes."""
-    with _active_refresh_counts_guard:
-        count = _active_refresh_counts.get(key, 0)
-        if count <= 1:
-            _active_refresh_counts.pop(key, None)
-        else:
-            _active_refresh_counts[key] = count - 1
-
-
-def is_refresh_active(key: KnowledgeRefreshTarget) -> bool:
-    """Return whether a refresh is active for one resolved physical binding."""
-    with _active_refresh_counts_guard:
-        return _active_refresh_counts.get(key, 0) > 0
-
-
-def is_refresh_active_for_binding(
-    base_id: str,
-    *,
-    config: Config,
-    runtime_paths: RuntimePaths,
-    execution_identity: ToolExecutionIdentity | None = None,
-) -> bool:
-    """Resolve a binding and return whether it has an active refresh."""
-    try:
-        key = resolve_refresh_target(
-            base_id,
-            config=config,
-            runtime_paths=runtime_paths,
-            execution_identity=execution_identity,
-            create=False,
-        )
-    except ValueError:
-        return False
-    return is_refresh_active(key)
 
 
 async def refresh_knowledge_binding_in_subprocess(
@@ -318,18 +209,6 @@ async def _send_subprocess_refresh_request(
         await process.stdin.wait_closed()
 
 
-def _refresh_file_lock_path(key: KnowledgeSourceRoot) -> Path:
-    digest = hashlib.sha256(f"{key.storage_root}\0{key.knowledge_path}".encode()).hexdigest()
-    return Path(tempfile.gettempdir()) / "mindroom" / "knowledge_refresh_locks" / f"{digest}.lock"
-
-
-@asynccontextmanager
-async def _acquire_refresh_file_lock(key: KnowledgeSourceRoot) -> AsyncIterator[None]:
-    """Serialize source-root refresh and mutation work across processes."""
-    async with async_exclusive_file_lock(_refresh_file_lock_path(key), poll_seconds=_REFRESH_FILE_LOCK_POLL_SECONDS):
-        yield
-
-
 def _subprocess_session_kwargs() -> _SubprocessSessionKwargs:
     if os.name == "nt":
         return {}
@@ -366,7 +245,7 @@ async def _cleanup_cancelled_refresh_subprocess(
     try:
         await _terminate_refresh_subprocess(process)
         source_root = source_root_for_published_index_key(key)
-        async with _acquire_refresh_lock(source_root), _acquire_refresh_file_lock(source_root):
+        async with refresh_source_root_lock(source_root):
             await _reconcile_cancelled_refresh(
                 key,
                 initial_state=initial_state,
@@ -385,7 +264,7 @@ async def _reconcile_failed_refresh_subprocess(
 ) -> None:
     try:
         source_root = source_root_for_published_index_key(key)
-        async with _acquire_refresh_lock(source_root), _acquire_refresh_file_lock(source_root):
+        async with refresh_source_root_lock(source_root):
             state = await asyncio.to_thread(load_published_index_state, published_index_metadata_path(key))
             if not _failed_subprocess_state_can_be_reconciled(key, state, initial_state):
                 return
@@ -412,7 +291,7 @@ async def knowledge_binding_mutation_lock(
         create=create,
     )
     source_root = source_root_for_refresh_target(key)
-    async with _acquire_refresh_lock(source_root), _acquire_refresh_file_lock(source_root):
+    async with refresh_source_root_lock(source_root):
         yield
 
 
@@ -453,7 +332,7 @@ async def _refresh_resolved_knowledge_binding(
     source_root = source_root_for_published_index_key(key)
     mark_refresh_active(refresh_target)
     try:
-        async with _acquire_refresh_lock(source_root), _acquire_refresh_file_lock(source_root):
+        async with refresh_source_root_lock(source_root):
             initial_state = await asyncio.to_thread(
                 load_published_index_state,
                 published_index_metadata_path(key),
