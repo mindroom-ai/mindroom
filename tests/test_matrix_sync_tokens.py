@@ -41,6 +41,7 @@ from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
     install_runtime_cache_support,
+    install_shutdown_drain_mocks,
     make_matrix_client_mock,
     runtime_paths_for,
     test_runtime_paths,
@@ -1053,10 +1054,11 @@ async def test_shutdown_discard_warning_logs_exact_drain_predicates(
 ) -> None:
     """Checkpoint-discard logs should identify which content-free drain predicate failed."""
     bot = _agent_bot(tmp_path)
-    bot._coalescing_gate.drain_all = AsyncMock(
-        return_value=CoalescingDrainResult(completed=coalescing_drain_completed),
+    install_shutdown_drain_mocks(
+        bot,
+        coalescing_drain_completed=coalescing_drain_completed,
+        responses_drained=responses_drained,
     )
-    bot._response_runner.drain_inbox_responses = AsyncMock(return_value=responses_drained)
 
     with capture_logs() as logs:
         await bot.prepare_for_sync_shutdown()
