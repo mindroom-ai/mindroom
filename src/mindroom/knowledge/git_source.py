@@ -28,7 +28,6 @@ from mindroom.knowledge.file_listing import (
     include_knowledge_relative_path,
 )
 from mindroom.knowledge.redaction import (
-    ENCODED_USERINFO_SEPARATOR,
     credential_free_repo_url,
     embedded_http_userinfo,
     redact_credentials_in_text,
@@ -141,43 +140,6 @@ def _git_auth_env(
         "GIT_CONFIG_KEY_0": f"url.{authenticated_url}.insteadOf",
         "GIT_CONFIG_VALUE_0": clean_url,
     }
-
-
-def _persistable_remote_url(repo_url: str, base_id: str) -> str:
-    """Return the remote URL safe to write to disk, or refuse to write one.
-
-    ``credential_free_repo_url`` strips userinfo from the authority ``urlparse``
-    reports, so a URL whose credentials sit anywhere else -- an empty authority
-    (``https:///user:secret@host/x``), a percent-encoded separator -- survives it
-    untouched and would be written verbatim into the checkout's ``.git/config``
-    and kept there across syncs.
-
-    Credentials may transit as a process-local ``GIT_CONFIG_*`` header, which is
-    what ``_git_auth_env`` is for; they must never be persisted. This asymmetry
-    is deliberate, so this checks the string actually about to be written rather
-    than trying to classify the configured URL. The bare ``user@host`` that
-    ``credential_free_repo_url`` intentionally keeps for SSH is still allowed:
-    SSH has no URL password field.
-
-    The message names no URL: it is raised into an error path that gets
-    persisted, which is the very thing being prevented.
-    """
-    clean_url = credential_free_repo_url(repo_url)
-    # Work on the string after any ``scheme:``, so the scheme's own colon is not
-    # mistaken for a password separator. What remains before the last ``@`` is
-    # the userinfo wherever it sits -- inside a normal authority, inside an
-    # empty one, or in scp-style syntax that ``urlparse`` reports as a bare path.
-    # A colon in there is a password; without one it is a bare username, which
-    # SSH remotes legitimately persist.
-    remainder = clean_url.removeprefix(f"{urlparse(clean_url).scheme}:")
-    userinfo = remainder.rsplit("@", 1)[0] if "@" in remainder else ""
-    if ENCODED_USERINFO_SEPARATOR in clean_url.lower() or remainder.count("@") > 1 or ":" in userinfo:
-        msg = (
-            f"Refusing to write a credential-bearing remote URL for knowledge base '{base_id}'. "
-            "Move the secret to a credentials_service instead of embedding it in repo_url."
-        )
-        raise RuntimeError(msg)
-    return clean_url
 
 
 def _merge_git_env(*envs: dict[str, str] | None) -> dict[str, str] | None:
@@ -436,7 +398,7 @@ class GitKnowledgeSource:
         if await self._checkout_present():
             await self._ensure_lfs_repository_ready(knowledge_root)
             current_remote = (await self._run_git(["remote", "get-url", "origin"])).strip()
-            expected_remote = _persistable_remote_url(git_config.repo_url, self.base_id)
+            expected_remote = credential_free_repo_url(git_config.repo_url)
             if current_remote != expected_remote:
                 await self._run_git(["remote", "set-url", "origin", expected_remote])
             return False
@@ -451,7 +413,7 @@ class GitKnowledgeSource:
         knowledge_root.parent.mkdir(parents=True, exist_ok=True)
         if git_config.lfs:
             await self._ensure_lfs_available(cwd=knowledge_root.parent)
-        clone_url = _persistable_remote_url(git_config.repo_url, self.base_id)
+        clone_url = credential_free_repo_url(git_config.repo_url)
         await self._run_git(
             [
                 "clone",

@@ -25,23 +25,10 @@ _AUTHORIZATION_HEADER_PATTERN: re.Pattern[str] = re.compile(
     r"\bAuthorization\s*:\s*(Basic|Bearer)\s+([^\s'\"<>]+)",
     re.IGNORECASE,
 )
-#: Protocol-relative tokens (``//user:secret@host/x``). They have no scheme, so
-#: neither pattern above finds them, and they are the one credential-bearing
-#: shape that cannot be confused with an email address.
-_PROTOCOL_RELATIVE_CREDENTIAL_URL_PATTERN: re.Pattern[str] = re.compile(
-    r"//[^\s'\"<>]*@[^\s'\"<>]*",
-)
 #: Percent-encoded ``@``. Its presence means the authority ``urlparse`` reported
 #: is not the authority a client will use, so the userinfo split cannot be trusted.
-ENCODED_USERINFO_SEPARATOR = "%40"
-#: ``git@github.com:org/repo.git``. SSH has no URL password field, so the
-#: userinfo here is a username; it is dropped anyway, and only the host and path
-#: are kept so the remote stays identifiable in an error message.
-_SCP_STYLE_REMOTE: re.Pattern[str] = re.compile(
-    r"^[A-Za-z0-9._-]+@(?P<rest>(?:[A-Za-z0-9.-]+|\[[0-9A-Fa-f:]+\]):[^@]*)$",
-)
+_ENCODED_USERINFO_SEPARATOR = "%40"
 __all__ = [
-    "ENCODED_USERINFO_SEPARATOR",
     "credential_free_repo_url",
     "credential_free_url_identity",
     "embedded_http_userinfo",
@@ -55,15 +42,7 @@ def _strip_path_params(path: str) -> str:
 
 
 def redact_url_credentials(value: str) -> str:
-    """Return one token with any credential material removed.
-
-    Fails closed, and the branch order is the point. Three shapes are
-    recognised; anything else is replaced wholesale, so a shape nobody
-    anticipated is redacted *by default* rather than preserved by default.
-    Every leak found in this helper came from the opposite arrangement -- an
-    exemption that returned a token unchanged because it did not look like it
-    carried a credential -- so recognising safety rather than danger is what
-    stops the next unanticipated shape.
+    """Redact URL credentials for any parsed URL scheme.
 
     Never raises. Callers redact free-form Git output, so the input is whatever
     a remote or a local ``git`` chose to print, and a token that merely looks
@@ -80,40 +59,43 @@ def redact_url_credentials(value: str) -> str:
         # leaking a secret; the surrounding message survives intact.
         return "***"
 
-    if "@" not in value and ENCODED_USERINFO_SEPARATOR not in value.lower():
-        # Shape 1: no userinfo separator anywhere, so there is nothing to hide.
-        # Bare Git arguments and credential-free URLs both land here.
-        if not parsed.scheme or not parsed.netloc:
-            return value
-        return urlunparse(
-            parsed._replace(path=_strip_path_params(parsed.path), params="", query="", fragment=""),
-        )
+    if not parsed.scheme:
+        # Not a URL. Bare Git arguments and scp-style remotes (``git@host:path``)
+        # reach this helper too; neither carries a password, so keep them readable.
+        return value
 
-    scp_style = _SCP_STYLE_REMOTE.match(value)
-    if scp_style is not None:
-        # Shape 2: an scp-style SSH remote. Keeping host and path keeps the
-        # remote identifiable; the userinfo goes regardless of what it holds.
-        return f"***@{scp_style.group('rest')}"
+    # Everything below assumes userinfo lives where ``urlparse`` says it does.
+    # When it does not, redacting the authority leaves the secret in the text,
+    # so these shapes are dropped wholesale instead:
+    #   https:///user:secret@host/repo   empty authority, credentials in the path
+    #   https://host/https://u:s@in/x    a second URL nested in the path
+    #   https://u%3As%40host/repo        the separator is percent-encoded
+    #   https://a@b@host/x               which ``@`` splits userinfo is ambiguous
+    authority_separators = parsed.netloc.count("@")
+    if (
+        _ENCODED_USERINFO_SEPARATOR in value.lower()
+        or value.count("@") != authority_separators
+        or authority_separators > 1
+    ):
+        return "***"
 
-    if ENCODED_USERINFO_SEPARATOR not in value.lower() and value.count("@") == 1 and parsed.netloc.count("@") == 1:
-        # Shape 3: the one separator in the token is the one splitting userinfo
-        # from host in the authority ``urlparse`` found, so the split is
-        # trustworthy and the host can be kept.
+    if not parsed.netloc:
+        return value
+
+    if "@" in parsed.netloc:
         _userinfo, host = parsed.netloc.rsplit("@", 1)
-        return urlunparse(
-            parsed._replace(
-                netloc=f"***@{host}",
-                path=_strip_path_params(parsed.path),
-                params="",
-                query="",
-                fragment="",
-            ),
-        )
-
-    # Userinfo somewhere this cannot account for: an empty or ambiguous
-    # authority, a nested URL, a percent-encoded separator, or a shape not yet
-    # seen. None of them can be partially redacted safely.
-    return "***"
+        netloc = f"***@{host}"
+    else:
+        netloc = parsed.netloc
+    return urlunparse(
+        parsed._replace(
+            netloc=netloc,
+            path=_strip_path_params(parsed.path),
+            params="",
+            query="",
+            fragment="",
+        ),
+    )
 
 
 def redact_credentials_in_text(value: str) -> str:
@@ -151,8 +133,7 @@ def redact_credentials_in_text(value: str) -> str:
         return redact_url_credentials(match.group(0))
 
     redacted = _URL_PATTERN.sub(_redact_url, redacted)
-    redacted = _SLASHLESS_CREDENTIAL_URL_PATTERN.sub(_redact_url, redacted)
-    return _PROTOCOL_RELATIVE_CREDENTIAL_URL_PATTERN.sub(_redact_url, redacted)
+    return _SLASHLESS_CREDENTIAL_URL_PATTERN.sub(_redact_url, redacted)
 
 
 def credential_free_url_identity(value: str) -> str:
