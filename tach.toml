@@ -231,6 +231,7 @@ visibility = [
 path = "mindroom.strict_knowledge"
 depends_on = []
 visibility = [
+    "mindroom.knowledge.collections",
     "mindroom.knowledge.manager",
     "mindroom.knowledge.registry",
     "mindroom.knowledge_source_descriptions",
@@ -3499,6 +3500,15 @@ visibility = [
 ]
 
 [[modules]]
+path = "mindroom.knowledge.collections"
+depends_on = [
+    "mindroom.knowledge.indexing_config",
+    "mindroom.logging_config",
+    "mindroom.strict_knowledge",
+]
+visibility = ["mindroom.knowledge.manager"]
+
+[[modules]]
 path = "mindroom.knowledge.embedding_batch"
 depends_on = [
     "mindroom.embedding_errors",
@@ -3550,6 +3560,7 @@ depends_on = [
     "mindroom.embedding_errors",
     "mindroom.embedding_factory",
     "mindroom.knowledge.candidate_checkpoint",
+    "mindroom.knowledge.collections",
     "mindroom.knowledge.embedding_batch",
     "mindroom.knowledge.file_listing",
     "mindroom.knowledge.git_source",
@@ -3601,11 +3612,21 @@ depends_on = [
 ]
 
 [[modules]]
+path = "mindroom.knowledge.refresh_policy"
+depends_on = [
+    "mindroom.credentials",
+    "mindroom.knowledge.availability",
+    "mindroom.knowledge.redaction",
+    "mindroom.knowledge.registry",
+]
+visibility = ["mindroom.knowledge.utils"]
+
+[[modules]]
 path = "mindroom.knowledge.utils"
 depends_on = [
     "mindroom.embedding_errors",
     "mindroom.knowledge.availability",
-    "mindroom.knowledge.redaction",
+    "mindroom.knowledge.refresh_policy",
     "mindroom.knowledge.registry",
     "mindroom.knowledge_source_descriptions",
     "mindroom.logging_config",

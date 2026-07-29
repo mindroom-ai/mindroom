@@ -91,6 +91,9 @@ class _SubprocessSessionKwargs(TypedDict, total=False):
 
 
 _refresh_locks_guard = Lock()
+# Deliberately uncapped, unlike the lock and cooldown tables below: entries are
+# refcounts that clear when a refresh finishes, so evicting a live one would
+# report an in-flight refresh as idle and mask the leak a crashed refresh means.
 _active_refresh_counts: dict[KnowledgeRefreshTarget, int] = {}
 _active_refresh_counts_guard = Lock()
 _MAX_REFRESH_LOCKS = 512
