@@ -943,7 +943,10 @@ class TestMaybeGenerateThreadSummary:
         ):
             await self._maybe_generate(client, config, rp)
 
-        load.assert_awaited_once_with(self.conversation_cache, "!room:x", "$thread1")
+        # Two reads per generated summary: the pre-generation gate, then the
+        # pin re-check immediately before delivery.
+        assert load.await_count == 2
+        load.assert_awaited_with(self.conversation_cache, "!room:x", "$thread1")
         generate.assert_awaited_once_with(
             thread_history,
             config,
@@ -2045,7 +2048,10 @@ class TestMaybeGenerateThreadSummary:
             release_fetch.set()
             await asyncio.gather(first, second)
 
-        assert fetch_calls == 2
+        # Three reads: both passes gate, then only the first reaches generation
+        # and re-checks the pin before delivery. The second sees the baseline
+        # the first advanced and returns at the threshold.
+        assert fetch_calls == 3
         mock_send.assert_awaited_once()
 
 
@@ -3001,3 +3007,72 @@ async def test_pin_decision_survives_a_real_write_and_read_round_trip(pinned: bo
     )
 
     assert _recover_pin_state([delivered], trusted_sender_ids=_TRUSTED_SUMMARY_SENDERS) is pinned
+
+
+@pytest.mark.asyncio
+class TestPinLandingDuringGeneration:
+    """A pin written while the model runs must supersede the in-flight summary."""
+
+    def _cache(self) -> MagicMock:
+        conversation_cache = MagicMock()
+        conversation_cache.get_latest_thread_event_id_if_needed = AsyncMock(return_value="$thread1")
+        conversation_cache.notify_outbound_message = Mock()
+        return conversation_cache
+
+    async def _run(self, conversation_cache: MagicMock, histories: list) -> AsyncMock:
+        client = _mock_client()
+        with (
+            patch("mindroom.thread_summary.maybe_rebuild_tag_vocabulary", new=AsyncMock(return_value=None)),
+            patch("mindroom.thread_summary.get_thread_tags", new=AsyncMock(return_value=None)),
+            patch(
+                "mindroom.thread_summary.current_internal_sender_ids",
+                return_value=_TRUSTED_SUMMARY_SENDERS,
+            ),
+            patch("mindroom.thread_summary._load_thread_history", side_effect=histories),
+            patch(
+                "mindroom.thread_summary._generate_summary",
+                return_value="Freshly generated title",
+            ),
+            patch(
+                "mindroom.thread_summary.send_thread_summary_event",
+                new=AsyncMock(return_value="$summary1"),
+            ) as deliver,
+        ):
+            await maybe_generate_thread_summary(
+                client,
+                "!room:x",
+                "$thread1",
+                _mock_config(),
+                _mock_runtime_paths(),
+                conversation_cache=conversation_cache,
+            )
+        return deliver
+
+    async def test_pin_during_generation_discards_the_summary(self) -> None:
+        """The pre-generation gate cannot see a pin that lands mid-generation."""
+        unpinned = _make_thread_history(12)
+        pinned_later = [
+            *_make_thread_history(12),
+            _make_summary_notice_message("$thread1", message_count=12, pinned=True),
+        ]
+
+        deliver = await self._run(self._cache(), [unpinned, pinned_later])
+
+        deliver.assert_not_awaited()
+        assert _last_summary_counts[_thread_summary_cache_key("!room:x", "$thread1")] == 12
+
+    async def test_still_delivers_when_no_pin_landed(self) -> None:
+        """The re-check must not suppress ordinary summaries."""
+        unpinned = _make_thread_history(12)
+
+        deliver = await self._run(self._cache(), [unpinned, list(unpinned)])
+
+        deliver.assert_awaited_once()
+
+    async def test_recheck_failure_still_delivers(self) -> None:
+        """A failed re-read falls back to the pre-generation decision."""
+        unpinned = _make_thread_history(12)
+
+        deliver = await self._run(self._cache(), [unpinned, RuntimeError("history read failed")])
+
+        deliver.assert_awaited_once()

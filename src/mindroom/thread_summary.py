@@ -506,14 +506,47 @@ async def _thread_is_resolved(
     try:
         tags_state = await get_thread_tags(client, room_id, thread_id)
     except Exception as exc:
-        logger.warning(
+        # Keep the type and traceback: this catch is broad, and intermittent
+        # Matrix failures are otherwise indistinguishable from each other.
+        logger.exception(
             "Thread tag read failed; continuing with automatic summary",
             room_id=room_id,
             thread_id=thread_id,
-            error=str(exc),
+            error_type=type(exc).__name__,
         )
         return False
     return tags_state is not None and RESOLVED_THREAD_TAG in tags_state.tags
+
+
+async def _pinned_since_generation_started(
+    conversation_cache: ConversationCacheProtocol,
+    room_id: str,
+    thread_id: str,
+    *,
+    trusted_sender_ids: Collection[str],
+) -> bool:
+    """Return whether a pin landed while this pass was generating a summary.
+
+    The gate before generation cannot cover the generation window itself. The
+    per-thread lock is process-local, so another runtime can write a manual pin
+    while this process is waiting on the model, and the finished automatic
+    summary would then land on top of a title the user just fixed.
+
+    Fails open, like the other background reads here: if the re-read fails the
+    pass delivers, which is the same exposure the pre-generation gate already
+    has. An automatic summary carries no ``pinned`` key, so the worst case is a
+    single superseded title and the next pass bails at the gate.
+    """
+    try:
+        thread_history = await _load_thread_history(conversation_cache, room_id, thread_id)
+    except Exception:
+        logger.exception(
+            "Pin re-check before summary delivery failed; delivering anyway",
+            room_id=room_id,
+            thread_id=thread_id,
+        )
+        return False
+    return _recover_pin_state(thread_history, trusted_sender_ids=trusted_sender_ids)
 
 
 @timed("maybe_generate_thread_summary")
@@ -625,8 +658,31 @@ async def _deliver_generated_summary(
     message_count: int,
     model_name: str,
     conversation_cache: ConversationCacheProtocol,
+    *,
+    trusted_sender_ids: Collection[str],
 ) -> None:
-    """Apply initial tags, then independently deliver the generated summary."""
+    """Apply initial tags, then independently deliver the generated summary.
+
+    Re-reads pin state first. The gate before generation cannot cover the
+    generation window, and the per-thread lock is process-local, so another
+    runtime can write a manual pin while this process waits on the model. That
+    check belongs here rather than in the caller because it is a delivery-time
+    question: a superseded summary should apply neither its tags nor its title.
+    """
+    if await _pinned_since_generation_started(
+        conversation_cache,
+        room_id,
+        thread_id,
+        trusted_sender_ids=trusted_sender_ids,
+    ):
+        logger.info(
+            "Discarding an automatic thread summary that a pin superseded during generation",
+            room_id=room_id,
+            thread_id=thread_id,
+            message_count=message_count,
+        )
+        return
+
     initial_enrichment_complete: bool | None = None
     if isinstance(generated, _ThreadEnrichment):
         initial_enrichment_complete = await _apply_initial_tags(
@@ -934,6 +990,7 @@ async def maybe_generate_thread_summary(  # noqa: PLR0911
             message_count,
             model_name,
             conversation_cache,
+            trusted_sender_ids=trusted_sender_ids,
         )
         # Record after the delivery attempt so cancellation cannot leave a
         # partially delivered initial enrichment marked complete.
