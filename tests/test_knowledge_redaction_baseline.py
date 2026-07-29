@@ -208,6 +208,17 @@ _CLEAN_URLS = [
     # The string this codebase builds itself in ``_git_auth_env``, and the shape
     # ``git config --list`` prints back.
     "url.https://example.com/a@b.insteadOf=https://x/y",
+    # URL *grammars* rather than remembered examples: every combination of a
+    # path that carries ``:`` and/or ``@`` is what the hand-written list left
+    # unconstrained, and a present regression sat in exactly that gap.
+    "https://host/a:b@c",
+    "https://host/a:b@c/repo.git",
+    "https://host/a@b",
+    "https://host/a:b",
+    "https://host:8443/a:b@c",
+    "https://host/p/a:b@c/q",
+    "https://host/repo.git@v1.2:3",
+    "ssh://host/a:b@c",
 ]
 
 #: Diagnostics with no URL to find, which must survive verbatim.
@@ -241,6 +252,24 @@ _INTENTIONAL_LOSSES = frozenset(
         # authority check cannot see, and telling them apart needs the parse
         # this shape is precisely too malformed to support.
         "url.https://example.com/a@b.insteadOf=https://x/y",
+        # A path segment shaped like ``user:password@host``. These are redacted
+        # deliberately, and it costs a real diagnostic, so the reasoning is
+        # recorded rather than assumed:
+        #
+        # ``https://host/a:b@c`` (benign) and ``https://host/u:SECRET@inner/x``
+        # (a credential in a path) are *grammatically identical* -- same
+        # delimiters, same shape, nothing in either that distinguishes them.
+        # The nested-scheme form is separable because it contains ``://``; this
+        # one is not. So the choice is which way to be wrong, and for a
+        # credential redactor that is settled: over-redacting a rare URL-path
+        # grammar beats leaving a credential-shaped path readable. The baseline
+        # leaks the second of those two, which is why the same rule is also one
+        # of this branch's improvements.
+        "https://host/a:b@c",
+        "https://host/a:b@c/repo.git",
+        "https://host:8443/a:b@c",
+        "https://host/p/a:b@c/q",
+        "ssh://host/a:b@c",
     },
 )
 
@@ -314,6 +343,18 @@ def test_every_declared_loss_is_still_a_loss(baseline_redact: _Redactor) -> None
     diverging = {shape for shape, text in _clean_texts() if redact_credentials_in_text(text) != baseline_redact(text)}
 
     assert diverging == _INTENTIONAL_LOSSES
+
+    # Exemptions are keyed by URL, so one declaration covers every framing of
+    # it. Require the divergence to be consistent across framings, otherwise a
+    # framing-specific bug could shelter under a legitimate declaration.
+    partial = {
+        shape
+        for shape in _INTENTIONAL_LOSSES
+        for texts in [[text for candidate, text in _clean_texts() if candidate == shape]]
+        if 0 < sum(redact_credentials_in_text(text) == baseline_redact(text) for text in texts) < len(texts)
+    }
+
+    assert not partial, f"these diverge under some framings but not others: {sorted(partial)}"
 
 
 def test_every_allowlisted_improvement_is_still_an_improvement(baseline_redact: _Redactor) -> None:

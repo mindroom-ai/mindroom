@@ -37,7 +37,7 @@ _AUTHORIZATION_HEADER_PATTERN: re.Pattern[str] = re.compile(
 #: character, so it is bounded twice. Excluding ``:`` from the password stops it
 #: crossing the next separator on colon-dense input -- ``a:a:a:…`` cost 36 s at
 #: 195 KB when it did -- and the length cap makes the per-position work constant
-#: regardless. The cap is ``_MAX_REDACTABLE_TOKEN_LENGTH``, so a run long enough
+#: regardless. The cap is ``MAX_REDACTABLE_TOKEN_LENGTH``, so a run long enough
 #: to exceed it would be dropped unread anyway.
 #:
 #: The cost is precise, and smaller than "only the username survives": matching
@@ -81,6 +81,7 @@ _SCP_STYLE_REMOTE: re.Pattern[str] = re.compile(
 #: or a userinfo pair there is a credential the authority check cannot see.
 _USERINFO_IN_PATH: re.Pattern[str] = re.compile(r"[^/\s:@]+:[^/\s@]+@")
 __all__ = [
+    "MAX_REDACTABLE_TOKEN_LENGTH",
     "credential_free_repo_url",
     "credential_free_url_identity",
     "embedded_http_userinfo",
@@ -100,7 +101,7 @@ def _strip_path_params(path: str) -> str:
 #: the coroutine that reads Git's stderr, which a remote controls via sideband
 #: output. A real URL is orders of magnitude shorter, so anything past this is
 #: replaced unread: fail closed, and bound the cost at the same time.
-_MAX_REDACTABLE_TOKEN_LENGTH = 2048
+MAX_REDACTABLE_TOKEN_LENGTH = 2048
 
 
 def fully_unquoted(value: str) -> str:
@@ -128,7 +129,7 @@ def fully_unquoted(value: str) -> str:
 
 def _inspectable_url(value: str) -> ParseResult | None:
     """Return the parsed token, or None when it must be dropped unread."""
-    if len(value) > _MAX_REDACTABLE_TOKEN_LENGTH:
+    if len(value) > MAX_REDACTABLE_TOKEN_LENGTH:
         return None
     try:
         return urlparse(value)
@@ -243,7 +244,7 @@ def _redact_candidate(match: re.Match[str]) -> str:
     one string.
     """
     candidate = match.group(0)
-    if len(candidate) > _MAX_REDACTABLE_TOKEN_LENGTH:
+    if len(candidate) > MAX_REDACTABLE_TOKEN_LENGTH:
         # Bounded before classification, so no amount of remote-supplied text
         # can make the work per match unbounded.
         return "***"

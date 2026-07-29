@@ -29,6 +29,7 @@ from mindroom.knowledge.file_listing import (
     include_knowledge_relative_path,
 )
 from mindroom.knowledge.redaction import (
+    MAX_REDACTABLE_TOKEN_LENGTH,
     credential_free_repo_url,
     embedded_http_userinfo,
     fully_unquoted,
@@ -173,8 +174,12 @@ def _parsed_remote_url(clean_url: str, base_id: str) -> str:
     """Return `clean_url` when its authority resolves and carries no password."""
     try:
         parsed = urlparse(clean_url)
-    except ValueError as exc:
-        raise _unwritable_remote(base_id, "the URL cannot be parsed") from exc
+    except ValueError:
+        # ``from None`` deliberately. ``urlsplit`` quotes the offending netloc --
+        # password included -- in its message, and the scheduled refresh
+        # subprocess logs failures with ``logger.exception``, which prints the
+        # whole chain. The refusal above names no URL; chaining would undo that.
+        raise _unwritable_remote(base_id, "the URL cannot be parsed") from None
 
     if not parsed.scheme:
         raise _unwritable_remote(base_id, "the URL has no scheme")
@@ -226,6 +231,15 @@ def _persistable_remote_url(repo_url: str, base_id: str) -> str:
     # one, no branch below is reasoning about the string a client will use. This
     # sat after the scp branch, so an encoded separator reached disk by taking a
     # different route than the one it was written to block.
+    if len(clean_url) > MAX_REDACTABLE_TOKEN_LENGTH:
+        # Decoding to a fixed point is quadratic in the nesting depth of the
+        # input, and nothing above this call bounds it: 195 KiB of nested
+        # ``%25`` took 16.8 s. Unlike the redactor's copy of this bound, the
+        # input here is operator-authored config rather than remote output, so
+        # this is a guard against a foot-gun rather than an attacker -- but a
+        # repository URL is never this long, so refusing costs nothing real.
+        raise _unwritable_remote(base_id, "the URL is implausibly long")
+
     if fully_unquoted(clean_url).count("@") != clean_url.count("@"):
         raise _unwritable_remote(base_id, "a percent-encoded separator hides part of the URL")
 

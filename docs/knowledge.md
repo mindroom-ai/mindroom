@@ -293,7 +293,7 @@ Bundled container images already include it.
 
 #### Accepted `repo_url` forms
 
-MindRoom writes `repo_url` into the checkout's `origin` remote, so it accepts only forms whose host it can resolve, and refuses anything else rather than guessing.
+MindRoom writes `repo_url` into the checkout's `origin` remote, so a network form is accepted only when its host resolves; hostless local forms are accepted on their own terms. Anything else is refused rather than guessed at.
 
 | Form | Example |
 |------|---------|
