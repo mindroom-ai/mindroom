@@ -260,19 +260,6 @@ def _persistable_remote_url(repo_url: str, base_id: str) -> str:
     return _parsed_remote_url(clean_url, base_id)
 
 
-def _redacted_command(args: list[str]) -> str:
-    """Render a failed Git command for an error message, with credentials removed.
-
-    Deliberately the same redactor the caller applies to stderr. Redacting each
-    argument in isolation gave the two halves of one error message different
-    answers about the same string, and treating every argument as a candidate
-    URL also mangled Git revision syntax: an argument like
-    ``+refs/heads/main:refs/remotes/origin/@{upstream}`` is not a URL, but it
-    has an ``@``. Sharing one function means the two cannot disagree.
-    """
-    return redact_credentials_in_text(" ".join(["git", *args]))
-
-
 def _merge_git_env(*envs: dict[str, str] | None) -> dict[str, str] | None:
     merged: dict[str, str] = {}
     for env in envs:
@@ -444,7 +431,7 @@ class GitKnowledgeSource:
                 process.kill()
             with suppress(ProcessLookupError):
                 await process.wait()
-            command = _redacted_command(args)
+            command = " ".join(["git", *(redact_url_credentials(arg) for arg in args)])
             msg = f"Git command timed out after {timeout_seconds:.0f}s: {command}"
             raise RuntimeError(msg) from exc
 
@@ -454,7 +441,7 @@ class GitKnowledgeSource:
         stdout_text = stdout.decode("utf-8", errors="replace").strip()
         stderr_text = stderr.decode("utf-8", errors="replace").strip()
         details = redact_credentials_in_text(stderr_text or stdout_text)
-        command = _redacted_command(args)
+        command = " ".join(["git", *(redact_url_credentials(arg) for arg in args)])
         msg = f"Git command failed with exit code {process.returncode}: {command}"
         if details:
             msg = f"{msg}\n{details}"
