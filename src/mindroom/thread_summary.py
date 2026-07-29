@@ -632,7 +632,7 @@ async def send_thread_summary_event(
     conversation_cache: ConversationCacheProtocol,
     *,
     initial_enrichment_complete: bool | None = None,
-    pinned: bool = False,
+    pinned: bool | None = None,
     known_latest_thread_event_id: str | None = None,
 ) -> str | None:
     """Send a thread summary as a standard Matrix notice event.
@@ -642,9 +642,12 @@ async def send_thread_summary_event(
     directly, skipping the history read that would otherwise scan the homeserver
     for a thread with no cache snapshot yet.
 
-    ``pinned`` records whether this summary should stop automatic
-    re-summarization. It defaults to ``False`` so that callers writing summaries
-    directly, such as the subagent spawn path, never pin a thread implicitly.
+    ``pinned`` records an explicit decision about whether this summary should
+    stop automatic re-summarization. It defaults to ``None``, which omits the
+    key entirely and leaves any existing pin decision untouched. Only callers
+    acting on a user's intent should pass a boolean: writers that summarize as a
+    side effect, such as the subagent spawn path, must not disturb pin state on
+    a thread the user already pinned.
     """
     normalized_summary = normalize_thread_summary_text(summary)
     if not normalized_summary:
@@ -683,12 +686,11 @@ async def send_thread_summary_event(
         "message_count": message_count,
         "generated_at": datetime.now(UTC).isoformat(),
         "model": model_name,
-        # Always recorded, including False: pin recovery is last-wins, so an
-        # explicit release has to be representable in the metadata.
-        "pinned": pinned,
     }
     if initial_enrichment_complete is not None:
         summary_metadata["initial_enrichment_complete"] = initial_enrichment_complete
+    if pinned is not None:
+        summary_metadata["pinned"] = pinned
 
     content = build_message_content(
         truncated_summary,

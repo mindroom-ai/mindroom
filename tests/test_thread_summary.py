@@ -2797,3 +2797,43 @@ class TestRecoverPinState:
             [pinned_message, malformed],
             trusted_sender_ids=_TRUSTED_SUMMARY_SENDERS,
         )
+
+
+@pytest.mark.asyncio
+class TestSummaryWritersLeavePinStateAlone:
+    """Writers that summarize as a side effect must not disturb a user's pin."""
+
+    async def test_default_write_omits_pinned_key(self) -> None:
+        """send_thread_summary_event must not record a pin decision unless asked.
+
+        The subagent spawn path reuses an existing thread by label and writes a
+        summary outside the per-thread summary lock. Recording pinned=False by
+        default there would silently release a pin the user had set.
+        """
+        client = _mock_client()
+        conversation_cache = MagicMock()
+        conversation_cache.get_latest_thread_event_id_if_needed = AsyncMock(return_value="$thread1")
+        conversation_cache.notify_outbound_message = Mock()
+
+        await send_thread_summary_event(
+            client,
+            "!room:x",
+            "$thread1",
+            "Spawned session summary",
+            1,
+            "manual",
+            conversation_cache,
+        )
+
+        sent_content = client.room_send.await_args.kwargs["content"]
+        assert "pinned" not in sent_content["io.mindroom.thread_summary"]
+
+    async def test_unpinned_side_effect_write_does_not_release_a_pin(self) -> None:
+        """A pinned thread stays pinned after a summary written without intent."""
+        pin = _make_summary_notice_message("$thread1", message_count=2, event_id="$s1", pinned=True)
+        side_effect_write = _make_summary_notice_message("$thread1", message_count=3, event_id="$s2")
+
+        assert _recover_pin_state(
+            [pin, side_effect_write],
+            trusted_sender_ids=_TRUSTED_SUMMARY_SENDERS,
+        )
