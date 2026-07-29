@@ -255,6 +255,7 @@ async def recover_stale_streaming_messages(
             cleaned_count += room_cleaned_count
             if resume_client is None or not config.defaults.auto_resume_after_restart or not interrupted_threads:
                 continue
+            retryable_room_ids: set[str] = set()
             resumed_count += await _auto_resume_interrupted_threads(
                 resume_client,
                 interrupted_threads,
@@ -263,7 +264,9 @@ async def recover_stale_streaming_messages(
                 conversation_cache=resume_conversation_cache,
                 owner_actors=joined_actors,
                 delay_before_first=resumed_count > 0,
+                retryable_room_ids=retryable_room_ids,
             )
+            scanned_room_ids.difference_update(retryable_room_ids)
     finally:
         for task in tasks:
             if not task.done():
@@ -317,6 +320,7 @@ async def _auto_resume_interrupted_threads(
     owner_actors: Mapping[str, StaleStreamCleanupActor],
     delay: float = 2.0,
     delay_before_first: bool = False,
+    retryable_room_ids: set[str] | None = None,
 ) -> int:
     """Send resume prompts for interrupted threaded conversations."""
     if not interrupted:
@@ -341,6 +345,10 @@ async def _auto_resume_interrupted_threads(
         )
         owner_actor = owner_actors.get(owner_user_id) if owner_user_id is not None else None
         if owner_actor is None or owner_actor.conversation_cache is None:
+            _mark_auto_resume_room_retryable(
+                retryable_room_ids,
+                room_id=interrupted_thread.room_id,
+            )
             logger.warning(
                 "Skipping auto-resume because owning actor is unavailable or not joined",
                 room_id=interrupted_thread.room_id,
@@ -358,6 +366,8 @@ async def _auto_resume_interrupted_threads(
             conversation_cache=owner_actor.conversation_cache,
         ):
             continue
+        send_attempted = False
+        delivered = None
         try:
             content = _build_auto_resume_content(
                 interrupted_thread,
@@ -365,6 +375,7 @@ async def _auto_resume_interrupted_threads(
                 runtime_paths=runtime_paths,
             )
             delay_due = True
+            send_attempted = True
             delivered = await send_message_result(client, interrupted_thread.room_id, content)
             if delivered is not None:
                 if conversation_cache is not None:
@@ -396,8 +407,37 @@ async def _auto_resume_interrupted_threads(
                 target_event_id=interrupted_thread.target_event_id,
                 error=str(exc),
             )
+        finally:
+            _mark_failed_auto_resume_delivery_retryable(
+                retryable_room_ids,
+                room_id=interrupted_thread.room_id,
+                send_attempted=send_attempted,
+                delivered=delivered,
+            )
 
     return resumed_count
+
+
+def _mark_auto_resume_room_retryable(
+    retryable_room_ids: set[str] | None,
+    *,
+    room_id: str,
+) -> None:
+    """Release a room so a later joined-membership wave can retry it."""
+    if retryable_room_ids is not None:
+        retryable_room_ids.add(room_id)
+
+
+def _mark_failed_auto_resume_delivery_retryable(
+    retryable_room_ids: set[str] | None,
+    *,
+    room_id: str,
+    send_attempted: bool,
+    delivered: object | None,
+) -> None:
+    """Release rooms whose router delivery attempt produced no Matrix event."""
+    if send_attempted and delivered is None:
+        _mark_auto_resume_room_retryable(retryable_room_ids, room_id=room_id)
 
 
 async def _interrupted_target_remains_latest_human_work(

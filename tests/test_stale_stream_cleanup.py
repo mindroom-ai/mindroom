@@ -3071,6 +3071,150 @@ async def test_recovery_selects_joined_owner_for_freshness_and_router_for_relay(
 
 
 @pytest.mark.asyncio
+async def test_failed_router_relay_keeps_room_retryable_for_post_join_recovery(tmp_path: Path) -> None:
+    """A failed router relay should let the joined-room delta retry after router membership."""
+    config = _make_config(tmp_path)
+    config.defaults.auto_resume_after_restart = True
+    router_client = make_matrix_client_mock(user_id="@actual_router:localhost")
+    owner_client = make_matrix_client_mock(user_id=BOT_USER_ID)
+    interrupted = InterruptedThread(
+        ROOM_ID,
+        "$thread",
+        "$target",
+        "Partial",
+        "test_agent",
+        original_sender_id=USER_ID,
+    )
+    router_cache = _auto_resume_conversation_cache([])
+    owner_cache = _auto_resume_conversation_cache([interrupted])
+    actors = {
+        "@actual_router:localhost": StaleStreamCleanupActor(router_client, router_cache),
+        BOT_USER_ID: StaleStreamCleanupActor(owner_client, owner_cache),
+    }
+    router_joined = False
+
+    async def joined_rooms(client: object) -> list[str]:
+        if client is router_client:
+            return [ROOM_ID] if router_joined else []
+        assert client is owner_client
+        return [ROOM_ID]
+
+    with (
+        patch("mindroom.matrix.stale_stream_cleanup.get_joined_rooms", side_effect=joined_rooms),
+        patch(
+            "mindroom.matrix.stale_stream_cleanup._cleanup_stale_streaming_room",
+            new=AsyncMock(return_value=(0, [interrupted])),
+        ),
+        patch(
+            "mindroom.matrix.stale_stream_cleanup.send_message_result",
+            new=AsyncMock(side_effect=[None, delivered_matrix_event("$resume")]),
+        ) as mock_send,
+    ):
+        scanned_room_ids: set[str] = set()
+        failed_result = await recover_stale_streaming_messages(
+            actors,
+            resume_client=router_client,
+            resume_conversation_cache=router_cache,
+            config=config,
+            runtime_paths=runtime_paths_for(config),
+            startup_cutoff_ms=NOW_MS,
+            scanned_room_ids=scanned_room_ids,
+        )
+        assert failed_result == StaleStreamRecoveryResult(room_count=1, cleaned_count=0, resumed_count=0)
+        assert scanned_room_ids == set()
+
+        router_joined = True
+        recovered_result = await recover_stale_streaming_messages(
+            actors,
+            resume_client=router_client,
+            resume_conversation_cache=router_cache,
+            config=config,
+            runtime_paths=runtime_paths_for(config),
+            startup_cutoff_ms=NOW_MS,
+            scanned_room_ids=scanned_room_ids,
+        )
+
+    assert recovered_result == StaleStreamRecoveryResult(room_count=1, cleaned_count=0, resumed_count=1)
+    assert scanned_room_ids == {ROOM_ID}
+    assert owner_cache.refresh_strict_thread_history_from_source.await_count == 2
+    router_cache.refresh_strict_thread_history_from_source.assert_not_awaited()
+    assert mock_send.await_count == 2
+    assert all(call.args[0] is router_client for call in mock_send.await_args_list)
+
+
+@pytest.mark.asyncio
+async def test_missing_owner_keeps_room_retryable_for_post_join_recovery(tmp_path: Path) -> None:
+    """A missing owner should let the membership wave retry after that owner joins."""
+    config = _make_config(tmp_path)
+    config.defaults.auto_resume_after_restart = True
+    router_client = make_matrix_client_mock(user_id="@actual_router:localhost")
+    owner_client = make_matrix_client_mock(user_id=BOT_USER_ID)
+    interrupted = InterruptedThread(
+        ROOM_ID,
+        "$thread",
+        "$target",
+        "Partial",
+        "test_agent",
+        original_sender_id=USER_ID,
+    )
+    router_cache = _auto_resume_conversation_cache([])
+    owner_cache = _auto_resume_conversation_cache([interrupted])
+    actors = {
+        "@actual_router:localhost": StaleStreamCleanupActor(router_client, router_cache),
+        BOT_USER_ID: StaleStreamCleanupActor(owner_client, owner_cache),
+    }
+    owner_joined = False
+
+    async def joined_rooms(client: object) -> list[str]:
+        if client is router_client:
+            return [ROOM_ID]
+        assert client is owner_client
+        return [ROOM_ID] if owner_joined else []
+
+    with (
+        patch("mindroom.matrix.stale_stream_cleanup.get_joined_rooms", side_effect=joined_rooms),
+        patch(
+            "mindroom.matrix.stale_stream_cleanup._cleanup_stale_streaming_room",
+            new=AsyncMock(return_value=(0, [interrupted])),
+        ),
+        patch(
+            "mindroom.matrix.stale_stream_cleanup.send_message_result",
+            new=AsyncMock(return_value=delivered_matrix_event("$resume")),
+        ) as mock_send,
+    ):
+        scanned_room_ids: set[str] = set()
+        missing_owner_result = await recover_stale_streaming_messages(
+            actors,
+            resume_client=router_client,
+            resume_conversation_cache=router_cache,
+            config=config,
+            runtime_paths=runtime_paths_for(config),
+            startup_cutoff_ms=NOW_MS,
+            scanned_room_ids=scanned_room_ids,
+        )
+        assert missing_owner_result == StaleStreamRecoveryResult(room_count=1, cleaned_count=0, resumed_count=0)
+        assert scanned_room_ids == set()
+
+        owner_joined = True
+        recovered_result = await recover_stale_streaming_messages(
+            actors,
+            resume_client=router_client,
+            resume_conversation_cache=router_cache,
+            config=config,
+            runtime_paths=runtime_paths_for(config),
+            startup_cutoff_ms=NOW_MS,
+            scanned_room_ids=scanned_room_ids,
+        )
+
+    assert recovered_result == StaleStreamRecoveryResult(room_count=1, cleaned_count=0, resumed_count=1)
+    assert scanned_room_ids == {ROOM_ID}
+    owner_cache.refresh_strict_thread_history_from_source.assert_awaited_once()
+    router_cache.refresh_strict_thread_history_from_source.assert_not_awaited()
+    mock_send.assert_awaited_once()
+    assert mock_send.await_args.args[0] is router_client
+
+
+@pytest.mark.asyncio
 async def test_auto_resume_uses_each_interrupted_owner_cache(tmp_path: Path) -> None:
     """Interrupted threads from different agents should refresh through their own caches."""
     config = _make_config(tmp_path)
