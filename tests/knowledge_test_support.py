@@ -277,7 +277,7 @@ class _FakeEmbedder(Embedder):
         raise AssertionError(msg)
 
 
-@pytest.fixture(autouse=True)
+@pytest.fixture
 def patch_vector_store(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     """Use an in-memory vector store for published knowledge index tests."""
     _VectorDb.collections = {}

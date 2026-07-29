@@ -80,8 +80,10 @@ from tests.knowledge_test_support import (
     _Knowledge,
     _vector_row_ids,
     _VectorDb,
-    patch_vector_store,  # noqa: F401  # autouse fixture
+    patch_vector_store,  # noqa: F401  # requested via pytestmark below
 )
+
+pytestmark = pytest.mark.usefixtures("patch_vector_store")
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Coroutine, Iterable

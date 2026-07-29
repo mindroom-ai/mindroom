@@ -29,8 +29,10 @@ from mindroom.knowledge.registry import (
 from tests.conftest import runtime_paths_for
 from tests.knowledge_test_support import (
     _config,
-    patch_vector_store,  # noqa: F401  # autouse fixture
+    patch_vector_store,  # noqa: F401  # requested via pytestmark below
 )
+
+pytestmark = pytest.mark.usefixtures("patch_vector_store")
 
 
 def _git_manager(
