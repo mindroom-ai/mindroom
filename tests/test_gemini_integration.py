@@ -6,6 +6,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from mindroom.google_gemini import MindRoomGoogleGemini
 from mindroom.model_loading import get_model_instance
 from src.mindroom.config.main import Config
 from src.mindroom.constants import RuntimePaths, resolve_runtime_paths
@@ -37,7 +38,7 @@ class TestGeminiIntegration:
 
         with patch.dict("os.environ", {"GOOGLE_API_KEY": "test-key"}):
             model = get_model_instance(config, runtime_paths, "test_model")
-            assert model.__class__.__name__ == "Gemini"
+            assert isinstance(model, MindRoomGoogleGemini)
             assert model.id == "gemini-2.0-flash-001"
             assert model.provider == "Google"
 
@@ -54,7 +55,7 @@ class TestGeminiIntegration:
 
         with patch.dict("os.environ", {"GOOGLE_API_KEY": "test-key"}):
             model = get_model_instance(config, runtime_paths, "test_model")
-            assert model.__class__.__name__ == "Gemini"
+            assert isinstance(model, MindRoomGoogleGemini)
             assert model.id == "gemini-2.0-pro-001"
             assert model.provider == "Google"
 
@@ -113,6 +114,6 @@ class TestGeminiIntegration:
 
             with patch.dict("os.environ", {"GOOGLE_API_KEY": "test-key"}):
                 model = get_model_instance(config, runtime_paths, "test")
-                assert model.__class__.__name__ == "Gemini"
+                assert isinstance(model, MindRoomGoogleGemini)
                 assert model.id == model_id
                 assert model.provider == "Google"
