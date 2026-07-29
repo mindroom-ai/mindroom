@@ -9180,6 +9180,24 @@ def test_redacting_an_unparseable_url_does_not_raise(separator: str) -> None:
     assert "***" in redact_credentials_in_text(text)
 
 
+@pytest.mark.parametrize("length", [2047, 2048, 2049, 4096])
+def test_long_credential_free_urls_keep_their_diagnostic(length: int) -> None:
+    """Redaction must not apply the write path's length policy to diagnostics.
+
+    ``MAX_REDACTABLE_TOKEN_LENGTH`` bounds ``fully_unquoted``, which only the
+    ``.git/config`` write gate calls. Bounding the redactor by the same constant
+    replaced any URL past 2048 characters with ``***``, so a Git or Git LFS error
+    carrying a long endpoint lost its diagnostic entirely -- for a URL that parses
+    fine and holds no credential. The expectation here is ``origin/main``'s:
+    preserved at every length.
+    """
+    prefix = "https://host/"
+    url = prefix + "a" * (length - len(prefix))
+    text = f"fatal: unable to access '{url}': failed"
+
+    assert redact_credentials_in_text(text) == text
+
+
 @pytest.mark.asyncio
 async def test_run_git_reports_the_git_failure_when_stderr_holds_an_unparseable_url(
     tmp_path: Path,

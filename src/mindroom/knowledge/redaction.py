@@ -33,9 +33,11 @@ _AUTHORIZATION_HEADER_PATTERN: re.Pattern[str] = re.compile(
     r"\bAuthorization:\s*(Basic|Bearer)\s+([^\s'\"<>]+)",
     re.IGNORECASE,
 )
-#: Longest URL these helpers will inspect. A real repository URL is orders of
-#: magnitude shorter, and ``fully_unquoted`` is quadratic in the nesting depth of
-#: its input, so anything past this is refused or replaced unread.
+#: Longest URL the ``.git/config`` write gate will decode. ``fully_unquoted`` is
+#: quadratic in its input's nesting depth, and a real repository URL is orders of
+#: magnitude shorter, so the gate refuses anything past this rather than decoding
+#: it. Deliberately *not* applied when redacting diagnostics: nothing on that
+#: path decodes, and bounding reads only costs error messages.
 MAX_REDACTABLE_TOKEN_LENGTH = 2048
 __all__ = [
     "MAX_REDACTABLE_TOKEN_LENGTH",
@@ -82,9 +84,14 @@ def _inspectable_url(value: str) -> ParseResult | None:
     propagate. Reaching it needs no credential, so an ordinary typo in
     ``repo_url`` was enough to replace a Git failure with a ``ValueError`` while
     the failure was being recorded.
+
+    Deliberately applies no length limit. ``MAX_REDACTABLE_TOKEN_LENGTH`` exists
+    for ``fully_unquoted``, which is quadratic in its input's nesting depth, and
+    which only the ``.git/config`` write path calls. Bounding here instead meant
+    a long but perfectly parseable URL in a Git or Git LFS error was replaced
+    wholesale, losing a diagnostic that carried no credential -- a write-path
+    policy applied to reads.
     """
-    if len(value) > MAX_REDACTABLE_TOKEN_LENGTH:
-        return None
     try:
         return urlparse(value)
     except ValueError:
