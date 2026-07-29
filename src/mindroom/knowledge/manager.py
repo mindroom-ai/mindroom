@@ -84,7 +84,7 @@ from mindroom.knowledge.readers import (
     MalformedJSONSourceError,
     build_reader,
     chunking_strategy_for_base,
-    reader_decodes_plain_text,
+    reader_rereads_within_file_size,
     text_fallback_reader,
 )
 from mindroom.knowledge.redaction import redact_credentials_in_text
@@ -860,7 +860,7 @@ class KnowledgeManager:
             reader = build_reader(resolved_path, chunking=self._chunking_strategy())
         except Exception:
             return ()
-        if not reader_decodes_plain_text(reader):
+        if not reader_rereads_within_file_size(reader):
             return ()
         try:
             documents: Sequence[Document] = reader.read(resolved_path, name=resolved_path.name)

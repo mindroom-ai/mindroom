@@ -10,10 +10,11 @@ manager consumes what this module builds and never names an Agno reader type.
 
 from __future__ import annotations
 
+import codecs
 import json
 import uuid
 from copy import deepcopy
-from typing import IO, TYPE_CHECKING, Any
+from typing import IO, TYPE_CHECKING, Any, Final
 
 from agno.knowledge.document.base import Document
 from agno.knowledge.reader import ReaderFactory
@@ -84,27 +85,51 @@ def chunking_strategy_for_base(config: Config, base_id: str) -> SafeFixedSizeChu
     )
 
 
-def reader_decodes_plain_text(reader: Reader) -> bool:
-    """Return whether ``reader`` decodes its source as text instead of unpacking it.
+#: Encodings whose decoded text cannot outgrow the source file's size on disk.
+#: UTF-8 re-encoded to UTF-8 is itself, and stripping a BOM only shrinks it.
+#: Others expand: UTF-16 holds a CJK character in two bytes where UTF-8 needs
+#: three, and Latin-1 holds an accent in one where UTF-8 needs two.
+_SIZE_PRESERVING_ENCODINGS: Final = frozenset({"utf-8", "utf-8-sig"})
 
-    Two independent preconditions for re-reading a file rest on this property
-    and on nothing else:
 
-    * the second read is cheap next to one embedding round trip, because it is
-      a decode rather than a document parse or an archive extraction;
-    * the file's size on disk bounds its decoded text, which is what makes
+def _decodes_within_file_size(encoding: str | None) -> bool:
+    """Return whether decoding with ``encoding`` can outgrow the bytes on disk."""
+    if encoding is None:
+        # How TextReader and MarkdownReader spell UTF-8: both read through
+        # `self.encoding or "utf-8"`.
+        return True
+    try:
+        return codecs.lookup(encoding).name in _SIZE_PRESERVING_ENCODINGS
+    except LookupError:
+        # An unusable codec never reads anything; refusing it keeps the caller
+        # off a path whose cost and size it cannot reason about.
+        return False
+
+
+def reader_rereads_within_file_size(reader: Reader) -> bool:
+    """Return whether a file may be re-read through ``reader`` under a size-on-disk budget.
+
+    This is checked, not inferred, because both halves have to hold and the
+    reader's type only settles the first:
+
+    * the second read must be cheap next to one embedding round trip, which
+      holds for a decode but not for a document parse or an archive
+      extraction -- so a compressed container (``.docx``, ``.xlsx``, ``.pdf``)
+      is refused;
+    * the decoded text must fit the file's size on disk, which is what makes
       :meth:`~mindroom.chunking.SafeFixedSizeChunking.max_chunk_text_bytes`
-      -- documented against a size on disk -- a valid budget for it. A
-      compressed container (``.docx``, ``.xlsx``, ``.pdf``) breaks that: its
-      extracted text can dwarf the archive it came out of.
+      -- documented against a size on disk -- a valid budget. That depends on
+      the encoding rather than the type: a UTF-16 text reader is perfectly
+      cheap to re-read and still decodes to more UTF-8 bytes than the file
+      holds.
 
-    This is currently the same set of types :func:`build_reader` reconfigures,
-    and that is a coincidence of the readers Agno ships, not one fact. Do not
-    merge the two: giving a reader MindRoom's chunking says nothing about what
-    reading it costs, and the first binary format to need a chunking override
-    would need this to keep answering ``False``.
+    The admitted types happen to be the ones :func:`build_reader` reconfigures,
+    and that is a coincidence of the readers Agno ships rather than one fact.
+    Do not merge the two: MindRoom's chunking says nothing about what a read
+    costs, and the first binary format to need a chunking override would need
+    this to keep refusing it.
     """
-    return isinstance(reader, (TextReader, MarkdownReader))
+    return isinstance(reader, (TextReader, MarkdownReader)) and _decodes_within_file_size(reader.encoding)
 
 
 def _configure_text_reader(
@@ -132,7 +157,7 @@ def build_reader(file_path: Path, *, chunking: SafeFixedSizeChunking) -> Reader:
 
     # Large markdown/plain-text files are the common source of oversized embed
     # requests. This decision is deliberately spelled out here rather than
-    # shared with `reader_decodes_plain_text`: the two coincide today but
+    # shared with `reader_rereads_within_file_size`: the two coincide today but
     # answer different questions, and see that function for why.
     if not isinstance(reader, (TextReader, MarkdownReader)):
         return reader
