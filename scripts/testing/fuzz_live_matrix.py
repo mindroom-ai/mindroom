@@ -127,6 +127,16 @@ class LiveOperation:
         )
 
 
+def _restart_prompt_observation(
+    log: str,
+    fresh_event_id: str,
+    historical_event_ids: tuple[str, str],
+) -> tuple[bool, bool]:
+    """Report fresh prompt presence and any historical-event overlap."""
+    fresh_lines = [line for line in log.splitlines() if "Preparing agent and prompt" in line and fresh_event_id in line]
+    return bool(fresh_lines), any(event_id in line for line in fresh_lines for event_id in historical_event_ids)
+
+
 @dataclass(frozen=True, slots=True)
 class LiveFuzzScenario:
     """Concurrent live batches with logical references instead of event IDs."""
@@ -728,11 +738,14 @@ class ManagedTuwunelStack:
         config["agents"][AGENT_NAME]["rooms"].append(room_id)
         self.config_path.write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
 
-    def cached_restart_event_count(self, event_ids: tuple[str, str]) -> int:
-        """Count distinct restart fixtures accepted by the durable event cache."""
+    def cached_restart_event_pair_count(self, room_id: str, event_ids: tuple[str, str]) -> int:
+        """Count exact principal/event pairs cached for the restart room."""
         with sqlite3.connect(self.storage_path / "event_cache.db") as database:
-            query = "SELECT COUNT(DISTINCT event_id) FROM events WHERE event_id IN (?, ?)"
-            row = database.execute(query, event_ids).fetchone()
+            query = """
+                SELECT COUNT(*) FROM events
+                WHERE principal_id IN (?, ?) AND room_id = ? AND event_id IN (?, ?)
+            """
+            row = database.execute(query, (self.agent_id, self.router_id, room_id, *event_ids)).fetchone()
         return int(row[0]) if row is not None else 0
 
     def _start_model_server(self) -> int:
@@ -1230,19 +1243,28 @@ class LiveFuzzRunner:
 
         deadline = time.monotonic() + self.reply_timeout
         counts = (0, 0, 0)
-        cached_history = 0
+        cached_event_pairs = 0
+        fresh_prompt_observed = False
+        historical_in_fresh_prompt = False
         settled = 0
         while time.monotonic() < deadline:
             await dormant.sync_incremental(timeout_ms=250, allow_limited=True)
             agent = self._canonical_response_ids(dormant.seen_events.values())
             router = self._canonical_response_ids(dormant.seen_events.values(), sender_id=self.stack.router_id)
-            counts = (
-                len(agent.get(historical_text, set())) + len(router.get(historical_text, set())),
-                len(agent.get(historical_media, set())) + len(router.get(historical_media, set())),
-                len(agent.get(fresh, set())),
+            counts = tuple(
+                self._combined_response_count(source_event_id, agent, router)
+                for source_event_id in (historical_text, historical_media, fresh)
             )
-            cached_history = self.stack.cached_restart_event_count((historical_text, historical_media))
-            settled = settled + 1 if counts[2] == 1 and cached_history == 2 else 0
+            cached_event_pairs = self.stack.cached_restart_event_pair_count(
+                dormant.room_id,
+                (historical_text, historical_media),
+            )
+            fresh_prompt_observed, historical_in_fresh_prompt = _restart_prompt_observation(
+                self.stack.log_path.read_text(encoding="utf-8", errors="replace"),
+                fresh,
+                (historical_text, historical_media),
+            )
+            settled = settled + 1 if counts[2] == 1 and cached_event_pairs == 4 and fresh_prompt_observed else 0
             if settled == 2:
                 break
             if settled:
@@ -1250,8 +1272,17 @@ class LiveFuzzRunner:
         checks = (
             ("historical_output_suppressed", counts[0], 0, "historical_text", "replacement_sync", 1),
             ("historical_output_suppressed", counts[1], 0, "historical_media", "replacement_sync", 2),
-            ("historical_events_cached", cached_history, 2, "historical_events", "replacement_sync", 3),
+            ("historical_event_pairs_cached", cached_event_pairs, 4, "historical_events", "replacement_sync", 3),
             ("fresh_event_exactly_once", counts[2], 1, "fresh_user", "replacement_startup", 4),
+            ("fresh_prompt_observed", fresh_prompt_observed, True, "fresh_user", "execution", 4),
+            (
+                "historical_events_absent_from_fresh_prompt",
+                historical_in_fresh_prompt,
+                False,
+                "historical_events",
+                "execution",
+                4,
+            ),
         )
         failures = [
             restart_failure(
@@ -1266,7 +1297,7 @@ class LiveFuzzRunner:
         ]
         if failures:
             raise AssertionError("restart regression invariant failures:\n" + "\n".join(failures))
-        return {"historical_events_cached": cached_history, "historical_outputs": 0, "status": "PASS"}
+        return {"historical_event_pairs_cached": cached_event_pairs, "historical_outputs": 0, "status": "PASS"}
 
     async def _run_saturation(self) -> dict[str, int | str]:
         """Run hot and parallel turns without cross-thread barriers."""
@@ -1439,6 +1470,14 @@ class LiveFuzzRunner:
             if isinstance(source_event_id, str):
                 response_ids[source_event_id].add(event_id)
         return response_ids
+
+    @staticmethod
+    def _combined_response_count(
+        source_event_id: str,
+        *response_indexes: Mapping[str, set[str]],
+    ) -> int:
+        """Count canonical bot responses across every configured sender."""
+        return sum(len(response_ids.get(source_event_id, set())) for response_ids in response_indexes)
 
     @staticmethod
     def _latest_event_body(

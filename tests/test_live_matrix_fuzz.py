@@ -2,17 +2,20 @@
 
 from __future__ import annotations
 
+import sqlite3
 from typing import Any, cast
 
 import pytest
 
 from scripts.testing.fuzz_live_matrix import (
-    RESTART_SCENARIO,
     ExactReplyOracle,
+    LiveFuzzRunner,
     LiveFuzzScenario,
     LiveMatrixClient,
     LiveOperation,
     LiveOperationKind,
+    ManagedTuwunelStack,
+    _restart_prompt_observation,
     live_scenario_from_seed,
     restart_failure,
     saturation_scenario,
@@ -120,10 +123,8 @@ def test_live_scenario_rejects_ambiguous_same_thread_reply_batch() -> None:
         scenario.validate()
 
 
-def test_restart_regression_profile_is_bounded_and_replayable() -> None:
-    """The fixed trace and its diagnostics must stay bounded and content-free."""
-    scenario = RESTART_SCENARIO
-    assert (scenario.profile, scenario.thread_count, scenario.batches) == ("restart-regression", 1, ())
+def test_restart_regression_diagnostics_reject_content() -> None:
+    """The fixed trace diagnostics must stay content-free."""
     with pytest.raises(TypeError, match="restart output observation"):
         restart_failure(
             "historical_output_suppressed",
@@ -132,6 +133,40 @@ def test_restart_regression_profile_is_bounded_and_replayable() -> None:
             observed=cast("Any", {"body": "must not reach diagnostics"}),
             step=1,
         )
+
+
+def test_restart_regression_evidence_rejects_false_passes() -> None:
+    """Sender, principal, room, and prompt overlap must remain observable."""
+    stack = ManagedTuwunelStack()
+    try:
+        stack.agent_id, stack.router_id = "@agent:example", "@router:example"
+        stack.storage_path.mkdir()
+        with sqlite3.connect(stack.storage_path / "event_cache.db") as database:
+            database.executescript(
+                """CREATE TABLE events(principal_id TEXT, room_id TEXT, event_id TEXT);
+                INSERT INTO events VALUES
+                ('@agent:example', '!target:example', '$old-text'),
+                ('@agent:example', '!target:example', '$old-media'),
+                ('@router:example', '!other:example', '$old-text');""",
+            )
+
+        event_ids = ("$old-text", "$old-media")
+        assert stack.cached_restart_event_pair_count("!target:example", event_ids) == 2
+        assert _restart_prompt_observation(
+            "Preparing agent and prompt $fresh $old-text",
+            "$fresh",
+            event_ids,
+        ) == (True, True)
+        assert (
+            LiveFuzzRunner._combined_response_count(
+                "$fresh",
+                {"$fresh": {"$agent-response"}},
+                {"$fresh": {"$router-response"}},
+            )
+            == 2
+        )
+    finally:
+        stack.close()
 
 
 @pytest.mark.asyncio
