@@ -11,6 +11,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+from agno.models.message import Message
 
 from mindroom import kimi_model
 from mindroom.config.main import Config
@@ -24,6 +25,7 @@ from mindroom.kimi_model import (
     normalize_kimi_model_id,
 )
 from mindroom.model_loading import get_model_instance
+from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 
 def _write_kimi_credentials(kimi_home: Path, access_token: str, refresh_value: str, *, expires_at: int) -> None:
@@ -199,6 +201,55 @@ def test_kimi_chat_fresh_clients_refresh_expired_tokens(tmp_path: Path, monkeypa
         return_value={"access_token": "refreshed-access", "expires_in": 900},
     ):
         assert model._get_client_params()["api_key"] == "refreshed-access"
+
+
+def test_kimi_chat_keeps_system_role_for_kimi_endpoint() -> None:
+    """Agno's system-to-developer role mapping must not leak to the Kimi Code endpoint."""
+    model = KimiChat(id="k3")
+    wire = model._format_message(Message(role="system", content="Be helpful."))
+    assert wire["role"] == "system"
+
+
+def test_kimi_chat_request_params_include_prompt_cache_key() -> None:
+    """KimiChat should pin requests to its prompt-cache namespace like the Kimi Code CLI."""
+    model = KimiChat(id="k3", prompt_cache_key="mindroom-code-agent")
+    assert model.get_request_params()["prompt_cache_key"] == "mindroom-code-agent"
+
+    model_without_key = KimiChat(id="k3")
+    assert "prompt_cache_key" not in model_without_key.get_request_params()
+
+
+def test_kimi_model_loader_derives_prompt_cache_key_from_execution_identity(tmp_path: Path) -> None:
+    """MindRoom should use a stable per-agent/session Kimi cache key by default."""
+    runtime_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "mindroom_data",
+        process_env={},
+    )
+    config = Config(
+        models={
+            "default": ModelConfig(
+                provider="kimi",
+                id="k3",
+            ),
+        },
+        agents={},
+    )
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="code",
+        requester_id="@alice:example.org",
+        room_id="!room:example.org",
+        thread_id="$thread:example.org",
+        resolved_thread_id="$thread:example.org",
+        session_id="!room:example.org:$thread:example.org",
+    )
+
+    model = get_model_instance(config, runtime_paths, execution_identity=identity)
+
+    assert isinstance(model, KimiChat)
+    assert model.prompt_cache_key == "mindroom-7ac97f304c4001bd9939c88ddba8b0e2"
+    assert model.get_request_params()["prompt_cache_key"] == "mindroom-7ac97f304c4001bd9939c88ddba8b0e2"
 
 
 @pytest.mark.parametrize("provider", ["kimi", "kimi_code"])

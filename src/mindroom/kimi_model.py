@@ -16,9 +16,16 @@ from openai import AsyncOpenAI, OpenAI
 from mindroom.file_locks import advisory_file_lock
 from mindroom.model_defaults import KIMI_K3
 from mindroom.openai_models import MindRoomOpenAIChat
+from mindroom.prompt_cache_key import derive_session_prompt_cache_key
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
+
+    from agno.run.agent import RunOutput
+    from agno.run.team import TeamRunOutput
+    from pydantic import BaseModel
+
+    from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 _KIMI_BASE_URL = "https://api.kimi.com/coding/v1"
 _KIMI_REFRESH_URL = "https://auth.kimi.com/api/oauth/token"
@@ -26,6 +33,7 @@ _KIMI_CLIENT_ID = "17e5f671-d194-4dfb-9706-5516cb48c098"
 _KIMI_REFRESH_SKEW_SECONDS = 30
 _KIMI_MODEL_PREFIX = "kimi-code/"
 _KIMI_CREDENTIALS_RELATIVE_PATH = Path("credentials") / "kimi-code.json"
+_KIMI_PROMPT_CACHE_KEY_PREFIX = "mindroom"
 
 
 class _KimiAuthError(ValueError):
@@ -151,6 +159,11 @@ def _update_credentials(credentials: dict[str, Any], refreshed: dict[str, Any]) 
         credentials["expires_at"] = int(time.time()) + int(refreshed["expires_in"])
 
 
+def derive_kimi_prompt_cache_key(identity: ToolExecutionIdentity) -> str | None:
+    """Derive a stable Kimi prompt-cache routing key for one active execution."""
+    return derive_session_prompt_cache_key(identity, prefix=_KIMI_PROMPT_CACHE_KEY_PREFIX)
+
+
 @dataclass
 class KimiChat(MindRoomOpenAIChat):
     """Agno Chat model backed by the local Kimi Code CLI OAuth credentials."""
@@ -160,11 +173,34 @@ class KimiChat(MindRoomOpenAIChat):
     provider: str = "Kimi"
     base_url: str = _KIMI_BASE_URL
     kimi_home: str | None = None
+    prompt_cache_key: str | None = None
 
     def __post_init__(self) -> None:
         """Normalize CLI-config-style model IDs before Agno uses the model id."""
         self.id = normalize_kimi_model_id(self.id)
         super().__post_init__()
+        if self.role_map is None:
+            # Agno maps system messages to OpenAI's newer "developer" role, which
+            # the Kimi Code endpoint rejects; keep the classic "system" role.
+            self.role_map = {**self.default_role_map, "system": "system"}
+
+    def get_request_params(
+        self,
+        response_format: dict[Any, Any] | type[BaseModel] | None = None,
+        tools: list[dict[str, Any]] | None = None,
+        tool_choice: str | dict[str, Any] | None = None,
+        run_response: RunOutput | TeamRunOutput | None = None,
+    ) -> dict[str, Any]:
+        """Pin requests to a stable prompt-cache namespace like the Kimi Code CLI does."""
+        request_params = super().get_request_params(
+            response_format=response_format,
+            tools=tools,
+            tool_choice=tool_choice,
+            run_response=run_response,
+        )
+        if self.prompt_cache_key:
+            request_params.setdefault("prompt_cache_key", self.prompt_cache_key)
+        return request_params
 
     def _get_client_params(self) -> dict[str, Any]:
         base_params = {

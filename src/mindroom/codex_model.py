@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import base64
-import hashlib
 import json
 import os
 import time
@@ -19,6 +18,7 @@ from openai import AsyncOpenAI, OpenAI
 from mindroom.file_locks import advisory_file_lock
 from mindroom.model_defaults import CODEX_GPT, CODEX_GPT_ENDPOINT
 from mindroom.openai_models import MindRoomOpenAIResponses
+from mindroom.prompt_cache_key import derive_session_prompt_cache_key
 from mindroom.prompts import CODEX_DEFAULT_INSTRUCTIONS
 
 if TYPE_CHECKING:
@@ -192,20 +192,7 @@ def _update_tokens(tokens: dict[str, Any], refreshed: dict[str, Any]) -> None:
 
 def derive_codex_prompt_cache_key(identity: ToolExecutionIdentity) -> str | None:
     """Derive a stable Codex prompt-cache routing key for one active execution."""
-    if identity.session_id is None:
-        return None
-    source = ":".join(
-        (
-            identity.channel,
-            identity.agent_name,
-            identity.requester_id or "",
-            identity.room_id or "",
-            identity.resolved_thread_id or identity.thread_id or "",
-            identity.session_id,
-        ),
-    )
-    digest = hashlib.sha256(source.encode("utf-8")).hexdigest()[:32]
-    return f"{_CODEX_PROMPT_CACHE_KEY_PREFIX}-{digest}"
+    return derive_session_prompt_cache_key(identity, prefix=_CODEX_PROMPT_CACHE_KEY_PREFIX)
 
 
 def _codex_prompt_cache_headers(prompt_cache_key: str) -> dict[str, str]:

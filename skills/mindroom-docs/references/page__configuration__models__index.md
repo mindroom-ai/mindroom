@@ -245,6 +245,10 @@ models:
 Kimi K3 always reasons before replying, so responses include reasoning tokens even for short answers.
 This adapter follows the local Kimi Code CLI authentication-file and backend contracts, so upstream Kimi Code changes can require a MindRoom update.
 
+Prompt caching is automatic on the Kimi Code endpoint: repeated request prefixes come back as `cached_tokens` with no opt-in.
+Like the Kimi Code CLI, MindRoom pins each active agent session to a stable `prompt_cache_key` derived from the execution identity (the same derivation the Codex provider uses), which keeps cache routing stable per Matrix thread.
+You can set `extra_kwargs.prompt_cache_key` to override the derived key for a model.
+
 ## OpenRouter Provider Routing
 
 OpenRouter routes each request to one of several upstream providers serving the model, and upstream quality varies (we have seen a third-party host leak raw tool-call markup into a visible reply).
