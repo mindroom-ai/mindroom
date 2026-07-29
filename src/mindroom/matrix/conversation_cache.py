@@ -34,6 +34,7 @@ from mindroom.matrix.cache import (
 from mindroom.matrix.cache.thread_reads import ThreadReadMode, ThreadReadPolicy
 from mindroom.matrix.cache.thread_write_cache_ops import ThreadMutationCacheOps
 from mindroom.matrix.cache.thread_writes import ThreadLiveWritePolicy, ThreadOutboundWritePolicy, ThreadSyncWritePolicy
+from mindroom.matrix.cache.write_coordinator import startup_cache_work
 from mindroom.matrix.client_thread_history import (
     BulkThreadRefreshStats,
     bulk_refresh_room_thread_histories,
@@ -439,8 +440,18 @@ class _ThreadRefillSingleFlight:
                 log_exceptions=False,
             )
             self._in_flight[key] = in_flight
-            in_flight.add_done_callback(lambda _task: self._in_flight.pop(key, None))
-        result = await asyncio.shield(in_flight)
+            in_flight.add_done_callback(
+                lambda task: self._in_flight.pop(key, None) if self._in_flight.get(key) is task else None,
+            )
+        try:
+            result = await asyncio.shield(in_flight)
+        except asyncio.CancelledError:
+            current_task = asyncio.current_task()
+            if not shared or (current_task is not None and current_task.cancelling()):
+                raise
+            if self._in_flight.get(key) is in_flight:
+                self._in_flight.pop(key)
+            return await self.run(key, refill)
         return _ThreadRefillSingleFlightResult(
             result=result,
             wait_ms=elapsed_ms_since(wait_started, clock=time.perf_counter) if wait_started is not None else 0.0,
@@ -1016,12 +1027,20 @@ class MatrixConversationCache(ConversationCacheProtocol):
         caller_label: str = "unknown",
     ) -> ThreadReadResult:
         """Refresh strict full history directly from Matrix."""
-        return await self._reads.read_thread(
-            room_id,
-            thread_id,
-            mode=ThreadReadMode.STRICT_SOURCE_REFRESH,
-            caller_label=caller_label,
-        )
+        try:
+            with startup_cache_work():
+                return await self._reads.read_thread(
+                    room_id,
+                    thread_id,
+                    mode=ThreadReadMode.STRICT_SOURCE_REFRESH,
+                    caller_label=caller_label,
+                )
+        except asyncio.CancelledError:
+            current_task = asyncio.current_task()
+            if current_task is not None and current_task.cancelling():
+                raise
+            message = "Startup cache work yielded to a foreground read"
+            raise RuntimeError(message) from None
 
     async def get_thread_id_for_event(self, room_id: str, event_id: str) -> str | None:
         """Resolve the cached thread root for one event when known."""

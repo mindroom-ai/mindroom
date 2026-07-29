@@ -2154,11 +2154,16 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
 
         async def wait_for_foreground() -> None:
             foreground_waiting.set()
-            await coordinator.wait_for_thread_idle(
+            async with coordinator.foreground_thread_read(
                 "!test:localhost",
                 "$thread:localhost",
                 coordination_scope="test-principal",
-            )
+            ):
+                await coordinator.wait_for_thread_idle(
+                    "!test:localhost",
+                    "$thread:localhost",
+                    coordination_scope="test-principal",
+                )
 
         def queue_startup_update() -> asyncio.Task[object]:
             with startup_cache_work():
@@ -2216,11 +2221,16 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
 
         async def wait_for_foreground() -> None:
             foreground_waiting.set()
-            await coordinator.wait_for_thread_idle(
+            async with coordinator.foreground_thread_read(
                 "!test:localhost",
                 "$thread:localhost",
                 coordination_scope="test-principal",
-            )
+            ):
+                await coordinator.wait_for_thread_idle(
+                    "!test:localhost",
+                    "$thread:localhost",
+                    coordination_scope="test-principal",
+                )
 
         with startup_cache_work():
             startup_task = coordinator.queue_thread_update(

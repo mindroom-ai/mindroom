@@ -25,7 +25,6 @@ from mindroom.dispatch_source import AUTO_RESUME_MESSAGE, TRUSTED_INTERNAL_RELAY
 from mindroom.entity_resolution import MissingManagedEntityAccountError, entity_identity_registry
 from mindroom.matrix import stale_stream_cleanup as stale_stream_cleanup_module
 from mindroom.matrix.cache import ThreadHistoryResult, thread_history_result
-from mindroom.matrix.cache.write_coordinator import _is_startup_cache_work
 from mindroom.matrix.client import ResolvedVisibleMessage
 from mindroom.matrix.client_thread_history import OpaqueEncryptedThreadHistoryError
 from mindroom.matrix.identity import managed_account_key
@@ -751,13 +750,15 @@ async def test_auto_resume_sends_correctly_threaded_messages(tmp_path: Path) -> 
         ),
     ]
     conversation_cache = _auto_resume_conversation_cache(interrupted)
-    startup_markers: list[bool] = []
+    refresh_count = 0
     history_for_thread = conversation_cache.refresh_strict_thread_history_from_source.side_effect
 
     def observed_history_for_thread(*args: object, **kwargs: object) -> ThreadHistoryResult:
-        startup_markers.append(_is_startup_cache_work())
-        if len(startup_markers) == 1:
-            raise asyncio.CancelledError
+        nonlocal refresh_count
+        refresh_count += 1
+        if refresh_count == 1:
+            message = "Startup cache work yielded to a foreground read"
+            raise RuntimeError(message)
         return history_for_thread(*args, **kwargs)
 
     conversation_cache.refresh_strict_thread_history_from_source.side_effect = observed_history_for_thread
@@ -783,7 +784,7 @@ async def test_auto_resume_sends_correctly_threaded_messages(tmp_path: Path) -> 
         )
 
     assert resumed_count == 2
-    assert startup_markers == [True, True, True]
+    assert refresh_count == 3
     assert mock_send.await_count == 2
     first_content = mock_send.await_args_list[0].args[2]
     second_content = mock_send.await_args_list[1].args[2]

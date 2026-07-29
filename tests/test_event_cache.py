@@ -33,7 +33,11 @@ from mindroom.matrix.cache.event_batching import group_lookup_events_by_room
 from mindroom.matrix.cache.sqlite_event_cache import SqliteEventCache
 from mindroom.matrix.cache.thread_history_result import thread_history_result
 from mindroom.matrix.cache.thread_reads import ThreadReadMode
-from mindroom.matrix.cache.write_coordinator import EventCacheWriteCoordinator, startup_cache_work
+from mindroom.matrix.cache.write_coordinator import (
+    EventCacheWriteCoordinator,
+    _is_startup_cache_work,
+    startup_cache_work,
+)
 from mindroom.matrix.client_thread_history import (
     BulkThreadRefreshStats,
     fetch_thread_history,
@@ -788,6 +792,11 @@ async def test_strict_source_refresh_bypasses_usable_cache(
         [ResolvedVisibleMessage.synthetic(sender="@bot:localhost", body="Target", event_id="$target")],
         is_full_history=True,
     )
+    startup_markers: list[bool] = []
+
+    async def refresh_source(*_args: object, **_kwargs: object) -> ThreadHistoryResult:
+        startup_markers.append(_is_startup_cache_work())
+        return fetched_history
 
     try:
         await asyncio.wait_for(write_started.wait(), timeout=5.0)
@@ -803,7 +812,7 @@ async def test_strict_source_refresh_bypasses_usable_cache(
             ) as cache_thread_history,
             patch(
                 "mindroom.matrix.conversation_cache.refresh_thread_history_from_source",
-                AsyncMock(return_value=fetched_history),
+                AsyncMock(side_effect=refresh_source),
             ) as refresh_thread_history,
         ):
             read_task = asyncio.create_task(
@@ -825,6 +834,7 @@ async def test_strict_source_refresh_bypasses_usable_cache(
 
     assert [message.event_id for message in result] == ["$target"]
     assert result.is_full_history is True
+    assert startup_markers == [True]
     refresh_thread_history.assert_awaited_once()
     assert refresh_thread_history.await_args.args[:4] == (
         client,
@@ -837,7 +847,7 @@ async def test_strict_source_refresh_bypasses_usable_cache(
 
 
 @pytest.mark.asyncio
-async def test_foreground_refill_replaces_cancelled_queued_startup_singleflight(  # noqa: PLR0915
+async def test_foreground_refill_replaces_cancelled_queued_startup_singleflight(
     tmp_path: Path,
 ) -> None:
     """Foreground intent must survive its idle wait until its refill is queued."""
@@ -851,8 +861,7 @@ async def test_foreground_refill_replaces_cancelled_queued_startup_singleflight(
     fetch_started = asyncio.Event()
     release_fetch = asyncio.Event()
     startup_queued = asyncio.Event()
-    startup_scan_started = asyncio.Event()
-    foreground_scan_started = asyncio.Event()
+    scan_started = asyncio.Event()
     fetched_history = thread_history_result(
         [ResolvedVisibleMessage.synthetic(sender="@bot:localhost", body="Target", event_id="$target")],
         is_full_history=True,
@@ -872,10 +881,8 @@ async def test_foreground_refill_replaces_cancelled_queued_startup_singleflight(
         return await kwargs["refill"](None)
 
     async def refresh_source(*_args: object, **kwargs: object) -> ThreadHistoryResult:
-        if kwargs["hydrate_sidecars"]:
-            startup_scan_started.set()
-        else:
-            foreground_scan_started.set()
+        assert kwargs["hydrate_sidecars"] is True
+        scan_started.set()
         return fetched_history
 
     try:
@@ -886,12 +893,12 @@ async def test_foreground_refill_replaces_cancelled_queued_startup_singleflight(
                 new=AsyncMock(side_effect=refresh_source),
             ),
             patch(
-                "mindroom.matrix.conversation_cache.fetch_dispatch_thread_snapshot",
+                "mindroom.matrix.conversation_cache.fetch_dispatch_thread_history",
                 new=AsyncMock(side_effect=delayed_dispatch_fetch),
             ),
         ):
             foreground_refill = asyncio.create_task(
-                conversation_cache.get_dispatch_thread_snapshot(
+                conversation_cache.get_dispatch_thread_history(
                     "!room:localhost",
                     "$thread:localhost",
                     caller_label="dispatch_post_lock_refresh",
@@ -932,8 +939,7 @@ async def test_foreground_refill_replaces_cancelled_queued_startup_singleflight(
         await event_cache.close()
 
     assert [message.event_id for message in history] == ["$target"]
-    assert foreground_scan_started.is_set()
-    assert startup_scan_started.is_set() is False
+    assert scan_started.is_set()
 
 
 @pytest.mark.asyncio

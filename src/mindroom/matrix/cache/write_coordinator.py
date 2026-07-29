@@ -679,7 +679,7 @@ class EventCacheWriteCoordinator:
             coordination_scope=coordination_scope,
         )
 
-    async def _wait_for_thread_idle(
+    async def wait_for_thread_idle(
         self,
         room_id: str,
         thread_id: str,
@@ -754,23 +754,6 @@ class EventCacheWriteCoordinator:
             else:
                 state.foreground_readers.pop(thread_id)
             self._cleanup_room_state(room_key)
-
-    async def wait_for_thread_idle(
-        self,
-        room_id: str,
-        thread_id: str,
-        *,
-        ignore_cancelled_room_fences: bool = False,
-        coordination_scope: str,
-    ) -> None:
-        """Wait for prior writes while reserving foreground priority for later startup work."""
-        async with self.foreground_thread_read(room_id, thread_id, coordination_scope=coordination_scope):
-            await self._wait_for_thread_idle(
-                room_id,
-                thread_id,
-                ignore_cancelled_room_fences=ignore_cancelled_room_fences,
-                coordination_scope=coordination_scope,
-            )
 
     async def wait_for_prior_room_updates(
         self,
