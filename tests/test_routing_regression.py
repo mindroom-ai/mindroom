@@ -529,7 +529,6 @@ class TestRoutingRegression:
 
         with (
             patch("mindroom.orchestrator.stop_entities", new=AsyncMock(side_effect=stop_after_relay)) as mock_stop,
-            patch.object(orchestrator, "_cancel_bot_start_task", new=AsyncMock()),
             patch.object(
                 orchestrator,
                 "_create_and_start_entities",
