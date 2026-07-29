@@ -7977,10 +7977,6 @@ async def test_valid_json_does_not_hide_downstream_json_decode_error(
     assert all(entry["event"] != "Malformed JSON knowledge file; indexing as text" for entry in logs)
 
 
-#: fixed; ``ambiguous-authority`` was already redacted by luck, because its last
-#: ``@`` happens to fall after the secret, and is pinned so it stays that way.
-
-
 #: Repository URLs that must never be written to ``.git/config``. The first four
 #: are documented provider credential forms with the scheme mistyped or dropped;
 #: ``urlparse`` reports the username as a scheme and finds no authority, so a

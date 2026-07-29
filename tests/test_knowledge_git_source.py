@@ -15,6 +15,7 @@ from pathlib import Path
 
 import pytest
 
+import mindroom.knowledge.git_source as knowledge_git_source_module
 from mindroom.config.knowledge import KnowledgeGitConfig
 from mindroom.credentials import get_runtime_shared_credentials_manager
 from mindroom.knowledge.git_source import GitKnowledgeSource, GitSyncResult
@@ -59,6 +60,34 @@ def _git_manager(
     if include_extensions is not None:
         config.knowledge_bases["docs"].include_extensions = include_extensions
     return KnowledgeManager("docs", config=config, runtime_paths=runtime_paths_for(config))
+
+
+@pytest.mark.parametrize(
+    "repo_url",
+    [
+        pytest.param("ssh://git%3AS3CR3T-CANARY@example.com/org/repo.git", id="encoded-colon"),
+        pytest.param("ssh://git%253AS3CR3T-CANARY@example.com/org/repo.git", id="double-encoded-colon"),
+        pytest.param("ssh://git\uff1aS3CR3T-CANARY@example.com/org/repo.git", id="nfkc-colon"),
+    ],
+)
+def test_hidden_ssh_password_separator_is_refused_before_persistence(repo_url: str) -> None:
+    """Hidden SSH credentials must never reach the checkout's Git config."""
+    with pytest.raises(RuntimeError, match="Refusing to write an unsafe remote URL") as exc_info:
+        knowledge_git_source_module._persistable_remote_url(repo_url, "docs")
+
+    assert "S3CR3T-CANARY" not in str(exc_info.value)
+
+
+@pytest.mark.parametrize(
+    "repo_url",
+    [
+        "ssh://git@example.com/org/repo.git",
+        "ssh://git@example.com:2222/org:repo.git",
+    ],
+)
+def test_passwordless_ssh_authority_forms_remain_persistable(repo_url: str) -> None:
+    """Usernames, ports, and colons outside userinfo remain supported."""
+    assert knowledge_git_source_module._persistable_remote_url(repo_url, "docs") == repo_url
 
 
 @pytest.mark.asyncio
@@ -743,6 +772,37 @@ async def test_run_git_redacts_credentials_in_error_message(
     message = str(exc_info.value)
     assert "secret-token" not in message
     assert "https://***@github.com/example/private.git" in message
+
+
+@pytest.mark.asyncio
+async def test_run_git_reports_the_git_failure_when_stderr_holds_an_unparseable_url(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Malformed URLs in Git output must not replace the failure with a parse error.
+
+    Redaction runs on whatever a remote or a local ``git`` chose to print, and an
+    unterminated IPv6 literal makes ``urlparse`` raise. Raising there would
+    destroy the diagnostic exactly when something has already gone wrong.
+    """
+    manager = _git_manager(tmp_path)
+
+    class _FailingProcess:
+        returncode = 128
+
+        async def communicate(self) -> tuple[bytes, bytes]:
+            return b"", b"fatal: unable to access 'http://[': bad address"
+
+    async def _fake_create_subprocess_exec(*args: object, **kwargs: object) -> _FailingProcess:
+        _ = args, kwargs
+        return _FailingProcess()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
+
+    with pytest.raises(RuntimeError, match="Git command failed with exit code 128") as exc_info:
+        await manager.git_source._run_git(["fetch", "origin", "main"])
+
+    assert "bad address" in str(exc_info.value)
 
 
 @pytest.mark.asyncio

@@ -195,11 +195,21 @@ def _parsed_remote_url(clean_url: str, base_id: str) -> str:
     if parsed.netloc.count("@") > 1:
         raise _unwritable_remote(base_id, "the URL has an ambiguous authority")
 
-    # No check for a password in the authority: ``credential_free_repo_url`` has
-    # already stripped one, and the bare ``user@host`` it deliberately keeps for
-    # SSH has no colon. A 400k-case fuzz reached this point with a password zero
-    # times, so a branch here would be untested code guarding nothing.
     return clean_url
+
+
+def _refuse_decoded_ssh_password(decoded_url: str, base_id: str) -> None:
+    """Refuse an SSH password separator hidden from the sanitizing parse."""
+    if not decoded_url.lower().startswith("ssh://"):
+        return
+
+    try:
+        parsed = urlparse(decoded_url)
+    except ValueError:
+        raise _unwritable_remote(base_id, "the decoded URL cannot be parsed") from None
+
+    if parsed.scheme == "ssh" and parsed.netloc and parsed.password is not None:
+        raise _unwritable_remote(base_id, "an encoded separator hides authentication credentials")
 
 
 def _persistable_remote_url(repo_url: str, base_id: str) -> str:
@@ -240,8 +250,11 @@ def _persistable_remote_url(repo_url: str, base_id: str) -> str:
         # repository URL is never this long, so refusing costs nothing real.
         raise _unwritable_remote(base_id, "the URL is implausibly long")
 
-    if fully_unquoted(clean_url).count("@") != clean_url.count("@"):
+    decoded_url = fully_unquoted(clean_url)
+    if decoded_url.count("@") != clean_url.count("@"):
         raise _unwritable_remote(base_id, "a percent-encoded separator hides part of the URL")
+
+    _refuse_decoded_ssh_password(decoded_url, base_id)
 
     if clean_url.count("://") > 1:
         # A second URL nested in the path carries its own userinfo, which the
