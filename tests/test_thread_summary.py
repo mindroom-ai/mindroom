@@ -37,6 +37,7 @@ from mindroom.thread_summary import (
     _recover_last_summary_count,
     _recover_pin_state,
     _resolve_thread_summary_model_name,
+    _thread_is_resolved,
     _thread_locks,
     _thread_summary_cache_key,
     _ThreadEnrichment,
@@ -92,6 +93,7 @@ def _make_summary_notice_message(
     model: str = "manual",
     sender: str = "@mindroom:localhost",
     pinned: bool | None = None,
+    generated_at: str = "2026-01-01T00:00:00+00:00",
 ) -> ResolvedVisibleMessage:
     """Build a synthetic thread summary notice for history-counting regressions."""
     summary = "🧵 Existing thread summary"
@@ -100,6 +102,7 @@ def _make_summary_notice_message(
         "summary": summary,
         "message_count": message_count,
         "model": model,
+        "generated_at": generated_at,
     }
     if initial_enrichment_complete is not None:
         summary_metadata["initial_enrichment_complete"] = initial_enrichment_complete
@@ -2758,18 +2761,103 @@ class TestRecoverPinState:
     def test_latest_pin_wins_over_earlier_release(self) -> None:
         """A later pin overrides an earlier release."""
         history = [
-            _make_summary_notice_message("$thread1", message_count=2, event_id="$s1", pinned=False),
-            _make_summary_notice_message("$thread1", message_count=4, event_id="$s2", pinned=True),
+            _make_summary_notice_message(
+                "$thread1",
+                message_count=2,
+                event_id="$s1",
+                pinned=False,
+                generated_at="2026-01-01T00:00:00+00:00",
+            ),
+            _make_summary_notice_message(
+                "$thread1",
+                message_count=4,
+                event_id="$s2",
+                pinned=True,
+                generated_at="2026-01-01T00:05:00+00:00",
+            ),
         ]
         assert _recover_pin_state(history, trusted_sender_ids=_TRUSTED_SUMMARY_SENDERS)
 
     def test_latest_release_wins_over_earlier_pin(self) -> None:
         """Release must be possible; any-wins recovery would make it impossible."""
         history = [
-            _make_summary_notice_message("$thread1", message_count=2, event_id="$s1", pinned=True),
-            _make_summary_notice_message("$thread1", message_count=4, event_id="$s2", pinned=False),
+            _make_summary_notice_message(
+                "$thread1",
+                message_count=2,
+                event_id="$s1",
+                pinned=True,
+                generated_at="2026-01-01T00:00:00+00:00",
+            ),
+            _make_summary_notice_message(
+                "$thread1",
+                message_count=4,
+                event_id="$s2",
+                pinned=False,
+                generated_at="2026-01-01T00:05:00+00:00",
+            ),
         ]
         assert _recover_pin_state(history, trusted_sender_ids=_TRUSTED_SUMMARY_SENDERS) is False
+
+    def test_newest_decision_wins_when_history_order_is_reversed(self) -> None:
+        """History position must not decide the pin.
+
+        _sort_thread_items_root_first breaks equal origin_server_ts ties with
+        backward-scan input order, which is newest-first, so a release written
+        after a pin in the same millisecond can appear before it in history.
+        """
+        release = _make_summary_notice_message(
+            "$thread1",
+            message_count=4,
+            event_id="$release",
+            pinned=False,
+            generated_at="2026-01-01T00:05:00+00:00",
+        )
+        pin = _make_summary_notice_message(
+            "$thread1",
+            message_count=2,
+            event_id="$pin",
+            pinned=True,
+            generated_at="2026-01-01T00:00:00+00:00",
+        )
+        assert _recover_pin_state([release, pin], trusted_sender_ids=_TRUSTED_SUMMARY_SENDERS) is False
+
+    def test_falls_back_to_position_when_timestamps_are_identical(self) -> None:
+        """Identical generated_at values still resolve deterministically."""
+        history = [
+            _make_summary_notice_message(
+                "$thread1",
+                message_count=2,
+                event_id="$s1",
+                pinned=True,
+                generated_at="2026-01-01T00:00:00+00:00",
+            ),
+            _make_summary_notice_message(
+                "$thread1",
+                message_count=4,
+                event_id="$s2",
+                pinned=False,
+                generated_at="2026-01-01T00:00:00+00:00",
+            ),
+        ]
+        assert _recover_pin_state(history, trusted_sender_ids=_TRUSTED_SUMMARY_SENDERS) is False
+
+    def test_decision_without_usable_timestamp_is_ignored(self) -> None:
+        """A malformed generated_at must not silently flip the decision."""
+        pin = _make_summary_notice_message(
+            "$thread1",
+            message_count=2,
+            event_id="$s1",
+            pinned=True,
+            generated_at="2026-01-01T00:00:00+00:00",
+        )
+        malformed = _make_summary_notice_message(
+            "$thread1",
+            message_count=4,
+            event_id="$s2",
+            pinned=False,
+            generated_at="not-a-timestamp",
+        )
+        assert _recover_pin_state([pin, malformed], trusted_sender_ids=_TRUSTED_SUMMARY_SENDERS)
 
     def test_untrusted_sender_cannot_pin(self) -> None:
         """Only runtime-owned senders may set pin state."""
@@ -2837,3 +2925,20 @@ class TestSummaryWritersLeavePinStateAlone:
             [pin, side_effect_write],
             trusted_sender_ids=_TRUSTED_SUMMARY_SENDERS,
         )
+
+
+@pytest.mark.asyncio
+async def test_resolved_tag_transport_error_fails_open() -> None:
+    """A raw transport error from the tag read must not abort the summary pass.
+
+    get_thread_tags awaits client.room_get_state directly, so a timeout is not
+    wrapped in ThreadTagsError. Letting it escape would skip the baseline
+    advance and re-run the full state and history reads on every turn.
+    """
+    client = _mock_client()
+
+    with patch(
+        "mindroom.thread_summary.get_thread_tags",
+        new=AsyncMock(side_effect=TimeoutError("state timeout")),
+    ):
+        assert await _thread_is_resolved(client, "!room:x", "$thread1") is False

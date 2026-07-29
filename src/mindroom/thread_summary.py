@@ -30,7 +30,6 @@ from mindroom.thread_tag_vocabulary import (
 from mindroom.thread_tags import (
     AUTOMATIC_THREAD_TAG_EXCLUSIONS,
     RESOLVED_THREAD_TAG,
-    ThreadTagsError,
     coerce_tag_name,
     get_thread_tags,
     set_thread_tags_if_empty,
@@ -295,25 +294,51 @@ def _recover_last_summary_count(
     return best_count
 
 
+def _parse_summary_generated_at(metadata: dict[str, object]) -> datetime | None:
+    """Return the ISO-8601 ``generated_at`` recorded on one summary, when usable."""
+    raw = metadata.get("generated_at")
+    if not isinstance(raw, str):
+        return None
+    try:
+        parsed = datetime.fromisoformat(raw)
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
+
+
 def _recover_pin_state(
     thread_history: Sequence[ResolvedVisibleMessage],
     *,
     trusted_sender_ids: Collection[str],
 ) -> bool:
-    """Return the latest durable pin decision recorded in summary metadata.
+    """Return the newest durable pin decision recorded in summary metadata.
 
-    Unlike the enrichment flag this is last-wins, so a later ``pinned: false``
-    summary releases a thread that an earlier summary pinned. Values that are
-    absent or not booleans leave the running decision untouched rather than
-    silently unpinning.
+    A later ``pinned: false`` summary releases a thread that an earlier summary
+    pinned, so the newest decision has to win. Summaries that omit the key state
+    no intent and are ignored entirely.
+
+    Ordering comes from ``generated_at`` rather than the position of the message
+    in the history, because history position does not always reflect Matrix
+    order: ``_sort_thread_items_root_first`` breaks equal ``origin_server_ts``
+    ties with backward-scan input order, which is newest-first. ``generated_at``
+    is also what the client uses to choose the summary it displays, so the pin
+    decision and the visible title are resolved by the same clock.
     """
+    newest_decision: tuple[datetime, int] | None = None
     pinned = False
-    for message in thread_history:
+    for position, message in enumerate(thread_history):
         metadata = _thread_summary_metadata(message, trusted_sender_ids=trusted_sender_ids)
         if metadata is None:
             continue
         recorded = metadata.get("pinned")
-        if isinstance(recorded, bool):
+        if not isinstance(recorded, bool):
+            continue
+        generated_at = _parse_summary_generated_at(metadata)
+        if generated_at is None:
+            continue
+        decision = (generated_at, position)
+        if newest_decision is None or decision > newest_decision:
+            newest_decision = decision
             pinned = recorded
     return pinned
 
@@ -471,12 +496,16 @@ async def _thread_is_resolved(
 ) -> bool:
     """Return whether a thread carries the resolved lifecycle tag.
 
-    Fails open: a transient room-state read error must not suppress summaries
-    room-wide, and the cost of being wrong is one summary on a resolved thread.
+    Fails open, matching ``_refresh_tag_vocabulary`` and the history load in this
+    module: this is a best-effort background read, and the cost of being wrong is
+    one summary on a resolved thread. Letting a transport error escape instead
+    would abort the pass before it advances the baseline, so a persistently
+    failing room-state read would re-run the full state and history reads on
+    every turn.
     """
     try:
         tags_state = await get_thread_tags(client, room_id, thread_id)
-    except ThreadTagsError as exc:
+    except Exception as exc:
         logger.warning(
             "Thread tag read failed; continuing with automatic summary",
             room_id=room_id,
