@@ -2017,7 +2017,7 @@ class TestRunErrorHandling:
         assert "No config found" in result.output
         assert "mindroom config init" in result.output
         provider_guidance = (
-            "mindroom config init --provider {openrouter,ollama,openai,azure,bedrock_claude,codex,claude"
+            "mindroom config init --provider {openrouter,ollama,openai,azure,bedrock_claude,codex,kimi,claude"
         )
         assert provider_guidance in result.output
         mock_main.assert_not_awaited()

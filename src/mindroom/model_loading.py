@@ -162,6 +162,8 @@ def _create_model_for_provider(  # noqa: C901, PLR0911, PLR0912, PLR0915
             "codex",
             "openai_codex",
             "synthetic",
+            "kimi",
+            "kimi_code",
             _BEDROCK_CLAUDE_PROVIDER,
         }
         and "api_key" not in extra_kwargs
@@ -258,6 +260,12 @@ def _create_model_for_provider(  # noqa: C901, PLR0911, PLR0912, PLR0915
             if prompt_cache_key is not None:
                 extra_kwargs["prompt_cache_key"] = prompt_cache_key
         return CodexResponses(id=normalize_codex_model_id(model_id), **extra_kwargs)
+
+    if canonical_provider_key in {"kimi", "kimi_code"}:
+        from mindroom.kimi_model import KimiChat, normalize_kimi_model_id  # noqa: PLC0415
+
+        extra_kwargs.pop("api_key", None)
+        return KimiChat(id=normalize_kimi_model_id(model_id), **extra_kwargs)
 
     if canonical_provider_key == _BEDROCK_CLAUDE_PROVIDER:
         extra_kwargs.pop("api_key", None)

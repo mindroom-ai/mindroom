@@ -303,6 +303,7 @@ For hosted providers, set the credentials for the provider you selected:
 - `OPENAI_API_KEY=...`, or
 - `OPENROUTER_API_KEY=...`, or
 - For Codex CLI ChatGPT authentication: run `codex login`.
+- For Kimi Code CLI authentication: run `kimi` and `/login`.
 - For Vertex AI Claude: set `ANTHROPIC_VERTEX_PROJECT_ID` and `CLOUD_ML_REGION` and authenticate with `gcloud auth application-default login`.
 Skip this step for `--provider ollama` or `--provider llama.cpp` unless you also add a remote provider.
 
@@ -2343,6 +2344,7 @@ Models define the AI providers and model IDs used by agents.
 - `azure` - OpenAI models through Azure OpenAI deployments
 - `openai` - GPT models and OpenAI-compatible endpoints
 - `codex` or `openai_codex` - OpenAI models available through a local Codex CLI ChatGPT login
+- `kimi` or `kimi_code` - Kimi models available through a local Kimi Code CLI login
 - `google` or `gemini` - Google Gemini models
 - `vertexai_claude` - Anthropic Claude models on Google Vertex AI
 - `ollama` - Local models via Ollama
@@ -2403,6 +2405,12 @@ models:
     provider: codex
     id: gpt-5.6
     context_window: 258000
+
+  # Kimi K3 via a Kimi Code CLI login
+  kimi:
+    provider: kimi
+    id: k3
+    context_window: 1048576
 
   # Google Gemini (both 'google' and 'gemini' work as provider names)
   gemini:
@@ -2544,6 +2552,33 @@ You can set `extra_kwargs.prompt_cache_key` to override that derived key for a m
 Live testing against the Codex ChatGPT endpoint reported `cached_tokens` only when the request included Codex CLI-style session headers tied to the prompt-cache key.
 Repeated long requests then reported cache hits, while requests without those headers stayed at `cached_tokens: 0`, and `prompt_cache_retention` was rejected.
 Treat Codex prompt caching as best-effort rather than guaranteed.
+
+## Kimi Models with Kimi Code Login
+
+Use `provider: kimi` when you want MindRoom to call Kimi models through an authenticated local Kimi Code CLI session (Kimi Code subscription) instead of the billed Moonshot API.
+Run `kimi` and `/login` first so `~/.kimi-code/credentials/kimi-code.json` contains OAuth tokens.
+MindRoom refreshes the access token when needed and sends requests to the Kimi Code OpenAI-compatible endpoint at `https://api.kimi.com/coding/v1`.
+
+| Model | Model ID | Best fit |
+|-------|----------|----------|
+| Kimi K3 | `k3` | Flagship reasoning, long-horizon coding, and agent work with a 1M-token context |
+| Kimi K3 256k | `k3-256k` | The same K3 generation with a 256k-token context |
+| Kimi for Coding | `kimi-for-coding` | Coding-tuned tier exposed by the Kimi Code CLI |
+
+The CLI-config-style form `kimi-code/k3` is accepted as an alternative to the bare slug.
+If you keep Kimi Code state outside `~/.kimi-code`, set `KIMI_CODE_HOME` or pass `extra_kwargs.kimi_home`; user-home prefixes such as `~/custom-kimi` are expanded.
+For starter config generation, use `mindroom config init --provider kimi`.
+
+```yaml
+models:
+  default:
+    provider: kimi
+    id: k3
+    context_window: 1048576
+```
+
+Kimi K3 always reasons before replying, so responses include reasoning tokens even for short answers.
+This adapter follows the local Kimi Code CLI authentication-file and backend contracts, so upstream Kimi Code changes can require a MindRoom update.
 
 ## OpenRouter Provider Routing
 
@@ -19523,7 +19558,7 @@ The `config` subgroup contains commands for creating, viewing, editing, and vali
 Create a starter `config.yaml` with the personal Mind agent, one model, file-based memory, and sensible defaults.
 
 Matrix server presets (`--matrix-server`) choose where MindRoom should create Matrix users and rooms: `mindroom.chat` (default hosted Matrix) or `self-hosted` (your own homeserver).
-Provider presets (`--provider`) set the default model: `anthropic`, `codex`, `llama.cpp`, `ollama`, `openai`, `openrouter`, or `vertexai_claude`.
+Provider presets (`--provider`) set the default model: `anthropic`, `codex`, `kimi`, `llama.cpp`, `ollama`, `openai`, `openrouter`, or `vertexai_claude`.
 Generated configs include commented model alternatives for providers that have common variants, such as OpenAI mini/nano models.
 
 ```bash
@@ -19559,6 +19594,9 @@ The `--provider codex` preset generates `provider: codex` with `id: gpt-5.6` and
 They set `extra_kwargs.reasoning_effort: medium`.
 Prompt caching is enabled automatically per active agent session; leave `prompt_cache_key` unset unless you intentionally want to override the derived key.
 Run `codex login` first so MindRoom can read `~/.codex/auth.json`.
+
+The `--provider kimi` preset generates `provider: kimi` with `id: k3` and `context_window: 1048576`.
+Run `kimi` and `/login` first so MindRoom can read `~/.kimi-code/credentials/kimi-code.json`.
 
 The `--provider ollama` preset generates `provider: ollama` with `id: gemma4`, an additional `qwen3_6_27b` model using `qwen3.6:27b`, and `OLLAMA_HOST=http://localhost:11434`.
 Pull both local models before running MindRoom:

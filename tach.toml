@@ -301,6 +301,7 @@ depends_on = [
     "mindroom.claude_prompt_cache",
     "mindroom.claude_stream_retry",
     "mindroom.codex_model",
+    "mindroom.kimi_model",
     "mindroom.openai_models",
     "mindroom.openai_tool_search",
     "mindroom.vertex_claude_compat",
