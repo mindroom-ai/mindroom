@@ -257,7 +257,8 @@ set_thread_summary(
 - `summary` must be a non-empty string up to 300 characters after whitespace normalization.
 - The tool writes a normal Matrix notice event, so the updated summary remains visible in the thread timeline.
 - Automatic thread summaries still exist, but this tool gives an agent an explicit override path when a human asks for a manual summary refresh.
-- Pin state lives in the summary notice's `io.mindroom.thread_summary` metadata, so it survives restarts and is shared across replicas.
+- Pin state lives in the summary notice's `io.mindroom.thread_summary` metadata, so it survives restarts and every runtime reads the same decision.
+- Pinning stops the whole automatic pass, not just the title. A thread pinned before its automatic topic tags are inferred will not receive them; tag it explicitly with `thread_tags` instead.
 - Automatic summaries are also skipped on threads carrying the `resolved` tag.
 
 ## [`thread_model`]

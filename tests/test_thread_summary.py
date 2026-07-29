@@ -2916,6 +2916,28 @@ class TestSummaryWritersLeavePinStateAlone:
         sent_content = client.room_send.await_args.kwargs["content"]
         assert "pinned" not in sent_content["io.mindroom.thread_summary"]
 
+    @pytest.mark.parametrize("pinned", [True, False])
+    async def test_explicit_decision_lands_in_sent_metadata(self, pinned: bool) -> None:
+        """An explicit pin decision must reach the Matrix event, not just the call."""
+        client = _mock_client()
+        conversation_cache = MagicMock()
+        conversation_cache.get_latest_thread_event_id_if_needed = AsyncMock(return_value="$thread1")
+        conversation_cache.notify_outbound_message = Mock()
+
+        await send_thread_summary_event(
+            client,
+            "!room:x",
+            "$thread1",
+            "A deliberate title",
+            1,
+            "manual",
+            conversation_cache,
+            pinned=pinned,
+        )
+
+        sent_content = client.room_send.await_args.kwargs["content"]
+        assert sent_content["io.mindroom.thread_summary"]["pinned"] is pinned
+
     async def test_unpinned_side_effect_write_does_not_release_a_pin(self) -> None:
         """A pinned thread stays pinned after a summary written without intent."""
         pin = _make_summary_notice_message("$thread1", message_count=2, event_id="$s1", pinned=True)
