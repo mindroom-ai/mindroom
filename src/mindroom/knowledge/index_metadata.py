@@ -76,7 +76,9 @@ def load_published_index_state(metadata_path: Path) -> PublishedIndexState | Non
         return None
     settings = _parse_settings(payload.get("settings"))
     status = payload.get("status")
-    if settings is None or status not in _PUBLISHED_INDEX_STATUSES:
+    # A JSON array or object decodes to an unhashable value, so membership is
+    # only asked once the value is known to be a string.
+    if settings is None or not isinstance(status, str) or status not in _PUBLISHED_INDEX_STATUSES:
         return None
     state = PublishedIndexState(
         settings=settings,
@@ -189,6 +191,6 @@ def _nonnegative_int(value: object) -> int | None:
 
 
 def _refresh_job(value: object) -> _RefreshJob:
-    if value in _REFRESH_JOBS:
+    if isinstance(value, str) and value in _REFRESH_JOBS:
         return cast("_RefreshJob", value)
     return "idle"

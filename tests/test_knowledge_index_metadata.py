@@ -166,21 +166,26 @@ def test_a_record_without_usable_settings_is_no_state_at_all(tmp_path: Path, pay
     assert load_published_index_state(metadata_path) is None
 
 
-@pytest.mark.parametrize("status", [None, "", "publishing", 3])
+@pytest.mark.parametrize("status", [None, "", "publishing", 3, ["complete"], {"status": "complete"}])
 def test_an_unknown_status_is_no_state_at_all(tmp_path: Path, status: object) -> None:
-    """A status outside the schema leaves the rest of the record meaningless."""
+    """A status outside the schema leaves the rest of the record meaningless.
+
+    A JSON array or object decodes to an unhashable value, so a record must be
+    refused rather than raising out of a loader every caller treats as total.
+    """
     metadata_path = tmp_path / "indexing_settings.json"
     write_json_atomic(metadata_path, {"settings": _settings().to_metadata(), "status": status})
 
     assert load_published_index_state(metadata_path) is None
 
 
-def test_an_unknown_refresh_job_falls_back_to_idle(tmp_path: Path) -> None:
+@pytest.mark.parametrize("refresh_job", ["sprinting", 4, ["running"], {"job": "running"}])
+def test_an_unknown_refresh_job_falls_back_to_idle(tmp_path: Path, refresh_job: object) -> None:
     """Refresh-job bookkeeping never invalidates a record that is otherwise usable."""
     metadata_path = tmp_path / "indexing_settings.json"
     write_json_atomic(
         metadata_path,
-        {"settings": _settings().to_metadata(), "status": "indexing", "refresh_job": "sprinting"},
+        {"settings": _settings().to_metadata(), "status": "indexing", "refresh_job": refresh_job},
     )
 
     state = load_published_index_state(metadata_path)
