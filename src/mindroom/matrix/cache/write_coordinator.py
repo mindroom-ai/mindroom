@@ -17,6 +17,9 @@ All ordering is scoped to one ``(principal, room)`` lane.
 
 4. Readers establish the write-read barrier with ``wait_for_thread_idle``: a thread read started after a
    mutation was queued in the same lane never observes cache state older than that mutation.
+
+5. Foreground readers cancel only queued, not-yet-started startup work in their lane. Active updates
+   remain transaction-safe, and normal-priority updates retain the ordering rules above.
 """
 
 from __future__ import annotations
@@ -29,6 +32,7 @@ from typing import TYPE_CHECKING, Any
 
 from mindroom.background_tasks import create_background_task, wait_for_background_tasks
 from mindroom.logging_config import bound_log_context
+from mindroom.matrix.cache_work_priority import is_startup_cache_work
 from mindroom.timing import elapsed_ms_between, emit_timing_event, timing_enabled
 
 if TYPE_CHECKING:
@@ -62,6 +66,7 @@ class _QueuedUpdate:
     update_state: _QueuedUpdateState
     thread_id: str | None = None
     coalesce_key: _CoalesceKey | None = None
+    startup_priority: bool = False
     started: bool = False
 
 
@@ -277,6 +282,21 @@ class EventCacheWriteCoordinator:
                 queued_thread_predecessors.add(entry.thread_id)
 
         self._cleanup_room_state(room_key)
+
+    def _cancel_queued_startup_updates(
+        self,
+        state: _RoomSchedulerState,
+        thread_id: str,
+    ) -> None:
+        """Yield not-yet-started startup work blocking one foreground thread."""
+        for entry in state.entries:
+            if (
+                isinstance(entry, _QueuedUpdate)
+                and entry.startup_priority
+                and not entry.started
+                and (entry.kind == "room" or entry.thread_id == thread_id)
+            ):
+                entry.task.cancel()
 
     def _coalescible_pending_entry(
         self,
@@ -507,6 +527,7 @@ class EventCacheWriteCoordinator:
             update_state=update_state,
             thread_id=thread_id,
             coalesce_key=coalesce_key,
+            startup_priority=is_startup_cache_work(),
         )
 
         room_state.entries.append(entry)
@@ -638,6 +659,9 @@ class EventCacheWriteCoordinator:
         room_key = _coordination_room_key(room_id, coordination_scope)
         while True:
             self._reevaluate_room(room_key)
+            state = self._room_states.get(room_key)
+            if state is not None and not is_startup_cache_work():
+                self._cancel_queued_startup_updates(state, thread_id)
             if self._thread_is_idle(
                 room_key,
                 thread_id,

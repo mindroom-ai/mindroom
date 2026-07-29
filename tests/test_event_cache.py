@@ -34,6 +34,7 @@ from mindroom.matrix.cache.sqlite_event_cache import SqliteEventCache
 from mindroom.matrix.cache.thread_history_result import thread_history_result
 from mindroom.matrix.cache.thread_reads import ThreadReadMode
 from mindroom.matrix.cache.write_coordinator import EventCacheWriteCoordinator
+from mindroom.matrix.cache_work_priority import startup_cache_work
 from mindroom.matrix.client_thread_history import (
     BulkThreadRefreshStats,
     fetch_thread_history,
@@ -834,6 +835,95 @@ async def test_strict_source_refresh_bypasses_usable_cache(
     )
     assert refresh_thread_history.await_args.kwargs["allow_stale_fallback"] is False
     cache_thread_history.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_foreground_refill_replaces_cancelled_queued_startup_singleflight(
+    tmp_path: Path,
+) -> None:
+    """A yielded startup refill must not poison the foreground singleflight."""
+    event_cache = SqliteEventCache(tmp_path / "event_cache.db")
+    await event_cache.initialize()
+    client = MagicMock()
+    conversation_cache = _conversation_cache_for_thread_reads(tmp_path, event_cache, client=client)
+    coordinator = EventCacheWriteCoordinator(logger=conversation_cache.logger)
+    conversation_cache.runtime.event_cache_write_coordinator = coordinator
+    blocker_started = asyncio.Event()
+    release_blocker = asyncio.Event()
+    startup_queued = asyncio.Event()
+    scan_started = asyncio.Event()
+    fetched_history = thread_history_result(
+        [ResolvedVisibleMessage.synthetic(sender="@bot:localhost", body="Target", event_id="$target")],
+        is_full_history=True,
+    )
+
+    async def blocking_update() -> None:
+        blocker_started.set()
+        await release_blocker.wait()
+
+    real_queue_thread_update = coordinator.queue_thread_update
+
+    def observed_queue_thread_update(*args: object, **kwargs: object) -> asyncio.Task[object]:
+        task = real_queue_thread_update(*args, **kwargs)
+        if kwargs["name"] == "matrix_cache_thread_refill":
+            startup_queued.set()
+        return task
+
+    async def refresh_source(*_args: object, **_kwargs: object) -> ThreadHistoryResult:
+        scan_started.set()
+        return fetched_history
+
+    blocker_task = coordinator.queue_thread_update(
+        "!room:localhost",
+        "$thread:localhost",
+        blocking_update,
+        name="matrix_cache_blocking_update",
+        coordination_scope=event_cache.principal_id,
+    )
+    await asyncio.wait_for(blocker_started.wait(), timeout=1.0)
+
+    try:
+        with (
+            patch.object(coordinator, "queue_thread_update", side_effect=observed_queue_thread_update),
+            patch(
+                "mindroom.matrix.conversation_cache.refresh_thread_history_from_source",
+                new=AsyncMock(side_effect=refresh_source),
+            ),
+        ):
+            with startup_cache_work():
+                startup_refill = asyncio.create_task(
+                    conversation_cache._refill_thread_from_client(
+                        "!room:localhost",
+                        "$thread:localhost",
+                        cache_reject_diagnostics=None,
+                        wants_full_history=True,
+                        allows_stale_fallback=False,
+                    ),
+                )
+            await asyncio.wait_for(startup_queued.wait(), timeout=1.0)
+            foreground_refill = asyncio.create_task(
+                conversation_cache.get_dispatch_thread_history(
+                    "!room:localhost",
+                    "$thread:localhost",
+                    caller_label="dispatch_post_lock_refresh",
+                ),
+            )
+
+            release_blocker.set()
+            history = await asyncio.wait_for(foreground_refill, timeout=1.0)
+            await asyncio.gather(startup_refill, return_exceptions=True)
+            await asyncio.wait_for(blocker_task, timeout=1.0)
+
+            assert conversation_cache._refill_single_flight._in_flight == {}
+            assert coordinator._room_states == {}
+    finally:
+        release_blocker.set()
+        await asyncio.gather(blocker_task, return_exceptions=True)
+        await coordinator.close()
+        await event_cache.close()
+
+    assert [message.event_id for message in history] == ["$target"]
+    assert scan_started.is_set()
 
 
 @pytest.mark.asyncio
