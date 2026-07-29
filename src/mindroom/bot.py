@@ -1734,29 +1734,26 @@ class AgentBot:
             shutdown_intent=shutdown_intent,
         )
         callback_failure_count = self._runtime_view.callback_failure_count
-        if (
+        source_checkpoint_safe = (
             background_tasks_completed
             and drain_result.completed
-            and responses_drained
             and post_drain_background_tasks_completed
             and callback_failure_count == 0
-            and self._sync_cache_trust.state is SyncTrustState.CERTIFIED
-        ):
+        )
+        # A certified checkpoint covers durable Matrix source ingestion, not
+        # completion of detached response generation.
+        if source_checkpoint_safe and self._sync_cache_trust.state is SyncTrustState.CERTIFIED:
             self._sync_cache_trust.persist_current()
-        elif (
-            not background_tasks_completed
-            or not drain_result.completed
-            or not responses_drained
-            or not post_drain_background_tasks_completed
-            or callback_failure_count
-        ):
+        elif not source_checkpoint_safe:
             self._sync_cache_trust.discard()
             self.logger.warning(
                 "sync_checkpoint_not_saved_after_incomplete_coalescing_drain",
                 agent_name=self.agent_name,
                 callback_failure_count=callback_failure_count,
                 background_tasks_completed=background_tasks_completed,
+                coalescing_completed=drain_result.completed,
                 post_drain_background_tasks_completed=post_drain_background_tasks_completed,
+                responses_drained=responses_drained,
                 released_reservation_count=drain_result.released_reservation_count,
                 cancelled_unready_count=drain_result.cancelled_unready_count,
                 failed_ready_count=drain_result.failed_ready_count,
