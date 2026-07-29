@@ -11,6 +11,7 @@ inferring them from attributes.
 
 from __future__ import annotations
 
+import codecs
 from itertools import pairwise
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -38,24 +39,33 @@ if TYPE_CHECKING:
 _CHUNK_SIZE = 137
 _CHUNK_OVERLAP = 11
 
+#: A CJK sample: three UTF-8 bytes per character but only two in UTF-16, so a
+#: UTF-16 source is smaller on disk than the text it decodes to.
+_CJK_TEXT = "写" * 100
+
 #: Suffixes whose reader MindRoom reconfigures with the base's chunking.
 _CHUNKED_SUFFIXES = (".md", ".markdown", ".txt", ".py", ".yaml", ".html", ".xyz", "")
 #: Suffixes whose reader owns its own splitting and must be left alone.
 _UNTOUCHED_SUFFIXES = (".csv", ".xlsx", ".docx")
 
 
-@pytest.fixture
-def config(tmp_path: Path) -> Config:
-    """Return a config whose knowledge base authors distinctive chunk settings."""
+def _config_for(tmp_path: Path, *, chunk_size: int, chunk_overlap: int) -> Config:
+    """Return a config whose single knowledge base authors these chunk settings."""
     return Config(
         knowledge_bases={
             "docs": KnowledgeBaseConfig(
                 path=str(tmp_path / "docs"),
-                chunk_size=_CHUNK_SIZE,
-                chunk_overlap=_CHUNK_OVERLAP,
+                chunk_size=chunk_size,
+                chunk_overlap=chunk_overlap,
             ),
         },
     )
+
+
+@pytest.fixture
+def config(tmp_path: Path) -> Config:
+    """Return a config whose knowledge base authors distinctive chunk settings."""
+    return _config_for(tmp_path, chunk_size=_CHUNK_SIZE, chunk_overlap=_CHUNK_OVERLAP)
 
 
 @pytest.fixture
@@ -74,6 +84,13 @@ def _distinct_text(length: int) -> str:
     return "".join(chr(ord("a") + index % 26) for index in range(length))
 
 
+def _emitted_utf8_bytes(reader: Reader, source: Path) -> int:
+    """Return the UTF-8 bytes one read of ``source`` puts in memory."""
+    documents = reader.read(source, name=source.stem)
+    assert len(documents) == 1, "keep the sample within one chunk so overlap cannot inflate the count"
+    return len(documents[0].content.encode("utf-8"))
+
+
 def _assert_carries_base_chunking(reader: Reader) -> None:
     """Assert every field of ``reader`` that can move a chunk boundary."""
     strategy = reader.chunking_strategy
@@ -88,13 +105,24 @@ def _assert_carries_base_chunking(reader: Reader) -> None:
     assert reader.encoding is None
 
 
-def test_chunking_strategy_for_base_reads_the_authored_config(config: Config) -> None:
-    """The strategy must come from this base's config, not from a default."""
-    strategy = chunking_strategy_for_base(config, "docs")
+@pytest.mark.parametrize(("chunk_size", "chunk_overlap"), [(_CHUNK_SIZE, _CHUNK_OVERLAP), (512, 64)])
+def test_chunking_strategy_for_base_reads_the_authored_config(
+    tmp_path: Path,
+    chunk_size: int,
+    chunk_overlap: int,
+) -> None:
+    """The strategy must be read out of this base's config, not fixed in the code.
+
+    Two different bases are checked because one would not distinguish reading
+    the config from returning a constant that happens to match it.
+    """
+    strategy = chunking_strategy_for_base(
+        _config_for(tmp_path, chunk_size=chunk_size, chunk_overlap=chunk_overlap),
+        "docs",
+    )
 
     assert type(strategy) is SafeFixedSizeChunking
-    assert strategy.chunk_size == _CHUNK_SIZE
-    assert strategy.overlap == _CHUNK_OVERLAP
+    assert (strategy.chunk_size, strategy.overlap) == (chunk_size, chunk_overlap)
 
 
 @pytest.mark.parametrize("suffix", _CHUNKED_SUFFIXES)
@@ -125,6 +153,27 @@ def test_text_reader_splits_a_file_on_the_bases_boundaries(
     assert [len(chunk) for chunk in chunks] == [137, 137, 137, 22]
     for earlier, later in pairwise(chunks):
         assert later[:_CHUNK_OVERLAP] == earlier[-_CHUNK_OVERLAP:]
+
+
+def test_a_second_base_moves_the_reader_and_its_boundaries(tmp_path: Path) -> None:
+    """A different authored config must reach the reader and change where it splits.
+
+    Every other case here uses one chunk size, which cannot tell a value read
+    from config apart from a constant that happens to equal it.
+    """
+    chunking = chunking_strategy_for_base(_config_for(tmp_path, chunk_size=512, chunk_overlap=64), "docs")
+    source = tmp_path / "notes.txt"
+    source.write_text(_distinct_text(1200), encoding="utf-8")
+    reader = build_reader(source, chunking=chunking)
+
+    assert reader.chunk_size == 512
+    assert reader.chunking_strategy is chunking
+
+    chunks = [document.content for document in reader.read(source, name="notes")]
+
+    assert [len(chunk) for chunk in chunks] == [512, 512, 304]
+    for earlier, later in pairwise(chunks):
+        assert later[:64] == earlier[-64:]
 
 
 def test_a_factory_reader_with_chunking_disabled_is_turned_back_on(
@@ -179,6 +228,12 @@ def test_json_keeps_structured_chunking_and_tags_its_parse_failures(
     assert raised.value.source_text.startswith('{\n  "claim": "kept"')
     assert (raised.value.line, raised.value.column) == (3, 3)
 
+    # The other direction: tagging must be reached only by a parse failure, or
+    # every JSON file in the corpus would divert to the text fallback.
+    valid = tmp_path / "valid.json"
+    valid.write_text('[{"claim": "one"}, {"claim": "two"}]', encoding="utf-8")
+    assert [document.content for document in reader.read(valid)] == ['{"claim": "one"}', '{"claim": "two"}']
+
 
 def test_malformed_json_fallback_reader_chunks_like_this_bases_text(chunking: SafeFixedSizeChunking) -> None:
     """Text served from a failed parse is chunked like any other text of this base.
@@ -209,6 +264,49 @@ def test_parsed_and_packed_sources_are_not_rereadable(suffix: str, chunking: Saf
     on disk to text an archive can hold many times over.
     """
     assert not reader_rereads_within_file_size(build_reader(Path(f"source{suffix}"), chunking=chunking))
+
+
+@pytest.mark.parametrize("alias", ["utf-8", "UTF-8", "utf8", "U8", "utf_8", "cp65001"])
+def test_every_spelling_of_utf8_is_admitted_and_stays_inside_its_file(alias: str, tmp_path: Path) -> None:
+    """Admission must follow the codec, not the one spelling the constant happens to hold.
+
+    ``codecs.lookup`` canonicalizes all of these to ``utf-8``. Matching raw
+    strings instead would refuse most of them and silently switch the embedding
+    prefetch off for those bases, costing throughput with nothing to show for
+    it -- no failure, no log line.
+    """
+    source = tmp_path / "notes.txt"
+    source.write_text(_CJK_TEXT, encoding="utf-8")
+    reader = TextReader(encoding=alias)
+
+    assert reader_rereads_within_file_size(reader)
+    assert _emitted_utf8_bytes(reader, source) <= source.stat().st_size
+
+
+def test_utf8_with_a_byte_order_mark_is_admitted_and_only_shrinks(tmp_path: Path) -> None:
+    """A BOM is consumed rather than re-emitted, so the decode still fits the file."""
+    source = tmp_path / "notes.txt"
+    source.write_text(_CJK_TEXT, encoding="utf-8-sig")
+    reader = TextReader(encoding="utf-8-sig")
+
+    assert reader_rereads_within_file_size(reader)
+    assert _emitted_utf8_bytes(reader, source) == source.stat().st_size - len(codecs.BOM_UTF8)
+
+
+def test_a_refused_encoding_really_would_have_broken_the_budget(tmp_path: Path) -> None:
+    """Show the refusal is warranted rather than merely conservative.
+
+    This is the case the check exists for: the same characters occupy fewer
+    bytes on disk as UTF-16 than they do once decoded and measured as UTF-8, so
+    a budget derived from the file's size would under-count the text held in
+    memory.
+    """
+    source = tmp_path / "notes.txt"
+    source.write_text(_CJK_TEXT, encoding="utf-16")
+    reader = TextReader(encoding="utf-16")
+
+    assert not reader_rereads_within_file_size(reader)
+    assert _emitted_utf8_bytes(reader, source) > source.stat().st_size
 
 
 @pytest.mark.parametrize("encoding", ["utf-16", "utf-32", "latin-1", "not-a-codec"])
