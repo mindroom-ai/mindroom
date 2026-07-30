@@ -383,7 +383,8 @@ class RestartRecoveryCoordinator:
 
         retry_targets: list[InterruptedThread] = []
         settlements: list[_TargetSettlement] = []
-        for target in self._eligible_targets(owner, tuple(targets)):
+        eligible_targets = self._eligible_targets(owner, tuple(targets))
+        for index, target in enumerate(eligible_targets):
             attempt = await self._process_target(owner, target, config)
             if not self._owner_is_current(owner):
                 return _RoomAttemptResult(owner, work.requests, work.targets, ())
@@ -391,12 +392,10 @@ class RestartRecoveryCoordinator:
                 retry_targets.append(target)
             else:
                 settlements.append(attempt)
-        return _RoomAttemptResult(
-            owner,
-            tuple(retry_requests),
-            tuple(retry_targets),
-            tuple(settlements),
-        )
+            if (lease := asyncio.current_task()) is not None and lease.cancelling():
+                retry_targets.extend(eligible_targets[index + 1 :])
+                break
+        return _RoomAttemptResult(owner, tuple(retry_requests), tuple(retry_targets), tuple(settlements))
 
     def _eligible_targets(
         self,

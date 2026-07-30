@@ -1071,6 +1071,71 @@ async def test_cancelled_pause_drains_successful_delivery_and_settles_target(  #
 
 
 @pytest.mark.asyncio
+async def test_pause_drains_current_delivery_without_starting_later_target(
+    tmp_path: Path,
+) -> None:
+    """Pause must settle the current delivery and retain every later target."""
+    owner = _owner()
+    router = _owner(
+        entity_name=ROUTER_AGENT_NAME,
+        user_id="@router:example.org",
+        rooms=frozenset(),
+    )
+    owners = {owner.user_id: owner, router.user_id: router}
+    first = _target("$first", timestamp_ms=10, thread_id="$thread-a")
+    second = _target("$second", timestamp_ms=20, thread_id="$thread-b")
+    delivery_started = asyncio.Event()
+    release_delivery = asyncio.Event()
+    second_delivered = asyncio.Event()
+    delivered_targets: list[str] = []
+
+    async def recover_room(
+        _owner: RecoveryOwner,
+        _request: RoomRecoveryRequest,
+        _owner_user_ids: frozenset[str],
+        _config: Config,
+    ) -> RoomRecoveryResult:
+        return RoomRecoveryResult(interrupted_threads=(first, second))
+
+    async def deliver(
+        _router: RecoveryOwner,
+        _owner: RecoveryOwner,
+        target: InterruptedThread,
+        _config: Config,
+    ) -> bool:
+        delivered_targets.append(target.target_event_id)
+        if target is first:
+            delivery_started.set()
+            await release_delivery.wait()
+        else:
+            second_delivered.set()
+        return True
+
+    coordinator = RestartRecoveryCoordinator(
+        current_config=lambda: _config(tmp_path),
+        current_owners=lambda: owners,
+        operations=_operations(recover_room=recover_room, deliver=deliver),
+        retry_delay=lambda _attempt: 0.0,
+    )
+    coordinator.start(startup_cutoff_ms=123)
+    await asyncio.wait_for(delivery_started.wait(), timeout=1.0)
+
+    pause_task = asyncio.create_task(coordinator.pause())
+    await asyncio.sleep(0)
+    release_delivery.set()
+    await pause_task
+    assert delivered_targets == ["$first"]
+
+    coordinator.resume()
+    try:
+        await asyncio.wait_for(second_delivered.wait(), timeout=1.0)
+    finally:
+        await coordinator.stop()
+
+    assert delivered_targets == ["$first", "$second"]
+
+
+@pytest.mark.asyncio
 async def test_cancelled_pause_drains_failed_delivery_and_restores_target(
     tmp_path: Path,
 ) -> None:
