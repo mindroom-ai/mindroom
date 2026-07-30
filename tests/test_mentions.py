@@ -4,6 +4,10 @@ from __future__ import annotations
 
 import tempfile
 from pathlib import Path
+from typing import TYPE_CHECKING, NoReturn
+
+if TYPE_CHECKING:
+    import pytest
 
 from mindroom import constants as constants_mod
 from mindroom.config.agent import AgentConfig, TeamConfig
@@ -97,6 +101,23 @@ class TestMentionParsing:
 
         assert processed == "Hey @actual_calculator:localhost can you help with this?"
         assert mentions == ["@actual_calculator:localhost"]
+
+    def test_parse_without_at_skips_regex_scanners(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Plain text without @ cannot contain mentions, so skip regex scanner work."""
+        config = _make_config(_default_runtime_paths())
+
+        def fail_scan(*_args: object, **_kwargs: object) -> NoReturn:
+            msg = "mention regex scanner should not run without @"
+            raise AssertionError(msg)
+
+        monkeypatch.setattr("mindroom.matrix.mentions._scan_explicit_matrix_id_tokens", fail_scan)
+        monkeypatch.setattr("mindroom.matrix.mentions._scan_entity_alias_tokens", fail_scan)
+
+        processed, mentions, markdown = _parse_mentions_in_text("plain **markdown** text", config)
+
+        assert processed == "plain **markdown** text"
+        assert markdown == "plain **markdown** text"
+        assert mentions == []
 
     def test_parse_multiple_mentions(self) -> None:
         """Test parsing multiple agent mentions."""
@@ -526,6 +547,47 @@ class TestMentionParsing:
             == '<p>Mind ID is <a href="https://matrix.to/#/@mindroom_mind_5ckzneqq:mindroom.chat">'
             "@mindroom_mind_5ckzneqq:mindroom.chat</a>.</p>\n"
         )
+
+    def test_format_message_keeps_fenced_matrix_ids_literal(self) -> None:
+        """Fenced commands should not turn literal Matrix IDs into Markdown links."""
+        config = _make_config(_default_runtime_paths())
+        text = (
+            "Ask @calculator before running:\n\n"
+            "```bash\n"
+            "mindroom desktop pair --user-id @alice:example.org "
+            "--controller-user-id @actual_code:localhost\n"
+            "```\n\n"
+            "Then ask @code."
+        )
+
+        content = _format_message_with_mentions(config, text)
+
+        assert content["body"] == (
+            "Ask @actual_calculator:localhost before running:\n\n"
+            "```bash\n"
+            "mindroom desktop pair --user-id @alice:example.org "
+            "--controller-user-id @actual_code:localhost\n"
+            "```\n\n"
+            "Then ask @actual_code:localhost."
+        )
+        assert content["m.mentions"]["user_ids"] == [
+            "@actual_calculator:localhost",
+            "@actual_code:localhost",
+        ]
+        assert "https://matrix.to/#/@alice:example.org" not in content["formatted_body"]
+        assert content["formatted_body"].count("https://matrix.to/#/@actual_code:localhost") == 1
+
+    def test_format_message_rejects_invalid_backtick_fence_opener(self) -> None:
+        """Backticks in a backtick fence info string should leave later prose outside code."""
+        config = _make_config(_default_runtime_paths())
+
+        content = _format_message_with_mentions(
+            config,
+            "```bash `invalid\nPing @alice:example.org",
+        )
+
+        assert content["m.mentions"]["user_ids"] == ["@alice:example.org"]
+        assert "https://matrix.to/#/@alice:example.org" in content["formatted_body"]
 
     def test_format_message_with_full_matrix_user_id_excludes_sentence_period(self) -> None:
         """Sentence punctuation should not become part of a full Matrix ID mention."""

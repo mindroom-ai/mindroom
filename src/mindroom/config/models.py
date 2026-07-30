@@ -8,7 +8,10 @@ from typing import Any, Literal, Self, cast
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_serializer, model_validator
 
 from mindroom.config.validation import duplicate_items, validate_history_limit_choice
-from mindroom.constants import DEFAULT_TOOL_OUTPUT_AUTO_SAVE_THRESHOLD_BYTES
+from mindroom.constants import (
+    DEFAULT_COMPACTION_TIMEOUT_SECONDS,
+    DEFAULT_TOOL_OUTPUT_AUTO_SAVE_THRESHOLD_BYTES,
+)
 from mindroom.credential_policy import credential_service_policy
 from mindroom.credentials import validate_service_name
 from mindroom.model_defaults import OPENAI_EMBEDDING_SMALL
@@ -239,7 +242,15 @@ class CompactionOverrideConfig(BaseModel):
         default=None,
         gt=0,
         lt=1,
-        description="Soft replay trigger budget as a fraction of the context window",
+        description="Soft replay trigger budget as a fraction of the effective replay window",
+    )
+    replay_window_tokens: int | None = Field(
+        default=None,
+        ge=1,
+        description=(
+            "Optional operational cap for persisted replay and required-compaction planning; compaction summary "
+            "input is instead budgeted from the selected compaction model's context window"
+        ),
     )
     reserve_tokens: int | None = Field(
         default=None,
@@ -249,6 +260,18 @@ class CompactionOverrideConfig(BaseModel):
     model: str | None = Field(
         default=None,
         description="Optional model config name to use for summary generation",
+    )
+    fallback_model: str | None = Field(
+        default=None,
+        description=(
+            "Optional model config name retried once when the summary model refuses for safeguards; summary input "
+            "is rebuilt under the fallback model's context budget when needed"
+        ),
+    )
+    timeout_seconds: float | None = Field(
+        default=None,
+        gt=0,
+        description="Maximum seconds allowed for each compaction summary request",
     )
 
     @model_validator(mode="after")
@@ -271,13 +294,24 @@ class CompactionConfig(BaseModel):
     threshold_tokens: int | None = Field(
         default=None,
         ge=1,
-        description="Soft replay trigger budget in tokens (defaults to 80% of context window when both thresholds are None)",
+        description=(
+            "Soft replay trigger budget in tokens "
+            "(defaults to 80% of the effective replay window when both thresholds are None)"
+        ),
     )
     threshold_percent: float | None = Field(
         default=None,
         gt=0,
         lt=1,
-        description="Soft replay trigger budget as a fraction of the context window",
+        description="Soft replay trigger budget as a fraction of the effective replay window",
+    )
+    replay_window_tokens: int | None = Field(
+        default=None,
+        ge=1,
+        description=(
+            "Optional operational cap for persisted replay and required-compaction planning; compaction summary "
+            "input is instead budgeted from the selected compaction model's context window"
+        ),
     )
     reserve_tokens: int = Field(
         default=16384,
@@ -287,6 +321,18 @@ class CompactionConfig(BaseModel):
     model: str | None = Field(
         default=None,
         description="Optional model config name to use for summary generation",
+    )
+    fallback_model: str | None = Field(
+        default=None,
+        description=(
+            "Optional model config name retried once when the summary model refuses for safeguards; summary input "
+            "is rebuilt under the fallback model's context budget when needed"
+        ),
+    )
+    timeout_seconds: float = Field(
+        default=DEFAULT_COMPACTION_TIMEOUT_SECONDS,
+        gt=0,
+        description="Maximum seconds allowed for each compaction summary request",
     )
 
     @model_validator(mode="after")
@@ -319,7 +365,7 @@ class DefaultsConfig(BaseModel):
     )
     show_stop_button: bool = Field(default=True, description="Whether to automatically show stop button on messages")
     auto_resume_after_restart: bool = Field(
-        default=False,
+        default=True,
         description="Whether restart cleanup should post a real system message to resume interrupted threaded conversations",
     )
     learning: bool = Field(default=True, description="Default Agno Learning setting")
@@ -409,7 +455,8 @@ class DefaultsConfig(BaseModel):
         description=(
             "Temperature override for automatic thread summaries. "
             "Set to null to omit temperature and use provider defaults. "
-            "MindRoom always omits temperature for Vertex Claude thread summaries."
+            "MindRoom always uses provider temperature defaults for Vertex Claude, Claude Opus 5, Sonnet 5, "
+            "Fable 5, and direct Google Gemini 3.6 Flash and Gemini 3.5 Flash-Lite thread summaries."
         ),
     )
     thread_summary_first_threshold: int = Field(
@@ -494,13 +541,32 @@ class EmbedderConfig(BaseModel):
     """Configuration for memory embedder."""
 
     model: str = Field(default=OPENAI_EMBEDDING_SMALL, description="Model name for embeddings")
-    api_key: str | None = Field(default=None, description="API key (usually from environment variable)")
+    credentials_service: str | None = Field(
+        default=None,
+        description=(
+            "Optional credential service used only by this embedder. When omitted, legacy resolution checks the "
+            "dedicated 'embedder' service and then the provider credential"
+        ),
+    )
+    api_key: str | None = Field(
+        default=None,
+        description=(
+            "Explicit embedder API key. Highest priority, above credentials_service and the legacy "
+            "dedicated embedder-to-openai fallback"
+        ),
+    )
     host: str | None = Field(default=None, description="Host URL for self-hosted models (Ollama, llama.cpp, etc.)")
     dimensions: int | None = Field(
         default=None,
         ge=1,
         description="Optional embedding dimension override for OpenAI-compatible providers",
     )
+
+    @field_validator("credentials_service")
+    @classmethod
+    def _validate_credentials_service(cls, value: str | None) -> str | None:
+        """Normalize an optional named credential reference."""
+        return None if value is None else validate_service_name(value)
 
 
 class ModelConfig(BaseModel):
@@ -519,7 +585,14 @@ class ModelConfig(BaseModel):
     context_window: int | None = Field(
         default=None,
         ge=1,
-        description="Context window size in tokens. MindRoom needs it on the active runtime model to enforce replay budgets, and an explicit compaction.model also needs its own context_window for destructive compaction",
+        description=(
+            "Actual provider context window size in tokens. MindRoom uses it for compaction summary input and as "
+            "the default replay-planning window unless compaction.replay_window_tokens sets a smaller replay cap. "
+            "An explicit compaction.model or compaction.fallback_model also needs its own context_window for "
+            "summary generation. "
+            "On vertexai_claude models it additionally "
+            "enables request-time fitting that trims replayed history when a request would exceed the window"
+        ),
     )
 
 

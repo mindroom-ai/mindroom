@@ -5,18 +5,21 @@ from datetime import UTC, datetime
 from functools import lru_cache
 from pathlib import Path
 from tempfile import NamedTemporaryFile
+from time import monotonic
 
-import yaml
 from pydantic import BaseModel, Field, field_serializer
 
-from mindroom import constants
+from mindroom import constants, yaml_io
+
+_MATRIX_STATE_STAT_TTL_SECONDS = 1.0
+_matrix_state_write_generation = 0
 
 
 class MatrixAccount(BaseModel):
     """Represents a Matrix account (user or agent)."""
 
     username: str
-    password: str
+    password: str | None = None
     requested_username: str | None = None
     domain: str | None = None
     device_id: str | None = None
@@ -48,10 +51,10 @@ class MatrixState(BaseModel):
     def load(cls, runtime_paths: constants.RuntimePaths) -> "MatrixState":
         """Load state from file.
 
-        Reads come from a process-wide cache keyed by the state file's
-        ``(path, st_mtime_ns, st_size)`` so repeated calls against an unchanged
-        file skip the YAML parse. A deep copy is returned so callers may safely
-        mutate the result before ``save`` without polluting the cache.
+        Reads come from a process-wide cache keyed by the state file path,
+        in-process write generation, and a short-TTL file signature. A deep
+        copy is returned so callers may safely mutate the result before
+        ``save`` without polluting the cache.
         """
         return matrix_state_for_runtime(runtime_paths).model_copy(deep=True)
 
@@ -71,7 +74,7 @@ class MatrixState(BaseModel):
         self,
         key: str,
         username: str,
-        password: str,
+        password: str | None,
         *,
         requested_username: str | None = None,
         domain: str | None = None,
@@ -106,8 +109,13 @@ class MatrixState(BaseModel):
         self.rooms[key] = MatrixRoom(room_id=room_id, alias=alias, name=name, created_at=datetime.now(tz=UTC))
 
     def get_room_aliases(self) -> dict[str, str]:
-        """Get mapping of room aliases to room IDs."""
-        return {key: room.room_id for key, room in self.rooms.items()}
+        """Get mapping of room keys and full aliases to room IDs."""
+        aliases: dict[str, str] = {}
+        for key, room in self.rooms.items():
+            aliases[key] = room.room_id
+            if room.alias:
+                aliases[room.alias] = room.room_id
+        return aliases
 
     def set_space_room_id(self, room_id: str | None) -> None:
         """Persist the root Matrix Space room ID."""
@@ -115,7 +123,7 @@ class MatrixState(BaseModel):
 
 
 def matrix_state_for_runtime(runtime_paths: constants.RuntimePaths) -> MatrixState:
-    """Return persisted Matrix state for one runtime, cached by file mtime/size.
+    """Return persisted Matrix state cached by write generation and file signature.
 
     The returned object is shared across callers; **read-only callers** should
     prefer this helper for the lowest overhead. Callers that intend to mutate
@@ -159,6 +167,11 @@ def resolve_room_aliases(
     return [aliases.get(room, room) for room in room_list]
 
 
+def resolve_room_id(room_id_or_alias: str, runtime_paths: constants.RuntimePaths) -> str:
+    """Resolve one room alias to its Matrix room ID when known."""
+    return resolve_room_aliases([room_id_or_alias], runtime_paths=runtime_paths)[0]
+
+
 def get_room_alias_from_id(room_id: str, runtime_paths: constants.RuntimePaths) -> str | None:
     """Get room alias from room ID."""
     for alias, resolved_room_id in _room_aliases(runtime_paths).items():
@@ -167,24 +180,35 @@ def get_room_alias_from_id(room_id: str, runtime_paths: constants.RuntimePaths) 
     return None
 
 
-def _matrix_state_cache_key(state_file: Path) -> tuple[Path, int | None, int | None]:
-    """Return one cache key that invalidates when the state file changes."""
-    if not state_file.exists():
-        return state_file, None, None
-    stat = state_file.stat()
-    return state_file, stat.st_mtime_ns, stat.st_size
+def _matrix_state_cache_key(state_file: Path) -> tuple[Path, int, int | None, int | None]:
+    """Return a key with eager local invalidation and bounded external staleness."""
+    stat_ttl_bucket = int(monotonic() / _MATRIX_STATE_STAT_TTL_SECONDS)
+    mtime_ns, size = _matrix_state_file_signature(state_file, stat_ttl_bucket)
+    return state_file, _matrix_state_write_generation, mtime_ns, size
+
+
+@lru_cache(maxsize=64)
+def _matrix_state_file_signature(state_file: Path, stat_ttl_bucket: int) -> tuple[int | None, int | None]:
+    """Stat one state file at most once per TTL bucket."""
+    del stat_ttl_bucket
+    try:
+        stat = state_file.stat()
+    except OSError:
+        return None, None
+    return stat.st_mtime_ns, stat.st_size
 
 
 @lru_cache(maxsize=64)
 def _load_matrix_state_file_cached(
     state_file: Path,
+    write_generation: int,
     mtime_ns: int | None,
     size: int | None,
     *,
     current_domain: str,
 ) -> MatrixState:
-    """Load Matrix state through a file-change-sensitive cache."""
-    del mtime_ns, size
+    """Load Matrix state through a local-write and external-file-sensitive cache."""
+    del write_generation, mtime_ns, size
     return _load_matrix_state_file(state_file, current_domain=current_domain)
 
 
@@ -213,7 +237,7 @@ def _load_matrix_state_file(state_file: Path, *, current_domain: str) -> MatrixS
     if not state_file.exists():
         return MatrixState()
     with state_file.open(encoding="utf-8") as f:
-        data = yaml.safe_load(f) or {}
+        data = yaml_io.safe_load(f) or {}
     state = MatrixState.model_validate(data)
     migrated = _migrate_accounts_to_current_schema(state, current_domain=current_domain)
     normalized_data = state.model_dump(mode="json")
@@ -224,6 +248,8 @@ def _load_matrix_state_file(state_file: Path, *, current_domain: str) -> MatrixS
 
 def _write_matrix_state_file(state_file: Path, data: dict[str, object]) -> None:
     """Atomically persist Matrix state without cross-process advisory locking."""
+    global _matrix_state_write_generation
+
     state_file.parent.mkdir(parents=True, exist_ok=True)
     temp_path: Path | None = None
     try:
@@ -236,10 +262,11 @@ def _write_matrix_state_file(state_file: Path, data: dict[str, object]) -> None:
             delete=False,
         ) as temp_file:
             temp_path = Path(temp_file.name)
-            yaml.safe_dump(data, temp_file, default_flow_style=False, sort_keys=False)
+            yaml_io.safe_dump(data, temp_file, default_flow_style=False, sort_keys=False)
             temp_file.flush()
             os.fsync(temp_file.fileno())
         temp_path.replace(state_file)
+        _matrix_state_write_generation += 1
         _fsync_directory(state_file.parent)
     finally:
         if temp_path is not None and temp_path.exists():

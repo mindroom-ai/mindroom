@@ -7,7 +7,6 @@ import contextlib
 import hashlib
 import json
 import mimetypes
-import re
 import time
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -17,6 +16,7 @@ from uuid import uuid4
 
 import nio
 
+from .attachment_ids import normalize_attachment_id
 from .constants import ATTACHMENT_IDS_KEY
 from .logging_config import get_logger
 from .matrix.media import (
@@ -37,25 +37,16 @@ from .matrix.media import (
 from .timing import emit_elapsed_timing
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Sequence
+    from collections.abc import Sequence
 
     from .matrix.client import ResolvedVisibleMessage
 
 logger = get_logger(__name__)
 
 _AttachmentKind = Literal["audio", "file", "image", "video"]
-_ATTACHMENT_ID_PATTERN = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_-]{0,127}$")
 _ATTACHMENT_RETENTION_DAYS = 30
 _CLEANUP_INTERVAL = timedelta(hours=1)
 _last_cleanup_time_by_storage_path: dict[Path, datetime] = {}
-
-
-def normalize_attachment_id(raw_attachment_id: str) -> str | None:
-    """Normalize attachment IDs and reject unsafe values."""
-    attachment_id = raw_attachment_id.strip()
-    if not attachment_id or not _ATTACHMENT_ID_PATTERN.fullmatch(attachment_id):
-        return None
-    return attachment_id
 
 
 @dataclass(frozen=True)
@@ -182,24 +173,6 @@ def attachment_records_for_visible_message(
     return [record for record in records if _attachment_record_in_message_scope(record, message, room_id=room_id)]
 
 
-def unique_attachment_ids(attachment_ids: Iterable[str]) -> list[str]:
-    """Return unique non-empty attachment IDs preserving first-seen order."""
-    unique_ids: list[str] = []
-    seen_attachment_ids: set[str] = set()
-    for attachment_id in attachment_ids:
-        if attachment_id and attachment_id not in seen_attachment_ids:
-            seen_attachment_ids.add(attachment_id)
-            unique_ids.append(attachment_id)
-    return unique_ids
-
-
-def merge_attachment_ids(*attachment_id_lists: list[str]) -> list[str]:
-    """Merge attachment IDs preserving first-seen order."""
-    return unique_attachment_ids(
-        attachment_id for attachment_ids in attachment_id_lists for attachment_id in attachment_ids
-    )
-
-
 _MAX_RENDERED_FILENAME_LENGTH = 80
 
 
@@ -236,6 +209,24 @@ def format_attachments_prompt(current_records: list[AttachmentRecord]) -> str | 
     lines = ["Attachments sent with the current message (use tool calls to inspect or process them by ID):"]
     lines.extend(_attachment_provenance_line(record) for record in current_records)
     return "\n".join(lines)
+
+
+def format_voice_transcript_attachment_guidance(current_records: list[AttachmentRecord]) -> str | None:
+    """Render model-only guidance for raw audio that already has a transcript."""
+    audio_attachment_ids = [record.attachment_id for record in current_records if record.kind == "audio"]
+    if not audio_attachment_ids:
+        return None
+    rendered_ids = ", ".join(audio_attachment_ids)
+    message_label = "message" if len(audio_attachment_ids) == 1 else "messages"
+    id_label = "ID" if len(audio_attachment_ids) == 1 else "IDs"
+    verb = "is" if len(audio_attachment_ids) == 1 else "are"
+    return (
+        f"MindRoom already transcribed the current voice {message_label}. "
+        f"The raw audio attachment {id_label} {verb} available for verification or deeper audio work: "
+        f"{rendered_ids}. "
+        "Only inspect or re-transcribe the raw audio if the user asks, the transcript seems wrong, "
+        "or the task specifically requires audio-level analysis."
+    )
 
 
 def format_attachment_annotation(attachment_records: list[AttachmentRecord]) -> str | None:

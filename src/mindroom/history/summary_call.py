@@ -6,20 +6,33 @@ It enforces the call-side half of the compaction invariants
 
 3. Summary calls get exactly one model configuration path.
    ``configure_summary_model`` applies all compaction-specific provider tuning in
-   one place: prompt-cache writes off, Claude thinking cleared (mandatory whenever
-   max_tokens is capped — a thinking budget at or above the cap is a 400 from
-   Anthropic), summary output capped at ``SUMMARY_MAX_OUTPUT_TOKENS``, SDK retries
-   disabled, and one SDK timeout coordinated with the outer chunk budget
-   (``MINDROOM_COMPACTION_CHUNK_TIMEOUT_SECONDS``) instead of two uncoordinated
-   constants in two modules. Unknown providers pass through untouched and rely on
-   the outer chunk timeout alone. Warm-prefix requests (``reuses_reply_prefix``)
-   keep cache flags and thinking exactly as the reply path configured them, so
-   the provider prompt cache built by the reply request stays valid.
+   one place: cold-request prompt-cache writes off, cold-request Claude thinking
+   cleared, warm-request tools disabled on the provider wire, SDK retries
+   disabled, and one SDK timeout coordinated with the caller's resolved chunk timeout
+   (``compaction.timeout_seconds``) instead of two uncoordinated timeouts in two
+   modules. ``effective_summary_timeout_seconds`` is the only place that combines
+   the resolved timeout with an authored provider timeout, so callers can log the
+   enforced value without re-deriving the rule. Claude summary output uses the
+   loaded model's own max_tokens as the truncation guard. Unknown providers pass
+   through untouched and rely on the outer chunk timeout alone.
 
-4. Budget shrinks deterministically on provider failure.
+4. Retry on provider failure is deterministic.
    ``SummaryRetryPolicy`` decides which error classes warrant a smaller retry
-   (timeouts and the named context-length fragments), the shrink schedule
-   (halving), and the give-up floor — no inline string matching at call sites.
+   (timeouts, typed context-window errors, empty results, output limits, and
+   named legacy context-length fragments), the shrink schedule
+   (halving, clamped to the caller's smallest progress-preserving rebuild), and the
+   give-up floor — no inline string matching at call sites. Selected typed
+   transient provider errors get one delayed same-budget retry. Safeguard
+   refusals are deliberately not shrinkable: the retry wrapper in
+   ``history.compaction`` switches once to the configured fallback model,
+   keeping the summary prompt and summary input bytes, included runs, and
+   budget unchanged (only the target model differs) instead of shrinking a
+   request the model refused on content grounds.
+
+5. Output-capped summaries use an explicit retry signal.
+   ``generate_compaction_summary`` refuses to return a likely truncated summary,
+   and the retry wrapper can shrink input through ``SummaryRetryPolicy`` without
+   depending on owned error-message text.
 
 The request has exactly two shapes: the standalone two-message request from
 ``build_summary_request_messages``, or a pre-assembled ``SummaryProviderRequest``
@@ -32,14 +45,17 @@ import asyncio
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from functools import partial
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
-from agno.models.anthropic import Claude
+import httpx
+from agno.exceptions import ContextWindowExceededError, ModelProviderError
 from agno.models.message import Message
 from agno.session.summary import SessionSummary
 
 from mindroom.cancellation import request_task_cancel
-from mindroom.constants import MINDROOM_COMPACTION_CHUNK_TIMEOUT_SECONDS
+from mindroom.claude_prompt_cache import as_anthropic_claude
+from mindroom.error_handling import TRANSIENT_PROVIDER_STATUS_CODES
+from mindroom.history.types import COMPACTION_SUMMARY_RETRY_FLOOR_TOKENS
 from mindroom.logging_config import get_logger
 from mindroom.timing import timed
 
@@ -50,11 +66,14 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
-SUMMARY_MAX_OUTPUT_TOKENS = 4096
 _COMPACTION_CANCEL_DRAIN_TIMEOUT_SECONDS = 1.0
 
-_RETRYABLE_PROVIDER_ERROR_FRAGMENTS = (
-    "timed out",
+# Status 502 is excluded because ``ModelProviderError`` uses it for unclassified
+# errors. Default-502 errors retry only when their cause chain proves a typed
+# network failure.
+_TRANSIENT_SUMMARY_STATUS_CODES = TRANSIENT_PROVIDER_STATUS_CODES - {502}
+
+_SHRINKABLE_PROVIDER_ERROR_FRAGMENTS = (
     "context length",
     "context_length_exceeded",
     "too many tokens",
@@ -68,36 +87,123 @@ _RETRYABLE_PROVIDER_ERROR_FRAGMENTS = (
     "request too large",
     "reduce the length",
 )
+_TIMEOUT_PROVIDER_ERROR_FRAGMENT = "timed out"
+
+
+def _has_typed_network_cause(error: ModelProviderError) -> bool:
+    """Return whether visible explicit or implicit causes contain a typed network failure."""
+    from anthropic import APIConnectionError as AnthropicAPIConnectionError  # noqa: PLC0415
+    from openai import APIConnectionError as OpenAIAPIConnectionError  # noqa: PLC0415
+
+    cause = error.__cause__ or (None if error.__suppress_context__ else error.__context__)
+    seen: set[int] = set()
+    while cause is not None and id(cause) not in seen:
+        seen.add(id(cause))
+        if isinstance(
+            cause,
+            ConnectionError
+            | TimeoutError
+            | httpx.TransportError
+            | AnthropicAPIConnectionError
+            | OpenAIAPIConnectionError,
+        ):
+            return True
+        cause = cause.__cause__ or (None if cause.__suppress_context__ else cause.__context__)
+    return False
+
+
+def _is_same_budget_transient(error: Exception) -> bool:
+    """Return whether a provider failure warrants one unchanged retry."""
+    if not isinstance(error, ModelProviderError):
+        return False
+    if error.status_code in _TRANSIENT_SUMMARY_STATUS_CODES:
+        return True
+    return error.status_code == 502 and _has_typed_network_cause(error)
+
+
+class CompactionSummaryOutputLimitError(RuntimeError):
+    """Raised when the summary response reaches the configured output-token cap."""
+
+
+class _CompactionSummaryEmptyResultError(RuntimeError):
+    """Raised when the summary model returns a success response with no text."""
+
+
+_TYPED_SHRINKABLE_ERRORS = (
+    _CompactionSummaryEmptyResultError,
+    TimeoutError,
+    ContextWindowExceededError,
+    CompactionSummaryOutputLimitError,
+)
+
+
+@dataclass(frozen=True)
+class SummaryRetryDecision:
+    """One policy-owned retry action for the compaction summary caller."""
+
+    budget: int
+    kind: Literal["shrink", "same-budget-transient"]
 
 
 @dataclass(frozen=True)
 class SummaryRetryPolicy:
-    """Explicit budget-shrink policy for failed compaction summary calls.
+    """Explicit retry policy for failed compaction summary calls.
 
-    The schedule is deterministic: each policy-approved failure divides the input
-    budget by ``shrink_divisor`` (clamped to ``floor_tokens``); once the budget can
-    no longer shrink, or ``max_attempts`` is reached, the error propagates.
+    Each shrinkable failure divides the actual serialized input size by
+    ``shrink_divisor``, clamped to the shared compaction-summary retry floor
+    and to the caller's smallest progress-preserving rebuild, while selected typed
+    transient failures wait ``same_input_retry_delay_seconds`` and retry the
+    same configured budget.
+    Once ``max_attempts`` is reached or no retry applies, the error propagates.
     """
 
     max_attempts: int = 2
     shrink_divisor: int = 2
-    floor_tokens: int = 1_000
+    same_input_retry_delay_seconds: float = 1.0
 
     def should_shrink(self, error: Exception) -> bool:
-        """Return whether a smaller summary input may resolve this provider failure."""
-        if isinstance(error, TimeoutError):
+        """Return whether rebuilding a smaller summary input may resolve the failure."""
+        if isinstance(error, _TYPED_SHRINKABLE_ERRORS):
             return True
         message = str(error).lower()
-        return any(fragment in message for fragment in _RETRYABLE_PROVIDER_ERROR_FRAGMENTS)
+        if any(fragment in message for fragment in _SHRINKABLE_PROVIDER_ERROR_FRAGMENTS):
+            return True
+        return _TIMEOUT_PROVIDER_ERROR_FRAGMENT in message and not _is_same_budget_transient(error)
 
-    def retry_budget(self, *, attempt: int, budget: int, error: Exception) -> int | None:
-        """Return the next smaller input budget, or None when the policy gives up."""
-        if attempt >= self.max_attempts or not self.should_shrink(error):
+    def retry_budget(
+        self,
+        *,
+        attempt: int,
+        budget: int,
+        input_tokens: int,
+        minimum_progress_input_tokens: int,
+        error: Exception,
+    ) -> SummaryRetryDecision | None:
+        """Return the next retry action, or None when retries end.
+
+        The decision kind is authoritative so callers cannot independently
+        reclassify the error and apply shrink-only safeguards to a same-budget
+        transient retry. ``minimum_progress_input_tokens`` is the smallest budget
+        at which the caller can rebuild without dropping the prior summary or
+        every run; shrink targets clamp there so a granted shrink is issued only
+        when it rebuilds to a strictly smaller request with summarizable content.
+        """
+        if attempt >= self.max_attempts:
             return None
-        smaller_budget = max(self.floor_tokens, budget // self.shrink_divisor)
-        if smaller_budget >= budget:
-            return None
-        return smaller_budget
+        if self.should_shrink(error):
+            smaller_budget = min(
+                budget,
+                max(
+                    COMPACTION_SUMMARY_RETRY_FLOOR_TOKENS,
+                    minimum_progress_input_tokens,
+                    input_tokens // self.shrink_divisor,
+                ),
+            )
+            if smaller_budget < input_tokens:
+                return SummaryRetryDecision(budget=smaller_budget, kind="shrink")
+        if _is_same_budget_transient(error):
+            return SummaryRetryDecision(budget=budget, kind="same-budget-transient")
+        return None
 
 
 DEFAULT_SUMMARY_RETRY_POLICY = SummaryRetryPolicy()
@@ -105,12 +211,7 @@ DEFAULT_SUMMARY_RETRY_POLICY = SummaryRetryPolicy()
 
 @dataclass(frozen=True)
 class SummaryProviderRequest:
-    """Pre-assembled provider request for one warm-prefix summary call.
-
-    ``reuses_reply_prefix`` marks requests whose messages reproduce the active
-    reply-path request prefix; configuration that would invalidate the provider
-    prompt cache (cache flags, thinking) is preserved for those calls.
-    """
+    """Pre-assembled provider request for one warm-prefix summary call."""
 
     messages: tuple[Message, ...]
     tools: tuple[dict[str, object], ...] = ()
@@ -118,11 +219,24 @@ class SummaryProviderRequest:
     reuses_reply_prefix: bool = True
 
 
+def effective_summary_timeout_seconds(model: Model, *, timeout_seconds: float) -> float:
+    """Return the timeout one summary request enforces after provider tuning (invariant 3).
+
+    An authored provider timeout shorter than the resolved compaction timeout stays
+    the stricter cap; every other model relies on the resolved timeout alone.
+    """
+    claude_model = as_anthropic_claude(model)
+    if claude_model is None or not claude_model.timeout:
+        return timeout_seconds
+    return min(claude_model.timeout, timeout_seconds)
+
+
 def configure_summary_model(
     model: Model,
     *,
-    timeout_seconds: float | None = None,
+    timeout_seconds: float,
     reuses_reply_prefix: bool = False,
+    disables_tools: bool = False,
 ) -> Model:
     """Apply all compaction-specific provider tuning to one loaded model (invariant 3).
 
@@ -130,36 +244,31 @@ def configure_summary_model(
     bedrock_claude providers because both forks subclass the Anthropic model.
     Mutating the instance is safe: ``get_model_instance`` builds a fresh model per
     call and compaction loads its own instance per run.
-
-    When ``reuses_reply_prefix`` is true the request reproduces the reply-path
-    prefix, so cache flags stay untouched (the cache_control breakpoints must
-    match the reply request) and ``thinking`` stays as configured (toggling
-    thinking invalidates message-level cache entries). Retry and timeout tuning
-    applies to every summary call.
     """
-    if not isinstance(model, Claude):
+    claude_model = as_anthropic_claude(model)
+    if claude_model is None:
         logger.debug(
             "Compaction summary model tuning skipped",
             model_type=type(model).__name__,
             reason="provider_specific_tuning_only_defined_for_claude",
         )
         return model
-    resolved_timeout = MINDROOM_COMPACTION_CHUNK_TIMEOUT_SECONDS if timeout_seconds is None else timeout_seconds
     if not reuses_reply_prefix:
-        model.cache_system_prompt = False
-        model.extended_cache_time = False
-        model.thinking = None
-    if model.thinking is None:
-        # The output cap is a sampling parameter, not prefix content, so it never
-        # invalidates the prompt cache; with thinking enabled, max_tokens must stay
-        # above the configured thinking budget, so the reply-path value is kept.
-        model.max_tokens = (
-            min(model.max_tokens, SUMMARY_MAX_OUTPUT_TOKENS) if model.max_tokens else SUMMARY_MAX_OUTPUT_TOKENS
-        )
-    model.timeout = min(model.timeout, resolved_timeout) if model.timeout else resolved_timeout
-    client_params = dict(model.client_params or {})
+        claude_model.cache_system_prompt = False
+        claude_model.extended_cache_time = False
+        claude_model.thinking = None
+    request_params = dict(claude_model.request_params or {})
+    if disables_tools:
+        # Agno 2.6.12 accepts ``tool_choice`` on Claude invocation methods but
+        # does not forward it to the Anthropic-compatible wire request.
+        request_params["tool_choice"] = {"type": "none"}
+    else:
+        request_params.pop("tool_choice", None)
+    claude_model.request_params = request_params or None
+    claude_model.timeout = effective_summary_timeout_seconds(model, timeout_seconds=timeout_seconds)
+    client_params = dict(claude_model.client_params or {})
     client_params["max_retries"] = 0
-    model.client_params = client_params
+    claude_model.client_params = client_params
     return model
 
 
@@ -236,32 +345,39 @@ async def generate_compaction_summary(
     model: Model,
     summary_input: str,
     summary_prompt: str,
-    timeout_seconds: float | None = None,
-    timing_scope: str | None = None,
+    timeout_seconds: float,
     provider_request: SummaryProviderRequest | None = None,
 ) -> SessionSummary:
     """Issue one compaction summary call with tuned provider config and one timeout.
 
-    Without ``provider_request`` the call sends the standalone two-message request
-    from ``build_summary_request_messages``. With one, the pre-assembled
-    warm-prefix request is sent verbatim (messages, tool schemas, tool_choice).
+    A provider request preserves every provider-visible message field when
+    supplied; otherwise the standalone two-message summary request is built
+    from ``summary_prompt`` and ``summary_input``.
     """
-    del timing_scope
-    resolved_timeout = MINDROOM_COMPACTION_CHUNK_TIMEOUT_SECONDS if timeout_seconds is None else timeout_seconds
-    configure_summary_model(
+    configured_model = configure_summary_model(
         model,
-        timeout_seconds=resolved_timeout,
+        timeout_seconds=timeout_seconds,
         reuses_reply_prefix=provider_request.reuses_reply_prefix if provider_request is not None else False,
+        disables_tools=bool(provider_request and provider_request.tools),
     )
+    summary_output_limit = _summary_output_token_limit(configured_model)
 
     async def _request_summary() -> ModelResponse:
         try:
             if provider_request is not None:
-                request_tools: list[Function | dict] | None = (
+                request_tools: list[Function | dict[str, object]] | None = (
                     [dict(tool) for tool in provider_request.tools] if provider_request.tools else None
                 )
+                # ``from_history`` is internal Agno replay metadata, not a wire
+                # field. Clear it so provider adapters cannot silently trim a
+                # subset of compacted runs after the compaction layer selected
+                # and committed to summarizing all of them.
+                request_messages = [
+                    message.model_copy(deep=True, update={"from_history": False})
+                    for message in provider_request.messages
+                ]
                 return await model.aresponse(
-                    messages=list(provider_request.messages),
+                    messages=request_messages,
                     tools=request_tools,
                     tool_choice=provider_request.tool_choice,
                 )
@@ -281,7 +397,7 @@ async def generate_compaction_summary(
     try:
         done, _pending = await asyncio.wait(
             {response_task},
-            timeout=resolved_timeout,
+            timeout=timeout_seconds,
         )
     except asyncio.CancelledError:
         request_task_cancel(response_task)
@@ -297,7 +413,7 @@ async def generate_compaction_summary(
             response_task,
             reason="timeout",
         )
-        msg = f"compaction summary timed out after {resolved_timeout}s"
+        msg = f"compaction summary timed out after {timeout_seconds}s"
         raise RuntimeError(msg)
 
     try:
@@ -307,8 +423,15 @@ async def generate_compaction_summary(
     raw_text = response.content if isinstance(response.content, str) else ""
     normalized_text = _normalize_compaction_summary_text(raw_text)
     if not normalized_text:
-        msg = "summary generation returned no result"
-        raise RuntimeError(msg)
+        msg = (
+            "summary generation returned no result "
+            f"(output_tokens={_response_output_tokens(response)}, "
+            f"has_reasoning={bool(response.reasoning_content or response.redacted_reasoning_content)})"
+        )
+        raise _CompactionSummaryEmptyResultError(msg)
+    if _summary_response_likely_truncated(response, output_token_limit=summary_output_limit):
+        msg = "compaction summary hit configured output token limit; refusing to persist incomplete summary"
+        raise CompactionSummaryOutputLimitError(msg)
     return SessionSummary(summary=normalized_text, updated_at=datetime.now(UTC))
 
 
@@ -321,3 +444,23 @@ def _normalize_compaction_summary_text(raw_text: str) -> str:
         if first_newline != -1:
             normalized = normalized[first_newline + 1 : -3].strip()
     return normalized
+
+
+def _summary_output_token_limit(model: Model) -> int | None:
+    claude_model = as_anthropic_claude(model)
+    return claude_model.max_tokens if claude_model is not None else None
+
+
+def _summary_response_likely_truncated(response: ModelResponse, *, output_token_limit: int | None) -> bool:
+    if output_token_limit is None:
+        return False
+    output_tokens = _response_output_tokens(response)
+    return output_tokens is not None and output_tokens >= output_token_limit
+
+
+def _response_output_tokens(response: ModelResponse) -> int | None:
+    if response.output_tokens is not None:
+        return response.output_tokens
+    if response.response_usage is None:
+        return None
+    return response.response_usage.output_tokens

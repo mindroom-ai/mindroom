@@ -12,7 +12,6 @@ from mindroom.matrix.sync_certification import (
     SyncTrustState,
     certify_sync_response,
     handle_unknown_pos,
-    start_from_loaded_token,
     sync_cache_write_diagnostics,
 )
 from mindroom.matrix.sync_token_values import normalize_sync_token
@@ -31,33 +30,6 @@ from mindroom.matrix.sync_token_values import normalize_sync_token
 def test_normalize_sync_token_accepts_only_non_empty_strings(value: object, expected: str | None) -> None:
     """Sync-token normalization should have one Matrix-local source of truth."""
     assert normalize_sync_token(value) == expected
-
-
-def test_start_without_token_is_cold() -> None:
-    """Missing saved token should start from cold sync state."""
-    startup = start_from_loaded_token(None)
-
-    assert startup.state is SyncTrustState.COLD
-    assert startup.sync_token is None
-
-
-def test_start_with_legacy_token_restores_sync_only() -> None:
-    """Plaintext tokens restore nio continuity without checkpoint certification."""
-    startup = start_from_loaded_token("s_legacy")
-
-    assert startup.state is SyncTrustState.COLD
-    assert startup.sync_token == "s_legacy"  # noqa: S105
-    assert startup.legacy_token is True
-
-
-def test_start_with_checkpoint_waits_for_first_sync() -> None:
-    """Certified checkpoints become pending until catch-up writes are durable."""
-    checkpoint = SyncCheckpoint(token="s_saved")  # noqa: S106
-
-    startup = start_from_loaded_token(checkpoint)
-
-    assert startup.state is SyncTrustState.PENDING
-    assert startup.sync_token == "s_saved"  # noqa: S105
 
 
 @pytest.mark.parametrize(

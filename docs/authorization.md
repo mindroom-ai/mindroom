@@ -61,6 +61,7 @@ matrix_room_access:
   publish_to_room_directory: false # publish managed rooms to public directory
   invite_only_rooms: []            # room keys/aliases/IDs that stay restricted
   reconcile_existing_rooms: false  # migrate existing managed rooms when true
+  room_admins: []                  # Matrix user IDs granted admin power (100) in every managed room
 ```
 
 **Defaults** (when `authorization` block is omitted):
@@ -96,6 +97,16 @@ When users authenticate through Synapse OIDC, they are regular Matrix users. To 
 3. Set `publish_to_room_directory: true` if rooms should appear in Explore/public room directory.
 
 If you keep `mode: single_user_private` (default), managed rooms remain invite-only and private in the directory.
+
+## Managed Room Admins
+
+`matrix_room_access.room_admins` lists Matrix user IDs that automatically receive room admin power (power level 100) in every managed room.
+Admin power is seeded when a managed room is created and reconciled for existing managed rooms on startup and config reload, regardless of `mode` or `reconcile_existing_rooms`.
+Existing power levels are never lowered: users already at admin level or above keep their level.
+Removing a user from `room_admins` stops future grants but does not lower admin power they already have, because the managing account cannot demote an equal-power admin in Matrix.
+Membership is not changed by this setting, so listed users become admins once they are in the room (for invites, use `authorization.global_users` or `room_permissions`).
+Admin power on the root Matrix Space is granted separately to `authorization.global_users`, so list a user in both places when they should administer both the Space and the managed rooms.
+Entries must be concrete Matrix user IDs; wildcard or placeholder entries are skipped with a warning.
 
 ### Required Service Account Permissions
 

@@ -130,11 +130,23 @@ class HookMatrixAdmin(Protocol):
     async def invite_user(self, room_id: str, user_id: str) -> bool:
         """Invite one user into one room."""
 
-    async def get_room_members(self, room_id: str) -> set[str]:
-        """Return joined members for one room."""
+    async def kick_user(self, room_id: str, user_id: str, *, reason: str | None = None) -> bool:
+        """Kick one joined user from one room."""
+
+    async def get_room_members(self, room_id: str) -> set[str] | None:
+        """Return joined members for one room, or ``None`` when the fetch fails."""
 
     async def add_room_to_space(self, space_room_id: str, room_id: str) -> bool:
         """Link one room into one Space."""
+
+    async def put_room_state(
+        self,
+        room_id: str,
+        event_type: str,
+        state_key: str,
+        content: dict[str, Any],
+    ) -> bool:
+        """Write one room state event."""
 
 
 type HookRoomStateQuerier = Callable[
@@ -161,6 +173,7 @@ class EnrichmentItem:
     key: str
     text: str
     cache_policy: EnrichmentCachePolicy = "volatile"
+    persist: bool = True
 
 
 @dataclass(frozen=True, slots=True)

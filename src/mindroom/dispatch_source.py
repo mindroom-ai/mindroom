@@ -3,9 +3,16 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
+from dataclasses import dataclass
 from typing import Any, Protocol, cast, runtime_checkable
 
-from mindroom.constants import SOURCE_KIND_KEY, VISIBLE_ROUTER_VOICE_ECHO_KEY
+from mindroom.constants import (
+    PER_FIRE_THREAD_ROOT_EVENT_ID_KEY,
+    PER_FIRE_THREAD_ROOT_KEY,
+    SCHEDULED_HISTORY_LIMIT_KEY,
+    SOURCE_KIND_KEY,
+    VISIBLE_ROUTER_VOICE_ECHO_KEY,
+)
 
 MESSAGE_SOURCE_KIND = "message"
 VOICE_SOURCE_KIND = "voice"
@@ -15,8 +22,12 @@ EDIT_SOURCE_KIND = "edit"
 SCHEDULED_SOURCE_KIND = "scheduled"
 HOOK_SOURCE_KIND = "hook"
 HOOK_DISPATCH_SOURCE_KIND = "hook_dispatch"
+EXTERNAL_TRIGGER_SOURCE_KIND = "external_trigger"
 ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND = "active_thread_follow_up"
 TRUSTED_INTERNAL_RELAY_SOURCE_KIND = "trusted_internal_relay"
+AUTO_RESUME_MESSAGE = (
+    "[System: Previous response was interrupted by service restart. Please continue where you left off.]"
+)
 _KNOWN_SOURCE_KINDS: frozenset[str] = frozenset(
     {
         MESSAGE_SOURCE_KIND,
@@ -27,6 +38,7 @@ _KNOWN_SOURCE_KINDS: frozenset[str] = frozenset(
         SCHEDULED_SOURCE_KIND,
         HOOK_SOURCE_KIND,
         HOOK_DISPATCH_SOURCE_KIND,
+        EXTERNAL_TRIGGER_SOURCE_KIND,
         TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
     },
 )
@@ -35,6 +47,7 @@ _AUTOMATION_SOURCE_KINDS: frozenset[str] = frozenset(
         SCHEDULED_SOURCE_KIND,
         HOOK_SOURCE_KIND,
         HOOK_DISPATCH_SOURCE_KIND,
+        EXTERNAL_TRIGGER_SOURCE_KIND,
     },
 )
 _COALESCING_BYPASS_SOURCE_KINDS: frozenset[str] = _AUTOMATION_SOURCE_KINDS | frozenset(
@@ -46,9 +59,16 @@ _TRUSTED_ORIGINAL_SENDER_SOURCE_KINDS: frozenset[str] = frozenset(
     {
         HOOK_DISPATCH_SOURCE_KIND,
         HOOK_SOURCE_KIND,
+        EXTERNAL_TRIGGER_SOURCE_KIND,
         SCHEDULED_SOURCE_KIND,
         TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
         VOICE_SOURCE_KIND,
+    },
+)
+_SELF_AUTHORED_INGRESS_SOURCE_KINDS: frozenset[str] = frozenset(
+    {
+        HOOK_DISPATCH_SOURCE_KIND,
+        EXTERNAL_TRIGGER_SOURCE_KIND,
     },
 )
 _INTERNAL_RELAY_DETECTION_SOURCE_KINDS: frozenset[str] = frozenset(
@@ -58,6 +78,21 @@ _INTERNAL_RELAY_DETECTION_SOURCE_KINDS: frozenset[str] = frozenset(
         TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
     },
 )
+_PER_FIRE_THREAD_ROOT_SOURCE_KINDS: frozenset[str] = frozenset(
+    {
+        SCHEDULED_SOURCE_KIND,
+        EXTERNAL_TRIGGER_SOURCE_KIND,
+        TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
+    },
+)
+
+
+@dataclass(frozen=True, slots=True)
+class ScheduledHistoryBudget:
+    """Trusted per-turn history budget and the scheduled event that owns the prompt."""
+
+    limit: int
+    source_event_id: str
 
 
 @runtime_checkable
@@ -100,6 +135,11 @@ def source_kind_allows_trusted_original_sender(source_kind: str | None) -> bool:
     return source_kind in _TRUSTED_ORIGINAL_SENDER_SOURCE_KINDS
 
 
+def source_kind_allows_self_authored_ingress(source_kind: str | None) -> bool:
+    """Return whether one self-authored Matrix event may enter dispatch."""
+    return source_kind in _SELF_AUTHORED_INGRESS_SOURCE_KINDS
+
+
 def source_kind_allows_internal_relay_detection(source_kind: str | None) -> bool:
     """Return whether content metadata may promote this event to a trusted internal relay."""
     return source_kind in _INTERNAL_RELAY_DETECTION_SOURCE_KINDS
@@ -116,11 +156,41 @@ def source_kind_from_content(content: Mapping[str, Any]) -> str | None:
     return _source_kind_from_value(source_kind)
 
 
+def per_fire_thread_root_event_id_from_content(content: Mapping[str, Any]) -> str | None:
+    """Return the relayed per-fire thread root annotated on Matrix content."""
+    relayed_root_event_id = content.get(PER_FIRE_THREAD_ROOT_EVENT_ID_KEY)
+    if isinstance(relayed_root_event_id, str) and relayed_root_event_id:
+        return relayed_root_event_id
+    return None
+
+
+def content_owns_per_fire_thread_root(content: Mapping[str, Any]) -> bool:
+    """Return whether trusted content explicitly owns a per-fire thread root."""
+    if content.get(PER_FIRE_THREAD_ROOT_KEY) is not True:
+        return False
+    if source_kind_from_content(content) in _PER_FIRE_THREAD_ROOT_SOURCE_KINDS:
+        return True
+    return per_fire_thread_root_event_id_from_content(content) is not None
+
+
+def scheduled_history_limit_from_content(content: Mapping[str, Any]) -> int | None:
+    """Return the scheduled-turn history limit annotated on Matrix content."""
+    value = content.get(SCHEDULED_HISTORY_LIMIT_KEY)
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        return None
+    return value
+
+
 def is_visible_router_voice_echo_content(content: object) -> bool:
     """Return whether Matrix content is a visible router voice transcript echo."""
     if not isinstance(content, Mapping):
         return False
     return cast("Mapping[str, object]", content).get(VISIBLE_ROUTER_VOICE_ECHO_KEY) is True
+
+
+def is_auto_resume_relay_body(body: object) -> bool:
+    """Return whether one message body is the restart auto-resume relay."""
+    return isinstance(body, str) and AUTO_RESUME_MESSAGE in body
 
 
 def _trusted_source_kind_from_event_content(

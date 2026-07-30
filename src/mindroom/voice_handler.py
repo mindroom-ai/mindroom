@@ -17,20 +17,23 @@ from agno.media import Audio
 from mindroom import model_loading
 from mindroom.attachments import register_audio_attachment
 from mindroom.authorization import responder_candidate_entities_for_room
+from mindroom.config.voice import normalize_speech_base_url
 from mindroom.constants import (
     ATTACHMENT_IDS_KEY,
     ORIGINAL_SENDER_KEY,
     SOURCE_KIND_KEY,
     VOICE_PREFIX,
     VOICE_RAW_AUDIO_FALLBACK_KEY,
+    VOICE_TRANSCRIPT_KEY,
 )
-from mindroom.credentials_sync import get_secret_from_env
+from mindroom.credentials_sync import get_api_key_for_service
 from mindroom.dispatch_source import VOICE_SOURCE_KIND
 from mindroom.entity_resolution import EntityIdentityRegistry, entity_identity_registry
 from mindroom.logging_config import get_logger
 from mindroom.matrix.identity import parse_current_matrix_user_id
 from mindroom.matrix.media import AudioMessageEvent, download_media_bytes, extract_media_caption, media_mime_type
 from mindroom.matrix.mentions import format_message_with_mentions, resolve_entity_name_for_mention_localpart
+from mindroom.model_defaults import LOCAL_OPENAI_API_KEY_DEFAULT
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -78,6 +81,13 @@ class _NormalizedVoiceMessage:
 
 
 _VOICE_NORMALIZATION_CACHE_MAX_ENTRIES = 128
+# Ingress lanes serialize per-sender delivery behind voice readiness, so a hung
+# normalization (download, STT, or the normalizer LLM call) wedges every later
+# message from that sender. Both timeouts exist to bound that failure mode: the
+# LLM cleanup call fails open to the raw transcription, and the shared
+# normalization task fails into the raw-audio fallback path.
+_VOICE_NORMALIZER_LLM_TIMEOUT_SECONDS = 45.0
+_VOICE_NORMALIZATION_TOTAL_TIMEOUT_SECONDS = 300.0
 _voice_normalization_cache: OrderedDict[tuple[str, str, str, str], _NormalizedVoiceMessage] = OrderedDict()
 _voice_normalization_tasks: dict[tuple[str, str, str, str], asyncio.Task[_NormalizedVoiceMessage | None]] = {}
 
@@ -196,17 +206,22 @@ async def _normalize_voice_message(
 
     task = _voice_normalization_tasks.get(cache_key)
     if task is None:
-        task = asyncio.create_task(
-            _compute_normalized_voice_message(
-                client,
-                storage_path,
-                room,
-                event,
-                config,
-                runtime_paths,
-                thread_id=thread_id,
-            ),
-        )
+
+        async def _compute_bounded() -> _NormalizedVoiceMessage | None:
+            # Hard deadline so a hung download/STT/normalizer fails this shared
+            # task instead of wedging every waiter (and their ingress lanes).
+            async with asyncio.timeout(_VOICE_NORMALIZATION_TOTAL_TIMEOUT_SECONDS):
+                return await _compute_normalized_voice_message(
+                    client,
+                    storage_path,
+                    room,
+                    event,
+                    config,
+                    runtime_paths,
+                    thread_id=thread_id,
+                )
+
+        task = asyncio.create_task(_compute_bounded())
         _voice_normalization_tasks[cache_key] = task
         task.add_done_callback(lambda done_task: _finalize_inflight_voice_normalization_task(cache_key, done_task))
 
@@ -263,23 +278,30 @@ async def prepare_raw_voice_fallback_message(
     thread_id: str | None,
 ) -> _PreparedVoiceMessage:
     """Download/register audio and build a fallback text event without STT."""
-    audio = await _download_audio(client, event)
     attachment_id = None
-    if audio is None or audio.content is None:
-        logger.error("Failed to download audio file for raw voice fallback")
-    else:
-        attachment_record = await register_audio_attachment(
-            storage_path,
-            event_id=event.event_id,
-            audio_bytes=audio.content,
-            mime_type=audio.mime_type,
-            room_id=room.room_id,
-            thread_id=thread_id,
-            sender=event.sender,
-            event_timestamp=event.server_timestamp,
-            filename=event.body if isinstance(event.body, str) else None,
+    try:
+        async with asyncio.timeout(_VOICE_NORMALIZATION_TOTAL_TIMEOUT_SECONDS):
+            audio = await _download_audio(client, event)
+            if audio is None or audio.content is None:
+                logger.error("Failed to download audio file for raw voice fallback")
+            else:
+                attachment_record = await register_audio_attachment(
+                    storage_path,
+                    event_id=event.event_id,
+                    audio_bytes=audio.content,
+                    mime_type=audio.mime_type,
+                    room_id=room.room_id,
+                    thread_id=thread_id,
+                    sender=event.sender,
+                    event_timestamp=event.server_timestamp,
+                    filename=event.body if isinstance(event.body, str) else None,
+                )
+                attachment_id = attachment_record.attachment_id if attachment_record is not None else None
+    except TimeoutError:
+        logger.warning(
+            "voice_raw_fallback_timeout",
+            timeout_seconds=_VOICE_NORMALIZATION_TOTAL_TIMEOUT_SECONDS,
         )
-        attachment_id = attachment_record.attachment_id if attachment_record is not None else None
 
     return _build_prepared_voice_message(
         event,
@@ -311,6 +333,8 @@ def _build_prepared_voice_message(
         extra_content[ATTACHMENT_IDS_KEY] = [attachment_id]
     if raw_audio_fallback:
         extra_content[VOICE_RAW_AUDIO_FALLBACK_KEY] = True
+    else:
+        extra_content[VOICE_TRANSCRIPT_KEY] = True
     original_content = event.source.get("content") if isinstance(event.source, dict) else None
     inherited_mentions = original_content.get("m.mentions") if isinstance(original_content, dict) else None
     if isinstance(inherited_mentions, dict):
@@ -467,10 +491,18 @@ async def _transcribe_audio(
 
     """
     try:
-        stt_host = config.voice.stt.host
-        url = f"{stt_host}/v1/audio/transcriptions" if stt_host else "https://api.openai.com/v1/audio/transcriptions"
+        stt_base_url = normalize_speech_base_url(config.voice.stt.host)
+        url = (
+            f"{stt_base_url}/audio/transcriptions" if stt_base_url else "https://api.openai.com/v1/audio/transcriptions"
+        )
 
-        api_key = config.voice.stt.api_key or get_secret_from_env("OPENAI_API_KEY", runtime_paths)
+        api_key = config.voice.stt.api_key
+        if api_key is None:
+            credentials_service = config.voice.stt.credentials_service
+            if credentials_service is not None:
+                api_key = get_api_key_for_service(credentials_service, runtime_paths)
+            elif config.voice.stt.provider == "openai_compatible":
+                api_key = LOCAL_OPENAI_API_KEY_DEFAULT
         if not api_key:
             logger.error("No OpenAI-compatible STT API key configured for voice transcription")
             return None
@@ -478,7 +510,8 @@ async def _transcribe_audio(
 
         filename, upload_mime_type = _stt_upload_filename_and_mime_type(mime_type)
         files = {"file": (filename, audio_data, upload_mime_type)}
-        form_data = {"model": config.voice.stt.model}
+        form_data: dict[str, object] = {"model": config.voice.stt.model}
+        form_data.update(config.voice.stt.extra_kwargs)
 
         async with httpx.AsyncClient() as http_client:
             response = await http_client.post(url, headers=headers, files=files, data=form_data)
@@ -567,9 +600,19 @@ async def _process_transcription(
             telemetry=False,
         )
 
-        # Process the transcription with the agent
+        # Process the transcription with the agent. The transcription is already
+        # usable, so a slow or hung normalizer model fails open to it instead of
+        # blocking voice readiness (and the ingress lane serialized behind it).
         session_id = f"voice_process_{uuid.uuid4()}"
-        response = await agent.arun(prompt, session_id=session_id)
+        try:
+            async with asyncio.timeout(_VOICE_NORMALIZER_LLM_TIMEOUT_SECONDS):
+                response = await agent.arun(prompt, session_id=session_id)
+        except TimeoutError:
+            logger.warning(
+                "voice_transcription_normalizer_timeout",
+                timeout_seconds=_VOICE_NORMALIZER_LLM_TIMEOUT_SECONDS,
+            )
+            return transcription
 
         # Extract the content from the response
         if response and response.content:

@@ -20,15 +20,20 @@ from mindroom import runtime_env_policy
 # Agent names
 ROUTER_AGENT_NAME = "router"
 VISIBLE_ROUTER_VOICE_ECHO_KEY = "com.mindroom.visible_router_voice_echo"
-MINDROOM_COMPACTION_CHUNK_TIMEOUT_SECONDS = 180.0
+DEFAULT_MINDROOM_URL = "http://127.0.0.1:8765"
+DEFAULT_COMPACTION_TIMEOUT_SECONDS = 600.0
 DEFAULT_TOOL_OUTPUT_AUTO_SAVE_THRESHOLD_BYTES = 50 * 1024
+KNOWLEDGE_FILE_INDEX_CONCURRENCY_ENV = "MINDROOM_KNOWLEDGE_FILE_INDEX_CONCURRENCY"
+DEFAULT_MAX_CONCURRENT_KNOWLEDGE_FILE_INDEXES = 4
+MAX_ALLOWED_CONCURRENT_KNOWLEDGE_FILE_INDEXES = 128
 _MINDROOM_DISPATCH_THREAD_READ_TIMEOUT_SECONDS = 1.0
 _STANDARD_HISTORY_ROLES = frozenset({"user", "assistant", "tool"})
 _PROMPT_HISTORY_STORAGE_ROLES = frozenset({"system", "developer"})
 
 # Search order for existing files: env var > ./config.yaml > ~/.mindroom/config.yaml
 _CONFIG_SEARCH_PATHS = [Path("config.yaml"), Path.home() / ".mindroom" / "config.yaml"]
-_RUNTIME_PATH_ENV_KEYS = frozenset({"MINDROOM_CONFIG_PATH", "MINDROOM_STORAGE_PATH"})
+CONTROL_STATE_PATH_ENV = runtime_env_policy.CONTROL_STATE_PATH_ENV
+_RUNTIME_PATH_ENV_KEYS = frozenset({"MINDROOM_CONFIG_PATH", "MINDROOM_STORAGE_PATH", CONTROL_STATE_PATH_ENV})
 _SANDBOX_STARTUP_MANIFEST_RELATIVE_PATH = Path(".runtime") / "startup_manifest.json"
 _CONFIG_PATH_PLACEHOLDER_PATTERN = re.compile(r"\$(?:\{(?P<braced>[A-Z0-9_]+)\}|(?P<bare>[A-Z0-9_]+))")
 
@@ -137,6 +142,7 @@ class RuntimePaths:
     config_dir: Path
     env_path: Path
     storage_root: Path
+    control_state_root: Path | None = None
     process_env: Mapping[str, str] = field(default_factory=dict, repr=False)
     env_file_values: Mapping[str, str] = field(default_factory=dict, repr=False)
 
@@ -146,6 +152,8 @@ class RuntimePaths:
             return str(self.config_path)
         if name == "MINDROOM_STORAGE_PATH":
             return str(self.storage_root)
+        if name == CONTROL_STATE_PATH_ENV:
+            return str(self.control_state_root) if self.control_state_root is not None else default
         if name in self.process_env:
             return self.process_env[name]
         if name in self.env_file_values:
@@ -214,6 +222,17 @@ def _storage_root_from_env_values(env_file_values: dict[str, str], *, config_dir
     return _resolve_runtime_relative_path(value, base_dir=config_dir)
 
 
+def _control_state_root_from_env_values(env_values: Mapping[str, str], *, config_dir: Path) -> Path | None:
+    value = env_values.get(CONTROL_STATE_PATH_ENV)
+    if value is None or not value.strip():
+        return None
+    return _resolve_runtime_relative_path(value, base_dir=config_dir)
+
+
+def _default_control_state_root(storage_root: Path) -> Path:
+    return (storage_root / "control_state").resolve()
+
+
 def resolve_runtime_paths(
     *,
     config_path: Path | None = None,
@@ -244,12 +263,24 @@ def resolve_runtime_paths(
         resolved_storage_root = env_storage_root
     else:
         resolved_storage_root = (config_dir / "mindroom_data").resolve()
+    resolved_control_state_root = _control_state_root_from_env_values(
+        resolved_process_env,
+        config_dir=config_dir,
+    )
+    if resolved_control_state_root is None:
+        resolved_control_state_root = _control_state_root_from_env_values(
+            env_file_values,
+            config_dir=config_dir,
+        )
+    if resolved_control_state_root is None:
+        resolved_control_state_root = _default_control_state_root(resolved_storage_root)
 
     return RuntimePaths(
         config_path=resolved_config_path,
         config_dir=config_dir,
         env_path=env_path,
         storage_root=resolved_storage_root,
+        control_state_root=resolved_control_state_root,
         process_env=cast("Mapping[str, str]", MappingProxyType(resolved_process_env)),
         env_file_values=cast("Mapping[str, str]", MappingProxyType(env_file_values)),
     )
@@ -267,6 +298,7 @@ def _with_primary_runtime_env(paths: RuntimePaths) -> RuntimePaths:
         config_dir=paths.config_dir,
         env_path=paths.env_path,
         storage_root=paths.storage_root,
+        control_state_root=paths.control_state_root,
         process_env=cast("Mapping[str, str]", MappingProxyType(normalized_process_env)),
         env_file_values=paths.env_file_values,
     )
@@ -417,11 +449,12 @@ def deserialize_runtime_paths(payload: object) -> RuntimePaths:
         key: value for key, value in raw_env_file_values.items() if isinstance(key, str) and isinstance(value, str)
     }
     config_path = Path(raw_config_path).expanduser().resolve()
+    storage_root = Path(raw_storage_root).expanduser().resolve()
     return RuntimePaths(
         config_path=config_path,
         config_dir=config_path.parent,
         env_path=config_path.parent / ".env",
-        storage_root=Path(raw_storage_root).expanduser().resolve(),
+        storage_root=storage_root,
         process_env=cast("Mapping[str, str]", MappingProxyType(process_env)),
         env_file_values=cast("Mapping[str, str]", MappingProxyType(env_file_values)),
     )
@@ -489,6 +522,12 @@ def runtime_paths_with_storage_root(runtime_paths: RuntimePaths, storage_root: P
     normalized_process_env = dict(runtime_paths.process_env)
     normalized_process_env["MINDROOM_CONFIG_PATH"] = str(runtime_paths.config_path)
     normalized_process_env["MINDROOM_STORAGE_PATH"] = str(resolved_storage_root)
+    old_default_control_state_root = _default_control_state_root(runtime_paths.storage_root)
+    current_control_state_root = runtime_paths.control_state_root
+    if current_control_state_root is None or current_control_state_root == old_default_control_state_root:
+        resolved_control_state_root = _default_control_state_root(resolved_storage_root)
+    else:
+        resolved_control_state_root = current_control_state_root
     if resolved_storage_root == runtime_paths.storage_root and normalized_process_env == dict(
         runtime_paths.process_env,
     ):
@@ -498,6 +537,7 @@ def runtime_paths_with_storage_root(runtime_paths: RuntimePaths, storage_root: P
         config_dir=runtime_paths.config_dir,
         env_path=runtime_paths.env_path,
         storage_root=resolved_storage_root,
+        control_state_root=resolved_control_state_root,
         process_env=cast("Mapping[str, str]", MappingProxyType(normalized_process_env)),
         env_file_values=runtime_paths.env_file_values,
     )
@@ -609,6 +649,7 @@ def isolated_runtime_paths(runtime_paths: RuntimePaths) -> RuntimePaths:
         config_dir=runtime_paths.config_dir,
         env_path=runtime_paths.env_path,
         storage_root=runtime_paths.storage_root,
+        control_state_root=None,
         process_env=cast("Mapping[str, str]", MappingProxyType(process_env)),
         env_file_values=cast("Mapping[str, str]", MappingProxyType(env_file_values)),
     )
@@ -665,18 +706,47 @@ EXECUTION_ENV_TOOL_NAMES = frozenset({"python", "shell"})
 # primary; it is minted into the worker pod and read here at execution time.
 _WORKER_EGRESS_PROXY_URL_ENV = runtime_env_policy.WORKER_EGRESS_PROXY_ENV_BY_KEY["proxy_url"]
 _WORKER_EGRESS_PROXY_TOKEN_FILE_ENV = runtime_env_policy.WORKER_EGRESS_PROXY_ENV_BY_KEY["token_file"]
+_WORKER_EGRESS_PROXY_VAULT_ENV = runtime_env_policy.WORKER_EGRESS_PROXY_ENV_BY_KEY["vault"]
 _WORKER_EGRESS_PROXY_CA_FILE_ENV = runtime_env_policy.WORKER_EGRESS_PROXY_ENV_BY_KEY["ca_file"]
 _WORKER_EGRESS_NO_PROXY = "localhost,127.0.0.1,::1,.svc,.cluster.local"
+
+
+def _git_config_env(process_env: Mapping[str, str], entries: list[tuple[str, str]]) -> dict[str, str]:
+    """Append entries to any well-formed environment-backed Git config.
+
+    A malformed incoming block is discarded so Git never receives an
+    inconsistent count/key/value set.
+    """
+    existing_entries: list[tuple[str, str]] = []
+    try:
+        existing_count = int(process_env.get("GIT_CONFIG_COUNT", "0"))
+    except ValueError:
+        existing_count = 0
+    if existing_count > 0:
+        for index in range(existing_count):
+            key = process_env.get(f"GIT_CONFIG_KEY_{index}")
+            value = process_env.get(f"GIT_CONFIG_VALUE_{index}")
+            if key is None or value is None:
+                existing_entries = []
+                break
+            existing_entries.append((key, value))
+
+    merged_entries = [*existing_entries, *entries]
+    env = {"GIT_CONFIG_COUNT": str(len(merged_entries))}
+    for index, (key, value) in enumerate(merged_entries):
+        env[f"GIT_CONFIG_KEY_{index}"] = key
+        env[f"GIT_CONFIG_VALUE_{index}"] = value
+    return env
 
 
 def worker_proxy_execution_env(process_env: Mapping[str, str]) -> dict[str, str]:
     """Return the per-worker egress proxy env overlay for python/shell, or ``{}``.
 
     General mechanism, provider-agnostic: reads a per-worker proxy endpoint plus
-    a token file written into the worker pod and composes ``http://<token>:@<host>``
-    (the token becomes the proxy basic-auth username, which credential-injecting
-    forward proxies such as Agent Vault accept). Returns empty when no per-worker
-    egress proxy is configured for this worker or the token is not yet present.
+    a token file written into the worker pod and composes proxy basic-auth
+    userinfo. The token becomes the username; when configured, the vault name
+    becomes the password. Returns empty when no per-worker egress proxy is
+    configured for this worker or the token is not yet present.
     """
     proxy_url = (process_env.get(_WORKER_EGRESS_PROXY_URL_ENV) or "").strip()
     token_file = (process_env.get(_WORKER_EGRESS_PROXY_TOKEN_FILE_ENV) or "").strip()
@@ -688,19 +758,31 @@ def worker_proxy_execution_env(process_env: Mapping[str, str]) -> dict[str, str]
         return {}
     if not token:
         return {}
+    vault = (process_env.get(_WORKER_EGRESS_PROXY_VAULT_ENV) or "").strip()
     scheme, _, rest = proxy_url.partition("://")
-    # Percent-encode the token: it becomes proxy basic-auth userinfo, so any
-    # URL-significant character (@ : / # ? % +, whitespace) would otherwise make
-    # HTTP clients mis-parse the proxy URL and silently break auth.
-    authed = f"{scheme}://{quote(token, safe='')}:@{rest}"
+    # Percent-encode proxy basic-auth userinfo so URL-significant characters
+    # (@ : / # ? % +, whitespace) cannot make HTTP clients mis-parse auth.
+    authed = f"{scheme}://{quote(token, safe='')}:{quote(vault, safe='')}@{rest}"
     env = {
         "HTTP_PROXY": authed,
         "HTTPS_PROXY": authed,
         "http_proxy": authed,
         "https_proxy": authed,
+        # Git/libcurl does not always preemptively send proxy credentials from
+        # HTTPS_PROXY userinfo on CONNECT. Environment-backed Git config makes
+        # the same proxy explicit without writing user/global git config.
         "NO_PROXY": _WORKER_EGRESS_NO_PROXY,
         "no_proxy": _WORKER_EGRESS_NO_PROXY,
     }
+    env.update(
+        _git_config_env(
+            process_env,
+            [
+                ("http.proxy", authed),
+                ("http.proxyAuthMethod", "basic"),
+            ],
+        ),
+    )
     ca_file = (process_env.get(_WORKER_EGRESS_PROXY_CA_FILE_ENV) or "").strip()
     if ca_file:
         env["REQUESTS_CA_BUNDLE"] = ca_file
@@ -942,13 +1024,21 @@ def _find_config(*, process_env: Mapping[str, str]) -> Path:
 VOICE_PREFIX = "🎤 "
 ORIGINAL_SENDER_KEY = "com.mindroom.original_sender"
 SOURCE_KIND_KEY = "com.mindroom.source_kind"
+PER_FIRE_THREAD_ROOT_KEY = "com.mindroom.per_fire_thread_root"
+PER_FIRE_THREAD_ROOT_EVENT_ID_KEY = "com.mindroom.per_fire_thread_root_event_id"
+SCHEDULED_HISTORY_LIMIT_KEY = "com.mindroom.history_limit"
 HOOK_SOURCE_KEY = "com.mindroom.hook_source"
 HOOK_MESSAGE_RECEIVED_DEPTH_KEY = "com.mindroom.message_received_depth"
 SKIP_MENTIONS_KEY = "com.mindroom.skip_mentions"
 VOICE_RAW_AUDIO_FALLBACK_KEY = "com.mindroom.voice_raw_audio_fallback"
+VOICE_TRANSCRIPT_KEY = "com.mindroom.voice_transcript"
 ATTACHMENT_IDS_KEY = "com.mindroom.attachment_ids"
 AI_RUN_METADATA_KEY = "io.mindroom.ai_run"
+MATRIX_TURN_SCHEMA_VERSION_METADATA_KEY = "matrix_turn_schema_version"
+MATRIX_TURN_DISCOVERY_EVENT_IDS_METADATA_KEY = "matrix_turn_discovery_event_ids"
+MATRIX_TURN_REDACTED_SOURCE_EVENT_IDS_METADATA_KEY = "matrix_turn_redacted_source_event_ids"
 MATRIX_EVENT_ID_METADATA_KEY = "matrix_event_id"
+MATRIX_MESSAGE_TARGET_ENRICHMENT_KEY = "matrix_message_target"
 MATRIX_RESPONSE_EVENT_ID_METADATA_KEY = "matrix_response_event_id"
 MATRIX_RESPONSE_OWNER_METADATA_KEY = "matrix_response_owner"
 MATRIX_SEEN_EVENT_IDS_METADATA_KEY = "matrix_seen_event_ids"
@@ -956,6 +1046,8 @@ MATRIX_HISTORY_SCOPE_METADATA_KEY = "matrix_history_scope"
 MATRIX_CONVERSATION_TARGET_METADATA_KEY = "matrix_conversation_target"
 MATRIX_SOURCE_EVENT_IDS_METADATA_KEY = "matrix_source_event_ids"
 MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY = "matrix_source_event_prompts"
+MATRIX_SOURCE_EVENT_REVISIONS_METADATA_KEY = "matrix_source_event_revisions"
+MATRIX_SOURCE_EVENT_METADATA_KEY = "matrix_source_event_metadata"
 MINDROOM_COMPACTION_METADATA_KEY = "mindroom_compaction"
 MINDROOM_MATRIX_HISTORY_METADATA_KEY = "mindroom_matrix_history"
 COMPACTION_NOTICE_CONTENT_KEY = "io.mindroom.compaction"
@@ -988,6 +1080,7 @@ PROVIDER_ENV_KEYS: dict[str, str] = {
     "deepseek": "DEEPSEEK_API_KEY",
     "cerebras": "CEREBRAS_API_KEY",
     "groq": "GROQ_API_KEY",
+    "zai": "ZAI_API_KEY",
     "ollama": "OLLAMA_HOST",
 }
 # Dedicated workers start with no mirrored/shared credentials by default.
@@ -1071,6 +1164,11 @@ def safe_replace(tmp_path: Path, target_path: Path) -> None:
         tmp_path.replace(target_path)
     except OSError:
         shutil.copy2(tmp_path, target_path)
+        target_fd = os.open(target_path, os.O_RDONLY)
+        try:
+            os.fsync(target_fd)
+        finally:
+            os.close(target_fd)
         tmp_path.unlink(missing_ok=True)
 
 

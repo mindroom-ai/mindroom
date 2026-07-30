@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import tempfile
-import time
 from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -19,10 +18,18 @@ from mindroom.commands.parsing import Command, CommandType
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
-from mindroom.constants import ROUTER_AGENT_NAME, resolve_runtime_paths
+from mindroom.constants import (
+    PER_FIRE_THREAD_ROOT_EVENT_ID_KEY,
+    PER_FIRE_THREAD_ROOT_KEY,
+    ROUTER_AGENT_NAME,
+    SOURCE_KIND_KEY,
+    resolve_runtime_paths,
+)
 from mindroom.conversation_resolver import MessageContext
+from mindroom.delivery_gateway import SendTextRequest
+from mindroom.dispatch_source import SCHEDULED_SOURCE_KIND
+from mindroom.entity_resolution import entity_identity_registry
 from mindroom.matrix.cache import ThreadHistoryResult, thread_history_result
-from mindroom.matrix.cache.event_cache import ThreadCacheState
 from mindroom.matrix.cache.thread_reads import ThreadReadMode
 from mindroom.matrix.cache.write_coordinator import EventCacheWriteCoordinator
 from mindroom.matrix.client import ResolvedVisibleMessage
@@ -30,8 +37,8 @@ from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.thread_diagnostics import THREAD_HISTORY_DEGRADED_DIAGNOSTIC
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
+from mindroom.session_ids import create_session_id, parse_session_id
 from mindroom.streaming import StreamingResponse, send_streaming_response
-from mindroom.thread_utils import create_session_id, parse_session_id
 from mindroom.tool_system.runtime_context import ToolRuntimeContext
 
 if TYPE_CHECKING:
@@ -584,7 +591,7 @@ class TestCreateSessionIdWithNoneThread:
         assert target.resolved_thread_id is None
         assert target.session_id == create_session_id("!room:localhost", None)
 
-    def test_message_target_from_runtime_context_keeps_room_mode_thread_provenance(self) -> None:
+    def test_tool_runtime_context_keeps_room_mode_target_provenance(self) -> None:
         """Room-mode runtime targets should retain raw provenance only under the source-thread field."""
         config = _runtime_bound_config(
             Config(
@@ -597,20 +604,22 @@ class TestCreateSessionIdWithNoneThread:
         )
         runtime_context = ToolRuntimeContext(
             agent_name="assistant",
-            room_id="!room:localhost",
-            thread_id="$raw-thread",
-            resolved_thread_id=None,
+            target=MessageTarget(
+                room_id="!room:localhost",
+                source_thread_id="$raw-thread",
+                resolved_thread_id=None,
+                reply_to_event_id="$event456",
+                session_id=create_session_id("!room:localhost", None),
+            ),
             requester_id="@user:localhost",
             client=AsyncMock(),
             config=config,
             runtime_paths=runtime_paths_for(config),
             event_cache=make_event_cache_mock(),
             conversation_cache=make_conversation_cache_mock(),
-            reply_to_event_id="$event456",
-            session_id=create_session_id("!room:localhost", None),
         )
 
-        target = MessageTarget.from_runtime_context(runtime_context)
+        target = runtime_context.target
 
         assert target.source_thread_id == "$raw-thread"
         assert target.resolved_thread_id is None
@@ -1069,9 +1078,73 @@ class TestExtractMessageContextRoomMode:
         assert target.resolved_thread_id is None
         assert target.session_id == create_session_id("!room:localhost", None)
 
+    def test_build_message_target_scheduled_root_starts_per_fire_thread_in_room_mode(
+        self,
+        room_mode_config: Config,
+        assistant_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """A trusted scheduled fire roots its own per-fire thread and session even in room mode."""
+        bot = _agent_bot(config=room_mode_config, agent_user=assistant_user, storage_path=tmp_path)
+        registry = entity_identity_registry(room_mode_config, runtime_paths_for(room_mode_config))
+
+        target = bot._conversation_resolver.build_message_target(
+            room_id="!room:localhost",
+            thread_id=None,
+            reply_to_event_id="$scheduled-fire:localhost",
+            event_source={
+                "content": {
+                    "body": "Kick off the weekly report",
+                    "msgtype": "m.text",
+                    SOURCE_KIND_KEY: SCHEDULED_SOURCE_KIND,
+                    PER_FIRE_THREAD_ROOT_KEY: True,
+                },
+                "event_id": "$scheduled-fire:localhost",
+                "sender": registry.current_id("assistant").full_id,
+                "origin_server_ts": 1234567890,
+                "room_id": "!room:localhost",
+                "type": "m.room.message",
+            },
+        )
+
+        assert target.resolved_thread_id == "$scheduled-fire:localhost"
+        assert target.session_id == create_session_id("!room:localhost", "$scheduled-fire:localhost")
+
+    def test_build_message_target_untrusted_scheduled_marker_keeps_room_mode(
+        self,
+        room_mode_config: Config,
+        assistant_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """A scheduled source-kind marker from a non-managed sender must not force a thread."""
+        bot = _agent_bot(config=room_mode_config, agent_user=assistant_user, storage_path=tmp_path)
+
+        target = bot._conversation_resolver.build_message_target(
+            room_id="!room:localhost",
+            thread_id=None,
+            reply_to_event_id="$spoofed-fire:localhost",
+            event_source={
+                "content": {
+                    "body": "pretend to be a scheduled fire",
+                    "msgtype": "m.text",
+                    SOURCE_KIND_KEY: SCHEDULED_SOURCE_KIND,
+                    PER_FIRE_THREAD_ROOT_KEY: True,
+                    PER_FIRE_THREAD_ROOT_EVENT_ID_KEY: "$spoofed-root:localhost",
+                },
+                "event_id": "$spoofed-fire:localhost",
+                "sender": "@user:localhost",
+                "origin_server_ts": 1234567890,
+                "room_id": "!room:localhost",
+                "type": "m.room.message",
+            },
+        )
+
+        assert target.resolved_thread_id is None
+        assert target.session_id == create_session_id("!room:localhost", None)
+
 
 class TestSendResponseRoomMode:
-    """Test _send_response skips thread relation in room mode."""
+    """Test the delivery gateway's send_text skips thread relation in room mode."""
 
     @pytest.mark.asyncio
     async def test_room_mode_no_thread_metadata(
@@ -1080,7 +1153,7 @@ class TestSendResponseRoomMode:
         assistant_user: AgentMatrixUser,
         tmp_path: Path,
     ) -> None:
-        """In room mode, _send_response should not add thread relation metadata."""
+        """In room mode, send_text should not add thread relation metadata."""
         bot = _agent_bot(config=room_mode_config, agent_user=assistant_user, storage_path=tmp_path)
         bot.client = AsyncMock()
 
@@ -1096,9 +1169,11 @@ class TestSendResponseRoomMode:
                 thread_id=None,
                 reply_to_event_id="$event123",
             )
-            event_id = await bot._send_response(
-                target=target,
-                response_text="Hello!",
+            event_id = await bot._delivery_gateway.send_text(
+                SendTextRequest(
+                    target=target,
+                    response_text="Hello!",
+                ),
             )
 
         assert event_id == "$response_event"
@@ -1270,8 +1345,8 @@ class TestCommandThreadContextRoomMode:
         )
         bot = _agent_bot(config=config, agent_user=router_user, storage_path=tmp_path)
         bot.client = AsyncMock()
-        bot._send_response = AsyncMock(return_value="$reply")
-        install_send_response_mock(bot, bot._send_response)
+        send_response = AsyncMock(return_value="$reply")
+        install_send_response_mock(bot, send_response)
 
         room = _matrix_room("!room:localhost")
 
@@ -1306,7 +1381,7 @@ class TestCommandThreadContextRoomMode:
             )
 
         assert mock_schedule.await_args.kwargs["thread_id"] is None
-        assert bot._send_response.await_args.kwargs["target"].resolved_thread_id is None
+        assert send_response.await_args.kwargs["target"].resolved_thread_id is None
 
     @pytest.mark.asyncio
     async def test_router_command_uses_stable_dispatch_target_without_deriving_context(
@@ -1329,8 +1404,8 @@ class TestCommandThreadContextRoomMode:
         )
         bot = _agent_bot(config=config, agent_user=router_user, storage_path=tmp_path)
         bot.client = AsyncMock()
-        bot._send_response = AsyncMock(return_value="$reply")
-        install_send_response_mock(bot, bot._send_response)
+        send_response = AsyncMock(return_value="$reply")
+        install_send_response_mock(bot, send_response)
 
         room = _matrix_room("!room:localhost")
         event = nio.RoomMessageText.from_dict(
@@ -1365,7 +1440,7 @@ class TestCommandThreadContextRoomMode:
             )
 
         assert mock_schedule.await_args.kwargs["thread_id"] == "$stable_thread"
-        assert bot._send_response.await_args.kwargs["target"].resolved_thread_id == "$stable_thread"
+        assert send_response.await_args.kwargs["target"].resolved_thread_id == "$stable_thread"
 
 
 class TestExtractedModuleLoggerRebinding:
@@ -1490,7 +1565,7 @@ class TestExtractedModuleLoggerRebinding:
         bot.logger = rebound_logger
 
         event_cache = AsyncMock()
-        event_cache.append_event.side_effect = RuntimeError("cache write failed")
+        event_cache.apply_thread_mutation_append.side_effect = RuntimeError("cache write failed")
         bot.event_cache = event_cache
         bot.event_cache_write_coordinator = EventCacheWriteCoordinator(
             logger=MagicMock(),
@@ -1519,8 +1594,9 @@ class TestExtractedModuleLoggerRebinding:
             event,
             event_info=EventInfo.from_event(event.source),
         )
+        await bot.event_cache_write_coordinator.close()
 
-        original_logger.warning.assert_called_once_with(
+        original_logger.warning.assert_any_call(
             "Failed to append thread event to cache",
             room_id="!room:localhost",
             thread_id="$threadroot",
@@ -1528,6 +1604,8 @@ class TestExtractedModuleLoggerRebinding:
             context="live",
             error="cache write failed",
         )
+        # Background repair is gone, so the append failure is the only warning left to rebind.
+        assert original_logger.warning.call_count == 1
         rebound_logger.warning.assert_not_called()
 
     def test_conversation_resolver_fetch_path_uses_conversation_cache_api(
@@ -1650,15 +1728,8 @@ class TestExtractedModuleLoggerRebinding:
         bot = _agent_bot(config=config, agent_user=assistant_user, storage_path=tmp_path)
         bot.event_cache = make_event_cache_mock()
         sync_bot_runtime_state(bot)
-        bot.event_cache.get_thread_cache_state = AsyncMock(
-            return_value=ThreadCacheState(
-                validated_at=time.time(),
-                invalidated_at=None,
-                invalidation_reason=None,
-                room_invalidated_at=None,
-                room_invalidation_reason=None,
-            ),
-        )
+        # No gap marker: the cached snapshot reads as usable.
+        bot.event_cache.get_thread_cache_gap = AsyncMock(return_value=None)
         bot.event_cache.get_thread_events = AsyncMock(
             return_value=[
                 {
@@ -1732,6 +1803,25 @@ class TestExtractedModuleLoggerRebinding:
 
         bot._conversation_resolver.deps.conversation_cache.get_thread_id_for_event = AsyncMock(
             side_effect=lambda _room_id, event_id: "$threadroot" if event_id == "$reply-seed:localhost" else None,
+        )
+        bot._conversation_resolver.deps.conversation_cache.get_event = AsyncMock(
+            return_value=nio.RoomGetEventResponse.from_dict(
+                {
+                    "event_id": "$reply-seed:localhost",
+                    "sender": "@user:localhost",
+                    "origin_server_ts": 1234567889,
+                    "room_id": room.room_id,
+                    "type": "m.room.message",
+                    "content": {
+                        "msgtype": "m.text",
+                        "body": "thread reply",
+                        "m.relates_to": {
+                            "event_id": "$threadroot",
+                            "rel_type": "m.thread",
+                        },
+                    },
+                },
+            ),
         )
         thread_lookup = await bot._conversation_resolver._explicit_thread_id_for_event(
             room.room_id,

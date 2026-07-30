@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import hashlib
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, NamedTuple, cast
 
 from agno.knowledge.embedder.base import Embedder
 from agno.vectordb.chroma import ChromaDb
@@ -25,6 +25,40 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
 
 _INDEXING_MODES: set[str] = {"semantic", "files"}
+
+
+class _QueryCompatibilityKey(NamedTuple):
+    """Fields that must match for safe vector queries against a published index."""
+
+    base_id: str
+    storage_root: str
+    knowledge_path: str
+    mode: KnowledgeBaseMode
+    embedder_provider: str
+    embedder_model: str
+    embedder_host: str
+    embedder_dimensions: str
+
+
+class _CorpusCompatibilityKey(NamedTuple):
+    """Fields that must match for safe source-corpus reuse of a published index."""
+
+    base_id: str
+    storage_root: str
+    knowledge_path: str
+    mode: KnowledgeBaseMode
+    repo_identity: str
+    git_branch: str
+    git_lfs: str
+    git_skip_hidden: str
+    git_include_patterns: str
+    git_exclude_patterns: str
+    include_patterns: str
+    exclude_patterns: str
+    include_extensions: str
+    exclude_extensions: str
+    extra_extensions: str
+    skip_hidden: str
 
 
 @dataclass(frozen=True)
@@ -52,6 +86,11 @@ class IndexingSettings:
     include_extensions: str
     exclude_extensions: str
     extra_extensions: str = ""
+    #: Effective hidden-path filtering for non-Git bases; "" for Git bases,
+    #: whose filtering is already identified by git_skip_hidden. Optional in
+    #: persisted metadata so pre-existing indexes (built while hidden paths
+    #: were still indexed) parse but no longer match the corpus key.
+    skip_hidden: str = ""
 
     @classmethod
     def from_metadata(cls, settings: Mapping[str, str]) -> IndexingSettings | None:
@@ -76,12 +115,17 @@ class IndexingSettings:
             "include_extensions",
             "exclude_extensions",
         }
-        optional_keys = {"include_patterns", "exclude_patterns", "extra_extensions"}
+        optional_keys = {"include_patterns", "exclude_patterns", "extra_extensions", "skip_hidden"}
         if not required_keys.issubset(settings) or set(settings) - required_keys - optional_keys:
             return None
         mode = settings["mode"]
         if mode not in _INDEXING_MODES:
             return None
+
+        # ``indexing_settings_key`` only populates extra_extensions in semantic
+        # mode, emitting "" otherwise, so legacy metadata must normalize to that.
+        semantic_only_empty = _EMPTY_FILTER_KEY if mode == "semantic" else ""
+
         return cls(
             base_id=settings["base_id"],
             storage_root=settings["storage_root"],
@@ -99,11 +143,15 @@ class IndexingSettings:
             git_skip_hidden=settings["git_skip_hidden"],
             git_include_patterns=settings["git_include_patterns"],
             git_exclude_patterns=settings["git_exclude_patterns"],
-            include_patterns=settings.get("include_patterns", ""),
-            exclude_patterns=settings.get("exclude_patterns", ""),
+            include_patterns=_optional_filter_key(settings, "include_patterns"),
+            exclude_patterns=_optional_filter_key(settings, "exclude_patterns"),
             include_extensions=settings["include_extensions"],
             exclude_extensions=settings["exclude_extensions"],
-            extra_extensions=settings.get("extra_extensions", ""),
+            extra_extensions=_optional_filter_key(settings, "extra_extensions", empty_value=semantic_only_empty),
+            # Not normalized on purpose: skip_hidden is a bool string rather than
+            # a filter key, and absent metadata must keep failing the corpus match
+            # so pre-skip_hidden indexes are rebuilt (see the field docstring).
+            skip_hidden=settings.get("skip_hidden", ""),
         )
 
     def to_metadata(self) -> dict[str, str]:
@@ -130,41 +178,41 @@ class IndexingSettings:
             "include_extensions": self.include_extensions,
             "exclude_extensions": self.exclude_extensions,
             "extra_extensions": self.extra_extensions,
+            "skip_hidden": self.skip_hidden,
         }
 
-    def query_compatibility_key(self) -> tuple[str, str, str, str, str, str, str, str]:
+    def query_compatibility_key(self) -> _QueryCompatibilityKey:
         """Return fields that must match for safe vector queries."""
-        return (
-            self.base_id,
-            self.storage_root,
-            self.knowledge_path,
-            self.mode,
-            self.embedder_provider,
-            self.embedder_model,
-            self.embedder_host,
-            self.embedder_dimensions,
+        return _QueryCompatibilityKey(
+            base_id=self.base_id,
+            storage_root=self.storage_root,
+            knowledge_path=self.knowledge_path,
+            mode=self.mode,
+            embedder_provider=self.embedder_provider,
+            embedder_model=self.embedder_model,
+            embedder_host=self.embedder_host,
+            embedder_dimensions=self.embedder_dimensions,
         )
 
-    def corpus_compatibility_key(
-        self,
-    ) -> tuple[str, str, str, str, str, str, str, str, str, str, str, str, str, str, str]:
+    def corpus_compatibility_key(self) -> _CorpusCompatibilityKey:
         """Return fields that must match for safe source-corpus reuse."""
-        return (
-            self.base_id,
-            self.storage_root,
-            self.knowledge_path,
-            self.mode,
-            self.repo_identity,
-            self.git_branch,
-            self.git_lfs,
-            self.git_skip_hidden,
-            self.git_include_patterns,
-            self.git_exclude_patterns,
-            self.include_patterns,
-            self.exclude_patterns,
-            self.include_extensions,
-            self.exclude_extensions,
-            self.extra_extensions,
+        return _CorpusCompatibilityKey(
+            base_id=self.base_id,
+            storage_root=self.storage_root,
+            knowledge_path=self.knowledge_path,
+            mode=self.mode,
+            repo_identity=self.repo_identity,
+            git_branch=self.git_branch,
+            git_lfs=self.git_lfs,
+            git_skip_hidden=self.git_skip_hidden,
+            git_include_patterns=self.git_include_patterns,
+            git_exclude_patterns=self.git_exclude_patterns,
+            include_patterns=self.include_patterns,
+            exclude_patterns=self.exclude_patterns,
+            include_extensions=self.include_extensions,
+            exclude_extensions=self.exclude_extensions,
+            extra_extensions=self.extra_extensions,
+            skip_hidden=self.skip_hidden,
         )
 
 
@@ -219,6 +267,24 @@ def _filter_settings_key(values: Iterable[str]) -> str:
     return str(tuple(sorted(values)))
 
 
+_EMPTY_FILTER_KEY = _filter_settings_key(())
+
+
+def _optional_filter_key(
+    settings: Mapping[str, str],
+    name: str,
+    *,
+    empty_value: str = _EMPTY_FILTER_KEY,
+) -> str:
+    """Read one optional filter key, normalizing legacy absence to today's producer output.
+
+    Metadata predating these keys omits them entirely. Mapping absence onto what
+    ``indexing_settings_key`` emits now keeps an old index from being misread as
+    config-incompatible and needlessly rebuilt.
+    """
+    return settings.get(name, "") or empty_value
+
+
 def indexing_settings_key(config: Config, storage_path: Path, base_id: str, knowledge_path: Path) -> IndexingSettings:
     """Derive the indexing-compatibility settings for one knowledge base binding."""
     base_config = config.get_knowledge_base_config(base_id)
@@ -270,4 +336,5 @@ def indexing_settings_key(config: Config, storage_path: Path, base_id: str, know
         include_extensions=include_extensions,
         exclude_extensions=exclude_extensions,
         extra_extensions=extra_extensions,
+        skip_hidden=str(base_config.skip_hidden) if git_config is None else "",
     )

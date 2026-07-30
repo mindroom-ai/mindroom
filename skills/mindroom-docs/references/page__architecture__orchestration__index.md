@@ -70,18 +70,38 @@ main() entry
 
 - **Entity order**: Router first, then agents, then teams
 - **Room setup** (`_setup_rooms_and_memberships`): Router creates rooms, invites agents, teams, and users, then bots join
-- **Sync loops**: Each bot runs `sync_forever_with_restart()` with automatic retry
+- **Sync loops**: Each bot runs `sync_forever_with_restart()` with automatic retry; the default `matrix_sync.mode: classic` uses classic `/v3/sync` and `matrix_sync.mode: sliding` opts into MSC4186 Simplified Sliding Sync
 - **Internal user identity**: `mindroom_user.username` is the account-creation request; runtime authorization uses the persisted actual Matrix ID
 
-## Hot Reload
+## Runtime Replacement Admission
 
-Config changes are detected via polling (`watch_file()` checks `st_mtime` every second):
+Config changes are detected via polling (`watch_paths()` checks watched source-file mtimes every second and fires after one quiet scan).
+MCP catalog changes use the same replacement admission path when the changed server has dependent agents or teams.
+The MCP manager callback schedules an orchestrator-owned background task so the triggering tool call can return and release its admission slot before replacement draining begins.
 
-1. On change, `ConfigReloadLifecycle.request_reload()` queues a debounced reload that first drains in-flight responses (forcing through after a timeout)
-2. `ConfigReloadLifecycle.update_config()` loads the new config and `_identify_entities_to_restart()` computes the diff using `model_dump(exclude_none=True)`
-3. The orchestrator applies the resulting plan: affected entities are stopped, recreated, and restarted
-4. Removed entities run `cleanup()` (leave rooms, stop bot)
-5. New/restarted bots go through room setup
+1. On a config change, `ConfigReloadLifecycle.request_reload()` queues a debounced reload.
+2. On an MCP catalog change, the orchestrator returns immediately when no configured entity references that server, while still clearing the worker validation snapshot cache.
+   The dependent-entity check runs again under the config update lock immediately before replacement.
+3. `ConfigReloadLifecycle.apply_with_response_admission()` serializes config reloads and MCP catalog replacements behind one global admission owner.
+4. Sampling the in-flight count and closing the shared `ResponseAdmissionGate` happen atomically, so a new response cannot race the decision to apply.
+   The gate covers Matrix-driven response lifecycles only.
+   Direct agent-run entry points that bypass the response lifecycle (`mindroom.api.openai_compat` and cascaded voice in `mindroom.matrix_rtc.call_tools`) are not admitted through it, so a replacement can still land underneath one of those runs.
+   The gate stays closed, but is not held, across config loading and plan application.
+   Holding it would stall the apply against itself: applying the plan stops bots, and stopping a bot drains its detached responses.
+5. While the gate is closed, a response waits before taking a lifecycle lock, incrementing the in-flight count, or publishing a placeholder.
+   The gate is global and covers the whole apply window regardless of how narrow the plan turns out to be.
+   When the apply finishes, responses owned by unchanged or replacement runtimes compete for admission normally.
+6. A runtime being replaced wakes its pre-admission waiters with `ResponseAdmissionRefusedError`.
+   This is deliberately not an `asyncio.CancelledError`, because the Matrix callback must fail and invalidate the old sync checkpoint so the replacement runtime replays the source event.
+   The refusal path performs no Matrix I/O, so replacement shutdown cannot stall on an untimed send.
+   Auto-resume messages received by replacement bots during the apply wait for the gate to reopen instead of being dropped.
+7. If responses never drain, either replacement flow stops deferring after 600 seconds and closes the gate over still-running responses.
+   This bounded forced apply prevents a busy install from starving config or MCP replacement forever.
+8. For config reloads, `ConfigReloadLifecycle.update_config()` loads the new config and `_identify_entities_to_restart()` computes the diff using `model_dump(exclude_none=True)`.
+9. The orchestrator applies the resulting plan: affected entities are stopped, recreated, and restarted.
+10. Removed entities run `cleanup()` to leave rooms and stop the bot.
+11. New and restarted bots go through room setup.
+12. The gate reopens once the apply finishes, whether it succeeded, failed, or was cancelled, and deferred responses may then start.
 
 Skills are watched separately via `_watch_skills_task()` with cache invalidation.
 
@@ -90,7 +110,7 @@ Skills are watched separately via `_watch_skills_task()` with cache invalidation
 The `src/mindroom/orchestration/` subpackage contains helpers extracted from the monolithic orchestrator:
 
 - **`runtime.py`** — Sync loop helpers: `sync_forever_with_restart()` with linear backoff (capped at 60s), `cancel_task()`, and `create_logged_task()` for safe asyncio task creation.
-- **`config_lifecycle.py`** — Debounced config-reload lifecycle: `ConfigReloadLifecycle` owns reload queueing, response draining, and the load → diff → plan sequencing, dispatching the plan back to the orchestrator to apply.
+- **`config_lifecycle.py`** — Debounced config-reload and shared replacement-admission lifecycle: `ConfigReloadLifecycle` owns reload queueing, serialized global response draining for config and MCP replacements, and the load → diff → plan sequencing that dispatches config plans back to the orchestrator.
 - **`config_updates.py`** — Config diffing and reload planning: `build_config_update_plan()` computes a `ConfigUpdatePlan` by calling `_identify_entities_to_restart()`, which diffs old and new configs using `model_dump(exclude_none=True)`.
 - **`plugin_watch.py`** — Plugin hot-reload watcher: `watch_plugins_task()` polls configured plugin roots, with `PluginWatchState` owning the watcher baselines and dirty-state revision.
 - **`rooms.py`** — Room invitation helpers: `get_authorized_user_ids_to_invite()` and `get_root_space_user_ids_to_invite()` compute which users should be invited to managed rooms and the root Matrix space.
@@ -143,6 +163,9 @@ Non-MindRoom bots listed in `bot_accounts` are excluded from this detection.
 - Each bot runs its own sync loop via `sync_forever_with_restart()`
 - Sync loop failures trigger automatic restart with linear backoff (5s, 10s, 15s, ... up to 60s max)
 - Watchdog-driven restarts of stalled sync loops add 0–10s of random jitter on top of the backoff so a loop-wide stall does not restart every sync loop as one thundering herd
+- An automatic receive-loop restart replaces only the sync task and its watchdog, so in-flight responses keep their original owner and finish across the restart
+- The response runtime is drained and cancelled only when the bot itself stops: a config reload replacing the entity, entity removal, or process shutdown
+- Each of those lifecycle events logs `restart_reason_category` and `resulting_action`, so `matrix_sync_transport_restart` is distinguishable from `matrix_agent_response_runtime_shutdown` in logs
 - Event callbacks run as background tasks (never block the sync loop)
 - `ResponseTracker` prevents duplicate replies
 - `StopManager` handles cancellation of in-progress responses
@@ -153,10 +176,11 @@ On `orchestrator.stop()`:
 
 1. Set `self.running = False`
 2. Cancel config reload task
-3. Stop memory auto-flush worker
-4. Shut down the per-binding knowledge refresh scheduler
-5. Cancel pending bot start tasks
-6. Stop the MCP manager
-7. Cancel all sync tasks
-8. Signal all bots to stop (`bot.running = False`)
-9. Call `bot.stop()` for each bot concurrently (waits 5s for background tasks, cancels scheduled tasks, closes Matrix client)
+3. Drain orchestrator-owned MCP catalog replacement tasks for up to 5 seconds before MCP or entity teardown
+4. Stop memory auto-flush worker
+5. Shut down the per-binding knowledge refresh scheduler
+6. Cancel pending bot start tasks
+7. Stop the MCP manager
+8. Cancel all sync tasks
+9. Signal all bots to stop (`bot.running = False`)
+10. Call `bot.stop()` for each bot concurrently (waits 5s for background tasks, cancels scheduled tasks, closes Matrix client)

@@ -12,25 +12,25 @@ import secrets
 import subprocess
 import sys
 from collections.abc import Mapping
-from contextlib import redirect_stderr, redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout, suppress
 from dataclasses import dataclass, replace
 from pathlib import Path
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Annotated, Any, Literal, cast
 
-import yaml
 from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Request
 from pydantic import BaseModel, Field, ValidationError
 
-from mindroom import constants
-from mindroom.api import sandbox_env_assembly, sandbox_exec, sandbox_protocol, sandbox_worker_prep
+from mindroom import constants, shell_supervisor
+from mindroom.api import sandbox_env_assembly, sandbox_exec, sandbox_forkserver, sandbox_protocol, sandbox_worker_prep
 from mindroom.api.worker_responses import (
     SandboxWorkerCleanupResponse,
     SandboxWorkerListResponse,
     serialize_sandbox_worker_response,
 )
-from mindroom.attachments import normalize_attachment_id
+from mindroom.attachment_ids import normalize_attachment_id
 from mindroom.config.main import Config, load_config, normalized_config_data
+from mindroom.config.yaml_includes import load_yaml_config_source
 from mindroom.credentials import CredentialsManager, get_runtime_credentials_manager, load_scoped_credentials
 from mindroom.logging_config import get_logger
 from mindroom.oauth.providers import OAuthConnectionRequired, oauth_connection_required_payload
@@ -41,6 +41,7 @@ from mindroom.runtime_env_policy import (
     sandbox_runner_startup_process_env,
 )
 from mindroom.runtime_resolution import resolve_agent_runtime
+from mindroom.shell_execution import DEFAULT_RUN_TIMEOUT_SECONDS
 from mindroom.tool_system.catalog import (
     TOOL_METADATA,
     ToolConfigOverrideError,
@@ -83,6 +84,7 @@ logger = get_logger(__name__)
 
 _SUBPROCESS_WORKER_ARG = "--sandbox-subprocess-worker"
 _WORKSPACE_ENV_HOOK_TOOL_NAMES = frozenset({"shell", "python"})
+_SHELL_DISPATCH_TIMEOUT_GRACE_SECONDS = 30.0
 _STARTUP_RUNTIME_PATHS_JSON_ENV = "MINDROOM_RUNTIME_PATHS_JSON"
 
 
@@ -122,6 +124,7 @@ def _startup_runtime_paths_from_env() -> RuntimePaths:
     startup_runtime_paths, _tool_validation_snapshot = _startup_runtime_payload_from_env()
     credentials_encryption_key = _startup_secret_from_env(CREDENTIALS_ENCRYPTION_KEY_ENV)
     process_env = dict(startup_runtime_paths.process_env)
+    process_env.pop(constants.CONTROL_STATE_PATH_ENV, None)
     if credentials_encryption_key is not None:
         process_env[CREDENTIALS_ENCRYPTION_KEY_ENV] = credentials_encryption_key
     if sandbox_exec.runner_uses_dedicated_worker(startup_runtime_paths):
@@ -149,14 +152,18 @@ def _startup_runtime_paths_from_env() -> RuntimePaths:
         storage_path=storage_path,
         process_env=process_env,
     )
+    resolved_process_env = dict(resolved_runtime_paths.process_env)
+    resolved_process_env.pop(constants.CONTROL_STATE_PATH_ENV, None)
     env_file_values = dict(startup_runtime_paths.env_file_values)
     env_file_values.update(resolved_runtime_paths.env_file_values)
+    env_file_values.pop(constants.CONTROL_STATE_PATH_ENV, None)
     return constants.RuntimePaths(
         config_path=resolved_runtime_paths.config_path,
         config_dir=resolved_runtime_paths.config_dir,
         env_path=resolved_runtime_paths.env_path,
         storage_root=resolved_runtime_paths.storage_root,
-        process_env=resolved_runtime_paths.process_env,
+        control_state_root=None,
+        process_env=MappingProxyType(resolved_process_env),
         env_file_values=MappingProxyType(env_file_values),
     )
 
@@ -226,8 +233,9 @@ def _runtime_config_or_empty(runtime_paths: RuntimePaths) -> Config:
 
 def _dedicated_worker_runtime_config_or_empty(runtime_paths: RuntimePaths) -> Config:
     """Return dedicated-worker config, tolerating plugins unavailable in that worker image."""
-    with runtime_paths.config_path.open() as f:
-        data = yaml.safe_load(f) or {}
+    # The authored config may be split across !include files; a plain
+    # yaml.safe_load crashes the worker on the include tags.
+    data, _config_source_files = load_yaml_config_source(runtime_paths.config_path)
 
     tool_validation_snapshot = _upstream_tool_validation_snapshot(runtime_paths)
     if not tool_validation_snapshot:
@@ -528,6 +536,7 @@ class _PreparedSandboxSubprocessContext:
     python_executable: str | None
     subprocess_env: dict[str, str] | None
     subprocess_cwd: str | None
+    template_env: dict[str, str] | None
 
 
 def _app_context(app: FastAPI) -> _SandboxRunnerContext:
@@ -1003,10 +1012,10 @@ def _prepare_execute_request(
 def _prepare_subprocess_context(
     prepared_request: _PreparedSandboxRequestContext,
 ) -> _PreparedSandboxSubprocessContext:
-    python_executable, subprocess_env, subprocess_cwd = sandbox_exec.resolve_subprocess_worker_context(
+    python_executable, template_env, subprocess_cwd = sandbox_exec.resolve_subprocess_worker_context(
         prepared_request.prepared_worker.paths if prepared_request.prepared_worker is not None else None,
     )
-    subprocess_env = sandbox_exec.subprocess_env_for_request(subprocess_env, prepared_request.execution_env)
+    subprocess_env = sandbox_exec.subprocess_env_for_request(template_env, prepared_request.execution_env)
     if workspace := prepared_request.execution_env.get("MINDROOM_AGENT_WORKSPACE"):
         workspace_path = Path(workspace).expanduser().resolve()
         if not sandbox_exec.runner_uses_dedicated_worker(prepared_request.runtime_paths):
@@ -1016,6 +1025,7 @@ def _prepare_subprocess_context(
         python_executable=python_executable,
         subprocess_env=subprocess_env,
         subprocess_cwd=subprocess_cwd,
+        template_env=template_env,
     )
 
 
@@ -1160,6 +1170,69 @@ def _parse_subprocess_response(
     return _subprocess_failure_response(request, "Sandbox subprocess returned an invalid response.", runtime_paths)
 
 
+def _execute_request_forkserver(
+    request: SandboxRunnerExecuteRequest,
+    runtime_paths: RuntimePaths,
+    *,
+    subprocess_context: _PreparedSandboxSubprocessContext,
+    envelope: str,
+    timeout_seconds: float,
+) -> SandboxRunnerExecuteResponse | None:
+    """Dispatch one prepared request via the warm template; None means fall back to spawn-per-call."""
+    try:
+        completed = sandbox_forkserver.get_sandbox_forkserver().execute(
+            python_executable=subprocess_context.python_executable,
+            template_env=subprocess_context.template_env,
+            request_env=subprocess_context.subprocess_env,
+            request_cwd=subprocess_context.subprocess_cwd,
+            envelope=envelope,
+            timeout_seconds=timeout_seconds,
+        )
+    except sandbox_forkserver.ForkserverTimeoutError:
+        return _subprocess_failure_response(request, "Sandbox subprocess timed out.", runtime_paths)
+    except sandbox_forkserver.ForkserverStartupError as exc:
+        # The warm template could not start; fall back to spawn-per-call so
+        # tool calls keep working at the old per-request import cost.
+        logger.warning("sandbox_forkserver_fallback_to_spawn", error=str(exc))
+        return None
+    except sandbox_forkserver.ForkserverError as exc:
+        return _subprocess_failure_response(request, str(exc), runtime_paths)
+    return _parse_subprocess_response(request, runtime_paths, completed)
+
+
+def _shell_run_timeout_seconds(prepared: PreparedSandboxRunnerExecuteRequest) -> float:
+    """Return the foreground wait requested by one run_shell_command call."""
+    if prepared.function_name != "run_shell_command":
+        return 0.0
+    raw_timeout = prepared.kwargs.get("timeout", DEFAULT_RUN_TIMEOUT_SECONDS)
+    try:
+        return max(0.0, float(raw_timeout))
+    except (TypeError, ValueError):
+        return float(DEFAULT_RUN_TIMEOUT_SECONDS)
+
+
+def _shell_subprocess_dispatch_context(
+    prepared: PreparedSandboxRunnerExecuteRequest,
+    subprocess_context: _PreparedSandboxSubprocessContext,
+    timeout_seconds: float,
+) -> tuple[_PreparedSandboxSubprocessContext, float]:
+    """Attach the shell supervisor socket and cover the shell timeout in the budget.
+
+    Background shell handles live in the runner's long-lived supervisor
+    process, so the per-request subprocess only relays the call. Its budget
+    must outlast the shell command's own foreground timeout or the runner
+    would kill the relay (and with it the supervised command) mid-wait.
+    """
+    socket_path = shell_supervisor.ensure_shell_supervisor()
+    subprocess_env = dict(subprocess_context.subprocess_env or {})
+    subprocess_env[shell_supervisor.SHELL_SUPERVISOR_SOCKET_ENV] = socket_path
+    timeout_seconds = max(
+        timeout_seconds,
+        _shell_run_timeout_seconds(prepared) + _SHELL_DISPATCH_TIMEOUT_GRACE_SECONDS,
+    )
+    return replace(subprocess_context, subprocess_env=subprocess_env), timeout_seconds
+
+
 def _execute_request_subprocess_sync(
     request: SandboxRunnerExecuteRequest,
     runtime_paths: RuntimePaths,
@@ -1186,6 +1259,27 @@ def _execute_request_subprocess_sync(
         request=prepared_request.request.model_dump(mode="json"),
         runtime_paths=constants.serialize_runtime_paths(prepared_request.runtime_paths),
     )
+    timeout_seconds = sandbox_exec.runner_subprocess_timeout_seconds(runtime_paths)
+    if prepared_request.request.tool_name == "shell":
+        try:
+            subprocess_context, timeout_seconds = _shell_subprocess_dispatch_context(
+                prepared_request.request,
+                subprocess_context,
+                timeout_seconds,
+            )
+        except shell_supervisor.ShellSupervisorStartupError as exc:
+            return _subprocess_failure_response(request, str(exc), runtime_paths)
+
+    if sandbox_exec.runner_uses_forkserver(runtime_paths) and sandbox_forkserver.forkserver_supported():
+        forkserver_response = _execute_request_forkserver(
+            request,
+            runtime_paths,
+            subprocess_context=subprocess_context,
+            envelope=envelope,
+            timeout_seconds=timeout_seconds,
+        )
+        if forkserver_response is not None:
+            return forkserver_response
 
     try:
         completed = subprocess.run(
@@ -1196,7 +1290,7 @@ def _execute_request_subprocess_sync(
             input=envelope,
             capture_output=True,
             text=True,
-            timeout=sandbox_exec.runner_subprocess_timeout_seconds(runtime_paths),
+            timeout=timeout_seconds,
             check=False,
             env=subprocess_context.subprocess_env,
             cwd=subprocess_context.subprocess_cwd,
@@ -1228,57 +1322,63 @@ async def _execute_request_subprocess(
     )
 
 
-def _run_subprocess_worker() -> int:
-    payload = sys.stdin.read()
+def _run_subprocess_worker_payload(payload: str) -> tuple[int, str, str]:
+    """Execute one serialized envelope; return (exit_code, tool_output, marked_response)."""
     if not payload.strip():
-        print(
-            sandbox_protocol.response_marker_payload(
-                SandboxRunnerExecuteResponse(
-                    ok=False,
-                    error="Sandbox subprocess received empty payload.",
-                    failure_kind="worker",
-                ).model_dump_json(),
-            ),
-            file=sys.stderr,
+        response = SandboxRunnerExecuteResponse(
+            ok=False,
+            error="Sandbox subprocess received empty payload.",
+            failure_kind="worker",
         )
-        return 1
+        return 1, "", sandbox_protocol.response_marker_payload(response.model_dump_json())
 
     try:
         envelope = sandbox_protocol.parse_subprocess_envelope(payload)
         request = PreparedSandboxRunnerExecuteRequest.model_validate(envelope.request)
     except ValidationError as exc:
-        print(
-            sandbox_protocol.response_marker_payload(
-                SandboxRunnerExecuteResponse(
-                    ok=False,
-                    error=f"Sandbox subprocess payload validation failed: {exc}",
-                    failure_kind="worker",
-                ).model_dump_json(),
-            ),
-            file=sys.stderr,
+        response = SandboxRunnerExecuteResponse(
+            ok=False,
+            error=f"Sandbox subprocess payload validation failed: {exc}",
+            failure_kind="worker",
         )
-        return 1
+        return 1, "", sandbox_protocol.response_marker_payload(response.model_dump_json())
     runtime_paths = constants.deserialize_runtime_paths(envelope.runtime_paths)
     config = _runtime_config_or_empty(runtime_paths)
 
     # Redirect stdout/stderr during tool execution so tool output doesn't
-    # interfere with the protocol marker we write to stderr afterwards.
+    # interfere with the protocol marker in the returned response text.
     captured_out = io.StringIO()
     captured_err = io.StringIO()
     with redirect_stdout(captured_out), redirect_stderr(captured_err):
         response = asyncio.run(_execute_prepared_request_inprocess(request, runtime_paths, config))
 
-    # Flush captured tool output to real stdout/stderr (informational only).
-    tool_stdout = captured_out.getvalue()
-    if tool_stdout:
-        sys.stdout.write(tool_stdout)
-    tool_stderr = captured_err.getvalue()
-    if tool_stderr:
-        sys.stdout.write(tool_stderr)
+    tool_output = captured_out.getvalue() + captured_err.getvalue()
+    return 0, tool_output, sandbox_protocol.response_marker_payload(response.model_dump_json())
 
-    # Write the response JSON to stderr after the marker.
-    print(sandbox_protocol.response_marker_payload(response.model_dump_json()), file=sys.stderr)
-    return 0
+
+def _run_subprocess_worker() -> int:
+    exit_code, tool_output, marked_response = _run_subprocess_worker_payload(sys.stdin.read())
+    # Flush captured tool output to real stdout (informational only), then
+    # write the response JSON to stderr after the marker.
+    if tool_output:
+        sys.stdout.write(tool_output)
+    print(marked_response, file=sys.stderr)
+    return exit_code
+
+
+def _run_forkserver_template() -> int:
+    """Serve warm forkserver requests from an already-imported runtime template."""
+    socket_path = sys.argv[sys.argv.index(sandbox_forkserver.TEMPLATE_ARG) + 1]
+    # Pre-warm the full tool import graph once so fork children skip it; this
+    # belongs to template startup, not to importing this module.
+    import mindroom.tools  # noqa: F401, PLC0415
+
+    # `python -m` prepended the runner's cwd to sys.path at template startup;
+    # fork children prepend their own request cwd instead, matching what a
+    # spawn-per-call child started in that cwd would see.
+    with suppress(ValueError):
+        sys.path.remove(str(Path.cwd()))
+    return sandbox_forkserver.serve_template(socket_path, _run_subprocess_worker_payload)
 
 
 @router.post("/leases", response_model=SandboxRunnerLeaseResponse)
@@ -1502,10 +1602,7 @@ async def execute_tool_call(
             if exc.failure_kind == "worker":
                 return SandboxRunnerExecuteResponse(ok=False, error=str(exc), failure_kind="worker")
             raise HTTPException(status_code=400, detail=str(exc)) from exc
-    # Shell background handles live in the long-lived runner process, so shell
-    # must stay on the in-process path even when the runner defaults to
-    # per-request subprocess execution.
-    if payload.tool_name != "shell" and sandbox_exec.runner_uses_subprocess(runtime_paths):
+    if sandbox_exec.runner_uses_subprocess(runtime_paths):
         return await _execute_request_subprocess(
             payload,
             runtime_paths,
@@ -1526,7 +1623,7 @@ async def execute_tool_call(
     # Worker-routed execution stays on the subprocess path so the per-worker
     # virtualenv and worker-specific process environment remain authoritative,
     # even when this pod is itself a dedicated worker runtime.
-    if payload.tool_name != "shell" and payload.worker_key is not None:
+    if payload.worker_key is not None:
         return await _execute_request_subprocess(
             payload,
             runtime_paths,
@@ -1545,3 +1642,5 @@ async def execute_tool_call(
 if __name__ == "__main__":
     if _SUBPROCESS_WORKER_ARG in sys.argv:
         raise SystemExit(_run_subprocess_worker())
+    if sandbox_forkserver.TEMPLATE_ARG in sys.argv:
+        raise SystemExit(_run_forkserver_template())

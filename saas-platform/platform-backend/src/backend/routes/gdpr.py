@@ -10,6 +10,12 @@ from fastapi import APIRouter, Depends
 from pydantic import BaseModel
 
 from backend.deps import ensure_supabase, verify_user
+from backend.models import (
+    GdprCancelDeletionResponse,
+    GdprConsentResponse,
+    GdprDeletionResponse,
+    GdprExportResponse,
+)
 from backend.services import instances_data
 
 router = APIRouter()
@@ -28,7 +34,7 @@ class DeletionRequest(BaseModel):
     confirmation: bool = False
 
 
-@router.get("/my/gdpr/export-data")
+@router.get("/my/gdpr/export-data", response_model=GdprExportResponse)
 async def export_user_data(user: Annotated[dict, Depends(verify_user)]) -> dict[str, Any]:
     """
     Export all user data for GDPR compliance.
@@ -104,7 +110,7 @@ async def export_user_data(user: Annotated[dict, Depends(verify_user)]) -> dict[
     }
 
 
-@router.post("/my/gdpr/request-deletion")
+@router.post("/my/gdpr/request-deletion", response_model=GdprDeletionResponse)
 async def request_account_deletion(
     user: Annotated[dict, Depends(verify_user)], request: DeletionRequest
 ) -> dict[str, Any]:
@@ -152,7 +158,7 @@ async def request_account_deletion(
     }
 
 
-@router.post("/my/gdpr/consent")
+@router.post("/my/gdpr/consent", response_model=GdprConsentResponse)
 async def update_consent(user: Annotated[dict, Depends(verify_user)], consent: ConsentUpdate) -> dict[str, Any]:
     """
     Update user consent preferences for GDPR compliance.
@@ -195,7 +201,7 @@ async def update_consent(user: Annotated[dict, Depends(verify_user)], consent: C
     }
 
 
-@router.post("/my/gdpr/cancel-deletion")
+@router.post("/my/gdpr/cancel-deletion", response_model=GdprCancelDeletionResponse)
 async def cancel_account_deletion(user: Annotated[dict, Depends(verify_user)]) -> dict[str, Any]:
     """
     Cancel a pending account deletion request.

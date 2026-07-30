@@ -3,25 +3,11 @@
 import { useEffect, useState } from 'react'
 import { createClient } from '@/lib/supabase/client'
 import { useAuth } from './useAuth'
-import { listInstances, restartInstance as apiRestartInstance } from '@/lib/api'
+import { listInstances, restartInstance as apiRestartInstance, type Instance } from '@/lib/api'
 import { instanceCache } from '@/lib/cache'
 import { logger } from '@/lib/logger'
 
-export interface Instance {
-  id: string // UUID
-  instance_id: number | string
-  subscription_id: string
-  subdomain: string
-  status: 'provisioning' | 'running' | 'failed' | 'stopped' | 'error' | 'deprovisioned' | 'restarting'
-  frontend_url: string | null
-  backend_url: string | null
-  created_at: string
-  updated_at: string
-  tier?: string
-  matrix_server_url?: string | null
-  kubernetes_synced_at?: string | null
-  status_hint?: string | null
-}
+export type { Instance }
 
 // Development-only mock instance
 const DEV_INSTANCE: Instance | null =

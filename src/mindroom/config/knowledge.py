@@ -112,6 +112,14 @@ class KnowledgeBaseConfig(BaseModel):
         default_factory=list,
         description="Optional root-anchored glob patterns to exclude after include filtering",
     )
+    skip_hidden: bool = Field(
+        default=True,
+        description=(
+            "Skip hidden files/folders (paths with components starting with '.') during indexing; "
+            "writers that update knowledge folders in place use dot-prefixed temp files. "
+            "Git-backed bases ignore this field and use git.skip_hidden instead"
+        ),
+    )
     git: KnowledgeGitConfig | None = Field(
         default=None,
         description="Optional Git sync configuration for this knowledge base",

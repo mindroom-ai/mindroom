@@ -13,6 +13,7 @@ from mindroom.bot import AgentBot, create_bot_for_entity
 from mindroom.config.main import Config
 from mindroom.matrix.presence import is_user_online, should_use_streaming
 from mindroom.matrix.users import AgentMatrixUser
+from mindroom.response_runner import ResponseRequest
 from tests.conftest import (
     bind_runtime_paths,
     delivered_matrix_event,
@@ -306,8 +307,6 @@ class TestBotIntegration:
             _client: object,
             _room_id: str,
             content: dict,
-            *,
-            config: Config,
         ) -> object:
             assert config is expected_config
             return delivered_matrix_event("$stream", content)
@@ -318,8 +317,6 @@ class TestBotIntegration:
             _event_id: str,
             content: dict,
             _display_text: str,
-            *,
-            config: Config,
         ) -> object:
             assert config is expected_config
             return delivered_matrix_event("$edit", content)
@@ -329,17 +326,19 @@ class TestBotIntegration:
             patch("mindroom.streaming.send_message_result", side_effect=mock_send_message_result),
             patch("mindroom.streaming.edit_message_result", side_effect=mock_edit_message_result),
         ):
-            await bot._generate_response(
-                prompt="Hello bot",
-                thread_history=[],
-                user_id="@user:localhost",
-                response_envelope=request_envelope(
-                    room_id="!test:localhost",
-                    reply_to_event_id="$msg123",
-                    thread_id="$thread123",
+            await bot._response_runner.generate_response(
+                ResponseRequest(
                     prompt="Hello bot",
+                    thread_history=[],
                     user_id="@user:localhost",
-                    agent_name="test_agent",
+                    response_envelope=request_envelope(
+                        room_id="!test:localhost",
+                        reply_to_event_id="$msg123",
+                        thread_id="$thread123",
+                        prompt="Hello bot",
+                        user_id="@user:localhost",
+                        agent_name="test_agent",
+                    ),
                 ),
             )
 
@@ -396,17 +395,19 @@ class TestBotIntegration:
         install_runtime_cache_support(bot)
 
         # Simulate a message from a user
-        await bot._generate_response(
-            prompt="Hello bot",
-            thread_history=[],
-            user_id="@user:localhost",
-            response_envelope=request_envelope(
-                room_id="!test:localhost",
-                reply_to_event_id="$msg123",
-                thread_id="$thread123",
+        await bot._response_runner.generate_response(
+            ResponseRequest(
                 prompt="Hello bot",
+                thread_history=[],
                 user_id="@user:localhost",
-                agent_name="test_agent",
+                response_envelope=request_envelope(
+                    room_id="!test:localhost",
+                    reply_to_event_id="$msg123",
+                    thread_id="$thread123",
+                    prompt="Hello bot",
+                    user_id="@user:localhost",
+                    agent_name="test_agent",
+                ),
             ),
         )
 

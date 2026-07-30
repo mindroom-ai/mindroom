@@ -5,21 +5,7 @@ import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { InstanceCard } from '../InstanceCard'
 import { provisionInstance } from '@/lib/api'
-
-// Define the Instance type
-type Instance = {
-  instance_id: number
-  account_id: string
-  status: 'running' | 'provisioning' | 'stopped' | 'error' | 'failed'
-  frontend_url: string | null
-  backend_url: string | null
-  matrix_server_url: string | null
-  tier: string | null
-  created_at: string
-  updated_at: string
-  kubernetes_synced_at?: string | null
-  status_hint?: string | null
-}
+import type { Instance } from '@/hooks/useInstance'
 
 // Mock the API
 jest.mock('@/lib/api', () => ({
@@ -80,8 +66,9 @@ describe('InstanceCard - Simplified Tests', () => {
 
   describe('When instance exists', () => {
     const mockInstance: Instance = {
+      id: 'inst-1',
       instance_id: 1,
-      account_id: 'acc-123',
+      subscription_id: 'sub-123',
       status: 'running',
       frontend_url: 'https://customer.mindroom.chat',
       backend_url: 'https://customer.api.mindroom.chat',
@@ -188,8 +175,9 @@ describe('InstanceCard - Simplified Tests', () => {
 
   describe('Relative time formatting', () => {
     const mockInstance: Instance = {
+      id: 'inst-1',
       instance_id: 1,
-      account_id: 'acc-123',
+      subscription_id: 'sub-123',
       status: 'running',
       frontend_url: null,
       backend_url: null,

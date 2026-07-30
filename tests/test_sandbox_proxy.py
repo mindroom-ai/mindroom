@@ -44,6 +44,7 @@ from mindroom.constants import (
 )
 from mindroom.credentials import get_runtime_credentials_manager, save_scoped_credentials
 from mindroom.hooks import HookRegistry
+from mindroom.message_target import MessageTarget
 from mindroom.runtime_env_policy import VENDOR_TELEMETRY_ENV_VALUES
 from mindroom.tool_system.metadata import (
     TOOL_METADATA,
@@ -55,11 +56,11 @@ from mindroom.tool_system.metadata import (
     ToolMetadata,
     ToolValidationInfo,
     get_tool_by_name,
-    register_tool_with_metadata,
     resolved_tool_validation_snapshot_for_runtime,
     serialize_tool_validation_snapshot,
 )
 from mindroom.tool_system.output_files import OUTPUT_PATH_ARGUMENT
+from mindroom.tool_system.registration import register_tool_with_metadata
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context, worker_progress_pump_scope
 from mindroom.tool_system.tool_hooks import build_tool_hook_bridge, prepend_tool_hook_bridge
 from mindroom.tool_system.worker_proxy_client import WorkerProxyClientConfig, execute_worker_proxy_request
@@ -439,6 +440,108 @@ def test_worker_proxy_client_records_worker_success() -> None:
     assert captured["timeout"] == 7.0
     assert manager.touched == ["agent:test"]
     assert manager.failures == []
+
+
+def _run_worker_proxy_request_with_exception(
+    exception_factory: Callable[[httpx.Request], Exception],
+) -> _TrackingWorkerManager:
+    manager = _TrackingWorkerManager()
+    handle = WorkerHandle(
+        worker_id="worker-1",
+        worker_key="agent:test",
+        endpoint="http://worker/api/sandbox-runner/execute",
+        auth_token=_TEST_AUTH_TOKEN,
+        status="ready",
+        backend_name="kubernetes",
+        last_used_at=0.0,
+        created_at=0.0,
+    )
+
+    class _TimeoutClient:
+        def __init__(self, *, timeout: float) -> None:
+            _ = timeout
+
+        def __enter__(self) -> Self:
+            return self
+
+        def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+            return
+
+        def post(self, url: str, *, json: dict[str, Any], headers: dict[str, str]) -> _FakeResponse:
+            _ = json, headers
+            request = httpx.Request("POST", url)
+            raise exception_factory(request)
+
+    with pytest.raises(httpx.TransportError):
+        execute_worker_proxy_request(
+            config=WorkerProxyClientConfig(
+                proxy_url=None,
+                proxy_token=None,
+                proxy_timeout_seconds=7.0,
+                credential_lease_ttl_seconds=60,
+                credential_policy={},
+            ),
+            payload={"tool_name": "shell", "function_name": "run_shell_command"},
+            credentials_manager=None,
+            tool_name="shell",
+            function_name="run_shell_command",
+            worker_target=None,
+            worker_handle=handle,
+            worker_manager=manager,
+            client_factory=_TimeoutClient,
+        )
+
+    return manager
+
+
+@pytest.mark.parametrize(
+    "exception_factory",
+    [
+        lambda request: httpx.ConnectError("[Errno 110] Connection timed out", request=request),
+        lambda request: httpx.ReadTimeout("timed out", request=request),
+        lambda request: httpx.WriteTimeout("timed out", request=request),
+    ],
+)
+def test_worker_proxy_transport_timeout_keeps_ready_worker_alive(
+    exception_factory: Callable[[httpx.Request], Exception],
+) -> None:
+    """A transient proxy transport timeout must not evict the shared worker for sibling streams."""
+    manager = _run_worker_proxy_request_with_exception(exception_factory)
+
+    assert manager.touched == ["agent:test"]
+    assert manager.failures == []
+
+
+@pytest.mark.parametrize(
+    ("exception_factory", "failure_reason"),
+    [
+        (
+            lambda request: httpx.ConnectError("connection refused", request=request),
+            "connection refused",
+        ),
+        (
+            lambda request: httpx.RemoteProtocolError("malformed worker response", request=request),
+            "malformed worker response",
+        ),
+        (
+            lambda request: httpx.ReadError("worker read failed", request=request),
+            "worker read failed",
+        ),
+        (
+            lambda request: httpx.WriteError("worker write failed", request=request),
+            "worker write failed",
+        ),
+    ],
+)
+def test_worker_proxy_malformed_transport_errors_record_worker_failure(
+    exception_factory: Callable[[httpx.Request], Exception],
+    failure_reason: str,
+) -> None:
+    """Malformed proxy transport failures must evict the broken shared worker."""
+    manager = _run_worker_proxy_request_with_exception(exception_factory)
+
+    assert manager.touched == []
+    assert manager.failures == [("agent:test", failure_reason)]
 
 
 class _MinimalModel(Model):
@@ -2248,6 +2351,36 @@ async def test_proxy_shell_path_prepend_survives_sandbox_runner_rebuild(
     assert result.endswith("/usr/local/bin:/usr/bin:/bin")
 
 
+def test_dedicated_worker_runtime_config_resolves_include_tags(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Dedicated workers must load configs split across !include files."""
+    (tmp_path / "models.yaml").write_text(
+        "default:\n  provider: openai\n  id: gpt-5.4\n",
+        encoding="utf-8",
+    )
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "models: !include models.yaml\nagents: {}\nrouter:\n  model: default\n",
+        encoding="utf-8",
+    )
+    runtime_paths = resolve_runtime_paths(
+        config_path=config_path,
+        storage_path=config_path.parent / "storage",
+        process_env={},
+    )
+    monkeypatch.setattr(
+        sandbox_runner_module,
+        "_upstream_tool_validation_snapshot",
+        lambda _runtime_paths: {"shell": object()},
+    )
+
+    config = sandbox_runner_module._dedicated_worker_runtime_config_or_empty(runtime_paths)
+
+    assert config.models["default"].id == "gpt-5.4"
+
+
 @pytest.mark.asyncio
 async def test_inprocess_runner_shell_uses_request_scoped_extra_env_snapshot(
     monkeypatch: pytest.MonkeyPatch,
@@ -2682,9 +2815,11 @@ def test_proxy_worker_routed_lease_skips_non_grantable_shared_credentials(
 
     runtime_context = ToolRuntimeContext(
         agent_name="code",
-        room_id="!room:example.org",
-        thread_id="$thread",
-        resolved_thread_id="$thread",
+        target=MessageTarget.resolve(
+            room_id="!room:example.org",
+            thread_id="$thread",
+            reply_to_event_id=None,
+        ),
         requester_id="@alice:example.org",
         client=object(),
         config=Config(
@@ -2777,9 +2912,11 @@ def test_proxy_includes_worker_routing_identity(monkeypatch: pytest.MonkeyPatch)
 
     runtime_context = ToolRuntimeContext(
         agent_name="code",
-        room_id="!room:example.org",
-        thread_id="$thread",
-        resolved_thread_id="$thread",
+        target=MessageTarget.resolve(
+            room_id="!room:example.org",
+            thread_id="$thread",
+            reply_to_event_id=None,
+        ),
         requester_id="alice",
         client=object(),
         config=Config(
@@ -2885,9 +3022,11 @@ def test_proxy_user_agent_shared_agent_sends_explicit_empty_private_visibility(
 
     runtime_context = ToolRuntimeContext(
         agent_name="code",
-        room_id="!room:example.org",
-        thread_id="$thread",
-        resolved_thread_id="$thread",
+        target=MessageTarget.resolve(
+            room_id="!room:example.org",
+            thread_id="$thread",
+            reply_to_event_id=None,
+        ),
         requester_id="alice",
         client=object(),
         config=Config(
@@ -4160,9 +4299,11 @@ def test_get_worker_manager_passes_committed_snapshot_from_tool_runtime_context(
 
     runtime_context = ToolRuntimeContext(
         agent_name="code",
-        room_id="!room:example.org",
-        thread_id=None,
-        resolved_thread_id=None,
+        target=MessageTarget.resolve(
+            room_id="!room:example.org",
+            thread_id=None,
+            reply_to_event_id=None,
+        ),
         requester_id="@user:example.org",
         client=object(),
         config=runtime_config,
@@ -4208,9 +4349,11 @@ def test_get_worker_manager_reuses_cached_kubernetes_validation_snapshot(
 
     runtime_context = ToolRuntimeContext(
         agent_name="code",
-        room_id="!room:example.org",
-        thread_id=None,
-        resolved_thread_id=None,
+        target=MessageTarget.resolve(
+            room_id="!room:example.org",
+            thread_id=None,
+            reply_to_event_id=None,
+        ),
         requester_id="@user:example.org",
         client=object(),
         config=runtime_config,
@@ -4298,9 +4441,11 @@ def test_proxy_leases_worker_manager_with_committed_runtime_context(
 
     runtime_context = ToolRuntimeContext(
         agent_name="code",
-        room_id="!room:example.org",
-        thread_id=None,
-        resolved_thread_id=None,
+        target=MessageTarget.resolve(
+            room_id="!room:example.org",
+            thread_id=None,
+            reply_to_event_id=None,
+        ),
         requester_id="@user:example.org",
         client=object(),
         config=runtime_config,
@@ -4487,9 +4632,11 @@ async def test_kubernetes_backend_misconfiguration_raises_instead_of_running_loc
 
     runtime_context = ToolRuntimeContext(
         agent_name="code",
-        room_id="!room:example.org",
-        thread_id=None,
-        resolved_thread_id=None,
+        target=MessageTarget.resolve(
+            room_id="!room:example.org",
+            thread_id=None,
+            reply_to_event_id=None,
+        ),
         requester_id="@user:example.org",
         client=object(),
         config=runtime_config,
@@ -5205,9 +5352,11 @@ async def test_docker_backend_misconfiguration_raises_instead_of_running_locally
 
     runtime_context = ToolRuntimeContext(
         agent_name="code",
-        room_id="!room:example.org",
-        thread_id=None,
-        resolved_thread_id=None,
+        target=MessageTarget.resolve(
+            room_id="!room:example.org",
+            thread_id=None,
+            reply_to_event_id=None,
+        ),
         requester_id="@user:example.org",
         client=object(),
         config=runtime_config,
@@ -5485,14 +5634,24 @@ class TestWorkerToolsOverride:
 
     @pytest.mark.parametrize(
         "tool_name",
-        ["gmail", "google_calendar", "google_drive", "google_sheets", "homeassistant"],
+        [
+            "callback_manager",
+            "desktop",
+            "gmail",
+            "google_calendar",
+            "google_docs",
+            "google_drive",
+            "google_sheets",
+            "homeassistant",
+            "todo",
+        ],
     )
     def test_local_only_tools_never_proxy(
         self,
         monkeypatch: pytest.MonkeyPatch,
         tool_name: str,
     ) -> None:
-        """Shared integrations marked local-only should stay in the primary runtime."""
+        """Tools marked local-only should stay in the primary runtime."""
         runtime_paths = _configure_proxy_runtime(
             monkeypatch,
             proxy_url="http://sandbox:8765",
@@ -5514,6 +5673,23 @@ class TestWorkerToolsOverride:
                 worker_tools_override=[tool_name],
             )
             is False
+        )
+
+    def test_browser_can_still_use_explicit_worker_routing(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Host-browser isolation must not be disabled by the optional Matrix desktop target."""
+        runtime_paths = _configure_proxy_runtime(
+            monkeypatch,
+            proxy_url="http://sandbox:8765",
+            execution_mode="all",
+        )
+
+        assert (
+            sandbox_proxy_module._sandbox_proxy_enabled_for_tool(
+                "browser",
+                runtime_paths=runtime_paths,
+                worker_tools_override=["browser"],
+            )
+            is True
         )
 
     def test_get_tool_by_name_keeps_homeassistant_local_even_when_listed(

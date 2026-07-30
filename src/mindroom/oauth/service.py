@@ -8,20 +8,35 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, cast
 from urllib.parse import urlencode, urlparse
 
-from mindroom.oauth.providers import OAuthClaimValidationError, OAuthProviderError, OAuthTokenResult
+from mindroom.credentials import load_scoped_credentials, save_scoped_credentials, scoped_credentials_path
+from mindroom.file_locks import async_exclusive_file_lock
+from mindroom.logging_config import get_logger
+from mindroom.oauth.providers import (
+    OAuthClaimValidationError,
+    OAuthProviderError,
+    OAuthTokenResult,
+    oauth_connect_url_requires_host_browser,
+)
 from mindroom.oauth.state import consume_opaque_oauth_state, issue_opaque_oauth_state, read_opaque_oauth_state
 
 if TYPE_CHECKING:
+    from collections.abc import Collection, Mapping
+    from pathlib import Path
+
     from mindroom.constants import RuntimePaths
+    from mindroom.credentials import CredentialsManager
     from mindroom.oauth.providers import OAuthClientConfig, OAuthProvider
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
 
 _OAUTH_CONNECT_TOKEN_TTL_SECONDS = 600
 _OAUTH_CONNECT_TOKEN_KIND = "conversation_oauth_connect"  # noqa: S105
 _OAUTH_ACCESS_TOKEN_EXPIRY_SKEW_SECONDS = 60
+_RECOVERABLE_REFRESH_ERROR_CODES = frozenset({"invalid_grant", "invalid_refresh_token"})
+logger = get_logger(__name__)
 _GOOGLE_SERVICE_ACCOUNT_PROVIDER_IDS = frozenset(
     {
         "google_calendar",
+        "google_docs",
         "google_drive",
         "google_gmail",
         "google_sheets",
@@ -29,7 +44,13 @@ _GOOGLE_SERVICE_ACCOUNT_PROVIDER_IDS = frozenset(
 )
 _SCOPE_IMPLICATIONS = {
     "https://www.googleapis.com/auth/calendar": frozenset(
-        {"https://www.googleapis.com/auth/calendar.readonly"},
+        {
+            "https://www.googleapis.com/auth/calendar.readonly",
+            "https://www.googleapis.com/auth/calendar.events",
+            "https://www.googleapis.com/auth/calendar.calendarlist.readonly",
+            "https://www.googleapis.com/auth/calendar.freebusy",
+            "https://www.googleapis.com/auth/calendar.settings.readonly",
+        },
     ),
     "https://www.googleapis.com/auth/drive": frozenset(
         {
@@ -38,12 +59,37 @@ _SCOPE_IMPLICATIONS = {
         },
     ),
     "https://www.googleapis.com/auth/gmail.modify": frozenset(
-        {"https://www.googleapis.com/auth/gmail.readonly"},
+        {
+            "https://www.googleapis.com/auth/gmail.readonly",
+            "https://www.googleapis.com/auth/gmail.compose",
+        },
     ),
     "https://www.googleapis.com/auth/spreadsheets": frozenset(
         {"https://www.googleapis.com/auth/spreadsheets.readonly"},
     ),
 }
+
+__all__ = [
+    "OAuthConnectTarget",
+    "OAuthCredentialsRefreshResult",
+    "build_oauth_connect_instruction",
+    "build_oauth_reconnect_instruction",
+    "consume_oauth_connect_token",
+    "lookup_oauth_connect_token",
+    "oauth_connect_url",
+    "oauth_credential_target_payload",
+    "oauth_credentials_have_required_scopes",
+    "oauth_credentials_have_scopes",
+    "oauth_credentials_match_client_id",
+    "oauth_credentials_satisfy_identity_policy",
+    "oauth_credentials_usable",
+    "oauth_provider_service_account_configured",
+    "oauth_success_redirect_url",
+    "refresh_scoped_oauth_credentials",
+    "refresh_scoped_oauth_credentials_with_result",
+    "sanitized_oauth_token_result",
+    "scoped_oauth_credentials_refresh_lock_path",
+]
 
 
 @dataclass(frozen=True)
@@ -56,6 +102,269 @@ class OAuthConnectTarget:
     worker_scope: str
     worker_key: str
     requester_id: str | None
+
+
+@dataclass(frozen=True)
+class OAuthCredentialsRefreshResult:
+    """Result of one locked scoped OAuth credential refresh attempt."""
+
+    credentials: dict[str, Any] | None
+    refreshed: bool
+    stale_retry_used: bool = False
+
+
+def scoped_oauth_credentials_refresh_lock_path(
+    service: str,
+    *,
+    credentials_manager: CredentialsManager,
+    worker_target: ResolvedWorkerTarget | None,
+) -> Path:
+    """Return the per-scope lock file for one OAuth credential refresh."""
+    credentials_path = scoped_credentials_path(
+        service,
+        credentials_manager=credentials_manager,
+        worker_target=worker_target,
+    )
+    return credentials_path.with_name(f"{credentials_path.name}.oauth-refresh.lock")
+
+
+async def refresh_scoped_oauth_credentials(
+    provider: OAuthProvider,
+    runtime_paths: RuntimePaths,
+    *,
+    credentials_manager: CredentialsManager,
+    worker_target: ResolvedWorkerTarget | None,
+    allowed_shared_services: frozenset[str] | None = None,
+) -> dict[str, Any] | None:
+    """Refresh one scoped OAuth credential under a per-scope advisory file lock."""
+    return (
+        await refresh_scoped_oauth_credentials_with_result(
+            provider,
+            runtime_paths,
+            credentials_manager=credentials_manager,
+            worker_target=worker_target,
+            allowed_shared_services=allowed_shared_services,
+        )
+    ).credentials
+
+
+async def refresh_scoped_oauth_credentials_with_result(
+    provider: OAuthProvider,
+    runtime_paths: RuntimePaths,
+    *,
+    credentials_manager: CredentialsManager,
+    worker_target: ResolvedWorkerTarget | None,
+    allowed_shared_services: frozenset[str] | None = None,
+) -> OAuthCredentialsRefreshResult:
+    """Refresh one scoped OAuth credential and report whether this call saved new credentials."""
+    lock_path = scoped_oauth_credentials_refresh_lock_path(
+        provider.credential_service,
+        credentials_manager=credentials_manager,
+        worker_target=worker_target,
+    )
+    async with async_exclusive_file_lock(lock_path):
+        credentials = load_scoped_credentials(
+            provider.credential_service,
+            credentials_manager=credentials_manager,
+            worker_target=worker_target,
+            allowed_shared_services=allowed_shared_services,
+        )
+        if credentials is None:
+            _log_oauth_refresh_skipped(provider, None, reason="missing_credentials", stale_retry_used=False)
+            return OAuthCredentialsRefreshResult(credentials=None, refreshed=False)
+        if not oauth_credentials_usable(provider, runtime_paths, credentials):
+            _log_oauth_refresh_skipped(provider, credentials, reason="unusable_credentials", stale_retry_used=False)
+            return OAuthCredentialsRefreshResult(credentials=credentials, refreshed=False)
+        return await _refresh_scoped_oauth_credentials_locked(
+            provider,
+            runtime_paths,
+            credentials=credentials,
+            credentials_manager=credentials_manager,
+            worker_target=worker_target,
+            allowed_shared_services=allowed_shared_services,
+        )
+
+
+async def _refresh_scoped_oauth_credentials_locked(
+    provider: OAuthProvider,
+    runtime_paths: RuntimePaths,
+    *,
+    credentials: dict[str, Any],
+    credentials_manager: CredentialsManager,
+    worker_target: ResolvedWorkerTarget | None,
+    allowed_shared_services: frozenset[str] | None,
+) -> OAuthCredentialsRefreshResult:
+    attempted_refresh_token = _refresh_token_value(credentials)
+    try:
+        refreshed_credentials = await provider.refresh_token_data(credentials, runtime_paths)
+    except OAuthProviderError as exc:
+        if attempted_refresh_token is None or not _is_recoverable_stale_refresh_rejection(exc):
+            _log_oauth_refresh_failed(
+                provider,
+                credentials,
+                exc,
+                reason="provider_refresh_failed",
+                stale_retry_used=False,
+            )
+            raise
+        latest_credentials = load_scoped_credentials(
+            provider.credential_service,
+            credentials_manager=credentials_manager,
+            worker_target=worker_target,
+            allowed_shared_services=allowed_shared_services,
+        )
+        latest_refresh_token = _refresh_token_value(latest_credentials)
+        if (
+            latest_credentials is None
+            or latest_refresh_token is None
+            or latest_refresh_token == attempted_refresh_token
+            or not oauth_credentials_usable(provider, runtime_paths, latest_credentials)
+        ):
+            _log_oauth_refresh_failed(
+                provider,
+                credentials,
+                exc,
+                reason="stale_retry_unavailable",
+                stale_retry_used=False,
+            )
+            raise
+        try:
+            refreshed_credentials = await provider.refresh_token_data(latest_credentials, runtime_paths)
+        except OAuthProviderError as retry_exc:
+            _log_oauth_refresh_failed(
+                provider,
+                latest_credentials,
+                retry_exc,
+                reason="stale_retry_failed",
+                stale_retry_used=True,
+            )
+            raise
+        if refreshed_credentials is None:
+            _log_oauth_refresh_skipped(
+                provider,
+                latest_credentials,
+                reason="stale_retry_not_needed",
+                stale_retry_used=True,
+            )
+            return OAuthCredentialsRefreshResult(
+                credentials=latest_credentials,
+                refreshed=False,
+                stale_retry_used=True,
+            )
+        save_scoped_credentials(
+            provider.credential_service,
+            refreshed_credentials,
+            credentials_manager=credentials_manager,
+            worker_target=worker_target,
+        )
+        _log_oauth_refreshed(
+            provider,
+            refreshed_credentials,
+            reason="stale_retry_refreshed",
+            stale_retry_used=True,
+        )
+        return OAuthCredentialsRefreshResult(
+            credentials=refreshed_credentials,
+            refreshed=True,
+            stale_retry_used=True,
+        )
+
+    if refreshed_credentials is None:
+        _log_oauth_refresh_skipped(provider, credentials, reason="not_needed", stale_retry_used=False)
+        return OAuthCredentialsRefreshResult(credentials=credentials, refreshed=False)
+    save_scoped_credentials(
+        provider.credential_service,
+        refreshed_credentials,
+        credentials_manager=credentials_manager,
+        worker_target=worker_target,
+    )
+    _log_oauth_refreshed(provider, refreshed_credentials, reason="refreshed", stale_retry_used=False)
+    return OAuthCredentialsRefreshResult(credentials=refreshed_credentials, refreshed=True)
+
+
+def _log_oauth_refreshed(
+    provider: OAuthProvider,
+    credentials: dict[str, Any],
+    *,
+    reason: str,
+    stale_retry_used: bool,
+) -> None:
+    logger.info(
+        "oauth_credentials_refreshed",
+        **_oauth_refresh_log_context(provider, credentials),
+        reason=reason,
+        stale_retry_used=stale_retry_used,
+    )
+
+
+def _log_oauth_refresh_skipped(
+    provider: OAuthProvider,
+    credentials: dict[str, Any] | None,
+    *,
+    reason: str,
+    stale_retry_used: bool,
+) -> None:
+    logger.debug(
+        "oauth_credentials_refresh_skipped",
+        **_oauth_refresh_log_context(provider, credentials),
+        reason=reason,
+        stale_retry_used=stale_retry_used,
+    )
+
+
+def _log_oauth_refresh_failed(
+    provider: OAuthProvider,
+    credentials: dict[str, Any],
+    exc: OAuthProviderError,
+    *,
+    reason: str,
+    stale_retry_used: bool,
+) -> None:
+    logger.warning(
+        "oauth_credentials_refresh_failed",
+        **_oauth_refresh_log_context(provider, credentials),
+        reason=reason,
+        stale_retry_used=stale_retry_used,
+        error_type=type(exc).__name__,
+        oauth_error=_normalized_oauth_error_code(exc.oauth_error),
+    )
+
+
+def _oauth_refresh_log_context(
+    provider: OAuthProvider,
+    credentials: dict[str, Any] | None,
+) -> dict[str, object]:
+    return {
+        "provider_id": provider.id,
+        "credential_service": provider.credential_service,
+        "has_refresh_token": _refresh_token_value(credentials) is not None,
+        "expires_at": _oauth_credentials_expires_at(credentials),
+    }
+
+
+def _oauth_credentials_expires_at(credentials: dict[str, Any] | None) -> float | None:
+    if credentials is None:
+        return None
+    expires_at = credentials.get("expires_at")
+    if isinstance(expires_at, bool) or not isinstance(expires_at, int | float) or not math.isfinite(expires_at):
+        return None
+    return float(expires_at)
+
+
+def _refresh_token_value(credentials: Mapping[str, Any] | None) -> str | None:
+    if credentials is None:
+        return None
+    refresh_token = credentials.get("refresh_token")
+    return refresh_token if isinstance(refresh_token, str) and refresh_token else None
+
+
+def _is_recoverable_stale_refresh_rejection(exc: OAuthProviderError) -> bool:
+    error_code = _normalized_oauth_error_code(exc.oauth_error)
+    return error_code in _RECOVERABLE_REFRESH_ERROR_CODES
+
+
+def _normalized_oauth_error_code(value: object) -> str | None:
+    return value.strip().lower() if isinstance(value, str) and value.strip() else None
 
 
 def oauth_credential_target_payload(
@@ -222,8 +531,11 @@ def oauth_credentials_match_client_id(
     return isinstance(stored_client_id, str) and stored_client_id.strip() == client_config.client_id
 
 
-def oauth_credentials_have_required_scopes(provider: OAuthProvider, credentials: dict[str, object]) -> bool:
-    """Return whether stored credentials include every provider-required scope."""
+def oauth_credentials_have_scopes(
+    credentials: Mapping[str, object],
+    required_scopes: Collection[str],
+) -> bool:
+    """Return whether stored credentials include every requested scope."""
     granted_scopes: set[str] = set()
     raw_scopes = credentials.get("scopes")
     if isinstance(raw_scopes, list):
@@ -234,7 +546,12 @@ def oauth_credentials_have_required_scopes(provider: OAuthProvider, credentials:
     expanded_granted_scopes = set(granted_scopes)
     for scope in granted_scopes:
         expanded_granted_scopes.update(_SCOPE_IMPLICATIONS.get(scope, ()))
-    return set(provider.scopes).issubset(expanded_granted_scopes)
+    return set(required_scopes).issubset(expanded_granted_scopes)
+
+
+def oauth_credentials_have_required_scopes(provider: OAuthProvider, credentials: dict[str, object]) -> bool:
+    """Return whether stored credentials include every provider-required scope."""
+    return oauth_credentials_have_scopes(credentials, provider.scopes)
 
 
 def oauth_credentials_satisfy_identity_policy(
@@ -316,9 +633,34 @@ def build_oauth_connect_instruction(
     connect_url: str,
 ) -> str:
     """Return a concise user-facing connection instruction for a tool result."""
+    if oauth_connect_url_requires_host_browser(connect_url):
+        return (
+            f"{provider.display_name} is not connected for this agent. "
+            "Open this MindRoom link in a browser on the computer where the MindRoom process is running, "
+            "not on a phone or another computer. If needed, open this conversation there or copy the complete "
+            f"link into that browser. After connecting, retry the request: {connect_url}"
+        )
     return (
         f"{provider.display_name} is not connected for this agent. "
         f"Open this MindRoom link to connect it, then retry the request: {connect_url}"
+    )
+
+
+def build_oauth_reconnect_instruction(
+    provider: OAuthProvider,
+    connect_url: str,
+) -> str:
+    """Return a concise instruction for an expired or invalid OAuth session."""
+    if oauth_connect_url_requires_host_browser(connect_url):
+        return (
+            f"{provider.display_name} session for this agent expired or is no longer valid. "
+            "Open this MindRoom link in a browser on the computer where the MindRoom process is running, "
+            "not on a phone or another computer. If needed, open this conversation there or copy the complete "
+            f"link into that browser. After reconnecting, retry the request: {connect_url}"
+        )
+    return (
+        f"{provider.display_name} session for this agent expired or is no longer valid. "
+        f"Reconnect it with this MindRoom link, then retry the request: {connect_url}"
     )
 
 

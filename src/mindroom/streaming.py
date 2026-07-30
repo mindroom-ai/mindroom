@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal, NoReturn
 
 from agno.run.agent import RunCompletedEvent, RunContentEvent, ToolCallCompletedEvent, ToolCallStartedEvent
+from nio.exceptions import SendRetryError
 
 from mindroom import interactive
 from mindroom.constants import (
@@ -33,10 +34,11 @@ from mindroom.orchestration.runtime import (
     USER_STOP_CANCEL_MSG,
     CancelSource,
     cancel_failure_reason,
+    cancel_source_from_failure_reason,
     classify_cancel_source,
     log_cancelled_response,
 )
-from mindroom.streaming_warmup import WorkerWarmupState
+from mindroom.streaming_warmup import RenderedWarmupLine, WorkerWarmupState
 from mindroom.timing import emit_timing_event
 from mindroom.tool_system.events import (
     StreamingToolTracker,
@@ -74,6 +76,7 @@ __all__ = [
     "build_cancelled_response_update",
     "build_restart_interrupted_body",
     "cancel_failure_reason",
+    "cancel_source_from_failure_reason",
     "clean_partial_reply_text",
     "interactive_response_for_visible_body",
     "is_interrupted_partial_reply",
@@ -267,7 +270,7 @@ def build_restart_interrupted_body(text: str) -> str:
 
 @dataclass(frozen=True)
 class _CommittedDeliveryState:
-    """One frozen non-terminal stream state that definitely reached Matrix."""
+    """One frozen stream state that definitely reached Matrix."""
 
     accumulated_text: str
     tool_trace: list[ToolTraceEntry]
@@ -275,6 +278,7 @@ class _CommittedDeliveryState:
     rendered_body: str
     visible_body_state: Literal["placeholder_only", "visible_body"]
     interactive_metadata: interactive.InteractiveMetadata | None
+    stream_status: str
 
 
 def _normalize_stream_accumulated_text(text: str) -> str:
@@ -328,7 +332,7 @@ def interactive_response_for_visible_body(
     return visible_response
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class _PreparedStreamingDelivery:
     """One frozen non-terminal delivery attempt."""
 
@@ -336,6 +340,82 @@ class _PreparedStreamingDelivery:
     display_text: str
     committed_state: _CommittedDeliveryState
     had_warmup_suffix: bool
+
+
+@dataclass(frozen=True, slots=True)
+class _StreamingDeliverySnapshot:
+    """Immutable state needed to format one outbound streaming payload."""
+
+    config: Config
+    runtime_paths: RuntimePaths
+    accumulated_text: str
+    event_id: str | None
+    effective_thread_id: str | None
+    reply_to_event_id: str | None
+    latest_thread_event_id: str | None
+    room_mode: bool
+    show_tool_calls: bool
+    tool_trace: tuple[ToolTraceEntry, ...]
+    extra_content: dict[str, Any] | None
+    warmup_suffix_lines: tuple[RenderedWarmupLine, ...]
+    stream_status: str
+
+
+def _prepare_delivery_from_snapshot(snapshot: _StreamingDeliverySnapshot) -> _PreparedStreamingDelivery:
+    """Format one outbound payload from immutable stream state."""
+    text_to_send = snapshot.accumulated_text if snapshot.accumulated_text.strip() else _PROGRESS_PLACEHOLDER
+
+    response = interactive.parse_and_format_interactive(text_to_send, extract_mapping=True)
+    display_text = response.formatted_text
+
+    latest_for_message = (
+        snapshot.latest_thread_event_id if snapshot.event_id is None and not snapshot.room_mode else None
+    )
+    extra_content = dict(snapshot.extra_content or {})
+    extra_content[STREAM_STATUS_KEY] = snapshot.stream_status
+    tool_trace = list(snapshot.tool_trace)
+
+    content = format_message_with_mentions(
+        config=snapshot.config,
+        runtime_paths=snapshot.runtime_paths,
+        text=display_text,
+        thread_event_id=snapshot.effective_thread_id if snapshot.event_id is None else None,
+        reply_to_event_id=snapshot.reply_to_event_id if snapshot.event_id is None else None,
+        latest_thread_event_id=latest_for_message,
+        tool_trace=tool_trace if snapshot.show_tool_calls else None,
+        extra_content=extra_content,
+    )
+    if snapshot.stream_status in {STREAM_STATUS_PENDING, STREAM_STATUS_STREAMING}:
+        # Matrix suppresses m.notice before evaluating mention rules. Streaming
+        # updates may already contain mentions, so using m.text here would make
+        # every progressive edit eligible for a push notification.
+        content["msgtype"] = "m.notice"
+    canonical_visible_body = content["body"]
+    if snapshot.warmup_suffix_lines:
+        content[STREAM_VISIBLE_BODY_KEY] = canonical_visible_body
+        warmup_suffix = "\n".join(line.text for line in snapshot.warmup_suffix_lines)
+        content[STREAM_WARMUP_SUFFIX_KEY] = warmup_suffix
+        display_text = f"{display_text}\n\n{warmup_suffix}" if display_text else warmup_suffix
+        content["body"] = f"{content['body']}\n\n{warmup_suffix}"
+        suffix_html = "".join(f"<p>{line.html}</p>" for line in snapshot.warmup_suffix_lines)
+        content["formatted_body"] = f"{content['formatted_body']}{suffix_html}"
+
+    return _PreparedStreamingDelivery(
+        content=content,
+        display_text=display_text,
+        committed_state=_CommittedDeliveryState(
+            accumulated_text=_normalize_stream_accumulated_text(snapshot.accumulated_text),
+            tool_trace=tool_trace,
+            placeholder_progress_sent=not snapshot.accumulated_text.strip(),
+            rendered_body=canonical_visible_body,
+            visible_body_state=(
+                "placeholder_only" if canonical_visible_body == _PROGRESS_PLACEHOLDER else "visible_body"
+            ),
+            interactive_metadata=response.interactive_metadata,
+            stream_status=snapshot.stream_status,
+        ),
+        had_warmup_suffix=bool(snapshot.warmup_suffix_lines),
+    )
 
 
 @dataclass
@@ -567,7 +647,28 @@ class StreamingResponse:
             return stream_status
         return STREAM_STATUS_COMPLETED
 
-    async def finalize(  # noqa: C901, PLR0911, PLR0912
+    async def finalize(
+        self,
+        client: nio.AsyncClient,
+        *,
+        cancelled: bool = False,
+        restart_interrupted: bool = False,
+        cancel_source: Literal["user_stop", "sync_restart", "interrupted"] | None = None,
+        error: Exception | None = None,
+    ) -> StreamTransportOutcome:
+        """Send one terminal update and always release its thread reservation."""
+        try:
+            return await self._finalize(
+                client,
+                cancelled=cancelled,
+                restart_interrupted=restart_interrupted,
+                cancel_source=cancel_source,
+                error=error,
+            )
+        finally:
+            self._release_thread_write_reservation()
+
+    async def _finalize(  # noqa: C901, PLR0911, PLR0912
         self,
         client: nio.AsyncClient,
         *,
@@ -684,7 +785,8 @@ class StreamingResponse:
                 retry_on_failure=retry_terminal_update,
                 retry_without_backoff=retry_terminal_update_immediately,
             )
-        except asyncio.CancelledError:
+        except asyncio.CancelledError as cancelled_error:
+            terminal_cancel_source = resolved_cancel_source or classify_cancel_source(cancelled_error)
             logger.warning(
                 "Terminal streaming update was cancelled before it landed",
                 event_id=self.event_id,
@@ -698,11 +800,11 @@ class StreamingResponse:
             ) = self._committed_terminal_snapshot()
             return StreamTransportOutcome(
                 last_physical_stream_event_id=self.event_id,
-                terminal_status=terminal_status,
+                terminal_status="cancelled",
                 rendered_body=committed_rendered_body,
                 visible_body_state=committed_visible_body_state,
                 canonical_final_body_candidate=canonical_final_body_candidate,
-                failure_reason=cancellation_failure_reason or "terminal_update_cancelled",
+                failure_reason=cancel_failure_reason(terminal_cancel_source),
                 interactive_metadata=self._last_committed_interactive_metadata,
             )
         except Exception as exc:
@@ -752,6 +854,7 @@ class StreamingResponse:
             terminal_status=terminal_status,
             rendered_body=attempted_rendered_body,
             visible_body_state=attempted_visible_body_state,
+            terminal_update_committed=True,
             canonical_final_body_candidate=canonical_final_body_candidate,
             failure_reason=cancellation_failure_reason,
             interactive_metadata=response.interactive_metadata,
@@ -770,7 +873,7 @@ class StreamingResponse:
         capture_completions: tuple[asyncio.Future[None], ...] = (),
     ) -> bool:
         """Send new message or edit existing one."""
-        prepared_delivery = self._prepare_delivery(
+        prepared_delivery = await self._prepare_delivery_async(
             is_final=is_final,
             allow_empty_progress=allow_empty_progress,
             stream_status=stream_status,
@@ -818,6 +921,7 @@ class StreamingResponse:
                 display_text=prepared_delivery.display_text,
                 retry_on_failure=retry_on_failure,
                 retry_without_backoff=retry_without_backoff,
+                retry_sync_recovery=not is_final or retry_on_failure,
             )
         finally:
             if self._inflight_nonterminal_capture is capture:
@@ -830,6 +934,7 @@ class StreamingResponse:
                 raise RuntimeError(msg)
             return False
 
+        self._mark_first_visible_reply_if_needed(prepared_delivery.committed_state)
         if not is_final:
             self._warmup_state.note_nonterminal_delivery(
                 had_warmup_suffix=prepared_delivery.had_warmup_suffix,
@@ -860,68 +965,51 @@ class StreamingResponse:
             edit_content=edit_content,
         )
 
-    def _prepare_delivery(
+    def _delivery_snapshot(
+        self,
+        *,
+        is_final: bool,
+        allow_empty_progress: bool,
+        stream_status: str | None,
+    ) -> _StreamingDeliverySnapshot | None:
+        """Freeze all mutable stream state needed for one formatting pass."""
+        warmup_suffix_lines = self._warmup_state.render_lines(show_tool_calls=self.show_tool_calls)
+        if not self.accumulated_text.strip() and not allow_empty_progress and not warmup_suffix_lines:
+            return None
+
+        assert self.target is not None
+        return _StreamingDeliverySnapshot(
+            config=self.config,
+            runtime_paths=self.runtime_paths,
+            accumulated_text=self.accumulated_text,
+            event_id=self.event_id,
+            effective_thread_id=self.target.resolved_thread_id,
+            reply_to_event_id=self.target.reply_to_event_id,
+            latest_thread_event_id=self.latest_thread_event_id,
+            room_mode=self.room_mode,
+            show_tool_calls=self.show_tool_calls,
+            tool_trace=tuple(deepcopy(self.tool_trace)),
+            extra_content=deepcopy(self.extra_content) if self.extra_content is not None else None,
+            warmup_suffix_lines=tuple(warmup_suffix_lines),
+            stream_status=self._resolve_stream_status(is_final=is_final, stream_status=stream_status),
+        )
+
+    async def _prepare_delivery_async(
         self,
         *,
         is_final: bool,
         allow_empty_progress: bool,
         stream_status: str | None,
     ) -> _PreparedStreamingDelivery | None:
-        """Freeze one exact outbound payload before awaiting Matrix I/O."""
-        warmup_suffix_lines = self._warmup_state.render_lines(show_tool_calls=self.show_tool_calls)
-        if not self.accumulated_text.strip() and not allow_empty_progress and not warmup_suffix_lines:
+        """Prepare one outbound payload without blocking the event loop on formatting."""
+        snapshot = self._delivery_snapshot(
+            is_final=is_final,
+            allow_empty_progress=allow_empty_progress,
+            stream_status=stream_status,
+        )
+        if snapshot is None:
             return None
-
-        assert self.target is not None
-        effective_thread_id = self.target.resolved_thread_id
-
-        text_to_send = self.accumulated_text if self.accumulated_text.strip() else _PROGRESS_PLACEHOLDER
-
-        # Format the text (handles interactive questions if present)
-        response = interactive.parse_and_format_interactive(text_to_send, extract_mapping=True)
-        display_text = response.formatted_text
-
-        # Only use latest_thread_event_id for the initial message (not edits)
-        latest_for_message = self.latest_thread_event_id if self.event_id is None and not self.room_mode else None
-        stream_status = self._resolve_stream_status(is_final=is_final, stream_status=stream_status)
-        extra_content = dict(self.extra_content or {})
-        extra_content[STREAM_STATUS_KEY] = stream_status
-
-        content = format_message_with_mentions(
-            config=self.config,
-            runtime_paths=self.runtime_paths,
-            text=display_text,
-            thread_event_id=effective_thread_id,
-            reply_to_event_id=self.target.reply_to_event_id,
-            latest_thread_event_id=latest_for_message,
-            tool_trace=self.tool_trace if self.show_tool_calls else None,
-            extra_content=extra_content,
-        )
-        canonical_visible_body = content["body"]
-        if warmup_suffix_lines:
-            content[STREAM_VISIBLE_BODY_KEY] = canonical_visible_body
-            warmup_suffix = "\n".join(line.text for line in warmup_suffix_lines)
-            content[STREAM_WARMUP_SUFFIX_KEY] = warmup_suffix
-            display_text = f"{display_text}\n\n{warmup_suffix}" if display_text else warmup_suffix
-            content["body"] = f"{content['body']}\n\n{warmup_suffix}"
-            suffix_html = "".join(f"<p>{line.html}</p>" for line in warmup_suffix_lines)
-            content["formatted_body"] = f"{content['formatted_body']}{suffix_html}"
-
-        return _PreparedStreamingDelivery(
-            content=content,
-            display_text=display_text,
-            committed_state=_CommittedDeliveryState(
-                accumulated_text=_normalize_stream_accumulated_text(self.accumulated_text),
-                tool_trace=deepcopy(self.tool_trace),
-                placeholder_progress_sent=not self.accumulated_text.strip(),
-                rendered_body=canonical_visible_body,
-                visible_body_state=(
-                    "placeholder_only" if canonical_visible_body == _PROGRESS_PLACEHOLDER else "visible_body"
-                ),
-                interactive_metadata=response.interactive_metadata,
-            ),
-            had_warmup_suffix=bool(warmup_suffix_lines),
-        )
+        return await asyncio.to_thread(_prepare_delivery_from_snapshot, snapshot)
 
     def _mark_delivery_committed(self, committed_state: _CommittedDeliveryState) -> None:
         """Snapshot the last non-terminal text/tool-trace state that actually reached Matrix."""
@@ -980,21 +1068,52 @@ class StreamingResponse:
             return
         self.conversation_cache.notify_outbound_message(self.room_id, edit_event_id, content_sent)
 
-    def _mark_first_visible_reply_if_needed(self) -> None:
-        """Mark first visible reply timing once visible text exists."""
-        if self.pipeline_timing is not None and self.accumulated_text.strip():
-            self.pipeline_timing.mark_first_visible_reply("stream_update")
+    def _reserve_thread_write_reservation(self) -> None:
+        """Retain known thread identity for later edits whose envelope only carries m.replace."""
+        if self.conversation_cache is None or self.event_id is None or self.thread_id is None:
+            return
+        self.conversation_cache.reserve_outbound_thread(
+            self.room_id,
+            self.event_id,
+            self.thread_id,
+        )
 
-    async def _send_initial_content(self, client: nio.AsyncClient, *, content: dict[str, Any]) -> bool:
+    def _release_thread_write_reservation(self) -> None:
+        """Release thread identity after terminal success, failure, or cancellation."""
+        if self.conversation_cache is None or self.event_id is None:
+            return
+        self.conversation_cache.release_outbound_thread(self.room_id, self.event_id)
+
+    def _mark_first_visible_reply_if_needed(self, delivered_state: _CommittedDeliveryState) -> None:
+        """Mark first visible reply timing from the payload acknowledged by Matrix."""
+        if self.pipeline_timing is not None and delivered_state.visible_body_state == "visible_body":
+            self.pipeline_timing.mark_first_visible_reply(
+                "stream_update",
+                substantive=delivered_state.stream_status
+                in {STREAM_STATUS_PENDING, STREAM_STATUS_STREAMING, STREAM_STATUS_COMPLETED},
+            )
+
+    async def _send_initial_content(
+        self,
+        client: nio.AsyncClient,
+        *,
+        content: dict[str, Any],
+        retry_sync_recovery: bool,
+    ) -> bool:
         """Send the initial streaming event."""
-        delivered = await send_message_result(client, self.room_id, content, config=self.config)
+        delivered = await send_message_result(
+            client,
+            self.room_id,
+            content,
+            retry_sync_recovery=retry_sync_recovery,
+        )
         if delivered is None:
             return False
         self.event_id = delivered.event_id
+        self._reserve_thread_write_reservation()
         if self.visible_event_id_callback is not None:
             self.visible_event_id_callback(delivered.event_id)
         await self._record_streaming_send(delivered.event_id, delivered.content_sent)
-        self._mark_first_visible_reply_if_needed()
         logger.debug("Initial streaming message sent", event_id=self.event_id)
         return True
 
@@ -1004,6 +1123,7 @@ class StreamingResponse:
         *,
         content: dict[str, Any],
         display_text: str,
+        retry_sync_recovery: bool,
     ) -> bool:
         """Send one streaming edit event for the existing message."""
         assert self.event_id is not None
@@ -1013,12 +1133,11 @@ class StreamingResponse:
             self.event_id,
             content,
             display_text,
-            config=self.config,
+            retry_sync_recovery=retry_sync_recovery,
         )
         if delivered is None:
             return False
         await self._record_streaming_edit(delivered.event_id, content_sent=delivered.content_sent)
-        self._mark_first_visible_reply_if_needed()
         return True
 
     async def _send_content(
@@ -1029,6 +1148,7 @@ class StreamingResponse:
         display_text: str,
         retry_on_failure: bool = False,
         retry_without_backoff: bool = False,
+        retry_sync_recovery: bool = False,
     ) -> bool:
         """Send a new event or edit the existing one."""
         total_attempts = 2 if retry_on_failure or retry_without_backoff else 1
@@ -1036,14 +1156,25 @@ class StreamingResponse:
             try:
                 if self.event_id is None:
                     logger.debug("Sending initial streaming message", attempt=attempt)
-                    if await self._send_initial_content(client, content=content):
+                    if await self._send_initial_content(
+                        client,
+                        content=content,
+                        retry_sync_recovery=retry_sync_recovery,
+                    ):
                         return True
                     logger.error("Failed to send initial streaming message", attempt=attempt)
                 else:
                     logger.debug("Editing streaming message", event_id=self.event_id, attempt=attempt)
-                    if await self._edit_existing_content(client, content=content, display_text=display_text):
+                    if await self._edit_existing_content(
+                        client,
+                        content=content,
+                        display_text=display_text,
+                        retry_sync_recovery=retry_sync_recovery,
+                    ):
                         return True
                     logger.error("Failed to edit streaming message", attempt=attempt)
+            except SendRetryError:
+                raise
             except Exception:
                 logger.warning(
                     "Streaming update attempt raised an exception",
@@ -1132,6 +1263,9 @@ class _DeliveryRequest:
     capture_completion: asyncio.Future[None] | None = None
 
 
+_STREAM_DELIVERY_PENDING_OPTIONAL_REQUEST_LIMIT = 32
+
+
 def _raise_progress_delivery_error(error: Exception) -> NoReturn:
     """Raise a stored worker-progress delivery error from a helper."""
     raise error
@@ -1150,23 +1284,39 @@ def _queue_delivery_request(
     wait_for_capture: bool = False,
 ) -> asyncio.Future[None] | None:
     """Queue one non-terminal delivery request for the single delivery owner."""
-    capture_completion = asyncio.get_running_loop().create_future() if wait_for_capture else None
-    delivery_queue.put_nowait(
-        _DeliveryRequest(
+    required_delivery = (
+        wait_for_capture or force_refresh or boundary_refresh or phase_boundary_flush or allow_empty_progress
+    )
+    queue_size = delivery_queue.qsize()
+    if not required_delivery and queue_size >= _STREAM_DELIVERY_PENDING_OPTIONAL_REQUEST_LIMIT:
+        emit_timing_event(
+            "Dispatch tool delivery timing",
+            phase="dropped_superseded",
+            queue_size=queue_size,
             progress_hint=progress_hint,
             force_refresh=force_refresh,
             boundary_refresh=boundary_refresh,
             phase_boundary_flush=phase_boundary_flush,
             allow_empty_progress=allow_empty_progress,
-            prior_delta_at=prior_delta_at,
-            boundary_refresh_prior_delta_at=(
-                (prior_delta_at if boundary_refresh_prior_delta_at is None else boundary_refresh_prior_delta_at)
-                if boundary_refresh
-                else None
-            ),
-            capture_completion=capture_completion,
+            wait_for_capture=False,
+        )
+        return None
+    capture_completion = asyncio.get_running_loop().create_future() if wait_for_capture else None
+    request = _DeliveryRequest(
+        progress_hint=progress_hint,
+        force_refresh=force_refresh,
+        boundary_refresh=boundary_refresh,
+        phase_boundary_flush=phase_boundary_flush,
+        allow_empty_progress=allow_empty_progress,
+        prior_delta_at=prior_delta_at,
+        boundary_refresh_prior_delta_at=(
+            (prior_delta_at if boundary_refresh_prior_delta_at is None else boundary_refresh_prior_delta_at)
+            if boundary_refresh
+            else None
         ),
+        capture_completion=capture_completion,
     )
+    delivery_queue.put_nowait(request)
     emit_timing_event(
         "Dispatch tool delivery timing",
         phase="queued",
@@ -1462,7 +1612,7 @@ async def _drive_stream_delivery(  # noqa: C901, PLR0912
             if merged_request.phase_boundary_flush and (
                 streaming.chars_since_last_update > 0 and streaming.accumulated_text.strip()
             ):
-                prepared_phase_boundary_flush = streaming._prepare_delivery(
+                prepared_phase_boundary_flush = await streaming._prepare_delivery_async(
                     is_final=False,
                     allow_empty_progress=False,
                     stream_status=None,
@@ -1687,13 +1837,20 @@ async def send_streaming_response(  # noqa: C901, PLR0912, PLR0915
 
     if existing_event_id:
         streaming.event_id = existing_event_id
+        streaming._reserve_thread_write_reservation()
         if visible_event_id_callback is not None:
             visible_event_id_callback(existing_event_id)
         streaming.accumulated_text = ""
         streaming.placeholder_progress_sent = adopt_existing_placeholder
 
     if header:
-        await streaming.update_content(header, client)
+        header_delivered = False
+        try:
+            await streaming.update_content(header, client)
+            header_delivered = True
+        finally:
+            if not header_delivered:
+                streaming._release_thread_write_reservation()
 
     worker_progress_queue: asyncio.Queue[WorkerProgressEvent] = asyncio.Queue()
     delivery_queue: asyncio.Queue[_DeliveryRequest | None] = asyncio.Queue()
@@ -1701,6 +1858,7 @@ async def send_streaming_response(  # noqa: C901, PLR0912, PLR0915
     delivery_task: asyncio.Task[None] | None = None
     loop = asyncio.get_running_loop()
     transport_outcome: StreamTransportOutcome | None = None
+    finalization_started = False
     with worker_progress_pump_scope(loop, worker_progress_queue) as pump:
         delivery_task = asyncio.create_task(_drive_stream_delivery(client, streaming, delivery_queue))
         progress_task = asyncio.create_task(
@@ -1759,6 +1917,7 @@ async def send_streaming_response(  # noqa: C901, PLR0912, PLR0915
                 user_stop_message="Streaming response cancelled by user",
                 interrupted_message="Streaming response interrupted — traceback for diagnosis",
             )
+            finalization_started = True
             transport_outcome = await streaming.finalize(client, cancel_source=cancel_source)
             raise StreamingDeliveryError(
                 exc,
@@ -1802,6 +1961,7 @@ async def send_streaming_response(  # noqa: C901, PLR0912, PLR0915
                 ) from shutdown_timeout
             if isinstance(exc, _NonTerminalDeliveryError):
                 streaming.restore_last_delivered_state()
+            finalization_started = True
             transport_outcome = await streaming.finalize(client, error=delivery_error)
             raise StreamingDeliveryError(
                 delivery_error,
@@ -1811,6 +1971,7 @@ async def send_streaming_response(  # noqa: C901, PLR0912, PLR0915
                 transport_outcome=transport_outcome,
             ) from delivery_error
         else:
+            finalization_started = True
             transport_outcome = await streaming.finalize(client)
         finally:
             cleanup_error = await _shutdown_worker_progress_drain(pump, progress_task)
@@ -1827,6 +1988,8 @@ async def send_streaming_response(  # noqa: C901, PLR0912, PLR0915
                 )
             if tool_trace_collector is not None:
                 tool_trace_collector[:] = streaming.tool_trace
+            if not finalization_started:
+                streaming._release_thread_write_reservation()
 
     assert transport_outcome is not None
     return transport_outcome

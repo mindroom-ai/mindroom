@@ -20,7 +20,7 @@ if TYPE_CHECKING:
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
-    from ._shared import MemoryResult
+    from ._shared import MemoryResult, MemorySearchOutcome
 
 
 class ResolvedMemoryBackend(Protocol):
@@ -54,8 +54,7 @@ class ResolvedMemoryBackend(Protocol):
         *,
         limit: int,
         execution_identity: ToolExecutionIdentity | None = None,
-        timing_scope: str | None = None,
-    ) -> list[MemoryResult]:
+    ) -> MemorySearchOutcome:
         """Search memories visible to an agent, including its team scopes."""
 
     async def list_all(
@@ -125,7 +124,6 @@ class ResolvedMemoryBackend(Protocol):
         config: Config,
         *,
         execution_identity: ToolExecutionIdentity | None = None,
-        timing_scope: str | None = None,
     ) -> str:
         """Return the stable session preamble context for an agent, if any."""
 

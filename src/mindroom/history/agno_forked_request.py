@@ -178,7 +178,6 @@ def _request_agent(agent: Agent) -> Agent:
     request_agent.add_history_to_context = True
     request_agent.num_history_runs = None
     request_agent.num_history_messages = None
-    request_agent.max_tool_calls_from_history = None
     request_agent._tool_instructions = deepcopy(agent._tool_instructions)
     return request_agent
 
@@ -217,4 +216,11 @@ def _is_tool_definition_dict(tool: object) -> TypeGuard[_ToolDefinition]:
         return False
     candidate_tool = cast("_ToolDefinition", tool)
     tool_name = candidate_tool.get("name")
-    return isinstance(tool_name, str) and bool(tool_name)
+    if isinstance(tool_name, str) and tool_name:
+        return True
+    function_payload = candidate_tool.get("function")
+    if not isinstance(function_payload, dict):
+        return False
+    function_definition = cast("_ToolDefinition", function_payload)
+    nested_name = function_definition.get("name")
+    return isinstance(nested_name, str) and bool(nested_name)

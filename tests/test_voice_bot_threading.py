@@ -22,6 +22,7 @@ from mindroom.config.main import Config
 from mindroom.constants import (
     ATTACHMENT_IDS_KEY,
     ORIGINAL_SENDER_KEY,
+    ROUTER_AGENT_NAME,
     SOURCE_KIND_KEY,
     VISIBLE_ROUTER_VOICE_ECHO_KEY,
     VOICE_RAW_AUDIO_FALLBACK_KEY,
@@ -37,8 +38,10 @@ from tests.conftest import (
     bind_runtime_paths,
     dispatch_context_result,
     drain_coalescing,
+    install_edit_message_mock,
     install_generate_response_mock,
     install_runtime_cache_support,
+    install_send_response_mock,
     replace_turn_controller_deps,
     runtime_paths_for,
     sync_bot_runtime_state,
@@ -48,7 +51,7 @@ from tests.conftest import (
 )
 
 if TYPE_CHECKING:
-    from mindroom.handled_turns import HandledTurnState
+    from mindroom.handled_turns import TurnRecord
 
 
 def _agent_bot(*, agent_user: AgentMatrixUser, storage_path: Path, config: Config, rooms: list[str]) -> AgentBot:
@@ -65,7 +68,13 @@ def _agent_bot(*, agent_user: AgentMatrixUser, storage_path: Path, config: Confi
 
 
 @pytest.fixture
-def mock_home_bot() -> AgentBot:
+def generate_response_mock() -> AsyncMock:
+    """Generation seam mock installed on mock_home_bot."""
+    return AsyncMock(return_value="$response")
+
+
+@pytest.fixture
+def mock_home_bot(generate_response_mock: AsyncMock) -> AgentBot:
     """Create a single-agent bot for audio threading tests."""
     tmpdir = Path(tempfile.mkdtemp())
     agent_user = AgentMatrixUser(
@@ -89,8 +98,7 @@ def mock_home_bot() -> AgentBot:
     sync_bot_runtime_state(bot)
     bot.logger = MagicMock()
     replace_turn_controller_deps(bot, logger=bot.logger)
-    bot._generate_response = AsyncMock(return_value="$response")
-    install_generate_response_mock(bot, bot._generate_response)
+    install_generate_response_mock(bot, generate_response_mock)
     return bot
 
 
@@ -290,7 +298,7 @@ def _normalized_voice_result(
     )
 
 
-def _handled_source_event_ids(handled_turn: HandledTurnState | None) -> list[str]:
+def _handled_source_event_ids(handled_turn: TurnRecord | None) -> list[str]:
     return list(handled_turn.source_event_ids) if handled_turn is not None else []
 
 
@@ -325,7 +333,10 @@ def _install_test_coalescing_gate(bot: AgentBot, *, debounce_seconds: float = 0.
 
 
 @pytest.mark.asyncio
-async def test_voice_message_in_main_room_creates_thread(mock_home_bot: AgentBot) -> None:
+async def test_voice_message_in_main_room_creates_thread(
+    mock_home_bot: AgentBot,
+    generate_response_mock: AsyncMock,
+) -> None:
     """Audio in the main room should reply in a thread rooted at the audio event."""
     bot = mock_home_bot
     mock_context = MessageContext(
@@ -362,8 +373,8 @@ async def test_voice_message_in_main_room_creates_thread(mock_home_bot: AgentBot
         await bot._on_media_message(room, voice_event)
         await drain_coalescing(bot)
 
-    bot._generate_response.assert_called_once()
-    call_kwargs = bot._generate_response.call_args.kwargs
+    generate_response_mock.assert_called_once()
+    call_kwargs = generate_response_mock.call_args.kwargs
     response_target = call_kwargs["response_envelope"].target
     assert response_target.reply_to_event_id == "$voice123"
     assert response_target.resolved_thread_id == "$voice123"
@@ -371,7 +382,10 @@ async def test_voice_message_in_main_room_creates_thread(mock_home_bot: AgentBot
 
 
 @pytest.mark.asyncio
-async def test_voice_message_in_thread_continues_thread(mock_home_bot: AgentBot) -> None:
+async def test_voice_message_in_thread_continues_thread(
+    mock_home_bot: AgentBot,
+    generate_response_mock: AsyncMock,
+) -> None:
     """Audio in an existing thread should keep using that thread root."""
     bot = mock_home_bot
     mock_context = MessageContext(
@@ -415,8 +429,8 @@ async def test_voice_message_in_thread_continues_thread(mock_home_bot: AgentBot)
         await bot._on_media_message(room, voice_event)
         await drain_coalescing(bot)
 
-    bot._generate_response.assert_called_once()
-    call_kwargs = bot._generate_response.call_args.kwargs
+    generate_response_mock.assert_called_once()
+    call_kwargs = generate_response_mock.call_args.kwargs
     response_target = call_kwargs["response_envelope"].target
     assert response_target.reply_to_event_id == "$voice456"
     assert response_target.resolved_thread_id == "$thread_root"
@@ -429,6 +443,7 @@ async def test_voice_message_in_thread_continues_thread(mock_home_bot: AgentBot)
 @pytest.mark.asyncio
 async def test_voice_plain_reply_to_thread_message_stays_threaded_transitively(
     mock_home_bot: AgentBot,
+    generate_response_mock: AsyncMock,
 ) -> None:
     """Plain-reply audio should inherit thread context transitively from the replied-to event."""
     bot = mock_home_bot
@@ -473,8 +488,8 @@ async def test_voice_plain_reply_to_thread_message_stays_threaded_transitively(
         await bot._on_media_message(room, voice_event)
         await drain_coalescing(bot)
 
-    bot._generate_response.assert_called_once()
-    call_kwargs = bot._generate_response.call_args.kwargs
+    generate_response_mock.assert_called_once()
+    call_kwargs = generate_response_mock.call_args.kwargs
     response_target = call_kwargs["response_envelope"].target
     assert response_target.reply_to_event_id == "$voice789"
     assert response_target.resolved_thread_id == "$thread_root"
@@ -554,9 +569,13 @@ async def test_voice_message_signals_active_turn_before_stt(mock_home_bot: Agent
     prepare_started = asyncio.Event()
     allow_prepare = asyncio.Event()
 
-    async def prepare_voice_event(*_args: object, **_kwargs: object) -> None:
+    async def prepare_voice_event(
+        *_args: object,
+        **_kwargs: object,
+    ) -> inbound_turn_normalizer._VoiceNormalizationResult:
         prepare_started.set()
         await allow_prepare.wait()
+        return _normalized_voice_result(event=voice_event, text="voice transcript")
 
     turn_active = True
     queued_signal.begin_response_turn()
@@ -644,6 +663,9 @@ async def test_voice_message_clears_active_turn_signal_when_post_stt_echo_fails(
         assert queued_signal.pending_human_messages == 1
         raise echo_error
 
+    replace_turn_controller_deps(bot, agent_name=ROUTER_AGENT_NAME)
+    install_send_response_mock(bot, AsyncMock(return_value="$voice-placeholder"))
+    install_edit_message_mock(bot, AsyncMock(side_effect=fail_visible_echo))
     turn_active = True
     queued_signal.begin_response_turn()
     try:
@@ -652,11 +674,6 @@ async def test_voice_message_clears_active_turn_signal_when_post_stt_echo_fails(
                 bot._turn_controller.deps.normalizer,
                 "prepare_voice_event",
                 new=AsyncMock(return_value=normalized_voice),
-            ),
-            patch.object(
-                bot._turn_controller,
-                "_maybe_send_visible_voice_echo",
-                new=AsyncMock(side_effect=fail_visible_echo),
             ),
             patch("mindroom.ingress_validation.is_authorized_sender", return_value=True),
         ):
@@ -672,20 +689,12 @@ async def test_voice_message_clears_active_turn_signal_when_post_stt_echo_fails(
     assert not queued_signal.is_set()
 
 
-@pytest.mark.parametrize(
-    ("echo_side_effect", "echo_return"),
-    [
-        pytest.param(RuntimeError("echo failed"), None, id="failed"),
-        pytest.param(None, None, id="disabled"),
-    ],
-)
 @pytest.mark.asyncio
-async def test_failed_or_disabled_visible_echo_does_not_affect_canonical_voice_dispatch(
+async def test_non_router_skips_visible_echo_and_dispatches_canonical_voice(
     mock_home_bot: AgentBot,
-    echo_side_effect: BaseException | None,
-    echo_return: str | None,
+    generate_response_mock: AsyncMock,
 ) -> None:
-    """Visible echo failures or disabled echo should not block canonical voice dispatch."""
+    """A non-router should dispatch canonical voice without posting a visible echo."""
     bot = mock_home_bot
     room = _threaded_room()
     _install_test_coalescing_gate(bot, debounce_seconds=0.0)
@@ -695,17 +704,19 @@ async def test_failed_or_disabled_visible_echo_does_not_affect_canonical_voice_d
         text="canonical voice transcript",
         thread_id="$thread_root",
     )
-    dispatches: list[tuple[list[str], str]] = []
-
-    async def record_dispatch(
-        _room: nio.MatrixRoom,
-        dispatched_event: PreparedTextEvent | nio.RoomMessageText,
-        _requester_user_id: str,
-        *,
-        handled_turn: HandledTurnState | None = None,
-        **_metadata: object,
-    ) -> None:
-        dispatches.append((_handled_source_event_ids(handled_turn), dispatched_event.body))
+    bot._conversation_resolver.extract_dispatch_context = AsyncMock(
+        return_value=dispatch_context_result(
+            MessageContext(
+                am_i_mentioned=True,
+                is_thread=True,
+                thread_id="$thread_root",
+                thread_history=[],
+                mentioned_agents=[bot.matrix_id],
+                has_non_agent_mentions=False,
+                requires_model_history_refresh=False,
+            ),
+        ),
+    )
 
     with (
         patch.object(
@@ -713,18 +724,14 @@ async def test_failed_or_disabled_visible_echo_does_not_affect_canonical_voice_d
             "prepare_voice_event",
             new=AsyncMock(return_value=normalized_voice),
         ),
-        patch.object(
-            bot._turn_controller,
-            "_maybe_send_visible_voice_echo",
-            new=AsyncMock(side_effect=echo_side_effect, return_value=echo_return),
-        ),
-        patch.object(bot._turn_controller, "_dispatch_text_message", new=AsyncMock(side_effect=record_dispatch)),
         patch("mindroom.ingress_validation.is_authorized_sender", return_value=True),
     ):
         await bot._on_media_message(room, voice_event)
         await drain_coalescing(bot)
 
-    assert dispatches == [(["$voice-visible-echo"], "canonical voice transcript")]
+    generate_response_mock.assert_called_once()
+    assert generate_response_mock.call_args.kwargs["prompt"].startswith("canonical voice transcript")
+    assert bot._turn_store.visible_echo_for_source(voice_event.event_id) is None
 
 
 @pytest.mark.asyncio
@@ -800,7 +807,6 @@ async def test_voice_message_uses_canonical_target_for_queued_notice_before_stt(
                 "prepare_voice_event",
                 new=AsyncMock(return_value=normalized_voice),
             ),
-            patch.object(bot._turn_controller, "_maybe_send_visible_voice_echo", new=AsyncMock()),
             patch.object(bot._turn_controller, "_dispatch_text_message", new=AsyncMock(side_effect=capture_dispatch)),
             patch("mindroom.ingress_validation.is_authorized_sender", return_value=True),
         ):
@@ -892,7 +898,6 @@ async def test_room_mode_voice_notice_survives_until_queued_dispatch_owns_it(
                 "prepare_voice_event",
                 new=AsyncMock(side_effect=prepare_voice_event),
             ),
-            patch.object(bot._turn_controller, "_maybe_send_visible_voice_echo", new=AsyncMock()),
             patch.object(bot._turn_controller, "_dispatch_text_message", new=AsyncMock(side_effect=capture_dispatch)),
             patch("mindroom.ingress_validation.is_authorized_sender", return_value=True),
         ):
@@ -966,7 +971,7 @@ async def test_voice_and_text_followups_during_streaming_coalesce_in_receive_ord
         dispatched_event: PreparedTextEvent | nio.RoomMessageText,
         _requester_user_id: str,
         *,
-        handled_turn: HandledTurnState | None = None,
+        handled_turn: TurnRecord | None = None,
         **_metadata: object,
     ) -> None:
         source_ids = _handled_source_event_ids(handled_turn)
@@ -989,7 +994,6 @@ async def test_voice_and_text_followups_during_streaming_coalesce_in_receive_ord
                 "resolve_text_event",
                 new=AsyncMock(side_effect=resolve_text_event),
             ),
-            patch.object(bot._turn_controller, "_maybe_send_visible_voice_echo", new=AsyncMock()),
             patch.object(bot._turn_controller, "_dispatch_text_message", new=AsyncMock(side_effect=record_dispatch)),
             patch("mindroom.turn_controller.interactive.handle_text_response", new=AsyncMock(return_value=None)),
             patch("mindroom.ingress_validation.is_authorized_sender", return_value=True),
@@ -1077,7 +1081,7 @@ async def test_voice_first_text_second_uses_receive_order_when_stt_finishes_late
         dispatched_event: PreparedTextEvent | nio.RoomMessageText,
         _requester_user_id: str,
         *,
-        handled_turn: HandledTurnState | None = None,
+        handled_turn: TurnRecord | None = None,
         **_metadata: object,
     ) -> None:
         dispatches.append((_handled_source_event_ids(handled_turn), dispatched_event.body))
@@ -1095,7 +1099,6 @@ async def test_voice_first_text_second_uses_receive_order_when_stt_finishes_late
                 "resolve_text_event",
                 new=AsyncMock(side_effect=resolve_text_event),
             ),
-            patch.object(bot._turn_controller, "_maybe_send_visible_voice_echo", new=AsyncMock()),
             patch.object(bot._turn_controller, "_dispatch_text_message", new=AsyncMock(side_effect=record_dispatch)),
             patch("mindroom.turn_controller.interactive.handle_text_response", new=AsyncMock(return_value=None)),
             patch("mindroom.ingress_validation.is_authorized_sender", return_value=True),
@@ -1168,7 +1171,7 @@ async def test_voice_first_text_second_waits_for_slow_thread_resolution(
         dispatched_event: PreparedTextEvent | nio.RoomMessageText,
         _requester_user_id: str,
         *,
-        handled_turn: HandledTurnState | None = None,
+        handled_turn: TurnRecord | None = None,
         **_metadata: object,
     ) -> None:
         dispatches.append((_handled_source_event_ids(handled_turn), dispatched_event.body))
@@ -1191,7 +1194,6 @@ async def test_voice_first_text_second_waits_for_slow_thread_resolution(
                 "resolve_text_event",
                 new=AsyncMock(side_effect=resolve_text_event),
             ),
-            patch.object(bot._turn_controller, "_maybe_send_visible_voice_echo", new=AsyncMock()),
             patch.object(bot._turn_controller, "_dispatch_text_message", new=AsyncMock(side_effect=record_dispatch)),
             patch("mindroom.turn_controller.interactive.handle_text_response", new=AsyncMock(return_value=None)),
             patch("mindroom.ingress_validation.is_authorized_sender", return_value=True),
@@ -1273,7 +1275,7 @@ async def test_root_voice_and_root_text_share_room_scope_while_stt_pending(
         dispatched_event: PreparedTextEvent | nio.RoomMessageText,
         _requester_user_id: str,
         *,
-        handled_turn: HandledTurnState | None = None,
+        handled_turn: TurnRecord | None = None,
         **_metadata: object,
     ) -> None:
         dispatches.append((_handled_source_event_ids(handled_turn), dispatched_event.body))
@@ -1296,7 +1298,6 @@ async def test_root_voice_and_root_text_share_room_scope_while_stt_pending(
                 "resolve_text_event",
                 new=AsyncMock(side_effect=resolve_text_event),
             ),
-            patch.object(bot._turn_controller, "_maybe_send_visible_voice_echo", new=AsyncMock()),
             patch.object(bot._turn_controller, "_dispatch_text_message", new=AsyncMock(side_effect=record_dispatch)),
             patch("mindroom.turn_controller.interactive.handle_text_response", new=AsyncMock(return_value=None)),
             patch("mindroom.ingress_validation.is_authorized_sender", return_value=True),
@@ -1360,7 +1361,7 @@ async def test_room_mode_voice_burst_dispatches_as_one_turn(mock_home_bot: Agent
         _dispatched_event: PreparedTextEvent | nio.RoomMessageText,
         _requester_user_id: str,
         *,
-        handled_turn: HandledTurnState | None = None,
+        handled_turn: TurnRecord | None = None,
         **_metadata: object,
     ) -> None:
         dispatches.append(_handled_source_event_ids(handled_turn))
@@ -1373,7 +1374,6 @@ async def test_room_mode_voice_burst_dispatches_as_one_turn(mock_home_bot: Agent
                 "prepare_voice_event",
                 new=AsyncMock(side_effect=prepare_voice_event),
             ),
-            patch.object(bot._turn_controller, "_maybe_send_visible_voice_echo", new=AsyncMock()),
             patch.object(bot._turn_controller, "_dispatch_text_message", new=AsyncMock(side_effect=record_dispatch)),
             patch("mindroom.ingress_validation.is_authorized_sender", return_value=True),
         ):
@@ -1492,7 +1492,7 @@ async def test_raw_voice_normalization_exception_dispatches_audio_fallback(mock_
         dispatched_event: PreparedTextEvent | nio.RoomMessageText,
         _requester_user_id: str,
         *,
-        handled_turn: HandledTurnState | None = None,
+        handled_turn: TurnRecord | None = None,
         **_metadata: object,
     ) -> None:
         dispatches.append((dispatched_event, _handled_source_event_ids(handled_turn)))
@@ -1504,7 +1504,6 @@ async def test_raw_voice_normalization_exception_dispatches_audio_fallback(mock_
             new=AsyncMock(side_effect=RuntimeError("stt failed")),
         ),
         patch("mindroom.voice_handler.download_media_bytes", new=AsyncMock(return_value=b"raw audio bytes")),
-        patch.object(bot._turn_controller, "_maybe_send_visible_voice_echo", new=AsyncMock()),
         patch.object(bot._turn_controller, "_dispatch_text_message", new=AsyncMock(side_effect=record_dispatch)),
         patch("mindroom.ingress_validation.is_authorized_sender", return_value=True),
     ):
@@ -1538,14 +1537,13 @@ async def test_raw_voice_download_failure_dispatches_text_only_fallback(mock_hom
         dispatched_event: PreparedTextEvent | nio.RoomMessageText,
         _requester_user_id: str,
         *,
-        handled_turn: HandledTurnState | None = None,
+        handled_turn: TurnRecord | None = None,
         **_metadata: object,
     ) -> None:
         dispatches.append((dispatched_event, _handled_source_event_ids(handled_turn)))
 
     with (
         patch("mindroom.voice_handler.download_media_bytes", new=AsyncMock(return_value=None)),
-        patch.object(bot._turn_controller, "_maybe_send_visible_voice_echo", new=AsyncMock()),
         patch.object(bot._turn_controller, "_dispatch_text_message", new=AsyncMock(side_effect=record_dispatch)),
         patch("mindroom.ingress_validation.is_authorized_sender", return_value=True),
     ):
@@ -1575,7 +1573,7 @@ async def test_raw_voice_thread_resolution_exception_does_not_dispatch_guessed_f
         dispatched_event: PreparedTextEvent | nio.RoomMessageText,
         _requester_user_id: str,
         *,
-        handled_turn: HandledTurnState | None = None,
+        handled_turn: TurnRecord | None = None,
         **_metadata: object,
     ) -> None:
         dispatches.append((dispatched_event, _handled_source_event_ids(handled_turn)))
@@ -1587,7 +1585,6 @@ async def test_raw_voice_thread_resolution_exception_does_not_dispatch_guessed_f
             new=AsyncMock(side_effect=RuntimeError("thread lookup failed")),
         ),
         patch.object(bot._turn_controller.deps.normalizer, "prepare_voice_event", new=AsyncMock()),
-        patch.object(bot._turn_controller, "_maybe_send_visible_voice_echo", new=AsyncMock()),
         patch.object(bot._turn_controller, "_dispatch_text_message", new=AsyncMock(side_effect=record_dispatch)),
         patch("mindroom.ingress_validation.is_authorized_sender", return_value=True),
     ):
@@ -1635,7 +1632,7 @@ async def test_raw_voice_root_target_failures_do_not_dispatch_guessed_fallbacks(
         dispatched_event: PreparedTextEvent | nio.RoomMessageText,
         _requester_user_id: str,
         *,
-        handled_turn: HandledTurnState | None = None,
+        handled_turn: TurnRecord | None = None,
         **_metadata: object,
     ) -> None:
         dispatches.append((dispatched_event, _handled_source_event_ids(handled_turn)))
@@ -1648,7 +1645,6 @@ async def test_raw_voice_root_target_failures_do_not_dispatch_guessed_fallbacks(
         ),
         patch("mindroom.voice_handler.download_media_bytes", new=AsyncMock(return_value=None)),
         patch.object(bot._turn_controller.deps.normalizer, "prepare_voice_event", new=AsyncMock()),
-        patch.object(bot._turn_controller, "_maybe_send_visible_voice_echo", new=AsyncMock()),
         patch.object(bot._turn_controller, "_dispatch_text_message", new=AsyncMock(side_effect=record_dispatch)),
         patch("mindroom.ingress_validation.is_authorized_sender", return_value=True),
     ):
@@ -1674,7 +1670,7 @@ async def test_raw_voice_cache_append_exception_does_not_dispatch_guessed_fallba
         dispatched_event: PreparedTextEvent | nio.RoomMessageText,
         _requester_user_id: str,
         *,
-        handled_turn: HandledTurnState | None = None,
+        handled_turn: TurnRecord | None = None,
         **_metadata: object,
     ) -> None:
         dispatches.append((dispatched_event, _handled_source_event_ids(handled_turn)))
@@ -1687,7 +1683,6 @@ async def test_raw_voice_cache_append_exception_does_not_dispatch_guessed_fallba
             new=AsyncMock(side_effect=RuntimeError("cache append failed")),
         ),
         patch.object(bot._turn_controller.deps.normalizer, "prepare_voice_event", new=prepare_voice_event),
-        patch.object(bot._turn_controller, "_maybe_send_visible_voice_echo", new=AsyncMock()),
         patch.object(bot._turn_controller, "_dispatch_text_message", new=AsyncMock(side_effect=record_dispatch)),
         patch("mindroom.ingress_validation.is_authorized_sender", return_value=True),
     ):

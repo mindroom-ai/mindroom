@@ -4,8 +4,13 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, ClassVar, cast
+from typing import TYPE_CHECKING, ClassVar, Protocol, TypeVar, cast, runtime_checkable
 
+from mindroom.embedder_health import (
+    EmbedderHealthRecorder,
+    capture_embedder_health_recorder,
+)
+from mindroom.embedding_errors import EmbedderRequestError, classified_embedder_error
 from mindroom.logging_config import get_logger
 from mindroom.timing import timed
 
@@ -23,6 +28,7 @@ from ._shared import (
     MEM0_REPLICA_KEY,
     MemoryNotFoundError,
     MemoryResult,
+    MemorySearchOutcome,
     ScopedMemoryCrud,
     ScopedMemoryWriter,
     new_memory_id,
@@ -38,8 +44,59 @@ if TYPE_CHECKING:
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 _MemoryFactory = Callable[..., Awaitable[ScopedMemoryCrud]]
+_T = TypeVar("_T")
 
 logger = get_logger(__name__)
+
+
+@runtime_checkable
+class _OperationTrackedEmbedder(Protocol):
+    def begin_operation(self) -> None: ...
+
+    def raise_for_operation_failure(self) -> None: ...
+
+
+def _record_classified_embedder_failure(
+    exc: BaseException,
+    health_recorder: EmbedderHealthRecorder,
+) -> str | None:
+    detail = classified_embedder_error(exc)
+    if detail is not None:
+        health_recorder.record(detail)
+    return detail
+
+
+async def _run_mem0_embedder_mutation(
+    operation: Callable[[], Awaitable[_T]],
+    health_recorder: EmbedderHealthRecorder,
+) -> _T:
+    """Run a Mem0 write without allowing raw provider exceptions to escape."""
+    try:
+        result = await operation()
+    except Exception as exc:
+        detail = _record_classified_embedder_failure(exc, health_recorder)
+        if detail is None:
+            raise
+        raise EmbedderRequestError(detail) from None
+    health_recorder.record(None)
+    return result
+
+
+async def _strict_mem0_add(
+    memory: ScopedMemoryWriter,
+    messages: list[dict],
+    *,
+    user_id: str,
+    metadata: dict[str, object],
+) -> object:
+    """Add through Mem0 and surface embedding failures it catches internally."""
+    embedder = getattr(memory, "embedding_model", None)
+    if isinstance(embedder, _OperationTrackedEmbedder):
+        embedder.begin_operation()
+    result = await memory.add(messages, user_id=user_id, metadata=metadata)
+    if isinstance(embedder, _OperationTrackedEmbedder):
+        embedder.raise_for_operation_failure()
+    return result
 
 
 def _mem0_results(payload: object) -> list[MemoryResult]:
@@ -77,9 +134,8 @@ async def _create_mem0_memory_instance(
     resolved_storage_path: Path,
     config: Config,
     create_memory: _MemoryFactory,
-    timing_scope: str | None,
 ) -> ScopedMemoryCrud:
-    return await create_memory(resolved_storage_path, config, timing_scope=timing_scope)
+    return await create_memory(resolved_storage_path, config)
 
 
 @timed("system_prompt_assembly.memory_search.mem0.agent_search")
@@ -273,11 +329,19 @@ async def _add_mem0_scope_messages(
     metadata: dict[str, object],
     failure_log: str,
     failure_context: dict[str, object],
-) -> None:
+    health_recorder: EmbedderHealthRecorder,
+) -> bool:
+    """Write one Mem0 replica and report whether it actually succeeded."""
     try:
-        await memory.add(messages, user_id=user_id, metadata=metadata)
+        await _strict_mem0_add(memory, messages, user_id=user_id, metadata=metadata)
     except Exception as error:
-        logger.exception(failure_log, error=str(error), **failure_context)
+        if (detail := _record_classified_embedder_failure(error, health_recorder)) is not None:
+            logger.warning(failure_log, error=detail, **failure_context)
+            return False
+        logger.exception(failure_log, error_type=type(error).__name__, **failure_context)
+        return False
+    health_recorder.record(None)
+    return True
 
 
 @dataclass(frozen=True)
@@ -306,16 +370,22 @@ class Mem0MemoryBackend:
             self.runtime_paths,
             execution_identity=execution_identity,
         )
-        memory = await self.create_memory(resolved_storage_path, config)
         metadata = dict(metadata or {})
         metadata["agent"] = agent_name
         messages = [{"role": "user", "content": content}]
-        try:
-            await memory.add(messages, user_id=agent_scope_user_id(agent_name), metadata=metadata)
-            logger.info("Memory added", agent=agent_name)
-        except Exception:
-            logger.exception("Failed to add memory", agent=agent_name)
-            raise
+        health_recorder = capture_embedder_health_recorder()
+
+        async def add_memory() -> None:
+            memory = await self.create_memory(resolved_storage_path, config)
+            await _strict_mem0_add(
+                memory,
+                messages,
+                user_id=agent_scope_user_id(agent_name),
+                metadata=metadata,
+            )
+
+        await _run_mem0_embedder_mutation(add_memory, health_recorder)
+        logger.info("Memory added", agent=agent_name)
 
     @timed("system_prompt_assembly.memory_search.mem0_backend")
     async def search(
@@ -327,9 +397,16 @@ class Mem0MemoryBackend:
         *,
         limit: int,
         execution_identity: ToolExecutionIdentity | None = None,
-        timing_scope: str | None = None,
-    ) -> list[MemoryResult]:
-        """Search mem0 memories visible to an agent."""
+    ) -> MemorySearchOutcome:
+        """Search mem0 memories visible to an agent.
+
+        Mem0 builds its own internal embedder, so passive health recording in
+        MindRoom's embedder never sees this traffic: the backend records the
+        outcome itself. Mem0's search embeds the query without swallowing
+        (verified against mem0ai 2.0.1), so a completed search proves the
+        embedder round-tripped and a propagated provider error classifies
+        into a degraded outcome instead of raising.
+        """
         resolved_storage_path = _primary_mem0_storage_path(
             agent_name,
             storage_path,
@@ -337,17 +414,38 @@ class Mem0MemoryBackend:
             self.runtime_paths,
             execution_identity=execution_identity,
         )
-        memory = await _create_mem0_memory_instance(
-            resolved_storage_path,
-            config,
-            self.create_memory,
-            timing_scope,
-        )
-        results = await _search_mem0_agent_scope(memory, query, agent_name, limit)
-        existing_memories = {result.get("memory", "") for result in results}
+        health_recorder = capture_embedder_health_recorder()
+        try:
+            memory = await _create_mem0_memory_instance(
+                resolved_storage_path,
+                config,
+                self.create_memory,
+            )
+            results = await _search_mem0_agent_scope(memory, query, agent_name, limit)
+        except Exception as exc:
+            degraded_reason = _record_classified_embedder_failure(exc, health_recorder)
+            if degraded_reason is None:
+                raise
+            logger.warning("Mem0 memory search degraded by embedder failure", agent=agent_name, error=degraded_reason)
+            return MemorySearchOutcome(results=[], degraded_reason=degraded_reason)
 
+        existing_memories = {result.get("memory", "") for result in results}
+        degraded_reason: str | None = None
         for team_id in get_team_ids_for_agent(agent_name, config):
-            team_memories = await _search_mem0_team_scope(memory, query, team_id, limit)
+            try:
+                team_memories = await _search_mem0_team_scope(memory, query, team_id, limit)
+            except Exception as exc:
+                scope_failure = _record_classified_embedder_failure(exc, health_recorder)
+                if scope_failure is None:
+                    raise
+                degraded_reason = degraded_reason or scope_failure
+                logger.warning(
+                    "Mem0 team memory search degraded by embedder failure",
+                    agent=agent_name,
+                    team_id=team_id,
+                    error=scope_failure,
+                )
+                continue
             for memory_result in team_memories:
                 if memory_result.get("memory", "") not in existing_memories:
                     results.append(memory_result)
@@ -355,7 +453,9 @@ class Mem0MemoryBackend:
             logger.debug("Team memories found", team_id=team_id, count=len(team_memories))
 
         logger.debug("Total memories found", count=len(results), agent=agent_name)
-        return results[:limit]
+        if degraded_reason is None:
+            health_recorder.record(None)
+        return MemorySearchOutcome(results=results[:limit], degraded_reason=degraded_reason)
 
     async def list_all(
         self,
@@ -410,31 +510,35 @@ class Mem0MemoryBackend:
         execution_identity: ToolExecutionIdentity | None = None,
     ) -> None:
         """Update one mem0 memory across its replica targets."""
-        if (
-            anchor_result := await _find_mem0_anchor_memory_result(
-                memory_id,
-                caller_context,
-                storage_path,
-                config,
-                self.runtime_paths,
+        health_recorder = capture_embedder_health_recorder()
+
+        async def update_targets() -> int:
+            if (
+                anchor_result := await _find_mem0_anchor_memory_result(
+                    memory_id,
+                    caller_context,
+                    storage_path,
+                    config,
+                    self.runtime_paths,
+                    create_memory=self.create_memory,
+                    execution_identity=execution_identity,
+                )
+            ) is None:
+                raise MemoryNotFoundError(memory_id)
+            return await _mutate_mem0_memory_targets(
+                memory_id=memory_id,
+                content=content,
+                operation="update",
+                caller_context=caller_context,
+                storage_path=storage_path,
+                config=config,
+                runtime_paths=self.runtime_paths,
+                anchor_result=anchor_result,
                 create_memory=self.create_memory,
                 execution_identity=execution_identity,
             )
-        ) is None:
-            raise MemoryNotFoundError(memory_id)
 
-        updated_targets = await _mutate_mem0_memory_targets(
-            memory_id=memory_id,
-            content=content,
-            operation="update",
-            caller_context=caller_context,
-            storage_path=storage_path,
-            config=config,
-            runtime_paths=self.runtime_paths,
-            anchor_result=anchor_result,
-            create_memory=self.create_memory,
-            execution_identity=execution_identity,
-        )
+        updated_targets = await _run_mem0_embedder_mutation(update_targets, health_recorder)
         if updated_targets > 0:
             logger.info("Memory updated", memory_id=memory_id, storage_targets=updated_targets)
             return
@@ -530,26 +634,50 @@ class Mem0MemoryBackend:
             failure_log = "Failed to add memory"
             failure_context = {"agent": agent_name}
 
+        stored_targets = 0
         for target_storage_path in target_storage_paths:
-            memory = await self.create_memory(target_storage_path, config)
-            await _add_mem0_scope_messages(
+            health_recorder = capture_embedder_health_recorder()
+            try:
+                memory = await self.create_memory(target_storage_path, config)
+            except Exception as exc:
+                if (detail := _record_classified_embedder_failure(exc, health_recorder)) is None:
+                    raise
+                logger.warning(failure_log, error=detail, **failure_context)
+                continue
+            if await _add_mem0_scope_messages(
                 memory=memory,
                 messages=messages,
                 user_id=scope_user_id,
                 metadata=metadata,
                 failure_log=failure_log,
                 failure_context=failure_context,
+                health_recorder=health_recorder,
+            ):
+                stored_targets += 1
+
+        if stored_targets == 0:
+            logger.warning(
+                "Conversation memory was not stored in any target",
+                requested_targets=len(target_storage_paths),
+                **failure_context,
             )
+            return
 
         if isinstance(agent_name, list):
             logger.info(
                 "Team memory added",
                 team_id=scope_user_id,
                 members=agent_name,
-                storage_targets=len(target_storage_paths),
+                storage_targets=stored_targets,
+                requested_targets=len(target_storage_paths),
             )
         else:
-            logger.info("Memory added", agent=agent_name)
+            logger.info(
+                "Memory added",
+                agent=agent_name,
+                storage_targets=stored_targets,
+                requested_targets=len(target_storage_paths),
+            )
 
     def load_entrypoint_context(
         self,
@@ -558,8 +686,7 @@ class Mem0MemoryBackend:
         config: Config,
         *,
         execution_identity: ToolExecutionIdentity | None = None,
-        timing_scope: str | None = None,
     ) -> str:
         """Return no stable entrypoint context; mem0 has no curated `MEMORY.md`."""
-        del agent_name, storage_path, config, execution_identity, timing_scope
+        del agent_name, storage_path, config, execution_identity
         return ""

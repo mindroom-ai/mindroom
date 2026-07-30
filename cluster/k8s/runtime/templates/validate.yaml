@@ -1,6 +1,21 @@
 {{- if not (or (eq .Values.eventCache.backend "postgres") (eq .Values.eventCache.backend "sqlite")) -}}
 {{- fail "eventCache.backend must be either postgres or sqlite" -}}
 {{- end -}}
+{{- if not (or (eq .Values.matrix.managedAccountAuth "password") (eq .Values.matrix.managedAccountAuth "appservice")) -}}
+{{- fail "matrix.managedAccountAuth must be either password or appservice" -}}
+{{- end -}}
+{{- if and (eq .Values.matrix.managedAccountAuth "appservice") (not .Values.matrix.appserviceToken.existingSecret) -}}
+{{- fail "matrix.appserviceToken.existingSecret is required when matrix.managedAccountAuth=appservice" -}}
+{{- end -}}
+{{- if and (eq .Values.matrix.managedAccountAuth "appservice") (not .Values.matrix.appserviceToken.key) -}}
+{{- fail "matrix.appserviceToken.key is required when matrix.managedAccountAuth=appservice" -}}
+{{- end -}}
+{{- if and (eq .Values.matrix.managedAccountAuth "password") .Values.matrix.appserviceToken.existingSecret -}}
+{{- fail "matrix.appserviceToken requires matrix.managedAccountAuth=appservice" -}}
+{{- end -}}
+{{- if and (eq .Values.matrix.managedAccountAuth "appservice") .Values.matrix.registrationToken.existingSecret -}}
+{{- fail "matrix.registrationToken cannot be set when matrix.managedAccountAuth=appservice" -}}
+{{- end -}}
 {{- $configSource := include "mindroom-runtime.configSource" . -}}
 {{- if not (or (eq $configSource "configMap") (eq $configSource "file")) -}}
 {{- fail "config.source must be either configMap or file" -}}
@@ -109,6 +124,32 @@
 {{- fail (printf "contentBundles[%d].seed.command is required when seed.enabled=true" $index) -}}
 {{- end -}}
 {{- end -}}
+{{- $providerCredentialEnvMap := include "mindroom-runtime.providerCredentialEnvMap" . | fromYaml -}}
+{{- $providerCredentialProviders := dict -}}
+{{- range $index, $entry := .Values.providerCredentials -}}
+{{- if not $entry.provider -}}
+{{- fail (printf "providerCredentials[%d].provider is required" $index) -}}
+{{- end -}}
+{{- if not (hasKey $providerCredentialEnvMap $entry.provider) -}}
+{{- fail (printf "providerCredentials[%d].provider %q is not supported; use one of: %s" $index $entry.provider (keys $providerCredentialEnvMap | sortAlpha | join ", ")) -}}
+{{- end -}}
+{{- if hasKey $providerCredentialProviders $entry.provider -}}
+{{- fail (printf "providerCredentials[%d].provider %q is used more than once" $index $entry.provider) -}}
+{{- end -}}
+{{- $_ := set $providerCredentialProviders $entry.provider true -}}
+{{- if not $entry.existingSecret -}}
+{{- fail (printf "providerCredentials[%d].existingSecret is required" $index) -}}
+{{- end -}}
+{{- if not $entry.key -}}
+{{- fail (printf "providerCredentials[%d].key is required" $index) -}}
+{{- end -}}
+{{- $envName := index $providerCredentialEnvMap $entry.provider -}}
+{{- range $extraEnv := $.Values.env.extra -}}
+{{- if eq (default "" $extraEnv.name) $envName -}}
+{{- fail (printf "providerCredentials[%d] and env.extra both set %s; remove one of them" $index $envName) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
 {{- $egressProxyEnabled := or .Values.egressProxy.enabled .Values.approvedEgress.enabled -}}
 {{- $egressPolicyEnabled := and $egressProxyEnabled .Values.egressProxy.networkPolicy.create -}}
 {{- if and $egressProxyEnabled (ne .Values.workers.backend "kubernetes") -}}
@@ -158,8 +199,24 @@
 {{- if and .Values.approvedEgress.persistence.enabled (not .Values.approvedEgress.persistence.existingClaim) (not .Values.approvedEgress.persistence.size) -}}
 {{- fail "approvedEgress.persistence.size is required when chart-managed approved egress persistence is enabled" -}}
 {{- end -}}
+{{- if .Values.approvedEgress.parentProxy.enabled -}}
+{{- if not (trim (default "" .Values.approvedEgress.parentProxy.host)) -}}
+{{- fail "approvedEgress.parentProxy.host is required when approvedEgress.parentProxy.enabled=true" -}}
+{{- end -}}
+{{- $parentProxyPort := int .Values.approvedEgress.parentProxy.port -}}
+{{- if or (lt $parentProxyPort 1) (gt $parentProxyPort 65535) -}}
+{{- fail "approvedEgress.parentProxy.port must be between 1 and 65535 when approvedEgress.parentProxy.enabled=true" -}}
+{{- end -}}
+{{- end -}}
 {{- end -}}
 {{- $agentVault := .Values.workers.kubernetes.agentVault -}}
+{{- $agentVaultProxyUrl := lower (regexReplaceAll "/+$" (trim (default "" $agentVault.proxyUrl)) "") -}}
+{{- $agentVaultServiceName := include "mindroom-runtime.agentVaultServerName" . -}}
+{{- $agentVaultMitmPort := printf "%v" $agentVault.server.mitmPort -}}
+{{- $agentVaultServiceProxyUrls := list (printf "http://%s:%s" $agentVaultServiceName $agentVaultMitmPort) (printf "http://%s.%s:%s" $agentVaultServiceName .Release.Namespace $agentVaultMitmPort) (printf "http://%s.%s.svc:%s" $agentVaultServiceName .Release.Namespace $agentVaultMitmPort) (printf "http://%s.%s.svc.cluster.local:%s" $agentVaultServiceName .Release.Namespace $agentVaultMitmPort) -}}
+{{- if and .Values.approvedEgress.enabled $agentVault.enabled (not .Values.approvedEgress.parentProxy.enabled) (has $agentVaultProxyUrl $agentVaultServiceProxyUrls) -}}
+{{- fail "approvedEgress with Agent Vault must be squid-first: enable approvedEgress.parentProxy so Squid sees worker source IPs for dynamic grants, or set workers.kubernetes.agentVault.proxyUrl to an external/custom proxy URL explicitly" -}}
+{{- end -}}
 {{- if $agentVault.accessTool.enabled -}}
 {{- if not $agentVault.enabled -}}
 {{- fail "workers.kubernetes.agentVault.accessTool.enabled requires workers.kubernetes.agentVault.enabled=true" -}}
@@ -169,5 +226,59 @@
 {{- end -}}
 {{- if not (and (trim (default "" $agentVault.accessTool.adminTokenSecret.name)) (trim (default "" $agentVault.accessTool.adminTokenSecret.key))) -}}
 {{- fail "workers.kubernetes.agentVault.accessTool.adminTokenSecret.name and .key must not be empty" -}}
+{{- end -}}
+{{- end -}}
+{{- $accessGrants := $agentVault.accessGrants -}}
+{{- if and $accessGrants.enabled (gt (len $accessGrants.grants) 0) -}}
+{{- if not $agentVault.enabled -}}
+{{- fail "workers.kubernetes.agentVault.accessGrants.enabled requires workers.kubernetes.agentVault.enabled=true when grants are configured" -}}
+{{- end -}}
+{{- if not (and (trim (default "" $accessGrants.adminTokenSecret.name)) (trim (default "" $accessGrants.adminTokenSecret.key))) -}}
+{{- fail "workers.kubernetes.agentVault.accessGrants.adminTokenSecret.name and .key must not be empty" -}}
+{{- end -}}
+{{- if and $agentVault.bootstrap.enabled (not (trim (default "" $agentVault.accessTool.adminAgentName))) -}}
+{{- fail "workers.kubernetes.agentVault.accessTool.adminAgentName must not be empty when accessGrants and bootstrap are enabled" -}}
+{{- end -}}
+{{- if and $agentVault.bootstrap.enabled $agentVault.accessTool.enabled (eq (trim (default "" $agentVault.accessTool.adminTokenSecret.name)) (trim (default "" $accessGrants.adminTokenSecret.name))) (ne (trim (default "" $agentVault.accessTool.adminTokenSecret.key)) (trim (default "" $accessGrants.adminTokenSecret.key))) -}}
+{{- fail "workers.kubernetes.agentVault.accessTool.adminTokenSecret.key must match workers.kubernetes.agentVault.accessGrants.adminTokenSecret.key when both use the same Secret name" -}}
+{{- end -}}
+{{- range $index, $grant := $accessGrants.grants -}}
+{{- $path := printf "workers.kubernetes.agentVault.accessGrants.grants[%d]" $index -}}
+{{- $email := trim (default "" $grant.email) -}}
+{{- $scope := trim (default "" $grant.workerScope) -}}
+{{- $role := trim (default "admin" $grant.role) -}}
+{{- $requester := trim (default "" $grant.requester) -}}
+{{- $agent := trim (default "" $grant.agent) -}}
+{{- if not $email -}}
+{{- fail (printf "%s.email is required" $path) -}}
+{{- end -}}
+{{- if not (has $scope (list "shared" "user" "user_agent")) -}}
+{{- fail (printf "%s.workerScope must be one of: shared, user, user_agent" $path) -}}
+{{- end -}}
+{{- if ne $role "admin" -}}
+{{- fail (printf "%s.role must be admin" $path) -}}
+{{- end -}}
+{{- if eq $scope "shared" -}}
+{{- if $requester -}}
+{{- fail (printf "%s.requester must be empty for workerScope=shared" $path) -}}
+{{- end -}}
+{{- if not $agent -}}
+{{- fail (printf "%s.agent is required for workerScope=shared" $path) -}}
+{{- end -}}
+{{- else if eq $scope "user" -}}
+{{- if not $requester -}}
+{{- fail (printf "%s.requester is required for workerScope=user" $path) -}}
+{{- end -}}
+{{- if $agent -}}
+{{- fail (printf "%s.agent must be empty for workerScope=user" $path) -}}
+{{- end -}}
+{{- else if eq $scope "user_agent" -}}
+{{- if not $requester -}}
+{{- fail (printf "%s.requester is required for workerScope=user_agent" $path) -}}
+{{- end -}}
+{{- if not $agent -}}
+{{- fail (printf "%s.agent is required for workerScope=user_agent" $path) -}}
+{{- end -}}
+{{- end -}}
 {{- end -}}
 {{- end -}}

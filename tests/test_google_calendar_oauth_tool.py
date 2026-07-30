@@ -13,6 +13,7 @@ from mindroom import constants
 from mindroom import tools as _mindroom_tools  # noqa: F401  # registers built-in tool metadata
 from mindroom.credentials import CredentialsManager
 from mindroom.custom_tools.google_calendar import GoogleCalendarTools
+from mindroom.oauth.google import GOOGLE_IDENTITY_SCOPES
 from mindroom.oauth.google_calendar import _GOOGLE_CALENDAR_OAUTH_SCOPES, google_calendar_oauth_provider
 from mindroom.oauth.providers import OAuthConnectionRequired
 from mindroom.tool_system.metadata import get_tool_by_name
@@ -101,7 +102,7 @@ def test_google_calendar_loads_tokens_from_oauth_service(tmp_path: Path) -> None
     assert "calendar_id" not in token_data
 
 
-def test_google_calendar_default_config_disables_write_methods(tmp_path: Path) -> None:
+def test_google_calendar_default_config_enables_write_methods(tmp_path: Path) -> None:
     tool = get_tool_by_name(
         "google_calendar",
         _runtime_paths(tmp_path),
@@ -111,12 +112,14 @@ def test_google_calendar_default_config_disables_write_methods(tmp_path: Path) -
     )
 
     assert isinstance(tool, GoogleCalendarTools)
-    assert "create_event" not in tool.functions
-    assert "update_event" not in tool.functions
-    assert "delete_event" not in tool.functions
-    assert "quick_add_event" not in tool.functions
-    assert "move_event" not in tool.functions
-    assert "respond_to_event" not in tool.functions
+    assert "create_event" in tool.functions
+    assert "update_event" in tool.functions
+    assert "delete_event" in tool.functions
+    assert "quick_add_event" in tool.functions
+    assert "move_event" in tool.functions
+    assert "respond_to_event" in tool.functions
+    # Agno validates its own broad scope marker during toolkit construction.
+    # MindRoom injects pre-authorized credentials carrying the granular provider scopes below.
     assert "https://www.googleapis.com/auth/calendar" in tool.scopes
 
 
@@ -139,14 +142,21 @@ def test_google_calendar_allow_update_enables_write_methods(tmp_path: Path) -> N
     assert "quick_add_event" in tool.functions
     assert "move_event" in tool.functions
     assert "respond_to_event" in tool.functions
+    # This is Agno's construction-time marker, not the scopes requested by MindRoom OAuth.
     assert "https://www.googleapis.com/auth/calendar" in tool.scopes
 
 
-def test_google_calendar_provider_uses_write_scope_for_method_gated_tools() -> None:
+def test_google_calendar_provider_uses_narrow_scopes_for_every_tool_operation() -> None:
     provider = google_calendar_oauth_provider()
 
     assert provider.scopes == _GOOGLE_CALENDAR_OAUTH_SCOPES
-    assert "https://www.googleapis.com/auth/calendar" in provider.scopes
+    assert set(provider.scopes) - set(GOOGLE_IDENTITY_SCOPES) == {
+        "https://www.googleapis.com/auth/calendar.events",
+        "https://www.googleapis.com/auth/calendar.calendarlist.readonly",
+        "https://www.googleapis.com/auth/calendar.freebusy",
+        "https://www.googleapis.com/auth/calendar.settings.readonly",
+    }
+    assert "https://www.googleapis.com/auth/calendar" not in provider.scopes
 
 
 def test_google_calendar_service_account_env_uses_upstream_auth(tmp_path: Path) -> None:

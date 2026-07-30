@@ -16,7 +16,7 @@ import time
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 
-from mindroom.attachments import merge_attachment_ids
+from mindroom.attachment_ids import merge_attachment_ids
 from mindroom.inbound_turn_normalizer import (
     BatchMediaAttachmentRequest,
     DispatchPayloadWithAttachmentsRequest,
@@ -43,6 +43,8 @@ class DispatchPayloadInputs:
     message_attachment_ids: tuple[str, ...]
     trusted_attachment_ids: tuple[str, ...]
     media_events: tuple[MediaDispatchEvent, ...]
+    raw_audio_fallback: bool = False
+    voice_transcript: bool = False
 
 
 @dataclass(frozen=True)
@@ -100,12 +102,6 @@ class ResponsePayloadPreparer:
             target_entity_name=self.agent_name,
             target_member_names=preparation.target_member_names,
         )
-        if system_enrichment_items:
-            prepared_payload = replace(
-                prepared_payload,
-                system_enrichment_items=tuple(system_enrichment_items),
-            )
-
         payload_ready_monotonic = time.monotonic()
         if pipeline_timing is not None:
             pipeline_timing.mark("response_payload_ready")
@@ -121,7 +117,8 @@ class ResponsePayloadPreparer:
             media=prepared_payload.payload.media,
             attachment_ids=tuple(prepared_payload.payload.attachment_ids or ()),
             response_envelope=prepared_payload.envelope,
-            system_enrichment_items=prepared_payload.system_enrichment_items,
+            transient_enrichment_items=prepared_payload.transient_enrichment_items,
+            system_enrichment_items=tuple(system_enrichment_items),
             requires_model_history_refresh=False,
             payload_preparation=None,
         )
@@ -165,6 +162,8 @@ class ResponsePayloadPreparer:
                     media_thread_id=media_thread_id,
                     thread_history=thread_history,
                     fallback_images=fallback_images,
+                    raw_audio_fallback=payload_inputs.raw_audio_fallback,
+                    voice_transcript=payload_inputs.voice_transcript,
                 ),
             )
             payload_builder_outcome = "success"

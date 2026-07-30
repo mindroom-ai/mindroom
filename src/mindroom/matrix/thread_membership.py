@@ -33,7 +33,8 @@ Invariants enforced here (every resolver in the repo must go through this module
    candidate root and retry).
    Lookup failures and missing related events during the walk are likewise INDETERMINATE, never ROOM_LEVEL.
 
-5. Child proof excludes the candidate root itself and excludes edits of the root: an ``m.replace`` of a
+5. Child proof and relation ancestry accept only ``m.room.message`` and ``m.room.encrypted`` events.
+   Child proof also excludes the candidate root itself and edits of the root: an ``m.replace`` of a
    relation-free event does not make that event a thread root.
 
 6. A root proof built from thread history whose read source is the explicit degraded fallback
@@ -52,7 +53,7 @@ from dataclasses import dataclass
 from enum import Enum, auto
 from typing import Protocol
 
-from mindroom.matrix.event_info import EventInfo
+from mindroom.matrix.event_info import EventInfo, event_type_supports_thread_relations
 from mindroom.matrix.thread_diagnostics import is_thread_history_source_degraded
 
 type _ThreadIdLookup = Callable[[str, str], Awaitable[str | None]]
@@ -184,6 +185,35 @@ class ThreadMembershipAccess:
     lookup_thread_id: _ThreadIdLookup
     fetch_event_info: _EventInfoLookup
     prove_thread_root: _ThreadRootProofLookup
+
+
+def conversation_relation_thread_membership_access(
+    access: ThreadMembershipAccess,
+) -> ThreadMembershipAccess:
+    """Reject non-message ancestors and stale indexes from conversation relation walks."""
+
+    async def fetch_event_info(room_id: str, event_id: str) -> EventInfo | None:
+        event_info = await access.fetch_event_info(room_id, event_id)
+        if event_info is not None and not event_type_supports_thread_relations(event_info.event_type):
+            msg = f"Related event {event_id} cannot carry conversation thread membership"
+            raise ThreadMembershipLookupError(msg)
+        return event_info
+
+    async def lookup_thread_id(room_id: str, event_id: str) -> str | None:
+        thread_id = await access.lookup_thread_id(room_id, event_id)
+        if thread_id is None:
+            return None
+        event_info = await fetch_event_info(room_id, event_id)
+        if event_info is None:
+            msg = f"Indexed event {event_id} is unavailable for conversation thread validation"
+            raise ThreadMembershipLookupError(msg)
+        return thread_id
+
+    return ThreadMembershipAccess(
+        lookup_thread_id=lookup_thread_id,
+        fetch_event_info=fetch_event_info,
+        prove_thread_root=access.prove_thread_root,
+    )
 
 
 def _resolution_from_root_proof(
@@ -327,10 +357,12 @@ def map_backed_thread_membership_access(
         )
         return ThreadRootProof.proven() if has_children else ThreadRootProof.not_a_thread_root()
 
-    return ThreadMembershipAccess(
-        lookup_thread_id=lookup_thread_id,
-        fetch_event_info=fetch_event_info,
-        prove_thread_root=prove_thread_root,
+    return conversation_relation_thread_membership_access(
+        ThreadMembershipAccess(
+            lookup_thread_id=lookup_thread_id,
+            fetch_event_info=fetch_event_info,
+            prove_thread_root=prove_thread_root,
+        ),
     )
 
 
@@ -341,7 +373,7 @@ def page_event_info_counts_as_thread_child_proof(
     event_info: EventInfo,
 ) -> bool:
     """Return whether one page-local event proves a root has thread children."""
-    if event_id == thread_root_id:
+    if event_id == thread_root_id or not event_type_supports_thread_relations(event_info.event_type):
         return False
     return any(
         candidate_thread_id == thread_root_id
@@ -413,10 +445,14 @@ def _room_scan_event_source_counts_as_thread_child_proof(
 ) -> bool:
     """Return whether one room-scan source proves the root has real threaded descendants."""
     event_id = event_source.get("event_id")
-    if event_id == thread_root_id:
+    if not isinstance(event_id, str):
         return False
     event_info = EventInfo.from_event(dict(event_source))
-    return not (event_info.is_edit and event_info.original_event_id == thread_root_id)
+    return (
+        event_id != thread_root_id
+        and event_type_supports_thread_relations(event_info.event_type)
+        and not (event_info.is_edit and event_info.original_event_id == thread_root_id)
+    )
 
 
 def thread_messages_thread_membership_access(
@@ -434,10 +470,12 @@ def thread_messages_thread_membership_access(
             fetch_thread_messages=fetch_thread_messages,
         )
 
-    return ThreadMembershipAccess(
-        lookup_thread_id=lookup_thread_id,
-        fetch_event_info=fetch_event_info,
-        prove_thread_root=prove_thread_root,
+    return conversation_relation_thread_membership_access(
+        ThreadMembershipAccess(
+            lookup_thread_id=lookup_thread_id,
+            fetch_event_info=fetch_event_info,
+            prove_thread_root=prove_thread_root,
+        ),
     )
 
 
@@ -456,8 +494,10 @@ def room_scan_thread_membership_access(
             fetch_thread_event_sources=fetch_thread_event_sources,
         )
 
-    return ThreadMembershipAccess(
-        lookup_thread_id=lookup_thread_id,
-        fetch_event_info=fetch_event_info,
-        prove_thread_root=prove_thread_root,
+    return conversation_relation_thread_membership_access(
+        ThreadMembershipAccess(
+            lookup_thread_id=lookup_thread_id,
+            fetch_event_info=fetch_event_info,
+            prove_thread_root=prove_thread_root,
+        ),
     )

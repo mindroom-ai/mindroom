@@ -1,0 +1,146 @@
+{{- $configManaged := and .Values.config.create (not .Values.config.existingConfigMap) -}}
+{{- $nginxManaged := and .Values.nginx.create (not .Values.nginx.existingConfigMap) -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "mindroom-client.fullname" . }}
+  labels:
+    {{- include "mindroom-client.labels" . | nindent 4 }}
+  {{- with .Values.deploymentAnnotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "mindroom-client.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "mindroom-client.selectorLabels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- if or $configManaged $nginxManaged .Values.podAnnotations }}
+      annotations:
+        {{- if $configManaged }}
+        checksum/config: {{ include (print $.Template.BasePath "/configmap-config.yaml") . | sha256sum }}
+        {{- end }}
+        {{- if $nginxManaged }}
+        checksum/nginx-config: {{ include (print $.Template.BasePath "/configmap-nginx.yaml") . | sha256sum }}
+        {{- end }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- end }}
+    spec:
+      automountServiceAccountToken: false
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if .Values.priorityClassName }}
+      priorityClassName: {{ .Values.priorityClassName | quote }}
+      {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.topologySpreadConstraints }}
+      topologySpreadConstraints:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: client
+          image: {{ include "mindroom-client.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          # Run nginx directly: the image entrypoint writes runtime-config.js
+          # into the app directory, which the unprivileged read-only container
+          # forbids; the chart-managed nginx config serves runtime-config.js.
+          command:
+            - nginx
+            - -g
+            - daemon off;
+          ports:
+            - name: http
+              containerPort: {{ .Values.nginx.port }}
+              protocol: TCP
+          {{- if .Values.probes.readiness.enabled }}
+          readinessProbe:
+            {{- if .Values.probes.readiness.custom }}
+            {{- toYaml .Values.probes.readiness.custom | nindent 12 }}
+            {{- else }}
+            httpGet:
+              path: {{ include "mindroom-client.probePath" . }}
+              port: http
+            initialDelaySeconds: {{ .Values.probes.readiness.initialDelaySeconds }}
+            periodSeconds: {{ .Values.probes.readiness.periodSeconds }}
+            timeoutSeconds: {{ .Values.probes.readiness.timeoutSeconds }}
+            failureThreshold: {{ .Values.probes.readiness.failureThreshold }}
+            {{- end }}
+          {{- end }}
+          {{- if .Values.probes.liveness.enabled }}
+          livenessProbe:
+            {{- if .Values.probes.liveness.custom }}
+            {{- toYaml .Values.probes.liveness.custom | nindent 12 }}
+            {{- else }}
+            httpGet:
+              path: {{ include "mindroom-client.probePath" . }}
+              port: http
+            initialDelaySeconds: {{ .Values.probes.liveness.initialDelaySeconds }}
+            periodSeconds: {{ .Values.probes.liveness.periodSeconds }}
+            timeoutSeconds: {{ .Values.probes.liveness.timeoutSeconds }}
+            failureThreshold: {{ .Values.probes.liveness.failureThreshold }}
+            {{- end }}
+          {{- end }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          {{- with .Values.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          volumeMounts:
+            # /usr/share/nginx/html is a symlink to /app in the client image,
+            # so the nginx aliases under html/ resolve to these mounts.
+            - name: config
+              mountPath: /app/config.json
+              subPath: {{ .Values.config.key }}
+              readOnly: true
+            - name: nginx-config
+              mountPath: /etc/nginx/conf.d/default.conf
+              subPath: {{ .Values.nginx.key }}
+              readOnly: true
+            {{- if .Values.rootServiceWorkerCleanup.enabled }}
+            - name: nginx-config
+              mountPath: /app/root-cleanup-sw.js
+              subPath: {{ .Values.nginx.cleanupWorkerKey }}
+              readOnly: true
+            {{- end }}
+            - name: nginx-cache
+              mountPath: /var/cache/nginx
+            - name: nginx-run
+              mountPath: /run
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "mindroom-client.configMapName" . }}
+        - name: nginx-config
+          configMap:
+            name: {{ include "mindroom-client.nginxConfigMapName" . }}
+        - name: nginx-cache
+          emptyDir: {}
+        - name: nginx-run
+          emptyDir: {}

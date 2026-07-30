@@ -4,7 +4,7 @@ from __future__ import annotations
 import asyncio
 import threading
 from contextlib import asynccontextmanager, suppress
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from typing import TYPE_CHECKING, Annotated, Any, Literal
 from urllib.parse import urlsplit
 
@@ -13,7 +13,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, ConfigDict, Field
 
-from mindroom import constants
+from mindroom import constants, file_watcher
 from mindroom.agent_policy import build_agent_policy_seeds, resolve_agent_policy_index
 from mindroom.api import config_lifecycle
 from mindroom.api.auth import ApiAuthState, verify_user  # noqa: F401
@@ -23,6 +23,7 @@ from mindroom.api.config_lifecycle import ApiSnapshot, ApiState, ConfigLoadResul
 # Import routers
 from mindroom.api.credentials import router as credentials_router
 from mindroom.api.dynamic_workflows import router as dynamic_workflows_router
+from mindroom.api.external_triggers import router as external_triggers_router
 from mindroom.api.frontend import router as frontend_router
 from mindroom.api.homeassistant_integration import router as homeassistant_router
 from mindroom.api.integrations import router as integrations_router
@@ -36,13 +37,16 @@ from mindroom.api.skills import router as skills_router
 from mindroom.api.tools import router as tools_router
 from mindroom.api.workers import router as workers_router
 from mindroom.credentials_sync import sync_env_to_credentials
+from mindroom.embedder_health import get_embedder_failure
 from mindroom.knowledge import KnowledgeRefreshScheduler, reconcile_knowledge_mode_transition_states
 from mindroom.knowledge.watch import KnowledgeSourceWatcher
 from mindroom.logging_config import get_logger
+from mindroom.matrix.decrypt_failure import e2ee_stats
 from mindroom.matrix.health import get_matrix_sync_health_snapshot
-from mindroom.orchestration.runtime import matrix_sync_startup_timeout_seconds
+from mindroom.orchestration.runtime import matrix_sync_cache_write_grace_seconds, matrix_sync_startup_timeout_seconds
 from mindroom.runtime_state import get_runtime_state
 from mindroom.tool_system.sandbox_proxy import sandbox_proxy_config
+from mindroom.workers.backend import maintain_workers
 from mindroom.workers.runtime import (
     get_primary_worker_manager,
     primary_worker_backend_available,
@@ -51,18 +55,22 @@ from mindroom.workers.runtime import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
+    from collections.abc import AsyncIterator, Awaitable, Callable
     from pathlib import Path
 
     from starlette.types import ASGIApp, Receive, Scope, Send
 
     from mindroom.config.main import Config
+    from mindroom.external_triggers.store import TriggerDeliverySnapshot
 
 logger = get_logger(__name__)
 _WORKER_CLEANUP_INTERVAL_ENV = "MINDROOM_WORKER_CLEANUP_INTERVAL_SECONDS"
 _DASHBOARD_CORS_ALLOWED_ORIGINS_ENV = "MINDROOM_DASHBOARD_CORS_ALLOWED_ORIGINS"
 _DASHBOARD_CORS_ALLOW_ALL_ORIGINS_ENV = "MINDROOM_DASHBOARD_CORS_ALLOW_ALL_ORIGINS"
-_DASHBOARD_CORS_EXPOSE_HEADERS = (config_lifecycle.CONFIG_GENERATION_HEADER,)
+_DASHBOARD_CORS_EXPOSE_HEADERS = (
+    config_lifecycle.CONFIG_GENERATION_HEADER,
+    config_lifecycle.CONFIG_USES_INCLUDES_HEADER,
+)
 _DEFAULT_DASHBOARD_CORS_ALLOWED_ORIGINS = (
     "http://localhost:3003",
     "http://localhost:5173",
@@ -215,14 +223,20 @@ def _cleanup_workers_once(
         kubernetes_tool_validation_snapshot=kubernetes_tool_validation_snapshot,
         worker_grantable_credentials=worker_grantable_credentials,
     )
-    cleaned_workers = worker_manager.cleanup_idle_workers()
-    if cleaned_workers:
+    maintenance = maintain_workers(worker_manager)
+    if maintenance.cleaned:
         logger.info(
             "Cleaned idle workers",
-            count=len(cleaned_workers),
+            count=len(maintenance.cleaned),
             backend=worker_manager.backend_name,
         )
-    return len(cleaned_workers)
+    if maintenance.reconciled:
+        logger.info(
+            "Reconciled drifted worker pod templates",
+            count=len(maintenance.reconciled),
+            backend=worker_manager.backend_name,
+        )
+    return len(maintenance.cleaned)
 
 
 async def _worker_cleanup_loop(
@@ -286,6 +300,7 @@ def initialize_api_app(api_app: FastAPI, runtime_paths: constants.RuntimePaths) 
     app_state.api_auth_account_id = runtime_paths.env_value("ACCOUNT_ID")
     previous_state = app_state.api_state
     if previous_state is None:
+        app_state.external_trigger_runtime = None
         app_state.api_state = ApiState(
             config_lock=threading.Lock(),
             snapshot=ApiSnapshot(
@@ -311,6 +326,9 @@ def initialize_api_app(api_app: FastAPI, runtime_paths: constants.RuntimePaths) 
         source_fingerprint = (
             current_snapshot.source_fingerprint if current_snapshot.runtime_paths == runtime_paths else None
         )
+        source_files = current_snapshot.source_files if current_snapshot.runtime_paths == runtime_paths else None
+        if current_snapshot.runtime_paths != runtime_paths:
+            app_state.external_trigger_runtime = None
         previous_state.snapshot = config_lifecycle._published_snapshot(
             current_snapshot,
             runtime_paths=runtime_paths,
@@ -319,6 +337,7 @@ def initialize_api_app(api_app: FastAPI, runtime_paths: constants.RuntimePaths) 
             auth_state=auth_state,
             config_load_result=config_load_result,
             source_fingerprint=source_fingerprint,
+            source_files=source_files,
         )
     config_lifecycle.register_api_app(api_app)
 
@@ -359,15 +378,37 @@ def _reconcile_knowledge_mode_transitions(
     reconcile_knowledge_mode_transition_states(previous_config, current_config, current_runtime_paths)
 
 
+async def _reload_config_into_app(api_app: FastAPI, runtime_paths: constants.RuntimePaths) -> bool:
+    """Reload one API app config snapshot from disk."""
+    previous = _read_app_runtime_config_or_none(api_app)
+    # Config validation executes plugin modules and walks the filesystem;
+    # keep it off the event loop (#1260).
+    loaded = await asyncio.to_thread(config_lifecycle.load_config_into_app, runtime_paths, api_app)
+    if loaded:
+        _reconcile_knowledge_mode_transitions(previous, api_app)
+    await _sync_standalone_knowledge_watchers(api_app)
+    return loaded
+
+
 async def _reload_config_after_file_change(
     api_app: FastAPI,
     runtime_paths: constants.RuntimePaths,
 ) -> None:
-    previous = _read_app_runtime_config_or_none(api_app)
-    loaded = config_lifecycle.load_config_into_app(runtime_paths, api_app)
-    if loaded:
-        _reconcile_knowledge_mode_transitions(previous, api_app)
-    await _sync_standalone_knowledge_watchers(api_app)
+    await _reload_config_into_app(api_app, runtime_paths)
+
+
+async def _watched_config_mtimes(api_app: FastAPI) -> tuple[constants.RuntimePaths, dict[Path, int]]:
+    """Return the runtime paths and mtimes of the config file plus its !include files.
+
+    The scan stats every config source on each poll, so it runs in a worker
+    thread rather than on the event loop.
+    """
+    while True:
+        snapshot = _app_context(api_app)
+        paths = snapshot.source_files or frozenset({snapshot.runtime_paths.config_path})
+        mtimes = await asyncio.to_thread(file_watcher.paths_mtime_snapshot, paths)
+        if _app_context(api_app) is snapshot:
+            return snapshot.runtime_paths, mtimes
 
 
 async def _watch_config(
@@ -376,20 +417,17 @@ async def _watch_config(
     *,
     poll_interval_seconds: float = 1.0,
 ) -> None:
-    """Watch the current config file, rebinding automatically when runtime paths change."""
-    watched_config_path: Path | None = None
-    last_mtime = 0.0
+    """Watch the config source files, rebinding automatically when runtime paths change.
+
+    A reload fires only after a quiet scan: scans that detect changes accumulate
+    them instead of reloading, so multi-file updates (git pull, rsync) land
+    completely before the reload reads the tree.
+    """
+    runtime_paths, last_mtimes = await _watched_config_mtimes(api_app)
+    watched_config_path: Path = runtime_paths.config_path
+    pending_paths: set[Path] = set()
 
     while not stop_event.is_set():
-        runtime_paths = _app_runtime_paths(api_app)
-        config_path = runtime_paths.config_path
-        if config_path != watched_config_path:
-            watched_config_path = config_path
-            try:
-                last_mtime = config_path.stat().st_mtime if config_path.exists() else 0.0
-            except (OSError, PermissionError):
-                last_mtime = 0.0
-
         try:
             await asyncio.wait_for(stop_event.wait(), timeout=poll_interval_seconds)
             break
@@ -397,22 +435,25 @@ async def _watch_config(
             pass
 
         try:
-            runtime_paths = _app_runtime_paths(api_app)
-            config_path = runtime_paths.config_path
-            if config_path != watched_config_path:
-                watched_config_path = config_path
-                try:
-                    last_mtime = config_path.stat().st_mtime if config_path.exists() else 0.0
-                except (OSError, PermissionError):
-                    last_mtime = 0.0
+            runtime_paths, current_mtimes = await _watched_config_mtimes(api_app)
+            if runtime_paths.config_path != watched_config_path:
+                # Runtime swap: rebaseline the new source set without reloading.
+                watched_config_path = runtime_paths.config_path
+                last_mtimes = current_mtimes
+                pending_paths.clear()
+                continue
 
-            current_mtime = config_path.stat().st_mtime if config_path.exists() else 0.0
-            if current_mtime != last_mtime:
-                last_mtime = current_mtime
-                logger.info("Config file changed", path=str(config_path))
+            changed_paths = file_watcher.changed_watched_paths(last_mtimes, current_mtimes)
+            vanished = file_watcher.any_paths_newly_missing(last_mtimes, current_mtimes)
+            last_mtimes = current_mtimes
+            if changed_paths:
+                pending_paths.update(changed_paths)
+            elif pending_paths and not vanished:
+                logger.info("Config file changed", paths=sorted(str(path) for path in pending_paths))
+                pending_paths.clear()
                 await _reload_config_after_file_change(api_app, runtime_paths)
         except (OSError, PermissionError):
-            last_mtime = 0.0
+            last_mtimes = dict.fromkeys(last_mtimes, 0)
         except Exception:
             logger.exception("Exception during file watcher callback - continuing to watch")
 
@@ -421,8 +462,23 @@ async def _watch_config(
 async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
     """Manage application startup and shutdown."""
     runtime_paths = _app_runtime_paths(_app)
-    constants.ensure_writable_config_path(create_minimal=True, runtime_paths=runtime_paths)
-    config_lifecycle.load_config_into_app(runtime_paths, _app)
+    await asyncio.to_thread(constants.ensure_writable_config_path, create_minimal=True, runtime_paths=runtime_paths)
+    app_state = config_lifecycle.app_state(_app)
+    preload_snapshot = _app_context(_app)
+    loaded = await asyncio.to_thread(config_lifecycle.load_config_into_app, runtime_paths, _app)
+    preload_runtime = app_state.external_trigger_runtime
+    if (
+        preload_runtime is not None
+        and preload_snapshot.runtime_config is None
+        and preload_snapshot.config_load_result is None
+    ):
+        if loaded:
+            app_state.external_trigger_runtime = replace(
+                preload_runtime,
+                config_generation=_app_context(_app).generation,
+            )
+        else:
+            app_state.external_trigger_runtime = None
     logger.info(
         "Initialized API runtime config",
         config_path=str(runtime_paths.config_path),
@@ -433,7 +489,6 @@ async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
     logger.info("Syncing API credentials from runtime env")
     sync_env_to_credentials(runtime_paths=runtime_paths)
 
-    app_state = config_lifecycle.app_state(_app)
     api_owned_knowledge_refresh_scheduler: KnowledgeRefreshScheduler | None = None
     standalone_knowledge_source_watcher: KnowledgeSourceWatcher | None = None
     knowledge_refresh_scheduler = app_state.orchestrator_knowledge_refresh_scheduler
@@ -473,6 +528,28 @@ def bind_orchestrator_knowledge_refresh_scheduler(
 ) -> None:
     """Attach the orchestrator-owned background refresh scheduler to the bundled API app."""
     config_lifecycle.app_state(api_app).orchestrator_knowledge_refresh_scheduler = scheduler
+
+
+def bind_external_trigger_runtime(
+    api_app: FastAPI,
+    client: object,
+    conversation_cache: object,
+    *,
+    is_trigger_snapshot_ready: Callable[[TriggerDeliverySnapshot], Awaitable[bool]],
+) -> None:
+    """Attach router Matrix delivery runtime to one API app."""
+    api_state = config_lifecycle.require_api_state(api_app)
+    config_lifecycle.app_state(api_app).external_trigger_runtime = config_lifecycle.ExternalTriggerRuntime(
+        client=client,
+        conversation_cache=conversation_cache,
+        config_generation=api_state.snapshot.generation,
+        is_trigger_snapshot_ready=is_trigger_snapshot_ready,
+    )
+
+
+def unbind_external_trigger_runtime(api_app: FastAPI) -> None:
+    """Clear router Matrix delivery runtime from one API app."""
+    config_lifecycle.app_state(api_app).external_trigger_runtime = None
 
 
 def _api_docs_kwargs(runtime_paths: constants.RuntimePaths) -> dict[str, str | None]:
@@ -629,6 +706,7 @@ app.include_router(tools_router, dependencies=[Depends(verify_user)])
 app.include_router(workers_router, dependencies=[Depends(verify_user)])
 app.include_router(openai_compat_router)  # Uses its own bearer auth, not verify_user
 app.include_router(report_publishing_public_router)
+app.include_router(external_triggers_router)
 app.include_router(dynamic_workflows_router, dependencies=[Depends(verify_user)])
 
 
@@ -639,14 +717,22 @@ async def health_check(request: Request) -> JSONResponse:
     runtime_paths = _api_runtime_paths(request)
     sync_health = get_matrix_sync_health_snapshot(
         startup_grace_seconds=matrix_sync_startup_timeout_seconds(runtime_paths),
+        cache_write_grace_seconds=matrix_sync_cache_write_grace_seconds(runtime_paths),
     )
 
     response: dict[str, object] = {
         "status": "healthy",
         "last_sync_time": sync_health.last_sync_time.isoformat() if sync_health.last_sync_time is not None else None,
+        "e2ee": e2ee_stats().as_dict(),
     }
     if sync_health.stale_entities:
         response["stale_sync_entities"] = list(sync_health.stale_entities)
+
+    embedder_failure = get_embedder_failure()
+    if embedder_failure is not None:
+        # Additive diagnostic only: a broken embedder degrades semantic search
+        # but must not flip liveness and restart an otherwise usable runtime.
+        response["embedder"] = {"status": "failing", "detail": embedder_failure}
 
     if runtime_state.phase == "ready" and not sync_health.is_healthy:
         response["status"] = "unhealthy"
@@ -677,6 +763,11 @@ async def load_config(
     generation = config_lifecycle.committed_generation(request)
     payload = config_lifecycle.read_committed_config(request, lambda config_data: dict(config_data))
     _set_config_generation_header(response, generation)
+    # The payload is the config itself, so the includes flag rides in a header
+    # like the generation does.
+    response.headers[config_lifecycle.CONFIG_USES_INCLUDES_HEADER] = (
+        "true" if config_lifecycle.config_uses_includes(request) else "false"
+    )
     return payload
 
 
@@ -690,7 +781,8 @@ async def save_config(
 ) -> dict[str, bool]:
     """Save configuration to file."""
     previous = _read_request_runtime_config_or_none(request)
-    generation = config_lifecycle.replace_committed_config(
+    generation = await asyncio.to_thread(
+        config_lifecycle.replace_committed_config,
         request,
         new_config,
         error_prefix="Failed to save configuration",
@@ -706,10 +798,13 @@ async def get_raw_config_source(
     request: Request,
     response: Response,
     _user: Annotated[dict, Depends(verify_user)],
-) -> dict[str, str]:
+) -> dict[str, Any]:
     """Return the raw config source text for recovery editing."""
     generation = config_lifecycle.committed_generation(request)
-    payload = {"source": config_lifecycle.read_raw_config_source(request)}
+    payload: dict[str, Any] = {
+        "source": config_lifecycle.read_raw_config_source(request),
+        "uses_includes": config_lifecycle.config_uses_includes(request),
+    }
     _set_config_generation_header(response, generation)
     return payload
 
@@ -774,7 +869,8 @@ async def update_agent(
     def mutate(candidate_config: dict[str, Any]) -> None:
         _upsert_section_entity(candidate_config, "agents", agent_id, agent_data)
 
-    config_lifecycle.write_committed_config(
+    await asyncio.to_thread(
+        config_lifecycle.write_committed_config,
         request,
         mutate,
         error_prefix="Failed to save agent",
@@ -793,7 +889,8 @@ async def create_agent(
     def mutate(candidate_config: dict[str, Any]) -> str:
         return _create_section_entity(candidate_config, "agents", "new_agent", agent_data)
 
-    agent_id = config_lifecycle.write_committed_config(
+    agent_id = await asyncio.to_thread(
+        config_lifecycle.write_committed_config,
         request,
         mutate,
         error_prefix="Failed to create agent",
@@ -812,7 +909,8 @@ async def delete_agent(
     def mutate(candidate_config: dict[str, Any]) -> None:
         _delete_section_entity(candidate_config, "agents", agent_id, "Agent not found")
 
-    config_lifecycle.write_committed_config(
+    await asyncio.to_thread(
+        config_lifecycle.write_committed_config,
         request,
         mutate,
         error_prefix="Failed to delete agent",
@@ -838,7 +936,8 @@ async def update_team(
     def mutate(candidate_config: dict[str, Any]) -> None:
         _upsert_section_entity(candidate_config, "teams", team_id, team_data)
 
-    config_lifecycle.write_committed_config(
+    await asyncio.to_thread(
+        config_lifecycle.write_committed_config,
         request,
         mutate,
         error_prefix="Failed to save team",
@@ -857,7 +956,8 @@ async def create_team(
     def mutate(candidate_config: dict[str, Any]) -> str:
         return _create_section_entity(candidate_config, "teams", "new_team", team_data)
 
-    team_id = config_lifecycle.write_committed_config(
+    team_id = await asyncio.to_thread(
+        config_lifecycle.write_committed_config,
         request,
         mutate,
         error_prefix="Failed to create team",
@@ -876,7 +976,8 @@ async def delete_team(
     def mutate(candidate_config: dict[str, Any]) -> None:
         _delete_section_entity(candidate_config, "teams", team_id, "Team not found")
 
-    config_lifecycle.write_committed_config(
+    await asyncio.to_thread(
+        config_lifecycle.write_committed_config,
         request,
         mutate,
         error_prefix="Failed to delete team",
@@ -907,7 +1008,8 @@ async def update_model(
             candidate_config["models"] = {}
         candidate_config["models"][model_id] = model_data
 
-    config_lifecycle.write_committed_config(
+    await asyncio.to_thread(
+        config_lifecycle.write_committed_config,
         request,
         mutate,
         error_prefix="Failed to save model",
@@ -935,7 +1037,8 @@ async def update_room_models(
     def mutate(candidate_config: dict[str, Any]) -> None:
         candidate_config["room_models"] = room_models
 
-    config_lifecycle.write_committed_config(
+    await asyncio.to_thread(
+        config_lifecycle.write_committed_config,
         request,
         mutate,
         error_prefix="Failed to save room models",

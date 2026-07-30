@@ -1,0 +1,15 @@
+MindRoom client chart rendered.
+
+Service:
+  {{ include "mindroom-client.fullname" . }}:{{ .Values.service.port }}
+
+Client:
+  Base path: {{ include "mindroom-client.basePath" . }}
+  Config ConfigMap: {{ include "mindroom-client.configMapName" . }}
+  Nginx ConfigMap: {{ include "mindroom-client.nginxConfigMapName" . }}
+  Service worker: {{ ternary "enabled" "disabled" .Values.serviceWorker.enabled }}{{- if .Values.rootServiceWorkerCleanup.enabled }} (root cleanup worker at /sw.js){{- end }}
+
+Route the full origin host to this Service: the client loads /runtime-config.js
+from the origin root even when basePath is not /.
+For production, point matrix.homeserverUrl at your homeserver and pin image.tag
+or image.digest.

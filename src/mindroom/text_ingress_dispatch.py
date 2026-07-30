@@ -4,12 +4,18 @@ from __future__ import annotations
 
 import asyncio
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any, Literal, Protocol
 
 from mindroom.attachments import parse_attachment_ids_from_event_source
 from mindroom.commands.parsing import command_parser
-from mindroom.constants import ATTACHMENT_IDS_KEY, ORIGINAL_SENDER_KEY, ROUTER_AGENT_NAME, VOICE_RAW_AUDIO_FALLBACK_KEY
+from mindroom.constants import (
+    ATTACHMENT_IDS_KEY,
+    ORIGINAL_SENDER_KEY,
+    SCHEDULED_HISTORY_LIMIT_KEY,
+    VOICE_RAW_AUDIO_FALLBACK_KEY,
+    VOICE_TRANSCRIPT_KEY,
+)
 from mindroom.dispatch_handoff import (
     DispatchEvent,
     DispatchIngressMetadata,
@@ -20,10 +26,11 @@ from mindroom.dispatch_handoff import (
     payload_metadata_from_source,
 )
 from mindroom.dispatch_source import VOICE_SOURCE_KIND, is_voice_event
-from mindroom.handled_turns import HandledTurnState
+from mindroom.handled_turns import TurnRecord
 from mindroom.inbound_turn_normalizer import TextNormalizationRequest
 from mindroom.matrix.media import is_audio_message_event, is_matrix_media_dispatch_event
 from mindroom.matrix.rooms import is_dm_room
+from mindroom.response_admission import ResponseAdmissionRefusedError
 from mindroom.response_payload_preparation import DispatchPayloadInputs
 from mindroom.timing import (
     DispatchPipelineTiming,
@@ -34,7 +41,7 @@ from mindroom.timing import (
 from mindroom.timing import timing_scope as timing_scope_context
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Awaitable, Callable, Sequence
 
     import nio
 
@@ -65,7 +72,7 @@ class _ReplayGuard(Protocol):
 class _PreparedTextDispatch:
     event: TextDispatchEvent
     payload_metadata: DispatchPayloadMetadata | None
-    handled_turn: HandledTurnState
+    handled_turn: TurnRecord
     command: Command | None
     dispatch: PreparedDispatch
     replay_guard: _ReplayGuard
@@ -79,13 +86,23 @@ async def dispatch_text_message(
     requester_user_id: str,
     *,
     media_events: list[MediaDispatchEvent] | None = None,
-    handled_turn: HandledTurnState | None = None,
+    handled_turn: TurnRecord | None = None,
     queued_notice_reservation: QueuedHumanNoticeReservation | None = None,
     ingress_metadata: DispatchIngressMetadata | None = None,
     payload_metadata: DispatchPayloadMetadata | None = None,
     trust_hydrated_internal_metadata: bool | None = None,
+    current_prompt_is_structured: bool = False,
 ) -> None:
     """Run the normal text or command dispatch pipeline for a prepared text event."""
+    turn_claim = handled_turn or TurnRecord.create([raw_event.event_id], completed=False)
+    if not _try_claim_turn(controller, turn_claim, queued_notice_reservation):
+        return
+    claim_transferred = False
+
+    def mark_claim_transferred() -> None:
+        nonlocal claim_transferred
+        claim_transferred = True
+
     timing_scope_token = None
     try:
         dispatch_timing = get_dispatch_pipeline_timing(raw_event.source)
@@ -99,6 +116,7 @@ async def dispatch_text_message(
             ingress_metadata=ingress_metadata,
             payload_metadata=payload_metadata,
             trust_hydrated_internal_metadata=trust_hydrated_internal_metadata,
+            current_prompt_is_structured=current_prompt_is_structured,
             dispatch_timing=dispatch_timing,
         )
         if prepared is None:
@@ -137,12 +155,29 @@ async def dispatch_text_message(
             trusted_attachment_ids=trusted_attachment_ids,
             media_events=media_events,
             queued_notice_reservation=queued_notice_reservation,
+            turn_claim=turn_claim,
+            mark_claim_transferred=mark_claim_transferred,
         )
     finally:
+        if not claim_transferred:
+            controller.deps.turn_store.release_pending_turn_claim(turn_claim)
         if queued_notice_reservation is not None:
             queued_notice_reservation.cancel()
         if timing_scope_token is not None:
             timing_scope_context.reset(timing_scope_token)
+
+
+def _try_claim_turn(
+    controller: TurnController,
+    turn_claim: TurnRecord,
+    queued_notice_reservation: QueuedHumanNoticeReservation | None,
+) -> bool:
+    """Claim dispatch ownership or cancel the reservation that cannot be consumed."""
+    if controller.deps.turn_store.try_claim_turn(turn_claim):
+        return True
+    if queued_notice_reservation is not None:
+        queued_notice_reservation.cancel()
+    return False
 
 
 async def _prepare_text_dispatch(
@@ -152,10 +187,11 @@ async def _prepare_text_dispatch(
     requester_user_id: str,
     *,
     media_events: list[MediaDispatchEvent] | None,
-    handled_turn: HandledTurnState | None,
+    handled_turn: TurnRecord | None,
     ingress_metadata: DispatchIngressMetadata | None,
     payload_metadata: DispatchPayloadMetadata | None,
     trust_hydrated_internal_metadata: bool | None,
+    current_prompt_is_structured: bool,
     dispatch_timing: DispatchPipelineTiming | None,
 ) -> _PreparedTextDispatch | None:
     event = await controller.deps.normalizer.resolve_text_event(TextNormalizationRequest(event=raw_event))
@@ -184,11 +220,20 @@ async def _prepare_text_dispatch(
     dispatch_started_at = time.monotonic()
 
     if handled_turn is None:
-        handled_turn = HandledTurnState.from_source_event_id(event.event_id)
+        handled_turn = TurnRecord.create([event.event_id])
     elif raw_event is not event and event.event_id in handled_turn.source_event_ids:
         refreshed_prompts = dict(handled_turn.source_event_prompts or {})
         refreshed_prompts[event.event_id] = event.body
-        handled_turn = handled_turn.with_source_event_prompts(refreshed_prompts)
+        handled_turn = replace(handled_turn, source_event_prompts=refreshed_prompts)
+    routed_original_event_id = controller.deps.ingress.router_relay_original_event_id(event)
+    if routed_original_event_id is not None:
+        # Keep the routed turn discoverable by the human message the router
+        # relayed, so edits and redactions of that message reach this
+        # responder's persisted runs.
+        handled_turn = replace(
+            handled_turn,
+            discovery_event_ids=(*handled_turn.discovery_event_ids, routed_original_event_id),
+        )
 
     command = _parsed_command_for_event(
         controller,
@@ -207,6 +252,7 @@ async def _prepare_text_dispatch(
         ingress_metadata=ingress_metadata,
         payload_metadata=payload_metadata,
         use_command_context=command is not None,
+        current_prompt_is_structured=current_prompt_is_structured,
     )
     if dispatch_timing is not None:
         dispatch_timing.mark("dispatch_prepare_ready")
@@ -217,7 +263,8 @@ async def _prepare_text_dispatch(
     return _PreparedTextDispatch(
         event=event,
         payload_metadata=payload_metadata,
-        handled_turn=handled_turn.with_request_context(
+        handled_turn=replace(
+            handled_turn,
             requester_id=prepared.dispatch.requester_user_id,
             correlation_id=prepared.dispatch.correlation_id,
         ),
@@ -255,14 +302,13 @@ async def _blocked_before_plan(
     requester_user_id: str,
 ) -> bool:
     if prepared.command is not None:
-        if controller.deps.agent_name == ROUTER_AGENT_NAME:
-            await controller._execute_command(
-                room=room,
-                event=prepared.event,
-                requester_user_id=requester_user_id,
-                command=prepared.command,
-                target=prepared.dispatch.target,
-            )
+        await controller._execute_command_if_owned(
+            room=room,
+            event=prepared.event,
+            requester_user_id=requester_user_id,
+            command=prepared.command,
+            target=prepared.dispatch.target,
+        )
         return True
     if controller._should_skip_deep_synthetic_full_dispatch(
         event_id=prepared.event.event_id,
@@ -270,7 +316,10 @@ async def _blocked_before_plan(
     ):
         return True
 
-    may_be_superseded = prepared.dispatch.envelope.origin.may_be_superseded_by_newer_requester_turn
+    may_be_superseded = prepared.dispatch.envelope.origin.may_be_superseded_by_newer_requester_turn and all(
+        metadata.sender == requester_user_id
+        for metadata in (prepared.handled_turn.source_event_metadata or {}).values()
+    )
     if prepared.replay_guard.degraded:
         skips_turn = await controller._has_newer_unresponded_cached_thread_event(
             room_id=room.room_id,
@@ -279,7 +328,7 @@ async def _blocked_before_plan(
             thread_id=prepared.replay_guard.thread_id,
             may_be_superseded_by_newer_requester_turn=may_be_superseded,
         )
-        if not skips_turn:
+        if may_be_superseded and not skips_turn:
             controller.deps.logger.warning(
                 "Thread replay guard degraded; proceeding without negative newer-message proof",
                 event_id=prepared.event.event_id,
@@ -323,8 +372,12 @@ def _attachment_parts(
         extra_content[ORIGINAL_SENDER_KEY] = payload_metadata.original_sender
     if payload_metadata is not None and payload_metadata.raw_audio_fallback:
         extra_content[VOICE_RAW_AUDIO_FALLBACK_KEY] = True
+    if payload_metadata is not None and payload_metadata.voice_transcript:
+        extra_content[VOICE_TRANSCRIPT_KEY] = True
     if media_events and ORIGINAL_SENDER_KEY not in extra_content:
         extra_content[ORIGINAL_SENDER_KEY] = requester_user_id
+    if prepared.dispatch.scheduled_history_budget is not None:
+        extra_content[SCHEDULED_HISTORY_LIMIT_KEY] = prepared.dispatch.scheduled_history_budget.limit
     return message_attachment_ids, trusted_attachment_ids, extra_content
 
 
@@ -338,6 +391,8 @@ async def _apply_turn_plan(
     trusted_attachment_ids: list[str],
     media_events: list[MediaDispatchEvent] | None,
     queued_notice_reservation: QueuedHumanNoticeReservation | None,
+    turn_claim: TurnRecord,
+    mark_claim_transferred: Callable[[], None],
 ) -> None:
     if plan.kind == "ignore":
         if plan.ignore_reason == "router":
@@ -351,7 +406,10 @@ async def _apply_turn_plan(
 
     assert plan.response_action is not None
     response_history_scope = (
-        controller.deps.turn_store.response_history_scope(plan.response_action)
+        controller.deps.turn_store.response_history_scope(
+            plan.response_action,
+            requester_user_id=prepared.dispatch.requester_user_id,
+        )
         if plan.response_action.kind in {"individual", "team"}
         else None
     )
@@ -360,46 +418,99 @@ async def _apply_turn_plan(
         history_scope=response_history_scope,
         conversation_target=prepared.dispatch.target,
     )
+    pending_turn = await asyncio.to_thread(
+        controller.deps.turn_store.record_pending_turn,
+        handled_turn,
+    )
+    if pending_turn is None or pending_turn.completed or pending_turn.redacted_source_event_ids:
+        return
+    handled_turn = pending_turn
 
     payload_inputs = DispatchPayloadInputs(
         message_attachment_ids=tuple(message_attachment_ids),
         trusted_attachment_ids=tuple(trusted_attachment_ids),
         media_events=tuple(media_events or ()),
+        raw_audio_fallback=(
+            prepared.payload_metadata.raw_audio_fallback is True if prepared.payload_metadata is not None else False
+        ),
+        voice_transcript=(
+            prepared.payload_metadata.voice_transcript is True if prepared.payload_metadata is not None else False
+        ),
     )
 
     # The inbox handoff is complete once the runner takes the conversation's
     # response lock; the response itself keeps running on a runner-owned task.
     response_started = asyncio.Event()
     response_task = controller.deps.response_runner.track_inbox_response(
-        controller._execute_response_action(
-            room,
-            prepared.event,
-            prepared.dispatch,
-            plan.response_action,
-            payload_inputs,
-            processing_log="Processing",
-            dispatch_started_at=prepared.dispatch_started_at,
-            handled_turn=handled_turn,
-            matrix_run_metadata=controller.deps.turn_store.build_run_metadata(handled_turn),
-            queued_notice_reservation=queued_notice_reservation,
-            on_lifecycle_lock_acquired=response_started.set,
+        _run_claimed_response(
+            controller,
+            turn_claim,
+            controller._execute_response_action(
+                room,
+                prepared.event,
+                prepared.dispatch,
+                plan.response_action,
+                payload_inputs,
+                processing_log="Processing",
+                dispatch_started_at=prepared.dispatch_started_at,
+                handled_turn=handled_turn,
+                matrix_run_metadata=controller.deps.turn_store.build_run_metadata(handled_turn),
+                queued_notice_reservation=queued_notice_reservation,
+                on_lifecycle_lock_acquired=response_started.set,
+            ),
         ),
         name=f"inbox_response:{prepared.event.event_id}",
+        recovery_proof_ready=lambda: (
+            prepared.dispatch.target.resolved_thread_id is not None
+            and controller.deps.interrupted_turn_rooms.contains(prepared.event.event_id)
+        ),
     )
+    # Ownership moves synchronously after task creation. If this dispatch task
+    # is cancelled while waiting for the lifecycle lock, its finally block must
+    # not reopen the source while the runner-owned response still exists.
+    mark_claim_transferred()
     started_wait = asyncio.ensure_future(response_started.wait())
     try:
         await asyncio.wait({started_wait, response_task}, return_when=asyncio.FIRST_COMPLETED)
     finally:
         started_wait.cancel()
+    # Surface pre-lock failures to the caller's containment; post-lock
+    # failures (including a fast failure racing the FIRST_COMPLETED wait)
+    # belong to the runner-owned task. Pre-lock CANCELLATION is
+    # deliberately NOT surfaced: this coroutine was not itself cancelled,
+    # and re-raising CancelledError here would corrupt the gate drain's
+    # own cancellation state. The queued-notice reservation still cancels
+    # in dispatch_text_message's finally, which is the cleanup contract.
     if response_task.done() and not response_task.cancelled() and not response_started.is_set():
-        # Surface pre-lock failures to the caller's containment; post-lock
-        # failures (including a fast failure racing the FIRST_COMPLETED wait)
-        # belong to the runner-owned task. Pre-lock CANCELLATION is
-        # deliberately NOT surfaced: this coroutine was not itself cancelled,
-        # and re-raising CancelledError here would corrupt the gate drain's
-        # own cancellation state. The queued-notice reservation still cancels
-        # in dispatch_text_message's finally, which is the cleanup contract.
         response_task.result()
+
+
+async def _run_claimed_response(
+    controller: TurnController,
+    turn_claim: TurnRecord,
+    response: Awaitable[None],
+) -> None:
+    """Release exclusive response ownership after every terminal path."""
+    try:
+        await response
+    finally:
+        controller.deps.turn_store.release_pending_turn_claim(turn_claim)
+
+
+async def _run_admitted_router_relay(
+    controller: TurnController,
+    relay: Callable[[], Awaitable[None]],
+) -> None:
+    """Keep config application outside one router selection and relay delivery."""
+    admission_gate = controller.deps.runtime.response_admission_gate
+    while not admission_gate.admit():
+        if not await controller.deps.response_runner.wait_for_admission_or_shutdown():
+            controller.deps.runtime.mark_callback_failed()
+            raise ResponseAdmissionRefusedError
+    try:
+        await relay()
+    finally:
+        admission_gate.release()
 
 
 async def _execute_route_plan(
@@ -434,12 +545,17 @@ async def _execute_route_plan(
             history_scope=None,
             conversation_target=prepared.dispatch.target,
         )
-    await controller._execute_router_relay(
-        room,
-        route_event,
-        prepared.dispatch.context.thread_history,
-        prepared.dispatch.target.resolved_thread_id,
-        **routing_kwargs,
+    if prepared.dispatch.scheduled_history_budget is not None:
+        routing_kwargs["scheduled_prompt"] = prepared.event.body
+    await _run_admitted_router_relay(
+        controller,
+        lambda: controller._execute_router_relay(
+            room,
+            route_event,
+            prepared.dispatch.context.thread_history,
+            prepared.dispatch.target.resolved_thread_id,
+            **routing_kwargs,
+        ),
     )
 
 
@@ -448,7 +564,7 @@ def _tracked_route_turn(
     *,
     route_event: DispatchEvent,
     single_direct_media_route: bool,
-) -> HandledTurnState | None:
+) -> TurnRecord | None:
     if single_direct_media_route:
         return None
     if not prepared.handled_turn.is_coalesced and (

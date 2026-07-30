@@ -22,6 +22,7 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
 from mindroom.matrix.users import AgentMatrixUser
+from mindroom.response_runner import ResponseRequest
 from tests.conftest import (
     bind_runtime_paths,
     delivered_matrix_side_effect,
@@ -129,17 +130,19 @@ async def test_interactive_question_preserves_thread_root_in_streaming(tmp_path:
         user_message_id = "$user_original_message"
         thread_id = user_message_id
 
-        resolution = await bot._generate_response(
-            prompt="Test prompt",
-            thread_history=[],
-            user_id="@user:localhost",
-            response_envelope=request_envelope(
-                room_id=room_id,
-                reply_to_event_id=user_message_id,
-                thread_id=thread_id,
+        resolution = await bot._response_runner.generate_response(
+            ResponseRequest(
                 prompt="Test prompt",
+                thread_history=[],
                 user_id="@user:localhost",
-                agent_name="general",
+                response_envelope=request_envelope(
+                    room_id=room_id,
+                    reply_to_event_id=user_message_id,
+                    thread_id=thread_id,
+                    prompt="Test prompt",
+                    user_id="@user:localhost",
+                    agent_name="general",
+                ),
             ),
         )
         if scheduled_tasks:
@@ -232,17 +235,19 @@ async def test_interactive_question_preserves_thread_root_in_non_streaming(tmp_p
         room_id = "!test:localhost"
         user_message_id = "$user_thread_start"
         thread_id = user_message_id
-        resolution = await bot._generate_response(
-            prompt="Test prompt",
-            thread_history=[],
-            user_id="@user:localhost",
-            response_envelope=request_envelope(
-                room_id=room_id,
-                reply_to_event_id=user_message_id,
-                thread_id=thread_id,
+        resolution = await bot._response_runner.generate_response(
+            ResponseRequest(
                 prompt="Test prompt",
+                thread_history=[],
                 user_id="@user:localhost",
-                agent_name="general",
+                response_envelope=request_envelope(
+                    room_id=room_id,
+                    reply_to_event_id=user_message_id,
+                    thread_id=thread_id,
+                    prompt="Test prompt",
+                    user_id="@user:localhost",
+                    agent_name="general",
+                ),
             ),
         )
         if scheduled_tasks:
@@ -323,16 +328,18 @@ async def test_interactive_question_without_thread_streaming(tmp_path: Path) -> 
         install_runtime_cache_support(bot)
 
         room_id = "!test:localhost"
-        resolution = await bot._generate_response(
-            prompt="Test prompt",
-            thread_history=[],
-            user_id="@user:localhost",
-            response_envelope=request_envelope(
-                room_id=room_id,
-                reply_to_event_id="$some_message",
+        resolution = await bot._response_runner.generate_response(
+            ResponseRequest(
                 prompt="Test prompt",
+                thread_history=[],
                 user_id="@user:localhost",
-                agent_name="general",
+                response_envelope=request_envelope(
+                    room_id=room_id,
+                    reply_to_event_id="$some_message",
+                    prompt="Test prompt",
+                    user_id="@user:localhost",
+                    agent_name="general",
+                ),
             ),
         )
 

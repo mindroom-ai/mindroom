@@ -19,6 +19,8 @@ export type ConfigSavePayload = RawConfig;
 
 const API_BASE = "/api";
 const CONFIG_GENERATION_HEADER = "x-mindroom-config-generation";
+const CONFIG_USES_INCLUDES_HEADER = "x-mindroom-config-uses-includes";
+const COMPOSED_FROM_INCLUDES_ERROR_CODE = "config_composed_from_includes";
 
 function isConfigValidationIssue(
   detail: unknown,
@@ -57,6 +59,25 @@ export class ConfigStaleError extends Error {
   }
 }
 
+export class ConfigComposedFromIncludesError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ConfigComposedFromIncludesError";
+  }
+}
+
+function composedFromIncludesMessage(detail: unknown): string | null {
+  if (
+    typeof detail === "object" &&
+    detail !== null &&
+    (detail as { code?: unknown }).code === COMPOSED_FROM_INCLUDES_ERROR_CODE &&
+    typeof (detail as { message?: unknown }).message === "string"
+  ) {
+    return (detail as { message: string }).message;
+  }
+  return null;
+}
+
 async function responseDetail(response: Response): Promise<unknown> {
   try {
     const payload = (await response.json()) as { detail?: unknown };
@@ -81,9 +102,18 @@ function responseGeneration(
   return Number.isFinite(parsed) ? parsed : fallbackGeneration;
 }
 
+function responseUsesIncludes(response: Response): boolean {
+  const headerValue =
+    typeof response.headers?.get === "function"
+      ? response.headers.get(CONFIG_USES_INCLUDES_HEADER)
+      : null;
+  return headerValue === "true";
+}
+
 export async function loadConfig(): Promise<{
   config: RawConfig;
   generation: number;
+  usesIncludes: boolean;
 }> {
   const response = await fetch(`${API_BASE}/config/load`, {
     method: "POST",
@@ -115,6 +145,7 @@ export async function loadConfig(): Promise<{
   return {
     config: (await response.json()) as RawConfig,
     generation: responseGeneration(response, 0),
+    usesIncludes: responseUsesIncludes(response),
   };
 }
 
@@ -168,6 +199,10 @@ export async function saveConfig(
   if (!response.ok) {
     const detail = await responseDetail(response);
     if (response.status === 409) {
+      const includesMessage = composedFromIncludesMessage(detail);
+      if (includesMessage != null) {
+        throw new ConfigComposedFromIncludesError(includesMessage);
+      }
       throw new ConfigStaleError(
         typeof detail === "string" && detail.length > 0 ? detail : undefined,
       );

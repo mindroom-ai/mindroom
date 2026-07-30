@@ -20,6 +20,9 @@ from mindroom.credential_policy import (
         ("google_drive_oauth", "user", True),
         ("google_drive_oauth", "user_agent", True),
         ("google_drive_oauth", "shared", False),
+        ("acme_oauth", "user", True),
+        ("acme_oauth", "user_agent", True),
+        ("acme_oauth", "shared", False),
         ("openai", "user", False),
         ("homeassistant", "user_agent", True),
     ],
@@ -33,7 +36,8 @@ def test_primary_runtime_scoped_service_policy(service: str, worker_scope: str, 
     ("service", "worker_scope", "expected"),
     [
         ("google_drive", "shared", True),
-        ("google_drive_oauth", "shared", True),
+        ("google_drive_oauth", "shared", False),
+        ("acme_oauth", "shared", False),
         ("gmail", "shared", True),
         ("openai", "shared", False),
         ("google_drive", "user", False),
@@ -45,18 +49,47 @@ def test_local_shared_service_policy(service: str, worker_scope: str, expected: 
 
 
 @pytest.mark.parametrize(
+    ("service", "worker_scope", "expected"),
+    [
+        ("google_drive_oauth", "shared", True),
+        ("acme_oauth", "shared", True),
+        ("mcp_demo_oauth", "shared", True),
+        ("google_drive_oauth", "user", False),
+        ("google_drive_oauth", "user_agent", False),
+        ("google_drive_oauth", None, False),
+        ("acme_oauth", "user", False),
+        ("acme_oauth", None, False),
+        ("mcp_demo_oauth", "user_agent", False),
+        ("mcp_demo_oauth", None, False),
+        ("google_drive", "shared", False),
+        ("google_drive_oauth_client", "shared", False),
+        ("openai", "shared", False),
+    ],
+)
+def test_agent_scoped_service_policy(service: str, worker_scope: str | None, expected: bool) -> None:
+    """Shared worker scope should keep OAuth tokens in per-agent primary-runtime storage."""
+    assert credential_service_policy(service, worker_scope).uses_primary_runtime_agent_scoped_credentials is expected
+
+
+@pytest.mark.parametrize(
     "service",
     [
         "google_calendar_oauth",
+        "google_docs_oauth",
         "google_drive_oauth",
         "google_gmail_oauth",
         "google_sheets_oauth",
-        "google_vertex_adc",
     ],
 )
-def test_worker_grantable_policy_rejects_sensitive_google_services(service: str) -> None:
-    """Sensitive Google credential services should stay unsupported for worker mirroring."""
-    assert service in _UNSUPPORTED_WORKER_GRANTABLE_CREDENTIALS
+def test_worker_grantable_policy_rejects_google_oauth_token_services(service: str) -> None:
+    """Google OAuth token services should stay unsupported for worker mirroring."""
+    assert credential_service_policy(service, "shared").worker_grantable_supported is False
+
+
+def test_worker_grantable_policy_rejects_sensitive_google_services() -> None:
+    """Machine-local identity services stay unsupported for worker mirroring."""
+    assert frozenset({"desktop", "google_vertex_adc"}) == _UNSUPPORTED_WORKER_GRANTABLE_CREDENTIALS
+    assert credential_service_policy("google_vertex_adc", "shared").worker_grantable_supported is False
 
 
 def test_credential_service_policy_classifies_google_oauth_user_scope() -> None:
@@ -68,6 +101,21 @@ def test_credential_service_policy_classifies_google_oauth_user_scope() -> None:
     assert policy.uses_primary_runtime_scoped_credentials is True
     assert policy.uses_local_shared_credentials is False
     assert policy.worker_grantable_supported is False
+
+
+def test_credential_service_policy_classifies_plugin_oauth_token_service() -> None:
+    """Plugin OAuth token services should use primary-runtime storage and reject worker grants."""
+    shared_policy = credential_service_policy("acme_oauth", "shared")
+    user_agent_policy = credential_service_policy("acme_oauth", "user_agent")
+
+    assert shared_policy.uses_local_shared_credentials is False
+    assert shared_policy.uses_primary_runtime_scoped_credentials is False
+    assert shared_policy.uses_primary_runtime_agent_scoped_credentials is True
+    assert shared_policy.worker_grantable_supported is False
+    assert user_agent_policy.uses_local_shared_credentials is False
+    assert user_agent_policy.uses_primary_runtime_scoped_credentials is True
+    assert user_agent_policy.uses_primary_runtime_agent_scoped_credentials is False
+    assert user_agent_policy.worker_grantable_supported is False
 
 
 def test_credential_service_policy_classifies_oauth_client_config_as_global_primary_runtime() -> None:

@@ -5,13 +5,13 @@ The actual toolkit requires agent and session context and is instantiated
 directly in ``create_agent()``, so it is NOT added to ``TOOL_REGISTRY``.
 """
 
-from mindroom.tool_system.metadata import (
+from mindroom.tool_system.declarations import (
     SetupType,
     ToolCategory,
     ToolMetadata,
     ToolStatus,
-    register_builtin_tool_metadata,
 )
+from mindroom.tool_system.registration import register_builtin_tool_metadata
 
 register_builtin_tool_metadata(
     ToolMetadata(

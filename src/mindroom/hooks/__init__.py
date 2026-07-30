@@ -39,7 +39,7 @@ from .context import (
     ToolBeforeCallContext,
 )
 from .decorators import get_hook_metadata, hook, iter_module_hooks
-from .enrichment import render_enrichment_block, render_system_enrichment_block
+from .enrichment import render_enrichment_block, render_system_enrichment_block, render_transient_context
 from .execution import emit, emit_collect, emit_final_response_transform, emit_gate, emit_transform
 from .ingress import HookIngressPolicy, hook_ingress_policy
 from .registry import HookRegistry, HookRegistryPlugin, HookRegistryState
@@ -80,6 +80,7 @@ from .types import (
 if TYPE_CHECKING:
     import nio
 
+    from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
 
 __all__ = [
@@ -162,6 +163,7 @@ __all__ = [
     "iter_module_hooks",
     "render_enrichment_block",
     "render_system_enrichment_block",
+    "render_transient_context",
     "send_and_track_message",
     "send_hook_message",
     "validate_event_name",
@@ -171,8 +173,10 @@ __all__ = [
 def build_hook_matrix_admin(
     client: nio.AsyncClient,
     runtime_paths: RuntimePaths,
+    *,
+    config: Config | None = None,
 ) -> HookMatrixAdmin:
     """Lazily import the concrete matrix admin builder to avoid package cycles."""
     from .matrix_admin import build_hook_matrix_admin  # noqa: PLC0415
 
-    return build_hook_matrix_admin(client, runtime_paths)
+    return build_hook_matrix_admin(client, runtime_paths, config=config)

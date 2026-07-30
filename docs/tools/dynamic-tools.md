@@ -2,7 +2,7 @@
 
 Dynamic tools let an agent keep rarely used tools out of the provider-visible schema list until it needs them.
 The loading unit is one authored entry in the agent's `tools:` list.
-MindRoom performs the schema gating in its runtime, so the feature works across model providers.
+On providers with server-side tool search the gating happens inside the provider API; everywhere else MindRoom performs the schema gating in its runtime.
 
 ## Configuration
 
@@ -30,14 +30,29 @@ No flags means the tool is eager and appears in every request.
 `defer: true` hides the tool schema until the agent loads that authored tool for the current session.
 `defer: true, initial: true` loads the tool at session start and prevents unloading.
 
+## Native Server-Side Tool Search
+
+Claude models since Opus 4.5 / Sonnet 4.5 / Haiku 4.5 on the `anthropic` and `vertexai_claude` providers, and GPT models 5.4 or newer on the first-party `openai`, `codex`, and `openai_codex` providers, use the provider's server-side tool search automatically.
+On this path every deferred tool ships in every request tagged `defer_loading: true` together with the provider's tool-search entry, so deferred schemas stay out of the model's rendered context until the model searches for them.
+Tool discovery never invalidates the prompt cache: Anthropic expands discovered tool references inline in the message stream, and OpenAI loads discovered tools at the end of the context window.
+The `dynamic_tools` manager, its prompt blocks, and session loaded-tool state are not used on this path; all deferred toolkits are attached at agent build, so discovered calls execute directly.
+MindRoom adds a compact system-prompt hint listing the deferred toolkit names and tells the model to search those capability domains before concluding that a tool is unavailable.
+`defer: true, initial: true` tools stay in the rendered schema list as plain non-deferred tools.
+Instructions attached to a toolkit or its functions remain inline when any function in that toolkit is initially active.
+MindRoom omits those instructions only when every function is deferred and non-initial because native tool search cannot extend the already-sent system prompt when it discovers a tool.
+
 ## Runtime Tools
 
-When an agent has at least one deferred tool and a stable session id, MindRoom injects the `dynamic_tools` manager.
+On providers without native tool search, when an agent has at least one deferred tool and a stable session id, MindRoom injects the `dynamic_tools` manager.
 The manager exposes `list_tools()`, `tool_search(query)`, `load_tool(tool_name)`, and `unload_tool(tool_name)`.
 Search is plain keyword and exact-name lookup only.
-Loading or unloading takes effect on the next request in the same session.
+A newly loaded tool becomes callable once it appears in the agent's available tools, never in the same parallel tool-call batch as `load_tool()`.
+A standalone agent continues the same task in a later tool-call step within the same response, because its run loop rebuilds the agent with the updated schema and resumes the turn without waiting for another user message.
+Team members and other embedded agents run without that continuation loop, so their loads and unloads take effect on the next request in the same session.
+Rebuilding the agent after a tool load also makes that toolkit's instructions available in the new system prompt.
 
 ## State Scope
 
 Loaded state is keyed by the exact `(agent, session_id)` pair.
 Two agents in the same Matrix thread do not share loaded tools.
+Native tool-search sessions neither read nor write this state.

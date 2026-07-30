@@ -2,6 +2,9 @@
 {{- $av := .Values.workers.kubernetes.agentVault -}}
 {{- $bs := $av.bootstrap -}}
 {{- $accessTool := $av.accessTool -}}
+{{- $accessGrants := $av.accessGrants -}}
+{{- $accessGrantsHasGrants := and $accessGrants.enabled (gt (len $accessGrants.grants) 0) -}}
+{{- $accessAdminTokenEnabled := or $accessTool.enabled $accessGrantsHasGrants -}}
 {{- $name := include "mindroom-runtime.agentVaultBootstrapName" . -}}
 {{- /* Target the same vault API the workers use, so bootstrap also works
      against an externally managed Agent Vault (server.enabled=false). */ -}}
@@ -42,7 +45,7 @@ rules:
       - get
       - update
       - patch
-  {{- if $accessTool.enabled }}
+  {{- if $accessAdminTokenEnabled }}
   - apiGroups:
       - ""
     resources:
@@ -54,7 +57,12 @@ rules:
     resources:
       - secrets
     resourceNames:
+      {{- if $accessTool.enabled }}
       - {{ $accessTool.adminTokenSecret.name }}
+      {{- end }}
+      {{- if $accessGrantsHasGrants }}
+      - {{ $accessGrants.adminTokenSecret.name }}
+      {{- end }}
     verbs:
       - get
       - update
@@ -141,10 +149,10 @@ spec:
                 --allowed-domains "$AGENT_VAULT_ALLOWED_DOMAINS"
               agent-vault ca fetch --address "$addr" > /work/ca.pem
               test -s /work/ca.pem
-              {{- if $accessTool.enabled }}
-              # Owner-role agent for the agent_vault_access tool. Re-runs
-              # rotate the token; the control plane re-reads it from the
-              # mounted Secret per call, so rotation needs no restart.
+              {{- if $accessAdminTokenEnabled }}
+              # Owner-role agent for Agent Vault UI/admin access helpers. Re-runs
+              # rotate the token; callers read it from the mounted Secret per
+              # call or per Job run, so rotation needs no runtime restart.
               if ! agent-vault agent create {{ $accessTool.adminAgentName | quote }} \
                 --token-only > /work/access-admin-token; then
                 agent-vault agent rotate {{ $accessTool.adminAgentName | quote }} \
@@ -180,6 +188,11 @@ spec:
               {{- if $accessTool.enabled }}
               kubectl -n "$POD_NAMESPACE" create secret generic {{ $accessTool.adminTokenSecret.name }} \
                 --from-file={{ $accessTool.adminTokenSecret.key }}=/work/access-admin-token \
+                --dry-run=client -o yaml | kubectl apply -f -
+              {{- end }}
+              {{- if $accessGrantsHasGrants }}
+              kubectl -n "$POD_NAMESPACE" create secret generic {{ $accessGrants.adminTokenSecret.name }} \
+                --from-file={{ $accessGrants.adminTokenSecret.key }}=/work/access-admin-token \
                 --dry-run=client -o yaml | kubectl apply -f -
               {{- end }}
           env:

@@ -12,7 +12,14 @@ from nio.responses import RoomGetEventError
 from mindroom.attachments import parse_attachment_ids_from_event_source
 from mindroom.constants import HOOK_MESSAGE_RECEIVED_DEPTH_KEY, HOOK_SOURCE_KEY, SKIP_MENTIONS_KEY
 from mindroom.dispatch_handoff import DispatchEvent, DispatchPayloadMetadata, PreparedTextEvent
-from mindroom.dispatch_source import IMAGE_SOURCE_KIND, MESSAGE_SOURCE_KIND, VOICE_SOURCE_KIND, source_kind_from_content
+from mindroom.dispatch_source import (
+    IMAGE_SOURCE_KIND,
+    MESSAGE_SOURCE_KIND,
+    VOICE_SOURCE_KIND,
+    content_owns_per_fire_thread_root,
+    per_fire_thread_root_event_id_from_content,
+    source_kind_from_content,
+)
 from mindroom.dispatch_thread_context import (
     DispatchThreadContext,
     context_with_dispatch_thread_context,
@@ -260,9 +267,7 @@ class ConversationResolver:
             if isinstance(event, PreparedTextEvent)
             else None
         )
-        config = self.deps.runtime.config
-        registry = entity_identity_registry(config, self.deps.runtime_paths)
-        source_kind_sender_is_trusted = registry.current_entity_name_for_user_id(event.sender) is not None
+        source_kind_sender_is_trusted = self._sender_is_managed_entity(event.sender)
         if resolved_source_kind is None and isinstance(content, dict):
             source_kind_override = source_kind_from_content(content)
             if source_kind_override is not None and source_kind_sender_is_trusted:
@@ -315,6 +320,39 @@ class ConversationResolver:
             trusted_user_relay=trusted_human_relay,
         )
 
+    def _sender_is_managed_entity(self, user_id: str) -> bool:
+        """Return whether one Matrix user ID belongs to a managed entity."""
+        registry = entity_identity_registry(self.deps.runtime.config, self.deps.runtime_paths)
+        return registry.current_entity_name_for_user_id(user_id) is not None
+
+    def _is_trusted_automation_fire(self, event_source: dict[str, Any]) -> bool:
+        """Return whether one event is a per-fire automation delivery from a managed entity."""
+        content = event_source.get("content")
+        if not isinstance(content, dict) or not content_owns_per_fire_thread_root(content):
+            return False
+        sender = event_source.get("sender")
+        return isinstance(sender, str) and self._sender_is_managed_entity(sender)
+
+    def _trusted_automation_fire_root_event_id(
+        self,
+        event_source: dict[str, Any],
+        event_info: EventInfo,
+        *,
+        fallback_root_event_id: str | None,
+    ) -> str | None:
+        """Return the explicit root for one trusted per-fire automation delivery."""
+        if not self._is_trusted_automation_fire(event_source):
+            return None
+        content = event_source.get("content")
+        relayed_root_event_id = (
+            per_fire_thread_root_event_id_from_content(content) if isinstance(content, dict) else None
+        )
+        if relayed_root_event_id is not None:
+            return relayed_root_event_id
+        if event_info.thread_id is not None:
+            return event_info.thread_id
+        return fallback_root_event_id if event_info.can_be_thread_root else None
+
     def build_message_target(
         self,
         *,
@@ -332,22 +370,30 @@ class ConversationResolver:
             room_id=room_id,
         )
         thread_start_root_event_id = None
+        automation_fire_root = False
         if event_source is not None:
             event_info = EventInfo.from_event(event_source)
             if event_info.can_be_thread_root and reply_to_event_id is not None:
                 thread_start_root_event_id = reply_to_event_id
+            automation_root_event_id = self._trusted_automation_fire_root_event_id(
+                event_source,
+                event_info,
+                fallback_root_event_id=thread_start_root_event_id,
+            )
+            if automation_root_event_id is not None:
+                thread_start_root_event_id = automation_root_event_id
+                automation_fire_root = True
         return MessageTarget.resolve(
             room_id=room_id,
             thread_id=thread_id,
             reply_to_event_id=reply_to_event_id,
             thread_start_root_event_id=thread_start_root_event_id,
-            room_mode=effective_thread_mode == "room",
+            room_mode=effective_thread_mode == "room" and not automation_fire_root,
         )
 
     def build_message_envelope(
         self,
         *,
-        room_id: str,
         event: DispatchEvent,
         requester_user_id: str,
         context: MessageContext,
@@ -376,10 +422,7 @@ class ConversationResolver:
 
         return MessageEnvelope(
             source_event_id=event.event_id,
-            room_id=room_id,
             target=target,
-            requester_id=requester_user_id,
-            sender_id=event.sender,
             body=body or event.body,
             attachment_ids=tuple(
                 attachment_ids if attachment_ids is not None else parse_attachment_ids_from_event_source(event.source),
@@ -389,7 +432,6 @@ class ConversationResolver:
                 for agent_id in context.mentioned_agents
             ),
             agent_name=agent_name or self.deps.agent_name,
-            source_kind=resolved_source_kind,
             hook_source=hook_source,
             message_received_depth=message_received_depth,
             dispatch_policy_source_kind=dispatch_policy_source_kind,
@@ -405,7 +447,6 @@ class ConversationResolver:
     def build_ingress_envelope(
         self,
         *,
-        room_id: str,
         event: DispatchEvent,
         requester_user_id: str,
         target: MessageTarget,
@@ -430,17 +471,13 @@ class ConversationResolver:
         )
         return MessageEnvelope(
             source_event_id=event.event_id,
-            room_id=room_id,
             target=target,
-            requester_id=requester_user_id,
-            sender_id=event.sender,
             body=body or event.body,
             attachment_ids=tuple(
                 attachment_ids if attachment_ids is not None else parse_attachment_ids_from_event_source(event.source),
             ),
             mentioned_agents=(),
             agent_name=agent_name or self.deps.agent_name,
-            source_kind=resolved_source_kind,
             hook_source=hook_source,
             message_received_depth=message_received_depth,
             dispatch_policy_source_kind=dispatch_policy_source_kind,
@@ -460,6 +497,7 @@ class ConversationResolver:
     ) -> str | None:
         """Return the coalescing thread scope for one inbound event."""
         config = self.deps.runtime.config
+        event_info = EventInfo.from_event(event.source)
         if (
             config.get_entity_thread_mode(
                 self.deps.agent_name,
@@ -468,11 +506,15 @@ class ConversationResolver:
             )
             == "room"
         ):
-            return None
+            return self._trusted_automation_fire_root_event_id(
+                event.source,
+                event_info,
+                fallback_root_event_id=event.event_id,
+            )
         try:
             resolution = await resolve_event_thread_membership(
                 room.room_id,
-                EventInfo.from_event(event.source),
+                event_info,
                 event_id=event.event_id,
                 access=self.thread_membership_access(
                     mode=ThreadReadMode.DISPATCH_SNAPSHOT,
@@ -615,17 +657,44 @@ class ConversationResolver:
         )
         thread_id = thread_lookup.thread_id
         if thread_id is None:
-            if thread_lookup.candidate_thread_root_id is None:
-                return _ThreadContextLookup.room_level()
+            candidate_thread_root_id = thread_lookup.candidate_thread_root_id
             candidate_history = thread_lookup.thread_history
-            if candidate_history is None:
-                return _ThreadContextLookup.unproven_candidate_without_history(
-                    thread_lookup.candidate_thread_root_id,
+            if (
+                candidate_thread_root_id is not None
+                and candidate_history is not None
+                and mode.dispatch_safe
+                and is_thread_history_degraded(candidate_history)
+            ):
+                strict_lookup = await self._explicit_thread_id_for_event(
+                    room_id,
+                    event_id,
+                    event_info,
+                    mode=ThreadReadMode.STRICT_FULL,
+                    caller_label=f"{caller_label}_strict_candidate_fallback",
                 )
-            return _ThreadContextLookup.unproven_candidate_demoted(
-                thread_lookup.candidate_thread_root_id,
-                candidate_history,
-            )
+                if strict_lookup.thread_id is not None:
+                    thread_lookup = strict_lookup
+                    thread_id = strict_lookup.thread_id
+                elif strict_lookup.thread_history is None:
+                    return _ThreadContextLookup.unproven_candidate_without_history(
+                        candidate_thread_root_id,
+                    )
+                else:
+                    return _ThreadContextLookup.unproven_candidate_demoted(
+                        candidate_thread_root_id,
+                        strict_lookup.thread_history,
+                    )
+            if thread_id is None:
+                if candidate_thread_root_id is None:
+                    return _ThreadContextLookup.room_level()
+                if candidate_history is None:
+                    return _ThreadContextLookup.unproven_candidate_without_history(
+                        candidate_thread_root_id,
+                    )
+                return _ThreadContextLookup.unproven_candidate_demoted(
+                    candidate_thread_root_id,
+                    candidate_history,
+                )
 
         thread_messages = thread_lookup.thread_history
         if thread_messages is None:

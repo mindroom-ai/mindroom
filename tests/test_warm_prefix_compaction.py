@@ -28,13 +28,12 @@ from mindroom.agent_storage import create_session_storage, get_agent_session
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import CompactionConfig, CompactionOverrideConfig, DefaultsConfig, ModelConfig
-from mindroom.constants import MINDROOM_COMPACTION_CHUNK_TIMEOUT_SECONDS, RuntimePaths, resolve_runtime_paths
+from mindroom.constants import DEFAULT_COMPACTION_TIMEOUT_SECONDS, RuntimePaths, resolve_runtime_paths
 from mindroom.history.agno_forked_request import build_agent_provider_request_from_runs
 from mindroom.history.compaction import _warm_summary_instruction, compact_scope_history
 from mindroom.history.runtime import _warm_prefix_summary_context
 from mindroom.history.storage import read_scope_state, write_scope_state
 from mindroom.history.summary_call import (
-    SUMMARY_MAX_OUTPUT_TOKENS,
     SummaryProviderRequest,
     configure_summary_model,
     generate_compaction_summary,
@@ -140,7 +139,7 @@ def _make_config(tmp_path: Path) -> tuple[Config, RuntimePaths]:
 
 def test_configure_summary_model_warm_prefix_preserves_cache_and_thinking() -> None:
     model = Claude(
-        id="claude-sonnet-4-6",
+        id="claude-sonnet-5",
         cache_system_prompt=True,
         extended_cache_time=True,
         thinking={"type": "enabled", "budget_tokens": 8192},
@@ -149,23 +148,39 @@ def test_configure_summary_model_warm_prefix_preserves_cache_and_thinking() -> N
         client_params={"max_retries": 2},
     )
 
-    configure_summary_model(model, reuses_reply_prefix=True)
+    configure_summary_model(
+        model,
+        timeout_seconds=DEFAULT_COMPACTION_TIMEOUT_SECONDS,
+        reuses_reply_prefix=True,
+        disables_tools=True,
+    )
 
     assert model.cache_system_prompt is True
     assert model.extended_cache_time is True
     assert model.thinking == {"type": "enabled", "budget_tokens": 8192}
     assert model.max_tokens == 64_000
-    assert model.timeout == MINDROOM_COMPACTION_CHUNK_TIMEOUT_SECONDS
+    assert model.timeout == DEFAULT_COMPACTION_TIMEOUT_SECONDS
     assert model.client_params == {"max_retries": 0}
+    assert model.request_params == {"tool_choice": {"type": "none"}}
+    request_kwargs = model._prepare_request_kwargs(
+        "system",
+        tools=[{"type": "function", "function": {"name": "_lookup_weather", "parameters": {}}}],
+    )
+    assert request_kwargs["tool_choice"] == {"type": "none"}
 
 
-def test_configure_summary_model_warm_prefix_caps_output_without_thinking() -> None:
-    model = Claude(id="claude-sonnet-4-6", cache_system_prompt=True, max_tokens=64_000)
+def test_configure_summary_model_warm_prefix_preserves_output_cap_without_thinking() -> None:
+    model = Claude(id="claude-sonnet-5", cache_system_prompt=True, max_tokens=64_000)
 
-    configure_summary_model(model, reuses_reply_prefix=True)
+    configure_summary_model(
+        model,
+        timeout_seconds=DEFAULT_COMPACTION_TIMEOUT_SECONDS,
+        reuses_reply_prefix=True,
+    )
 
     assert model.cache_system_prompt is True
-    assert model.max_tokens == SUMMARY_MAX_OUTPUT_TOKENS
+    assert model.max_tokens == 64_000
+    assert model.request_params is None
 
 
 # --- Warm request construction -------------------------------------------------
@@ -204,6 +219,50 @@ async def test_forked_request_preserves_run_history_and_appends_instruction() ->
 
 
 @pytest.mark.asyncio
+async def test_forked_request_honors_history_tool_call_limit() -> None:
+    agent = _agent()
+    agent.max_tool_calls_from_history = 0
+    run = RunOutput(
+        run_id="run-1",
+        agent_id="test_agent",
+        status=RunStatus.completed,
+        messages=[
+            Message(role="user", content="question"),
+            Message(
+                role="assistant",
+                content="calling tool",
+                tool_calls=[
+                    {
+                        "id": "call-1",
+                        "type": "function",
+                        "function": {"name": "_lookup_weather", "arguments": '{"city":"Paris"}'},
+                    },
+                ],
+            ),
+            Message(
+                role="tool",
+                content="TOOL-SECRET",
+                tool_call_id="call-1",
+                tool_name="_lookup_weather",
+            ),
+            Message(role="assistant", content="answer"),
+        ],
+    )
+    session = _session([run])
+
+    request = await build_agent_provider_request_from_runs(
+        agent=agent,
+        source_session=session,
+        prefix_runs=[run],
+        final_user_message=Message(role="user", content="SUMMARY-INSTRUCTION"),
+        synthetic_run_id="run-1",
+    )
+
+    assert all("TOOL-SECRET" not in str(message.content) for message in request.messages)
+    assert all(not message.tool_calls for message in request.messages)
+
+
+@pytest.mark.asyncio
 async def test_warm_prefix_summary_request_is_marked_for_prefix_reuse() -> None:
     agent = _agent()
     session = _session([_completed_run("run-1", "MARKER")])
@@ -221,12 +280,44 @@ async def test_warm_prefix_summary_request_is_marked_for_prefix_reuse() -> None:
 
 
 @pytest.mark.asyncio
+async def test_forked_request_preserves_nested_provider_tool_schema() -> None:
+    nested_tool = {
+        "type": "function",
+        "function": {
+            "name": "provider_lookup",
+            "description": "Look up provider data.",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    }
+    agent = Agent(
+        id="test_agent",
+        name="Test Agent",
+        model=FakeModel(id="fake-model", provider="fake"),
+        tools=[nested_tool],
+        add_history_to_context=True,
+        store_history_messages=False,
+    )
+    session = _session([_completed_run("run-1", "MARKER")])
+
+    request = await build_agent_provider_request_from_runs(
+        agent=agent,
+        source_session=session,
+        prefix_runs=list(session.runs or []),
+        final_user_message=Message(role="user", content="SUMMARY-INSTRUCTION"),
+        synthetic_run_id="run-1",
+    )
+
+    assert request.tools == (nested_tool,)
+    assert request.tool_choice == "none"
+
+
+@pytest.mark.asyncio
 async def test_generate_compaction_summary_sends_provider_request_verbatim() -> None:
     model = _RecordingFakeModel(id="fake-model", provider="fake")
     request = SummaryProviderRequest(
         messages=(
             Message(role="system", content="system prefix"),
-            Message(role="user", content="history"),
+            Message(role="user", content="history", from_history=True),
             Message(role="user", content="instruction"),
         ),
         tools=({"type": "function", "function": {"name": "_lookup_weather"}},),
@@ -237,6 +328,7 @@ async def test_generate_compaction_summary_sends_provider_request_verbatim() -> 
         model=model,
         summary_input="unused for warm requests",
         summary_prompt=COMPACTION_SUMMARY_PROMPT,
+        timeout_seconds=DEFAULT_COMPACTION_TIMEOUT_SECONDS,
         provider_request=request,
     )
 
@@ -248,6 +340,7 @@ async def test_generate_compaction_summary_sends_provider_request_verbatim() -> 
     ]
     assert model.seen_tools == [{"type": "function", "function": {"name": "_lookup_weather"}}]
     assert model.seen_tool_choice == "none"
+    assert all(message.from_history is False for message in model.seen_messages)
 
 
 # --- Warm instruction ------------------------------------------------------------
@@ -302,7 +395,7 @@ async def test_compact_scope_history_sends_warm_prefix_request(tmp_path: Path) -
     summary_model = _RecordingFakeModel(id="summary-model", provider="fake")
     agent = _agent()
 
-    _state, outcome = await compact_scope_history(
+    outcome = await compact_scope_history(
         storage=storage,
         session=session,
         scope=_SCOPE,
@@ -312,11 +405,10 @@ async def test_compact_scope_history_sends_warm_prefix_request(tmp_path: Path) -
         summary_input_budget=50_000,
         summary_model=summary_model,
         summary_model_name="default",
-        active_context_window=64_000,
         replay_window_tokens=64_000,
         threshold_tokens=None,
-        reserve_tokens=0,
         summary_prompt=COMPACTION_SUMMARY_PROMPT,
+        summary_timeout_seconds=DEFAULT_COMPACTION_TIMEOUT_SECONDS,
         warm_prefix=WarmPrefixSummaryContext(agent=agent, instruction=COMPACTION_WARM_SUMMARY_INSTRUCTION),
     )
 

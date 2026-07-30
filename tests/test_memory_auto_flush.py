@@ -333,7 +333,9 @@ async def test_worker_flush_unscoped_uses_canonical_agent_workspace_memory_path(
     assert wrote_memory is True
     canonical_daily_files = list((agent_workspace_root_path(tmp_path, "general") / "memory").rglob("*.md"))
     assert len(canonical_daily_files) == 1
-    assert "important decision" in canonical_daily_files[0].read_text(encoding="utf-8")
+    daily_content = canonical_daily_files[0].read_text(encoding="utf-8")
+    assert daily_content.startswith("- [id=m_")
+    assert "] [auto_flush:session-general:100] important decision\n" in daily_content
     assert not list((tmp_path / "shared-memory").rglob("*.md"))
     assert not list((tmp_path / "memory_files").rglob("*.md"))
 

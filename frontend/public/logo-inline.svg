@@ -1,0 +1,29 @@
+<svg
+  xmlns="http://www.w3.org/2000/svg"
+  viewBox="0 0 80 80"
+  role="img"
+  aria-labelledby="title"
+>
+  <title id="title">MindRoom mark</title>
+
+  <g stroke="#062631" stroke-width="1.5" stroke-linejoin="round">
+    <path d="M3 12 18 3l22 13-11 7Z" fill="#6fa8aa" />
+    <path d="M3 12 17 18v41l12 7-12 9-14-7Z" fill="#0d4558" />
+    <path d="m17 18 12 5v43l-12-7Z" fill="#2f7882" />
+
+    <path d="m77 12-15-9-22 13 11 7Z" fill="#6fa8aa" />
+    <path d="M77 12 63 18v41l-12 7 12 9 14-7Z" fill="#0d4558" />
+    <path d="m63 18-12 5v43l12-7Z" fill="#2f7882" />
+
+    <path d="m40 22 14 8-14 9-14-9Z" fill="#ffe69a" />
+    <path d="m26 30 14 9v17l-14-9Z" fill="#d99b36" />
+    <path d="m54 30-14 9v17l14-9Z" fill="#f0c45e" />
+  </g>
+
+  <g fill="none" stroke-linecap="round" stroke-linejoin="round">
+    <path d="m9 13 9-5 16 9" stroke="#bee2d9" stroke-width="2.5" />
+    <path d="m71 13-9-5-16 9" stroke="#bee2d9" stroke-width="2.5" />
+    <path d="M20 25v31l6 4" stroke="#edb957" stroke-width="2.5" />
+    <path d="M60 25v31l-6 4" stroke="#edb957" stroke-width="2.5" />
+  </g>
+</svg>

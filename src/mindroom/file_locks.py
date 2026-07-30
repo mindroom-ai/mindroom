@@ -14,6 +14,8 @@ if TYPE_CHECKING:
 
 _DEFAULT_POLL_SECONDS = 0.1
 
+__all__ = ["advisory_file_lock", "async_exclusive_file_lock"]
+
 
 def _open_lock_file(lock_path: Path) -> TextIO:
     lock_path.parent.mkdir(parents=True, exist_ok=True)

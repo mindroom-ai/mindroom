@@ -5,14 +5,13 @@ from __future__ import annotations
 import asyncio
 import json
 import threading
-import time
 from collections import OrderedDict
 from collections.abc import Awaitable, Callable, Iterator
 from concurrent.futures import Future, InvalidStateError
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, cast
 from uuid import uuid4
 
 from mindroom.approval_events import (
@@ -23,6 +22,7 @@ from mindroom.approval_events import (
     terminal_edit_matches_card_sender,
 )
 from mindroom.logging_config import get_logger
+from mindroom.redaction import redact_sensitive_data
 from mindroom.tool_system.tool_calls import sanitize_failure_text, sanitize_failure_value
 
 if TYPE_CHECKING:
@@ -52,11 +52,15 @@ _DEFAULT_SEND_FAILURE_REASON = "Tool approval request could not be delivered to 
 DEFAULT_SHUTDOWN_REASON = "MindRoom shut down before approval completed."
 _DEFAULT_TIMEOUT_REASON = "Tool approval request timed out."
 _DEFAULT_TRUNCATED_APPROVAL_REASON = (
-    "Cannot approve: the displayed arguments are truncated. "
-    "Ask the agent to retry with a smaller payload, or approve via the script-based approval rule."
+    "Cannot approve: the tool arguments are too large to show in full, so a human cannot review "
+    "exactly what would run. Retry with a smaller payload — for example save large content to a "
+    "workspace file via `mindroom_output_path` or send it as a file attachment with a short message "
+    "body — or auto-approve this tool via a script-based approval rule."
 )
 _STARTUP_DISCARD_REASON = "Bot restarted before approval — original request was cancelled."
+_DETACHED_REQUEST_REASON = "Original tool request is no longer active."
 _MAX_ARGUMENTS_PREVIEW_CHARS = 1200
+_MAX_FULL_ARGUMENTS_JSON_BYTES = 2_000_000
 _MAX_REMEMBERED_TERMINAL_CARD_IDS = 4096
 _SANITIZER_TRUNCATION_MARKER = "... [truncated]"
 _MANAGER: _ApprovalManager | None = None
@@ -170,6 +174,20 @@ def _build_event_arguments_preview(arguments: dict[str, Any]) -> tuple[dict[str,
     return preview, True
 
 
+def _full_arguments_json_bytes(value: object) -> int:
+    return len(json.dumps(value, ensure_ascii=False, sort_keys=True).encode("utf-8"))
+
+
+def _build_full_event_arguments(arguments: dict[str, Any]) -> dict[str, Any] | None:
+    """Return the complete redacted arguments when they can be delivered to a human, else None."""
+    if _full_arguments_json_bytes(arguments) > _MAX_FULL_ARGUMENTS_JSON_BYTES:
+        return None
+    sanitized = cast("dict[str, Any]", redact_sensitive_data(arguments))
+    if _full_arguments_json_bytes(sanitized) > _MAX_FULL_ARGUMENTS_JSON_BYTES:
+        return None
+    return sanitized
+
+
 @dataclass(frozen=True, slots=True)
 class ApprovalDecision:
     """One resolved approval outcome."""
@@ -185,6 +203,9 @@ class SentApprovalEvent:
     """One delivered approval event."""
 
     event_id: str
+    # Content the transport actually sent when it diverges from the requested content,
+    # e.g. after offloading full arguments to an uploaded sidecar.
+    sent_content: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -224,8 +245,8 @@ class _ActiveApprovalSend:
 class _ApprovalManager:
     """Coordinate live approval waiters against Matrix approval cards.
 
-    Cached approval cards are only a startup cleanup index; they never make an
-    approval actionable after the live waiter is gone.
+    Cached approval cards support terminal cleanup only; they never make an
+    approval actionable after its live waiter is gone.
     """
 
     def __init__(
@@ -283,11 +304,15 @@ class _ApprovalManager:
         requested_at = _utcnow()
         expires_at = requested_at + timedelta(seconds=max(timeout_seconds, 0.0))
         event_arguments, arguments_truncated = _build_event_arguments_preview(arguments)
+        full_arguments = (
+            await asyncio.to_thread(_build_full_event_arguments, arguments) if arguments_truncated else None
+        )
         content = self._pending_event_content(
             approval_id=approval_id,
             tool_name=tool_name,
             arguments=event_arguments,
             arguments_truncated=arguments_truncated,
+            full_arguments=full_arguments,
             agent_name=agent_name,
             workflow_id=workflow_id,
             participant_id=participant_id,
@@ -331,28 +356,25 @@ class _ApprovalManager:
             with self._live_lock:
                 self._pending_by_card_event.pop(waiter.card_event_id, None)
 
-    async def discard_pending_on_startup(self, *, lookback_hours: int = 24) -> int:
+    async def discard_pending_on_startup(self) -> int:
         """Expire cached, router-authored approval cards after startup."""
         transport_sender = self._transport_sender_id()
         if transport_sender is None:
             return 0
 
-        cutoff_ts_ms = _lookback_cutoff_ms(lookback_hours)
         discarded = 0
         for room_id in self._configured_approval_room_ids():
             for card_event in await self._scan_cached_room_cards(
                 room_id,
-                since_ts_ms=cutoff_ts_ms,
+                since_ts_ms=0,
                 limit=_STARTUP_DISCARD_SCAN_LIMIT,
             ):
-                try:
-                    pending = PendingApproval.from_card_event(card_event, room_id=room_id)
-                except (TypeError, ValueError):
-                    continue
-                if pending.card_sender_id != transport_sender:
-                    continue
-                latest_edit = await self._latest_trusted_edit(pending)
-                if pending.latest_status(latest_edit) != "pending":
+                pending = await self._trusted_pending_from_card_event(
+                    card_event,
+                    room_id=room_id,
+                    transport_sender=transport_sender,
+                )
+                if pending is None:
                     continue
                 result = await self._discard_matrix_only_card(
                     pending=pending,
@@ -383,8 +405,20 @@ class _ApprovalManager:
                 reason=reason,
             )
 
-        consumed = self.knows_in_memory_approval_card(card_event_id)
-        return ApprovalActionResult(consumed=consumed, resolved=False, card_event_id=card_event_id)
+        if self.knows_in_memory_approval_card(card_event_id):
+            return ApprovalActionResult(consumed=True, resolved=False, card_event_id=card_event_id)
+
+        pending = await self._cached_trusted_pending_approval_for_card(
+            room_id=room_id,
+            card_event_id=card_event_id,
+        )
+        if pending is None or pending.approver_user_id != sender_id:
+            return ApprovalActionResult(consumed=False, resolved=False, card_event_id=card_event_id)
+        return await self._discard_matrix_only_card(
+            pending=pending,
+            reason=_DETACHED_REQUEST_REASON,
+            resolved_by=sender_id,
+        )
 
     async def handle_live_approval_id_response(
         self,
@@ -572,7 +606,7 @@ class _ApprovalManager:
     ) -> _LiveApprovalWaiter:
         card_event = self._card_event_from_content(
             event_id=sent_event.event_id,
-            content=content,
+            content=sent_event.sent_content if sent_event.sent_content is not None else content,
             requested_at=requested_at,
         )
         waiter = _LiveApprovalWaiter(
@@ -810,6 +844,51 @@ class _ApprovalManager:
             return None
         return pending
 
+    async def _cached_trusted_pending_approval_for_card(
+        self,
+        *,
+        room_id: str,
+        card_event_id: str,
+    ) -> PendingApproval | None:
+        if self._event_cache is None:
+            return None
+        card_event = await self._event_cache.get_event(room_id, card_event_id)
+        if card_event is None or not is_original_approval_card(card_event):
+            return None
+        transport_sender = self._transport_sender_id()
+        if transport_sender is None:
+            return None
+        return await self._trusted_pending_from_card_event(
+            card_event,
+            room_id=room_id,
+            transport_sender=transport_sender,
+            expected_card_event_id=card_event_id,
+        )
+
+    async def _trusted_pending_from_card_event(
+        self,
+        card_event: dict[str, Any],
+        *,
+        room_id: str,
+        transport_sender: str,
+        expected_card_event_id: str | None = None,
+    ) -> PendingApproval | None:
+        event_room_id = card_event.get("room_id")
+        if event_room_id is not None and event_room_id != room_id:
+            return None
+        try:
+            pending = PendingApproval.from_card_event(card_event, room_id=room_id)
+        except (TypeError, ValueError):
+            return None
+        if (
+            expected_card_event_id is not None and pending.card_event_id != expected_card_event_id
+        ) or pending.card_sender_id != transport_sender:
+            return None
+        latest_edit = await self._latest_trusted_edit(pending)
+        if pending.latest_status(latest_edit) != "pending":
+            return None
+        return pending
+
     async def _latest_edit(
         self,
         *,
@@ -846,6 +925,12 @@ class _ApprovalManager:
             since_ts_ms=since_ts_ms,
             limit=limit,
         )
+        if len(events) >= limit:
+            logger.warning(
+                "approval_startup_scan_truncated",
+                room_id=room_id,
+                scan_limit=limit,
+            )
         return [event for event in events if is_original_approval_card(event)]
 
     async def shutdown(self, *, reason: str) -> None:
@@ -1082,6 +1167,7 @@ class _ApprovalManager:
         status: PendingApprovalStatus,
         workflow_id: str | None = None,
         participant_id: str | None = None,
+        full_arguments: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         content: dict[str, Any] = {
             "msgtype": "io.mindroom.tool_approval",
@@ -1109,6 +1195,10 @@ class _ApprovalManager:
             content["participant_id"] = participant_id
         if arguments_truncated:
             content["arguments_truncated"] = True
+            if full_arguments is not None:
+                content["full_arguments"] = full_arguments
+            else:
+                content["approvable"] = False
         if requester_id is not None:
             content["requester_id"] = requester_id
         return content
@@ -1190,7 +1280,8 @@ class _ApprovalManager:
         status: _ResolutionStatus,
         reason: str | None,
     ) -> tuple[_ApprovalStatus, str | None, bool]:
-        if status == "approved" and pending.arguments_preview_truncated:
+        arguments_unreviewable = pending.arguments_preview_truncated and not pending.full_arguments_available
+        if status == "approved" and (not pending.approvable or arguments_unreviewable):
             return "denied", _DEFAULT_TRUNCATED_APPROVAL_REASON, True
         return status, reason, False
 
@@ -1207,10 +1298,6 @@ class _ApprovalManager:
             resolved_by=resolved_by,
             resolved_at=_utcnow(),
         )
-
-
-def _lookback_cutoff_ms(lookback_hours: int) -> int:
-    return int((time.time() - max(lookback_hours, 0) * 3600) * 1000)
 
 
 def get_approval_store() -> _ApprovalManager | None:

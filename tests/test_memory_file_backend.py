@@ -12,9 +12,11 @@ import pytest
 import mindroom.memory._semantic_file_search as semantic_file_search
 import mindroom.memory.functions as memory_functions
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
+from mindroom.config.knowledge import KnowledgeBaseConfig
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
 from mindroom.knowledge.availability import KnowledgeAvailability
+from mindroom.knowledge.utils import KnowledgeBaseAccessResolution
 from mindroom.memory import MemoryPromptParts
 from mindroom.memory import add_agent_memory as public_add_agent_memory
 from mindroom.memory import build_memory_enhanced_prompt as public_build_memory_enhanced_prompt
@@ -26,6 +28,7 @@ from mindroom.memory import search_agent_memories as public_search_agent_memorie
 from mindroom.memory import store_conversation_memory as public_store_conversation_memory
 from mindroom.memory import update_agent_memory as public_update_agent_memory
 from mindroom.runtime_resolution import resolve_agent_runtime
+from mindroom.timing import timing_scope
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
     _private_instance_state_root_path,
@@ -87,7 +90,7 @@ async def search_agent_memories(
     config: Config,
     limit: int = 3,
 ):
-    return await public_search_agent_memories(
+    outcome = await public_search_agent_memories(
         query,
         agent_name,
         storage_path,
@@ -96,6 +99,8 @@ async def search_agent_memories(
         limit,
         get_tool_execution_identity(),
     )
+    assert outcome.degraded_reason is None
+    return outcome.results
 
 
 async def list_all_agent_memories(
@@ -255,6 +260,42 @@ def config(storage_path: Path) -> Config:
     return _test_config(storage_path)
 
 
+def test_semantic_memory_index_is_a_runtime_config_overlay(storage_path: Path, config: Config) -> None:
+    """Synthetic file-memory indexes must not leak into authored config serialization."""
+    root = storage_path / "workspace"
+    base_id = "file_memory_agent_general_test"
+
+    knowledge_config = semantic_file_search._memory_knowledge_config(
+        config,
+        base_id=base_id,
+        root=root,
+        search_config=config.memory.search,
+    )
+
+    assert knowledge_config.knowledge_bases[base_id].path == str(root.resolve())
+    assert knowledge_config.runtime_knowledge_base_overlay(base_id) is knowledge_config.knowledge_bases[base_id]
+    assert base_id not in knowledge_config.authored_model_dump().get("knowledge_bases", {})
+    assert base_id not in config.knowledge_bases
+    assert config.runtime_knowledge_base_overlay(base_id) is None
+    assert knowledge_config.memory is config.memory
+
+
+@pytest.mark.parametrize(
+    "base_id",
+    ["", " ", ".", "..", "group/research", "group\\research", "foo\nbar", "foo\rbar", "__agent_private__:mind"],
+)
+def test_runtime_knowledge_base_overlay_rejects_unsafe_ids(
+    storage_path: Path,
+    config: Config,
+    base_id: str,
+) -> None:
+    """Runtime overlays must enforce the same ID constraints as authored bases."""
+    runtime_base = KnowledgeBaseConfig(path=str(storage_path / "workspace"))
+
+    with pytest.raises(ValueError, match="knowledge_bases keys"):
+        config.with_runtime_knowledge_base_overlay(base_id, runtime_base)
+
+
 @pytest.mark.asyncio
 async def test_semantic_memory_search_uses_ready_published_index_without_refresh(
     storage_path: Path,
@@ -356,23 +397,26 @@ async def test_semantic_memory_search_emits_nested_query_timings(
 
     emitted: list[tuple[str, str | None]] = []
 
-    def emit_timing(label: str, _start: float, **event_data: object) -> None:
-        emitted.append((label, event_data.get("timing_scope")))
+    def emit_timing(label: str, _start: float, **_event_data: object) -> None:
+        emitted.append((label, timing_scope.get()))
 
     monkeypatch.setattr(semantic_file_search, "list_knowledge_files", lambda *_args, **_kwargs: [memory_file.resolve()])
     monkeypatch.setattr(semantic_file_search, "resolve_knowledge_base_access", resolve_access)
     monkeypatch.setattr(semantic_file_search, "emit_elapsed_timing", emit_timing)
 
-    results = await semantic_file_search.search_semantic_file_memories(
-        "semantic memory",
-        scope_user_id="agent_general",
-        root=root,
-        config=config,
-        runtime_paths=runtime_paths,
-        search_config=config.memory.search,
-        limit=5,
-        timing_scope="scope-123",
-    )
+    token = timing_scope.set("scope-123")
+    try:
+        results = await semantic_file_search.search_semantic_file_memories(
+            "semantic memory",
+            scope_user_id="agent_general",
+            root=root,
+            config=config,
+            runtime_paths=runtime_paths,
+            search_config=config.memory.search,
+            limit=5,
+        )
+    finally:
+        timing_scope.reset(token)
 
     assert [result["memory"] for result in results] == ["Published semantic memory."]
     assert ("system_prompt_assembly.memory_search.semantic.published_index.resolve", "scope-123") in emitted
@@ -402,14 +446,14 @@ async def test_semantic_memory_missing_knowledge_index_schedules_refresh_and_rai
     def list_files(*_args: object, **_kwargs: object) -> list[Path]:
         return [memory_file.resolve()]
 
-    def resolve_access(*_args: object, **_kwargs: object) -> object:
-        return SimpleNamespace(knowledge=None, availability=KnowledgeAvailability.INITIALIZING)
+    def resolve_access(*_args: object, **_kwargs: object) -> KnowledgeBaseAccessResolution:
+        return KnowledgeBaseAccessResolution(knowledge=None, availability=KnowledgeAvailability.INITIALIZING)
 
     monkeypatch.setattr(semantic_file_search, "list_knowledge_files", list_files)
     monkeypatch.setattr(semantic_file_search, "resolve_knowledge_base_access", resolve_access)
     monkeypatch.setattr(semantic_file_search, "_memory_refresh_scheduler", FakeScheduler())
 
-    with pytest.raises(semantic_file_search.SemanticFileMemoryIndexUnavailableError):
+    with pytest.raises(semantic_file_search.SemanticFileMemoryIndexUnavailableError) as excinfo:
         await semantic_file_search.search_semantic_file_memories(
             "semantic memory",
             scope_user_id="agent_general",
@@ -421,6 +465,54 @@ async def test_semantic_memory_missing_knowledge_index_schedules_refresh_and_rai
         )
 
     assert scheduled_base_ids
+    # Plain warm-up carries no degradation cause.
+    assert excinfo.value.degraded_reason is None
+
+
+@pytest.mark.asyncio
+async def test_semantic_memory_cold_failed_index_carries_classified_cause(
+    storage_path: Path,
+    config: Config,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A cold index kept unpublished by an embedder failure surfaces the classified cause."""
+    root = storage_path / "memory-root"
+    memory_file = root / "memory" / "2026-06-02.md"
+    memory_file.parent.mkdir(parents=True)
+    memory_file.write_text("Serialized semantic memory.\n", encoding="utf-8")
+
+    class FakeScheduler:
+        def schedule_refresh(self, base_id: str, **_kwargs: object) -> None:
+            del base_id
+
+    def list_files(*_args: object, **_kwargs: object) -> list[Path]:
+        return [memory_file.resolve()]
+
+    def resolve_access(*_args: object, **_kwargs: object) -> KnowledgeBaseAccessResolution:
+        return KnowledgeBaseAccessResolution(
+            knowledge=None,
+            availability=KnowledgeAvailability.REFRESH_FAILED,
+            last_error=(
+                "Indexed 0 of 1 managed knowledge files (first error: embedder authentication failed (HTTP 401))"
+            ),
+        )
+
+    monkeypatch.setattr(semantic_file_search, "list_knowledge_files", list_files)
+    monkeypatch.setattr(semantic_file_search, "resolve_knowledge_base_access", resolve_access)
+    monkeypatch.setattr(semantic_file_search, "_memory_refresh_scheduler", FakeScheduler())
+
+    with pytest.raises(semantic_file_search.SemanticFileMemoryIndexUnavailableError) as excinfo:
+        await semantic_file_search.search_semantic_file_memories(
+            "semantic memory",
+            scope_user_id="agent_general",
+            root=root,
+            config=config,
+            runtime_paths=runtime_paths_for(config),
+            search_config=config.memory.search,
+            limit=5,
+        )
+
+    assert excinfo.value.degraded_reason == "embedder authentication failed (HTTP 401)"
 
 
 @pytest.mark.asyncio
@@ -438,6 +530,84 @@ async def test_file_backend_add_and_list_memories(storage_path: Path, config: Co
     memory_file = agent_workspace_root_path(storage_path, "general") / "MEMORY.md"
     assert memory_file.exists()
     assert "User prefers concise responses" in memory_file.read_text(encoding="utf-8")
+
+
+@pytest.mark.asyncio
+async def test_file_backend_lists_unstructured_daily_memory_lines(storage_path: Path, config: Config) -> None:
+    config.memory.backend = "file"
+    config.agents["general"].memory_backend = "file"
+
+    workspace = agent_workspace_root_path(storage_path, "general")
+    daily_file = workspace / "memory" / "2026-06-13.md"
+    daily_file.parent.mkdir(parents=True, exist_ok=True)
+    daily_file.write_text(
+        "# Daily notes\n\nBas prefers repo-grounded answers.\n- [id=m_existing] Structured daily note.\n",
+        encoding="utf-8",
+    )
+
+    results = await list_all_agent_memories("general", storage_path, config)
+
+    assert [result["memory"] for result in results] == [
+        "Structured daily note.",
+        "Bas prefers repo-grounded answers.",
+    ]
+    assert [result["id"] for result in results] == [
+        "m_existing",
+        "file:memory/2026-06-13.md:3",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_file_backend_deduplicates_unstructured_lines_with_internal_whitespace(
+    storage_path: Path,
+    config: Config,
+) -> None:
+    config.memory.backend = "file"
+    config.agents["general"].memory_backend = "file"
+
+    await add_agent_memory("Bas prefers repo-grounded answers.", "general", storage_path, config)
+
+    workspace = agent_workspace_root_path(storage_path, "general")
+    daily_file = workspace / "memory" / "2026-06-13.md"
+    daily_file.parent.mkdir(parents=True, exist_ok=True)
+    daily_file.write_text(
+        "Bas   prefers\trepo-grounded   answers.\nUnique raw note.\n",
+        encoding="utf-8",
+    )
+
+    results = await list_all_agent_memories("general", storage_path, config)
+
+    assert [result["memory"] for result in results] == [
+        "Bas prefers repo-grounded answers.",
+        "Unique raw note.",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_file_backend_list_all_skips_unstructured_entrypoint_lines(
+    storage_path: Path,
+    config: Config,
+) -> None:
+    config.memory.backend = "file"
+    config.agents["general"].memory_backend = "file"
+
+    workspace = agent_workspace_root_path(storage_path, "general")
+    memory_file = workspace / "MEMORY.md"
+    memory_file.parent.mkdir(parents=True, exist_ok=True)
+    memory_file.write_text(
+        "# Memory\n\nCurated raw entrypoint line.\n- [id=m_existing] Structured entrypoint note.\n",
+        encoding="utf-8",
+    )
+    daily_file = workspace / "memory" / "2026-06-13.md"
+    daily_file.parent.mkdir(parents=True, exist_ok=True)
+    daily_file.write_text("Daily raw note.\n", encoding="utf-8")
+
+    results = await list_all_agent_memories("general", storage_path, config)
+
+    assert [result["memory"] for result in results] == [
+        "Structured entrypoint note.",
+        "Daily raw note.",
+    ]
 
 
 @pytest.mark.asyncio
@@ -666,10 +836,81 @@ async def test_file_backend_semantic_search_falls_back_to_keyword_on_index_error
         "mindroom.memory._file_backend.search_semantic_file_memories",
         side_effect=RuntimeError("embedder offline"),
     ):
-        results = await search_agent_memories("Keyword fallback", "general", storage_path, config, limit=5)
+        outcome = await public_search_agent_memories(
+            "Keyword fallback",
+            "general",
+            storage_path,
+            config,
+            runtime_paths_for(config),
+            5,
+            get_tool_execution_identity(),
+        )
 
-    assert any(result.get("memory") == "Keyword fallback memory" for result in results)
-    assert all((result.get("metadata") or {}).get("search_mode") == "keyword" for result in results)
+    assert outcome.degraded_reason == "semantic memory search failed (RuntimeError)"
+    assert any(result.get("memory") == "Keyword fallback memory" for result in outcome.results)
+    assert all((result.get("metadata") or {}).get("search_mode") == "keyword" for result in outcome.results)
+
+
+@pytest.mark.asyncio
+async def test_file_backend_cold_failed_index_degrades_instead_of_healthy_fallback(
+    storage_path: Path,
+    config: Config,
+) -> None:
+    """A never-built index kept down by an auth failure is not a healthy keyword fallback."""
+    config.memory.backend = "file"
+    config.memory.search.mode = "semantic"
+    config.agents["general"].memory_backend = "file"
+
+    await add_agent_memory("Keyword fallback memory", "general", storage_path, config)
+
+    with patch(
+        "mindroom.memory._file_backend.search_semantic_file_memories",
+        side_effect=semantic_file_search.SemanticFileMemoryIndexUnavailableError(
+            "Semantic file-memory index is not ready",
+            degraded_reason="embedder authentication failed (HTTP 401)",
+        ),
+    ):
+        outcome = await public_search_agent_memories(
+            "Keyword fallback",
+            "general",
+            storage_path,
+            config,
+            runtime_paths_for(config),
+            5,
+            get_tool_execution_identity(),
+        )
+
+    assert outcome.degraded_reason == "embedder authentication failed (HTTP 401)"
+    assert any(result.get("memory") == "Keyword fallback memory" for result in outcome.results)
+
+
+@pytest.mark.asyncio
+async def test_prompt_parts_carry_degradation_notice_with_keyword_matches(
+    storage_path: Path,
+    config: Config,
+) -> None:
+    """Automatic prompt assembly keeps both the notice and the keyword fallback context."""
+    config.memory.backend = "file"
+    config.memory.search.mode = "semantic"
+    config.agents["general"].memory_backend = "file"
+
+    await add_agent_memory("Keyword fallback memory", "general", storage_path, config)
+
+    with patch(
+        "mindroom.memory._file_backend.search_semantic_file_memories",
+        side_effect=RuntimeError("embedder offline"),
+    ):
+        prompt_parts = await public_build_memory_prompt_parts(
+            "Keyword fallback",
+            "general",
+            storage_path,
+            config,
+            runtime_paths_for(config),
+        )
+
+    assert "Semantic memory search is unavailable this turn" in prompt_parts.transient_turn_context
+    assert "semantic memory search failed (RuntimeError)" in prompt_parts.transient_turn_context
+    assert "Keyword fallback memory" in prompt_parts.transient_turn_context
 
 
 @pytest.mark.asyncio
@@ -1096,7 +1337,10 @@ async def test_file_backend_mixed_private_team_conversation_memory_is_rejected(
     config.agents["general"].private = AgentPrivateConfig(per="user", root="mind_data")
     config.teams = {"mixed_team": MockTeamConfig(agents=["general", "calculator"])}
 
-    with pytest.raises(ValueError, match="private agents cannot participate in teams yet"):
+    with pytest.raises(
+        ValueError,
+        match="private agents are only supported in explicit Matrix ad hoc teams with requester identity",
+    ):
         await store_conversation_memory(
             "Alice-authored private team memory",
             ["general", "calculator"],
@@ -1161,10 +1405,16 @@ async def test_file_backend_mixed_private_team_member_crud_is_rejected(
     await add_agent_memory("Calculator workspace note", "calculator", storage_path, config)
     memory_id = (await list_all_agent_memories("calculator", storage_path, config))[0]["id"]
 
-    with pytest.raises(ValueError, match="private agents cannot participate in teams yet"):
+    with pytest.raises(
+        ValueError,
+        match="private agents are only supported in explicit Matrix ad hoc teams with requester identity",
+    ):
         await get_agent_memory(memory_id, ["general", "calculator"], storage_path, config)
 
-    with pytest.raises(ValueError, match="private agents cannot participate in teams yet"):
+    with pytest.raises(
+        ValueError,
+        match="private agents are only supported in explicit Matrix ad hoc teams with requester identity",
+    ):
         await update_agent_memory(
             memory_id,
             "Updated calculator workspace note",
@@ -1173,7 +1423,10 @@ async def test_file_backend_mixed_private_team_member_crud_is_rejected(
             config,
         )
 
-    with pytest.raises(ValueError, match="private agents cannot participate in teams yet"):
+    with pytest.raises(
+        ValueError,
+        match="private agents are only supported in explicit Matrix ad hoc teams with requester identity",
+    ):
         await delete_agent_memory(memory_id, ["general", "calculator"], storage_path, config)
 
     memory_content = (workspace / "MEMORY.md").read_text(encoding="utf-8")
@@ -1213,8 +1466,8 @@ async def test_file_backend_build_memory_prompt_parts_splits_entrypoint_from_tur
 
     assert "[File memory entrypoint (agent)]" in prompt_parts.session_preamble
     assert "Project uses FastAPI." in prompt_parts.session_preamble
-    assert "Deployment runbook lives in docs/deploy.md" in prompt_parts.turn_context
-    assert "Project uses FastAPI." not in prompt_parts.turn_context
+    assert "Deployment runbook lives in docs/deploy.md" in prompt_parts.transient_turn_context
+    assert "Project uses FastAPI." not in prompt_parts.transient_turn_context
 
 
 @pytest.mark.asyncio
@@ -1298,6 +1551,109 @@ async def test_file_backend_memory_crud_and_scope(storage_path: Path, config: Co
     assert await get_agent_memory(private_id, "other_agent", storage_path, config) is None
     with pytest.raises(ValueError, match=f"No memory found with id={private_id}"):
         await update_agent_memory(private_id, "Tampered", "other_agent", storage_path, config)
+
+
+@pytest.mark.asyncio
+async def test_file_backend_can_update_and_delete_unstructured_file_memory_line(
+    storage_path: Path,
+    config: Config,
+) -> None:
+    config.memory.backend = "file"
+    config.agents["general"].memory_backend = "file"
+
+    workspace = agent_workspace_root_path(storage_path, "general")
+    daily_file = workspace / "memory" / "2026-06-13.md"
+    daily_file.parent.mkdir(parents=True, exist_ok=True)
+    daily_file.write_text("Old raw note.\nKeep this line.\n", encoding="utf-8")
+
+    memory_id = "file:memory/2026-06-13.md:1"
+    await update_agent_memory(memory_id, "Updated raw note.", "general", storage_path, config)
+
+    assert daily_file.read_text(encoding="utf-8") == "Updated raw note.\nKeep this line.\n"
+    updated = await get_agent_memory(memory_id, "general", storage_path, config)
+    assert updated is not None
+    assert updated["memory"] == "Updated raw note."
+
+    await delete_agent_memory(memory_id, "general", storage_path, config)
+    assert daily_file.read_text(encoding="utf-8") == "\nKeep this line.\n"
+    assert await get_agent_memory(memory_id, "general", storage_path, config) is None
+
+
+@pytest.mark.asyncio
+async def test_file_backend_whitespace_only_update_deletes_unstructured_file_memory_line(
+    storage_path: Path,
+    config: Config,
+) -> None:
+    config.memory.backend = "file"
+    config.agents["general"].memory_backend = "file"
+
+    workspace = agent_workspace_root_path(storage_path, "general")
+    daily_file = workspace / "memory" / "2026-06-13.md"
+    daily_file.parent.mkdir(parents=True, exist_ok=True)
+    daily_file.write_text("  Old raw note.\nKeep this line.\n", encoding="utf-8")
+
+    memory_id = "file:memory/2026-06-13.md:1"
+    await update_agent_memory(memory_id, "   \t", "general", storage_path, config)
+
+    assert daily_file.read_text(encoding="utf-8") == "\nKeep this line.\n"
+    assert await get_agent_memory(memory_id, "general", storage_path, config) is None
+
+
+@pytest.mark.asyncio
+async def test_file_backend_rejects_path_ids_outside_memory_files(
+    storage_path: Path,
+    config: Config,
+) -> None:
+    config.memory.backend = "file"
+    config.agents["general"].memory_backend = "file"
+
+    workspace = agent_workspace_root_path(storage_path, "general")
+    docs_file = workspace / "docs" / "runbook.md"
+    docs_file.parent.mkdir(parents=True, exist_ok=True)
+    docs_file.write_text("Runbook instruction.\n", encoding="utf-8")
+    soul_file = workspace / "SOUL.md"
+    soul_file.write_text("Protected instruction.\n", encoding="utf-8")
+
+    assert await get_agent_memory("file:docs/runbook.md:1", "general", storage_path, config) is None
+    assert await get_agent_memory("file:SOUL.md:1", "general", storage_path, config) is None
+
+    with pytest.raises(ValueError, match=r"No memory found with id=file:docs/runbook\.md:1"):
+        await update_agent_memory("file:docs/runbook.md:1", "Changed.", "general", storage_path, config)
+    with pytest.raises(ValueError, match=r"No memory found with id=file:SOUL\.md:1"):
+        await delete_agent_memory("file:SOUL.md:1", "general", storage_path, config)
+
+    assert docs_file.read_text(encoding="utf-8") == "Runbook instruction.\n"
+    assert soul_file.read_text(encoding="utf-8") == "Protected instruction.\n"
+
+
+@pytest.mark.asyncio
+async def test_file_backend_rejects_unstructured_entrypoint_path_ids(
+    storage_path: Path,
+    config: Config,
+) -> None:
+    config.memory.backend = "file"
+    config.agents["general"].memory_backend = "file"
+
+    workspace = agent_workspace_root_path(storage_path, "general")
+    memory_file = workspace / "MEMORY.md"
+    memory_file.parent.mkdir(parents=True, exist_ok=True)
+    memory_file.write_text(
+        "# Memory\n\nCurated raw entrypoint line.\n- [id=m_existing] Structured entrypoint note.\n",
+        encoding="utf-8",
+    )
+    original_content = memory_file.read_text(encoding="utf-8")
+
+    structured = await get_agent_memory("m_existing", "general", storage_path, config)
+    assert structured is not None
+    assert structured["memory"] == "Structured entrypoint note."
+    assert await get_agent_memory("file:MEMORY.md:3", "general", storage_path, config) is None
+
+    with pytest.raises(ValueError, match=r"No memory found with id=file:MEMORY\.md:3"):
+        await update_agent_memory("file:MEMORY.md:3", "Changed.", "general", storage_path, config)
+    with pytest.raises(ValueError, match=r"No memory found with id=file:MEMORY\.md:3"):
+        await delete_agent_memory("file:MEMORY.md:3", "general", storage_path, config)
+
+    assert memory_file.read_text(encoding="utf-8") == original_content
 
 
 @pytest.mark.asyncio

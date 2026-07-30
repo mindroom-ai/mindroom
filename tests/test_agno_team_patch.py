@@ -196,6 +196,31 @@ async def test_team_list_message_patch_preserves_roleful_input_through_formatter
     assert historical_answer.from_history is True
 
 
+@pytest.mark.asyncio
+async def test_team_list_message_patch_excludes_transient_input_from_persisted_run() -> None:
+    """Roleful team input must honor add_to_agent_memory on transient context."""
+    model = RecordingOpenAIChat(id="gpt-test", api_key="sk-test")
+    team = _team(model)
+    transient_context = Message(
+        role="user",
+        content="Current location: Amsterdam",
+        add_to_agent_memory=False,
+    )
+
+    response = await team.arun(
+        [
+            Message(role="assistant", content="Earlier answer"),
+            transient_context,
+            Message(role="user", content="Current question"),
+        ],
+    )
+
+    assert transient_context in model.raw_messages
+    persisted_content = [message.content for message in response.messages or []]
+    assert "Current location: Amsterdam" not in persisted_content
+    assert "Current question" in persisted_content
+
+
 @pytest.mark.parametrize("use_async", [False, True])
 @pytest.mark.asyncio
 async def test_team_list_message_patch_sets_user_message(use_async: bool) -> None:

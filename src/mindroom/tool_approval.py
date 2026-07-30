@@ -28,6 +28,7 @@ from mindroom.approval_manager import (
 from mindroom.constants import RuntimePaths, resolve_config_relative_path
 from mindroom.entity_resolution import entity_identity_registry, mindroom_user_id
 from mindroom.logging_config import get_logger
+from mindroom.tool_system.approval_exemptions import tool_call_is_approval_exempt
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -219,6 +220,9 @@ async def evaluate_tool_approval(
     require_approval = approval_config.default == "require_approval"
     timeout_seconds = approval_config.timeout_days * 24 * 60 * 60
 
+    if tool_call_is_approval_exempt(tool_name, arguments):
+        return False, timeout_seconds
+
     rule = _matching_tool_approval_rule(config, tool_name)
     if rule is None:
         return require_approval, timeout_seconds
@@ -296,19 +300,21 @@ def is_process_active_approval_card(card_event_id: str) -> bool:
 
 
 async def handle_matrix_approval_action(action: MatrixApprovalAction) -> ApprovalActionResult:
-    """Resolve one Matrix approval action against live in-process approval state."""
+    """Resolve a live approval or expire a validated detached Matrix card."""
     manager = approval_manager.get_approval_store()
     if manager is None:
         return ApprovalActionResult(consumed=False, resolved=False)
     sanitized_reason = action.reason.strip() if isinstance(action.reason, str) and action.reason.strip() else None
     if action.approval_id is not None:
-        return await manager.handle_live_approval_id_response(
+        result = await manager.handle_live_approval_id_response(
             room_id=action.room_id,
             sender_id=action.sender_id,
             approval_id=action.approval_id,
             status=action.status,
             reason=sanitized_reason,
         )
+        if result.consumed or action.card_event_id is None:
+            return result
     if action.card_event_id is None:
         return ApprovalActionResult(consumed=False, resolved=False)
     return await manager.handle_card_response(
@@ -340,12 +346,12 @@ def initialize_approval_runtime(
     )
 
 
-async def expire_orphaned_approval_cards_on_startup(*, lookback_hours: int) -> int:
+async def expire_orphaned_approval_cards_on_startup() -> int:
     """Expire router-authored approval cards that can no longer have live waiters."""
     manager = approval_manager.get_approval_store()
     if manager is None:
         return 0
-    return await manager.discard_pending_on_startup(lookback_hours=lookback_hours)
+    return await manager.discard_pending_on_startup()
 
 
 async def shutdown_approval_runtime(reason: str = DEFAULT_SHUTDOWN_REASON) -> None:

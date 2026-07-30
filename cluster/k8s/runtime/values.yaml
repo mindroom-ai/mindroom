@@ -53,6 +53,27 @@ podDisruptionBudget:
   maxUnavailable: 1
   minAvailable: ""
 
+# Optional NetworkPolicy for the MindRoom control-plane pod.
+# When created, pod ingress is limited to the runtime API port from the configured peers.
+networkPolicy:
+  create: false
+  name: ""
+  # NetworkPolicyPeer entries allowed to reach the runtime API port, for example an edge proxy and known in-cluster clients.
+  # NetworkPolicy targets pods rather than Services, so selectors must match the client pods.
+  # A bare podSelector only matches pods in the release namespace; combine namespaceSelector and podSelector for cross-namespace clients.
+  # Leave empty to allow the API port from all sources while still denying other ingress.
+  apiIngressFrom: []
+  # Example:
+  # apiIngressFrom:
+  #   - podSelector:
+  #       matchLabels:
+  #         app.kubernetes.io/name: my-ingress
+  # Raw Kubernetes NetworkPolicyIngressRule entries appended after the API rule.
+  extraIngress: []
+  # Raw Kubernetes NetworkPolicyEgressRule entries.
+  # Setting any entry adds Egress to policyTypes, so include every egress flow the runtime needs.
+  extraEgress: []
+
 runtime:
   apiHost: 0.0.0.0
   apiPort: 8765
@@ -200,6 +221,22 @@ contentBundles: []
 #   source: file
 #   path: /app/agent_data/content-bundles/team-config/content/environments/prod/agent-config.yaml
 
+# Model-provider API keys sourced from existing Kubernetes Secrets.
+# Each entry binds one Secret key to the provider's native credential env var
+# (for example OPENAI_API_KEY); at startup the runtime syncs that value into
+# its credential service as <storage.mountPath>/credentials/<provider>_credentials.json.
+# Supported providers mirror PROVIDER_ENV_KEYS in src/mindroom/constants.py:
+# anthropic, azure, openai, google, openrouter, deepseek, cerebras, groq, zai, ollama.
+providerCredentials: []
+# Example:
+# providerCredentials:
+#   - provider: openai
+#     existingSecret: my-llm-secret
+#     key: api-key
+#   - provider: anthropic
+#     existingSecret: my-llm-secret
+#     key: anthropic-api-key
+
 env:
   # Raw Kubernetes EnvVar entries appended to the MindRoom container.
   extra: []
@@ -210,9 +247,14 @@ matrix:
   homeserverUrl: ""
   serverName: ""
   startupTimeoutSeconds: ""
+  # Authentication used only to create/login MindRoom-managed Matrix accounts.
+  managedAccountAuth: password
   registrationToken:
     existingSecret: ""
     key: MATRIX_REGISTRATION_TOKEN
+  appserviceToken:
+    existingSecret: ""
+    key: MATRIX_APPSERVICE_TOKEN
 
 resources:
   requests:
@@ -293,6 +335,10 @@ workers:
     port: 8766
     readyTimeoutSeconds: 60
     idleTimeoutSeconds: 1800
+    # Recreate scaled-down worker Deployments whose pod template (image, env,
+    # resources) drifted from current config during each cleanup interval.
+    # Running workers are recreated on their next provisioning after scale-down.
+    reconcilePodTemplates: true
     namePrefix: mindroom-worker
     storageSubpathPrefix: workers
     enableServiceLinks: false
@@ -305,6 +351,8 @@ workers:
     extraEnv: {}
     extraLabels: {}
     extraAnnotations: {}
+    extraContainers: []
+    extraVolumes: []
     resources:
       requests:
         cpu: 100m
@@ -315,22 +363,28 @@ workers:
     # Per-worker Agent Vault egress. When enabled, each dedicated worker pod
     # gets an init container that mints a proxy-role Agent Vault token for that
     # worker's vault into an in-pod volume; the sandbox runner composes
-    # http://<token>:@<proxyUrl host> for python/shell egress. No separate
+    # http://<token>:<vault>@<proxyUrl host> for python/shell egress. No separate
     # bridge pod or Service is created.
     #
-    # NOTE: if egressProxy/approvedEgress NetworkPolicies are also enabled, they
-    # restrict worker egress and do NOT open the Agent Vault api/proxy ports.
-    # You must allow the worker pods (and their init container) to reach the
-    # agent-vault api (apiUrl) and proxy (proxyUrl) ports, e.g. via
-    # egressProxy.networkPolicy.extraEgress, or the init container will time out.
+    # NOTE: if egressProxy/approvedEgress NetworkPolicies are also enabled,
+    # workers still need Agent Vault API egress (apiUrl) so the init container
+    # can mint the per-worker token. For a chart-managed vault server, the chart
+    # opens that API egress automatically. For externally managed vaults, add
+    # an explicit API-only egress rule. Do not open direct worker egress to the
+    # Agent Vault proxy port when approvedEgress owns dynamic grants; enable
+    # approvedEgress.parentProxy so Squid remains the first hop and forwards
+    # token-bearing traffic to the vault parent.
     agentVault:
       enabled: false
       # Agent Vault CLI image used by the init container to mint per-worker
       # proxy-role agent tokens. Required when enabled.
       cliImage: ""
-      # Agent Vault instance owner email used for provisioning. Required when enabled.
+      # Agent Vault instance owner email used for provisioning and worker token
+      # minting. Required when enabled. When accessTool is enabled, self-service
+      # grants also keep this owner admin on each worker vault so the init
+      # container can attach the proxy-role agent even for user-created vaults.
       ownerEmail: ""
-      # Prefix for the per-worker vault name (worker_id_for_key); the
+      # Prefix for the per-worker vault name (descriptive_worker_id_for_key); the
       # agent_vault_access tool must use the same prefix
       # (MINDROOM_AGENT_VAULT_ACCESS_VAULT_NAME_PREFIX) so the UI manages the
       # same vault the worker reads.
@@ -421,6 +475,49 @@ workers:
         adminTokenSecret:
           name: agent-vault-access-admin
           key: token
+      # Optional declarative Agent Vault UI/admin grants for worker vaults.
+      # This controls raw secret visibility and management only. It does not
+      # restrict which users may cause a shared agent to use credentials at
+      # runtime.
+      accessGrants:
+        enabled: false
+        # Optional tenant/account identifiers used in MindRoom worker-key
+        # derivation. Set these to the same values the runtime receives through
+        # CUSTOMER_ID or ACCOUNT_ID when your deployment uses tenant-specific
+        # worker keys. Leave empty for the runtime default tenant.
+        tenantId: ""
+        accountId: ""
+        # Existing Secret holding an owner/admin token for Agent Vault. When
+        # bootstrap.enabled is true, the bootstrap Job publishes the same
+        # owner-role token it uses for accessTool into this Secret too.
+        # If accessTool uses the same Secret name, use the same key or a
+        # different Secret name so bootstrap never applies one Secret twice.
+        adminTokenSecret:
+          name: agent-vault-access-admin
+          key: token
+        waitReadySeconds: 180
+        resources: {}
+        # Each grant gives an email raw UI/admin access to the resolved worker
+        # vault. Supported workerScope values are shared, user, and user_agent.
+        # For workerScope=user, omit agent; use workerScope=user_agent when the
+        # vault should be both requester- and agent-specific.
+        # Supported role is admin.
+        grants: []
+        # Example:
+        # grants:
+        #   - email: user@example.com
+        #     workerScope: shared
+        #     agent: example-agent
+        #     role: admin
+        #   - email: user@example.com
+        #     workerScope: user_agent
+        #     requester: "@user:example.com"
+        #     agent: example-agent
+        #     role: admin
+        #   - email: user@example.com
+        #     workerScope: user
+        #     requester: "@user:example.com"
+        #     role: admin
 
 # Optional external HTTP proxy for dedicated Kubernetes workers.
 # This chart can point worker pods at an existing proxy Service and, when
@@ -500,6 +597,16 @@ approvedEgress:
   maxTtlSeconds: 21600
   sandboxProxyTimeoutSeconds: ""
   logLevel: info
+  # Optional parent proxy for token-bearing worker traffic. This is primarily
+  # for Agent Vault: workers proxy to approved egress first, so dynamic grants
+  # resolve from the real worker source IP, then Squid forwards requests with a
+  # Proxy-Authorization header to the Agent Vault MITM proxy for credential
+  # injection. Tokenless traffic egresses direct from Squid after the normal
+  # allowlist/grant check.
+  parentProxy:
+    enabled: false
+    host: agent-vault
+    port: 14322
   resources:
     requests:
       cpu: 100m

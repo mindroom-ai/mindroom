@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
+from dataclasses import replace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -11,6 +13,7 @@ import pytest
 from agno.media import Audio
 
 from mindroom.attachments import _attachment_id_for_event, load_attachment
+from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.bot import AgentBot
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
@@ -22,17 +25,21 @@ from mindroom.constants import (
     SOURCE_KIND_KEY,
     VOICE_PREFIX,
     VOICE_RAW_AUDIO_FALLBACK_KEY,
+    VOICE_TRANSCRIPT_KEY,
 )
+from mindroom.dispatch_handoff import PreparedTextEvent
 from mindroom.dispatch_source import TRUSTED_INTERNAL_RELAY_SOURCE_KIND, VOICE_SOURCE_KIND
-from mindroom.handled_turns import HandledTurnState
+from mindroom.handled_turns import TurnRecord
 from mindroom.history.types import HistoryScope
 from mindroom.matrix.cache.thread_history_result import thread_history_result
 from mindroom.matrix.identity import MatrixID
 from mindroom.message_target import MessageTarget
+from mindroom.visible_voice_echo import VisibleVoiceEchoRequest
 from mindroom.voice_handler import prepare_voice_message
 from tests.conftest import (
     bind_runtime_paths,
     drain_coalescing,
+    install_edit_message_mock,
     install_generate_response_mock,
     install_runtime_cache_support,
     install_send_response_mock,
@@ -45,6 +52,8 @@ from tests.conftest import (
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+    from mindroom.delivery_gateway import EditTextRequest
 
 
 def _attach_runtime_paths(config: Config, tmp_path: Path) -> Config:
@@ -130,6 +139,7 @@ def _make_visible_router_echo_scenario(
     *,
     agents: dict | None = None,
     authorization: dict | None = None,
+    voice_enabled: bool = True,
     send_response_return: str | None = "$voice_echo",
     send_response_side_effect: list[str] | None = None,
 ) -> tuple[AgentBot, nio.MatrixRoom, nio.RoomMessageAudio]:
@@ -144,7 +154,7 @@ def _make_visible_router_echo_scenario(
         Config(
             agents=configured_agents,
             authorization=authorization or {"default_room_access": True},
-            voice={"enabled": True, "visible_router_echo": True},
+            voice={"enabled": voice_enabled, "visible_router_echo": True},
         ),
         tmp_path,
     )
@@ -160,12 +170,13 @@ def _make_visible_router_echo_scenario(
     bot.client = AsyncMock()
     bot.client.rooms = {}
     _install_voice_thread_dispatch_mocks(bot)
-    bot._send_response = AsyncMock()
+    send_response = AsyncMock()
     if send_response_side_effect is not None:
-        bot._send_response.side_effect = send_response_side_effect
+        send_response.side_effect = send_response_side_effect
     else:
-        bot._send_response.return_value = send_response_return
-    install_send_response_mock(bot, bot._send_response)
+        send_response.return_value = send_response_return
+    install_send_response_mock(bot, send_response)
+    install_edit_message_mock(bot, AsyncMock(return_value=True))
 
     room_user_ids = [
         "@mindroom_router:localhost",
@@ -300,8 +311,8 @@ async def test_router_processes_own_sidecar_commands_using_original_sender(tmp_p
             ).encode("utf-8"),
         ),
     )
-    bot._send_response = AsyncMock(return_value="$reply")
-    install_send_response_mock(bot, bot._send_response)
+    send_response = AsyncMock(return_value="$reply")
+    install_send_response_mock(bot, send_response)
 
     room = _make_room("@mindroom_router:example.com", "@mindroom_home:localhost", "@alice:example.com")
     event = nio.Event.parse_event(
@@ -383,8 +394,8 @@ async def test_router_parses_sidecar_schedule_command_from_canonical_body(tmp_pa
             ).encode("utf-8"),
         ),
     )
-    bot._send_response = AsyncMock(return_value="$reply")
-    install_send_response_mock(bot, bot._send_response)
+    send_response = AsyncMock(return_value="$reply")
+    install_send_response_mock(bot, send_response)
 
     room = _make_room("@mindroom_router:example.com", "@mindroom_home:localhost", "@alice:example.com")
     event = nio.Event.parse_event(
@@ -471,8 +482,8 @@ async def test_router_treats_sidecar_skill_command_as_unknown_command(tmp_path) 
             ).encode("utf-8"),
         ),
     )
-    bot._send_response = AsyncMock(return_value="$fallback")
-    install_send_response_mock(bot, bot._send_response)
+    send_response = AsyncMock(return_value="$fallback")
+    install_send_response_mock(bot, send_response)
 
     room = _make_room(
         "@mindroom_router:example.com",
@@ -509,10 +520,8 @@ async def test_router_treats_sidecar_skill_command_as_unknown_command(tmp_path) 
         await bot._coalescing_gate.drain_all()
 
     mock_interactive.assert_awaited_once()
-    bot._send_response.assert_awaited_once()
-    assert bot._send_response.await_args.kwargs["response_text"] == (
-        "❌ Unknown command. Try !help for available commands."
-    )
+    send_response.assert_awaited_once()
+    assert send_response.await_args.kwargs["response_text"] == ("❌ Unknown command. Try !help for available commands.")
 
 
 @pytest.mark.asyncio
@@ -575,7 +584,7 @@ async def test_router_skips_unauthorized_sidecar_commands_before_hydration(tmp_p
     mock_interactive.assert_not_awaited()
     mock_schedule.assert_not_awaited()
     turn_store.record_turn.assert_called_once_with(
-        HandledTurnState.from_source_event_id(event.event_id),
+        TurnRecord.create([event.event_id]),
     )
 
 
@@ -741,8 +750,8 @@ async def test_router_ignores_audio_events_from_internal_agents(tmp_path) -> Non
     bot.logger = MagicMock()
     replace_turn_controller_deps(bot, logger=bot.logger)
     bot.client = MagicMock()
-    bot._send_response = AsyncMock()
-    install_send_response_mock(bot, bot._send_response)
+    send_response = AsyncMock()
+    install_send_response_mock(bot, send_response)
 
     room = _make_room(
         "@mindroom_router:example.com",
@@ -765,9 +774,9 @@ async def test_router_ignores_audio_events_from_internal_agents(tmp_path) -> Non
 
     mock_voice.assert_not_called()
     mock_download_audio.assert_not_called()
-    bot._send_response.assert_not_called()
+    send_response.assert_not_called()
     turn_store.record_turn.assert_called_once_with(
-        HandledTurnState.from_source_event_id("$agent_audio_event"),
+        TurnRecord.create(["$agent_audio_event"]),
     )
 
 
@@ -793,14 +802,15 @@ async def test_agent_handles_audio_without_router_when_voice_disabled(tmp_path) 
     )
     turn_store = unwrap_extracted_collaborator(bot._turn_store)
     turn_store.is_handled = MagicMock(return_value=False)
+    turn_store.record_pending_turn = MagicMock(wraps=turn_store.record_pending_turn)
     turn_store.record_turn = MagicMock(wraps=turn_store.record_turn)
     bot.logger = MagicMock()
     replace_turn_controller_deps(bot, logger=bot.logger)
     bot.client = AsyncMock()
     bot.client.rooms = {}
     bot.client.user_id = "@mindroom_home:localhost"
-    bot._generate_response = AsyncMock(return_value="$response")
-    install_generate_response_mock(bot, bot._generate_response)
+    generate_response = AsyncMock(return_value="$response")
+    install_generate_response_mock(bot, generate_response)
     _install_voice_thread_dispatch_mocks(bot)
 
     room = _make_room("@mindroom_home:localhost", "@alice:example.com")
@@ -817,32 +827,40 @@ async def test_agent_handles_audio_without_router_when_voice_disabled(tmp_path) 
         await bot._on_media_message(room, event)
         await drain_coalescing(bot)
 
-    bot._generate_response.assert_called_once()
-    call_kwargs = bot._generate_response.call_args.kwargs
+    generate_response.assert_called_once()
+    call_kwargs = generate_response.call_args.kwargs
     expected_attachment_id = _attachment_id_for_event("$voice_event")
     assert call_kwargs["response_envelope"].target.reply_to_event_id == "$voice_event"
     assert call_kwargs["prompt"].startswith(f"{VOICE_PREFIX}[Attached voice message]")
     assert call_kwargs["attachment_ids"] == [expected_attachment_id]
     assert list(call_kwargs["media"].audio)
-    turn_store.record_turn.assert_called_once_with(
-        HandledTurnState.from_source_event_id(
-            "$voice_event",
+    expected_record = replace(
+        TurnRecord.create(
+            ["$voice_event"],
             response_event_id="$response",
             source_event_prompts={"$voice_event": f"{VOICE_PREFIX}[Attached voice message]"},
-        ).with_response_context(
-            response_owner="home",
-            requester_id="@alice:example.com",
-            correlation_id="$voice_event",
-            history_scope=HistoryScope(kind="agent", scope_id="home"),
-            conversation_target=MessageTarget(
-                room_id=room.room_id,
-                source_thread_id=None,
-                resolved_thread_id="$voice_event",
-                reply_to_event_id="$voice_event",
-                session_id=f"{room.room_id}:$voice_event",
-            ),
+        ),
+        response_owner="home",
+        requester_id="@alice:example.com",
+        correlation_id="$voice_event",
+        history_scope=HistoryScope(kind="agent", scope_id="home"),
+        conversation_target=MessageTarget(
+            room_id=room.room_id,
+            source_thread_id=None,
+            resolved_thread_id="$voice_event",
+            reply_to_event_id="$voice_event",
+            session_id=f"{room.room_id}:$voice_event",
         ),
     )
+    turn_store.record_pending_turn.assert_called_once()
+    pending_input = turn_store.record_pending_turn.call_args.args[0]
+    assert replace(pending_input, response_event_id="$response") == expected_record
+    turn_store.record_turn.assert_called_once()
+    terminal_input = turn_store.record_turn.call_args.args[0]
+    assert replace(terminal_input, completed=True, timestamp=0.0) == expected_record
+    persisted_record = turn_store.get_turn_record("$voice_event")
+    assert persisted_record is not None
+    assert persisted_record.completed is True
 
 
 @pytest.mark.asyncio
@@ -872,8 +890,8 @@ async def test_agent_handles_audio_with_router_present_in_single_agent_room(tmp_
     bot.client = AsyncMock()
     bot.client.rooms = {}
     bot.client.user_id = "@mindroom_home:localhost"
-    bot._generate_response = AsyncMock(return_value="$response")
-    install_generate_response_mock(bot, bot._generate_response)
+    generate_response = AsyncMock(return_value="$response")
+    install_generate_response_mock(bot, generate_response)
     _install_voice_thread_dispatch_mocks(bot)
 
     room = _make_room("@mindroom_router:localhost", "@mindroom_home:localhost", "@alice:example.com")
@@ -891,7 +909,7 @@ async def test_agent_handles_audio_with_router_present_in_single_agent_room(tmp_
         await drain_coalescing(bot)
 
     mock_download_audio.assert_called_once()
-    bot._generate_response.assert_called_once()
+    generate_response.assert_called_once()
 
 
 @pytest.mark.asyncio
@@ -907,6 +925,8 @@ async def test_router_and_agent_share_audio_normalization_when_router_is_present
     )
 
     bots: list[AgentBot] = []
+    send_response_mocks: list[AsyncMock] = []
+    generate_response_mocks: list[AsyncMock] = []
     for agent_name in (ROUTER_AGENT_NAME, "home"):
         agent_user = MagicMock()
         agent_user.user_id = f"@mindroom_{agent_name}:localhost"
@@ -925,12 +945,14 @@ async def test_router_and_agent_share_audio_normalization_when_router_is_present
         bot.client = AsyncMock()
         bot.client.rooms = {}
         bot.client.user_id = agent_user.user_id
-        bot._send_response = AsyncMock(return_value="$router_response")
-        bot._generate_response = AsyncMock(return_value=f"${agent_name}_response")
-        install_send_response_mock(bot, bot._send_response)
-        install_generate_response_mock(bot, bot._generate_response)
+        send_response = AsyncMock(return_value="$router_response")
+        generate_response = AsyncMock(return_value=f"${agent_name}_response")
+        install_send_response_mock(bot, send_response)
+        install_generate_response_mock(bot, generate_response)
         _install_voice_thread_dispatch_mocks(bot)
         bots.append(bot)
+        send_response_mocks.append(send_response)
+        generate_response_mocks.append(generate_response)
 
     room = _make_room("@mindroom_router:localhost", "@mindroom_home:localhost", "@alice:example.com")
     event = _make_voice_event(sender="@alice:example.com")
@@ -949,8 +971,8 @@ async def test_router_and_agent_share_audio_normalization_when_router_is_present
 
     assert mock_download_audio.await_count == 1
     assert mock_voice.await_count == 1
-    bots[0]._send_response.assert_not_called()
-    assert bots[1]._generate_response.await_count == 1
+    send_response_mocks[0].assert_not_called()
+    assert generate_response_mocks[1].await_count == 1
 
 
 @pytest.mark.asyncio
@@ -969,16 +991,527 @@ async def test_router_posts_visible_voice_echo_when_enabled(tmp_path) -> None:  
         await drain_coalescing(bot)
 
     bot._delivery_gateway.send_text.assert_called_once()
-    request = bot._delivery_gateway.send_text.call_args.args[0]
-    assert request.target.reply_to_event_id == "$voice_event"
-    assert request.response_text == f"{VOICE_PREFIX}@home turn on the lights"
-    assert request.target.resolved_thread_id == "$voice_event"
-    assert request.skip_mentions is True
+    placeholder_request = bot._delivery_gateway.send_text.call_args.args[0]
+    assert placeholder_request.target.reply_to_event_id == "$voice_event"
+    assert placeholder_request.response_text == "Router agent is transcribing…"
+    assert placeholder_request.target.resolved_thread_id == "$voice_event"
+    assert placeholder_request.skip_mentions is True
+
+    bot._delivery_gateway.edit_text.assert_awaited_once()
+    edit_request = bot._delivery_gateway.edit_text.await_args.args[0]
+    assert edit_request.event_id == "$voice_echo"
+    assert edit_request.new_text == f"{VOICE_PREFIX}@home turn on the lights"
+    assert edit_request.extra_content is not None
+    assert edit_request.extra_content[ORIGINAL_SENDER_KEY] == "@alice:example.com"
+    assert edit_request.extra_content[SOURCE_KIND_KEY] == TRUSTED_INTERNAL_RELAY_SOURCE_KIND
+    assert edit_request.extra_content[ATTACHMENT_IDS_KEY] == [_attachment_id_for_event("$voice_event")]
+    assert VOICE_RAW_AUDIO_FALLBACK_KEY not in edit_request.extra_content
+
+
+@pytest.mark.asyncio
+async def test_router_voice_echo_skips_transcription_placeholder_when_voice_is_disabled(tmp_path) -> None:  # noqa: ANN001
+    """Disabled STT should post only truthful attached-voice fallback text."""
+    bot, room, event = _make_visible_router_echo_scenario(tmp_path, voice_enabled=False)
+
+    with (
+        patch("mindroom.voice_handler._download_audio", new_callable=AsyncMock) as mock_download_audio,
+        patch("mindroom.ingress_validation.is_authorized_sender", return_value=True),
+    ):
+        mock_download_audio.return_value = Audio(content=b"voice-bytes", mime_type="audio/ogg")
+        await bot._on_media_message(room, event)
+        await drain_coalescing(bot)
+
+    bot._delivery_gateway.send_text.assert_awaited_once()
+    request = bot._delivery_gateway.send_text.await_args.args[0]
+    assert request.response_text == f"{VOICE_PREFIX}[Attached voice message]"
     assert request.extra_content is not None
-    assert request.extra_content[ORIGINAL_SENDER_KEY] == "@alice:example.com"
-    assert request.extra_content[SOURCE_KIND_KEY] == TRUSTED_INTERNAL_RELAY_SOURCE_KIND
-    assert request.extra_content[ATTACHMENT_IDS_KEY] == [_attachment_id_for_event("$voice_event")]
-    assert VOICE_RAW_AUDIO_FALLBACK_KEY not in request.extra_content
+    assert request.extra_content[VOICE_RAW_AUDIO_FALLBACK_KEY] is True
+    bot._delivery_gateway.edit_text.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_router_posts_transcription_placeholder_before_voice_is_ready(tmp_path) -> None:  # noqa: ANN001
+    """Router should show immediate progress, then replace it with the normalized voice text."""
+    bot, room, event = _make_visible_router_echo_scenario(tmp_path)
+    allow_placeholder_send = asyncio.Event()
+    placeholder_send_finished = asyncio.Event()
+    placeholder_send_started = asyncio.Event()
+    transcription_started = asyncio.Event()
+    release_transcription = asyncio.Event()
+
+    async def transcribe_voice(*_args: object, **_kwargs: object) -> str:
+        transcription_started.set()
+        await release_transcription.wait()
+        return f"{VOICE_PREFIX}@home turn on the lights"
+
+    async def send_visible_echo(_request: object) -> str:
+        placeholder_send_started.set()
+        await allow_placeholder_send.wait()
+        placeholder_send_finished.set()
+        return "$voice_echo"
+
+    with (
+        patch("mindroom.voice_handler._download_audio", new_callable=AsyncMock) as mock_download_audio,
+        patch("mindroom.voice_handler._handle_voice_message", side_effect=transcribe_voice),
+        patch("mindroom.ingress_validation.is_authorized_sender", return_value=True),
+    ):
+        mock_download_audio.return_value = Audio(content=b"voice-bytes", mime_type="audio/ogg")
+        bot._delivery_gateway.send_text.side_effect = send_visible_echo
+        await bot._turn_controller.handle_media_event(room, event)
+        try:
+            await asyncio.wait_for(placeholder_send_started.wait(), timeout=1)
+            await asyncio.wait_for(transcription_started.wait(), timeout=1)
+            assert not placeholder_send_finished.is_set()
+            allow_placeholder_send.set()
+            await asyncio.wait_for(placeholder_send_finished.wait(), timeout=1)
+            placeholder_request = bot._delivery_gateway.send_text.await_args.args[0]
+            assert placeholder_request.response_text == "Router agent is transcribing…"
+            bot._delivery_gateway.edit_text.assert_not_awaited()
+        finally:
+            allow_placeholder_send.set()
+            release_transcription.set()
+            await drain_coalescing(bot)
+
+    bot._delivery_gateway.send_text.assert_awaited_once()
+    bot._delivery_gateway.edit_text.assert_awaited_once()
+    edit_request = bot._delivery_gateway.edit_text.await_args.args[0]
+    assert edit_request.event_id == "$voice_echo"
+    assert edit_request.new_text == f"{VOICE_PREFIX}@home turn on the lights"
+    assert edit_request.extra_content is not None
+    assert edit_request.extra_content[ORIGINAL_SENDER_KEY] == "@alice:example.com"
+    assert edit_request.extra_content[SOURCE_KIND_KEY] == TRUSTED_INTERNAL_RELAY_SOURCE_KIND
+    assert edit_request.extra_content[ATTACHMENT_IDS_KEY] == [_attachment_id_for_event("$voice_event")]
+
+
+@pytest.mark.asyncio
+async def test_concurrent_voice_redelivery_shares_visible_echo_lifecycle(tmp_path) -> None:  # noqa: ANN001
+    """Concurrent delivery of one audio event should send and finish one visible echo."""
+    bot, room, event = _make_visible_router_echo_scenario(tmp_path)
+    allow_normalization = asyncio.Event()
+    allow_placeholder_send = asyncio.Event()
+    both_normalizations_started = asyncio.Event()
+    placeholder_send_started = asyncio.Event()
+    normalization_count = 0
+    normalized_event = PreparedTextEvent(
+        sender=event.sender,
+        event_id=event.event_id,
+        body=f"{VOICE_PREFIX}@home turn on the lights",
+        source={
+            "content": {
+                "body": f"{VOICE_PREFIX}@home turn on the lights",
+                ORIGINAL_SENDER_KEY: event.sender,
+                SOURCE_KIND_KEY: VOICE_SOURCE_KIND,
+                VOICE_TRANSCRIPT_KEY: True,
+            },
+        },
+        server_timestamp=event.server_timestamp,
+        source_kind_override=VOICE_SOURCE_KIND,
+    )
+
+    async def normalize_voice(*_args: object, **_kwargs: object) -> tuple[PreparedTextEvent, str]:
+        nonlocal normalization_count
+        normalization_count += 1
+        if normalization_count == 2:
+            both_normalizations_started.set()
+        await allow_normalization.wait()
+        return normalized_event, event.event_id
+
+    async def send_placeholder(_request: object) -> str:
+        placeholder_send_started.set()
+        await allow_placeholder_send.wait()
+        return "$voice_echo"
+
+    with (
+        patch.object(
+            bot._turn_controller,
+            "_normalize_voice_event_or_fallback",
+            new=AsyncMock(side_effect=normalize_voice),
+        ),
+        patch("mindroom.ingress_validation.is_authorized_sender", return_value=True),
+    ):
+        bot._delivery_gateway.send_text.side_effect = send_placeholder
+        await bot._turn_controller.handle_media_event(room, event)
+        await bot._turn_controller.handle_media_event(room, event)
+        try:
+            await asyncio.wait_for(both_normalizations_started.wait(), timeout=1)
+            await asyncio.wait_for(placeholder_send_started.wait(), timeout=1)
+            await asyncio.sleep(0)
+            assert bot._delivery_gateway.send_text.await_count == 1
+        finally:
+            allow_normalization.set()
+            allow_placeholder_send.set()
+            await drain_coalescing(bot)
+
+    bot._delivery_gateway.send_text.assert_awaited_once()
+    bot._delivery_gateway.edit_text.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_voice_echo_finishes_after_config_is_disabled_mid_transcription(tmp_path) -> None:  # noqa: ANN001
+    """A started placeholder lifecycle should finish despite a live config toggle."""
+    bot, room, event = _make_visible_router_echo_scenario(tmp_path)
+    placeholder_sent = asyncio.Event()
+    release_transcription = asyncio.Event()
+    transcription_started = asyncio.Event()
+
+    async def transcribe_voice(*_args: object, **_kwargs: object) -> str:
+        transcription_started.set()
+        await release_transcription.wait()
+        return f"{VOICE_PREFIX}@home turn on the lights"
+
+    async def send_placeholder(_request: object) -> str:
+        placeholder_sent.set()
+        return "$voice_echo"
+
+    with (
+        patch("mindroom.voice_handler._download_audio", new_callable=AsyncMock) as mock_download_audio,
+        patch("mindroom.voice_handler._handle_voice_message", side_effect=transcribe_voice),
+        patch("mindroom.ingress_validation.is_authorized_sender", return_value=True),
+    ):
+        mock_download_audio.return_value = Audio(content=b"voice-bytes", mime_type="audio/ogg")
+        bot._delivery_gateway.send_text.side_effect = send_placeholder
+        await bot._turn_controller.handle_media_event(room, event)
+        await asyncio.wait_for(placeholder_sent.wait(), timeout=1)
+        await asyncio.wait_for(transcription_started.wait(), timeout=1)
+        bot.config.voice.visible_router_echo = False
+        release_transcription.set()
+        await drain_coalescing(bot)
+
+    bot._delivery_gateway.send_text.assert_awaited_once()
+    bot._delivery_gateway.edit_text.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_voice_echo_edit_failure_retries_existing_placeholder(tmp_path) -> None:  # noqa: ANN001
+    """A failed replacement should retry the same placeholder on redelivery."""
+    bot, room, event = _make_visible_router_echo_scenario(tmp_path)
+    bot._delivery_gateway.edit_text.side_effect = None
+    bot._delivery_gateway.edit_text.return_value = False
+
+    with (
+        patch("mindroom.voice_handler._download_audio", new_callable=AsyncMock) as mock_download_audio,
+        patch("mindroom.voice_handler._handle_voice_message", new_callable=AsyncMock) as mock_voice,
+        patch("mindroom.ingress_validation.is_authorized_sender", return_value=True),
+    ):
+        mock_download_audio.return_value = Audio(content=b"voice-bytes", mime_type="audio/ogg")
+        mock_voice.return_value = f"{VOICE_PREFIX}@home turn on the lights"
+        await bot._turn_controller.handle_media_event(room, event)
+        await drain_coalescing(bot)
+        assert not bot._turn_store.is_handled(event.event_id)
+
+        bot._delivery_gateway.edit_text.return_value = True
+        await bot._turn_controller.handle_media_event(room, event)
+        await drain_coalescing(bot)
+
+    bot._delivery_gateway.send_text.assert_awaited_once()
+    assert bot._delivery_gateway.edit_text.await_count == 2
+    assert bot._turn_store.is_handled(event.event_id)
+    assert bot._turn_store.visible_echo_for_source(event.event_id) == "$voice_echo"
+
+
+@pytest.mark.asyncio
+async def test_finalized_voice_transcript_is_not_replaced_by_late_fallback(tmp_path) -> None:  # noqa: ANN001
+    """A late fallback must not downgrade a successfully delivered transcript."""
+    bot, room, event = _make_visible_router_echo_scenario(tmp_path)
+    voice_target = bot._turn_controller.deps.resolver.build_message_target(
+        room_id=room.room_id,
+        thread_id=event.event_id,
+        reply_to_event_id=event.event_id,
+        event_source=event.source,
+    )
+    bot._turn_store.record_visible_echo(event.event_id, "$voice_echo")
+    bot._turn_store.record_finalized_visible_echo(
+        event.event_id,
+        "$voice_echo",
+        is_fallback=False,
+    )
+    handle = bot._visible_voice_echo.start(
+        VisibleVoiceEchoRequest(
+            source_event_id=event.event_id,
+            target=voice_target,
+            requester_user_id=event.sender,
+            raw_source=event.source,
+        ),
+    )
+
+    await bot._visible_voice_echo.finish(
+        handle,
+        PreparedTextEvent(
+            sender=event.sender,
+            event_id=event.event_id,
+            body=f"{VOICE_PREFIX}[Attached voice message]",
+            source={
+                "content": {
+                    "body": f"{VOICE_PREFIX}[Attached voice message]",
+                    ORIGINAL_SENDER_KEY: event.sender,
+                    SOURCE_KIND_KEY: VOICE_SOURCE_KIND,
+                    VOICE_RAW_AUDIO_FALLBACK_KEY: True,
+                },
+            },
+            server_timestamp=event.server_timestamp,
+            source_kind_override=VOICE_SOURCE_KIND,
+        ),
+    )
+
+    bot._delivery_gateway.edit_text.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_cancelled_voice_finish_does_not_replace_finalized_transcript(tmp_path) -> None:  # noqa: ANN001
+    """Cancellation cleanup must not downgrade a successfully delivered transcript."""
+    bot, room, event = _make_visible_router_echo_scenario(tmp_path)
+    voice_target = bot._turn_controller.deps.resolver.build_message_target(
+        room_id=room.room_id,
+        thread_id=event.event_id,
+        reply_to_event_id=event.event_id,
+        event_source=event.source,
+    )
+    bot._turn_store.record_visible_echo(event.event_id, "$voice_echo")
+    bot._turn_store.record_finalized_visible_echo(
+        event.event_id,
+        "$voice_echo",
+        is_fallback=False,
+    )
+    handle = bot._visible_voice_echo.start(
+        VisibleVoiceEchoRequest(
+            source_event_id=event.event_id,
+            target=voice_target,
+            requester_user_id=event.sender,
+            raw_source=event.source,
+        ),
+    )
+    fallback_event = PreparedTextEvent(
+        sender=event.sender,
+        event_id=event.event_id,
+        body=f"{VOICE_PREFIX}[Attached voice message]",
+        source={
+            "content": {
+                "body": f"{VOICE_PREFIX}[Attached voice message]",
+                ORIGINAL_SENDER_KEY: event.sender,
+                SOURCE_KIND_KEY: VOICE_SOURCE_KIND,
+                VOICE_RAW_AUDIO_FALLBACK_KEY: True,
+            },
+        },
+        server_timestamp=event.server_timestamp,
+        source_kind_override=VOICE_SOURCE_KIND,
+    )
+
+    bot._visible_voice_echo.finish_after_cancellation(handle, fallback_event)
+
+    assert await wait_for_background_tasks(timeout=1, owner=bot._runtime_view) is True
+    bot._delivery_gateway.edit_text.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_transcript_wins_when_fallback_edit_is_in_flight(tmp_path) -> None:  # noqa: ANN001
+    """A transcript arriving during fallback delivery should become final visible text."""
+    bot, room, event = _make_visible_router_echo_scenario(tmp_path)
+    voice_target = bot._turn_controller.deps.resolver.build_message_target(
+        room_id=room.room_id,
+        thread_id=event.event_id,
+        reply_to_event_id=event.event_id,
+        event_source=event.source,
+    )
+    handle = bot._visible_voice_echo.start(
+        VisibleVoiceEchoRequest(
+            source_event_id=event.event_id,
+            target=voice_target,
+            requester_user_id=event.sender,
+            raw_source=event.source,
+        ),
+    )
+    assert handle is not None
+    assert handle.placeholder_task is not None
+    assert await handle.placeholder_task == "$voice_echo"
+
+    edit_started = asyncio.Event()
+    release_fallback_edit = asyncio.Event()
+    edited_texts: list[str] = []
+
+    async def edit_text(request: EditTextRequest) -> bool:
+        new_text = request.new_text
+        edited_texts.append(new_text)
+        if len(edited_texts) == 1:
+            edit_started.set()
+            await release_fallback_edit.wait()
+        return True
+
+    bot._delivery_gateway.edit_text.side_effect = edit_text
+    fallback_event = PreparedTextEvent(
+        sender=event.sender,
+        event_id=event.event_id,
+        body=f"{VOICE_PREFIX}[Attached voice message]",
+        source={
+            "content": {
+                "body": f"{VOICE_PREFIX}[Attached voice message]",
+                VOICE_RAW_AUDIO_FALLBACK_KEY: True,
+            },
+        },
+    )
+    transcript_event = PreparedTextEvent(
+        sender=event.sender,
+        event_id=event.event_id,
+        body=f"{VOICE_PREFIX}summarize this audio",
+        source={
+            "content": {
+                "body": f"{VOICE_PREFIX}summarize this audio",
+                VOICE_TRANSCRIPT_KEY: True,
+            },
+        },
+    )
+
+    fallback_task = asyncio.create_task(bot._visible_voice_echo.finish(handle, fallback_event))
+    await asyncio.wait_for(edit_started.wait(), timeout=1)
+    transcript_task = asyncio.create_task(bot._visible_voice_echo.finish(handle, transcript_event))
+    release_fallback_edit.set()
+    await asyncio.gather(fallback_task, transcript_task)
+
+    assert edited_texts == [
+        f"{VOICE_PREFIX}[Attached voice message]",
+        f"{VOICE_PREFIX}summarize this audio",
+    ]
+    finalized = bot._turn_store.finalized_visible_echo(event.event_id)
+    assert finalized is not None
+    assert finalized.is_fallback is False
+
+
+@pytest.mark.asyncio
+async def test_voice_readiness_failure_replaces_placeholder_with_fallback(tmp_path) -> None:  # noqa: ANN001
+    """A readiness failure after placeholder delivery should leave terminal fallback text."""
+    bot, room, event = _make_visible_router_echo_scenario(tmp_path)
+
+    with (
+        patch.object(
+            bot._turn_controller.deps.resolver,
+            "build_ingress_envelope",
+            side_effect=RuntimeError("readiness failed"),
+        ),
+        patch("mindroom.ingress_validation.is_authorized_sender", return_value=True),
+    ):
+        await bot._turn_controller.handle_media_event(room, event)
+        await drain_coalescing(bot)
+
+    bot._delivery_gateway.send_text.assert_awaited_once()
+    bot._delivery_gateway.edit_text.assert_awaited_once()
+    edit_request = bot._delivery_gateway.edit_text.await_args.args[0]
+    assert edit_request.event_id == "$voice_echo"
+    assert edit_request.new_text == f"{VOICE_PREFIX}[Attached voice message]"
+    assert edit_request.extra_content is not None
+    assert edit_request.extra_content[VOICE_RAW_AUDIO_FALLBACK_KEY] is True
+
+
+@pytest.mark.asyncio
+async def test_voice_readiness_cancellation_schedules_terminal_placeholder_fallback(tmp_path) -> None:  # noqa: ANN001
+    """Cancelling readiness should schedule terminal fallback replacement before escaping."""
+    bot, room, event = _make_visible_router_echo_scenario(tmp_path)
+    normalization_started = asyncio.Event()
+    placeholder_sent = asyncio.Event()
+
+    async def wait_for_cancellation(*_args: object, **_kwargs: object) -> None:
+        normalization_started.set()
+        await asyncio.Event().wait()
+
+    async def send_placeholder(_request: object) -> str:
+        placeholder_sent.set()
+        return "$voice_echo"
+
+    bot._delivery_gateway.send_text.side_effect = send_placeholder
+    with (
+        patch.object(
+            bot._turn_controller.deps.normalizer,
+            "prepare_voice_event",
+            side_effect=wait_for_cancellation,
+        ),
+        patch("mindroom.ingress_validation.is_authorized_sender", return_value=True),
+    ):
+        await bot._turn_controller.handle_media_event(room, event)
+        await asyncio.wait_for(normalization_started.wait(), timeout=1)
+        await asyncio.wait_for(placeholder_sent.wait(), timeout=1)
+        drain_result = await bot._coalescing_gate.drain_all(ready_timeout_seconds=0.0)
+
+    assert drain_result.cancelled_unready_count == 1
+    assert await wait_for_background_tasks(timeout=1, owner=bot._runtime_view) is True
+    bot._delivery_gateway.edit_text.assert_awaited_once()
+    edit_request = bot._delivery_gateway.edit_text.await_args.args[0]
+    assert edit_request.event_id == "$voice_echo"
+    assert edit_request.new_text == f"{VOICE_PREFIX}[Attached voice message]"
+    assert edit_request.extra_content is not None
+    assert edit_request.extra_content[VOICE_RAW_AUDIO_FALLBACK_KEY] is True
+
+
+@pytest.mark.asyncio
+async def test_voice_placeholder_is_owned_by_runtime_shutdown(tmp_path) -> None:  # noqa: ANN001
+    """Runtime shutdown should find and cancel a blocked voice-placeholder send."""
+    bot, room, event = _make_visible_router_echo_scenario(tmp_path)
+    placeholder_send_started = asyncio.Event()
+    placeholder_send_stopped = asyncio.Event()
+    release_placeholder_send = asyncio.Event()
+    release_transcription = asyncio.Event()
+
+    async def transcribe_voice(*_args: object, **_kwargs: object) -> str:
+        await release_transcription.wait()
+        return f"{VOICE_PREFIX}@home turn on the lights"
+
+    async def send_placeholder(_request: object) -> str:
+        placeholder_send_started.set()
+        try:
+            await release_placeholder_send.wait()
+        finally:
+            placeholder_send_stopped.set()
+        return "$voice_echo"
+
+    with (
+        patch("mindroom.voice_handler._download_audio", new_callable=AsyncMock) as mock_download_audio,
+        patch("mindroom.voice_handler._handle_voice_message", side_effect=transcribe_voice),
+        patch("mindroom.ingress_validation.is_authorized_sender", return_value=True),
+    ):
+        mock_download_audio.return_value = Audio(content=b"voice-bytes", mime_type="audio/ogg")
+        bot._delivery_gateway.send_text.side_effect = send_placeholder
+        await bot._turn_controller.handle_media_event(room, event)
+        await asyncio.wait_for(placeholder_send_started.wait(), timeout=1)
+        try:
+            completed = await wait_for_background_tasks(timeout=0.0, owner=bot._runtime_view)
+            assert completed is False
+            await asyncio.wait_for(placeholder_send_stopped.wait(), timeout=1)
+        finally:
+            release_placeholder_send.set()
+            release_transcription.set()
+            await drain_coalescing(bot)
+
+
+@pytest.mark.asyncio
+async def test_voice_placeholder_finish_is_owned_by_runtime_shutdown(tmp_path) -> None:  # noqa: ANN001
+    """Runtime shutdown should find and cancel a blocked placeholder replacement."""
+    bot, room, event = _make_visible_router_echo_scenario(tmp_path)
+    edit_started = asyncio.Event()
+    edit_stopped = asyncio.Event()
+    release_edit = asyncio.Event()
+
+    async def edit_placeholder(_request: object) -> bool:
+        edit_started.set()
+        try:
+            await release_edit.wait()
+        finally:
+            edit_stopped.set()
+        return True
+
+    with (
+        patch("mindroom.voice_handler._download_audio", new_callable=AsyncMock) as mock_download_audio,
+        patch("mindroom.voice_handler._handle_voice_message", new_callable=AsyncMock) as mock_voice,
+        patch("mindroom.ingress_validation.is_authorized_sender", return_value=True),
+    ):
+        mock_download_audio.return_value = Audio(content=b"voice-bytes", mime_type="audio/ogg")
+        mock_voice.return_value = f"{VOICE_PREFIX}@home turn on the lights"
+        bot._delivery_gateway.edit_text.side_effect = edit_placeholder
+        await bot._turn_controller.handle_media_event(room, event)
+        await asyncio.wait_for(edit_started.wait(), timeout=1)
+        try:
+            completed = await wait_for_background_tasks(timeout=0.0, owner=bot._runtime_view)
+            assert completed is False
+            await asyncio.wait_for(edit_stopped.wait(), timeout=1)
+        finally:
+            release_edit.set()
+            await drain_coalescing(bot)
 
 
 @pytest.mark.asyncio
@@ -998,6 +1531,7 @@ async def test_router_visible_voice_echo_is_deduplicated_on_redelivery(tmp_path)
         await drain_coalescing(bot)
 
     bot._delivery_gateway.send_text.assert_called_once()
+    bot._delivery_gateway.edit_text.assert_awaited_once()
     assert mock_download_audio.await_count == 1
     assert mock_voice.await_count == 1
     assert bot._turn_store.is_handled(event.event_id)
@@ -1060,20 +1594,29 @@ async def test_router_visible_voice_echo_keeps_multi_agent_handoff(tmp_path) -> 
     echo_request = bot._delivery_gateway.send_text.call_args_list[0].args[0]
     handoff_request = bot._delivery_gateway.send_text.call_args_list[1].args[0]
     assert echo_request.target.reply_to_event_id == "$voice_event"
-    assert echo_request.response_text == f"{VOICE_PREFIX}summarize this audio"
+    assert echo_request.response_text == "Router agent is transcribing…"
     assert echo_request.skip_mentions is True
-    assert echo_request.extra_content is not None
-    assert echo_request.extra_content[ORIGINAL_SENDER_KEY] == "@alice:example.com"
-    assert echo_request.extra_content[SOURCE_KIND_KEY] == TRUSTED_INTERNAL_RELAY_SOURCE_KIND
-    assert echo_request.extra_content[ATTACHMENT_IDS_KEY] == [_attachment_id_for_event("$voice_event")]
-    assert VOICE_RAW_AUDIO_FALLBACK_KEY not in echo_request.extra_content
+    bot._delivery_gateway.edit_text.assert_awaited_once()
+    edit_request = bot._delivery_gateway.edit_text.await_args.args[0]
+    assert edit_request.event_id == "$voice_echo"
+    assert edit_request.new_text == f"{VOICE_PREFIX}summarize this audio"
+    assert edit_request.extra_content is not None
+    assert edit_request.extra_content[ORIGINAL_SENDER_KEY] == "@alice:example.com"
+    assert edit_request.extra_content[SOURCE_KIND_KEY] == TRUSTED_INTERNAL_RELAY_SOURCE_KIND
+    assert edit_request.extra_content[ATTACHMENT_IDS_KEY] == [_attachment_id_for_event("$voice_event")]
+    assert VOICE_RAW_AUDIO_FALLBACK_KEY not in edit_request.extra_content
     assert handoff_request.target.reply_to_event_id == "$voice_event"
     assert handoff_request.response_text == "@home could you help with this?"
     assert handoff_request.extra_content == {
         ORIGINAL_SENDER_KEY: "@alice:example.com",
         SOURCE_KIND_KEY: TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
         ATTACHMENT_IDS_KEY: [_attachment_id_for_event("$voice_event")],
+        VOICE_TRANSCRIPT_KEY: True,
     }
+    finalized_echo = bot._turn_store.finalized_visible_echo(event.event_id)
+    assert finalized_echo is not None
+    assert finalized_echo.event_id == "$voice_echo"
+    assert finalized_echo.is_fallback is False
 
 
 @pytest.mark.asyncio
@@ -1090,13 +1633,17 @@ async def test_router_visible_voice_echo_marks_raw_audio_fallback(tmp_path) -> N
         await drain_coalescing(bot)
 
     bot._delivery_gateway.send_text.assert_called_once()
-    request = bot._delivery_gateway.send_text.call_args.args[0]
-    assert request.response_text == f"{VOICE_PREFIX}[Attached voice message]"
-    assert request.extra_content is not None
-    assert request.extra_content[ORIGINAL_SENDER_KEY] == "@alice:example.com"
-    assert request.extra_content[SOURCE_KIND_KEY] == TRUSTED_INTERNAL_RELAY_SOURCE_KIND
-    assert request.extra_content[ATTACHMENT_IDS_KEY] == [_attachment_id_for_event("$voice_event")]
-    assert request.extra_content[VOICE_RAW_AUDIO_FALLBACK_KEY] is True
+    placeholder_request = bot._delivery_gateway.send_text.call_args.args[0]
+    assert placeholder_request.response_text == "Router agent is transcribing…"
+
+    bot._delivery_gateway.edit_text.assert_awaited_once()
+    edit_request = bot._delivery_gateway.edit_text.await_args.args[0]
+    assert edit_request.new_text == f"{VOICE_PREFIX}[Attached voice message]"
+    assert edit_request.extra_content is not None
+    assert edit_request.extra_content[ORIGINAL_SENDER_KEY] == "@alice:example.com"
+    assert edit_request.extra_content[SOURCE_KIND_KEY] == TRUSTED_INTERNAL_RELAY_SOURCE_KIND
+    assert edit_request.extra_content[ATTACHMENT_IDS_KEY] == [_attachment_id_for_event("$voice_event")]
+    assert edit_request.extra_content[VOICE_RAW_AUDIO_FALLBACK_KEY] is True
 
 
 @pytest.mark.asyncio
@@ -1130,10 +1677,11 @@ async def test_router_visible_voice_echo_is_not_duplicated_when_handoff_retries(
 
     response_texts = [call.args[0].response_text for call in bot._delivery_gateway.send_text.call_args_list]
     assert response_texts == [
-        f"{VOICE_PREFIX}summarize this audio",
+        "Router agent is transcribing…",
         "@home could you help with this?",
         "@home could you help with this?",
     ]
+    bot._delivery_gateway.edit_text.assert_awaited_once()
     assert bot._turn_store.is_handled(event.event_id)
     assert bot._turn_store.visible_echo_for_source(event.event_id) == "$voice_echo"
 
@@ -1222,8 +1770,8 @@ async def test_router_routes_transcribed_audio_when_multiple_agents_are_present(
     bot.logger = MagicMock()
     replace_turn_controller_deps(bot, logger=bot.logger)
     bot.client = AsyncMock()
-    bot._send_response = AsyncMock(return_value="$response")
-    install_send_response_mock(bot, bot._send_response)
+    send_response = AsyncMock(return_value="$response")
+    install_send_response_mock(bot, send_response)
     _install_voice_thread_dispatch_mocks(bot)
 
     room = _make_room(
@@ -1255,12 +1803,14 @@ async def test_router_routes_transcribed_audio_when_multiple_agents_are_present(
         ORIGINAL_SENDER_KEY: "@alice:example.com",
         SOURCE_KIND_KEY: TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
         ATTACHMENT_IDS_KEY: [_attachment_id_for_event("$voice_event")],
+        VOICE_TRANSCRIPT_KEY: True,
     }
     turn_store.record_turn.assert_called_once_with(
-        HandledTurnState.from_source_event_id(
-            "$voice_event",
-            response_event_id="$response",
-        ).with_response_context(
+        replace(
+            TurnRecord.create(
+                ["$voice_event"],
+                response_event_id="$response",
+            ),
             response_owner=ROUTER_AGENT_NAME,
             requester_id="@alice:example.com",
             correlation_id="$voice_event",
@@ -1293,6 +1843,7 @@ async def test_transcribed_mentions_target_the_mentioned_agent_when_router_absen
     event = _make_voice_event(sender="@alice:example.com")
 
     bots: list[AgentBot] = []
+    generate_response_mocks: list[AsyncMock] = []
     for agent_name in ("home", "research"):
         agent_user = MagicMock()
         agent_user.user_id = f"@mindroom_{agent_name}:localhost"
@@ -1311,10 +1862,11 @@ async def test_transcribed_mentions_target_the_mentioned_agent_when_router_absen
         bot.client = AsyncMock()
         bot.client.rooms = {}
         bot.client.user_id = f"@mindroom_{agent_name}:localhost"
-        bot._generate_response = AsyncMock(return_value=f"${agent_name}_response")
-        install_generate_response_mock(bot, bot._generate_response)
+        generate_response = AsyncMock(return_value=f"${agent_name}_response")
+        install_generate_response_mock(bot, generate_response)
         _install_voice_thread_dispatch_mocks(bot)
         bots.append(bot)
+        generate_response_mocks.append(generate_response)
 
     with (
         patch("mindroom.voice_handler._download_audio", new_callable=AsyncMock) as mock_download_audio,
@@ -1330,9 +1882,9 @@ async def test_transcribed_mentions_target_the_mentioned_agent_when_router_absen
 
     assert mock_download_audio.await_count == 1
     assert mock_voice.await_count == 1
-    assert bots[0]._generate_response.await_count == 0
-    assert bots[1]._generate_response.await_count == 1
-    call_kwargs = bots[1]._generate_response.call_args.kwargs
+    assert generate_response_mocks[0].await_count == 0
+    assert generate_response_mocks[1].await_count == 1
+    call_kwargs = generate_response_mocks[1].call_args.kwargs
     assert call_kwargs["response_envelope"].target.reply_to_event_id == "$voice_event"
     assert call_kwargs["prompt"].startswith(f"{VOICE_PREFIX}@research summarize this audio")
     assert call_kwargs["attachment_ids"] == [_attachment_id_for_event("$voice_event")]
@@ -1367,6 +1919,7 @@ async def test_caption_mentions_still_target_agent_when_stt_drops_the_mention(tm
     )
 
     bots: list[AgentBot] = []
+    generate_response_mocks: list[AsyncMock] = []
     for agent_name in ("home", "research"):
         agent_user = MagicMock()
         agent_user.user_id = f"@mindroom_{agent_name}:localhost"
@@ -1385,10 +1938,11 @@ async def test_caption_mentions_still_target_agent_when_stt_drops_the_mention(tm
         bot.client = AsyncMock()
         bot.client.rooms = {}
         bot.client.user_id = f"@mindroom_{agent_name}:localhost"
-        bot._generate_response = AsyncMock(return_value=f"${agent_name}_response")
-        install_generate_response_mock(bot, bot._generate_response)
+        generate_response = AsyncMock(return_value=f"${agent_name}_response")
+        install_generate_response_mock(bot, generate_response)
         _install_voice_thread_dispatch_mocks(bot)
         bots.append(bot)
+        generate_response_mocks.append(generate_response)
 
     with (
         patch("mindroom.voice_handler._download_audio", new_callable=AsyncMock) as mock_download_audio,
@@ -1404,9 +1958,9 @@ async def test_caption_mentions_still_target_agent_when_stt_drops_the_mention(tm
 
     assert mock_download_audio.await_count == 1
     assert mock_voice.await_count == 1
-    assert bots[0]._generate_response.await_count == 0
-    assert bots[1]._generate_response.await_count == 1
-    call_kwargs = bots[1]._generate_response.call_args.kwargs
+    assert generate_response_mocks[0].await_count == 0
+    assert generate_response_mocks[1].await_count == 1
+    call_kwargs = generate_response_mocks[1].call_args.kwargs
     assert call_kwargs["response_envelope"].target.reply_to_event_id == "$voice_event"
     assert call_kwargs["prompt"].startswith(f"{VOICE_PREFIX}summarize this audio")
     assert call_kwargs["attachment_ids"] == [_attachment_id_for_event("$voice_event")]

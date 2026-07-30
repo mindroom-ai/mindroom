@@ -25,6 +25,8 @@ from mindroom.custom_tools.browser import (
     _persistent_launch_kwargs,
     _profile_dir,
 )
+from mindroom.desktop.protocol import DesktopResponse, EncryptedDesktopMedia
+from mindroom.message_target import MessageTarget
 from mindroom.server_fetch_url import ServerFetchUrlError
 from mindroom.tool_system.metadata import TOOL_METADATA
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
@@ -34,6 +36,14 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
 TEST_RUNTIME_PATHS = resolve_primary_runtime_paths(config_path=Path("config.yaml"))
+DESKTOP_MEDIA = EncryptedDesktopMedia(
+    url="mxc://example.org/browser",
+    key="key",
+    iv="iv",
+    sha256="hash",
+    mime_type="image/png",
+    size=8,
+)
 
 
 @pytest.mark.parametrize(
@@ -138,10 +148,11 @@ def test_persistent_launch_kwargs_runtime_env_wins_over_shell(
     assert launch_kwargs["executable_path"] == "/right"
 
 
-def test_validate_target_accepts_none_and_host() -> None:
-    """MindRoom browser target validation accepts host and unset targets."""
+def test_validate_target_accepts_none_host_and_desktop() -> None:
+    """MindRoom browser target validation accepts both supported runtimes."""
     BrowserTools._validate_target(target=None, node=None)
     BrowserTools._validate_target(target="host", node=None)
+    BrowserTools._validate_target(target="desktop", node=None)
 
 
 def test_validate_target_rejects_invalid_node_and_non_host_targets() -> None:
@@ -149,10 +160,10 @@ def test_validate_target_rejects_invalid_node_and_non_host_targets() -> None:
     with pytest.raises(ValueError, match="node parameter is not supported in MindRoom"):
         BrowserTools._validate_target(target="host", node="node-1")
 
-    with pytest.raises(ValueError, match="host target only"):
+    with pytest.raises(ValueError, match="does not support sandbox or node"):
         BrowserTools._validate_target(target="sandbox", node=None)
 
-    with pytest.raises(ValueError, match="host target only"):
+    with pytest.raises(ValueError, match="does not support sandbox or node"):
         BrowserTools._validate_target(target="node", node=None)
 
     with pytest.raises(ValueError, match="Unsupported target"):
@@ -202,9 +213,11 @@ def test_resolve_output_dir_prefers_tool_runtime_context_storage_path(tmp_path: 
     context_storage_path = tmp_path / "context-storage"
     context = ToolRuntimeContext(
         agent_name="general",
-        room_id="!room:example.org",
-        thread_id=None,
-        resolved_thread_id=None,
+        target=MessageTarget.resolve(
+            room_id="!room:example.org",
+            thread_id=None,
+            reply_to_event_id=None,
+        ),
         requester_id="@alice:example.org",
         client=MagicMock(),
         config=MagicMock(),
@@ -233,9 +246,11 @@ def test_resolve_output_dir_does_not_reuse_previous_context_storage_path(tmp_pat
     def runtime_context(storage_path: Path) -> ToolRuntimeContext:
         return ToolRuntimeContext(
             agent_name="general",
-            room_id="!room:example.org",
-            thread_id=None,
-            resolved_thread_id=None,
+            target=MessageTarget.resolve(
+                room_id="!room:example.org",
+                thread_id=None,
+                reply_to_event_id=None,
+            ),
             requester_id="@alice:example.org",
             client=MagicMock(),
             config=MagicMock(),
@@ -296,6 +311,21 @@ async def test_browser_discovery_actions_return_action_table(action: str) -> Non
     assert any(entry["action"] == "act" for entry in payload["actionTable"])
 
 
+@pytest.mark.asyncio
+async def test_browser_discovery_distinguishes_host_and_desktop_semantics() -> None:
+    """Discovery must not direct desktop agents toward rejected host-only arguments."""
+    tool = BrowserTools(TEST_RUNTIME_PATHS)
+
+    payload = json.loads(await tool.browser(action="help", target="desktop"))
+    descriptions = {entry["action"]: entry["description"] for entry in payload["actionTable"]}
+
+    assert "Host target only" in descriptions["focus"]
+    assert "desktop closes its current extension tab" in descriptions["close"]
+    assert "current desktop extension tab" in descriptions["navigate"]
+    assert "active desktop file chooser" in descriptions["upload"]
+    assert "desktop removes its transient scratch file" in descriptions["screenshot"]
+
+
 def test_browser_function_schema_documents_actions_and_act_request() -> None:
     """Tool schema should make browser actions and act request kinds discoverable."""
     tool = BrowserTools(TEST_RUNTIME_PATHS)
@@ -311,6 +341,8 @@ def test_browser_function_schema_documents_actions_and_act_request() -> None:
     assert "request.kind" in request_description
     assert "click" in request_description
     assert "evaluate" in request_description
+    for field_name in ("compact", "frame", "interactive", "labels", "limit", "mode", "refs", "snapshotFormat"):
+        assert "Host-target" in properties[field_name]["description"]
 
 
 def test_browser_schema_description_requires_registered_browser_function() -> None:
@@ -335,7 +367,9 @@ def test_browser_metadata_documents_default_output_dir() -> None:
     output_dir_field = next(field for field in TOOL_METADATA["browser"].config_fields if field.name == "output_dir")
 
     assert output_dir_field.description is not None
+    assert "host target" in output_dir_field.description
     assert "storage path's browser/ directory" in output_dir_field.description
+    assert "desktop-browser" in output_dir_field.description
 
 
 def test_browser_private_network_metadata_defaults_to_false() -> None:
@@ -470,18 +504,278 @@ async def test_browser_navigate_rejects_unsupported_target_url(monkeypatch: pyte
 
 
 @pytest.mark.asyncio
-async def test_browser_rejects_non_host_targets() -> None:
-    """MindRoom browser currently supports host only."""
+async def test_browser_rejects_unsupported_or_unconfigured_targets() -> None:
+    """Desktop browser routing requires a pinned device and still rejects node targets."""
     tool = BrowserTools(TEST_RUNTIME_PATHS)
 
-    with pytest.raises(ValueError, match="host target only"):
+    with pytest.raises(ValueError, match="does not support sandbox or node"):
         await tool.browser(action="status", target="sandbox")
 
-    with pytest.raises(ValueError, match="host target only"):
+    with pytest.raises(ValueError, match="does not support sandbox or node"):
         await tool.browser(action="status", target="node")
+
+    with pytest.raises(ValueError, match="configured Matrix desktop device identity"):
+        await tool.browser(action="status", target="desktop")
 
     with pytest.raises(ValueError, match="node parameter is not supported in MindRoom"):
         await tool.browser(action="status", target="host", node="node-1")
+
+    configured_tool = BrowserTools(
+        TEST_RUNTIME_PATHS,
+        device_user_id="@desktop:example.org",
+        device_id="DESKTOP",
+        device_ed25519="fingerprint",
+    )
+    with pytest.raises(ValueError, match="requires a live Matrix runtime context"):
+        await configured_tool.browser(action="status", target="desktop")
+
+
+@pytest.mark.asyncio
+async def test_desktop_target_routes_snapshot_and_control_over_matrix(monkeypatch: pytest.MonkeyPatch) -> None:
+    """One browser surface selects the Matrix extension backend without changing agent vocabulary."""
+    context = SimpleNamespace(
+        requester_id="@alice:example.org",
+        agent_name="computer",
+        client=object(),
+    )
+    request = AsyncMock(
+        side_effect=[
+            DesktopResponse(
+                request_id="observe",
+                session_id="session",
+                ok=True,
+                result={"action": "snapshot", "provider": "playwright_mcp_extension", "result": "plain-tree"},
+            ),
+            DesktopResponse(
+                request_id="navigate",
+                session_id="session",
+                ok=True,
+                result={"action": "navigate", "provider": "playwright_mcp_extension", "result": "navigated"},
+            ),
+            DesktopResponse(
+                request_id="click",
+                session_id="session",
+                ok=True,
+                result={"action": "act", "provider": "playwright_mcp_extension", "result": "clicked"},
+            ),
+        ],
+    )
+    monkeypatch.setattr("mindroom.custom_tools.browser.get_tool_runtime_context", lambda: context)
+    monkeypatch.setattr(
+        "mindroom.custom_tools.browser.desktop_response_router",
+        lambda _client: SimpleNamespace(request=request),
+    )
+    tool = BrowserTools(
+        TEST_RUNTIME_PATHS,
+        default_target="desktop",
+        device_user_id="@desktop:example.org",
+        device_id="DESKTOP",
+        device_ed25519="fingerprint",
+    )
+
+    plain_snapshot = await tool.browser(action="snapshot", maxChars=1000)
+    navigate = await tool.browser(action="navigate", targetUrl="https://example.com")
+    click = await tool.browser(action="act", request={"kind": "click", "ref": "e3"})
+
+    assert isinstance(plain_snapshot, str)
+    assert isinstance(navigate, str)
+    assert json.loads(navigate)["provider"] == "playwright_mcp_extension"
+    assert isinstance(click, str)
+    observe_command = request.await_args_list[0].args[1]
+    navigate_command = request.await_args_list[1].args[1]
+    click_command = request.await_args_list[2].args[1]
+    assert observe_command.action == "browser_observe"
+    assert observe_command.parameters == {
+        "browser_action": "snapshot",
+        "browser_parameters": {"maxChars": 1000},
+    }
+    assert navigate_command.action == "browser_control"
+    assert navigate_command.parameters == {
+        "browser_action": "navigate",
+        "browser_parameters": {"targetUrl": "https://example.com"},
+    }
+    assert click_command.action == "browser_control"
+    assert click_command.parameters == {
+        "browser_action": "act",
+        "browser_parameters": {"request": {"kind": "click", "ref": "e3"}},
+    }
+    assert (observe_command.sequence, navigate_command.sequence, click_command.sequence) == (0, 1, 2)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("action", "arguments", "expected"),
+    [
+        ("snapshot", {"targetId": "1"}, "does not support targetId"),
+        (
+            "act",
+            {"request": {"kind": "click", "ref": "e1", "targetId": "1"}},
+            "does not support request.targetId",
+        ),
+        ("snapshot", {"snapshotFormat": "aria"}, "does not support: snapshotFormat"),
+        ("status", {"profile": "chrome"}, "does not support: profile"),
+        ("upload", {"paths": ["invoice.pdf"], "inputRef": "e1"}, "does not support: inputRef"),
+        ("upload", {"paths": ["invoice.pdf"], "ref": "e1"}, "does not support ref or element"),
+        ("upload", {"paths": ["invoice.pdf"], "element": "File input"}, "does not support ref or element"),
+        ("dialog", {"timeoutMs": 1000}, "does not support: timeoutMs"),
+        ("focus", {}, "does not support focus"),
+    ],
+)
+async def test_desktop_target_rejects_unsupported_host_arguments(
+    monkeypatch: pytest.MonkeyPatch,
+    action: str,
+    arguments: dict[str, object],
+    expected: str,
+) -> None:
+    """Desktop routing fails closed instead of pretending host-only arguments were honored."""
+    context = SimpleNamespace(requester_id="@alice:example.org", agent_name="computer", client=object())
+    request = AsyncMock()
+    monkeypatch.setattr("mindroom.custom_tools.browser.get_tool_runtime_context", lambda: context)
+    monkeypatch.setattr(
+        "mindroom.custom_tools.browser.desktop_response_router",
+        lambda _client: SimpleNamespace(request=request),
+    )
+    tool = BrowserTools(
+        TEST_RUNTIME_PATHS,
+        default_target="desktop",
+        device_user_id="@desktop:example.org",
+        device_id="DESKTOP",
+        device_ed25519="fingerprint",
+    )
+
+    with pytest.raises(ValueError, match=expected):
+        await tool.browser(action=action, **arguments)
+
+    request.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("arguments", [{"interactive": False}, {"compact": False}, {"labels": False}])
+async def test_desktop_target_accepts_false_noop_host_hints(
+    monkeypatch: pytest.MonkeyPatch,
+    arguments: dict[str, bool],
+) -> None:
+    """Explicit false values for host-only hints preserve the desktop default behavior."""
+    context = SimpleNamespace(requester_id="@alice:example.org", agent_name="computer", client=object())
+    response = DesktopResponse(
+        request_id="snapshot",
+        session_id="session",
+        ok=True,
+        result={"action": "snapshot", "provider": "playwright_mcp_extension"},
+    )
+    request = AsyncMock(return_value=response)
+    monkeypatch.setattr("mindroom.custom_tools.browser.get_tool_runtime_context", lambda: context)
+    monkeypatch.setattr(
+        "mindroom.custom_tools.browser.desktop_response_router",
+        lambda _client: SimpleNamespace(request=request),
+    )
+    tool = BrowserTools(
+        TEST_RUNTIME_PATHS,
+        default_target="desktop",
+        device_user_id="@desktop:example.org",
+        device_id="DESKTOP",
+        device_ed25519="fingerprint",
+    )
+
+    result = await tool.browser(action="snapshot", **arguments)
+
+    assert json.loads(result) == {"action": "snapshot", "provider": "playwright_mcp_extension"}
+    command = request.await_args.args[1]
+    assert command.action == "browser_observe"
+    assert command.parameters == {"browser_action": "snapshot", "browser_parameters": {}}
+
+
+@pytest.mark.asyncio
+async def test_desktop_target_returns_decrypted_browser_screenshot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The agent receives the real-profile page screenshot as model-visible image media."""
+    context = SimpleNamespace(requester_id="@alice:example.org", agent_name="computer", client=object())
+    response = DesktopResponse(
+        request_id="screenshot",
+        session_id="session",
+        ok=True,
+        result={"action": "screenshot", "provider": "playwright_mcp_extension"},
+        screenshot=DESKTOP_MEDIA,
+    )
+    monkeypatch.setattr("mindroom.custom_tools.browser.get_tool_runtime_context", lambda: context)
+    monkeypatch.setattr(
+        "mindroom.custom_tools.browser.desktop_response_router",
+        lambda _client: SimpleNamespace(request=AsyncMock(return_value=response)),
+    )
+    decrypt = AsyncMock(return_value=b"\x89PNGpage")
+    monkeypatch.setattr("mindroom.custom_tools.browser.download_encrypted_screenshot", decrypt)
+    tool = BrowserTools(
+        TEST_RUNTIME_PATHS,
+        device_user_id="@desktop:example.org",
+        device_id="DESKTOP",
+        device_ed25519="fingerprint",
+    )
+
+    result = await tool.browser(action="screenshot", target="desktop")
+
+    assert not isinstance(result, str)
+    assert result.images is not None
+    assert result.images[0].content == b"\x89PNGpage"
+
+
+@pytest.mark.asyncio
+async def test_desktop_browser_screenshot_can_return_sendable_attachment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Real-profile screenshots can be resent from encrypted media without a local file."""
+    context = SimpleNamespace(
+        requester_id="@alice:example.org",
+        agent_name="computer",
+        client=object(),
+        attachment_ids=(),
+        runtime_attachment_ids=[],
+        runtime_media_attachments={},
+    )
+    response = DesktopResponse(
+        request_id="screenshot",
+        session_id="session",
+        ok=True,
+        result={"action": "screenshot", "provider": "playwright_mcp_extension"},
+        screenshot=DESKTOP_MEDIA,
+    )
+    monkeypatch.setattr("mindroom.custom_tools.browser.get_tool_runtime_context", lambda: context)
+    monkeypatch.setattr(
+        "mindroom.custom_tools.browser.desktop_response_router",
+        lambda _client: SimpleNamespace(request=AsyncMock(return_value=response)),
+    )
+    monkeypatch.setattr(
+        "mindroom.custom_tools.browser.download_encrypted_screenshot",
+        AsyncMock(return_value=b"\x89PNGpage"),
+    )
+    tool = BrowserTools(
+        TEST_RUNTIME_PATHS,
+        device_user_id="@desktop:example.org",
+        device_id="DESKTOP",
+        device_ed25519="fingerprint",
+    )
+
+    result = await tool.browser(action="screenshot", target="desktop", returnAttachment=True)
+
+    assert not isinstance(result, str)
+    payload = json.loads(result.content)
+    attachment_id = payload["attachment_id"]
+    assert payload["attachment_lifetime"] == "current_turn"
+    assert context.runtime_attachment_ids == [attachment_id]
+    attachment = context.runtime_media_attachments[attachment_id]
+    assert attachment.url == DESKTOP_MEDIA.url
+    assert attachment.filename.endswith(".png")
+
+
+@pytest.mark.asyncio
+async def test_browser_return_attachment_requires_desktop_screenshot() -> None:
+    """Host screenshots and non-screenshot actions reject the desktop-only attachment option."""
+    tool = BrowserTools(TEST_RUNTIME_PATHS)
+
+    with pytest.raises(ValueError, match="requires target=desktop"):
+        await tool.browser(action="screenshot", target="host", returnAttachment=True)
+    with pytest.raises(ValueError, match="only supported for action=screenshot"):
+        await tool.browser(action="tabs", target="desktop", returnAttachment=True)
 
 
 @pytest.mark.asyncio
@@ -626,9 +920,11 @@ def test_browser_upload_roots_do_not_reuse_previous_context_output_dir(tmp_path:
     def runtime_context(storage_path: Path) -> ToolRuntimeContext:
         return ToolRuntimeContext(
             agent_name="general",
-            room_id="!room:example.org",
-            thread_id=None,
-            resolved_thread_id=None,
+            target=MessageTarget.resolve(
+                room_id="!room:example.org",
+                thread_id=None,
+                reply_to_event_id=None,
+            ),
             requester_id="@alice:example.org",
             client=MagicMock(),
             config=MagicMock(),

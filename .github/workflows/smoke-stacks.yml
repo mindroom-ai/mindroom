@@ -60,11 +60,12 @@ jobs:
         uses: azure/setup-helm@v4
 
       - name: Set up kind
-        uses: engineerd/setup-kind@v0.6.2
-        with:
-          skipClusterCreation: true
-          skipClusterDeletion: true
-          skipClusterLogsExport: true
+        run: |
+          curl -fsSLo kind "https://kind.sigs.k8s.io/dl/v0.24.0/kind-linux-amd64"
+          echo "b89aada5a39d620da3fcd16435b7f28d858927dd53f92cbac77686b0588b600d  kind" | sha256sum --check
+          chmod +x kind
+          sudo mv kind /usr/local/bin/kind
+          kind version
 
       - name: Free runner disk space
         run: |

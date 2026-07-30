@@ -1,0 +1,374 @@
+"""Per-client thread retrieval, authorization, and target fan-out."""
+
+from __future__ import annotations
+
+from datetime import UTC, datetime
+from typing import TYPE_CHECKING
+
+import nio
+
+from mindroom.logging_config import get_logger
+from mindroom.matrix.client_thread_history import (
+    bulk_refresh_room_thread_histories,
+    enumerate_room_thread_root_ids,
+    fetch_thread_history,
+    refresh_thread_history_from_source,
+    thread_ids_needing_refill,
+)
+from mindroom.matrix.thread_diagnostics import is_thread_history_degraded
+from mindroom.thread_export.models import (
+    ThreadExportAccumulator,
+    ThreadExportRoom,
+    ThreadExportTarget,
+    failure_for_room,
+)
+from mindroom.thread_export.policy import target_accepts_room
+from mindroom.thread_export.selection import trusted_sender_ids_for_export
+from mindroom.thread_export.storage import (
+    remove_room_export,
+    remove_stale_thread_exports,
+    room_has_thread_exports,
+    thread_payload,
+    write_room_index,
+    write_thread_payload,
+)
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
+
+    from mindroom.config.main import Config
+    from mindroom.constants import RuntimePaths
+    from mindroom.matrix.cache import ConversationEventCache
+
+
+logger = get_logger(__name__)
+
+
+def retract_room_export(accumulator: ThreadExportAccumulator, room: ThreadExportRoom) -> None:
+    """Remove one target's room export or record a room-scoped storage failure."""
+    try:
+        remove_room_export(accumulator.target.output_dir, room)
+    except (OSError, RuntimeError) as exc:
+        accumulator.failed_items.append(failure_for_room(room, f"Room removal failed: {exc}"))
+
+
+async def _bulk_backfill_threads_needing_refill(
+    client: nio.AsyncClient,
+    room: ThreadExportRoom,
+    thread_ids: Sequence[str],
+    *,
+    event_cache: ConversationEventCache,
+) -> frozenset[str]:
+    """Warm the thread cache with one room scan covering every thread that would miss it.
+
+    The scan stops as soon as every requested root has been seen, so its cost is roughly one walk
+    to the deepest requested root while the per-thread path pays one walk per thread.
+    Returns the thread roots the scan proved absent so callers can fail them without paying one
+    full per-thread history walk each. Any bulk failure falls back to the per-thread path.
+    """
+    try:
+        needs_refill = await thread_ids_needing_refill(event_cache, room.room_id, thread_ids)
+    except Exception as exc:
+        logger.warning(
+            "Thread-refill probe failed; using per-thread fetches",
+            room_id=room.room_id,
+            error=str(exc),
+        )
+        return frozenset()
+    if not needs_refill:
+        return frozenset()
+    try:
+        stats = await bulk_refresh_room_thread_histories(
+            client,
+            room.room_id,
+            event_cache,
+            thread_root_ids=needs_refill,
+            caller_label="thread_export_bulk",
+        )
+    except Exception as exc:
+        logger.warning(
+            "Bulk thread cache refresh failed; using per-thread fetches",
+            room_id=room.room_id,
+            error=str(exc),
+        )
+        return frozenset()
+    return stats.missing_root_ids
+
+
+async def _joined_member_ids(client: nio.AsyncClient, room_id: str) -> frozenset[str]:
+    """Return the current joined Matrix user IDs for one room."""
+    response = await client.joined_members(room_id)
+    if isinstance(response, nio.JoinedMembersResponse):
+        return frozenset(member.user_id for member in response.members)
+    msg = f"Membership lookup failed: {response}"
+    raise RuntimeError(msg)
+
+
+async def _fetch_thread_payload(
+    client: nio.AsyncClient,
+    room: ThreadExportRoom,
+    thread_id: str,
+    *,
+    event_cache: ConversationEventCache,
+    trusted_sender_ids: frozenset[str],
+    prefer_cache: bool,
+) -> dict[str, object]:
+    """Fetch and build one thread payload independently of export destinations."""
+    if prefer_cache:
+        history = await fetch_thread_history(
+            client,
+            room.room_id,
+            thread_id,
+            event_cache,
+            trusted_sender_ids=trusted_sender_ids,
+            caller_label="thread_export",
+        )
+        # A cached read cannot truncate, but it can still come back degraded - a stale fallback
+        # after a failed refetch reports is_full_history=True whenever its sidecars hydrated, so
+        # completeness alone does not mean the rows are current. Export must not write a file that
+        # looks authoritative when it is stale, so both signals are checked.
+        if not history.is_full_history or is_thread_history_degraded(history):
+            msg = (
+                f"Refusing to export thread {thread_id} from cache: the cached read is incomplete "
+                "or stale. "
+                "Re-run without --prefer-cache to fetch from the homeserver."
+            )
+            raise RuntimeError(msg)
+    else:
+        history = await refresh_thread_history_from_source(
+            client,
+            room.room_id,
+            thread_id,
+            event_cache,
+            allow_stale_fallback=False,
+            trusted_sender_ids=trusted_sender_ids,
+            caller_label="thread_export",
+        )
+    return thread_payload(
+        room=room,
+        thread_id=thread_id,
+        messages=list(history),
+        exported_at=datetime.now(UTC),
+        trusted_sender_ids=trusted_sender_ids,
+    )
+
+
+async def _authorized_room_accumulators(
+    client: nio.AsyncClient,
+    room: ThreadExportRoom,
+    accumulators: Sequence[ThreadExportAccumulator],
+) -> list[ThreadExportAccumulator]:
+    """Return targets authorized for one room, removing exports only on definitive revocation."""
+    eligible = [accumulator for accumulator in accumulators if target_accepts_room(accumulator.target, room)]
+    for accumulator in accumulators:
+        if not target_accepts_room(accumulator.target, room):
+            retract_room_export(accumulator, room)
+
+    scoped = [accumulator for accumulator in eligible if accumulator.target.required_member_user_id is not None]
+    authorized = [accumulator for accumulator in eligible if accumulator.target.required_member_user_id is None]
+    if not scoped:
+        return authorized
+    try:
+        member_ids = await _joined_member_ids(client, room.room_id)
+    except Exception as exc:
+        # Authorization is unknown here, not revoked: removal is a retraction action and must be
+        # driven by a definitive "not a member" answer, never by a lookup error. A boot-time 429
+        # burst on joined_members once deleted every previously exported room before this guard.
+        for accumulator in scoped:
+            accumulator.retained_room_keys.add(room.key)
+            accumulator.failed_items.append(failure_for_room(room, str(exc)))
+        return authorized
+
+    for accumulator in scoped:
+        member_user_id = accumulator.target.required_member_user_id
+        if member_user_id in member_ids:
+            authorized.append(accumulator)
+        else:
+            retract_room_export(accumulator, room)
+    return authorized
+
+
+async def _write_thread_to_targets(
+    *,
+    client: nio.AsyncClient,
+    room: ThreadExportRoom,
+    thread_id: str,
+    event_cache: ConversationEventCache,
+    trusted_sender_ids: frozenset[str],
+    prefer_cache: bool,
+    accumulators: Sequence[ThreadExportAccumulator],
+    changed_accumulator_ids: set[int],
+) -> None:
+    """Fetch one thread once and write it independently to each target."""
+    try:
+        payload = await _fetch_thread_payload(
+            client,
+            room,
+            thread_id,
+            event_cache=event_cache,
+            trusted_sender_ids=trusted_sender_ids,
+            prefer_cache=prefer_cache,
+        )
+    except Exception as exc:
+        for accumulator in accumulators:
+            accumulator.failed_items.append(failure_for_room(room, str(exc), thread_id=thread_id))
+        return
+
+    for accumulator in accumulators:
+        try:
+            wrote_file = write_thread_payload(
+                accumulator.target.output_dir,
+                room,
+                thread_id,
+                payload,
+            )
+        except Exception as exc:
+            accumulator.failed_items.append(failure_for_room(room, str(exc), thread_id=thread_id))
+            continue
+        accumulator.threads_exported += 1
+        if wrote_file:
+            changed_accumulator_ids.add(id(accumulator))
+        else:
+            accumulator.threads_unchanged += 1
+
+
+def _finish_room_exports(
+    room: ThreadExportRoom,
+    thread_ids: Sequence[str],
+    *,
+    truncated: bool,
+    accumulators: Sequence[ThreadExportAccumulator],
+    changed_accumulator_ids: set[int],
+) -> None:
+    """Reconcile removed threads and update indexes for one enumerated room."""
+    for accumulator in accumulators:
+        try:
+            output_dir = accumulator.target.output_dir
+            skip_empty_reconciliation = not truncated and not thread_ids and room_has_thread_exports(output_dir, room)
+            if skip_empty_reconciliation:
+                logger.warning(
+                    "Skipping stale thread reconciliation after empty enumeration",
+                    output_dir=str(output_dir),
+                    room_key=room.key,
+                    room_id=room.room_id,
+                )
+            elif not truncated:
+                removed_stale_threads = remove_stale_thread_exports(
+                    output_dir,
+                    room,
+                    thread_ids,
+                )
+                if removed_stale_threads:
+                    changed_accumulator_ids.add(id(accumulator))
+            write_room_index(
+                output_dir,
+                room,
+                thread_files_changed=id(accumulator) in changed_accumulator_ids,
+            )
+        except Exception as exc:
+            accumulator.failed_items.append(failure_for_room(room, f"Room reconciliation failed: {exc}"))
+
+
+async def export_threads_for_targets_for_client(
+    *,
+    client: nio.AsyncClient,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    event_cache: ConversationEventCache,
+    rooms: Sequence[ThreadExportRoom],
+    targets: Sequence[ThreadExportTarget],
+    max_thread_roots: int = 2000,
+    prefer_cache: bool = False,
+) -> tuple[ThreadExportAccumulator, ...]:
+    """Fetch each Matrix thread once and fan it out to authorized destinations."""
+    trusted_sender_ids = trusted_sender_ids_for_export(config, runtime_paths)
+    accumulators = tuple(ThreadExportAccumulator(target=target) for target in targets)
+
+    for room in rooms:
+        authorized = await _authorized_room_accumulators(client, room, accumulators)
+        if not authorized:
+            continue
+        for accumulator in authorized:
+            accumulator.retained_room_keys.add(room.key)
+
+        try:
+            thread_ids, truncated = await enumerate_room_thread_root_ids(
+                client,
+                room.room_id,
+                max_thread_roots=max_thread_roots,
+            )
+        except Exception as exc:
+            for accumulator in authorized:
+                accumulator.failed_items.append(failure_for_room(room, str(exc)))
+            continue
+
+        for accumulator in authorized:
+            accumulator.rooms_exported += 1
+            accumulator.threads_seen += len(thread_ids)
+            if truncated:
+                accumulator.truncated_rooms += 1
+        await _export_enumerated_room_threads(
+            client=client,
+            room=room,
+            thread_ids=thread_ids,
+            truncated=truncated,
+            event_cache=event_cache,
+            trusted_sender_ids=trusted_sender_ids,
+            prefer_cache=prefer_cache,
+            authorized=authorized,
+        )
+
+    return accumulators
+
+
+async def _export_enumerated_room_threads(
+    *,
+    client: nio.AsyncClient,
+    room: ThreadExportRoom,
+    thread_ids: Sequence[str],
+    truncated: bool,
+    event_cache: ConversationEventCache,
+    trusted_sender_ids: frozenset[str],
+    prefer_cache: bool,
+    authorized: Sequence[ThreadExportAccumulator],
+) -> None:
+    """Export one enumerated room's threads to every authorized accumulator."""
+    changed_accumulator_ids: set[int] = set()
+    missing_root_ids: frozenset[str] = frozenset()
+    if prefer_cache and thread_ids:
+        missing_root_ids = await _bulk_backfill_threads_needing_refill(
+            client,
+            room,
+            thread_ids,
+            event_cache=event_cache,
+        )
+
+    for thread_id in thread_ids:
+        if thread_id in missing_root_ids:
+            for accumulator in authorized:
+                accumulator.failed_items.append(
+                    failure_for_room(
+                        room,
+                        "thread root not found during bulk room scan",
+                        thread_id=thread_id,
+                    ),
+                )
+            continue
+        await _write_thread_to_targets(
+            client=client,
+            room=room,
+            thread_id=thread_id,
+            event_cache=event_cache,
+            trusted_sender_ids=trusted_sender_ids,
+            prefer_cache=prefer_cache,
+            accumulators=authorized,
+            changed_accumulator_ids=changed_accumulator_ids,
+        )
+
+    _finish_room_exports(
+        room,
+        thread_ids,
+        truncated=truncated,
+        accumulators=authorized,
+        changed_accumulator_ids=changed_accumulator_ids,
+    )

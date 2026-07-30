@@ -99,7 +99,8 @@ That same reconciliation path also updates `m.room.power_levels` for managed roo
 Audio events are handled through the shared media pipeline on all bots.
 The router only posts a visible handoff when it must disambiguate between multiple eligible responders in a room.
 When the responder is already clear, normalized audio follows the normal direct agent or team dispatch rules without an extra router message.
-By default, `voice.visible_router_echo: true` also lets the router post the normalized voice text as a display-only message when it is allowed to reply.
+By default, `voice.visible_router_echo: true` also lets the router post an immediate display-only transcription placeholder and replace it with the normalized transcript or fallback text when voice STT is enabled and it is allowed to reply.
+With STT disabled, the router posts the display-only fallback directly.
 Set `voice.visible_router_echo: false` to suppress that display-only echo.
 
 See [Voice Messages](https://docs.mindroom.chat/voice/) for the detailed dispatch behavior.

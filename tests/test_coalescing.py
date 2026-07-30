@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock
 import nio
 import pytest
 
+from mindroom.cancellation import SYNC_RESTART_CANCEL_MSG
 from mindroom.coalescing import (
     CoalescingGate,
     IngressAdmissionClosedError,
@@ -22,6 +23,7 @@ from mindroom.coalescing_batch import (
     active_follow_up_coalescing_key,
     build_coalesced_batch,
 )
+from mindroom.config.main import Config
 from mindroom.dispatch_handoff import PendingDispatchMetadata, PreparedTextEvent, build_dispatch_handoff
 from mindroom.dispatch_source import (
     ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
@@ -29,6 +31,10 @@ from mindroom.dispatch_source import (
     MESSAGE_SOURCE_KIND,
     VOICE_SOURCE_KIND,
 )
+from mindroom.execution_preparation import _messages_with_current_prompt
+from mindroom.ingress_lanes import LaneDelivery
+from mindroom.runtime_shutdown import SYNC_RESTART_SHUTDOWN
+from mindroom.timestamp_formatting import format_timestamp_ms
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -119,6 +125,139 @@ def _voice_pending(event_id: str, body: str, origin_server_ts: int) -> PendingEv
         room=nio.MatrixRoom("!room:localhost", "@mindroom:localhost"),
         source_kind=VOICE_SOURCE_KIND,
     )
+
+
+def test_single_message_batch_is_not_structured() -> None:
+    """A lone coalesced message stays unstructured and keeps its plain body as the prompt."""
+    batch = build_coalesced_batch(
+        CoalescingKey("!room:localhost", "$thread:localhost", "@user:localhost"),
+        [_pending(_text_event("$only:localhost", "just one", 1_774_019_700_000))],
+        timestamp_formatter=lambda timestamp_ms: format_timestamp_ms(timestamp_ms, timezone="America/Los_Angeles"),
+    )
+
+    assert batch.current_prompt_is_structured is False
+    assert batch.prompt == "just one"
+
+
+def test_dispatch_handoff_carries_structured_flag_and_metadata() -> None:
+    """A structured coalesced batch must hand its flag and per-message metadata to dispatch."""
+    batch = build_coalesced_batch(
+        CoalescingKey("!room:localhost", "$thread:localhost", "@user:localhost"),
+        [
+            _pending(_text_event("$a1:localhost", "first", 1_774_019_700_000)),
+            _pending(_text_event("$a2:localhost", "second", 1_774_019_760_000)),
+        ],
+        timestamp_formatter=lambda timestamp_ms: format_timestamp_ms(timestamp_ms, timezone="America/Los_Angeles"),
+    )
+
+    handoff = build_dispatch_handoff(batch)
+
+    assert batch.current_prompt_is_structured is True
+    assert handoff.current_prompt_is_structured is True
+    assert set(handoff.source_event_metadata) == {"$a1:localhost", "$a2:localhost"}
+
+
+def test_active_follow_up_prompt_renders_timestamp_attributes() -> None:
+    """Queued message tags should carry per-message local timestamps."""
+    key = active_follow_up_coalescing_key("!room:localhost", "$thread:localhost")
+    batch = build_coalesced_batch(
+        key,
+        [
+            PendingEvent(
+                event=_text_event("$a1:localhost", "first", 1_774_019_700_000),
+                room=nio.MatrixRoom("!room:localhost", "@mindroom:localhost"),
+                source_kind=MESSAGE_SOURCE_KIND,
+                requester_user_id="@alice:localhost",
+                dispatch_policy_source_kind=ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
+            ),
+            PendingEvent(
+                event=_text_event("$a2:localhost", "second", 1_774_019_760_000),
+                room=nio.MatrixRoom("!room:localhost", "@mindroom:localhost"),
+                source_kind=MESSAGE_SOURCE_KIND,
+                requester_user_id="@alice:localhost",
+                dispatch_policy_source_kind=ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
+            ),
+        ],
+        timestamp_formatter=lambda timestamp_ms: format_timestamp_ms(timestamp_ms, timezone="America/Los_Angeles"),
+    )
+
+    assert batch.prompt == (
+        "Messages arrived while the previous response was still running. "
+        "They are in chat timeline order. Respond once to the combined context:\n\n"
+        "<queued_messages>\n"
+        '<msg event_id="$a1:localhost" from="@alice:localhost" ts="2026-03-20 08:15 PDT"><![CDATA[first]]></msg>\n'
+        '<msg event_id="$a2:localhost" from="@alice:localhost" ts="2026-03-20 08:16 PDT"><![CDATA[second]]></msg>\n'
+        "</queued_messages>"
+    )
+
+
+def test_tagged_coalesced_prompt_is_safe_inside_current_message_wrapper() -> None:
+    """A structured coalesced prompt should not be wrapped in another message tag."""
+    batch = build_coalesced_batch(
+        CoalescingKey("!room:localhost", "$thread:localhost", "@alice:localhost"),
+        [
+            PendingEvent(
+                event=_text_event("$a1:localhost", "first <tag>", 1_774_019_700_000),
+                room=nio.MatrixRoom("!room:localhost", "@mindroom:localhost"),
+                source_kind=MESSAGE_SOURCE_KIND,
+                requester_user_id="@alice:localhost",
+            ),
+            PendingEvent(
+                event=_text_event("$a2:localhost", "second ]]> message", 1_774_019_760_000),
+                room=nio.MatrixRoom("!room:localhost", "@mindroom:localhost"),
+                source_kind=MESSAGE_SOURCE_KIND,
+                requester_user_id="@alice:localhost",
+            ),
+        ],
+        timestamp_formatter=lambda timestamp_ms: format_timestamp_ms(timestamp_ms, timezone="America/Los_Angeles"),
+    )
+
+    messages = _messages_with_current_prompt(
+        batch.prompt,
+        current_sender_id="@alice:localhost",
+        current_timestamp_ms=1_774_019_760_000,
+        current_prompt_is_structured=batch.current_prompt_is_structured,
+        config=Config(timezone="America/Los_Angeles"),
+    )
+
+    content = messages[0].content
+    assert content == (
+        "Current message:\n"
+        "The user sent the following messages in quick succession. "
+        "Treat them as one turn and respond once:\n\n"
+        "<messages>\n"
+        '<msg event_id="$a1:localhost" from="@alice:localhost" ts="2026-03-20 08:15 PDT">'
+        "<![CDATA[first <tag>]]></msg>\n"
+        '<msg event_id="$a2:localhost" from="@alice:localhost" ts="2026-03-20 08:16 PDT">'
+        "<![CDATA[second ]]]]><![CDATA[> message]]></msg>\n"
+        "</messages>"
+    )
+    assert "&lt;" not in content
+
+
+def test_structured_coalesced_prompt_with_model_tail_is_not_wrapped() -> None:
+    """Trusted structured prompts should not depend on exact prompt suffixes."""
+    prompt = (
+        "The user sent the following messages in quick succession. "
+        "Treat them as one turn and respond once:\n\n"
+        "<messages>\n"
+        '<msg event_id="$a1:localhost" from="@alice:localhost" ts="2026-03-20 08:15 PDT">'
+        "<![CDATA[first]]></msg>\n"
+        "</messages>\n\n"
+        "Attachment context:\n- file.txt"
+    )
+
+    messages = _messages_with_current_prompt(
+        prompt,
+        current_sender_id="@alice:localhost",
+        current_timestamp_ms=1_774_019_760_000,
+        current_prompt_is_structured=True,
+        config=Config(timezone="America/Los_Angeles"),
+    )
+
+    content = messages[0].content
+    assert content == f"Current message:\n{prompt}"
+    assert '<msg from="@alice:localhost"' not in content
 
 
 async def _ready_after(
@@ -853,6 +992,42 @@ async def test_failed_lane_ready_task_does_not_block_later_lane_work() -> None:
 
 
 @pytest.mark.asyncio
+async def test_lane_admission_does_not_wait_for_its_own_unsettled_slot() -> None:
+    """A lane-admitted event is already ready and must not wait for its own slot to settle."""
+    batches: list[CoalescedBatch] = []
+
+    async def dispatch_batch(batch: CoalescedBatch) -> None:
+        batches.append(batch)
+
+    gate = CoalescingGate(
+        dispatch_batch=dispatch_batch,
+        debounce_seconds=lambda: 0.0,
+        is_shutting_down=lambda: False,
+    )
+    key = CoalescingKey("!room:localhost", "$thread:localhost", "@user:localhost")
+    slot = gate.enter_lane(room_id=key.room_id, sender_id=key.requester_user_id)
+    ready = ReadyPendingEvent(
+        pending_event=_pending(_text_event("$lane:localhost", "lane text", 1_000_002)),
+    )
+    delivery = LaneDelivery(
+        key=key,
+        source_event_id="$lane:localhost",
+        source_kind=MESSAGE_SOURCE_KIND,
+        ready_result=ready,
+        ready_task=None,
+        received_at=1_000.0,
+    )
+
+    try:
+        await gate._admit_from_lane(slot, delivery, ready)
+        await _wait_for(lambda: [batch.source_event_ids for batch in batches] == [["$lane:localhost"]])
+        assert not slot.settled.is_set()
+    finally:
+        gate.release_lane_slot(slot)
+        await gate.drain_all()
+
+
+@pytest.mark.asyncio
 async def test_bounded_shutdown_marks_internal_drain_failure_incomplete() -> None:
     """Unexpected drain failures during shutdown must make checkpointing unsafe."""
     gate = CoalescingGate(
@@ -884,10 +1059,15 @@ async def test_bounded_shutdown_times_out_stuck_in_flight_dispatch() -> None:
     """Bounded shutdown must return unsafe instead of hanging on a stuck dispatch."""
     dispatch_started = asyncio.Event()
     release_dispatch = asyncio.Event()
+    cancelled_args: list[tuple[object, ...]] = []
 
     async def dispatch_batch(_batch: CoalescedBatch) -> None:
         dispatch_started.set()
-        await release_dispatch.wait()
+        try:
+            await release_dispatch.wait()
+        except asyncio.CancelledError as exc:
+            cancelled_args.append(exc.args)
+            raise
 
     gate = CoalescingGate(
         dispatch_batch=dispatch_batch,
@@ -911,6 +1091,52 @@ async def test_bounded_shutdown_times_out_stuck_in_flight_dispatch() -> None:
 
     assert result.completed is False
     assert result.dispatch_cancelled_count == 1
+    assert cancelled_args == [()]
+
+
+@pytest.mark.asyncio
+async def test_bounded_shutdown_preserves_shutdown_intent_for_drain_tasks() -> None:
+    """Bounded sync-restart drains should preserve restart provenance for in-flight dispatch."""
+    dispatch_started = asyncio.Event()
+    release_dispatch = asyncio.Event()
+    cancelled_args: list[tuple[object, ...]] = []
+
+    async def dispatch_batch(_batch: CoalescedBatch) -> None:
+        dispatch_started.set()
+        try:
+            await release_dispatch.wait()
+        except asyncio.CancelledError as exc:
+            cancelled_args.append(exc.args)
+            raise
+
+    gate = CoalescingGate(
+        dispatch_batch=dispatch_batch,
+        debounce_seconds=lambda: 0.0,
+        is_shutting_down=lambda: True,
+    )
+    key = CoalescingKey("!room:localhost", "$thread:localhost", "@user:localhost")
+    await _admit_ready(gate, key, _pending(_text_event("$text:localhost", "typed", 1_000_000)))
+    await asyncio.wait_for(dispatch_started.wait(), timeout=0.5)
+
+    drain_task = asyncio.create_task(
+        gate.drain_all(
+            ready_timeout_seconds=0.01,
+            shutdown_intent=SYNC_RESTART_SHUTDOWN,
+        ),
+    )
+    try:
+        result = await asyncio.wait_for(asyncio.shield(drain_task), timeout=0.2)
+    except TimeoutError:  # pragma: no cover - documents the failure mode on regression
+        pytest.fail("bounded drain hung behind in-flight dispatch")
+    finally:
+        release_dispatch.set()
+        if not drain_task.done():
+            drain_task.cancel()
+            await asyncio.gather(drain_task, return_exceptions=True)
+
+    assert result.completed is False
+    assert result.dispatch_cancelled_count == 1
+    assert cancelled_args == [(SYNC_RESTART_CANCEL_MSG,)]
 
 
 @pytest.mark.asyncio

@@ -14,6 +14,7 @@ from fastapi import HTTPException, Request
 from mindroom.api import config_lifecycle
 from mindroom.credential_policy import (
     OAUTH_CREDENTIAL_FIELDS,
+    RUNTIME_BOOTSTRAPPED_CLIENT_CONFIG_KEY,
     dashboard_may_edit_oauth_service,
     filter_oauth_credential_fields,
     is_oauth_client_config_service,
@@ -207,11 +208,40 @@ def preserve_oauth_client_config_from_existing(
     oauth_service_match: OAuthCredentialServiceMatch | None,
 ) -> None:
     """Require or preserve OAuth client config identity fields from stored credentials."""
+    _reject_implicit_provisioned_client_resave(credentials, existing_credentials)
     _require_or_preserve_oauth_client_config_field(credentials, existing_credentials, "client_id")
     if _oauth_client_config_secret_required(oauth_service_match):
         _require_or_preserve_oauth_client_config_secret(credentials, existing_credentials)
     else:
         _preserve_optional_oauth_client_config_secret(credentials, existing_credentials)
+
+
+def _reject_implicit_provisioned_client_resave(
+    credentials: dict[str, Any],
+    existing_credentials: dict[str, Any],
+) -> None:
+    """Keep redacted dashboard saves from pinning a provisioned client as custom."""
+    if existing_credentials.get(RUNTIME_BOOTSTRAPPED_CLIENT_CONFIG_KEY) is not True:
+        return
+    submitted_client_id = credentials.get("client_id")
+    existing_client_id = existing_credentials.get("client_id")
+    if (
+        isinstance(submitted_client_id, str)
+        and isinstance(existing_client_id, str)
+        and submitted_client_id.strip()
+        and submitted_client_id.strip() != existing_client_id.strip()
+    ):
+        return
+    submitted_secret = credentials.get("client_secret")
+    if isinstance(submitted_secret, str) and submitted_secret.strip():
+        return
+    raise HTTPException(
+        status_code=400,
+        detail=(
+            "Provisioned OAuth client configuration does not need to be saved. "
+            "Delete it to re-bootstrap, or provide a complete custom client configuration."
+        ),
+    )
 
 
 def _reject_non_client_config_fields(credentials: dict[str, Any]) -> None:

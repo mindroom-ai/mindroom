@@ -1,0 +1,32 @@
+# mindroom-dev single-issue development protocol.
+
+name: mindroom-dev
+version: "1.0"
+description: "Single-issue dev protocol: plan, implement, review, live-test, and PR."
+
+todos:
+  - title: "Create living report for {{ ISSUE_REF }} in the repo notes or task file"
+    priority: high
+  - title: "Create implementation plan for {{ ISSUE_REF }} on {{ BRANCH }}"
+    depends_on: [1]
+    priority: high
+  - title: "Implement requested change in {{ REPO }}"
+    depends_on: [2]
+    assigned_agent: "{{ IMPLEMENTER_AGENT }}"
+    priority: high
+  - title: "Run focused automated tests for {{ ISSUE_REF }}"
+    depends_on: [3]
+    priority: high
+  - sub_template: parallel-review-loop
+    params:
+      N_REVIEWERS: "{{ N_REVIEWERS }}"
+    depends_on: [4]
+  - title: "Run diff sanity check against {{ BASE }}"
+    depends_on: [5]
+    priority: high
+  - title: "Capture live-test or manual verification evidence when the change needs runtime proof"
+    depends_on: [5]
+    priority: high
+  - title: "Push {{ BRANCH }} and open PR if IS_PR is true"
+    depends_on: [6, 7]
+    priority: critical

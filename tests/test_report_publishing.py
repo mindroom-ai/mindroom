@@ -17,6 +17,7 @@ from mindroom.custom_tools.dynamic_workflow import DynamicWorkflowTools
 from mindroom.custom_tools.dynamic_workflow_context import dynamic_workflow_store_and_owner
 from mindroom.custom_tools.report_publishing import ReportPublishingTools
 from mindroom.dynamic_workflows.service import DynamicWorkflowService
+from mindroom.message_target import MessageTarget
 from mindroom.report_publishing.store import PublishableReport, ReportPublishingError, ReportPublishingStore
 from mindroom.tool_system.metadata import TOOL_METADATA
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
@@ -103,9 +104,11 @@ def _make_context(
     )
     return ToolRuntimeContext(
         agent_name="general",
-        room_id="!room:localhost",
-        thread_id="$thread:localhost",
-        resolved_thread_id="$thread:localhost",
+        target=MessageTarget.resolve(
+            room_id="!room:localhost",
+            thread_id="$thread:localhost",
+            reply_to_event_id="$event:localhost",
+        ),
         requester_id="@user:localhost",
         client=AsyncMock(),
         config=config,
@@ -113,7 +116,6 @@ def _make_context(
         conversation_cache=AsyncMock(),
         event_cache=make_event_cache_mock(),
         room=None,
-        reply_to_event_id="$event:localhost",
         storage_path=None,
     )
 

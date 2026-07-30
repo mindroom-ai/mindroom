@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import stat
 from typing import TYPE_CHECKING
+
+import pytest
 
 from mindroom.cli.env_file import env_path_for_config, upsert_env_values
 
@@ -46,3 +49,28 @@ def test_upsert_env_values_creates_parent_directory_and_file(tmp_path: Path) -> 
     upsert_env_values(env_path, {"MINDROOM_NAMESPACE": "a1b2c3d4"})
 
     assert env_path.read_text(encoding="utf-8") == "MINDROOM_NAMESPACE=a1b2c3d4\n"
+    assert stat.S_IMODE(env_path.stat().st_mode) == 0o600
+
+
+def test_upsert_env_values_hardens_existing_env_file(tmp_path: Path) -> None:
+    """Updating an existing env file should remove access for other OS users."""
+    env_path = tmp_path / ".env"
+    env_path.write_text("EXISTING=value\n", encoding="utf-8")
+    env_path.chmod(0o644)
+
+    upsert_env_values(env_path, {"NEW": "secret"})
+
+    assert stat.S_IMODE(env_path.stat().st_mode) == 0o600
+
+
+def test_upsert_env_values_refuses_symlink_destination(tmp_path: Path) -> None:
+    """Env writes should never follow a destination symlink."""
+    target_path = tmp_path / "target"
+    target_path.write_text("preserve-me\n", encoding="utf-8")
+    env_path = tmp_path / ".env"
+    env_path.symlink_to(target_path)
+
+    with pytest.raises(ValueError, match="Refusing to write env file through a symlink"):
+        upsert_env_values(env_path, {"NEW": "secret"})
+
+    assert target_path.read_text(encoding="utf-8") == "preserve-me\n"

@@ -15,10 +15,14 @@ final class StatusMenuController: NSObject, NSMenuDelegate {
     private override init() {
         super.init()
         menu.delegate = self
+        menu.autoenablesItems = false
     }
 
     func start() {
         guard statusItem == nil else { return }
+        runner.onCommandFinished = { [weak self] command, result in
+            self?.showCommandResult(command, result: result)
+        }
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         item.menu = menu
         statusItem = item
@@ -45,35 +49,76 @@ final class StatusMenuController: NSObject, NSMenuDelegate {
         menu.removeAllItems()
 
         menu.addItem(disabledItem("Status: \(runner.serviceStatus.message)"))
-        if runner.isRunningCommand {
-            menu.addItem(disabledItem("Running command..."))
+        if let runningTitle = runner.runningCommandTitle {
+            menu.addItem(disabledItem("Running \(runningTitle)..."))
         }
         menu.addItem(.separator())
 
-        menu.addItem(actionItem(MindRoomCommand.installRuntime.title, symbolName: "arrow.down.circle", action: #selector(installRuntime)))
-        menu.addItem(actionItem(MindRoomCommand.updateRuntime.title, symbolName: "arrow.triangle.2.circlepath", action: #selector(updateRuntime)))
+        menu.addItem(disabledItem("Set Up Hosted MindRoom"))
+        menu.addItem(actionItem(
+            "1. \(MindRoomCommand.installRuntime.title)",
+            symbolName: "arrow.down.circle",
+            action: #selector(installRuntime),
+            toolTip: "Installs the mindroom CLI with the bundled uv."
+        ))
+        menu.addItem(actionItem(
+            "2. \(MindRoomCommand.initializeHostedConfig.title)",
+            symbolName: "person.2.wave.2",
+            action: #selector(initializeHostedConfig),
+            toolTip: "Writes config.yaml and .env to ~/.mindroom for the hosted chat.mindroom.chat Matrix server. Existing files are kept unchanged."
+        ))
+        menu.addItem(actionItem(
+            "3. \(MindRoomCommand.openHostedChat.title)",
+            symbolName: "safari",
+            action: #selector(openHostedChat),
+            toolTip: "Sign in to create your hosted account, then click the Local MindRoom icon in the sidebar to generate a pair code."
+        ))
+        menu.addItem(actionItem(
+            "4. \(MindRoomCommand.pairHosted(pairCode: "").title)",
+            symbolName: "link",
+            action: #selector(pairHosted),
+            toolTip: "Links this Mac to your hosted account using the pair code."
+        ))
+        menu.addItem(actionItem(
+            "5. \(MindRoomCommand.installService.title)",
+            symbolName: "checkmark.circle",
+            action: #selector(installService),
+            toolTip: "Installs and starts the MindRoom background service (launchd)."
+        ))
         menu.addItem(.separator())
 
-        menu.addItem(actionItem(MindRoomCommand.installService.title, symbolName: "checkmark.circle", action: #selector(installService)))
         menu.addItem(actionItem(MindRoomCommand.startService.title, symbolName: "play.circle", action: #selector(startService)))
         menu.addItem(actionItem(MindRoomCommand.stopService.title, symbolName: "stop.circle", action: #selector(stopService)))
         menu.addItem(actionItem(MindRoomCommand.restartService.title, symbolName: "arrow.clockwise.circle", action: #selector(restartService)))
         menu.addItem(actionItem(MindRoomCommand.serviceStatus.title, symbolName: "waveform.path.ecg", action: #selector(refreshStatus)))
         menu.addItem(.separator())
 
-        menu.addItem(actionItem(MindRoomCommand.initializeHostedConfig.title, symbolName: "person.2.wave.2", action: #selector(initializeHostedConfig)))
-        menu.addItem(actionItem(MindRoomCommand.initializeSelfHostedConfig.title, symbolName: "server.rack", action: #selector(initializeSelfHostedConfig)))
-        menu.addItem(actionItem(MindRoomCommand.localStackSetup.title, symbolName: "shippingbox", action: #selector(localStackSetup)))
-        menu.addItem(actionItem(MindRoomCommand.pairHosted(pairCode: "").title, symbolName: "link", action: #selector(pairHosted)))
-        menu.addItem(actionItem(MindRoomCommand.openHostedChat.title, symbolName: "safari", action: #selector(openHostedChat)))
-        menu.addItem(.separator())
-
-        menu.addItem(actionItem(MindRoomCommand.openDashboard.title, symbolName: "rectangle.3.group", action: #selector(openDashboard)))
+        menu.addItem(actionItem(
+            MindRoomCommand.openDashboard.title,
+            symbolName: "rectangle.3.group",
+            action: #selector(openDashboard),
+            toolTip: "Opens the local dashboard at http://localhost:8765, served by the MindRoom service."
+        ))
         menu.addItem(actionItem(MindRoomCommand.openConfigFolder.title, symbolName: "folder", action: #selector(openConfigFolder)))
         menu.addItem(actionItem(MindRoomCommand.openLogsFolder.title, symbolName: "doc.text.magnifyingglass", action: #selector(openLogsFolder)))
         if !runner.lastOutput.isEmpty {
             menu.addItem(actionItem("Copy Last Output", symbolName: "doc.on.doc", action: #selector(copyLastOutput)))
         }
+        menu.addItem(.separator())
+
+        let otherSetup = NSMenuItem(title: "Other Setup", action: nil, keyEquivalent: "")
+        let otherSetupMenu = NSMenu()
+        otherSetupMenu.autoenablesItems = false
+        otherSetupMenu.addItem(actionItem(
+            MindRoomCommand.initializeSelfHostedConfig.title,
+            symbolName: "server.rack",
+            action: #selector(initializeSelfHostedConfig),
+            toolTip: "Writes config.yaml and .env to ~/.mindroom for connecting to your own Matrix homeserver."
+        ))
+        otherSetupMenu.addItem(actionItem(MindRoomCommand.localStackSetup.title, symbolName: "shippingbox", action: #selector(localStackSetup)))
+        otherSetup.submenu = otherSetupMenu
+        menu.addItem(otherSetup)
+        menu.addItem(actionItem(MindRoomCommand.updateRuntime.title, symbolName: "arrow.triangle.2.circlepath", action: #selector(updateRuntime)))
         menu.addItem(.separator())
 
         let loginItem = actionItem(loginItemController.menuTitle, symbolName: loginItemController.isEnabled ? "checkmark.circle" : "circle", action: #selector(toggleStartAtLogin))
@@ -85,6 +130,28 @@ final class StatusMenuController: NSObject, NSMenuDelegate {
         menu.addItem(updateItem)
         menu.addItem(.separator())
         menu.addItem(actionItem("Quit", symbolName: "power", action: #selector(quit)))
+
+        if runner.isRunningCommand {
+            disableRuntimeCommandItems(in: menu)
+        }
+    }
+
+    /// Only one runtime command runs at a time, so gray the triggers out while one is in flight.
+    private func disableRuntimeCommandItems(in menu: NSMenu) {
+        let runtimeSelectors: Set<Selector> = [
+            #selector(installRuntime), #selector(updateRuntime), #selector(installService),
+            #selector(startService), #selector(stopService), #selector(restartService),
+            #selector(initializeHostedConfig), #selector(initializeSelfHostedConfig),
+            #selector(localStackSetup), #selector(pairHosted),
+        ]
+        for item in menu.items {
+            if let submenu = item.submenu {
+                disableRuntimeCommandItems(in: submenu)
+            }
+            if let action = item.action, runtimeSelectors.contains(action) {
+                item.isEnabled = false
+            }
+        }
     }
 
     private func startStatusRefreshTimer() {
@@ -120,10 +187,11 @@ final class StatusMenuController: NSObject, NSMenuDelegate {
         }
     }
 
-    private func actionItem(_ title: String, symbolName: String, action: Selector) -> NSMenuItem {
+    private func actionItem(_ title: String, symbolName: String, action: Selector, toolTip: String? = nil) -> NSMenuItem {
         let item = NSMenuItem(title: title, action: action, keyEquivalent: "")
         item.target = self
         item.image = NSImage(systemSymbolName: symbolName, accessibilityDescription: nil)
+        item.toolTip = toolTip
         return item
     }
 
@@ -131,6 +199,32 @@ final class StatusMenuController: NSObject, NSMenuDelegate {
         let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
         item.isEnabled = false
         return item
+    }
+
+    private func showCommandResult(_ command: MindRoomCommand, result: CommandResult) {
+        NSApp.activate(ignoringOtherApps: true)
+        let alert = NSAlert()
+        if result.isSuccess {
+            alert.alertStyle = .informational
+            alert.messageText = "\(command.title) Finished"
+            alert.informativeText = command.successMessage ?? result.condensedOutput
+            alert.addButton(withTitle: "OK")
+            alert.runModal()
+            return
+        }
+        alert.alertStyle = .warning
+        alert.messageText = "\(command.title) Failed"
+        let output = result.condensedOutput
+        var informativeText = output.isEmpty ? "The command exited with code \(result.exitCode)." : output
+        if output.contains("No such option") {
+            informativeText += "\n\nThe installed MindRoom runtime is older than this app. Use Update MindRoom Runtime, then try again."
+        }
+        alert.informativeText = informativeText
+        alert.addButton(withTitle: "OK")
+        alert.addButton(withTitle: "Copy Output")
+        if alert.runModal() == .alertSecondButtonReturn {
+            copyLastOutput()
+        }
     }
 
     @objc private func installRuntime() {
@@ -174,9 +268,10 @@ final class StatusMenuController: NSObject, NSMenuDelegate {
     }
 
     @objc private func pairHosted() {
+        NSApp.activate(ignoringOtherApps: true)
         let alert = NSAlert()
         alert.messageText = "Pair Hosted MindRoom"
-        alert.informativeText = "Enter the pair code from chat.mindroom.chat."
+        alert.informativeText = "In chat.mindroom.chat, click the Local MindRoom icon in the left sidebar to generate a pair code, then enter it here."
         let textField = NSTextField(frame: NSRect(x: 0, y: 0, width: 220, height: 24))
         textField.placeholderString = "ABCD-EFGH"
         alert.accessoryView = textField
@@ -186,14 +281,63 @@ final class StatusMenuController: NSObject, NSMenuDelegate {
         guard alert.runModal() == .alertFirstButtonReturn else { return }
         let pairCode = textField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !pairCode.isEmpty else {
-            runner.lastOutputForDisplay = "Pair code cannot be empty."
+            showSimpleAlert(title: "Pair Code Missing", message: "Enter the pair code from chat.mindroom.chat to pair.")
             return
         }
         runner.run(.pairHosted(pairCode: pairCode))
     }
 
+    /// Why the dashboard would not respond in this state, with the one-click fix; nil when opening is fine.
+    private func dashboardBlocker(
+        for state: MindRoomServiceState
+    ) -> (message: String, fixTitle: String, fix: MindRoomCommand)? {
+        switch state {
+        case .stopped:
+            return (
+                "The dashboard at http://localhost:8765 is served by the MindRoom service, which is installed but stopped.",
+                "Start Service",
+                .startService
+            )
+        case .notInstalled:
+            return (
+                "The dashboard at http://localhost:8765 is served by the MindRoom service, which is not installed yet. Follow the Set Up Hosted MindRoom steps in the menu.",
+                "Install Service",
+                .installService
+            )
+        case .runtimeMissing:
+            return (
+                "The dashboard at http://localhost:8765 is served by the MindRoom service, but the MindRoom runtime is not installed yet. Follow the Set Up Hosted MindRoom steps in the menu.",
+                "Install Runtime",
+                .installRuntime
+            )
+        case .running, .unknown:
+            return nil
+        }
+    }
+
     @objc private func openDashboard() {
-        runner.run(.openDashboard)
+        guard let blocker = dashboardBlocker(for: runner.serviceStatus.state) else {
+            runner.run(.openDashboard)
+            return
+        }
+
+        NSApp.activate(ignoringOtherApps: true)
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "MindRoom Is Not Running"
+        alert.informativeText = blocker.message
+        alert.addButton(withTitle: blocker.fixTitle)
+        alert.addButton(withTitle: "Open Anyway")
+        alert.addButton(withTitle: "Cancel")
+
+        switch alert.runModal() {
+        case .alertFirstButtonReturn:
+            runner.run(blocker.fix)
+        case .alertSecondButtonReturn:
+            runner.run(.openDashboard)
+        default:
+            break
+        }
     }
 
     @objc private func openHostedChat() {
@@ -214,7 +358,11 @@ final class StatusMenuController: NSObject, NSMenuDelegate {
     }
 
     @objc private func toggleStartAtLogin() {
-        loginItemController.toggle()
+        do {
+            try loginItemController.toggle()
+        } catch {
+            showSimpleAlert(title: "Start at Login Failed", message: error.localizedDescription)
+        }
         rebuildMenu()
     }
 
@@ -222,8 +370,17 @@ final class StatusMenuController: NSObject, NSMenuDelegate {
         do {
             try appUpdater.checkForUpdates()
         } catch {
-            runner.lastOutputForDisplay = error.localizedDescription
+            showSimpleAlert(title: "App Update Check Failed", message: error.localizedDescription)
         }
+    }
+
+    private func showSimpleAlert(title: String, message: String) {
+        NSApp.activate(ignoringOtherApps: true)
+        let alert = NSAlert()
+        alert.messageText = title
+        alert.informativeText = message
+        alert.addButton(withTitle: "OK")
+        alert.runModal()
     }
 
     @objc private func quit() {

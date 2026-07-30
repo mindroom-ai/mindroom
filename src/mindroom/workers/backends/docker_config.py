@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import os
 import re
 from dataclasses import dataclass
@@ -21,6 +20,12 @@ from mindroom.credentials import runtime_credentials_manager_key
 from mindroom.runtime_env_policy import KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY, SANDBOX_RUNTIME_ENV_BY_KEY
 from mindroom.tool_system.worker_routing import worker_root_path
 from mindroom.workers.backend import WorkerBackendError
+from mindroom.workers.backends._config_helpers import (
+    read_env,
+    read_float_env,
+    read_int_env,
+    read_json_mapping_env,
+)
 from mindroom.workers.backends._dedicated_worker_common import (
     build_backend_config_signature,
     validate_dedicated_worker_extra_env,
@@ -86,51 +91,6 @@ _DOCKER_RESERVED_LABEL_NAMES = frozenset(
 )
 
 
-def _read_env(env: Mapping[str, str], name: str, default: str = "") -> str:
-    return env.get(name, default).strip()
-
-
-def _read_float_env(env: Mapping[str, str], name: str, default: float) -> float:
-    raw = _read_env(env, name, str(default))
-    try:
-        value = float(raw)
-    except ValueError:
-        value = default
-    return max(1.0, value)
-
-
-def _read_int_env(env: Mapping[str, str], name: str, default: int) -> int:
-    raw = _read_env(env, name, str(default))
-    try:
-        value = int(raw)
-    except ValueError:
-        value = default
-    return max(1, value)
-
-
-def _read_json_mapping_env(env: Mapping[str, str], name: str) -> dict[str, str]:
-    raw = _read_env(env, name)
-    if not raw:
-        return {}
-    try:
-        parsed = json.loads(raw)
-    except json.JSONDecodeError as exc:
-        msg = f"{name} must contain a JSON object."
-        raise WorkerBackendError(msg) from exc
-    if not isinstance(parsed, dict):
-        msg = f"{name} must contain a JSON object."
-        raise WorkerBackendError(msg)
-    cleaned: dict[str, str] = {}
-    for key, value in parsed.items():
-        if not isinstance(key, str):
-            continue
-        if isinstance(value, str):
-            cleaned[key] = value
-        elif value is not None:
-            cleaned[key] = str(value)
-    return cleaned
-
-
 def validate_docker_extra_labels(extra_labels: Mapping[str, str]) -> None:
     """Reject extra labels that would override backend-owned Docker metadata."""
     invalid_names = sorted(name for name in extra_labels if name in _DOCKER_RESERVED_LABEL_NAMES)
@@ -162,7 +122,7 @@ def validate_docker_endpoint_host(*, endpoint_host: str) -> None:
 
 
 def _read_host_config_path(runtime_paths: RuntimePaths, env: Mapping[str, str]) -> Path | None:
-    configured = _read_env(env, _HOST_CONFIG_PATH_ENV)
+    configured = read_env(env, _HOST_CONFIG_PATH_ENV)
     if configured:
         resolved = resolve_config_relative_path(configured, runtime_paths)
         if not resolved.exists():
@@ -243,14 +203,14 @@ class _DockerWorkerBackendConfig:
     @classmethod
     def from_runtime(cls, runtime_paths: RuntimePaths) -> _DockerWorkerBackendConfig:
         env = runtime_env_values(runtime_paths)
-        image = _read_env(env, _IMAGE_ENV)
+        image = read_env(env, _IMAGE_ENV)
         if not image:
             msg = f"{_IMAGE_ENV} must be set when {_WORKER_BACKEND_ENV}=docker."
             raise WorkerBackendError(msg)
 
-        publish_host = _read_env(env, _PUBLISH_HOST_ENV, _DEFAULT_PUBLISH_HOST) or _DEFAULT_PUBLISH_HOST
-        endpoint_host = _read_env(env, _ENDPOINT_HOST_ENV, publish_host) or publish_host
-        extra_env = _read_json_mapping_env(env, _EXTRA_ENV_JSON_ENV)
+        publish_host = read_env(env, _PUBLISH_HOST_ENV, _DEFAULT_PUBLISH_HOST) or _DEFAULT_PUBLISH_HOST
+        endpoint_host = read_env(env, _ENDPOINT_HOST_ENV, publish_host) or publish_host
+        extra_env = read_json_mapping_env(env, _EXTRA_ENV_JSON_ENV)
         validate_dedicated_worker_extra_env(
             extra_env,
             backend_name="Docker",
@@ -258,19 +218,19 @@ class _DockerWorkerBackendConfig:
         )
         return cls(
             image=image,
-            worker_port=_read_int_env(env, _PORT_ENV, _DEFAULT_WORKER_PORT),
-            storage_mount_path=_read_env(env, _STORAGE_MOUNT_PATH_ENV, _DEFAULT_STORAGE_MOUNT_PATH)
+            worker_port=read_int_env(env, _PORT_ENV, _DEFAULT_WORKER_PORT),
+            storage_mount_path=read_env(env, _STORAGE_MOUNT_PATH_ENV, _DEFAULT_STORAGE_MOUNT_PATH)
             or _DEFAULT_STORAGE_MOUNT_PATH,
-            config_path=_read_env(env, _CONFIG_PATH_ENV, _DEFAULT_CONFIG_PATH) or _DEFAULT_CONFIG_PATH,
+            config_path=read_env(env, _CONFIG_PATH_ENV, _DEFAULT_CONFIG_PATH) or _DEFAULT_CONFIG_PATH,
             host_config_path=_read_host_config_path(runtime_paths, env),
-            idle_timeout_seconds=_read_float_env(env, _IDLE_TIMEOUT_ENV, _DEFAULT_IDLE_TIMEOUT_SECONDS),
-            ready_timeout_seconds=_read_float_env(env, _READY_TIMEOUT_ENV, _DEFAULT_READY_TIMEOUT_SECONDS),
-            name_prefix=_read_env(env, _NAME_PREFIX_ENV, _DEFAULT_NAME_PREFIX) or _DEFAULT_NAME_PREFIX,
+            idle_timeout_seconds=read_float_env(env, _IDLE_TIMEOUT_ENV, _DEFAULT_IDLE_TIMEOUT_SECONDS),
+            ready_timeout_seconds=read_float_env(env, _READY_TIMEOUT_ENV, _DEFAULT_READY_TIMEOUT_SECONDS),
+            name_prefix=read_env(env, _NAME_PREFIX_ENV, _DEFAULT_NAME_PREFIX) or _DEFAULT_NAME_PREFIX,
             publish_host=publish_host,
             endpoint_host=endpoint_host,
             user=_read_docker_user(env),
             extra_env=extra_env,
-            extra_labels=_read_json_mapping_env(env, _EXTRA_LABELS_JSON_ENV),
+            extra_labels=read_json_mapping_env(env, _EXTRA_LABELS_JSON_ENV),
         )
 
     @classmethod

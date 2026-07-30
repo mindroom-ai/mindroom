@@ -22,6 +22,10 @@ It should send, edit, redact, and finalize already-generated responses.
 `EditRegenerator` owns the edited-message replay workflow.
 It is still coupled to the current persistence split, but its workflow boundary is real.
 
+`RedactedTurnCleanup` owns durable source-redaction tombstoning and advisory cache sanitization.
+`TurnStore` removes redacted persisted replay before the next response starts in the affected conversation.
+`AgentBot` only delegates the Matrix redaction callback to that collaborator.
+
 ## Current Problems
 
 `TurnController` is the real turn owner now, but it is still too large.
@@ -64,6 +68,32 @@ It no longer sends messages, runs AI, or writes persistence state.
 `TurnStore` is now the main durable turn boundary for the extracted runtime flows.
 `TurnController` and `EditRegenerator` read and write through `TurnStore` instead of owning their own persistence helpers.
 Command handling now records terminal outcomes through `TurnStore` as well.
+
+`TurnRecord` is the single immutable schema for turn identity, outcome, and regeneration facts.
+One codec projects that schema into the versioned handled-turn ledger and recoverable Agno run metadata.
+Interactive-selection discovery aliases remain separate from canonical source identity, so recovery can index every triggering event without making one message look coalesced.
+Coalesced router relays persist each human discovery alias on its physical source metadata so later edits and redactions update the owned prompt.
+Per-source Matrix revision tuples keep durable edit facts newest-wins across retries and restarts.
+`EditRegenerator` groups edits by room, response anchor, and requester in a bounded per-response mailbox.
+One draining owner folds each source's newest Matrix revision into a complete response request and loops when newer edits arrive.
+Physical source IDs are exclusive turn claims, while discovery aliases are advisory settlement keys observed by `wait_for_turn_settled`.
+A committed service-restart or generic terminal interruption note records its exact source room in `InterruptedTurnRooms`.
+Replacement recovery uses the registered room directly, while next-startup cleanup can rediscover the durable note and an interrupted edit revision remains uncommitted for re-drive.
+The two physical stores remain intentionally redundant so run metadata can repair a ledger write lost during a crash.
+`TurnStore` applies deterministic field precedence: a present ledger record owns canonical source identity and anchor, while a newer delivered run can repair mutable response and regeneration facts after a crash.
+Recovery never replaces a ledger record that changed while run metadata was loading.
+Older or incomplete run metadata only backfills absent optional facts, and conflicting discovery aliases are pruned instead of claiming another completed turn.
+Run metadata supplies a complete record when the ledger row is absent and otherwise participates only through that precedence rule.
+`TurnStore` immediately writes a recovered or enriched record back to the ledger, so callers never own backfill or repair decisions.
+One runtime process owns each ledger's semantic ordering, while the advisory file lock protects exact durable writes without defining cross-process turn precedence.
+Unversioned pre-user ledger and run-metadata turn schemas are rejected instead of carrying migration scaffolding.
+
+Matrix source redactions are durably tombstoned before the advisory conversation cache is mutated.
+A tombstone becomes a retained cleanup intent once the entity has recorded the affected conversation context, while unrelated redactions remain bounded ledger barriers without storage probes.
+Pending normal and interactive responses durably record their exact target and history scope off the event loop before generation, and every source-backed response checks tombstones again under the lifecycle lock.
+Before a response starts, `TurnStore` removes the matching run and its causal suffix from every history scope recorded for the conversation, clears summary-backed replay state, preserves compaction run tombstones, and sanitizes coalesced prompt metadata used by later edit regeneration.
+Redacted replay may remain in local session storage until that conversation's next response, but no model receives it.
+Semantic memory backends such as Mem0 have a separate lifecycle and are not altered by persisted replay cleanup.
 
 ## Tool Dispatch Contracts
 

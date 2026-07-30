@@ -81,7 +81,7 @@ apply_label("is:unread category:promotions", "Needs Review", count=10)
 ### Notes
 
 - Connect Gmail through the `google_gmail` OAuth provider rather than storing a Gmail-specific API key.
-- The Gmail provider requests Gmail read, modify, and compose scopes.
+- The Gmail provider requests `gmail.modify`, which is the narrowest single scope that preserves mailbox reading, drafting, sending, labeling, and organization.
 - `gmail` always runs in the primary MindRoom runtime so worker runtimes do not receive Google OAuth secrets.
 - Agno's Gmail constructor accepts per-method selector kwargs (`get_latest_emails`, `get_unread_emails`, `search_emails`, etc.), and the MindRoom wrapper forwards them via `**kwargs`.
 - Use those selector kwargs to disable specific methods you do not want the agent calling.

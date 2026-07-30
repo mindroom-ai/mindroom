@@ -4,31 +4,31 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import hashlib
 import json
 import os
 import signal
 import sys
-import tempfile
 from contextlib import asynccontextmanager, suppress
-from dataclasses import asdict, dataclass, field, replace
+from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
-from threading import Lock
-from typing import TYPE_CHECKING, TypedDict
+from typing import TYPE_CHECKING, TypedDict, cast
 
+from mindroom.config.knowledge import KnowledgeBaseConfig
 from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths, resolve_runtime_paths, runtime_env_values
-from mindroom.file_locks import async_exclusive_file_lock
 from mindroom.knowledge.availability import KnowledgeAvailability
-from mindroom.knowledge.manager import KnowledgeManager, knowledge_source_signature
+from mindroom.knowledge.index_metadata import state_for_publication
+from mindroom.knowledge.manager import KnowledgeManager
 from mindroom.knowledge.redaction import redact_credentials_in_text
+from mindroom.knowledge.refresh_locks import (
+    mark_refresh_active,
+    mark_refresh_inactive,
+    refresh_source_root_lock,
+)
 from mindroom.knowledge.registry import (
-    KnowledgeRefreshTarget,
-    KnowledgeSourceRoot,
     PublishedIndexKey,
     PublishedIndexState,
-    indexing_settings_metadata_equal,
     load_published_index_state,
     mark_knowledge_source_changed_async,
     mark_published_index_refresh_failed_preserving_last_good,
@@ -81,6 +81,7 @@ class _SubprocessRefreshRequest:
     config_data: dict[str, object]
     config_path: str
     storage_root: str
+    runtime_knowledge_base: dict[str, object] | None = None
     execution_identity: SerializedToolExecutionIdentity | None = None
     force_reindex: bool = False
 
@@ -89,111 +90,14 @@ class _SubprocessSessionKwargs(TypedDict, total=False):
     start_new_session: bool
 
 
-_refresh_locks_guard = Lock()
-_active_refresh_counts: dict[KnowledgeRefreshTarget, int] = {}
-_active_refresh_counts_guard = Lock()
-_MAX_REFRESH_LOCKS = 512
-_REFRESH_FILE_LOCK_POLL_SECONDS = 0.1
-
-
-@dataclass
-class _RefreshLockEntry:
-    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
-    borrowers: int = 0
-
-
-_refresh_locks: dict[KnowledgeSourceRoot, _RefreshLockEntry] = {}
-
-
-def _borrow_refresh_lock_for_key(key: KnowledgeSourceRoot) -> _RefreshLockEntry:
-    with _refresh_locks_guard:
-        entry = _refresh_locks.get(key)
-        if entry is None:
-            _prune_refresh_locks_locked(reserve_slots=1)
-            entry = _RefreshLockEntry()
-            _refresh_locks[key] = entry
-        entry.borrowers += 1
-        return entry
-
-
-def _release_refresh_lock_for_key(key: KnowledgeSourceRoot, entry: _RefreshLockEntry) -> None:
-    with _refresh_locks_guard:
-        if entry.borrowers <= 0:
-            return
-        entry.borrowers -= 1
-        if _refresh_locks.get(key) is entry:
-            _prune_refresh_locks_locked()
-
-
-def _prune_refresh_locks_locked(*, reserve_slots: int = 0) -> None:
-    target_size = max(_MAX_REFRESH_LOCKS - reserve_slots, 0)
-    if len(_refresh_locks) <= target_size:
-        return
-    excess = len(_refresh_locks) - target_size
-    for key, entry in tuple(_refresh_locks.items()):
-        if excess <= 0:
-            break
-        if entry.borrowers > 0 or entry.lock.locked():
-            continue
-        _refresh_locks.pop(key, None)
-        excess -= 1
-
-
-@asynccontextmanager
-async def _acquire_refresh_lock(key: KnowledgeSourceRoot) -> AsyncIterator[None]:
-    entry = _borrow_refresh_lock_for_key(key)
-    acquired = False
-    try:
-        await entry.lock.acquire()
-        acquired = True
-        yield
-    finally:
-        if acquired:
-            entry.lock.release()
-        _release_refresh_lock_for_key(key, entry)
-
-
-def mark_refresh_active(key: KnowledgeRefreshTarget) -> None:
-    """Record scheduler-level refresh activity before a task reaches the runner."""
-    with _active_refresh_counts_guard:
-        _active_refresh_counts[key] = _active_refresh_counts.get(key, 0) + 1
-
-
-def mark_refresh_inactive(key: KnowledgeRefreshTarget) -> None:
-    """Clear scheduler-level refresh activity after a scheduled task finishes."""
-    with _active_refresh_counts_guard:
-        count = _active_refresh_counts.get(key, 0)
-        if count <= 1:
-            _active_refresh_counts.pop(key, None)
-        else:
-            _active_refresh_counts[key] = count - 1
-
-
-def is_refresh_active(key: KnowledgeRefreshTarget) -> bool:
-    """Return whether a refresh is active for one resolved physical binding."""
-    with _active_refresh_counts_guard:
-        return _active_refresh_counts.get(key, 0) > 0
-
-
-def is_refresh_active_for_binding(
-    base_id: str,
-    *,
-    config: Config,
-    runtime_paths: RuntimePaths,
-    execution_identity: ToolExecutionIdentity | None = None,
-) -> bool:
-    """Resolve a binding and return whether it has an active refresh."""
-    try:
-        key = resolve_refresh_target(
-            base_id,
-            config=config,
-            runtime_paths=runtime_paths,
-            execution_identity=execution_identity,
-            create=False,
-        )
-    except ValueError:
-        return False
-    return is_refresh_active(key)
+_REFRESH_SUBPROCESS_THREAD_ENV = {
+    "OMP_NUM_THREADS": "1",
+    "OPENBLAS_NUM_THREADS": "1",
+    "MKL_NUM_THREADS": "1",
+    "NUMEXPR_NUM_THREADS": "1",
+    "VECLIB_MAXIMUM_THREADS": "1",
+    "TOKENIZERS_PARALLELISM": "false",
+}
 
 
 async def refresh_knowledge_binding_in_subprocess(
@@ -227,6 +131,7 @@ async def refresh_knowledge_binding_in_subprocess(
         force_reindex=force_reindex,
     )
     env = dict(runtime_env_values(runtime_paths))
+    env.update(_REFRESH_SUBPROCESS_THREAD_ENV)
     env["MINDROOM_KNOWLEDGE_REFRESH_SUBPROCESS"] = "1"
     process = await asyncio.create_subprocess_exec(
         sys.executable,
@@ -271,11 +176,17 @@ def _serialize_subprocess_refresh_request(
     execution_identity: ToolExecutionIdentity | None,
     force_reindex: bool,
 ) -> bytes:
+    runtime_knowledge_base = config.runtime_knowledge_base_overlay(base_id)
     payload = _SubprocessRefreshRequest(
         base_id=base_id,
         config_data=config.authored_model_dump(),
         config_path=str(runtime_paths.config_path),
         storage_root=str(runtime_paths.storage_root),
+        runtime_knowledge_base=(
+            None
+            if runtime_knowledge_base is None
+            else cast("dict[str, object]", runtime_knowledge_base.model_dump(mode="json", exclude_unset=True))
+        ),
         execution_identity=None
         if execution_identity is None
         else serialize_tool_execution_identity(execution_identity),
@@ -296,18 +207,6 @@ async def _send_subprocess_refresh_request(
     process.stdin.close()
     with suppress(BrokenPipeError, ConnectionResetError):
         await process.stdin.wait_closed()
-
-
-def _refresh_file_lock_path(key: KnowledgeSourceRoot) -> Path:
-    digest = hashlib.sha256(f"{key.storage_root}\0{key.knowledge_path}".encode()).hexdigest()
-    return Path(tempfile.gettempdir()) / "mindroom" / "knowledge_refresh_locks" / f"{digest}.lock"
-
-
-@asynccontextmanager
-async def _acquire_refresh_file_lock(key: KnowledgeSourceRoot) -> AsyncIterator[None]:
-    """Serialize source-root refresh and mutation work across processes."""
-    async with async_exclusive_file_lock(_refresh_file_lock_path(key), poll_seconds=_REFRESH_FILE_LOCK_POLL_SECONDS):
-        yield
 
 
 def _subprocess_session_kwargs() -> _SubprocessSessionKwargs:
@@ -346,7 +245,7 @@ async def _cleanup_cancelled_refresh_subprocess(
     try:
         await _terminate_refresh_subprocess(process)
         source_root = source_root_for_published_index_key(key)
-        async with _acquire_refresh_lock(source_root), _acquire_refresh_file_lock(source_root):
+        async with refresh_source_root_lock(source_root):
             await _reconcile_cancelled_refresh(
                 key,
                 initial_state=initial_state,
@@ -365,7 +264,7 @@ async def _reconcile_failed_refresh_subprocess(
 ) -> None:
     try:
         source_root = source_root_for_published_index_key(key)
-        async with _acquire_refresh_lock(source_root), _acquire_refresh_file_lock(source_root):
+        async with refresh_source_root_lock(source_root):
             state = await asyncio.to_thread(load_published_index_state, published_index_metadata_path(key))
             if not _failed_subprocess_state_can_be_reconciled(key, state, initial_state):
                 return
@@ -392,7 +291,7 @@ async def knowledge_binding_mutation_lock(
         create=create,
     )
     source_root = source_root_for_refresh_target(key)
-    async with _acquire_refresh_lock(source_root), _acquire_refresh_file_lock(source_root):
+    async with refresh_source_root_lock(source_root):
         yield
 
 
@@ -433,7 +332,7 @@ async def _refresh_resolved_knowledge_binding(
     source_root = source_root_for_published_index_key(key)
     mark_refresh_active(refresh_target)
     try:
-        async with _acquire_refresh_lock(source_root), _acquire_refresh_file_lock(source_root):
+        async with refresh_source_root_lock(source_root):
             initial_state = await asyncio.to_thread(
                 load_published_index_state,
                 published_index_metadata_path(key),
@@ -484,7 +383,6 @@ async def _refresh_knowledge_binding_locked(
     force_reindex: bool = False,
 ) -> KnowledgeRefreshResult:
     base_id = key.base_id
-    manager: KnowledgeManager | None = None
     try:
         if config.get_knowledge_base_config(base_id).mode == "files":
             return await _refresh_file_mode_binding_locked(
@@ -517,16 +415,19 @@ async def _refresh_knowledge_binding_locked(
         )
         if unchanged_result is not None:
             return unchanged_result
-        indexed_count = await manager.reindex_all()
-        if manager._last_refresh_error is not None:
-            error = redact_credentials_in_text(manager._last_refresh_error)
-            await asyncio.to_thread(mark_published_index_refresh_failed_preserving_last_good, key, error=error)
+        outcome = await manager.reindex_all(force_reindex=force_reindex)
+        if outcome.error is not None:
+            await asyncio.to_thread(
+                mark_published_index_refresh_failed_preserving_last_good,
+                key,
+                error=outcome.error,
+            )
             return KnowledgeRefreshResult(
                 key=key,
-                indexed_count=indexed_count,
+                indexed_count=outcome.indexed_count,
                 index_published=False,
                 availability=KnowledgeAvailability.REFRESH_FAILED,
-                last_error=error,
+                last_error=outcome.error,
             )
     except Exception as exc:
         error = redact_credentials_in_text(str(exc))
@@ -534,7 +435,7 @@ async def _refresh_knowledge_binding_locked(
         raise
     return await _refresh_result_from_persisted_state(
         key,
-        indexed_count=indexed_count,
+        indexed_count=outcome.indexed_count,
         config=config,
         runtime_paths=runtime_paths,
     )
@@ -543,32 +444,20 @@ async def _refresh_knowledge_binding_locked(
 async def _publish_file_mode_source_metadata(
     key: PublishedIndexKey,
     manager: KnowledgeManager,
+    *,
+    published_revision: str | None = None,
 ) -> KnowledgeRefreshResult:
     """Publish current source metadata for a file-only base without building vectors."""
-    source_signature = await asyncio.to_thread(
-        knowledge_source_signature,
-        manager.config,
-        manager.base_id,
-        manager._knowledge_source_path(),
-        tracked_relative_paths=manager._git_tracked_relative_paths,
-    )
-    now = datetime.now(tz=UTC).isoformat()
+    source_signature = await manager.source_signature()
     await asyncio.to_thread(
         save_published_index_state,
         published_index_metadata_path(key),
-        PublishedIndexState(
+        state_for_publication(
             settings=key.indexing_settings,
-            status="complete",
             collection=None,
-            last_published_at=now,
-            published_revision=manager._git_last_successful_commit,
             indexed_count=0,
             source_signature=source_signature,
-            refresh_job="idle",
-            reason=None,
-            last_error=None,
-            updated_at=now,
-            last_refresh_at=now,
+            published_revision=published_revision,
         ),
     )
     return KnowledgeRefreshResult(
@@ -652,9 +541,11 @@ async def _refresh_file_mode_binding_locked(
         storage_path=binding.storage_root,
         knowledge_path=binding.knowledge_path,
     )
-    if manager._git_config() is not None:
-        git_sync_result = await manager.sync_git_source()
-        if git_sync_result.get("updated", False):
+    published_revision: str | None = None
+    if manager.git_source.is_configured():
+        git_sync_result = await manager.git_source.sync()
+        published_revision = git_sync_result.head
+        if git_sync_result.updated:
             await mark_knowledge_source_changed_async(
                 key.base_id,
                 config=manager.config,
@@ -663,7 +554,7 @@ async def _refresh_file_mode_binding_locked(
                 reason="git_source_updated",
             )
 
-    return await _publish_file_mode_source_metadata(key, manager)
+    return await _publish_file_mode_source_metadata(key, manager, published_revision=published_revision)
 
 
 async def _maybe_publish_unchanged_index(
@@ -673,11 +564,11 @@ async def _maybe_publish_unchanged_index(
     execution_identity: ToolExecutionIdentity | None,
     force_reindex: bool,
 ) -> KnowledgeRefreshResult | None:
-    force_reindex = force_reindex or manager._needs_full_reindex_on_create()
-    if manager._git_config() is not None:
-        git_sync_result = await manager.sync_git_source()
-        if force_reindex or git_sync_result.get("updated", False):
-            if git_sync_result.get("updated", False):
+    force_reindex = force_reindex or manager.needs_full_reindex_on_create()
+    if manager.git_source.is_configured():
+        git_sync_result = await manager.git_source.sync()
+        if force_reindex or git_sync_result.updated:
+            if git_sync_result.updated:
                 await mark_knowledge_source_changed_async(
                     key.base_id,
                     config=manager.config,
@@ -689,7 +580,7 @@ async def _maybe_publish_unchanged_index(
         return await _publish_unchanged_index(
             manager,
             key,
-            published_revision=manager._git_last_successful_commit,
+            published_revision=git_sync_result.head,
         )
     if force_reindex:
         await mark_knowledge_source_changed_async(
@@ -778,6 +669,19 @@ async def _refresh_result_from_persisted_state(
     )
 
 
+def _revision_proves_source_unchanged(state: PublishedIndexState, published_revision: str | None) -> bool:
+    """Return whether a matching Git revision already proves the indexed corpus is unchanged.
+
+    MindRoom owns the checkout and realigns it with ``git reset --hard``, so a tracked
+    file's content is fully determined by HEAD. Every corpus filter (branch, LFS, hidden
+    paths, include/exclude patterns and extensions) lives in ``IndexingSettings``, which
+    the caller has already compared. An unmoved revision therefore means byte-identical
+    indexed content, and hashing the corpus to learn the same thing costs a full read of
+    every file — the dominant cost on a large or network-mounted source.
+    """
+    return published_revision is not None and state.published_revision == published_revision
+
+
 async def _publish_unchanged_index(
     manager: KnowledgeManager,
     key: PublishedIndexKey,
@@ -791,18 +695,15 @@ async def _publish_unchanged_index(
         state is None
         or state.status != "complete"
         or state.source_signature is None
-        or not indexing_settings_metadata_equal(state.settings, key.indexing_settings)
+        or state.settings != key.indexing_settings
         or not await asyncio.to_thread(published_index_collection_exists_for_state, key, state)
     ):
         return None
 
-    current_source_signature = await asyncio.to_thread(
-        knowledge_source_signature,
-        manager.config,
-        manager.base_id,
-        manager._knowledge_source_path(),
-        tracked_relative_paths=manager._git_tracked_relative_paths,
-    )
+    if _revision_proves_source_unchanged(state, published_revision):
+        current_source_signature = state.source_signature
+    else:
+        current_source_signature = await manager.source_signature()
     if current_source_signature != state.source_signature:
         if mark_stale_on_source_change:
             await mark_knowledge_source_changed_async(
@@ -814,9 +715,9 @@ async def _publish_unchanged_index(
             )
         return None
 
+    # Settings already matched at the top of this function, so only the revision
+    # and publish stamp can still move.
     updated_state = state
-    if state.settings != key.indexing_settings:
-        updated_state = replace(updated_state, settings=key.indexing_settings)
     if published_revision is not None:
         updated_state = replace(
             updated_state,
@@ -843,6 +744,17 @@ async def _publish_unchanged_index(
             last_error=error,
         )
     await asyncio.to_thread(mark_published_index_refresh_succeeded, key)
+    # This path returns before any candidate is opened, so it is the only place
+    # that can retire candidate state left by an interrupted forced rebuild.
+    try:
+        await manager.discard_superseded_candidate(published_collection=updated_state.collection)
+    except Exception:
+        logger.warning(
+            "Failed to retire candidate after unchanged knowledge index publish",
+            base_id=manager.base_id,
+            collection=updated_state.collection,
+            exc_info=True,
+        )
     return KnowledgeRefreshResult(
         key=key,
         indexed_count=updated_state.indexed_count or 0,
@@ -866,6 +778,7 @@ def _published_state_fingerprint(state: PublishedIndexState | None) -> tuple[obj
         state.refresh_job,
         state.reason,
         state.last_error,
+        state.consecutive_refresh_failures,
     )
 
 
@@ -950,6 +863,7 @@ def _load_subprocess_refresh_request(payload: bytes) -> _SubprocessRefreshReques
     raw_config_data = raw_payload.get("config_data")
     raw_config_path = raw_payload.get("config_path")
     raw_storage_root = raw_payload.get("storage_root")
+    raw_runtime_knowledge_base = raw_payload.get("runtime_knowledge_base")
     raw_execution_identity = raw_payload.get("execution_identity")
     raw_force_reindex = raw_payload.get("force_reindex", False)
     if not isinstance(raw_base_id, str) or not raw_base_id.strip():
@@ -964,6 +878,9 @@ def _load_subprocess_refresh_request(payload: bytes) -> _SubprocessRefreshReques
     if not isinstance(raw_storage_root, str) or not raw_storage_root.strip():
         msg = "Knowledge refresh subprocess request is missing storage_root"
         raise TypeError(msg)
+    if raw_runtime_knowledge_base is not None and not isinstance(raw_runtime_knowledge_base, dict):
+        msg = "Knowledge refresh subprocess request runtime_knowledge_base must be an object when present"
+        raise TypeError(msg)
     if raw_execution_identity is not None and not isinstance(raw_execution_identity, dict):
         msg = "Knowledge refresh subprocess request execution_identity must be an object when present"
         raise TypeError(msg)
@@ -972,6 +889,7 @@ def _load_subprocess_refresh_request(payload: bytes) -> _SubprocessRefreshReques
         config_data=raw_config_data,
         config_path=raw_config_path,
         storage_root=raw_storage_root,
+        runtime_knowledge_base=cast("dict[str, object] | None", raw_runtime_knowledge_base),
         execution_identity=raw_execution_identity,
         force_reindex=bool(raw_force_reindex),
     )
@@ -985,6 +903,9 @@ async def _run_subprocess_refresh_request(payload: bytes) -> KnowledgeRefreshRes
         process_env=dict(os.environ),
     )
     config = Config.validate_with_runtime(request.config_data, runtime_paths, tolerate_plugin_load_errors=True)
+    if request.runtime_knowledge_base is not None:
+        base_config = KnowledgeBaseConfig.model_validate(request.runtime_knowledge_base)
+        config = config.with_runtime_knowledge_base_overlay(request.base_id, base_config)
     execution_identity = (
         None
         if request.execution_identity is None

@@ -1,0 +1,119 @@
+name: Plugin fleet
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "23 7 * * *"
+  workflow_dispatch:
+    inputs:
+      mindroom_ref:
+        description: Optional MindRoom ref override.
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: plugin-fleet-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  inventory:
+    name: Build plugin matrix
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+
+    steps:
+      - name: Check out MindRoom
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+
+      - name: Check registry drift
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          expected="$(mktemp)"
+          actual="$(mktemp)"
+          jq -r '.[]' .github/plugin-fleet.json | sort > "$expected"
+          gh api --paginate 'orgs/mindroom-ai/repos?per_page=100&type=public' \
+            --jq '.[] | select(.archived == false and (.name | endswith("-plugin"))) | .full_name' \
+            | sort > "$actual"
+          diff -u "$expected" "$actual"
+
+      - name: Export plugin matrix
+        id: matrix
+        run: |
+          matrix="$(jq -c '{include: map({plugin_repository: ., artifact_name: sub("^[^/]+/"; "")})}' .github/plugin-fleet.json)"
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+
+  compatibility:
+    name: ${{ matrix.artifact_name }}
+    needs: inventory
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.inventory.outputs.matrix) }}
+    permissions:
+      contents: read
+    uses: ./.github/workflows/plugin-ci.yml
+    with:
+      plugin_repository: ${{ matrix.plugin_repository }}
+      plugin_ref: main
+      artifact_name: ${{ matrix.artifact_name }}
+      mindroom_repository: ${{ github.repository }}
+      mindroom_ref: ${{ inputs.mindroom_ref || github.sha }}
+
+  report-nightly:
+    name: Report nightly result
+    if: ${{ always() && github.event_name == 'schedule' }}
+    needs: [inventory, compatibility]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: read
+      contents: read
+      issues: write
+
+    steps:
+      - name: Update nightly failure issue
+        env:
+          COMPATIBILITY_RESULT: ${{ needs.compatibility.result }}
+          GH_TOKEN: ${{ github.token }}
+          INVENTORY_RESULT: ${{ needs.inventory.result }}
+          REPOSITORY: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          title="Plugin fleet nightly failure"
+          issue_number="$(
+            gh issue list --repo "$REPOSITORY" --state open --limit 100 \
+              --json number,title --jq ".[] | select(.title == \"$title\") | .number" \
+              | head -1
+          )"
+          if [[ "$INVENTORY_RESULT" == "success" && "$COMPATIBILITY_RESULT" == "success" ]]; then
+            if [[ -n "$issue_number" ]]; then
+              gh issue close "$issue_number" --repo "$REPOSITORY" \
+                --comment "Nightly plugin compatibility recovered: $RUN_URL"
+            fi
+            exit 0
+          fi
+
+          failed_jobs="$(
+            gh api --paginate "repos/$REPOSITORY/actions/runs/$RUN_ID/jobs?per_page=100" \
+              --jq '.jobs[] | select(.conclusion == "failure") | "- \(.name)"'
+          )"
+          printf -v body \
+            'Nightly plugin compatibility failed.\n\nRun: %s\nInventory: %s\nCompatibility: %s\n\nFailed jobs:\n%s' \
+            "$RUN_URL" "$INVENTORY_RESULT" "$COMPATIBILITY_RESULT" "${failed_jobs:-unknown}"
+          if [[ -n "$issue_number" ]]; then
+            gh issue edit "$issue_number" --repo "$REPOSITORY" --body "$body"
+          else
+            gh issue create --repo "$REPOSITORY" --title "$title" --body "$body"
+          fi

@@ -17,7 +17,7 @@ if TYPE_CHECKING:
 
     from agno.tools import Toolkit
 
-    from mindroom.tool_system.metadata import ToolMetadata
+    from mindroom.tool_system.declarations import ToolMetadata
 
 TOOL_METADATA: dict[str, ToolMetadata] = {}
 TOOL_REGISTRY: dict[str, Callable[[], type[Toolkit]]] = {}

@@ -6,15 +6,15 @@ import subprocess
 from typing import TYPE_CHECKING, Any
 
 from mindroom.logging_config import get_logger
-from mindroom.tool_system.dependencies import install_command_for_current_python
-from mindroom.tool_system.metadata import (
+from mindroom.tool_system.declarations import (
     ConfigField,
     SetupType,
     ToolCategory,
     ToolExecutionTarget,
     ToolStatus,
-    register_tool_with_metadata,
 )
+from mindroom.tool_system.dependencies import install_command_for_current_python
+from mindroom.tool_system.registration import register_tool_with_metadata
 
 if TYPE_CHECKING:
     import logging

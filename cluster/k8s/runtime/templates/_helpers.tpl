@@ -187,6 +187,10 @@ app.kubernetes.io/component: runtime
 {{- end -}}
 {{- end -}}
 
+{{- define "mindroom-runtime.networkPolicyName" -}}
+{{- default (include "mindroom-runtime.fullname" .) .Values.networkPolicy.name -}}
+{{- end -}}
+
 {{- define "mindroom-runtime.workerNetworkPolicyName" -}}
 {{- default (printf "%s-workers" (include "mindroom-runtime.fullname" .)) .Values.workers.kubernetes.networkPolicy.name -}}
 {{- end -}}
@@ -209,6 +213,27 @@ app.kubernetes.io/component: runtime
 {{- else -}}
 {{- printf "%s-config" (include "mindroom-runtime.approvedEgressName" .) -}}
 {{- end -}}
+{{- end -}}
+
+{{- define "mindroom-runtime.approvedEgressSquidConfigMapName" -}}
+{{- printf "%s-squid-config" (include "mindroom-runtime.approvedEgressName" .) -}}
+{{- end -}}
+
+{{- define "mindroom-runtime.approvedEgressSquidConfigPath" -}}
+/etc/squid/mindroom-egress-chain.conf
+{{- end -}}
+
+{{- define "mindroom-runtime.approvedEgressSquidConfig" -}}
+include /etc/squid/squid.conf
+
+acl egress_has_token req_header Proxy-Authorization .
+dns_defnames on
+cache_peer {{ .Values.approvedEgress.parentProxy.host }} parent {{ .Values.approvedEgress.parentProxy.port }} 0 no-query no-digest login=PASSTHRU
+cache_peer_access {{ .Values.approvedEgress.parentProxy.host }} allow egress_has_token
+cache_peer_access {{ .Values.approvedEgress.parentProxy.host }} deny all
+nonhierarchical_direct off
+always_direct allow !egress_has_token
+never_direct allow egress_has_token
 {{- end -}}
 
 {{- define "mindroom-runtime.approvedEgressClaimName" -}}
@@ -321,6 +346,14 @@ matchLabels:
 {{- $scheme = "http" -}}
 {{- end -}}
 {{- printf "%s://%s.%s.svc.cluster.local:%v" $scheme $serviceName $namespace $servicePort -}}
+{{- end -}}
+
+{{- define "mindroom-runtime.agentVaultProxyUrl" -}}
+{{- if and .Values.approvedEgress.enabled .Values.approvedEgress.parentProxy.enabled -}}
+{{- include "mindroom-runtime.egressProxyUrl" . -}}
+{{- else -}}
+{{- .Values.workers.kubernetes.agentVault.proxyUrl -}}
+{{- end -}}
 {{- end -}}
 
 {{- define "mindroom-runtime.workerExtraEnvJson" -}}
@@ -449,11 +482,32 @@ app.kubernetes.io/managed-by: {{ .Release.Service | quote }}
 {{- printf "%s-bootstrap" (include "mindroom-runtime.agentVaultServerName" .) | trunc 63 | trimSuffix "-" -}}
 {{- end -}}
 
+{{- define "mindroom-runtime.agentVaultAccessGrantsName" -}}
+{{- printf "%s-access-grants" (include "mindroom-runtime.agentVaultServerName" .) | trunc 63 | trimSuffix "-" -}}
+{{- end -}}
+
+{{- define "mindroom-runtime.agentVaultAccessGrantsConfigPath" -}}
+/etc/mindroom-agent-vault-access-grants/access-grants.yaml
+{{- end -}}
+
+{{- define "mindroom-runtime.agentVaultAccessGrantsTokenPath" -}}
+{{- printf "/etc/agent-vault-access-grants/%s" .Values.workers.kubernetes.agentVault.accessGrants.adminTokenSecret.key -}}
+{{- end -}}
+
 {{- define "mindroom-runtime.agentVaultBootstrapLabels" -}}
 helm.sh/chart: {{ printf "%s-%s" .Chart.Name .Chart.Version | replace "+" "_" | quote }}
 app.kubernetes.io/name: {{ include "mindroom-runtime.agentVaultBootstrapName" . | quote }}
 app.kubernetes.io/instance: {{ .Release.Name | quote }}
 app.kubernetes.io/component: agent-vault-bootstrap
+app.kubernetes.io/version: {{ .Chart.AppVersion | quote }}
+app.kubernetes.io/managed-by: {{ .Release.Service | quote }}
+{{- end -}}
+
+{{- define "mindroom-runtime.agentVaultAccessGrantsLabels" -}}
+helm.sh/chart: {{ printf "%s-%s" .Chart.Name .Chart.Version | replace "+" "_" | quote }}
+app.kubernetes.io/name: {{ include "mindroom-runtime.agentVaultAccessGrantsName" . | quote }}
+app.kubernetes.io/instance: {{ .Release.Name | quote }}
+app.kubernetes.io/component: agent-vault-access-grants
 app.kubernetes.io/version: {{ .Chart.AppVersion | quote }}
 app.kubernetes.io/managed-by: {{ .Release.Service | quote }}
 {{- end -}}
@@ -466,4 +520,27 @@ app.kubernetes.io/managed-by: {{ .Release.Service | quote }}
 {{- define "mindroom-runtime.agentVaultBootstrapImage" -}}
 {{- $av := .Values.workers.kubernetes.agentVault -}}
 {{- required "workers.kubernetes.agentVault.bootstrap.image or cliImage is required when bootstrap is enabled" (default $av.cliImage $av.bootstrap.image) -}}
+{{- end -}}
+
+{{/*
+Provider API key env vars the runtime natively syncs into its credential
+service at startup. Mirrors PROVIDER_ENV_KEYS in src/mindroom/constants.py.
+*/}}
+{{- define "mindroom-runtime.providerCredentialEnvMap" -}}
+anthropic: ANTHROPIC_API_KEY
+azure: AZURE_OPENAI_API_KEY
+openai: OPENAI_API_KEY
+google: GOOGLE_API_KEY
+openrouter: OPENROUTER_API_KEY
+deepseek: DEEPSEEK_API_KEY
+cerebras: CEREBRAS_API_KEY
+groq: GROQ_API_KEY
+zai: ZAI_API_KEY
+ollama: OLLAMA_HOST
+{{- end -}}
+
+{{- define "mindroom-runtime.providerCredentialEnvName" -}}
+{{- $entry := index . 1 -}}
+{{- $envMap := include "mindroom-runtime.providerCredentialEnvMap" (index . 0) | fromYaml -}}
+{{- index $envMap $entry.provider -}}
 {{- end -}}

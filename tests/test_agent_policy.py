@@ -71,9 +71,9 @@ def test_resolve_agent_policy_index_marks_private_team_ineligibility() -> None:
     assert index.policies["helper"].team_eligibility_reason is None
     assert (
         index.policies["leader"].team_eligibility_reason
-        == "Delegates to private agent 'mind', so it cannot participate in teams yet."
+        == "Delegates to private agent 'mind', so it cannot participate in teams."
     )
-    assert index.policies["mind"].team_eligibility_reason == "Private agents cannot participate in teams yet."
+    assert index.policies["mind"].team_eligibility_reason == "Private agents cannot be configured as team members."
 
 
 def test_resolve_agent_policy_index_is_order_independent_for_cycles() -> None:
@@ -99,10 +99,10 @@ def test_resolve_agent_policy_index_is_order_independent_for_cycles() -> None:
             "a": ("a",),
             "b": ("a",),
         }
-        assert index.policies["a"].team_eligibility_reason == "Private agents cannot participate in teams yet."
+        assert index.policies["a"].team_eligibility_reason == "Private agents cannot be configured as team members."
         assert (
             index.policies["b"].team_eligibility_reason
-            == "Delegates to private agent 'a', so it cannot participate in teams yet."
+            == "Delegates to private agent 'a', so it cannot participate in teams."
         )
 
 

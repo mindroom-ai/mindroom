@@ -6,10 +6,7 @@ export type MemorySearchMode = "keyword" | "semantic";
 export type WorkerScope = "shared" | "user" | "user_agent";
 export type PrivateWorkerScope = Exclude<WorkerScope, "shared">;
 export type AgentPolicySource =
-  | "private.per"
-  | "agent.worker_scope"
-  | "defaults.worker_scope"
-  | "unscoped";
+  "private.per" | "agent.worker_scope" | "defaults.worker_scope" | "unscoped";
 export type AgentPoliciesByAgent = Record<string, AgentPolicy>;
 export const DEFAULT_PRIVATE_KNOWLEDGE_PATH = "memory";
 export const SHARED_CONTEXT_FILE_PLACEHOLDER = "SOUL.md";
@@ -29,6 +26,7 @@ export interface MemoryConfig {
     provider: string;
     config: {
       model: string;
+      credentials_service?: string;
       host?: string;
       dimensions?: number;
     };
@@ -117,29 +115,50 @@ export interface CompactionConfig {
   enabled?: boolean;
   threshold_tokens?: number | null;
   threshold_percent?: number | null;
+  replay_window_tokens?: number | null;
   reserve_tokens?: number;
+  timeout_seconds?: number | null;
   model?: string | null;
+  fallback_model?: string | null;
 }
 
 const DEFAULT_INHERITED_TOOLS = ["scheduler"] as const;
 
+// Every authored compaction field except the model names, which carry their own
+// clear semantics. Keep in sync with CompactionOverrideConfig in the backend:
+// authoring any of these marks the override as authored, which the backend
+// resolves to enabled compaction.
+const COMPACTION_NON_MODEL_FIELDS: readonly (keyof CompactionConfig)[] = [
+  "enabled",
+  "threshold_tokens",
+  "threshold_percent",
+  "replay_window_tokens",
+  "reserve_tokens",
+  "timeout_seconds",
+];
+
+function hasAuthoredNonModelCompactionField(
+  compaction: CompactionConfig,
+): boolean {
+  return COMPACTION_NON_MODEL_FIELDS.some(
+    (field) => compaction[field] !== undefined,
+  );
+}
+
 function isPureCompactionModelClear(compaction: CompactionConfig): boolean {
+  const modelFields = [compaction.model, compaction.fallback_model];
   return (
-    compaction.model === null &&
-    compaction.enabled === undefined &&
-    compaction.threshold_tokens === undefined &&
-    compaction.threshold_percent === undefined &&
-    compaction.reserve_tokens === undefined
+    modelFields.some((value) => value === null) &&
+    modelFields.every((value) => value === null || value === undefined) &&
+    !hasAuthoredNonModelCompactionField(compaction)
   );
 }
 
 function isEmptyCompactionOverride(compaction: CompactionConfig): boolean {
   return (
-    compaction.enabled === undefined &&
     compaction.model === undefined &&
-    compaction.threshold_tokens === undefined &&
-    compaction.threshold_percent === undefined &&
-    compaction.reserve_tokens === undefined
+    compaction.fallback_model === undefined &&
+    !hasAuthoredNonModelCompactionField(compaction)
   );
 }
 
@@ -258,10 +277,11 @@ export interface RoomConfig {
 }
 
 export interface VoiceSTTConfig {
-  provider: string;
+  provider: "openai" | "openai_compatible";
   model: string;
   api_key?: string;
   host?: string;
+  extra_kwargs?: Record<string, unknown>;
 }
 
 export interface VoiceLLMConfig {
@@ -273,6 +293,16 @@ export interface VoiceConfig {
   visible_router_echo: boolean;
   stt: VoiceSTTConfig;
   intelligence: VoiceLLMConfig;
+}
+
+export interface MatrixRoomAccessConfig {
+  mode?: "single_user_private" | "multi_user";
+  multi_user_join_rule?: "public" | "knock";
+  publish_to_room_directory?: boolean;
+  invite_only_rooms?: string[];
+  reconcile_existing_rooms?: boolean;
+  encrypt_managed_rooms?: boolean;
+  room_admins?: string[]; // Matrix user IDs granted admin power (100) in every managed room
 }
 
 export interface Config {
@@ -306,6 +336,7 @@ export interface Config {
   teams?: Record<string, TeamConfig>; // Teams configuration
   tools?: Record<string, unknown>; // Tool configurations
   voice?: VoiceConfig; // Voice configuration
+  matrix_room_access?: MatrixRoomAccessConfig; // Managed room access policy
 }
 
 export interface AgentPolicy {
@@ -366,18 +397,21 @@ function normalizeCompactionConfig(
     return compaction;
   }
 
-  const normalizedModel =
-    compaction.model === null
+  const normalizeModelName = (
+    modelName: string | null | undefined,
+  ): string | null | undefined =>
+    modelName === null
       ? null
-      : compaction.model?.trim()
-        ? compaction.model.trim()
+      : modelName?.trim()
+        ? modelName.trim()
         : undefined;
   const hasExplicitNullClear = Object.values(compaction).some(
     (value) => value === null,
   );
   const normalizedCompaction: CompactionConfig = {
     ...compaction,
-    model: normalizedModel,
+    model: normalizeModelName(compaction.model),
+    fallback_model: normalizeModelName(compaction.fallback_model),
   };
 
   if (

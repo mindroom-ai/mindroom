@@ -2,35 +2,11 @@
 
 import { useState, useEffect } from 'react'
 import { useSubscription } from '@/hooks/useSubscription'
-import { createPortalSession, getPricingConfig } from '@/lib/api'
+import { createPortalSession, getPricingConfig, type PricingConfig } from '@/lib/api'
 import { logger } from '@/lib/logger'
 import { PLAN_GRADIENTS, type PlanId } from '@/lib/pricing-config'
 import { DashboardLoader } from '@/components/dashboard/DashboardLoader'
 import { Loader2, CreditCard, TrendingUp, Check, RefreshCw } from 'lucide-react'
-
-interface PricingPlan {
-  name: string
-  price_monthly: string
-  price_yearly: string
-  description: string
-  features: string[]
-  recommended?: boolean
-  included_ai_budget_usd?: number
-  requires_customer_provider_keys?: boolean
-  resource_profile?: 'small' | 'pro'
-  limits?: {
-    max_agents: number | string
-    max_messages_per_day: number | string
-    storage_gb: number | string
-  }
-}
-
-interface PricingConfig {
-  plans: Record<string, PricingPlan>
-  discounts?: {
-    annual_percentage: number
-  }
-}
 
 function formatLimit(value: number | string | undefined): string {
   if (!value) return 'N/A'
@@ -41,6 +17,11 @@ function formatLimit(value: number | string | undefined): string {
     return value.toString()
   }
   return value
+}
+
+function formatMonthlyPrice(price: string): string {
+  if (price === 'custom') return 'Custom'
+  return `${price}/month`
 }
 
 export default function BillingPage() {
@@ -101,7 +82,7 @@ export default function BillingPage() {
   const tierInfo = {
     name: currentPlan?.name || 'Free',
     price: currentPlan ?
-      `${currentPlan.price_monthly}/month` :
+      formatMonthlyPrice(currentPlan.price_monthly) :
       '$0/month',
   }
 

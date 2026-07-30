@@ -22,8 +22,17 @@ from mindroom.mcp.registry import (
 )
 from mindroom.mcp.toolkit import bind_mcp_server_manager
 from mindroom.mcp.types import MCPServerState
-from mindroom.tool_system.metadata import TOOL_METADATA, TOOL_REGISTRY, SetupType, ToolStatus, get_tool_by_name
-from mindroom.tool_system.worker_routing import supports_tool_name_for_worker_scope
+from mindroom.tool_system.declarations import SetupType, ToolManagedInitArg, ToolStatus
+from mindroom.tool_system.metadata import (
+    TOOL_METADATA,
+    TOOL_REGISTRY,
+    get_tool_by_name,
+)
+from mindroom.tool_system.worker_routing import (
+    ToolExecutionIdentity,
+    resolve_worker_target,
+    supports_tool_name_for_worker_scope,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -247,7 +256,7 @@ def test_config_validation_rejects_runtime_mcp_name_collisions(tmp_path: Path) -
     )
     (plugin_root / "tools.py").write_text(
         "from agno.tools import Toolkit\n"
-        "from mindroom.tool_system.metadata import ToolCategory, register_tool_with_metadata\n"
+        "from mindroom.tool_system.declarations import ToolCategory\nfrom mindroom.tool_system.registration import register_tool_with_metadata\n"
         "\n"
         "class DemoTool(Toolkit):\n"
         "    def __init__(self) -> None:\n"
@@ -296,7 +305,7 @@ def test_config_validation_allows_non_mcp_prefixed_plugin_tools_on_isolating_sco
     )
     (plugin_root / "tools.py").write_text(
         "from agno.tools import Toolkit\n"
-        "from mindroom.tool_system.metadata import ToolCategory, register_tool_with_metadata\n"
+        "from mindroom.tool_system.declarations import ToolCategory\nfrom mindroom.tool_system.registration import register_tool_with_metadata\n"
         "\n"
         "class DemoTool(Toolkit):\n"
         "    def __init__(self) -> None:\n"
@@ -328,7 +337,7 @@ def test_config_validation_allows_non_mcp_prefixed_plugin_tools_on_isolating_sco
         _runtime_paths(tmp_path),
     )
 
-    assert "mcp_custom_plugin" in config.get_agent_available_tools("code")
+    assert "mcp_custom_plugin" in config.resolve_entity("code").available_tools
 
 
 def test_mcp_tool_registry_returns_empty_toolkit_without_bound_manager(tmp_path: Path) -> None:
@@ -340,6 +349,28 @@ def test_mcp_tool_registry_returns_empty_toolkit_without_bound_manager(tmp_path:
 
     assert toolkit.name == "mcp_demo"
     assert toolkit.async_functions == {}
+
+
+def test_non_oauth_mcp_toolkit_builds_for_private_per_user_worker_target(tmp_path: Path) -> None:
+    """Tool construction accepts isolating worker targets for non-OAuth MCP tools."""
+    config = _config(tmp_path)
+    sync_mcp_tool_registry(config)
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="code",
+        requester_id="@alice:example.test",
+        room_id="!room:example.test",
+        thread_id="$thread",
+        resolved_thread_id="$thread",
+        session_id=None,
+        tenant_id="tenant",
+        account_id=None,
+    )
+    worker_target = resolve_worker_target("user_agent", "code", identity)
+
+    toolkit = get_tool_by_name("mcp_demo", _runtime_paths(tmp_path), worker_target=worker_target)
+
+    assert toolkit.name == "mcp_demo"
 
 
 def _bind_failed_manager(tmp_path: Path, server_config: MCPServerConfig) -> None:
@@ -390,12 +421,24 @@ def test_mcp_tool_registry_fails_when_required_server_unavailable(tmp_path: Path
         get_tool_by_name("mcp_demo", _runtime_paths(tmp_path), worker_target=None)
 
 
-def test_mcp_tool_names_are_shared_only(tmp_path: Path) -> None:
-    """Treat all MCP registry tools as shared-only integrations."""
+def test_non_oauth_mcp_toolkit_declares_constructor_managed_init_args(tmp_path: Path) -> None:
+    """Non-OAuth MCP tools still expose the shared MCP toolkit constructor contract."""
+    sync_mcp_tool_registry(_config(tmp_path))
+
+    assert TOOL_METADATA["mcp_demo"].managed_init_args == (
+        ToolManagedInitArg.RUNTIME_PATHS,
+        ToolManagedInitArg.CREDENTIALS_MANAGER,
+        ToolManagedInitArg.WORKER_TARGET,
+    )
+
+
+def test_non_oauth_mcp_tool_names_are_supported_on_isolating_scope(tmp_path: Path) -> None:
+    """Non-OAuth MCP registry tools are scope-agnostic; calls always use the shared server session."""
     sync_mcp_tool_registry(_config(tmp_path))
 
     assert mcp_server_id_from_tool_name("mcp_demo") == "demo"
-    assert supports_tool_name_for_worker_scope("mcp_demo", "user") is False
+    assert supports_tool_name_for_worker_scope("mcp_demo", "user") is True
+    assert supports_tool_name_for_worker_scope("mcp_demo", "user_agent") is True
 
 
 def test_oauth_mcp_tool_names_are_supported_on_isolating_scope(tmp_path: Path) -> None:

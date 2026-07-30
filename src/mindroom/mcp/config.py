@@ -110,6 +110,10 @@ class MCPServerConfig(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     enabled: bool = Field(default=True, description="Whether the server is active")
+    description: str | None = Field(
+        default=None,
+        description="What the server provides; appended to the OAuth bridge tool descriptions shown to the model. Requires auth.",
+    )
     required: bool = Field(
         default=False,
         description="Block dependent agent startup while this server is unavailable instead of degrading",
@@ -129,6 +133,14 @@ class MCPServerConfig(BaseModel):
     call_timeout_seconds: float = Field(default=120.0, gt=0, description="Default call timeout")
     max_concurrent_calls: int = Field(default=1, ge=1, description="Maximum concurrent calls")
     auto_reconnect: bool = Field(default=True, description="Whether to reconnect automatically")
+
+    @field_validator("description")
+    @classmethod
+    def normalize_description(cls, value: str | None) -> str | None:
+        """Collapse blank descriptions to None so callers can test truthiness."""
+        if value is None:
+            return None
+        return value.strip() or None
 
     @field_validator("include_tools", "exclude_tools", mode="before")
     @classmethod
@@ -190,6 +202,10 @@ class MCPServerConfig(BaseModel):
             self._validate_stdio_transport()
         else:
             self._validate_remote_transport()
+
+        if self.description is not None and self.auth is None:
+            msg = "MCP description requires OAuth auth; it is only surfaced in OAuth bridge tool descriptions"
+            raise ValueError(msg)
 
         if self.auth is not None and self.auth.discovery == "manual":
             if not self.auth.authorization_url or not self.auth.authorization_url.strip():

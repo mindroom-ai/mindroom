@@ -30,6 +30,7 @@ import mindroom.api.sandbox_runner_app as sandbox_runner_app_module
 import mindroom.api.sandbox_worker_prep as sandbox_worker_prep_module
 import mindroom.constants as constants_module
 import mindroom.tool_system.metadata as metadata_module
+import mindroom.tool_system.registration as registration_module
 from mindroom import runtime_env_policy
 from mindroom.api.sandbox_runner_app import app as sandbox_runner_app
 from mindroom.config.main import Config, ConfigRuntimeValidationError
@@ -48,13 +49,9 @@ from mindroom.credentials import (
 from mindroom.oauth.providers import OAuthConnectionRequired
 from mindroom.runtime_env_policy import SHARED_CREDENTIALS_PATH_ENV
 from mindroom.tool_system.bootstrap import ensure_tool_registry_loaded
+from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCategory, ToolMetadata, ToolStatus
 from mindroom.tool_system.metadata import (
     TOOL_METADATA,
-    ConfigField,
-    SetupType,
-    ToolCategory,
-    ToolMetadata,
-    ToolStatus,
     get_tool_by_name,
     resolved_tool_validation_snapshot_for_runtime,
     serialize_tool_validation_snapshot,
@@ -122,6 +119,14 @@ def _set_sandbox_token(monkeypatch: pytest.MonkeyPatch) -> None:
     """Set the sandbox token through the runner's explicit runtime env boundary."""
     monkeypatch.setenv("MINDROOM_SANDBOX_PROXY_TOKEN", SANDBOX_TOKEN)
     _refresh_runner_app_from_env()
+
+
+def _shell_command_output(result: object, *, cwd: Path) -> str:
+    """Assert and remove the workspace cwd line from a shell command result."""
+    assert isinstance(result, str)
+    prefix = f"[cwd: {cwd.resolve()}]\n"
+    assert result.startswith(prefix)
+    return result.removeprefix(prefix)
 
 
 def _set_worker_tool_validation_snapshot(*tool_names: str) -> None:
@@ -237,8 +242,8 @@ def _missing_plugin_path_config_path(tmp_path: Path) -> Path:
         "    include_default_tools: false\n"
         "    tools:\n"
         "      - shell\n"
-        "  saguaro:\n"
-        "    display_name: Saguaro\n"
+        "  searcher:\n"
+        "    display_name: Searcher\n"
         "    model: default\n"
         "    include_default_tools: false\n"
         "    tools:\n"
@@ -1327,7 +1332,7 @@ async def test_inprocess_execution_tool_uses_encrypted_persisted_config_after_ke
     )
 
     assert response.ok is True, response
-    assert response.result == f"{workspace}|"
+    assert _shell_command_output(response.result, cwd=workspace) == f"{workspace}|"
 
 
 def test_subprocess_execution_preloads_encrypted_persisted_config_without_runtime_key(
@@ -2368,7 +2373,7 @@ def test_resolve_entrypoint_loads_persisted_tool_credentials(
     )
     monkeypatch.setenv("MINDROOM_CONFIG_PATH", str(config_path))
     monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(shared_storage))
-    metadata_module.register_builtin_tool_metadata(
+    registration_module.register_builtin_tool_metadata(
         ToolMetadata(
             name=tool_name,
             display_name="Dummy",
@@ -2431,7 +2436,7 @@ def test_get_tool_by_name_loads_persisted_tool_credentials_without_explicit_mana
     original_builtin_metadata = metadata_module.BUILTIN_TOOL_METADATA.copy()
     storage_root = tmp_path / "runtime-storage"
     monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(storage_root))
-    metadata_module.register_builtin_tool_metadata(
+    registration_module.register_builtin_tool_metadata(
         ToolMetadata(
             name=tool_name,
             display_name="Dummy",
@@ -2807,7 +2812,7 @@ def test_sandbox_runner_execute_refreshes_plugin_metadata_before_override_valida
     )
     (plugin_root / "tools.py").write_text(
         "from agno.tools import Toolkit\n"
-        "from mindroom.tool_system.metadata import ConfigField, ToolCategory, register_tool_with_metadata\n"
+        "from mindroom.tool_system.declarations import ConfigField, ToolCategory\nfrom mindroom.tool_system.registration import register_tool_with_metadata\n"
         "\n"
         "class DemoPluginTool(Toolkit):\n"
         "    def __init__(self, label: str | None = None) -> None:\n"
@@ -2871,7 +2876,7 @@ def test_sandbox_runner_execute_refreshes_plugin_metadata_before_tool_init_overr
     )
     (plugin_root / "tools.py").write_text(
         "from agno.tools import Toolkit\n"
-        "from mindroom.tool_system.metadata import ConfigField, ToolCategory, register_tool_with_metadata\n"
+        "from mindroom.tool_system.declarations import ConfigField, ToolCategory\nfrom mindroom.tool_system.registration import register_tool_with_metadata\n"
         "\n"
         "class DemoPluginInitTool(Toolkit):\n"
         "    def __init__(self, base_dir: str | None = None) -> None:\n"
@@ -3391,7 +3396,7 @@ def test_sandbox_runner_auto_saves_large_result_for_routed_agent_workspace(
     original_metadata = TOOL_METADATA.copy()
     original_builtin_registry = metadata_module.BUILTIN_TOOL_REGISTRY.copy()
     original_builtin_metadata = metadata_module.BUILTIN_TOOL_METADATA.copy()
-    metadata_module.register_builtin_tool_metadata(
+    registration_module.register_builtin_tool_metadata(
         ToolMetadata(
             name=tool_name,
             display_name="Runner Auto Save",
@@ -3972,7 +3977,7 @@ def test_dedicated_user_agent_worker_shell_uses_private_base_dir(
     assert response.status_code == 200
     data = response.json()
     assert data["ok"] is True
-    assert json.loads(data["result"]) == {
+    assert json.loads(_shell_command_output(data["result"], cwd=private_workspace)) == {
         "cwd": str(private_workspace),
         "owner": "alice",
     }
@@ -4124,8 +4129,9 @@ def test_sandbox_runner_worker_shell_uses_workspace_home_and_worker_venv(
     assert data["ok"] is True
 
     worker_root = storage_root / "workers" / worker_dir_name("worker-a")
-    expected_result = f"{worker_root / 'workspace'}|{worker_root / 'venv'}|{worker_root / 'workspace'}"
-    assert data["result"] == expected_result
+    workspace = worker_root / "workspace"
+    expected_result = f"{workspace}|{worker_root / 'venv'}|{workspace}"
+    assert _shell_command_output(data["result"], cwd=workspace) == expected_result
 
 
 @requires_linux(reason=LINUX_LOCAL_WORKER_REASON, timeout=LINUX_LOCAL_WORKER_TIMEOUT_SECONDS)
@@ -5239,7 +5245,8 @@ def test_worker_routed_shell_uses_agent_workspace_as_home(
     assert response.status_code == 200
     payload = response.json()
     assert payload["ok"] is True, payload
-    pwd, home, agent_workspace, xdg_config, xdg_cache, virtual_env = payload["result"].split("|", 5)
+    shell_output = _shell_command_output(payload["result"], cwd=workspace)
+    pwd, home, agent_workspace, xdg_config, xdg_cache, virtual_env = shell_output.split("|", 5)
     assert pwd == str(workspace.resolve())
     assert home == str(workspace.resolve())
     assert agent_workspace == str(workspace.resolve())
@@ -5305,7 +5312,8 @@ def test_worker_routed_shell_ignores_dotenv_for_workspace_home_contract(
     assert response.status_code == 200
     payload = response.json()
     assert payload["ok"] is True, payload
-    home, agent_workspace, xdg_config, xdg_cache, pip_cache, uv_cache, pycache, virtual_env = payload["result"].split(
+    shell_output = _shell_command_output(payload["result"], cwd=workspace)
+    home, agent_workspace, xdg_config, xdg_cache, pip_cache, uv_cache, pycache, virtual_env = shell_output.split(
         "|",
         7,
     )
@@ -5427,7 +5435,7 @@ def test_worker_attachment_save_can_be_read_through_shell_home(
     assert read_response.status_code == 200
     read_payload = read_response.json()
     assert read_payload["ok"] is True, read_payload
-    assert read_payload["result"] == payload_bytes.decode()
+    assert _shell_command_output(read_payload["result"], cwd=workspace) == payload_bytes.decode()
 
 
 def test_workspace_env_hook_uses_routed_agent_workspace_without_base_dir(tmp_path: Path) -> None:
@@ -5683,7 +5691,7 @@ def test_workspace_env_hook_shell_side_effects_do_not_reach_command(tmp_path: Pa
     response = sandbox_runner_module._execute_request_subprocess_sync(request, runtime_paths, config)
 
     assert response.ok is True, response
-    token, pwd = str(response.result).split("|", 1)
+    token, pwd = _shell_command_output(response.result, cwd=workspace).split("|", 1)
     assert token == "hooked"  # noqa: S105
     assert pwd == str(workspace)
 
@@ -5770,7 +5778,7 @@ def test_workspace_env_hook_overlays_shell_execution(
     assert response.status_code == 200
     payload = response.json()
     assert payload["ok"] is True, payload
-    token, path_value = payload["result"].split("|", 1)
+    token, path_value = _shell_command_output(payload["result"], cwd=workspace).split("|", 1)
     assert token == "hello-from-hook"  # noqa: S105
     assert path_value.startswith(f"{workspace.resolve()}/.local/bin:")
 
@@ -5806,7 +5814,7 @@ def test_workspace_env_hook_edits_take_effect_on_next_call(
 
         assert first.status_code == 200
         assert first.json()["ok"] is True
-        assert first.json()["result"] == "first"
+        assert _shell_command_output(first.json()["result"], cwd=workspace) == "first"
 
         _write_workspace_env_hook(workspace, "export WORKSPACE_HOOK_TOKEN=second\n")
 
@@ -5825,7 +5833,7 @@ def test_workspace_env_hook_edits_take_effect_on_next_call(
 
     assert second.status_code == 200
     assert second.json()["ok"] is True
-    assert second.json()["result"] == "second"
+    assert _shell_command_output(second.json()["result"], cwd=workspace) == "second"
 
 
 @requires_linux(reason=LINUX_LOCAL_WORKER_REASON, timeout=LINUX_LOCAL_WORKER_TIMEOUT_SECONDS)
@@ -5881,7 +5889,8 @@ def test_workspace_env_hook_keeps_user_credentials_and_filters_runner_control(
     assert response.status_code == 200
     payload = response.json()
     assert payload["ok"] is True, payload
-    api_key, stripe_secret, token, proxy_token, sandbox_value = payload["result"].split("|", 4)
+    shell_output = _shell_command_output(payload["result"], cwd=workspace)
+    api_key, stripe_secret, token, proxy_token, sandbox_value = shell_output.split("|", 4)
     assert api_key == "from-hook"
     assert stripe_secret == "from-hook"  # noqa: S105
     assert token == "from-hook"  # noqa: S105
@@ -6150,7 +6159,7 @@ def test_workspace_env_hook_unkeyed_proxy_uses_init_override_base_dir(
     assert response.status_code == 200
     payload = response.json()
     assert payload["ok"] is True, payload
-    assert payload["result"] == "visible"
+    assert _shell_command_output(payload["result"], cwd=workspace) == "visible"
 
 
 @requires_linux(reason=LINUX_LOCAL_WORKER_REASON, timeout=LINUX_LOCAL_WORKER_TIMEOUT_SECONDS)

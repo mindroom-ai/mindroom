@@ -21,6 +21,7 @@ import json
 import os
 import posixpath
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from types import MappingProxyType
@@ -29,6 +30,7 @@ from typing import TYPE_CHECKING, Protocol, cast
 import yaml
 
 from mindroom import constants
+from mindroom.config.yaml_includes import load_yaml_config_source
 from mindroom.constants import RuntimePaths
 from mindroom.runtime_env_policy import (
     CREDENTIALS_ENCRYPTION_KEY_ENV,
@@ -41,7 +43,7 @@ from mindroom.runtime_env_policy import (
     credentials_encryption_key_value,
     worker_extra_env,
 )
-from mindroom.tool_system.worker_routing import worker_id_for_key
+from mindroom.tool_system.worker_routing import descriptive_worker_id_for_key
 from mindroom.workers.backend import WorkerBackendError
 from mindroom.workers.backends._dedicated_worker_common import (
     plan_scoped_visible_state_roots,
@@ -52,6 +54,15 @@ from mindroom.workers.backends._lifecycle import WorkerLifecycleState
 from mindroom.workers.backends.kubernetes_config import (
     credentials_encryption_key_hash,
     is_kubernetes_worker_backend_config_env_name,
+)
+from mindroom.workers.backends.kubernetes_pod_names import (
+    AGENT_VAULT_BOOTSTRAP_VOLUME_NAME,
+    AGENT_VAULT_CA_VOLUME_NAME,
+    AGENT_VAULT_MINT_CONTAINER_NAME,
+    AGENT_VAULT_TOKEN_VOLUME_NAME,
+    SANDBOX_RUNNER_CONTAINER_NAME,
+    WORKER_CONFIG_VOLUME_NAME,
+    WORKER_STORAGE_VOLUME_NAME,
 )
 
 if TYPE_CHECKING:
@@ -79,6 +90,7 @@ _ANNOTATION_STARTUP_MANIFEST_HASH = "mindroom.ai/startup-manifest-hash"
 _ANNOTATION_RUNNER_TOKEN_HASH = "mindroom.ai/runner-token-hash"  # noqa: S105
 _ANNOTATION_CREDENTIALS_ENCRYPTION_KEY_HASH = "mindroom.ai/credentials-encryption-key-hash"
 _ANNOTATION_TEMPLATE_HASH = "mindroom.ai/template-hash"
+_ANNOTATION_PRIVATE_AGENT_NAMES = "mindroom.ai/private-agent-names"
 
 _LABEL_COMPONENT = "mindroom.ai/component"
 _LABEL_COMPONENT_VALUE = "worker"
@@ -89,22 +101,19 @@ _LABEL_NAME_VALUE = "mindroom-worker"
 _LABEL_WORKER_ID = "mindroom.ai/worker-id"
 # Agent Vault per-worker egress: an init container in the worker pod mints the
 # worker's proxy-role token into a shared in-pod volume; the sandbox runner
-# composes http://<token>:@<proxy host> for python/shell. No separate bridge pod.
-_AGENT_VAULT_MINT_CONTAINER_NAME = "agent-vault-mint-token"
+# composes http://<token>:<vault>@<proxy host> for python/shell. No separate bridge pod.
 _AGENT_VAULT_TOKEN_MOUNT_DIR = "/agent-vault"  # noqa: S105
 _AGENT_VAULT_TOKEN_FILE = "token"  # noqa: S105
 _AGENT_VAULT_TOKEN_PATH = f"{_AGENT_VAULT_TOKEN_MOUNT_DIR}/{_AGENT_VAULT_TOKEN_FILE}"
 _AGENT_VAULT_BOOTSTRAP_MOUNT_PATH = "/agent-vault-bootstrap"
 _AGENT_VAULT_OWNER_PASSWORD_SECRET_KEY = "AGENT_VAULT_OWNER_PASSWORD"  # noqa: S105
-_AGENT_VAULT_TOKEN_VOLUME = "agent-vault-token"  # noqa: S105
-_AGENT_VAULT_BOOTSTRAP_VOLUME = "agent-vault-bootstrap"
-_AGENT_VAULT_CA_VOLUME = "agent-vault-ca"
 _AGENT_VAULT_WORKER_CA_MOUNT_DIR = "/etc/agent-vault"
 _AGENT_VAULT_WORKER_CA_FILE = "ca.pem"
 _AGENT_VAULT_WORKER_CA_PATH = f"{_AGENT_VAULT_WORKER_CA_MOUNT_DIR}/{_AGENT_VAULT_WORKER_CA_FILE}"
 # Worker pod env consumed by the sandbox runner to compose python/shell proxy env.
 _WORKER_EGRESS_PROXY_URL_ENV = WORKER_EGRESS_PROXY_ENV_BY_KEY["proxy_url"]
 _WORKER_EGRESS_PROXY_TOKEN_FILE_ENV = WORKER_EGRESS_PROXY_ENV_BY_KEY["token_file"]
+_WORKER_EGRESS_PROXY_VAULT_ENV = WORKER_EGRESS_PROXY_ENV_BY_KEY["vault"]
 _WORKER_EGRESS_PROXY_CA_FILE_ENV = WORKER_EGRESS_PROXY_ENV_BY_KEY["ca_file"]
 # HOME is kept on the init container's own ephemeral filesystem (not the shared
 # token volume) so the owner CLI session never lands on a volume the
@@ -127,19 +136,47 @@ agent-vault auth login \\
   --email "$AGENT_VAULT_OWNER_EMAIL" \\
   --password-stdin < "{bootstrap_path}/{owner_password_key}" > /dev/null
 agent-vault vault create "$AGENT_VAULT_VAULT" > /dev/null 2>&1 || true
+agent-vault owner vault join "$AGENT_VAULT_VAULT" > /dev/null 2>&1 || true
 if ! agent-vault agent create "$AGENT_VAULT_VAULT" \\
   --vault "$AGENT_VAULT_VAULT:proxy" \\
   --token-only > "{token_path}"; then
   agent-vault agent rotate "$AGENT_VAULT_VAULT" --token-only > "{token_path}"
 fi
+if ! agent-vault vault agent add "$AGENT_VAULT_VAULT" \\
+  --vault "$AGENT_VAULT_VAULT" \\
+  --role proxy > /dev/null; then
+  agent-vault vault agent set-role "$AGENT_VAULT_VAULT" \\
+    --vault "$AGENT_VAULT_VAULT" \\
+    --role proxy > /dev/null
+fi
 test -s "{token_path}"
 """
 
-_CONTAINER_NAME = "sandbox-runner"
+_CONTAINER_NAME = SANDBOX_RUNNER_CONTAINER_NAME
 _KUBERNETES_STORAGE_SUBPATH_PREFIX_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["storage_subpath_prefix"]
 _DEFAULT_CONTAINER_PATH = "/app/.venv/bin:/usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin"
 _WORKER_TOKEN_PURPOSE = b"mindroom-kubernetes-worker-token-v1"
 _CREDENTIALS_ENCRYPTION_KEY_SECRET_SUFFIX = "credentials-encryption-key"  # noqa: S105
+
+
+def _extend_unique_named_pod_entries(
+    entries: list[dict[str, object]],
+    extra_entries: tuple[dict[str, object], ...],
+    *,
+    field_name: str,
+) -> None:
+    existing_names = {name.strip() for entry in entries if isinstance(name := entry.get("name"), str) and name.strip()}
+    for index, extra_entry in enumerate(extra_entries):
+        name = extra_entry.get("name")
+        if not isinstance(name, str) or not name.strip():
+            msg = f"{field_name}[{index}].name must be a non-empty string."
+            raise WorkerBackendError(msg)
+        name = name.strip()
+        if name in existing_names:
+            msg = f"{field_name}[{index}].name duplicates existing pod entry: {name}."
+            raise WorkerBackendError(msg)
+        existing_names.add(name)
+        entries.append(dict(extra_entry))
 
 
 @dataclass(frozen=True, slots=True)
@@ -154,6 +191,50 @@ class _ApiStatusError(Exception):
 
 
 class _KubernetesMetadata(Protocol):
+    @property
+    def name(self) -> str: ...
+
+    @property
+    def annotations(self) -> dict[str, str] | None: ...
+
+    @property
+    def labels(self) -> dict[str, str]: ...
+
+    @property
+    def generation(self) -> int | None: ...
+
+    @property
+    def uid(self) -> str | None: ...
+
+
+class _KubernetesDeploymentSpec(Protocol):
+    @property
+    def replicas(self) -> int | None: ...
+
+
+class _KubernetesDeploymentStatus(Protocol):
+    @property
+    def ready_replicas(self) -> int | None: ...
+
+    @property
+    def observed_generation(self) -> int | None: ...
+
+
+class KubernetesDeployment(Protocol):
+    """Minimal Deployment surface used by the backend."""
+
+    @property
+    def metadata(self) -> _KubernetesMetadata: ...  # noqa: D102
+
+    @property
+    def spec(self) -> _KubernetesDeploymentSpec: ...  # noqa: D102
+
+    @property
+    def status(self) -> _KubernetesDeploymentStatus: ...  # noqa: D102
+
+
+@dataclass(slots=True)
+class _DeploymentMetadataSnapshot:
     name: str
     annotations: dict[str, str] | None
     labels: dict[str, str]
@@ -161,21 +242,22 @@ class _KubernetesMetadata(Protocol):
     uid: str | None
 
 
-class _KubernetesDeploymentSpec(Protocol):
+@dataclass(slots=True)
+class _DeploymentSpecSnapshot:
     replicas: int | None
 
 
-class _KubernetesDeploymentStatus(Protocol):
+@dataclass(slots=True)
+class _DeploymentStatusSnapshot:
     ready_replicas: int | None
     observed_generation: int | None
 
 
-class KubernetesDeployment(Protocol):
-    """Minimal Deployment surface used by the backend."""
-
-    metadata: _KubernetesMetadata
-    spec: _KubernetesDeploymentSpec
-    status: _KubernetesDeploymentStatus
+@dataclass(slots=True)
+class _DeploymentSnapshot:
+    metadata: _DeploymentMetadataSnapshot
+    spec: _DeploymentSpecSnapshot
+    status: _DeploymentStatusSnapshot
 
 
 class _KubernetesPodSpec(Protocol):
@@ -186,8 +268,10 @@ class _KubernetesPod(Protocol):
     spec: _KubernetesPodSpec
 
 
-class _KubernetesDeploymentList(Protocol):
-    items: list[KubernetesDeployment] | None
+class _KubernetesRawResponse(Protocol):
+    data: bytes
+
+    def release_conn(self) -> None: ...
 
 
 class _AppsApiProtocol(Protocol):
@@ -204,7 +288,13 @@ class _AppsApiProtocol(Protocol):
 
     def delete_namespaced_deployment(self, name: str, namespace: str) -> None: ...
 
-    def list_namespaced_deployment(self, namespace: str, label_selector: str) -> _KubernetesDeploymentList: ...
+    def list_namespaced_deployment(
+        self,
+        namespace: str,
+        *,
+        label_selector: str,
+        _preload_content: bool = True,
+    ) -> _KubernetesRawResponse: ...
 
 
 class _KubernetesApiClientProtocol(Protocol):
@@ -373,6 +463,20 @@ def _template_hash(template: dict[str, object]) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
+def parse_private_agent_names_annotation(annotations: dict[str, str]) -> frozenset[str] | None:
+    """Parse the persisted private-agent visibility annotation, ``None`` when absent."""
+    raw = annotations.get(_ANNOTATION_PRIVATE_AGENT_NAMES)
+    if not raw:
+        return None
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(parsed, list):
+        return None
+    return frozenset(name for name in parsed if isinstance(name, str))
+
+
 def _labels(*, extra_labels: dict[str, str], worker_id: str) -> dict[str, str]:
     labels = {
         _LABEL_COMPONENT: _LABEL_COMPONENT_VALUE,
@@ -394,15 +498,96 @@ def _list_selector(*, extra_labels: dict[str, str]) -> str:
     return ",".join(f"{key}={value}" for key, value in sorted(selector.items()))
 
 
+def _optional_int(value: object, *, field_name: str) -> int | None:
+    """Read one optional integer from a Kubernetes JSON response."""
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int):
+        msg = f"Kubernetes Deployment list returned invalid {field_name}."
+        raise WorkerBackendError(msg)
+    return value
+
+
+def _required_mapping(payload: Mapping[str, object], field_name: str) -> Mapping[str, object]:
+    """Read one required object from a Kubernetes Deployment payload."""
+    value = payload.get(field_name)
+    if not isinstance(value, Mapping):
+        msg = f"Kubernetes Deployment list returned an item without an object {field_name}."
+        raise WorkerBackendError(msg)
+    return cast("Mapping[str, object]", value)
+
+
+def _optional_mapping(payload: Mapping[str, object], field_name: str) -> Mapping[str, object]:
+    """Read one optional object, treating absence as empty."""
+    value = payload.get(field_name)
+    if value is None:
+        return {}
+    if not isinstance(value, Mapping):
+        msg = f"Kubernetes Deployment list returned a non-object {field_name}."
+        raise WorkerBackendError(msg)
+    return cast("Mapping[str, object]", value)
+
+
+def _string_mapping(value: object, *, field_name: str) -> dict[str, str]:
+    """Read an optional string-to-string Kubernetes metadata mapping."""
+    if value is None:
+        return {}
+    if not isinstance(value, Mapping) or any(
+        not isinstance(key, str) or not isinstance(item, str) for key, item in value.items()
+    ):
+        msg = f"Kubernetes Deployment list returned invalid {field_name}."
+        raise WorkerBackendError(msg)
+    return dict(cast("Mapping[str, str]", value))
+
+
+def _deployment_snapshot(payload: object) -> KubernetesDeployment:
+    """Project one raw Deployment payload onto fields used by maintenance."""
+    if not isinstance(payload, Mapping):
+        msg = "Kubernetes Deployment list returned a non-object item."
+        raise WorkerBackendError(msg)
+    payload_mapping = cast("Mapping[str, object]", payload)
+    metadata = _required_mapping(payload_mapping, "metadata")
+    spec = _required_mapping(payload_mapping, "spec")
+    # status is populated by the deployment controller, so a Deployment read
+    # before that first write has none. Absence means "not ready yet", which the
+    # None fields below already express -- never a reason to fail the whole pass.
+    status = _optional_mapping(payload_mapping, "status")
+    name = metadata.get("name")
+    if not isinstance(name, str) or not name:
+        msg = "Kubernetes Deployment list returned an item without metadata.name."
+        raise WorkerBackendError(msg)
+    uid = metadata.get("uid")
+    if uid is not None and not isinstance(uid, str):
+        msg = "Kubernetes Deployment list returned invalid metadata.uid."
+        raise WorkerBackendError(msg)
+    annotations = _string_mapping(metadata.get("annotations"), field_name="metadata.annotations")
+    return _DeploymentSnapshot(
+        metadata=_DeploymentMetadataSnapshot(
+            name=name,
+            annotations=annotations,
+            labels=_string_mapping(metadata.get("labels"), field_name="metadata.labels"),
+            generation=_optional_int(metadata.get("generation"), field_name="metadata.generation"),
+            uid=uid,
+        ),
+        spec=_DeploymentSpecSnapshot(
+            replicas=_optional_int(spec.get("replicas"), field_name="spec.replicas"),
+        ),
+        status=_DeploymentStatusSnapshot(
+            ready_replicas=_optional_int(status.get("readyReplicas"), field_name="status.readyReplicas"),
+            observed_generation=_optional_int(
+                status.get("observedGeneration"),
+                field_name="status.observedGeneration",
+            ),
+        ),
+    )
+
+
 def _resolved_agent_policies_for_runtime_paths(runtime_paths: RuntimePaths) -> dict[str, ResolvedAgentPolicy]:
     try:
-        raw_config = runtime_paths.config_path.read_text(encoding="utf-8")
+        config_data, _source_files = load_yaml_config_source(runtime_paths.config_path)
     except OSError:
         return {}
-
-    try:
-        config_data = yaml.safe_load(raw_config) or {}
-    except yaml.YAMLError as exc:
+    except (yaml.YAMLError, UnicodeError) as exc:
         msg = f"Failed to parse Kubernetes worker config for scoped storage planning: {exc}"
         raise WorkerBackendError(msg) from exc
     if not isinstance(config_data, dict):
@@ -458,12 +643,23 @@ class KubernetesResourceManager:
         return self.api_exception_cls
 
     def list_deployments(self) -> list[KubernetesDeployment]:
-        """List managed worker Deployments in this namespace."""
+        """List lightweight worker snapshots without Kubernetes model deserialization."""
         response = self._apps.list_namespaced_deployment(
             self.config.namespace,
             label_selector=_list_selector(extra_labels=self.config.extra_labels),
+            _preload_content=False,
         )
-        return list(response.items or [])
+        try:
+            payload = json.loads(response.data)
+        except (json.JSONDecodeError, TypeError, UnicodeDecodeError) as exc:
+            msg = "Kubernetes Deployment list returned invalid JSON."
+            raise WorkerBackendError(msg) from exc
+        finally:
+            response.release_conn()
+        if not isinstance(payload, Mapping) or not isinstance(payload.get("items"), list):
+            msg = "Kubernetes Deployment list returned an invalid items payload."
+            raise WorkerBackendError(msg)
+        return [_deployment_snapshot(item) for item in payload["items"]]
 
     def read_deployment(self, deployment_name: str) -> KubernetesDeployment | None:
         """Read one Deployment, returning ``None`` for 404s."""
@@ -562,6 +758,20 @@ class KubernetesResourceManager:
             body["spec"] = {"replicas": replicas}
         self._apps.patch_namespaced_deployment(deployment_name, self.config.namespace, body)
 
+    def patch_deployment_annotations(self, deployment_name: str, *, annotations: dict[str, str]) -> bool:
+        """Merge selected Deployment annotations, returning false when it disappeared."""
+        try:
+            self._apps.patch_namespaced_deployment(
+                deployment_name,
+                self.config.namespace,
+                {"metadata": {"annotations": annotations}},
+            )
+        except self._api_exception as exc:
+            if exc.status == 404:
+                return False
+            raise
+        return True
+
     def delete_deployment(self, deployment_name: str) -> None:
         """Delete one worker Deployment, ignoring 404s."""
         self._delete_object(self._apps.delete_namespaced_deployment, deployment_name)
@@ -594,7 +804,7 @@ class KubernetesResourceManager:
         cfg = self.config.agent_vault
         if cfg is None:
             return None
-        return worker_id_for_key(worker_key, prefix=cfg.vault_name_prefix)
+        return descriptive_worker_id_for_key(worker_key, prefix=cfg.vault_name_prefix)
 
     def _agent_vault_init_container(self, *, worker_key: str) -> dict[str, object]:
         cfg: KubernetesAgentVaultConfig | None = self.config.agent_vault
@@ -608,7 +818,7 @@ class KubernetesResourceManager:
             token_path=_AGENT_VAULT_TOKEN_PATH,
         )
         return {
-            "name": _AGENT_VAULT_MINT_CONTAINER_NAME,
+            "name": AGENT_VAULT_MINT_CONTAINER_NAME,
             "image": cfg.cli_image,
             "imagePullPolicy": self.config.image_pull_policy,
             "command": ["sh", "-ec", script],
@@ -618,9 +828,9 @@ class KubernetesResourceManager:
                 {"name": "AGENT_VAULT_VAULT", "value": vault},
             ],
             "volumeMounts": [
-                {"name": _AGENT_VAULT_TOKEN_VOLUME, "mountPath": _AGENT_VAULT_TOKEN_MOUNT_DIR},
+                {"name": AGENT_VAULT_TOKEN_VOLUME_NAME, "mountPath": _AGENT_VAULT_TOKEN_MOUNT_DIR},
                 {
-                    "name": _AGENT_VAULT_BOOTSTRAP_VOLUME,
+                    "name": AGENT_VAULT_BOOTSTRAP_VOLUME_NAME,
                     "mountPath": _AGENT_VAULT_BOOTSTRAP_MOUNT_PATH,
                     "readOnly": True,
                 },
@@ -628,13 +838,18 @@ class KubernetesResourceManager:
             "securityContext": {"allowPrivilegeEscalation": False, "capabilities": {"drop": ["ALL"]}},
         }
 
-    def _agent_vault_main_env(self) -> list[dict[str, object]]:
+    def _agent_vault_main_env(self, *, worker_key: str) -> list[dict[str, object]]:
         cfg = self.config.agent_vault
         if cfg is None:
             return []
+        vault = self.agent_vault_vault_name(worker_key)
+        if vault is None:
+            msg = f"Agent Vault main env requested without a worker vault name for worker_key={worker_key!r}."
+            raise WorkerBackendError(msg)
         env: list[dict[str, object]] = [
             {"name": _WORKER_EGRESS_PROXY_URL_ENV, "value": cfg.proxy_url},
             {"name": _WORKER_EGRESS_PROXY_TOKEN_FILE_ENV, "value": _AGENT_VAULT_TOKEN_PATH},
+            {"name": _WORKER_EGRESS_PROXY_VAULT_ENV, "value": vault},
         ]
         if cfg.worker_ca_configmap_name is not None:
             env.append({"name": _WORKER_EGRESS_PROXY_CA_FILE_ENV, "value": _AGENT_VAULT_WORKER_CA_PATH})
@@ -645,8 +860,8 @@ class KubernetesResourceManager:
         if cfg is None:
             return []
         return [
-            {"name": _AGENT_VAULT_TOKEN_VOLUME, "emptyDir": {}},
-            {"name": _AGENT_VAULT_BOOTSTRAP_VOLUME, "secret": {"secretName": cfg.bootstrap_secret_name}},
+            {"name": AGENT_VAULT_TOKEN_VOLUME_NAME, "emptyDir": {}},
+            {"name": AGENT_VAULT_BOOTSTRAP_VOLUME_NAME, "secret": {"secretName": cfg.bootstrap_secret_name}},
         ]
 
     def _patch_secret_merge(self, secret_name: str, body: dict[str, object]) -> None:
@@ -885,22 +1100,42 @@ class KubernetesResourceManager:
             secret_data[encryption_key_secret_key] = None
         return secret_data
 
-    def _deployment_manifest(
+    def deployment_template_drifted(
+        self,
+        deployment: KubernetesDeployment,
+        *,
+        worker_key: str,
+        worker_id: str,
+        state_subpath: str,
+        private_agent_names: frozenset[str] | None,
+    ) -> bool:
+        """Return whether one Deployment's recorded pod template differs from current config."""
+        startup_manifest_path, startup_manifest_hash = self._startup_manifest_path_and_hash(
+            worker_key=worker_key,
+            dedicated_root=Path(f"{self.config.storage_mount_path}/{state_subpath}".rstrip("/")),
+        )
+        template = self._pod_template(
+            worker_key=worker_key,
+            worker_id=worker_id,
+            state_subpath=state_subpath,
+            startup_manifest_path=startup_manifest_path,
+            startup_manifest_hash=startup_manifest_hash,
+            private_agent_names=private_agent_names,
+        )
+        recorded_hash = dict(deployment.metadata.annotations or {}).get(_ANNOTATION_TEMPLATE_HASH)
+        return recorded_hash != _template_hash(template)
+
+    def _pod_template(
         self,
         *,
         worker_key: str,
         worker_id: str,
         state_subpath: str,
-        annotations: dict[str, str],
-        replicas: int,
-        private_agent_names: frozenset[str] | None = None,
+        startup_manifest_path: str,
+        startup_manifest_hash: str,
+        private_agent_names: frozenset[str] | None,
     ) -> dict[str, object]:
         worker_labels = _labels(extra_labels=self.config.extra_labels, worker_id=worker_id)
-        startup_manifest_path, startup_manifest_hash = self._write_startup_manifest(
-            worker_key=worker_key,
-            dedicated_root=Path(f"{self.config.storage_mount_path}/{state_subpath}".rstrip("/")),
-            local_dedicated_root=(self.storage_root / state_subpath).resolve(),
-        )
         template_annotations = dict(self.config.extra_annotations)
         template_annotations[ANNOTATION_WORKER_KEY] = worker_key
         template_annotations[_ANNOTATION_STARTUP_MANIFEST_HASH] = startup_manifest_hash
@@ -912,10 +1147,6 @@ class KubernetesResourceManager:
         credentials_key_hash = credentials_encryption_key_hash(self._credentials_encryption_key())
         if credentials_key_hash is not None:
             template_annotations[_ANNOTATION_CREDENTIALS_ENCRYPTION_KEY_HASH] = credentials_key_hash
-        template_metadata = {
-            "labels": worker_labels,
-            "annotations": template_annotations,
-        }
         template_spec: dict[str, object] = {
             "serviceAccountName": self.config.service_account_name,
             "automountServiceAccountToken": False,
@@ -969,12 +1200,49 @@ class KubernetesResourceManager:
             ],
             "volumes": self._volumes(),
         }
+        containers = cast("list[dict[str, object]]", template_spec["containers"])
+        _extend_unique_named_pod_entries(
+            containers,
+            self.config.extra_containers,
+            field_name="extra_containers",
+        )
         if self.config.agent_vault is not None:
             template_spec["initContainers"] = [self._agent_vault_init_container(worker_key=worker_key)]
-        template: dict[str, object] = {
-            "metadata": template_metadata,
+        node_name = self._worker_node_name_or_none()
+        if node_name is not None:
+            template_spec["nodeName"] = node_name
+        return {
+            "metadata": {
+                "labels": worker_labels,
+                "annotations": template_annotations,
+            },
             "spec": template_spec,
         }
+
+    def _deployment_manifest(
+        self,
+        *,
+        worker_key: str,
+        worker_id: str,
+        state_subpath: str,
+        annotations: dict[str, str],
+        replicas: int,
+        private_agent_names: frozenset[str] | None = None,
+    ) -> dict[str, object]:
+        worker_labels = _labels(extra_labels=self.config.extra_labels, worker_id=worker_id)
+        startup_manifest_path, startup_manifest_hash = self._write_startup_manifest(
+            worker_key=worker_key,
+            dedicated_root=Path(f"{self.config.storage_mount_path}/{state_subpath}".rstrip("/")),
+            local_dedicated_root=(self.storage_root / state_subpath).resolve(),
+        )
+        template = self._pod_template(
+            worker_key=worker_key,
+            worker_id=worker_id,
+            state_subpath=state_subpath,
+            startup_manifest_path=startup_manifest_path,
+            startup_manifest_hash=startup_manifest_hash,
+            private_agent_names=private_agent_names,
+        )
         metadata: dict[str, object] = {
             "name": worker_id,
             "namespace": self.config.namespace,
@@ -983,11 +1251,13 @@ class KubernetesResourceManager:
         owner_reference = self._owner_reference_or_none()
         if owner_reference is not None:
             metadata["ownerReferences"] = [owner_reference]
-        node_name = self._worker_node_name_or_none()
-        if node_name is not None:
-            template_spec["nodeName"] = node_name
         desired_annotations = dict(annotations)
         desired_annotations[_ANNOTATION_TEMPLATE_HASH] = _template_hash(template)
+        if private_agent_names is not None:
+            desired_annotations[_ANNOTATION_PRIVATE_AGENT_NAMES] = json.dumps(
+                sorted(private_agent_names),
+                separators=(",", ":"),
+            )
         metadata["annotations"] = desired_annotations
 
         return {
@@ -1013,7 +1283,7 @@ class KubernetesResourceManager:
         venv_path = f"{dedicated_root}/venv"
         env: list[dict[str, object]] = [
             {"name": SANDBOX_RUNTIME_ENV_BY_KEY["runner_mode"], "value": "true"},
-            {"name": SANDBOX_RUNTIME_ENV_BY_KEY["runner_execution_mode"], "value": "subprocess"},
+            {"name": SANDBOX_RUNTIME_ENV_BY_KEY["runner_execution_mode"], "value": "forkserver"},
             {"name": SANDBOX_RUNTIME_ENV_BY_KEY["runner_port"], "value": str(self.config.worker_port)},
             {
                 "name": SANDBOX_STARTUP_MANIFEST_PATH_ENV,
@@ -1036,7 +1306,7 @@ class KubernetesResourceManager:
         if credentials_encryption_key_env is not None:
             env.append(credentials_encryption_key_env)
 
-        env.extend(self._agent_vault_main_env())
+        env.extend(self._agent_vault_main_env(worker_key=worker_key))
 
         for name, value in sorted(worker_extra_env(self.config.extra_env).items()):
             env.append({"name": name, "value": value})
@@ -1084,22 +1354,11 @@ class KubernetesResourceManager:
             raise WorkerBackendError(msg)
         return worker_token
 
-    def _write_startup_manifest(
-        self,
-        *,
-        worker_key: str,
-        dedicated_root: Path,
-        local_dedicated_root: Path,
-    ) -> tuple[str, str]:
+    def _startup_manifest_path_and_hash(self, *, worker_key: str, dedicated_root: Path) -> tuple[str, str]:
+        """Return the worker-visible startup manifest path and content hash without writing."""
         startup_runtime_paths = self._worker_runtime_paths(
             worker_key=worker_key,
             dedicated_root=dedicated_root,
-        )
-        constants.write_startup_manifest(
-            local_dedicated_root,
-            startup_runtime_paths,
-            tool_validation_snapshot=self.tool_validation_snapshot,
-            public_runtime=True,
         )
         return (
             str(constants.sandbox_startup_manifest_path(dedicated_root)),
@@ -1109,6 +1368,21 @@ class KubernetesResourceManager:
                 public_runtime=True,
             ),
         )
+
+    def _write_startup_manifest(
+        self,
+        *,
+        worker_key: str,
+        dedicated_root: Path,
+        local_dedicated_root: Path,
+    ) -> tuple[str, str]:
+        constants.write_startup_manifest(
+            local_dedicated_root,
+            self._worker_runtime_paths(worker_key=worker_key, dedicated_root=dedicated_root),
+            tool_validation_snapshot=self.tool_validation_snapshot,
+            public_runtime=True,
+        )
+        return self._startup_manifest_path_and_hash(worker_key=worker_key, dedicated_root=dedicated_root)
 
     def _worker_runtime_paths(
         self,
@@ -1134,7 +1408,7 @@ class KubernetesResourceManager:
         process_env.update(
             {
                 SANDBOX_RUNTIME_ENV_BY_KEY["runner_mode"]: "true",
-                SANDBOX_RUNTIME_ENV_BY_KEY["runner_execution_mode"]: "subprocess",
+                SANDBOX_RUNTIME_ENV_BY_KEY["runner_execution_mode"]: "forkserver",
                 SANDBOX_RUNTIME_ENV_BY_KEY["runner_port"]: str(self.config.worker_port),
                 "MINDROOM_CONFIG_PATH": str(config_path),
                 "MINDROOM_STORAGE_PATH": str(dedicated_root),
@@ -1175,7 +1449,7 @@ class KubernetesResourceManager:
         if self.config.config_map_name is not None:
             mounts.append(
                 {
-                    "name": "worker-config",
+                    "name": WORKER_CONFIG_VOLUME_NAME,
                     "mountPath": self.config.config_path,
                     "subPath": self.config.config_key,
                     "readOnly": True,
@@ -1184,7 +1458,7 @@ class KubernetesResourceManager:
         if self.config.agent_vault is not None:
             mounts.append(
                 {
-                    "name": _AGENT_VAULT_TOKEN_VOLUME,
+                    "name": AGENT_VAULT_TOKEN_VOLUME_NAME,
                     "mountPath": _AGENT_VAULT_TOKEN_MOUNT_DIR,
                     "readOnly": True,
                 },
@@ -1192,7 +1466,7 @@ class KubernetesResourceManager:
         if self._agent_vault_worker_ca_configmap_name() is not None:
             mounts.append(
                 {
-                    "name": _AGENT_VAULT_CA_VOLUME,
+                    "name": AGENT_VAULT_CA_VOLUME_NAME,
                     "mountPath": _AGENT_VAULT_WORKER_CA_MOUNT_DIR,
                     "readOnly": True,
                 },
@@ -1218,7 +1492,7 @@ class KubernetesResourceManager:
         visible_subpath = PurePosixPath(relative_config_path.parts[0])
         return [
             {
-                "name": "worker-storage",
+                "name": WORKER_STORAGE_VOLUME_NAME,
                 "mountPath": str(storage_root / visible_subpath),
                 "subPath": str(visible_subpath),
                 "readOnly": True,
@@ -1228,14 +1502,14 @@ class KubernetesResourceManager:
     def _volumes(self) -> list[dict[str, object]]:
         volumes: list[dict[str, object]] = [
             {
-                "name": "worker-storage",
+                "name": WORKER_STORAGE_VOLUME_NAME,
                 "persistentVolumeClaim": {"claimName": self.config.storage_pvc_name},
             },
         ]
         if self.config.config_map_name is not None:
             volumes.append(
                 {
-                    "name": "worker-config",
+                    "name": WORKER_CONFIG_VOLUME_NAME,
                     "configMap": {"name": self.config.config_map_name},
                 },
             )
@@ -1244,7 +1518,7 @@ class KubernetesResourceManager:
         if ca_configmap_name is not None:
             volumes.append(
                 {
-                    "name": _AGENT_VAULT_CA_VOLUME,
+                    "name": AGENT_VAULT_CA_VOLUME_NAME,
                     "configMap": {
                         "name": ca_configmap_name,
                         "items": [
@@ -1256,6 +1530,11 @@ class KubernetesResourceManager:
                     },
                 },
             )
+        _extend_unique_named_pod_entries(
+            volumes,
+            self.config.extra_volumes,
+            field_name="extra_volumes",
+        )
         return volumes
 
     def _worker_node_name_or_none(self) -> str | None:
@@ -1320,7 +1599,7 @@ class KubernetesResourceManager:
         mounted_storage_root = Path(self.config.storage_mount_path)
         mounts: list[dict[str, object]] = [
             {
-                "name": "worker-storage",
+                "name": WORKER_STORAGE_VOLUME_NAME,
                 "mountPath": str(planned_root.worker_visible_path),
                 "subPath": str(planned_root.worker_visible_path.relative_to(mounted_storage_root)),
             }
@@ -1335,7 +1614,7 @@ class KubernetesResourceManager:
         ]
         mounts.append(
             {
-                "name": "worker-storage",
+                "name": WORKER_STORAGE_VOLUME_NAME,
                 "mountPath": f"{self.config.storage_mount_path}/{state_subpath}",
                 "subPath": state_subpath,
             },

@@ -4,9 +4,11 @@ When the compaction summary model is the active reply model, the summary call
 can reproduce the reply-path request prefix — system prompt, tool schemas, and
 the history runs being compacted — and append one summary instruction as the
 final user turn.
-Providers that cache the reply prefix (Vertex Claude full-prefix breakpoints,
-OpenAI automatic prefix caching, Anthropic system/tool caching) then serve most
-of the summary input from cache instead of re-reading it at full price.
+Providers can then reuse the cacheable part of that prefix.
+Claude requests with tools deliberately change ``tool_choice`` to ``none`` at
+the provider wire, which preserves tool and system cache reads but invalidates
+Claude's message-level cache; tool-free Claude requests can reuse the history
+prefix too.
 
 This module adapts compaction-domain inputs into the pure Agno forked-request
 adapter (``mindroom.history.agno_forked_request``) and returns the

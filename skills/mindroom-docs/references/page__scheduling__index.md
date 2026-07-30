@@ -2,7 +2,8 @@
 
 Schedule agents or teams to perform tasks at specific times or intervals using natural language.
 
-Tasks run in the thread where they were created.
+By default, tasks run in the same scope where they were created: the room timeline for room-level schedules, or the current thread for threaded schedules.
+The `schedule()` tool accepts `new_thread=True` to start a fresh thread per fire: each fire posts a room-level root and the responding agent answers in a new thread under it with a fresh session.
 
 ## Commands
 
@@ -31,13 +32,15 @@ Tasks run in the thread where they were created.
 
 Conditional or event-like requests are converted to recurring cron-based polling schedules.
 
-The AI picks an appropriate polling frequency based on urgency, and the condition is embedded in the task message so the scheduled responder checks it on each poll cycle.
+For predictable behavior, include an explicit polling cadence.
+
+The condition is embedded in the task message so the scheduled responder checks it on each poll cycle.
 
 These are **not** real event subscriptions — they are periodic checks.
 
 ```
-!schedule If I get an email about "urgent", @phone_agent call me
-!schedule When Bitcoin drops below $40k, @crypto_agent notify me
+!schedule Every 5 minutes, check if I got an email about "urgent"; if so, @phone_agent call me
+!schedule Every 10 minutes, check whether Bitcoin dropped below $40k; if so, @crypto_agent notify me
 ```
 
 ### Edit a Schedule
@@ -67,6 +70,26 @@ Use `!help schedule` for detailed inline help on scheduling commands.
 Include `@agent_name` or `@team_name` in your schedule to have specific responders answer.
 
 The scheduler validates that mentioned agents and teams are available in the room before creating the task.
+
+## History Limits
+
+Scheduled tasks normally use the responder's configured conversation history policy.
+Add a context phrase when you want each run to see less of the current room or thread.
+Use `with no history`, `without context`, or `context-free` when the scheduled responder should see no prior room or thread messages; the system prompt and fired task message remain available.
+Use phrases such as `with only the last 5 messages of context` or `include the last 5 messages` to cap each scheduled run to recent context.
+
+```
+!schedule Every hour, @ops check deployment health with no history
+!schedule Daily at 9am, @research summarize AI news with only the last 5 messages
+```
+
+For edits, omitted fields stay unchanged, including any existing history limit.
+Use `restore full history` or `use unlimited history` in an edit to remove a history limit.
+
+```
+!edit_schedule task42 keep the same schedule but restore full history
+!edit_schedule task42 every weekday at 8am check build status with no history
+```
 
 ## Timezone
 

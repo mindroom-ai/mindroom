@@ -4,14 +4,14 @@ from __future__ import annotations
 
 from typing import Any
 
-from backend.models import StripePriceResponse
+from backend.models import PricingConfigResponse, StripePriceResponse
 from backend.pricing import PRICING_CONFIG_MODEL, get_stripe_price_id
 from fastapi import APIRouter, HTTPException
 
 router = APIRouter()
 
 
-@router.get("/pricing/config")
+@router.get("/pricing/config", response_model=PricingConfigResponse)
 async def get_pricing_config() -> dict[str, Any]:
     """Get the current pricing configuration.
 

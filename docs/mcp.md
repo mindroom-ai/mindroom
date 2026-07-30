@@ -100,6 +100,7 @@ Use the OAuth `auth` block for remote MCP servers that need a different bearer t
 | Option | Type | Default | Notes |
 |--------|------|---------|-------|
 | `enabled` | bool | `true` | Set to `false` to disable one server without removing its config |
+| `description` | string | `null` | What the server provides; appended to the OAuth bridge tool descriptions shown to the model; requires `auth` |
 | `required` | bool | `false` | Block dependent agent startup while this server is unavailable instead of degrading |
 | `transport` | string | *required* | One of `stdio`, `sse`, or `streamable-http` |
 | `command` | string | `null` | Required for `stdio` |
@@ -161,10 +162,9 @@ agents:
 These per-agent overrides filter the already discovered catalog for that agent assignment.
 They are useful when one server exposes many tools but one agent should see only a focused subset.
 
-Non-OAuth MCP integrations are treated as shared-only integrations.
-Agents using `worker_scope: user` or `worker_scope: user_agent` cannot use non-OAuth `mcp_<server_id>` tools.
-Use unscoped execution or `worker_scope: shared` for unauthenticated MCP servers and static-header MCP servers.
-OAuth-backed remote MCP servers are the exception because MindRoom loads a scoped OAuth token for the current requester at tool-call time.
+MCP tools are available on every worker scope, including private per-user agents.
+Non-OAuth `mcp_<server_id>` tools always execute through the shared MCP server session; requester identity and requester credentials are never passed to the server.
+OAuth-backed remote MCP servers instead load a scoped OAuth token for the current requester at tool-call time and keep one session per requester scope.
 
 ## OAuth-Backed Remote MCP
 
@@ -177,6 +177,7 @@ mcp_servers:
     transport: streamable-http
     url: https://mcp.example.com/mcp
     tool_prefix: example
+    description: Example workspace search, documents, and calendar for the signed-in user.
     auth:
       type: oauth
       provider_id: mcp_example
@@ -211,6 +212,8 @@ OAuth-backed MCP servers always expose a stable bridge surface:
 
 The bridge functions let an agent trigger the normal MindRoom OAuth connect flow before the remote server has revealed a requester-specific tool catalog.
 When credentials are missing, the bridge returns the same structured OAuth-required payload used by built-in OAuth tools.
+Until the requester connects, the bridge functions are the only model-visible surface for the server, and their generic descriptions say nothing about what the server offers.
+Set the per-server `description` option to tell the model what connecting would unlock; it is appended to all three bridge tool descriptions.
 After the user connects, `list_tools` returns the remote catalog and `call_tool` sends `Authorization: Bearer <requester access token>` to the MCP server.
 After MindRoom has a cached requester-specific catalog, the toolkit also exposes typed `<prefix>_<remote_tool_name>` functions for that requester in addition to the bridge functions.
 
@@ -423,13 +426,17 @@ If reconnect also fails, the error is surfaced to the caller.
 
 If an MCP server sends a `tools/list_changed` notification, MindRoom refreshes that server's catalog.
 If the catalog changed, MindRoom restarts the agents and teams that reference that server so they pick up the updated tool list.
+The catalog-change callback schedules this replacement asynchronously so the triggering MCP tool call can finish before response draining starts.
+Configured servers with no dependent entity return before admission draining while still invalidating the worker validation snapshot cache.
+Referenced-entity replacement shares one serialized global response-admission owner with config reload.
+It waits up to 600 seconds for active Matrix responses to drain, then force-applies while keeping admission closed over the replacement window.
 
 ## Limitations
 
 - Phase 1 supports MCP tools only.
 - MCP resources and prompts are not exposed in MindRoom yet.
-- Non-OAuth MCP integrations are shared-only and cannot be used with `worker_scope: user` or `worker_scope: user_agent`.
-- OAuth-backed remote MCP integrations use requester-scoped OAuth credentials and can be used with isolating worker scopes.
+- Non-OAuth MCP integrations always use the shared server session, even on isolating worker scopes; per-requester isolation requires an OAuth-backed server.
+- OAuth-backed remote MCP integrations use requester-scoped OAuth credentials and sessions.
 - OAuth-backed remote MCP typed functions appear only after MindRoom has cached a requester-specific remote catalog.
 - `server_id` and `tool_prefix` must use letters, numbers, and underscores.
 - The final function name `<prefix>_<remote_tool_name>` must be 64 characters or fewer.

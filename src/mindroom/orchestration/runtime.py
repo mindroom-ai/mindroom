@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import math
 import random
 import time
 from contextlib import suppress
@@ -25,10 +26,19 @@ from mindroom.cancellation import (
 from mindroom.constants import RuntimePaths, runtime_matrix_ssl_verify
 from mindroom.logging_config import get_logger
 from mindroom.matrix.health import (
+    MATRIX_SYNC_CACHE_WRITE_GRACE_SECONDS,
     MATRIX_SYNC_STARTUP_GRACE_SECONDS,
     MATRIX_SYNC_WATCHDOG_TIMEOUT_SECONDS,
     matrix_versions_url,
     response_has_matrix_versions,
+)
+from mindroom.runtime_shutdown import (
+    GENERIC_SHUTDOWN,
+    SYNC_RESTART_SHUTDOWN,
+    RestartReasonCategory,
+    RuntimeLifecycleAction,
+    RuntimeShutdownIntent,
+    shutdown_intent_for_entity,
 )
 from mindroom.runtime_state import set_runtime_starting
 from mindroom.startup_errors import PermanentStartupError
@@ -51,6 +61,7 @@ STARTUP_RETRY_MAX_DELAY_SECONDS = 60.0
 _CANCELLING_LOGGED_TASKS: set[asyncio.Task[Any]] = set()
 _MATRIX_SYNC_WATCHDOG_POLL_INTERVAL_SECONDS = 5.0
 _MATRIX_SYNC_STARTUP_TIMEOUT_ENV = "MINDROOM_MATRIX_SYNC_STARTUP_TIMEOUT_SECONDS"
+_MATRIX_SYNC_CACHE_WRITE_GRACE_ENV = "MINDROOM_MATRIX_SYNC_CACHE_WRITE_GRACE_SECONDS"
 _STALLED_RESTART_MAX_JITTER_SECONDS = 10.0
 
 
@@ -84,6 +95,7 @@ __all__ = [
     "log_cancelled_response_source",
     "log_startup_phase_finished",
     "log_startup_phase_started",
+    "matrix_sync_cache_write_grace_seconds",
     "matrix_sync_startup_timeout_seconds",
     "request_task_cancel",
     "retry_delay_seconds",
@@ -154,6 +166,22 @@ def matrix_sync_startup_timeout_seconds(runtime_paths: RuntimePaths) -> float:
     return value
 
 
+def matrix_sync_cache_write_grace_seconds(runtime_paths: RuntimePaths) -> float:
+    """Return the finite grace for one active durable sync-cache phase."""
+    raw = (runtime_paths.env_value(_MATRIX_SYNC_CACHE_WRITE_GRACE_ENV) or "").strip()
+    if not raw:
+        return MATRIX_SYNC_CACHE_WRITE_GRACE_SECONDS
+    try:
+        value = float(raw)
+    except ValueError:
+        msg = f"{_MATRIX_SYNC_CACHE_WRITE_GRACE_ENV} must be a finite positive number"
+        raise ValueError(msg) from None
+    if not math.isfinite(value) or value <= 0:
+        msg = f"{_MATRIX_SYNC_CACHE_WRITE_GRACE_ENV} must be a finite positive number"
+        raise ValueError(msg)
+    return value
+
+
 def _matrix_homeserver_startup_timeout_seconds_from_env(
     runtime_paths: RuntimePaths,
 ) -> int | None:
@@ -190,12 +218,12 @@ async def cancel_task(
     task: asyncio.Task | None,
     *,
     suppress_exceptions: tuple[type[BaseException], ...] = (asyncio.CancelledError,),
-    cancel_msg: str | None = None,
+    shutdown_intent: RuntimeShutdownIntent = GENERIC_SHUTDOWN,
 ) -> None:
     """Cancel a detached task and wait for it to finish."""
     if task is None:
         return
-    request_task_cancel(task, cancel_msg=cancel_msg)
+    request_task_cancel(task, cancel_source=shutdown_intent.cancel_source)
     with suppress(*suppress_exceptions):
         await task
 
@@ -240,6 +268,7 @@ class _SyncIteration:
         against a first sync that never completes.
         """
         startup_timeout_seconds = matrix_sync_startup_timeout_seconds(bot.runtime_paths)
+        cache_write_grace_seconds = matrix_sync_cache_write_grace_seconds(bot.runtime_paths)
         startup_monotonic = time.monotonic()
         while bot.running and not sync_task.done():
             await asyncio.sleep(_MATRIX_SYNC_WATCHDOG_POLL_INTERVAL_SECONDS)
@@ -251,23 +280,58 @@ class _SyncIteration:
                 if elapsed <= startup_timeout_seconds:
                     continue
                 logger.error(
-                    "Matrix sync watchdog: first sync never completed",
-                    agent_name=bot.agent_name,
+                    "matrix_sync_watchdog_stalled",
+                    agent=bot.agent_name,
+                    active_response_count=bot.in_flight_response_count,
                     elapsed_seconds=elapsed,
+                    restart_reason_category="first_sync_timeout",
+                    resulting_action="cancel_receive_loop",
                     startup_timeout_seconds=startup_timeout_seconds,
                 )
             elif sync_age_seconds <= MATRIX_SYNC_WATCHDOG_TIMEOUT_SECONDS:
                 continue
             else:
-                logger.error(
-                    "Matrix sync watchdog detected a stalled sync loop",
-                    agent_name=bot.agent_name,
-                    stale_for_seconds=sync_age_seconds,
-                    last_sync_time=bot.last_sync_time.isoformat() if bot.last_sync_time is not None else None,
+                cache_write_progress = bot.sync_cache_write_progress()
+                now_monotonic = time.monotonic()
+                cache_write_seconds = (
+                    cache_write_progress.seconds_in_flight(now_monotonic) if cache_write_progress is not None else None
                 )
+                if cache_write_seconds is not None and cache_write_seconds <= cache_write_grace_seconds:
+                    logger.debug(
+                        "matrix_sync_watchdog_awaiting_cache_write",
+                        agent=bot.agent_name,
+                        active_response_count=bot.in_flight_response_count,
+                        cache_write_grace_seconds=cache_write_grace_seconds,
+                        cache_write_seconds_in_flight=cache_write_seconds,
+                        resulting_action="await_sync_cache_write",
+                        stale_for_seconds=sync_age_seconds,
+                    )
+                    continue
+                if cache_write_seconds is not None:
+                    logger.error(
+                        "matrix_sync_watchdog_stalled",
+                        agent=bot.agent_name,
+                        active_response_count=bot.in_flight_response_count,
+                        cache_write_grace_seconds=cache_write_grace_seconds,
+                        cache_write_seconds_in_flight=cache_write_seconds,
+                        last_sync_time=bot.last_sync_time.isoformat() if bot.last_sync_time is not None else None,
+                        restart_reason_category="cache_write_grace_exhausted",
+                        resulting_action="cancel_receive_loop",
+                        stale_for_seconds=sync_age_seconds,
+                    )
+                else:
+                    logger.error(
+                        "matrix_sync_watchdog_stalled",
+                        agent=bot.agent_name,
+                        active_response_count=bot.in_flight_response_count,
+                        last_sync_time=bot.last_sync_time.isoformat() if bot.last_sync_time is not None else None,
+                        restart_reason_category="sync_activity_timeout",
+                        resulting_action="cancel_receive_loop",
+                        stale_for_seconds=sync_age_seconds,
+                    )
 
             watchdog_cancelled_sync.set()
-            request_task_cancel(sync_task, cancel_msg=SYNC_RESTART_CANCEL_MSG)
+            request_task_cancel(sync_task, cancel_source="sync_restart")
             with suppress(asyncio.CancelledError):
                 await sync_task
             msg = f"Matrix sync loop stalled for {bot.agent_name}"
@@ -320,7 +384,7 @@ class _SyncIteration:
             return
         await self.watchdog_task
 
-    async def cancel(self) -> None:
+    async def cancel(self, *, shutdown_intent: RuntimeShutdownIntent = GENERIC_SHUTDOWN) -> None:
         """Cancel child tasks without masking the original failure."""
         for attr in ("watchdog_task", "sync_task"):
             task = getattr(self, attr)
@@ -328,7 +392,7 @@ class _SyncIteration:
                 continue
             setattr(self, attr, None)
             if attr == "sync_task":
-                request_task_cancel(task, cancel_msg=SYNC_RESTART_CANCEL_MSG)
+                request_task_cancel(task, cancel_source=shutdown_intent.cancel_source)
             else:
                 task.cancel()
             try:
@@ -336,7 +400,53 @@ class _SyncIteration:
             except (asyncio.CancelledError, _MatrixSyncStalledError):
                 pass
             except Exception:
-                logger.warning("Suppressed error during sync iteration cleanup", exc_info=True)
+                logger.warning("sync_iteration_cleanup_failed", agent=self.bot.agent_name, exc_info=True)
+
+
+@dataclass(frozen=True, slots=True)
+class _SyncIterationOutcome:
+    """Why one receive-loop iteration ended, and how its runtime must be settled."""
+
+    # None means the supervisor is done with this bot: it either stopped or was
+    # cancelled, so no replacement receive loop should start.
+    restart_reason_category: RestartReasonCategory | None = None
+    stalled_restart: bool = False
+    shutdown_intent: RuntimeShutdownIntent = GENERIC_SHUTDOWN
+
+
+async def _run_sync_iteration(bot: AgentBot | TeamBot, *, attempt: int) -> _SyncIterationOutcome:
+    """Run one receive-loop iteration and settle only the tasks that iteration owns.
+
+    Live responses outlive a transport restart: the response runtime is torn down
+    only once the bot itself has stopped, which is a config, agent, or process
+    shutdown driven by the caller rather than a restart of the receive loop.
+    """
+    iteration: _SyncIteration | None = None
+    outcome = _SyncIterationOutcome()
+    try:
+        logger.info("starting_sync_loop", agent=bot.agent_name)
+        iteration = _SyncIteration.start(bot)
+        await iteration.wait()
+        if bot.running:
+            logger.warning("sync_loop_returned_while_bot_running", agent=bot.agent_name, retry_count=attempt)
+            outcome = _SyncIterationOutcome(restart_reason_category="unexpected_sync_return")
+    except asyncio.CancelledError as exc:
+        logger.info("sync_task_cancelled", agent=bot.agent_name)
+        if is_sync_restart_cancel(exc):
+            # A replacement runtime is taking over, so its predecessor's responses
+            # must carry sync-restart provenance into the drain below.
+            outcome = _SyncIterationOutcome(shutdown_intent=SYNC_RESTART_SHUTDOWN)
+    except _MatrixSyncStalledError:
+        outcome = _SyncIterationOutcome(restart_reason_category="watchdog_stall", stalled_restart=True)
+    except Exception:
+        logger.exception("sync_loop_failed", agent=bot.agent_name, retry_count=attempt)
+        outcome = _SyncIterationOutcome(restart_reason_category="sync_failure")
+    finally:
+        if iteration is not None:
+            await iteration.cancel(shutdown_intent=outcome.shutdown_intent)
+            if not bot.running:
+                await bot.prepare_for_sync_shutdown(shutdown_intent=outcome.shutdown_intent)
+    return outcome
 
 
 def _log_detached_task_result(task: asyncio.Task, *, message: str) -> None:
@@ -497,38 +607,49 @@ async def cancel_sync_task(
     entity_name: str,
     sync_tasks: dict[str, asyncio.Task],
     *,
-    cancel_msg: str | None = None,
+    shutdown_intent: RuntimeShutdownIntent = GENERIC_SHUTDOWN,
 ) -> None:
     """Cancel and remove a sync task for an entity."""
     task = sync_tasks.pop(entity_name, None)
-    await cancel_task(task, cancel_msg=cancel_msg)
+    await cancel_task(task, shutdown_intent=shutdown_intent)
 
 
 async def stop_entities(
-    entities_to_restart: set[str],
+    entities_to_stop: set[str],
     agent_bots: dict[str, AgentBot | TeamBot],
     sync_tasks: dict[str, asyncio.Task],
+    *,
+    restart_entities: set[str] | None = None,
 ) -> None:
     """Stop a set of entities and remove them from runtime maps."""
+    restart_entities = set() if restart_entities is None else restart_entities
+    shutdown_intents = {
+        entity_name: shutdown_intent_for_entity(entity_name, restart_entities=restart_entities)
+        for entity_name in entities_to_stop
+    }
     # Stop sync loops before certifying callback drains; otherwise fresh callbacks can
     # appear after the checkpoint decision.
-    for entity_name in entities_to_restart:
-        await cancel_sync_task(entity_name, sync_tasks, cancel_msg=SYNC_RESTART_CANCEL_MSG)
+    for entity_name in entities_to_stop:
+        await cancel_sync_task(
+            entity_name,
+            sync_tasks,
+            shutdown_intent=shutdown_intents[entity_name],
+        )
 
-    for entity_name in entities_to_restart:
+    for entity_name in entities_to_stop:
         bot = agent_bots.get(entity_name)
         if bot is not None:
-            await bot.prepare_for_sync_shutdown()
+            await bot.prepare_for_sync_shutdown(shutdown_intent=shutdown_intents[entity_name])
 
     stop_tasks = [
-        agent_bots[entity_name].stop(reason="restart")
-        for entity_name in entities_to_restart
+        agent_bots[entity_name].stop(shutdown_intent=shutdown_intents[entity_name])
+        for entity_name in entities_to_stop
         if entity_name in agent_bots
     ]
     if stop_tasks:
         await asyncio.gather(*stop_tasks)
 
-    for entity_name in entities_to_restart:
+    for entity_name in entities_to_stop:
         agent_bots.pop(entity_name, None)
 
 
@@ -536,45 +657,30 @@ async def sync_forever_with_restart(bot: AgentBot | TeamBot, max_retries: int = 
     """Run sync_forever with automatic restart on failure."""
     retry_count = 0
     while bot.running and (max_retries < 0 or retry_count < max_retries):
-        iteration: _SyncIteration | None = None
-        stalled_restart = False
-        try:
-            logger.info("starting_sync_loop", agent=bot.agent_name)
-            iteration = _SyncIteration.start(bot)
-            await iteration.wait()
-            if not bot.running:
-                # sync_forever returned normally after an intentional stop.
-                break
-            retry_count += 1
-            logger.warning(
-                "sync_loop_returned_while_bot_running",
-                agent=bot.agent_name,
-                retry_count=retry_count,
-            )
-        except asyncio.CancelledError:
-            # Task cancellation is part of normal shutdown.
-            logger.info("sync_task_cancelled", agent=bot.agent_name)
+        outcome = await _run_sync_iteration(bot, attempt=retry_count + 1)
+        if outcome.restart_reason_category is None or not bot.running:
             break
-        except _MatrixSyncStalledError:
-            retry_count += 1
-            stalled_restart = True
-            logger.warning("restarting_stalled_sync_loop", agent=bot.agent_name, retry_count=retry_count)
-        except Exception:
-            retry_count += 1
-            logger.exception("sync_loop_failed", agent=bot.agent_name, retry_count=retry_count)
-        finally:
-            if iteration is not None:
-                await iteration.cancel()
-                await bot.prepare_for_sync_shutdown()
-
-        if not bot.running:
-            break
-        if max_retries >= 0 and retry_count >= max_retries:
+        retry_count += 1
+        will_retry = max_retries < 0 or retry_count < max_retries
+        resulting_action: RuntimeLifecycleAction = "restart_receive_loop" if will_retry else "preserve_response_runtime"
+        logger.warning(
+            "matrix_sync_transport_restart",
+            agent=bot.agent_name,
+            active_response_count=bot.in_flight_response_count,
+            restart_reason_category=outcome.restart_reason_category,
+            resulting_action=resulting_action,
+            retry_count=retry_count,
+            will_retry=will_retry,
+        )
+        if not will_retry:
+            # The entity keeps its live responses but has no receive loop left, so
+            # its stale sync clock surfaces it through the Matrix sync health snapshot.
             logger.error(
                 "sync_loop_retries_exhausted",
                 agent=bot.agent_name,
                 retry_count=retry_count,
                 max_retries=max_retries,
+                restart_reason_category=outcome.restart_reason_category,
             )
             break
 
@@ -583,7 +689,7 @@ async def sync_forever_with_restart(bot: AgentBot | TeamBot, max_retries: int = 
             initial_delay_seconds=5.0,
             max_delay_seconds=60.0,
         )
-        if stalled_restart:
+        if outcome.stalled_restart:
             wait_time += _stalled_restart_jitter_seconds()
         logger.info("restarting_sync_loop", agent=bot.agent_name, retry_count=retry_count, wait_seconds=wait_time)
         await asyncio.sleep(wait_time)

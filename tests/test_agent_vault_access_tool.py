@@ -13,8 +13,8 @@ from mindroom.custom_tools.agent_vault_access import AgentVaultAccessTools, _Age
 from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
+    descriptive_worker_id_for_key,
     resolve_worker_target,
-    worker_id_for_key,
 )
 
 if TYPE_CHECKING:
@@ -38,7 +38,11 @@ def _runtime_paths(tmp_path: Path, *, env: dict[str, str] | None = None) -> Runt
     )
 
 
-def _worker_target(*, requester: str | None = "@bas.nijholt:example.test") -> object:
+def _worker_target(
+    *,
+    requester: str | None = "@bas.nijholt:example.test",
+    worker_scope: str = "user_agent",
+) -> object:
     identity = ToolExecutionIdentity(
         channel="matrix",
         agent_name="mind",
@@ -50,7 +54,7 @@ def _worker_target(*, requester: str | None = "@bas.nijholt:example.test") -> ob
         tenant_id=None,
     )
     return resolve_worker_target(
-        "user_agent",
+        worker_scope,
         "mind",
         execution_identity=identity,
         private_agent_names=frozenset({"mind"}),
@@ -113,9 +117,9 @@ async def test_request_vault_access_grants_and_returns_link(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A first request resolves the vault, grants membership, and returns the link."""
+    """A first request resolves the vault, grants admin access, and returns the link."""
     target = _worker_target()
-    expected_vault = worker_id_for_key(target.worker_key, prefix="agent-vault")
+    expected_vault = descriptive_worker_id_for_key(target.worker_key, prefix="agent-vault")
     api = _FakeVaultAPI({"/v1/vaults": 201, "/join": 409, "/users": 201})
     _patch_client(monkeypatch, api)
 
@@ -129,16 +133,82 @@ async def test_request_vault_access_grants_and_returns_link(
     assert payload["url"] == f"https://example.test/agent-vault/vaults/{expected_vault}"
     # The grant must target the resolved vault and the derived email.
     grant_calls = [body for path, body in api.calls if path.endswith("/users")]
-    assert grant_calls == [{"email": "bas.nijholt@example.test", "role": "member"}]
+    assert grant_calls == [{"email": "bas.nijholt@example.test", "role": "admin"}]
 
 
 @pytest.mark.asyncio
-async def test_request_vault_access_is_idempotent_when_already_member(
+async def test_request_vault_access_names_shared_vault_without_granting(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Re-requesting when already a member reports success without error."""
-    api = _FakeVaultAPI({"/v1/vaults": 409, "/join": 200, "/users": 409})
+    """Shared worker vaults are not requester-owned: name the vault, never grant admin.
+
+    The link alone grants nothing (the UI enforces vault membership), and it is
+    how the operator-designated admin discovers which vault backs this agent.
+    """
+    api = _FakeVaultAPI({"/v1/vaults": 201, "/join": 409, "/users": 201})
+    _patch_client(monkeypatch, api)
+
+    target = _worker_target(worker_scope="shared")
+    expected_vault = descriptive_worker_id_for_key(target.worker_key, prefix="agent-vault")
+    tool = AgentVaultAccessTools(runtime_paths=_runtime_paths(tmp_path), worker_target=target)
+    payload = json.loads(await tool.request_vault_access())
+
+    assert payload["status"] == "ok"
+    assert payload["access"] == "operator_managed"
+    assert payload["vault"] == expected_vault
+    assert payload["url"] == f"https://example.test/agent-vault/vaults/{expected_vault}"
+    assert "operator" in payload["note"]
+    assert "email" not in payload
+    assert api.calls == []
+
+
+@pytest.mark.asyncio
+async def test_shared_scope_tool_needs_only_ui_base_url(tmp_path: Path) -> None:
+    """A shared-scope instance never reaches the grant API, so only the UI base URL is required."""
+    env = {"MINDROOM_AGENT_VAULT_ACCESS_UI_BASE_URL": "https://example.test/agent-vault"}
+    target = _worker_target(worker_scope="shared")
+    expected_vault = descriptive_worker_id_for_key(target.worker_key, prefix="agent-vault")
+
+    tool = AgentVaultAccessTools(runtime_paths=_runtime_paths(tmp_path, env=env), worker_target=target)
+    payload = json.loads(await tool.request_vault_access())
+
+    assert payload["status"] == "ok"
+    assert payload["access"] == "operator_managed"
+    assert payload["url"] == f"https://example.test/agent-vault/vaults/{expected_vault}"
+
+
+def test_isolated_scope_still_requires_grant_config(tmp_path: Path) -> None:
+    """Requester-isolated scopes self-grant, so the full API configuration stays required."""
+    env = {"MINDROOM_AGENT_VAULT_ACCESS_UI_BASE_URL": "https://example.test/agent-vault"}
+    with pytest.raises(_AgentVaultAccessError, match="API_URL"):
+        AgentVaultAccessTools(runtime_paths=_runtime_paths(tmp_path, env=env), worker_target=_worker_target())
+
+
+def test_unknown_target_still_requires_grant_config(tmp_path: Path) -> None:
+    """Without a worker target the reachable paths are unknown, so validation stays strict."""
+    env = {"MINDROOM_AGENT_VAULT_ACCESS_UI_BASE_URL": "https://example.test/agent-vault"}
+    with pytest.raises(_AgentVaultAccessError, match="API_URL"):
+        AgentVaultAccessTools(runtime_paths=_runtime_paths(tmp_path, env=env), worker_target=None)
+
+
+@pytest.mark.asyncio
+async def test_shared_vault_link_needs_no_requester(tmp_path: Path) -> None:
+    """The shared-vault link is requester-independent, so a missing requester is fine."""
+    target = _worker_target(requester=None, worker_scope="shared")
+    tool = AgentVaultAccessTools(runtime_paths=_runtime_paths(tmp_path), worker_target=target)
+    payload = json.loads(await tool.request_vault_access())
+    assert payload["status"] == "ok"
+    assert payload["access"] == "operator_managed"
+
+
+@pytest.mark.asyncio
+async def test_request_vault_access_is_idempotent_when_already_has_access(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Re-requesting when already granted reports success without error."""
+    api = _FakeVaultAPI({"/v1/vaults": 409, "/join": 200, "/users": 409, "/role": 200})
     _patch_client(monkeypatch, api)
 
     tool = AgentVaultAccessTools(runtime_paths=_runtime_paths(tmp_path), worker_target=_worker_target())
@@ -146,6 +216,23 @@ async def test_request_vault_access_is_idempotent_when_already_member(
 
     assert payload["status"] == "ok"
     assert payload["access"] == "already had access"
+
+
+@pytest.mark.asyncio
+async def test_request_vault_access_promotes_existing_member_to_admin(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Existing vault members must be promoted so the tool always leaves admin access."""
+    api = _FakeVaultAPI({"/v1/vaults": 409, "/join": 200, "/users": 409, "/role": 200})
+    _patch_client(monkeypatch, api)
+
+    tool = AgentVaultAccessTools(runtime_paths=_runtime_paths(tmp_path), worker_target=_worker_target())
+    payload = json.loads(await tool.request_vault_access())
+
+    assert payload["status"] == "ok"
+    role_updates = [body for path, body in api.calls if path.endswith("/role")]
+    assert role_updates == [{"role": "admin"}]
 
 
 @pytest.mark.asyncio
@@ -160,7 +247,7 @@ async def test_request_vault_access_joins_worker_created_vault(
     the owner actor vault-admin) before POSTing the member grant.
     """
     target = _worker_target()
-    expected_vault = worker_id_for_key(target.worker_key, prefix="agent-vault")
+    expected_vault = descriptive_worker_id_for_key(target.worker_key, prefix="agent-vault")
     # Pre-existing vault (409 on create), not yet joined (200 on join).
     api = _FakeVaultAPI({"/v1/vaults": 409, "/join": 200, "/users": 201})
     _patch_client(monkeypatch, api)
@@ -175,6 +262,69 @@ async def test_request_vault_access_joins_worker_created_vault(
     grant_path = f"/v1/vaults/{expected_vault}/users"
     assert join_path in paths
     assert paths.index(join_path) < paths.index(grant_path)
+
+
+@pytest.mark.asyncio
+async def test_request_vault_access_keeps_worker_token_owner_admin(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Self-service grants must also keep the worker token-mint owner as vault admin."""
+    env = {**_ENV, "MINDROOM_AGENT_VAULT_ACCESS_OWNER_EMAIL": "owner@example.test"}
+    api = _FakeVaultAPI({"/v1/vaults": 409, "/join": 200, "/users": 201})
+    _patch_client(monkeypatch, api)
+
+    tool = AgentVaultAccessTools(runtime_paths=_runtime_paths(tmp_path, env=env), worker_target=_worker_target())
+    payload = json.loads(await tool.request_vault_access())
+
+    assert payload["status"] == "ok"
+    grant_calls = [body for path, body in api.calls if path.endswith("/users")]
+    assert grant_calls == [
+        {"email": "owner@example.test", "role": "admin"},
+        {"email": "bas.nijholt@example.test", "role": "admin"},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_request_vault_access_skips_duplicate_owner_grant(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A requester who is also the configured owner should be granted once."""
+    env = {**_ENV, "MINDROOM_AGENT_VAULT_ACCESS_OWNER_EMAIL": "owner@example.test"}
+    api = _FakeVaultAPI({"/v1/vaults": 409, "/join": 200, "/users": 201})
+    _patch_client(monkeypatch, api)
+
+    tool = AgentVaultAccessTools(
+        runtime_paths=_runtime_paths(tmp_path, env=env),
+        worker_target=_worker_target(requester="@owner:example.test"),
+    )
+    payload = json.loads(await tool.request_vault_access())
+
+    assert payload["status"] == "ok"
+    grant_calls = [body for path, body in api.calls if path.endswith("/users")]
+    assert grant_calls == [{"email": "owner@example.test", "role": "admin"}]
+
+
+@pytest.mark.asyncio
+async def test_request_vault_access_reports_owner_account_setup_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Owner-account setup errors should not look like requester signup work."""
+    env = {**_ENV, "MINDROOM_AGENT_VAULT_ACCESS_OWNER_EMAIL": "owner@example.test"}
+    api = _FakeVaultAPI({"/v1/vaults": 409, "/join": 200, "/users": 404})
+    _patch_client(monkeypatch, api)
+
+    tool = AgentVaultAccessTools(runtime_paths=_runtime_paths(tmp_path, env=env), worker_target=_worker_target())
+    payload = json.loads(await tool.request_vault_access())
+
+    assert payload["status"] == "error"
+    assert "configured worker token-mint owner account" in payload["error"]
+    assert "operator" in payload["error"]
+    assert "register and verify their email" not in payload["error"]
+    grant_calls = [body for path, body in api.calls if path.endswith("/users")]
+    assert grant_calls == [{"email": "owner@example.test", "role": "admin"}]
 
 
 @pytest.mark.asyncio
@@ -209,6 +359,24 @@ async def test_request_vault_access_reports_unregistered_account(
 
     assert payload["status"] == "error"
     assert "does not have an Agent Vault account" in payload["error"]
+    assert "https://example.test/agent-vault/login" in payload["error"]
+
+
+@pytest.mark.asyncio
+async def test_request_vault_access_reports_grant_error_body(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Unexpected grant API failures should include the upstream error body."""
+    api = _FakeVaultAPI({"/v1/vaults": 201, "/join": 409, "/users": 500})
+    _patch_client(monkeypatch, api)
+
+    tool = AgentVaultAccessTools(runtime_paths=_runtime_paths(tmp_path), worker_target=_worker_target())
+    payload = json.loads(await tool.request_vault_access())
+
+    assert payload["status"] == "error"
+    assert "500" in payload["error"]
+    assert "scripted" in payload["error"]
 
 
 @pytest.mark.asyncio

@@ -17,12 +17,14 @@ Use these tools when you need repository context, issue tracking, documentation 
 - [`confluence`] - Confluence page lookup, space discovery, page creation, and page updates.
 - [`notion`] - Notion database page creation, page appends, and tag-based search.
 - [`trello`] - Trello boards, lists, cards, and card moves.
+- [`todo`] - Per-thread MindRoom work plans with priorities, dependencies, assignments, and templates.
 - [`todoist`] - Todoist task creation, updates, completion, deletion, and project discovery.
 - [`zendesk`] - Zendesk Help Center article search.
 
 ## Common Setup Notes
 
-All tools on this page are registered as `status=requires_config`, so they stay unavailable in the dashboard until their required credentials or connection fields are present.
+The `todo` tool is available without credentials.
+The other tools on this page are registered as `status=requires_config`, so they stay unavailable in the dashboard until their required credentials or connection fields are present.
 None of these tools declare an `auth_provider`, and `src/mindroom/api/integrations.py` currently only exposes Spotify OAuth routes, so project-management tools are configured through stored tool credentials or environment variables rather than a dedicated dashboard OAuth flow.
 Password and token fields should be stored through the dashboard or credential store instead of inline YAML.
 Most upstream SDKs also read environment variables, including `GITHUB_ACCESS_TOKEN`, `BITBUCKET_USERNAME`, `BITBUCKET_PASSWORD`, `BITBUCKET_TOKEN`, `JIRA_SERVER_URL`, `JIRA_USERNAME`, `JIRA_PASSWORD`, `JIRA_TOKEN`, `LINEAR_API_KEY`, `CLICKUP_API_KEY`, `MASTER_SPACE_ID`, `CONFLUENCE_URL`, `CONFLUENCE_USERNAME`, `CONFLUENCE_API_KEY`, `CONFLUENCE_PASSWORD`, `NOTION_API_KEY`, `NOTION_DATABASE_ID`, `TRELLO_API_KEY`, `TRELLO_API_SECRET`, `TRELLO_TOKEN`, `TODOIST_API_TOKEN`, `ZENDESK_USERNAME`, `ZENDESK_PASSWORD`, and `ZENDESK_COMPANY_NAME`.
@@ -68,6 +70,64 @@ get_pull_request("mindroom-ai/mindroom", 123)
 - `access_token` is marked optional in MindRoom metadata, but the upstream client raises at startup if neither `access_token` nor `GITHUB_ACCESS_TOKEN` is present.
 - Use `base_url` only for GitHub Enterprise, and set it to the API endpoint such as `/api/v3` rather than the human-facing site root.
 - `github` is the best fit on this page when you need repository file operations or rich pull-request inspection in addition to issue tracking.
+
+## [`todo`]
+
+`todo` is MindRoom's built-in per-thread work-plan tool.
+
+### What It Does
+
+`todo` exposes `plan()`, `add_todo()`, `list_todos()`, `update_todo()`, `apply_template()`, and `list_templates()`.
+Todo items are scoped to the current Matrix room and resolved thread, so separate threads can carry independent plans.
+Each item can have a priority, dependency list, status, and assigned agent name.
+State is stored under `mindroom_data/todo/` and survives restarts.
+Built-in templates live with the package, and agents can add workspace-local templates under `todo/templates`.
+
+### Native Auto-Poke
+
+MindRoom scans native todo state in the background and wakes an idle configured agent when that agent has assigned, open, dependency-unblocked work.
+The scanner waits for the quiet period measured from the newest update among the agent's actionable items in the thread; an item unblocked by a completed dependency keeps its old timestamp, so it becomes eligible as soon as the rest of that agent's actionable work in the thread is quiet.
+Future item timestamps beyond one quiet window are treated as already quiet so clock skew cannot disable a scope indefinitely.
+A pending schedule for the same room and existing thread suppresses the poke, while schedules that create a new thread do not suppress room-main work.
+Work fingerprints are persisted under `mindroom_data/todo/poke_state.json`, so changed work observes a cooldown and unchanged work receives at most three one-hour anti-stall retries.
+A failed send is recorded like any other attempt, so the retry waits out the changed-work cooldown instead of tracking a separate failure counter.
+Future persisted timestamps beyond the relevant cooldown or backstop window are treated as elapsed so clock skew cannot mute valid work indefinitely.
+Each scan sends at most one poke to a given agent even when that agent has actionable work in multiple scopes.
+Todo titles are rendered as literal text, and only the assigned agent is mentioned for dispatch.
+
+| Environment variable | Default | Behavior |
+| --- | --- | --- |
+| `MINDROOM_TODO_POKE_INTERVAL_SECONDS` | `120` | Sets the scan interval in seconds, `0` disables the worker, and enabled values must be at least `1`. |
+| `MINDROOM_TODO_POKE_QUIET_SECONDS` | `300` | Sets the minimum quiet period for actionable assigned work. |
+
+### Configuration
+
+This tool has no tool-specific inline configuration fields.
+
+### Example
+
+```yaml
+agents:
+  maintainer:
+    tools:
+      - todo
+```
+
+```python
+plan("[high] Inspect issue\nWrite failing test\nImplement fix")
+add_todo("Run focused regression test", depends_on="a1b2c3d4", priority="high")
+list_todos(show_all=True)
+update_todo("a1b2c3d4", status="done")
+apply_template("mindroom-dev", {"ISSUE_REF": "ISSUE-123", "REPO": "mindroom"})
+```
+
+### Notes
+
+- `plan()` creates one item per non-empty line and supports `[low]`, `[medium]`, `[high]`, and `[critical]` prefixes.
+- `update_todo()` can change title, priority, status, dependency list, and assignee.
+- `apply_template(..., dry_run=True)` previews template expansion before writing state.
+- The built-in `mindroom-dev` template includes a nested `parallel-review-loop` template.
+- Auto-poke scheduling, deduplication, and idle checks are built into the orchestrator and require no plugin.
 
 ## [`bitbucket`]
 

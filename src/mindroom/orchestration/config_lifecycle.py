@@ -1,4 +1,4 @@
-"""Debounced config-reload lifecycle for the orchestrator."""
+"""Debounced config reload and shared response-admission replacement lifecycle."""
 
 from __future__ import annotations
 
@@ -7,6 +7,7 @@ from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING
 
 from mindroom.config.main import load_config
+from mindroom.config.yaml_includes import partial_source_files
 from mindroom.logging_config import get_logger
 from mindroom.orchestration.config_updates import (
     build_config_update_plan,
@@ -17,47 +18,40 @@ from mindroom.orchestration.runtime import cancel_logged_task, create_logged_tas
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Mapping
+    from pathlib import Path
 
     from mindroom.bot import AgentBot, TeamBot
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.orchestration.config_updates import ConfigUpdatePlan
+    from mindroom.response_admission import ResponseAdmissionGate
 
 logger = get_logger(__name__)
 
+
 _CONFIG_RELOAD_DEBOUNCE_SECONDS = 2.0
-_CONFIG_RELOAD_IDLE_POLL_SECONDS = 0.5
-_CONFIG_RELOAD_DRAIN_WARNING_AFTER_SECONDS = 30.0
-_CONFIG_RELOAD_DRAIN_WARNING_INTERVAL_SECONDS = 30.0
-_CONFIG_RELOAD_DRAIN_FORCE_AFTER_SECONDS = 120.0
+_REPLACEMENT_DRAIN_IDLE_POLL_SECONDS = 0.5
+_REPLACEMENT_DRAIN_WARNING_AFTER_SECONDS = 30.0
+_REPLACEMENT_DRAIN_WARNING_INTERVAL_SECONDS = 30.0
+# The in-flight count includes responses still queued behind a conversation lock,
+# so a busy install may never observe a fully idle moment. Bound the wait rather
+# than letting a replacement be deferred forever.
+_REPLACEMENT_DRAIN_FORCE_AFTER_SECONDS = 600.0
 
 
 @dataclass
-class _ConfigReloadDrainState:
-    """Track response-drain state for a queued config reload."""
+class _ReplacementDrainState:
+    """Track response-drain state for one replacement apply."""
 
     waiting_for_idle: bool = False
     wait_started_at: float | None = None
     last_warning_at: float | None = None
-    request_started_at: float | None = None
 
-    def reset(self) -> None:
-        """Clear all drain tracking state."""
-        self.waiting_for_idle = False
-        self.wait_started_at = None
-        self.last_warning_at = None
-        self.request_started_at = None
-
-    def begin_wait(self, *, now: float, requested_at: float) -> None:
-        """Start a fresh drain window for the current reload request."""
+    def begin_wait(self, *, now: float) -> None:
+        """Start a fresh response-drain window."""
         self.waiting_for_idle = True
         self.wait_started_at = now
         self.last_warning_at = None
-        self.request_started_at = requested_at
-
-    def should_reset_for_request(self, requested_at: float) -> bool:
-        """Return whether a newer request should restart the drain window."""
-        return self.waiting_for_idle and self.request_started_at != requested_at
 
     def wait_seconds(self, now: float) -> float:
         """Return how long the current drain window has been waiting."""
@@ -83,29 +77,37 @@ class _ConfigReloadDrainState:
         """Record the time a drain warning was logged."""
         self.last_warning_at = now
 
-    def should_force_reload(self, *, now: float, force_after_seconds: float) -> bool:
-        """Return whether the drain timeout has expired."""
+    def should_force_apply(self, *, now: float, force_after_seconds: float) -> bool:
+        """Return whether the drain has waited long enough to stop deferring."""
         return self.wait_started_at is not None and self.wait_seconds(now) >= force_after_seconds
 
 
 @dataclass
 class ConfigReloadLifecycle:
-    """Own debounced config reloads: queueing, response drain, and plan dispatch.
+    """Own debounced config reloads and serialized replacement admission.
 
     The orchestrator stays the owner of applying a plan (restarting bots,
-    reconciling accounts and rooms); this collaborator owns when a reload
-    runs and how the new config is diffed into a plan.
+    reconciling accounts and rooms). This collaborator owns when a config
+    reload runs, how it is diffed into a plan, and the global admission window
+    shared by config reloads and asynchronous MCP catalog replacements.
     """
 
     runtime_paths: RuntimePaths
     is_running: Callable[[], bool]
     current_config: Callable[[], Config | None]
     agent_bots: Callable[[], Mapping[str, AgentBot | TeamBot]]
-    in_flight_response_count: Callable[[], int]
     load_initial_config: Callable[[Config], Awaitable[bool]]
     apply_update_plan: Callable[[Config, ConfigUpdatePlan, tuple[str, ...]], Awaitable[bool]]
+    response_admission_gate: ResponseAdmissionGate
+    # Shared with manual plugin reloads and MCP catalog-change handling so no
+    # two publication flows can interleave their read-plan-apply sequences.
+    config_update_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    _response_admission_apply_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False, repr=False)
     _reload_task: asyncio.Task | None = field(default=None, init=False)
     _requested_at: float | None = field(default=None, init=False)
+    # Source files of the last reload attempt that failed to load, so the
+    # config watcher can cover include files the last good config never saw.
+    failed_reload_source_files: frozenset[Path] | None = field(default=None, init=False)
 
     def request_reload(self) -> None:
         """Queue a debounced config reload for the running orchestrator."""
@@ -132,23 +134,26 @@ class ConfigReloadLifecycle:
 
     async def update_config(self) -> bool:
         """Reload configuration from disk and dispatch the resulting update plan."""
-        new_config = load_config(self.runtime_paths, tolerate_plugin_load_errors=True)
-        current_config = self.current_config()
-        if current_config is None:
-            return await self.load_initial_config(new_config)
+        async with self.config_update_lock:
+            # Config validation executes plugin modules and walks the filesystem;
+            # keep it off the event loop (#1260).
+            new_config = await asyncio.to_thread(load_config, self.runtime_paths, tolerate_plugin_load_errors=True)
+            current_config = self.current_config()
+            if current_config is None:
+                return await self.load_initial_config(new_config)
 
-        agent_bots = self.agent_bots()
-        plugin_changes = plugin_change_paths(current_config, new_config)
-        plan = build_config_update_plan(
-            current_config=current_config,
-            new_config=new_config,
-            configured_entities=set(configured_entity_names(new_config)),
-            existing_entities=set(agent_bots.keys()),
-            agent_bots=agent_bots,
-        )
-        if plugin_changes:
-            plan = replace(plan, entities_to_restart=plan.entities_to_restart | set(agent_bots))
-        return await self.apply_update_plan(current_config, plan, plugin_changes)
+            agent_bots = self.agent_bots()
+            plugin_changes = plugin_change_paths(current_config, new_config)
+            plan = build_config_update_plan(
+                current_config=current_config,
+                new_config=new_config,
+                configured_entities=set(configured_entity_names(new_config)),
+                existing_entities=set(agent_bots.keys()),
+                agent_bots=agent_bots,
+            )
+            if plugin_changes:
+                plan = replace(plan, entities_to_restart=plan.entities_to_restart | set(agent_bots))
+            return await self.apply_update_plan(current_config, plan, plugin_changes)
 
     async def _wait_for_reload_debounce(
         self,
@@ -161,51 +166,114 @@ class ConfigReloadLifecycle:
         if delay_seconds > 0:
             await asyncio.sleep(delay_seconds)
 
-    async def _should_defer_reload_for_active_responses(
+    async def _should_defer_replacement_for_active_responses(
         self,
         *,
-        drain_state: _ConfigReloadDrainState,
-        requested_at: float,
+        drain_state: _ReplacementDrainState,
         active_response_count: int,
         loop: asyncio.AbstractEventLoop,
+        operation_name: str,
     ) -> bool:
-        """Return whether a queued reload should keep waiting for responses to finish."""
-        if active_response_count <= 0:
-            return False
+        """Return whether one replacement apply should keep waiting for responses.
 
+        Only called with responses actually in flight: the caller applies
+        immediately when ``close_if_idle()`` succeeds.
+        """
         now = loop.time()
         if not drain_state.waiting_for_idle:
             logger.info(
-                "Deferring configuration reload until active responses finish",
+                "Deferring replacement until active responses finish",
+                operation=operation_name,
                 active_response_count=active_response_count,
             )
-            drain_state.begin_wait(now=now, requested_at=requested_at)
+            drain_state.begin_wait(now=now)
         elif drain_state.should_warn(
             now=now,
-            warning_after_seconds=_CONFIG_RELOAD_DRAIN_WARNING_AFTER_SECONDS,
-            warning_interval_seconds=_CONFIG_RELOAD_DRAIN_WARNING_INTERVAL_SECONDS,
+            warning_after_seconds=_REPLACEMENT_DRAIN_WARNING_AFTER_SECONDS,
+            warning_interval_seconds=_REPLACEMENT_DRAIN_WARNING_INTERVAL_SECONDS,
         ):
             logger.warning(
-                "Configuration reload still waiting for active responses to finish",
+                "Replacement still waiting for active responses to finish",
+                operation=operation_name,
                 active_response_count=active_response_count,
                 drain_wait_seconds=round(drain_state.wait_seconds(now), 1),
             )
             drain_state.mark_warning(now)
 
-        if drain_state.should_force_reload(
+        if drain_state.should_force_apply(
             now=now,
-            force_after_seconds=_CONFIG_RELOAD_DRAIN_FORCE_AFTER_SECONDS,
+            force_after_seconds=_REPLACEMENT_DRAIN_FORCE_AFTER_SECONDS,
         ):
             logger.error(
-                "Forcing configuration reload while responses are still active",
+                "Applying replacement while responses are still active",
+                operation=operation_name,
                 active_response_count=active_response_count,
                 drain_wait_seconds=round(drain_state.wait_seconds(now), 1),
-                timeout_seconds=_CONFIG_RELOAD_DRAIN_FORCE_AFTER_SECONDS,
+                timeout_seconds=_REPLACEMENT_DRAIN_FORCE_AFTER_SECONDS,
             )
             return False
 
-        await asyncio.sleep(_CONFIG_RELOAD_IDLE_POLL_SECONDS)
+        await asyncio.sleep(_REPLACEMENT_DRAIN_IDLE_POLL_SECONDS)
         return True
+
+    async def _apply_with_closed_admission(
+        self,
+        operation: Callable[[], Awaitable[None]],
+    ) -> None:
+        """Apply one replacement with admission already closed, then always reopen it.
+
+        Callers must close the gate immediately before calling, with no await in
+        between, so nothing can be admitted into the window.
+
+        The gate is closed but not held for the duration: applying the plan stops
+        bots, and stopping a bot drains its detached responses, so holding the
+        gate here would stall that drain until it cancelled the very responses
+        this flow exists to protect.
+        """
+        assert self.response_admission_gate.closed, "admission must be closed before applying"
+        try:
+            await operation()
+        finally:
+            self.response_admission_gate.reopen()
+
+    async def apply_with_response_admission(
+        self,
+        operation: Callable[[], Awaitable[None]],
+        *,
+        operation_name: str,
+        request_is_current: Callable[[], bool],
+    ) -> None:
+        """Run one global serialized replacement after a bounded response drain.
+
+        Config reloads call this from their debounced task. MCP catalog changes
+        call it from an orchestrator-owned background task so an admitted tool
+        call cannot wait on its own slot. The drain defers for at most 600
+        seconds before closing admission over a forced apply.
+        """
+        loop = asyncio.get_running_loop()
+        drain_state = _ReplacementDrainState()
+        async with self._response_admission_apply_lock:
+            while request_is_current():
+                if self.response_admission_gate.close_if_idle():
+                    if drain_state.waiting_for_idle:
+                        logger.info(
+                            "Active responses finished; applying replacement",
+                            operation=operation_name,
+                        )
+                    break
+                if await self._should_defer_replacement_for_active_responses(
+                    drain_state=drain_state,
+                    active_response_count=self.response_admission_gate.in_flight_response_count,
+                    loop=loop,
+                    operation_name=operation_name,
+                ):
+                    continue
+                self.response_admission_gate.close()
+                break
+            else:
+                return
+
+            await self._apply_with_closed_admission(operation)
 
     async def _apply_queued_config_reload(self) -> None:
         """Apply one queued config reload attempt and log the result."""
@@ -213,9 +281,16 @@ class ConfigReloadLifecycle:
         logger.info("Configuration file changed, checking for updates...")
         try:
             updated = await self.update_config()
-        except Exception:
+        except Exception as exc:
             logger.exception("Configuration update failed; will retry if a new change is queued")
+            # Keep watching every file the broken load read so fixing a newly
+            # added include file (not yet in the last good config) still
+            # triggers the retry reload.
+            failed_files = partial_source_files(exc)
+            if failed_files is not None:
+                self.failed_reload_source_files = failed_files
             return
+        self.failed_reload_source_files = None
         if updated:
             logger.info("Configuration update applied to affected agents")
         else:
@@ -225,7 +300,6 @@ class ConfigReloadLifecycle:
         """Apply queued config reloads after debounce and response drain."""
         current_task = asyncio.current_task()
         loop = asyncio.get_running_loop()
-        drain_state = _ConfigReloadDrainState()
 
         try:
             while self.is_running() and self._requested_at is not None:
@@ -233,31 +307,13 @@ class ConfigReloadLifecycle:
                 await self._wait_for_reload_debounce(requested_at, loop)
                 if self._requested_at != requested_at:
                     # A newer config change superseded the current one.
-                    # Reset drain state so the new change gets a full drain window.
-                    drain_state.reset()
                     continue
 
-                if drain_state.should_reset_for_request(requested_at):
-                    # A newer config change arrived while we were already waiting
-                    # for responses to drain, so restart the drain window.
-                    drain_state.reset()
-                    continue
-
-                active_response_count = self.in_flight_response_count()
-                if await self._should_defer_reload_for_active_responses(
-                    drain_state=drain_state,
-                    requested_at=requested_at,
-                    active_response_count=active_response_count,
-                    loop=loop,
-                ):
-                    continue
-
-                if drain_state.waiting_for_idle and active_response_count == 0:
-                    logger.info("Active responses finished; applying queued configuration reload")
-                if drain_state.waiting_for_idle:
-                    drain_state.reset()
-
-                await self._apply_queued_config_reload()
+                await self.apply_with_response_admission(
+                    self._apply_queued_config_reload,
+                    operation_name="configuration reload",
+                    request_is_current=lambda requested_at=requested_at: self._requested_at == requested_at,
+                )
         finally:
             if self._reload_task is current_task:
                 self._reload_task = None

@@ -10,6 +10,9 @@ if TYPE_CHECKING:
 
     from .types import EnrichmentItem
 
+_TRANSIENT_CONTEXT_OPEN = "<mindroom_transient_context>"
+_TRANSIENT_CONTEXT_CLOSE = "</mindroom_transient_context>"
+
 
 def _render_items(items: Sequence[EnrichmentItem]) -> list[str]:
     return [
@@ -33,6 +36,23 @@ def render_enrichment_block(items: list[EnrichmentItem]) -> str:
         return ""
     rendered_items = _render_items(items)
     return "<mindroom_message_context>\n" + "\n".join(rendered_items) + "\n</mindroom_message_context>"
+
+
+def render_transient_context(parts: Sequence[str]) -> str:
+    """Wrap non-persisted current-turn context in one recognizable block."""
+    body = "\n\n".join(part for part in parts if part)
+    if not body:
+        return ""
+    return f"{_TRANSIENT_CONTEXT_OPEN}\n{body}\n{_TRANSIENT_CONTEXT_CLOSE}"
+
+
+def is_transient_context(text: object) -> bool:
+    """Return whether text is a block produced by ``render_transient_context``."""
+    return (
+        isinstance(text, str)
+        and text.startswith(f"{_TRANSIENT_CONTEXT_OPEN}\n")
+        and text.endswith(f"\n{_TRANSIENT_CONTEXT_CLOSE}")
+    )
 
 
 def render_system_enrichment_block(items: Sequence[EnrichmentItem]) -> str:

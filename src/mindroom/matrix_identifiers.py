@@ -3,8 +3,12 @@
 from __future__ import annotations
 
 import re
+from typing import TYPE_CHECKING
 
 from mindroom.constants import RuntimePaths, runtime_matrix_server_name, runtime_mindroom_namespace
+
+if TYPE_CHECKING:
+    from collections.abc import Iterable
 
 _AGENT_USERNAME_PREFIX = "mindroom_"
 _NAMESPACE_PATTERN = re.compile(r"^[a-z0-9]{4,32}$")
@@ -91,6 +95,24 @@ def room_alias_identifier_candidates(room_alias: str, runtime_paths: RuntimePath
     if managed_room_key:
         identifiers.append(managed_room_key)
     return identifiers
+
+
+def _is_concrete_matrix_user_id(user_id: str) -> bool:
+    """Return whether this string is a concrete Matrix user ID (no wildcards or placeholders)."""
+    if not user_id.startswith("@") or "*" in user_id or "?" in user_id:
+        return False
+    if any(character.isspace() for character in user_id):
+        return False
+    localpart, separator, domain = user_id[1:].partition(":")
+    return bool(separator) and bool(localpart) and bool(domain)
+
+
+def split_concrete_matrix_user_ids(user_ids: Iterable[str]) -> tuple[list[str], list[str]]:
+    """Split user IDs into deduplicated concrete Matrix IDs and sorted skipped entries."""
+    unique_ids = list(dict.fromkeys(user_ids))
+    concrete = [user_id for user_id in unique_ids if _is_concrete_matrix_user_id(user_id)]
+    skipped = sorted(user_id for user_id in unique_ids if not _is_concrete_matrix_user_id(user_id))
+    return concrete, skipped
 
 
 def extract_server_name_from_homeserver(homeserver: str, runtime_paths: RuntimePaths) -> str:

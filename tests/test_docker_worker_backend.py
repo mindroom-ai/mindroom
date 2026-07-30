@@ -522,6 +522,35 @@ router:
     assert projected_plugin_path.read_text(encoding="utf-8") == "PLUGIN_VERSION = 'mapped'\n"
 
 
+def test_docker_worker_projection_resolves_config_includes(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A split host config projects as the fully merged config for the worker."""
+    (tmp_path / "agents.yaml").write_text(
+        "code:\n  display_name: Code\n  role: Writes code\n",
+        encoding="utf-8",
+    )
+    config_text = (
+        "agents: !include agents.yaml\n"
+        "models:\n  default:\n    provider: openai\n    id: test-model\n"
+        "router:\n  model: default\n"
+    )
+
+    backend, _fake_client, _credential_sync_calls = _backend(
+        monkeypatch,
+        tmp_path,
+        config_text=config_text,
+    )
+    projection = backend._projection_manager.projected_config(
+        local_worker_state_paths_for_root(tmp_path / "workers" / "split-config"),
+        materialize=True,
+    )
+
+    projected = yaml.safe_load((projection.root / "config.yaml").read_text(encoding="utf-8"))
+    assert projected["agents"]["code"]["display_name"] == "Code"
+
+
 def _backend(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -1137,7 +1166,7 @@ def test_docker_backend_ensures_worker_container_and_bind_mount(
     env = run_call["environment"]
     assert isinstance(env, dict)
     assert env["MINDROOM_SANDBOX_RUNNER_MODE"] == "true"
-    assert env["MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE"] == "subprocess"
+    assert env["MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE"] == "forkserver"
     assert env["MINDROOM_SANDBOX_PROXY_TOKEN"] == _TEST_AUTH_TOKEN
     assert env["MINDROOM_SANDBOX_DEDICATED_WORKER_KEY"] == _TEST_UNSCOPED_WORKER_KEY
     assert env["MINDROOM_SANDBOX_DEDICATED_WORKER_ROOT"] == "/app/worker"
@@ -2175,6 +2204,69 @@ router:
     projected_config = yaml.safe_load(projection.projected_yaml)
 
     assert list(projected_config["agents"]) == ["My Agent"]
+
+
+def test_docker_projection_keeps_no_references_to_stripped_agents(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Projected worker configs must stay loadable after projection strips other agents.
+
+    References to stripped agents fail Config validation inside the worker
+    ("calls.agents references unknown agent(s): ..."), crash-looping every
+    dedicated worker start.
+    """
+    backend, fake_client, _sync_calls = _backend(
+        monkeypatch,
+        tmp_path,
+        config_text="""
+agents:
+  alpha:
+    display_name: Alpha
+    role: Test
+    model: default
+    worker_scope: shared
+    delegate_to: [beta]
+  beta:
+    display_name: Beta
+    role: Test
+    model: default
+    worker_scope: shared
+calls:
+  enabled: true
+  profiles:
+    realtime-profile:
+      backend: realtime
+      model: test-realtime-model
+      credentials_service: openai
+      voice: test-voice
+  agents:
+    alpha: realtime-profile
+    beta: realtime-profile
+models:
+  default:
+    provider: openai
+    id: test-model
+""".lstrip(),
+    )
+
+    backend.ensure_worker(WorkerSpec("v1:default:shared:alpha"), now=10.0)
+
+    volumes = fake_client.containers.run_calls[0]["volumes"]
+    assert isinstance(volumes, dict)
+    projection_root = _projection_root(volumes)
+    projected_config = yaml.safe_load((projection_root / "config.yaml").read_text(encoding="utf-8"))
+
+    assert list(projected_config["agents"]) == ["alpha"]
+    assert projected_config["agents"]["alpha"]["delegate_to"] == []
+    assert projected_config["calls"] == {}
+
+    projected_runtime_paths = resolve_runtime_paths(
+        config_path=projection_root / "config.yaml",
+        storage_path=tmp_path / "projected-storage",
+    )
+
+    assert set(load_config(projected_runtime_paths).agents) == {"alpha"}
 
 
 def test_docker_backend_recreates_container_when_launch_config_changes(

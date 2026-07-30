@@ -50,6 +50,10 @@ def _event_cache() -> AsyncMock:
     return make_event_cache_mock()
 
 
+def _allow_schedule_state_persistence(client: AsyncMock, room_id: str) -> None:
+    client.room_put_state = AsyncMock(return_value=nio.RoomPutStateResponse("$scheduled-state", room_id))
+
+
 def _scheduling_runtime(
     *,
     client: AsyncMock,
@@ -210,7 +214,7 @@ async def test_schedule_allows_agents_in_room() -> None:
 
     # Mock client
     client = AsyncMock()
-    client.room_put_state = AsyncMock()
+    _allow_schedule_state_persistence(client, "test_room")
 
     # Create a mock room with both agents - use the actual domain from config
     room = create_mock_room(
@@ -346,7 +350,7 @@ async def test_schedule_with_no_agent_mentions() -> None:
     )
 
     client = AsyncMock()
-    client.room_put_state = AsyncMock()
+    _allow_schedule_state_persistence(client, "test_room")
 
     # Create a mock room - use the actual domain from config
     room = create_mock_room(
@@ -387,7 +391,7 @@ async def test_schedule_with_no_agent_mentions() -> None:
 
     assert task_id is not None
     assert "✅ Scheduled" in response
-    assert "New room-level thread root" in response
+    assert "New thread per fire" in response
     conversation_cache.get_thread_history.assert_not_called()
     available_agents = mock_parse.await_args.args[3]
     expected_agents = [
@@ -420,6 +424,7 @@ async def test_schedule_validation_respects_sender_reply_permissions() -> None:
     )
 
     client = AsyncMock()
+    _allow_schedule_state_persistence(client, "test_room")
     room = create_mock_room(
         "test_room",
         [
@@ -468,6 +473,7 @@ async def test_schedule_with_nonexistent_agent() -> None:
     )
 
     client = AsyncMock()
+    _allow_schedule_state_persistence(client, "test_room")
 
     # Create a mock room - use the actual domain from config
     room = create_mock_room(

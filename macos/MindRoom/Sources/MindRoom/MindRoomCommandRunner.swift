@@ -11,9 +11,13 @@ final class MindRoomCommandRunner: ObservableObject {
         state: .unknown,
         message: "MindRoom status is unknown"
     )
-    @Published private(set) var isRunningCommand = false
+    @Published private(set) var runningCommandTitle: String?
     @Published private(set) var lastOutput = ""
 
+    /// Called on the main actor when a user-initiated command finishes.
+    var onCommandFinished: ((MindRoomCommand, CommandResult) -> Void)?
+
+    private var isRefreshingStatus = false
     private let runtime: MindRoomRuntime
     private let processRunner: MindRoomProcessRunner
 
@@ -25,13 +29,24 @@ final class MindRoomCommandRunner: ObservableObject {
         self.processRunner = processRunner
     }
 
-    func refreshStatus() {
-        runRuntimeAction(.serviceStatus, updateStatusFromOutput: true)
+    var isRunningCommand: Bool {
+        runningCommandTitle != nil
     }
 
-    var lastOutputForDisplay: String {
-        get { lastOutput }
-        set { lastOutput = newValue }
+    // Status refreshes run independently of user commands so a background
+    // refresh never swallows a menu click.
+    func refreshStatus() {
+        guard !isRefreshingStatus else { return }
+        isRefreshingStatus = true
+        let invocation = runtime.command(for: .serviceStatus)
+        let processRunner = processRunner
+        DispatchQueue.global(qos: .utility).async {
+            let result = processRunner(invocation)
+            DispatchQueue.main.async {
+                self.isRefreshingStatus = false
+                self.serviceStatus = MindRoomServiceStatus.parse(result.output)
+            }
+        }
     }
 
     func run(_ command: MindRoomCommand) {
@@ -44,29 +59,26 @@ final class MindRoomCommandRunner: ObservableObject {
             NSWorkspace.shared.open(runtime.configDirectoryURL)
         case .openLogsFolder:
             NSWorkspace.shared.open(runtime.logsDirectoryURL)
+        case .serviceStatus:
+            refreshStatus()
         default:
             guard let action = command.runtimeAction else { return }
-            runRuntimeAction(action, updateStatusFromOutput: action == .serviceStatus)
+            runUserCommand(command, action: action)
         }
     }
 
-    private func runRuntimeAction(_ action: MindRoomRuntimeAction, updateStatusFromOutput: Bool = false) {
-        guard !isRunningCommand else { return }
-        isRunningCommand = true
+    private func runUserCommand(_ command: MindRoomCommand, action: MindRoomRuntimeAction) {
+        guard runningCommandTitle == nil else { return }
+        runningCommandTitle = command.title
         let invocation = runtime.command(for: action)
         let processRunner = processRunner
         DispatchQueue.global(qos: .userInitiated).async {
             let result = processRunner(invocation)
             DispatchQueue.main.async {
-                self.isRunningCommand = false
-                if updateStatusFromOutput {
-                    self.serviceStatus = MindRoomServiceStatus.parse(result.output)
-                } else {
-                    self.lastOutput = result.output
-                    if result.exitCode == 0 {
-                        self.refreshStatus()
-                    }
-                }
+                self.runningCommandTitle = nil
+                self.lastOutput = result.output
+                self.onCommandFinished?(command, result)
+                self.refreshStatus()
             }
         }
     }
@@ -76,6 +88,8 @@ final class MindRoomCommandRunner: ObservableObject {
         process.executableURL = invocation.executableURL
         process.arguments = invocation.arguments
         process.environment = invocation.environment
+        // No TTY is attached, so any CLI prompt must see EOF instead of hanging.
+        process.standardInput = FileHandle.nullDevice
 
         let pipe = Pipe()
         process.standardOutput = pipe

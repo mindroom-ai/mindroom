@@ -43,7 +43,7 @@ class GoogleCalendarTools(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin,
         unified credential storage and passes them to the Agno GoogleCalendarTools.
         """
         provided_creds = kwargs.pop("creds", None)
-        allow_update = kwargs.get("allow_update") is True
+        allow_update = kwargs.get("allow_update", True) is True
         kwargs.update(
             {
                 "create_event": allow_update,
@@ -67,6 +67,9 @@ class GoogleCalendarTools(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin,
             defer_to_original_auth=defer_to_original_auth,
         )
 
+        # Agno's toolkit still validates its legacy broad scope markers during
+        # construction. Those markers are not used for MindRoom's OAuth flow:
+        # the credentials injected below carry the provider's granular scopes.
         super().__init__(**kwargs)
         self.creds = creds
 

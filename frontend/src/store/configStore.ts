@@ -13,6 +13,7 @@ import {
   normalizeAgentUpdates,
   normalizeTeamUpdates,
   VoiceConfig,
+  MatrixRoomAccessConfig,
 } from "@/types/config";
 import * as configService from "@/services/configService";
 import type {
@@ -592,6 +593,9 @@ interface ConfigState {
   isLoading: boolean;
   diagnostics: ConfigDiagnostic[];
   syncStatus: "synced" | "syncing" | "error" | "disconnected";
+  // Whether the committed config is composed from multiple files via !include,
+  // in which case structured saves are rejected by the backend.
+  configUsesIncludes: boolean;
   // UI-only backup so a draft private toggle can restore the prior explicit worker_scope
   // until the draft is either saved successfully or toggled back off.
   privateWorkerScopeBackups: Record<string, Agent["worker_scope"] | null>;
@@ -634,6 +638,7 @@ interface ConfigState {
   deleteModel: (modelId: string) => void;
   updateToolConfig: (toolId: string, config: unknown) => void;
   updateVoiceConfig: (voiceConfig: VoiceConfig) => void;
+  updateMatrixRoomAccess: (matrixRoomAccess: MatrixRoomAccessConfig) => void;
   getAgentToolOverrides: (
     agentId: string,
     toolName: string,
@@ -731,6 +736,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
   isLoading: false,
   diagnostics: [],
   syncStatus: "disconnected",
+  configUsesIncludes: false,
   privateWorkerScopeBackups: {},
 
   // Load configuration from backend
@@ -746,8 +752,11 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       loadConfigRequestId,
     });
     try {
-      const { config: rawConfig, generation } =
-        await configService.loadConfig();
+      const {
+        config: rawConfig,
+        generation,
+        usesIncludes,
+      } = await configService.loadConfig();
       const {
         normalizedConfig: loadedConfig,
         rawEntriesByAgent,
@@ -798,6 +807,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
           isLoading: false,
           syncStatus: latestState.syncStatus,
           diagnostics: retainedDraftDiagnostics(latestState.diagnostics),
+          configUsesIncludes: usesIncludes,
         });
         return;
       }
@@ -823,6 +833,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
         isDirty: false,
         dirtyRoots: [],
         diagnostics,
+        configUsesIncludes: usesIncludes,
         privateWorkerScopeBackups: {},
       });
     } catch (error) {
@@ -1070,6 +1081,9 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
         ...(dirtyRootSet.has("models") ? { models: config.models } : {}),
         ...(dirtyRootSet.has("tools") ? { tools: config.tools } : {}),
         ...(dirtyRootSet.has("voice") ? { voice: config.voice } : {}),
+        ...(dirtyRootSet.has("matrix_room_access")
+          ? { matrix_room_access: config.matrix_room_access }
+          : {}),
         ...(dirtyRootSet.has("agents") ? { agents: currentAgentsObject } : {}),
         ...(dirtyRootSet.has("teams") ? { teams: currentTeamsObject } : {}),
         ...(dirtyRootSet.has("cultures")
@@ -1192,6 +1206,26 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
           syncStatus: draftSyncStatus(currentState),
         });
         return { status: "stale" };
+      }
+      if (error instanceof configService.ConfigComposedFromIncludesError) {
+        const errorDiagnostics = [
+          {
+            kind: "global" as const,
+            message: error.message,
+            blocking: false,
+          },
+        ];
+        set({
+          diagnostics: errorDiagnostics,
+          isLoading: false,
+          syncStatus: "error",
+          configUsesIncludes: true,
+        });
+        return {
+          status: "error",
+          message: error.message,
+          diagnostics: errorDiagnostics,
+        };
       }
       if (error instanceof configService.ConfigValidationError) {
         const errorDiagnostics = validationDiagnostics(error.issues, {
@@ -2227,6 +2261,21 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       return {
         config: nextConfig,
         ...markDraftDirty(state, {}, [["voice"]]),
+      };
+    });
+  },
+
+  updateMatrixRoomAccess: (matrixRoomAccess) => {
+    set((state) => {
+      if (!state.config) return state;
+      const nextConfig = {
+        ...state.config,
+        matrix_room_access: matrixRoomAccess,
+      };
+      preserveRawToolEntries(state.config, nextConfig);
+      return {
+        config: nextConfig,
+        ...markDraftDirty(state, {}, [["matrix_room_access"]]),
       };
     });
   },

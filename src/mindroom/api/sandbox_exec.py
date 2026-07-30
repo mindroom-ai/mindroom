@@ -55,8 +55,13 @@ def _runner_execution_mode(runtime_paths: RuntimePaths) -> str:
 
 
 def runner_uses_subprocess(runtime_paths: RuntimePaths) -> bool:
-    """Return whether the runner should dispatch through a subprocess."""
-    return _runner_execution_mode(runtime_paths) == "subprocess"
+    """Return whether the runner should dispatch through a per-request child process."""
+    return _runner_execution_mode(runtime_paths) in {"subprocess", "forkserver"}
+
+
+def runner_uses_forkserver(runtime_paths: RuntimePaths) -> bool:
+    """Return whether per-request children should fork from a warm template process."""
+    return _runner_execution_mode(runtime_paths) == "forkserver"
 
 
 def runner_subprocess_timeout_seconds(runtime_paths: RuntimePaths) -> float:
@@ -157,7 +162,8 @@ def request_execution_env(
     # Agent Vault egress is composed from the worker pod's own token + endpoint,
     # so it is always overlaid here at the worker (never shipped from the
     # primary, which has neither the token nor the endpoint env).
-    agent_vault_env = constants.worker_proxy_execution_env({**os.environ, **runtime_paths.process_env})
+    worker_local_env = {**runtime_paths.process_env, **os.environ}
+    agent_vault_env = constants.worker_proxy_execution_env(worker_local_env)
     if execution_env:
         protected_env_names = _protected_dedicated_worker_execution_env_names(runtime_paths)
         env = {key: value for key, value in execution_env.items() if key not in protected_env_names}
@@ -168,11 +174,14 @@ def request_execution_env(
         if runner_uses_dedicated_worker(runtime_paths)
         else {**os.environ, **runtime_paths.process_env}
     )
-    return constants.build_execution_tool_env(
-        tool_name,
-        runtime_paths,
-        extra_env_passthrough=extra_env_passthrough,
-        shell_process_env=shell_process_env,
+    return (
+        constants.build_execution_tool_env(
+            tool_name,
+            runtime_paths,
+            extra_env_passthrough=extra_env_passthrough,
+            shell_process_env=shell_process_env,
+        )
+        | agent_vault_env
     )
 
 
