@@ -632,6 +632,7 @@ async def test_agent_handles_room_invite(mock_calculator_agent: AgentMatrixUser,
     with patch("mindroom.bot.login_agent_user") as mock_login:
         mock_client = make_matrix_client_mock(user_id=mock_calculator_agent.user_id)
         mock_client.user_id = mock_calculator_agent.user_id
+        mock_client.join = AsyncMock(return_value=nio.JoinResponse(room_id=invite_room))
         mock_login.return_value = mock_client
 
         config = _make_config(tmp_path)

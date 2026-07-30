@@ -9,8 +9,11 @@ import nio
 
 from mindroom.bot_runtime_view import BotRuntimeState
 from mindroom.config.main import Config
+from mindroom.config.matrix import MindRoomUserConfig
 from mindroom.constants import ORIGINAL_SENDER_KEY, SOURCE_KIND_KEY
+from mindroom.dispatch_handoff import DispatchIngressMetadata, DispatchPayloadMetadata
 from mindroom.dispatch_source import TRUSTED_INTERNAL_RELAY_SOURCE_KIND
+from mindroom.entity_resolution import mindroom_user_id
 from mindroom.ingress_validation import IngressValidator, IngressValidatorDeps
 from mindroom.matrix import stale_stream_cleanup
 from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
@@ -25,6 +28,8 @@ def test_trusted_relay_resolves_requester_and_allows_self_authored_ingress(tmp_p
     config = bind_runtime_paths(
         Config(
             agents={"test_agent": {"display_name": "Test Agent"}},
+            bot_accounts=["@bridge_bot:localhost"],
+            mindroom_user=MindRoomUserConfig(),
             models={"default": {"provider": "test", "id": "test-model"}},
             authorization={"default_room_access": True},
         ),
@@ -102,3 +107,37 @@ def test_trusted_relay_resolves_requester_and_allows_self_authored_ingress(tmp_p
     room = nio.MatrixRoom("!room:localhost", agent_id.full_id)
 
     assert validator.precheck_event(room, event) == human_sender
+    ingress_metadata = DispatchIngressMetadata(source_kind=TRUSTED_INTERNAL_RELAY_SOURCE_KIND)
+    router_event = nio.RoomMessageText.from_dict(
+        {
+            "event_id": "$router-relay",
+            "sender": ids["router"].full_id,
+            "origin_server_ts": 1234567890,
+            "content": {"msgtype": "m.text", "body": "relay"},
+        },
+    )
+    assert validator.should_use_trusted_router_relay_context(
+        router_event,
+        ingress_metadata=ingress_metadata,
+        payload_metadata=DispatchPayloadMetadata(original_sender=human_sender),
+    )
+
+    for non_human_sender in ("@bridge_bot:localhost", mindroom_user_id(config, runtime_paths)):
+        assert non_human_sender is not None
+        assert (
+            validator.requester_user_id(
+                sender=agent_id.full_id,
+                source={
+                    "content": {
+                        ORIGINAL_SENDER_KEY: non_human_sender,
+                        SOURCE_KIND_KEY: TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
+                    },
+                },
+            )
+            == agent_id.full_id
+        )
+        assert not validator.should_use_trusted_router_relay_context(
+            router_event,
+            ingress_metadata=ingress_metadata,
+            payload_metadata=DispatchPayloadMetadata(original_sender=non_human_sender),
+        )

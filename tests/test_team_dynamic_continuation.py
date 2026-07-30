@@ -293,7 +293,6 @@ def test_release_attempt_members_resets_snapshot_state() -> None:
             materialized_agent_names={"general"},
             failed_agent_names=[],
         ),
-        last_response=TeamRunOutput(content="stale"),
         render_partial=lambda: "stale partial",
     )
     stale_tracker = holder.tool_tracker
@@ -302,7 +301,6 @@ def test_release_attempt_members_resets_snapshot_state() -> None:
     release(None)
 
     assert holder.team_members is None
-    assert holder.last_response is None
     assert holder.render_partial() == ""
     assert holder.tool_tracker is not stale_tracker
 

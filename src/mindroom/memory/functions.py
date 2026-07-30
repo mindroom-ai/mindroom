@@ -7,12 +7,13 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from mindroom.logging_config import get_logger
+from mindroom.prompt_templates import render_prompt_template
 from mindroom.timing import timed
 
 from ._backend import resolve_memory_backend
 from ._file_backend import append_agent_daily_file_memory
 from ._prompting import format_memories_as_context
-from ._shared import MemorySearchOutcome
+from ._shared import MemoryEntrypointContext, MemorySearchOutcome
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -188,6 +189,30 @@ async def delete_agent_memory(
     )
 
 
+def _render_entrypoint_preamble(entrypoint: MemoryEntrypointContext, config: Config) -> str:
+    """Frame the preloaded memory entrypoint as already-inlined, cap-aware context.
+
+    A file whose preloaded head is blank still reports its truncation, so the
+    cap never withholds lines silently.
+    """
+    header = render_prompt_template(
+        config.get_prompt("FILE_MEMORY_ENTRYPOINT_HEADER_TEMPLATE"),
+        memory_path=entrypoint.source_path,
+    )
+    truncation_notice = (
+        render_prompt_template(
+            config.get_prompt("FILE_MEMORY_ENTRYPOINT_TRUNCATION_TEMPLATE"),
+            included_lines=entrypoint.included_lines,
+            total_lines=entrypoint.total_lines,
+            max_entrypoint_lines=config.memory.file.max_entrypoint_lines,
+            memory_path=entrypoint.source_path,
+        )
+        if entrypoint.omitted_lines
+        else ""
+    )
+    return "\n".join(part for part in (header, entrypoint.text, truncation_notice) if part)
+
+
 @timed("system_prompt_assembly.memory_enhancement")
 async def build_memory_prompt_parts(
     prompt: str,
@@ -224,8 +249,8 @@ async def build_memory_prompt_parts(
         config,
         execution_identity=execution_identity,
     )
-    if agent_entrypoint:
-        session_preamble = f"{config.get_prompt('FILE_MEMORY_ENTRYPOINT_HEADER')}\n{agent_entrypoint}"
+    if agent_entrypoint.text or agent_entrypoint.omitted_lines:
+        session_preamble = _render_entrypoint_preamble(agent_entrypoint, config)
 
     # The automatic per-turn path must not silently drop the degradation
     # signal: a broken embedder would otherwise look like an agent with no

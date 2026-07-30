@@ -209,6 +209,13 @@ class TestMemoryTools:
 
         assert description is not None
         assert "notes" in description
+        assert "configured Markdown paths" in description
+        assert "default: memory/**/*.md" in description
+        assert "falls back to keyword search" in description
+        assert "MEMORY.md and memory/**/*.md" in description
+        assert "semantic:*" in description
+        assert "read-only locators" in description
+        assert "get_memory, update_memory, or delete_memory" in description
         assert "knowledge base" not in description.lower()
         assert "mem0" not in description.lower()
 

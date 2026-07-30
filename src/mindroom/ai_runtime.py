@@ -6,7 +6,7 @@ import asyncio
 from collections.abc import Callable, Generator, Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Protocol, cast
 from uuid import uuid4
 
@@ -18,6 +18,7 @@ from agno.run.team import TeamRunOutput
 from agno.session.agent import AgentSession
 from agno.session.team import TeamSession
 
+from mindroom.history_run_visibility import is_model_history_visible_run
 from mindroom.logging_config import get_logger
 from mindroom.media_fallback import append_inline_media_fallback_prompt
 from mindroom.media_inputs import MediaInputs, MediaKind
@@ -36,15 +37,16 @@ __all__ = [
     "append_inline_media_fallback_to_run_input",
     "attach_media_to_run_input",
     "cached_agent_run",
-    "cleanup_queued_notice_state_async",
     "copy_run_input",
     "discard_empty_completed_run",
+    "finalize_queued_notice_response_turn_async",
     "install_queued_message_notice_hook",
     "is_empty_completed_run",
     "media_inputs_from_run_input",
     "next_retry_run_id",
     "note_attempt_run_id",
     "queued_message_signal_context",
+    "register_queued_notice_storage",
     "scrub_queued_notice_session_context",
 ]
 
@@ -53,6 +55,8 @@ logger = get_logger(__name__)
 type ModelRunInput = str | Sequence[Message]
 
 _QUEUED_MESSAGE_NOTICE_MARKER_KEY = "mindroom_queued_message_notice"
+_QUEUED_MESSAGE_NOTICE_PERSISTED_MARKER = "persisted"
+_QUEUED_MESSAGE_NOTICE_RESPONSE_TURN_ID_KEY = "mindroom_queued_message_notice_response_turn_id"
 _QUEUED_MESSAGE_NOTICE_HOOK_ATTR = "_mindroom_queued_message_notice_hook_installed"
 
 EMPTY_RESPONSE_NOTICE = "The model returned an empty response — please try again."
@@ -134,6 +138,17 @@ class _SupportsQueuedMessageState(Protocol):
 @dataclass
 class _QueuedMessageNoticeContext:
     state: _SupportsQueuedMessageState | None
+    response_turn_id: str = field(default_factory=lambda: str(uuid4()))
+    notice_fired: bool = False
+    storage_targets: dict[tuple[str, str, SessionType], _QueuedNoticeStorageTarget] = field(default_factory=dict)
+
+
+@dataclass
+class _QueuedNoticeStorageTarget:
+    storage_factory: Callable[[], BaseDb]
+    session_id: str
+    session_type: SessionType
+    entity_name: str
 
 
 _queued_message_notice_context: ContextVar[_QueuedMessageNoticeContext | None] = ContextVar(
@@ -145,30 +160,69 @@ _queued_message_notice_context: ContextVar[_QueuedMessageNoticeContext | None] =
 @contextmanager
 def queued_message_signal_context(
     signal: _SupportsQueuedMessageState | None,
-) -> Generator[None, None, None]:
+) -> Generator[_QueuedMessageNoticeContext, None, None]:
     """Bind one queued-message signal to the current async task."""
-    token = _queued_message_notice_context.set(_QueuedMessageNoticeContext(state=signal))
+    notice_context = _QueuedMessageNoticeContext(state=signal)
+    token = _queued_message_notice_context.set(notice_context)
     try:
-        yield
+        yield notice_context
     finally:
         _queued_message_notice_context.reset(token)
 
 
 def _has_queued_notice_marker(message: Message) -> bool:
     provider_data = message.provider_data
-    return isinstance(provider_data, dict) and provider_data.get(_QUEUED_MESSAGE_NOTICE_MARKER_KEY) is True
+    return isinstance(provider_data, dict) and provider_data.get(_QUEUED_MESSAGE_NOTICE_MARKER_KEY) in (
+        True,
+        _QUEUED_MESSAGE_NOTICE_PERSISTED_MARKER,
+    )
 
 
-def _is_queued_notice_message(message: Message) -> bool:
+def _queued_notice_marker(message: Message) -> bool | str | None:
+    provider_data = message.provider_data
+    if not isinstance(provider_data, dict):
+        return None
+    marker = provider_data.get(_QUEUED_MESSAGE_NOTICE_MARKER_KEY)
+    return marker if marker in (True, _QUEUED_MESSAGE_NOTICE_PERSISTED_MARKER) else None
+
+
+def _queued_notice_response_turn_id(message: Message) -> str | None:
+    provider_data = message.provider_data
+    if not isinstance(provider_data, dict):
+        return None
+    response_turn_id = provider_data.get(_QUEUED_MESSAGE_NOTICE_RESPONSE_TURN_ID_KEY)
+    return response_turn_id if isinstance(response_turn_id, str) and response_turn_id else None
+
+
+def _is_queued_notice_message(
+    message: Message,
+    *,
+    response_turn_id: str | None = None,
+) -> bool:
     """Return whether one Agno message is the hidden queued-message notice."""
-    return _has_queued_notice_marker(message)
+    if not _has_queued_notice_marker(message):
+        return False
+    if response_turn_id is None:
+        return True
+    return _queued_notice_response_turn_id(message) == response_turn_id
 
 
-def _strip_queued_notice_messages(messages: list[Message] | None) -> bool:
+def _strip_queued_notice_messages(
+    messages: list[Message] | None,
+    *,
+    response_turn_id: str | None = None,
+) -> bool:
     """Remove queued-message notices from one mutable message list."""
     if not messages:
         return False
-    filtered_messages = [message for message in messages if not _is_queued_notice_message(message)]
+    filtered_messages = [
+        message
+        for message in messages
+        if not _is_queued_notice_message(
+            message,
+            response_turn_id=response_turn_id,
+        )
+    ]
     if len(filtered_messages) == len(messages):
         return False
     messages[:] = filtered_messages
@@ -181,39 +235,63 @@ def _append_queued_notice_if_needed(
     function_call_results: Sequence[Message],
     notice_text: str,
 ) -> None:
-    _strip_queued_notice_messages(messages)
+    notice_context = _queued_message_notice_context.get()
     if any(message.stop_after_tool_call for message in function_call_results):
         return
-    notice_context = _queued_message_notice_context.get()
+    if notice_context is not None:
+        _strip_queued_notice_messages(
+            messages,
+            response_turn_id=notice_context.response_turn_id,
+        )
     if notice_context is None or notice_context.state is None or not notice_context.state.has_pending_human_messages():
         return
     messages.append(
         Message(
             role="user",
             content=notice_text,
-            provider_data={_QUEUED_MESSAGE_NOTICE_MARKER_KEY: True},
+            provider_data={
+                _QUEUED_MESSAGE_NOTICE_MARKER_KEY: True,
+                _QUEUED_MESSAGE_NOTICE_RESPONSE_TURN_ID_KEY: notice_context.response_turn_id,
+            },
         ),
     )
+    if not notice_context.notice_fired:
+        notice_context.notice_fired = True
+        logger.info(
+            "queued_message_notice_injected",
+            response_turn_id=notice_context.response_turn_id,
+        )
 
 
-def _cleanup_queued_notice_from_run_output(run_output: RunOutput | TeamRunOutput | None) -> bool:
-    """Remove queued-message notices from one returned run output."""
-    if run_output is None:
-        return False
-    changed = _strip_queued_notice_messages(run_output.messages)
+def _strip_response_turn_notice_from_run_output(
+    run_output: RunOutput | TeamRunOutput,
+    *,
+    response_turn_id: str,
+) -> bool:
+    """Remove one response's notice from a top-level or nested run output."""
+    changed = _strip_queued_notice_messages(
+        run_output.messages,
+        response_turn_id=response_turn_id,
+    )
     if isinstance(run_output, TeamRunOutput) and run_output.member_responses:
         for member_response in run_output.member_responses:
             if isinstance(member_response, RunOutput | TeamRunOutput):
-                changed = _cleanup_queued_notice_from_run_output(member_response) or changed
+                changed = (
+                    _strip_response_turn_notice_from_run_output(
+                        member_response,
+                        response_turn_id=response_turn_id,
+                    )
+                    or changed
+                )
     return changed
 
 
-def _load_session_for_cleanup(
+def _load_queued_notice_session(
     raw_session: AgentSession | TeamSession | dict[str, object],
     *,
     session_type: SessionType,
 ) -> AgentSession | TeamSession | None:
-    """Deserialize one stored Agno session for queued-notice cleanup."""
+    """Deserialize one stored Agno session for queued-notice finalization."""
     if isinstance(raw_session, dict):
         session_mapping = cast("dict[str, Any]", raw_session)
         return (
@@ -224,80 +302,330 @@ def _load_session_for_cleanup(
     return raw_session
 
 
-def _strip_queued_notice_from_session(session: AgentSession | TeamSession) -> bool:
-    changed = False
-    for run in session.runs or []:
-        if isinstance(run, (RunOutput, TeamRunOutput)):
-            changed = _cleanup_queued_notice_from_run_output(run) or changed
-    return changed
+def _session_run_outputs(session: AgentSession | TeamSession) -> list[RunOutput | TeamRunOutput]:
+    return [run for run in session.runs or [] if isinstance(run, RunOutput | TeamRunOutput)]
 
 
-def _strip_queued_notice_from_session_storage(
-    storage: BaseDb,
-    session_id: str,
+def _run_output_notice_messages(
+    run_output: RunOutput | TeamRunOutput,
     *,
-    session_type: SessionType = SessionType.AGENT,
-) -> bool:
-    """Remove queued-message notices from one persisted Agno session."""
-    raw_session = storage.get_session(session_id, session_type)
-    if raw_session is None:
-        return False
-    session = _load_session_for_cleanup(
-        cast("AgentSession | TeamSession | dict[str, object]", raw_session),
-        session_type=session_type,
+    response_turn_id: str,
+) -> list[Message]:
+    matches = _top_level_queued_notice_messages(
+        run_output,
+        response_turn_id=response_turn_id,
     )
-    if session is None:
-        return False
-    changed = _strip_queued_notice_from_session(session)
-    if changed:
-        storage.upsert_session(session)
-    return changed
+    if isinstance(run_output, TeamRunOutput) and run_output.member_responses:
+        for member_response in run_output.member_responses:
+            if isinstance(member_response, RunOutput | TeamRunOutput):
+                matches.extend(
+                    _run_output_notice_messages(
+                        member_response,
+                        response_turn_id=response_turn_id,
+                    ),
+                )
+    return matches
 
 
-async def cleanup_queued_notice_state_async(
+def _top_level_queued_notice_messages(
+    run_output: RunOutput | TeamRunOutput,
     *,
-    run_output: RunOutput | TeamRunOutput | None,
+    response_turn_id: str,
+) -> list[Message]:
+    return [
+        message
+        for message in run_output.messages or []
+        if _is_queued_notice_message(
+            message,
+            response_turn_id=response_turn_id,
+        )
+    ]
+
+
+def _new_persisted_queued_notice(response_turn_id: str, notice_text: str) -> Message:
+    return Message(
+        role="user",
+        content=notice_text,
+        provider_data={
+            _QUEUED_MESSAGE_NOTICE_MARKER_KEY: _QUEUED_MESSAGE_NOTICE_PERSISTED_MARKER,
+            _QUEUED_MESSAGE_NOTICE_RESPONSE_TURN_ID_KEY: response_turn_id,
+        },
+    )
+
+
+def _queued_notice_text_to_persist(
+    *,
+    destination_matches: Sequence[Message],
+) -> str | None:
+    destination_live_notice = next(
+        (
+            message
+            for message in destination_matches
+            if _queued_notice_marker(message) is True and isinstance(message.content, str)
+        ),
+        None,
+    )
+    if destination_live_notice is not None:
+        return cast("str", destination_live_notice.content)
+    persisted_source = next(
+        (
+            message
+            for message in destination_matches
+            if _queued_notice_marker(message) == _QUEUED_MESSAGE_NOTICE_PERSISTED_MARKER
+            and isinstance(message.content, str)
+        ),
+        None,
+    )
+    return cast("str", persisted_source.content) if persisted_source is not None else None
+
+
+def _finalize_queued_notice_in_runs(
+    runs: Sequence[RunOutput | TeamRunOutput],
+    *,
+    response_turn_id: str,
+) -> bool:
+    """Leave one exact persisted notice where the newest replayable run saw it."""
+    destination = next(
+        (
+            run
+            for run in reversed(runs)
+            if is_model_history_visible_run(run)
+            and _top_level_queued_notice_messages(
+                run,
+                response_turn_id=response_turn_id,
+            )
+        ),
+        None,
+    )
+    all_matches = [
+        message
+        for run in runs
+        for message in _run_output_notice_messages(
+            run,
+            response_turn_id=response_turn_id,
+        )
+    ]
+    if not all_matches and destination is None:
+        return False
+
+    destination_matches = (
+        _top_level_queued_notice_messages(
+            destination,
+            response_turn_id=response_turn_id,
+        )
+        if destination is not None
+        else []
+    )
+    notice_text = _queued_notice_text_to_persist(
+        destination_matches=destination_matches,
+    )
+    if (
+        notice_text is not None
+        and len(all_matches) == 1
+        and len(destination_matches) == 1
+        and _queued_notice_marker(destination_matches[0]) == _QUEUED_MESSAGE_NOTICE_PERSISTED_MARKER
+        and destination_matches[0].content == notice_text
+    ):
+        return False
+
+    insertion_index: int | None = None
+    if destination is not None and destination.messages:
+        insertion_index = next(
+            (
+                index
+                for index, message in enumerate(destination.messages)
+                if _is_queued_notice_message(
+                    message,
+                    response_turn_id=response_turn_id,
+                )
+            ),
+            None,
+        )
+
+    for run in runs:
+        _strip_response_turn_notice_from_run_output(
+            run,
+            response_turn_id=response_turn_id,
+        )
+
+    if destination is None or notice_text is None:
+        return True
+    if destination.messages is None:
+        destination.messages = []
+    persisted_notice = _new_persisted_queued_notice(response_turn_id, notice_text)
+    if insertion_index is None:
+        destination.messages.append(persisted_notice)
+    else:
+        destination.messages.insert(min(insertion_index, len(destination.messages)), persisted_notice)
+    return True
+
+
+def _finalize_queued_notice_in_new_session_storage(
+    target: _QueuedNoticeStorageTarget,
+    response_turn_id: str,
+) -> None:
+    """Finalize one response in a worker-owned session storage handle."""
+    storage = target.storage_factory()
+    try:
+        raw_session = storage.get_session(target.session_id, target.session_type)
+        if raw_session is None:
+            return
+        session = _load_queued_notice_session(
+            cast("AgentSession | TeamSession | dict[str, object]", raw_session),
+            session_type=target.session_type,
+        )
+        if session is None:
+            return
+        if _finalize_queued_notice_in_runs(
+            _session_run_outputs(session),
+            response_turn_id=response_turn_id,
+        ):
+            storage.upsert_session(session)
+    finally:
+        storage.close()
+
+
+def register_queued_notice_storage(
+    *,
     storage_factory: Callable[[], BaseDb] | None,
     session_id: str | None,
     session_type: SessionType,
     entity_name: str,
 ) -> None:
-    """Strip queued notices using worker-owned storage off the event loop."""
-    _cleanup_queued_notice_from_run_output(run_output)
+    """Register storage touched by one response for queued-notice finalization."""
+    notice_context = _queued_message_notice_context.get()
+    if notice_context is None:
+        return
     if storage_factory is None or not session_id:
         return
-    try:
-        await asyncio.to_thread(
-            _strip_queued_notice_from_new_session_storage,
-            storage_factory,
-            session_id,
-            session_type=session_type,
-        )
-    except Exception:
-        logger.exception(
-            "Failed to strip queued-message notice from session history",
-            entity=entity_name,
+    target_key = (entity_name, session_id, session_type)
+    target = notice_context.storage_targets.get(target_key)
+    if target is None:
+        target = _QueuedNoticeStorageTarget(
+            storage_factory=storage_factory,
             session_id=session_id,
-            session_type=session_type.value,
-        )
-
-
-def _strip_queued_notice_from_new_session_storage(
-    storage_factory: Callable[[], BaseDb],
-    session_id: str,
-    *,
-    session_type: SessionType,
-) -> None:
-    """Create, use, and close one session storage handle in its worker thread."""
-    storage = storage_factory()
-    try:
-        _strip_queued_notice_from_session_storage(
-            storage,
-            session_id,
             session_type=session_type,
+            entity_name=entity_name,
         )
-    finally:
-        storage.close()
+        notice_context.storage_targets[target_key] = target
+
+
+def _finalize_queued_notice_storage_targets(
+    targets: Sequence[_QueuedNoticeStorageTarget],
+    response_turn_id: str,
+) -> None:
+    """Finalize all durable targets for one response from a worker thread."""
+    for target in targets:
+        try:
+            _finalize_queued_notice_in_new_session_storage(
+                target,
+                response_turn_id,
+            )
+        except Exception:
+            logger.exception(
+                "Failed to finalize queued-message notice in session history",
+                entity=target.entity_name,
+                session_id=target.session_id,
+                session_type=target.session_type.value,
+                response_turn_id=response_turn_id,
+            )
+
+
+async def finalize_queued_notice_response_turn_async(
+    notice_context: _QueuedMessageNoticeContext,
+) -> None:
+    """Finalize one delivered notice at the user-visible response boundary."""
+    if not notice_context.notice_fired:
+        return
+    if not notice_context.storage_targets:
+        return
+    storage_task = asyncio.create_task(
+        asyncio.to_thread(
+            _finalize_queued_notice_storage_targets,
+            tuple(notice_context.storage_targets.values()),
+            notice_context.response_turn_id,
+        ),
+    )
+    try:
+        await asyncio.shield(storage_task)
+    except asyncio.CancelledError:
+        while not storage_task.done():
+            try:
+                await asyncio.shield(storage_task)
+            except asyncio.CancelledError:
+                continue
+        storage_task.result()
+        raise
+
+
+def _queued_notice_response_turn_ids(
+    runs: Sequence[RunOutput | TeamRunOutput],
+) -> set[str]:
+    return {
+        response_turn_id
+        for run in runs
+        for message in _run_output_notice_messages_for_any_response(run)
+        if (response_turn_id := _queued_notice_response_turn_id(message)) is not None
+    }
+
+
+def _run_output_notice_messages_for_any_response(
+    run_output: RunOutput | TeamRunOutput,
+) -> list[Message]:
+    matches = [message for message in run_output.messages or [] if _has_queued_notice_marker(message)]
+    if isinstance(run_output, TeamRunOutput) and run_output.member_responses:
+        for member_response in run_output.member_responses:
+            if isinstance(member_response, RunOutput | TeamRunOutput):
+                matches.extend(_run_output_notice_messages_for_any_response(member_response))
+    return matches
+
+
+def _has_notice_marker_for_response(
+    runs: Sequence[RunOutput | TeamRunOutput],
+    *,
+    response_turn_id: str,
+    marker: bool | str,
+) -> bool:
+    return any(
+        _queued_notice_marker(message) == marker
+        for run in runs
+        for message in _run_output_notice_messages(
+            run,
+            response_turn_id=response_turn_id,
+        )
+    )
+
+
+def _recover_prior_queued_notices(
+    session: AgentSession | TeamSession,
+    *,
+    active_response_turn_id: str | None,
+) -> bool:
+    runs = _session_run_outputs(session)
+    changed = False
+    for response_turn_id in _queued_notice_response_turn_ids(runs):
+        if response_turn_id == active_response_turn_id:
+            continue
+        if not _has_notice_marker_for_response(
+            runs,
+            response_turn_id=response_turn_id,
+            marker=True,
+        ):
+            continue
+        if _has_notice_marker_for_response(
+            runs,
+            response_turn_id=response_turn_id,
+            marker=_QUEUED_MESSAGE_NOTICE_PERSISTED_MARKER,
+        ):
+            continue
+        changed = (
+            _finalize_queued_notice_in_runs(
+                runs,
+                response_turn_id=response_turn_id,
+            )
+            or changed
+        )
+    return changed
 
 
 def scrub_queued_notice_session_context(
@@ -305,15 +633,19 @@ def scrub_queued_notice_session_context(
     scope_context: ScopeSessionContext | None,
     entity_name: str,
 ) -> None:
-    """Strip stale queued-message notices from the loaded session before replay."""
+    """Recover prior crash-left notices without touching the active response."""
     if scope_context is None or scope_context.session is None:
         return
+    notice_context = _queued_message_notice_context.get()
     try:
-        if _strip_queued_notice_from_session(scope_context.session):
+        if _recover_prior_queued_notices(
+            scope_context.session,
+            active_response_turn_id=notice_context.response_turn_id if notice_context is not None else None,
+        ):
             scope_context.storage.upsert_session(scope_context.session)
     except Exception:
         logger.exception(
-            "Failed to strip queued-message notice from loaded session history",
+            "Failed to recover queued-message notice in loaded session history",
             entity=entity_name,
             session_id=scope_context.session.session_id,
             session_type="team" if isinstance(scope_context.session, TeamSession) else "agent",
@@ -351,7 +683,7 @@ def _remove_run_from_session_storage(
     raw_session = storage.get_session(session_id, session_type)
     if raw_session is None:
         return False
-    session = _load_session_for_cleanup(
+    session = _load_queued_notice_session(
         cast("AgentSession | TeamSession | dict[str, object]", raw_session),
         session_type=session_type,
     )

@@ -1755,21 +1755,45 @@ async def test_callback_failure_preserves_saved_checkpoint_immediately(tmp_path:
 
 @pytest.mark.asyncio
 async def test_invite_failure_rewinds_classic_cursor_before_response_certification(tmp_path: Path) -> None:
-    """An invite failure must replay the sync instead of certifying past the invite."""
+    """An invite failure must leave exact durable work before replaying the sync."""
     bot = _agent_bot(tmp_path)
     bot.client = make_matrix_client_mock(user_id=bot.matrix_id.full_id)
     bot.client.next_batch = "s_after_invite"
     bot._sync_cache_trust.state = SyncTrustState.CERTIFIED
     bot._sync_cache_trust.checkpoint = SyncCheckpoint("s_before_invite")
     bot._room_lifecycle.on_invite = AsyncMock(side_effect=RuntimeError("join failed"))
+    room = nio.MatrixRoom("!invited:localhost", bot.matrix_id.full_id)
+    event = nio.InviteEvent.parse_event(
+        {
+            "type": "m.room.member",
+            "sender": "@owner:localhost",
+            "state_key": bot.matrix_id.full_id,
+            "content": {"membership": "invite"},
+        },
+    )
+    assert isinstance(event, nio.InviteEvent)
 
     with pytest.raises(RuntimeError, match="join failed"):
-        await bot._on_invite_before_sync_certification(
-            MagicMock(spec=nio.MatrixRoom),
-            MagicMock(spec=nio.InviteEvent),
-        )
+        await bot._on_invite_before_sync_certification(room, event)
 
     assert bot.client.next_batch == "s_before_invite"
+    pending = bot._dispatch_obligation_store.pending()
+    assert len(pending) == 1
+    assert pending[0].room_id == room.room_id
+    assert pending[0].event_source == {
+        **event.source,
+        "content": event.content,
+    }
+
+    recovered_invite = AsyncMock()
+    bot._room_lifecycle.on_invite = recovered_invite
+    await bot._dispatch_obligation_runner.recover_pending(turn_backed=False)
+
+    recovered_invite.assert_awaited_once()
+    recovered_event = recovered_invite.await_args.args[1]
+    assert isinstance(recovered_event, nio.InviteMemberEvent)
+    assert recovered_event.content == {"membership": "invite"}
+    assert not bot._dispatch_obligation_store.pending()
 
 
 @pytest.mark.asyncio
@@ -1802,6 +1826,55 @@ async def test_dispatch_persistence_failure_rewinds_classic_cursor(
         )
 
     assert bot.client.next_batch == "s_before_failure"
+
+
+@pytest.mark.asyncio
+async def test_dispatch_creation_drains_repeated_cancellation_before_rewind(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cancellation cannot escape while its create worker may still commit unseen work."""
+    bot = _agent_bot(tmp_path)
+    bot.client = make_matrix_client_mock(user_id=bot.matrix_id.full_id)
+    bot.client.next_batch = "s_after_cancel"
+    bot._sync_cache_trust.state = SyncTrustState.CERTIFIED
+    bot._sync_cache_trust.checkpoint = SyncCheckpoint("s_before_cancel")
+    create_started = threading.Event()
+    release_create = threading.Event()
+    original_create = bot._dispatch_obligation_store.create_pending
+
+    def blocking_create(obligation: object) -> object:
+        create_started.set()
+        assert release_create.wait(timeout=2)
+        return original_create(obligation)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(bot._dispatch_obligation_store, "create_pending", blocking_create)
+    run_persisted = AsyncMock()
+    monkeypatch.setattr(bot._dispatch_obligation_runner, "run_persisted", run_persisted)
+    wrapper = bot._dispatch_obligation_runner.task_wrapper(
+        DispatchCallbackKind.MESSAGE,
+        owner=bot._runtime_view,
+    )
+    event = _text_event("$cancelled-create", "hello", 1)
+    task = asyncio.create_task(
+        wrapper(nio.MatrixRoom("!room:localhost", bot.matrix_id.full_id), event),
+    )
+
+    assert await asyncio.to_thread(create_started.wait, 2)
+    task.cancel()
+    await asyncio.sleep(0)
+    task.cancel()
+    await asyncio.sleep(0)
+    escaped_before_worker = task.done()
+    release_create.set()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert not escaped_before_worker
+    assert bot._dispatch_obligation_store.has_pending(event.event_id, DispatchCallbackKind.MESSAGE)
+    assert bot.client.next_batch == "s_before_cancel"
+    run_persisted.assert_not_awaited()
 
 
 @pytest.mark.asyncio

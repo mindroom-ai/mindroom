@@ -1049,8 +1049,7 @@ async def _run_non_streaming_agent_attempts(
             pending_retry_decision.record_retry_success()
         return _NonStreamingAttemptResult(response=response, attempt=attempt)
     finally:
-        await ai_runtime.cleanup_queued_notice_state_async(
-            run_output=response,
+        ai_runtime.register_queued_notice_storage(
             storage_factory=scope_context.storage_factory if scope_context is not None else None,
             session_id=run_context.session_id,
             session_type=SessionType.AGENT,
@@ -1965,8 +1964,7 @@ async def stream_agent_response(  # noqa: C901, PLR0915
         if not holder.attempt_started:
             return
         holder.attempt_started = False
-        await ai_runtime.cleanup_queued_notice_state_async(
-            run_output=None,
+        ai_runtime.register_queued_notice_storage(
             storage_factory=scope_context.storage_factory if scope_context is not None else None,
             session_id=session_id,
             session_type=SessionType.AGENT,

@@ -206,7 +206,7 @@ class BotRoomLifecycle:
             return
         self._update_invited_room(room_id, remember=False)
 
-    def _update_invited_room(self, room_id: str, *, remember: bool) -> None:
+    def _update_invited_room(self, room_id: str, *, remember: bool) -> bool:
         """Merge one update with durable and in-memory state before saving."""
         room_ids = load_invited_rooms(self.invited_rooms_file_path()) | self.invited_rooms
         if remember:
@@ -216,9 +216,17 @@ class BotRoomLifecycle:
             self._pending_forgotten_invited_rooms.add(room_id)
         room_ids.difference_update(self._pending_forgotten_invited_rooms)
 
-        if save_invited_rooms(self.invited_rooms_file_path(), room_ids):
+        saved = save_invited_rooms(self.invited_rooms_file_path(), room_ids)
+        if saved:
             self._pending_forgotten_invited_rooms.clear()
         self.invited_rooms = room_ids
+        return saved
+
+    def _remember_invited_room(self, room_id: str) -> None:
+        """Persist one accepted invite or fail so its durable intent can retry."""
+        if self.should_persist_invited_rooms() and not self._update_invited_room(room_id, remember=True):
+            msg = f"Failed to persist invited room {room_id}"
+            raise OSError(msg)
 
     async def join_configured_rooms(self) -> None:
         """Join all rooms this bot should preserve across restarts."""
@@ -352,6 +360,8 @@ class BotRoomLifecycle:
         async with self._lock_for_room(self._invite_join_locks, room.room_id):
             if room.room_id in self._handled_invite_room_ids or self._client_has_joined_room(room.room_id):
                 self._logger().debug("Invite already handled", room_id=room.room_id, sender=event.sender)
+                await self.deps.on_room_joined(room.room_id)
+                self._remember_invited_room(room.room_id)
                 if self.deps.agent_name == ROUTER_AGENT_NAME:
                     await self.send_welcome_message_if_empty(room.room_id, event.sender)
                 return
@@ -359,12 +369,12 @@ class BotRoomLifecycle:
             self._logger().info("Received invite", room_id=room.room_id, sender=event.sender)
             if not await self._join_room_with_decrypt_notice_fence(client, room.room_id):
                 self._logger().error("Failed to join room", room_id=room.room_id)
-                return
+                msg = f"Failed to join invited room {room.room_id}"
+                raise RuntimeError(msg)
 
-            self._handled_invite_room_ids.add(room.room_id)
             self._logger().info("Joined room", room_id=room.room_id)
             await self.deps.on_room_joined(room.room_id)
-            if self.should_persist_invited_rooms():
-                self._update_invited_room(room.room_id, remember=True)
+            self._remember_invited_room(room.room_id)
+            self._handled_invite_room_ids.add(room.room_id)
             if self.deps.agent_name == ROUTER_AGENT_NAME:
                 await self.send_welcome_message_if_empty(room.room_id, event.sender)

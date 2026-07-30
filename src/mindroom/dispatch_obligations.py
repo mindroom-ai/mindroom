@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import sqlite3
 import threading
@@ -11,6 +12,7 @@ from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
+from typing import TypeVar
 
 import nio
 from typing_extensions import TypeIs
@@ -25,6 +27,7 @@ _DATABASE_NAME = "dispatch_obligations.sqlite3"
 _SCHEMA_VERSION = 2
 _PENDING_STATE = "pending"
 _TOOL_APPROVAL_RESPONSE_EVENT_TYPE = "io.mindroom.tool_approval_response"
+_StoreResult = TypeVar("_StoreResult")
 
 
 class DispatchCallbackKind(StrEnum):
@@ -34,6 +37,7 @@ class DispatchCallbackKind(StrEnum):
     MEDIA = "media"
     REACTION = "reaction"
     APPROVAL = "approval"
+    INVITE = "invite"
     ROOM_LIFECYCLE = "room_lifecycle"
     REDACTION = "redaction"
     DECRYPTION_FAILURE = "decryption_failure"
@@ -173,11 +177,8 @@ class DispatchObligationStore:
 
     @staticmethod
     def _event_source_json(obligation: _DispatchObligation) -> str:
-        if obligation.event_source.get("event_id") != obligation.source_event_id:
-            msg = "Dispatch obligation source event ID does not match its event payload"
-            raise ValueError(msg)
         try:
-            return json.dumps(
+            event_source_json = json.dumps(
                 obligation.event_source,
                 ensure_ascii=True,
                 separators=(",", ":"),
@@ -186,6 +187,15 @@ class DispatchObligationStore:
         except (TypeError, ValueError) as exc:
             msg = "Dispatch obligation event source must be JSON-safe"
             raise ValueError(msg) from exc
+        expected_source_event_id = (
+            _invite_source_event_id(obligation.room_id, event_source_json)
+            if obligation.callback_kind is DispatchCallbackKind.INVITE
+            else obligation.event_source.get("event_id")
+        )
+        if expected_source_event_id != obligation.source_event_id:
+            msg = "Dispatch obligation source event ID does not match its event payload"
+            raise ValueError(msg)
+        return event_source_json
 
     def _validate_bound_key(self, key: _DispatchObligationKey) -> None:
         if key.principal_id != self.principal_id or key.entity_name != self.entity_name:
@@ -341,6 +351,29 @@ class DispatchObligationStore:
                 if existing is None:
                     msg = f"Unknown dispatch obligation {key.source_event_id!r}"
                     raise KeyError(msg)
+
+    def discard_pending(self, key: _DispatchObligationKey) -> None:
+        """Remove successful work whose source has no permanent Matrix event ID."""
+        self._validate_bound_key(key)
+        with self._lock, self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            connection.execute(
+                """
+                DELETE FROM dispatch_obligations
+                WHERE principal_id = ?
+                  AND entity_name = ?
+                  AND source_event_id = ?
+                  AND callback_kind = ?
+                  AND state = ?
+                """,
+                (
+                    key.principal_id,
+                    key.entity_name,
+                    key.source_event_id,
+                    key.callback_kind.value,
+                    _PENDING_STATE,
+                ),
+            )
 
     def settle_from_turn_store(
         self,
@@ -499,11 +532,13 @@ class DispatchObligationStore:
         return row is not None
 
 
-_DispatchCallback = Callable[[nio.MatrixRoom, nio.Event], Awaitable[_DispatchCallbackResult]]
+_DispatchEvent = nio.Event | nio.InviteEvent
+_DispatchCallback = Callable[[nio.MatrixRoom, _DispatchEvent], Awaitable[_DispatchCallbackResult]]
 _MessageCallback = Callable[[nio.MatrixRoom, nio.RoomMessageText], Awaitable[None]]
 _MediaCallback = Callable[[nio.MatrixRoom, MatrixMediaEvent], Awaitable[None]]
 _ReactionCallback = Callable[[nio.MatrixRoom, nio.ReactionEvent], Awaitable[None]]
 _ApprovalCallback = Callable[[nio.MatrixRoom, nio.UnknownEvent], Awaitable[None]]
+_InviteCallback = Callable[[nio.MatrixRoom, nio.InviteEvent], Awaitable[None]]
 _RoomLifecycleCallback = Callable[[nio.MatrixRoom, nio.RoomMemberEvent], Awaitable[None]]
 _RedactionCallback = Callable[[nio.MatrixRoom, nio.RedactionEvent], Awaitable[None]]
 _DecryptionFailureCallback = Callable[[nio.MatrixRoom, nio.MegolmEvent], Awaitable[None]]
@@ -520,14 +555,14 @@ async def _admit_all_sources(
     return True
 
 
-async def _run_store_settlement(
-    operation: Callable[..., None],
+async def _run_owned_store_operation(
+    operation: Callable[..., _StoreResult],
     *args: object,
-) -> None:
-    """Finish one owned store settlement before propagating cancellation."""
+) -> _StoreResult:
+    """Finish one owned store operation before propagating cancellation."""
     worker_task = asyncio.create_task(asyncio.to_thread(operation, *args))
     try:
-        await asyncio.shield(worker_task)
+        return await asyncio.shield(worker_task)
     except asyncio.CancelledError:
         while not worker_task.done():
             try:
@@ -538,7 +573,59 @@ async def _run_store_settlement(
         raise
 
 
-def _parse_recovery_event(obligation: _DispatchObligation) -> nio.Event:
+async def _run_store_settlement(
+    operation: Callable[..., None],
+    *args: object,
+) -> None:
+    """Finish one owned store settlement before propagating cancellation."""
+    await _run_owned_store_operation(operation, *args)
+
+
+def _invite_source_event_id(room_id: str, event_source_json: str) -> str:
+    digest = hashlib.sha256(f"{room_id}\0{event_source_json}".encode()).hexdigest()
+    return f"invite:{digest}"
+
+
+def _dispatch_event_source(event: _DispatchEvent) -> dict[str, object]:
+    source = dict(event.source)
+    if isinstance(event, nio.InviteMemberEvent):
+        source["content"] = dict(event.content)
+    return source
+
+
+def _dispatch_source_event_id(
+    room_id: str,
+    event: _DispatchEvent,
+    callback_kind: DispatchCallbackKind,
+    event_source_json: str,
+) -> str:
+    if callback_kind is DispatchCallbackKind.INVITE:
+        if not isinstance(event, nio.InviteEvent):
+            msg = "Invite dispatch requires an invite event"
+            raise TypeError(msg)
+        return _invite_source_event_id(room_id, event_source_json)
+    if not isinstance(event, nio.Event):
+        msg = f"{callback_kind.value} dispatch requires an event with an exact Matrix event ID"
+        raise TypeError(msg)
+    return event.event_id
+
+
+def _parse_recovery_event(obligation: _DispatchObligation) -> _DispatchEvent:
+    if obligation.callback_kind is DispatchCallbackKind.INVITE:
+        event_source_json = json.dumps(
+            obligation.event_source,
+            ensure_ascii=True,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        if _invite_source_event_id(obligation.room_id, event_source_json) != obligation.source_event_id:
+            msg = f"corrupt dispatch obligation event {obligation.source_event_id!r}/'invite'"
+            raise _DispatchObligationCorruptionError(msg)
+        event = nio.InviteEvent.parse_event(dict(obligation.event_source))
+        if not isinstance(event, nio.InviteEvent):
+            msg = f"corrupt dispatch obligation event {obligation.source_event_id!r}/'invite'"
+            raise _DispatchObligationCorruptionError(msg)
+        return event
     event = (
         parse_matrix_media_event_source(obligation.event_source)
         if obligation.callback_kind is DispatchCallbackKind.MEDIA
@@ -556,6 +643,7 @@ class _CallbackBindings:
     on_media: _MediaCallback
     on_reaction: _ReactionCallback
     on_approval: _ApprovalCallback
+    on_invite: _InviteCallback
     on_room_lifecycle: _RoomLifecycleCallback
     on_redaction: _RedactionCallback
     on_decryption_failure: _DecryptionFailureCallback
@@ -568,6 +656,7 @@ class _CallbackBindings:
             DispatchCallbackKind.MEDIA: self.dispatch_media,
             DispatchCallbackKind.REACTION: self.dispatch_reaction,
             DispatchCallbackKind.APPROVAL: self.dispatch_approval,
+            DispatchCallbackKind.INVITE: self.dispatch_invite,
             DispatchCallbackKind.ROOM_LIFECYCLE: self.dispatch_room_lifecycle,
             DispatchCallbackKind.REDACTION: self.dispatch_redaction,
             DispatchCallbackKind.DECRYPTION_FAILURE: self.dispatch_decryption_failure,
@@ -581,7 +670,7 @@ class _CallbackBindings:
     async def dispatch_message(
         self,
         room: nio.MatrixRoom,
-        event: nio.Event,
+        event: _DispatchEvent,
     ) -> _DispatchCallbackResult:
         if not isinstance(event, nio.RoomMessageText):
             return _DispatchCallbackResult.INTENTIONALLY_IGNORED
@@ -591,7 +680,7 @@ class _CallbackBindings:
     async def dispatch_media(
         self,
         room: nio.MatrixRoom,
-        event: nio.Event,
+        event: _DispatchEvent,
     ) -> _DispatchCallbackResult:
         if not isinstance(event, MATRIX_MEDIA_EVENT_TYPES):
             return _DispatchCallbackResult.INTENTIONALLY_IGNORED
@@ -601,7 +690,7 @@ class _CallbackBindings:
     async def dispatch_reaction(
         self,
         room: nio.MatrixRoom,
-        event: nio.Event,
+        event: _DispatchEvent,
     ) -> _DispatchCallbackResult:
         if not isinstance(event, nio.ReactionEvent):
             return _DispatchCallbackResult.INTENTIONALLY_IGNORED
@@ -611,17 +700,27 @@ class _CallbackBindings:
     async def dispatch_approval(
         self,
         room: nio.MatrixRoom,
-        event: nio.Event,
+        event: _DispatchEvent,
     ) -> _DispatchCallbackResult:
-        if not _is_tool_approval_response(event):
+        if not isinstance(event, nio.Event) or not _is_tool_approval_response(event):
             return _DispatchCallbackResult.INTENTIONALLY_IGNORED
         await self.on_approval(room, event)
+        return _DispatchCallbackResult.SUCCEEDED
+
+    async def dispatch_invite(
+        self,
+        room: nio.MatrixRoom,
+        event: _DispatchEvent,
+    ) -> _DispatchCallbackResult:
+        if not isinstance(event, nio.InviteEvent):
+            return _DispatchCallbackResult.INTENTIONALLY_IGNORED
+        await self.on_invite(room, event)
         return _DispatchCallbackResult.SUCCEEDED
 
     async def dispatch_room_lifecycle(
         self,
         room: nio.MatrixRoom,
-        event: nio.Event,
+        event: _DispatchEvent,
     ) -> _DispatchCallbackResult:
         if not isinstance(event, nio.RoomMemberEvent):
             return _DispatchCallbackResult.INTENTIONALLY_IGNORED
@@ -631,7 +730,7 @@ class _CallbackBindings:
     async def dispatch_redaction(
         self,
         room: nio.MatrixRoom,
-        event: nio.Event,
+        event: _DispatchEvent,
     ) -> _DispatchCallbackResult:
         if not isinstance(event, nio.RedactionEvent):
             return _DispatchCallbackResult.INTENTIONALLY_IGNORED
@@ -641,7 +740,7 @@ class _CallbackBindings:
     async def dispatch_decryption_failure(
         self,
         room: nio.MatrixRoom,
-        event: nio.Event,
+        event: _DispatchEvent,
     ) -> _DispatchCallbackResult:
         if not isinstance(event, nio.MegolmEvent):
             return _DispatchCallbackResult.INTENTIONALLY_IGNORED
@@ -669,6 +768,7 @@ class DispatchObligationRunner:
         on_media: _MediaCallback,
         on_reaction: _ReactionCallback,
         on_approval: _ApprovalCallback,
+        on_invite: _InviteCallback,
         on_room_lifecycle: _RoomLifecycleCallback,
         on_redaction: _RedactionCallback,
         on_decryption_failure: _DecryptionFailureCallback,
@@ -681,6 +781,7 @@ class DispatchObligationRunner:
             on_media=on_media,
             on_reaction=on_reaction,
             on_approval=on_approval,
+            on_invite=on_invite,
             on_room_lifecycle=on_room_lifecycle,
             on_redaction=on_redaction,
             on_decryption_failure=on_decryption_failure,
@@ -733,7 +834,7 @@ class DispatchObligationRunner:
     async def dispatch(
         self,
         room: nio.MatrixRoom,
-        event: nio.Event,
+        event: _DispatchEvent,
         callback_kind: DispatchCallbackKind,
     ) -> None:
         """Persist exact work before invoking its fallible callback."""
@@ -745,34 +846,51 @@ class DispatchObligationRunner:
     async def persist(
         self,
         room: nio.MatrixRoom,
-        event: nio.Event,
+        event: _DispatchEvent,
         callback_kind: DispatchCallbackKind,
     ) -> _DispatchObligation | None:
         """Persist exact work before its background task may be created."""
         try:
+            event_source = _dispatch_event_source(event)
+            event_source_json = json.dumps(
+                event_source,
+                ensure_ascii=True,
+                separators=(",", ":"),
+                sort_keys=True,
+            )
+            source_event_id = _dispatch_source_event_id(
+                room.room_id,
+                event,
+                callback_kind,
+                event_source_json,
+            )
             if not await self.source_admission(
                 room.room_id,
-                event.event_id,
+                source_event_id,
                 callback_kind,
             ):
                 return None
             obligation = _DispatchObligation(
                 principal_id=self.store.principal_id,
                 entity_name=self.store.entity_name,
-                source_event_id=event.event_id,
+                source_event_id=source_event_id,
                 callback_kind=callback_kind,
                 room_id=room.room_id,
-                event_source=dict(event.source),
+                event_source=event_source,
             )
             if await self._settle_from_turn_store_if_owned(obligation):
                 return None
-            create_result = await asyncio.to_thread(self.store.create_pending, obligation)
+            create_result = await _run_owned_store_operation(self.store.create_pending, obligation)
             if create_result is _DispatchCreateResult.ALREADY_TERMINAL:
                 persisted_obligation = None
             elif create_result is _DispatchCreateResult.ALREADY_PENDING:
                 persisted_obligation = await asyncio.to_thread(self.store.pending_for, obligation.key)
             else:
                 persisted_obligation = obligation
+        except asyncio.CancelledError:
+            if self.on_persist_failure is not None:
+                self.on_persist_failure()
+            raise
         except Exception:
             if self.on_persist_failure is not None:
                 self.on_persist_failure()
@@ -784,10 +902,10 @@ class DispatchObligationRunner:
         obligation: _DispatchObligation,
         *,
         room: nio.MatrixRoom,
-        event: nio.Event,
+        event: _DispatchEvent,
     ) -> None:
         """Execute work whose exact durable obligation already exists."""
-        if room.room_id != obligation.room_id or dict(event.source) != obligation.event_source:
+        if room.room_id != obligation.room_id or _dispatch_event_source(event) != obligation.event_source:
             room = self.room_for_id(obligation.room_id)
             event = _parse_recovery_event(obligation)
         await self._run_obligation(obligation, room=room, event=event)
@@ -821,7 +939,7 @@ class DispatchObligationRunner:
         obligation: _DispatchObligation,
         *,
         room: nio.MatrixRoom,
-        event: nio.Event,
+        event: _DispatchEvent,
     ) -> None:
         if not await self._claim(obligation.key):
             return
@@ -867,6 +985,9 @@ class DispatchObligationRunner:
             return
         if await self._settle_from_turn_store_if_owned(obligation):
             return
+        if obligation.callback_kind is DispatchCallbackKind.INVITE:
+            await _run_store_settlement(self.store.discard_pending, obligation.key)
+            return
         outcome = (
             _DispatchTerminalOutcome.SUCCEEDED
             if result is _DispatchCallbackResult.SUCCEEDED
@@ -894,7 +1015,7 @@ class _DispatchObligationTaskWrapper:
     callback_kind: DispatchCallbackKind
     owner: object
 
-    async def __call__(self, room: nio.MatrixRoom, event: nio.Event) -> None:
+    async def __call__(self, room: nio.MatrixRoom, event: _DispatchEvent) -> None:
         """Persist one callback obligation before scheduling its execution."""
         obligation = await self.runner.persist(room, event, self.callback_kind)
         if obligation is None:
@@ -909,7 +1030,7 @@ class _DispatchObligationTaskWrapper:
         obligation: _DispatchObligation,
         *,
         room: nio.MatrixRoom,
-        event: nio.Event,
+        event: _DispatchEvent,
     ) -> None:
         try:
             await self.runner.run_persisted(obligation, room=room, event=event)
