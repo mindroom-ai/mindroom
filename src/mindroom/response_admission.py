@@ -42,7 +42,7 @@ class ResponseAdmissionRefusedError(Exception):
     """
 
     def __init__(self) -> None:
-        super().__init__("Configuration reload is restarting this entity")
+        super().__init__("Runtime replacement is restarting this entity")
 
 
 @dataclass
@@ -98,5 +98,5 @@ class ResponseAdmissionGate:
         self._open_event.set()
 
     async def wait_until_open(self) -> None:
-        """Wait until config application reopens response admission."""
+        """Wait until runtime replacement reopens response admission."""
         await self._open_event.wait()

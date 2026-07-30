@@ -3029,10 +3029,11 @@ async def test_replaced_runtime_refuses_deferred_response_without_matrix_io(
         assert task.done()
         assert not task.cancelled()
         assert isinstance(task.exception(), ResponseAdmissionRefusedError)
+        assert str(task.exception()) == "Runtime replacement is restarting this entity"
         assert bot.in_flight_response_count == 0
         send_response.assert_not_awaited()
         assert any(
-            call.args and call.args[0] == "response_deferred_during_config_apply"
+            call.args and call.args[0] == "response_deferred_during_replacement"
             for call in refusal_logger.info.call_args_list
         )
         assert any(

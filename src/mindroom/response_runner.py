@@ -830,7 +830,7 @@ class ResponseRunner:
             if not admission_deferred:
                 admission_deferred = True
                 self.deps.logger.info(
-                    "response_deferred_during_config_apply",
+                    "response_deferred_during_replacement",
                     response_kind=response_kind,
                     **request.response_envelope.target.log_context,
                 )
