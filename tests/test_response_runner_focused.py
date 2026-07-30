@@ -22,13 +22,18 @@ from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.cancellation import request_task_cancel
 from mindroom.constants import STREAM_STATUS_KEY, STREAM_STATUS_PENDING
 from mindroom.conversation_resolver import ConversationResolver, MessageContext
-from mindroom.delivery_gateway import DeliveryGateway, SendTextRequest
+from mindroom.delivery_gateway import (
+    DeliveryGateway,
+    FinalizeStreamedResponseRequest,
+    SendTextRequest,
+)
 from mindroom.dispatch_source import ScheduledHistoryBudget
 from mindroom.entity_resolution import current_internal_sender_ids
 from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
 from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.logging_config import get_logger
 from mindroom.matrix.cache import ThreadHistoryResult
+from mindroom.matrix.client import DeliveredMatrixEvent
 from mindroom.post_response_effects import PostResponseEffectsDeps, ResponseOutcome, apply_post_response_effects
 from mindroom.response_attempt import ResponseAttemptDeps, ResponseAttemptRequest, ResponseAttemptRunner
 from mindroom.response_lifecycle import ResponseLifecycleCoordinator
@@ -45,7 +50,12 @@ from mindroom.response_runner import (
     prepare_memory_and_model_context,
 )
 from mindroom.stop import StopManager
-from mindroom.streaming import INTERRUPTED_RESPONSE_NOTE, RESTART_INTERRUPTED_RESPONSE_NOTE, StreamingDeliveryError
+from mindroom.streaming import (
+    INTERRUPTED_RESPONSE_NOTE,
+    RESTART_INTERRUPTED_RESPONSE_NOTE,
+    StreamingDeliveryError,
+    StreamingResponse,
+)
 from mindroom.thread_summary import thread_summary_message_count_hint
 from mindroom.timing import DispatchPipelineTiming
 from mindroom.turn_policy import PreparedDispatch
@@ -1544,6 +1554,88 @@ async def test_cancel_cleanup_error_does_not_mark_source_handled(tmp_path: Path)
             post_response_deps=PostResponseEffectsDeps(logger=get_logger("tests.post_response")),
         )
 
+    assert result is None
+    assert callbacks == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("terminal_error", [False, True], ids=["success", "error"])
+async def test_terminal_send_cancellation_preserves_source_replay(
+    tmp_path: Path,
+    terminal_error: bool,
+) -> None:
+    """A restart cancel during a normal terminal edit must reach gateway and source settlement."""
+    coordinator = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    target = _target(thread_id="$thread")
+    callbacks: list[str] = []
+    request = replace(
+        _plain_request(target),
+        on_interrupted_response_recoverable=lambda: callbacks.append("recovery"),
+        on_deferred_outcome_handled=lambda _event_id: callbacks.append("handled"),
+    )
+    streaming = StreamingResponse(
+        target=target,
+        config=coordinator.deps.runtime.config,
+        runtime_paths=coordinator.deps.runtime_paths,
+    )
+    streaming.event_id = "$response"
+    streaming.accumulated_text = "partial answer"
+    delivered = DeliveredMatrixEvent(
+        event_id="$response",
+        content_sent={"body": "partial answer"},
+    )
+    with patch("mindroom.streaming.edit_message_result", new=AsyncMock(return_value=delivered)):
+        assert await streaming._send_or_edit_message(coordinator._client(), is_final=False)
+
+    with patch(
+        "mindroom.streaming.edit_message_result",
+        new=AsyncMock(side_effect=asyncio.CancelledError("sync_restart")),
+    ):
+        transport_outcome = await streaming.finalize(
+            coordinator._client(),
+            error=RuntimeError("generation failed") if terminal_error else None,
+        )
+
+    final_outcome = await coordinator.deps.delivery_gateway.finalize_streamed_response(
+        FinalizeStreamedResponseRequest(
+            target=target,
+            stream_transport_outcome=transport_outcome,
+            initial_delivery_kind="sent",
+            identity=coordinator._response_identity(request, response_kind="ai"),
+            tool_trace=None,
+            extra_content=None,
+        ),
+    )
+    progress = response_runner._DeliveryProgress()
+    progress.settle(final_outcome)
+    lifecycle = coordinator._build_lifecycle(
+        identity=coordinator._response_identity(request, response_kind="ai"),
+        request=request,
+    )
+    with (
+        patch.object(
+            coordinator,
+            "run_cancellable_response",
+            new=AsyncMock(return_value="$response"),
+        ),
+        patch_response_runner_module(apply_post_response_effects=AsyncMock()),
+    ):
+        result = await coordinator._run_and_settle_locked_response(
+            request,
+            target=target,
+            lifecycle=lifecycle,
+            progress=progress,
+            response_function=AsyncMock(),
+            thinking_message=None,
+            user_id=request.user_id,
+            run_id="run-1",
+            build_post_response_outcome=lambda _outcome: ResponseOutcome(),
+            post_response_deps=PostResponseEffectsDeps(logger=get_logger("tests.post_response")),
+        )
+
+    assert transport_outcome.terminal_status == "cancelled"
+    assert transport_outcome.failure_reason == "sync_restart_cancelled"
+    assert final_outcome.cancel_source == "sync_restart"
     assert result is None
     assert callbacks == []
 
