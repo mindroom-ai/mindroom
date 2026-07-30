@@ -25,6 +25,7 @@ from scripts.testing.fuzz_live_matrix import (
     _restart_prompt_observation,
     evaluate_restart_regression,
     live_scenario_from_seed,
+    restart_failure,
     restart_regression_scenario,
     saturation_scenario,
 )
@@ -164,6 +165,18 @@ def test_restart_regression_evaluator_accepts_pass_and_rejects_bad_directions() 
     assert any("invariant=historical_output_suppressed" in failure for failure in failures)
     assert any("invariant=historical_events_absent_from_fresh_prompt" in failure for failure in failures)
     assert any("invariant=response_callbacks_quiescent" in failure for failure in failures)
+
+
+def test_restart_failure_rejects_content_bearing_observation() -> None:
+    """Failure coordinates must reject values that could expose Matrix content."""
+    with pytest.raises(TypeError, match="integer or boolean"):
+        restart_failure(
+            "historical_output_suppressed",
+            event_category="historical_text",
+            phase="replacement_sync",
+            observed=cast("Any", {"body": "secret"}),
+            step=1,
+        )
 
 
 @pytest.mark.asyncio

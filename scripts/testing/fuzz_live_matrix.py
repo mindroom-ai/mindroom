@@ -94,6 +94,9 @@ def restart_failure(
     step: int,
 ) -> str:
     """Format replay coordinates without accepting message content."""
+    if not isinstance(observed, (int, bool)):
+        msg = "Restart failure observation must be an integer or boolean"
+        raise TypeError(msg)
     return (
         f"invariant={invariant} seed={RESTART_SEED} step={step} thread=0 "
         f"event_category={event_category} phase={phase} observed={observed}"
