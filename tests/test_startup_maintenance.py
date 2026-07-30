@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from mindroom.matrix.stale_stream_cleanup import StaleStreamRecoveryState
 from mindroom.startup_maintenance import StartupMaintenanceController
 
 
@@ -29,13 +30,13 @@ async def test_startup_maintenance_scans_rooms_joined_during_concurrent_setup() 
         started_bots: list[object],
         recovery_config: object,
         startup_cutoff_ms: int,
-        scanned_room_ids: set[str],
+        recovery_state: StaleStreamRecoveryState,
     ) -> None:
         assert started_bots == bots
         assert recovery_config is config
         assert startup_cutoff_ms == 123456
-        newly_joined_room_ids = joined_room_ids - scanned_room_ids
-        scanned_room_ids.update(newly_joined_room_ids)
+        newly_joined_room_ids = joined_room_ids - recovery_state.scanned_room_ids
+        recovery_state.scanned_room_ids.update(newly_joined_room_ids)
         recovery_waves.append(newly_joined_room_ids)
         call_order.append(f"recover-{len(recovery_waves)}")
         if len(recovery_waves) == 1:
@@ -78,7 +79,12 @@ async def test_startup_maintenance_continues_after_failed_recovery_and_room_setu
     """Later phases still run after stale recovery and room setup fail."""
     call_order: list[str] = []
 
-    async def recover_stale(_: list[object], __: object, ___: int, ____: set[str]) -> None:
+    async def recover_stale(
+        _: list[object],
+        __: object,
+        ___: int,
+        ____: StaleStreamRecoveryState,
+    ) -> None:
         call_order.append("recover")
         msg = "recovery failed"
         raise RuntimeError(msg)

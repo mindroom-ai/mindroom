@@ -47,6 +47,7 @@ from mindroom.matrix.identity import managed_account_user_id
 from mindroom.matrix.rooms import ensure_all_rooms_exist, ensure_root_space, ensure_user_in_rooms
 from mindroom.matrix.stale_stream_cleanup import (
     StaleStreamCleanupActor,
+    StaleStreamRecoveryState,
     recover_stale_streaming_messages,
 )
 from mindroom.matrix.state import load_rooms, resolve_room_aliases
@@ -296,12 +297,12 @@ class _MultiAgentOrchestrator:
             event_cache_provider=self._approval_event_cache,
         )
         self._startup_maintenance = StartupMaintenanceController(
-            recover_stale_streams=lambda bots, config, startup_cutoff_ms, scanned_room_ids: (
+            recover_stale_streams=lambda bots, config, startup_cutoff_ms, recovery_state: (
                 self._recover_stale_streams_after_restart(
                     bots,
                     config,
                     startup_cutoff_ms,
-                    scanned_room_ids,
+                    recovery_state,
                 )
             ),
             setup_rooms_and_memberships=self._setup_startup_rooms_and_memberships,
@@ -1056,7 +1057,7 @@ class _MultiAgentOrchestrator:
         bots: list[AgentBot | TeamBot],
         config: Config,
         startup_cutoff_ms: int | None,
-        scanned_room_ids: set[str],
+        recovery_state: StaleStreamRecoveryState,
         *,
         target_room_ids: set[str] | None = None,
     ) -> None:
@@ -1068,6 +1069,16 @@ class _MultiAgentOrchestrator:
             actors[bot.agent_user.user_id] = StaleStreamCleanupActor(
                 client=bot.client,
                 conversation_cache=bot._conversation_cache,
+                first_sync_complete=(
+                    self.agent_bots.get(bot.agent_name) is bot
+                    and self.entity_first_sync_complete(bot.agent_name) is True
+                ),
+                expected_room_ids=frozenset(
+                    resolve_room_aliases(
+                        get_rooms_for_entity(bot.agent_name, config),
+                        runtime_paths=self.runtime_paths,
+                    ),
+                ),
             )
         if not actors:
             return
@@ -1080,7 +1091,7 @@ class _MultiAgentOrchestrator:
             config=config,
             runtime_paths=self.runtime_paths,
             startup_cutoff_ms=startup_cutoff_ms,
-            scanned_room_ids=scanned_room_ids,
+            recovery_state=recovery_state,
             target_room_ids=target_room_ids,
         )
         logger.info(
@@ -1146,19 +1157,22 @@ class _MultiAgentOrchestrator:
             pending_room_ids.difference_update(room_ids)
             if not pending_room_ids:
                 del self._pending_replacement_recovery_room_ids[entity_name]
-        scanned_room_ids: set[str] = set()
+        recovery_state = StaleStreamRecoveryState()
         try:
             await self._recover_stale_streams_after_restart(
                 recovery_bots,
                 config,
                 None,
-                scanned_room_ids,
+                recovery_state,
                 target_room_ids=set().union(*claimed_room_ids.values()),
             )
         except BaseException:
             self._restore_pending_replacement_rooms(claimed_room_ids, set())
             raise
-        self._restore_pending_replacement_rooms(claimed_room_ids, scanned_room_ids)
+        self._restore_pending_replacement_rooms(
+            claimed_room_ids,
+            recovery_state.scanned_room_ids,
+        )
 
     def _resolve_bot_room_aliases(self, bots: list[AgentBot | TeamBot], config: Config) -> None:
         """Resolve currently known room aliases into each bot's configured room IDs."""

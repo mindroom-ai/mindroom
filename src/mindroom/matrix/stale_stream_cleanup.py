@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import time
 from dataclasses import dataclass, field
+from enum import Enum, auto
 from typing import TYPE_CHECKING, Any
 
 import nio
@@ -13,7 +14,6 @@ from nio.api import RelationshipType
 from mindroom.authorization import get_effective_sender_id_for_reply_permissions
 from mindroom.constants import (
     ORIGINAL_SENDER_KEY,
-    ROUTER_AGENT_NAME,
     SOURCE_KIND_KEY,
     STREAM_STATUS_CANCELLED,
     STREAM_STATUS_COMPLETED,
@@ -31,8 +31,6 @@ from mindroom.dispatch_source import (
     is_auto_resume_relay_body,
 )
 from mindroom.entity_resolution import (
-    MissingManagedEntityAccountError,
-    current_entity_id,
     current_internal_sender_ids,
     entity_identity_registry,
 )
@@ -61,7 +59,7 @@ from mindroom.streaming import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Iterable, Mapping, Sequence
+    from collections.abc import AsyncIterator, Iterable, Sequence
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
@@ -92,24 +90,36 @@ _TERMINAL_STREAM_STATUSES = frozenset(
 
 
 @dataclass(frozen=True)
+class StaleStreamCleanupActor:
+    """One bot account that may repair its own stale messages."""
+
+    client: nio.AsyncClient
+    conversation_cache: ConversationCacheProtocol
+    first_sync_complete: bool
+    expected_room_ids: frozenset[str]
+
+
+@dataclass(frozen=True)
 class _InterruptedThread:
-    """One interrupted thread that can be resumed after restart."""
+    """One exact-owner interrupted thread that can be resumed after restart."""
 
     room_id: str
     thread_id: str | None
     target_event_id: str
     partial_text: str
     agent_name: str
+    bot_user_id: str
+    owner_actor: StaleStreamCleanupActor = field(compare=False, repr=False)
     original_sender_id: str | None = None
     timestamp_ms: int = field(default=0, compare=False)
 
 
-@dataclass(frozen=True)
-class StaleStreamCleanupActor:
-    """One bot account that may repair its own stale messages."""
+@dataclass
+class StaleStreamRecoveryState:
+    """Narrow cross-pass state for one startup recovery generation."""
 
-    client: nio.AsyncClient
-    conversation_cache: ConversationCacheProtocol | None
+    scanned_room_ids: set[str] = field(default_factory=set)
+    retry_target_event_ids: set[str] = field(default_factory=set)
 
 
 @dataclass(frozen=True)
@@ -121,13 +131,40 @@ class _StaleStreamRecoveryResult:
     resumed_count: int
 
 
+@dataclass(frozen=True)
+class _RoomCleanupResult:
+    """Typed outcome from one room history scan."""
+
+    room_id: str
+    cleaned_count: int
+    interrupted_threads: tuple[_InterruptedThread, ...]
+    retry_room: bool = False
+
+
+@dataclass(frozen=True)
+class _AutoResumeResult:
+    """Typed delivery outcome for one group of exact-owner candidates."""
+
+    resumed_count: int
+    retry_room_ids: frozenset[str]
+    retry_target_event_ids: frozenset[str]
+    settled_target_event_ids: frozenset[str]
+
+
+class _FreshnessOutcome(Enum):
+    """Authoritative startup auto-resume freshness classification."""
+
+    CURRENT = auto()
+    NEWER_HUMAN = auto()
+    RETRY = auto()
+
+
 @dataclass
 class _MessageState:
     """Latest visible state for one original Matrix message."""
 
     latest_body: str | None = None
     latest_timestamp: int = 0
-    original_timestamp: int | None = None
     latest_event_id: str = ""
     latest_content: dict[str, Any] | None = None
     thread_id: str | None = None
@@ -201,7 +238,7 @@ async def recover_stale_streaming_messages(
     config: Config,
     runtime_paths: RuntimePaths,
     startup_cutoff_ms: int | None,
-    scanned_room_ids: set[str],
+    recovery_state: StaleStreamRecoveryState,
     target_room_ids: set[str] | None = None,
     room_concurrency: int = _RECOVERY_ROOM_CONCURRENCY,
 ) -> _StaleStreamRecoveryResult:
@@ -209,43 +246,43 @@ async def recover_stale_streaming_messages(
     room_actors = {
         room_id: joined_actors
         for room_id, joined_actors in (await _joined_room_actors(actors)).items()
-        if room_id not in scanned_room_ids and (target_room_ids is None or room_id in target_room_ids)
+        if room_id not in recovery_state.scanned_room_ids and (target_room_ids is None or room_id in target_room_ids)
     }
-    scanned_room_ids.update(room_actors)
+    recovery_state.scanned_room_ids.update(room_actors)
     if not room_actors:
         return _StaleStreamRecoveryResult(room_count=0, cleaned_count=0, resumed_count=0)
 
     semaphore = asyncio.Semaphore(max(1, room_concurrency))
-    all_bot_user_ids = set(actors)
     resume_user_id = resume_client.user_id if resume_client is not None else None
 
     async def recover_room(
         room_id: str,
         joined_actors: dict[str, StaleStreamCleanupActor],
-    ) -> tuple[int, list[_InterruptedThread], dict[str, StaleStreamCleanupActor], set[str]]:
+    ) -> _RoomCleanupResult:
         scan_actor = joined_actors.get(resume_user_id) if isinstance(resume_user_id, str) else None
         if scan_actor is None:
             scan_actor = joined_actors[min(joined_actors)]
-        retryable_room_ids: set[str] = set()
         async with semaphore:
             try:
-                cleaned_count, interrupted_threads = await _cleanup_stale_streaming_room(
+                return await _cleanup_stale_streaming_room(
                     scan_actor.client,
                     room_id=room_id,
-                    actors=joined_actors,
-                    bot_user_ids=all_bot_user_ids,
+                    actors=actors,
+                    joined_bot_user_ids=frozenset(joined_actors),
                     config=config,
                     runtime_paths=runtime_paths,
                     startup_cutoff_ms=startup_cutoff_ms,
                     terminal_interrupted_only=target_room_ids is not None,
-                    retryable_room_ids=retryable_room_ids,
+                    retry_target_event_ids=frozenset(recovery_state.retry_target_event_ids),
                 )
             except Exception:
-                scanned_room_ids.discard(room_id)
                 logger.warning("Failed stale stream recovery for room", room_id=room_id, exc_info=True)
-                return 0, [], joined_actors, set()
-            else:
-                return cleaned_count, interrupted_threads, joined_actors, retryable_room_ids
+                return _RoomCleanupResult(
+                    room_id=room_id,
+                    cleaned_count=0,
+                    interrupted_threads=(),
+                    retry_room=True,
+                )
 
     tasks = [
         asyncio.create_task(recover_room(room_id, joined_actors), name=f"stale_stream_recovery:{room_id}")
@@ -255,22 +292,30 @@ async def recover_stale_streaming_messages(
     resumed_count = 0
     try:
         for completed in asyncio.as_completed(tasks):
-            room_cleaned_count, interrupted_threads, joined_actors, retryable_room_ids = await completed
-            cleaned_count += room_cleaned_count
-            scanned_room_ids.difference_update(retryable_room_ids)
-            if resume_client is None or not config.defaults.auto_resume_after_restart or not interrupted_threads:
+            room_result = await completed
+            cleaned_count += room_result.cleaned_count
+            if room_result.retry_room:
+                recovery_state.scanned_room_ids.discard(room_result.room_id)
+            if (
+                resume_client is None
+                or not config.defaults.auto_resume_after_restart
+                or not room_result.interrupted_threads
+            ):
                 continue
-            resumed_count += await _auto_resume_interrupted_threads(
+            auto_resume_result = await _auto_resume_interrupted_threads(
                 resume_client,
-                interrupted_threads,
+                room_result.interrupted_threads,
                 config=config,
                 runtime_paths=runtime_paths,
                 conversation_cache=resume_conversation_cache,
-                owner_actors=joined_actors,
                 delay_before_first=resumed_count > 0,
-                retryable_room_ids=retryable_room_ids,
             )
-            scanned_room_ids.difference_update(retryable_room_ids)
+            resumed_count += auto_resume_result.resumed_count
+            recovery_state.scanned_room_ids.difference_update(auto_resume_result.retry_room_ids)
+            recovery_state.retry_target_event_ids.difference_update(
+                auto_resume_result.settled_target_event_ids,
+            )
+            recovery_state.retry_target_event_ids.update(auto_resume_result.retry_target_event_ids)
     finally:
         for task in tasks:
             if not task.done():
@@ -316,22 +361,20 @@ async def _joined_room_actors(
 
 async def _auto_resume_interrupted_threads(
     client: nio.AsyncClient,
-    interrupted: list[_InterruptedThread],
+    interrupted: Sequence[_InterruptedThread],
     *,
     config: Config,
     runtime_paths: RuntimePaths,
     conversation_cache: ConversationCacheProtocol | None = None,
-    owner_actors: Mapping[str, StaleStreamCleanupActor],
     delay: float = 2.0,
     delay_before_first: bool = False,
-    retryable_room_ids: set[str],
-) -> int:
+) -> _AutoResumeResult:
     """Send resume prompts for interrupted threaded conversations."""
-    if not interrupted:
-        return 0
-
     candidate_threads = _ordered_auto_resume_candidates(interrupted)
     resumed_count = 0
+    retry_room_ids: set[str] = set()
+    retry_target_event_ids: set[str] = set()
+    settled_target_event_ids: set[str] = set()
     delay_due = delay_before_first
     for interrupted_thread in candidate_threads:
         if interrupted_thread.original_sender_id is None:
@@ -341,65 +384,31 @@ async def _auto_resume_interrupted_threads(
                 thread_id=interrupted_thread.thread_id,
                 target_event_id=interrupted_thread.target_event_id,
             )
-            continue
-        owner_user_id = _current_configured_entity_user_id(
-            interrupted_thread.agent_name,
-            config,
-            runtime_paths,
-        )
-        owner_actor = owner_actors.get(owner_user_id) if owner_user_id is not None else None
-        if owner_actor is None or owner_actor.conversation_cache is None:
-            retryable_room_ids.add(interrupted_thread.room_id)
-            logger.warning(
-                "Skipping auto-resume because owning actor is unavailable or not joined",
-                room_id=interrupted_thread.room_id,
-                agent_name=interrupted_thread.agent_name,
-                target_event_id=interrupted_thread.target_event_id,
-            )
+            settled_target_event_ids.add(interrupted_thread.target_event_id)
             continue
         if delay_due:
             await asyncio.sleep(delay)
             delay_due = False
-        if not await _interrupted_target_remains_latest_human_work(
+        freshness = await _interrupted_target_freshness(
             interrupted_thread,
             config=config,
             runtime_paths=runtime_paths,
-            conversation_cache=owner_actor.conversation_cache,
-        ):
+        )
+        if freshness is _FreshnessOutcome.RETRY:
+            retry_room_ids.add(interrupted_thread.room_id)
+            retry_target_event_ids.add(interrupted_thread.target_event_id)
             continue
-        send_attempted = False
-        delivered = None
+        settled_target_event_ids.add(interrupted_thread.target_event_id)
+        if freshness is _FreshnessOutcome.NEWER_HUMAN:
+            continue
         try:
             content = _build_auto_resume_content(
                 interrupted_thread,
+                sender_is_owner=interrupted_thread.owner_actor.client is client,
                 config=config,
-                runtime_paths=runtime_paths,
             )
             delay_due = True
-            send_attempted = True
             delivered = await send_message_result(client, interrupted_thread.room_id, content)
-            if delivered is not None:
-                if conversation_cache is not None:
-                    conversation_cache.notify_outbound_message(
-                        interrupted_thread.room_id,
-                        delivered.event_id,
-                        delivered.content_sent,
-                    )
-                logger.info(
-                    "Queued auto-resume after restart",
-                    room_id=interrupted_thread.room_id,
-                    thread_id=interrupted_thread.thread_id,
-                    target_event_id=interrupted_thread.target_event_id,
-                    event_id=delivered.event_id,
-                )
-                resumed_count += 1
-            else:
-                logger.warning(
-                    "Failed to queue auto-resume after restart",
-                    room_id=interrupted_thread.room_id,
-                    thread_id=interrupted_thread.thread_id,
-                    target_event_id=interrupted_thread.target_event_id,
-                )
         except Exception as exc:
             logger.warning(
                 "Failed to send auto-resume message",
@@ -408,42 +417,64 @@ async def _auto_resume_interrupted_threads(
                 target_event_id=interrupted_thread.target_event_id,
                 error=str(exc),
             )
-        finally:
-            _mark_failed_auto_resume_delivery_retryable(
-                retryable_room_ids,
+            retry_room_ids.add(interrupted_thread.room_id)
+            retry_target_event_ids.add(interrupted_thread.target_event_id)
+            settled_target_event_ids.discard(interrupted_thread.target_event_id)
+            continue
+        if delivered is None:
+            logger.warning(
+                "Failed to queue auto-resume after restart",
                 room_id=interrupted_thread.room_id,
-                send_attempted=send_attempted,
-                delivered=delivered,
+                thread_id=interrupted_thread.thread_id,
+                target_event_id=interrupted_thread.target_event_id,
             )
+            retry_room_ids.add(interrupted_thread.room_id)
+            retry_target_event_ids.add(interrupted_thread.target_event_id)
+            settled_target_event_ids.discard(interrupted_thread.target_event_id)
+            continue
+        if conversation_cache is not None:
+            try:
+                conversation_cache.notify_outbound_message(
+                    interrupted_thread.room_id,
+                    delivered.event_id,
+                    delivered.content_sent,
+                )
+            except Exception:
+                logger.warning(
+                    "Failed to record queued auto-resume message",
+                    room_id=interrupted_thread.room_id,
+                    event_id=delivered.event_id,
+                    exc_info=True,
+                )
+        logger.info(
+            "Queued auto-resume after restart",
+            room_id=interrupted_thread.room_id,
+            thread_id=interrupted_thread.thread_id,
+            target_event_id=interrupted_thread.target_event_id,
+            event_id=delivered.event_id,
+        )
+        resumed_count += 1
 
-    return resumed_count
+    return _AutoResumeResult(
+        resumed_count=resumed_count,
+        retry_room_ids=frozenset(retry_room_ids),
+        retry_target_event_ids=frozenset(retry_target_event_ids),
+        settled_target_event_ids=frozenset(settled_target_event_ids),
+    )
 
 
-def _mark_failed_auto_resume_delivery_retryable(
-    retryable_room_ids: set[str],
-    *,
-    room_id: str,
-    send_attempted: bool,
-    delivered: object | None,
-) -> None:
-    """Release a room when router delivery produced no Matrix event."""
-    if send_attempted and delivered is None:
-        retryable_room_ids.add(room_id)
-
-
-async def _interrupted_target_remains_latest_human_work(
+async def _interrupted_target_freshness(
     interrupted_thread: _InterruptedThread,
     *,
     config: Config,
     runtime_paths: RuntimePaths,
-    conversation_cache: ConversationCacheProtocol | None,
-) -> bool:
-    """Return whether authoritative history has no newer effective human activity."""
-    if conversation_cache is None or interrupted_thread.thread_id is None:
-        return False
+) -> _FreshnessOutcome:
+    """Classify an interrupted target using its exact owner's authoritative history."""
+    if interrupted_thread.thread_id is None:
+        return _FreshnessOutcome.RETRY
 
     try:
-        history = await conversation_cache.refresh_strict_thread_history_from_source(
+        history = await interrupted_thread.owner_actor.conversation_cache.refresh_strict_thread_history_from_source(
             interrupted_thread.room_id,
             interrupted_thread.thread_id,
             caller_label="startup_auto_resume_freshness",
@@ -452,7 +483,7 @@ async def _interrupted_target_remains_latest_human_work(
             history,
             target_event_id=interrupted_thread.target_event_id,
         )
-        remains_latest = _later_thread_activity_is_internal(
+        remains_current = _later_thread_activity_is_internal(
             later_messages,
             config=config,
             runtime_paths=runtime_paths,
@@ -463,14 +494,15 @@ async def _interrupted_target_remains_latest_human_work(
             target_event_id=interrupted_thread.target_event_id,
             error=str(exc),
         )
-        return False
+        return _FreshnessOutcome.RETRY
 
-    if not remains_latest:
+    if not remains_current:
         logger.info(
             "Skipping stale auto-resume after newer human activity",
             target_event_id=interrupted_thread.target_event_id,
         )
-    return remains_latest
+        return _FreshnessOutcome.NEWER_HUMAN
+    return _FreshnessOutcome.CURRENT
 
 
 def _authoritative_history_after_target(
@@ -531,17 +563,18 @@ async def _cleanup_stale_streaming_room(
     *,
     room_id: str,
     actors: dict[str, StaleStreamCleanupActor],
-    bot_user_ids: set[str],
+    joined_bot_user_ids: frozenset[str],
     config: Config,
     runtime_paths: RuntimePaths,
     startup_cutoff_ms: int | None = None,
     terminal_interrupted_only: bool = False,
-    retryable_room_ids: set[str],
-) -> tuple[int, list[_InterruptedThread]]:
+    retry_target_event_ids: frozenset[str] = frozenset(),
+) -> _RoomCleanupResult:
     """Scan one room once and let each bot account repair its own messages."""
     if not actors:
-        return 0, []
+        return _RoomCleanupResult(room_id, 0, ())
     current_time_ms = int(time.time() * 1000)
+    bot_user_ids = set(actors)
     scan_policy = _cleanup_scan_policy(
         config,
         startup_cutoff_ms=startup_cutoff_ms,
@@ -550,7 +583,6 @@ async def _cleanup_stale_streaming_room(
     scanned_state = await _scan_room_message_states(
         scan_client,
         room_id=room_id,
-        cleanup_bot_user_ids=bot_user_ids,
         bot_user_ids=bot_user_ids,
         config=config,
         runtime_paths=runtime_paths,
@@ -559,9 +591,10 @@ async def _cleanup_stale_streaming_room(
     )
     message_states = scanned_state.message_states
     if not message_states:
-        return 0, []
+        return _RoomCleanupResult(room_id, 0, ())
 
     cleaned_count = 0
+    retry_room = False
     prior_edit_succeeded_by_bot: set[str] = set()
     interrupted_threads: list[_InterruptedThread] = []
     candidate_items = sorted(
@@ -574,18 +607,25 @@ async def _cleanup_stale_streaming_room(
         bot_user_id = state.bot_user_id
         if bot_user_id is None:
             continue
-        actor = actors.get(bot_user_id)
-        if actor is None:
-            _mark_unavailable_cleanup_actor_retryable(
-                retryable_room_ids,
-                room_id=room_id,
-                bot_user_id=bot_user_id,
+        actor = actors[bot_user_id]
+        allow_post_cutoff = target_event_id in retry_target_event_ids
+        if bot_user_id not in joined_bot_user_ids or not actor.first_sync_complete:
+            agent_name = _cleanup_candidate_agent_name(
+                bot_user_id,
                 state=state,
                 config=config,
                 runtime_paths=runtime_paths,
                 current_time_ms=current_time_ms,
                 scan_policy=scan_policy,
+                allow_post_cutoff=allow_post_cutoff,
             )
+            has_pending_work = (
+                agent_name is not None
+                and room_id in actor.expected_room_ids
+                and target_event_id not in scanned_state.auto_resume_target_event_ids
+                and not _is_older_than_cleanup_window(state.latest_timestamp, now_ms=current_time_ms)
+            )
+            retry_room = retry_room or has_pending_work
             continue
         edited, interrupted = await _process_stale_room_candidate(
             actor,
@@ -599,6 +639,7 @@ async def _cleanup_stale_streaming_room(
             runtime_paths=runtime_paths,
             current_time_ms=current_time_ms,
             scan_policy=scan_policy,
+            allow_post_cutoff=allow_post_cutoff,
             prior_edit_succeeded=bot_user_id in prior_edit_succeeded_by_bot,
         )
         if edited:
@@ -607,33 +648,12 @@ async def _cleanup_stale_streaming_room(
         if interrupted is not None:
             interrupted_threads.append(interrupted)
 
-    return cleaned_count, interrupted_threads
-
-
-def _mark_unavailable_cleanup_actor_retryable(
-    retryable_room_ids: set[str],
-    *,
-    room_id: str,
-    bot_user_id: str,
-    state: _MessageState,
-    config: Config,
-    runtime_paths: RuntimePaths,
-    current_time_ms: int,
-    scan_policy: _CleanupScanPolicy,
-) -> None:
-    """Release a room when its recoverable message owner is not joined yet."""
-    if (
-        _cleanup_candidate_agent_name(
-            bot_user_id,
-            state=state,
-            config=config,
-            runtime_paths=runtime_paths,
-            current_time_ms=current_time_ms,
-            scan_policy=scan_policy,
-        )
-        is not None
-    ):
-        retryable_room_ids.add(room_id)
+    return _RoomCleanupResult(
+        room_id=room_id,
+        cleaned_count=cleaned_count,
+        interrupted_threads=tuple(interrupted_threads),
+        retry_room=retry_room,
+    )
 
 
 async def _process_stale_room_candidate(
@@ -649,6 +669,7 @@ async def _process_stale_room_candidate(
     runtime_paths: RuntimePaths,
     current_time_ms: int,
     scan_policy: _CleanupScanPolicy,
+    allow_post_cutoff: bool,
     prior_edit_succeeded: bool,
 ) -> tuple[bool, _InterruptedThread | None]:
     """Repair or classify one bot-owned candidate from a shared room scan."""
@@ -660,6 +681,7 @@ async def _process_stale_room_candidate(
         runtime_paths=runtime_paths,
         current_time_ms=current_time_ms,
         scan_policy=scan_policy,
+        allow_post_cutoff=allow_post_cutoff,
     )
     if agent_name is None:
         return False, None
@@ -674,10 +696,10 @@ async def _process_stale_room_candidate(
             runtime_paths=runtime_paths,
             conversation_cache=actor.conversation_cache,
             agent_name=agent_name,
+            bot_user_id=bot_user_id,
+            owner_actor=actor,
             prior_edit_succeeded=prior_edit_succeeded,
         )
-    if not (_has_restart_interrupted_note(state.latest_body) or _has_resumable_interrupted_note(state)):
-        return False, None
     return await _handle_interrupted_message(
         actor.client,
         room_id=room_id,
@@ -690,6 +712,8 @@ async def _process_stale_room_candidate(
         runtime_paths=runtime_paths,
         conversation_cache=actor.conversation_cache,
         agent_name=agent_name,
+        bot_user_id=bot_user_id,
+        owner_actor=actor,
         prior_edit_succeeded=prior_edit_succeeded,
     )
 
@@ -702,6 +726,7 @@ def _cleanup_candidate_agent_name(
     runtime_paths: RuntimePaths,
     current_time_ms: int,
     scan_policy: _CleanupScanPolicy,
+    allow_post_cutoff: bool,
 ) -> str | None:
     """Return the owner name when one message belongs in this cleanup pass."""
     assert state.latest_body is not None
@@ -710,6 +735,7 @@ def _cleanup_candidate_agent_name(
         state,
         now_ms=current_time_ms,
         scan_policy=scan_policy,
+        allow_post_cutoff=allow_post_cutoff,
     ):
         return None
     if scan_policy.terminal_interrupted_only and not _has_resumable_interrupted_note(state):
@@ -733,6 +759,8 @@ async def _handle_interrupted_message(
     runtime_paths: RuntimePaths,
     conversation_cache: ConversationCacheProtocol | None = None,
     agent_name: str,
+    bot_user_id: str,
+    owner_actor: StaleStreamCleanupActor,
     prior_edit_succeeded: bool,
 ) -> tuple[bool, _InterruptedThread | None]:
     """Handle an interrupted response or restart marker seen during startup cleanup."""
@@ -743,6 +771,8 @@ async def _handle_interrupted_message(
             target_event_id=target_event_id,
             state=state,
             agent_name=agent_name,
+            bot_user_id=bot_user_id,
+            owner_actor=owner_actor,
         )
     repaired = await _repair_restart_marked_message_metadata(
         client,
@@ -814,6 +844,8 @@ async def _cleanup_one_stale_message(
     runtime_paths: RuntimePaths,
     conversation_cache: ConversationCacheProtocol | None = None,
     agent_name: str,
+    bot_user_id: str,
+    owner_actor: StaleStreamCleanupActor,
 ) -> tuple[bool, _InterruptedThread | None]:
     """Edit one stale message, redact stop reactions, return interrupted thread info."""
     assert state.latest_body is not None
@@ -838,6 +870,8 @@ async def _cleanup_one_stale_message(
             target_event_id=target_event_id,
             partial_text=_truncate_partial_text(clean_partial_reply_text(state.latest_body)),
             agent_name=agent_name,
+            bot_user_id=bot_user_id,
+            owner_actor=owner_actor,
             original_sender_id=state.requester_user_id,
             timestamp_ms=state.latest_timestamp,
         )
@@ -862,6 +896,8 @@ async def _cleanup_candidate_message(
     runtime_paths: RuntimePaths,
     conversation_cache: ConversationCacheProtocol | None = None,
     agent_name: str,
+    bot_user_id: str,
+    owner_actor: StaleStreamCleanupActor,
     prior_edit_succeeded: bool,
 ) -> tuple[bool, _InterruptedThread | None]:
     """Best-effort cleanup of one stale candidate message."""
@@ -878,6 +914,8 @@ async def _cleanup_candidate_message(
             runtime_paths=runtime_paths,
             conversation_cache=conversation_cache,
             agent_name=agent_name,
+            bot_user_id=bot_user_id,
+            owner_actor=owner_actor,
         )
     except Exception as exc:
         logger.warning(
@@ -893,7 +931,6 @@ async def _scan_room_message_states(
     client: nio.AsyncClient,
     *,
     room_id: str,
-    cleanup_bot_user_ids: set[str],
     bot_user_ids: set[str],
     config: Config,
     runtime_paths: RuntimePaths,
@@ -904,7 +941,7 @@ async def _scan_room_message_states(
     message_states, message_events = await _collect_room_history_events(
         client,
         room_id=room_id,
-        cleanup_bot_user_ids=cleanup_bot_user_ids,
+        cleanup_bot_user_ids=bot_user_ids,
         now_ms=now_ms,
         scan_policy=scan_policy,
     )
@@ -914,14 +951,14 @@ async def _scan_room_message_states(
         config=config,
         runtime_paths=runtime_paths,
     )
-    bot_message_events = [event for event in message_events if event.sender in cleanup_bot_user_ids]
+    bot_message_events = [event for event in message_events if event.sender in bot_user_ids]
     resolved_messages = await resolve_latest_visible_messages(
         bot_message_events,
         client,
         trusted_sender_ids=trusted_sender_ids,
     )
     bot_resolved_messages = {
-        event_id: message for event_id, message in resolved_messages.items() if message.sender in cleanup_bot_user_ids
+        event_id: message for event_id, message in resolved_messages.items() if message.sender in bot_user_ids
     }
     scanned_message_data_by_event_id = await _scanned_message_data_by_event_id(message_events)
     auto_resume_target_event_ids = _auto_resume_target_event_ids(
@@ -933,14 +970,14 @@ async def _scan_room_message_states(
         resolved_messages=bot_resolved_messages,
         scanned_message_data_by_event_id=scanned_message_data_by_event_id,
         room_id=room_id,
-        bot_user_ids=cleanup_bot_user_ids,
+        bot_user_ids=bot_user_ids,
         config=config,
         runtime_paths=runtime_paths,
     )
     _merge_bot_resolved_message_states(
         message_states,
         bot_resolved_messages,
-        bot_user_ids=cleanup_bot_user_ids,
+        bot_user_ids=bot_user_ids,
         requester_ids_by_event_id=requester_ids_by_event_id,
         scanned_message_data_by_event_id=scanned_message_data_by_event_id,
     )
@@ -1069,7 +1106,6 @@ def _merge_resolved_message_state(
     normalized_latest_content = {key: value for key, value in message.content.items() if isinstance(key, str)}
     state = message_states.setdefault(target_event_id, _MessageState())
     state.latest_body = message.body
-    state.original_timestamp = message.timestamp
     # The last time this message changed, not when it was created. ``timestamp`` deliberately
     # stays the original event's so an edit cannot reorder a thread, which means it is the
     # wrong clock for "is this stream still active": a placeholder posted eight hours ago and
@@ -1762,7 +1798,7 @@ def _truncate_partial_text(text: str, *, limit: int = _INTERRUPTED_PARTIAL_TEXT_
 
 
 def _ordered_auto_resume_candidates(
-    interrupted: list[_InterruptedThread],
+    interrupted: Sequence[_InterruptedThread],
 ) -> list[_InterruptedThread]:
     """Return each unique interrupted thread once in timestamp order."""
     latest_by_key: dict[tuple[str, str, str], _InterruptedThread] = {}
@@ -1770,7 +1806,7 @@ def _ordered_auto_resume_candidates(
     for interrupted_thread in interrupted:
         if interrupted_thread.thread_id is None:
             continue
-        key = (interrupted_thread.room_id, interrupted_thread.thread_id, interrupted_thread.agent_name)
+        key = (interrupted_thread.room_id, interrupted_thread.thread_id, interrupted_thread.bot_user_id)
         existing = latest_by_key.get(key)
         if existing is None or interrupted_thread.timestamp_ms >= existing.timestamp_ms:
             latest_by_key[key] = interrupted_thread
@@ -1813,6 +1849,8 @@ def _interrupted_thread_from_terminal_state(
     target_event_id: str,
     state: _MessageState,
     agent_name: str,
+    bot_user_id: str,
+    owner_actor: StaleStreamCleanupActor,
 ) -> _InterruptedThread | None:
     """Build an auto-resume record for an already-terminal interrupted response."""
     assert state.latest_body is not None
@@ -1824,6 +1862,8 @@ def _interrupted_thread_from_terminal_state(
         target_event_id=target_event_id,
         partial_text=_truncate_partial_text(clean_partial_reply_text(state.latest_body)),
         agent_name=agent_name,
+        bot_user_id=bot_user_id,
+        owner_actor=owner_actor,
         original_sender_id=state.requester_user_id,
         timestamp_ms=state.latest_timestamp,
     )
@@ -1844,17 +1884,15 @@ def _should_skip_for_startup_cleanup_window(
     *,
     now_ms: int,
     scan_policy: _CleanupScanPolicy,
+    allow_post_cutoff: bool,
 ) -> bool:
     """Return whether startup cleanup should ignore one candidate by age."""
     timestamp_ms = state.latest_timestamp
     is_resumable_interruption = scan_policy.collect_terminal_interrupted_for_resume and _has_resumable_interrupted_note(
         state,
     )
-    cutoff_timestamp_ms = (
-        state.original_timestamp if is_resumable_interruption and state.original_timestamp is not None else timestamp_ms
-    )
-    if _is_at_or_after_startup_cutoff(
-        cutoff_timestamp_ms,
+    if not allow_post_cutoff and _is_at_or_after_startup_cutoff(
+        timestamp_ms,
         startup_cutoff_ms=scan_policy.startup_cutoff_ms,
     ):
         return True
@@ -1913,15 +1951,11 @@ def _lookback_scan_state(
 def _build_auto_resume_content(
     interrupted_thread: _InterruptedThread,
     *,
+    sender_is_owner: bool,
     config: Config,
-    runtime_paths: RuntimePaths,
 ) -> dict[str, object]:
     """Build the router-authored visible resume relay for one interrupted agent."""
-    target_user_id = (
-        None
-        if interrupted_thread.agent_name == ROUTER_AGENT_NAME
-        else _current_configured_entity_user_id(interrupted_thread.agent_name, config, runtime_paths)
-    )
+    target_user_id = None if sender_is_owner else interrupted_thread.bot_user_id
     display_name = _entity_display_name(interrupted_thread.agent_name, config)
 
     body = AUTO_RESUME_MESSAGE
@@ -1949,21 +1983,6 @@ def _build_auto_resume_content(
         latest_thread_event_id=interrupted_thread.target_event_id,
         extra_content=extra_content,
     )
-
-
-def _current_configured_entity_user_id(
-    entity_name: str,
-    config: Config,
-    runtime_paths: RuntimePaths,
-) -> str | None:
-    """Return one configured entity user ID without resolving unrelated entities."""
-    if entity_name != ROUTER_AGENT_NAME and entity_name not in config.agents and entity_name not in config.teams:
-        return None
-    try:
-        return current_entity_id(entity_name, runtime_paths).full_id
-    except MissingManagedEntityAccountError:
-        logger.debug("auto_resume_target_entity_account_unavailable", entity_name=entity_name)
-        return None
 
 
 def _entity_display_name(agent_name: str, config: Config) -> str:

@@ -55,6 +55,12 @@ def test_trusted_relay_resolves_requester_and_allows_self_authored_ingress(tmp_p
         ),
     )
     human_sender = "@human:localhost"
+    owner_actor = stale_stream_cleanup.StaleStreamCleanupActor(
+        client=MagicMock(spec=nio.AsyncClient),
+        conversation_cache=MagicMock(),
+        first_sync_complete=True,
+        expected_room_ids=frozenset(),
+    )
     content = stale_stream_cleanup._build_auto_resume_content(
         stale_stream_cleanup._InterruptedThread(
             room_id="!room:localhost",
@@ -62,10 +68,12 @@ def test_trusted_relay_resolves_requester_and_allows_self_authored_ingress(tmp_p
             target_event_id="$target",
             partial_text="partial",
             agent_name="test_agent",
+            bot_user_id=ids["test_agent"].full_id,
+            owner_actor=owner_actor,
             original_sender_id=human_sender,
         ),
+        sender_is_owner=False,
         config=config,
-        runtime_paths=runtime_paths,
     )
 
     assert content[ORIGINAL_SENDER_KEY] == human_sender

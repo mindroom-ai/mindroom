@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from mindroom.logging_config import get_logger
+from mindroom.matrix.stale_stream_cleanup import StaleStreamRecoveryState
 from mindroom.orchestration.runtime import (
     cancel_logged_task,
     create_logged_task,
@@ -23,7 +24,10 @@ logger = get_logger(__name__)
 
 type _StartupBot = AgentBot | TeamBot
 type _SetupRooms = Callable[[list[_StartupBot]], Awaitable[None]]
-type _RecoverStaleStreams = Callable[[list[_StartupBot], Config, int, set[str]], Awaitable[None]]
+type _RecoverStaleStreams = Callable[
+    [list[_StartupBot], Config, int, StaleStreamRecoveryState],
+    Awaitable[None],
+]
 type _SyncRuntimeSupport = Callable[[Config], Awaitable[None]]
 type _MarkRuntimeSupportReady = Callable[[], Awaitable[None]]
 type _RunningBots = Callable[[], list[_StartupBot]]
@@ -72,7 +76,7 @@ class StartupMaintenanceController:
         self.start(bots, config, startup_cutoff_ms=self.startup_cutoff_ms)
 
     async def _run(self, bots: list[_StartupBot], config: Config, startup_cutoff_ms: int) -> None:
-        scanned_room_ids: set[str] = set()
+        recovery_state = StaleStreamRecoveryState()
         room_setup_task = asyncio.create_task(
             self._run_phase(
                 "startup_maintenance.rooms_and_memberships",
@@ -88,7 +92,7 @@ class StartupMaintenanceController:
                     bots,
                     config,
                     startup_cutoff_ms,
-                    scanned_room_ids,
+                    recovery_state,
                 ),
                 failure_message="Initial startup stale stream recovery failed",
             )
@@ -99,7 +103,7 @@ class StartupMaintenanceController:
                     bots,
                     config,
                     startup_cutoff_ms,
-                    scanned_room_ids,
+                    recovery_state,
                 ),
                 failure_message="Joined-room delta stale stream recovery failed",
             )
