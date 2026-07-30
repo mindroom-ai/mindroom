@@ -281,7 +281,13 @@ async def test_router_accepts_authorized_invite_persists_and_rejoins_on_startup(
     bot.client = AsyncMock()
     bot.client.rooms = {}
 
-    join_room = AsyncMock(return_value=True)
+    fenced_during_join: list[bool] = []
+
+    async def join_room_while_sync_is_live(_client: object, room_id: str) -> bool:
+        fenced_during_join.append(bot._room_lifecycle.decrypt_notice_is_fenced(room_id))
+        return True
+
+    join_room = AsyncMock(side_effect=join_room_while_sync_is_live)
     monkeypatch.setattr("mindroom.bot_room_lifecycle.is_authorized_sender", lambda *_args, **_kwargs: True)
     monkeypatch.setattr("mindroom.bot_room_lifecycle.join_room", join_room)
     welcome_message = AsyncMock()
@@ -294,7 +300,9 @@ async def test_router_accepts_authorized_invite_persists_and_rejoins_on_startup(
     await bot._on_invite(room, event)
 
     join_room.assert_awaited_once_with(bot.client, "!router-invited:localhost")
+    assert fenced_during_join == [True]
     welcome_message.assert_awaited_once_with("!router-invited:localhost", "@owner:localhost")
+    assert bot._room_lifecycle.decrypt_notice_is_fenced("!router-invited:localhost")
     assert bot._room_lifecycle.invited_rooms == {"!router-invited:localhost"}
     assert _invited_rooms_path(config, ROUTER_AGENT_NAME).read_text(encoding="utf-8") == (
         '[\n  "!router-invited:localhost"\n]\n'

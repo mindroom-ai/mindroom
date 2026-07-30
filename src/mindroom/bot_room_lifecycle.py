@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Protocol
 
@@ -79,6 +79,7 @@ class BotRoomLifecycle:
         self._welcome_locks: dict[str, asyncio.Lock] = {}
         self._handled_invite_room_ids: set[str] = set()
         self._welcomed_room_ids: set[str] = set()
+        self._decrypt_notice_fenced_room_ids: set[str] = set()
 
     def _lock_for_room(self, locks: dict[str, asyncio.Lock], room_id: str) -> asyncio.Lock:
         lock = locks.get(room_id)
@@ -121,6 +122,25 @@ class BotRoomLifecycle:
     def should_persist_invited_rooms(self) -> bool:
         """Return whether this entity persists invited room IDs across restarts."""
         return should_persist_invited_rooms(self._config(), self.deps.agent_name)
+
+    def decrypt_notice_is_fenced(self, room_id: str) -> bool:
+        """Return whether pre-join decrypt failures in this room stay silent."""
+        return room_id in self._decrypt_notice_fenced_room_ids
+
+    def observe_trusted_sync_rooms(self, room_ids: Iterable[str]) -> None:
+        """Clear join fences for rooms included in one trusted sync response."""
+        self._decrypt_notice_fenced_room_ids.difference_update(room_ids)
+
+    async def _join_room_with_decrypt_notice_fence(self, client: nio.AsyncClient, room_id: str) -> bool:
+        """Fence decrypt callbacks before a live join can race its first sync."""
+        joined = False
+        self._decrypt_notice_fenced_room_ids.add(room_id)
+        try:
+            joined = await join_room(client, room_id)
+        finally:
+            if not joined:
+                self._decrypt_notice_fenced_room_ids.discard(room_id)
+        return joined
 
     async def _on_configured_room_joined(self, room_id: str) -> None:
         """Apply common join state before configured-room setup."""
@@ -173,7 +193,7 @@ class BotRoomLifecycle:
                 await self._on_configured_room_joined(room_id)
                 continue
 
-            if await join_room(client, room_id):
+            if await self._join_room_with_decrypt_notice_fence(client, room_id):
                 current_rooms.add(room_id)
                 self._logger().info("Joined room", room_id=room_id)
                 await self._on_configured_room_joined(room_id)
@@ -292,7 +312,7 @@ class BotRoomLifecycle:
                 return
 
             self._logger().info("Received invite", room_id=room.room_id, sender=event.sender)
-            if not await join_room(client, room.room_id):
+            if not await self._join_room_with_decrypt_notice_fence(client, room.room_id):
                 self._logger().error("Failed to join room", room_id=room.room_id)
                 return
 

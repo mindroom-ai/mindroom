@@ -484,12 +484,13 @@ _ApprovalCallback = Callable[[nio.MatrixRoom, nio.UnknownEvent], Awaitable[None]
 _RoomLifecycleCallback = Callable[[nio.MatrixRoom, nio.RoomMemberEvent], Awaitable[None]]
 _RedactionCallback = Callable[[nio.MatrixRoom, nio.RedactionEvent], Awaitable[None]]
 _DecryptionFailureCallback = Callable[[nio.MatrixRoom, nio.MegolmEvent], Awaitable[None]]
-_SourceAdmission = Callable[[str, DispatchCallbackKind], Awaitable[bool]]
+_SourceAdmission = Callable[[str, str, DispatchCallbackKind], Awaitable[bool]]
 
 _TURN_BACKED_KINDS = frozenset({DispatchCallbackKind.MESSAGE, DispatchCallbackKind.MEDIA})
 
 
 async def _admit_all_sources(
+    _room_id: str,
     _source_event_id: str,
     _callback_kind: DispatchCallbackKind,
 ) -> bool:
@@ -726,7 +727,11 @@ class DispatchObligationRunner:
     ) -> _DispatchObligation | None:
         """Persist exact work before its background task may be created."""
         try:
-            if not await self.source_admission(event.event_id, callback_kind):
+            if not await self.source_admission(
+                room.room_id,
+                event.event_id,
+                callback_kind,
+            ):
                 return None
             obligation = _DispatchObligation(
                 principal_id=self.store.principal_id,

@@ -69,7 +69,10 @@ def _runner(
         callbacks={DispatchCallbackKind.MESSAGE: callback},
         room_for_id=lambda room_id: nio.MatrixRoom(room_id, "@code:example.org"),
         turn_is_terminal=lambda _event_id: False,
-        source_admission=fence.admit,
+        source_admission=lambda _room_id, event_id, callback_kind: fence.admit(
+            event_id,
+            callback_kind,
+        ),
     )
 
 

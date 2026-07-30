@@ -207,6 +207,145 @@ async def test_classic_response_without_continuation_keeps_fence_cold(
 
 
 @pytest.mark.asyncio
+async def test_warm_join_decrypt_notice_waits_for_trusted_sync_containing_room(
+    tmp_path: Path,
+) -> None:
+    """Pre-join Megolm sessions stay unclaimed until this room reaches trusted sync."""
+    room_id = "!room:localhost"
+    bot = _agent_bot(tmp_path)
+    bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
+    bot.client.outgoing_key_requests = {}
+    bot._first_sync_done = True
+    bot._cold_history_fence.start(trusted_continuation="s_warm")
+    room = nio.MatrixRoom(room_id, bot.agent_user.user_id)
+
+    def megolm_event(event_id: str) -> nio.MegolmEvent:
+        event = nio.MegolmEvent.from_dict(
+            {
+                "event_id": event_id,
+                "sender": "@user:localhost",
+                "origin_server_ts": 1,
+                "type": "m.room.encrypted",
+                "room_id": room_id,
+                "content": {
+                    "algorithm": "m.megolm.v1.aes-sha2",
+                    "ciphertext": "cipher",
+                    "sender_key": "sender-key",
+                    "session_id": "pre-join-session",
+                    "device_id": "DEVICE",
+                },
+            },
+        )
+        assert isinstance(event, nio.MegolmEvent)
+        return event
+
+    def sync_response(*, joined_room_id: str, next_batch: str) -> nio.SyncResponse:
+        response = MagicMock(spec=nio.SyncResponse)
+        response.next_batch = next_batch
+        response.rooms = MagicMock(
+            join={
+                joined_room_id: MagicMock(
+                    state=[],
+                    timeline=MagicMock(events=[], limited=False),
+                ),
+            },
+            leave={},
+        )
+        return response
+
+    notice = AsyncMock(return_value=True)
+    decrypt_callback = bot._dispatch_obligation_runner.task_wrapper(
+        DispatchCallbackKind.DECRYPTION_FAILURE,
+        owner=bot._runtime_view,
+    )
+    cache_result = AsyncMock(
+        side_effect=[
+            SyncCacheWriteResult(complete=False),
+            SyncCacheWriteResult(complete=True),
+            SyncCacheWriteResult(complete=True),
+        ],
+    )
+    admitted_during_join: list[bool] = []
+
+    async def join_while_sync_is_live(_client: object, joining_room_id: str) -> bool:
+        admitted_during_join.append(
+            await bot._admit_dispatch_source(
+                joining_room_id,
+                "$during-join",
+                DispatchCallbackKind.DECRYPTION_FAILURE,
+            ),
+        )
+        return True
+
+    with (
+        patch("mindroom.bot_room_lifecycle.get_joined_rooms", AsyncMock(return_value=[])),
+        patch("mindroom.bot_room_lifecycle.join_room", new=join_while_sync_is_live),
+        patch("mindroom.bot.is_authorized_sender", return_value=True),
+        patch("mindroom.matrix.decrypt_failure._send_decrypt_failure_notice", new=notice),
+        patch.object(
+            bot._conversation_cache,
+            "cache_sync_timeline_for_certification",
+            new=cache_result,
+        ),
+    ):
+        await bot.join_configured_rooms()
+        assert admitted_during_join == [False]
+        assert await bot._admit_dispatch_source(
+            room_id,
+            "$ordinary-message",
+            DispatchCallbackKind.MESSAGE,
+        )
+        assert not await bot._admit_dispatch_source(
+            room_id,
+            "$pre-join",
+            DispatchCallbackKind.DECRYPTION_FAILURE,
+        )
+        await decrypt_callback(room, megolm_event("$pre-join"))
+        assert not bot._dispatch_obligation_store.has_pending(
+            "$pre-join",
+            DispatchCallbackKind.DECRYPTION_FAILURE,
+        )
+        notice.assert_not_awaited()
+
+        await bot._on_sync_response(
+            sync_response(
+                joined_room_id=room_id,
+                next_batch="s_uncertified_room",
+            ),
+        )
+        await decrypt_callback(room, megolm_event("$after-uncertified-room"))
+        assert not bot._dispatch_obligation_store.has_pending(
+            "$after-uncertified-room",
+            DispatchCallbackKind.DECRYPTION_FAILURE,
+        )
+        notice.assert_not_awaited()
+
+        await bot._on_sync_response(
+            sync_response(
+                joined_room_id="!other:localhost",
+                next_batch="s_certified_other",
+            ),
+        )
+        await decrypt_callback(room, megolm_event("$after-certified-other"))
+        assert not bot._dispatch_obligation_store.has_pending(
+            "$after-certified-other",
+            DispatchCallbackKind.DECRYPTION_FAILURE,
+        )
+        notice.assert_not_awaited()
+
+        await bot._on_sync_response(
+            sync_response(
+                joined_room_id=room_id,
+                next_batch="s_certified_room",
+            ),
+        )
+        await decrypt_callback(room, megolm_event("$after-certified-room"))
+        assert await wait_for_background_tasks(timeout=0.5, owner=bot._runtime_view)
+
+    notice.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_sliding_response_pos_opens_fence_and_missing_or_unknown_pos_rearms(
     tmp_path: Path,
 ) -> None:
@@ -232,6 +371,34 @@ async def test_sliding_response_pos_opens_fence_and_missing_or_unknown_pos_rearm
     )
 
     assert bot._cold_history_fence.is_cold
+
+
+@pytest.mark.asyncio
+async def test_sliding_trusted_sync_clears_joined_room_decrypt_notice_fence(
+    tmp_path: Path,
+) -> None:
+    """A Sliding response with a position clears join fences only for included rooms."""
+    bot = _agent_bot(tmp_path)
+    bot.config.matrix_sync = MatrixSyncConfig(mode="sliding")
+    bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
+    bot._first_sync_done = True
+
+    with (
+        patch("mindroom.bot_room_lifecycle.get_joined_rooms", AsyncMock(return_value=[])),
+        patch("mindroom.bot_room_lifecycle.join_room", AsyncMock(return_value=True)),
+    ):
+        await bot.join_configured_rooms()
+
+    assert bot._room_lifecycle.decrypt_notice_is_fenced("!room:localhost")
+
+    await bot._on_sync_response(
+        nio.SlidingSyncResponse(
+            "pos_after_join",
+            rooms={"!room:localhost": nio.SlidingSyncRoom(membership="join")},
+        ),
+    )
+
+    assert not bot._room_lifecycle.decrypt_notice_is_fenced("!room:localhost")
 
 
 def _text_event(event_id: str, body: str, origin_server_ts: int) -> nio.RoomMessageText:

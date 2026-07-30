@@ -527,7 +527,7 @@ class AgentBot:
             room_for_id=self._room_for_dispatch_obligation,
             turn_is_terminal=self._turn_store.is_durably_handled,
             on_persist_failure=self._rewind_sync_after_dispatch_persistence_failure,
-            source_admission=self._cold_history_fence.admit,
+            source_admission=self._admit_dispatch_source,
         )
         self._post_response_effects_support = PostResponseEffectsSupport(
             runtime=self._runtime_view,
@@ -1180,6 +1180,21 @@ class AgentBot:
             has_retry_token=retry_token is not None,
         )
 
+    async def _admit_dispatch_source(
+        self,
+        room_id: str,
+        source_event_id: str,
+        callback_kind: DispatchCallbackKind,
+    ) -> bool:
+        """Apply decrypt-only room joins before global continuity admission."""
+        decrypt_notice_fenced = (
+            callback_kind is DispatchCallbackKind.DECRYPTION_FAILURE
+            and self._room_lifecycle.decrypt_notice_is_fenced(room_id)
+        )
+        if decrypt_notice_fenced:
+            return False
+        return await self._cold_history_fence.admit(source_event_id, callback_kind)
+
     def seconds_since_last_sync_activity(self) -> float | None:
         """Return elapsed seconds since the last sync-loop activity seen by the watchdog."""
         if self._last_sync_monotonic is None:
@@ -1322,6 +1337,8 @@ class AgentBot:
                     room_member_join_hook_plan = _RoomMemberJoinSyncHookPlan(arm_after_response=False)
                 else:
                     self._cold_history_fence.observe_continuation(_response.next_batch)
+                if decision.state is SyncTrustState.CERTIFIED:
+                    self._room_lifecycle.observe_trusted_sync_rooms(_response.rooms.join)
             self._mark_sync_progress()
         elif isinstance(_response, nio.SlidingSyncResponse):
             # Sliding sync never certifies the classic checkpoint, but the
@@ -1329,6 +1346,8 @@ class AgentBot:
             with track_matrix_sync_cache_write(self.agent_name):
                 await self._apply_own_room_membership_from_sliding_sync(_response)
             self._cold_history_fence.observe_continuation(_response.pos)
+            if not self._cold_history_fence.is_cold:
+                self._room_lifecycle.observe_trusted_sync_rooms(_response.rooms)
             self._mark_sync_progress()
         self._first_sync_done = True
         self._room_member_join_hooks_armed = room_member_join_hook_plan.arm_after_response
