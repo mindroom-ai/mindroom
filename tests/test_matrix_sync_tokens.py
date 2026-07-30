@@ -21,6 +21,7 @@ from mindroom.coalescing import CoalescingDrainResult, CoalescingGate, IngressAd
 from mindroom.coalescing_batch import CoalescedBatch, CoalescingKey, PendingEvent
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
+from mindroom.config.matrix import MatrixSyncConfig
 from mindroom.config.models import ModelConfig
 from mindroom.dispatch_handoff import PendingDispatchMetadata
 from mindroom.dispatch_obligations import DispatchCallbackKind
@@ -52,6 +53,7 @@ from tests.conftest import (
 
 if TYPE_CHECKING:
     from pathlib import Path
+    from typing import Literal
 
     from mindroom.coalescing import LaneSlot, _GateEntry
 
@@ -96,6 +98,109 @@ def _load_sync_token_value(tmp_path: Path, agent_name: str) -> str | None:
     if checkpoint is None:
         return None
     return checkpoint.token
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("mode", "saved_token", "expected_cold"),
+    [
+        ("classic", None, True),
+        ("classic", "s_restored", False),
+        ("sliding", None, True),
+        ("sliding", "s_classic_only", True),
+    ],
+)
+async def test_sync_transport_startup_sets_cold_history_admission(
+    tmp_path: Path,
+    mode: Literal["classic", "sliding"],
+    saved_token: str | None,
+    expected_cold: bool,
+) -> None:
+    """Classic since is reusable while a restarted Sliding connection has no pos."""
+    bot = _agent_bot(tmp_path)
+    bot.config.matrix_sync = MatrixSyncConfig(mode=mode)
+    bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
+    if saved_token is not None:
+        save_sync_token(
+            tmp_path,
+            bot.agent_name,
+            saved_token,
+            cache_generation=_CACHE_GENERATION,
+        )
+
+    await bot._prepare_matrix_sync_continuity()
+
+    assert bot._cold_history_fence.is_cold is expected_cold
+
+
+@pytest.mark.asyncio
+async def test_classic_response_continuation_opens_fence_and_unknown_pos_rearms(
+    tmp_path: Path,
+) -> None:
+    """Classic next_batch opens admission and M_UNKNOWN_POS closes it."""
+    bot = _agent_bot(tmp_path)
+    bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
+    await bot._prepare_matrix_sync_continuity()
+    bot._first_sync_done = True
+    response = MagicMock(spec=nio.SyncResponse)
+    response.next_batch = "s_after_cold"
+    response.rooms = MagicMock(join={}, leave={})
+
+    await bot._on_sync_response(response)
+
+    assert not bot._cold_history_fence.is_cold
+    sync_error = MagicMock(spec=nio.SyncError)
+    sync_error.status_code = "M_UNKNOWN_POS"
+
+    await bot._on_sync_error(sync_error)
+
+    assert bot._cold_history_fence.is_cold
+
+
+@pytest.mark.asyncio
+async def test_classic_response_without_continuation_keeps_fence_cold(
+    tmp_path: Path,
+) -> None:
+    """Classic response without next_batch cannot establish continuity."""
+    bot = _agent_bot(tmp_path)
+    bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
+    await bot._prepare_matrix_sync_continuity()
+    bot._first_sync_done = True
+    response = MagicMock(spec=nio.SyncResponse)
+    response.next_batch = None
+    response.rooms = MagicMock(join={}, leave={})
+
+    await bot._on_sync_response(response)
+
+    assert bot._cold_history_fence.is_cold
+
+
+@pytest.mark.asyncio
+async def test_sliding_response_pos_opens_fence_and_missing_or_unknown_pos_rearms(
+    tmp_path: Path,
+) -> None:
+    """Sliding pos opens admission while missing or rejected pos closes it."""
+    bot = _agent_bot(tmp_path)
+    bot.config.matrix_sync = MatrixSyncConfig(mode="sliding")
+    bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
+    await bot._prepare_matrix_sync_continuity()
+    bot._first_sync_done = True
+
+    await bot._on_sync_response(nio.SlidingSyncResponse("pos_after_cold"))
+
+    assert not bot._cold_history_fence.is_cold
+
+    await bot._on_sync_response(nio.SlidingSyncResponse(""))
+
+    assert bot._cold_history_fence.is_cold
+
+    await bot._on_sync_response(nio.SlidingSyncResponse("pos_after_missing"))
+
+    await bot._on_sync_error(
+        nio.SlidingSyncError("connection expired", "M_UNKNOWN_POS"),
+    )
+
+    assert bot._cold_history_fence.is_cold
 
 
 def _text_event(event_id: str, body: str, origin_server_ts: int) -> nio.RoomMessageText:
@@ -1162,6 +1267,7 @@ async def test_dispatch_persistence_failure_rewinds_classic_cursor(
     bot.client.next_batch = "s_after_failure"
     bot._sync_cache_trust.state = SyncTrustState.CERTIFIED
     bot._sync_cache_trust.checkpoint = SyncCheckpoint("s_before_failure")
+    bot._cold_history_fence.start(trusted_continuation="s_before_failure")
 
     def fail_persist(*_args: object, **_kwargs: object) -> None:
         message = "dispatch database unavailable"
@@ -1188,6 +1294,7 @@ async def test_dispatch_obligation_waits_for_terminal_turn_durability(tmp_path: 
     bot = _agent_bot(tmp_path)
     room = nio.MatrixRoom("!room:localhost", bot.matrix_id.full_id)
     event = _text_event("$write-behind", "hello", 1)
+    bot._cold_history_fence.start(trusted_continuation="s_live")
     obligation = await bot._dispatch_obligation_runner.persist(
         room,
         event,

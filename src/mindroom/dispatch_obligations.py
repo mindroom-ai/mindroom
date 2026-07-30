@@ -442,8 +442,16 @@ _ApprovalCallback = Callable[[nio.MatrixRoom, nio.UnknownEvent], Awaitable[None]
 _RoomLifecycleCallback = Callable[[nio.MatrixRoom, nio.RoomMemberEvent], Awaitable[None]]
 _RedactionCallback = Callable[[nio.MatrixRoom, nio.RedactionEvent], Awaitable[None]]
 _DecryptionFailureCallback = Callable[[nio.MatrixRoom, nio.MegolmEvent], Awaitable[None]]
+_SourceAdmission = Callable[[str, DispatchCallbackKind], Awaitable[bool]]
 
 _TURN_BACKED_KINDS = frozenset({DispatchCallbackKind.MESSAGE, DispatchCallbackKind.MEDIA})
+
+
+async def _admit_all_sources(
+    _source_event_id: str,
+    _callback_kind: DispatchCallbackKind,
+) -> bool:
+    return True
 
 
 def _parse_recovery_event(obligation: _DispatchObligation) -> nio.Event:
@@ -566,6 +574,7 @@ class DispatchObligationRunner:
     room_for_id: Callable[[str], nio.MatrixRoom]
     turn_is_terminal: Callable[[str], bool]
     on_persist_failure: Callable[[], None] | None = None
+    source_admission: _SourceAdmission = _admit_all_sources
     _active: set[_DispatchObligationKey] = field(default_factory=set, init=False, repr=False)
     _active_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False, repr=False)
 
@@ -656,6 +665,8 @@ class DispatchObligationRunner:
         callback_kind: DispatchCallbackKind,
     ) -> _DispatchObligation | None:
         """Persist exact work before its background task may be created."""
+        if not await self.source_admission(event.event_id, callback_kind):
+            return None
         obligation = _DispatchObligation(
             principal_id=self.store.principal_id,
             entity_name=self.store.entity_name,

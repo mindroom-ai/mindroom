@@ -13,7 +13,6 @@ from mindroom.authorization import is_authorized_sender
 from mindroom.commands.handler import generate_welcome_message_for_room
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.matrix.client_room_admin import get_joined_rooms, join_room
-from mindroom.matrix.decrypt_failure import raise_notice_floor
 from mindroom.matrix.invited_rooms_store import (
     invited_rooms_path,
     load_invited_rooms,
@@ -177,10 +176,6 @@ class BotRoomLifecycle:
             if await join_room(client, room_id):
                 current_rooms.add(room_id)
                 self._logger().info("Joined room", room_id=room_id)
-                if client.user_id:
-                    # Pre-join encrypted history can never decrypt on this device;
-                    # don't post decrypt-failure notices for it.
-                    raise_notice_floor(client.user_id, room_id)
                 await self._on_configured_room_joined(room_id)
             else:
                 self._logger().warning("Failed to join room", room_id=room_id)
@@ -304,10 +299,6 @@ class BotRoomLifecycle:
             self._handled_invite_room_ids.add(room.room_id)
             self._logger().info("Joined room", room_id=room.room_id)
             await self.deps.on_room_joined(room.room_id)
-            if client.user_id:
-                # Pre-join encrypted history can never decrypt on this device;
-                # don't post decrypt-failure notices for it.
-                raise_notice_floor(client.user_id, room.room_id)
             if self.should_persist_invited_rooms():
                 self._update_invited_room(room.room_id, remember=True)
             if self.deps.agent_name == ROUTER_AGENT_NAME:

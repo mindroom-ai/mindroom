@@ -97,6 +97,11 @@ depends_on = [
 visibility = ["mindroom.bot"]
 
 [[modules]]
+path = "mindroom.cold_history_fence"
+depends_on = ["mindroom.matrix.sync_token_values"]
+visibility = ["mindroom.bot"]
+
+[[modules]]
 path = "mindroom.report_publishing"
 depends_on = ["mindroom.durable_write"]
 
@@ -848,7 +853,6 @@ depends_on = [
     "mindroom.commands.handler",
     "mindroom.constants",
     "mindroom.matrix.client_room_admin",
-    "mindroom.matrix.decrypt_failure",
     "mindroom.matrix.rooms",
     "mindroom.matrix.state",
     "mindroom.runtime_protocols",
@@ -2003,6 +2007,7 @@ visibility = ["mindroom.matrix.sync_cache_trust"]
 path = "mindroom.matrix.sync_token_values"
 depends_on = []
 visibility = [
+    "mindroom.cold_history_fence",
     "mindroom.matrix.sync_certification",
     "mindroom.matrix.sync_tokens",
 ]
@@ -2151,7 +2156,6 @@ depends_on = [
 visibility = [
     "mindroom.api.main",
     "mindroom.bot",
-    "mindroom.bot_room_lifecycle",
     "mindroom.commands.encryption_commands",
 ]
 
@@ -2715,6 +2719,7 @@ depends_on = [
     "mindroom.approval_inbound",
     "mindroom.bot_room_lifecycle",
     "mindroom.bot_runtime_view",
+    "mindroom.cold_history_fence",
     "mindroom.commands.config_confirmation",
     "mindroom.constants",
     "mindroom.conversation_resolver",

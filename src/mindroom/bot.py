@@ -37,7 +37,7 @@ from mindroom.hooks import (
     send_hook_message,
 )
 from mindroom.matrix.conversation_cache import MatrixConversationCache
-from mindroom.matrix.decrypt_failure import handle_decrypt_failure, raise_notice_floor
+from mindroom.matrix.decrypt_failure import handle_decrypt_failure
 from mindroom.matrix.event_info import EventInfo, origin_server_ts_from_event_source
 from mindroom.matrix.health import (
     SyncCacheWriteProgress,
@@ -82,6 +82,7 @@ from .authorization import is_authorized_sender
 from .background_tasks import create_background_task, wait_for_background_tasks
 from .coalescing import CoalescingGate
 from .coalescing_batch import CoalescingKey, is_active_follow_up_coalescing_key
+from .cold_history_fence import ColdHistoryFence
 from .commands import config_confirmation
 from .constants import ROUTER_AGENT_NAME, RuntimePaths, resolve_avatar_path
 from .conversation_resolver import ConversationResolver, ConversationResolverDeps
@@ -327,6 +328,7 @@ class AgentBot:
     _room_lifecycle: BotRoomLifecycle
     _local_departures_awaiting_sync: set[str]
     _sync_cache_trust: SyncCacheTrust
+    _cold_history_fence: ColdHistoryFence
 
     def __init__(
         self,
@@ -420,6 +422,7 @@ class AgentBot:
             principal_id=runtime_matrix_id.full_id,
             entity_name=self.agent_name,
         )
+        self._cold_history_fence = ColdHistoryFence(self._dispatch_obligation_store)
         self._coalescing_gate = CoalescingGate(
             dispatch_batch=self._dispatch_coalesced_batch,
             debounce_seconds=lambda: self.config.defaults.coalescing.debounce_ms / 1000,
@@ -524,6 +527,7 @@ class AgentBot:
             room_for_id=self._room_for_dispatch_obligation,
             turn_is_terminal=self._turn_store.is_durably_handled,
             on_persist_failure=self._rewind_sync_after_dispatch_persistence_failure,
+            source_admission=self._cold_history_fence.admit,
         )
         self._post_response_effects_support = PostResponseEffectsSupport(
             runtime=self._runtime_view,
@@ -1110,9 +1114,8 @@ class AgentBot:
         assert client is not None
         sync_token = await self._sync_cache_trust.prepare_startup()
         cast("Any", client).next_batch = sync_token
-        if sync_token is None and client.user_id:
-            # A cold sync replays history handled by an older device.
-            raise_notice_floor(client.user_id)
+        trusted_continuation = sync_token if self.config.matrix_sync.mode == "classic" else None
+        self._cold_history_fence.start(trusted_continuation=trusted_continuation)
 
     def _certify_sync_response(
         self,
@@ -1127,8 +1130,7 @@ class AgentBot:
             cache_result=cache_result,
             first_sync=first_sync,
         )
-        if decision.reset_client_token and self.client is not None:
-            cast("Any", self.client).next_batch = None
+        self._apply_cold_history_continuity_decision(decision)
         return decision
 
     def _plan_sync_response(
@@ -1153,8 +1155,17 @@ class AgentBot:
     ) -> None:
         """Advance sync continuity after prerequisite durable work completes."""
         self._sync_cache_trust.apply_response(decision, cache_result=cache_result)
-        if decision.reset_client_token and self.client is not None:
-            cast("Any", self.client).next_batch = None
+        self._apply_cold_history_continuity_decision(decision)
+
+    def _apply_cold_history_continuity_decision(
+        self,
+        decision: SyncCertificationDecision,
+    ) -> None:
+        """Apply one Classic checkpoint decision to callback admission."""
+        if decision.reset_client_token:
+            if self.client is not None:
+                cast("Any", self.client).next_batch = None
+            self._cold_history_fence.reset()
 
     def _rewind_sync_after_dispatch_persistence_failure(self) -> None:
         """Replay work that failed before an exact durable obligation existed."""
@@ -1204,7 +1215,7 @@ class AgentBot:
             if not isinstance(event, nio.RoomMemberEvent):
                 return
             hooks_armed_at_delivery = self._first_sync_done and self._room_member_join_hooks_armed
-            if not hooks_armed_at_delivery:
+            if not hooks_armed_at_delivery and not self._cold_history_fence.is_cold:
                 return
             await durable_callback(room, event)
 
@@ -1306,12 +1317,15 @@ class AgentBot:
                     room_member_join_hook_plan=room_member_join_hook_plan,
                 )
                 self._apply_sync_response_decision(decision, cache_result=cache_result)
+                if not decision.reset_client_token:
+                    self._cold_history_fence.observe_continuation(_response.next_batch)
             self._mark_sync_progress()
         elif isinstance(_response, nio.SlidingSyncResponse):
             # Sliding sync never certifies the classic checkpoint, but the
             # account's own kicks and bans still must fence and purge rooms.
             with track_matrix_sync_cache_write(self.agent_name):
                 await self._apply_own_room_membership_from_sliding_sync(_response)
+            self._cold_history_fence.observe_continuation(_response.pos)
             self._mark_sync_progress()
         self._first_sync_done = True
         self._room_member_join_hooks_armed = room_member_join_hook_plan.arm_after_response
@@ -1337,12 +1351,13 @@ class AgentBot:
             # nio restarts expired sliding connections (M_UNKNOWN_POS)
             # transparently, and sliding errors say nothing about the classic
             # sync checkpoint, so classic token rejection must not run here.
+            if _response.status_code == "M_UNKNOWN_POS":
+                self._cold_history_fence.reset()
             self._warn_if_sliding_sync_never_succeeded(_response)
             return
         if _response.status_code == "M_UNKNOWN_POS":
             decision = self._sync_cache_trust.reject_unknown_pos()
-            if decision.reset_client_token and self.client is not None:
-                cast("Any", self.client).next_batch = None
+            self._apply_cold_history_continuity_decision(decision)
             self._room_member_join_hooks_armed = False
             self.logger.warning(
                 "matrix_sync_token_rejected",
