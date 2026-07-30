@@ -643,6 +643,11 @@ class AgentBot:
         self._runtime_view.client = value
 
     @property
+    def first_sync_complete(self) -> bool:
+        """Return whether this bot generation completed its first sync."""
+        return self._first_sync_done
+
+    @property
     def config(self) -> Config:
         """Return the canonical live config."""
         return self._runtime_view.config
@@ -1756,6 +1761,8 @@ class AgentBot:
                 agent_name=self.agent_name,
                 callback_failure_count=callback_failure_count,
                 background_tasks_completed=background_tasks_completed,
+                coalescing_drain_completed=drain_result.completed,
+                responses_drained=responses_drained,
                 post_drain_background_tasks_completed=post_drain_background_tasks_completed,
                 released_reservation_count=drain_result.released_reservation_count,
                 cancelled_unready_count=drain_result.cancelled_unready_count,

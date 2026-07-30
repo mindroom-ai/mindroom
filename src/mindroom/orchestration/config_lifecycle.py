@@ -46,25 +46,12 @@ class _ConfigReloadDrainState:
     waiting_for_idle: bool = False
     wait_started_at: float | None = None
     last_warning_at: float | None = None
-    request_started_at: float | None = None
 
-    def reset(self) -> None:
-        """Clear all drain tracking state."""
-        self.waiting_for_idle = False
-        self.wait_started_at = None
-        self.last_warning_at = None
-        self.request_started_at = None
-
-    def begin_wait(self, *, now: float, requested_at: float) -> None:
-        """Start a fresh drain window for the current reload request."""
+    def begin_wait(self, *, now: float) -> None:
+        """Start a fresh response-drain window."""
         self.waiting_for_idle = True
         self.wait_started_at = now
         self.last_warning_at = None
-        self.request_started_at = requested_at
-
-    def should_reset_for_request(self, requested_at: float) -> bool:
-        """Return whether a newer request should restart the drain window."""
-        return self.waiting_for_idle and self.request_started_at != requested_at
 
     def wait_seconds(self, now: float) -> float:
         """Return how long the current drain window has been waiting."""
@@ -114,6 +101,7 @@ class ConfigReloadLifecycle:
     # Shared with manual plugin reloads and MCP catalog-change handling so no
     # two publication flows can interleave their read-plan-apply sequences.
     config_update_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    _response_admission_apply_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False, repr=False)
     _reload_task: asyncio.Task | None = field(default=None, init=False)
     _requested_at: float | None = field(default=None, init=False)
     # Source files of the last reload attempt that failed to load, so the
@@ -181,29 +169,30 @@ class ConfigReloadLifecycle:
         self,
         *,
         drain_state: _ConfigReloadDrainState,
-        requested_at: float,
         active_response_count: int,
         loop: asyncio.AbstractEventLoop,
+        operation_name: str = "configuration reload",
     ) -> bool:
-        """Return whether a queued reload should keep waiting for responses to finish.
+        """Return whether one replacement apply should keep waiting for responses.
 
         Only called with responses actually in flight: the caller applies
         immediately when ``close_if_idle()`` succeeds.
         """
+        titled_operation_name = operation_name[0].upper() + operation_name[1:]
         now = loop.time()
         if not drain_state.waiting_for_idle:
             logger.info(
-                "Deferring configuration reload until active responses finish",
+                f"Deferring {operation_name} until active responses finish",
                 active_response_count=active_response_count,
             )
-            drain_state.begin_wait(now=now, requested_at=requested_at)
+            drain_state.begin_wait(now=now)
         elif drain_state.should_warn(
             now=now,
             warning_after_seconds=_CONFIG_RELOAD_DRAIN_WARNING_AFTER_SECONDS,
             warning_interval_seconds=_CONFIG_RELOAD_DRAIN_WARNING_INTERVAL_SECONDS,
         ):
             logger.warning(
-                "Configuration reload still waiting for active responses to finish",
+                f"{titled_operation_name} still waiting for active responses to finish",
                 active_response_count=active_response_count,
                 drain_wait_seconds=round(drain_state.wait_seconds(now), 1),
             )
@@ -214,7 +203,7 @@ class ConfigReloadLifecycle:
             force_after_seconds=_CONFIG_RELOAD_DRAIN_FORCE_AFTER_SECONDS,
         ):
             logger.error(
-                "Applying configuration reload while responses are still active",
+                f"Applying {operation_name} while responses are still active",
                 active_response_count=active_response_count,
                 drain_wait_seconds=round(drain_state.wait_seconds(now), 1),
                 timeout_seconds=_CONFIG_RELOAD_DRAIN_FORCE_AFTER_SECONDS,
@@ -224,8 +213,11 @@ class ConfigReloadLifecycle:
         await asyncio.sleep(_CONFIG_RELOAD_IDLE_POLL_SECONDS)
         return True
 
-    async def _apply_with_closed_admission(self) -> None:
-        """Apply one queued reload with admission already closed, then always reopen it.
+    async def _apply_with_closed_admission(
+        self,
+        operation: Callable[[], Awaitable[None]],
+    ) -> None:
+        """Apply one replacement with admission already closed, then always reopen it.
 
         Callers must close the gate immediately before calling, with no await in
         between, so nothing can be admitted into the window.
@@ -237,9 +229,41 @@ class ConfigReloadLifecycle:
         """
         assert self.response_admission_gate.closed, "admission must be closed before applying"
         try:
-            await self._apply_queued_config_reload()
+            await operation()
         finally:
             self.response_admission_gate.reopen()
+
+    async def apply_with_response_admission(
+        self,
+        operation: Callable[[], Awaitable[None]],
+        *,
+        operation_name: str,
+        request_is_current: Callable[[], bool] | None = None,
+    ) -> bool:
+        """Drain responses, own admission, then run one serialized replacement apply."""
+        is_current = request_is_current or (lambda: True)
+        loop = asyncio.get_running_loop()
+        drain_state = _ConfigReloadDrainState()
+        async with self._response_admission_apply_lock:
+            while is_current():
+                if self.response_admission_gate.close_if_idle():
+                    if drain_state.waiting_for_idle:
+                        logger.info(f"Active responses finished; applying {operation_name}")
+                    break
+                if await self._should_defer_reload_for_active_responses(
+                    drain_state=drain_state,
+                    active_response_count=self.response_admission_gate.in_flight_response_count,
+                    loop=loop,
+                    operation_name=operation_name,
+                ):
+                    continue
+                self.response_admission_gate.close()
+                break
+            else:
+                return False
+
+            await self._apply_with_closed_admission(operation)
+        return True
 
     async def _apply_queued_config_reload(self) -> None:
         """Apply one queued config reload attempt and log the result."""
@@ -266,7 +290,6 @@ class ConfigReloadLifecycle:
         """Apply queued config reloads after debounce and response drain."""
         current_task = asyncio.current_task()
         loop = asyncio.get_running_loop()
-        drain_state = _ConfigReloadDrainState()
 
         try:
             while self.is_running() and self._requested_at is not None:
@@ -274,38 +297,13 @@ class ConfigReloadLifecycle:
                 await self._wait_for_reload_debounce(requested_at, loop)
                 if self._requested_at != requested_at:
                     # A newer config change superseded the current one.
-                    # Reset drain state so the new change gets a full drain window.
-                    drain_state.reset()
                     continue
 
-                if drain_state.should_reset_for_request(requested_at):
-                    # A newer config change arrived while we were already waiting
-                    # for responses to drain, so restart the drain window.
-                    drain_state.reset()
-                    continue
-
-                # Closing the gate is atomic with the final idle sample, so a response
-                # cannot slip in between.
-                if self.response_admission_gate.close_if_idle():
-                    if drain_state.waiting_for_idle:
-                        logger.info("Active responses finished; applying queued configuration reload")
-                        drain_state.reset()
-                    await self._apply_with_closed_admission()
-                    continue
-
-                if await self._should_defer_reload_for_active_responses(
-                    drain_state=drain_state,
-                    requested_at=requested_at,
-                    active_response_count=self.response_admission_gate.in_flight_response_count,
-                    loop=loop,
-                ):
-                    continue
-
-                # The drain timed out. Close admission over the still-running
-                # responses so the apply is not racing fresh ones, then apply.
-                drain_state.reset()
-                self.response_admission_gate.close()
-                await self._apply_with_closed_admission()
+                await self.apply_with_response_admission(
+                    self._apply_queued_config_reload,
+                    operation_name="configuration reload",
+                    request_is_current=lambda requested_at=requested_at: self._requested_at == requested_at,
+                )
         finally:
             if self._reload_task is current_task:
                 self._reload_task = None

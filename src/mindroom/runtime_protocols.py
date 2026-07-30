@@ -61,6 +61,10 @@ class OrchestratorRuntime(Protocol):
         """Validate persisted managed Matrix identities for the live config."""
         ...
 
+    def entity_first_sync_complete(self, entity_name: str) -> bool | None:
+        """Return first-sync readiness for the current entity generation."""
+        ...
+
     def handle_bot_ready(self, bot: AgentBot | TeamBot) -> Awaitable[None]:
         """Handle a managed bot completing its first sync."""
         ...

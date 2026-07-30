@@ -586,7 +586,7 @@ class ResponseRunner:
         """Wake pre-admission responses whose owning runtime is shutting down."""
         self._admission_shutdown_requested.set()
 
-    async def _wait_for_admission_or_shutdown(self) -> bool:
+    async def wait_for_admission_or_shutdown(self) -> bool:
         """Return whether admission reopened before this runtime started shutdown."""
         if self._admission_shutdown_requested.is_set():
             return False
@@ -834,7 +834,7 @@ class ResponseRunner:
                     response_kind=response_kind,
                     **request.response_envelope.target.log_context,
                 )
-            if not await self._wait_for_admission_or_shutdown():
+            if not await self.wait_for_admission_or_shutdown():
                 self.deps.logger.warning(
                     "response_refused_after_runtime_replacement",
                     response_kind=response_kind,
