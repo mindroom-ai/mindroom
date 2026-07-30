@@ -17184,7 +17184,8 @@ Report viewers do not need dashboard access, API keys, or general API permission
 Protected static reports keep their active content inside a CSP sandbox without `allow-same-origin`.
 If an upstream gateway authorizes nested report assets with a browser cookie, that cookie must use `SameSite=None; Secure` so the sandbox's opaque origin can send it on each asset request.
 Do not add `allow-same-origin` to work around a cookie setting because that would weaken isolation between untrusted report code and the MindRoom origin.
-[Cloudflare Access checks every protected request and defaults its application `CF_Authorization` cookie to `SameSite=None`.](https://developers.cloudflare.com/cloudflare-one/access-controls/applications/http-apps/authorization-cookie/)
+[Cloudflare Access checks every protected request and defaults its application `CF_Authorization` cookie to `SameSite=None`, but administrators can instead configure `Lax` or `Strict`.](https://developers.cloudflare.com/cloudflare-one/access-controls/applications/http-apps/authorization-cookie/)
+Verify or explicitly set `SameSite=None` in the Access application's cookie settings before relying on it for nested sandbox assets.
 Private-browsing tracking protection may still block these cookies, so validate a protected report containing external CSS, JavaScript, and images in the browsers your deployment supports.
 
 ## Environment
