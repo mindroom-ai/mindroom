@@ -209,6 +209,7 @@ async def test_stale_client_room_after_leave_cannot_reopen_cache(
 
     join_room.assert_awaited_once_with(bot.client, room_id)
     assert bot._local_departures_awaiting_sync == {room_id}
+    assert not bot._room_lifecycle.decrypt_notice_is_fenced(room_id)
 
 
 @pytest.mark.asyncio

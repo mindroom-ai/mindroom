@@ -1367,7 +1367,9 @@ class AgentBot:
                 await self._apply_own_room_membership_from_sliding_sync(_response)
             self._cold_history_fence.observe_continuation(_response.pos)
             if not self._cold_history_fence.is_cold:
-                self._room_lifecycle.observe_trusted_sync_rooms(_response.rooms)
+                self._room_lifecycle.observe_trusted_sync_rooms(
+                    room_id for room_id, room in _response.rooms.items() if room.membership == "join"
+                )
             self._mark_sync_progress()
         self._first_sync_done = True
         self._room_member_join_hooks_armed = room_member_join_hook_plan.arm_after_response

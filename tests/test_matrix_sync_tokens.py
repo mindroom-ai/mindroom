@@ -377,7 +377,7 @@ async def test_sliding_response_pos_opens_fence_and_missing_or_unknown_pos_rearm
 async def test_sliding_trusted_sync_clears_joined_room_decrypt_notice_fence(
     tmp_path: Path,
 ) -> None:
-    """A Sliding response with a position clears join fences only for included rooms."""
+    """A Sliding invite keeps the fence until membership becomes joined."""
     bot = _agent_bot(tmp_path)
     bot.config.matrix_sync = MatrixSyncConfig(mode="sliding")
     bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
@@ -393,12 +393,83 @@ async def test_sliding_trusted_sync_clears_joined_room_decrypt_notice_fence(
 
     await bot._on_sync_response(
         nio.SlidingSyncResponse(
+            "pos_after_invite",
+            rooms={"!room:localhost": nio.SlidingSyncRoom(membership="invite")},
+        ),
+    )
+
+    assert bot._room_lifecycle.decrypt_notice_is_fenced("!room:localhost")
+
+    await bot._on_sync_response(
+        nio.SlidingSyncResponse(
             "pos_after_join",
             rooms={"!room:localhost": nio.SlidingSyncRoom(membership="join")},
         ),
     )
 
     assert not bot._room_lifecycle.decrypt_notice_is_fenced("!room:localhost")
+
+
+@pytest.mark.asyncio
+async def test_restart_rearms_decrypt_notice_fence_for_room_joined_before_crash(
+    tmp_path: Path,
+) -> None:
+    """Server-confirmed membership must restore a lost in-memory join fence."""
+    room_id = "!room:localhost"
+    unpersisted_invite_room_id = "!invite-before-persist:localhost"
+    first_bot = _agent_bot(tmp_path)
+    first_bot.client = make_matrix_client_mock(user_id=first_bot.agent_user.user_id)
+
+    with (
+        patch("mindroom.bot_room_lifecycle.get_joined_rooms", AsyncMock(return_value=[])),
+        patch("mindroom.bot_room_lifecycle.join_room", AsyncMock(return_value=True)),
+    ):
+        await first_bot.join_configured_rooms()
+
+    assert first_bot._room_lifecycle.decrypt_notice_is_fenced(room_id)
+
+    restarted_bot = _agent_bot(tmp_path)
+    restarted_bot.client = make_matrix_client_mock(user_id=restarted_bot.agent_user.user_id)
+    join_room = AsyncMock(return_value=True)
+    with (
+        patch(
+            "mindroom.bot_room_lifecycle.get_joined_rooms",
+            AsyncMock(return_value=[room_id, unpersisted_invite_room_id]),
+        ),
+        patch("mindroom.bot_room_lifecycle.join_room", join_room),
+    ):
+        await restarted_bot.join_configured_rooms()
+
+    join_room.assert_not_awaited()
+    assert restarted_bot._room_lifecycle.decrypt_notice_is_fenced(room_id)
+    assert restarted_bot._room_lifecycle.decrypt_notice_is_fenced(unpersisted_invite_room_id)
+
+
+@pytest.mark.asyncio
+async def test_join_cancellation_after_server_side_effect_retains_decrypt_notice_fence(
+    tmp_path: Path,
+) -> None:
+    """An ambiguous cancelled join must remain fenced for later sync confirmation."""
+    room_id = "!room:localhost"
+    bot = _agent_bot(tmp_path)
+    bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
+
+    async def join_then_cancel(client: nio.AsyncClient, joining_room_id: str) -> bool:
+        client.rooms[joining_room_id] = nio.MatrixRoom(
+            room_id=joining_room_id,
+            own_user_id=bot.agent_user.user_id,
+        )
+        raise asyncio.CancelledError
+
+    with (
+        patch("mindroom.bot_room_lifecycle.get_joined_rooms", AsyncMock(return_value=[])),
+        patch("mindroom.bot_room_lifecycle.join_room", new=join_then_cancel),
+        pytest.raises(asyncio.CancelledError),
+    ):
+        await bot.join_configured_rooms()
+
+    assert room_id in bot.client.rooms
+    assert bot._room_lifecycle.decrypt_notice_is_fenced(room_id)
 
 
 def _text_event(event_id: str, body: str, origin_server_ts: int) -> nio.RoomMessageText:
