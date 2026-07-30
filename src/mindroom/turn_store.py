@@ -800,7 +800,11 @@ def _reconcile_ledger_and_recovery(
         completed=recovery_record.completed,
         source_event_prompts=source_event_prompts,
         source_event_revisions=source_event_revisions,
-        source_event_metadata=recovery_record.source_event_metadata or ledger_record.source_event_metadata,
+        source_event_metadata=(
+            recovery_record.source_event_metadata
+            if recovery_record.source_event_metadata is not None
+            else ledger_record.source_event_metadata
+        ),
         response_owner=recovery_record.response_owner or ledger_record.response_owner,
         requester_id=recovery_record.requester_id or ledger_record.requester_id,
         correlation_id=recovery_record.correlation_id or ledger_record.correlation_id,

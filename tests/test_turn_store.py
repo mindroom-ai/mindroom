@@ -761,6 +761,75 @@ def test_redaction_cleanup_clears_after_pending_coalesced_turn_splits(tmp_path: 
     assert completed_sibling.response_event_id == "$second-reply"
 
 
+def test_redaction_cleanup_keeps_context_after_colliding_alias_projection(tmp_path: Path) -> None:
+    """Projecting a redacted physical source must retain the context needed to sanitize it."""
+    relay_event_id = "$relay"
+    human_event_id = "$human"
+    requester_user_id = "@alice:example.org"
+    target = MessageTarget.resolve("!room:example.org", "$thread", human_event_id)
+    scope = HistoryScope(kind="agent", scope_id="agent")
+    session = AgentSession(
+        session_id=target.session_id,
+        agent_id="agent",
+        runs=[
+            RunOutput(
+                session_id=target.session_id,
+                metadata={constants.MATRIX_EVENT_ID_METADATA_KEY: human_event_id},
+            ),
+        ],
+        summary=SessionSummary(summary="contains REDACTED_SECRET"),
+    )
+    update_scope_seen_event_ids(session, scope, [human_event_id])
+    storage = _FakeAgentStorage(session)
+    store = _store_with_storage(tmp_path, storage)
+    store.record_pending_turn(
+        TurnRecord.create(
+            [relay_event_id, human_event_id],
+            completed=False,
+            source_event_metadata={
+                relay_event_id: SourceEventMetadata(
+                    sender="@bob:example.org",
+                    discovery_event_id=human_event_id,
+                ),
+                human_event_id: SourceEventMetadata(sender=requester_user_id),
+            },
+            requester_id=requester_user_id,
+            response_owner="agent",
+            history_scope=scope,
+            conversation_target=target,
+        ),
+    )
+    store.record_turn(
+        TurnRecord.create(
+            [relay_event_id],
+            response_event_id="$relay-reply",
+            requester_id="@bob:example.org",
+        ),
+    )
+
+    projected = store.mark_source_redacted(human_event_id)
+
+    assert projected is not None
+    assert projected.source_event_ids == (human_event_id,)
+    assert projected.source_event_metadata == {}
+    assert projected.requester_id == requester_user_id
+    assert projected.requester_id_for_source(human_event_id) is None
+    assert projected.pending_redaction_cleanup_event_ids == (human_event_id,)
+
+    should_suppress = store.prepare_response_for_redactions(
+        target=target,
+        source_event_ids=("$later",),
+    )
+
+    assert should_suppress is False
+    assert storage.upserted_session is session
+    assert session.summary is None
+    assert read_scope_seen_event_ids(session, scope) == set()
+    cleaned = store.get_turn_record(human_event_id)
+    assert cleaned is not None
+    assert cleaned.pending_redaction_cleanup_event_ids == ()
+
+
 def test_active_ad_hoc_team_redaction_uses_pending_response_scope(tmp_path: Path) -> None:
     """Post-lock cleanup must retain the exact team scope recorded before generation."""
     target = MessageTarget.resolve("!room:example.org", "$thread", "$user_msg")
@@ -1103,6 +1172,106 @@ def test_turn_record_codec_projects_and_parses_one_versioned_run_schema() -> Non
     assert parsed == turn_record
 
 
+def test_turn_record_codec_preserves_physical_source_ownership_when_alias_id_collides() -> None:
+    """A physical source must outrank another source's discovery alias with the same ID."""
+    relay_event_id = "$relay"
+    human_event_id = "$human"
+    turn_record = TurnRecord.create(
+        [relay_event_id, human_event_id],
+        source_event_prompts={
+            relay_event_id: "routed prompt",
+            human_event_id: "physical prompt",
+        },
+        source_event_metadata={
+            relay_event_id: SourceEventMetadata(
+                sender="@bob:example.org",
+                discovery_event_id=human_event_id,
+            ),
+            human_event_id: SourceEventMetadata(sender="@alice:example.org"),
+        },
+        requester_id="@bob:example.org",
+    )
+
+    run_metadata = TurnRecordCodec.to_run_metadata(turn_record)
+    run_metadata[constants.MATRIX_EVENT_ID_METADATA_KEY] = human_event_id
+    recovered = TurnRecordCodec.from_run_metadata(run_metadata)
+
+    assert recovered is not None
+    assert recovered.prompt_source_event_id(human_event_id) == human_event_id
+    assert recovered.requester_id_for_source(human_event_id) == "@alice:example.org"
+    assert recovered.requester_id_for_source(relay_event_id) == "@bob:example.org"
+
+
+def test_physical_source_membership_outranks_alias_when_metadata_is_partial() -> None:
+    """A missing physical metadata row must fail closed instead of resolving through a relay alias."""
+    relay_event_id = "$relay"
+    human_event_id = "$human"
+    turn_record = TurnRecord.create(
+        [relay_event_id, human_event_id],
+        source_event_metadata={
+            relay_event_id: SourceEventMetadata(
+                sender="@bob:example.org",
+                discovery_event_id=human_event_id,
+            ),
+        },
+        requester_id="@bob:example.org",
+    )
+
+    assert turn_record.prompt_source_event_id(human_event_id) == human_event_id
+    assert turn_record.requester_id_for_source(human_event_id) is None
+
+
+def test_redacted_physical_source_does_not_tombstone_colliding_relay_alias() -> None:
+    """Redacting a physical source must retain the sibling relay and its prompt."""
+    relay_event_id = "$relay"
+    human_event_id = "$human"
+    turn_record = TurnRecord.create(
+        [relay_event_id, human_event_id],
+        redacted_source_event_ids=[human_event_id],
+        source_event_prompts={
+            relay_event_id: "routed prompt",
+            human_event_id: "physical prompt",
+        },
+        source_event_metadata={
+            relay_event_id: SourceEventMetadata(
+                sender="@bob:example.org",
+                discovery_event_id=human_event_id,
+            ),
+            human_event_id: SourceEventMetadata(sender="@alice:example.org"),
+        },
+        requester_id="@bob:example.org",
+    )
+
+    assert turn_record.prompt_source_event_id(human_event_id) == human_event_id
+    assert turn_record.replay_source_event_ids == (relay_event_id,)
+    assert turn_record.source_event_prompts == {relay_event_id: "routed prompt"}
+
+
+def test_turn_record_codecs_preserve_explicit_unknown_source_ownership() -> None:
+    """An explicit empty source map must survive persistence and disable singleton fallback."""
+    event_id = "$source"
+    turn_record = TurnRecord.create(
+        [event_id],
+        source_event_metadata={},
+        requester_id="@stale:example.org",
+    )
+
+    ledger_recovered = TurnRecordCodec.from_ledger_record(
+        event_id,
+        TurnRecordCodec.to_ledger_record(turn_record),
+    )
+    run_metadata = TurnRecordCodec.to_run_metadata(turn_record)
+    run_metadata[constants.MATRIX_EVENT_ID_METADATA_KEY] = event_id
+    run_recovered = TurnRecordCodec.from_run_metadata(run_metadata)
+
+    assert turn_record.source_event_metadata == {}
+    assert ledger_recovered is not None
+    assert ledger_recovered.source_event_metadata == {}
+    assert run_recovered is not None
+    assert run_recovered.source_event_metadata == {}
+    assert run_recovered.requester_id_for_source(event_id) is None
+
+
 def test_build_run_metadata_normalizes_discovery_aliases(tmp_path: Path) -> None:
     """Additional discovery IDs should share canonical source-ID normalization."""
     store = _store(tmp_path)
@@ -1330,6 +1499,39 @@ def test_recovery_without_prompts_preserves_durable_prompt_map(tmp_path: Path) -
 
     assert loaded is not None
     assert loaded.source_event_prompts == {"$first": "first", "$anchor": "anchor"}
+
+
+def test_recovery_preserves_explicit_unknown_source_ownership(tmp_path: Path) -> None:
+    """A newer explicit unknown-ownership marker must not inherit stale ledger attribution."""
+    store = _store(tmp_path)
+    store._ledger.record_handled_turn(
+        TurnRecord.create(
+            ["$event"],
+            response_event_id="$old-response",
+            source_event_metadata={
+                "$event": SourceEventMetadata(sender="@stale:example.org"),
+            },
+            timestamp=10,
+        ),
+    )
+    recovery_record = TurnRecord.create(
+        ["$event"],
+        response_event_id="$new-response",
+        source_event_metadata={},
+        requester_id="@current:example.org",
+        timestamp=20,
+    )
+
+    loaded = _load_with_recovery(
+        store,
+        original_event_id="$event",
+        recovery_record=recovery_record,
+    )
+
+    assert loaded is not None
+    assert loaded.response_event_id == "$new-response"
+    assert loaded.source_event_metadata == {}
+    assert loaded.requester_id_for_source("$event") is None
 
 
 def test_routed_alias_redaction_marks_owning_relay_under_lock(tmp_path: Path) -> None:
