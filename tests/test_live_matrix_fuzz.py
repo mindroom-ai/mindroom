@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import sqlite3
+import time
 from contextlib import closing
 from dataclasses import replace
 from typing import Any, cast
@@ -155,11 +156,13 @@ def test_restart_regression_evaluator_accepts_pass_and_rejects_bad_directions() 
             passing,
             historical_output_counts=(1, 0),
             historical_in_fresh_prompt=True,
+            response_callbacks_quiescent=False,
         ),
     )
 
     assert any("invariant=historical_output_suppressed" in failure for failure in failures)
     assert any("invariant=historical_events_absent_from_fresh_prompt" in failure for failure in failures)
+    assert any("invariant=response_callbacks_quiescent" in failure for failure in failures)
 
 
 def test_restart_regression_cache_evidence_uses_production_schema_and_exact_filters() -> None:
@@ -283,10 +286,10 @@ async def test_restart_response_index_honors_sender_override() -> None:
 
 
 @pytest.mark.asyncio
-async def test_restart_observation_rejects_historical_output_arriving_during_quiescence(
+async def test_restart_observation_rejects_historical_output_arriving_during_callback_drain(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A historical reply arriving after the fresh terminal reply must still fail."""
+    """A historical reply arriving while callbacks drain must still fail."""
 
     class DormantClient:
         room_id = "!restart:example"
@@ -303,12 +306,6 @@ async def test_restart_observation_rejects_historical_output_arriving_during_qui
                     "$fresh-response",
                     "@agent:example",
                     "$fresh",
-                )
-            if self.sync_count == 3:
-                self.seen_events["$late-historical-response"] = response(
-                    "$late-historical-response",
-                    "@agent:example",
-                    "$old-text",
                 )
             await asyncio.sleep(0.05)
 
@@ -336,6 +333,17 @@ async def test_restart_observation_rejects_historical_output_arriving_during_qui
         )
         monkeypatch.setattr(stack, "cached_restart_event_pair_count", lambda _room_id, _event_ids: 4)
         dormant = DormantClient()
+
+        def drain_callbacks() -> bool:
+            time.sleep(1.2)
+            dormant.seen_events["$late-historical-response"] = response(
+                "$late-historical-response",
+                "@agent:example",
+                "$old-text",
+            )
+            return True
+
+        monkeypatch.setattr(stack, "stop_mindroom_for_observation", drain_callbacks)
         runner = LiveFuzzRunner(
             stack,
             (cast("LiveMatrixClient", dormant),),

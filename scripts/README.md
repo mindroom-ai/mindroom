@@ -58,7 +58,9 @@ The saturation profile uses a 180-second per-reply deadline because its slow 12-
 
 The `restart-regression` profile is a manual opt-in oracle for the agent and router replacement caused by a real `config.yaml` hot reload.
 It creates a dormant public room, writes historical text and media there, adds that room to the managed agent configuration, waits for both replacement principals and the completed configuration update, then sends one fresh request.
-The run passes only after both principals cache both historical events, the fresh request completes exactly once, no historical event reaches the fresh prompt, no historical reply appears, and Matrix responses plus runtime callbacks remain quiet for the observation window.
+The run sends the fresh request only after the replacement setup boundary completes.
+It then uses the runtime's orderly callback and response drain as a quiescence boundary before the final Matrix audit.
+The run passes only after both principals cache both historical events, the fresh request completes exactly once, no historical event reaches the fresh prompt, no historical reply appears, and the quiescence drain completes without bounded cancellation.
 
 The profile requires Docker, `just`, `uv`, Python 3.13, available local ports, and permission to create and remove an isolated Tuwunel instance.
 It starts its own deterministic model stub and disposable Matrix stack, so no external model credential is required.
@@ -72,7 +74,7 @@ uv run python scripts/testing/fuzz_live_matrix.py \
 ```
 
 `--reply-timeout` bounds lifecycle, cache, prompt, response, and quiescence observation.
-`--settle-seconds` controls the quiet observation window, with a one-second minimum for this profile.
+`--settle-seconds` controls the final Matrix long-poll after the quiescence drain.
 `--failure-log` preserves the complete MindRoom log when the oracle fails without printing content-bearing runtime output to the terminal.
 `--save-trace` writes the fixed profile trace, and `--trace` loads that JSON through the normal validated replay path.
 `--seed`, `--steps`, `--threads`, `--max-batch-size`, and `--restart-interval` do not change this fixed profile.

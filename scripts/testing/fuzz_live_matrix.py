@@ -774,6 +774,10 @@ class ManagedTuwunelStack:
         self._stop_mindroom()
         self._start_mindroom()
 
+    def stop_mindroom_for_observation(self) -> bool:
+        """Stop MindRoom and report whether its response and callback drain stayed bounded."""
+        return self._stop_mindroom()
+
     def close(self) -> None:
         """Stop child processes and delete the exact disposable instance."""
         self._stop_mindroom()
@@ -932,18 +936,21 @@ class ManagedTuwunelStack:
         msg = f"MindRoom did not create {ROOM_KEY!r}"
         raise TimeoutError(msg)
 
-    def _stop_mindroom(self) -> None:
+    def _stop_mindroom(self) -> bool:
         process = self._mindroom_process
         if process is None:
-            return
-        if process.poll() is None:
+            return True
+        stopped_gracefully = process.poll() is None
+        if stopped_gracefully:
             process.send_signal(signal.SIGINT)
             try:
                 process.wait(timeout=20)
             except subprocess.TimeoutExpired:
+                stopped_gracefully = False
                 process.kill()
                 process.wait(timeout=10)
         self._mindroom_process = None
+        return stopped_gracefully
 
     @staticmethod
     def _wait_for_url(url: str, *, timeout: float) -> None:
@@ -1341,6 +1348,15 @@ class LiveFuzzRunner:
             ),
         )
         replacement_boundary_reached = all(lifecycle_results)
+        if not replacement_boundary_reached:
+            failure = restart_failure(
+                "replacement_setup_boundary_reached",
+                event_category="lifecycle",
+                phase="reload",
+                observed=False,
+                step=3,
+            )
+            raise AssertionError("restart regression invariant failures:\n" + failure)
         fresh = await dormant.send_event(
             "m.room.message",
             "restart-fresh",
@@ -1376,10 +1392,7 @@ class LiveFuzzRunner:
         fresh_prompt_observed = False
         historical_in_fresh_prompt = False
         response_callbacks_quiescent = False
-        last_response_fingerprint: tuple[tuple[tuple[str, tuple[str, ...]], ...], ...] | None = None
-        last_callback_count: int | None = None
-        quiet_started_at: float | None = None
-        quiet_seconds = max(self.settle_seconds, 1.0)
+        positive_evidence_ready = False
         while time.monotonic() < deadline:
             await dormant.sync_incremental(timeout_ms=250, allow_limited=True)
             agent = self._canonical_response_ids(dormant.seen_events.values())
@@ -1397,16 +1410,7 @@ class LiveFuzzRunner:
                 fresh_event_id,
                 historical_event_ids,
             )
-            response_fingerprint = (
-                tuple(sorted((source, tuple(sorted(event_ids))) for source, event_ids in agent.items())),
-                tuple(sorted((source, tuple(sorted(event_ids))) for source, event_ids in router.items())),
-            )
             callback_count = self.stack.log_count("matrix_event_callback_started", dormant.room_id)
-            if response_fingerprint != last_response_fingerprint or callback_count != last_callback_count:
-                quiet_started_at = None
-                last_response_fingerprint = response_fingerprint
-                last_callback_count = callback_count
-
             fresh_response_ids = agent.get(fresh_event_id, set()) | router.get(fresh_event_id, set())
             fresh_response_complete = len(fresh_response_ids) == 1 and "END call=" in self._latest_event_body(
                 dormant.seen_events.values(),
@@ -1420,15 +1424,40 @@ class LiveFuzzRunner:
                 and fresh_response_complete
                 and callback_count > 0
             )
-            if not positive_evidence_ready:
-                quiet_started_at = None
-                continue
-            now = time.monotonic()
-            if quiet_started_at is None:
-                quiet_started_at = now
-            elif now - quiet_started_at >= quiet_seconds:
-                response_callbacks_quiescent = True
+            if positive_evidence_ready:
                 break
+
+        if positive_evidence_ready:
+            incomplete_drain_count = self.stack.log_count(
+                "sync_checkpoint_not_saved_after_incomplete_coalescing_drain",
+            )
+            stopped_gracefully = await asyncio.to_thread(self.stack.stop_mindroom_for_observation)
+            response_callbacks_quiescent = (
+                stopped_gracefully
+                and self.stack.log_count(
+                    "sync_checkpoint_not_saved_after_incomplete_coalescing_drain",
+                )
+                == incomplete_drain_count
+            )
+            await dormant.sync_incremental(
+                timeout_ms=max(round(self.settle_seconds * 1000), 0),
+                allow_limited=True,
+            )
+            agent = self._canonical_response_ids(dormant.seen_events.values())
+            router = self._canonical_response_ids(dormant.seen_events.values(), sender_id=self.stack.router_id)
+            counts = tuple(
+                self._combined_response_count(source_event_id, agent, router)
+                for source_event_id in (*historical_event_ids, fresh_event_id)
+            )
+            cached_event_pairs = self.stack.cached_restart_event_pair_count(
+                dormant.room_id,
+                historical_event_ids,
+            )
+            fresh_prompt_observed, historical_in_fresh_prompt = _restart_prompt_observation(
+                self.stack.log_path.read_text(encoding="utf-8", errors="replace"),
+                fresh_event_id,
+                historical_event_ids,
+            )
 
         return RestartRegressionObservation(
             historical_output_counts=(counts[0], counts[1]),
