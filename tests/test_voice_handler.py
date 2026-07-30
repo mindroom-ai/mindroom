@@ -17,7 +17,7 @@ from mindroom import voice_handler
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.voice import VoiceConfig, VoiceSTTConfig, _VoiceLLMConfig
-from mindroom.constants import ATTACHMENT_IDS_KEY
+from mindroom.constants import ATTACHMENT_IDS_KEY, VOICE_RAW_AUDIO_FALLBACK_KEY
 from mindroom.model_defaults import LOCAL_OPENAI_API_KEY_DEFAULT
 from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
 from tests.identity_helpers import persist_actual_entity_accounts
@@ -717,3 +717,44 @@ class TestVoiceHandler:
             for task in voice_handler._voice_normalization_tasks.values():
                 task.cancel()
             voice_handler._voice_normalization_tasks.clear()
+
+    @pytest.mark.asyncio
+    async def test_prepare_raw_voice_fallback_message_times_out_hung_download(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        """A hung fallback download must degrade to text instead of wedging the ingress lane."""
+        config = _runtime_bound_config(Config(voice=VoiceConfig(enabled=True)))
+        monkeypatch.setattr(voice_handler, "_VOICE_NORMALIZATION_TOTAL_TIMEOUT_SECONDS", 0.05, raising=False)
+        client = AsyncMock()
+        room = _matrix_room("!test:server", members=("@alice:example.com",))
+        event = MagicMock(spec=nio.RoomMessageAudio)
+        event.event_id = "$hung_fallback"
+        event.sender = "@alice:example.com"
+        event.body = "voice.ogg"
+        event.server_timestamp = 1_000
+        event.source = {"content": {"body": "voice.ogg", "msgtype": "m.audio"}}
+        download_started = asyncio.Event()
+
+        async def hung_download(*_args: object, **_kwargs: object) -> None:
+            download_started.set()
+            await asyncio.Event().wait()
+
+        with patch("mindroom.voice_handler._download_audio", side_effect=hung_download):
+            prepared = await asyncio.wait_for(
+                voice_handler.prepare_raw_voice_fallback_message(
+                    client,
+                    tmp_path,
+                    room,
+                    event,
+                    config,
+                    runtime_paths=runtime_paths_for(config),
+                    thread_id=None,
+                ),
+                timeout=2.0,
+            )
+
+        assert download_started.is_set()
+        assert prepared.source["content"][VOICE_RAW_AUDIO_FALLBACK_KEY] is True
+        assert ATTACHMENT_IDS_KEY not in prepared.source["content"]

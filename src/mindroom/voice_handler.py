@@ -278,23 +278,30 @@ async def prepare_raw_voice_fallback_message(
     thread_id: str | None,
 ) -> _PreparedVoiceMessage:
     """Download/register audio and build a fallback text event without STT."""
-    audio = await _download_audio(client, event)
     attachment_id = None
-    if audio is None or audio.content is None:
-        logger.error("Failed to download audio file for raw voice fallback")
-    else:
-        attachment_record = await register_audio_attachment(
-            storage_path,
-            event_id=event.event_id,
-            audio_bytes=audio.content,
-            mime_type=audio.mime_type,
-            room_id=room.room_id,
-            thread_id=thread_id,
-            sender=event.sender,
-            event_timestamp=event.server_timestamp,
-            filename=event.body if isinstance(event.body, str) else None,
+    try:
+        async with asyncio.timeout(_VOICE_NORMALIZATION_TOTAL_TIMEOUT_SECONDS):
+            audio = await _download_audio(client, event)
+            if audio is None or audio.content is None:
+                logger.error("Failed to download audio file for raw voice fallback")
+            else:
+                attachment_record = await register_audio_attachment(
+                    storage_path,
+                    event_id=event.event_id,
+                    audio_bytes=audio.content,
+                    mime_type=audio.mime_type,
+                    room_id=room.room_id,
+                    thread_id=thread_id,
+                    sender=event.sender,
+                    event_timestamp=event.server_timestamp,
+                    filename=event.body if isinstance(event.body, str) else None,
+                )
+                attachment_id = attachment_record.attachment_id if attachment_record is not None else None
+    except TimeoutError:
+        logger.warning(
+            "voice_raw_fallback_timeout",
+            timeout_seconds=_VOICE_NORMALIZATION_TOTAL_TIMEOUT_SECONDS,
         )
-        attachment_id = attachment_record.attachment_id if attachment_record is not None else None
 
     return _build_prepared_voice_message(
         event,
