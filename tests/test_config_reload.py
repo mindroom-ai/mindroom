@@ -1525,13 +1525,14 @@ async def test_config_update_serializes_manual_plugin_reload_and_mcp_catalog_cha
 
         # The authoritative under-lock recheck must observe the config current
         # when the queued MCP replacement finally applies.
-        orchestrator.config = _runtime_bound_config(Config(), tmp_path)
+        replacement_config = _runtime_bound_config(Config(), tmp_path)
+        orchestrator.config = replacement_config
         finish_apply.set()
         assert await config_task is False
         assert await plugin_task is reload_result
         await mcp_task
 
-    reload_plugins_mock.assert_called_once_with(orchestrator.config, orchestrator.runtime_paths)
+    reload_plugins_mock.assert_called_once_with(replacement_config, orchestrator.runtime_paths)
 
 
 @pytest.mark.asyncio
