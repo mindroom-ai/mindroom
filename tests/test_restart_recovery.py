@@ -420,6 +420,66 @@ async def test_matrix_room_recovery_shares_membership_discovery_for_owner_genera
 
 
 @pytest.mark.asyncio
+async def test_matrix_room_recovery_does_not_reuse_snapshot_after_generation_id_collision(
+    tmp_path: Path,
+) -> None:
+    """A replacement generation must never inherit a stale snapshot when object IDs collide."""
+    old_room = "!old:example.org"
+    new_room = "!new:example.org"
+    old_owner = _owner(
+        generation=object(),
+        rooms=frozenset({old_room}),
+    )
+    new_owner = _owner(
+        generation=object(),
+        rooms=frozenset({new_room}),
+    )
+    config = _config(tmp_path)
+    operations = build_matrix_restart_recovery_operations(test_runtime_paths(tmp_path))
+
+    with (
+        patch("mindroom.restart_recovery.id", return_value=7, create=True),
+        patch(
+            "mindroom.restart_recovery.get_joined_rooms",
+            new=AsyncMock(side_effect=[[old_room], [new_room]]),
+        ) as get_rooms,
+        patch(
+            "mindroom.restart_recovery.cleanup_stale_streaming_room",
+            new=AsyncMock(
+                return_value=stale_stream_cleanup_module._StaleStreamCleanupResult(
+                    cleaned_count=0,
+                    interrupted_threads=(),
+                ),
+            ),
+        ),
+    ):
+        old_result = await operations.recover_room(
+            old_owner,
+            RoomRecoveryRequest(
+                room_id=old_room,
+                startup_cutoff_ms=123,
+                terminal_interrupted_only=False,
+            ),
+            frozenset({old_owner.user_id}),
+            config,
+        )
+        new_result = await operations.recover_room(
+            new_owner,
+            RoomRecoveryRequest(
+                room_id=new_room,
+                startup_cutoff_ms=123,
+                terminal_interrupted_only=False,
+            ),
+            frozenset({new_owner.user_id}),
+            config,
+        )
+
+    assert old_result == RoomRecoveryResult()
+    assert new_result == RoomRecoveryResult()
+    assert get_rooms.await_count == 2
+
+
+@pytest.mark.asyncio
 async def test_stalled_room_does_not_block_other_rooms_and_concurrency_is_bounded(
     tmp_path: Path,
 ) -> None:
@@ -611,6 +671,64 @@ async def test_replacement_enqueue_during_same_active_scan_latches_one_rerun(tmp
         await coordinator.stop()
 
     assert attempts == 2
+    assert max_active_attempts == 1
+
+
+@pytest.mark.asyncio
+async def test_startup_and_terminal_room_intents_share_one_owner_room_lease(
+    tmp_path: Path,
+) -> None:
+    """Startup and terminal-only intents for one owner-room must never scan concurrently."""
+    room_id = "!code:example.org"
+    owner = _owner(rooms=frozenset({room_id}))
+    owners = {owner.user_id: owner}
+    first_scan_started = asyncio.Event()
+    release_first_scan = asyncio.Event()
+    second_scan_finished = asyncio.Event()
+    processed_intents: list[bool] = []
+    active_attempts = 0
+    max_active_attempts = 0
+
+    async def recover_room(
+        _owner: RecoveryOwner,
+        request: RoomRecoveryRequest,
+        _owner_user_ids: frozenset[str],
+        _config: Config,
+    ) -> RoomRecoveryResult:
+        nonlocal active_attempts, max_active_attempts
+        processed_intents.append(request.terminal_interrupted_only)
+        active_attempts += 1
+        max_active_attempts = max(max_active_attempts, active_attempts)
+        try:
+            if len(processed_intents) == 1:
+                first_scan_started.set()
+                await release_first_scan.wait()
+            else:
+                second_scan_finished.set()
+            return RoomRecoveryResult()
+        finally:
+            active_attempts -= 1
+
+    coordinator = RestartRecoveryCoordinator(
+        current_config=lambda: _config(tmp_path),
+        current_owners=lambda: owners,
+        operations=_operations(recover_room=recover_room),
+    )
+    coordinator.start(startup_cutoff_ms=123)
+    await asyncio.wait_for(first_scan_started.wait(), timeout=1.0)
+
+    coordinator.enqueue_replacement_rooms(owner.user_id, {room_id})
+    try:
+        coordinator._start_due_attempts()
+        await asyncio.sleep(0)
+        assert processed_intents == [False]
+        release_first_scan.set()
+        await asyncio.wait_for(second_scan_finished.wait(), timeout=1.0)
+    finally:
+        release_first_scan.set()
+        await coordinator.stop()
+
+    assert processed_intents == [False, True]
     assert max_active_attempts == 1
 
 

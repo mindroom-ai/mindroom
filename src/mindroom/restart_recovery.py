@@ -161,41 +161,51 @@ class _RestartRecoveryOperations:
 class _OwnerMembershipSnapshots:
     """Share joined-room discovery across one exact owner generation."""
 
-    tasks: dict[tuple[str, int], asyncio.Task[list[str] | None]] = field(default_factory=dict)
+    snapshots: dict[str, _OwnerMembershipSnapshot] = field(default_factory=dict)
 
     async def joined_rooms(self, owner: RecoveryOwner) -> list[str] | None:
         """Return one generation snapshot, creating it on first use."""
-        key = owner.user_id, id(owner.generation)
-        task = self.tasks.get(key)
-        if task is None:
-            for task_key in tuple(self.tasks):
-                if task_key[0] == owner.user_id:
-                    self.tasks.pop(task_key)
+        snapshot = self.snapshots.get(owner.user_id)
+        if snapshot is None or snapshot.generation is not owner.generation:
             task = asyncio.create_task(
                 get_joined_rooms(owner.client),
                 name=f"restart_recovery_membership:{owner.user_id}",
             )
-            self.tasks[key] = task
+            snapshot = _OwnerMembershipSnapshot(
+                generation=owner.generation,
+                task=task,
+            )
+            self.snapshots[owner.user_id] = snapshot
         try:
-            return await task
+            return await snapshot.task
         except asyncio.CancelledError:
-            self._discard(key, task)
+            self._discard(owner.user_id, snapshot)
             raise
         except Exception:
-            self._discard(key, task)
+            self._discard(owner.user_id, snapshot)
             raise
 
     def invalidate(self, owner: RecoveryOwner) -> None:
         """Discard a snapshot that did not contain one desired room."""
-        self.tasks.pop((owner.user_id, id(owner.generation)), None)
+        snapshot = self.snapshots.get(owner.user_id)
+        if snapshot is not None and snapshot.generation is owner.generation:
+            self.snapshots.pop(owner.user_id)
 
     def _discard(
         self,
-        key: tuple[str, int],
-        task: asyncio.Task[list[str] | None],
+        owner_user_id: str,
+        snapshot: _OwnerMembershipSnapshot,
     ) -> None:
-        if self.tasks.get(key) is task:
-            self.tasks.pop(key)
+        if self.snapshots.get(owner_user_id) is snapshot:
+            self.snapshots.pop(owner_user_id)
+
+
+@dataclass(frozen=True)
+class _OwnerMembershipSnapshot:
+    """One joined-room lookup bound to its retained owner generation."""
+
+    generation: object
+    task: asyncio.Task[list[str] | None]
 
 
 def build_matrix_restart_recovery_operations(runtime_paths: RuntimePaths) -> _RestartRecoveryOperations:
@@ -340,6 +350,11 @@ class _RoomJob:
             self.request.room_id,
             self.request.terminal_interrupted_only,
         )
+
+    @property
+    def lease_key(self) -> tuple[str, str]:
+        """Return the owner-room identity that must scan serially."""
+        return self.owner_user_id, self.request.room_id
 
 
 @dataclass(frozen=True)
@@ -554,8 +569,8 @@ class RestartRecoveryCoordinator:
             await self._drain_active_attempts()
 
     def _next_room_job(self) -> _RoomJob | None:
-        active_keys = {job.key for job in self._active_attempts.values() if isinstance(job, _RoomJob)}
-        eligible_jobs = [job for job in self._room_jobs.values() if job.key not in active_keys]
+        active_keys = {job.lease_key for job in self._active_attempts.values() if isinstance(job, _RoomJob)}
+        eligible_jobs = [job for job in self._room_jobs.values() if job.lease_key not in active_keys]
         if not eligible_jobs:
             return None
         return min(eligible_jobs, key=lambda job: (job.due_at, job.key))
