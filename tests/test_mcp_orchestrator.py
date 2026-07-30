@@ -25,6 +25,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.constants import RuntimePaths
+    from mindroom.matrix.stale_stream_cleanup import StaleStreamRecoveryState
 
 
 def _runtime_paths(tmp_path: Path) -> RuntimePaths:
@@ -852,11 +853,11 @@ async def test_entity_replacement_recovers_rooms_after_old_bot_is_removed(
         _bots: object,
         _config: object,
         _cutoff: object,
-        scanned_room_ids: set[str],
+        recovery_state: StaleStreamRecoveryState,
         *,
         target_room_ids: set[str],
     ) -> None:
-        scanned_room_ids.update(target_room_ids)
+        recovery_state.scanned_room_ids.update(target_room_ids)
 
     with (
         patch(
@@ -883,7 +884,7 @@ async def test_entity_replacement_recovers_rooms_after_old_bot_is_removed(
     assert mock_recover.await_args.args[0] == [new_bot]
     assert mock_recover.await_args.args[1] is config
     assert mock_recover.await_args.args[2] is None
-    assert mock_recover.await_args.args[3] == {"!interrupted:example.org"}
+    assert mock_recover.await_args.args[3].scanned_room_ids == {"!interrupted:example.org"}
     assert mock_recover.await_args.kwargs["target_room_ids"] == {"!interrupted:example.org"}
     assert orchestrator._pending_replacement_recovery_room_ids == {}
 
@@ -938,11 +939,11 @@ async def test_mcp_prestop_captures_rooms_before_old_bot_is_removed(tmp_path: Pa
         _bots: object,
         _config: object,
         _cutoff: object,
-        scanned_room_ids: set[str],
+        recovery_state: StaleStreamRecoveryState,
         *,
         target_room_ids: set[str],
     ) -> None:
-        scanned_room_ids.update(target_room_ids)
+        recovery_state.scanned_room_ids.update(target_room_ids)
 
     with (
         patch(
@@ -1032,14 +1033,14 @@ async def test_pending_replacement_recovery_claims_once_and_requeues_failed_room
         _bots: object,
         _config: object,
         _cutoff: object,
-        scanned_room_ids: set[str],
+        recovery_state: StaleStreamRecoveryState,
         *,
         target_room_ids: set[str],
     ) -> None:
         assert target_room_ids == {"!scanned:example.org", "!failed:example.org"}
         assert orchestrator._pending_replacement_recovery_room_ids == {}
         await orchestrator._recover_pending_replacement_rooms(config)
-        scanned_room_ids.add("!scanned:example.org")
+        recovery_state.scanned_room_ids.add("!scanned:example.org")
 
     with patch.object(
         orchestrator,
