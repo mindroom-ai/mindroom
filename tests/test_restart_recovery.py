@@ -338,6 +338,52 @@ async def test_ready_owner_immediately_retries_startup_and_replacement_room_inte
 
 
 @pytest.mark.asyncio
+async def test_replacement_enqueue_during_same_active_scan_latches_one_rerun(tmp_path: Path) -> None:
+    """A newer same-room handoff must survive an already-running recovery scan."""
+    room_id = "!code:example.org"
+    owner = _owner(rooms=frozenset())
+    owners = {owner.user_id: owner}
+    first_scan_started = asyncio.Event()
+    release_first_scan = asyncio.Event()
+    second_scan_finished = asyncio.Event()
+    attempts = 0
+
+    async def recover_room(
+        _owner: RecoveryOwner,
+        request: RoomRecoveryRequest,
+        _owner_user_ids: frozenset[str],
+        _config: Config,
+    ) -> RoomRecoveryResult:
+        nonlocal attempts
+        assert request.room_id == room_id
+        attempts += 1
+        if attempts == 1:
+            first_scan_started.set()
+            await release_first_scan.wait()
+        else:
+            second_scan_finished.set()
+        return RoomRecoveryResult()
+
+    coordinator = RestartRecoveryCoordinator(
+        current_config=lambda: _config(tmp_path),
+        current_owners=lambda: owners,
+        operations=_operations(recover_room=recover_room),
+    )
+    coordinator.start(startup_cutoff_ms=123)
+    coordinator.enqueue_replacement_rooms(owner.user_id, {room_id})
+    await asyncio.wait_for(first_scan_started.wait(), timeout=1.0)
+
+    coordinator.enqueue_replacement_rooms(owner.user_id, {room_id})
+    release_first_scan.set()
+    try:
+        await asyncio.wait_for(second_scan_finished.wait(), timeout=1.0)
+    finally:
+        await coordinator.stop()
+
+    assert attempts == 2
+
+
+@pytest.mark.asyncio
 async def test_target_freshness_and_delivery_failures_retry_autonomously(tmp_path: Path) -> None:
     """Final target reads and sends must retry without another readiness event."""
     owner = _owner()

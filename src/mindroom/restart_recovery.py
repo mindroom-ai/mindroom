@@ -414,7 +414,7 @@ class RestartRecoveryCoordinator:
             request.room_id,
             request.terminal_interrupted_only,
         )
-        if key not in self._room_jobs and not self._active_job_has_key(key):
+        if key not in self._room_jobs:
             self._room_jobs[key] = _RoomJob(
                 owner_user_id=owner_user_id,
                 request=request,
@@ -433,10 +433,6 @@ class RestartRecoveryCoordinator:
             key: replace(job, due_at=due_at) if job.owner_user_id == owner_user_id else job
             for key, job in self._target_jobs.items()
         }
-
-    def _active_job_has_key(self, key: _RoomKey) -> bool:
-        active_job = self._active_job
-        return isinstance(active_job, _RoomJob) and active_job.key == key
 
     def _enqueue_target(self, owner_user_id: str, target: InterruptedThread) -> None:
         if target.thread_id is None:
