@@ -1063,7 +1063,7 @@ async def test_shutdown_discard_warning_logs_exact_drain_predicates(
     with capture_logs() as logs:
         await bot.prepare_for_sync_shutdown()
 
-    warnings = [entry for entry in logs if entry["event"] == "sync_checkpoint_not_saved_after_incomplete_shutdown"]
+    warnings = [entry for entry in logs if entry["event"] == "sync_checkpoint_discarded"]
     assert len(warnings) == 1
     assert warnings[0]["coalescing_drain_completed"] is coalescing_drain_result.completed
     assert warnings[0]["cancelled_unready_count"] == coalescing_drain_result.cancelled_unready_count
@@ -1106,8 +1106,8 @@ async def test_shutdown_timeout_does_not_save_checkpoint_for_post_drain_backgrou
 
 
 @pytest.mark.asyncio
-async def test_callback_failure_prevents_certified_shutdown_checkpoint(tmp_path: Path) -> None:
-    """A Matrix callback exception must make the certified sync token unsafe."""
+async def test_callback_failure_discards_checkpoint_with_generic_event(tmp_path: Path) -> None:
+    """A callback-only discard must not blame an incomplete shutdown."""
     bot = _agent_bot(tmp_path)
     bot._sync_cache_trust.state = SyncTrustState.CERTIFIED
     bot._sync_cache_trust.checkpoint = SyncCheckpoint("s_after_bad_callback")
@@ -1121,11 +1121,19 @@ async def test_callback_failure_prevents_certified_shutdown_checkpoint(tmp_path:
     await callback()
     await wait_for_background_tasks(timeout=0.5, owner=bot._runtime_view)
 
-    await bot.prepare_for_sync_shutdown()
+    with capture_logs() as logs:
+        await bot.prepare_for_sync_shutdown()
 
     assert bot._sync_cache_trust.state is SyncTrustState.UNCERTAIN
     assert bot._sync_cache_trust.checkpoint is None
     assert _load_sync_token_value(tmp_path, bot.agent_name) is None
+    warnings = [entry for entry in logs if entry["event"] == "sync_checkpoint_discarded"]
+    assert len(warnings) == 1
+    assert warnings[0]["callback_failure_count"] == 1
+    assert warnings[0]["background_tasks_completed"] is True
+    assert warnings[0]["coalescing_drain_completed"] is True
+    assert warnings[0]["responses_drained"] is True
+    assert warnings[0]["post_drain_background_tasks_completed"] is True
 
 
 @pytest.mark.asyncio
