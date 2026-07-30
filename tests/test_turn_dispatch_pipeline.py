@@ -1592,6 +1592,7 @@ class TestAgentBot(AgentBotTestBase):
         bot.client = _make_matrix_client_mock()
         room = MagicMock(spec=nio.MatrixRoom)
         room.room_id = "!room:localhost"
+        room.users = {"@user:localhost": MagicMock()}
         voice_event = _room_audio_event(sender="@user:localhost", event_id="$voice-followup", room_id=room.room_id)
         voice_event.source["content"]["m.relates_to"] = {"rel_type": "m.thread", "event_id": "$thread_root"}
         prepared_event = PreparedTextEvent(

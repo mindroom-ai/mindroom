@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import json
-from dataclasses import replace
+from contextlib import contextmanager
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -51,6 +52,7 @@ from tests.conftest import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
     from pathlib import Path
 
     from mindroom.delivery_gateway import EditTextRequest
@@ -186,6 +188,102 @@ def _make_visible_router_echo_scenario(
     room = _make_room(*room_user_ids)
     event = _make_voice_event(sender="@alice:example.com")
     return bot, room, event
+
+
+@dataclass
+class _VoiceOrderingScenario:
+    """Two bots sharing one audio event, recording what each publishes and when."""
+
+    router: AgentBot | None
+    responder: AgentBot
+    room: nio.MatrixRoom
+    event: nio.RoomMessageAudio
+    router_send: AsyncMock
+    responder_generate: AsyncMock
+    publication_order: list[str]
+
+
+def _make_voice_ordering_scenario(
+    tmp_path: Path,
+    *,
+    visible_router_echo: bool = True,
+    with_router: bool = True,
+) -> _VoiceOrderingScenario:
+    """Build a router plus responding agent that both ingest the same voice event."""
+    config = _attach_runtime_paths(
+        Config(
+            agents={"home": {"display_name": "HomeAssistant", "rooms": ["!test:example.com"]}},
+            authorization={"default_room_access": True},
+            voice={"enabled": True, "visible_router_echo": visible_router_echo},
+        ),
+        tmp_path,
+    )
+    publication_order: list[str] = []
+    entity_names = [ROUTER_AGENT_NAME, "home"] if with_router else ["home"]
+    bots: dict[str, AgentBot] = {}
+    for agent_name in entity_names:
+        agent_user = MagicMock()
+        agent_user.user_id = f"@mindroom_{agent_name}:localhost"
+        agent_user.agent_name = agent_name
+        agent_user.matrix_id = MatrixID.parse(agent_user.user_id)
+        bot = _agent_bot(
+            agent_user=agent_user,
+            storage_path=tmp_path,
+            config=config,
+            rooms=["!test:example.com"],
+        )
+        turn_store = unwrap_extracted_collaborator(bot._turn_store)
+        turn_store.is_handled = MagicMock(return_value=False)
+        bot.logger = MagicMock()
+        replace_turn_controller_deps(bot, logger=bot.logger)
+        bot.client = AsyncMock()
+        bot.client.rooms = {}
+        bot.client.user_id = agent_user.user_id
+        _install_voice_thread_dispatch_mocks(bot)
+        install_edit_message_mock(bot, AsyncMock(return_value=True))
+        bots[agent_name] = bot
+
+    router_send = AsyncMock(return_value="$voice_echo")
+    if with_router:
+        install_send_response_mock(bots[ROUTER_AGENT_NAME], router_send)
+
+    async def answer_as_responder(**_kwargs: object) -> str:
+        publication_order.append("home")
+        return "$home_response"
+
+    responder_generate = AsyncMock(side_effect=answer_as_responder)
+    install_send_response_mock(bots["home"], AsyncMock(return_value="$home_response"))
+    install_generate_response_mock(bots["home"], responder_generate)
+
+    room = _make_room(*[f"@mindroom_{name}:localhost" for name in entity_names], "@alice:example.com")
+    return _VoiceOrderingScenario(
+        router=bots.get(ROUTER_AGENT_NAME),
+        responder=bots["home"],
+        room=room,
+        event=_make_voice_event(sender="@alice:example.com"),
+        router_send=router_send,
+        responder_generate=responder_generate,
+        publication_order=publication_order,
+    )
+
+
+@contextmanager
+def _voice_ordering_patches() -> Iterator[AsyncMock]:
+    """Patch audio download, transcription, and authorization for ordering tests."""
+    with (
+        patch("mindroom.voice_handler._download_audio", new_callable=AsyncMock) as mock_download_audio,
+        patch("mindroom.voice_handler._handle_voice_message", new_callable=AsyncMock) as mock_voice,
+        patch("mindroom.ingress_validation.is_authorized_sender", return_value=True),
+        patch("mindroom.text_ingress_dispatch.is_dm_room", new_callable=AsyncMock, return_value=False),
+    ):
+        mock_download_audio.return_value = Audio(content=b"voice-bytes", mime_type="audio/ogg")
+        mock_voice.return_value = f"{VOICE_PREFIX}turn on the lights"
+        yield mock_voice
+
+
+# Real time granted to a responder that must not publish yet. Two orders of
+# magnitude above the ~20ms an unblocked responder needs to finish its drain.
+_RESPONDER_PROGRESS_SECONDS = 2.0
 
 
 @pytest.mark.asyncio
@@ -973,6 +1071,113 @@ async def test_router_and_agent_share_audio_normalization_when_router_is_present
     assert mock_voice.await_count == 1
     send_response_mocks[0].assert_not_called()
     assert generate_response_mocks[1].await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_responding_agent_waits_for_visible_router_echo(tmp_path) -> None:  # noqa: ANN001
+    """The visible router echo must be published before a responder answers the same audio."""
+    scenario = _make_voice_ordering_scenario(tmp_path)
+    echo_send_started = asyncio.Event()
+    release_echo_send = asyncio.Event()
+
+    async def send_router_echo(**_kwargs: object) -> str:
+        echo_send_started.set()
+        await release_echo_send.wait()
+        scenario.publication_order.append("echo")
+        return "$voice_echo"
+
+    scenario.router_send.side_effect = send_router_echo
+
+    with _voice_ordering_patches() as mock_voice:
+        assert scenario.router is not None
+        await scenario.router._on_media_message(scenario.room, scenario.event)
+        await scenario.responder._on_media_message(scenario.room, scenario.event)
+        # The drain runs in the background: a responder held by the barrier keeps
+        # its ingress lane slot unsettled, which a foreground drain would await.
+        responder_drain = asyncio.create_task(drain_coalescing(scenario.responder))
+        try:
+            await asyncio.wait_for(echo_send_started.wait(), timeout=1)
+            # An unblocked responder finishes this drain in ~20ms (see the tests
+            # below that let it run), so a stalled drain here means the barrier held.
+            await asyncio.wait({responder_drain}, timeout=_RESPONDER_PROGRESS_SECONDS)
+            assert scenario.publication_order == []
+            assert not responder_drain.done()
+            scenario.responder_generate.assert_not_awaited()
+        finally:
+            release_echo_send.set()
+            await asyncio.wait_for(responder_drain, timeout=10)
+            await drain_coalescing(scenario.router)
+
+    assert mock_voice.await_count == 1
+    assert scenario.publication_order == ["echo", "home"]
+
+
+@pytest.mark.asyncio
+async def test_responding_agent_does_not_wait_when_visible_router_echo_is_disabled(tmp_path) -> None:  # noqa: ANN001
+    """A disabled visible echo must add no ordering wait to the responding agent."""
+    scenario = _make_voice_ordering_scenario(tmp_path, visible_router_echo=False)
+
+    with _voice_ordering_patches():
+        await scenario.responder._on_media_message(scenario.room, scenario.event)
+        await drain_coalescing(scenario.responder)
+        assert scenario.publication_order == ["home"]
+
+
+@pytest.mark.asyncio
+async def test_responding_agent_does_not_wait_when_no_router_is_present(tmp_path) -> None:  # noqa: ANN001
+    """Rooms without a router must not stall responders on an echo that cannot arrive."""
+    scenario = _make_voice_ordering_scenario(tmp_path, with_router=False)
+
+    with _voice_ordering_patches():
+        await scenario.responder._on_media_message(scenario.room, scenario.event)
+        await drain_coalescing(scenario.responder)
+        assert scenario.publication_order == ["home"]
+
+
+@pytest.mark.asyncio
+async def test_responding_agent_abandons_turn_when_visible_router_echo_fails(tmp_path) -> None:  # noqa: ANN001
+    """A failed visible echo must abandon the responder turn instead of answering out of order."""
+    scenario = _make_voice_ordering_scenario(tmp_path)
+    scenario.router_send.return_value = None
+
+    with _voice_ordering_patches():
+        assert scenario.router is not None
+        await scenario.router._on_media_message(scenario.room, scenario.event)
+        await scenario.responder._on_media_message(scenario.room, scenario.event)
+        await drain_coalescing(scenario.router, scenario.responder)
+
+    assert scenario.publication_order == []
+    scenario.responder_generate.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_responding_agent_recovers_when_the_router_turn_dies(tmp_path) -> None:  # noqa: ANN001
+    """A router turn that dies before any echo attempt must release, not strand, responders."""
+    scenario = _make_voice_ordering_scenario(tmp_path)
+    assert scenario.router is not None
+    # The placeholder send fails, so only the (never reached) settle could publish.
+    scenario.router_send.return_value = None
+    router_crash = RuntimeError("router voice turn died")
+
+    with (
+        _voice_ordering_patches(),
+        patch.object(
+            scenario.router._turn_controller,
+            "_normalize_voice_event_or_fallback",
+            side_effect=router_crash,
+        ),
+        patch.object(
+            scenario.router._turn_controller,
+            "_ready_voice_fallback_event",
+            side_effect=router_crash,
+        ),
+    ):
+        await scenario.router._on_media_message(scenario.room, scenario.event)
+        await scenario.responder._on_media_message(scenario.room, scenario.event)
+        await drain_coalescing(scenario.responder)
+
+    assert scenario.publication_order == []
+    scenario.responder_generate.assert_not_awaited()
 
 
 @pytest.mark.asyncio

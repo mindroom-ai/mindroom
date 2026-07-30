@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+from collections import OrderedDict
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from threading import Lock
 from typing import TYPE_CHECKING, Any
 
+from mindroom.authorization import is_sender_allowed_for_agent_reply
 from mindroom.background_tasks import create_background_task
 from mindroom.constants import (
     ATTACHMENT_IDS_KEY,
@@ -26,6 +28,7 @@ from mindroom.turn_origin import original_sender_for_router_relay
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
+    import nio
     import structlog
 
     from mindroom.bot_runtime_view import BotRuntimeView
@@ -36,6 +39,82 @@ if TYPE_CHECKING:
 
 
 _VOICE_TRANSCRIPTION_PLACEHOLDER = "Router agent is transcribing…"
+
+# How long a responder waits for the router to enter its echo lifecycle before
+# answering anyway. This only covers per-bot sync skew: the router claims the
+# barrier before shared voice normalization starts, so any router that received
+# the audio while normalization ran has already claimed by the time a responder
+# reaches this wait.
+_ECHO_CLAIM_GRACE_SECONDS = 0.25
+_MAX_TRACKED_ECHO_BARRIERS = 128
+
+type _BarrierKey = tuple[str, str, str]
+
+
+@dataclass
+class _EchoBarrier:
+    """Cross-entity publication gate for one raw voice event."""
+
+    claimed: asyncio.Event = field(default_factory=asyncio.Event)
+    settled: asyncio.Event = field(default_factory=asyncio.Event)
+    published_event_id: str | None = None
+    settling: bool = False
+
+
+_echo_barriers: OrderedDict[_BarrierKey, _EchoBarrier] = OrderedDict()
+
+
+def _reset_visible_voice_echo_barriers() -> None:
+    """Drop process-global echo-ordering state so isolated runs cannot inherit it."""
+    _echo_barriers.clear()
+
+
+def _echo_barrier(key: _BarrierKey) -> _EchoBarrier:
+    barrier = _echo_barriers.get(key)
+    if barrier is None:
+        barrier = _EchoBarrier()
+        _echo_barriers[key] = barrier
+        while len(_echo_barriers) > _MAX_TRACKED_ECHO_BARRIERS:
+            _echo_barriers.popitem(last=False)
+    else:
+        _echo_barriers.move_to_end(key)
+    return barrier
+
+
+def _claim_echo_barrier(key: _BarrierKey) -> None:
+    """Record that the router owns a visible echo for this audio event."""
+    _echo_barrier(key).claimed.set()
+
+
+def _publish_echo_barrier(key: _BarrierKey, event_id: str) -> None:
+    """Release waiters once the visible echo exists in the room."""
+    barrier = _echo_barrier(key)
+    if barrier.settled.is_set():
+        return
+    barrier.published_event_id = event_id
+    barrier.claimed.set()
+    barrier.settled.set()
+
+
+def _fail_echo_barrier(key: _BarrierKey) -> None:
+    """Release waiters with no published echo so they abandon their turn."""
+    barrier = _echo_barrier(key)
+    if barrier.settled.is_set():
+        return
+    barrier.claimed.set()
+    barrier.settled.set()
+
+
+def _settle_echo_barrier_from_task(key: _BarrierKey, task: asyncio.Task[str | None]) -> None:
+    """Settle the barrier from one finished settle task, however that task ended."""
+    if task.cancelled():
+        _fail_echo_barrier(key)
+        return
+    event_id = None if task.exception() is not None else task.result()
+    if event_id is None:
+        _fail_echo_barrier(key)
+    else:
+        _publish_echo_barrier(key, event_id)
 
 
 @dataclass
@@ -125,8 +204,61 @@ class VisibleVoiceEchoLifecycle:
         config = self.deps.runtime.config.voice
         if self.deps.agent_name != ROUTER_AGENT_NAME or not config.visible_router_echo:
             return None
+        _claim_echo_barrier(self._barrier_key(request.target.room_id, request.source_event_id))
         placeholder_task = self._start_placeholder(request) if config.enabled else None
         return _VisibleVoiceEchoHandle(request=request, placeholder_task=placeholder_task)
+
+    async def await_publication(
+        self,
+        *,
+        room: nio.MatrixRoom,
+        source_event_id: str,
+        requester_user_id: str,
+    ) -> bool:
+        """Return whether this turn may answer, holding it until the router echo publishes.
+
+        Waiting is unbounded once the router has claimed the echo: the claim is
+        always settled, including when the claiming task is cancelled.
+        """
+        if not self._router_echo_expected(room, requester_user_id):
+            return True
+        barrier = _echo_barrier(self._barrier_key(room.room_id, source_event_id))
+        if not barrier.claimed.is_set():
+            try:
+                await asyncio.wait_for(barrier.claimed.wait(), _ECHO_CLAIM_GRACE_SECONDS)
+            except TimeoutError:
+                self.deps.logger.warning(
+                    "No visible voice echo claimed; answering without the ordering barrier",
+                    event_id=source_event_id,
+                    room_id=room.room_id,
+                    grace_seconds=_ECHO_CLAIM_GRACE_SECONDS,
+                )
+                return True
+        await barrier.settled.wait()
+        if barrier.published_event_id is None:
+            self.deps.logger.warning(
+                "Visible voice echo never published; abandoning this voice turn",
+                event_id=source_event_id,
+                room_id=room.room_id,
+            )
+            return False
+        return True
+
+    def _router_echo_expected(self, room: nio.MatrixRoom, requester_user_id: str) -> bool:
+        """Return whether a router in this room will publish a visible echo for this sender."""
+        config = self.deps.runtime.config
+        if not config.voice.visible_router_echo:
+            return False
+        if not any(
+            self.deps.ingress.managed_entity_name_for_sender(user_id) == ROUTER_AGENT_NAME for user_id in room.users
+        ):
+            return False
+        return is_sender_allowed_for_agent_reply(
+            requester_user_id,
+            ROUTER_AGENT_NAME,
+            config,
+            self.deps.runtime.runtime_paths,
+        )
 
     async def finish(
         self,
@@ -136,10 +268,10 @@ class VisibleVoiceEchoLifecycle:
         """Best-effort settle one started lifecycle without blocking canonical dispatch."""
         if handle is None:
             return
-        task = create_background_task(
-            self._settle(handle, normalized_event),
+        task = self._spawn_settle(
+            handle,
+            normalized_event,
             name=(f"voice_placeholder_finish:{handle.request.target.room_id}:{handle.request.source_event_id}"),
-            owner=self.deps.runtime,
         )
         try:
             await asyncio.shield(task)
@@ -162,11 +294,38 @@ class VisibleVoiceEchoLifecycle:
         """Schedule terminal fallback cleanup without swallowing caller cancellation."""
         if handle is None:
             return
-        create_background_task(
-            self._settle(handle, fallback_event),
+        self._spawn_settle(
+            handle,
+            fallback_event,
             name=(f"voice_placeholder_cancel_finish:{handle.request.target.room_id}:{handle.request.source_event_id}"),
+        )
+
+    def abandon_unsettled(self, handle: _VisibleVoiceEchoHandle | None) -> None:
+        """Release waiters when a claimed echo ends without ever attempting to settle."""
+        if handle is None:
+            return
+        key = self._barrier_key(handle.request.target.room_id, handle.request.source_event_id)
+        if _echo_barrier(key).settling:
+            return
+        _fail_echo_barrier(key)
+
+    def _spawn_settle(
+        self,
+        handle: _VisibleVoiceEchoHandle,
+        event: PreparedTextEvent,
+        *,
+        name: str,
+    ) -> asyncio.Task[str | None]:
+        """Run one settle attempt that always settles the ordering barrier when it ends."""
+        key = self._barrier_key(handle.request.target.room_id, handle.request.source_event_id)
+        _echo_barrier(key).settling = True
+        task = create_background_task(
+            self._settle(handle, event),
+            name=name,
             owner=self.deps.runtime,
         )
+        task.add_done_callback(lambda done_task: _settle_echo_barrier_from_task(key, done_task))
+        return task
 
     def _start_placeholder(self, request: VisibleVoiceEchoRequest) -> asyncio.Task[str | None]:
         existing_task = self._placeholder_tasks.get(request.source_event_id)
@@ -195,9 +354,11 @@ class VisibleVoiceEchoLifecycle:
             self._placeholder_tasks.pop(source_event_id)
 
     async def _send_placeholder(self, request: VisibleVoiceEchoRequest) -> str | None:
+        barrier_key = self._barrier_key(request.target.room_id, request.source_event_id)
         async with _serialize_update(self._update_key(request)):
             existing_event_id = self.deps.turn_store.visible_echo_for_source(request.source_event_id)
             if existing_event_id is not None:
+                _publish_echo_barrier(barrier_key, existing_event_id)
                 return existing_event_id
             event_id = await self.deps.delivery_gateway.send_text(
                 SendTextRequest(
@@ -212,6 +373,7 @@ class VisibleVoiceEchoLifecycle:
             )
             if event_id is not None:
                 self.deps.turn_store.record_visible_echo(request.source_event_id, event_id)
+                _publish_echo_barrier(barrier_key, event_id)
             return event_id
 
     async def _settle(
@@ -270,6 +432,10 @@ class VisibleVoiceEchoLifecycle:
 
     def _update_key(self, request: VisibleVoiceEchoRequest) -> tuple[str, str, str]:
         return (self.deps.agent_name, request.target.room_id, request.source_event_id)
+
+    def _barrier_key(self, room_id: str, source_event_id: str) -> _BarrierKey:
+        """Key one echo barrier so every entity in this process shares it."""
+        return (str(self.deps.runtime.runtime_paths.storage_root.resolve()), room_id, source_event_id)
 
     def _extra_content(
         self,

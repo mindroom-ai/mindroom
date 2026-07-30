@@ -92,7 +92,7 @@ from mindroom.turn_controller import TurnController, _DispatchPreparation, _Repl
 from mindroom.turn_origin import TurnOrigin, classify_turn_origin
 from mindroom.turn_policy import PreparedDispatch, TurnPolicy
 from mindroom.turn_store import TurnStore
-from mindroom.visible_voice_echo import VisibleVoiceEchoLifecycle
+from mindroom.visible_voice_echo import VisibleVoiceEchoLifecycle, _reset_visible_voice_echo_barriers
 from tests.identity_helpers import persist_entity_accounts
 
 if TYPE_CHECKING:
@@ -1609,6 +1609,14 @@ def _reset_model_media_capabilities() -> Generator[None, None, None]:
     reset_model_media_capability_cache()
     yield
     reset_model_media_capability_cache()
+
+
+@pytest.fixture(autouse=True)
+def _reset_voice_echo_barriers() -> Generator[None, None, None]:
+    """Keep cross-bot voice echo ordering state, and its loop bindings, per test."""
+    _reset_visible_voice_echo_barriers()
+    yield
+    _reset_visible_voice_echo_barriers()
 
 
 @pytest.fixture(autouse=True)

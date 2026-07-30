@@ -2297,6 +2297,13 @@ class TurnController:
 
             await self.deps.visible_voice_echo.finish(visible_echo, normalized_event)
 
+            if not await self.deps.visible_voice_echo.await_publication(
+                room=room,
+                source_event_id=event.event_id,
+                requester_user_id=prechecked_event.requester_user_id,
+            ):
+                return None
+
             normalized_target = self.deps.resolver.build_message_target(
                 room_id=room.room_id,
                 thread_id=effective_thread_id,
@@ -2357,6 +2364,7 @@ class TurnController:
             await self.deps.visible_voice_echo.finish(visible_echo, fallback.event)
             return fallback.ready
         finally:
+            self.deps.visible_voice_echo.abandon_unsettled(visible_echo)
             if not reservation_released_or_handed_off and queued_notice_reservation is not None:
                 queued_notice_reservation.cancel()
 
