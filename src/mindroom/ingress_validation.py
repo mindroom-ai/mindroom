@@ -258,7 +258,11 @@ class IngressValidator:
             return (
                 original_sender is not None
                 and original_sender != ""
-                and self.managed_entity_name_for_sender(original_sender) is None
+                and is_human_requester_id(
+                    original_sender,
+                    self.deps.runtime.config,
+                    self.deps.runtime_paths,
+                )
             )
         return self.is_trusted_internal_relay_event(event)
 
