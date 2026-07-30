@@ -17,8 +17,10 @@ from mindroom import interactive
 from mindroom.attachments import register_local_attachment
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
+from mindroom.constants import ORIGINAL_SENDER_KEY, SKIP_MENTIONS_KEY, SOURCE_KIND_KEY
 from mindroom.custom_tools.attachments import AttachmentTools
 from mindroom.custom_tools.matrix_message import MatrixMessageTools
+from mindroom.dispatch_source import TRUSTED_INTERNAL_RELAY_SOURCE_KIND
 from mindroom.interactive import parse_and_format_interactive
 from mindroom.matrix.client import DeliveredMatrixEvent, RoomThreadsPageError
 from mindroom.matrix.message_extras import MINDROOM_MESSAGE_EXTRAS_KEY
@@ -256,6 +258,35 @@ async def test_matrix_message_send_defaults_to_room_level() -> None:
     sent_content = mock_send.await_args.args[2]
     assert sent_content["body"] == "hello"
     assert "m.relates_to" not in sent_content
+
+
+@pytest.mark.asyncio
+async def test_matrix_message_active_mentions_mark_trusted_human_relay() -> None:
+    """Intentional mention dispatch should preserve a trusted human requester."""
+    tool = MatrixMessageTools()
+    ctx = _make_context(thread_id=None)
+
+    with (
+        patch(
+            "mindroom.custom_tools.matrix_conversation_operations.send_message_result",
+            new=AsyncMock(side_effect=delivered_matrix_side_effect("$evt")),
+        ) as mock_send,
+        tool_runtime_context(ctx),
+    ):
+        payload = json.loads(
+            await tool.matrix_message(
+                action="send",
+                message="@general continue work",
+                ignore_mentions=False,
+            ),
+        )
+
+    assert payload["status"] == "ok"
+    sent_content = mock_send.await_args.args[2]
+    assert sent_content["m.mentions"] == {"user_ids": [ctx.client.user_id]}
+    assert SKIP_MENTIONS_KEY not in sent_content
+    assert sent_content[ORIGINAL_SENDER_KEY] == ctx.requester_id
+    assert sent_content[SOURCE_KIND_KEY] == TRUSTED_INTERNAL_RELAY_SOURCE_KIND
 
 
 @pytest.mark.asyncio

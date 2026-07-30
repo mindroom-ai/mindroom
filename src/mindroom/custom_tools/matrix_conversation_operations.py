@@ -8,13 +8,14 @@ from typing import TYPE_CHECKING, Any, Literal
 
 import nio
 
-from mindroom.constants import ORIGINAL_SENDER_KEY, SKIP_MENTIONS_KEY
+from mindroom.constants import ORIGINAL_SENDER_KEY, SKIP_MENTIONS_KEY, SOURCE_KIND_KEY
 from mindroom.custom_tools.attachment_helpers import resolve_context_thread_id
 from mindroom.custom_tools.attachments import (
     resolve_send_attachments,
     send_context_attachments,
     send_resolved_attachments,
 )
+from mindroom.dispatch_source import TRUSTED_INTERNAL_RELAY_SOURCE_KIND
 from mindroom.interactive import (
     add_reaction_buttons,
     clear_interactive_question,
@@ -89,6 +90,7 @@ class MatrixMessageOperations:
             extra_content[SKIP_MENTIONS_KEY] = True
         elif context.requester_id != context.client.user_id:
             extra_content[ORIGINAL_SENDER_KEY] = context.requester_id
+            extra_content[SOURCE_KIND_KEY] = TRUSTED_INTERNAL_RELAY_SOURCE_KIND
         if message_extras:
             extra_content.update(build_message_extras_content(message_extras))
         content = format_message_with_mentions(
