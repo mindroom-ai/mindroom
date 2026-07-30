@@ -388,7 +388,7 @@ def _apply_preload_cap(
         return rendered, 0
 
     # Trim against a budget that already reserves room for the summary marker,
-    # so the hard-cap clamp below does not slice away the omission markers.
+    # so file bodies cannot consume space required by omission metadata.
     marker_upper_bound = render_prompt_template(
         truncation_marker_template,
         omitted_chars=sum(len(chunk.body) for chunk in personality_chunks),
