@@ -851,6 +851,7 @@ class StreamingResponse:
             terminal_status=terminal_status,
             rendered_body=attempted_rendered_body,
             visible_body_state=attempted_visible_body_state,
+            terminal_update_committed=True,
             canonical_final_body_candidate=canonical_final_body_candidate,
             failure_reason=cancellation_failure_reason,
             interactive_metadata=response.interactive_metadata,

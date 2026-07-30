@@ -1172,14 +1172,16 @@ class ResponseRunner:
     ) -> None:
         """Tell the dispatcher when a marked-handled interrupted turn is recoverable.
 
-        Only turns that end as a visible interrupted note are reported: Matrix
-        restart cleanup can discover that note, while the handled-turn ledger
-        prevents source replay from answering it twice. Explicit user stops are
-        terminal user intent and must never schedule recovery.
+        Only turns whose terminal interruption update reached Matrix are
+        reported: restart cleanup can discover that note, while the handled-turn
+        ledger prevents source replay from answering it twice. Explicit user
+        stops are terminal user intent and must never schedule recovery.
         """
         if request.on_interrupted_response_recoverable is None or final_outcome.terminal_status != "cancelled":
             return
         if not final_outcome.mark_handled:
+            return
+        if final_outcome.delivery_kind is None:
             return
         cancel_source = cancel_source_from_failure_reason(final_outcome.failure_reason)
         if cancel_source == "user_stop":

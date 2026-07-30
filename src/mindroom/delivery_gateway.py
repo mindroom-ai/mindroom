@@ -1139,6 +1139,9 @@ class DeliveryGateway:
                         event_id=visible_stream_event_id,
                         is_visible_response=True,
                         final_visible_body=streamed_text or None,
+                        delivery_kind=request.initial_delivery_kind
+                        if stream_outcome.terminal_update_committed
+                        else None,
                         failure_reason=failure_reason,
                         tool_trace=tuple(request.tool_trace or ()),
                         extra_content=request.extra_content,

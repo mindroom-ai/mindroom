@@ -250,6 +250,7 @@ def _cancelled_outcome(
     failure_reason: str,
     visible: bool = True,
     final_visible_body: str | None = None,
+    terminal_update_committed: bool = True,
 ) -> FinalDeliveryOutcome:
     if visible and final_visible_body is None:
         final_visible_body = (
@@ -262,6 +263,7 @@ def _cancelled_outcome(
         event_id="$interrupted_note" if visible else None,
         is_visible_response=visible,
         final_visible_body=final_visible_body,
+        delivery_kind="edited" if visible and terminal_update_committed else None,
         failure_reason=failure_reason,
     )
 
@@ -293,6 +295,14 @@ def test_notify_ignores_user_stop_and_unmarked_turns() -> None:
 
     _notify(runner, request, _cancelled_outcome(failure_reason="cancelled_by_user"))
     _notify(runner, request, _cancelled_outcome(failure_reason="sync_restart_cancelled", visible=False))
+    _notify(
+        runner,
+        request,
+        _cancelled_outcome(
+            failure_reason="sync_restart_cancelled",
+            terminal_update_committed=False,
+        ),
+    )
     _notify(
         runner,
         request,

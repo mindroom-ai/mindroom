@@ -20,6 +20,7 @@ class StreamTransportOutcome:  # noqa: D101
     terminal_status: _TerminalStatus
     rendered_body: str | None
     visible_body_state: VisibleBodyState
+    terminal_update_committed: bool = False
     canonical_final_body_candidate: str | None = None
     failure_reason: str | None = None
     interactive_metadata: InteractiveMetadata | None = None

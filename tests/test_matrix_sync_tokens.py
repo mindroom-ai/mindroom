@@ -43,7 +43,7 @@ from mindroom.runtime_shutdown import (
     SYNC_RESTART_SHUTDOWN,
     RuntimeShutdownIntent,
 )
-from mindroom.streaming import StreamingResponse
+from mindroom.streaming import RESTART_INTERRUPTED_RESPONSE_NOTE, StreamingResponse
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
@@ -1902,12 +1902,20 @@ async def test_shutdown_discards_checkpoint_when_response_swallows_cancellation_
         pytest.param(asyncio.CancelledError("terminal edit cancelled"), id="cancelled"),
     ],
 )
+@pytest.mark.parametrize(
+    "prior_visible_body",
+    [
+        pytest.param("partial answer", id="ordinary-body"),
+        pytest.param(RESTART_INTERRUPTED_RESPONSE_NOTE, id="marker-collision"),
+    ],
+)
 @pytest.mark.asyncio
 async def test_shutdown_discards_checkpoint_when_terminal_interruption_note_did_not_land(
     tmp_path: Path,
     terminal_edit_effect: object,
+    prior_visible_body: str,
 ) -> None:
-    """A prior visible body cannot prove recovery when its terminal note edit fails."""
+    """Even a colliding prior body cannot prove that the terminal note edit landed."""
     bot = _certified_shutdown_bot(tmp_path)
     bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
     room_id = "!room:localhost"
@@ -1925,7 +1933,7 @@ async def test_shutdown_discards_checkpoint_when_terminal_interruption_note_did_
         runtime_paths=runtime_paths_for(bot.config),
     )
     streaming.event_id = "$response"
-    streaming.accumulated_text = "partial answer"
+    streaming.accumulated_text = prior_visible_body
     response_started = asyncio.Event()
     final_outcomes: list[FinalDeliveryOutcome] = []
 
@@ -1966,7 +1974,7 @@ async def test_shutdown_discards_checkpoint_when_terminal_interruption_note_did_
 
     edit_message = AsyncMock(
         side_effect=[
-            DeliveredMatrixEvent(event_id="$partial-edit", content_sent={"body": "partial answer"}),
+            DeliveredMatrixEvent(event_id="$partial-edit", content_sent={"body": prior_visible_body}),
             terminal_edit_effect,
         ],
     )
@@ -1986,7 +1994,7 @@ async def test_shutdown_discards_checkpoint_when_terminal_interruption_note_did_
     assert response_task.cancelled()
     assert len(final_outcomes) == 1
     assert final_outcomes[0].mark_handled is True
-    assert final_outcomes[0].final_visible_body == "partial answer"
+    assert final_outcomes[0].final_visible_body == prior_visible_body
     assert not bot._interrupted_turn_rooms.contains(source_event_id)
     assert bot._response_runner.incomplete_inbox_responses_recoverable is False
     assert bot._sync_cache_trust.state is SyncTrustState.UNCERTAIN

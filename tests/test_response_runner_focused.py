@@ -1079,6 +1079,7 @@ async def test_agent_streaming_sync_restart_cancelled_outcome_registers_retry(tm
         event_id="$stream",
         is_visible_response=True,
         final_visible_body=f"partial\n\n{RESTART_INTERRUPTED_RESPONSE_NOTE}",
+        delivery_kind="edited",
         failure_reason="sync_restart_cancelled",
     )
 
@@ -1402,6 +1403,7 @@ async def test_terminal_settlement_registers_retry_before_rethrowing_cancel(tmp_
         event_id="$response",
         is_visible_response=True,
         final_visible_body=RESTART_INTERRUPTED_RESPONSE_NOTE,
+        delivery_kind="edited",
         failure_reason="sync_restart_cancelled",
     )
     progress = response_runner._DeliveryProgress()
@@ -1472,6 +1474,7 @@ async def test_terminal_interruption_registers_recovery_unless_user_stopped(
             event_id="$response",
             is_visible_response=True,
             final_visible_body=final_visible_body,
+            delivery_kind="edited",
             failure_reason=failure_reason,
         ),
     )
