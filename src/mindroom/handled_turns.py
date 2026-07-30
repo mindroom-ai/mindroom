@@ -79,9 +79,16 @@ class SourceEventMetadata:
 SourceEventRevision = tuple[int, str]
 
 
-def _prompt_source_event_id(source_event_metadata: Mapping[str, SourceEventMetadata] | None, event_id: str) -> str:
+def _prompt_source_event_id(
+    source_event_ids: tuple[str, ...],
+    source_event_metadata: Mapping[str, SourceEventMetadata] | None,
+    event_id: str,
+) -> str:
     """Return the physical prompt owner for a source or discovery alias."""
-    for source_id, metadata in (source_event_metadata or {}).items():
+    if event_id in source_event_ids:
+        return event_id
+    metadata_by_source = source_event_metadata or {}
+    for source_id, metadata in metadata_by_source.items():
         if metadata.discovery_event_id == event_id:
             return source_id
     return event_id
@@ -148,7 +155,8 @@ class TurnRecord:
             source_event_ids,
             self.source_event_prompts,
             excluded_event_ids={
-                _prompt_source_event_id(source_event_metadata, event_id) for event_id in redacted_source_event_ids
+                _prompt_source_event_id(source_event_ids, source_event_metadata, event_id)
+                for event_id in redacted_source_event_ids
             },
         )
         source_event_revisions = _immutable_source_event_revisions(
@@ -251,7 +259,19 @@ class TurnRecord:
 
     def prompt_source_event_id(self, event_id: str) -> str:
         """Return the physical prompt owner for a source or discovery alias."""
-        return _prompt_source_event_id(self.source_event_metadata, event_id)
+        return _prompt_source_event_id(self.source_event_ids, self.source_event_metadata, event_id)
+
+    def requester_id_for_source(self, event_id: str) -> str | None:
+        """Return the exact requester for one source, or None when the record cannot prove one.
+
+        A single-source turn is one requester by construction, so it falls back to the turn-level
+        requester. A coalesced turn needs per-source metadata: records persisted before that field
+        existed, and maps normalization pruned an entry from, cannot attribute their sources.
+        """
+        if self.source_event_metadata is None:
+            return self.requester_id if not self.is_coalesced else None
+        metadata = self.source_event_metadata.get(self.prompt_source_event_id(event_id))
+        return metadata.sender if metadata is not None else None
 
     @property
     def replay_source_event_ids(self) -> tuple[str, ...]:
@@ -947,6 +967,14 @@ def _project_redaction_alias(
         turn_record,
         source_event_ids=retained_source_event_ids,
         anchor_event_id=anchor_event_id,
+        source_event_metadata=(
+            {}
+            if turn_record.is_coalesced and turn_record.source_event_metadata is None
+            else turn_record.source_event_metadata
+        ),
+        # Turn-level requester context remains required for owed redaction cleanup; an explicit
+        # empty source map keeps per-source replay ownership fail-closed after projection.
+        requester_id=turn_record.requester_id,
     )
 
 
@@ -1049,7 +1077,7 @@ def _immutable_source_event_metadata(
     excluded_event_ids: set[str],
 ) -> Mapping[str, SourceEventMetadata] | None:
     """Normalize and freeze source metadata belonging to the canonical identity."""
-    if not source_event_metadata:
+    if source_event_metadata is None:
         return None
     metadata: dict[str, SourceEventMetadata] = {}
     for event_id in source_event_ids:
@@ -1063,7 +1091,7 @@ def _immutable_source_event_metadata(
         )
         if normalized is not None:
             metadata[event_id] = normalized
-    return MappingProxyType(metadata) if metadata else None
+    return MappingProxyType(metadata)
 
 
 def _responses_file_path(base_path: Path, agent_name: str) -> Path:
