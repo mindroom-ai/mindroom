@@ -1053,21 +1053,34 @@ async def test_recovered_sync_response_certifies_after_nio_callback_completion(t
     """A recovered nio result certifies because its source callback was already durable."""
     bot = _agent_bot(tmp_path)
     bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
+    room = nio.MatrixRoom("!room:localhost", bot.matrix_id.full_id)
+    event = _text_event("$recovered-source", "hello", 1)
+    source_callback = bot._dispatch_obligation_runner.task_wrapper(
+        DispatchCallbackKind.MESSAGE,
+        owner=bot._runtime_view,
+    )
     response = _sync_response("s_recovered")
-    response.recovered_room_ids = frozenset({"!recovered:localhost"})
+    response.recovered_room_ids = frozenset({room.room_id})
     cache_result = SyncCacheWriteResult.from_sync_response(
         response,
         complete=True,
-        limited_room_ids=("!recovered:localhost",),
+        limited_room_ids=(room.room_id,),
     )
 
-    with patch.object(
-        bot._conversation_cache,
-        "cache_sync_timeline_for_certification",
-        AsyncMock(return_value=cache_result),
+    with (
+        patch.object(bot._dispatch_obligation_runner, "run_persisted", AsyncMock()) as run_persisted,
+        patch.object(
+            bot._conversation_cache,
+            "cache_sync_timeline_for_certification",
+            AsyncMock(return_value=cache_result),
+        ),
     ):
+        await source_callback(room, event)
+        assert bot._dispatch_obligation_store.has_pending(event.event_id, DispatchCallbackKind.MESSAGE)
         await bot._on_sync_response(response)
+        await wait_for_background_tasks(timeout=1.0, owner=bot._runtime_view)
 
+    run_persisted.assert_awaited_once()
     assert bot._sync_cache_trust.state is SyncTrustState.CERTIFIED
     assert _load_sync_token_value(tmp_path, bot.agent_name) == "s_recovered"
 
@@ -1343,16 +1356,22 @@ async def test_invite_failure_rewinds_classic_cursor_before_response_certificati
 
 
 @pytest.mark.asyncio
-async def test_dispatch_persistence_failure_rewinds_classic_cursor(
+async def test_dispatch_persistence_failure_keeps_pre_recovery_checkpoint(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Work rejected before durable acceptance must replay from the certified cursor."""
+    """A source write failure keeps the checkpoint that predates recovered callback delivery."""
     bot = _agent_bot(tmp_path)
     bot.client = make_matrix_client_mock(user_id=bot.matrix_id.full_id)
     bot.client.next_batch = "s_after_failure"
     bot._sync_cache_trust.state = SyncTrustState.CERTIFIED
     bot._sync_cache_trust.checkpoint = SyncCheckpoint("s_before_failure")
+    save_sync_token(
+        tmp_path,
+        bot.agent_name,
+        "s_before_failure",
+        cache_generation=_CACHE_GENERATION,
+    )
 
     def fail_persist(*_args: object, **_kwargs: object) -> None:
         message = "dispatch database unavailable"
@@ -1371,6 +1390,7 @@ async def test_dispatch_persistence_failure_rewinds_classic_cursor(
         )
 
     assert bot.client.next_batch == "s_before_failure"
+    assert _load_sync_token_value(tmp_path, bot.agent_name) == "s_before_failure"
 
 
 @pytest.mark.asyncio
