@@ -65,7 +65,10 @@ Settled rows become permanent exact-key tombstones and atomically scrub that rep
 Successful and intentionally ignored callbacks settle explicitly, while failures and cancellations remain pending for direct startup recovery.
 Recovery parses and invokes pending work without depending on a later Classic Sync token or Sliding Sync position.
 Message and media obligations remain pending when coalescing or a pending `TurnStore` record defers them, then yield only to durably persisted terminal turn truth.
-Raw sync-cache continuity remains owned separately by `SyncCacheTrust`, so a durable pending dispatch obligation is sufficient to preserve a certified checkpoint.
+For a typed nio recovered-room outcome, `AgentBot` first fences the saved sync checkpoint, then `DispatchObligationRunner` writes and reads back an exact `(principal, entity, room, sync token)` receipt before `SyncCacheTrust` can certify that response.
+The receipt write and readback run in one owned task; cancellation drains that task through repeated cancellation before the sync transport rewinds, so it cannot race a later transport restart.
+An interrupted or failed receipt leaves the recovered room pending, and a later clean response remains uncertified with `pending_recovery_obligation` until a recovered response receives a fresh durable receipt.
+Receipt rows retain only the newest token per room in the same transaction that records it, so repeated recovery cannot grow the receipt table without bound.
 Classic Sync response-owned lifecycle hooks and their durable de-duplication markers complete before `SyncCacheTrust` certifies the response checkpoint.
 Separately registered nio event callbacks may continue in the background after their exact dispatch obligation is durable.
 

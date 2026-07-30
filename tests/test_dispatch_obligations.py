@@ -833,6 +833,128 @@ async def test_recovered_rooms_require_a_durable_acceptance_receipt(tmp_path: Pa
 
 
 @pytest.mark.asyncio
+async def test_cancelled_recovery_acceptance_drains_before_transport_restart(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cancellation cannot leave receipt persistence racing a restarted transport."""
+    record_started = threading.Event()
+    allow_record = threading.Event()
+    record_finished = threading.Event()
+    failure_notifications = 0
+    store = _store(tmp_path)
+    record_recovery_acceptance = store.record_recovery_acceptance
+
+    def record_after_release(room_ids: frozenset[str], *, sync_token: str) -> None:
+        record_started.set()
+        try:
+            assert allow_record.wait(timeout=1.0)
+            record_recovery_acceptance(room_ids, sync_token=sync_token)
+        finally:
+            record_finished.set()
+
+    def notify_failure() -> None:
+        nonlocal failure_notifications
+        failure_notifications += 1
+
+    async def callback(_room: nio.MatrixRoom, _event: nio.Event) -> DispatchCallbackResult:
+        return DispatchCallbackResult.SUCCEEDED
+
+    monkeypatch.setattr(store, "record_recovery_acceptance", record_after_release)
+    runner = DispatchObligationRunner(
+        store=store,
+        callbacks={DispatchCallbackKind.MESSAGE: callback},
+        room_for_id=lambda room_id: nio.MatrixRoom(room_id, _PRINCIPAL_ID),
+        turn_is_terminal=lambda _event_id: False,
+        on_persist_failure=notify_failure,
+    )
+    acceptance = asyncio.create_task(
+        runner.accept_recovered_rooms(frozenset({_ROOM_ID}), sync_token="s_recovered"),  # noqa: S106
+    )
+    assert await asyncio.to_thread(record_started.wait, 1.0)
+
+    acceptance.cancel()
+    await asyncio.sleep(0)
+    assert not acceptance.done()
+    acceptance.cancel()
+    allow_record.set()
+
+    with pytest.raises(asyncio.CancelledError):
+        await acceptance
+    assert await asyncio.to_thread(record_finished.wait, 1.0)
+    assert store.has_recovery_acceptance(_ROOM_ID, sync_token="s_recovered")  # noqa: S106
+    assert failure_notifications == 1
+
+    restarted = _runner(_store(tmp_path), callback)
+    accepted_room_ids = await restarted.accept_recovered_rooms(
+        frozenset({_ROOM_ID}),
+        sync_token="s_recovered_retry",  # noqa: S106
+    )
+
+    assert accepted_room_ids == frozenset({_ROOM_ID})
+
+
+def test_recovery_receipts_keep_only_the_latest_room_token(tmp_path: Path) -> None:
+    """Repeated recovery must not grow the receipt table once per sync token."""
+    store = _store(tmp_path)
+
+    store.record_recovery_acceptance(frozenset({_ROOM_ID}), sync_token="s_first")  # noqa: S106
+    store.record_recovery_acceptance(frozenset({_ROOM_ID}), sync_token="s_second")  # noqa: S106
+
+    assert not store.has_recovery_acceptance(_ROOM_ID, sync_token="s_first")  # noqa: S106
+    assert store.has_recovery_acceptance(_ROOM_ID, sync_token="s_second")  # noqa: S106
+
+
+@pytest.mark.asyncio
+async def test_failed_recovery_receipt_retries_without_false_acceptance(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed receipt write leaves no acceptance and a later retry can own the gap."""
+    attempts = 0
+    failure_notifications = 0
+    store = _store(tmp_path)
+    record_recovery_acceptance = store.record_recovery_acceptance
+
+    def fail_once(room_ids: frozenset[str], *, sync_token: str) -> None:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            msg = "receipt write failed"
+            raise OSError(msg)
+        record_recovery_acceptance(room_ids, sync_token=sync_token)
+
+    def notify_failure() -> None:
+        nonlocal failure_notifications
+        failure_notifications += 1
+
+    async def callback(_room: nio.MatrixRoom, _event: nio.Event) -> DispatchCallbackResult:
+        return DispatchCallbackResult.SUCCEEDED
+
+    monkeypatch.setattr(store, "record_recovery_acceptance", fail_once)
+    runner = DispatchObligationRunner(
+        store=store,
+        callbacks={DispatchCallbackKind.MESSAGE: callback},
+        room_for_id=lambda room_id: nio.MatrixRoom(room_id, _PRINCIPAL_ID),
+        turn_is_terminal=lambda _event_id: False,
+        on_persist_failure=notify_failure,
+    )
+
+    with pytest.raises(OSError, match="receipt write failed"):
+        await runner.accept_recovered_rooms(frozenset({_ROOM_ID}), sync_token="s_retry")  # noqa: S106
+    assert not store.has_recovery_acceptance(_ROOM_ID, sync_token="s_retry")  # noqa: S106
+
+    accepted_room_ids = await runner.accept_recovered_rooms(
+        frozenset({_ROOM_ID}),
+        sync_token="s_retry",  # noqa: S106
+    )
+
+    assert accepted_room_ids == frozenset({_ROOM_ID})
+    assert store.has_recovery_acceptance(_ROOM_ID, sync_token="s_retry")  # noqa: S106
+    assert failure_notifications == 1
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("entrypoint", ["direct", "task-wrapper"])
 async def test_persist_failure_notifies_once_for_every_runner_entrypoint(
     tmp_path: Path,

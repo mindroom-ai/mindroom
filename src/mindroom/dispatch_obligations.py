@@ -7,7 +7,8 @@ import json
 import sqlite3
 import threading
 import time
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Coroutine, Mapping
+from contextlib import suppress
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
@@ -196,6 +197,16 @@ class DispatchObligationStore:
         accepted_at_ns = time.time_ns()
         with self._lock, self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
+            connection.executemany(
+                """
+                DELETE FROM recovery_dispatch_acceptances
+                WHERE principal_id = ?
+                  AND entity_name = ?
+                  AND room_id = ?
+                  AND sync_token != ?
+                """,
+                ((self.principal_id, self.entity_name, room_id, sync_token) for room_id in room_ids),
+            )
             connection.executemany(
                 """
                 INSERT INTO recovery_dispatch_acceptances (
@@ -581,6 +592,24 @@ async def _run_store_settlement(
         raise
 
 
+async def _run_owned_recovery_receipt(operation: Coroutine[object, object, None]) -> None:
+    """Drain receipt persistence before an interrupted sync callback returns."""
+    worker_task = asyncio.create_task(operation)
+    try:
+        await asyncio.shield(worker_task)
+    except asyncio.CancelledError:
+        while not worker_task.done():
+            try:
+                await asyncio.shield(worker_task)
+            except asyncio.CancelledError:
+                continue
+            except Exception:
+                break
+        with suppress(Exception):
+            worker_task.result()
+        raise
+
+
 def _parse_recovery_event(obligation: _DispatchObligation) -> nio.Event:
     event = (
         parse_matrix_media_event_source(obligation.event_source)
@@ -825,17 +854,35 @@ class DispatchObligationRunner:
         if not room_ids:
             return frozenset()
         try:
-            await asyncio.to_thread(
-                self.store.record_recovery_acceptance,
-                room_ids,
-                sync_token=sync_token,
+            await _run_owned_recovery_receipt(
+                self._record_and_verify_recovered_rooms(
+                    room_ids,
+                    sync_token=sync_token,
+                ),
             )
-            await self._verify_recovered_room_acceptance(room_ids, sync_token=sync_token)
+        except asyncio.CancelledError:
+            if self.on_persist_failure is not None:
+                self.on_persist_failure()
+            raise
         except Exception:
             if self.on_persist_failure is not None:
                 self.on_persist_failure()
             raise
         return room_ids
+
+    async def _record_and_verify_recovered_rooms(
+        self,
+        room_ids: frozenset[str],
+        *,
+        sync_token: str,
+    ) -> None:
+        """Write and read back one recovery receipt set without a cancellation gap."""
+        await asyncio.to_thread(
+            self.store.record_recovery_acceptance,
+            room_ids,
+            sync_token=sync_token,
+        )
+        await self._verify_recovered_room_acceptance(room_ids, sync_token=sync_token)
 
     async def _verify_recovered_room_acceptance(
         self,

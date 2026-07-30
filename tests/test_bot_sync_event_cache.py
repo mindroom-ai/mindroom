@@ -756,6 +756,10 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             try:
                 assert await asyncio.to_thread(entered.wait, 1.0)
                 response_task.cancel()
+                await asyncio.sleep(0)
+                assert not response_task.done()
+                response_task.cancel()
+                release.set()
                 with pytest.raises(asyncio.CancelledError):
                     await response_task
             finally:
