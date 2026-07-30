@@ -18,7 +18,7 @@ from agno.run.agent import RunOutput
 from agno.run.team import TeamRunOutput
 
 from mindroom.constants import MATRIX_EVENT_ID_METADATA_KEY, MATRIX_SOURCE_EVENT_IDS_METADATA_KEY
-from mindroom.history.storage import is_model_history_visible_run
+from mindroom.history_run_visibility import is_model_history_visible_run
 from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:

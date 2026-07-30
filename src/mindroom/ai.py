@@ -352,6 +352,7 @@ class _AgentTurnHolder:
     attempt: _MediaAttempt | None = None
     state: _StreamingAttemptState | None = None  # streaming turns only
     attempt_started: bool = False  # streaming turns only
+    queued_notice_run_id: str | None = None  # streaming turns register durable ownership by ID
 
 
 @dataclass(frozen=True)
@@ -1049,7 +1050,7 @@ async def _run_non_streaming_agent_attempts(
             pending_retry_decision.record_retry_success()
         return _NonStreamingAttemptResult(response=response, attempt=attempt)
     finally:
-        await ai_runtime.cleanup_queued_notice_state_async(
+        ai_runtime.register_queued_notice_attempt(
             run_output=response,
             storage_factory=scope_context.storage_factory if scope_context is not None else None,
             session_id=run_context.session_id,
@@ -1965,15 +1966,19 @@ async def stream_agent_response(  # noqa: C901, PLR0915
         if not holder.attempt_started:
             return
         holder.attempt_started = False
-        await ai_runtime.cleanup_queued_notice_state_async(
+        # Agno's agent stream yields terminal events rather than an in-memory
+        # RunOutput, so bind durable finalization to the terminal run ID.
+        ai_runtime.register_queued_notice_attempt(
             run_output=None,
             storage_factory=scope_context.storage_factory if scope_context is not None else None,
             session_id=session_id,
             session_type=SessionType.AGENT,
             entity_name=agent_name,
+            run_id=holder.queued_notice_run_id,
         )
+        holder.queued_notice_run_id = None
 
-    async def _run_streaming_attempt(  # noqa: C901
+    async def _run_streaming_attempt(  # noqa: C901, PLR0915
         run: TurnRunState,
         continuation_state: DynamicContinuationRunState,
     ) -> AsyncGenerator[AIStreamChunk | AttemptResolved, None]:
@@ -2024,6 +2029,7 @@ async def stream_agent_response(  # noqa: C901, PLR0915
         )
         holder.attempt = attempt
         holder.attempt_started = True
+        holder.queued_notice_run_id = attempt.attempt_run_id
         turn_state = run.turn_state
         state = _StreamingAttemptState()
         pending_retry_decision: MediaRetryDecision | None = None
@@ -2088,6 +2094,9 @@ async def stream_agent_response(  # noqa: C901, PLR0915
             ):
                 yield stream_chunk
 
+            holder.queued_notice_run_id = (
+                state.completed_run_event.run_id if state.completed_run_event is not None else None
+            ) or attempt.attempt_run_id
             if state.media_fallback_retry is not None:
                 pending_retry_decision = state.media_fallback_retry
                 attempt.retry(
@@ -2097,6 +2106,7 @@ async def stream_agent_response(  # noqa: C901, PLR0915
                     retry_media_inputs=pending_retry_decision.media_inputs,
                     run_id=continuation_state.active_run_id,
                 )
+                holder.queued_notice_run_id = attempt.attempt_run_id
                 continue
 
             run_error = state.user_error or state.stream_exception

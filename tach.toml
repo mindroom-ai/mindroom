@@ -271,6 +271,7 @@ visibility = [
 [[modules]]
 path = "mindroom.ai_runtime"
 depends_on = [
+    "mindroom.history_run_visibility",
     "mindroom.logging_config",
     "mindroom.media_fallback",
     "mindroom.media_inputs",
@@ -285,6 +286,16 @@ visibility = [
     "mindroom.teams",
     "mindroom.thread_summary",
     "mindroom.topic_generator",
+]
+
+[[modules]]
+path = "mindroom.history_run_visibility"
+depends_on = []
+visibility = [
+    "mindroom.ai_runtime",
+    "mindroom.history.compaction",
+    "mindroom.history.storage",
+    "mindroom.sync_restart_retry",
 ]
 
 [[modules]]
@@ -1018,6 +1029,7 @@ path = "mindroom.history.compaction"
 depends_on = [
     "mindroom.claude_prompt_cache",
     "mindroom.constants",
+    "mindroom.history_run_visibility",
     "mindroom.history.storage",
     "mindroom.history.summary_call",
     "mindroom.history.types",
@@ -1059,6 +1071,7 @@ depends_on = [
 path = "mindroom.history.storage"
 depends_on = [
     "mindroom.constants",
+    "mindroom.history_run_visibility",
     "mindroom.history.types",
     "mindroom.metadata_merge",
 ]
@@ -2058,7 +2071,7 @@ path = "mindroom.sync_restart_retry"
 depends_on = [
     "mindroom.response_admission",
     "mindroom.constants",
-    "mindroom.history.storage",
+    "mindroom.history_run_visibility",
     "mindroom.history.types",
     "mindroom.logging_config",
 ]

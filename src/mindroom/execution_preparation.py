@@ -1053,7 +1053,7 @@ def _scrub_bound_team_scope_context(
     team: Team,
     entity_name: str | None,
 ) -> None:
-    """Strip stale queued-message notices before preparing a bound team run."""
+    """Recover prior queued-message notices before preparing a bound team run."""
     ai_runtime.scrub_queued_notice_session_context(
         scope_context=scope_context,
         entity_name=entity_name or str(team.name or "Team"),

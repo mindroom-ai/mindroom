@@ -13,7 +13,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import nio
 import pytest
 from agno.agent import Agent as AgnoAgent
-from agno.db.base import SessionType
+from agno.db.base import BaseDb, SessionType
 from agno.media import Image
 from agno.models.message import Message
 from agno.run.agent import RunCompletedEvent, RunContentEvent, RunOutput
@@ -21,13 +21,15 @@ from agno.run.base import RunStatus
 from agno.run.team import TeamRunOutput
 from agno.session.agent import AgentSession
 from agno.session.team import TeamSession
+from structlog.testing import capture_logs
 
-from mindroom import turn_controller
+from mindroom import ai_runtime, turn_controller
+from mindroom.agent_storage import create_state_storage, get_agent_session
 from mindroom.ai import _PreparedAgentRun, ai_response, stream_agent_response
 from mindroom.ai_runtime import (
-    cleanup_queued_notice_state_async,
     install_queued_message_notice_hook,
     queued_message_signal_context,
+    register_queued_notice_attempt,
 )
 from mindroom.bot import AgentBot
 from mindroom.bot_runtime_view import BotRuntimeState
@@ -41,6 +43,7 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
+from mindroom.constants import prompt_roles_for_history_storage
 from mindroom.conversation_resolver import MessageContext
 from mindroom.dispatch_handoff import PendingDispatchMetadata, PreparedTextEvent
 from mindroom.dispatch_source import (
@@ -69,7 +72,7 @@ from mindroom.post_response_effects import (
     apply_post_response_effects,
 )
 from mindroom.prompts import QUEUED_MESSAGE_NOTICE_TEXT
-from mindroom.response_lifecycle import _QueuedMessageState
+from mindroom.response_lifecycle import ResponseLifecycleCoordinator, _QueuedMessageState
 from mindroom.response_payload_preparation import DispatchPayloadInputs, ResponsePayloadPreparation
 from mindroom.response_runner import (
     PostLockRequestPreparationError,
@@ -95,6 +98,7 @@ from tests.conftest import (
     unwrap_extracted_collaborator,
     wrap_extracted_collaborators,
 )
+from tests.history_helpers import RecordingModel
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine
@@ -345,15 +349,77 @@ async def test_response_lifecycle_rejects_mismatched_locked_response_target(tmp_
         )
 
 
-def _notice_count(messages: list[Message]) -> int:
-    return sum(1 for message in messages if message.content == QUEUED_MESSAGE_NOTICE_TEXT)
+_QUEUED_NOTICE_MARKER_KEY = "mindroom_queued_message_notice"
+_QUEUED_NOTICE_RESPONSE_TURN_ID_KEY = "mindroom_queued_message_notice_response_turn_id"
+_QUEUED_NOTICE_HISTORY_TEXT = (
+    '\n\n<mindroom-history-note kind="queued-message-notice">\n'
+    "A queued-message notice was delivered.\n"
+    "</mindroom-history-note>\n\n"
+)
 
 
-def _queued_notice_message() -> Message:
+def _notice_messages(
+    messages: list[Message],
+    *,
+    marker: bool | str | None = None,
+    response_turn_id: str | None = None,
+) -> list[Message]:
+    matches: list[Message] = []
+    for message in messages:
+        provider_data = message.provider_data
+        if not isinstance(provider_data, dict):
+            continue
+        notice_marker = provider_data.get(_QUEUED_NOTICE_MARKER_KEY)
+        if notice_marker not in (True, "persisted"):
+            continue
+        if marker is not None and notice_marker != marker:
+            continue
+        if response_turn_id is not None and provider_data.get(_QUEUED_NOTICE_RESPONSE_TURN_ID_KEY) != response_turn_id:
+            continue
+        matches.append(message)
+    return matches
+
+
+def _notice_count(
+    messages: list[Message],
+    *,
+    marker: bool | str | None = None,
+    response_turn_id: str | None = None,
+) -> int:
+    return len(
+        _notice_messages(
+            messages,
+            marker=marker,
+            response_turn_id=response_turn_id,
+        ),
+    )
+
+
+def _queued_notice_message(
+    response_turn_id: str,
+    *,
+    marker: bool | str = True,
+    content: str = QUEUED_MESSAGE_NOTICE_TEXT,
+    from_history: bool = False,
+) -> Message:
     return Message(
         role="user",
-        content=QUEUED_MESSAGE_NOTICE_TEXT,
-        provider_data={"mindroom_queued_message_notice": True},
+        content=content,
+        provider_data={
+            _QUEUED_NOTICE_MARKER_KEY: marker,
+            _QUEUED_NOTICE_RESPONSE_TURN_ID_KEY: response_turn_id,
+        },
+        from_history=from_history,
+    )
+
+
+def _queued_notice_storage(tmp_path: Path) -> BaseDb:
+    return create_state_storage(
+        "queued_notice",
+        tmp_path,
+        subdir="sessions",
+        session_table="queued_notice_sessions",
+        prompt_roles=prompt_roles_for_history_storage(),
     )
 
 
@@ -361,6 +427,7 @@ class _FakeStorage:
     def __init__(self) -> None:
         self.session: AgentSession | TeamSession | None = None
         self.upserted = False
+        self.upsert_count = 0
         self.closed = False
 
     def get_session(self, session_id: str, _session_type: object) -> AgentSession | TeamSession | None:
@@ -371,6 +438,7 @@ class _FakeStorage:
     def upsert_session(self, session: AgentSession | TeamSession) -> AgentSession | TeamSession:
         self.session = session
         self.upserted = True
+        self.upsert_count += 1
         return session
 
     def close(self) -> None:
@@ -2875,7 +2943,7 @@ def test_notice_hook_keeps_single_notice_at_end_and_skips_stop_after_tool_call()
     )
     assert _notice_count(plain_messages) == 0
 
-    with queued_message_signal_context(_StaticQueuedState(pending=True)):
+    with queued_message_signal_context(_StaticQueuedState(pending=True)) as notice_context:
         queued_messages = [Message(role="user", content="hello")]
         model.format_function_call_results(
             messages=queued_messages,
@@ -2894,7 +2962,7 @@ def test_notice_hook_keeps_single_notice_at_end_and_skips_stop_after_tool_call()
             function_call_results=[Message(role="tool", content="done", stop_after_tool_call=True)],
         )
 
-    with queued_message_signal_context(_StaticQueuedState(pending=True)):
+    with queued_message_signal_context(_StaticQueuedState(pending=True)) as next_notice_context:
         next_turn_messages = [Message(role="user", content="hello")]
         model.format_function_call_results(
             messages=next_turn_messages,
@@ -2903,9 +2971,26 @@ def test_notice_hook_keeps_single_notice_at_end_and_skips_stop_after_tool_call()
 
     assert _notice_count(queued_messages) == 1
     assert queued_messages[-1].content == QUEUED_MESSAGE_NOTICE_TEXT
+    assert queued_messages[-1].provider_data == {
+        _QUEUED_NOTICE_MARKER_KEY: True,
+        _QUEUED_NOTICE_RESPONSE_TURN_ID_KEY: notice_context.response_turn_id,
+    }
     assert _notice_count(next_turn_messages) == 1
     assert next_turn_messages[-1].content == QUEUED_MESSAGE_NOTICE_TEXT
+    assert next_notice_context.response_turn_id != notice_context.response_turn_id
     assert _notice_count(stop_after_messages) == 0
+
+
+def test_default_queued_notice_requires_pause_handoff() -> None:
+    """The default notice should require an explicit pause handoff and continuation default."""
+    assert QUEUED_MESSAGE_NOTICE_TEXT == (
+        "[SYSTEM NOTICE — PAUSE FOR A NEWER USER MESSAGE] A newer user message arrived in this thread "
+        "while you were working. This is a PAUSE, not a cancellation of the current task. Do not make "
+        "any new tool calls. End this turn now with a final text response that explicitly says a newer "
+        "message arrived and states: (1) what you completed, (2) what remains unfinished, and (3) the "
+        "next step. If work remains, state that you will resume it on the next turn unless the newer "
+        "message explicitly tells you to stop or redirect it."
+    )
 
 
 def test_notice_hook_uses_configured_notice_text() -> None:
@@ -2913,7 +2998,7 @@ def test_notice_hook_uses_configured_notice_text() -> None:
     model = _FakeModel()
     install_queued_message_notice_hook(model, notice_text="Custom queued notice.")
 
-    with queued_message_signal_context(_StaticQueuedState(pending=True)):
+    with queued_message_signal_context(_StaticQueuedState(pending=True)) as notice_context:
         messages = [Message(role="user", content="hello")]
         model.format_function_call_results(
             messages=messages,
@@ -2921,7 +3006,64 @@ def test_notice_hook_uses_configured_notice_text() -> None:
         )
 
     assert messages[-1].content == "Custom queued notice."
-    assert messages[-1].provider_data == {"mindroom_queued_message_notice": True}
+    assert messages[-1].provider_data == {
+        _QUEUED_NOTICE_MARKER_KEY: True,
+        _QUEUED_NOTICE_RESPONSE_TURN_ID_KEY: notice_context.response_turn_id,
+    }
+
+
+def test_notice_hook_scopes_dedupe_to_response_turn_id() -> None:
+    """Tool-round dedupe should remove only notices owned by the active response."""
+    model = _FakeModel()
+    install_queued_message_notice_hook(model, notice_text=QUEUED_MESSAGE_NOTICE_TEXT)
+
+    with queued_message_signal_context(_StaticQueuedState(pending=True)) as notice_context:
+        prior_notice = _queued_notice_message(
+            "prior-response",
+            marker="persisted",
+            content=_QUEUED_NOTICE_HISTORY_TEXT,
+            from_history=True,
+        )
+        current_stale_notice = _queued_notice_message(
+            notice_context.response_turn_id,
+            marker="persisted",
+            content=_QUEUED_NOTICE_HISTORY_TEXT,
+        )
+        messages = [prior_notice, current_stale_notice]
+        model.format_function_call_results(
+            messages=messages,
+            function_call_results=[Message(role="tool", content="result")],
+        )
+
+    assert messages[0] is prior_notice
+    assert _notice_count(messages, marker="persisted", response_turn_id="prior-response") == 1
+    assert _notice_count(messages, marker="persisted", response_turn_id=notice_context.response_turn_id) == 0
+    assert _notice_count(messages, marker=True, response_turn_id=notice_context.response_turn_id) == 1
+
+
+def test_notice_hook_preserves_prior_factual_replay() -> None:
+    """A prior factual replay note should survive later tool-result formatting byte-for-byte."""
+    model = _FakeModel()
+    install_queued_message_notice_hook(model, notice_text=QUEUED_MESSAGE_NOTICE_TEXT)
+    prior_notice = _queued_notice_message(
+        "prior-response",
+        marker="persisted",
+        content=_QUEUED_NOTICE_HISTORY_TEXT,
+        from_history=True,
+    )
+    original = prior_notice.model_dump()
+
+    with queued_message_signal_context(_StaticQueuedState(pending=True)) as notice_context:
+        messages = [prior_notice]
+        for index in range(2):
+            model.format_function_call_results(
+                messages=messages,
+                function_call_results=[Message(role="tool", content=f"result {index}")],
+            )
+
+    assert prior_notice.model_dump() == original
+    assert _notice_count(messages, marker="persisted", response_turn_id="prior-response") == 1
+    assert _notice_count(messages, marker=True, response_turn_id=notice_context.response_turn_id) == 1
 
 
 def test_notice_reinjects_at_end_across_multiple_tool_rounds() -> None:
@@ -2941,24 +3083,46 @@ def test_notice_reinjects_at_end_across_multiple_tool_rounds() -> None:
             assert messages[-1].content == QUEUED_MESSAGE_NOTICE_TEXT
 
 
-def test_stop_after_tool_call_strips_stale_notice_without_readding() -> None:
-    """A stop-after-tool-call round should remove any stale queued notice and not append a new one."""
+def test_queued_notice_logs_once_per_response_turn() -> None:
+    """Repeated successful appends should emit one injection event for the response."""
     model = _FakeModel()
     install_queued_message_notice_hook(model, notice_text=QUEUED_MESSAGE_NOTICE_TEXT)
 
-    messages = [Message(role="user", content="hello")]
-    with queued_message_signal_context(_StaticQueuedState(pending=True)):
-        model.format_function_call_results(
-            messages=messages,
-            function_call_results=[Message(role="tool", content="result")],
-        )
-        model.format_function_call_results(
-            messages=messages,
-            function_call_results=[Message(role="tool", content="done", stop_after_tool_call=True)],
-        )
+    with (
+        capture_logs() as logs,
+        queued_message_signal_context(
+            _StaticQueuedState(pending=True),
+        ) as notice_context,
+    ):
+        messages = [Message(role="user", content="hello")]
+        for index in range(5):
+            model.format_function_call_results(
+                messages=messages,
+                function_call_results=[Message(role="tool", content=f"result {index}")],
+            )
 
-    assert _notice_count(messages) == 0
-    assert messages[-1].content == "done"
+    injection_logs = [entry for entry in logs if entry.get("event") == "queued_message_notice_injected"]
+    assert injection_logs == [
+        {
+            "event": "queued_message_notice_injected",
+            "log_level": "info",
+            "response_turn_id": notice_context.response_turn_id,
+        },
+    ]
+
+    with capture_logs() as no_injection_logs:
+        with queued_message_signal_context(_StaticQueuedState(pending=False)):
+            model.format_function_call_results(
+                messages=[],
+                function_call_results=[Message(role="tool", content="result")],
+            )
+        with queued_message_signal_context(_StaticQueuedState(pending=True)):
+            model.format_function_call_results(
+                messages=[],
+                function_call_results=[Message(role="tool", content="done", stop_after_tool_call=True)],
+            )
+
+    assert not any(entry.get("event") == "queued_message_notice_injected" for entry in no_injection_logs)
 
 
 def test_notice_reinjects_after_media_follow_up_message() -> None:
@@ -3007,7 +3171,7 @@ def test_notice_hook_still_installs_when_media_handler_is_missing() -> None:
 
 @pytest.mark.asyncio
 async def test_ai_response_preserves_stale_notice_before_prepare(tmp_path: Path) -> None:
-    """Loaded session history should strip stale queued notices before replay."""
+    """Loaded session history should factualize a prior crash-left live notice."""
     config = _config(tmp_path)
     storage = _FakeStorage()
     storage.session = AgentSession(
@@ -3016,7 +3180,8 @@ async def test_ai_response_preserves_stale_notice_before_prepare(tmp_path: Path)
             RunOutput(
                 run_id="run-0",
                 session_id="session-1",
-                messages=[_queued_notice_message()],
+                messages=[_queued_notice_message("prior-response")],
+                status=RunStatus.completed,
             ),
         ],
     )
@@ -3064,15 +3229,20 @@ async def test_ai_response_preserves_stale_notice_before_prepare(tmp_path: Path)
         )
 
     assert response == "final answer"
-    assert observed_notice_counts == [0]
+    assert observed_notice_counts == [1]
     assert storage.upserted is True
     assert storage.session is not None
-    assert _notice_count(storage.session.runs[0].messages or []) == 0
+    recovered = _notice_messages(
+        storage.session.runs[0].messages or [],
+        marker="persisted",
+        response_turn_id="prior-response",
+    )
+    assert [message.content for message in recovered] == [_QUEUED_NOTICE_HISTORY_TEXT]
 
 
 @pytest.mark.asyncio
-async def test_ai_response_preserves_notice_in_run_output_and_session(tmp_path: Path) -> None:
-    """Non-streaming runs should strip the hidden notice from returned and persisted history."""
+async def test_ai_response_preserves_notice_in_session(tmp_path: Path) -> None:
+    """Attempt registration should stay live until outer non-stream finalization."""
     config = _config(tmp_path)
     storage = _FakeStorage()
     model = _FakeModel()
@@ -3092,7 +3262,14 @@ async def test_ai_response_preserves_notice_in_run_output_and_session(tmp_path: 
         stored_messages = [message.model_copy(deep=True) for message in messages]
         storage.session = AgentSession(
             session_id=session_id,
-            runs=[RunOutput(run_id="run-1", session_id=session_id, messages=stored_messages)],
+            runs=[
+                RunOutput(
+                    run_id="run-1",
+                    session_id=session_id,
+                    messages=stored_messages,
+                    status=RunStatus.completed,
+                ),
+            ],
         )
         run_output = RunOutput(
             run_id="run-1",
@@ -3118,7 +3295,7 @@ async def test_ai_response_preserves_notice_in_run_output_and_session(tmp_path: 
         ),
         patch("mindroom.ai._prepare_agent_and_prompt", new=AsyncMock(return_value=_prepared_run(agent))),
         patch("mindroom.ai.close_agent_runtime_state_dbs"),
-        queued_message_signal_context(_StaticQueuedState(pending=True)),
+        queued_message_signal_context(_StaticQueuedState(pending=True)) as notice_context,
     ):
         response = await ai_response(
             make_turn_context("general", session_id="session-1"),
@@ -3126,17 +3303,22 @@ async def test_ai_response_preserves_notice_in_run_output_and_session(tmp_path: 
             runtime_paths=runtime_paths_for(config),
             config=config,
         )
+        assert storage.upserted is False
+        assert _notice_count(run_output_holder["run"].messages or [], marker=True) == 1
+        assert storage.session is not None
+        assert _notice_count(storage.session.runs[0].messages or [], marker=True) == 1
+        await ai_runtime.finalize_queued_notice_response_turn_async(notice_context)
 
     assert response == "final answer"
     assert storage.upserted is True
-    assert _notice_count(run_output_holder["run"].messages or []) == 0
     assert storage.session is not None
-    assert _notice_count(storage.session.runs[0].messages or []) == 0
+    assert _notice_count(storage.session.runs[0].messages or [], marker=True) == 0
+    assert _notice_count(storage.session.runs[0].messages or [], marker="persisted") == 1
 
 
 @pytest.mark.asyncio
 async def test_ai_response_preserves_notice_in_session_after_exception(tmp_path: Path) -> None:
-    """Non-streaming failures should still scrub persisted notices."""
+    """An error-only response should remove its live notice at the outer boundary."""
     config = _config(tmp_path)
     storage = _FakeStorage()
     model = _FakeModel()
@@ -3154,7 +3336,14 @@ async def test_ai_response_preserves_notice_in_session_after_exception(tmp_path:
         )
         storage.session = AgentSession(
             session_id=session_id,
-            runs=[RunOutput(run_id="run-1", session_id=session_id, messages=messages)],
+            runs=[
+                RunOutput(
+                    run_id="run-1",
+                    session_id=session_id,
+                    messages=messages,
+                    status=RunStatus.error,
+                ),
+            ],
         )
         error_message = "boom"
         raise RuntimeError(error_message)
@@ -3170,7 +3359,7 @@ async def test_ai_response_preserves_notice_in_session_after_exception(tmp_path:
         ),
         patch("mindroom.ai._prepare_agent_and_prompt", new=AsyncMock(return_value=_prepared_run(agent))),
         patch("mindroom.ai.close_agent_runtime_state_dbs"),
-        queued_message_signal_context(_StaticQueuedState(pending=True)),
+        queued_message_signal_context(_StaticQueuedState(pending=True)) as notice_context,
     ):
         response = await ai_response(
             make_turn_context("general", session_id="session-1"),
@@ -3178,6 +3367,9 @@ async def test_ai_response_preserves_notice_in_session_after_exception(tmp_path:
             runtime_paths=runtime_paths_for(config),
             config=config,
         )
+        assert storage.session is not None
+        assert _notice_count(storage.session.runs[0].messages or [], marker=True) == 1
+        await ai_runtime.finalize_queued_notice_response_turn_async(notice_context)
 
     assert isinstance(response, str)
     assert storage.upserted is True
@@ -3187,7 +3379,7 @@ async def test_ai_response_preserves_notice_in_session_after_exception(tmp_path:
 
 @pytest.mark.asyncio
 async def test_stream_agent_response_preserves_notice_in_session(tmp_path: Path) -> None:
-    """Streaming runs should also scrub the hidden notice from persisted history."""
+    """Streaming attempt cleanup should wait for the outer response boundary."""
     config = _config(tmp_path)
     storage = _FakeStorage()
     model = _FakeModel()
@@ -3206,7 +3398,14 @@ async def test_stream_agent_response_preserves_notice_in_session(tmp_path: Path)
         stored_messages = [message.model_copy(deep=True) for message in messages]
         storage.session = AgentSession(
             session_id=session_id,
-            runs=[RunOutput(run_id="run-1", session_id=session_id, messages=stored_messages)],
+            runs=[
+                RunOutput(
+                    run_id="run-1",
+                    session_id=session_id,
+                    messages=stored_messages,
+                    status=RunStatus.completed,
+                ),
+            ],
         )
         yield RunContentEvent(content="chunk")
         yield RunCompletedEvent(run_id="run-1", session_id=session_id)
@@ -3222,7 +3421,7 @@ async def test_stream_agent_response_preserves_notice_in_session(tmp_path: Path)
         ),
         patch("mindroom.ai._prepare_agent_and_prompt", new=AsyncMock(return_value=_prepared_run(agent))),
         patch("mindroom.ai.close_agent_runtime_state_dbs"),
-        queued_message_signal_context(_StaticQueuedState(pending=True)),
+        queued_message_signal_context(_StaticQueuedState(pending=True)) as notice_context,
     ):
         chunks = [
             chunk
@@ -3233,11 +3432,16 @@ async def test_stream_agent_response_preserves_notice_in_session(tmp_path: Path)
                 config=config,
             )
         ]
+        assert storage.upserted is False
+        assert storage.session is not None
+        assert _notice_count(storage.session.runs[0].messages or [], marker=True) == 1
+        await ai_runtime.finalize_queued_notice_response_turn_async(notice_context)
 
     assert any(isinstance(chunk, RunContentEvent) and chunk.content == "chunk" for chunk in chunks)
     assert storage.upserted is True
     assert storage.session is not None
-    assert _notice_count(storage.session.runs[0].messages or []) == 0
+    assert _notice_count(storage.session.runs[0].messages or [], marker=True) == 0
+    assert _notice_count(storage.session.runs[0].messages or [], marker="persisted") == 1
 
 
 def test_create_team_instance_installs_notice_hook_on_team_model(tmp_path: Path) -> None:
@@ -3279,65 +3483,74 @@ def test_create_team_instance_installs_notice_hook_on_team_model(tmp_path: Path)
 
 
 @pytest.mark.asyncio
-async def test_cleanup_queued_notice_state_strips_nested_team_member_responses() -> None:
-    """Team cleanup should recurse into nested member responses."""
-    run_output = TeamRunOutput(
-        run_id="run-1",
-        session_id="session-1",
-        messages=[_queued_notice_message()],
-        member_responses=[
-            RunOutput(
-                run_id="member-run-1",
-                session_id="session-1",
-                messages=[_queued_notice_message()],
-            ),
-        ],
-        status=RunStatus.completed,
-    )
+async def test_response_finalization_collapses_nested_current_notice_state() -> None:
+    """Outer finalization should leave one factual note in the top-level completed run."""
     created_storages: list[_FakeStorage] = []
+    model = _FakeModel()
+    install_queued_message_notice_hook(model, notice_text=QUEUED_MESSAGE_NOTICE_TEXT)
 
-    def storage_factory() -> _FakeStorage:
-        storage = _FakeStorage()
-        storage.session = TeamSession(
+    with queued_message_signal_context(_StaticQueuedState(pending=True)) as notice_context:
+        messages: list[Message] = []
+        model.format_function_call_results(
+            messages=messages,
+            function_call_results=[Message(role="tool", content="result")],
+        )
+        run_output = TeamRunOutput(
+            run_id="run-1",
             session_id="session-1",
-            runs=[
-                TeamRunOutput(
-                    run_id="run-1",
+            messages=[message.model_copy(deep=True) for message in messages],
+            member_responses=[
+                RunOutput(
+                    run_id="member-run-1",
                     session_id="session-1",
-                    messages=[_queued_notice_message()],
-                    member_responses=[
-                        RunOutput(
-                            run_id="member-run-1",
-                            session_id="session-1",
-                            messages=[_queued_notice_message()],
-                        ),
-                    ],
+                    messages=[message.model_copy(deep=True) for message in messages],
                     status=RunStatus.completed,
                 ),
             ],
+            status=RunStatus.completed,
         )
-        created_storages.append(storage)
-        return storage
 
-    await cleanup_queued_notice_state_async(
-        run_output=run_output,
-        storage_factory=storage_factory,
-        session_id="session-1",
-        session_type=SessionType.TEAM,
-        entity_name="queued-notice-team",
-    )
+        def storage_factory() -> _FakeStorage:
+            storage = _FakeStorage()
+            storage.session = TeamSession(
+                session_id="session-1",
+                runs=[
+                    TeamRunOutput(
+                        run_id="run-1",
+                        session_id="session-1",
+                        messages=[message.model_copy(deep=True) for message in messages],
+                        member_responses=[
+                            RunOutput(
+                                run_id="member-run-1",
+                                session_id="session-1",
+                                messages=[message.model_copy(deep=True) for message in messages],
+                                status=RunStatus.completed,
+                            ),
+                        ],
+                        status=RunStatus.completed,
+                    ),
+                ],
+            )
+            created_storages.append(storage)
+            return storage
+
+        register_queued_notice_attempt(
+            run_output=run_output,
+            storage_factory=storage_factory,
+            session_id="session-1",
+            session_type=SessionType.TEAM,
+            entity_name="queued-notice-team",
+        )
+        assert _notice_count(run_output.messages or [], marker=True) == 1
+        await ai_runtime.finalize_queued_notice_response_turn_async(notice_context)
 
     storage = created_storages[0]
-    assert _notice_count(run_output.messages or []) == 0
-    assert run_output.member_responses is not None
-    nested_member_run = run_output.member_responses[0]
-    assert isinstance(nested_member_run, RunOutput)
-    assert _notice_count(nested_member_run.messages or []) == 0
     assert storage.upserted is True
     assert storage.session is not None
     stored_team_run = storage.session.runs[0]
     assert isinstance(stored_team_run, TeamRunOutput)
-    assert _notice_count(stored_team_run.messages or []) == 0
+    assert _notice_count(stored_team_run.messages or [], marker=True) == 0
+    assert _notice_count(stored_team_run.messages or [], marker="persisted") == 1
     assert stored_team_run.member_responses is not None
     stored_member_run = stored_team_run.member_responses[0]
     assert isinstance(stored_member_run, RunOutput)
@@ -3346,8 +3559,95 @@ async def test_cleanup_queued_notice_state_strips_nested_team_member_responses()
 
 
 @pytest.mark.asyncio
+async def test_response_finalization_uses_newest_completed_same_turn_run_and_original_notice_position() -> None:
+    """Two completed attempts should leave one factual note at the newest attempt's notice position."""
+    model = _FakeModel()
+    install_queued_message_notice_hook(model, notice_text=QUEUED_MESSAGE_NOTICE_TEXT)
+    storage = _FakeStorage()
+
+    with queued_message_signal_context(_StaticQueuedState(pending=True)) as notice_context:
+        first_messages = [
+            Message(role="user", content="First request"),
+            Message(role="assistant", content="First tool call"),
+        ]
+        model.format_function_call_results(
+            messages=first_messages,
+            function_call_results=[Message(role="tool", content="First result")],
+        )
+        first_messages.append(Message(role="assistant", content="First final"))
+        second_messages = [
+            Message(role="user", content="Second request"),
+            Message(role="assistant", content="Second tool call"),
+        ]
+        model.format_function_call_results(
+            messages=second_messages,
+            function_call_results=[Message(role="tool", content="Second result")],
+        )
+        second_messages.append(Message(role="assistant", content="Second final"))
+        first_run = RunOutput(
+            run_id="first-completed-run",
+            session_id="session-1",
+            messages=first_messages,
+            status=RunStatus.completed,
+        )
+        second_run = RunOutput(
+            run_id="second-completed-run",
+            session_id="session-1",
+            messages=second_messages,
+            status=RunStatus.completed,
+        )
+        storage.session = AgentSession(
+            session_id="session-1",
+            runs=[
+                RunOutput(
+                    run_id=first_run.run_id,
+                    session_id=first_run.session_id,
+                    messages=[message.model_copy(deep=True) for message in first_messages],
+                    status=first_run.status,
+                ),
+                RunOutput(
+                    run_id=second_run.run_id,
+                    session_id=second_run.session_id,
+                    messages=[message.model_copy(deep=True) for message in second_messages],
+                    status=second_run.status,
+                ),
+            ],
+        )
+        for run_output in (first_run, second_run):
+            register_queued_notice_attempt(
+                run_output=run_output,
+                storage_factory=lambda: storage,
+                session_id="session-1",
+                session_type=SessionType.AGENT,
+                entity_name="general",
+            )
+
+        await ai_runtime.finalize_queued_notice_response_turn_async(notice_context)
+
+    assert storage.upsert_count == 1
+    assert storage.session is not None
+    stored_first, stored_second = storage.session.runs
+    assert _notice_count(stored_first.messages or []) == 0
+    assert [(message.role, message.content) for message in stored_second.messages or []] == [
+        ("user", "Second request"),
+        ("assistant", "Second tool call"),
+        ("tool", "Second result"),
+        ("user", _QUEUED_NOTICE_HISTORY_TEXT),
+        ("assistant", "Second final"),
+    ]
+    assert (
+        _notice_count(
+            stored_second.messages or [],
+            marker="persisted",
+            response_turn_id=notice_context.response_turn_id,
+        )
+        == 1
+    )
+
+
+@pytest.mark.asyncio
 async def test_async_cleanup_keeps_session_storage_io_off_event_loop() -> None:
-    """Slow synchronous session storage must not stall concurrent asyncio work."""
+    """Slow response-boundary storage finalization must stay off the event loop."""
     request_started = threading.Event()
     release_request = threading.Event()
     created_storages: list[_BlockingStorage] = []
@@ -3363,39 +3663,624 @@ async def test_async_cleanup_keeps_session_storage_io_off_event_loop() -> None:
             release_request.wait(timeout=1)
             return super().get_session(session_id, _session_type)
 
-    def storage_factory() -> _BlockingStorage:
-        storage = _BlockingStorage()
-        storage.session = AgentSession(
-            session_id="session-1",
-            runs=[
-                RunOutput(
-                    run_id="run-1",
-                    session_id="session-1",
-                    messages=[_queued_notice_message()],
-                ),
-            ],
+    model = _FakeModel()
+    install_queued_message_notice_hook(model, notice_text=QUEUED_MESSAGE_NOTICE_TEXT)
+    with queued_message_signal_context(_StaticQueuedState(pending=True)) as notice_context:
+        messages: list[Message] = []
+        model.format_function_call_results(
+            messages=messages,
+            function_call_results=[Message(role="tool", content="result")],
         )
-        created_storages.append(storage)
-        return storage
 
-    cleanup_task = asyncio.create_task(
-        cleanup_queued_notice_state_async(
+        def storage_factory() -> _BlockingStorage:
+            storage = _BlockingStorage()
+            storage.session = AgentSession(
+                session_id="session-1",
+                runs=[
+                    RunOutput(
+                        run_id="run-1",
+                        session_id="session-1",
+                        messages=[message.model_copy(deep=True) for message in messages],
+                        status=RunStatus.completed,
+                    ),
+                ],
+            )
+            created_storages.append(storage)
+            return storage
+
+        register_queued_notice_attempt(
             run_output=None,
             storage_factory=storage_factory,
             session_id="session-1",
             session_type=SessionType.AGENT,
             entity_name="queued-notice-agent",
-        ),
-    )
-    try:
-        assert await asyncio.to_thread(request_started.wait, 1)
-        await asyncio.wait_for(asyncio.sleep(0), timeout=0.1)
-        assert not cleanup_task.done()
-    finally:
-        release_request.set()
+        )
+        cleanup_task = asyncio.create_task(
+            ai_runtime.finalize_queued_notice_response_turn_async(notice_context),
+        )
+        try:
+            assert await asyncio.to_thread(request_started.wait, 1)
+            await asyncio.wait_for(asyncio.sleep(0), timeout=0.1)
+            assert not cleanup_task.done()
+        finally:
+            release_request.set()
 
-    await asyncio.wait_for(cleanup_task, timeout=1)
+        await asyncio.wait_for(cleanup_task, timeout=1)
     storage = created_storages[0]
     assert storage.created_thread_id != event_loop_thread_id
     assert storage.upserted is True
     assert storage.closed is True
+
+
+@pytest.mark.asyncio
+async def test_response_turn_finalization_completes_when_cancelled_during_storage_io() -> None:
+    """Cancellation during storage I/O must not leave a durable live imperative behind."""
+    request_started = threading.Event()
+    release_request = threading.Event()
+    request_finished = threading.Event()
+    model = _FakeModel()
+    install_queued_message_notice_hook(model, notice_text=QUEUED_MESSAGE_NOTICE_TEXT)
+
+    class _BlockingStorage(_FakeStorage):
+        def get_session(self, session_id: str, _session_type: object) -> AgentSession | TeamSession | None:
+            request_started.set()
+            release_request.wait(timeout=1)
+            return super().get_session(session_id, _session_type)
+
+        def close(self) -> None:
+            super().close()
+            request_finished.set()
+
+    with queued_message_signal_context(_StaticQueuedState(pending=True)) as notice_context:
+        messages: list[Message] = []
+        model.format_function_call_results(
+            messages=messages,
+            function_call_results=[Message(role="tool", content="result")],
+        )
+        run_output = RunOutput(
+            run_id="completed-run",
+            session_id="session-1",
+            messages=messages,
+            status=RunStatus.completed,
+        )
+        storage = _BlockingStorage()
+        storage.session = AgentSession(
+            session_id="session-1",
+            runs=[
+                RunOutput(
+                    run_id=run_output.run_id,
+                    session_id=run_output.session_id,
+                    messages=[message.model_copy(deep=True) for message in messages],
+                    status=run_output.status,
+                ),
+            ],
+        )
+        register_queued_notice_attempt(
+            run_output=run_output,
+            storage_factory=lambda: storage,
+            session_id="session-1",
+            session_type=SessionType.AGENT,
+            entity_name="general",
+        )
+        finalization_task = asyncio.create_task(
+            ai_runtime.finalize_queued_notice_response_turn_async(notice_context),
+        )
+        assert await asyncio.to_thread(request_started.wait, 1)
+        finalization_task.cancel()
+        release_request.set()
+        with pytest.raises(asyncio.CancelledError):
+            await finalization_task
+        assert await asyncio.to_thread(request_finished.wait, 1)
+
+    assert storage.session is not None
+    assert _notice_count(storage.session.runs[0].messages or [], marker=True) == 0
+    assert (
+        _notice_count(
+            storage.session.runs[0].messages or [],
+            marker="persisted",
+            response_turn_id=notice_context.response_turn_id,
+        )
+        == 1
+    )
+
+
+@pytest.mark.asyncio
+async def test_attempt_registration_deduplicates_one_session_across_fresh_factories() -> None:
+    """Fresh storage-factory closures for one session should cause one boundary open."""
+    model = _FakeModel()
+    install_queued_message_notice_hook(model, notice_text=QUEUED_MESSAGE_NOTICE_TEXT)
+    factory_calls = 0
+
+    with queued_message_signal_context(_StaticQueuedState(pending=True)) as notice_context:
+        messages: list[Message] = []
+        model.format_function_call_results(
+            messages=messages,
+            function_call_results=[Message(role="tool", content="result")],
+        )
+        run_output = RunOutput(
+            run_id="completed-run",
+            session_id="session-1",
+            messages=messages,
+            status=RunStatus.completed,
+        )
+        storage = _FakeStorage()
+        storage.session = AgentSession(
+            session_id="session-1",
+            runs=[
+                RunOutput(
+                    run_id=run_output.run_id,
+                    session_id=run_output.session_id,
+                    messages=[message.model_copy(deep=True) for message in messages],
+                    status=run_output.status,
+                ),
+            ],
+        )
+
+        def fresh_storage_factory() -> Callable[[], _FakeStorage]:
+            def storage_factory() -> _FakeStorage:
+                nonlocal factory_calls
+                factory_calls += 1
+                return storage
+
+            return storage_factory
+
+        for _ in range(2):
+            register_queued_notice_attempt(
+                run_output=run_output,
+                storage_factory=fresh_storage_factory(),
+                session_id="session-1",
+                session_type=SessionType.AGENT,
+                entity_name="general",
+            )
+        await ai_runtime.finalize_queued_notice_response_turn_async(notice_context)
+
+    assert factory_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_error_responses_never_attach_notices_to_prior_completed_run() -> None:
+    """Failed responses must not accumulate their notice facts on an earlier turn."""
+    model = _FakeModel()
+    install_queued_message_notice_hook(model, notice_text=QUEUED_MESSAGE_NOTICE_TEXT)
+    storage = _FakeStorage()
+    prior_completed = RunOutput(
+        run_id="prior-completed",
+        session_id="session-1",
+        messages=[
+            Message(role="user", content="Prior request"),
+            Message(role="assistant", content="Prior answer"),
+        ],
+        status=RunStatus.completed,
+    )
+    storage.session = AgentSession(session_id="session-1", runs=[prior_completed])
+
+    for index in range(3):
+        with queued_message_signal_context(_StaticQueuedState(pending=True)) as notice_context:
+            messages: list[Message] = []
+            model.format_function_call_results(
+                messages=messages,
+                function_call_results=[Message(role="tool", content=f"failed result {index}")],
+            )
+            error_run = RunOutput(
+                run_id=f"error-run-{index}",
+                session_id="session-1",
+                messages=messages,
+                status=RunStatus.error,
+            )
+            assert storage.session.runs is not None
+            storage.session.runs.append(
+                RunOutput(
+                    run_id=error_run.run_id,
+                    session_id=error_run.session_id,
+                    messages=[message.model_copy(deep=True) for message in messages],
+                    status=error_run.status,
+                ),
+            )
+            register_queued_notice_attempt(
+                run_output=error_run,
+                storage_factory=lambda: storage,
+                session_id="session-1",
+                session_type=SessionType.AGENT,
+                entity_name="general",
+            )
+            await ai_runtime.finalize_queued_notice_response_turn_async(notice_context)
+
+    assert storage.session.runs is not None
+    assert _notice_count(prior_completed.messages or []) == 0
+    assert (
+        sum(
+            _notice_count(run.messages or [])
+            for run in storage.session.runs
+            if isinstance(run, RunOutput | TeamRunOutput)
+        )
+        == 0
+    )
+
+
+@pytest.mark.asyncio
+async def test_response_lifecycle_finalizes_notice_after_locked_operation() -> None:
+    """The lifecycle boundary should finalize registered attempts after the operation returns."""
+    lifecycle = ResponseLifecycleCoordinator()
+    target = MessageTarget.resolve("!room:localhost", "$thread", "$event")
+    envelope = _envelope(source_event_id="$event", target=target)
+    storage = _FakeStorage()
+    model = _FakeModel()
+    install_queued_message_notice_hook(model, notice_text=QUEUED_MESSAGE_NOTICE_TEXT)
+    observed_live_counts: list[int] = []
+
+    async def locked_operation(_target: MessageTarget) -> str:
+        lifecycle._get_or_create_queued_signal(target).add_waiting_human_message("$newer")
+        messages: list[Message] = []
+        model.format_function_call_results(
+            messages=messages,
+            function_call_results=[Message(role="tool", content="result")],
+        )
+        run = RunOutput(
+            run_id="completed-run",
+            session_id="session-1",
+            messages=messages,
+            status=RunStatus.completed,
+        )
+        storage.session = AgentSession(
+            session_id="session-1",
+            runs=[
+                RunOutput(
+                    run_id=run.run_id,
+                    session_id=run.session_id,
+                    messages=[message.model_copy(deep=True) for message in messages],
+                    status=run.status,
+                ),
+            ],
+        )
+        register_queued_notice_attempt(
+            run_output=run,
+            storage_factory=lambda: storage,
+            session_id="session-1",
+            session_type=SessionType.AGENT,
+            entity_name="general",
+        )
+        observed_live_counts.append(_notice_count(run.messages or [], marker=True))
+        return "$response"
+
+    result = await lifecycle.run_locked_response(
+        target=target,
+        response_envelope=envelope,
+        queued_notice_reservation=None,
+        pipeline_timing=None,
+        locked_operation=locked_operation,
+    )
+
+    assert result == "$response"
+    assert observed_live_counts == [1]
+    assert storage.session is not None
+    stored_run = storage.session.runs[0]
+    assert _notice_count(stored_run.messages or [], marker=True) == 0
+    factual = _notice_messages(stored_run.messages or [], marker="persisted")
+    assert [message.content for message in factual] == [_QUEUED_NOTICE_HISTORY_TEXT]
+    assert storage.upsert_count == 1
+
+
+@pytest.mark.asyncio
+async def test_response_lifecycle_finalizes_error_state_when_operation_raises() -> None:
+    """The lifecycle finally block should remove live state when the operation raises."""
+    lifecycle = ResponseLifecycleCoordinator()
+    target = MessageTarget.resolve("!room:localhost", "$thread", "$event")
+    envelope = _envelope(source_event_id="$event", target=target)
+    storage = _FakeStorage()
+    model = _FakeModel()
+    install_queued_message_notice_hook(model, notice_text=QUEUED_MESSAGE_NOTICE_TEXT)
+
+    async def locked_operation(_target: MessageTarget) -> str:
+        lifecycle._get_or_create_queued_signal(target).add_waiting_human_message("$newer")
+        messages: list[Message] = []
+        model.format_function_call_results(
+            messages=messages,
+            function_call_results=[Message(role="tool", content="failed result")],
+        )
+        storage.session = AgentSession(
+            session_id="session-1",
+            runs=[
+                RunOutput(
+                    run_id="error-run",
+                    session_id="session-1",
+                    messages=messages,
+                    status=RunStatus.error,
+                ),
+            ],
+        )
+        register_queued_notice_attempt(
+            run_output=None,
+            storage_factory=lambda: storage,
+            session_id="session-1",
+            session_type=SessionType.AGENT,
+            entity_name="general",
+        )
+        error_message = "provider failed"
+        raise RuntimeError(error_message)
+
+    with pytest.raises(RuntimeError, match="provider failed"):
+        await lifecycle.run_locked_response(
+            target=target,
+            response_envelope=envelope,
+            queued_notice_reservation=None,
+            pipeline_timing=None,
+            locked_operation=locked_operation,
+        )
+
+    assert storage.session is not None
+    assert _notice_count(storage.session.runs[0].messages or []) == 0
+
+
+@pytest.mark.asyncio
+async def test_response_turn_finalization_is_idempotent_for_one_factual_note() -> None:
+    """Repeated boundary finalization should not rewrite an already-normalized response."""
+    storage = _FakeStorage()
+    model = _FakeModel()
+    install_queued_message_notice_hook(model, notice_text=QUEUED_MESSAGE_NOTICE_TEXT)
+
+    with queued_message_signal_context(_StaticQueuedState(pending=True)) as notice_context:
+        injected_messages: list[Message] = []
+        model.format_function_call_results(
+            messages=injected_messages,
+            function_call_results=[Message(role="tool", content="result")],
+        )
+        factual = _queued_notice_message(
+            notice_context.response_turn_id,
+            marker="persisted",
+            content=_QUEUED_NOTICE_HISTORY_TEXT,
+        )
+        run = RunOutput(
+            run_id="completed-run",
+            session_id="session-1",
+            messages=[factual],
+            status=RunStatus.completed,
+        )
+        storage.session = AgentSession(
+            session_id="session-1",
+            runs=[
+                RunOutput(
+                    run_id=run.run_id,
+                    session_id=run.session_id,
+                    messages=[factual.model_copy(deep=True)],
+                    status=run.status,
+                ),
+            ],
+        )
+        original_stored = (storage.session.runs[0].messages or [])[0].model_dump()
+        register_queued_notice_attempt(
+            run_output=run,
+            storage_factory=lambda: storage,
+            session_id="session-1",
+            session_type=SessionType.AGENT,
+            entity_name="general",
+        )
+        await ai_runtime.finalize_queued_notice_response_turn_async(notice_context)
+        await ai_runtime.finalize_queued_notice_response_turn_async(notice_context)
+
+    assert storage.upsert_count == 0
+    assert storage.session is not None
+    assert (storage.session.runs[0].messages or [])[0].model_dump() == original_stored
+
+
+def test_pre_replay_crash_recovery_preserves_prior_factual_and_active_live_notice() -> None:
+    """Recovery should factualize prior live state without touching prior facts or the active response."""
+    storage = _FakeStorage()
+
+    with queued_message_signal_context(_StaticQueuedState(pending=False)) as notice_context:
+        prior_factual = _queued_notice_message(
+            "already-factual",
+            marker="persisted",
+            content=_QUEUED_NOTICE_HISTORY_TEXT,
+        )
+        prior_dump = prior_factual.model_dump()
+        active_live = _queued_notice_message(notice_context.response_turn_id)
+        storage.session = AgentSession(
+            session_id="session-1",
+            runs=[
+                RunOutput(
+                    run_id="completed-run",
+                    session_id="session-1",
+                    messages=[
+                        _queued_notice_message("crash-left"),
+                        prior_factual,
+                        active_live,
+                    ],
+                ),
+            ],
+        )
+        ai_runtime.scrub_queued_notice_session_context(
+            scope_context=SimpleNamespace(
+                storage=storage,
+                session=storage.session,
+            ),
+            entity_name="general",
+        )
+
+    assert storage.session is not None
+    stored_messages = storage.session.runs[0].messages or []
+    assert prior_factual.model_dump() == prior_dump
+    assert _notice_count(stored_messages, marker="persisted", response_turn_id="already-factual") == 1
+    assert _notice_count(stored_messages, marker="persisted", response_turn_id="crash-left") == 1
+    assert _notice_count(stored_messages, marker=True, response_turn_id="crash-left") == 0
+    assert _notice_count(stored_messages, marker=True, response_turn_id=notice_context.response_turn_id) == 1
+
+
+def test_notice_provider_data_survives_mindroom_sqlite_round_trip(tmp_path: Path) -> None:
+    """MindRoom's prompt-sanitizing SQLite storage should preserve notice ownership metadata."""
+    response_turn_id = "response-1"
+    storage = _queued_notice_storage(tmp_path)
+    storage.upsert_session(
+        AgentSession(
+            session_id="session-1",
+            agent_id="general",
+            runs=[
+                RunOutput(
+                    run_id="run-1",
+                    agent_id="general",
+                    session_id="session-1",
+                    messages=[_queued_notice_message(response_turn_id)],
+                    status=RunStatus.completed,
+                ),
+            ],
+            created_at=1,
+            updated_at=1,
+        ),
+    )
+    storage.close()
+
+    reopened_storage = _queued_notice_storage(tmp_path)
+    try:
+        session = get_agent_session(reopened_storage, "session-1")
+    finally:
+        reopened_storage.close()
+
+    assert session is not None
+    assert session.runs is not None
+    stored_run = session.runs[0]
+    assert isinstance(stored_run, RunOutput)
+    stored_notice = (stored_run.messages or [])[0]
+    assert stored_notice.content == QUEUED_MESSAGE_NOTICE_TEXT
+    assert stored_notice.provider_data == {
+        _QUEUED_NOTICE_MARKER_KEY: True,
+        _QUEUED_NOTICE_RESPONSE_TURN_ID_KEY: response_turn_id,
+    }
+    assert stored_notice.from_history is False
+
+
+async def _persist_notice_bearing_response(tmp_path: Path) -> str:
+    lifecycle = ResponseLifecycleCoordinator()
+    target = MessageTarget.resolve("!room:localhost", "$thread", "$event-1")
+    envelope = _envelope(source_event_id="$event-1", target=target)
+    response_1_model = RecordingModel(id="response-1-model", provider="fake")
+    install_queued_message_notice_hook(response_1_model, notice_text=QUEUED_MESSAGE_NOTICE_TEXT)
+    response_1_ids: list[str] = []
+
+    async def response_1_operation(_target: MessageTarget) -> str:
+        lifecycle._get_or_create_queued_signal(target).add_waiting_human_message("$newer")
+        messages = [Message(role="user", content="First request")]
+        response_1_model.format_function_call_results(
+            messages=messages,
+            function_call_results=[Message(role="tool", content="First tool result")],
+        )
+        notices = _notice_messages(messages, marker=True)
+        assert len(notices) == 1
+        provider_data = notices[0].provider_data
+        assert isinstance(provider_data, dict)
+        response_turn_id = provider_data[_QUEUED_NOTICE_RESPONSE_TURN_ID_KEY]
+        assert isinstance(response_turn_id, str)
+        response_1_ids.append(response_turn_id)
+        messages.append(Message(role="assistant", content="First response handoff"))
+        run_output = RunOutput(
+            run_id="run-1",
+            agent_id="general",
+            session_id="session-1",
+            messages=messages,
+            status=RunStatus.completed,
+        )
+        storage = _queued_notice_storage(tmp_path)
+        try:
+            storage.upsert_session(
+                AgentSession(
+                    session_id="session-1",
+                    agent_id="general",
+                    runs=[run_output],
+                    created_at=1,
+                    updated_at=1,
+                ),
+            )
+        finally:
+            storage.close()
+        register_queued_notice_attempt(
+            run_output=run_output,
+            storage_factory=lambda: _queued_notice_storage(tmp_path),
+            session_id="session-1",
+            session_type=SessionType.AGENT,
+            entity_name="general",
+        )
+        return "First response handoff"
+
+    response_1 = await lifecycle.run_locked_response(
+        target=target,
+        response_envelope=envelope,
+        queued_notice_reservation=None,
+        pipeline_timing=None,
+        locked_operation=response_1_operation,
+    )
+
+    assert response_1 == "First response handoff"
+    assert len(response_1_ids) == 1
+    return response_1_ids[0]
+
+
+@pytest.mark.asyncio
+async def test_prior_notice_survives_actual_next_provider_request_and_tool_round(
+    tmp_path: Path,
+) -> None:
+    """A factual notice should survive real SQLite replay and the next response's tool formatting."""
+    response_1_id = await _persist_notice_bearing_response(tmp_path)
+
+    response_2_storage = _queued_notice_storage(tmp_path)
+    recording_model = RecordingModel(id="response-2-model", provider="fake")
+    install_queued_message_notice_hook(recording_model, notice_text=QUEUED_MESSAGE_NOTICE_TEXT)
+    response_2_agent = AgnoAgent(
+        id="general",
+        name="General",
+        model=recording_model,
+        db=response_2_storage,
+        add_history_to_context=True,
+        num_history_runs=10,
+        store_history_messages=False,
+    )
+    try:
+        with queued_message_signal_context(_StaticQueuedState(pending=False)) as response_2_context:
+            response_2 = await response_2_agent.arun("Second request", session_id="session-1")
+            prior = next(
+                message for message in recording_model.seen_messages if message.content == _QUEUED_NOTICE_HISTORY_TEXT
+            )
+            assert prior.from_history is True
+            assert prior.provider_data == {
+                _QUEUED_NOTICE_MARKER_KEY: "persisted",
+                _QUEUED_NOTICE_RESPONSE_TURN_ID_KEY: response_1_id,
+            }
+            original_prior = prior.model_dump()
+
+            recording_model.format_function_call_results(
+                messages=recording_model.seen_messages,
+                function_call_results=[Message(role="tool", content="Second tool result")],
+            )
+
+            assert prior.model_dump() == original_prior
+            assert (
+                _notice_count(
+                    recording_model.seen_messages,
+                    marker="persisted",
+                    response_turn_id=response_1_id,
+                )
+                == 1
+            )
+            assert (
+                _notice_count(
+                    recording_model.seen_messages,
+                    response_turn_id=response_2_context.response_turn_id,
+                )
+                == 0
+            )
+
+        assert response_2.content == "ok"
+        persisted = get_agent_session(response_2_storage, "session-1")
+    finally:
+        response_2_storage.close()
+
+    assert persisted is not None
+    assert persisted.runs is not None
+    response_2_run = persisted.runs[-1]
+    assert isinstance(response_2_run, RunOutput)
+    assert all(message.content != _QUEUED_NOTICE_HISTORY_TEXT for message in response_2_run.messages or [])
+    response_1_run = persisted.runs[0]
+    assert isinstance(response_1_run, RunOutput)
+    factual = _notice_messages(
+        response_1_run.messages or [],
+        marker="persisted",
+        response_turn_id=response_1_id,
+    )
+    assert [message.content for message in factual] == [_QUEUED_NOTICE_HISTORY_TEXT]

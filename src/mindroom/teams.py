@@ -340,20 +340,22 @@ def _format_terminal_team_response(
     return _format_team_header(team_display_names) + _team_response_text(response)
 
 
-async def _cleanup_team_notice_state(
+def _register_team_notice_attempt(
     *,
     run_output: TeamRunOutput | RunOutput | None,
     scope_context: ScopeSessionContext | None,
     session_id: str | None,
     entity_name: str,
+    run_id: str | None = None,
 ) -> None:
-    """Strip queued-message notices from returned and persisted team state."""
-    await ai_runtime.cleanup_queued_notice_state_async(
+    """Register team attempt state for response-boundary notice finalization."""
+    ai_runtime.register_queued_notice_attempt(
         run_output=run_output,
         storage_factory=scope_context.storage_factory if scope_context is not None else None,
         session_id=session_id,
         session_type=SessionType.TEAM,
         entity_name=entity_name,
+        run_id=run_id,
     )
 
 
@@ -362,7 +364,7 @@ def _scrub_team_retry_notice_state(
     scope_context: ScopeSessionContext | None,
     entity_name: str,
 ) -> None:
-    """Strip queued-message notices from the loaded team session before retry."""
+    """Recover prior notices without finalizing the active team response."""
     ai_runtime.scrub_queued_notice_session_context(
         scope_context=scope_context,
         entity_name=entity_name,
@@ -2140,7 +2142,7 @@ async def team_response(  # noqa: C901, PLR0915
                         error=error_text,
                         removed_media_kinds=sorted(retry_decision.removed_kinds),
                     )
-                    await _cleanup_team_notice_state(
+                    _register_team_notice_attempt(
                         run_output=response,
                         scope_context=run.scope_context,
                         session_id=ctx.session_id,
@@ -2286,7 +2288,7 @@ async def team_response(  # noqa: C901, PLR0915
         if not holder.attempt_started:
             return
         holder.attempt_started = False
-        await _cleanup_team_notice_state(
+        _register_team_notice_attempt(
             run_output=holder.last_response,
             scope_context=scope_context,
             session_id=ctx.session_id,
@@ -2771,7 +2773,7 @@ async def team_response_stream(  # noqa: C901, PLR0915
                     if isinstance(event, TeamRunOutput) and not _is_bound_team_output(event, team_id=bound_team_id):
                         logger.debug("Ignoring non-bound team run output", run_id=event.run_id)
                         continue
-                    await _cleanup_team_notice_state(
+                    _register_team_notice_attempt(
                         run_output=event,
                         scope_context=run.scope_context,
                         session_id=ctx.session_id,
@@ -3074,6 +3076,7 @@ async def team_response_stream(  # noqa: C901, PLR0915
                     # this event is the stream's usage/identity source instead.
                     if event.team_id in (None, "", bound_team_id):
                         completed_run_event = event
+                        holder.attempt_run_id = event.run_id or attempt_run_id
                     continue
                 elif isinstance(event, TeamModelRequestCompletedEvent):
                     usage.track(event)
@@ -3141,11 +3144,12 @@ async def team_response_stream(  # noqa: C901, PLR0915
         if not holder.attempt_started:
             return
         holder.attempt_started = False
-        await _cleanup_team_notice_state(
+        _register_team_notice_attempt(
             run_output=None,
             scope_context=scope_context,
             session_id=ctx.session_id,
             entity_name=configured_team_name or team_label,
+            run_id=holder.attempt_run_id,
         )
 
     discard_team_empty_run = _build_team_empty_run_discard(
