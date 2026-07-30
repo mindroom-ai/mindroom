@@ -29,6 +29,7 @@ import tempfile
 import threading
 import time
 from collections import defaultdict
+from contextlib import closing
 from dataclasses import asdict, dataclass
 from enum import StrEnum
 from http import HTTPStatus
@@ -89,12 +90,103 @@ def restart_failure(
     step: int,
 ) -> str:
     """Format replay coordinates without accepting message content."""
-    if not isinstance(observed, (bool, int)):
-        msg = "restart output observation must be a count or boolean"
-        raise TypeError(msg)
     return (
         f"invariant={invariant} seed={RESTART_SEED} step={step} thread=0 "
         f"event_category={event_category} phase={phase} observed={observed}"
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class RestartRegressionObservation:
+    """Content-free evidence collected after replacement activity settles."""
+
+    historical_output_counts: tuple[int, int]
+    replacement_boundary_reached: bool
+    cached_event_pair_count: int
+    fresh_output_count: int
+    fresh_prompt_observed: bool
+    historical_in_fresh_prompt: bool
+    response_callbacks_quiescent: bool
+
+
+def evaluate_restart_regression(observation: RestartRegressionObservation) -> tuple[str, ...]:
+    """Return every violated restart invariant from one settled observation."""
+    checks = (
+        (
+            "historical_output_suppressed",
+            observation.historical_output_counts[0],
+            0,
+            "historical_text",
+            "replacement_sync",
+            1,
+        ),
+        (
+            "historical_output_suppressed",
+            observation.historical_output_counts[1],
+            0,
+            "historical_media",
+            "replacement_sync",
+            2,
+        ),
+        (
+            "replacement_setup_boundary_reached",
+            observation.replacement_boundary_reached,
+            True,
+            "lifecycle",
+            "reload",
+            3,
+        ),
+        (
+            "historical_event_pairs_cached",
+            observation.cached_event_pair_count,
+            4,
+            "historical_events",
+            "replacement_sync",
+            3,
+        ),
+        (
+            "fresh_event_exactly_once",
+            observation.fresh_output_count,
+            1,
+            "fresh_user",
+            "replacement_startup",
+            4,
+        ),
+        (
+            "fresh_prompt_observed",
+            observation.fresh_prompt_observed,
+            True,
+            "fresh_user",
+            "execution",
+            4,
+        ),
+        (
+            "historical_events_absent_from_fresh_prompt",
+            observation.historical_in_fresh_prompt,
+            False,
+            "historical_events",
+            "execution",
+            4,
+        ),
+        (
+            "response_callbacks_quiescent",
+            observation.response_callbacks_quiescent,
+            True,
+            "lifecycle",
+            "observation",
+            4,
+        ),
+    )
+    return tuple(
+        restart_failure(
+            invariant,
+            event_category=category,
+            phase=phase,
+            observed=observed,
+            step=step,
+        )
+        for invariant, observed, expected, category, phase, step in checks
+        if observed != expected
     )
 
 
@@ -235,6 +327,13 @@ class LiveFuzzScenario:
             known_events.update(new_events)
             known_responses.update(new_responses)
             message_events.update(new_messages)
+
+
+def restart_regression_scenario() -> LiveFuzzScenario:
+    """Return the fixed config-replacement regression trace."""
+    scenario = LiveFuzzScenario(thread_count=1, batches=(), profile="restart-regression")
+    scenario.validate()
+    return scenario
 
 
 def _validate_live_operation(
@@ -713,17 +812,21 @@ class ManagedTuwunelStack:
 
     def log_count(self, *markers: str) -> int:
         """Count lines containing every content-free lifecycle marker."""
+        if not self.log_path.exists():
+            return 0
         log = self.log_path.read_text(encoding="utf-8", errors="replace")
         return sum(all(marker in line for marker in markers) for line in log.splitlines())
 
     def wait_for_log_count(self, markers: tuple[str, ...], minimum: int, timeout: float = 60) -> bool:
         """Wait for a bounded lifecycle milestone."""
         deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
+        while True:
             if self.log_count(*markers) >= minimum:
                 return True
-            time.sleep(0.1)
-        return False
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return False
+            time.sleep(min(0.1, remaining))
 
     def add_restart_room(self, room_id: str) -> None:
         """Trigger a real entity replacement that adds one dormant room."""
@@ -733,7 +836,10 @@ class ManagedTuwunelStack:
 
     def cached_restart_event_pair_count(self, room_id: str, event_ids: tuple[str, str]) -> int:
         """Count exact principal/event pairs cached for the restart room."""
-        with sqlite3.connect(self.storage_path / "event_cache.db") as database:
+        database_path = self.storage_path / "event_cache.db"
+        if not database_path.is_file():
+            return 0
+        with closing(sqlite3.connect(database_path)) as database:
             query = "SELECT COUNT(*) FROM events WHERE principal_id IN (?, ?) AND room_id = ? AND event_id IN (?, ?)"
             row = database.execute(query, (self.agent_id, self.router_id, room_id, *event_ids)).fetchone()
         return int(row[0]) if row is not None else 0
@@ -1216,85 +1322,123 @@ class LiveFuzzRunner:
                 "url": "mxc://localhost/synthetic",
             },
         )
-        setup_markers = (("agent_setup_complete", self.stack.agent_id), ("agent_setup_complete", self.stack.router_id))
-        setup_counts = tuple(self.stack.log_count(*markers) for markers in setup_markers)
-        update_count = self.stack.log_count("configuration_update_complete")
+        lifecycle_markers = (
+            ("agent_setup_complete", self.stack.agent_id),
+            ("agent_setup_complete", self.stack.router_id),
+            ("configuration_update_complete",),
+        )
+        lifecycle_counts = tuple(self.stack.log_count(*markers) for markers in lifecycle_markers)
         self.stack.add_restart_room(dormant.room_id)
-        setup_complete = True
-        for markers, count in zip(setup_markers, setup_counts, strict=True):
-            setup_complete &= await asyncio.to_thread(self.stack.wait_for_log_count, markers, count + 1)
+        lifecycle_results = await asyncio.gather(
+            *(
+                asyncio.to_thread(
+                    self.stack.wait_for_log_count,
+                    markers,
+                    count + 1,
+                    timeout=self.reply_timeout,
+                )
+                for markers, count in zip(lifecycle_markers, lifecycle_counts, strict=True)
+            ),
+        )
+        replacement_boundary_reached = all(lifecycle_results)
         fresh = await dormant.send_event(
             "m.room.message",
             "restart-fresh",
             self._message_content("Synthetic fresh startup request"),
         )
-        fresh_sent_before_update_complete = self.stack.log_count("configuration_update_complete") == update_count
-        update_complete = await asyncio.to_thread(
-            self.stack.wait_for_log_count,
-            ("configuration_update_complete",),
-            update_count + 1,
+        observation = await self._wait_for_restart_observation(
+            dormant,
+            historical_event_ids=(historical_text, historical_media),
+            fresh_event_id=fresh,
+            replacement_boundary_reached=replacement_boundary_reached,
         )
+        failures = evaluate_restart_regression(observation)
+        if failures:
+            raise AssertionError("restart regression invariant failures:\n" + "\n".join(failures))
+        return {
+            "historical_event_pairs_cached": observation.cached_event_pair_count,
+            "historical_outputs": 0,
+            "status": "PASS",
+        }
 
+    async def _wait_for_restart_observation(
+        self,
+        dormant: LiveMatrixClient,
+        *,
+        historical_event_ids: tuple[str, str],
+        fresh_event_id: str,
+        replacement_boundary_reached: bool,
+    ) -> RestartRegressionObservation:
+        """Observe replacement output until the fresh response and callback stream settle."""
         deadline = time.monotonic() + self.reply_timeout
         counts = (0, 0, 0)
         cached_event_pairs = 0
         fresh_prompt_observed = False
         historical_in_fresh_prompt = False
-        settled = 0
+        response_callbacks_quiescent = False
+        last_response_fingerprint: tuple[tuple[tuple[str, tuple[str, ...]], ...], ...] | None = None
+        last_callback_count: int | None = None
+        quiet_started_at: float | None = None
+        quiet_seconds = max(self.settle_seconds, 1.0)
         while time.monotonic() < deadline:
             await dormant.sync_incremental(timeout_ms=250, allow_limited=True)
             agent = self._canonical_response_ids(dormant.seen_events.values())
             router = self._canonical_response_ids(dormant.seen_events.values(), sender_id=self.stack.router_id)
             counts = tuple(
                 self._combined_response_count(source_event_id, agent, router)
-                for source_event_id in (historical_text, historical_media, fresh)
+                for source_event_id in (*historical_event_ids, fresh_event_id)
             )
             cached_event_pairs = self.stack.cached_restart_event_pair_count(
                 dormant.room_id,
-                (historical_text, historical_media),
+                historical_event_ids,
             )
             fresh_prompt_observed, historical_in_fresh_prompt = _restart_prompt_observation(
                 self.stack.log_path.read_text(encoding="utf-8", errors="replace"),
-                fresh,
-                (historical_text, historical_media),
+                fresh_event_id,
+                historical_event_ids,
             )
-            settled = settled + 1 if counts[2] == 1 and cached_event_pairs == 4 and fresh_prompt_observed else 0
-            if settled == 2:
+            response_fingerprint = (
+                tuple(sorted((source, tuple(sorted(event_ids))) for source, event_ids in agent.items())),
+                tuple(sorted((source, tuple(sorted(event_ids))) for source, event_ids in router.items())),
+            )
+            callback_count = self.stack.log_count("matrix_event_callback_started", dormant.room_id)
+            if response_fingerprint != last_response_fingerprint or callback_count != last_callback_count:
+                quiet_started_at = None
+                last_response_fingerprint = response_fingerprint
+                last_callback_count = callback_count
+
+            fresh_response_ids = agent.get(fresh_event_id, set()) | router.get(fresh_event_id, set())
+            fresh_response_complete = len(fresh_response_ids) == 1 and "END call=" in self._latest_event_body(
+                dormant.seen_events.values(),
+                next(iter(fresh_response_ids), ""),
+            )
+            positive_evidence_ready = (
+                replacement_boundary_reached
+                and cached_event_pairs == 4
+                and counts[2] == 1
+                and fresh_prompt_observed
+                and fresh_response_complete
+                and callback_count > 0
+            )
+            if not positive_evidence_ready:
+                quiet_started_at = None
+                continue
+            now = time.monotonic()
+            if quiet_started_at is None:
+                quiet_started_at = now
+            elif now - quiet_started_at >= quiet_seconds:
+                response_callbacks_quiescent = True
                 break
-            if settled:
-                await asyncio.sleep(self.settle_seconds)
-        checks = (
-            ("historical_output_suppressed", counts[0], 0, "historical_text", "replacement_sync", 1),
-            ("historical_output_suppressed", counts[1], 0, "historical_media", "replacement_sync", 2),
-            ("replacement_principals_setup", setup_complete, True, "lifecycle", "reload", 3),
-            ("historical_event_pairs_cached", cached_event_pairs, 4, "historical_events", "replacement_sync", 3),
-            ("fresh_event_exactly_once", counts[2], 1, "fresh_user", "replacement_startup", 4),
-            ("fresh_sent_before_update_complete", fresh_sent_before_update_complete, True, "fresh_user", "reload", 4),
-            ("configuration_update_completed", update_complete, True, "lifecycle", "reload", 4),
-            ("fresh_prompt_observed", fresh_prompt_observed, True, "fresh_user", "execution", 4),
-            (
-                "historical_events_absent_from_fresh_prompt",
-                historical_in_fresh_prompt,
-                False,
-                "historical_events",
-                "execution",
-                4,
-            ),
+
+        return RestartRegressionObservation(
+            historical_output_counts=(counts[0], counts[1]),
+            replacement_boundary_reached=replacement_boundary_reached,
+            cached_event_pair_count=cached_event_pairs,
+            fresh_output_count=counts[2],
+            fresh_prompt_observed=fresh_prompt_observed,
+            historical_in_fresh_prompt=historical_in_fresh_prompt,
+            response_callbacks_quiescent=response_callbacks_quiescent,
         )
-        failures = [
-            restart_failure(
-                invariant,
-                event_category=category,
-                phase=phase,
-                observed=observed,
-                step=step,
-            )
-            for invariant, observed, expected, category, phase, step in checks
-            if observed != expected
-        ]
-        if failures:
-            raise AssertionError("restart regression invariant failures:\n" + "\n".join(failures))
-        return {"historical_event_pairs_cached": cached_event_pairs, "historical_outputs": 0, "status": "PASS"}
 
     async def _run_saturation(self) -> dict[str, int | str]:
         """Run hot and parallel turns without cross-thread barriers."""
@@ -1450,8 +1594,9 @@ class LiveFuzzRunner:
     ) -> dict[str, set[str]]:
         """Index canonical agent originals by their direct source event."""
         response_ids: dict[str, set[str]] = defaultdict(set)
+        expected_sender = self.stack.agent_id if sender_id is None else sender_id
         for event in events:
-            if event.get("type") != "m.room.message" or event.get("sender") != (sender_id or self.stack.agent_id):
+            if event.get("type") != "m.room.message" or event.get("sender") != expected_sender:
                 continue
             event_id = event.get("event_id")
             content = event.get("content")
@@ -1745,7 +1890,7 @@ def main() -> None:
             saturation_scenario()
             if args.profile == "saturation"
             else (
-                LiveFuzzScenario(thread_count=1, batches=(), profile="restart-regression")
+                restart_regression_scenario()
                 if args.profile == "restart-regression"
                 else live_scenario_from_seed(
                     args.seed,
@@ -1791,10 +1936,11 @@ def main() -> None:
                 stack.log_path.read_text(encoding="utf-8", errors="replace"),
                 encoding="utf-8",
             )
-        log_tail = stack.log_tail()
-        if log_tail and scenario.profile != "restart-regression":
-            print("MindRoom log tail:", file=sys.stderr)
-            print(log_tail, file=sys.stderr)
+        if scenario.profile != "restart-regression":
+            log_tail = stack.log_tail()
+            if log_tail:
+                print("MindRoom log tail:", file=sys.stderr)
+                print(log_tail, file=sys.stderr)
         raise
     finally:
         stack.close()

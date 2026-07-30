@@ -54,6 +54,30 @@ uv run python scripts/testing/fuzz_live_matrix.py --profile saturation
 
 The saturation profile uses a 180-second per-reply deadline because its slow 12-way stream workload intentionally queues much more work than normal fuzz runs.
 
+#### Config-replacement regression profile
+
+The `restart-regression` profile is a manual opt-in oracle for the agent and router replacement caused by a real `config.yaml` hot reload.
+It creates a dormant public room, writes historical text and media there, adds that room to the managed agent configuration, waits for both replacement principals and the completed configuration update, then sends one fresh request.
+The run passes only after both principals cache both historical events, the fresh request completes exactly once, no historical event reaches the fresh prompt, no historical reply appears, and Matrix responses plus runtime callbacks remain quiet for the observation window.
+
+The profile requires Docker, `just`, `uv`, Python 3.13, available local ports, and permission to create and remove an isolated Tuwunel instance.
+It starts its own deterministic model stub and disposable Matrix stack, so no external model credential is required.
+
+```bash
+uv run python scripts/testing/fuzz_live_matrix.py \
+  --profile restart-regression \
+  --reply-timeout 60 \
+  --settle-seconds 0.75 \
+  --failure-log restart-regression.log
+```
+
+`--reply-timeout` bounds lifecycle, cache, prompt, response, and quiescence observation.
+`--settle-seconds` controls the quiet observation window, with a one-second minimum for this profile.
+`--failure-log` preserves the complete MindRoom log when the oracle fails without printing content-bearing runtime output to the terminal.
+`--save-trace` writes the fixed profile trace, and `--trace` loads that JSON through the normal validated replay path.
+`--seed`, `--steps`, `--threads`, `--max-batch-size`, and `--restart-interval` do not change this fixed profile.
+Failures report content-free invariant coordinates, while the optional failure log contains the raw diagnostics needed for local investigation.
+
 ### Generate and sync managed avatars
 Run MindRoom at least once before syncing so the router account exists in Matrix state.
 When you run this from a source checkout, generated files are written under `./avatars/`.

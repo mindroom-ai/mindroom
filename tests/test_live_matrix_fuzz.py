@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+import asyncio
 import sqlite3
+from contextlib import closing
+from dataclasses import replace
 from typing import Any, cast
 
 import pytest
 
+from mindroom.matrix.cache.sqlite_event_cache import _initialize_event_cache_db
 from scripts.testing.fuzz_live_matrix import (
     ExactReplyOracle,
     LiveFuzzRunner,
@@ -15,9 +19,11 @@ from scripts.testing.fuzz_live_matrix import (
     LiveOperation,
     LiveOperationKind,
     ManagedTuwunelStack,
+    RestartRegressionObservation,
     _restart_prompt_observation,
+    evaluate_restart_regression,
     live_scenario_from_seed,
-    restart_failure,
+    restart_regression_scenario,
     saturation_scenario,
 )
 
@@ -123,41 +129,92 @@ def test_live_scenario_rejects_ambiguous_same_thread_reply_batch() -> None:
         scenario.validate()
 
 
-def test_restart_regression_diagnostics_reject_content() -> None:
-    """The fixed trace diagnostics must stay content-free."""
-    with pytest.raises(TypeError, match="restart output observation"):
-        restart_failure(
-            "historical_output_suppressed",
-            event_category="historical_text",
-            phase="replacement_sync",
-            observed=cast("Any", {"body": "must not reach diagnostics"}),
-            step=1,
-        )
+def test_restart_regression_scenario_is_allowed_and_json_replayable() -> None:
+    """The manual profile must survive the same trace parser used by replay."""
+    scenario = restart_regression_scenario()
+
+    assert LiveFuzzScenario.from_json(scenario.to_json()) == scenario
 
 
-def test_restart_regression_evidence_rejects_false_passes() -> None:
-    """Sender, principal, room, and prompt overlap must remain observable."""
+def test_restart_regression_evaluator_accepts_pass_and_rejects_bad_directions() -> None:
+    """The profile's pure oracle must accept clean evidence and reject old output and prompt overlap."""
+    passing = RestartRegressionObservation(
+        historical_output_counts=(0, 0),
+        replacement_boundary_reached=True,
+        cached_event_pair_count=4,
+        fresh_output_count=1,
+        fresh_prompt_observed=True,
+        historical_in_fresh_prompt=False,
+        response_callbacks_quiescent=True,
+    )
+
+    assert evaluate_restart_regression(passing) == ()
+
+    failures = evaluate_restart_regression(
+        replace(
+            passing,
+            historical_output_counts=(1, 0),
+            historical_in_fresh_prompt=True,
+        ),
+    )
+
+    assert any("invariant=historical_output_suppressed" in failure for failure in failures)
+    assert any("invariant=historical_events_absent_from_fresh_prompt" in failure for failure in failures)
+
+
+def test_restart_regression_cache_evidence_uses_production_schema_and_exact_filters() -> None:
+    """Principal, room, and event filters must reject plausible distractor rows."""
     stack = ManagedTuwunelStack()
     try:
         stack.agent_id, stack.router_id = "@agent:example", "@router:example"
         assert not stack.wait_for_log_count(("missing",), 1, timeout=0)
+        stack.log_path.write_text("agent_setup_complete @agent:example\n", encoding="utf-8")
+        assert stack.wait_for_log_count(("agent_setup_complete", "@agent:example"), 1, timeout=0)
         stack.storage_path.mkdir()
-        with sqlite3.connect(stack.storage_path / "event_cache.db") as database:
-            database.executescript(
-                """CREATE TABLE events(principal_id TEXT, room_id TEXT, event_id TEXT);
-                INSERT INTO events VALUES
-                ('@agent:example', '!target:example', '$old-text'),
-                ('@agent:example', '!target:example', '$old-media'),
-                ('@router:example', '!other:example', '$old-text');""",
+        database_path = stack.storage_path / "event_cache.db"
+        database, _report, _generation = asyncio.run(_initialize_event_cache_db(database_path))
+        asyncio.run(database.close())
+        rows = (
+            ("@agent:example", "$old-text", "!target:example"),
+            ("@agent:example", "$old-media", "!target:example"),
+            ("@router:example", "$old-text", "!target:example"),
+            ("@router:example", "$old-media", "!target:example"),
+            ("@wrong:example", "$old-text", "!target:example"),
+            ("@wrong:example", "$old-media", "!target:example"),
+            ("@agent:example", "$wrong-event", "!target:example"),
+            ("@router:example", "$wrong-event", "!target:example"),
+            ("@agent:example", "$old-text", "!wrong:example"),
+        )
+        with closing(sqlite3.connect(database_path)) as fixture_database:
+            fixture_database.executemany(
+                """
+                INSERT INTO events(
+                    principal_id,
+                    event_id,
+                    room_id,
+                    origin_server_ts,
+                    event_json,
+                    sender,
+                    cached_at,
+                    write_seq
+                ) VALUES (?, ?, ?, 1, '{}', '@sender:example', 1.0, ?)
+                """,
+                ((*row, write_seq) for write_seq, row in enumerate(rows, start=1)),
             )
+            fixture_database.commit()
 
         event_ids = ("$old-text", "$old-media")
-        assert stack.cached_restart_event_pair_count("!target:example", event_ids) == 2
+        assert stack.cached_restart_event_pair_count("!target:example", event_ids) == 4
         assert _restart_prompt_observation(
             "Preparing agent and prompt $fresh $old-text",
             "$fresh",
             event_ids,
         ) == (True, True)
+        assert _restart_prompt_observation("Preparing agent and prompt $fresh", "$fresh", event_ids) == (True, False)
+        assert _restart_prompt_observation("Preparing agent and prompt $old-text", "$fresh", event_ids) == (
+            False,
+            False,
+        )
         assert (
             LiveFuzzRunner._combined_response_count(
                 "$fresh",
@@ -165,6 +222,139 @@ def test_restart_regression_evidence_rejects_false_passes() -> None:
                 {"$fresh": {"$router-response"}},
             )
             == 2
+        )
+    finally:
+        stack.close()
+
+
+def test_restart_regression_cache_probe_does_not_create_an_empty_database() -> None:
+    """Missing runtime cache state must not be converted into an empty SQLite database."""
+    stack = ManagedTuwunelStack()
+    try:
+        database_path = stack.storage_path / "event_cache.db"
+
+        assert stack.cached_restart_event_pair_count("!target:example", ("$old-text", "$old-media")) == 0
+        assert not database_path.exists()
+    finally:
+        stack.close()
+
+
+@pytest.mark.asyncio
+async def test_restart_response_index_honors_sender_override() -> None:
+    """Agent and router observations must use their explicitly selected sender."""
+    stack = ManagedTuwunelStack()
+    client = LiveMatrixClient("http://matrix.invalid", "!room:example")
+    try:
+        stack.agent_id, stack.router_id = "@agent:example", "@router:example"
+        runner = LiveFuzzRunner(
+            stack,
+            (client,),
+            restart_regression_scenario(),
+            reply_timeout=1,
+            settle_seconds=0,
+        )
+
+        def response(event_id: str, sender: str, source: str) -> dict[str, Any]:
+            return {
+                "event_id": event_id,
+                "sender": sender,
+                "type": "m.room.message",
+                "content": {
+                    "m.relates_to": {
+                        "rel_type": "m.thread",
+                        "event_id": source,
+                        "m.in_reply_to": {"event_id": source},
+                    },
+                },
+            }
+
+        events = (
+            response("$agent-response", stack.agent_id, "$agent-source"),
+            response("$router-response", stack.router_id, "$router-source"),
+        )
+
+        assert runner._canonical_response_ids(events) == {"$agent-source": {"$agent-response"}}
+        assert runner._canonical_response_ids(events, sender_id=stack.router_id) == {
+            "$router-source": {"$router-response"},
+        }
+    finally:
+        await client.close()
+        stack.close()
+
+
+@pytest.mark.asyncio
+async def test_restart_observation_rejects_historical_output_arriving_during_quiescence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A historical reply arriving after the fresh terminal reply must still fail."""
+
+    class DormantClient:
+        room_id = "!restart:example"
+
+        def __init__(self) -> None:
+            self.seen_events: dict[str, dict[str, Any]] = {}
+            self.sync_count = 0
+
+        async def sync_incremental(self, *, timeout_ms: int, allow_limited: bool = False) -> None:
+            del timeout_ms, allow_limited
+            self.sync_count += 1
+            if self.sync_count == 1:
+                self.seen_events["$fresh-response"] = response(
+                    "$fresh-response",
+                    "@agent:example",
+                    "$fresh",
+                )
+            if self.sync_count == 3:
+                self.seen_events["$late-historical-response"] = response(
+                    "$late-historical-response",
+                    "@agent:example",
+                    "$old-text",
+                )
+            await asyncio.sleep(0.05)
+
+    def response(event_id: str, sender: str, source: str) -> dict[str, Any]:
+        return {
+            "event_id": event_id,
+            "sender": sender,
+            "type": "m.room.message",
+            "content": {
+                "body": "END call=1",
+                "m.relates_to": {
+                    "rel_type": "m.thread",
+                    "event_id": source,
+                    "m.in_reply_to": {"event_id": source},
+                },
+            },
+        }
+
+    stack = ManagedTuwunelStack()
+    try:
+        stack.agent_id, stack.router_id = "@agent:example", "@router:example"
+        stack.log_path.write_text(
+            "matrix_event_callback_started !restart:example\nPreparing agent and prompt $fresh\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(stack, "cached_restart_event_pair_count", lambda _room_id, _event_ids: 4)
+        dormant = DormantClient()
+        runner = LiveFuzzRunner(
+            stack,
+            (cast("LiveMatrixClient", dormant),),
+            restart_regression_scenario(),
+            reply_timeout=2,
+            settle_seconds=0,
+        )
+
+        observation = await runner._wait_for_restart_observation(
+            cast("LiveMatrixClient", dormant),
+            historical_event_ids=("$old-text", "$old-media"),
+            fresh_event_id="$fresh",
+            replacement_boundary_reached=True,
+        )
+
+        assert observation.response_callbacks_quiescent
+        assert observation.historical_output_counts == (1, 0)
+        assert any(
+            "invariant=historical_output_suppressed" in failure for failure in evaluate_restart_regression(observation)
         )
     finally:
         stack.close()
