@@ -18,8 +18,8 @@ from mindroom.knowledge.file_listing import git_checkout_present, include_knowle
 from mindroom.knowledge.file_listing import list_git_tracked_knowledge_files as list_git_tracked_managed_knowledge_files
 from mindroom.knowledge.file_listing import list_knowledge_files as list_managed_knowledge_files
 from mindroom.knowledge.redaction import redact_credentials_in_text, redact_url_credentials
+from mindroom.knowledge.refresh_locks import is_refresh_active_for_binding
 from mindroom.knowledge.refresh_runner import (
-    is_refresh_active_for_binding,
     knowledge_binding_mutation_lock,
     publish_file_mode_source_metadata_for_base,
     refresh_knowledge_binding,
@@ -51,6 +51,13 @@ _DASHBOARD_GIT_FILE_LIST_TIMEOUT_SECONDS = 1.0
 class _FileListInfo:
     files: list[dict[str, Any]]
     total_size: int
+    degraded: bool = False
+    error: str | None = None
+
+
+@dataclass(frozen=True)
+class _FileCountInfo:
+    count: int
     degraded: bool = False
     error: str | None = None
 
@@ -122,6 +129,24 @@ async def _list_file_info(
         )
 
     return _FileListInfo(files=files, total_size=total_size)
+
+
+async def _count_managed_files(config: Config, base_id: str, root: Path) -> _FileCountInfo:
+    """Count managed files without stating each one.
+
+    The base list and per-base status report only a count. Collecting per-file
+    sizes and modification times to derive it is unbounded work that scales with
+    the corpus on every request; ``/bases/{base_id}/files`` still serves the full
+    listing for callers that need it.
+    """
+    resolved_root = root.resolve()
+    if not resolved_root.is_dir():
+        return _FileCountInfo(count=0)
+
+    managed_paths, error = await _list_managed_file_paths(config, base_id, resolved_root)
+    if error is not None:
+        return _FileCountInfo(count=0, degraded=True, error=error)
+    return _FileCountInfo(count=len(managed_paths))
 
 
 async def _list_managed_file_paths(config: Config, base_id: str, root: Path) -> tuple[set[Path], str | None]:
@@ -580,7 +605,7 @@ async def list_knowledge_bases(request: Request) -> dict[str, Any]:
     for base_id in sorted(config.knowledge_bases):
         base_config = config.knowledge_bases[base_id]
         root = _knowledge_root(config, base_id, runtime_paths)
-        file_info = await _list_file_info(config, base_id, root)
+        file_info = await _count_managed_files(config, base_id, root)
         index_status = await _index_status(config, base_id, runtime_paths)
         git_status = await _git_status(
             config,
@@ -597,7 +622,7 @@ async def list_knowledge_bases(request: Request) -> dict[str, Any]:
             "mode": base_config.mode,
             "path": str(root),
             "watch": base_config.watch,
-            "file_count": len(file_info.files),
+            "file_count": file_info.count,
             "indexed_count": index_status.indexed_count,
             "refreshing": refreshing,
             "refresh_state": index_status.refresh_state,
@@ -736,7 +761,7 @@ async def knowledge_status(base_id: str, request: Request) -> dict[str, Any]:
     root = _knowledge_root(config, base_id, runtime_paths)
     base_config = config.knowledge_bases[base_id]
     index_status = await _index_status(config, base_id, runtime_paths)
-    file_info = await _list_file_info(config, base_id, root)
+    file_info = await _count_managed_files(config, base_id, root)
     git_status = await _git_status(
         config,
         base_id,
@@ -752,7 +777,7 @@ async def knowledge_status(base_id: str, request: Request) -> dict[str, Any]:
         "mode": base_config.mode,
         "folder_path": str(root),
         "watch": base_config.watch,
-        "file_count": len(file_info.files),
+        "file_count": file_info.count,
         "indexed_count": index_status.indexed_count,
         "refreshing": refreshing,
         "refresh_state": index_status.refresh_state,

@@ -5,12 +5,13 @@ include patterns derive listing targets that bound where traversal looks, traver
 yields only candidates whose directory chain is vetted, and per-file rules run cheap
 relative-path checks before filesystem safety checks.
 Every path returned by the listing functions is a regular file, not a symlink, with no
-symlinked ancestors, whose strictly resolved location stays inside the knowledge root.
+symlinked ancestors and no ".." traversal, so it always stays inside the knowledge root.
 """
 
 from __future__ import annotations
 
 import os
+import stat
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -200,6 +201,9 @@ class _DirectoryGuard:
             relative_path = directory.relative_to(self.root)
         except ValueError:
             return False
+        # ``relative_to`` is lexical, so it happily walks back out through "..".
+        if ".." in relative_path.parts:
+            return False
 
         current = self.root
         for part in relative_path.parts:
@@ -231,18 +235,21 @@ def _iter_target_files(target: _ListingTarget, guard: _DirectoryGuard) -> Iterat
             yield current_dir / filename
 
 
-def _resolve_safe_file(root: Path, candidate: Path) -> Path | None:
-    """Return the resolved path when a chain-vetted candidate is a regular file inside root."""
-    if candidate.is_symlink():
-        return None
+def _safe_regular_file(candidate: Path) -> Path | None:
+    """Return a chain-vetted candidate when it is a regular file inside the knowledge root.
+
+    The candidate is returned as given, not canonicalized: ``_DirectoryGuard`` has
+    already vetted every directory component and rejected ".." traversal, so a
+    candidate that is not itself a symlink is already canonical and cannot point
+    outside the root. A single ``lstat`` therefore settles both questions, where
+    ``resolve(strict=True)`` re-walked the whole path for every file — several
+    extra round trips per file on a network filesystem.
+    """
     try:
-        resolved = candidate.resolve(strict=True)
-        resolved.relative_to(root)
-    except (OSError, ValueError):
+        status = candidate.lstat()
+    except OSError:
         return None
-    if not candidate.is_file():
-        return None
-    return resolved
+    return candidate if stat.S_ISREG(status.st_mode) else None
 
 
 def list_knowledge_files(config: Config, base_id: str, knowledge_root: Path) -> list[Path]:
@@ -258,9 +265,9 @@ def list_knowledge_files(config: Config, base_id: str, knowledge_root: Path) -> 
         for candidate in _iter_target_files(target, guard):
             if not include_knowledge_relative_path(config, base_id, candidate.relative_to(root).as_posix()):
                 continue
-            resolved = _resolve_safe_file(root, candidate)
-            if resolved is not None:
-                files.add(resolved)
+            safe_file = _safe_regular_file(candidate)
+            if safe_file is not None:
+                files.add(safe_file)
     return sorted(files)
 
 
@@ -280,9 +287,9 @@ def knowledge_files_from_relative_paths(
         candidate = root / relative_path
         if not guard.is_safe(candidate.parent):
             continue
-        resolved = _resolve_safe_file(root, candidate)
-        if resolved is not None:
-            files.append(resolved)
+        safe_file = _safe_regular_file(candidate)
+        if safe_file is not None:
+            files.append(safe_file)
     return files
 
 

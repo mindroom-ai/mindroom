@@ -77,7 +77,8 @@ Per-source Matrix revision tuples keep durable edit facts newest-wins across ret
 `EditRegenerator` groups edits by room, response anchor, and requester in a bounded per-response mailbox.
 One draining owner folds each source's newest Matrix revision into a complete response request and loops when newer edits arrive.
 Physical source IDs are exclusive turn claims, while discovery aliases are advisory settlement keys observed by `wait_for_turn_settled`.
-A sync-restart cancellation leaves its revision uncommitted and records the room in `InterruptedTurnRooms`, so the replacement runtime's recovery re-drives the turn instead of losing it.
+A committed service-restart or generic terminal interruption note records its exact source room in `InterruptedTurnRooms`.
+Replacement recovery uses the registered room directly, while next-startup cleanup can rediscover the durable note and an interrupted edit revision remains uncommitted for re-drive.
 The two physical stores remain intentionally redundant so run metadata can repair a ledger write lost during a crash.
 `TurnStore` applies deterministic field precedence: a present ledger record owns canonical source identity and anchor, while a newer delivered run can repair mutable response and regeneration facts after a crash.
 Recovery never replaces a ledger record that changed while run metadata was loading.

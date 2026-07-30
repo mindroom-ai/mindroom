@@ -19,6 +19,7 @@ from .postgres_event_cache_events import (
     delete_event_thread_rows,
     event_or_original_is_redacted,
     filter_cacheable_events,
+    last_row_per_key,
     write_lookup_index_rows,
 )
 from .thread_cache_state import (
@@ -29,6 +30,8 @@ from .thread_cache_state import (
 
 if TYPE_CHECKING:
     from psycopg import AsyncConnection
+
+    from .event_cache_events import SerializedCachedEvent
 
 
 # The edits that survive a collapsed read: one per message, from the right sender.
@@ -301,6 +304,44 @@ async def set_room_membership_locked(
     )
 
 
+async def _upsert_thread_membership_rows(
+    db: AsyncConnection,
+    *,
+    namespace: str,
+    room_id: str,
+    thread_id: str,
+    serialized_events: list[SerializedCachedEvent],
+) -> None:
+    """Bind one event set to a thread in a single statement.
+
+    Every row targets the same thread, so a repeated event ID resolves to the values the
+    row-at-a-time upsert left behind; only the last occurrence is sent because
+    ``ON CONFLICT DO UPDATE`` cannot touch the same row twice in one statement.
+    """
+    if not serialized_events:
+        return
+    events = last_row_per_key(serialized_events, lambda event: event.event_id)
+    await db.execute(
+        """
+        INSERT INTO mindroom_event_cache_thread_events(namespace, room_id, thread_id, event_id, origin_server_ts)
+        SELECT %s::text, %s::text, %s::text, incoming.event_id, incoming.origin_server_ts
+        FROM unnest(%s::text[], %s::bigint[]) AS incoming(event_id, origin_server_ts)
+        ON CONFLICT(namespace, room_id, event_id) DO UPDATE SET
+            thread_id = excluded.thread_id,
+            origin_server_ts = excluded.origin_server_ts,
+            event_json = NULL,
+            write_seq = nextval('mindroom_event_cache_write_seq')
+        """,
+        (
+            namespace,
+            room_id,
+            thread_id,
+            [event.event_id for event in events],
+            [event.origin_server_ts for event in events],
+        ),
+    )
+
+
 async def _store_thread_events_locked(
     db: AsyncConnection,
     *,
@@ -328,25 +369,13 @@ async def _store_thread_events_locked(
         cached_at=stored_at,
         thread_id=thread_id,
     )
-    for event in serialized_events:
-        await db.execute(
-            """
-            INSERT INTO mindroom_event_cache_thread_events(namespace, room_id, thread_id, event_id, origin_server_ts)
-            VALUES (%s, %s, %s, %s, %s)
-            ON CONFLICT(namespace, room_id, event_id) DO UPDATE SET
-                thread_id = excluded.thread_id,
-                origin_server_ts = excluded.origin_server_ts,
-                event_json = NULL,
-                write_seq = nextval('mindroom_event_cache_write_seq')
-            """,
-            (
-                namespace,
-                room_id,
-                thread_id,
-                event.event_id,
-                event.origin_server_ts,
-            ),
-        )
+    await _upsert_thread_membership_rows(
+        db,
+        namespace=namespace,
+        room_id=room_id,
+        thread_id=thread_id,
+        serialized_events=serialized_events,
+    )
     await _clear_thread_gap_covered_by_fetch(
         db,
         namespace=namespace,
@@ -680,42 +709,43 @@ async def _append_existing_thread_event(
         (namespace, room_id, thread_id),
     )
     thread_exists = row is not None
+    reflected_at = time.time()
     await write_lookup_index_rows(
         db,
         namespace=namespace,
         room_id=room_id,
         serialized_events=[serialized_event],
-        cached_at=time.time(),
+        cached_at=reflected_at,
         thread_id=thread_id,
     )
     if not thread_exists:
         # Only lookup-index rows are recorded: there is no snapshot to extend, so only a full
-        # history scan can make this thread readable again.
+        # history scan can make this thread readable again. Advance the watermark anyway: a fetch
+        # already in flight when this event landed cannot represent the thread, so it must not be
+        # allowed to install a snapshot that predates the event. The runtime coordinator normally
+        # serializes same-thread refills and appends; this watermark also protects off-lane startup,
+        # prewarm, and cross-process races.
+        await _advance_snapshot_watermark(
+            db,
+            namespace=namespace,
+            room_id=room_id,
+            thread_id=thread_id,
+            reflected_at=reflected_at,
+        )
         return ThreadAppendOutcome.SNAPSHOT_MISSING
-    await db.execute(
-        """
-        INSERT INTO mindroom_event_cache_thread_events(namespace, room_id, thread_id, event_id, origin_server_ts)
-        VALUES (%s, %s, %s, %s, %s)
-        ON CONFLICT(namespace, room_id, event_id) DO UPDATE SET
-            thread_id = excluded.thread_id,
-            origin_server_ts = excluded.origin_server_ts,
-            event_json = NULL,
-            write_seq = nextval('mindroom_event_cache_write_seq')
-        """,
-        (
-            namespace,
-            room_id,
-            thread_id,
-            serialized_event.event_id,
-            serialized_event.origin_server_ts,
-        ),
+    await _upsert_thread_membership_rows(
+        db,
+        namespace=namespace,
+        room_id=room_id,
+        thread_id=thread_id,
+        serialized_events=[serialized_event],
     )
     await _advance_snapshot_watermark(
         db,
         namespace=namespace,
         room_id=room_id,
         thread_id=thread_id,
-        reflected_at=time.time(),
+        reflected_at=reflected_at,
     )
     return ThreadAppendOutcome.APPENDED
 

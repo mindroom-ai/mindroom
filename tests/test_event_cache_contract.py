@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import time
 from typing import Any
+from unittest.mock import patch
 
 import pytest
 
@@ -572,6 +574,108 @@ class TestConversationEventCacheContract:
         cached = await event_cache.get_thread_events(room_id, thread_id)
         assert cached is not None
         assert [event["event_id"] for event in cached] == [thread_id, "$live:localhost"]
+
+    @pytest.mark.asyncio
+    async def test_in_flight_fetch_cannot_install_snapshot_after_snapshotless_live_append(
+        self,
+        event_cache: ConversationEventCache,
+    ) -> None:
+        """A live append onto a not-yet-cached thread makes an in-flight fetch too old.
+
+        This is the SNAPSHOT_MISSING sibling of the append-shaped burial test above. A thread has
+        no cached rows yet. A refill scan starts; while it runs, a live event lands in the thread.
+        The append finds no snapshot to extend (SNAPSHOT_MISSING), records the point row, and marks
+        a gap. Because that append advances the ordering watermark, the in-flight scan is now too
+        old to install its snapshot, so its store is refused and the gap survives. The runtime
+        write barrier supplies liveness by keeping same-thread appends out of the fetch-and-store
+        window; this contract supplies safety for off-lane and cross-process races.
+        """
+        room_id = "!race-missing:localhost"
+        thread_id = "$thread-missing:localhost"
+        root = _message_event(thread_id, 1)
+
+        # A scan starts over a thread with no cached snapshot. The gap the live append marks below
+        # is stamped with real wall-clock time, so the in-flight fetch must be dated just before it
+        # for the interleaving to be realistic; the fresh fetch afterwards is dated just after.
+        before_append = time.time()
+        fetch_started_at = before_append - 1.0
+
+        # ...and a live event lands in the thread while it is still running. No snapshot exists yet,
+        # so the append is SNAPSHOT_MISSING and marks a gap.
+        live = _message_event("$live:localhost", 3, thread_id=thread_id)
+        assert (
+            await event_cache.apply_thread_mutation_append(
+                room_id,
+                thread_id,
+                live,
+                append_failed_reason="live_append_failed",
+            )
+            is ThreadAppendOutcome.SNAPSHOT_MISSING
+        )
+        assert thread_cache_rejection_reason(await event_cache.get_thread_cache_gap(room_id, thread_id)) is not None
+
+        # The in-flight scan finishes carrying only the root (it predates the live event). The
+        # watermark advanced by the append must refuse this stale store, leaving the gap in place.
+        await event_cache.replace_thread(
+            room_id,
+            thread_id,
+            [root],
+            expected_membership_epoch=await event_cache.room_membership_epoch(room_id),
+            fetch_started_at=fetch_started_at,
+        )
+        assert thread_cache_rejection_reason(await event_cache.get_thread_cache_gap(room_id, thread_id)) is not None, (
+            "stale in-flight store must not clear the gap"
+        )
+
+        # A fresh fetch that started after the live event landed (so it genuinely saw it) may clear
+        # the gap and install the full snapshot.
+        fresh_fetch_started_at = time.time()
+        await replace_thread_unconditionally(
+            event_cache,
+            room_id,
+            thread_id,
+            [root, live],
+            fetch_started_at=fresh_fetch_started_at,
+        )
+        assert thread_cache_rejection_reason(await event_cache.get_thread_cache_gap(room_id, thread_id)) is None
+        cached = await event_cache.get_thread_events(room_id, thread_id)
+        assert cached is not None
+        assert [event["event_id"] for event in cached] == [thread_id, "$live:localhost"]
+
+    @pytest.mark.asyncio
+    async def test_clock_rollback_during_snapshotless_append_does_not_admit_stale_fetch(
+        self,
+        event_cache: ConversationEventCache,
+    ) -> None:
+        """One append timestamp must fence a fetch even if the wall clock steps backward."""
+        room_id = "!clock-rollback:localhost"
+        thread_id = "$thread-clock-rollback:localhost"
+        root = _message_event(thread_id, 1)
+        live = _message_event("$live-clock-rollback:localhost", 2, thread_id=thread_id)
+        backend = event_cache.runtime_diagnostics()["cache_backend"]
+        clock_target = f"mindroom.matrix.cache.{backend}_event_cache_threads.time.time"
+
+        with patch(clock_target, side_effect=[200.0, 100.0, 100.0]):
+            assert (
+                await event_cache.apply_thread_mutation_append(
+                    room_id,
+                    thread_id,
+                    live,
+                    append_failed_reason="live_append_failed",
+                )
+                is ThreadAppendOutcome.SNAPSHOT_MISSING
+            )
+
+        await event_cache.replace_thread(
+            room_id,
+            thread_id,
+            [root],
+            expected_membership_epoch=await event_cache.room_membership_epoch(room_id),
+            fetch_started_at=150.0,
+        )
+
+        assert await event_cache.get_thread_events(room_id, thread_id) is None
+        assert thread_cache_rejection_reason(await event_cache.get_thread_cache_gap(room_id, thread_id)) is not None
 
     @pytest.mark.asyncio
     async def test_redaction_tombstones_original_edits_and_late_replays(

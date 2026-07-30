@@ -21,7 +21,7 @@ from agno.agent import Agent
 from agno.models.deepseek import DeepSeek
 from pydantic import BaseModel, Field
 
-from mindroom.model_defaults import DEEPSEEK_REASONER
+from mindroom.model_defaults import DEEPSEEK_V4_PRO
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 COMMIT_DIR = REPO_ROOT / "commit_messages"
@@ -90,7 +90,7 @@ async def rewrite_commit(commit_hash: str) -> CommitRewrite | None:
     # Create the agent with structured output
     agent = Agent(
         name="commit-rewriter",
-        model=DeepSeek(id=DEEPSEEK_REASONER),
+        model=DeepSeek(id=DEEPSEEK_V4_PRO),
         response_model=CommitRewrite,
     )
 

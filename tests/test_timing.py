@@ -432,6 +432,7 @@ def test_dispatch_pipeline_summary_emits_additive_segments_and_diagnostics() -> 
     logger = Mock()
     timing = DispatchPipelineTiming(source_event_id="$event", room_id="!room")
     timing.metadata["first_visible_kind"] = "stream_update"
+    timing.metadata["first_substantive_kind"] = "stream_update"
     timing.marks.update(
         {
             "message_received": 0.0,
@@ -472,6 +473,7 @@ def test_dispatch_pipeline_summary_emits_additive_segments_and_diagnostics() -> 
             "model_request_sent": 18.0,
             "model_first_token": 19.5,
             "first_visible_reply": 20.0,
+            "first_substantive_reply": 22.0,
             "streaming_complete": 24.0,
             "response_complete": 25.0,
         },
@@ -483,6 +485,7 @@ def test_dispatch_pipeline_summary_emits_additive_segments_and_diagnostics() -> 
     assert logger.debug.call_args.args == ("Dispatch pipeline timing",)
     summary = logger.debug.call_args.kwargs
     assert summary["first_visible_kind"] == "stream_update"
+    assert summary["first_substantive_kind"] == "stream_update"
     assert summary["seg_ingress_ms"] == 1000.0
     assert summary["seg_coalescing_ms"] == 2000.0
     assert summary["seg_dispatch_ms"] == 7000.0
@@ -490,6 +493,7 @@ def test_dispatch_pipeline_summary_emits_additive_segments_and_diagnostics() -> 
     assert summary["seg_first_visible_reply_ms"] == 8000.0
     assert summary["seg_after_first_visible_ms"] == 5000.0
     assert summary["time_to_first_visible_reply_ms"] == 20000.0
+    assert summary["time_to_first_substantive_reply_ms"] == 22000.0
     assert summary["total_pipeline_ms"] == 25000.0
     assert summary["diag_ingress_cache_append_ms"] == 500.0
     assert summary["diag_ingress_normalize_ms"] == 500.0
@@ -509,6 +513,8 @@ def test_dispatch_pipeline_summary_emits_additive_segments_and_diagnostics() -> 
     assert summary["diag_prompt_assembly_ms"] == 200.0
     assert summary["diag_history_ready_to_model_request_ms"] == 1000.0
     assert summary["diag_provider_ttft_ms"] == 1500.0
+    assert summary["diag_first_visible_to_first_substantive_reply_ms"] == 2000.0
+    assert summary["diag_model_first_token_to_first_substantive_reply_ms"] == 2500.0
     assert summary["diag_first_visible_to_stream_complete_ms"] == 4000.0
     assert summary["diag_model_request_to_completion_ms"] == 7000.0
     assert "model_first_token_to_first_visible_stream_update_ms" not in summary
@@ -516,19 +522,43 @@ def test_dispatch_pipeline_summary_emits_additive_segments_and_diagnostics() -> 
     assert "model_request_to_completion_ms" not in summary
 
 
-def test_dispatch_pipeline_first_visible_reply_is_first_write_wins(
+def test_dispatch_pipeline_visible_reply_milestones_are_first_write_wins(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The first visible reply mark should preserve the earliest visible milestone."""
+    """Placeholder and substantive reply marks should preserve their earliest milestones."""
     perf_counter = Mock(side_effect=[1.5, 9.0])
     monkeypatch.setattr(timing_module.time, "perf_counter", perf_counter)
     timing = DispatchPipelineTiming(source_event_id="$event", room_id="!room")
 
     timing.mark_first_visible_reply("placeholder")
-    timing.mark_first_visible_reply("final")
+    timing.mark_first_visible_reply("stream_update", substantive=True)
+    timing.mark_first_visible_reply("final", substantive=True)
 
     assert timing.marks["first_visible_reply"] == 1.5
     assert timing.metadata["first_visible_kind"] == "placeholder"
+    assert timing.marks["first_substantive_reply"] == 9.0
+    assert timing.metadata["first_substantive_kind"] == "stream_update"
+    assert perf_counter.call_count == 2
+
+
+def test_dispatch_pipeline_placeholder_only_omits_substantive_reply_metrics(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed turn with only a placeholder should not report words as delivered."""
+    monkeypatch.setattr(timing_module.time, "perf_counter", Mock(return_value=1.5))
+    logger = Mock()
+    timing = DispatchPipelineTiming(source_event_id="$event", room_id="!room")
+    timing.marks["message_received"] = 0.0
+
+    timing.mark_first_visible_reply("placeholder")
+    timing.emit_summary(logger, outcome="failed")
+
+    summary = logger.debug.call_args.kwargs
+    assert summary["time_to_first_visible_reply_ms"] == 1500.0
+    assert "first_substantive_reply" not in timing.marks
+    assert "first_substantive_kind" not in summary
+    assert "time_to_first_substantive_reply_ms" not in summary
+    assert "diag_first_visible_to_first_substantive_reply_ms" not in summary
 
 
 def test_emit_timing_event_builds_no_payload_when_debug_is_disabled(

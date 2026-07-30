@@ -249,17 +249,17 @@ def _harness(tmp_path: Path, *, turn_record: TurnRecord | None) -> _Harness:  # 
         async with response_lock:
             assert isinstance(request, ResponseRequest)
             interrupted = False
-            on_sync_restart_cancelled = request.on_sync_restart_cancelled
+            on_interrupted_response_recoverable = request.on_interrupted_response_recoverable
 
             def record_interruption() -> None:
                 nonlocal interrupted
                 interrupted = True
-                if on_sync_restart_cancelled is not None:
-                    on_sync_restart_cancelled()
+                if on_interrupted_response_recoverable is not None:
+                    on_interrupted_response_recoverable()
 
             observed_request = replace(
                 request,
-                on_sync_restart_cancelled=record_interruption,
+                on_interrupted_response_recoverable=record_interruption,
             )
             response_event_id = await generate_response(observed_request)
             if response_event_id is not None and not interrupted:
@@ -1547,9 +1547,9 @@ async def test_sync_restart_cancellation_leaves_interrupted_edit_uncommitted(tmp
         attempts += 1
         assert request.on_lifecycle_lock_acquired is not None
         request.on_lifecycle_lock_acquired()
-        assert request.on_sync_restart_cancelled is not None
+        assert request.on_interrupted_response_recoverable is not None
         assert request.on_deferred_outcome_handled is None
-        request.on_sync_restart_cancelled()
+        request.on_interrupted_response_recoverable()
         raise asyncio.CancelledError
 
     harness.generate_response.side_effect = interrupt
@@ -1616,9 +1616,8 @@ async def test_swallowed_sync_restart_leaves_edit_uncommitted(tmp_path: Path) ->
     async def interrupt(request: ResponseRequest) -> str:
         nonlocal attempts
         attempts += 1
-        assert request.on_sync_restart_cancelled is not None
-        assert request.on_deferred_outcome_handled is None
-        request.on_sync_restart_cancelled()
+        assert request.on_interrupted_response_recoverable is not None
+        request.on_interrupted_response_recoverable()
         return "$interrupted:example.org"
 
     harness.generate_response.side_effect = interrupt
@@ -1673,9 +1672,9 @@ async def test_sync_restart_leaves_every_waiting_coalesced_source_uncommitted(tm
         attempts += 1
         generation_started.set()
         await cancel_generation.wait()
-        assert request.on_sync_restart_cancelled is not None
+        assert request.on_interrupted_response_recoverable is not None
         assert request.on_deferred_outcome_handled is None
-        request.on_sync_restart_cancelled()
+        request.on_interrupted_response_recoverable()
         raise asyncio.CancelledError
 
     harness.ingress_hook_runner.emit_message_received_hooks.side_effect = hook

@@ -968,12 +968,22 @@ class TestCredentialsManager:
     def test_sync_shared_credentials_to_worker_empty_allowlist_mirrors_nothing(
         self,
         temp_credentials_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """An explicit empty worker allowlist should deny all shared credential mirroring."""
+        """An empty allowlist should skip the shared store while cleaning stale mirrors."""
         manager = CredentialsManager(temp_credentials_dir)
         manager.save_credentials("google", {"api_key": "env-key", "_source": "env"})
         worker_shared_manager = manager.for_worker("worker-a").shared_manager()
         worker_shared_manager.save_credentials("google", {"api_key": "stale-key", "_source": "env"})
+
+        def fail_shared_store_lookup(_manager: CredentialsManager) -> CredentialsManager:
+            pytest.fail("empty allowlist must not open the shared credential store")
+
+        monkeypatch.setattr(
+            credentials_module,
+            "_shared_credentials_manager",
+            fail_shared_store_lookup,
+        )
 
         sync_shared_credentials_to_worker(
             "worker-a",

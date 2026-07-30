@@ -687,7 +687,6 @@ def sync_shared_credentials_to_worker(
     """
     manager = credentials_manager
     worker_shared_manager = manager.for_worker(worker_key).shared_manager()
-    source_manager = _shared_credentials_manager(manager)
     mirrored_services = set(worker_shared_manager.list_services())
     copied_services: set[str] = set()
     logger.debug(
@@ -696,23 +695,29 @@ def sync_shared_credentials_to_worker(
         allowed_services=sorted(allowed_services),
     )
 
-    for service in source_manager.list_services():
-        shared_credentials = load_worker_grantable_shared_credentials(
-            service,
-            shared_manager=source_manager,
-            allowed_services=allowed_services,
-        )
-        if shared_credentials is None:
-            if service not in allowed_services:
-                logger.info(
-                    "Skipping non-grantable shared credentials during worker sync",
-                    worker_key=worker_key,
-                    service=service,
-                )
-            continue
+    # An empty allowlist can grant nothing, so the copy loop is a guaranteed no-op that would only
+    # re-scan the shared-credential store from disk and log one skip per service. This is the
+    # default configuration and it runs on every worker-routed tool call, so short-circuit it and
+    # fall straight through to the cleanup pass, which still tears down any stale mirror.
+    if allowed_services:
+        source_manager = _shared_credentials_manager(manager)
+        for service in source_manager.list_services():
+            shared_credentials = load_worker_grantable_shared_credentials(
+                service,
+                shared_manager=source_manager,
+                allowed_services=allowed_services,
+            )
+            if shared_credentials is None:
+                if service not in allowed_services:
+                    logger.debug(
+                        "Skipping non-grantable shared credentials during worker sync",
+                        worker_key=worker_key,
+                        service=service,
+                    )
+                continue
 
-        copied_services.add(service)
-        worker_shared_manager.save_credentials(service, shared_credentials)
+            copied_services.add(service)
+            worker_shared_manager.save_credentials(service, shared_credentials)
 
     for service in mirrored_services - copied_services:
         worker_shared_manager.delete_credentials(service)

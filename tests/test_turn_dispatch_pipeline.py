@@ -33,7 +33,7 @@ from mindroom.delivery_gateway import (
     ResponseIdentity,
     SendTextRequest,
 )
-from mindroom.dispatch_handoff import PreparedTextEvent
+from mindroom.dispatch_handoff import PendingDispatchMetadata, PreparedTextEvent
 from mindroom.dispatch_source import (
     AUTO_RESUME_MESSAGE,
     EXTERNAL_TRIGGER_SOURCE_KIND,
@@ -62,7 +62,7 @@ from mindroom.response_runner import (
 )
 from mindroom.teams import TeamIntent, TeamMode, TeamResolution
 from mindroom.text_ingress_dispatch import _run_claimed_response
-from mindroom.turn_controller import _IngressAdmissionOutcome, _PrecheckedEvent
+from mindroom.turn_controller import _IngressAdmissionOutcome, _PrecheckedEvent, _ReadyVoiceFallback
 from mindroom.turn_policy import PreparedDispatch, ResponseAction, _DispatchPlan
 from tests.bot_helpers import (
     AgentBotTestBase,
@@ -113,6 +113,89 @@ def mock_agent_user() -> AgentMatrixUser:
 
 class TestAgentBot(AgentBotTestBase):
     """Bot behavior tests moved verbatim from tests/test_multi_agent_bot.py."""
+
+    @pytest.mark.asyncio
+    async def test_voice_normalization_fallback_obeys_echo_publication_barrier(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """A normalization failure must not let a responder fallback overtake the router echo."""
+        config = self._config_for_storage(tmp_path)
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        controller = unwrap_extracted_collaborator(bot._turn_controller)
+        room = _matrix_room(user_ids=("@user:localhost",))
+        voice_event = _room_audio_event(
+            sender="@user:localhost",
+            event_id="$voice-fallback-barrier",
+            room_id=room.room_id,
+        )
+        target = MessageTarget.resolve(
+            room_id=room.room_id,
+            thread_id="$thread-root",
+            reply_to_event_id=voice_event.event_id,
+        )
+        fallback_event = PreparedTextEvent(
+            sender=voice_event.sender,
+            event_id=voice_event.event_id,
+            body="🎤 [Attached voice message]",
+            source=voice_event.source,
+        )
+        fallback_cleanup = MagicMock()
+        fallback = _ReadyVoiceFallback(
+            event=fallback_event,
+            ready=ReadyPendingEvent(
+                pending_event=PendingEvent(
+                    event=fallback_event,
+                    room=room,
+                    source_kind=VOICE_SOURCE_KIND,
+                    requester_user_id=voice_event.sender,
+                    dispatch_metadata=(
+                        PendingDispatchMetadata(
+                            kind="fallback_cleanup",
+                            payload=None,
+                            close=fallback_cleanup,
+                        ),
+                    ),
+                ),
+            ),
+        )
+
+        with (
+            patch.object(
+                controller,
+                "_normalize_voice_event_or_fallback",
+                new=AsyncMock(side_effect=RuntimeError("normalization failed")),
+            ),
+            patch.object(
+                controller,
+                "_ready_voice_fallback_event",
+                new=AsyncMock(return_value=fallback),
+            ),
+            patch.object(
+                controller.deps.visible_voice_echo,
+                "await_publication",
+                new=AsyncMock(return_value=False),
+            ) as await_publication,
+        ):
+            result = await controller._ready_voice_event(
+                room=room,
+                prechecked_event=_PrecheckedEvent(
+                    event=voice_event,
+                    requester_user_id=voice_event.sender,
+                ),
+                voice_target=target,
+                dispatch_timing=None,
+            )
+
+        assert result is None
+        await_publication.assert_awaited_once_with(
+            room=room,
+            source_event_id=voice_event.event_id,
+            requester_user_id=voice_event.sender,
+        )
+        fallback_cleanup.assert_called_once_with()
+        assert fallback.ready.pending_event.dispatch_metadata == ()
 
     @pytest.mark.asyncio
     async def test_execute_dispatch_action_sends_visible_rejection_for_unsupported_team_request(
@@ -816,14 +899,13 @@ class TestAgentBot(AgentBotTestBase):
         _wrap_extracted_collaborators(bot)
         bot.client = _make_matrix_client_mock()
         tracker = _set_turn_store_tracker(bot, MagicMock())
-        tracker.visible_echo_event_id_for_sources.side_effect = lambda source_event_ids: (
-            "$voice_echo" if tuple(source_event_ids) == ("$voice", "$text") else None
-        )
         tracker.get_turn_record.side_effect = lambda source_event_id: (
             TurnRecord.create(
                 ["$voice", "$text"],
+                response_event_id="$voice_echo",
                 completed=False,
                 visible_echo_event_id="$voice_echo",
+                visible_echo_is_fallback=False,
             )
             if source_event_id in {"$voice", "$text"}
             else None
@@ -886,6 +968,7 @@ class TestAgentBot(AgentBotTestBase):
                     response_event_id="$voice_echo",
                     source_event_prompts={"$voice": "voice prompt", "$text": "text prompt"},
                     visible_echo_event_id="$voice_echo",
+                    visible_echo_is_fallback=False,
                     requester_id="@user:localhost",
                     correlation_id="corr-visible-echo",
                 ),
@@ -1592,6 +1675,7 @@ class TestAgentBot(AgentBotTestBase):
         bot.client = _make_matrix_client_mock()
         room = MagicMock(spec=nio.MatrixRoom)
         room.room_id = "!room:localhost"
+        room.users = {"@user:localhost": MagicMock()}
         voice_event = _room_audio_event(sender="@user:localhost", event_id="$voice-followup", room_id=room.room_id)
         voice_event.source["content"]["m.relates_to"] = {"rel_type": "m.thread", "event_id": "$thread_root"}
         prepared_event = PreparedTextEvent(
@@ -1612,7 +1696,6 @@ class TestAgentBot(AgentBotTestBase):
                     ),
                 ),
             ),
-            patch.object(bot._turn_controller, "_maybe_send_visible_voice_echo", new=AsyncMock()) as mock_echo,
             patch.object(
                 bot._response_runner,
                 "active_thread_ids_for_room",
@@ -1645,7 +1728,6 @@ class TestAgentBot(AgentBotTestBase):
             ready_event = mock_admit.await_args.kwargs["ready_result"]
 
         assert isinstance(ready_event, ReadyPendingEvent)
-        mock_echo.assert_awaited_once()
         mock_reserve_waiting_human_message.assert_called_once()
         reserved_target = mock_reserve_waiting_human_message.call_args.kwargs["target"]
         assert reserved_target.resolved_thread_id == "$thread_root"

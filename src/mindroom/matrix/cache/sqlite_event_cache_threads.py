@@ -877,17 +877,29 @@ async def _append_existing_thread_event(
     )
     row = await cursor.fetchone()
     await cursor.close()
+    reflected_at = time.time()
     await write_lookup_index_rows(
         db,
         principal_id=principal_id,
         room_id=room_id,
         serialized_events=[serialized_event],
-        cached_at=time.time(),
+        cached_at=reflected_at,
         thread_id=thread_id,
     )
     if row is None:
         # Only lookup-index rows are recorded: there is no snapshot to extend, so only a full
-        # history scan can make this thread readable again.
+        # history scan can make this thread readable again. Advance the watermark anyway: a fetch
+        # already in flight when this event landed cannot represent the thread, so it must not be
+        # allowed to install a snapshot that predates the event. The runtime coordinator normally
+        # serializes same-thread refills and appends; this watermark also protects off-lane startup,
+        # prewarm, and cross-process races.
+        await _advance_snapshot_watermark(
+            db,
+            principal_id=principal_id,
+            room_id=room_id,
+            thread_id=thread_id,
+            reflected_at=reflected_at,
+        )
         return ThreadAppendOutcome.SNAPSHOT_MISSING
 
     write_sequence = (await allocate_write_sequences(db, 1))[0]
@@ -921,7 +933,7 @@ async def _append_existing_thread_event(
         principal_id=principal_id,
         room_id=room_id,
         thread_id=thread_id,
-        reflected_at=time.time(),
+        reflected_at=reflected_at,
     )
     return ThreadAppendOutcome.APPENDED
 

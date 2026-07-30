@@ -31,6 +31,7 @@ __all__ = [
     "MEMORY_EXISTING_SNIPPETS_TEMPLATE",
     "MEMORY_NO_EXISTING_SNIPPETS",
     "MIXED_PARTIAL_REPLY_HEADER",
+    "NATIVE_TOOL_SEARCH_INSTRUCTION_TEMPLATE",
     "OPENAI_COMPAT_AGENT_IDENTITY_CONTEXT_TEMPLATE",
     "OPENAI_COMPAT_HISTORY_GUIDANCE",
     "OUTPUT_REDIRECT_PROMPT",
@@ -174,6 +175,10 @@ Use load_tool(tool_name) to load one by exact name.
 Use tool_search(query) for keyword lookup across deferred tools.
 A loaded tool becomes callable once it appears in your available tools; do not call it in the same parallel tool-call batch as load_tool.
 In team conversations, each member manages its own dynamic tool state."""
+
+NATIVE_TOOL_SEARCH_INSTRUCTION_TEMPLATE = """## Deferred Tool Discovery
+Deferred capability domains available through native tool search: {tool_domains}.
+When a request may need one of these domains, search the deferred tool catalog before concluding that the capability is unavailable."""
 
 PREVIOUS_CONVERSATION_THREAD_HEADER = "Previous conversation in this thread:"
 CURRENT_MESSAGE_PROMPT_INTRO = "Current message:\n"
@@ -501,6 +506,7 @@ PROMPT_TEMPLATE_FIELDS = MappingProxyType(
         "DATETIME_CONTEXT_TEMPLATE": frozenset({"date_str", "timezone_str", "timezone_abbrev"}),
         "DELEGATE_TOOLKIT_INSTRUCTIONS_TEMPLATE": frozenset({"agent_descriptions"}),
         "DYNAMIC_TOOLING_INSTRUCTION_TEMPLATE": frozenset({"tool_catalog"}),
+        "NATIVE_TOOL_SEARCH_INSTRUCTION_TEMPLATE": frozenset({"tool_domains"}),
         "MEMORY_AUTO_FLUSH_EXTRACT_PROMPT_TEMPLATE": frozenset(
             {"no_reply_token", "existing_block", "excerpt"},
         ),

@@ -21,7 +21,7 @@ from .event_cache_events import (
 from .postgres_cursor import fetchall, fetchone, rowcount
 
 if TYPE_CHECKING:
-    from collections.abc import Collection
+    from collections.abc import Callable, Collection
 
     from psycopg import AsyncConnection
 
@@ -474,6 +474,26 @@ async def _thread_ids_for_events(
     return {str(row[0]) for row in rows}
 
 
+def last_row_per_key[RowT](rows: list[RowT], key: Callable[[RowT], str]) -> list[RowT]:
+    """Return one row per key, each at the position of its last occurrence.
+
+    ``ON CONFLICT DO UPDATE`` refuses to touch the same row twice in one statement, so batched
+    upserts must first collapse repeated keys the way the row-at-a-time loop resolved them.
+
+    Position matters as much as the value. A row that carries ``nextval`` is ordered by the
+    sequence it draws, so the collapsed list has to arrive in the order the sequential loop last
+    wrote each key -- for ``A, B, A-last`` the loop left ``A`` newer than ``B``. Assigning the key
+    its first position instead, which is what a plain dict insert does, would rank ``A`` before
+    ``B`` and diverge from SQLite whenever the timestamps tie.
+    """
+    latest: dict[str, RowT] = {}
+    for row in rows:
+        row_key = key(row)
+        latest.pop(row_key, None)
+        latest[row_key] = row
+    return list(latest.values())
+
+
 async def _reconcile_thread_root_self_rows(
     db: AsyncConnection,
     namespace: str,
@@ -482,35 +502,122 @@ async def _reconcile_thread_root_self_rows(
     candidate_root_ids: set[str],
     current_self_root_ids: set[str],
 ) -> None:
-    """Keep root self-mappings exactly while a current row still proves them."""
-    for root_id in candidate_root_ids:
-        surviving_child = await fetchone(
-            db,
-            """
+    """Keep root self-mappings exactly while a current row still proves them.
+
+    Each root's decision reads only rows whose ``thread_id`` is that root and writes only that
+    root's self row, so the roots never observe one another and resolve as one set.
+    """
+    if not candidate_root_ids:
+        return
+    # ``EXISTS`` rather than ``SELECT DISTINCT thread_id``: the semi-join stops at each root's first
+    # surviving child, the way the row-at-a-time ``LIMIT 1`` probe did, while ``DISTINCT`` has to
+    # read every row of every candidate thread before it can dedupe. This runs on every write while
+    # the principal lock is held, and long agent threads are exactly where it runs.
+    proven_rows = await fetchall(
+        db,
+        """
+        SELECT candidate.root_id
+        FROM unnest(%s::text[]) AS candidate(root_id)
+        WHERE EXISTS (
             SELECT 1
-            FROM mindroom_event_cache_event_threads
-            WHERE namespace = %s AND room_id = %s AND thread_id = %s AND event_id <> %s
-            LIMIT 1
-            """,
-            (namespace, room_id, root_id, root_id),
+            FROM mindroom_event_cache_event_threads AS child
+            WHERE child.namespace = %s
+                AND child.room_id = %s
+                AND child.thread_id = candidate.root_id
+                AND child.event_id <> candidate.root_id
         )
-        if surviving_child is not None or root_id in current_self_root_ids:
-            await db.execute(
-                """
-                INSERT INTO mindroom_event_cache_event_threads(namespace, room_id, event_id, thread_id)
-                VALUES (%s, %s, %s, %s)
-                ON CONFLICT(namespace, room_id, event_id) DO NOTHING
-                """,
-                (namespace, room_id, root_id, root_id),
-            )
-            continue
+        """,
+        (sorted(candidate_root_ids), namespace, room_id),
+    )
+    proven_root_ids = {str(row[0]) for row in proven_rows} | (candidate_root_ids & current_self_root_ids)
+    if proven_root_ids:
+        await db.execute(
+            """
+            INSERT INTO mindroom_event_cache_event_threads(namespace, room_id, event_id, thread_id)
+            SELECT %s::text, %s::text, incoming.root_id, incoming.root_id
+            FROM unnest(%s::text[]) AS incoming(root_id)
+            ON CONFLICT(namespace, room_id, event_id) DO NOTHING
+            """,
+            (namespace, room_id, sorted(proven_root_ids)),
+        )
+    unproven_root_ids = sorted(candidate_root_ids - proven_root_ids)
+    if unproven_root_ids:
+        # Match on ``event_id`` so the primary key stays usable. ``thread_id = ANY(...)`` with a
+        # bare ``event_id = thread_id`` is a column-to-column comparison the planner cannot turn
+        # into an index qual, and it degrades to a sequential scan of the whole table.
         await db.execute(
             """
             DELETE FROM mindroom_event_cache_event_threads
-            WHERE namespace = %s AND room_id = %s AND event_id = %s AND thread_id = %s
+            WHERE namespace = %s AND room_id = %s AND event_id = ANY(%s) AND thread_id = event_id
             """,
-            (namespace, room_id, root_id, root_id),
+            (namespace, room_id, unproven_root_ids),
         )
+
+
+_POINT_LOOKUP_UPSERT = """
+    INSERT INTO mindroom_event_cache_events(
+        namespace, event_id, room_id, origin_server_ts, event_json, sender, cached_at
+    )
+    SELECT
+        %s::text,
+        incoming.event_id,
+        %s::text,
+        incoming.origin_server_ts,
+        incoming.event_json,
+        incoming.sender,
+        %s::float8
+    FROM unnest(%s::text[], %s::bigint[], %s::text[], %s::text[])
+        AS incoming(event_id, origin_server_ts, event_json, sender)
+    ON CONFLICT(namespace, room_id, event_id) DO UPDATE SET
+        origin_server_ts = excluded.origin_server_ts,
+        event_json = excluded.event_json,
+        sender = excluded.sender,
+        cached_at = excluded.cached_at,
+        write_seq = nextval('mindroom_event_cache_write_seq')
+    WHERE mindroom_event_cache_events.event_json::jsonb ->> 'type' = 'm.room.encrypted'
+        OR excluded.event_json::jsonb ->> 'type' <> 'm.room.encrypted'
+    RETURNING event_id
+"""
+
+
+async def _upsert_point_lookup_rows(
+    db: AsyncConnection,
+    *,
+    namespace: str,
+    room_id: str,
+    serialized_events: list[SerializedCachedEvent],
+    cached_at: float,
+) -> list[SerializedCachedEvent]:
+    """Persist point payloads and return the accepted events in input order.
+
+    Payload quality is monotonic per event ID, so a repeated ID inside one batch must keep the
+    sequential outcome: ``ON CONFLICT DO UPDATE`` cannot touch the same row twice in a single
+    statement, and collapsing the duplicates first would change which payload survives. A batch
+    holding a repeated ID therefore degrades to one statement per event, which is what the
+    row-at-a-time path always did.
+    """
+    event_ids = [event.event_id for event in serialized_events]
+    duplicate_free_groups = (
+        [serialized_events] if len(set(event_ids)) == len(event_ids) else [[event] for event in serialized_events]
+    )
+    accepted_events: list[SerializedCachedEvent] = []
+    for group in duplicate_free_groups:
+        accepted_rows = await fetchall(
+            db,
+            _POINT_LOOKUP_UPSERT,
+            (
+                namespace,
+                room_id,
+                cached_at,
+                [event.event_id for event in group],
+                [event.origin_server_ts for event in group],
+                [event.event_json for event in group],
+                [event.sender for event in group],
+            ),
+        )
+        accepted_event_ids = {str(row[0]) for row in accepted_rows}
+        accepted_events.extend(event for event in group if event.event_id in accepted_event_ids)
+    return accepted_events
 
 
 async def write_lookup_index_rows(
@@ -531,43 +638,13 @@ async def write_lookup_index_rows(
     """
     if not serialized_events:
         return
-    accepted_events: list[SerializedCachedEvent] = []
-    for event in serialized_events:
-        accepted_row = await fetchone(
-            db,
-            """
-            INSERT INTO mindroom_event_cache_events(
-                namespace,
-                event_id,
-                room_id,
-                origin_server_ts,
-                event_json,
-                sender,
-                cached_at
-            )
-            VALUES (%s, %s, %s, %s, %s, %s, %s)
-            ON CONFLICT(namespace, room_id, event_id) DO UPDATE SET
-                origin_server_ts = excluded.origin_server_ts,
-                event_json = excluded.event_json,
-                sender = excluded.sender,
-                cached_at = excluded.cached_at,
-                write_seq = nextval('mindroom_event_cache_write_seq')
-            WHERE mindroom_event_cache_events.event_json::jsonb ->> 'type' = 'm.room.encrypted'
-                OR excluded.event_json::jsonb ->> 'type' <> 'm.room.encrypted'
-            RETURNING event_id
-            """,
-            (
-                namespace,
-                event.event_id,
-                room_id,
-                event.origin_server_ts,
-                event.event_json,
-                event.sender,
-                cached_at,
-            ),
-        )
-        if accepted_row is not None:
-            accepted_events.append(event)
+    accepted_events = await _upsert_point_lookup_rows(
+        db,
+        namespace=namespace,
+        room_id=room_id,
+        serialized_events=serialized_events,
+        cached_at=cached_at,
+    )
 
     accepted_event_ids = [event.event_id for event in accepted_events]
     previous_mxc_urls = await _mxc_urls_for_events(
@@ -583,18 +660,28 @@ async def write_lookup_index_rows(
         """,
         (namespace, room_id, accepted_event_ids),
     )
-    for event in accepted_events:
-        for mxc_url in event_mxc_urls(event.event):
-            await db.execute(
-                """
-                INSERT INTO mindroom_event_cache_event_mxc_references(
-                    namespace, room_id, event_id, mxc_url
-                )
-                VALUES (%s, %s, %s, %s)
-                ON CONFLICT(namespace, room_id, event_id, mxc_url) DO NOTHING
-                """,
-                (namespace, room_id, event.event_id, mxc_url),
+    mxc_reference_rows = list(
+        dict.fromkeys(
+            (event.event_id, mxc_url) for event in accepted_events for mxc_url in event_mxc_urls(event.event)
+        ),
+    )
+    if mxc_reference_rows:
+        await db.execute(
+            """
+            INSERT INTO mindroom_event_cache_event_mxc_references(
+                namespace, room_id, event_id, mxc_url
             )
+            SELECT %s::text, %s::text, incoming.event_id, incoming.mxc_url
+            FROM unnest(%s::text[], %s::text[]) AS incoming(event_id, mxc_url)
+            ON CONFLICT(namespace, room_id, event_id, mxc_url) DO NOTHING
+            """,
+            (
+                namespace,
+                room_id,
+                [event_id for event_id, _mxc_url in mxc_reference_rows],
+                [mxc_url for _event_id, mxc_url in mxc_reference_rows],
+            ),
+        )
     await _delete_orphaned_mxc_text(db, namespace, room_id, mxc_urls=previous_mxc_urls)
 
     await db.execute(
@@ -604,19 +691,27 @@ async def write_lookup_index_rows(
         """,
         (namespace, room_id, accepted_event_ids),
     )
-    edit_rows = event_edit_rows(room_id, accepted_events)
-    for row in edit_rows:
+    edit_rows = last_row_per_key(event_edit_rows(room_id, accepted_events), lambda row: row.edit_event_id)
+    if edit_rows:
         await db.execute(
             """
             INSERT INTO mindroom_event_cache_event_edits(
                 namespace, edit_event_id, room_id, original_event_id, origin_server_ts
             )
-            VALUES (%s, %s, %s, %s, %s)
+            SELECT %s::text, incoming.edit_event_id, %s::text, incoming.original_event_id, incoming.origin_server_ts
+            FROM unnest(%s::text[], %s::text[], %s::bigint[])
+                AS incoming(edit_event_id, original_event_id, origin_server_ts)
             ON CONFLICT(namespace, room_id, edit_event_id) DO UPDATE SET
                 original_event_id = excluded.original_event_id,
                 origin_server_ts = excluded.origin_server_ts
             """,
-            (namespace, row.edit_event_id, row.room_id, row.original_event_id, row.origin_server_ts),
+            (
+                namespace,
+                room_id,
+                [row.edit_event_id for row in edit_rows],
+                [row.original_event_id for row in edit_rows],
+                [row.origin_server_ts for row in edit_rows],
+            ),
         )
 
     thread_index_events = serialized_events if thread_id is not None else accepted_events
@@ -635,17 +730,26 @@ async def write_lookup_index_rows(
         """,
         (namespace, room_id, thread_index_event_ids),
     )
-    if thread_rows:
-        for row in thread_rows:
-            await db.execute(
-                """
-                INSERT INTO mindroom_event_cache_event_threads(namespace, room_id, event_id, thread_id)
-                VALUES (%s, %s, %s, %s)
-                ON CONFLICT(namespace, room_id, event_id) DO UPDATE SET
-                    thread_id = excluded.thread_id
-                """,
-                (namespace, row.room_id, row.event_id, row.thread_id),
-            )
+    # A root self-row can repeat an event ID already mapped to another thread, and the
+    # row-at-a-time upsert let the last row win. Only the last row per event ID is sent; the
+    # untrimmed rows still drive root reconciliation below.
+    inserted_thread_rows = last_row_per_key(thread_rows, lambda row: row.event_id)
+    if inserted_thread_rows:
+        await db.execute(
+            """
+            INSERT INTO mindroom_event_cache_event_threads(namespace, room_id, event_id, thread_id)
+            SELECT %s::text, %s::text, incoming.event_id, incoming.thread_id
+            FROM unnest(%s::text[], %s::text[]) AS incoming(event_id, thread_id)
+            ON CONFLICT(namespace, room_id, event_id) DO UPDATE SET
+                thread_id = excluded.thread_id
+            """,
+            (
+                namespace,
+                room_id,
+                [row.event_id for row in inserted_thread_rows],
+                [row.thread_id for row in inserted_thread_rows],
+            ),
+        )
     await _reconcile_thread_root_self_rows(
         db,
         namespace,
@@ -815,15 +919,17 @@ async def _record_redacted_events(
     event_ids: list[str],
 ) -> None:
     """Persist durable tombstones for redacted event IDs."""
-    for event_id in event_ids:
-        await db.execute(
-            """
-            INSERT INTO mindroom_event_cache_redacted_events(namespace, room_id, event_id)
-            VALUES (%s, %s, %s)
-            ON CONFLICT(namespace, room_id, event_id) DO NOTHING
-            """,
-            (namespace, room_id, event_id),
-        )
+    if not event_ids:
+        return
+    await db.execute(
+        """
+        INSERT INTO mindroom_event_cache_redacted_events(namespace, room_id, event_id)
+        SELECT %s::text, %s::text, incoming.event_id
+        FROM unnest(%s::text[]) AS incoming(event_id)
+        ON CONFLICT(namespace, room_id, event_id) DO NOTHING
+        """,
+        (namespace, room_id, list(dict.fromkeys(event_ids))),
+    )
 
 
 async def _redacted_event_ids_for_candidates(

@@ -707,13 +707,17 @@ async def test_strict_thread_history_uses_no_stale_fetch_without_dispatch_timeou
     client = MagicMock()
     conversation_cache = _conversation_cache_for_thread_reads(tmp_path, event_cache, client=client)
 
-    coordinator = MagicMock()
-    coordinator.wait_for_thread_idle = AsyncMock(return_value=None)
+    coordinator = EventCacheWriteCoordinator(logger=conversation_cache.logger)
     conversation_cache.runtime.event_cache_write_coordinator = coordinator
     fetched_history = thread_history_result([], is_full_history=True)
 
     try:
         with (
+            patch.object(
+                coordinator,
+                "wait_for_thread_idle",
+                wraps=coordinator.wait_for_thread_idle,
+            ) as wait_for_thread_idle,
             patch(
                 "mindroom.matrix.conversation_cache.refresh_thread_history_from_source",
                 AsyncMock(return_value=fetched_history),
@@ -729,10 +733,11 @@ async def test_strict_thread_history_uses_no_stale_fetch_without_dispatch_timeou
                 caller_label="dispatch_post_lock_refresh",
             )
     finally:
+        await coordinator.close()
         await event_cache.close()
 
     assert result.is_full_history is True
-    coordinator.wait_for_thread_idle.assert_awaited_once()
+    wait_for_thread_idle.assert_awaited_once()
     refresh_thread_history.assert_awaited_once()
     assert refresh_thread_history.await_args.kwargs["allow_stale_fallback"] is False
 
@@ -829,6 +834,140 @@ async def test_strict_source_refresh_bypasses_usable_cache(
     )
     assert refresh_thread_history.await_args.kwargs["allow_stale_fallback"] is False
     cache_thread_history.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_startup_source_refresh_does_not_join_foreground_refill(
+    tmp_path: Path,
+) -> None:
+    """Startup refresh should finish without joining a blocked foreground refill."""
+    event_cache = SqliteEventCache(tmp_path / "event_cache.db")
+    await event_cache.initialize()
+    client = object()
+    conversation_cache = _conversation_cache_for_thread_reads(tmp_path, event_cache, client=client)
+    coordinator = EventCacheWriteCoordinator(logger=conversation_cache.logger)
+    conversation_cache.runtime.event_cache_write_coordinator = coordinator
+    first_source_call_started = asyncio.Event()
+    release_first_source_call = asyncio.Event()
+    second_source_call_started = asyncio.Event()
+    source_call_count = 0
+    foreground_refill: asyncio.Task[ThreadHistoryResult] | None = None
+    startup_refresh: asyncio.Task[ThreadHistoryResult] | None = None
+    foreground_history = thread_history_result(
+        [ResolvedVisibleMessage.synthetic(sender="@bot:localhost", body="Foreground", event_id="$foreground")],
+        is_full_history=True,
+    )
+    startup_history = thread_history_result(
+        [ResolvedVisibleMessage.synthetic(sender="@bot:localhost", body="Startup", event_id="$startup")],
+        is_full_history=True,
+        diagnostics={"thread_read_source": "homeserver"},
+    )
+
+    async def source_refresh(*_args: object, **kwargs: object) -> ThreadHistoryResult:
+        nonlocal source_call_count
+        source_call_count += 1
+        if source_call_count == 1:
+            first_source_call_started.set()
+            await release_first_source_call.wait()
+            return foreground_history
+        assert kwargs["hydrate_sidecars"] is True
+        assert kwargs["allow_stale_fallback"] is False
+        assert kwargs["caller_label"] == "startup_auto_resume_freshness"
+        second_source_call_started.set()
+        return startup_history
+
+    try:
+        with patch(
+            "mindroom.matrix.conversation_cache.refresh_thread_history_from_source",
+            AsyncMock(side_effect=source_refresh),
+        ):
+            foreground_refill = asyncio.create_task(
+                conversation_cache._refill_thread_from_client(
+                    "!room:localhost",
+                    "$thread:localhost",
+                    cache_reject_diagnostics=None,
+                    wants_full_history=True,
+                    allows_stale_fallback=False,
+                ),
+            )
+            await asyncio.wait_for(first_source_call_started.wait(), timeout=1.0)
+            foreground_single_flight = dict(conversation_cache._refill_single_flight._in_flight)
+            assert len(foreground_single_flight) == 1
+
+            startup_refresh = asyncio.create_task(
+                conversation_cache.refresh_startup_thread_history_from_source(
+                    "!room:localhost",
+                    "$thread:localhost",
+                    caller_label="startup_auto_resume_freshness",
+                ),
+            )
+            await asyncio.wait_for(second_source_call_started.wait(), timeout=1.0)
+            startup_result = await asyncio.wait_for(startup_refresh, timeout=1.0)
+
+            assert [message.event_id for message in startup_result] == ["$startup"]
+            assert startup_result.is_full_history is True
+            assert foreground_refill.done() is False
+            assert conversation_cache._refill_single_flight._in_flight == foreground_single_flight
+
+            release_first_source_call.set()
+            foreground_result = await asyncio.wait_for(foreground_refill, timeout=1.0)
+            assert [message.event_id for message in foreground_result] == ["$foreground"]
+    finally:
+        release_first_source_call.set()
+        await asyncio.gather(
+            *(task for task in (foreground_refill, startup_refresh) if task is not None),
+            return_exceptions=True,
+        )
+        await coordinator.close()
+        await event_cache.close()
+
+
+@pytest.mark.asyncio
+async def test_cancelled_startup_source_refresh_leaves_no_shared_refill_state(
+    tmp_path: Path,
+) -> None:
+    """Cancelling startup refresh should not retain coordinator or singleflight state."""
+    event_cache = SqliteEventCache(tmp_path / "event_cache.db")
+    await event_cache.initialize()
+    conversation_cache = _conversation_cache_for_thread_reads(tmp_path, event_cache, client=object())
+    coordinator = EventCacheWriteCoordinator(logger=conversation_cache.logger)
+    conversation_cache.runtime.event_cache_write_coordinator = coordinator
+    source_call_started = asyncio.Event()
+    release_source_call = asyncio.Event()
+    startup_refresh: asyncio.Task[ThreadHistoryResult] | None = None
+
+    async def blocking_source_refresh(*_args: object, **_kwargs: object) -> ThreadHistoryResult:
+        source_call_started.set()
+        await release_source_call.wait()
+        return thread_history_result([], is_full_history=True)
+
+    try:
+        with patch(
+            "mindroom.matrix.conversation_cache.refresh_thread_history_from_source",
+            AsyncMock(side_effect=blocking_source_refresh),
+        ):
+            startup_refresh = asyncio.create_task(
+                conversation_cache.refresh_startup_thread_history_from_source(
+                    "!room:localhost",
+                    "$thread:localhost",
+                    caller_label="startup_auto_resume_freshness",
+                ),
+            )
+            await asyncio.wait_for(source_call_started.wait(), timeout=1.0)
+            startup_refresh.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(startup_refresh, timeout=1.0)
+
+            assert conversation_cache._refill_single_flight._in_flight == {}
+            assert coordinator._room_states == {}
+    finally:
+        release_source_call.set()
+        await asyncio.gather(
+            *(task for task in (startup_refresh,) if task is not None),
+            return_exceptions=True,
+        )
+        await coordinator.close()
+        await event_cache.close()
 
 
 @pytest.mark.asyncio
@@ -1529,6 +1668,142 @@ async def test_duplicate_ids_in_one_batch_converge_on_clear_payload(
     assert cached_event["content"]["body"] == "decrypted"
     assert await event_cache.get_thread_id_for_event(room_id, event_id) == thread_root_id
     assert await event_cache.get_thread_id_for_event(room_id, thread_root_id) == thread_root_id
+
+
+@pytest.mark.asyncio
+async def test_chained_thread_relations_keep_the_middle_event_as_its_own_root(
+    event_cache: ConversationEventCache,
+) -> None:
+    """An event that is both a thread child and another event's root maps to itself.
+
+    The derived index rows repeat that middle event ID under two different thread IDs: once as a
+    child of the outer root, and once as the self row every learned root gets. A batched upsert has
+    to collapse the repeat to the row the sequential write left behind, because
+    ``ON CONFLICT DO UPDATE`` cannot touch the same row twice in one statement.
+    """
+    room_id = "!room:localhost"
+    child_id = "$child:localhost"
+    middle_id = "$middle:localhost"
+    outer_id = "$outer:localhost"
+
+    await event_cache.store_events_batch(
+        [
+            (child_id, room_id, _clear_payload(child_id, body="child", thread_root_id=middle_id)),
+            (middle_id, room_id, _clear_payload(middle_id, body="middle", thread_root_id=outer_id)),
+        ],
+    )
+
+    assert await event_cache.get_thread_id_for_event(room_id, child_id) == middle_id
+    assert await event_cache.get_thread_id_for_event(room_id, middle_id) == middle_id
+    assert await event_cache.get_thread_id_for_event(room_id, outer_id) == outer_id
+
+
+@pytest.mark.asyncio
+async def test_repeated_edit_ids_in_one_batch_keep_the_last_edit_index_row(
+    event_cache: ConversationEventCache,
+) -> None:
+    """A batch naming one edit event twice indexes that edit once, keeping the last payload.
+
+    Both occurrences are accepted -- clear content never loses to clear content -- so the derived
+    edit-index rows repeat the same ``edit_event_id``, which a batched upsert has to collapse.
+    """
+    room_id = "!room:localhost"
+    original_id = "$original:localhost"
+    edit_id = "$edit:localhost"
+
+    await event_cache.store_events_batch(
+        [(original_id, room_id, _clear_payload(original_id, body="original"))],
+    )
+    await event_cache.store_events_batch(
+        [
+            (edit_id, room_id, _clear_payload(edit_id, body="first edit", edit_of=original_id)),
+            (edit_id, room_id, _clear_payload(edit_id, body="second edit", edit_of=original_id)),
+        ],
+    )
+
+    latest_edit = await event_cache.get_latest_edit(room_id, original_id)
+    assert latest_edit is not None
+    assert latest_edit["event_id"] == edit_id
+    assert latest_edit["content"]["m.new_content"]["body"] == "second edit"
+
+
+@pytest.mark.asyncio
+async def test_one_write_settles_proven_and_unproven_thread_roots_together(
+    event_cache: ConversationEventCache,
+) -> None:
+    """Re-parenting the only child proves the new root and unproves the old one in one write."""
+    room_id = "!room:localhost"
+    child_id = "$child:localhost"
+    old_root_id = "$old-root:localhost"
+    new_root_id = "$new-root:localhost"
+
+    await event_cache.store_events_batch(
+        [(child_id, room_id, _clear_payload(child_id, body="first", thread_root_id=old_root_id))],
+    )
+    assert await event_cache.get_thread_id_for_event(room_id, old_root_id) == old_root_id
+
+    await event_cache.store_events_batch(
+        [(child_id, room_id, _clear_payload(child_id, body="reparented", thread_root_id=new_root_id))],
+    )
+
+    assert await event_cache.get_thread_id_for_event(room_id, child_id) == new_root_id
+    assert await event_cache.get_thread_id_for_event(room_id, new_root_id) == new_root_id
+    assert await event_cache.get_thread_id_for_event(room_id, old_root_id) is None
+
+
+@pytest.mark.asyncio
+async def test_repeated_event_in_a_snapshot_keeps_its_last_position_on_every_backend(
+    event_cache: ConversationEventCache,
+) -> None:
+    """A snapshot of ``A, B, A-last`` reads back as ``B, A`` on both backends.
+
+    Membership rows are ordered by ``origin_server_ts`` and then by the sequence value each write
+    draws, so when the timestamps tie the write order decides the read order. The sequential loop
+    rewrote ``A`` after ``B``, leaving ``A`` newer. A batched upsert that collapsed the repeat to
+    ``A``'s *first* position would draw ``A``'s sequence value before ``B``'s and silently reverse
+    the pair against SQLite.
+    """
+    room_id = "!room:localhost"
+    thread_id = "$root:localhost"
+    first_id = "$a:localhost"
+    second_id = "$b:localhost"
+    tied_ts = 1000
+
+    await _replace_thread(
+        event_cache,
+        room_id,
+        thread_id,
+        [
+            _clear_payload(thread_id, body="root", origin_server_ts=tied_ts),
+            _clear_payload(first_id, body="a-first", thread_root_id=thread_id, origin_server_ts=tied_ts),
+            _clear_payload(second_id, body="b", thread_root_id=thread_id, origin_server_ts=tied_ts),
+            _clear_payload(first_id, body="a-last", thread_root_id=thread_id, origin_server_ts=tied_ts),
+        ],
+    )
+
+    thread_events = await event_cache.get_thread_events(room_id, thread_id)
+    assert thread_events is not None
+    assert [event["event_id"] for event in thread_events] == [thread_id, second_id, first_id]
+    assert thread_events[-1]["content"]["body"] == "a-last"
+
+
+@pytest.mark.asyncio
+async def test_repeated_event_in_one_thread_snapshot_binds_the_thread_once(
+    event_cache: ConversationEventCache,
+) -> None:
+    """A snapshot naming one event twice binds it to the thread exactly once."""
+    room_id = "!room:localhost"
+    thread_id = "$thread-root:localhost"
+    duplicated_id = "$duplicated:localhost"
+    root_source = _clear_payload(thread_id, body="root", origin_server_ts=1000)
+    reply = _clear_payload(duplicated_id, body="reply", thread_root_id=thread_id, origin_server_ts=1100)
+
+    await _replace_thread(event_cache, room_id, thread_id, [root_source, reply, reply])
+
+    thread_events = await event_cache.get_thread_events(room_id, thread_id)
+    assert thread_events is not None
+    assert [event["event_id"] for event in thread_events] == [thread_id, duplicated_id]
+    assert await event_cache.get_thread_id_for_event(room_id, duplicated_id) == thread_id
 
 
 @pytest.mark.asyncio

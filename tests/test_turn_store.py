@@ -1508,6 +1508,76 @@ def test_terminal_turn_can_replace_a_provisional_source_identity(tmp_path: Path)
     assert first_record.visible_echo_event_id == "$echo"
 
 
+def test_visible_echo_is_finalized_only_after_replacement_acknowledgement(tmp_path: Path) -> None:
+    """A posted placeholder should not become a terminal router outcome before its edit succeeds."""
+    store = _store(tmp_path)
+    store.record_visible_echo("$event", "$echo")
+
+    assert store.finalized_visible_echo_for_sources(("$event",)) is None
+
+    store.record_finalized_visible_echo("$event", "$echo", is_fallback=False)
+
+    record = store.get_turn_record("$event")
+    assert record is not None
+    assert not record.completed
+    assert record.response_event_id == "$echo"
+    assert store.finalized_visible_echo_for_sources(("$event",)) == "$echo"
+    finalized = store.finalized_visible_echo("$event")
+    assert finalized is not None
+    assert finalized.event_id == "$echo"
+    assert finalized.is_fallback is False
+
+
+def test_visible_echo_finalization_requires_tracked_placeholder(tmp_path: Path) -> None:
+    """An acknowledgement alone must not create a finalized visible echo."""
+    store = _store(tmp_path)
+
+    store.record_finalized_visible_echo("$event", "$echo", is_fallback=False)
+
+    assert store.get_turn_record("$event") is None
+
+
+def test_visible_echo_finalization_cannot_overwrite_terminal_outcome(tmp_path: Path) -> None:
+    """A late edit acknowledgement should preserve a concurrently completed turn."""
+    store = _store(tmp_path)
+    store.record_visible_echo("$event", "$echo")
+    store.record_turn(TurnRecord.create(["$event"], response_event_id="$response"))
+
+    store.record_finalized_visible_echo("$event", "$echo", is_fallback=False)
+
+    record = store.get_turn_record("$event")
+    assert record is not None
+    assert record.completed
+    assert record.response_event_id == "$response"
+    finalized = store.finalized_visible_echo("$event")
+    assert finalized is not None
+    assert finalized.event_id == "$echo"
+    assert finalized.is_fallback is False
+
+
+def test_finalized_visible_echo_keeps_transcript_over_fallback(tmp_path: Path) -> None:
+    """Transcript replacement should upgrade fallback and reject later downgrade."""
+    store = _store(tmp_path)
+    store.record_visible_echo("$event", "$echo")
+
+    store.record_finalized_visible_echo("$event", "$echo", is_fallback=True)
+    fallback = store.finalized_visible_echo("$event")
+    assert fallback is not None
+    assert fallback.is_fallback is True
+
+    store.record_finalized_visible_echo("$event", "$echo", is_fallback=False)
+    transcript = store.finalized_visible_echo("$event")
+    assert transcript is not None
+    assert transcript.is_fallback is False
+
+    store.record_finalized_visible_echo("$event", "$echo", is_fallback=True)
+    assert store.finalized_visible_echo("$event") == transcript
+
+    store._ledger.flush()
+    _reset_handled_turn_ledger_runtime()
+    assert _store(tmp_path).finalized_visible_echo("$event") == transcript
+
+
 def test_terminal_turn_rejects_conflicting_completed_canonical_source(tmp_path: Path) -> None:
     """A completed source cannot be reassigned into a different canonical turn."""
     store = _store(tmp_path)

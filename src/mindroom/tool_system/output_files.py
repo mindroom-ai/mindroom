@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, Any, Literal, cast, get_type_hints
 from agno.tools.function import Function, ToolResult
 from pydantic import BaseModel
 
+from mindroom import agno_function_patch
 from mindroom.constants import DEFAULT_TOOL_OUTPUT_AUTO_SAVE_THRESHOLD_BYTES
 from mindroom.logging_config import get_logger
 from mindroom.workspaces import resolve_relative_path_within_root_preserving_leaf
@@ -27,6 +28,8 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
 
 logger = get_logger(__name__)
+
+agno_function_patch.apply_patch()
 
 OUTPUT_PATH_ARGUMENT = "mindroom_output_path"
 _OUTPUT_PATH_ARGUMENT_DESCRIPTION = (

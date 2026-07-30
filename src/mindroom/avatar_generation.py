@@ -42,9 +42,8 @@ _ROOT_SPACE_AVATAR_NAME = "root_space"
 # mid-sentence and the mangled prompt makes the image model answer with
 # text instead of an image.
 _PROMPT_MAX_OUTPUT_TOKENS = 400
-# The image model occasionally returns no image for a valid prompt; each
-# retry regenerates the prompt (sampled at temperature), so attempts are
-# not identical.
+# The image model occasionally returns no image for a valid prompt, so retry
+# the complete prompt and image-generation request.
 _MAX_IMAGE_ATTEMPTS = 3
 
 _ROOM_PURPOSES = {
@@ -160,7 +159,6 @@ async def _generate_prompt(
         contents=user_prompt,
         config=types.GenerateContentConfig(
             system_instruction=system_prompt,
-            temperature=0.7,
             max_output_tokens=_PROMPT_MAX_OUTPUT_TOKENS,
         ),
     )
