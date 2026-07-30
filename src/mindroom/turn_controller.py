@@ -2362,6 +2362,18 @@ class TurnController:
                 )
                 raise
             await self.deps.visible_voice_echo.finish(visible_echo, fallback.event)
+            publication_allowed = False
+            try:
+                publication_allowed = await self.deps.visible_voice_echo.await_publication(
+                    room=room,
+                    source_event_id=event.event_id,
+                    requester_user_id=prechecked_event.requester_user_id,
+                )
+            finally:
+                if not publication_allowed:
+                    close_pending_event_metadata_once([fallback.ready.pending_event])
+            if not publication_allowed:
+                return None
             return fallback.ready
         finally:
             self.deps.visible_voice_echo.abandon_unsettled(visible_echo)
