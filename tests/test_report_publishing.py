@@ -94,7 +94,8 @@ def _make_context(
             "MINDROOM_PUBLIC_URL": public_url,
             **(
                 trusted_auth_env
-                or {
+                if trusted_auth_env is not None
+                else {
                     "MINDROOM_TRUSTED_UPSTREAM_AUTH_ENABLED": "true",
                     "MINDROOM_TRUSTED_UPSTREAM_USER_ID_HEADER": "X-Trusted-User",
                     "MINDROOM_TRUSTED_UPSTREAM_MATRIX_USER_ID_HEADER": "X-Trusted-Matrix-User",
@@ -775,10 +776,25 @@ def test_public_disable_does_not_block_existing_report_revocation(tmp_path: Path
     assert revoked["access_policy"] == "public"
 
 
-def test_report_publishing_tool_rejects_origin_room_without_browser_auth(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("trusted_auth", "trusted_auth_env"),
+    [
+        pytest.param(False, None, id="disabled"),
+        pytest.param(True, {}, id="enabled-with-empty-environment"),
+    ],
+)
+def test_report_publishing_tool_rejects_origin_room_without_browser_auth(
+    tmp_path: Path,
+    trusted_auth: bool,
+    trusted_auth_env: dict[str, str] | None,
+) -> None:
     """Protected creation should fail before copying when viewer auth is unavailable."""
     report_tool = ReportPublishingTools()
-    context = _make_context(tmp_path)
+    context = _make_context(
+        tmp_path,
+        trusted_auth=trusted_auth,
+        trusted_auth_env=trusted_auth_env,
+    )
 
     with tool_runtime_context(context):
         rejected = _tool_payload(

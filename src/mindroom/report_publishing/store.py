@@ -39,7 +39,7 @@ _REQUIRED_PUBLISHED_REPORT_FIELDS = frozenset(
 
 
 class ReportPublishingError(ValueError):
-    """Raised when a public report publishing operation is invalid."""
+    """Raised when a report publishing operation is invalid."""
 
 
 @dataclass(frozen=True)
@@ -146,7 +146,7 @@ class ReportPublishingStore:
         return report
 
     def report_asset_path(self, report: PublishedReport, asset_path: str | None = None) -> Path:
-        """Return one served file or static-site asset path for a loaded public report."""
+        """Return one served file or static-site asset path for a loaded report."""
         if report.is_static_site:
             site_root = self._artifact_path_from_relative(report.artifact_path)
             try:
@@ -154,14 +154,14 @@ class ReportPublishingStore:
             except StaticSiteSnapshotError as exc:
                 raise ReportPublishingError(str(exc)) from exc
         if report.artifact_kind != _ARTIFACT_KIND_HTML_FILE:
-            msg = f"Public report '{report.slug}' artifact kind is invalid."
+            msg = f"Published report '{report.slug}' artifact kind is invalid."
             raise ReportPublishingError(msg)
         if asset_path not in (None, ""):
-            msg = f"Public report '{report.slug}' does not contain static assets."
+            msg = f"Published report '{report.slug}' does not contain static assets."
             raise ReportPublishingError(msg)
         report_path = self._artifact_path_from_relative(report.artifact_path)
         if not report_path.is_file():
-            msg = f"Public report '{report.slug}' artifact was not found."
+            msg = f"Published report '{report.slug}' artifact was not found."
             raise ReportPublishingError(msg)
         return report_path
 

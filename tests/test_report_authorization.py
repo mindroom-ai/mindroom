@@ -341,6 +341,68 @@ async def test_success_cache_coalesces_concurrent_checks() -> None:
 
 
 @pytest.mark.asyncio
+async def test_success_cache_creator_cancellation_does_not_cancel_shared_check() -> None:
+    """Cancelling the first waiter must not cancel a check used by another waiter."""
+    cache = SuccessfulReportAuthorizationCache()
+    key = OriginRoomAuthorizationKey("!room:localhost", "@alice:localhost", "general", "@general:localhost")
+    check_started = asyncio.Event()
+    release_check = asyncio.Event()
+    calls = 0
+
+    async def check() -> ReportAuthorizationDecision:
+        nonlocal calls
+        calls += 1
+        check_started.set()
+        await release_check.wait()
+        return ReportAuthorizationDecision(ReportAuthorizationReason.AUTHORIZED)
+
+    creator = asyncio.create_task(cache.authorize(key, check))
+    await check_started.wait()
+    creator.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await creator
+
+    sibling = asyncio.create_task(cache.authorize(key, check))
+    await asyncio.sleep(0)
+    release_check.set()
+    decision = await sibling
+
+    assert decision.authorized is True
+    assert calls == 1
+
+
+@pytest.mark.asyncio
+async def test_success_cache_sibling_cancellation_does_not_cancel_shared_check() -> None:
+    """Cancelling a joined waiter must not cancel the creator's check."""
+    cache = SuccessfulReportAuthorizationCache()
+    key = OriginRoomAuthorizationKey("!room:localhost", "@alice:localhost", "general", "@general:localhost")
+    check_started = asyncio.Event()
+    release_check = asyncio.Event()
+    calls = 0
+
+    async def check() -> ReportAuthorizationDecision:
+        nonlocal calls
+        calls += 1
+        check_started.set()
+        await release_check.wait()
+        return ReportAuthorizationDecision(ReportAuthorizationReason.AUTHORIZED)
+
+    creator = asyncio.create_task(cache.authorize(key, check))
+    await check_started.wait()
+    sibling = asyncio.create_task(cache.authorize(key, check))
+    await asyncio.sleep(0)
+
+    sibling.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await sibling
+    release_check.set()
+    decision = await creator
+
+    assert decision.authorized is True
+    assert calls == 1
+
+
+@pytest.mark.asyncio
 async def test_success_cache_is_bounded_and_never_caches_backend_errors() -> None:
     """Cache should evict old success and retry unavailable backends."""
     cache = SuccessfulReportAuthorizationCache(max_entries=2)

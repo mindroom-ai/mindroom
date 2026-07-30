@@ -90,26 +90,28 @@ class SuccessfulReportAuthorizationCache:
             del self._successful[key]
 
         task = self._in_flight.get(key)
-        owns_task = task is None
         if task is None:
-            task = asyncio.create_task(check())
+            task = asyncio.create_task(self._run_check(key, check))
             self._in_flight[key] = task
+        return await asyncio.shield(task)
+
+    async def _run_check(
+        self,
+        key: OriginRoomAuthorizationKey,
+        check: Callable[[], Coroutine[Any, Any, ReportAuthorizationDecision]],
+    ) -> ReportAuthorizationDecision:
+        """Own one authoritative check through cache update and cleanup."""
         try:
-            decision = await task
+            decision = await check()
+            if decision.authorized:
+                self._successful[key] = self._monotonic() + self._ttl_seconds
+                self._successful.move_to_end(key)
+                while len(self._successful) > self._max_entries:
+                    self._successful.popitem(last=False)
+            return decision
         finally:
-            if owns_task:
+            if self._in_flight.get(key) is asyncio.current_task():
                 self._in_flight.pop(key, None)
-
-        if decision.authorized:
-            self._successful[key] = self._monotonic() + self._ttl_seconds
-            self._successful.move_to_end(key)
-            while len(self._successful) > self._max_entries:
-                self._successful.popitem(last=False)
-        return decision
-
-    def clear(self) -> None:
-        """Drop cached successful decisions."""
-        self._successful.clear()
 
     @property
     def size(self) -> int:
