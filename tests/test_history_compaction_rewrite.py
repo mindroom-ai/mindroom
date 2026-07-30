@@ -21,7 +21,7 @@ from mindroom.config.models import CompactionOverrideConfig
 from mindroom.constants import (
     DEFAULT_COMPACTION_TIMEOUT_SECONDS,
 )
-from mindroom.error_handling import ModelSafeguardRefusalError
+from mindroom.error_handling import MODEL_SAFEGUARD_REFUSAL_MESSAGE, ModelSafeguardRefusalError
 from mindroom.history.compaction import (
     _build_summary_input,
     _emit_compaction_hook,
@@ -310,7 +310,7 @@ async def test_rewrite_switches_to_fallback_and_uses_it_for_later_chunks(tmp_pat
     fallback = FakeModel(id="fallback-model-id", provider="fake")
     summary_mock = AsyncMock(
         side_effect=[
-            ModelSafeguardRefusalError(message="Vertex Claude returned stop_reason=refusal"),
+            ModelSafeguardRefusalError(message=MODEL_SAFEGUARD_REFUSAL_MESSAGE),
             SessionSummary(summary="first chunk summary", updated_at=datetime.now(UTC)),
             SessionSummary(summary="merged summary", updated_at=datetime.now(UTC)),
         ],
@@ -378,7 +378,7 @@ async def test_rewrite_propagates_fallback_refusal_without_persisting(tmp_path: 
     storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
     working_session = _session("session-1", runs=[_completed_run("run-1")])
     summary_mock = AsyncMock(
-        side_effect=ModelSafeguardRefusalError(message="Vertex Claude returned stop_reason=refusal"),
+        side_effect=ModelSafeguardRefusalError(message=MODEL_SAFEGUARD_REFUSAL_MESSAGE),
     )
     retry_sleep = AsyncMock()
 
@@ -465,7 +465,7 @@ async def test_rewrite_retries_transient_provider_error_with_same_input_and_one_
     ("error", "expected_attempts", "expected_delay"),
     [
         pytest.param(
-            ModelSafeguardRefusalError(message="Vertex Claude returned stop_reason=refusal"),
+            ModelSafeguardRefusalError(message=MODEL_SAFEGUARD_REFUSAL_MESSAGE),
             1,
             False,
             id="unshrinkable-refusal",

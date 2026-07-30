@@ -99,7 +99,7 @@ The override changes only the calls-enabled agent's LLM selection, while STT, TT
 models:
   chat:
     provider: anthropic
-    id: claude-opus-4-8
+    id: claude-opus-5
   call_fast:
     provider: anthropic
     id: claude-haiku-4-5

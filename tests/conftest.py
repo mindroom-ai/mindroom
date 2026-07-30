@@ -43,6 +43,7 @@ import mindroom.bot  # noqa: F401
 from mindroom.agent_storage import get_agent_session, get_team_session
 from mindroom.ai import ResponseTurnContext
 from mindroom.bot import AgentBot, TeamBot
+from mindroom.coalescing import CoalescingDrainResult
 from mindroom.config.main import Config, load_config
 from mindroom.constants import RuntimePaths, resolve_runtime_paths, safe_replace
 from mindroom.conversation_resolver import DispatchContextResult, MessageContext
@@ -91,7 +92,7 @@ from mindroom.turn_controller import TurnController, _DispatchPreparation, _Repl
 from mindroom.turn_origin import TurnOrigin, classify_turn_origin
 from mindroom.turn_policy import PreparedDispatch, TurnPolicy
 from mindroom.turn_store import TurnStore
-from mindroom.visible_voice_echo import VisibleVoiceEchoLifecycle
+from mindroom.visible_voice_echo import VisibleVoiceEchoLifecycle, _reset_visible_voice_echo_barriers
 from tests.identity_helpers import persist_entity_accounts
 
 if TYPE_CHECKING:
@@ -169,6 +170,7 @@ __all__ = [
     "install_generate_response_mock",
     "install_runtime_cache_support",
     "install_send_response_mock",
+    "install_shutdown_drain_mocks",
     "load_config_yaml",
     "make_conversation_cache_mock",
     "make_event_cache_mock",
@@ -1404,6 +1406,24 @@ def patch_response_runner_module(**changes: object) -> Generator[None, None, Non
         yield
 
 
+def install_shutdown_drain_mocks(
+    bot: RuntimeBot,
+    *,
+    coalescing_drain_result: CoalescingDrainResult,
+    responses_drained: bool,
+    response_recovery_complete: bool,
+) -> None:
+    """Install exact shutdown drain outcomes through stable collaborator seams."""
+    wrap_extracted_collaborators(bot, "_coalescing_gate", "_response_runner")
+    bot._coalescing_gate.drain_all = AsyncMock(
+        return_value=coalescing_drain_result,
+    )
+    bot._response_runner.drain_inbox_responses = AsyncMock(return_value=responses_drained)
+    unwrap_extracted_collaborator(
+        bot._response_runner,
+    )._incomplete_inbox_responses_recoverable = response_recovery_complete
+
+
 def install_send_response_mock(bot: RuntimeBot, send_response: AsyncMock) -> None:
     """Route visible delivery through one target-explicit send-response mock."""
     wrap_extracted_collaborators(bot, "_delivery_gateway")
@@ -1593,6 +1613,14 @@ def _reset_model_media_capabilities() -> Generator[None, None, None]:
     reset_model_media_capability_cache()
     yield
     reset_model_media_capability_cache()
+
+
+@pytest.fixture(autouse=True)
+def _reset_voice_echo_barriers() -> Generator[None, None, None]:
+    """Keep cross-bot voice echo ordering state, and its loop bindings, per test."""
+    _reset_visible_voice_echo_barriers()
+    yield
+    _reset_visible_voice_echo_barriers()
 
 
 @pytest.fixture(autouse=True)

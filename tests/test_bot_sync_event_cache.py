@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, Mock, call, patch
 
@@ -19,6 +20,12 @@ from mindroom.matrix.cache.sqlite_event_cache import SqliteEventCache
 from mindroom.matrix.cache.thread_cache_state import ThreadAppendOutcome
 from mindroom.matrix.cache.write_coordinator import EventCacheWriteCoordinator
 from mindroom.matrix.client import PermanentMatrixStartupError
+from mindroom.matrix.health import (
+    get_matrix_sync_cache_write_progress,
+    get_matrix_sync_health_snapshot,
+    mark_matrix_sync_success,
+    reset_matrix_sync_health,
+)
 from mindroom.matrix.sync_certification import SyncCacheWriteResult, SyncCheckpoint, SyncTrustState
 from mindroom.matrix.sync_tokens import load_sync_checkpoint
 from mindroom.matrix.users import AgentMatrixUser
@@ -370,6 +377,96 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
                 await asyncio.gather(response_task, return_exceptions=True)
 
         assert _load_sync_token_value(bot.storage_path, bot.agent_name) == "s_after_delayed_cache"
+
+    @pytest.mark.asyncio
+    async def test_classic_membership_write_publishes_shared_cache_progress(self, bot: AgentBot) -> None:
+        """Classic purge and join writes must publish before timeline certification."""
+        purge_started = asyncio.Event()
+        allow_purge_finish = asyncio.Event()
+        departed_room_id = "!departed:localhost"
+        joined_room_id = "!joined:localhost"
+
+        async def delayed_purge(_room_ids: object) -> None:
+            purge_started.set()
+            await allow_purge_finish.wait()
+
+        response = self._sync_response(
+            {joined_room_id: MagicMock(timeline=MagicMock(events=[]))},
+        )
+        response.rooms.leave = {departed_room_id: MagicMock()}
+        bot._first_sync_done = True
+        reset_matrix_sync_health()
+        cache_timeline = AsyncMock(return_value=SyncCacheWriteResult(complete=True))
+
+        with (
+            patch.object(bot._conversation_cache, "purge_rooms", AsyncMock(side_effect=delayed_purge)),
+            patch.object(bot._conversation_cache, "mark_room_joined", AsyncMock()) as mark_room_joined,
+            patch.object(
+                bot._conversation_cache,
+                "cache_sync_timeline_for_certification",
+                cache_timeline,
+            ),
+        ):
+            response_task = asyncio.create_task(
+                self._run_sync_response_without_startup_side_effects(bot, response),
+            )
+            try:
+                await asyncio.wait_for(purge_started.wait(), timeout=1.0)
+                progress = bot.sync_cache_write_progress()
+                cache_timeline.assert_not_awaited()
+
+                health = get_matrix_sync_health_snapshot(
+                    stale_after_seconds=0.0,
+                    cache_write_grace_seconds=600.0,
+                )
+
+                assert progress is not None
+                assert progress == get_matrix_sync_cache_write_progress(bot.agent_name)
+                assert progress.seconds_in_flight(progress.started_monotonic + 1.0) <= 600.0
+                assert health.stale_entities == ()
+
+                allow_purge_finish.set()
+                await asyncio.wait_for(response_task, timeout=1.0)
+            finally:
+                allow_purge_finish.set()
+                await asyncio.gather(response_task, return_exceptions=True)
+                reset_matrix_sync_health()
+
+        assert bot.sync_cache_write_progress() is None
+        mark_room_joined.assert_awaited_once_with(joined_room_id)
+        cache_timeline.assert_awaited_once_with(response)
+
+    @pytest.mark.asyncio
+    async def test_long_successful_cache_write_refreshes_health_on_completion(self, bot: AgentBot) -> None:
+        """A completed durable phase must not expose its old arrival time as stale."""
+        arrival_time = datetime.now(UTC) - timedelta(seconds=400)
+        completion_time = datetime.now(UTC)
+        sync_times = iter([arrival_time, completion_time])
+
+        def record_sync_progress(entity_name: str) -> datetime:
+            return mark_matrix_sync_success(entity_name, next(sync_times))
+
+        response = self._sync_response({})
+        response.rooms.leave = {}
+        bot._first_sync_done = True
+        reset_matrix_sync_health()
+        try:
+            with (
+                patch("mindroom.bot.mark_matrix_sync_success", side_effect=record_sync_progress),
+                patch.object(
+                    bot._conversation_cache,
+                    "cache_sync_timeline_for_certification",
+                    AsyncMock(return_value=SyncCacheWriteResult(complete=True)),
+                ),
+            ):
+                await self._run_sync_response_without_startup_side_effects(bot, response)
+
+            health = get_matrix_sync_health_snapshot()
+
+            assert health.stale_entities == ()
+            assert health.last_sync_time == completion_time
+        finally:
+            reset_matrix_sync_health()
 
     @pytest.mark.asyncio
     async def test_restored_first_sync_success_updates_checkpoint(self, bot: AgentBot) -> None:

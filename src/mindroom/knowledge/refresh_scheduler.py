@@ -17,10 +17,12 @@ from mindroom.embedder_health import (
     get_embedder_failure,
 )
 from mindroom.embedding_errors import extract_classified_embedder_detail
-from mindroom.knowledge.refresh_runner import (
+from mindroom.knowledge.refresh_locks import (
     is_refresh_active,
     mark_refresh_active,
     mark_refresh_inactive,
+)
+from mindroom.knowledge.refresh_runner import (
     refresh_knowledge_binding,
     refresh_knowledge_binding_in_subprocess,
 )

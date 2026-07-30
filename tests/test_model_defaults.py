@@ -55,12 +55,101 @@ def test_saas_default_config_models_match_central_defaults() -> None:
 
 def test_saas_default_uses_current_gemini_flash() -> None:
     """The SaaS default and named Flash preset should use the current Gemini Flash model."""
-    expected_model = "google/gemini-3.5-flash"
-    old_preview_model = "google/gemini-3-flash-preview"
+    expected_model = "google/gemini-3.6-flash"
+    retired_models = {
+        "google/gemini-3-flash-preview",
+        "google/gemini-3.5-flash",
+    }
 
     assert model_defaults.SAAS_MODEL_PRESETS["default"].id == expected_model
     assert model_defaults.SAAS_MODEL_PRESETS["gemini_flash"].id == expected_model
-    assert old_preview_model not in {preset.id for preset in model_defaults.SAAS_MODEL_PRESETS.values()}
+    assert retired_models.isdisjoint(preset.id for preset in model_defaults.SAAS_MODEL_PRESETS.values())
+
+
+def test_anthropic_frontier_presets_use_current_models() -> None:
+    """Every Anthropic surface should expose current Fable and Opus IDs."""
+    anthropic_alternatives = dict(model_defaults.CONFIG_INIT_MODEL_ALTERNATIVES["anthropic"])
+    bedrock_alternatives = dict(model_defaults.CONFIG_INIT_MODEL_ALTERNATIVES["bedrock_claude"])
+    openrouter_alternatives = dict(model_defaults.CONFIG_INIT_MODEL_ALTERNATIVES["openrouter"])
+    vertex_alternatives = dict(model_defaults.CONFIG_INIT_MODEL_ALTERNATIVES["vertexai_claude"])
+
+    assert anthropic_alternatives["fable"] == model_defaults.ModelPreset("anthropic", "claude-fable-5", 1_000_000)
+    assert anthropic_alternatives["opus"] == model_defaults.ModelPreset("anthropic", "claude-opus-5", 1_000_000)
+    assert model_defaults.CONFIG_INIT_MODEL_PRESETS["bedrock_claude"] == model_defaults.ModelPreset(
+        "bedrock_claude",
+        "anthropic.claude-opus-5",
+        1_000_000,
+    )
+    assert bedrock_alternatives["fable"] == model_defaults.ModelPreset(
+        "bedrock_claude",
+        "anthropic.claude-fable-5",
+        1_000_000,
+    )
+    assert openrouter_alternatives["fable"] == model_defaults.ModelPreset(
+        "openrouter",
+        "anthropic/claude-fable-5",
+        1_000_000,
+    )
+    assert openrouter_alternatives["opus"] == model_defaults.ModelPreset(
+        "openrouter",
+        "anthropic/claude-opus-5",
+        1_000_000,
+    )
+    assert vertex_alternatives["fable"] == model_defaults.ModelPreset(
+        "vertexai_claude",
+        "claude-fable-5",
+        1_000_000,
+    )
+    assert vertex_alternatives["opus"] == model_defaults.ModelPreset(
+        "vertexai_claude",
+        "claude-opus-5",
+        1_000_000,
+    )
+    assert model_defaults.SAAS_MODEL_PRESETS["fable"] == model_defaults.ModelPreset(
+        "openrouter",
+        "anthropic/claude-fable-5",
+        1_000_000,
+    )
+    assert model_defaults.SAAS_MODEL_PRESETS["opus"] == model_defaults.ModelPreset(
+        "openrouter",
+        "anthropic/claude-opus-5",
+        1_000_000,
+    )
+
+
+def test_current_google_and_openrouter_specialist_models() -> None:
+    """Google media and OpenRouter specialist presets should use current IDs."""
+    openrouter_alternatives = dict(model_defaults.CONFIG_INIT_MODEL_ALTERNATIVES["openrouter"])
+
+    assert model_defaults.GOOGLE_AVATAR_PROMPT == "gemini-3.5-flash-lite"
+    assert model_defaults.GOOGLE_AVATAR_IMAGE == "gemini-3.1-flash-image"
+    assert model_defaults.GOOGLE_IMAGE == "gemini-3.1-flash-image"
+    assert model_defaults.GOOGLE_VEO == "veo-3.1-generate-preview"
+    assert model_defaults.GOOGLE_PROVIDER_DEFAULT_SAMPLING_MODEL_SUFFIXES == (
+        "gemini-3.6-flash",
+        "gemini-3.5-flash-lite",
+    )
+    assert model_defaults.CLAUDE_PROVIDER_DEFAULT_SAMPLING_MODEL_SUFFIXES == (
+        "claude-fable-5",
+        "claude-opus-5",
+        "claude-sonnet-5",
+    )
+    assert openrouter_alternatives["gemini_flash"] == model_defaults.ModelPreset(
+        "openrouter",
+        "google/gemini-3.6-flash",
+        1_048_576,
+    )
+    assert openrouter_alternatives["gemini_lite"] == model_defaults.ModelPreset(
+        "openrouter",
+        "google/gemini-3.5-flash-lite",
+        1_048_576,
+    )
+    assert openrouter_alternatives["kimi"] == model_defaults.ModelPreset(
+        "openrouter",
+        "moonshotai/kimi-k3",
+        1_048_576,
+    )
+    assert model_defaults.DEEPSEEK_V4_PRO == "deepseek-v4-pro"
 
 
 def test_sonnet_presets_use_current_generation() -> None:
@@ -71,13 +160,15 @@ def test_sonnet_presets_use_current_generation() -> None:
     assert model_defaults.CONFIG_INIT_MODEL_PRESETS["vertexai_claude"].id == "claude-sonnet-5"
     assert model_defaults.CONFIG_INIT_MODEL_PRESETS["openrouter"].id == "anthropic/claude-sonnet-5"
     assert model_defaults.SAAS_MODEL_PRESETS["sonnet"].id == "anthropic/claude-sonnet-5"
-    assert bedrock_alternatives["sonnet"].id == "global.anthropic.claude-sonnet-5"
+    assert bedrock_alternatives["sonnet"].id == "anthropic.claude-sonnet-5"
+    assert bedrock_alternatives["haiku"].id == "anthropic.claude-haiku-4-5"
     assert "claude-sonnet-4-6" not in {
         model_defaults.CONFIG_INIT_MODEL_PRESETS["anthropic"].id,
         model_defaults.CONFIG_INIT_MODEL_PRESETS["vertexai_claude"].id,
         model_defaults.CONFIG_INIT_MODEL_PRESETS["openrouter"].id,
         model_defaults.SAAS_MODEL_PRESETS["sonnet"].id,
         bedrock_alternatives["sonnet"].id,
+        bedrock_alternatives["haiku"].id,
     }
 
 

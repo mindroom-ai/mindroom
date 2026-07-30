@@ -92,13 +92,13 @@ generate_speech("Status update complete.")
 
 ## [`gemini`]
 
-`gemini` is the Google media toolkit for image generation through Imagen and video generation through Veo.
+`gemini` is the Google media toolkit for image generation through Nano Banana and video generation through Veo.
 
 ### What It Does
 
 `gemini` exposes `generate_image(prompt)` and `generate_video(prompt)`.
-`generate_image()` uses the configured `image_generation_model`, which defaults to `imagen-3.0-generate-002`, and returns attached image bytes.
-`generate_video()` uses the configured `video_generation_model`, which defaults to `veo-2.0-generate-001`, polls until the long-running operation completes, and returns attached video artifacts.
+`generate_image()` uses the Gemini content-generation API with the configured `image_generation_model`, which defaults to Nano Banana 2 (`gemini-3.1-flash-image`), and returns attached image bytes.
+`generate_video()` uses the configured `video_generation_model`, which defaults to Veo 3.1 Preview (`veo-3.1-generate-preview`), polls until the long-running operation completes, and returns attached video artifacts.
 The current implementation requires Vertex AI mode for video generation and returns an error if `vertexai` is not enabled.
 In non-Vertex mode, the tool uses the Gemini API through `GOOGLE_API_KEY`.
 
@@ -110,8 +110,8 @@ In non-Vertex mode, the tool uses the Gemini API through `GOOGLE_API_KEY`.
 | `vertexai` | `boolean` | `no` | `false` | Use Vertex AI instead of the direct Gemini API. Required for `generate_video()`. |
 | `project_id` | `text` | `no` | `null` | Vertex project override. Falls back to `GOOGLE_CLOUD_PROJECT` when omitted. |
 | `location` | `text` | `no` | `null` | Vertex location override. Falls back to `GOOGLE_CLOUD_LOCATION` when omitted. |
-| `image_generation_model` | `text` | `no` | `imagen-3.0-generate-002` | Model used by `generate_image()`. |
-| `video_generation_model` | `text` | `no` | `veo-2.0-generate-001` | Model used by `generate_video()`. |
+| `image_generation_model` | `text` | `no` | `gemini-3.1-flash-image` | Model used by `generate_image()`. |
+| `video_generation_model` | `text` | `no` | `veo-3.1-generate-preview` | Model used by `generate_video()`. |
 | `enable_generate_image` | `boolean` | `no` | `true` | Enable `generate_image()`. |
 | `enable_generate_video` | `boolean` | `no` | `true` | Enable `generate_video()`. |
 | `all` | `boolean` | `no` | `false` | Enable both generation functions. |
@@ -126,8 +126,8 @@ agents:
           vertexai: true
           project_id: my-gcp-project
           location: us-central1
-          image_generation_model: imagen-3.0-generate-002
-          video_generation_model: veo-2.0-generate-001
+          image_generation_model: gemini-3.1-flash-image
+          video_generation_model: veo-3.1-generate-preview
 ```
 
 ```python

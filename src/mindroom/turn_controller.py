@@ -135,6 +135,7 @@ if TYPE_CHECKING:
     from mindroom.message_target import MessageTarget
     from mindroom.response_lifecycle import QueuedHumanNoticeReservation
     from mindroom.response_runner import ResponseRunner
+    from mindroom.runtime_protocols import OrchestratorRuntime
     from mindroom.sync_restart_retry import InterruptedTurnRooms
     from mindroom.tool_system.runtime_context import ToolRuntimeSupport
     from mindroom.turn_store import TurnStore
@@ -143,6 +144,47 @@ if TYPE_CHECKING:
 
 _QUEUED_NOTICE_METADATA_KIND = "queued_notice_reservation"
 _PENDING_TURN_CLAIM_METADATA_KIND = "pending_turn_claim"
+_ROUTER_TARGET_STARTING_TEXT = "That agent is still starting. Please try again shortly."
+_ROUTER_TARGET_UNAVAILABLE_TEXT = (
+    "⚠️ I couldn't determine which agent or team should help with this. "
+    "Please try mentioning an agent or team directly with @ or rephrase your request."
+)
+
+
+def _gate_router_target_readiness(
+    orchestrator: OrchestratorRuntime | None,
+    suggested_entity: str | None,
+) -> tuple[str | None, bool]:
+    """Drop a known unready or stale router selection before relay delivery."""
+    if suggested_entity is None or orchestrator is None:
+        return suggested_entity, False
+    first_sync_complete = orchestrator.entity_first_sync_complete(suggested_entity)
+    return (suggested_entity if first_sync_complete is True else None, first_sync_complete is False)
+
+
+async def _send_router_relay_after_readiness_recheck(
+    *,
+    orchestrator: OrchestratorRuntime | None,
+    delivery_gateway: DeliveryGateway,
+    selected_entity: str | None,
+    suggested_entity: str | None,
+    delivery_request: SendTextRequest,
+) -> tuple[str | None, str | None]:
+    """Recheck one sampled target immediately before sending its relay."""
+    if selected_entity is None or orchestrator is None:
+        return await delivery_gateway.send_text(delivery_request), suggested_entity
+    final_readiness = orchestrator.entity_first_sync_complete(selected_entity)
+    if final_readiness is True:
+        return await delivery_gateway.send_text(delivery_request), suggested_entity
+    fallback_extra_content = dict(delivery_request.extra_content or {})
+    fallback_extra_content.pop(ORIGINAL_SENDER_KEY, None)
+    fallback_extra_content.pop(SOURCE_KIND_KEY, None)
+    fallback_request = replace(
+        delivery_request,
+        response_text=_ROUTER_TARGET_STARTING_TEXT if final_readiness is False else _ROUTER_TARGET_UNAVAILABLE_TEXT,
+        extra_content=fallback_extra_content or None,
+    )
+    return await delivery_gateway.send_text(fallback_request), None
 
 
 def _room_level_context_event(event: TextDispatchEvent) -> TextDispatchEvent:
@@ -1364,6 +1406,11 @@ class TurnController:
             ),
         )
 
+        record_interrupted_turn, record_deferred_outcome = self._build_response_settlement_callbacks(
+            room,
+            source_event_id=source_event_id,
+            handled_turn=selection_handled_turn,
+        )
         response_event_id = await self.deps.response_runner.generate_response(
             ResponseRequest(
                 prompt=selection_payload.prompt,
@@ -1379,6 +1426,8 @@ class TurnController:
                     target=response_target,
                     source_event_ids=selection_handled_turn.indexed_event_ids,
                 ),
+                on_interrupted_response_recoverable=record_interrupted_turn,
+                on_deferred_outcome_handled=record_deferred_outcome,
             ),
         )
         if response_event_id is not None:
@@ -1469,11 +1518,16 @@ class TurnController:
                     thread_history,
                 )
 
-        if not suggested_entity:
-            response_text = (
-                "⚠️ I couldn't determine which agent or team should help with this. "
-                "Please try mentioning an agent or team directly with @ or rephrase your request."
-            )
+        selected_entity = suggested_entity
+        suggested_entity, target_starting = _gate_router_target_readiness(
+            self.deps.runtime.orchestrator,
+            suggested_entity,
+        )
+
+        if target_starting:
+            response_text = _ROUTER_TARGET_STARTING_TEXT
+        elif not suggested_entity:
+            response_text = _ROUTER_TARGET_UNAVAILABLE_TEXT
             with bound_log_context(room_id=room.room_id, thread_id=thread_id):
                 self.deps.logger.warning("Router failed to determine entity")
         else:
@@ -1533,12 +1587,17 @@ class TurnController:
             else:
                 routed_extra_content.pop(ATTACHMENT_IDS_KEY, None)
 
-        event_id = await self.deps.delivery_gateway.send_text(
-            SendTextRequest(
-                target=resolved_target,
-                response_text=response_text,
-                extra_content=routed_extra_content or None,
-            ),
+        delivery_request = SendTextRequest(
+            target=resolved_target,
+            response_text=response_text,
+            extra_content=routed_extra_content or None,
+        )
+        event_id, suggested_entity = await _send_router_relay_after_readiness_recheck(
+            orchestrator=self.deps.runtime.orchestrator,
+            delivery_gateway=self.deps.delivery_gateway,
+            selected_entity=selected_entity,
+            suggested_entity=suggested_entity,
+            delivery_request=delivery_request,
         )
         tracked_handled_turn = handled_turn or TurnRecord.create([event.event_id])
         tracked_handled_turn = replace(
@@ -1604,14 +1663,14 @@ class TurnController:
     def _build_response_settlement_callbacks(
         self,
         room: nio.MatrixRoom,
-        event: DispatchEvent,
         *,
+        source_event_id: str,
         handled_turn: TurnRecord,
     ) -> tuple[Callable[[], None], Callable[[str], None]]:
         """Build callbacks for interrupted-turn recording and deferred handled recording."""
 
         def record_interrupted_turn() -> None:
-            self.deps.interrupted_turn_rooms.register(event.event_id, room_id=room.room_id)
+            self.deps.interrupted_turn_rooms.register(source_event_id, room_id=room.room_id)
 
         def record_deferred_outcome(response_event_id: str) -> None:
             self._mark_source_events_responded(replace(handled_turn, response_event_id=response_event_id))
@@ -1711,7 +1770,7 @@ class TurnController:
 
             record_interrupted_turn, record_deferred_outcome = self._build_response_settlement_callbacks(
                 room,
-                event,
+                source_event_id=event.event_id,
                 handled_turn=handled_turn,
             )
             try:
@@ -1738,7 +1797,7 @@ class TurnController:
                                 target=dispatch.target,
                                 source_event_ids=handled_turn.indexed_event_ids,
                             ),
-                            on_sync_restart_cancelled=record_interrupted_turn,
+                            on_interrupted_response_recoverable=record_interrupted_turn,
                             on_deferred_outcome_handled=record_deferred_outcome,
                         ),
                         team_agents=action.form_team.eligible_members,
@@ -1765,7 +1824,7 @@ class TurnController:
                                 target=dispatch.target,
                                 source_event_ids=handled_turn.indexed_event_ids,
                             ),
-                            on_sync_restart_cancelled=record_interrupted_turn,
+                            on_interrupted_response_recoverable=record_interrupted_turn,
                             on_deferred_outcome_handled=record_deferred_outcome,
                         ),
                     )
@@ -2245,6 +2304,13 @@ class TurnController:
 
             await self.deps.visible_voice_echo.finish(visible_echo, normalized_event)
 
+            if not await self.deps.visible_voice_echo.await_publication(
+                room=room,
+                source_event_id=event.event_id,
+                requester_user_id=prechecked_event.requester_user_id,
+            ):
+                return None
+
             normalized_target = self.deps.resolver.build_message_target(
                 room_id=room.room_id,
                 thread_id=effective_thread_id,
@@ -2303,8 +2369,21 @@ class TurnController:
                 )
                 raise
             await self.deps.visible_voice_echo.finish(visible_echo, fallback.event)
+            publication_allowed = False
+            try:
+                publication_allowed = await self.deps.visible_voice_echo.await_publication(
+                    room=room,
+                    source_event_id=event.event_id,
+                    requester_user_id=prechecked_event.requester_user_id,
+                )
+            finally:
+                if not publication_allowed:
+                    close_pending_event_metadata_once([fallback.ready.pending_event])
+            if not publication_allowed:
+                return None
             return fallback.ready
         finally:
+            self.deps.visible_voice_echo.abandon_unsettled(visible_echo)
             if not reservation_released_or_handed_off and queued_notice_reservation is not None:
                 queued_notice_reservation.cancel()
 

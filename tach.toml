@@ -569,6 +569,7 @@ depends_on = [
     "mindroom.knowledge.availability",
     "mindroom.knowledge.file_listing",
     "mindroom.knowledge.redaction",
+    "mindroom.knowledge.refresh_locks",
     "mindroom.knowledge.refresh_runner",
     "mindroom.knowledge.status",
 ]
@@ -3596,9 +3597,19 @@ path = "mindroom.knowledge.refresh_scheduler"
 depends_on = [
     "mindroom.embedder_health",
     "mindroom.embedding_errors",
+    "mindroom.knowledge.refresh_locks",
     "mindroom.knowledge.refresh_runner",
     "mindroom.knowledge.registry",
     "mindroom.logging_config",
+]
+
+[[modules]]
+path = "mindroom.knowledge.refresh_locks"
+depends_on = ["mindroom.knowledge.registry"]
+visibility = [
+    "mindroom.api.knowledge",
+    "mindroom.knowledge.refresh_runner",
+    "mindroom.knowledge.refresh_scheduler",
 ]
 
 [[modules]]
@@ -3610,6 +3621,7 @@ depends_on = [
     "mindroom.knowledge.index_metadata",
     "mindroom.knowledge.manager",
     "mindroom.knowledge.redaction",
+    "mindroom.knowledge.refresh_locks",
     "mindroom.knowledge.registry",
     "mindroom.runtime_resolution",
     "mindroom.tool_system.worker_routing",
