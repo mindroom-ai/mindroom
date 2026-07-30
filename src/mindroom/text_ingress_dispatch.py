@@ -30,6 +30,7 @@ from mindroom.handled_turns import TurnRecord
 from mindroom.inbound_turn_normalizer import TextNormalizationRequest
 from mindroom.matrix.media import is_audio_message_event, is_matrix_media_dispatch_event
 from mindroom.matrix.rooms import is_dm_room
+from mindroom.response_admission import ResponseAdmissionRefusedError
 from mindroom.response_payload_preparation import DispatchPayloadInputs
 from mindroom.timing import (
     DispatchPipelineTiming,
@@ -492,6 +493,22 @@ async def _run_claimed_response(
         controller.deps.turn_store.release_pending_turn_claim(turn_claim)
 
 
+async def _run_admitted_router_relay(
+    controller: TurnController,
+    relay: Callable[[], Awaitable[None]],
+) -> None:
+    """Keep config application outside one router selection and relay delivery."""
+    admission_gate = controller.deps.runtime.response_admission_gate
+    while not admission_gate.admit():
+        if not await controller.deps.response_runner.wait_for_admission_or_shutdown():
+            controller.deps.runtime.mark_callback_failed()
+            raise ResponseAdmissionRefusedError
+    try:
+        await relay()
+    finally:
+        admission_gate.release()
+
+
 async def _execute_route_plan(
     controller: TurnController,
     room: nio.MatrixRoom,
@@ -526,12 +543,15 @@ async def _execute_route_plan(
         )
     if prepared.dispatch.scheduled_history_budget is not None:
         routing_kwargs["scheduled_prompt"] = prepared.event.body
-    await controller._execute_router_relay(
-        room,
-        route_event,
-        prepared.dispatch.context.thread_history,
-        prepared.dispatch.target.resolved_thread_id,
-        **routing_kwargs,
+    await _run_admitted_router_relay(
+        controller,
+        lambda: controller._execute_router_relay(
+            room,
+            route_event,
+            prepared.dispatch.context.thread_history,
+            prepared.dispatch.target.resolved_thread_id,
+            **routing_kwargs,
+        ),
     )
 
 

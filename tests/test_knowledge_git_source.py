@@ -15,6 +15,7 @@ from pathlib import Path
 
 import pytest
 
+import mindroom.knowledge.git_source as knowledge_git_source_module
 from mindroom.config.knowledge import KnowledgeGitConfig
 from mindroom.credentials import get_runtime_shared_credentials_manager
 from mindroom.knowledge.git_source import GitKnowledgeSource, GitSyncResult
@@ -59,6 +60,34 @@ def _git_manager(
     if include_extensions is not None:
         config.knowledge_bases["docs"].include_extensions = include_extensions
     return KnowledgeManager("docs", config=config, runtime_paths=runtime_paths_for(config))
+
+
+@pytest.mark.parametrize(
+    "repo_url",
+    [
+        pytest.param("ssh://git%3AS3CR3T-CANARY@example.com/org/repo.git", id="encoded-colon"),
+        pytest.param("ssh://git%253AS3CR3T-CANARY@example.com/org/repo.git", id="double-encoded-colon"),
+        pytest.param("ssh://git\uff1aS3CR3T-CANARY@example.com/org/repo.git", id="nfkc-colon"),
+    ],
+)
+def test_hidden_ssh_password_separator_is_refused_before_persistence(repo_url: str) -> None:
+    """Hidden SSH credentials must never reach the checkout's Git config."""
+    with pytest.raises(RuntimeError, match="Refusing to write an unsafe remote URL") as exc_info:
+        knowledge_git_source_module._persistable_remote_url(repo_url, "docs")
+
+    assert "S3CR3T-CANARY" not in str(exc_info.value)
+
+
+@pytest.mark.parametrize(
+    "repo_url",
+    [
+        "ssh://git@example.com/org/repo.git",
+        "ssh://git@example.com:2222/org:repo.git",
+    ],
+)
+def test_passwordless_ssh_authority_forms_remain_persistable(repo_url: str) -> None:
+    """Usernames, ports, and colons outside userinfo remain supported."""
+    assert knowledge_git_source_module._persistable_remote_url(repo_url, "docs") == repo_url
 
 
 @pytest.mark.asyncio

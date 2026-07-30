@@ -11,7 +11,7 @@ import pytest
 from agno.knowledge.document.base import Document
 from agno.knowledge.embedder.base import Embedder
 
-import mindroom.knowledge.refresh_runner as knowledge_refresh_runner
+import mindroom.knowledge.refresh_locks as knowledge_refresh_locks
 import mindroom.knowledge.registry as knowledge_registry
 import mindroom.knowledge.utils as knowledge_utils
 from mindroom.config.agent import AgentConfig
@@ -295,13 +295,13 @@ def patch_vector_store(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     monkeypatch.setattr("mindroom.knowledge.registry.create_configured_embedder", lambda *_args, **_kwargs: object())
     knowledge_registry._published_indexes.clear()
     knowledge_utils._refresh_scheduled_at.clear()
-    knowledge_refresh_runner._refresh_locks.clear()
-    knowledge_refresh_runner._active_refresh_counts.clear()
+    knowledge_refresh_locks._refresh_locks.clear()
+    knowledge_refresh_locks._active_refresh_counts.clear()
     yield
     knowledge_registry._published_indexes.clear()
     knowledge_utils._refresh_scheduled_at.clear()
-    knowledge_refresh_runner._refresh_locks.clear()
-    knowledge_refresh_runner._active_refresh_counts.clear()
+    knowledge_refresh_locks._refresh_locks.clear()
+    knowledge_refresh_locks._active_refresh_counts.clear()
     _VectorDb.collections = {}
 
 

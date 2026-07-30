@@ -43,6 +43,7 @@ import mindroom.bot  # noqa: F401
 from mindroom.agent_storage import get_agent_session, get_team_session
 from mindroom.ai import ResponseTurnContext
 from mindroom.bot import AgentBot, TeamBot
+from mindroom.coalescing import CoalescingDrainResult
 from mindroom.config.main import Config, load_config
 from mindroom.constants import RuntimePaths, resolve_runtime_paths, safe_replace
 from mindroom.conversation_resolver import DispatchContextResult, MessageContext
@@ -169,6 +170,7 @@ __all__ = [
     "install_generate_response_mock",
     "install_runtime_cache_support",
     "install_send_response_mock",
+    "install_shutdown_drain_mocks",
     "load_config_yaml",
     "make_conversation_cache_mock",
     "make_event_cache_mock",
@@ -1402,6 +1404,20 @@ def patch_response_runner_module(**changes: object) -> Generator[None, None, Non
             )
             stack.enter_context(patch(f"{module_name}.{name}", new=replacement))
         yield
+
+
+def install_shutdown_drain_mocks(
+    bot: RuntimeBot,
+    *,
+    coalescing_drain_completed: bool,
+    responses_drained: bool,
+) -> None:
+    """Install exact shutdown drain outcomes through stable collaborator seams."""
+    wrap_extracted_collaborators(bot, "_coalescing_gate", "_response_runner")
+    bot._coalescing_gate.drain_all = AsyncMock(
+        return_value=CoalescingDrainResult(completed=coalescing_drain_completed),
+    )
+    bot._response_runner.drain_inbox_responses = AsyncMock(return_value=responses_drained)
 
 
 def install_send_response_mock(bot: RuntimeBot, send_response: AsyncMock) -> None:

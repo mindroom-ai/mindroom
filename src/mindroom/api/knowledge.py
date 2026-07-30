@@ -18,8 +18,8 @@ from mindroom.knowledge.file_listing import git_checkout_present, include_knowle
 from mindroom.knowledge.file_listing import list_git_tracked_knowledge_files as list_git_tracked_managed_knowledge_files
 from mindroom.knowledge.file_listing import list_knowledge_files as list_managed_knowledge_files
 from mindroom.knowledge.redaction import redact_credentials_in_text, redact_url_credentials
+from mindroom.knowledge.refresh_locks import is_refresh_active_for_binding
 from mindroom.knowledge.refresh_runner import (
-    is_refresh_active_for_binding,
     knowledge_binding_mutation_lock,
     publish_file_mode_source_metadata_for_base,
     refresh_knowledge_binding,

@@ -314,6 +314,13 @@ class _MultiAgentOrchestrator:
         """Return the orchestrator-owned background knowledge refresh scheduler."""
         return self._knowledge_refresh_scheduler
 
+    def entity_first_sync_complete(self, entity_name: str) -> bool | None:
+        """Return first-sync readiness for the current entity generation."""
+        bot = self.agent_bots.get(entity_name)
+        if bot is None:
+            return None
+        return bot.running and bot.first_sync_complete
+
     async def _stop_memory_auto_flush_worker(self) -> None:
         """Stop the background memory auto-flush worker if running."""
         worker = self._memory_auto_flush_worker

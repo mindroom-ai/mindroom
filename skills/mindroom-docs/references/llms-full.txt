@@ -1304,7 +1304,9 @@ Sandbox-proxied execution is stricter than direct local execution: ordinary runt
 # while keeping the rest of defaults.tools for that agent.
 # See agents.md for the full per-agent tool configuration syntax.
 # These thresholds only affect automatic thread summaries; manual `set_thread_summary`
-# tool calls write immediately and reset the automatic baseline from the new message count.
+# tool calls write immediately and pin the thread by default, which stops automatic
+# summaries entirely until a `pin=False` call releases it.
+# Automatic summaries are also skipped on threads tagged `resolved`.
 
 # Memory system configuration (optional)
 memory:
@@ -7234,11 +7236,12 @@ reopen_thread()
 
 ### What It Does
 
-`thread_summary` exposes `set_thread_summary(summary, thread_id=None, room_id=None)`.
+`thread_summary` exposes `set_thread_summary(summary, thread_id=None, room_id=None, pin=True)`.
 The tool defaults to the active room and current resolved thread from `ToolRuntimeContext`.
 When there is no active resolved thread context, pass `thread_id` explicitly.
 The tool normalizes the target to the canonical thread root before sending a new `m.notice` summary event with `io.mindroom.thread_summary` metadata.
-Manual summaries are marked with `model_name="manual"` and update the cached last-summary count so later automatic summaries continue from the new baseline.
+Manual summaries are marked with `model_name="manual"` and pin the thread by default, which stops automatic summaries from overwriting the title.
+Pass `pin=False` to write a summary that later automatic summaries may replace; that also releases a thread pinned by an earlier call.
 A per-thread async lock prevents concurrent duplicate manual summaries from racing each other.
 
 ### Configuration
@@ -7256,6 +7259,7 @@ agents:
 
 ```python
 set_thread_summary("Decision: ship the current plan and revisit logs tomorrow.")
+set_thread_summary("Routine status update.", pin=False)
 set_thread_summary(
     "Summary for the import thread.",
     thread_id="$threadRoot",
@@ -7268,6 +7272,9 @@ set_thread_summary(
 - `summary` must be a non-empty string up to 300 characters after whitespace normalization.
 - The tool writes a normal Matrix notice event, so the updated summary remains visible in the thread timeline.
 - Automatic thread summaries still exist, but this tool gives an agent an explicit override path when a human asks for a manual summary refresh.
+- Pin state lives in the summary notice's `io.mindroom.thread_summary` metadata, so it survives restarts and every runtime reads the same decision.
+- Pinning stops the whole automatic pass, not just the title. A thread pinned before its automatic topic tags are inferred will not receive them; tag it explicitly with `thread_tags` instead.
+- Automatic summaries are also skipped on threads carrying the `resolved` tag.
 
 ## [`thread_model`]
 
