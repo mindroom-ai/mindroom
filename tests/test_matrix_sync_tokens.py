@@ -664,15 +664,10 @@ async def test_bot_start_fails_when_joined_rooms_query_cannot_verify_fences(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("responder_fleet_ready", [False, True])
-async def test_orchestrated_router_start_gates_turn_recovery_on_responder_fleet(
-    tmp_path: Path,
-    responder_fleet_ready: bool,
-) -> None:
-    """Router startup must leave turn-backed replay gated until responders start."""
+async def test_orchestrated_router_start_defers_turn_recovery_to_coordinator(tmp_path: Path) -> None:
+    """Router startup must leave turn-backed replay to orchestrator readiness."""
     bot = _agent_bot(tmp_path, agent_name=ROUTER_AGENT_NAME)
     bot.orchestrator = MagicMock()
-    bot.orchestrator.running = responder_fleet_ready
     client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
     recover_pending = AsyncMock()
     bot._dispatch_obligation_runner.recover_pending = recover_pending
@@ -686,8 +681,7 @@ async def test_orchestrated_router_start_gates_turn_recovery_on_responder_fleet(
     ):
         await bot.start()
 
-    expected_kwargs = {} if responder_fleet_ready else {"turn_backed": False}
-    recover_pending.assert_awaited_once_with(**expected_kwargs)
+    recover_pending.assert_awaited_once_with(turn_backed=False)
 
 
 @pytest.mark.asyncio
@@ -1706,6 +1700,25 @@ async def test_callback_failure_preserves_saved_checkpoint_immediately(tmp_path:
     assert bot._sync_cache_trust.state is SyncTrustState.CERTIFIED
     assert bot._sync_cache_trust.checkpoint == SyncCheckpoint("s_before_failure")
     assert _load_sync_token_value(tmp_path, bot.agent_name) == "s_before_failure"
+
+
+@pytest.mark.asyncio
+async def test_invite_failure_rewinds_classic_cursor_before_response_certification(tmp_path: Path) -> None:
+    """An invite failure must replay the sync instead of certifying past the invite."""
+    bot = _agent_bot(tmp_path)
+    bot.client = make_matrix_client_mock(user_id=bot.matrix_id.full_id)
+    bot.client.next_batch = "s_after_invite"
+    bot._sync_cache_trust.state = SyncTrustState.CERTIFIED
+    bot._sync_cache_trust.checkpoint = SyncCheckpoint("s_before_invite")
+    bot._room_lifecycle.on_invite = AsyncMock(side_effect=RuntimeError("join failed"))
+
+    with pytest.raises(RuntimeError, match="join failed"):
+        await bot._on_invite_before_sync_certification(
+            MagicMock(spec=nio.MatrixRoom),
+            MagicMock(spec=nio.InviteEvent),
+        )
+
+    assert bot.client.next_batch == "s_before_invite"
 
 
 @pytest.mark.asyncio
