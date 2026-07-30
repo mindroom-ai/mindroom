@@ -847,7 +847,12 @@ MindRoom tracks runtime phases internally:
 | `failed` | Startup or runtime failure (detail message available) |
 
 When the semantic-search embedder is failing, the health payload additionally carries `"embedder": {"status": "failing", "detail": ...}` with the classified cause; this block is diagnostic only and never flips liveness.
-Use `/api/health` for liveness probes and `/api/ready` for readiness probes in container orchestrators. Note: `/api/health` returns `503` when Matrix sync is stale (>180s without successful sync, after the 120s watchdog timeout has attempted recovery). Configure liveness probe `failureThreshold` to allow sufficient time for watchdog self-healing.
+Use `/api/health` for liveness probes and `/api/ready` for readiness probes in container orchestrators.
+Ordinary Matrix transport silence still reaches the watchdog after 120 seconds and makes `/api/health` return `503` after 180 seconds without a successful sync.
+While a sync callback is actively completing its sequential durable cache phase, the watchdog and `/api/health` consume the same monotonic progress snapshot and defer for `MINDROOM_MATRIX_SYNC_CACHE_WRITE_GRACE_SECONDS` (default 600).
+Both stop deferring when that grace expires.
+Successful cache-phase completion refreshes both liveness clocks, so a long healthy write does not immediately return `503`.
+Configure liveness probe `failureThreshold` to allow sufficient time for watchdog self-healing.
 
 ### Tools & Matrix
 
@@ -1065,8 +1070,13 @@ Set `CODEX_HOME` only if your Codex CLI state lives outside `~/.codex`.
 | `MINDROOM_DASHBOARD_CORS_ALLOW_ALL_ORIGINS` | Set to `true` to allow every dashboard API origin while disabling credentialed CORS responses | _(unset)_ |
 | `MINDROOM_NO_AUTO_INSTALL_TOOLS` | Set to `1`/`true`/`yes` to disable automatic tool dependency installation | _(unset — auto-install enabled)_ |
 | `MINDROOM_MATRIX_HOMESERVER_STARTUP_TIMEOUT_SECONDS` | Seconds to wait for homeserver to become reachable at startup (0 = skip). MindRoom polls the homeserver's `/_matrix/client/versions` endpoint with exponential backoff retry, detecting permanent errors (e.g., wrong URL) vs transient failures | _(wait indefinitely)_ |
+| `MINDROOM_MATRIX_SYNC_CACHE_WRITE_GRACE_SECONDS` | Finite positive seconds the sync watchdog and `/api/health` may wait for one active durable sync-cache phase before treating it as wedged | `600` |
 | `MINDROOM_DISPATCH_THREAD_READ_TIMEOUT_SECONDS` | Wall-clock seconds allowed for live dispatch-safe Matrix thread reads before dispatch proceeds with degraded thread evidence | `1.0` |
 | `MINDROOM_WORKER_BACKEND` | Worker backend for tool execution (`static_runner`, `docker`, or `kubernetes`) | `static_runner` |
+
+The sync cache-write grace is a hang backstop, not the ordinary Matrix transport timeout.
+Set it above the observed healthy cache-write p99 for the deployment.
+Raising it delays both watchdog cancellation and liveness failure only while a sync callback is actively completing its sequential durable cache phase.
 
 ### OpenAI-Compatible API
 
@@ -1271,7 +1281,7 @@ defaults:
 
 MindRoom uses `defaults.thread_summary_temperature` for automatic thread summaries on providers that support runtime temperature overrides.
 Set it to `null` to omit the field and use provider defaults.
-MindRoom always omits temperature for Vertex Claude thread summaries because the provider rejects that field on this path.
+MindRoom always uses provider temperature defaults for Vertex Claude, Claude Opus 5, Sonnet 5, Fable 5, and direct Google Gemini 3.6 Flash and Gemini 3.5 Flash-Lite thread summaries.
 Use `room_thread_summary_models` when automatic summaries in a specific room should use a different model from `defaults.thread_summary_model`.
 Keys can be managed room aliases such as `lobby` or raw Matrix room IDs such as `!room:example.org`.
 
@@ -2380,6 +2390,16 @@ models:
     id: claude-sonnet-5
     context_window: 1000000
 
+  fable:
+    provider: anthropic
+    id: claude-fable-5
+    context_window: 1000000
+
+  opus:
+    provider: anthropic
+    id: claude-opus-5
+    context_window: 1000000
+
   haiku:
     provider: anthropic
     id: claude-haiku-4-5
@@ -2388,7 +2408,7 @@ models:
   # Anthropic Claude on Amazon Bedrock
   bedrock_opus:
     provider: bedrock_claude
-    id: anthropic.claude-opus-4-8
+    id: anthropic.claude-opus-5
     context_window: 1000000
 
   # OpenAI
@@ -2417,7 +2437,8 @@ models:
   # Google Gemini (both 'google' and 'gemini' work as provider names)
   gemini:
     provider: google
-    id: gemini-3.1-pro-preview
+    id: gemini-3.6-flash
+    context_window: 1048576
 
   # Anthropic Claude on Vertex AI
   vertex_claude:
@@ -2451,7 +2472,8 @@ models:
   # DeepSeek
   deepseek:
     provider: deepseek
-    id: deepseek-chat
+    id: deepseek-v4-pro
+    context_window: 1048576
 
   # Z.ai (GLM models)
   glm:
@@ -2630,15 +2652,16 @@ For starter config generation, use `mindroom config init --provider azure`.
 ## Amazon Bedrock Claude
 
 Use `provider: bedrock_claude` when you want MindRoom to call Anthropic Claude through Amazon Bedrock.
-MindRoom uses Agno's AWS Bedrock Claude model wrapper and auto-installs the `aws_bedrock` optional extra on first use unless `MINDROOM_NO_AUTO_INSTALL_TOOLS=1` is set.
+MindRoom uses Anthropic's Bedrock Mantle Messages client and auto-installs the `aws_bedrock` optional extra on first use unless `MINDROOM_NO_AUTO_INSTALL_TOOLS=1` is set.
 The `id` field should be the Bedrock model ID or inference profile ID enabled in your AWS account and region.
-Use Opus when you want the highest Claude tier available through Bedrock.
+Bedrock lists Fable 5 as open access, while Opus 5 access can depend on the AWS account and region.
+The generated Bedrock starter config defaults to Opus 5, so confirm access or choose Fable 5 or Sonnet 5 instead.
 
 ```yaml
 models:
   default:
     provider: bedrock_claude
-    id: anthropic.claude-opus-4-8
+    id: anthropic.claude-opus-5
     context_window: 1000000
 ```
 
@@ -2704,12 +2727,16 @@ This is useful for models with smaller context windows or long-running conversat
 
 ## Extra Kwargs
 
-The `extra_kwargs` field passes additional parameters directly to the underlying [Agno](https://docs.agno.com/) model class. Common options include:
+The `extra_kwargs` field configures additional parameters on the underlying [Agno](https://docs.agno.com/) model class.
+Common options include:
 
 - `base_url` - Custom API endpoint (useful for OpenAI-compatible servers)
 - `temperature` - Sampling temperature
 - `max_tokens` - Maximum tokens in response
 - `extra_body` - Extra JSON body fields for OpenAI-compatible providers (e.g., OpenRouter provider routing above)
+
+Claude Fable 5, Opus 5, and Sonnet 5 reject non-default `temperature`, `top_p`, and `top_k` values, so MindRoom omits those controls on Anthropic, Bedrock, and Vertex requests.
+MindRoom also omits those deprecated controls for direct Gemini 3.6 Flash and Gemini 3.5 Flash-Lite requests.
 
 ## Environment Variables
 
@@ -6236,13 +6263,13 @@ generate_speech("Status update complete.")
 
 ## [`gemini`]
 
-`gemini` is the Google media toolkit for image generation through Imagen and video generation through Veo.
+`gemini` is the Google media toolkit for image generation through Nano Banana and video generation through Veo.
 
 ### What It Does
 
 `gemini` exposes `generate_image(prompt)` and `generate_video(prompt)`.
-`generate_image()` uses the configured `image_generation_model`, which defaults to `imagen-3.0-generate-002`, and returns attached image bytes.
-`generate_video()` uses the configured `video_generation_model`, which defaults to `veo-2.0-generate-001`, polls until the long-running operation completes, and returns attached video artifacts.
+`generate_image()` uses the Gemini content-generation API with the configured `image_generation_model`, which defaults to Nano Banana 2 (`gemini-3.1-flash-image`), and returns attached image bytes.
+`generate_video()` uses the configured `video_generation_model`, which defaults to Veo 3.1 Preview (`veo-3.1-generate-preview`), polls until the long-running operation completes, and returns attached video artifacts.
 The current implementation requires Vertex AI mode for video generation and returns an error if `vertexai` is not enabled.
 In non-Vertex mode, the tool uses the Gemini API through `GOOGLE_API_KEY`.
 
@@ -6254,8 +6281,8 @@ In non-Vertex mode, the tool uses the Gemini API through `GOOGLE_API_KEY`.
 | `vertexai` | `boolean` | `no` | `false` | Use Vertex AI instead of the direct Gemini API. Required for `generate_video()`. |
 | `project_id` | `text` | `no` | `null` | Vertex project override. Falls back to `GOOGLE_CLOUD_PROJECT` when omitted. |
 | `location` | `text` | `no` | `null` | Vertex location override. Falls back to `GOOGLE_CLOUD_LOCATION` when omitted. |
-| `image_generation_model` | `text` | `no` | `imagen-3.0-generate-002` | Model used by `generate_image()`. |
-| `video_generation_model` | `text` | `no` | `veo-2.0-generate-001` | Model used by `generate_video()`. |
+| `image_generation_model` | `text` | `no` | `gemini-3.1-flash-image` | Model used by `generate_image()`. |
+| `video_generation_model` | `text` | `no` | `veo-3.1-generate-preview` | Model used by `generate_video()`. |
 | `enable_generate_image` | `boolean` | `no` | `true` | Enable `generate_image()`. |
 | `enable_generate_video` | `boolean` | `no` | `true` | Enable `generate_video()`. |
 | `all` | `boolean` | `no` | `false` | Enable both generation functions. |
@@ -6270,8 +6297,8 @@ agents:
           vertexai: true
           project_id: my-gcp-project
           location: us-central1
-          image_generation_model: imagen-3.0-generate-002
-          video_generation_model: veo-2.0-generate-001
+          image_generation_model: gemini-3.1-flash-image
+          video_generation_model: veo-3.1-generate-preview
 ```
 
 ```python
@@ -7419,7 +7446,8 @@ matrix_message(action="reply", message="Sharing the plan here.", attachment_ids=
 Automatic thread summaries are still implemented in `src/mindroom/thread_summary.py` as bot runtime behavior.
 The summarizer posts one `m.notice` summary after a successful response brings a thread to the configured first threshold (one message by default), and then again every ten additional messages by default, using `defaults.thread_summary_model` or `default`.
 Set `room_thread_summary_models` to override the automatic summary model for a managed room alias or raw Matrix room ID.
-MindRoom uses `defaults.thread_summary_temperature` for automatic summaries when the provider supports runtime temperature overrides, and always omits temperature for Vertex Claude summaries.
+MindRoom uses `defaults.thread_summary_temperature` for automatic summaries when the provider supports runtime temperature overrides.
+MindRoom always uses provider temperature defaults for Vertex Claude, Claude Opus 5, Sonnet 5, Fable 5, and direct Google Gemini 3.6 Flash and Gemini 3.5 Flash-Lite summaries.
 The `thread_summary` tool complements that automatic behavior by letting an agent publish a manual summary immediately and advance the stored summary baseline.
 When no trusted prior summary exists, the first automatic summary is summary-only so a useful thread title appears early.
 The next scheduled refresh uses one structured model call to update the summary and produce up to three normalized topic tags, whether the prior summary was automatic or manual.
@@ -14087,7 +14115,7 @@ The override changes only the calls-enabled agent's LLM selection, while STT, TT
 models:
   chat:
     provider: anthropic
-    id: claude-opus-4-8
+    id: claude-opus-5
   call_fast:
     provider: anthropic
     id: claude-haiku-4-5

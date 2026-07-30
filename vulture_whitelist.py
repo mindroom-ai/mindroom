@@ -99,7 +99,8 @@ _.async_get_embeddings_batch_and_usage  # unused method (src/mindroom/embeddings
 _.embed  # mem0 embedding adapter protocol (src/mindroom/memory/config.py)
 _.embed_batch  # mem0 embedding adapter protocol (src/mindroom/memory/config.py)
 _._handle_vector_db_insert  # Agno insertion callback override (src/mindroom/strict_knowledge.py)
-DEEPSEEK_REASONER  # used by scripts/utilities/rewrite_git_commits_ai.py
+_.generate_image  # Agno toolkit override (src/mindroom/custom_tools/gemini_media.py)
+DEEPSEEK_V4_PRO  # used by scripts/utilities/rewrite_git_commits_ai.py
 SAAS_MODEL_PRESETS  # used by scripts/sync_config.py
 _.to_config_dict  # used by scripts/sync_config.py
 _.serialize_datetime  # unused method (src/mindroom/matrix/state.py)

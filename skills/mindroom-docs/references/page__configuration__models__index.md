@@ -43,6 +43,16 @@ models:
     id: claude-sonnet-5
     context_window: 1000000
 
+  fable:
+    provider: anthropic
+    id: claude-fable-5
+    context_window: 1000000
+
+  opus:
+    provider: anthropic
+    id: claude-opus-5
+    context_window: 1000000
+
   haiku:
     provider: anthropic
     id: claude-haiku-4-5
@@ -51,7 +61,7 @@ models:
   # Anthropic Claude on Amazon Bedrock
   bedrock_opus:
     provider: bedrock_claude
-    id: anthropic.claude-opus-4-8
+    id: anthropic.claude-opus-5
     context_window: 1000000
 
   # OpenAI
@@ -80,7 +90,8 @@ models:
   # Google Gemini (both 'google' and 'gemini' work as provider names)
   gemini:
     provider: google
-    id: gemini-3.1-pro-preview
+    id: gemini-3.6-flash
+    context_window: 1048576
 
   # Anthropic Claude on Vertex AI
   vertex_claude:
@@ -114,7 +125,8 @@ models:
   # DeepSeek
   deepseek:
     provider: deepseek
-    id: deepseek-chat
+    id: deepseek-v4-pro
+    context_window: 1048576
 
   # Z.ai (GLM models)
   glm:
@@ -293,15 +305,16 @@ For starter config generation, use `mindroom config init --provider azure`.
 ## Amazon Bedrock Claude
 
 Use `provider: bedrock_claude` when you want MindRoom to call Anthropic Claude through Amazon Bedrock.
-MindRoom uses Agno's AWS Bedrock Claude model wrapper and auto-installs the `aws_bedrock` optional extra on first use unless `MINDROOM_NO_AUTO_INSTALL_TOOLS=1` is set.
+MindRoom uses Anthropic's Bedrock Mantle Messages client and auto-installs the `aws_bedrock` optional extra on first use unless `MINDROOM_NO_AUTO_INSTALL_TOOLS=1` is set.
 The `id` field should be the Bedrock model ID or inference profile ID enabled in your AWS account and region.
-Use Opus when you want the highest Claude tier available through Bedrock.
+Bedrock lists Fable 5 as open access, while Opus 5 access can depend on the AWS account and region.
+The generated Bedrock starter config defaults to Opus 5, so confirm access or choose Fable 5 or Sonnet 5 instead.
 
 ```yaml
 models:
   default:
     provider: bedrock_claude
-    id: anthropic.claude-opus-4-8
+    id: anthropic.claude-opus-5
     context_window: 1000000
 ```
 
@@ -367,12 +380,16 @@ This is useful for models with smaller context windows or long-running conversat
 
 ## Extra Kwargs
 
-The `extra_kwargs` field passes additional parameters directly to the underlying [Agno](https://docs.agno.com/) model class. Common options include:
+The `extra_kwargs` field configures additional parameters on the underlying [Agno](https://docs.agno.com/) model class.
+Common options include:
 
 - `base_url` - Custom API endpoint (useful for OpenAI-compatible servers)
 - `temperature` - Sampling temperature
 - `max_tokens` - Maximum tokens in response
 - `extra_body` - Extra JSON body fields for OpenAI-compatible providers (e.g., OpenRouter provider routing above)
+
+Claude Fable 5, Opus 5, and Sonnet 5 reject non-default `temperature`, `top_p`, and `top_k` values, so MindRoom omits those controls on Anthropic, Bedrock, and Vertex requests.
+MindRoom also omits those deprecated controls for direct Gemini 3.6 Flash and Gemini 3.5 Flash-Lite requests.
 
 ## Environment Variables
 

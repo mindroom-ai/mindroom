@@ -20,28 +20,31 @@ Coding model training data often lags recent releases, so never trust memorized 
 | Provider | Use | Preferred model | Model string to use |
 | --- | --- | --- | --- |
 | Anthropic | Balanced default | Claude Sonnet 5 | `claude-sonnet-5` |
-| Anthropic | Max intelligence | Claude Opus 4.8 | `claude-opus-4-8` |
+| Anthropic | Max intelligence | Claude Fable 5 | `claude-fable-5` |
+| Anthropic | Flagship default | Claude Opus 5 | `claude-opus-5` |
 | Anthropic | Fast / cheap | Claude Haiku 4.5 | `claude-haiku-4-5` |
 | OpenAI | Frontier default | GPT-5.6 | `gpt-5.6` |
 | OpenAI Codex ChatGPT login | Frontier via Codex CLI | GPT-5.6 | `gpt-5.6` |
 | Moonshot Kimi Code login | Frontier via Kimi Code CLI | Kimi K3 | `k3` |
 | Google (Gemini API) | Max intelligence | Gemini 3.1 Pro Preview | `gemini-3.1-pro-preview` |
-| Google (Gemini API) | Standard text / coding | Gemini 3.5 Flash | `gemini-3.5-flash` |
-| Google (Gemini API) | Fast / cheap text | Gemini 3.1 Flash-Lite Preview | `gemini-3.1-flash-lite-preview` |
-| Google (Gemini API) | Image generation / editing | Nano Banana 2 Preview | `gemini-3.1-flash-image-preview` |
-| Google (Gemini API) | Embeddings for `google` | Gemini Embedding 2 Preview | `gemini-embedding-2-preview` |
+| Google (Gemini API) | Standard text / coding | Gemini 3.6 Flash | `gemini-3.6-flash` |
+| Google (Gemini API) | Fast / cheap text | Gemini 3.5 Flash-Lite | `gemini-3.5-flash-lite` |
+| Google (Gemini API) | Image generation / editing | Nano Banana 2 | `gemini-3.1-flash-image` |
+| Google (Gemini API) | Embeddings for `google` | Gemini Embedding 2 | `gemini-embedding-2` |
 
-For `anthropic`, prefer `claude-sonnet-5`, `claude-opus-4-8`, and `claude-haiku-4-5` unless you intentionally need a pinned snapshot ID.
+For `anthropic`, prefer `claude-sonnet-5`, `claude-opus-5`, and `claude-haiku-4-5` unless you intentionally need a pinned snapshot ID.
+Use `claude-fable-5` when you need Anthropic's highest available capability.
+Claude Fable 5 is generally available on the direct Anthropic API and the documented cloud platforms.
 For `vertexai_claude`, use the current Vertex AI request name from the provider docs instead of assuming the Anthropic API ID carries over unchanged.
-Current docs list bare Vertex IDs for current Claude models such as `claude-sonnet-5` and `claude-opus-4-8`, while some other Vertex models are still documented as dated snapshot IDs such as `claude-haiku-4-5@20251001`.
+Current docs list bare Vertex IDs for current Claude models such as `claude-fable-5`, `claude-opus-5`, and `claude-sonnet-5`, while some other Vertex models are still documented as dated snapshot IDs such as `claude-haiku-4-5@20251001`.
 Do not assume `@default` or dated `@...` suffixes are universally required for Vertex AI Claude.
-For Gemini API text and coding work, prefer `gemini-3.5-flash` as the standard stable model unless you intentionally need the cheaper Flash-Lite tier.
+For Gemini API text and coding work, prefer `gemini-3.6-flash` as the standard stable model unless you intentionally need the cheaper `gemini-3.5-flash-lite` tier.
 Use `gemini-3.1-pro-preview` only when you need the highest Gemini API intelligence tier and accept a preview model.
 The Google rows above are for the Gemini API / AI Studio `google` provider, not for Vertex AI.
 For `vertexai`, verify the current Vertex AI docs instead of assuming Gemini API names or defaults carry over unchanged.
-Current Vertex AI image docs prominently document `gemini-3-pro-image-preview` and `gemini-2.5-flash-image`, and the right default depends on the specific Vertex surface you are editing.
+Current Vertex AI image docs prominently document `gemini-3-pro-image-preview`, `gemini-3.1-flash-image`, and `gemini-2.5-flash-image`, and the right default depends on the specific Vertex surface you are editing.
 For Google image work, use the official product name from the docs for the provider surface you are editing.
-Gemini API docs call `gemini-3.1-flash-image-preview` Nano Banana 2, while Vertex AI docs use their own product naming and model tables.
+Gemini API docs call `gemini-3.1-flash-image` Nano Banana 2, while Vertex AI docs use their own product naming and model tables.
 
 ## Architecture
 
@@ -295,7 +298,7 @@ voice:
   enabled: false
   stt:
     provider: openai
-    model: whisper-1
+    model: gpt-4o-transcribe
 
 mindroom_user:
   username: mindroom_user
