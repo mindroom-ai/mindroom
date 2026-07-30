@@ -530,7 +530,12 @@ async def finalize_queued_notice_response_turn_async(
     try:
         await asyncio.shield(storage_task)
     except asyncio.CancelledError:
-        await storage_task
+        while not storage_task.done():
+            try:
+                await asyncio.shield(storage_task)
+            except asyncio.CancelledError:
+                continue
+        storage_task.result()
         raise
 
 

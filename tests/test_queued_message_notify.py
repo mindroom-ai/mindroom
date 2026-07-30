@@ -3785,6 +3785,94 @@ async def test_response_turn_finalization_completes_when_cancelled_during_storag
 
 
 @pytest.mark.asyncio
+async def test_response_turn_finalization_defers_repeated_cancellation_during_storage_io() -> None:
+    """Repeated cancellation must not release the caller before durable finalization finishes."""
+    request_started = threading.Event()
+    release_request = threading.Event()
+    request_finished = threading.Event()
+    first_cancel_observed = asyncio.Event()
+    original_shield = asyncio.shield
+    model = _FakeModel()
+    install_queued_message_notice_hook(model, notice_text=QUEUED_MESSAGE_NOTICE_TEXT)
+
+    class _BlockingStorage(_FakeStorage):
+        def get_session(self, session_id: str, _session_type: object) -> AgentSession | TeamSession | None:
+            request_started.set()
+            release_request.wait(timeout=1)
+            return super().get_session(session_id, _session_type)
+
+        def close(self) -> None:
+            super().close()
+            request_finished.set()
+
+    async def observed_shield(task: asyncio.Task[None]) -> None:
+        try:
+            await original_shield(task)
+        except asyncio.CancelledError:
+            first_cancel_observed.set()
+            raise
+
+    with queued_message_signal_context(_StaticQueuedState(pending=True)) as notice_context:
+        messages: list[Message] = []
+        model.format_function_call_results(
+            messages=messages,
+            function_call_results=[Message(role="tool", content="result")],
+        )
+        run_output = RunOutput(
+            run_id="completed-run",
+            session_id="session-1",
+            messages=messages,
+            status=RunStatus.completed,
+        )
+        storage = _BlockingStorage()
+        storage.session = AgentSession(
+            session_id="session-1",
+            runs=[
+                RunOutput(
+                    run_id=run_output.run_id,
+                    session_id=run_output.session_id,
+                    messages=[message.model_copy(deep=True) for message in messages],
+                    status=run_output.status,
+                ),
+            ],
+        )
+        register_queued_notice_attempt(
+            run_output=run_output,
+            storage_factory=lambda: storage,
+            session_id="session-1",
+            session_type=SessionType.AGENT,
+            entity_name="general",
+        )
+        with patch.object(ai_runtime.asyncio, "shield", new=observed_shield):
+            finalization_task = asyncio.create_task(
+                ai_runtime.finalize_queued_notice_response_turn_async(notice_context),
+            )
+            assert await asyncio.to_thread(request_started.wait, 1)
+            finalization_task.cancel()
+            await asyncio.wait_for(first_cancel_observed.wait(), timeout=1)
+            finalization_task.cancel()
+            completed, _ = await asyncio.wait({finalization_task}, timeout=0.05)
+            try:
+                assert finalization_task not in completed
+            finally:
+                release_request.set()
+            with pytest.raises(asyncio.CancelledError):
+                await finalization_task
+
+    assert request_finished.is_set()
+    assert storage.session is not None
+    assert _notice_count(storage.session.runs[0].messages or [], marker=True) == 0
+    assert (
+        _notice_count(
+            storage.session.runs[0].messages or [],
+            marker="persisted",
+            response_turn_id=notice_context.response_turn_id,
+        )
+        == 1
+    )
+
+
+@pytest.mark.asyncio
 async def test_attempt_registration_deduplicates_one_session_across_fresh_factories() -> None:
     """Fresh storage-factory closures for one session should cause one boundary open."""
     model = _FakeModel()
