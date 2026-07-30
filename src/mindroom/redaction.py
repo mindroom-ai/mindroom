@@ -663,6 +663,8 @@ def redact_sensitive_data(
             _force_redact=_force_redact,
         )
     except Exception:
+        if isinstance(value, Mapping):
+            return {"event": REDACTION_FAILED}
         return REDACTION_FAILED
 
 
