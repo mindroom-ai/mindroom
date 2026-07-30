@@ -108,9 +108,12 @@ class RestartRegressionObservation:
     """Content-free evidence collected after replacement activity settles."""
 
     historical_output_counts: tuple[int, int]
+    historical_callback_counts: tuple[int, int]
     replacement_boundary_reached: bool
     cached_event_pair_count: int
-    fresh_output_count: int
+    fresh_agent_output_count: int
+    fresh_router_output_count: int
+    fresh_callback_observed: bool
     fresh_prompt_observed: bool
     historical_in_fresh_prompt: bool
     response_callbacks_quiescent: bool
@@ -120,7 +123,11 @@ class RestartRegressionObservation:
 class _RestartEvidence:
     """One consistent snapshot of replacement evidence."""
 
-    response_counts: tuple[int, int, int]
+    historical_output_counts: tuple[int, int]
+    historical_callback_counts: tuple[int, int]
+    fresh_agent_output_count: int
+    fresh_router_output_count: int
+    fresh_callback_observed: bool
     cached_event_pair_count: int
     fresh_prompt_observed: bool
     historical_in_fresh_prompt: bool
@@ -163,9 +170,41 @@ def evaluate_restart_regression(observation: RestartRegressionObservation) -> tu
             3,
         ),
         (
-            "fresh_event_exactly_once",
-            observation.fresh_output_count,
+            "historical_callback_suppressed",
+            observation.historical_callback_counts[0],
+            0,
+            "historical_text",
+            "replacement_sync",
             1,
+        ),
+        (
+            "historical_callback_suppressed",
+            observation.historical_callback_counts[1],
+            0,
+            "historical_media",
+            "replacement_sync",
+            2,
+        ),
+        (
+            "fresh_agent_response_exactly_once",
+            observation.fresh_agent_output_count,
+            1,
+            "fresh_user",
+            "replacement_startup",
+            4,
+        ),
+        (
+            "fresh_router_response_suppressed",
+            observation.fresh_router_output_count,
+            0,
+            "fresh_user",
+            "replacement_startup",
+            4,
+        ),
+        (
+            "fresh_callback_observed",
+            observation.fresh_callback_observed,
+            True,
             "fresh_user",
             "replacement_startup",
             4,
@@ -1450,9 +1489,12 @@ class LiveFuzzRunner:
         events = tuple(dormant.seen_events.values())
         agent = self._canonical_response_ids(events)
         router = self._canonical_response_ids(events, sender_id=self.stack.router_id)
-        response_counts = tuple(
-            self._combined_response_count(source_event_id, agent, router)
-            for source_event_id in (*historical_event_ids, fresh_event_id)
+        historical_output_counts = tuple(
+            self._combined_response_count(source_event_id, agent, router) for source_event_id in historical_event_ids
+        )
+        historical_callback_counts = tuple(
+            self.stack.log_count("matrix_event_callback_started", dormant.room_id, event_id)
+            for event_id in historical_event_ids
         )
         cached_event_pair_count = self.stack.cached_restart_event_pair_count(
             dormant.room_id,
@@ -1463,13 +1505,28 @@ class LiveFuzzRunner:
             fresh_event_id,
             historical_event_ids,
         )
-        fresh_response_ids = agent.get(fresh_event_id, set()) | router.get(fresh_event_id, set())
-        fresh_response_complete = len(fresh_response_ids) == 1 and "END call=" in self._latest_event_body(
-            events,
-            next(iter(fresh_response_ids), ""),
+        fresh_agent_response_ids = agent.get(fresh_event_id, set())
+        fresh_router_response_ids = router.get(fresh_event_id, set())
+        fresh_response_complete = (
+            len(fresh_agent_response_ids) == 1
+            and not fresh_router_response_ids
+            and "END call="
+            in self._latest_event_body(
+                events,
+                next(iter(fresh_agent_response_ids), ""),
+            )
         )
         return _RestartEvidence(
-            response_counts=(response_counts[0], response_counts[1], response_counts[2]),
+            historical_output_counts=(historical_output_counts[0], historical_output_counts[1]),
+            historical_callback_counts=(historical_callback_counts[0], historical_callback_counts[1]),
+            fresh_agent_output_count=len(fresh_agent_response_ids),
+            fresh_router_output_count=len(fresh_router_response_ids),
+            fresh_callback_observed=self.stack.log_count(
+                "matrix_event_callback_started",
+                dormant.room_id,
+                fresh_event_id,
+            )
+            > 0,
             cached_event_pair_count=cached_event_pair_count,
             fresh_prompt_observed=fresh_prompt_observed,
             historical_in_fresh_prompt=historical_in_fresh_prompt,
@@ -1487,7 +1544,11 @@ class LiveFuzzRunner:
         """Observe replacement output until the fresh response and callback stream settle."""
         deadline = time.monotonic() + self.reply_timeout
         evidence = _RestartEvidence(
-            response_counts=(0, 0, 0),
+            historical_output_counts=(0, 0),
+            historical_callback_counts=(0, 0),
+            fresh_agent_output_count=0,
+            fresh_router_output_count=0,
+            fresh_callback_observed=False,
             cached_event_pair_count=0,
             fresh_prompt_observed=False,
             historical_in_fresh_prompt=False,
@@ -1502,26 +1563,29 @@ class LiveFuzzRunner:
                 historical_event_ids=historical_event_ids,
                 fresh_event_id=fresh_event_id,
             )
-            callback_count = self.stack.log_count("matrix_event_callback_started", dormant.room_id)
             positive_evidence_ready = (
                 replacement_boundary_reached
                 and evidence.cached_event_pair_count == 4
-                and evidence.response_counts[2] == 1
+                and evidence.historical_callback_counts == (0, 0)
+                and evidence.fresh_agent_output_count == 1
+                and evidence.fresh_router_output_count == 0
+                and evidence.fresh_callback_observed
                 and evidence.fresh_prompt_observed
                 and evidence.fresh_response_complete
-                and callback_count > 0
             )
             if positive_evidence_ready:
                 break
 
         if positive_evidence_ready:
-            shutdown_failure_count = self.stack.restart_shutdown_failure_count()
+            shutdown_failure_count_before = self.stack.restart_shutdown_failure_count()
             stopped_gracefully = await asyncio.to_thread(
                 self.stack.stop_mindroom_for_observation,
                 timeout=self.reply_timeout,
             )
             response_callbacks_quiescent = (
-                stopped_gracefully and self.stack.restart_shutdown_failure_count() == shutdown_failure_count
+                stopped_gracefully
+                and shutdown_failure_count_before == 0
+                and self.stack.restart_shutdown_failure_count() == 0
             )
             await dormant.sync_incremental(
                 timeout_ms=max(round(self.settle_seconds * 1000), 0),
@@ -1534,10 +1598,13 @@ class LiveFuzzRunner:
             )
 
         return RestartRegressionObservation(
-            historical_output_counts=(evidence.response_counts[0], evidence.response_counts[1]),
+            historical_output_counts=evidence.historical_output_counts,
+            historical_callback_counts=evidence.historical_callback_counts,
             replacement_boundary_reached=replacement_boundary_reached,
             cached_event_pair_count=evidence.cached_event_pair_count,
-            fresh_output_count=evidence.response_counts[2],
+            fresh_agent_output_count=evidence.fresh_agent_output_count,
+            fresh_router_output_count=evidence.fresh_router_output_count,
+            fresh_callback_observed=evidence.fresh_callback_observed,
             fresh_prompt_observed=evidence.fresh_prompt_observed,
             historical_in_fresh_prompt=evidence.historical_in_fresh_prompt,
             response_callbacks_quiescent=response_callbacks_quiescent,

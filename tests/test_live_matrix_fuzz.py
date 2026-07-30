@@ -50,6 +50,33 @@ class _RecordingDormantClient:
         return f"${txn_id}"
 
 
+class _StaticObservationClient:
+    room_id = "!restart:example"
+
+    def __init__(self, events: tuple[dict[str, Any], ...]) -> None:
+        self.seen_events = {event["event_id"]: event for event in events}
+
+    async def sync_incremental(self, *, timeout_ms: int, allow_limited: bool = False) -> None:
+        del timeout_ms, allow_limited
+        await asyncio.sleep(0.001)
+
+
+def _restart_response(event_id: str, sender: str, source: str) -> dict[str, Any]:
+    return {
+        "event_id": event_id,
+        "sender": sender,
+        "type": "m.room.message",
+        "content": {
+            "body": "END call=1",
+            "m.relates_to": {
+                "rel_type": "m.thread",
+                "event_id": source,
+                "m.in_reply_to": {"event_id": source},
+            },
+        },
+    }
+
+
 def test_live_scenario_is_deterministic_and_json_replayable() -> None:
     """A seed must produce a stable trace that survives JSON round-tripping."""
     scenario = live_scenario_from_seed(
@@ -162,9 +189,12 @@ def test_restart_regression_evaluator_accepts_pass_and_rejects_bad_directions() 
     """The profile's pure oracle must accept clean evidence and reject old output and prompt overlap."""
     passing = RestartRegressionObservation(
         historical_output_counts=(0, 0),
+        historical_callback_counts=(0, 0),
         replacement_boundary_reached=True,
         cached_event_pair_count=4,
-        fresh_output_count=1,
+        fresh_agent_output_count=1,
+        fresh_router_output_count=0,
+        fresh_callback_observed=True,
         fresh_prompt_observed=True,
         historical_in_fresh_prompt=False,
         response_callbacks_quiescent=True,
@@ -176,12 +206,20 @@ def test_restart_regression_evaluator_accepts_pass_and_rejects_bad_directions() 
         replace(
             passing,
             historical_output_counts=(1, 0),
+            historical_callback_counts=(0, 1),
+            fresh_agent_output_count=0,
+            fresh_router_output_count=1,
+            fresh_callback_observed=False,
             historical_in_fresh_prompt=True,
             response_callbacks_quiescent=False,
         ),
     )
 
     assert any("invariant=historical_output_suppressed" in failure for failure in failures)
+    assert any("invariant=historical_callback_suppressed" in failure for failure in failures)
+    assert any("invariant=fresh_agent_response_exactly_once" in failure for failure in failures)
+    assert any("invariant=fresh_router_response_suppressed" in failure for failure in failures)
+    assert any("invariant=fresh_callback_observed" in failure for failure in failures)
     assert any("invariant=historical_events_absent_from_fresh_prompt" in failure for failure in failures)
     assert any("invariant=response_callbacks_quiescent" in failure for failure in failures)
 
@@ -481,6 +519,133 @@ def test_restart_shutdown_failure_count_tracks_checkpoint_discard_markers(marker
 
 
 @pytest.mark.asyncio
+async def test_restart_observation_rejects_checkpoint_discard_from_replacement(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A discard before final shutdown must fail instead of becoming the accepted baseline."""
+    stack = ManagedTuwunelStack()
+    try:
+        stack.agent_id, stack.router_id = "@agent:example", "@router:example"
+        stack.log_path.write_text(
+            "matrix_event_callback_started !restart:example $fresh\n"
+            "Preparing agent and prompt $fresh\n"
+            '{"event": "sync_checkpoint_discarded"}\n',
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(stack, "cached_restart_event_pair_count", lambda _room_id, _event_ids: 4)
+        monkeypatch.setattr(stack, "stop_mindroom_for_observation", lambda *, timeout: timeout > 0)
+        dormant = _StaticObservationClient(
+            (_restart_response("$agent-response", stack.agent_id, "$fresh"),),
+        )
+        runner = LiveFuzzRunner(
+            stack,
+            (cast("LiveMatrixClient", dormant),),
+            restart_regression_scenario(),
+            reply_timeout=0.05,
+            settle_seconds=0,
+        )
+
+        observation = await runner._wait_for_restart_observation(
+            cast("LiveMatrixClient", dormant),
+            historical_event_ids=("$old-text", "$old-media"),
+            fresh_event_id="$fresh",
+            replacement_boundary_reached=True,
+        )
+
+        assert not observation.response_callbacks_quiescent
+    finally:
+        stack.close()
+
+
+@pytest.mark.asyncio
+async def test_restart_observation_rejects_old_media_callback_as_fresh_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An exact historical media callback must not release final observation."""
+    stack = ManagedTuwunelStack()
+    stop_calls: list[float] = []
+    try:
+        stack.agent_id, stack.router_id = "@agent:example", "@router:example"
+        stack.log_path.write_text(
+            "matrix_event_callback_started !restart:example $old-media\nPreparing agent and prompt $fresh\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(stack, "cached_restart_event_pair_count", lambda _room_id, _event_ids: 4)
+
+        def record_stop(*, timeout: float) -> bool:
+            stop_calls.append(timeout)
+            return True
+
+        monkeypatch.setattr(stack, "stop_mindroom_for_observation", record_stop)
+        dormant = _StaticObservationClient(
+            (_restart_response("$agent-response", stack.agent_id, "$fresh"),),
+        )
+        runner = LiveFuzzRunner(
+            stack,
+            (cast("LiveMatrixClient", dormant),),
+            restart_regression_scenario(),
+            reply_timeout=0.05,
+            settle_seconds=0,
+        )
+
+        observation = await runner._wait_for_restart_observation(
+            cast("LiveMatrixClient", dormant),
+            historical_event_ids=("$old-text", "$old-media"),
+            fresh_event_id="$fresh",
+            replacement_boundary_reached=True,
+        )
+
+        assert stop_calls == []
+        assert not observation.response_callbacks_quiescent
+    finally:
+        stack.close()
+
+
+@pytest.mark.asyncio
+async def test_restart_observation_rejects_router_only_fresh_response(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An agent-mentioned fresh event requires an agent response, not a router substitute."""
+    stack = ManagedTuwunelStack()
+    stop_calls: list[float] = []
+    try:
+        stack.agent_id, stack.router_id = "@agent:example", "@router:example"
+        stack.log_path.write_text(
+            "matrix_event_callback_started !restart:example $fresh\nPreparing agent and prompt $fresh\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(stack, "cached_restart_event_pair_count", lambda _room_id, _event_ids: 4)
+
+        def record_stop(*, timeout: float) -> bool:
+            stop_calls.append(timeout)
+            return True
+
+        monkeypatch.setattr(stack, "stop_mindroom_for_observation", record_stop)
+        dormant = _StaticObservationClient(
+            (_restart_response("$router-response", stack.router_id, "$fresh"),),
+        )
+        runner = LiveFuzzRunner(
+            stack,
+            (cast("LiveMatrixClient", dormant),),
+            restart_regression_scenario(),
+            reply_timeout=0.05,
+            settle_seconds=0,
+        )
+
+        observation = await runner._wait_for_restart_observation(
+            cast("LiveMatrixClient", dormant),
+            historical_event_ids=("$old-text", "$old-media"),
+            fresh_event_id="$fresh",
+            replacement_boundary_reached=True,
+        )
+
+        assert stop_calls == []
+        assert not observation.response_callbacks_quiescent
+    finally:
+        stack.close()
+
+
+@pytest.mark.asyncio
 async def test_restart_response_index_honors_sender_override() -> None:
     """Agent and router observations must use their explicitly selected sender."""
     stack = ManagedTuwunelStack()
@@ -569,7 +734,7 @@ async def test_restart_observation_rejects_historical_output_arriving_during_cal
     try:
         stack.agent_id, stack.router_id = "@agent:example", "@router:example"
         stack.log_path.write_text(
-            "matrix_event_callback_started !restart:example\nPreparing agent and prompt $fresh\n",
+            "matrix_event_callback_started !restart:example $fresh\nPreparing agent and prompt $fresh\n",
             encoding="utf-8",
         )
         monkeypatch.setattr(stack, "cached_restart_event_pair_count", lambda _room_id, _event_ids: 4)
