@@ -204,8 +204,8 @@ QUEUED_MESSAGE_NOTICE_TEXT = (
     "while you were working. This is a PAUSE, not a cancellation of the current task. Do not make "
     "any new tool calls. End this turn now with a final text response that explicitly says a newer "
     "message arrived and states: (1) what you completed, (2) what remains unfinished, and (3) the "
-    "next step. If work remains, state that you will resume it on the next turn unless the newer "
-    "message explicitly tells you to stop or redirect it."
+    "next step. You cannot see the newer message's contents yet. If work remains, state that you "
+    "intend to resume it on the next turn, subject to the newer message's instructions."
 )
 INLINE_MEDIA_FALLBACK_PROMPT = (
     "The model rejected inline attachments for this turn. "
