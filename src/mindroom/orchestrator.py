@@ -1184,6 +1184,18 @@ class _MultiAgentOrchestrator:
     async def handle_bot_ready(self, bot: AgentBot | TeamBot) -> None:
         """Handle bot-ready notifications through the public runtime protocol."""
         await self._approval_transport.handle_bot_ready(bot)
+        if (
+            self.agent_bots.get(bot.agent_name) is not bot
+            or self.config is None
+            or self._startup_maintenance.startup_cutoff_ms is None
+        ):
+            return
+        self._startup_maintenance.schedule_ready_recovery(
+            partial(self._recover_restart_work_after_bot_ready, bot),
+        )
+
+    async def _recover_restart_work_after_bot_ready(self, bot: AgentBot | TeamBot) -> None:
+        """Recover startup and replacement work for the exact ready generation."""
         if self.agent_bots.get(bot.agent_name) is not bot or self.config is None:
             return
         startup_cutoff_ms = self._startup_maintenance.startup_cutoff_ms

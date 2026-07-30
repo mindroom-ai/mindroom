@@ -1057,7 +1057,7 @@ async def test_pending_replacement_recovery_claims_once_and_requeues_failed_room
 
 @pytest.mark.asyncio
 async def test_current_bot_ready_retries_startup_and_replacement_recovery(tmp_path: Path) -> None:
-    """First-sync completion retries rooms deferred for the exact current generation."""
+    """First-sync completion schedules serialized recovery outside the sync callback."""
     orchestrator = _MultiAgentOrchestrator(runtime_paths=_runtime_paths(tmp_path))
     config = _config_with_code_agent(tmp_path)
     config.defaults.auto_resume_after_restart = True
@@ -1071,6 +1071,12 @@ async def test_current_bot_ready_retries_startup_and_replacement_recovery(tmp_pa
     orchestrator.agent_bots = {ROUTER_AGENT_NAME: router_bot, "code": code_bot}
     orchestrator._startup_maintenance.startup_cutoff_ms = 123456
     startup_recovery_state = orchestrator._startup_maintenance.recovery_state
+    recovery_started = asyncio.Event()
+    release_recovery = asyncio.Event()
+
+    async def recover_startup(*_args: object, **_kwargs: object) -> None:
+        recovery_started.set()
+        await release_recovery.wait()
 
     with (
         patch.object(
@@ -1081,7 +1087,7 @@ async def test_current_bot_ready_retries_startup_and_replacement_recovery(tmp_pa
         patch.object(
             orchestrator,
             "_recover_stale_streams_after_restart",
-            new=AsyncMock(),
+            new=AsyncMock(side_effect=recover_startup),
         ) as recover_startup,
         patch.object(
             orchestrator,
@@ -1089,7 +1095,16 @@ async def test_current_bot_ready_retries_startup_and_replacement_recovery(tmp_pa
             new=AsyncMock(),
         ) as recover_replacement,
     ):
-        await orchestrator.handle_bot_ready(code_bot)
+        ready_call = asyncio.create_task(orchestrator.handle_bot_ready(code_bot))
+        try:
+            await asyncio.wait_for(recovery_started.wait(), timeout=1.0)
+            await asyncio.sleep(0)
+            assert ready_call.done()
+        finally:
+            release_recovery.set()
+            await ready_call
+        assert orchestrator._startup_maintenance.task is not None
+        await orchestrator._startup_maintenance.task
 
     recover_startup.assert_awaited_once_with(
         [router_bot, code_bot],

@@ -120,6 +120,7 @@ class StaleStreamRecoveryState:
 
     scanned_room_ids: set[str] = field(default_factory=set)
     retry_target_event_ids: set[str] = field(default_factory=set)
+    known_actor_user_ids: set[str] = field(default_factory=set)
 
 
 @dataclass(frozen=True)
@@ -230,6 +231,18 @@ def _requester_resolution_message(
     )
 
 
+def _reopen_rooms_for_new_actors(
+    actors: dict[str, StaleStreamCleanupActor],
+    recovery_state: StaleStreamRecoveryState,
+) -> None:
+    """Reopen expected rooms when an actor first joins this recovery generation."""
+    new_actor_user_ids = set(actors).difference(recovery_state.known_actor_user_ids)
+    recovery_state.scanned_room_ids.difference_update(
+        room_id for bot_user_id in new_actor_user_ids for room_id in actors[bot_user_id].expected_room_ids
+    )
+    recovery_state.known_actor_user_ids.update(new_actor_user_ids)
+
+
 async def recover_stale_streaming_messages(
     actors: dict[str, StaleStreamCleanupActor],
     *,
@@ -243,6 +256,8 @@ async def recover_stale_streaming_messages(
     room_concurrency: int = _RECOVERY_ROOM_CONCURRENCY,
 ) -> _StaleStreamRecoveryResult:
     """Recover stale streams through one concurrent Matrix-history path."""
+    _reopen_rooms_for_new_actors(actors, recovery_state)
+
     room_actors = {
         room_id: joined_actors
         for room_id, joined_actors in (await _joined_room_actors(actors)).items()
@@ -290,6 +305,7 @@ async def recover_stale_streaming_messages(
     ]
     cleaned_count = 0
     resumed_count = 0
+    processed_room_ids: set[str] = set()
     try:
         for completed in asyncio.as_completed(tasks):
             room_result = await completed
@@ -301,6 +317,7 @@ async def recover_stale_streaming_messages(
                 or not config.defaults.auto_resume_after_restart
                 or not room_result.interrupted_threads
             ):
+                processed_room_ids.add(room_result.room_id)
                 continue
             recovery_state.retry_target_event_ids.update(
                 interrupted_thread.target_event_id for interrupted_thread in room_result.interrupted_threads
@@ -319,7 +336,9 @@ async def recover_stale_streaming_messages(
                 auto_resume_result.settled_target_event_ids,
             )
             recovery_state.retry_target_event_ids.update(auto_resume_result.retry_target_event_ids)
+            processed_room_ids.add(room_result.room_id)
     finally:
+        recovery_state.scanned_room_ids.difference_update(set(room_actors).difference(processed_room_ids))
         for task in tasks:
             if not task.done():
                 task.cancel()

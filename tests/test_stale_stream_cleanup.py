@@ -3955,12 +3955,21 @@ async def test_recovery_scans_unique_rooms_and_resumes_before_slow_rooms_finish(
 
 @pytest.mark.asyncio
 async def test_cancelled_auto_resume_preserves_exact_target_for_replay(tmp_path: Path) -> None:
-    """Cancellation after cleanup keeps the exact post-cutoff target retryable."""
+    """Cancellation after cleanup keeps the room and exact target retryable."""
     config = _make_config(tmp_path)
     config.defaults.auto_resume_after_restart = True
     router_client = make_matrix_client_mock(user_id="@actual_router:localhost")
+    owner_cache = AsyncMock()
+    owner_cache.refresh_startup_thread_history_from_source = AsyncMock(
+        side_effect=[
+            asyncio.CancelledError(),
+            _authoritative_history(_history_message("$target")),
+        ],
+    )
+    owner_cache.notify_outbound_message = Mock()
+    router_actor = _cleanup_actor(router_client, owner_cache)
     actors = {
-        "@actual_router:localhost": _cleanup_actor(router_client),
+        "@actual_router:localhost": router_actor,
     }
     interrupted = InterruptedThread(
         room_id=ROOM_ID,
@@ -3969,6 +3978,7 @@ async def test_cancelled_auto_resume_preserves_exact_target_for_replay(tmp_path:
         partial_text="Partial",
         agent_name=ROUTER_AGENT_NAME,
         original_sender_id=USER_ID,
+        owner_actor=router_actor,
     )
     recovery_state = StaleStreamRecoveryState()
 
@@ -3980,24 +3990,89 @@ async def test_cancelled_auto_resume_preserves_exact_target_for_replay(tmp_path:
         patch(
             "mindroom.matrix.stale_stream_cleanup._cleanup_stale_streaming_room",
             new=AsyncMock(return_value=RoomCleanupResult(ROOM_ID, 1, (interrupted,))),
-        ),
+        ) as mock_cleanup,
         patch(
-            "mindroom.matrix.stale_stream_cleanup._auto_resume_interrupted_threads",
-            new=AsyncMock(side_effect=asyncio.CancelledError),
-        ),
-        pytest.raises(asyncio.CancelledError),
+            "mindroom.matrix.stale_stream_cleanup.send_message_result",
+            new=AsyncMock(return_value=delivered_matrix_event("$resume")),
+        ) as mock_send,
     ):
-        await recover_stale_streaming_messages(
+        with pytest.raises(asyncio.CancelledError):
+            await recover_stale_streaming_messages(
+                actors,
+                resume_client=router_client,
+                resume_conversation_cache=owner_cache,
+                config=config,
+                runtime_paths=runtime_paths_for(config),
+                startup_cutoff_ms=NOW_MS,
+                recovery_state=recovery_state,
+            )
+
+        assert recovery_state.retry_target_event_ids == {"$target"}
+        assert recovery_state.scanned_room_ids == set()
+        mock_send.assert_not_awaited()
+
+        replay_result = await recover_stale_streaming_messages(
             actors,
             resume_client=router_client,
-            resume_conversation_cache=actors["@actual_router:localhost"].conversation_cache,
+            resume_conversation_cache=owner_cache,
             config=config,
             runtime_paths=runtime_paths_for(config),
             startup_cutoff_ms=NOW_MS,
             recovery_state=recovery_state,
         )
 
-    assert recovery_state.retry_target_event_ids == {"$target"}
+    assert replay_result == StaleStreamRecoveryResult(room_count=1, cleaned_count=1, resumed_count=1)
+    assert recovery_state.retry_target_event_ids == set()
+    assert recovery_state.scanned_room_ids == {ROOM_ID}
+    assert mock_cleanup.await_count == 2
+    mock_send.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_recovery_rescans_expected_rooms_when_owner_actor_appears(tmp_path: Path) -> None:
+    """A later-starting owner must reopen rooms scanned before its actor existed."""
+    config = _make_config(tmp_path)
+    router_user_id = "@actual_router:localhost"
+    router_client = make_matrix_client_mock(user_id=router_user_id)
+    owner_client = make_matrix_client_mock(user_id=BOT_USER_ID)
+    actors = {
+        router_user_id: _cleanup_actor(router_client),
+    }
+    recovery_state = StaleStreamRecoveryState()
+
+    with (
+        patch(
+            "mindroom.matrix.stale_stream_cleanup.get_joined_rooms",
+            new=AsyncMock(return_value=[ROOM_ID]),
+        ),
+        patch(
+            "mindroom.matrix.stale_stream_cleanup._cleanup_stale_streaming_room",
+            new=AsyncMock(return_value=RoomCleanupResult(ROOM_ID, 0, ())),
+        ) as mock_cleanup,
+    ):
+        initial_result = await recover_stale_streaming_messages(
+            actors,
+            resume_client=router_client,
+            resume_conversation_cache=actors[router_user_id].conversation_cache,
+            config=config,
+            runtime_paths=runtime_paths_for(config),
+            startup_cutoff_ms=NOW_MS,
+            recovery_state=recovery_state,
+        )
+        actors[BOT_USER_ID] = _cleanup_actor(owner_client)
+        owner_ready_result = await recover_stale_streaming_messages(
+            actors,
+            resume_client=router_client,
+            resume_conversation_cache=actors[router_user_id].conversation_cache,
+            config=config,
+            runtime_paths=runtime_paths_for(config),
+            startup_cutoff_ms=NOW_MS,
+            recovery_state=recovery_state,
+        )
+
+    assert initial_result.room_count == 1
+    assert owner_ready_result.room_count == 1
+    assert mock_cleanup.await_count == 2
 
 
 @pytest.mark.asyncio

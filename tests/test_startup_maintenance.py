@@ -159,6 +159,40 @@ async def test_startup_maintenance_cancel_reports_unfinished_and_replays_with_ru
 
 
 @pytest.mark.asyncio
+async def test_ready_recovery_is_detached_and_serialized() -> None:
+    """Ready callbacks enqueue recovery without overlapping maintenance sweeps."""
+    first_started = asyncio.Event()
+    release_first = asyncio.Event()
+    second_started = asyncio.Event()
+
+    async def first_recovery() -> None:
+        first_started.set()
+        await release_first.wait()
+
+    async def second_recovery() -> None:
+        second_started.set()
+
+    controller = StartupMaintenanceController(
+        recover_stale_streams=AsyncMock(),
+        setup_rooms_and_memberships=AsyncMock(),
+        sync_runtime_support=AsyncMock(),
+        mark_runtime_support_ready=AsyncMock(),
+    )
+
+    controller.schedule_ready_recovery(first_recovery)
+    controller.schedule_ready_recovery(second_recovery)
+    await asyncio.wait_for(first_started.wait(), timeout=1.0)
+    await asyncio.sleep(0)
+    assert not second_started.is_set()
+
+    release_first.set()
+    assert controller.task is not None
+    await asyncio.wait_for(controller.task, timeout=1.0)
+
+    assert second_started.is_set()
+
+
+@pytest.mark.asyncio
 async def test_startup_maintenance_cancel_completed_task_returns_false() -> None:
     """Canceling completed maintenance does not request replay."""
     controller = StartupMaintenanceController(

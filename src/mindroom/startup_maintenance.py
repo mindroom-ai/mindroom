@@ -31,6 +31,7 @@ type _RecoverStaleStreams = Callable[
 type _SyncRuntimeSupport = Callable[[Config], Awaitable[None]]
 type _MarkRuntimeSupportReady = Callable[[], Awaitable[None]]
 type _RunningBots = Callable[[], list[_StartupBot]]
+type _ReadyRecovery = Callable[[], Awaitable[None]]
 
 
 @dataclass
@@ -60,6 +61,29 @@ class StartupMaintenanceController:
             self._run(bots, config, startup_cutoff_ms),
             name="startup_maintenance",
             failure_message="Startup maintenance task failed",
+        )
+
+    def schedule_ready_recovery(self, recovery: _ReadyRecovery) -> None:
+        """Queue one bot-ready recovery after current startup maintenance."""
+        previous_task = self.task
+        self.task = create_logged_task(
+            self._run_ready_recovery(previous_task, recovery),
+            name="startup_ready_recovery",
+            failure_message="Bot-ready restart recovery task failed",
+        )
+
+    async def _run_ready_recovery(
+        self,
+        previous_task: asyncio.Task[None] | None,
+        recovery: _ReadyRecovery,
+    ) -> None:
+        """Serialize a bot-ready recovery behind prior maintenance work."""
+        if previous_task is not None:
+            await previous_task
+        await self._run_phase(
+            "startup_maintenance.stale_stream_recovery.bot_ready",
+            recovery,
+            failure_message="Bot-ready stale stream recovery failed",
         )
 
     async def cancel(self) -> bool:
