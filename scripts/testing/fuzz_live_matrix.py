@@ -51,6 +51,10 @@ MODEL_ID = "mindroom-live-fuzz"
 AGENT_NAME = "general"
 ROOM_KEY = "lobby"
 RESTART_SEED = 20_260_729
+RESTART_SHUTDOWN_FAILURE_MARKERS = (
+    "sync_checkpoint_discarded",
+    "sync_checkpoint_not_saved_after_incomplete_coalescing_drain",
+)
 
 
 def _required_int(value: Mapping[str, object], key: str) -> int:
@@ -774,9 +778,9 @@ class ManagedTuwunelStack:
         self._stop_mindroom()
         self._start_mindroom()
 
-    def stop_mindroom_for_observation(self) -> bool:
+    def stop_mindroom_for_observation(self, *, timeout: float) -> bool:
         """Stop MindRoom and report whether its response and callback drain stayed bounded."""
-        return self._stop_mindroom()
+        return self._stop_mindroom(timeout=timeout)
 
     def close(self) -> None:
         """Stop child processes and delete the exact disposable instance."""
@@ -820,6 +824,10 @@ class ManagedTuwunelStack:
             return 0
         log = self.log_path.read_text(encoding="utf-8", errors="replace")
         return sum(all(marker in line for marker in markers) for line in log.splitlines())
+
+    def restart_shutdown_failure_count(self) -> int:
+        """Count checkpoint discards caused by an incomplete orderly shutdown."""
+        return sum(self.log_count(marker) for marker in RESTART_SHUTDOWN_FAILURE_MARKERS)
 
     def wait_for_log_count(self, markers: tuple[str, ...], minimum: int, timeout: float = 60) -> bool:
         """Wait for a bounded lifecycle milestone."""
@@ -936,7 +944,7 @@ class ManagedTuwunelStack:
         msg = f"MindRoom did not create {ROOM_KEY!r}"
         raise TimeoutError(msg)
 
-    def _stop_mindroom(self) -> bool:
+    def _stop_mindroom(self, *, timeout: float = 20) -> bool:
         process = self._mindroom_process
         if process is None:
             return True
@@ -944,13 +952,13 @@ class ManagedTuwunelStack:
         if stopped_gracefully:
             process.send_signal(signal.SIGINT)
             try:
-                process.wait(timeout=20)
+                process.wait(timeout=timeout)
             except subprocess.TimeoutExpired:
                 stopped_gracefully = False
                 process.kill()
                 process.wait(timeout=10)
         self._mindroom_process = None
-        return stopped_gracefully
+        return stopped_gracefully and process.returncode == 0
 
     @staticmethod
     def _wait_for_url(url: str, *, timeout: float) -> None:
@@ -1428,16 +1436,13 @@ class LiveFuzzRunner:
                 break
 
         if positive_evidence_ready:
-            incomplete_drain_count = self.stack.log_count(
-                "sync_checkpoint_not_saved_after_incomplete_coalescing_drain",
+            shutdown_failure_count = self.stack.restart_shutdown_failure_count()
+            stopped_gracefully = await asyncio.to_thread(
+                self.stack.stop_mindroom_for_observation,
+                timeout=self.reply_timeout,
             )
-            stopped_gracefully = await asyncio.to_thread(self.stack.stop_mindroom_for_observation)
             response_callbacks_quiescent = (
-                stopped_gracefully
-                and self.stack.log_count(
-                    "sync_checkpoint_not_saved_after_incomplete_coalescing_drain",
-                )
-                == incomplete_drain_count
+                stopped_gracefully and self.stack.restart_shutdown_failure_count() == shutdown_failure_count
             )
             await dormant.sync_incremental(
                 timeout_ms=max(round(self.settle_seconds * 1000), 0),

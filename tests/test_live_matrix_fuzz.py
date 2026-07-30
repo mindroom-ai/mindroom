@@ -165,6 +165,48 @@ def test_restart_regression_evaluator_accepts_pass_and_rejects_bad_directions() 
     assert any("invariant=response_callbacks_quiescent" in failure for failure in failures)
 
 
+@pytest.mark.asyncio
+async def test_restart_regression_does_not_send_fresh_event_before_replacement_boundary(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A missed replacement boundary must abort before the fresh event is sent."""
+
+    class DormantClient:
+        room_id = "!restart:example"
+
+        def __init__(self) -> None:
+            self.sent_txn_ids: list[str] = []
+
+        async def create_public_room(self) -> None:
+            return
+
+        async def send_event(self, event_type: str, txn_id: str, content: dict[str, Any]) -> str:
+            del event_type, content
+            self.sent_txn_ids.append(txn_id)
+            return f"${txn_id}"
+
+    stack = ManagedTuwunelStack()
+    try:
+        stack.agent_id, stack.router_id = "@agent:example", "@router:example"
+        monkeypatch.setattr(stack, "add_restart_room", lambda _room_id: None)
+        monkeypatch.setattr(stack, "wait_for_log_count", lambda *_args, **_kwargs: False)
+        dormant = DormantClient()
+        runner = LiveFuzzRunner(
+            stack,
+            (cast("LiveMatrixClient", dormant),),
+            restart_regression_scenario(),
+            reply_timeout=0,
+            settle_seconds=0,
+        )
+
+        with pytest.raises(AssertionError, match="replacement_setup_boundary_reached"):
+            await runner._run_restart_regression()
+
+        assert dormant.sent_txn_ids == ["restart-old-text", "restart-old-media"]
+    finally:
+        stack.close()
+
+
 def test_restart_regression_cache_evidence_uses_production_schema_and_exact_filters() -> None:
     """Principal, room, and event filters must reject plausible distractor rows."""
     stack = ManagedTuwunelStack()
@@ -242,6 +284,46 @@ def test_restart_regression_cache_probe_does_not_create_an_empty_database() -> N
         stack.close()
 
 
+def test_restart_shutdown_rejects_nonzero_process_exit() -> None:
+    """A bounded process exit is graceful only when shutdown succeeds."""
+
+    class FailedProcess:
+        returncode = 7
+
+        @staticmethod
+        def poll() -> None:
+            return None
+
+        @staticmethod
+        def send_signal(_signal: int) -> None:
+            return
+
+        @staticmethod
+        def wait(*, timeout: float) -> int:
+            del timeout
+            return 7
+
+    stack = ManagedTuwunelStack()
+    try:
+        stack._mindroom_process = cast("Any", FailedProcess())
+
+        assert not stack.stop_mindroom_for_observation(timeout=1)
+        assert stack._mindroom_process is None
+    finally:
+        stack.close()
+
+
+def test_restart_shutdown_failure_count_tracks_current_checkpoint_discard_marker() -> None:
+    """The harness must track the shutdown failure marker emitted on current main."""
+    stack = ManagedTuwunelStack()
+    try:
+        stack.log_path.write_text('{"event": "sync_checkpoint_discarded"}\n', encoding="utf-8")
+
+        assert stack.restart_shutdown_failure_count() == 1
+    finally:
+        stack.close()
+
+
 @pytest.mark.asyncio
 async def test_restart_response_index_honors_sender_override() -> None:
     """Agent and router observations must use their explicitly selected sender."""
@@ -297,6 +379,7 @@ async def test_restart_observation_rejects_historical_output_arriving_during_cal
         def __init__(self) -> None:
             self.seen_events: dict[str, dict[str, Any]] = {}
             self.sync_count = 0
+            self.pending_historical_event: dict[str, Any] | None = None
 
         async def sync_incremental(self, *, timeout_ms: int, allow_limited: bool = False) -> None:
             del timeout_ms, allow_limited
@@ -307,6 +390,8 @@ async def test_restart_observation_rejects_historical_output_arriving_during_cal
                     "@agent:example",
                     "$fresh",
                 )
+            if self.sync_count >= 2 and self.pending_historical_event is not None:
+                self.seen_events["$late-historical-response"] = self.pending_historical_event
             await asyncio.sleep(0.05)
 
     def response(event_id: str, sender: str, source: str) -> dict[str, Any]:
@@ -334,13 +419,16 @@ async def test_restart_observation_rejects_historical_output_arriving_during_cal
         monkeypatch.setattr(stack, "cached_restart_event_pair_count", lambda _room_id, _event_ids: 4)
         dormant = DormantClient()
 
-        def drain_callbacks() -> bool:
+        def drain_callbacks(*, timeout: float) -> bool:
+            assert timeout == 2
             time.sleep(1.2)
-            dormant.seen_events["$late-historical-response"] = response(
+            dormant.pending_historical_event = response(
                 "$late-historical-response",
                 "@agent:example",
                 "$old-text",
             )
+            with stack.log_path.open("a", encoding="utf-8") as log:
+                log.write('{"event": "sync_checkpoint_discarded"}\n')
             return True
 
         monkeypatch.setattr(stack, "stop_mindroom_for_observation", drain_callbacks)
@@ -359,10 +447,14 @@ async def test_restart_observation_rejects_historical_output_arriving_during_cal
             replacement_boundary_reached=True,
         )
 
-        assert observation.response_callbacks_quiescent
+        assert dormant.sync_count == 2
+        assert not observation.response_callbacks_quiescent
         assert observation.historical_output_counts == (1, 0)
         assert any(
             "invariant=historical_output_suppressed" in failure for failure in evaluate_restart_regression(observation)
+        )
+        assert any(
+            "invariant=response_callbacks_quiescent" in failure for failure in evaluate_restart_regression(observation)
         )
     finally:
         stack.close()
