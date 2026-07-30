@@ -39,7 +39,14 @@ from mindroom.hooks import (
 from mindroom.matrix.conversation_cache import MatrixConversationCache
 from mindroom.matrix.decrypt_failure import handle_decrypt_failure, raise_notice_floor
 from mindroom.matrix.event_info import EventInfo, origin_server_ts_from_event_source
-from mindroom.matrix.health import clear_matrix_sync_state, mark_matrix_sync_loop_started, mark_matrix_sync_success
+from mindroom.matrix.health import (
+    SyncCacheWriteProgress,
+    clear_matrix_sync_state,
+    get_matrix_sync_cache_write_progress,
+    mark_matrix_sync_loop_started,
+    mark_matrix_sync_success,
+    track_matrix_sync_cache_write,
+)
 from mindroom.matrix.media import MATRIX_MEDIA_EVENT_TYPES
 from mindroom.matrix.presence import build_agent_status_message, set_presence_status
 from mindroom.matrix.room_cleanup import cleanup_all_orphaned_bots
@@ -118,6 +125,7 @@ from .sync_restart_retry import InterruptedTurnRooms
 from .turn_controller import TurnController, TurnControllerDeps
 from .turn_policy import IngressHookRunner, TurnPolicy, TurnPolicyDeps
 from .turn_store import TurnStore, TurnStoreDeps
+from .visible_voice_echo import VisibleVoiceEchoDeps, VisibleVoiceEchoLifecycle
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -299,6 +307,7 @@ class AgentBot:
     _response_runner: ResponseRunner
     _redacted_turn_cleanup: RedactedTurnCleanup
     _turn_store: TurnStore
+    _visible_voice_echo: VisibleVoiceEchoLifecycle
     _tool_runtime_support: ToolRuntimeSupport
     _post_response_effects_support: PostResponseEffectsSupport
     _ingress_hook_runner: IngressHookRunner
@@ -565,6 +574,16 @@ class AgentBot:
                 turn_store=self._turn_store,
             ),
         )
+        self._visible_voice_echo = VisibleVoiceEchoLifecycle(
+            VisibleVoiceEchoDeps(
+                runtime=self._runtime_view,
+                logger=self.logger,
+                agent_name=self.agent_name,
+                delivery_gateway=self._delivery_gateway,
+                turn_store=self._turn_store,
+                ingress=self._ingress_validator,
+            ),
+        )
         self._turn_controller = TurnController(
             TurnControllerDeps(
                 runtime=self._runtime_view,
@@ -585,6 +604,7 @@ class AgentBot:
                 edit_regenerator=self._edit_regenerator,
                 ingress=self._ingress_validator,
                 interrupted_turn_rooms=self._interrupted_turn_rooms,
+                visible_voice_echo=self._visible_voice_echo,
             ),
         )
 
@@ -628,6 +648,11 @@ class AgentBot:
     def client(self, value: nio.AsyncClient | None) -> None:
         """Update the current Matrix client."""
         self._runtime_view.client = value
+
+    @property
+    def first_sync_complete(self) -> bool:
+        """Return whether this bot generation completed its first sync."""
+        return self._first_sync_done
 
     @property
     def config(self) -> Config:
@@ -1086,6 +1111,15 @@ class AgentBot:
             return None
         return time.monotonic() - self._last_sync_monotonic
 
+    def sync_cache_write_progress(self) -> SyncCacheWriteProgress | None:
+        """Return the durable sync-cache phase shared by watchdog and health."""
+        return get_matrix_sync_cache_write_progress(self.agent_name)
+
+    def _mark_sync_progress(self) -> None:
+        """Advance watchdog and health freshness from one sync progress event."""
+        self.last_sync_time = mark_matrix_sync_success(self.agent_name)
+        self._last_sync_monotonic = time.monotonic()
+
     def _register_room_member_callback_after_initial_sync(self) -> None:
         """Start listening for live member joins after startup history is drained."""
         if self.agent_name != ROUTER_AGENT_NAME or self._room_member_callback_registered:
@@ -1177,42 +1211,45 @@ class AgentBot:
         first_sync_response = not self._first_sync_done
         room_member_join_hooks_were_armed = self._room_member_join_hooks_armed
         room_member_join_hook_plan = _RoomMemberJoinSyncHookPlan()
-        self.last_sync_time = mark_matrix_sync_success(self.agent_name)
-        self._last_sync_monotonic = time.monotonic()
+        self._mark_sync_progress()
 
         if self._sync_shutting_down:
             return
 
         if isinstance(_response, nio.SyncResponse):
-            await self._apply_own_room_membership_from_sync(_response)
-            restored_token_first_sync_response = (
-                first_sync_response and self._sync_cache_trust.state is SyncTrustState.PENDING
-            )
-            try:
-                cache_result = await self._conversation_cache.cache_sync_timeline_for_certification(_response)
-            except asyncio.CancelledError as exc:
-                cache_result = SyncCacheWriteResult(complete=False, errors=(exc,))
-                self._certify_sync_response(
+            with track_matrix_sync_cache_write(self.agent_name):
+                await self._apply_own_room_membership_from_sync(_response)
+                restored_token_first_sync_response = (
+                    first_sync_response and self._sync_cache_trust.state is SyncTrustState.PENDING
+                )
+                try:
+                    cache_result = await self._conversation_cache.cache_sync_timeline_for_certification(_response)
+                except asyncio.CancelledError as exc:
+                    cache_result = SyncCacheWriteResult(complete=False, errors=(exc,))
+                    self._certify_sync_response(
+                        next_batch=_response.next_batch,
+                        cache_result=cache_result,
+                        first_sync=first_sync_response,
+                    )
+                    raise
+                decision = self._certify_sync_response(
                     next_batch=_response.next_batch,
                     cache_result=cache_result,
                     first_sync=first_sync_response,
                 )
-                raise
-            decision = self._certify_sync_response(
-                next_batch=_response.next_batch,
-                cache_result=cache_result,
-                first_sync=first_sync_response,
-            )
-            room_member_join_hook_plan = self._room_member_join_sync_hook_plan(
-                first_sync_response=first_sync_response,
-                restored_token_first_sync_response=restored_token_first_sync_response,
-                hooks_were_armed=room_member_join_hooks_were_armed,
-                decision=decision,
-            )
+                room_member_join_hook_plan = self._room_member_join_sync_hook_plan(
+                    first_sync_response=first_sync_response,
+                    restored_token_first_sync_response=restored_token_first_sync_response,
+                    hooks_were_armed=room_member_join_hooks_were_armed,
+                    decision=decision,
+                )
+            self._mark_sync_progress()
         elif isinstance(_response, nio.SlidingSyncResponse):
             # Sliding sync never certifies the classic checkpoint, but the
             # account's own kicks and bans still must fence and purge rooms.
-            await self._apply_own_room_membership_from_sliding_sync(_response)
+            with track_matrix_sync_cache_write(self.agent_name):
+                await self._apply_own_room_membership_from_sliding_sync(_response)
+            self._mark_sync_progress()
         self._first_sync_done = True
         self._room_member_join_hooks_armed = room_member_join_hook_plan.arm_after_response
 
@@ -1698,59 +1735,78 @@ class AgentBot:
                 resulting_action="drain_then_cancel_response_runtime",
             )
         self._sync_shutting_down = True
-        self._response_runner.refuse_pending_admissions()
-        await self._cancel_startup_thread_prewarm()
-        if self.agent_name == ROUTER_AGENT_NAME:
-            await self._cancel_deferred_overdue_task_drain()
-        background_tasks_completed = await wait_for_background_tasks(
-            timeout=5.0,
-            owner=self._runtime_view,
-            shutdown_intent=shutdown_intent,
-        )
-        drain_result = await self._coalescing_gate.drain_all(
-            ready_timeout_seconds=5.0,
-            shutdown_intent=shutdown_intent,
-        )
-        responses_drained = await self._response_runner.drain_inbox_responses(
-            cancel_after_seconds=5.0,
-            shutdown_intent=shutdown_intent,
-        )
-        post_drain_background_tasks_completed = await wait_for_background_tasks(
-            timeout=5.0,
-            owner=self._runtime_view,
-            shutdown_intent=shutdown_intent,
-        )
-        callback_failure_count = self._runtime_view.callback_failure_count
-        if (
-            background_tasks_completed
-            and drain_result.completed
-            and responses_drained
-            and post_drain_background_tasks_completed
-            and callback_failure_count == 0
-            and self._sync_cache_trust.state is SyncTrustState.CERTIFIED
-        ):
-            self._sync_cache_trust.persist_current()
-        elif (
-            not background_tasks_completed
-            or not drain_result.completed
-            or not responses_drained
-            or not post_drain_background_tasks_completed
-            or callback_failure_count
-        ):
-            self._sync_cache_trust.discard()
-            self.logger.warning(
-                "sync_checkpoint_not_saved_after_incomplete_coalescing_drain",
-                agent_name=self.agent_name,
-                callback_failure_count=callback_failure_count,
-                background_tasks_completed=background_tasks_completed,
-                post_drain_background_tasks_completed=post_drain_background_tasks_completed,
-                released_reservation_count=drain_result.released_reservation_count,
-                cancelled_unready_count=drain_result.cancelled_unready_count,
-                failed_ready_count=drain_result.failed_ready_count,
-                dropped_ready_count=drain_result.dropped_ready_count,
-                dispatch_failure_count=drain_result.dispatch_failure_count,
-                dispatch_cancelled_count=drain_result.dispatch_cancelled_count,
+        checkpoint_decision_completed = False
+        try:
+            self._response_runner.refuse_pending_admissions()
+            await self._cancel_startup_thread_prewarm()
+            if self.agent_name == ROUTER_AGENT_NAME:
+                await self._cancel_deferred_overdue_task_drain()
+            background_tasks_completed = await wait_for_background_tasks(
+                timeout=5.0,
+                owner=self._runtime_view,
+                shutdown_intent=shutdown_intent,
             )
+            drain_result = await self._coalescing_gate.drain_all(
+                ready_timeout_seconds=5.0,
+                shutdown_intent=shutdown_intent,
+            )
+            responses_drained = await self._response_runner.drain_inbox_responses(
+                cancel_after_seconds=5.0,
+                shutdown_intent=shutdown_intent,
+            )
+            pending_response_count = self._response_runner.pending_inbox_response_count
+            if not responses_drained:
+                self.logger.warning(
+                    "matrix_agent_response_drain_incomplete",
+                    agent_name=self.agent_name,
+                    active_response_count=self.in_flight_response_count,
+                    pending_response_count=pending_response_count,
+                    response_recovery_complete=self._response_runner.incomplete_inbox_responses_recoverable,
+                    restart_reason_category=restart_reason_category_for(shutdown_intent),
+                )
+            post_drain_background_tasks_completed = await wait_for_background_tasks(
+                timeout=5.0,
+                owner=self._runtime_view,
+                shutdown_intent=shutdown_intent,
+            )
+            callback_failure_count = self._runtime_view.callback_failure_count
+            source_checkpoint_safe = (
+                background_tasks_completed
+                and drain_result.completed
+                and post_drain_background_tasks_completed
+                and callback_failure_count == 0
+            )
+            # The checkpoint certifies source ingestion, not response completion.
+            # Incomplete response work is safe only after an explicit source-event
+            # recovery proof for every cancelled task.
+            checkpoint_recovery_safe = (
+                source_checkpoint_safe and self._response_runner.incomplete_inbox_responses_recoverable
+            )
+            if checkpoint_recovery_safe and self._sync_cache_trust.state is SyncTrustState.CERTIFIED:
+                self._sync_cache_trust.persist_current()
+            elif not checkpoint_recovery_safe:
+                self._sync_cache_trust.discard()
+                self.logger.warning(
+                    "sync_checkpoint_discarded",
+                    agent_name=self.agent_name,
+                    callback_failure_count=callback_failure_count,
+                    background_tasks_completed=background_tasks_completed,
+                    coalescing_drain_completed=drain_result.completed,
+                    pending_response_count=pending_response_count,
+                    response_recovery_complete=self._response_runner.incomplete_inbox_responses_recoverable,
+                    post_drain_background_tasks_completed=post_drain_background_tasks_completed,
+                    responses_drained=responses_drained,
+                    released_reservation_count=drain_result.released_reservation_count,
+                    cancelled_unready_count=drain_result.cancelled_unready_count,
+                    failed_ready_count=drain_result.failed_ready_count,
+                    dropped_ready_count=drain_result.dropped_ready_count,
+                    dispatch_failure_count=drain_result.dispatch_failure_count,
+                    dispatch_cancelled_count=drain_result.dispatch_cancelled_count,
+                )
+            checkpoint_decision_completed = True
+        finally:
+            if not checkpoint_decision_completed:
+                self._sync_cache_trust.discard()
 
     async def sync_forever(self) -> None:
         """Run the sync loop for this agent."""

@@ -264,7 +264,7 @@ async def test_llm_request_logging_uses_post_defer_wire_tools(tmp_path: Path) ->
 @pytest.mark.asyncio
 async def test_llm_request_logging_records_claude_native_wire_tools(tmp_path: Path) -> None:
     """Claude logs should match the final native-search array passed to its SDK."""
-    model = Claude(id="claude-opus-4-8", api_key="test-key", cache_system_prompt=False)
+    model = Claude(id="claude-opus-5", api_key="test-key", cache_system_prompt=False)
 
     class _FakeMessagesAPI:
         async def create(self, **_kwargs: object) -> object:

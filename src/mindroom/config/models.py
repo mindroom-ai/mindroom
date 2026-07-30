@@ -455,7 +455,8 @@ class DefaultsConfig(BaseModel):
         description=(
             "Temperature override for automatic thread summaries. "
             "Set to null to omit temperature and use provider defaults. "
-            "MindRoom always omits temperature for Vertex Claude thread summaries."
+            "MindRoom always uses provider temperature defaults for Vertex Claude, Claude Opus 5, Sonnet 5, "
+            "Fable 5, and direct Google Gemini 3.6 Flash and Gemini 3.5 Flash-Lite thread summaries."
         ),
     )
     thread_summary_first_threshold: int = Field(

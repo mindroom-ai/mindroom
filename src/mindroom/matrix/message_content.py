@@ -83,11 +83,6 @@ def _sidecar_reference(event_source: Mapping[str, Any]) -> tuple[str, str] | Non
     return event_id, mxc_url
 
 
-def has_sidecar_references(event_sources: Sequence[dict[str, Any]]) -> bool:
-    """Return whether any event source carries a durable long-text sidecar reference."""
-    return any(_sidecar_reference(event_source) is not None for event_source in event_sources)
-
-
 async def prepare_sidecar_hydration_batch(
     event_sources: Sequence[dict[str, Any]],
     *,
@@ -96,7 +91,7 @@ async def prepare_sidecar_hydration_batch(
     expected_membership_epoch: int | None,
     register_owners: bool,
 ) -> SidecarHydrationBatch | None:
-    """Prepare one bounded durable lookup for all sidecars in a history reconstruction."""
+    """Prepare one batched durable lookup for all sidecars in a history reconstruction."""
     if expected_membership_epoch is None or expected_membership_epoch == UNCERTIFIED_MEMBERSHIP_EPOCH:
         return None
     sidecars_by_event_id: dict[str, tuple[dict[str, Any], tuple[str, str]]] = {}
@@ -257,7 +252,7 @@ async def _download_mxc_text(  # noqa: PLR0911, PLR0912, PLR0915, C901
         room_id: Room scope for event-cache locking when a durable MXC cache is available
         event_id: Visible event that owns the room-scoped MXC reference
         expected_membership_epoch: Durable room transition expected by fetch-derived writes
-        hydration_batch: Request-scoped durable sidecar hits from one bounded cache read
+        hydration_batch: Request-scoped durable sidecar hits from one batched cache read
     Returns:
         The downloaded text content, or None if download failed
 
@@ -393,7 +388,7 @@ async def extract_and_resolve_message(
         event_cache: Optional durable event cache used for restart-safe sidecar reuse
         room_id: Room scope for durable sidecar cache reads and writes
         expected_membership_epoch: Durable room transition expected by fetch-derived writes
-        hydration_batch: Request-scoped durable sidecar hits from one bounded cache read
+        hydration_batch: Request-scoped durable sidecar hits from one batched cache read
         trusted_sender_ids: Exact trusted internal sender IDs allowed to override visible body
 
     Returns:

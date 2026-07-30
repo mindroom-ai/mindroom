@@ -133,6 +133,8 @@ class _AgentToolAssembly:
     loaded_tools: tuple[str, ...]
     hidden_toolkits: frozenset[str]
     selected_dynamic_tools: tuple[str, ...]
+    # Authored toolkit names whose schemas use native deferred loading.
+    deferred_tool_names: tuple[str, ...]
     # Wire-level function names to send with defer_loading on the native
     # server-side tool-search path (Anthropic and OpenAI Responses); empty on
     # the homegrown dynamic-tools path.
@@ -912,6 +914,21 @@ def _build_dynamic_tooling_instruction_block(
     )
 
 
+def _build_native_tool_search_instruction_blocks(
+    config: Config,
+    deferred_tool_names: tuple[str, ...],
+) -> tuple[str, ...]:
+    """Return compact discovery guidance for provider-native deferred tools."""
+    if not deferred_tool_names:
+        return ()
+    return (
+        config.render_prompt(
+            "NATIVE_TOOL_SEARCH_INSTRUCTION_TEMPLATE",
+            tool_domains=", ".join(deferred_tool_names),
+        ),
+    )
+
+
 def _build_dynamic_tooling_state_suffix(
     config: Config,
     agent_name: str,
@@ -1354,6 +1371,7 @@ def _assemble_agent_toolkits(
         )
     entity_view = config.resolve_entity(agent_name)
     tools: list[Toolkit] = []
+    deferred_tool_names: list[str] = []
     deferred_wire_tool_names: set[str] = set()
     for tool_name, tool_entry in resolved_tool_configs.items():
         try:
@@ -1389,6 +1407,7 @@ def _assemble_agent_toolkits(
                 # the rendered prompt prefix as plain non-deferred tools.
                 if native_deferred_tools and tool_entry.defer and not tool_entry.initial:
                     suppress_fully_deferred_toolkit_instructions(toolkit)
+                    deferred_tool_names.append(tool_entry.authored_name or tool_name)
                     deferred_wire_tool_names.update(toolkit.get_functions())
                     deferred_wire_tool_names.update(toolkit.get_async_functions())
         except (ValueError, ImportError) as exc:
@@ -1403,6 +1422,7 @@ def _assemble_agent_toolkits(
         loaded_tools=loaded_tools,
         hidden_toolkits=hidden_toolkits,
         selected_dynamic_tools=dynamic_tool_selection.loaded_tools,
+        deferred_tool_names=tuple(dict.fromkeys(deferred_tool_names)),
         deferred_wire_tool_names=frozenset(deferred_wire_tool_names),
     )
 
@@ -1499,6 +1519,7 @@ def _build_agent_instructions(
     disable_runtime_capabilities: bool,
     hidden_toolkits: frozenset[str],
     loaded_tools: tuple[str, ...],
+    native_deferred_tool_names: tuple[str, ...],
     all_deferred_tools_eager: bool,
 ) -> list[str]:
     """Accumulate the configured and runtime instruction blocks for one agent instance."""
@@ -1506,6 +1527,13 @@ def _build_agent_instructions(
 
     if skills and skills.get_skill_names():
         instructions.append(config.get_prompt("SKILLS_TOOL_USAGE_PROMPT"))
+
+    instructions.extend(
+        _build_native_tool_search_instruction_blocks(
+            config,
+            native_deferred_tool_names,
+        ),
+    )
 
     # Native server-side tool search replaces the load_tool catalog and
     # loaded-state prompt blocks, so the native path emits neither.
@@ -1799,6 +1827,7 @@ def create_agent(
         disable_runtime_capabilities=disable_runtime_capabilities,
         hidden_toolkits=tool_assembly.hidden_toolkits,
         loaded_tools=tool_assembly.loaded_tools,
+        native_deferred_tool_names=tool_assembly.deferred_tool_names,
         all_deferred_tools_eager=native_deferred_tools or eager_deferred_tools,
     )
 

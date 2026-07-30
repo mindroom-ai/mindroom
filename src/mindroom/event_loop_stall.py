@@ -13,13 +13,16 @@ where external profilers such as py-spy cannot attach.
 from __future__ import annotations
 
 import asyncio
+import math
 import sys
 import threading
 import time
 import traceback
+from collections import deque
 from typing import TYPE_CHECKING
 
 from mindroom.logging_config import get_logger
+from mindroom.timing import elapsed_ms_between
 
 if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
@@ -28,7 +31,8 @@ logger = get_logger(__name__)
 
 _EVENT_LOOP_STALL_THRESHOLD_ENV = "MINDROOM_EVENT_LOOP_STALL_THRESHOLD_SECONDS"
 _DEFAULT_EVENT_LOOP_STALL_THRESHOLD_SECONDS = 5.0
-_HEARTBEAT_INTERVAL_SECONDS = 1.0
+_HEARTBEAT_INTERVAL_SECONDS = 0.05
+_SCHEDULER_LAG_WINDOW_SECONDS = 60.0
 _REPEAT_LOG_INTERVAL_SECONDS = 30.0
 _THREAD_JOIN_TIMEOUT_SECONDS = 2.0
 
@@ -53,6 +57,9 @@ class EventLoopStallDetector:
         poll_interval_seconds: float | None = None,
     ) -> None:
         """Configure thresholds; ``start()`` arms the heartbeat and thread."""
+        if not math.isfinite(heartbeat_interval_seconds) or heartbeat_interval_seconds <= 0:
+            msg = "heartbeat_interval_seconds must be finite and > 0"
+            raise ValueError(msg)
         self.threshold_seconds = threshold_seconds
         self.heartbeat_interval_seconds = heartbeat_interval_seconds
         self.repeat_log_interval_seconds = repeat_log_interval_seconds
@@ -63,6 +70,11 @@ class EventLoopStallDetector:
         self._last_beat: float = 0.0
         self._stalled_beat: float | None = None
         self._next_repeat_log: float = 0.0
+        self._scheduler_lag_samples: deque[float] = deque(
+            maxlen=max(1, math.ceil(_SCHEDULER_LAG_WINDOW_SECONDS / heartbeat_interval_seconds)),
+        )
+        self._scheduler_lag_window_started_at: float = 0.0
+        self._scheduler_lag_lock = threading.Lock()
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
 
@@ -71,7 +83,8 @@ class EventLoopStallDetector:
         self._loop = asyncio.get_running_loop()
         self._loop_thread_ident = threading.get_ident()
         self._last_beat = time.monotonic()
-        self._heartbeat_handle = self._loop.call_later(self.heartbeat_interval_seconds, self._beat)
+        self._scheduler_lag_window_started_at = time.monotonic()
+        self._schedule_heartbeat(self._loop.time() + self.heartbeat_interval_seconds)
         self._thread = threading.Thread(
             target=self._watch,
             name="event-loop-stall-detector",
@@ -94,11 +107,40 @@ class EventLoopStallDetector:
             self._thread.join(timeout=_THREAD_JOIN_TIMEOUT_SECONDS)
             self._thread = None
 
-    def _beat(self) -> None:
-        """Refresh the heartbeat on the loop and re-arm the next beat."""
+    def _schedule_heartbeat(self, scheduled_loop_time: float) -> None:
+        """Schedule one heartbeat while retaining its requested loop time."""
+        assert self._loop is not None
+        self._heartbeat_handle = self._loop.call_at(scheduled_loop_time, self._beat, scheduled_loop_time)
+
+    def _beat(self, scheduled_loop_time: float) -> None:
+        """Refresh heartbeat, sample callback lag, and re-arm from actual loop time."""
+        assert self._loop is not None
+        actual_loop_time = self._loop.time()
         self._last_beat = time.monotonic()
-        if not self._stop_event.is_set() and self._loop is not None:
-            self._heartbeat_handle = self._loop.call_later(self.heartbeat_interval_seconds, self._beat)
+        with self._scheduler_lag_lock:
+            self._scheduler_lag_samples.append(max(0.0, actual_loop_time - scheduled_loop_time))
+        if not self._stop_event.is_set():
+            self._schedule_heartbeat(actual_loop_time + self.heartbeat_interval_seconds)
+
+    def _report_scheduler_lag(self, now: float) -> None:
+        """Emit one completed scheduler-lag window from the native watcher."""
+        with self._scheduler_lag_lock:
+            if now - self._scheduler_lag_window_started_at < _SCHEDULER_LAG_WINDOW_SECONDS:
+                return
+            samples = list(self._scheduler_lag_samples)
+            self._scheduler_lag_samples.clear()
+            self._scheduler_lag_window_started_at = now
+        if not samples:
+            return
+        milliseconds = sorted(elapsed_ms_between(0.0, sample, ndigits=3) for sample in samples)
+        logger.info(
+            "event_loop_scheduler_lag_summary",
+            sample_count=len(milliseconds),
+            p50_ms=_nearest_rank_percentile(milliseconds, 50),
+            p95_ms=_nearest_rank_percentile(milliseconds, 95),
+            p99_ms=_nearest_rank_percentile(milliseconds, 99),
+            max_ms=milliseconds[-1],
+        )
 
     def _loop_thread_stack(self) -> str | None:
         """Return the loop thread's current stack, formatted for logging."""
@@ -143,11 +185,17 @@ class EventLoopStallDetector:
         """Poll the heartbeat off-loop and log stalls with the blocking stack."""
         while not self._stop_event.wait(self.poll_interval_seconds):
             now = time.monotonic()
+            self._report_scheduler_lag(now)
             last_beat = self._last_beat
             if self._stalled_beat is not None and last_beat != self._stalled_beat:
                 self._note_stall_ended(last_beat)
             if now - last_beat > self.threshold_seconds:
                 self._note_stalled(now, last_beat)
+
+
+def _nearest_rank_percentile(samples: list[float], percentile: int) -> float:
+    """Return one nearest-rank percentile from sorted non-empty samples."""
+    return samples[math.ceil(len(samples) * percentile / 100) - 1]
 
 
 def start_event_loop_stall_detector(runtime_paths: RuntimePaths) -> EventLoopStallDetector | None:

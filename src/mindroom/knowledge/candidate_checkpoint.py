@@ -51,6 +51,21 @@ FileSignature = tuple[int, int, str]
 _CandidateStatus = Literal["building", "failed"]
 
 
+def file_signature_from_fields(
+    source_mtime_ns: object,
+    source_size: object,
+    source_digest: object,
+) -> FileSignature | None:
+    """Return a validated file signature, or None for malformed fields."""
+    if isinstance(source_mtime_ns, bool) or isinstance(source_size, bool):
+        return None
+    if not isinstance(source_mtime_ns, int) or not isinstance(source_size, int) or source_size < 0:
+        return None
+    if not isinstance(source_digest, str) or not source_digest:
+        return None
+    return source_mtime_ns, source_size, source_digest
+
+
 def _utc_now() -> str:
     return datetime.now(tz=UTC).isoformat()
 
@@ -102,14 +117,7 @@ def _candidate_journal_path(base_storage_path: Path) -> Path:
 def _parse_signature(value: object) -> FileSignature | None:
     if not isinstance(value, list) or len(value) != 3:
         return None
-    source_mtime_ns, source_size, source_digest = value
-    if isinstance(source_mtime_ns, bool) or isinstance(source_size, bool):
-        return None
-    if not isinstance(source_mtime_ns, int) or not isinstance(source_size, int) or source_size < 0:
-        return None
-    if not isinstance(source_digest, str) or not source_digest:
-        return None
-    return source_mtime_ns, source_size, source_digest
+    return file_signature_from_fields(*value)
 
 
 def _parse_failure(value: object) -> CandidateFailure | None:

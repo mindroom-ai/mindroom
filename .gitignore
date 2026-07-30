@@ -248,6 +248,12 @@ wgcf-profile.conf
 mindroom-test-storage/
 
 # Local AI-agent artifacts
+# Per-checkout agent instruction overrides: CLAUDE.local.md, AGENTS.local.md, and whatever the
+# next tool calls its own. These are where operator-private context belongs, so the pattern is
+# deliberately broad - nothing in any of them may reach this public repository, and a file that
+# cannot be committed by accident is the only version of that rule that holds.
+*.local.md
+**/*.local.md
 .claude/LIVE-TEST.md
 .claude/REPORT.md
 .claude/settings.local.json

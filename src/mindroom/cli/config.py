@@ -74,6 +74,7 @@ _ProviderPreset = Literal[
     "bedrock_claude",
     "azure",
     "codex",
+    "kimi",
     "llama_cpp",
     "ollama",
     "openai",
@@ -91,6 +92,7 @@ _PROVIDER_PRESET_ALIASES: dict[str, _ProviderPreset] = {
     "azure-openai": "azure",
     "claude": "anthropic",
     "codex": "codex",
+    "kimi": "kimi",
     "llama.cpp": "llama_cpp",
     "llama-cpp": "llama_cpp",
     "llama_cpp": "llama_cpp",
@@ -117,7 +119,7 @@ _MATRIX_SERVER_HELP = (
 )
 _PROVIDER_HELP = "Default model provider for the generated config."
 _PROVIDER_CHOICES_TEXT = (
-    "anthropic, azure, bedrock_claude, codex, llama.cpp, ollama, openai, openrouter, or vertexai_claude"
+    "anthropic, azure, bedrock_claude, codex, kimi, llama.cpp, ollama, openai, openrouter, or vertexai_claude"
 )
 
 
@@ -255,6 +257,7 @@ def _config_init_env_hint(matrix_server: _MatrixServerPreset, selected_preset: _
         "azure": "Set your Azure OpenAI key/endpoint and confirm the config model deployment name",
         "bedrock_claude": "Set AWS Bedrock region and credentials (Matrix homeserver is prefilled)",
         "codex": "Run `codex login` before starting MindRoom (Matrix homeserver is prefilled)",
+        "kimi": "Run `kimi` and `/login` before starting MindRoom (Matrix homeserver is prefilled)",
         "vertexai_claude": "Set your Vertex AI project/region and Google auth (Matrix homeserver is prefilled)",
         "ollama": "Start Ollama and pull the local models (Matrix homeserver is prefilled)",
         "llama_cpp": "Start llama.cpp server with the local model (Matrix homeserver is prefilled)",
@@ -263,6 +266,7 @@ def _config_init_env_hint(matrix_server: _MatrixServerPreset, selected_preset: _
         "azure": "Set your Matrix homeserver, Azure OpenAI key/endpoint, and config model deployment name",
         "bedrock_claude": "Set your Matrix homeserver, AWS Bedrock region, and AWS credentials",
         "codex": "Set your Matrix homeserver and run `codex login` before starting MindRoom",
+        "kimi": "Set your Matrix homeserver and run `kimi` and `/login` before starting MindRoom",
         "vertexai_claude": "Set your Matrix homeserver, Vertex AI project/region, and Google auth",
         "ollama": "Set your Matrix homeserver, start Ollama, and pull the local models",
         "llama_cpp": "Set your Matrix homeserver and start llama.cpp server with the local model",
@@ -823,7 +827,7 @@ def _prompt_provider_preset() -> _ProviderPreset:
     """Prompt the user for a starter provider preset."""
     while True:
         raw_value = typer.prompt(
-            "Choose provider preset [anthropic/azure/bedrock_claude/codex/llama.cpp/ollama/openai/openrouter/vertexai_claude]",
+            "Choose provider preset [anthropic/azure/bedrock_claude/codex/kimi/llama.cpp/ollama/openai/openrouter/vertexai_claude]",
             default="openai",
             show_default=True,
         )
@@ -1118,6 +1122,14 @@ def _provider_env_template(provider_preset: _ProviderPreset) -> str:  # noqa: PL
         # Run `codex login` before starting MindRoom.
         # MindRoom reads ChatGPT OAuth tokens from ~/.codex/auth.json by default.
         # CODEX_HOME=~/.codex
+        """).rstrip()
+
+    if provider_preset == "kimi":
+        return textwrap.dedent("""\
+        # Kimi Code CLI OAuth authentication
+        # Run `kimi` and `/login` before starting MindRoom.
+        # MindRoom reads OAuth tokens from ~/.kimi-code/credentials/kimi-code.json by default.
+        # KIMI_CODE_HOME=~/.kimi-code
         """).rstrip()
 
     if provider_preset == "vertexai_claude":

@@ -53,6 +53,14 @@ class TurnStoreDeps:
     tool_runtime: ToolRuntimeSupport
 
 
+@dataclass(frozen=True)
+class _FinalizedVisibleEcho:
+    """Durable terminal state for one editable visible echo."""
+
+    event_id: str
+    is_fallback: bool
+
+
 @dataclass
 class TurnStore:
     """Own replication, precedence, backfill, and repair for one entity's turns.
@@ -144,9 +152,50 @@ class TurnStore:
 
         self._ledger.update_handled_turn((source_event_id,), visible_echo_record)
 
-    def visible_echo_for_sources(self, source_event_ids: tuple[str, ...]) -> str | None:
-        """Return the first visible echo already tracked for one or more source events."""
-        return self._ledger.visible_echo_event_id_for_sources(source_event_ids)
+    def record_finalized_visible_echo(
+        self,
+        source_event_id: str,
+        echo_event_id: str,
+        *,
+        is_fallback: bool,
+    ) -> None:
+        """Mark a tracked visible echo as successfully replaced."""
+        tracked_record = self.get_turn_record(source_event_id)
+        if tracked_record is None or tracked_record.visible_echo_event_id != echo_event_id:
+            return
+
+        def finalized_visible_echo_record(existing_records: Mapping[str, TurnRecord]) -> TurnRecord:
+            existing = existing_records[source_event_id]
+            if existing.visible_echo_event_id != echo_event_id or (
+                existing.visible_echo_is_fallback is False and is_fallback
+            ):
+                return existing
+            return replace(
+                existing,
+                response_event_id=existing.response_event_id if existing.completed else echo_event_id,
+                visible_echo_is_fallback=is_fallback,
+                timestamp=0.0,
+            )
+
+        self._ledger.update_handled_turn((source_event_id,), finalized_visible_echo_record)
+
+    def finalized_visible_echo(self, source_event_id: str) -> _FinalizedVisibleEcho | None:
+        """Return named terminal state for one tracked visible echo."""
+        record = self.get_turn_record(source_event_id)
+        if record is None or record.visible_echo_event_id is None or record.visible_echo_is_fallback is None:
+            return None
+        return _FinalizedVisibleEcho(
+            event_id=record.visible_echo_event_id,
+            is_fallback=record.visible_echo_is_fallback,
+        )
+
+    def finalized_visible_echo_for_sources(self, source_event_ids: tuple[str, ...]) -> str | None:
+        """Return the first visible echo whose replacement succeeded."""
+        for source_event_id in source_event_ids:
+            finalized = self.finalized_visible_echo(source_event_id)
+            if finalized is not None:
+                return finalized.event_id
+        return None
 
     def get_turn_record(self, source_event_id: str) -> TurnRecord | None:
         """Return the ledger-backed canonical record for one source event."""
@@ -692,6 +741,11 @@ def _backfill_missing_turn_facts(authority: TurnRecord, recovery: TurnRecord) ->
         ),
         response_event_id=authority.response_event_id or recovery.response_event_id,
         visible_echo_event_id=authority.visible_echo_event_id or recovery.visible_echo_event_id,
+        visible_echo_is_fallback=(
+            authority.visible_echo_is_fallback
+            if authority.visible_echo_is_fallback is not None
+            else recovery.visible_echo_is_fallback
+        ),
         source_event_prompts=(
             authority.source_event_prompts
             if authority.source_event_prompts is not None

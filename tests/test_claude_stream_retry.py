@@ -11,7 +11,7 @@ from agno.models.response import ModelResponse
 
 from mindroom import claude_stream_retry
 from mindroom.claude_stream_retry import install_claude_stream_retry_hook
-from mindroom.error_handling import ModelSafeguardRefusalError
+from mindroom.error_handling import MODEL_SAFEGUARD_REFUSAL_MESSAGE, ModelSafeguardRefusalError
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Iterator
@@ -157,7 +157,7 @@ async def test_does_not_retry_non_transient_error() -> None:
 async def test_does_not_retry_safeguard_refusal() -> None:
     """A deterministic model safeguard refusal must surface after one request."""
     refusal = ModelSafeguardRefusalError(
-        message="Vertex Claude returned stop_reason=refusal",
+        message=MODEL_SAFEGUARD_REFUSAL_MESSAGE,
         model_name="Claude",
         model_id="claude-sonnet-5",
     )

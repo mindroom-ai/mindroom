@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import base64
-import hashlib
 import json
 import os
 import time
@@ -26,8 +25,6 @@ if TYPE_CHECKING:
     from agno.run.agent import RunOutput
     from pydantic import BaseModel
 
-    from mindroom.tool_system.worker_routing import ToolExecutionIdentity
-
 _CODEX_BASE_URL = "https://chatgpt.com/backend-api/codex"
 _CODEX_REFRESH_URL = "https://auth.openai.com/oauth/token"
 _CODEX_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"
@@ -35,7 +32,6 @@ _CODEX_REFRESH_SKEW_SECONDS = 30
 _CODEX_MODEL_PREFIX = "openai-codex/"
 _CODEX_MODEL_ALIASES = {CODEX_GPT: CODEX_GPT_ENDPOINT}
 _CODEX_UNSUPPORTED_REQUEST_PARAMS = {"max_output_tokens", "temperature"}
-_CODEX_PROMPT_CACHE_KEY_PREFIX = "mindroom"
 _CODEX_INSTALLATION_ID_HEADER = "x-codex-installation-id"
 _CODEX_WINDOW_ID_HEADER = "x-codex-window-id"
 
@@ -188,24 +184,6 @@ def _update_tokens(tokens: dict[str, Any], refreshed: dict[str, Any]) -> None:
     for key in ("access_token", "id_token", "refresh_token"):
         if refreshed.get(key):
             tokens[key] = refreshed[key]
-
-
-def derive_codex_prompt_cache_key(identity: ToolExecutionIdentity) -> str | None:
-    """Derive a stable Codex prompt-cache routing key for one active execution."""
-    if identity.session_id is None:
-        return None
-    source = ":".join(
-        (
-            identity.channel,
-            identity.agent_name,
-            identity.requester_id or "",
-            identity.room_id or "",
-            identity.resolved_thread_id or identity.thread_id or "",
-            identity.session_id,
-        ),
-    )
-    digest = hashlib.sha256(source.encode("utf-8")).hexdigest()[:32]
-    return f"{_CODEX_PROMPT_CACHE_KEY_PREFIX}-{digest}"
 
 
 def _codex_prompt_cache_headers(prompt_cache_key: str) -> dict[str, str]:

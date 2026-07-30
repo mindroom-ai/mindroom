@@ -116,6 +116,7 @@ async def test_set_thread_summary_defaults_to_context_room_and_thread() -> None:
         "action": "set",
         "event_id": "$summary-event:localhost",
         "message_count": 3,
+        "pinned": True,
         "room_id": "!room:localhost",
         "status": "ok",
         "summary": "🧵 Ready for review",
@@ -136,6 +137,7 @@ async def test_set_thread_summary_defaults_to_context_room_and_thread() -> None:
         config=context.config,
         runtime_paths=context.runtime_paths,
         conversation_cache=context.conversation_cache,
+        pin=True,
     )
 
 
@@ -168,6 +170,7 @@ async def test_set_thread_summary_returns_helper_summary() -> None:
         config=context.config,
         runtime_paths=context.runtime_paths,
         conversation_cache=context.conversation_cache,
+        pin=True,
     )
 
 
@@ -220,6 +223,7 @@ async def test_set_thread_summary_normalizes_explicit_thread_id() -> None:
         config=context.config,
         runtime_paths=context.runtime_paths,
         conversation_cache=context.conversation_cache,
+        pin=True,
     )
 
 
@@ -425,3 +429,51 @@ async def test_set_thread_summary_returns_error_when_send_raises() -> None:
     assert payload["status"] == "error"
     assert payload["thread_id"] == "$ctx-thread:localhost"
     assert payload["message"] == "Failed to send thread summary event."
+
+
+@pytest.mark.asyncio
+async def test_set_thread_summary_pins_by_default() -> None:
+    """Asking an agent to set a title should make it survive automatic re-summarization."""
+    tool = ThreadSummaryTools()
+    context = _make_context(thread_id="$ctx-thread:localhost")
+
+    with (
+        patch(
+            "mindroom.custom_tools.thread_summary.resolve_thread_root_event_id_for_client",
+            new=AsyncMock(return_value="$ctx-thread:localhost"),
+        ),
+        patch(
+            "mindroom.custom_tools.thread_summary.set_manual_thread_summary",
+            new=AsyncMock(return_value=_write_result(summary="A fixed title")),
+        ) as mock_set,
+        tool_runtime_context(context),
+    ):
+        payload = json.loads(await tool.set_thread_summary("A fixed title"))
+
+    assert payload["status"] == "ok"
+    assert payload["pinned"] is True
+    assert mock_set.await_args.kwargs["pin"] is True
+
+
+@pytest.mark.asyncio
+async def test_set_thread_summary_forwards_pin_false() -> None:
+    """pin=False writes a summary and releases the thread for automatic summaries."""
+    tool = ThreadSummaryTools()
+    context = _make_context(thread_id="$ctx-thread:localhost")
+
+    with (
+        patch(
+            "mindroom.custom_tools.thread_summary.resolve_thread_root_event_id_for_client",
+            new=AsyncMock(return_value="$ctx-thread:localhost"),
+        ),
+        patch(
+            "mindroom.custom_tools.thread_summary.set_manual_thread_summary",
+            new=AsyncMock(return_value=_write_result(summary="A routine title")),
+        ) as mock_set,
+        tool_runtime_context(context),
+    ):
+        payload = json.loads(await tool.set_thread_summary("A routine title", pin=False))
+
+    assert payload["status"] == "ok"
+    assert payload["pinned"] is False
+    assert mock_set.await_args.kwargs["pin"] is False

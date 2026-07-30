@@ -28,6 +28,7 @@ from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.constants import (
     STREAM_STATUS_CANCELLED,
     STREAM_STATUS_COMPLETED,
+    STREAM_STATUS_ERROR,
     STREAM_STATUS_KEY,
     STREAM_STATUS_PENDING,
     STREAM_STATUS_STREAMING,
@@ -41,6 +42,7 @@ from mindroom.streaming import (
     StreamingResponse,
     send_streaming_response,
 )
+from mindroom.timing import DispatchPipelineTiming
 from mindroom.tool_system.events import _TOOL_TRACE_KEY, ToolTraceEntry
 from tests.conftest import (
     bind_runtime_paths,
@@ -272,6 +274,117 @@ async def test_nonterminal_delivery_formats_off_event_loop_thread(config: Config
     assert "<strong>world</strong>" in delivered_content["formatted_body"]
 
 
+@pytest.mark.asyncio
+async def test_placeholder_ack_waits_for_answer_ack_before_marking_substantive(config: Config) -> None:
+    """Substantive timing must describe the acknowledged payload, not newer buffered text."""
+    timing = DispatchPipelineTiming(source_event_id="$request", room_id="!test:localhost")
+    streaming = StreamingResponse(
+        target=MessageTarget.resolve("!test:localhost", None, "$original_123", room_mode=True),
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+        pipeline_timing=timing,
+    )
+    delivered_bodies: list[str] = []
+
+    async def fake_send(
+        _client: object,
+        _room_id: str,
+        content: dict[str, Any],
+        *,
+        retry_sync_recovery: bool = False,  # noqa: ARG001
+    ) -> DeliveredMatrixEvent:
+        delivered_bodies.append(content["body"])
+        streaming.accumulated_text = "Answer buffered while the placeholder is in flight"
+        return DeliveredMatrixEvent(event_id="$placeholder", content_sent=dict(content))
+
+    async def fake_edit(
+        _client: object,
+        _room_id: str,
+        _event_id: str,
+        new_content: dict[str, Any],
+        _new_text: str,
+        *,
+        retry_sync_recovery: bool = False,  # noqa: ARG001
+    ) -> DeliveredMatrixEvent:
+        delivered_bodies.append(new_content["body"])
+        return DeliveredMatrixEvent(event_id="$answer-edit", content_sent=dict(new_content))
+
+    with (
+        patch("mindroom.streaming.send_message_result", new=fake_send),
+        patch("mindroom.streaming.edit_message_result", new=fake_edit),
+    ):
+        placeholder_sent = await streaming._send_or_edit_message(
+            make_matrix_client_mock(user_id="@mindroom_helper:localhost"),
+            allow_empty_progress=True,
+        )
+        assert placeholder_sent is True
+        assert delivered_bodies == [_PROGRESS_PLACEHOLDER]
+        assert "first_substantive_reply" not in timing.marks
+        assert "first_substantive_kind" not in timing.metadata
+
+        answer_sent = await streaming._send_or_edit_message(
+            make_matrix_client_mock(user_id="@mindroom_helper:localhost"),
+        )
+
+    assert answer_sent is True
+    assert delivered_bodies == [
+        _PROGRESS_PLACEHOLDER,
+        "Answer buffered while the placeholder is in flight",
+    ]
+    assert "first_substantive_reply" in timing.marks
+    assert timing.metadata["first_substantive_kind"] == "stream_update"
+
+
+@pytest.mark.parametrize(
+    ("stream_status", "terminal_note"),
+    [
+        (STREAM_STATUS_ERROR, "**[Response interrupted by an error: boom]**"),
+        (STREAM_STATUS_CANCELLED, _CANCELLED_RESPONSE_NOTE),
+    ],
+)
+@pytest.mark.asyncio
+async def test_terminal_failure_note_ack_is_visible_but_not_substantive(
+    config: Config,
+    stream_status: str,
+    terminal_note: str,
+) -> None:
+    """Acknowledged failure notes are visible transport output, not substantive replies."""
+    timing = DispatchPipelineTiming(source_event_id="$request", room_id="!test:localhost")
+    streaming = StreamingResponse(
+        target=MessageTarget.resolve("!test:localhost", None, "$original_123", room_mode=True),
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+        pipeline_timing=timing,
+    )
+    streaming.event_id = "$placeholder"
+    streaming.placeholder_progress_sent = True
+    streaming.accumulated_text = terminal_note
+
+    async def fake_edit(
+        _client: object,
+        _room_id: str,
+        _event_id: str,
+        new_content: dict[str, Any],
+        _new_text: str,
+        *,
+        retry_sync_recovery: bool = False,  # noqa: ARG001
+    ) -> DeliveredMatrixEvent:
+        return DeliveredMatrixEvent(event_id="$terminal-edit", content_sent=dict(new_content))
+
+    with patch("mindroom.streaming.edit_message_result", new=fake_edit):
+        sent = await streaming._send_or_edit_message(
+            make_matrix_client_mock(user_id="@mindroom_helper:localhost"),
+            is_final=True,
+            stream_status=stream_status,
+        )
+
+    assert sent is True
+    assert "first_visible_reply" in timing.marks
+    assert timing.metadata["first_visible_kind"] == "stream_update"
+    assert "first_substantive_reply" not in timing.marks
+    assert "first_substantive_kind" not in timing.metadata
+
+
 def test_delivery_snapshot_isolates_tool_trace(config: Config) -> None:
     """Snapshot formatting should not observe later live tool-trace mutations."""
     streaming = StreamingResponse(
@@ -297,6 +410,54 @@ def test_delivery_snapshot_isolates_tool_trace(config: Config) -> None:
     assert len(snapshot.tool_trace) == 1
     assert snapshot.tool_trace[0].type == "tool_call_started"
     assert snapshot.tool_trace[0].result_preview is None
+
+
+def test_delivery_preparation_builds_thread_relation_only_for_initial_send(config: Config) -> None:
+    """Edit payloads must not put dead thread or reply relations in m.new_content."""
+    streaming = StreamingResponse(
+        target=MessageTarget.resolve("!test:localhost", "$thread", "$reply"),
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+    )
+    streaming.accumulated_text = "Hello"
+    streaming.latest_thread_event_id = "$latest"
+    initial_snapshot = streaming._delivery_snapshot(
+        is_final=False,
+        allow_empty_progress=False,
+        stream_status=None,
+    )
+    assert initial_snapshot is not None
+
+    streaming.event_id = "$stream"
+    edit_snapshot = streaming._delivery_snapshot(
+        is_final=False,
+        allow_empty_progress=False,
+        stream_status=None,
+    )
+    assert edit_snapshot is not None
+
+    formatting_kwargs: list[dict[str, object]] = []
+
+    def recording_format(**kwargs: object) -> dict[str, str]:
+        formatting_kwargs.append(kwargs)
+        return {
+            "msgtype": "m.text",
+            "body": "Hello",
+            "format": "org.matrix.custom.html",
+            "formatted_body": "Hello",
+        }
+
+    with patch("mindroom.streaming.format_message_with_mentions", new=recording_format):
+        streaming_mod._prepare_delivery_from_snapshot(initial_snapshot)
+        streaming_mod._prepare_delivery_from_snapshot(edit_snapshot)
+
+    initial_kwargs, edit_kwargs = formatting_kwargs
+    assert initial_kwargs["thread_event_id"] == "$thread"
+    assert initial_kwargs["reply_to_event_id"] == "$reply"
+    assert initial_kwargs["latest_thread_event_id"] == "$latest"
+    assert edit_kwargs["thread_event_id"] is None
+    assert edit_kwargs["reply_to_event_id"] is None
+    assert edit_kwargs["latest_thread_event_id"] is None
 
 
 @pytest.mark.asyncio

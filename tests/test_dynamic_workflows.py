@@ -33,6 +33,7 @@ from mindroom.dynamic_workflows.service import DynamicWorkflowService
 from mindroom.dynamic_workflows.store import DynamicWorkflowStore
 from mindroom.dynamic_workflows.validation import DynamicWorkflowError
 from mindroom.entity_resolution import entity_identity_registry
+from mindroom.matrix.state import MatrixState
 from mindroom.message_target import MessageTarget
 from mindroom.tool_approval import ToolCallWorkflowOrigin, _matching_tool_approval_rule, _shutdown_approval_store
 from mindroom.tool_system.metadata import TOOL_METADATA
@@ -1720,7 +1721,7 @@ def test_dynamic_workflow_tool_rejects_ephemeral_model_outside_caller_policy(tmp
             agents={"general": AgentConfig(display_name="General Agent", tools=["dynamic_workflow"], model="default")},
             models={
                 "default": ModelConfig(provider="anthropic", id="claude-sonnet-4-6"),
-                "opus": ModelConfig(provider="anthropic", id="claude-opus-4-8"),
+                "opus": ModelConfig(provider="anthropic", id="claude-opus-5"),
             },
         ),
         context.runtime_paths,
@@ -1740,7 +1741,7 @@ def test_dynamic_workflow_tool_rejects_ephemeral_model_outside_caller_policy(tmp
                             "tools": [],
                         },
                     ],
-                    permissions={"models": ["claude-opus-4-8"], "tools": []},
+                    permissions={"models": ["claude-opus-5"], "tools": []},
                 ),
             ),
         )
@@ -1758,7 +1759,7 @@ def test_dynamic_workflow_tool_enforces_permission_models_for_default_participan
             agents={"general": AgentConfig(display_name="General Agent", tools=["dynamic_workflow"], model="default")},
             models={
                 "default": ModelConfig(provider="anthropic", id="claude-sonnet-4-6"),
-                "opus": ModelConfig(provider="anthropic", id="claude-opus-4-8"),
+                "opus": ModelConfig(provider="anthropic", id="claude-opus-5"),
             },
         ),
         context.runtime_paths,
@@ -1777,7 +1778,7 @@ def test_dynamic_workflow_tool_enforces_permission_models_for_default_participan
                             "tools": [],
                         },
                     ],
-                    permissions={"models": ["claude-opus-4-8"], "tools": []},
+                    permissions={"models": ["claude-opus-5"], "tools": []},
                 ),
             ),
         )
@@ -1795,7 +1796,7 @@ def test_dynamic_workflow_tool_defaults_ephemeral_model_to_caller_runtime_model(
             agents={"general": AgentConfig(display_name="General Agent", tools=["dynamic_workflow"], model="opus")},
             models={
                 "default": ModelConfig(provider="anthropic", id="claude-sonnet-4-6"),
-                "opus": ModelConfig(provider="anthropic", id="claude-opus-4-8"),
+                "opus": ModelConfig(provider="anthropic", id="claude-opus-5"),
             },
         ),
         context.runtime_paths,
@@ -1900,7 +1901,7 @@ def test_dynamic_workflow_tool_revalidates_saved_revision_policy_before_run(tmp_
             agents={"general": AgentConfig(display_name="General Agent", tools=["dynamic_workflow"], model="default")},
             models={
                 "default": ModelConfig(provider="anthropic", id="claude-sonnet-4-6"),
-                "opus": ModelConfig(provider="anthropic", id="claude-opus-4-8"),
+                "opus": ModelConfig(provider="anthropic", id="claude-opus-5"),
             },
         ),
         context.runtime_paths,
@@ -2002,7 +2003,7 @@ def test_room_agent_participant_rebinds_context_and_uses_isolated_state(tmp_path
             },
             models={
                 "default": ModelConfig(provider="anthropic", id="claude-sonnet-4-6"),
-                "large": ModelConfig(provider="anthropic", id="claude-opus-4-8"),
+                "large": ModelConfig(provider="anthropic", id="claude-opus-5"),
             },
             room_models={"lobby": "large"},
             knowledge_bases={"reference": {"path": str(tmp_path / "knowledge")}},
@@ -2010,12 +2011,9 @@ def test_room_agent_participant_rebinds_context_and_uses_isolated_state(tmp_path
         context.runtime_paths,
     )
     runtime_paths = runtime_paths_for(config)
-    (runtime_paths.storage_root / "matrix_state.yaml").write_text(
-        yaml.safe_dump(
-            {"rooms": {"lobby": {"room_id": "!room:localhost", "alias": "#lobby:localhost", "name": "Lobby"}}},
-        ),
-        encoding="utf-8",
-    )
+    state = MatrixState.load(runtime_paths=runtime_paths)
+    state.add_room("lobby", room_id="!room:localhost", alias="#lobby:localhost", name="Lobby")
+    state.save(runtime_paths=runtime_paths)
     persist_entity_accounts(config, runtime_paths)
     context = replace(context, config=config, runtime_paths=runtime_paths)
     parent_loop = asyncio.new_event_loop()

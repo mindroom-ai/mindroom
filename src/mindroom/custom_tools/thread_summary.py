@@ -41,10 +41,14 @@ class ThreadSummaryTools(Toolkit):
         summary: str,
         thread_id: str | None = None,
         room_id: str | None = None,
+        pin: bool = True,
     ) -> str:
         """Write a plain-text summary notice into the current or specified Matrix thread.
 
         Summary must be plain text (no markdown), maximum 300 characters.
+        Pinning stops automatic re-summarization from overwriting the title, and
+        is the default. Pass pin=False for a routine update that later automatic
+        summaries may replace; that also releases an earlier pin.
         """
         context = get_tool_runtime_context()
         if context is None:
@@ -108,6 +112,7 @@ class ThreadSummaryTools(Toolkit):
                 config=context.config,
                 runtime_paths=context.runtime_paths,
                 conversation_cache=conversation_cache,
+                pin=pin,
             )
         except ThreadSummaryWriteError as exc:
             return self._payload(
@@ -126,4 +131,5 @@ class ThreadSummaryTools(Toolkit):
             event_id=result.event_id,
             message_count=result.message_count,
             summary=result.summary,
+            pinned=pin,
         )

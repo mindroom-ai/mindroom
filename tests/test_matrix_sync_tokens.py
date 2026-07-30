@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
 import uuid
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, cast
@@ -21,15 +22,20 @@ from mindroom.coalescing_batch import CoalescedBatch, CoalescingKey, PendingEven
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
+from mindroom.delivery_gateway import FinalizeStreamedResponseRequest, ResponseIdentity
 from mindroom.dispatch_handoff import PendingDispatchMetadata
 from mindroom.dispatch_source import VOICE_SOURCE_KIND
+from mindroom.handled_turns import TurnRecord
 from mindroom.matrix.cache.event_cache import EventCacheBackendUnavailableError
 from mindroom.matrix.cache.postgres_event_cache import PostgresEventCache
 from mindroom.matrix.cache.sqlite_event_cache import SqliteEventCache
+from mindroom.matrix.client import DeliveredMatrixEvent
 from mindroom.matrix.sync_certification import SyncCheckpoint, SyncTrustState
 from mindroom.matrix.sync_tokens import clear_sync_token, load_sync_checkpoint, save_sync_token
 from mindroom.matrix.users import AgentMatrixUser
+from mindroom.message_target import MessageTarget
 from mindroom.response_admission import ResponseAdmissionGate
+from mindroom.response_runner import ResponseRequest
 from mindroom.runtime_shutdown import (
     ENTITY_REMOVED_SHUTDOWN,
     GENERIC_SHUTDOWN,
@@ -37,19 +43,24 @@ from mindroom.runtime_shutdown import (
     SYNC_RESTART_SHUTDOWN,
     RuntimeShutdownIntent,
 )
+from mindroom.streaming import RESTART_INTERRUPTED_RESPONSE_NOTE, StreamingResponse
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
     install_runtime_cache_support,
+    install_shutdown_drain_mocks,
     make_matrix_client_mock,
+    request_envelope,
     runtime_paths_for,
     test_runtime_paths,
+    wrap_extracted_collaborators,
 )
 
 if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.coalescing import LaneSlot, _GateEntry
+    from mindroom.final_delivery import FinalDeliveryOutcome
 
 _CACHE_GENERATION = "test-cache-generation"
 
@@ -80,6 +91,27 @@ def _agent_bot(tmp_path: Path, *, agent_name: str = "code") -> AgentBot:
         rooms=["!room:localhost"],
     )
     install_runtime_cache_support(bot)
+    return bot
+
+
+def _install_fast_response_drain(bot: AgentBot) -> None:
+    """Keep real response draining while shortening its bounded waits."""
+    drain_inbox_responses = bot._response_runner.drain_inbox_responses
+
+    async def fast_drain(*, cancel_after_seconds: float | None, shutdown_intent: RuntimeShutdownIntent) -> bool:
+        assert cancel_after_seconds == 5.0
+        return await drain_inbox_responses(cancel_after_seconds=0.01, shutdown_intent=shutdown_intent)
+
+    bot._response_runner.drain_inbox_responses = fast_drain
+
+
+def _certified_shutdown_bot(tmp_path: Path) -> AgentBot:
+    bot = _agent_bot(tmp_path)
+    save_sync_token(tmp_path, bot.agent_name, "s_previous", cache_generation=_CACHE_GENERATION)
+    bot._sync_cache_trust.state = SyncTrustState.CERTIFIED
+    bot._sync_cache_trust.checkpoint = SyncCheckpoint("s_shutdown")
+    wrap_extracted_collaborators(bot, "_coalescing_gate", "_response_runner")
+    bot._coalescing_gate.drain_all = AsyncMock(return_value=CoalescingDrainResult(completed=True))
     return bot
 
 
@@ -1038,6 +1070,41 @@ async def test_shutdown_timeout_does_not_save_checkpoint_for_cancelled_ingress(t
     assert _load_sync_token_value(tmp_path, bot.agent_name) is None
 
 
+@pytest.mark.parametrize(
+    ("coalescing_drain_result", "responses_drained", "response_recovery_complete"),
+    [
+        (CoalescingDrainResult(completed=True), False, False),
+        (CoalescingDrainResult(completed=False, cancelled_unready_count=1), True, True),
+    ],
+)
+@pytest.mark.asyncio
+async def test_shutdown_discard_warning_logs_exact_drain_predicates(
+    tmp_path: Path,
+    coalescing_drain_result: CoalescingDrainResult,
+    responses_drained: bool,
+    response_recovery_complete: bool,
+) -> None:
+    """Checkpoint-discard logs should identify which content-free drain predicate failed."""
+    bot = _agent_bot(tmp_path)
+    install_shutdown_drain_mocks(
+        bot,
+        coalescing_drain_result=coalescing_drain_result,
+        responses_drained=responses_drained,
+        response_recovery_complete=response_recovery_complete,
+    )
+
+    with capture_logs() as logs:
+        await bot.prepare_for_sync_shutdown()
+
+    warnings = [entry for entry in logs if entry["event"] == "sync_checkpoint_discarded"]
+    assert len(warnings) == 1
+    assert warnings[0]["coalescing_drain_completed"] is coalescing_drain_result.completed
+    assert warnings[0]["cancelled_unready_count"] == coalescing_drain_result.cancelled_unready_count
+    assert warnings[0]["responses_drained"] is responses_drained
+    assert warnings[0]["response_recovery_complete"] is response_recovery_complete
+    assert not {"body", "content", "formatted_body", "message_content"} & warnings[0].keys()
+
+
 @pytest.mark.asyncio
 async def test_shutdown_timeout_does_not_save_checkpoint_for_unsettled_callbacks(tmp_path: Path) -> None:
     """Shutdown must not checkpoint if callback tasks timed out before the gate drain."""
@@ -1073,8 +1140,40 @@ async def test_shutdown_timeout_does_not_save_checkpoint_for_post_drain_backgrou
 
 
 @pytest.mark.asyncio
-async def test_callback_failure_prevents_certified_shutdown_checkpoint(tmp_path: Path) -> None:
-    """A Matrix callback exception must make the certified sync token unsafe."""
+async def test_shutdown_cancellation_during_post_drain_wait_discards_unsafe_checkpoint(tmp_path: Path) -> None:
+    """Cancellation after an unsafe drain must poison the certified checkpoint."""
+    bot = _certified_shutdown_bot(tmp_path)
+    bot._coalescing_gate.drain_all = AsyncMock(
+        return_value=CoalescingDrainResult(completed=False, cancelled_unready_count=1),
+    )
+    post_drain_wait_started = asyncio.Event()
+    wait_call_count = 0
+
+    async def wait_with_post_drain_barrier(**_kwargs: object) -> bool:
+        nonlocal wait_call_count
+        wait_call_count += 1
+        if wait_call_count == 1:
+            return True
+        post_drain_wait_started.set()
+        await asyncio.Event().wait()
+        return True
+
+    with patch("mindroom.bot.wait_for_background_tasks", new=wait_with_post_drain_barrier):
+        shutdown_task = asyncio.create_task(bot.prepare_for_sync_shutdown())
+        await post_drain_wait_started.wait()
+        shutdown_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await shutdown_task
+
+    assert wait_call_count == 2
+    assert bot._sync_cache_trust.state is SyncTrustState.UNCERTAIN
+    assert bot._sync_cache_trust.checkpoint is None
+    assert _load_sync_token_value(tmp_path, bot.agent_name) is None
+
+
+@pytest.mark.asyncio
+async def test_callback_failure_discards_checkpoint_with_generic_event(tmp_path: Path) -> None:
+    """A callback-only discard must not blame an incomplete shutdown."""
     bot = _agent_bot(tmp_path)
     bot._sync_cache_trust.state = SyncTrustState.CERTIFIED
     bot._sync_cache_trust.checkpoint = SyncCheckpoint("s_after_bad_callback")
@@ -1088,11 +1187,19 @@ async def test_callback_failure_prevents_certified_shutdown_checkpoint(tmp_path:
     await callback()
     await wait_for_background_tasks(timeout=0.5, owner=bot._runtime_view)
 
-    await bot.prepare_for_sync_shutdown()
+    with capture_logs() as logs:
+        await bot.prepare_for_sync_shutdown()
 
     assert bot._sync_cache_trust.state is SyncTrustState.UNCERTAIN
     assert bot._sync_cache_trust.checkpoint is None
     assert _load_sync_token_value(tmp_path, bot.agent_name) is None
+    warnings = [entry for entry in logs if entry["event"] == "sync_checkpoint_discarded"]
+    assert len(warnings) == 1
+    assert warnings[0]["callback_failure_count"] == 1
+    assert warnings[0]["background_tasks_completed"] is True
+    assert warnings[0]["coalescing_drain_completed"] is True
+    assert warnings[0]["responses_drained"] is True
+    assert warnings[0]["post_drain_background_tasks_completed"] is True
 
 
 @pytest.mark.asyncio
@@ -1694,22 +1801,330 @@ async def test_shutdown_in_flight_dispatch_cancellation_marks_drain_incomplete()
     assert result.dispatch_cancelled_count == 1
 
 
+@pytest.mark.parametrize(
+    (
+        "response_rooms",
+        "handoff_indexes",
+        "remains_pending",
+        "checkpoint_preserved",
+        "shutdown_intent",
+        "restart_reason_category",
+    ),
+    [
+        (("!one:localhost",), frozenset({0}), False, True, SYNC_RESTART_SHUTDOWN, "config_reload"),
+        (("!one:localhost",), frozenset(), False, False, SYNC_RESTART_SHUTDOWN, "config_reload"),
+        (
+            ("!one:localhost", "!two:localhost"),
+            frozenset({0}),
+            False,
+            False,
+            SYNC_RESTART_SHUTDOWN,
+            "config_reload",
+        ),
+        (
+            ("!one:localhost", "!one:localhost"),
+            frozenset({0}),
+            False,
+            False,
+            SYNC_RESTART_SHUTDOWN,
+            "config_reload",
+        ),
+        (
+            ("!one:localhost", "!one:localhost"),
+            frozenset({0, 1}),
+            False,
+            True,
+            SYNC_RESTART_SHUTDOWN,
+            "config_reload",
+        ),
+        (("!one:localhost",), frozenset(), True, False, SYNC_RESTART_SHUTDOWN, "config_reload"),
+        (("!one:localhost",), frozenset({0}), False, True, ORDERLY_SHUTDOWN, "process_shutdown"),
+    ],
+)
 @pytest.mark.asyncio
-async def test_shutdown_timeout_does_not_save_checkpoint_for_undrained_inbox_responses(tmp_path: Path) -> None:
-    """A stuck detached inbox response must block the certified shutdown checkpoint."""
+async def test_shutdown_preserves_checkpoint_only_when_each_cancelled_response_has_source_recovery(
+    tmp_path: Path,
+    response_rooms: tuple[str, ...],
+    handoff_indexes: frozenset[int],
+    remains_pending: bool,
+    checkpoint_preserved: bool,
+    shutdown_intent: RuntimeShutdownIntent,
+    restart_reason_category: str,
+) -> None:
+    """Every settled cancellation needs its exact source recovery handoff."""
+    bot = _certified_shutdown_bot(tmp_path)
+    response_started = [asyncio.Event() for _room_id in response_rooms]
+    release_response = asyncio.Event()
+
+    async def interrupted_response(index: int, room_id: str) -> None:
+        response_started[index].set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            if remains_pending:
+                await release_response.wait()
+            if index in handoff_indexes:
+                bot._interrupted_turn_rooms.register(f"$source-{index}", room_id=room_id)
+            if not remains_pending:
+                raise
+
+    response_tasks = [
+        bot._response_runner.track_inbox_response(
+            interrupted_response(index, room_id),
+            name=f"test_interrupted_response_{index}",
+            recovery_proof_ready=lambda index=index: bot._interrupted_turn_rooms.contains(f"$source-{index}"),
+        )
+        for index, room_id in enumerate(response_rooms)
+    ]
+    await asyncio.gather(*(event.wait() for event in response_started))
+    _install_fast_response_drain(bot)
+    with capture_logs() as logs:
+        await bot.prepare_for_sync_shutdown(shutdown_intent=shutdown_intent)
+
+    release_response.set()
+    await asyncio.gather(*response_tasks, return_exceptions=True)
+    assert all(task.cancelled() for task in response_tasks) == (not remains_pending)
+    expected_state = SyncTrustState.CERTIFIED if checkpoint_preserved else SyncTrustState.UNCERTAIN
+    assert bot._sync_cache_trust.state is expected_state
+    expected_token = "s_shutdown" if checkpoint_preserved else None
+    assert _load_sync_token_value(tmp_path, bot.agent_name) == expected_token
+    assert bot.pending_sync_restart_retry_room_ids == {response_rooms[index] for index in handoff_indexes}
+    incomplete_log = next(entry for entry in logs if entry["event"] == "matrix_agent_response_drain_incomplete")
+    assert incomplete_log["restart_reason_category"] == restart_reason_category
+    assert incomplete_log["response_recovery_complete"] is checkpoint_preserved
+
+
+@pytest.mark.asyncio
+async def test_shutdown_discards_checkpoint_when_response_swallows_cancellation_without_handoff(
+    tmp_path: Path,
+) -> None:
+    """An accepted cancellation needs exact recovery even if the task returns cleanly."""
+    bot = _certified_shutdown_bot(tmp_path)
+    response_started = asyncio.Event()
+
+    async def swallowed_response_cancellation() -> None:
+        response_started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            return
+
+    response_task = bot._response_runner.track_inbox_response(
+        swallowed_response_cancellation(),
+        name="test_swallowed_response_cancellation",
+        recovery_proof_ready=lambda: False,
+    )
+    await response_started.wait()
+    _install_fast_response_drain(bot)
+
+    await bot.prepare_for_sync_shutdown(shutdown_intent=SYNC_RESTART_SHUTDOWN)
+
+    assert response_task.done()
+    assert not response_task.cancelled()
+    assert response_task.exception() is None
+    assert bot._response_runner.incomplete_inbox_responses_recoverable is False
+    assert bot._sync_cache_trust.state is SyncTrustState.UNCERTAIN
+    assert _load_sync_token_value(tmp_path, bot.agent_name) is None
+
+
+@pytest.mark.parametrize(
+    "terminal_edit_effect",
+    [
+        pytest.param(None, id="failed"),
+        pytest.param(asyncio.CancelledError("terminal edit cancelled"), id="cancelled"),
+    ],
+)
+@pytest.mark.parametrize(
+    "prior_visible_body",
+    [
+        pytest.param("partial answer", id="ordinary-body"),
+        pytest.param(RESTART_INTERRUPTED_RESPONSE_NOTE, id="marker-collision"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_shutdown_discards_checkpoint_when_terminal_interruption_note_did_not_land(
+    tmp_path: Path,
+    terminal_edit_effect: object,
+    prior_visible_body: str,
+) -> None:
+    """Even a colliding prior body cannot prove that the terminal note edit landed."""
+    bot = _certified_shutdown_bot(tmp_path)
+    bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
+    room_id = "!room:localhost"
+    source_event_id = "$source"
+    target = MessageTarget.resolve(room_id, "$thread", source_event_id)
+    envelope = request_envelope(
+        room_id=room_id,
+        reply_to_event_id=source_event_id,
+        target=target,
+        agent_name=bot.agent_name,
+    )
+    streaming = StreamingResponse(
+        target=target,
+        config=bot.config,
+        runtime_paths=runtime_paths_for(bot.config),
+    )
+    streaming.event_id = "$response"
+    streaming.accumulated_text = prior_visible_body
+    response_started = asyncio.Event()
+    final_outcomes: list[FinalDeliveryOutcome] = []
+
+    async def interrupted_response() -> None:
+        response_started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            transport_outcome = await streaming.finalize(bot.client, restart_interrupted=True)
+            final_outcome = await bot._response_runner.deps.delivery_gateway.finalize_streamed_response(
+                FinalizeStreamedResponseRequest(
+                    target=target,
+                    stream_transport_outcome=transport_outcome,
+                    initial_delivery_kind="sent",
+                    identity=ResponseIdentity(
+                        response_kind="ai",
+                        response_envelope=envelope,
+                        correlation_id=source_event_id,
+                    ),
+                    tool_trace=None,
+                    extra_content=None,
+                ),
+            )
+            final_outcomes.append(final_outcome)
+            bot._response_runner._notify_interrupted_response_recoverable(
+                ResponseRequest(
+                    thread_history=(),
+                    prompt="Hello",
+                    response_envelope=envelope,
+                    on_interrupted_response_recoverable=lambda: bot._interrupted_turn_rooms.register(
+                        source_event_id,
+                        room_id=room_id,
+                    ),
+                ),
+                final_outcome,
+            )
+            raise
+
+    edit_message = AsyncMock(
+        side_effect=[
+            DeliveredMatrixEvent(event_id="$partial-edit", content_sent={"body": prior_visible_body}),
+            terminal_edit_effect,
+        ],
+    )
+    with patch("mindroom.streaming.edit_message_result", new=edit_message):
+        assert await streaming._send_or_edit_message(bot.client)
+        response_task = bot._response_runner.track_inbox_response(
+            interrupted_response(),
+            name="test_unlanded_terminal_interruption",
+            recovery_proof_ready=lambda: bot._interrupted_turn_rooms.contains(source_event_id),
+        )
+        await response_started.wait()
+        _install_fast_response_drain(bot)
+        await bot.prepare_for_sync_shutdown(shutdown_intent=SYNC_RESTART_SHUTDOWN)
+
+    await asyncio.gather(response_task, return_exceptions=True)
+    assert edit_message.await_count == 2
+    assert response_task.cancelled()
+    assert len(final_outcomes) == 1
+    assert final_outcomes[0].mark_handled is True
+    assert final_outcomes[0].final_visible_body == prior_visible_body
+    assert not bot._interrupted_turn_rooms.contains(source_event_id)
+    assert bot._response_runner.incomplete_inbox_responses_recoverable is False
+    assert bot._sync_cache_trust.state is SyncTrustState.UNCERTAIN
+    assert _load_sync_token_value(tmp_path, bot.agent_name) is None
+
+
+@pytest.mark.asyncio
+async def test_orderly_shutdown_discards_checkpoint_for_write_behind_handled_response_without_handoff(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Write-behind handled state alone cannot preserve source continuity."""
+    bot = _certified_shutdown_bot(tmp_path)
+    source_event_id = "$orderly-source"
+    response_started = asyncio.Event()
+    persist_started = threading.Event()
+    release_persist = threading.Event()
+    real_persist = bot._turn_store._ledger._persist_records
+
+    def persist_with_barrier(turn_records: tuple[TurnRecord, ...]) -> None:
+        persist_started.set()
+        if not release_persist.wait(timeout=5):
+            msg = "test did not release terminal-turn persistence"
+            raise TimeoutError(msg)
+        real_persist(turn_records)
+
+    monkeypatch.setattr(bot._turn_store._ledger, "_persist_records", persist_with_barrier)
+
+    async def write_behind_handled_cancellation() -> None:
+        response_started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            bot._turn_store.record_turn(
+                TurnRecord.create([source_event_id], response_event_id="$interrupted-response"),
+            )
+
+    response_task = bot._response_runner.track_inbox_response(
+        write_behind_handled_cancellation(),
+        name="test_write_behind_handled_orderly_cancellation",
+        recovery_proof_ready=lambda: bot._interrupted_turn_rooms.contains(source_event_id),
+    )
+    await response_started.wait()
+    _install_fast_response_drain(bot)
+
+    try:
+        await bot.prepare_for_sync_shutdown(shutdown_intent=ORDERLY_SHUTDOWN)
+        assert await asyncio.to_thread(persist_started.wait, 5)
+        assert response_task.done()
+        assert not response_task.cancelled()
+        assert bot._turn_store.is_handled(source_event_id)
+        assert bot._response_runner.incomplete_inbox_responses_recoverable is False
+        assert bot._sync_cache_trust.state is SyncTrustState.UNCERTAIN
+        assert _load_sync_token_value(tmp_path, bot.agent_name) is None
+    finally:
+        release_persist.set()
+        await asyncio.to_thread(bot._turn_store._ledger.flush)
+
+
+@pytest.mark.parametrize("source_failure", ["coalescing", "callback"])
+@pytest.mark.asyncio
+async def test_response_timeout_discards_checkpoint_when_source_is_unsafe(
+    tmp_path: Path,
+    source_failure: str,
+) -> None:
+    """Response cancellation cannot preserve continuity across source uncertainty."""
+    bot = _certified_shutdown_bot(tmp_path)
+    bot._coalescing_gate.drain_all = AsyncMock(
+        return_value=CoalescingDrainResult(
+            completed=source_failure != "coalescing",
+            cancelled_unready_count=int(source_failure == "coalescing"),
+        ),
+    )
+    bot._response_runner.drain_inbox_responses = AsyncMock(return_value=False)
+    if source_failure == "callback":
+        bot._runtime_view.mark_callback_failed()
+
+    await bot.prepare_for_sync_shutdown()
+
+    assert bot._sync_cache_trust.state is SyncTrustState.UNCERTAIN
+    assert bot._sync_cache_trust.checkpoint is None
+    assert _load_sync_token_value(tmp_path, bot.agent_name) is None
+
+
+@pytest.mark.asyncio
+async def test_response_timeout_does_not_persist_uncertified_precallback_token(tmp_path: Path) -> None:
+    """Response cancellation must not promote nio's token before callback certification."""
     bot = _agent_bot(tmp_path)
-    bot._sync_cache_trust.state = SyncTrustState.CERTIFIED
-    bot._sync_cache_trust.checkpoint = SyncCheckpoint("s_shutdown")
+    bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
+    bot.client.next_batch = "s_uncertified"
+    bot._sync_cache_trust.state = SyncTrustState.PENDING
+    wrap_extracted_collaborators(bot, "_coalescing_gate", "_response_runner")
     bot._coalescing_gate.drain_all = AsyncMock(return_value=CoalescingDrainResult(completed=True))
     bot._response_runner.drain_inbox_responses = AsyncMock(return_value=False)
 
     await bot.prepare_for_sync_shutdown()
 
-    bot._response_runner.drain_inbox_responses.assert_awaited_once_with(
-        cancel_after_seconds=5.0,
-        shutdown_intent=GENERIC_SHUTDOWN,
-    )
-    assert bot._sync_cache_trust.state is SyncTrustState.UNCERTAIN
+    assert bot._sync_cache_trust.state is SyncTrustState.PENDING
     assert bot._sync_cache_trust.checkpoint is None
     assert _load_sync_token_value(tmp_path, bot.agent_name) is None
 

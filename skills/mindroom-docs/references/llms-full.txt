@@ -303,6 +303,7 @@ For hosted providers, set the credentials for the provider you selected:
 - `OPENAI_API_KEY=...`, or
 - `OPENROUTER_API_KEY=...`, or
 - For Codex CLI ChatGPT authentication: run `codex login`.
+- For Kimi Code CLI authentication: run `kimi` and `/login`.
 - For Vertex AI Claude: set `ANTHROPIC_VERTEX_PROJECT_ID` and `CLOUD_ML_REGION` and authenticate with `gcloud auth application-default login`.
 Skip this step for `--provider ollama` or `--provider llama.cpp` unless you also add a remote provider.
 
@@ -846,7 +847,12 @@ MindRoom tracks runtime phases internally:
 | `failed` | Startup or runtime failure (detail message available) |
 
 When the semantic-search embedder is failing, the health payload additionally carries `"embedder": {"status": "failing", "detail": ...}` with the classified cause; this block is diagnostic only and never flips liveness.
-Use `/api/health` for liveness probes and `/api/ready` for readiness probes in container orchestrators. Note: `/api/health` returns `503` when Matrix sync is stale (>180s without successful sync, after the 120s watchdog timeout has attempted recovery). Configure liveness probe `failureThreshold` to allow sufficient time for watchdog self-healing.
+Use `/api/health` for liveness probes and `/api/ready` for readiness probes in container orchestrators.
+Ordinary Matrix transport silence still reaches the watchdog after 120 seconds and makes `/api/health` return `503` after 180 seconds without a successful sync.
+While a sync callback is actively completing its sequential durable cache phase, the watchdog and `/api/health` consume the same monotonic progress snapshot and defer for `MINDROOM_MATRIX_SYNC_CACHE_WRITE_GRACE_SECONDS` (default 600).
+Both stop deferring when that grace expires.
+Successful cache-phase completion refreshes both liveness clocks, so a long healthy write does not immediately return `503`.
+Configure liveness probe `failureThreshold` to allow sufficient time for watchdog self-healing.
 
 ### Tools & Matrix
 
@@ -1064,8 +1070,13 @@ Set `CODEX_HOME` only if your Codex CLI state lives outside `~/.codex`.
 | `MINDROOM_DASHBOARD_CORS_ALLOW_ALL_ORIGINS` | Set to `true` to allow every dashboard API origin while disabling credentialed CORS responses | _(unset)_ |
 | `MINDROOM_NO_AUTO_INSTALL_TOOLS` | Set to `1`/`true`/`yes` to disable automatic tool dependency installation | _(unset — auto-install enabled)_ |
 | `MINDROOM_MATRIX_HOMESERVER_STARTUP_TIMEOUT_SECONDS` | Seconds to wait for homeserver to become reachable at startup (0 = skip). MindRoom polls the homeserver's `/_matrix/client/versions` endpoint with exponential backoff retry, detecting permanent errors (e.g., wrong URL) vs transient failures | _(wait indefinitely)_ |
+| `MINDROOM_MATRIX_SYNC_CACHE_WRITE_GRACE_SECONDS` | Finite positive seconds the sync watchdog and `/api/health` may wait for one active durable sync-cache phase before treating it as wedged | `600` |
 | `MINDROOM_DISPATCH_THREAD_READ_TIMEOUT_SECONDS` | Wall-clock seconds allowed for live dispatch-safe Matrix thread reads before dispatch proceeds with degraded thread evidence | `1.0` |
 | `MINDROOM_WORKER_BACKEND` | Worker backend for tool execution (`static_runner`, `docker`, or `kubernetes`) | `static_runner` |
+
+The sync cache-write grace is a hang backstop, not the ordinary Matrix transport timeout.
+Set it above the observed healthy cache-write p99 for the deployment.
+Raising it delays both watchdog cancellation and liveness failure only while a sync callback is actively completing its sequential durable cache phase.
 
 ### OpenAI-Compatible API
 
@@ -1270,7 +1281,7 @@ defaults:
 
 MindRoom uses `defaults.thread_summary_temperature` for automatic thread summaries on providers that support runtime temperature overrides.
 Set it to `null` to omit the field and use provider defaults.
-MindRoom always omits temperature for Vertex Claude thread summaries because the provider rejects that field on this path.
+MindRoom always uses provider temperature defaults for Vertex Claude, Claude Opus 5, Sonnet 5, Fable 5, and direct Google Gemini 3.6 Flash and Gemini 3.5 Flash-Lite thread summaries.
 Use `room_thread_summary_models` when automatic summaries in a specific room should use a different model from `defaults.thread_summary_model`.
 Keys can be managed room aliases such as `lobby` or raw Matrix room IDs such as `!room:example.org`.
 
@@ -1303,7 +1314,9 @@ Sandbox-proxied execution is stricter than direct local execution: ordinary runt
 # while keeping the rest of defaults.tools for that agent.
 # See agents.md for the full per-agent tool configuration syntax.
 # These thresholds only affect automatic thread summaries; manual `set_thread_summary`
-# tool calls write immediately and reset the automatic baseline from the new message count.
+# tool calls write immediately and pin the thread by default, which stops automatic
+# summaries entirely until a `pin=False` call releases it.
+# Automatic summaries are also skipped on threads tagged `resolved`.
 
 # Memory system configuration (optional)
 memory:
@@ -1380,7 +1393,7 @@ knowledge_bases:
 # Voice message handling (optional)
 voice:
   enabled: false                   # Default: false
-  visible_router_echo: true        # Optional: show the normalized voice text from the router
+  visible_router_echo: true        # Optional: show router voice progress or direct fallback
   stt:
     provider: openai               # Default: openai
     model: gpt-4o-transcribe       # Default: gpt-4o-transcribe
@@ -2343,6 +2356,7 @@ Models define the AI providers and model IDs used by agents.
 - `azure` - OpenAI models through Azure OpenAI deployments
 - `openai` - GPT models and OpenAI-compatible endpoints
 - `codex` or `openai_codex` - OpenAI models available through a local Codex CLI ChatGPT login
+- `kimi` or `kimi_code` - Kimi models available through a local Kimi Code CLI login
 - `google` or `gemini` - Google Gemini models
 - `vertexai_claude` - Anthropic Claude models on Google Vertex AI
 - `ollama` - Local models via Ollama
@@ -2376,6 +2390,16 @@ models:
     id: claude-sonnet-5
     context_window: 1000000
 
+  fable:
+    provider: anthropic
+    id: claude-fable-5
+    context_window: 1000000
+
+  opus:
+    provider: anthropic
+    id: claude-opus-5
+    context_window: 1000000
+
   haiku:
     provider: anthropic
     id: claude-haiku-4-5
@@ -2384,7 +2408,7 @@ models:
   # Anthropic Claude on Amazon Bedrock
   bedrock_opus:
     provider: bedrock_claude
-    id: anthropic.claude-opus-4-8
+    id: anthropic.claude-opus-5
     context_window: 1000000
 
   # OpenAI
@@ -2404,10 +2428,17 @@ models:
     id: gpt-5.6
     context_window: 258000
 
+  # Kimi K3 via a Kimi Code CLI login
+  kimi:
+    provider: kimi
+    id: k3
+    context_window: 1048576
+
   # Google Gemini (both 'google' and 'gemini' work as provider names)
   gemini:
     provider: google
-    id: gemini-3.1-pro-preview
+    id: gemini-3.6-flash
+    context_window: 1048576
 
   # Anthropic Claude on Vertex AI
   vertex_claude:
@@ -2441,7 +2472,8 @@ models:
   # DeepSeek
   deepseek:
     provider: deepseek
-    id: deepseek-chat
+    id: deepseek-v4-pro
+    context_window: 1048576
 
   # Z.ai (GLM models)
   glm:
@@ -2545,6 +2577,37 @@ Live testing against the Codex ChatGPT endpoint reported `cached_tokens` only wh
 Repeated long requests then reported cache hits, while requests without those headers stayed at `cached_tokens: 0`, and `prompt_cache_retention` was rejected.
 Treat Codex prompt caching as best-effort rather than guaranteed.
 
+## Kimi Models with Kimi Code Login
+
+Use `provider: kimi` when you want MindRoom to call Kimi models through an authenticated local Kimi Code CLI session (Kimi Code subscription) instead of the billed Moonshot API.
+Run `kimi` and `/login` first so `~/.kimi-code/credentials/kimi-code.json` contains OAuth tokens.
+MindRoom refreshes the access token when needed and sends requests to the Kimi Code OpenAI-compatible endpoint at `https://api.kimi.com/coding/v1`.
+
+| Model | Model ID | Best fit |
+|-------|----------|----------|
+| Kimi K3 | `k3` | Flagship reasoning, long-horizon coding, and agent work with a 1M-token context |
+| Kimi K3 256k | `k3-256k` | The same K3 generation with a 256k-token context |
+| Kimi for Coding | `kimi-for-coding` | Coding-tuned tier exposed by the Kimi Code CLI |
+
+The CLI-config-style form `kimi-code/k3` is accepted as an alternative to the bare slug.
+If you keep Kimi Code state outside `~/.kimi-code`, set `KIMI_CODE_HOME` or pass `extra_kwargs.kimi_home`; user-home prefixes such as `~/custom-kimi` are expanded.
+For starter config generation, use `mindroom config init --provider kimi`.
+
+```yaml
+models:
+  default:
+    provider: kimi
+    id: k3
+    context_window: 1048576
+```
+
+Kimi K3 always reasons before replying, so responses include reasoning tokens even for short answers.
+This adapter follows the local Kimi Code CLI authentication-file and backend contracts, so upstream Kimi Code changes can require a MindRoom update.
+
+Prompt caching is automatic on the Kimi Code endpoint: repeated request prefixes come back as `cached_tokens` with no opt-in.
+Like the Kimi Code CLI, MindRoom pins each active agent session to a stable `prompt_cache_key` derived from the execution identity (the same derivation the Codex provider uses), which keeps cache routing stable per Matrix thread.
+You can set `extra_kwargs.prompt_cache_key` to override the derived key for a model.
+
 ## OpenRouter Provider Routing
 
 OpenRouter routes each request to one of several upstream providers serving the model, and upstream quality varies (we have seen a third-party host leak raw tool-call markup into a visible reply).
@@ -2589,15 +2652,16 @@ For starter config generation, use `mindroom config init --provider azure`.
 ## Amazon Bedrock Claude
 
 Use `provider: bedrock_claude` when you want MindRoom to call Anthropic Claude through Amazon Bedrock.
-MindRoom uses Agno's AWS Bedrock Claude model wrapper and auto-installs the `aws_bedrock` optional extra on first use unless `MINDROOM_NO_AUTO_INSTALL_TOOLS=1` is set.
+MindRoom uses Anthropic's Bedrock Mantle Messages client and auto-installs the `aws_bedrock` optional extra on first use unless `MINDROOM_NO_AUTO_INSTALL_TOOLS=1` is set.
 The `id` field should be the Bedrock model ID or inference profile ID enabled in your AWS account and region.
-Use Opus when you want the highest Claude tier available through Bedrock.
+Bedrock lists Fable 5 as open access, while Opus 5 access can depend on the AWS account and region.
+The generated Bedrock starter config defaults to Opus 5, so confirm access or choose Fable 5 or Sonnet 5 instead.
 
 ```yaml
 models:
   default:
     provider: bedrock_claude
-    id: anthropic.claude-opus-4-8
+    id: anthropic.claude-opus-5
     context_window: 1000000
 ```
 
@@ -2663,12 +2727,16 @@ This is useful for models with smaller context windows or long-running conversat
 
 ## Extra Kwargs
 
-The `extra_kwargs` field passes additional parameters directly to the underlying [Agno](https://docs.agno.com/) model class. Common options include:
+The `extra_kwargs` field configures additional parameters on the underlying [Agno](https://docs.agno.com/) model class.
+Common options include:
 
 - `base_url` - Custom API endpoint (useful for OpenAI-compatible servers)
 - `temperature` - Sampling temperature
 - `max_tokens` - Maximum tokens in response
 - `extra_body` - Extra JSON body fields for OpenAI-compatible providers (e.g., OpenRouter provider routing above)
+
+Claude Fable 5, Opus 5, and Sonnet 5 reject non-default `temperature`, `top_p`, and `top_k` values, so MindRoom omits those controls on Anthropic, Bedrock, and Vertex requests.
+MindRoom also omits those deprecated controls for direct Gemini 3.6 Flash and Gemini 3.5 Flash-Lite requests.
 
 ## Environment Variables
 
@@ -3046,7 +3114,8 @@ That same reconciliation path also updates `m.room.power_levels` for managed roo
 Audio events are handled through the shared media pipeline on all bots.
 The router only posts a visible handoff when it must disambiguate between multiple eligible responders in a room.
 When the responder is already clear, normalized audio follows the normal direct agent or team dispatch rules without an extra router message.
-By default, `voice.visible_router_echo: true` also lets the router post the normalized voice text as a display-only message when it is allowed to reply.
+By default, `voice.visible_router_echo: true` also lets the router post an immediate display-only transcription placeholder and replace it with the normalized transcript or fallback text when voice STT is enabled and it is allowed to reply.
+With STT disabled, the router posts the display-only fallback directly.
 Set `voice.visible_router_echo: false` to suppress that display-only echo.
 
 See [Voice Messages](https://docs.mindroom.chat/voice/) for the detailed dispatch behavior.
@@ -3294,6 +3363,7 @@ Claude models since Opus 4.5 / Sonnet 4.5 / Haiku 4.5 on the `anthropic` and `ve
 On this path every deferred tool ships in every request tagged `defer_loading: true` together with the provider's tool-search entry, so deferred schemas stay out of the model's rendered context until the model searches for them.
 Tool discovery never invalidates the prompt cache: Anthropic expands discovered tool references inline in the message stream, and OpenAI loads discovered tools at the end of the context window.
 The `dynamic_tools` manager, its prompt blocks, and session loaded-tool state are not used on this path; all deferred toolkits are attached at agent build, so discovered calls execute directly.
+MindRoom adds a compact system-prompt hint listing the deferred toolkit names and tells the model to search those capability domains before concluding that a tool is unavailable.
 `defer: true, initial: true` tools stay in the rendered schema list as plain non-deferred tools.
 Instructions attached to a toolkit or its functions remain inline when any function in that toolkit is initially active.
 MindRoom omits those instructions only when every function is deferred and non-initial because native tool search cannot extend the already-sent system prompt when it discovers a tool.
@@ -6193,13 +6263,13 @@ generate_speech("Status update complete.")
 
 ## [`gemini`]
 
-`gemini` is the Google media toolkit for image generation through Imagen and video generation through Veo.
+`gemini` is the Google media toolkit for image generation through Nano Banana and video generation through Veo.
 
 ### What It Does
 
 `gemini` exposes `generate_image(prompt)` and `generate_video(prompt)`.
-`generate_image()` uses the configured `image_generation_model`, which defaults to `imagen-3.0-generate-002`, and returns attached image bytes.
-`generate_video()` uses the configured `video_generation_model`, which defaults to `veo-2.0-generate-001`, polls until the long-running operation completes, and returns attached video artifacts.
+`generate_image()` uses the Gemini content-generation API with the configured `image_generation_model`, which defaults to Nano Banana 2 (`gemini-3.1-flash-image`), and returns attached image bytes.
+`generate_video()` uses the configured `video_generation_model`, which defaults to Veo 3.1 Preview (`veo-3.1-generate-preview`), polls until the long-running operation completes, and returns attached video artifacts.
 The current implementation requires Vertex AI mode for video generation and returns an error if `vertexai` is not enabled.
 In non-Vertex mode, the tool uses the Gemini API through `GOOGLE_API_KEY`.
 
@@ -6211,8 +6281,8 @@ In non-Vertex mode, the tool uses the Gemini API through `GOOGLE_API_KEY`.
 | `vertexai` | `boolean` | `no` | `false` | Use Vertex AI instead of the direct Gemini API. Required for `generate_video()`. |
 | `project_id` | `text` | `no` | `null` | Vertex project override. Falls back to `GOOGLE_CLOUD_PROJECT` when omitted. |
 | `location` | `text` | `no` | `null` | Vertex location override. Falls back to `GOOGLE_CLOUD_LOCATION` when omitted. |
-| `image_generation_model` | `text` | `no` | `imagen-3.0-generate-002` | Model used by `generate_image()`. |
-| `video_generation_model` | `text` | `no` | `veo-2.0-generate-001` | Model used by `generate_video()`. |
+| `image_generation_model` | `text` | `no` | `gemini-3.1-flash-image` | Model used by `generate_image()`. |
+| `video_generation_model` | `text` | `no` | `veo-3.1-generate-preview` | Model used by `generate_video()`. |
 | `enable_generate_image` | `boolean` | `no` | `true` | Enable `generate_image()`. |
 | `enable_generate_video` | `boolean` | `no` | `true` | Enable `generate_video()`. |
 | `all` | `boolean` | `no` | `false` | Enable both generation functions. |
@@ -6227,8 +6297,8 @@ agents:
           vertexai: true
           project_id: my-gcp-project
           location: us-central1
-          image_generation_model: imagen-3.0-generate-002
-          video_generation_model: veo-2.0-generate-001
+          image_generation_model: gemini-3.1-flash-image
+          video_generation_model: veo-3.1-generate-preview
 ```
 
 ```python
@@ -7193,11 +7263,12 @@ reopen_thread()
 
 ### What It Does
 
-`thread_summary` exposes `set_thread_summary(summary, thread_id=None, room_id=None)`.
+`thread_summary` exposes `set_thread_summary(summary, thread_id=None, room_id=None, pin=True)`.
 The tool defaults to the active room and current resolved thread from `ToolRuntimeContext`.
 When there is no active resolved thread context, pass `thread_id` explicitly.
 The tool normalizes the target to the canonical thread root before sending a new `m.notice` summary event with `io.mindroom.thread_summary` metadata.
-Manual summaries are marked with `model_name="manual"` and update the cached last-summary count so later automatic summaries continue from the new baseline.
+Manual summaries are marked with `model_name="manual"` and pin the thread by default, which stops automatic summaries from overwriting the title.
+Pass `pin=False` to write a summary that later automatic summaries may replace; that also releases a thread pinned by an earlier call.
 A per-thread async lock prevents concurrent duplicate manual summaries from racing each other.
 
 ### Configuration
@@ -7215,6 +7286,7 @@ agents:
 
 ```python
 set_thread_summary("Decision: ship the current plan and revisit logs tomorrow.")
+set_thread_summary("Routine status update.", pin=False)
 set_thread_summary(
     "Summary for the import thread.",
     thread_id="$threadRoot",
@@ -7227,6 +7299,9 @@ set_thread_summary(
 - `summary` must be a non-empty string up to 300 characters after whitespace normalization.
 - The tool writes a normal Matrix notice event, so the updated summary remains visible in the thread timeline.
 - Automatic thread summaries still exist, but this tool gives an agent an explicit override path when a human asks for a manual summary refresh.
+- Pin state lives in the summary notice's `io.mindroom.thread_summary` metadata, so it survives restarts and every runtime reads the same decision.
+- Pinning stops the whole automatic pass, not just the title. A thread pinned before its automatic topic tags are inferred will not receive them; tag it explicitly with `thread_tags` instead.
+- Automatic summaries are also skipped on threads carrying the `resolved` tag.
 
 ## [`thread_model`]
 
@@ -7371,7 +7446,8 @@ matrix_message(action="reply", message="Sharing the plan here.", attachment_ids=
 Automatic thread summaries are still implemented in `src/mindroom/thread_summary.py` as bot runtime behavior.
 The summarizer posts one `m.notice` summary after a successful response brings a thread to the configured first threshold (one message by default), and then again every ten additional messages by default, using `defaults.thread_summary_model` or `default`.
 Set `room_thread_summary_models` to override the automatic summary model for a managed room alias or raw Matrix room ID.
-MindRoom uses `defaults.thread_summary_temperature` for automatic summaries when the provider supports runtime temperature overrides, and always omits temperature for Vertex Claude summaries.
+MindRoom uses `defaults.thread_summary_temperature` for automatic summaries when the provider supports runtime temperature overrides.
+MindRoom always uses provider temperature defaults for Vertex Claude, Claude Opus 5, Sonnet 5, Fable 5, and direct Google Gemini 3.6 Flash and Gemini 3.5 Flash-Lite summaries.
 The `thread_summary` tool complements that automatic behavior by letting an agent publish a manual summary immediately and advance the stored summary baseline.
 When no trusted prior summary exists, the first automatic summary is summary-only so a useful thread title appears early.
 The next scheduled refresh uses one structured model call to update the summary and produce up to three normalized topic tags, whether the prior summary was automatic or manual.
@@ -11075,6 +11151,10 @@ If reconnect also fails, the error is surfaced to the caller.
 
 If an MCP server sends a `tools/list_changed` notification, MindRoom refreshes that server's catalog.
 If the catalog changed, MindRoom restarts the agents and teams that reference that server so they pick up the updated tool list.
+The catalog-change callback schedules this replacement asynchronously so the triggering MCP tool call can finish before response draining starts.
+Configured servers with no dependent entity return before admission draining while still invalidating the worker validation snapshot cache.
+Referenced-entity replacement shares one serialized global response-admission owner with config reload.
+It waits up to 600 seconds for active Matrix responses to drain, then force-applies while keeping admission closed over the replacement window.
 
 ## Limitations
 
@@ -12971,6 +13051,9 @@ agents:
 Place files in `./knowledge_docs/`, then trigger a reindex from the dashboard/API or let MindRoom watch shared local bases with `watch: true`.
 Chat uses the last successfully published index and continues without blocking when a base is missing, stale, or failed.
 When a watched file changes, MindRoom marks the published index stale, refreshes in the background, and atomically publishes the replacement when it succeeds.
+A refresh builds that replacement by reusing the published index's stored vectors for every file whose content is unchanged, so it only embeds files that were added or edited.
+Changing `chunk_size`, `chunk_overlap`, the embedder, or any corpus filter invalidates the stored vectors, and the next refresh re-embeds the whole base.
+An explicit reindex from the dashboard or API rebuilds every vector instead of reusing any, which is how you replace an index you no longer trust.
 When `watch: false`, direct external file edits require explicit reindex, while dashboard/API upload and delete actions still schedule refresh after a successful mutation.
 Knowledge base IDs are the keys under `knowledge_bases`.
 Use a non-empty single path component such as `docs` or `company_docs`, not `""`, `.`, `..`, names containing `/` or `\`, or names containing line breaks.
@@ -13061,6 +13144,11 @@ The allowed set is always explicit configuration and never changes based on the 
 Non-text formats such as `.pdf`, `.docx`, or `.pptx` require their reader package (for example `pypdf`, `python-docx`, or `python-pptx`) in the MindRoom environment.
 When a reader package is missing, the refresh indexes every other file, logs a warning naming the file and the missing package, and records a partial-index error instead of publishing an index without the opted-in content.
 Extension filtering does not apply in `files` mode, which exposes every managed file.
+
+A `.json` file is normally split into one document per top-level JSON value, which keeps structured entries separately searchable.
+When such a file is not valid JSON, the refresh indexes its raw text instead of failing the file, and logs a warning naming the file and the line and column of the parse error.
+The file then counts as successfully indexed, so its content stays searchable, but it is chunked like plain text rather than split per JSON value.
+Fix the reported parse error to get structured chunking back.
 
 ### Private Agent Knowledge
 
@@ -13185,7 +13273,7 @@ knowledge_bases:
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `repo_url` | string | *required* | HTTPS repository URL to clone/fetch |
+| `repo_url` | string | *required* | Repository URL to clone/fetch. See the accepted forms below |
 | `branch` | string | `main` | Branch to track |
 | `poll_interval_seconds` | int | `300` | Interval for scheduling background Git refreshes |
 | `credentials_service` | string | `null` | Service name in CredentialsManager for private repos |
@@ -13198,6 +13286,25 @@ knowledge_bases:
 When `lfs: true`, install `git-lfs` on the runtime host for `uv run` or `uvx` flows.
 Bundled container images already include it.
 
+#### Accepted `repo_url` forms
+
+MindRoom writes `repo_url` into the checkout's `origin` remote, so a network form is accepted only when its host resolves; hostless local forms are accepted on their own terms. Anything else is refused rather than guessed at.
+
+| Form | Example |
+|------|---------|
+| URL with a host | `https://github.com/org/repo.git`, `ssh://git@host/org/repo.git` |
+| scp-style SSH | `git@github.com:org/repo.git`, `github.com:org/repo.git` |
+| Absolute local path | `/srv/repos/repo.git` |
+| `file:` URL | `file:///srv/repos/repo.git` |
+
+Refused, with an error naming the reason: relative and home-relative paths (`./repo.git`, `../repo.git`, `~/repo.git`, `repo.git`), URLs with an empty authority (`https:///org/repo.git`), URLs whose separator is percent-encoded or written as a lookalike codepoint, and anything embedding a second URL.
+
+**Do not embed credentials in `repo_url`.** A password in a well-formed URL is stripped before the remote is written, so it never reaches `.git/config` — but it is still in your config file, and still handed to Git for every command.
+A password MindRoom cannot strip with confidence is refused outright rather than written: that covers forms where the scheme has been dropped, such as `oauth2:TOKEN@gitlab.com:org/repo.git` or `x-access-token:TOKEN@github.com/org/repo.git`.
+Use `credentials_service` instead: those credentials are passed to Git for the duration of one command and are never written to disk.
+
+If a checkout already holds a credential-bearing remote from before this check existed, the refusal cannot clean it — delete the checkout directory so the next sync clones afresh.
+
 ### Sync Behavior
 
 - Chat and runtime requests never wait for Git sync or indexing.
@@ -13206,6 +13313,9 @@ Bundled container images already include it.
 - Semantic Git refresh then advances a candidate index, while files-only Git refresh publishes source metadata.
 - When `lfs: true`, MindRoom disables implicit LFS smudge during clone/checkout/reset and explicitly hydrates the checkout after sync, keeping the working tree complete even when indexing filters only include some file types.
 - Local edits to Git-tracked files are discarded during refresh sync, and tracked deletions are restored from the remote checkout.
+- Change detection for Git-backed bases is the tracked revision, not file contents: while the checkout stays on the revision the index was published from, MindRoom republishes the existing index without reading the corpus.
+- Consequently an out-of-band edit to a Git-backed checkout is not indexed while the revision is unchanged.
+- The checkout is MindRoom-owned; edit the repository and sync, or force a reindex, instead of editing the working tree.
 - Git-backed bases reject dashboard/API file upload and delete mutations; update the repository and sync or reindex instead.
 - Successful refresh publishes a new last successfully published index while failed refresh preserves the previous one and records the error in status metadata.
 - Semantic refresh is resumable: an interrupted or failed build keeps its private candidate index and continues it on the next refresh instead of restarting from zero.
@@ -13682,14 +13792,15 @@ If STT is unavailable, disabled, or fails, the audio still remains available as 
 When a voice message is received:
 
 1. The audio event is handled through the shared media pipeline.
-2. Audio is downloaded and decrypted, if needed, and registered as a context-scoped attachment.
-3. If STT is configured and succeeds, the audio is transcribed and lightly normalized for mentions and commands.
-4. If STT is unavailable, disabled, or fails, MindRoom falls back to `🎤 [Attached voice message]`.
-5. The normalized text plus attachment metadata is dispatched using the normal routing and thread logic.
-6. If routing is ambiguous in a multi-responder room, the router posts a visible handoff message.
-7. If `voice.visible_router_echo` is enabled and the router is present and allowed to reply, the router also posts the normalized voice text as a display-only message.
-8. Otherwise, no extra router message is posted and the chosen agent or team replies directly.
-9. The responding entity receives the original audio attachment alongside the normalized prompt.
+2. If voice STT and `voice.visible_router_echo` are enabled and the router is present and allowed to reply, the router immediately posts `Router agent is transcribing…`.
+3. Audio is downloaded and decrypted, if needed, and registered as a context-scoped attachment while the placeholder is visible.
+4. If STT is configured and succeeds, the audio is transcribed and lightly normalized for mentions and commands.
+5. If STT is unavailable, disabled, or fails, MindRoom falls back to `🎤 [Attached voice message]`.
+6. The router replaces its placeholder with the normalized transcript or fallback text, or posts the fallback directly when STT is disabled.
+7. The normalized transcript or fallback prompt plus attachment metadata is dispatched using the normal routing and thread logic.
+8. If routing is ambiguous in a multi-responder room, the router posts a visible handoff message.
+9. Otherwise, no extra router message is posted and the chosen agent or team replies directly.
+10. The responding entity receives the original audio attachment alongside the normalized transcript or fallback prompt.
 
 ## Configuration
 
@@ -13712,7 +13823,8 @@ Or use the dashboard's Voice tab.
 
 With `voice.enabled: false`, audio messages are still surfaced as attachments with the fallback prompt.
 Enabling voice adds STT and command-recognition on top of that attachment flow.
-With `voice.visible_router_echo: true`, the router also posts the normalized transcript or fallback text for inspection when it is present in the room and allowed to reply.
+With `voice.visible_router_echo: true` and `voice.enabled: true`, the router immediately posts a transcription placeholder and replaces that message with the normalized transcript or fallback text when it is present in the room and allowed to reply.
+When `voice.enabled: false`, the router posts the fallback text directly without claiming that transcription is running.
 
 ## STT Providers
 
@@ -13822,7 +13934,8 @@ If only one eligible agent or team is visible, that responder answers the normal
 If the audio caption or transcript explicitly mentions an agent or team, that targeted responder answers directly as well.
 In these cases, the router does not post an extra visible routing handoff.
 The transcript or fallback text is used internally for dispatch, not echoed to the room as a separate message.
-If `voice.visible_router_echo` is enabled, the router still posts a display-only copy of the normalized voice text, but responders ignore that echo and continue responding to the original audio event.
+If voice STT and `voice.visible_router_echo` are enabled, the router still posts a display-only placeholder and replaces it with the normalized transcript or fallback text, but responders ignore that echo and continue responding to the original audio event.
+With STT disabled, the router posts the display-only fallback directly.
 
 ### Multi-responder rooms where the router must choose
 
@@ -13830,7 +13943,8 @@ If multiple agents or teams are available and the audio does not already target 
 The router then posts a normal handoff message such as `@home could you help with this?`.
 The selected agent or team responds to that router handoff, and the handoff carries the original audio attachment metadata forward.
 This is the case where a visible router message appears.
-If `voice.visible_router_echo` is also enabled, the router first posts the normalized voice text as a display-only echo and then posts the normal handoff.
+If voice STT and `voice.visible_router_echo` are enabled, the router immediately posts a display-only transcription placeholder, replaces it with the normalized transcript or fallback text, and then posts the normal handoff.
+With STT disabled, the router posts the display-only fallback directly before the normal handoff.
 
 ### No router, or router cannot reply
 
@@ -13842,7 +13956,8 @@ If multiple eligible responders remain and the audio does not already target one
 
 ### Visibility rule
 
-By default, MindRoom posts a display-only router echo of normalized voice text when the router is allowed to process the event.
+By default, MindRoom immediately posts a display-only router transcription placeholder when voice STT is enabled and the router is allowed to process the event, then replaces it with the normalized transcript or fallback text.
+With STT disabled, MindRoom posts the display-only fallback directly.
 The router handoff message appears only when the router must disambiguate between multiple eligible responders.
 If the responder is already clear from room shape, thread context, or explicit targeting, the chosen agent or team replies directly to the original audio event.
 Set `voice.visible_router_echo: false` to suppress the display-only echo without changing which event responders actually answer.
@@ -14018,7 +14133,7 @@ The override changes only the calls-enabled agent's LLM selection, while STT, TT
 models:
   chat:
     provider: anthropic
-    id: claude-opus-4-8
+    id: claude-opus-5
   call_fast:
     provider: anthropic
     id: claude-haiku-4-5
@@ -16001,6 +16116,7 @@ MindRoom's architecture consists of several key components working together.
 | `execution_preparation.py` | Request-scoped execution preparation for prompts and persisted replay |
 | `response_payload_preparation.py` | Execution-side, under-lock assembly of one response's payload from immutable ingress inputs |
 | `delivery_gateway.py` | Visible Matrix delivery for already-generated responses (send, edit, finalize) |
+| `visible_voice_echo.py` | Immediate router voice-placeholder delivery, replacement ordering, and deduplication |
 | `post_response_effects.py` | Shared post-response effects after Matrix delivery |
 | `routing.py` | Intelligent agent or team selection when no entity is mentioned |
 | `streaming.py` | Streaming state machine: placeholder, progressive edits, tool traces, cancellation |
@@ -16342,29 +16458,35 @@ main() entry
 - **Sync loops**: Each bot runs `sync_forever_with_restart()` with automatic retry; the default `matrix_sync.mode: classic` uses classic `/v3/sync` and `matrix_sync.mode: sliding` opts into MSC4186 Simplified Sliding Sync
 - **Internal user identity**: `mindroom_user.username` is the account-creation request; runtime authorization uses the persisted actual Matrix ID
 
-## Hot Reload
+## Runtime Replacement Admission
 
-Config changes are detected via polling (`watch_paths()` checks watched source-file mtimes every second and fires after one quiet scan):
+Config changes are detected via polling (`watch_paths()` checks watched source-file mtimes every second and fires after one quiet scan).
+MCP catalog changes use the same replacement admission path when the changed server has dependent agents or teams.
+The MCP manager callback schedules an orchestrator-owned background task so the triggering tool call can return and release its admission slot before replacement draining begins.
 
-1. On change, `ConfigReloadLifecycle.request_reload()` queues a debounced reload that waits until no responses are in flight, logging periodic warnings while it waits
-2. Sampling the in-flight count and closing the shared `ResponseAdmissionGate` happen atomically, so a new response cannot race the decision to apply.
+1. On a config change, `ConfigReloadLifecycle.request_reload()` queues a debounced reload.
+2. On an MCP catalog change, the orchestrator returns immediately when no configured entity references that server, while still clearing the worker validation snapshot cache.
+   The dependent-entity check runs again under the config update lock immediately before replacement.
+3. `ConfigReloadLifecycle.apply_with_response_admission()` serializes config reloads and MCP catalog replacements behind one global admission owner.
+4. Sampling the in-flight count and closing the shared `ResponseAdmissionGate` happen atomically, so a new response cannot race the decision to apply.
    The gate covers Matrix-driven response lifecycles only.
-   Direct agent-run entry points that bypass the response lifecycle (`mindroom.api.openai_compat` and cascaded voice in `mindroom.matrix_rtc.call_tools`) are not admitted through it, so a reload can still land underneath one of those runs.
+   Direct agent-run entry points that bypass the response lifecycle (`mindroom.api.openai_compat` and cascaded voice in `mindroom.matrix_rtc.call_tools`) are not admitted through it, so a replacement can still land underneath one of those runs.
    The gate stays closed, but is not held, across config loading and plan application.
-   Holding it would stall the apply against itself: applying the plan stops bots, and stopping a bot drains its detached responses
-3. While the gate is closed, a response waits before taking a lifecycle lock, incrementing the in-flight count, or publishing a placeholder.
+   Holding it would stall the apply against itself: applying the plan stops bots, and stopping a bot drains its detached responses.
+5. While the gate is closed, a response waits before taking a lifecycle lock, incrementing the in-flight count, or publishing a placeholder.
    The gate is global and covers the whole apply window regardless of how narrow the plan turns out to be.
    When the apply finishes, responses owned by unchanged or replacement runtimes compete for admission normally.
-4. A runtime being replaced wakes its pre-admission waiters with `ResponseAdmissionRefusedError`.
+6. A runtime being replaced wakes its pre-admission waiters with `ResponseAdmissionRefusedError`.
    This is deliberately not an `asyncio.CancelledError`, because the Matrix callback must fail and invalidate the old sync checkpoint so the replacement runtime replays the source event.
    The refusal path performs no Matrix I/O, so replacement shutdown cannot stall on an untimed send.
-   Auto-resume messages received by replacement bots during the apply wait for the gate to reopen instead of being dropped
-5. If responses never drain, the reload stops deferring after ten minutes and closes the gate over the still-running responses, so a config change cannot be starved forever on a busy install
-6. `ConfigReloadLifecycle.update_config()` loads the new config and `_identify_entities_to_restart()` computes the diff using `model_dump(exclude_none=True)`
-7. The orchestrator applies the resulting plan: affected entities are stopped, recreated, and restarted
-8. Removed entities run `cleanup()` (leave rooms, stop bot)
-9. New/restarted bots go through room setup
-10. The gate reopens once the apply finishes, whether it succeeded or failed, and deferred responses may then start
+   Auto-resume messages received by replacement bots during the apply wait for the gate to reopen instead of being dropped.
+7. If responses never drain, either replacement flow stops deferring after 600 seconds and closes the gate over still-running responses.
+   This bounded forced apply prevents a busy install from starving config or MCP replacement forever.
+8. For config reloads, `ConfigReloadLifecycle.update_config()` loads the new config and `_identify_entities_to_restart()` computes the diff using `model_dump(exclude_none=True)`.
+9. The orchestrator applies the resulting plan: affected entities are stopped, recreated, and restarted.
+10. Removed entities run `cleanup()` to leave rooms and stop the bot.
+11. New and restarted bots go through room setup.
+12. The gate reopens once the apply finishes, whether it succeeded, failed, or was cancelled, and deferred responses may then start.
 
 Skills are watched separately via `_watch_skills_task()` with cache invalidation.
 
@@ -16373,7 +16495,7 @@ Skills are watched separately via `_watch_skills_task()` with cache invalidation
 The `src/mindroom/orchestration/` subpackage contains helpers extracted from the monolithic orchestrator:
 
 - **`runtime.py`** — Sync loop helpers: `sync_forever_with_restart()` with linear backoff (capped at 60s), `cancel_task()`, and `create_logged_task()` for safe asyncio task creation.
-- **`config_lifecycle.py`** — Debounced config-reload lifecycle: `ConfigReloadLifecycle` owns reload queueing, response draining, and the load → diff → plan sequencing, dispatching the plan back to the orchestrator to apply.
+- **`config_lifecycle.py`** — Debounced config-reload and shared replacement-admission lifecycle: `ConfigReloadLifecycle` owns reload queueing, serialized global response draining for config and MCP replacements, and the load → diff → plan sequencing that dispatches config plans back to the orchestrator.
 - **`config_updates.py`** — Config diffing and reload planning: `build_config_update_plan()` computes a `ConfigUpdatePlan` by calling `_identify_entities_to_restart()`, which diffs old and new configs using `model_dump(exclude_none=True)`.
 - **`plugin_watch.py`** — Plugin hot-reload watcher: `watch_plugins_task()` polls configured plugin roots, with `PluginWatchState` owning the watcher baselines and dirty-state revision.
 - **`rooms.py`** — Room invitation helpers: `get_authorized_user_ids_to_invite()` and `get_root_space_user_ids_to_invite()` compute which users should be invited to managed rooms and the root Matrix space.
@@ -16439,13 +16561,14 @@ On `orchestrator.stop()`:
 
 1. Set `self.running = False`
 2. Cancel config reload task
-3. Stop memory auto-flush worker
-4. Shut down the per-binding knowledge refresh scheduler
-5. Cancel pending bot start tasks
-6. Stop the MCP manager
-7. Cancel all sync tasks
-8. Signal all bots to stop (`bot.running = False`)
-9. Call `bot.stop()` for each bot concurrently (waits 5s for background tasks, cancels scheduled tasks, closes Matrix client)
+3. Drain orchestrator-owned MCP catalog replacement tasks for up to 5 seconds before MCP or entity teardown
+4. Stop memory auto-flush worker
+5. Shut down the per-binding knowledge refresh scheduler
+6. Cancel pending bot start tasks
+7. Stop the MCP manager
+8. Cancel all sync tasks
+9. Signal all bots to stop (`bot.running = False`)
+10. Call `bot.stop()` for each bot concurrently (waits 5s for background tasks, cancels scheduled tasks, closes Matrix client)
 
 # Deployment
 
@@ -19526,7 +19649,7 @@ The `config` subgroup contains commands for creating, viewing, editing, and vali
 Create a starter `config.yaml` with the personal Mind agent, one model, file-based memory, and sensible defaults.
 
 Matrix server presets (`--matrix-server`) choose where MindRoom should create Matrix users and rooms: `mindroom.chat` (default hosted Matrix) or `self-hosted` (your own homeserver).
-Provider presets (`--provider`) set the default model: `anthropic`, `codex`, `llama.cpp`, `ollama`, `openai`, `openrouter`, or `vertexai_claude`.
+Provider presets (`--provider`) set the default model: `anthropic`, `codex`, `kimi`, `llama.cpp`, `ollama`, `openai`, `openrouter`, or `vertexai_claude`.
 Generated configs include commented model alternatives for providers that have common variants, such as OpenAI mini/nano models.
 
 ```bash
@@ -19562,6 +19685,9 @@ The `--provider codex` preset generates `provider: codex` with `id: gpt-5.6` and
 They set `extra_kwargs.reasoning_effort: medium`.
 Prompt caching is enabled automatically per active agent session; leave `prompt_cache_key` unset unless you intentionally want to override the derived key.
 Run `codex login` first so MindRoom can read `~/.codex/auth.json`.
+
+The `--provider kimi` preset generates `provider: kimi` with `id: k3` and `context_window: 1048576`.
+Run `kimi` and `/login` first so MindRoom can read `~/.kimi-code/credentials/kimi-code.json`.
 
 The `--provider ollama` preset generates `provider: ollama` with `id: gemma4`, an additional `qwen3_6_27b` model using `qwen3.6:27b`, and `OLLAMA_HOST=http://localhost:11434`.
 Pull both local models before running MindRoom:
