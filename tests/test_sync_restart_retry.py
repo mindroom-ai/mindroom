@@ -231,7 +231,7 @@ async def test_team_resolution_fallback_without_terminal_note_does_not_register_
             resolution_reason="No team available",
         )
 
-    assert response is None
+    assert response == "$existing"
     assert retries == []
     assert edit_message.await_count == 1
 

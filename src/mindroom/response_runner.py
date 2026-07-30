@@ -1526,7 +1526,8 @@ class ResponseRunner:
         )
         interruption_recovery_registered = self._notify_interrupted_response_recoverable(request, final_outcome)
         source_handled = final_outcome.mark_handled and (
-            final_outcome.terminal_status != "cancelled"
+            request.on_deferred_outcome_handled is None
+            or final_outcome.terminal_status != "cancelled"
             or cancel_source_from_failure_reason(final_outcome.failure_reason) == "user_stop"
             or interruption_recovery_registered
         )
