@@ -16,7 +16,7 @@ from mindroom.custom_tools.attachments import (
     send_resolved_attachments,
 )
 from mindroom.dispatch_source import TRUSTED_INTERNAL_RELAY_SOURCE_KIND
-from mindroom.entity_resolution import entity_identity_registry
+from mindroom.entity_resolution import is_human_requester_id
 from mindroom.interactive import (
     add_reaction_buttons,
     clear_interactive_question,
@@ -89,10 +89,11 @@ class MatrixMessageOperations:
         extra_content: dict[str, Any] = {}
         if ignore_mentions:
             extra_content[SKIP_MENTIONS_KEY] = True
-        elif context.requester_id != context.client.user_id and not entity_identity_registry(
+        elif context.requester_id != context.client.user_id and is_human_requester_id(
+            context.requester_id,
             context.config,
             context.runtime_paths,
-        ).is_managed_user_id(context.requester_id):
+        ):
             extra_content[ORIGINAL_SENDER_KEY] = context.requester_id
             extra_content[SOURCE_KIND_KEY] = TRUSTED_INTERNAL_RELAY_SOURCE_KIND
         if message_extras:

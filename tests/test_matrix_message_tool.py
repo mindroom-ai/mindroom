@@ -17,6 +17,7 @@ from mindroom import interactive
 from mindroom.attachments import register_local_attachment
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
+from mindroom.config.matrix import MindRoomUserConfig
 from mindroom.constants import ORIGINAL_SENDER_KEY, SKIP_MENTIONS_KEY, SOURCE_KIND_KEY
 from mindroom.custom_tools.attachments import AttachmentTools
 from mindroom.custom_tools.matrix_message import MatrixMessageTools
@@ -73,6 +74,8 @@ def _make_context(
     room_id: str = "!room:localhost",
     thread_id: str | None = "$thread:localhost",
     requester_id: str = "@user:localhost",
+    bot_accounts: list[str] | None = None,
+    mindroom_user: MindRoomUserConfig | None = None,
     resolved_thread_id: object = _DEFAULT_RESOLVED_THREAD_ID,
     reply_to_event_id: str | None = "$reply:localhost",
     storage_path: Path | None = None,
@@ -97,6 +100,8 @@ def _make_context(
                     thread_mode=agent_thread_mode,
                 ),
             },
+            bot_accounts=bot_accounts or [],
+            mindroom_user=mindroom_user,
         ),
         test_runtime_paths(runtime_root),
     )
@@ -300,6 +305,51 @@ async def test_matrix_message_active_mentions_do_not_promote_managed_requester()
     ctx = _make_context(
         thread_id=None,
         requester_id="@mindroom_router:localhost",
+    )
+
+    with (
+        patch(
+            "mindroom.custom_tools.matrix_conversation_operations.send_message_result",
+            new=AsyncMock(side_effect=delivered_matrix_side_effect("$evt")),
+        ) as mock_send,
+        tool_runtime_context(ctx),
+    ):
+        payload = json.loads(
+            await tool.matrix_message(
+                action="send",
+                message="@general continue work",
+                ignore_mentions=False,
+            ),
+        )
+
+    assert payload["status"] == "ok"
+    sent_content = mock_send.await_args.args[2]
+    assert sent_content["m.mentions"] == {"user_ids": [ctx.client.user_id]}
+    assert SKIP_MENTIONS_KEY not in sent_content
+    assert ORIGINAL_SENDER_KEY not in sent_content
+    assert SOURCE_KIND_KEY not in sent_content
+
+
+@pytest.mark.parametrize(
+    ("requester_id", "bot_accounts", "mindroom_user"),
+    [
+        ("@bridge_bot:localhost", ["@bridge_bot:localhost"], None),
+        ("@mindroom_user:localhost", [], MindRoomUserConfig()),
+    ],
+)
+@pytest.mark.asyncio
+async def test_matrix_message_active_mentions_do_not_promote_non_human_requester(
+    requester_id: str,
+    bot_accounts: list[str],
+    mindroom_user: MindRoomUserConfig | None,
+) -> None:
+    """Trusted relay provenance should require a human requester."""
+    tool = MatrixMessageTools()
+    ctx = _make_context(
+        thread_id=None,
+        requester_id=requester_id,
+        bot_accounts=bot_accounts,
+        mindroom_user=mindroom_user,
     )
 
     with (
