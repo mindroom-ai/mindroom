@@ -347,26 +347,33 @@ class DispatchObligationStore:
         source_event_id: str,
         callback_kind: DispatchCallbackKind,
     ) -> None:
-        """Replace a message/media obligation with exact terminal turn truth."""
+        """Retain bounded terminal identity after exact TurnStore settlement."""
         if callback_kind not in {DispatchCallbackKind.MESSAGE, DispatchCallbackKind.MEDIA}:
             msg = "TurnStore can settle only a message or media dispatch obligation"
             raise ValueError(msg)
         with self._lock, self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
             connection.execute(
                 """
-                DELETE FROM dispatch_obligations
+                UPDATE dispatch_obligations
+                SET state = ?, settled_at_ns = ?
                 WHERE principal_id = ?
                   AND entity_name = ?
                   AND source_event_id = ?
                   AND callback_kind = ?
+                  AND state = ?
                 """,
                 (
+                    _DispatchTerminalOutcome.SUCCEEDED.value,
+                    time.time_ns(),
                     self.principal_id,
                     self.entity_name,
                     source_event_id,
                     callback_kind.value,
+                    _PENDING_STATE,
                 ),
             )
+            self._prune_terminal_locked(connection)
 
     def pending(self) -> tuple[_DispatchObligation, ...]:
         """Return pending work oldest-first, failing on unrecoverable durable input."""

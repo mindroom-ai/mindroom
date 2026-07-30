@@ -208,8 +208,8 @@ def test_principal_and_entity_are_part_of_the_exact_identity(tmp_path: Path) -> 
     assert not other_entity.has_pending("$isolated", DispatchCallbackKind.MESSAGE)
 
 
-def test_turn_store_terminal_truth_removes_only_message_and_media_rows(tmp_path: Path) -> None:
-    """Turn truth may replace message/media obligations, never unrelated callback kinds."""
+def test_turn_store_terminal_truth_tombstones_only_message_and_media_rows(tmp_path: Path) -> None:
+    """Turn truth must block message/media replay without settling unrelated callbacks."""
     store = _store(tmp_path)
     message = _message_obligation("$turn")
     media = replace(message, callback_kind=DispatchCallbackKind.MEDIA)
@@ -223,8 +223,24 @@ def test_turn_store_terminal_truth_removes_only_message_and_media_rows(tmp_path:
     assert not store.has_pending("$turn", DispatchCallbackKind.MESSAGE)
     assert not store.has_pending("$turn", DispatchCallbackKind.MEDIA)
     assert store.has_pending("$turn", DispatchCallbackKind.REACTION)
+    assert store.create_pending(message) is _DispatchCreateResult.ALREADY_TERMINAL
+    assert store.create_pending(media) is _DispatchCreateResult.ALREADY_TERMINAL
+    assert store.create_pending(reaction) is _DispatchCreateResult.ALREADY_PENDING
     with pytest.raises(ValueError, match="message or media"):
         store.settle_from_turn_store("$turn", DispatchCallbackKind.REACTION)
+
+
+def test_turn_store_terminal_tombstones_use_bounded_history(tmp_path: Path) -> None:
+    """Turn-backed replay protection must use the existing bounded terminal history."""
+    store = _store(tmp_path, terminal_limit=1)
+    older = _message_obligation("$older-turn")
+    newer = _message_obligation("$newer-turn")
+    for obligation in (older, newer):
+        store.create_pending(obligation)
+        store.settle_from_turn_store(obligation.source_event_id, obligation.callback_kind)
+
+    assert store.create_pending(newer) is _DispatchCreateResult.ALREADY_TERMINAL
+    assert store.create_pending(older) is _DispatchCreateResult.CREATED
 
 
 def test_terminal_pruning_never_removes_pending_work(tmp_path: Path) -> None:
