@@ -520,6 +520,16 @@ def test_format_tool_started_redacts_top_level_key_value_secret_args() -> None:
     assert "value=***redacted***" in trace.args_preview
 
 
+def test_format_tool_started_survives_structured_redaction_failure() -> None:
+    """A failed argument redaction must not abort tool event formatting."""
+    _text, trace = _format_tool_started(
+        "run_shell",
+        {"command": "password=\n  hunter2"},
+    )
+
+    assert trace.args_preview == "command=[redaction failed]"
+
+
 def test_complete_pending_tool_block_roundtrip_with_marker_id() -> None:
     """Pending marker produced by format_tool_started should be completed in-place by id."""
     pending_text, _ = _format_tool_started(

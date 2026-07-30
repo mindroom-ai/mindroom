@@ -1571,6 +1571,85 @@ async def test_file_backend_prompt_respects_max_entrypoint_lines(storage_path: P
 
 
 @pytest.mark.asyncio
+async def test_file_backend_entrypoint_preamble_announces_automatic_preload(
+    storage_path: Path,
+    config: Config,
+) -> None:
+    """The preamble must tell the agent its MEMORY.md is already inlined, and where it lives."""
+    config.memory.backend = "file"
+    config.memory.file.path = str(storage_path / "memory-files")
+
+    workspace = agent_workspace_root_path(storage_path, "general")
+    workspace.mkdir(parents=True, exist_ok=True)
+    memory_path = workspace / "MEMORY.md"
+    memory_path.write_text("# Memory\nCurated fact.\n", encoding="utf-8")
+
+    prompt_parts = await build_memory_prompt_parts(
+        "What should I remember?",
+        "general",
+        storage_path,
+        config,
+    )
+
+    assert "is inlined below automatically every turn" in prompt_parts.session_preamble
+    assert str(memory_path) in prompt_parts.session_preamble
+    assert "truncated" not in prompt_parts.session_preamble
+
+
+@pytest.mark.asyncio
+async def test_file_backend_entrypoint_preamble_reports_truncated_lines(
+    storage_path: Path,
+    config: Config,
+) -> None:
+    """A capped MEMORY.md preload must say how much was withheld and where to read it."""
+    config.memory.backend = "file"
+    config.memory.file.path = str(storage_path / "memory-files")
+    config.memory.file.max_entrypoint_lines = 2
+
+    workspace = agent_workspace_root_path(storage_path, "general")
+    workspace.mkdir(parents=True, exist_ok=True)
+    memory_path = workspace / "MEMORY.md"
+    memory_path.write_text("# Memory\nCurated fact.\nThird fact.\nFourth fact.\n", encoding="utf-8")
+
+    prompt_parts = await build_memory_prompt_parts(
+        "What should I remember?",
+        "general",
+        storage_path,
+        config,
+    )
+
+    assert "[Memory entrypoint truncated - showing the first 2 of 4 lines" in prompt_parts.session_preamble
+    assert "memory.file.max_entrypoint_lines=2" in prompt_parts.session_preamble
+    assert str(memory_path) in prompt_parts.session_preamble
+
+
+@pytest.mark.asyncio
+async def test_file_backend_entrypoint_reports_truncation_when_preloaded_head_is_blank(
+    storage_path: Path,
+    config: Config,
+) -> None:
+    """Truncation must be reported even when the preloaded lines carry no text."""
+    config.memory.backend = "file"
+    config.memory.file.path = str(storage_path / "memory-files")
+    config.memory.file.max_entrypoint_lines = 2
+
+    workspace = agent_workspace_root_path(storage_path, "general")
+    workspace.mkdir(parents=True, exist_ok=True)
+    memory_path = workspace / "MEMORY.md"
+    memory_path.write_text("\n\n# Memory\nCurated fact.\nThird fact.\n", encoding="utf-8")
+
+    prompt_parts = await build_memory_prompt_parts(
+        "What should I remember?",
+        "general",
+        storage_path,
+        config,
+    )
+
+    assert "[Memory entrypoint truncated - showing the first 2 of 5 lines" in prompt_parts.session_preamble
+    assert str(memory_path) in prompt_parts.session_preamble
+
+
+@pytest.mark.asyncio
 async def test_file_backend_search_skips_structured_line_duplicates(storage_path: Path, config: Config) -> None:
     config.memory.backend = "file"
     config.memory.file.path = str(storage_path / "memory-files")

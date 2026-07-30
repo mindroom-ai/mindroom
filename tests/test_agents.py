@@ -23,12 +23,16 @@ from agno.tools.function import Function
 from agno.tools.toolkit import Toolkit
 from pydantic import ValidationError
 
+from mindroom import prompts
 from mindroom.agent_storage import get_agent_runtime_state_dbs
 from mindroom.agents import (
     _CULTURE_MANAGER_CACHE,
     _PRIVATE_CULTURE_MANAGER_CACHE,
+    _AdditionalContextChunk,
+    _apply_preload_cap,
     _load_context_files,
     _prune_toolkit_functions,
+    _trim_chunk_tails,
     agent_build_can_overlap_file_memory,
     build_agent_toolkit,
     create_agent,
@@ -2402,9 +2406,9 @@ def test_agent_context_files_are_loaded_into_role(mock_storage: MagicMock, tmp_p
     agent = _create_agent_for_test("general", config=_bind_runtime_paths(config, _runtime_paths(tmp_path)))
 
     assert "## Personality Context" in agent.role
-    assert "### SOUL.md" in agent.role
+    assert f"### {soul_path}" in agent.role
     assert "Core personality directive." in agent.role
-    assert "### USER.md" in agent.role
+    assert f"### {user_path}" in agent.role
     assert "User preference: concise answers." in agent.role
     soul_path.write_text("Canonical soul directive.", encoding="utf-8")
 
@@ -2413,32 +2417,116 @@ def test_agent_context_files_are_loaded_into_role(mock_storage: MagicMock, tmp_p
     assert "Canonical soul directive." in updated_agent.role
 
 
+def _preload_chunks() -> list[_AdditionalContextChunk]:
+    return [
+        _AdditionalContextChunk(title="/ws/FIRST.md", body="FIRST_START " + "A" * 600),
+        _AdditionalContextChunk(title="/ws/SECOND.md", body="SECOND_START " + "B" * 600),
+    ]
+
+
+def _apply_test_preload_cap(chunks: list[_AdditionalContextChunk], max_preload_chars: int) -> tuple[str, int]:
+    return _apply_preload_cap(
+        chunks,
+        max_preload_chars,
+        section_heading=prompts.PERSONALITY_CONTEXT_SECTION_HEADING,
+        truncation_marker_template=prompts.CONTEXT_TRUNCATION_MARKER_TEMPLATE,
+        chunk_marker_template=prompts.CONTEXT_CHUNK_OMITTED_MARKER_TEMPLATE,
+    )
+
+
+def test_trim_chunk_tails_counts_whitespace_removed_by_cleanup() -> None:
+    """Tail trimming must count whitespace removed after the requested slice."""
+    chunk = _AdditionalContextChunk(title="/ws/SOUL.md", body="alpha   beta")
+
+    omitted_chars = _trim_chunk_tails(
+        [chunk],
+        len("alpha   "),
+        render=lambda chunks: chunks[0].body,
+    )
+
+    assert chunk.body == "alpha"
+    assert chunk.omitted_chars == 7
+    assert omitted_chars == 7
+
+
+def test_preload_cap_truncates_context_files_in_order() -> None:
+    """Preload cap should drop earlier context files before later ones."""
+    chunks = _preload_chunks()
+    heading_and_markers = len(prompts.PERSONALITY_CONTEXT_SECTION_HEADING) + 400
+
+    rendered, omitted_chars = _apply_test_preload_cap(chunks, len(chunks[1].body) + heading_and_markers)
+
+    assert omitted_chars >= len(_preload_chunks()[0].body)
+    assert "FIRST_START" not in rendered
+    assert "SECOND_START" in rendered
+    assert "[Context files exceeded the preload budget - " in rendered
+
+
+def test_preload_cap_keeps_the_dropped_file_path_visible() -> None:
+    """A dropped context file must stay visible as its path plus an omission marker."""
+    chunks = _preload_chunks()
+    dropped_body_length = len(chunks[0].body)
+    heading_and_markers = len(prompts.PERSONALITY_CONTEXT_SECTION_HEADING) + 400
+
+    rendered, _ = _apply_test_preload_cap(chunks, len(chunks[1].body) + heading_and_markers)
+
+    assert "### /ws/FIRST.md" in rendered
+    assert f"[Truncated - {dropped_body_length} chars omitted. Read /ws/FIRST.md for the rest.]" in rendered
+
+
+def test_preload_cap_rejects_budget_too_small_for_required_markers() -> None:
+    """A hard cap must fail explicitly rather than slice away required file markers."""
+    chunks = [
+        _AdditionalContextChunk(
+            title=f"/workspace/context/file-{index}.md",
+            body="x" * 700,
+        )
+        for index in range(6)
+    ]
+
+    with pytest.raises(ValueError, match="cannot fit required context headings and omission markers"):
+        _apply_test_preload_cap(chunks, 400)
+
+
+def test_preload_cap_trims_last_context_body_instead_of_dropping_it() -> None:
+    """After dropping earlier files, the final file should keep as much leading content as fits."""
+    rendered, omitted_chars = _apply_test_preload_cap(_preload_chunks(), 1_000)
+
+    assert len(_preload_chunks()[0].body) < omitted_chars < sum(len(chunk.body) for chunk in _preload_chunks())
+    assert "FIRST_START" not in rendered
+    assert "SECOND_START" in rendered
+    assert "### /ws/FIRST.md" in rendered
+    assert "### /ws/SECOND.md" in rendered
+    assert len(rendered) <= 1_000
+
+
+def test_preload_cap_leaves_untruncated_context_unmarked() -> None:
+    """Context that fits the budget must carry no omission markers."""
+    rendered, omitted_chars = _apply_test_preload_cap(_preload_chunks(), 50_000)
+
+    assert omitted_chars == 0
+    assert "Truncated" not in rendered
+    assert "FIRST_START" in rendered
+    assert "SECOND_START" in rendered
+
+
 @patch("mindroom.agent_storage.SqliteDb")
-def test_agent_preload_cap_truncates_context_files_in_order(
+def test_agent_context_section_states_files_are_preloaded(
     mock_storage: MagicMock,  # noqa: ARG001
     tmp_path: Path,
 ) -> None:
-    """Preload cap should drop earlier context files before later ones."""
+    """The context section must tell the model these files are already inlined."""
     config = _test_config()
-    authored_defaults = config.defaults.model_dump(mode="python")
-    authored_defaults["max_preload_chars"] = 420
-    config.defaults = DefaultsConfig(**authored_defaults)
-
     workspace = agent_workspace_root_path(tmp_path, "general")
     workspace.mkdir(parents=True, exist_ok=True)
-    first_path = workspace / "FIRST.md"
-    second_path = workspace / "SECOND.md"
-    first_path.write_text("FIRST_START " + "A" * 220 + " FIRST_END", encoding="utf-8")
-    second_path.write_text("SECOND_START " + "B" * 220 + " SECOND_END", encoding="utf-8")
+    (workspace / "SOUL.md").write_text("Core personality directive.", encoding="utf-8")
 
-    config.agents["general"].context_files = ["FIRST.md", "SECOND.md"]
+    config.agents["general"].context_files = ["SOUL.md"]
 
     agent = _create_agent_for_test("general", config=_bind_runtime_paths(config, _runtime_paths(tmp_path)))
 
-    assert "[Content truncated - " in agent.role
-    assert "### FIRST.md" not in agent.role
-    assert "### SECOND.md" in agent.role
-    assert "SECOND_START" in agent.role
+    assert "headed by the path of the file it was read from" in agent.role
+    assert "Do not re-read a file" in agent.role
 
 
 @patch("mindroom.agent_storage.SqliteDb")

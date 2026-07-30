@@ -904,6 +904,7 @@ depends_on = [
     "mindroom.constants",
     "mindroom.custom_tools.attachment_helpers",
     "mindroom.custom_tools.attachments",
+    "mindroom.entity_resolution",
     "mindroom.interactive",
     "mindroom.logging_config",
     "mindroom.matrix.client_delivery",
