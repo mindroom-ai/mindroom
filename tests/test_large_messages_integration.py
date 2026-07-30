@@ -55,10 +55,12 @@ class MockClient:
         message_type: str,
         content: dict,
         *,
+        tx_id: str | None = None,
         ignore_unverified_devices: bool = False,
     ) -> MagicMock:
         """Mock sending a message."""
         assert message_type == "m.room.message"
+        assert tx_id is None or isinstance(tx_id, str)
         assert ignore_unverified_devices is True
         self.messages_sent.append(("send", room_id, content))
 

@@ -554,9 +554,11 @@ class RestartRecoveryCoordinator:
             await self._drain_active_attempts()
 
     def _next_room_job(self) -> _RoomJob | None:
-        if not self._room_jobs:
+        active_keys = {job.key for job in self._active_attempts.values() if isinstance(job, _RoomJob)}
+        eligible_jobs = [job for job in self._room_jobs.values() if job.key not in active_keys]
+        if not eligible_jobs:
             return None
-        return min(self._room_jobs.values(), key=lambda job: (job.due_at, job.key))
+        return min(eligible_jobs, key=lambda job: (job.due_at, job.key))
 
     def _next_target_job(self) -> _TargetJob | None:
         if not self._target_jobs:

@@ -566,6 +566,8 @@ async def test_replacement_enqueue_during_same_active_scan_latches_one_rerun(tmp
     release_first_scan = asyncio.Event()
     second_scan_finished = asyncio.Event()
     attempts = 0
+    active_attempts = 0
+    max_active_attempts = 0
 
     async def recover_room(
         _owner: RecoveryOwner,
@@ -573,15 +575,20 @@ async def test_replacement_enqueue_during_same_active_scan_latches_one_rerun(tmp
         _owner_user_ids: frozenset[str],
         _config: Config,
     ) -> RoomRecoveryResult:
-        nonlocal attempts
+        nonlocal active_attempts, attempts, max_active_attempts
         assert request.room_id == room_id
         attempts += 1
-        if attempts == 1:
-            first_scan_started.set()
-            await release_first_scan.wait()
-        else:
-            second_scan_finished.set()
-        return RoomRecoveryResult()
+        active_attempts += 1
+        max_active_attempts = max(max_active_attempts, active_attempts)
+        try:
+            if attempts == 1:
+                first_scan_started.set()
+                await release_first_scan.wait()
+            else:
+                second_scan_finished.set()
+            return RoomRecoveryResult()
+        finally:
+            active_attempts -= 1
 
     coordinator = RestartRecoveryCoordinator(
         current_config=lambda: _config(tmp_path),
@@ -593,13 +600,18 @@ async def test_replacement_enqueue_during_same_active_scan_latches_one_rerun(tmp
     await asyncio.wait_for(first_scan_started.wait(), timeout=1.0)
 
     coordinator.enqueue_replacement_rooms(owner.user_id, {room_id})
-    release_first_scan.set()
     try:
+        coordinator._start_due_attempts()
+        await asyncio.sleep(0)
+        assert attempts == 1
+        release_first_scan.set()
         await asyncio.wait_for(second_scan_finished.wait(), timeout=1.0)
     finally:
+        release_first_scan.set()
         await coordinator.stop()
 
     assert attempts == 2
+    assert max_active_attempts == 1
 
 
 @pytest.mark.asyncio
