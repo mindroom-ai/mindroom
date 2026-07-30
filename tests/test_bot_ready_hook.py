@@ -234,6 +234,56 @@ def test_call_manager_registers_call_and_room_membership_callbacks(tmp_path: Pat
     client.add_to_device_callback.assert_called_once_with(ANY, AuthenticatedToDeviceEvent)
 
 
+@pytest.mark.asyncio
+async def test_call_manager_room_callbacks_reject_cold_history(tmp_path: Path) -> None:
+    """Historical room membership and call state cannot mutate the live call runtime."""
+    bot = _agent_bot(tmp_path)
+    client = MagicMock(spec=nio.AsyncClient)
+    call_manager = MagicMock()
+    call_manager.on_room_membership_event = AsyncMock()
+    call_manager.on_room_event = AsyncMock()
+    room = nio.MatrixRoom("!room:localhost", bot.agent_user.user_id)
+    membership_event = nio.RoomMemberEvent.from_dict(
+        {
+            "event_id": "$historical-member",
+            "sender": "@owner:localhost",
+            "origin_server_ts": 1,
+            "type": "m.room.member",
+            "state_key": bot.agent_user.user_id,
+            "content": {"membership": "leave"},
+        },
+    )
+    assert isinstance(membership_event, nio.RoomMemberEvent)
+    call_event = nio.UnknownEvent(
+        {
+            "event_id": "$historical-call",
+            "sender": "@owner:localhost",
+            "origin_server_ts": 1,
+        },
+        "org.matrix.msc3401.call.member",
+    )
+
+    with patch("mindroom.bot.maybe_build_call_manager", return_value=call_manager):
+        bot._register_call_manager_callbacks(client)
+
+    membership_callback = client.add_event_callback.call_args_list[0].args[0]
+    call_callback = client.add_event_callback.call_args_list[1].args[0]
+    await membership_callback(room, membership_event)
+    await call_callback(room, call_event)
+    await wait_for_background_tasks(timeout=1.0, owner=bot._runtime_view)
+
+    call_manager.on_room_membership_event.assert_not_awaited()
+    call_manager.on_room_event.assert_not_awaited()
+
+    bot._cold_history_fence.observe_continuation("s_warm")
+    await membership_callback(room, membership_event)
+    await call_callback(room, call_event)
+    await wait_for_background_tasks(timeout=1.0, owner=bot._runtime_view)
+
+    call_manager.on_room_membership_event.assert_awaited_once_with(room, membership_event)
+    call_manager.on_room_event.assert_awaited_once_with(room, call_event)
+
+
 def test_room_membership_cleanup_registers_without_call_runtime(tmp_path: Path) -> None:
     """Persisted ad-hoc ownership is cleaned even when voice dependencies are absent."""
     bot = _agent_bot(tmp_path)

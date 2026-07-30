@@ -1479,25 +1479,44 @@ class AgentBot:
             tool_support=self._tool_runtime_support,
             get_invited_rooms_by_agent=self._invited_call_rooms_by_agent,
         )
+
+        async def on_room_membership_event(room: nio.MatrixRoom, event: nio.RoomMemberEvent) -> None:
+            if await self._admit_dispatch_source(
+                room.room_id,
+                event.event_id,
+                DispatchCallbackKind.ROOM_LIFECYCLE,
+            ):
+                await self._on_room_membership_event(room, event)
+
         client.add_event_callback(
             _create_best_effort_task_wrapper(
-                self._on_room_membership_event,
+                on_room_membership_event,
                 owner=self._runtime_view,
             ),
             nio.RoomMemberEvent,
         )
-        if self._call_manager is None:
+        call_manager = self._call_manager
+        if call_manager is None:
             return
+
+        async def on_call_room_event(room: nio.MatrixRoom, event: nio.UnknownEvent) -> None:
+            if await self._admit_dispatch_source(
+                room.room_id,
+                event.event_id,
+                DispatchCallbackKind.ROOM_LIFECYCLE,
+            ):
+                await call_manager.on_room_event(room, event)
+
         client.add_event_callback(
             _create_best_effort_task_wrapper(
-                self._call_manager.on_room_event,
+                on_call_room_event,
                 owner=self._runtime_view,
             ),
             nio.UnknownEvent,
         )
         client.add_to_device_callback(
             _create_best_effort_task_wrapper(  # ty: ignore[invalid-argument-type]  # matrix-nio callback types are too strict here
-                self._call_manager.on_to_device_event,
+                call_manager.on_to_device_event,
                 owner=self._runtime_view,
             ),
             AuthenticatedToDeviceEvent,

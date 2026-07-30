@@ -177,6 +177,40 @@ async def test_agent_skips_rejoining_rooms_it_already_has(monkeypatch: pytest.Mo
 
 
 @pytest.mark.asyncio
+async def test_join_configured_rooms_fails_closed_when_membership_inventory_is_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """An unreadable joined-room inventory cannot invent new join fences."""
+    agent_user = AgentMatrixUser(
+        agent_name="agent1",
+        user_id="@mindroom_agent1:localhost",
+        display_name="Agent 1",
+        password=TEST_PASSWORD,
+    )
+    config = bind_runtime_paths(Config(router=RouterConfig(model="default")), test_runtime_paths(tmp_path))
+    bot = AgentBot(
+        agent_user=agent_user,
+        storage_path=tmp_path,
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+        rooms=["!room1:localhost", "!room2:localhost"],
+    )
+    install_runtime_cache_support(bot)
+    bot.client = AsyncMock()
+    join_room = AsyncMock(return_value=True)
+    monkeypatch.setattr("mindroom.bot_room_lifecycle.get_joined_rooms", AsyncMock(return_value=None))
+    monkeypatch.setattr("mindroom.bot_room_lifecycle.join_room", join_room)
+
+    with pytest.raises(RuntimeError, match="joined rooms"):
+        await bot.join_configured_rooms()
+
+    join_room.assert_not_awaited()
+    assert not bot._room_lifecycle.decrypt_notice_is_fenced("!room1:localhost")
+    assert not bot._room_lifecycle.decrypt_notice_is_fenced("!room2:localhost")
+
+
+@pytest.mark.asyncio
 async def test_stale_client_room_after_leave_cannot_reopen_cache(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
