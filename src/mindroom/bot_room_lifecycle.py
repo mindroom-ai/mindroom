@@ -136,6 +136,8 @@ class BotRoomLifecycle:
 
     async def restore_pending_join_decrypt_fences(self) -> None:
         """Validate durable unfinished-join fences before sync can start."""
+        if not self._decrypt_notice_fenced_room_ids:
+            return
         joined_rooms = await get_joined_rooms(self._client())
         if joined_rooms is None:
             msg = "Could not verify pending join decrypt fences because joined rooms are unavailable"

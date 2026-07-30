@@ -1102,6 +1102,8 @@ class AgentBot:
         self._sync_shutting_down = False
         self._response_runner.resume_pending_admissions()
         self._calls_reconcile_pending = self._call_manager is not None
+        if self.config.matrix_sync.mode == "sliding":
+            self._cold_history_fence.reset()
         mark_matrix_sync_loop_started(self.agent_name)
 
     def reset_watchdog_clock(self) -> None:

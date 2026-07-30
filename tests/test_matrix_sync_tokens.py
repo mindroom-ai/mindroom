@@ -375,6 +375,26 @@ async def test_sliding_response_pos_opens_fence_and_missing_or_unknown_pos_rearm
 
 
 @pytest.mark.asyncio
+async def test_sliding_transport_restart_rearms_cold_history_fence(
+    tmp_path: Path,
+) -> None:
+    """Each fresh Sliding transport starts without a connection position."""
+    bot = _agent_bot(tmp_path)
+    bot.config.matrix_sync = MatrixSyncConfig(mode="sliding")
+    bot._cold_history_fence.observe_continuation("pos_from_previous_loop")
+    assert not bot._cold_history_fence.is_cold
+
+    bot.mark_sync_loop_started()
+
+    assert bot._cold_history_fence.is_cold
+    assert not await bot._admit_dispatch_source(
+        "!room:localhost",
+        "$initial-history",
+        DispatchCallbackKind.MESSAGE,
+    )
+
+
+@pytest.mark.asyncio
 async def test_sliding_trusted_sync_clears_joined_room_decrypt_notice_fence(
     tmp_path: Path,
 ) -> None:
@@ -628,7 +648,7 @@ async def test_bot_start_leaves_trusted_joined_room_unfenced_for_catch_up(
     ):
         await bot.start()
 
-    get_joined_rooms.assert_awaited_once_with(client)
+    get_joined_rooms.assert_not_awaited()
     assert client.next_batch == "s_saved"
     assert await bot._admit_dispatch_source(
         room_id,
@@ -643,6 +663,14 @@ async def test_bot_start_fails_when_joined_rooms_query_cannot_verify_fences(
 ) -> None:
     """Startup cannot silently unfence pending joins when membership is unknown."""
     bot = _agent_bot(tmp_path)
+    bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
+    with (
+        patch("mindroom.bot_room_lifecycle.get_joined_rooms", AsyncMock(return_value=[])),
+        patch("mindroom.bot_room_lifecycle.join_room", AsyncMock(return_value=True)),
+    ):
+        await bot.join_configured_rooms()
+    assert bot._room_lifecycle.decrypt_notice_is_fenced("!room:localhost")
+
     client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
     get_joined_rooms = AsyncMock(return_value=None)
 
@@ -661,6 +689,29 @@ async def test_bot_start_fails_when_joined_rooms_query_cannot_verify_fences(
     client.close.assert_awaited_once_with()
     assert bot.client is None
     assert not bot.running
+
+
+@pytest.mark.asyncio
+async def test_bot_start_skips_joined_rooms_query_without_pending_join_fences(
+    tmp_path: Path,
+) -> None:
+    """No durable unfinished joins means no membership reconciliation is needed."""
+    bot = _agent_bot(tmp_path)
+    client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
+    get_joined_rooms = AsyncMock(side_effect=AssertionError("unexpected joined_rooms query"))
+
+    with (
+        patch.object(bot, "ensure_user_account", AsyncMock()),
+        patch("mindroom.bot.login_agent_user", AsyncMock(return_value=client)),
+        patch.object(bot, "_set_avatar_if_available", AsyncMock()),
+        patch.object(bot, "_set_presence_with_model_info", AsyncMock()),
+        patch("mindroom.bot.interactive.init_persistence"),
+        patch("mindroom.bot_room_lifecycle.get_joined_rooms", get_joined_rooms),
+    ):
+        await bot.start()
+
+    get_joined_rooms.assert_not_awaited()
+    assert bot.running
 
 
 @pytest.mark.asyncio
