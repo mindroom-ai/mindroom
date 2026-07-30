@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
 import uuid
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, cast
@@ -22,7 +23,9 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.dispatch_handoff import PendingDispatchMetadata
+from mindroom.dispatch_obligations import DispatchCallbackKind
 from mindroom.dispatch_source import VOICE_SOURCE_KIND
+from mindroom.handled_turns import TurnRecord
 from mindroom.matrix.cache.event_cache import EventCacheBackendUnavailableError
 from mindroom.matrix.cache.postgres_event_cache import PostgresEventCache
 from mindroom.matrix.cache.sqlite_event_cache import SqliteEventCache
@@ -1146,6 +1149,88 @@ async def test_callback_failure_preserves_saved_checkpoint_immediately(tmp_path:
     assert bot._sync_cache_trust.state is SyncTrustState.CERTIFIED
     assert bot._sync_cache_trust.checkpoint == SyncCheckpoint("s_before_failure")
     assert _load_sync_token_value(tmp_path, bot.agent_name) == "s_before_failure"
+
+
+@pytest.mark.asyncio
+async def test_dispatch_persistence_failure_rewinds_classic_cursor(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Work rejected before durable acceptance must replay from the certified cursor."""
+    bot = _agent_bot(tmp_path)
+    bot.client = make_matrix_client_mock(user_id=bot.matrix_id.full_id)
+    bot.client.next_batch = "s_after_failure"
+    bot._sync_cache_trust.state = SyncTrustState.CERTIFIED
+    bot._sync_cache_trust.checkpoint = SyncCheckpoint("s_before_failure")
+
+    def fail_persist(*_args: object, **_kwargs: object) -> None:
+        message = "dispatch database unavailable"
+        raise OSError(message)
+
+    monkeypatch.setattr(bot._dispatch_obligation_store, "create_pending", fail_persist)
+    wrapper = bot._dispatch_obligation_runner.task_wrapper(
+        DispatchCallbackKind.MESSAGE,
+        owner=bot._runtime_view,
+    )
+
+    with pytest.raises(OSError, match="dispatch database unavailable"):
+        await wrapper(
+            nio.MatrixRoom("!room:localhost", bot.matrix_id.full_id),
+            _text_event("$unpersisted", "hello", 1),
+        )
+
+    assert bot.client.next_batch == "s_before_failure"
+
+
+@pytest.mark.asyncio
+async def test_dispatch_obligation_waits_for_terminal_turn_durability(tmp_path: Path) -> None:
+    """In-memory terminal state must not retire exact work before its ledger fsync."""
+    bot = _agent_bot(tmp_path)
+    room = nio.MatrixRoom("!room:localhost", bot.matrix_id.full_id)
+    event = _text_event("$write-behind", "hello", 1)
+    obligation = await bot._dispatch_obligation_runner.persist(
+        room,
+        event,
+        DispatchCallbackKind.MESSAGE,
+    )
+    assert obligation is not None
+
+    persist_started = threading.Event()
+    release_persist = threading.Event()
+    original_persist = bot._turn_store._ledger._persist_records
+
+    def blocking_persist(records: tuple[TurnRecord, ...]) -> None:
+        persist_started.set()
+        assert release_persist.wait(timeout=2)
+        original_persist(records)
+
+    with patch.object(bot._turn_store._ledger, "_persist_records", side_effect=blocking_persist):
+        bot._turn_store.record_turn(TurnRecord.create([event.event_id], response_event_id="$response"))
+        assert await asyncio.to_thread(persist_started.wait, 2)
+        run_task = asyncio.create_task(
+            bot._dispatch_obligation_runner.run_persisted(
+                obligation,
+                room=room,
+                event=event,
+            ),
+        )
+        try:
+            await asyncio.sleep(0.05)
+            pending_before_durable_turn = bot._dispatch_obligation_store.has_pending(
+                event.event_id,
+                DispatchCallbackKind.MESSAGE,
+            )
+            task_done_before_durable_turn = run_task.done()
+        finally:
+            release_persist.set()
+            await asyncio.gather(run_task, return_exceptions=True)
+
+    assert pending_before_durable_turn
+    assert not task_done_before_durable_turn
+    assert not bot._dispatch_obligation_store.has_pending(
+        event.event_id,
+        DispatchCallbackKind.MESSAGE,
+    )
 
 
 @pytest.mark.asyncio

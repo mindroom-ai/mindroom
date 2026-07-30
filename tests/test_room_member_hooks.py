@@ -385,6 +385,57 @@ async def test_sync_state_marker_failure_blocks_checkpoint_certification(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("record_only", [False, True])
+async def test_sync_state_baseline_markers_batch_one_worker_write(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    record_only: bool,
+) -> None:
+    """Full-state baseline recording must write once without blocking the event loop."""
+
+    @hook(EVENT_ROOM_MEMBER_JOINED)
+    async def joined(_ctx: RoomMemberJoinedContext) -> None:
+        pass
+
+    bot = _router_bot(tmp_path)
+    room = _room()
+    bot.client.rooms = {room.room_id: room}
+    bot.hook_registry = HookRegistry.from_plugins([_plugin("onboarding", [joined])])
+    event_loop_thread = threading.get_ident()
+    save_threads: list[int] = []
+    original_save = room_member_joins._save_room_member_joins
+
+    def tracked_save(path: Path, seen: dict[str, set[str]]) -> bool:
+        save_threads.append(threading.get_ident())
+        return original_save(path, seen)
+
+    monkeypatch.setattr(room_member_joins, "_save_room_member_joins", tracked_save)
+    events = [
+        _room_member_event(event_id="$alice", user_id="@alice:localhost", prev_membership=None),
+        _room_member_event(event_id="$bob", user_id="@bob:localhost", prev_membership=None),
+    ]
+
+    await bot._emit_room_member_joined_sync_state_hooks(
+        _sync_response_with_state(room.room_id, events),
+        record_only=record_only,
+    )
+
+    assert len(save_threads) == 1
+    assert save_threads[0] != event_loop_thread
+    assert room_member_joins.room_member_join_is_seen(
+        bot.runtime_paths.storage_root,
+        room_id=room.room_id,
+        user_id="@alice:localhost",
+    )
+    assert room_member_joins.room_member_join_is_seen(
+        bot.runtime_paths.storage_root,
+        room_id=room.room_id,
+        user_id="@bob:localhost",
+    )
+
+
+@pytest.mark.asyncio
 async def test_router_emits_room_member_joined_from_first_restored_token_sync_timeline(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

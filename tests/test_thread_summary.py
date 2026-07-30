@@ -15,9 +15,11 @@ import pytest
 from agno.models.vertexai.claude import Claude as VertexAIClaude
 from pydantic import ValidationError
 
+from mindroom.anthropic_claude import MindRoomAnthropicClaude
 from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths
 from mindroom.entity_resolution import resolve_room_scoped_model_override
+from mindroom.google_gemini import MindRoomGoogleGemini
 from mindroom.logging_config import setup_logging
 from mindroom.matrix.client import ResolvedVisibleMessage
 from mindroom.prompts import THREAD_SUMMARY_INSTRUCTIONS
@@ -27,6 +29,7 @@ from mindroom.thread_summary import (
     THREAD_SUMMARY_MAX_LENGTH,
     ThreadSummaryWriteError,
     _build_conversation_text,
+    _configure_summary_model_temperature,
     _count_non_summary_thread_messages,
     _generate_summary,
     _is_thread_summary_message,
@@ -514,6 +517,14 @@ class _TemperatureAwareModel:
 
     def __init__(self, temperature: float | None = None) -> None:
         self.temperature = temperature
+
+
+class _TemperatureAwareIdentifiedModel(_TemperatureAwareModel):
+    """Temperature-capable stub with one configured provider model ID."""
+
+    def __init__(self, model_id: str, temperature: float | None = None) -> None:
+        super().__init__(temperature)
+        self.id = model_id
 
 
 class _ModelWithoutTemperature:
@@ -2517,6 +2528,65 @@ class TestGenerateSummary:
 
         assert result == "🧪 ISSUE-148 matrix cache invalidate-and-refetch live test"
         assert mock_model.temperature == 0.1
+
+    @pytest.mark.parametrize(
+        "model_id",
+        [
+            "claude-fable-5",
+            "anthropic.claude-fable-5",
+            "anthropic/claude-fable-5",
+        ],
+    )
+    async def test_generate_summary_omits_invalid_fable_temperature(self, model_id: str) -> None:
+        """Fable requests through each supported provider must omit invalid temperature."""
+        model = _TemperatureAwareIdentifiedModel(model_id, temperature=0.9)
+
+        _configure_summary_model_temperature(
+            model,
+            summary_temperature=0.2,
+            model_name="summary",
+        )
+
+        assert model.temperature is None
+
+    @pytest.mark.parametrize("model_id", ["claude-opus-5", "claude-sonnet-5"])
+    async def test_generate_summary_omits_invalid_current_direct_claude_temperature(self, model_id: str) -> None:
+        """Current direct Claude requests must omit deprecated sampling controls."""
+        model = MindRoomAnthropicClaude(id=model_id, api_key="dummy-key", temperature=0.9)
+
+        _configure_summary_model_temperature(
+            model,
+            summary_temperature=0.2,
+            model_name="summary",
+        )
+
+        assert model.temperature is None
+
+    @pytest.mark.parametrize("model_id", ["gemini-3.6-flash", "gemini-3.5-flash-lite"])
+    async def test_generate_summary_omits_deprecated_direct_google_temperature(self, model_id: str) -> None:
+        """Current direct Gemini requests must omit deprecated sampling controls."""
+        model = MindRoomGoogleGemini(id=model_id, api_key="dummy-key", temperature=0.9)
+
+        _configure_summary_model_temperature(
+            model,
+            summary_temperature=0.2,
+            model_name="summary",
+        )
+
+        assert model.temperature is None
+
+    @pytest.mark.parametrize("model_id", ["google/gemini-3.6-flash", "google/gemini-3.5-flash-lite"])
+    async def test_generate_summary_preserves_supported_openrouter_gemini_temperature(self, model_id: str) -> None:
+        """OpenRouter supports temperature for current Gemini request IDs."""
+        model = _TemperatureAwareIdentifiedModel(model_id, temperature=0.9)
+
+        _configure_summary_model_temperature(
+            model,
+            summary_temperature=0.2,
+            model_name="summary",
+        )
+
+        assert model.temperature == 0.2
 
     async def test_generate_summary_uses_explicit_model_name(self) -> None:
         """Callers can pass the resolved room-specific summary model to generation."""

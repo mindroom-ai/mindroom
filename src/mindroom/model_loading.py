@@ -286,9 +286,9 @@ def _create_model_for_provider(  # noqa: C901, PLR0911, PLR0912, PLR0915
             missing_message="Missing AWS Bedrock dependencies. Install with: pip install 'mindroom[aws_bedrock]'",
         )
         _populate_bedrock_claude_runtime_kwargs(extra_kwargs, runtime_paths)
-        from agno.models.aws.claude import Claude as AwsBedrockClaude  # noqa: PLC0415
+        from mindroom.bedrock_claude import MindRoomBedrockClaude  # noqa: PLC0415
 
-        return AwsBedrockClaude(id=model_id, **extra_kwargs)
+        return MindRoomBedrockClaude(id=model_id, **extra_kwargs)
 
     if canonical_provider_key == "openai":
         from mindroom.openai_tool_search import openai_native_tool_search_supported  # noqa: PLC0415
@@ -309,14 +309,14 @@ def _create_model_for_provider(  # noqa: C901, PLR0911, PLR0912, PLR0915
         return MindRoomAzureOpenAI(id=model_id, **extra_kwargs)
 
     if canonical_provider_key == "anthropic":
-        from agno.models.anthropic import Claude  # noqa: PLC0415
+        from mindroom.anthropic_claude import MindRoomAnthropicClaude  # noqa: PLC0415
 
-        return Claude(id=model_id, **extra_kwargs)
+        return MindRoomAnthropicClaude(id=model_id, **extra_kwargs)
 
     if canonical_provider_key in {"gemini", "google"}:
-        from agno.models.google import Gemini  # noqa: PLC0415
+        from mindroom.google_gemini import MindRoomGoogleGemini  # noqa: PLC0415
 
-        return Gemini(id=model_id, **extra_kwargs)
+        return MindRoomGoogleGemini(id=model_id, **extra_kwargs)
 
     if canonical_provider_key == "vertexai_claude":
         from mindroom.vertex_claude_compat import MindroomVertexAIClaude  # noqa: PLC0415

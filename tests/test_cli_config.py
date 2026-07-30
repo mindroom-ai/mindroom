@@ -1268,14 +1268,16 @@ class TestConfigInit:
 
         config = yaml.safe_load(target.read_text())
         assert config["models"]["default"]["provider"] == "bedrock_claude"
-        assert config["models"]["default"]["id"] == "anthropic.claude-opus-4-8"
+        assert config["models"]["default"]["id"] == "anthropic.claude-opus-5"
         assert config["models"]["default"]["context_window"] == 1_000_000
 
         config_text = target.read_text(encoding="utf-8")
+        assert "# fable:" in config_text
+        assert "#   id: anthropic.claude-fable-5" in config_text
         assert "# sonnet:" in config_text
-        assert "#   id: global.anthropic.claude-sonnet-5" in config_text
+        assert "#   id: anthropic.claude-sonnet-5" in config_text
         assert "# haiku:" in config_text
-        assert "#   id: global.anthropic.claude-haiku-4-5" in config_text
+        assert "#   id: anthropic.claude-haiku-4-5" in config_text
 
         env_content = (tmp_path / ".env").read_text()
         assert "AWS_REGION=us-east-1" in env_content
@@ -1908,7 +1910,7 @@ class TestConfigValidate:
         """Config validate should warn about missing Bedrock region settings."""
         cfg = tmp_path / "config.yaml"
         cfg.write_text(
-            "models:\n  default:\n    provider: bedrock_claude\n    id: anthropic.claude-opus-4-8\n"
+            "models:\n  default:\n    provider: bedrock_claude\n    id: anthropic.claude-opus-5\n"
             "agents:\n  assistant:\n    display_name: Assistant\n    model: default\n"
             "router:\n  model: default\n",
         )
@@ -1937,7 +1939,7 @@ class TestConfigValidate:
             "models:\n"
             "  default:\n"
             "    provider: bedrock_claude\n"
-            "    id: anthropic.claude-opus-4-8\n"
+            "    id: anthropic.claude-opus-5\n"
             "    extra_kwargs:\n"
             "      aws_region: us-west-2\n"
             "agents:\n  assistant:\n    display_name: Assistant\n    model: default\n"
@@ -1966,7 +1968,7 @@ class TestConfigValidate:
             "models:\n"
             "  default:\n"
             "    provider: bedrock_claude\n"
-            "    id: anthropic.claude-opus-4-8\n"
+            "    id: anthropic.claude-opus-5\n"
             "    extra_kwargs:\n"
             "      aws_profile: dev-profile\n"
             "agents:\n  assistant:\n    display_name: Assistant\n    model: default\n"
@@ -1992,7 +1994,7 @@ class TestConfigValidate:
         """Config validate should accept Bedrock AWS_PROFILE without explicit region."""
         cfg = tmp_path / "config.yaml"
         cfg.write_text(
-            "models:\n  default:\n    provider: bedrock_claude\n    id: anthropic.claude-opus-4-8\n"
+            "models:\n  default:\n    provider: bedrock_claude\n    id: anthropic.claude-opus-5\n"
             "agents:\n  assistant:\n    display_name: Assistant\n    model: default\n"
             "router:\n  model: default\n",
         )

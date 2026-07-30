@@ -11,6 +11,7 @@ from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
+from typing import TypeIs
 
 import nio
 
@@ -23,6 +24,7 @@ logger = get_logger(__name__)
 _DATABASE_NAME = "dispatch_obligations.sqlite3"
 _SCHEMA_VERSION = 1
 _PENDING_STATE = "pending"
+_TOOL_APPROVAL_RESPONSE_EVENT_TYPE = "io.mindroom.tool_approval_response"
 
 
 class DispatchCallbackKind(StrEnum):
@@ -466,7 +468,6 @@ class _CallbackBindings:
     on_redaction: _RedactionCallback
     on_decryption_failure: _DecryptionFailureCallback
     turn_is_persisted: Callable[[str], bool]
-    turn_is_terminal: Callable[[str], bool]
     source_is_deferred: Callable[[str], bool]
 
     def as_mapping(self) -> Mapping[DispatchCallbackKind, _DispatchCallback]:
@@ -481,8 +482,6 @@ class _CallbackBindings:
         }
 
     def _turn_result(self, source_event_id: str) -> _DispatchCallbackResult:
-        if self.turn_is_terminal(source_event_id):
-            return _DispatchCallbackResult.SUCCEEDED
         if self.turn_is_persisted(source_event_id) or self.source_is_deferred(source_event_id):
             return _DispatchCallbackResult.DEFERRED
         return _DispatchCallbackResult.INTENTIONALLY_IGNORED
@@ -522,7 +521,7 @@ class _CallbackBindings:
         room: nio.MatrixRoom,
         event: nio.Event,
     ) -> _DispatchCallbackResult:
-        if not isinstance(event, nio.UnknownEvent) or event.type != "io.mindroom.tool_approval_response":
+        if not _is_tool_approval_response(event):
             return _DispatchCallbackResult.INTENTIONALLY_IGNORED
         await self.on_approval(room, event)
         return _DispatchCallbackResult.SUCCEEDED
@@ -566,6 +565,7 @@ class DispatchObligationRunner:
     callbacks: Mapping[DispatchCallbackKind, _DispatchCallback]
     room_for_id: Callable[[str], nio.MatrixRoom]
     turn_is_terminal: Callable[[str], bool]
+    on_persist_failure: Callable[[], None] | None = None
     _active: set[_DispatchObligationKey] = field(default_factory=set, init=False, repr=False)
     _active_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False, repr=False)
 
@@ -580,7 +580,6 @@ class DispatchObligationRunner:
         on_redaction: _RedactionCallback,
         on_decryption_failure: _DecryptionFailureCallback,
         turn_is_persisted: Callable[[str], bool],
-        turn_is_terminal: Callable[[str], bool],
         source_is_deferred: Callable[[str], bool],
     ) -> Mapping[DispatchCallbackKind, _DispatchCallback]:
         """Bind typed Matrix callbacks to explicit durable outcomes."""
@@ -593,7 +592,6 @@ class DispatchObligationRunner:
             on_redaction=on_redaction,
             on_decryption_failure=on_decryption_failure,
             turn_is_persisted=turn_is_persisted,
-            turn_is_terminal=turn_is_terminal,
             source_is_deferred=source_is_deferred,
         ).as_mapping()
 
@@ -627,10 +625,13 @@ class DispatchObligationRunner:
         media_callback = self.task_wrapper(DispatchCallbackKind.MEDIA, owner=owner)
         for event_type in MATRIX_MEDIA_EVENT_TYPES:
             client.add_event_callback(media_callback, event_type)
-        client.add_event_callback(
-            self.task_wrapper(DispatchCallbackKind.APPROVAL, owner=owner),
-            nio.UnknownEvent,
-        )
+        approval_callback = self.task_wrapper(DispatchCallbackKind.APPROVAL, owner=owner)
+
+        async def dispatch_approval(room: nio.MatrixRoom, event: nio.Event) -> None:
+            if _is_tool_approval_response(event):
+                await approval_callback(room, event)
+
+        client.add_event_callback(dispatch_approval, nio.UnknownEvent)
         client.add_event_callback(
             self.task_wrapper(DispatchCallbackKind.DECRYPTION_FAILURE, owner=owner),
             nio.MegolmEvent,
@@ -710,6 +711,12 @@ class DispatchObligationRunner:
         if not await self._claim(obligation.key):
             return
         try:
+            if not await asyncio.to_thread(
+                self.store.has_pending,
+                obligation.source_event_id,
+                obligation.callback_kind,
+            ):
+                return
             if await self._settle_from_turn_store_if_owned(obligation):
                 return
             callback = self.callbacks.get(obligation.callback_kind)
@@ -724,7 +731,7 @@ class DispatchObligationRunner:
     async def _settle_from_turn_store_if_owned(self, obligation: _DispatchObligation) -> bool:
         if obligation.callback_kind not in _TURN_BACKED_KINDS:
             return False
-        if not self.turn_is_terminal(obligation.source_event_id):
+        if not await asyncio.to_thread(self.turn_is_terminal, obligation.source_event_id):
             return False
         await asyncio.to_thread(
             self.store.settle_from_turn_store,
@@ -774,7 +781,12 @@ class _DispatchObligationTaskWrapper:
 
     async def __call__(self, room: nio.MatrixRoom, event: nio.Event) -> None:
         """Persist one callback obligation before scheduling its execution."""
-        obligation = await self.runner.persist(room, event, self.callback_kind)
+        try:
+            obligation = await self.runner.persist(room, event, self.callback_kind)
+        except Exception:
+            if self.runner.on_persist_failure is not None:
+                self.runner.on_persist_failure()
+            raise
         if obligation is None:
             return
         create_background_task(
@@ -800,3 +812,7 @@ class _DispatchObligationTaskWrapper:
                 callback_kind=obligation.callback_kind.value,
                 room_id=obligation.room_id,
             )
+
+
+def _is_tool_approval_response(event: nio.Event) -> TypeIs[nio.UnknownEvent]:
+    return isinstance(event, nio.UnknownEvent) and event.type == _TOOL_APPROVAL_RESPONSE_EVENT_TYPE
