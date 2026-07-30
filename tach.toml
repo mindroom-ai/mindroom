@@ -974,7 +974,6 @@ depends_on = [
     "mindroom.handled_turns",
     "mindroom.matrix.client_delivery",
     "mindroom.matrix.conversation_cache",
-    "mindroom.runtime_protocols",
     "mindroom.turn_store",
 ]
 
@@ -2078,7 +2077,6 @@ visibility = [
     "mindroom.inbound_turn_normalizer",
     "mindroom.knowledge.utils",
     "mindroom.post_response_effects",
-    "mindroom.terminal_delivery",
     "mindroom.turn_policy",
 ]
 

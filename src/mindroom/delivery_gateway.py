@@ -740,7 +740,13 @@ class DeliveryGateway:
         display_text = interactive_response.formatted_text
 
         if request.existing_event_id is not None:
-            if request.existing_event_is_placeholder and self.deps.terminal_delivery_coordinator is not None:
+            coordinator = self.deps.terminal_delivery_coordinator
+            source_event_ids = (request.identity.response_envelope.source_event_id,)
+            if (
+                request.existing_event_is_placeholder
+                and coordinator is not None
+                and await coordinator.can_checkpoint(source_event_ids)
+            ):
                 replacement_content = format_message_with_mentions(
                     self.deps.runtime.config,
                     self.deps.runtime_paths,
@@ -1070,10 +1076,12 @@ class DeliveryGateway:
 
         terminal_edit_callback = None
         identity = request.identity
+        coordinator = self.deps.terminal_delivery_coordinator
         if (
-            self.deps.terminal_delivery_coordinator is not None
+            coordinator is not None
             and identity is not None
             and (request.existing_event_id is None or request.adopt_existing_placeholder)
+            and await coordinator.can_checkpoint((identity.response_envelope.source_event_id,))
         ):
 
             async def terminal_edit_callback(

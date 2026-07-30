@@ -8,7 +8,7 @@ import json
 from collections.abc import Mapping
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Literal, cast
+from typing import TYPE_CHECKING, Any, Literal, Protocol, cast
 
 from mindroom.handled_turns import TerminalEditCheckpoint, TurnRecord
 from mindroom.matrix.client_delivery import send_message_result
@@ -16,13 +16,20 @@ from mindroom.matrix.client_delivery import send_message_result
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable
 
+    import nio
     import structlog
 
     from mindroom.matrix.conversation_cache import ConversationCacheProtocol
-    from mindroom.runtime_protocols import SupportsClientConfig
     from mindroom.turn_store import TurnStore
 
 _TerminalDeliveryStatus = Literal["delivered", "deferred", "superseded"]
+
+
+class _RuntimeClient(Protocol):
+    """Runtime surface needed by terminal transport."""
+
+    @property
+    def client(self) -> nio.AsyncClient | None: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -63,7 +70,7 @@ class TerminalDeliveryCommit:
 class TerminalDeliveryCoordinatorDeps:
     """Collaborators needed for durable terminal transport."""
 
-    runtime: SupportsClientConfig
+    runtime: _RuntimeClient
     turn_store: TurnStore
     conversation_cache: ConversationCacheProtocol
     redact_message_event: Callable[..., Awaitable[bool]]
@@ -107,6 +114,10 @@ class TerminalDeliveryCoordinator:
         """Wake retry after Matrix readiness or new checkpoint work."""
         del reason
         self._wake_event.set()
+
+    async def can_checkpoint(self, source_event_ids: tuple[str, ...]) -> bool:
+        """Return whether one canonical turn currently owns every source."""
+        return await asyncio.to_thread(self._turn_for_sources, source_event_ids) is not None
 
     @asynccontextmanager
     async def stale_cleanup_guard(self, target_event_id: str) -> AsyncIterator[bool]:

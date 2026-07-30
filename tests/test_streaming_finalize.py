@@ -231,6 +231,7 @@ async def test_delivery_gateway_checkpoints_placeholder_edit_before_matrix(tmp_p
     """A non-streamed placeholder replacement uses the same durable edit boundary."""
     gateway = _delivery_gateway(tmp_path)
     coordinator = SimpleNamespace(
+        can_checkpoint=AsyncMock(return_value=True),
         commit_and_attempt=AsyncMock(
             return_value=TerminalDeliveryCommit("deferred", "matrix_not_ready"),
         ),
@@ -272,6 +273,7 @@ async def test_delivery_gateway_freezes_stream_transform_in_durable_edit(tmp_pat
         response_text="transformed answer",
     )
     coordinator = SimpleNamespace(
+        can_checkpoint=AsyncMock(return_value=True),
         commit_and_attempt=AsyncMock(
             return_value=TerminalDeliveryCommit("deferred", "matrix_not_ready"),
         ),
