@@ -266,6 +266,80 @@ def test_redact_sensitive_data_keeps_values_for_non_schema_label_keys() -> None:
     ]
 
 
+@pytest.mark.parametrize(
+    "value",
+    [
+        "-=" * 400,
+        "x:" * 500,
+        ":".join(str(index) for index in range(400)),
+    ],
+    ids=("alternating-equals", "repeated-colons", "colon-joined-numbers"),
+)
+def test_redact_sensitive_text_preserves_dense_benign_assignment_separators(value: str) -> None:
+    """Dense non-secret separators must survive redaction without exhausting the Python stack."""
+    assert redact_sensitive_text(value) == value
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        pytest.param(
+            "password:\nmessage='safe'",
+            "password:\nmessage='safe'",
+            id="same-indent-assignment-is-sibling",
+        ),
+        pytest.param(
+            "password=\nuser=bob",
+            "password=\nuser=bob",
+            id="empty-value-before-safe-sibling",
+        ),
+        pytest.param(
+            "password= \nuser=bob",
+            "password= \nuser=bob",
+            id="empty-value-with-space-before-safe-sibling",
+        ),
+        pytest.param(
+            "password=\napi_key:\n  YWJjZA==",
+            f"password=\napi_key:\n  {REDACTED}",
+            id="indented-base64-value",
+        ),
+        pytest.param(
+            "api_key=\npassword:\n  hunter2:",
+            f"api_key=\npassword:\n  {REDACTED}",
+            id="indented-colon-value",
+        ),
+        pytest.param(
+            "password=\nauthorization:\n  Basic dXNlcg==",
+            f"password=\nauthorization:\n  {REDACTED}",
+            id="complete-authorization-value",
+        ),
+        pytest.param(
+            "token=\npassword:\ncorrect horse battery staple",
+            f"token=\npassword:\n{REDACTED}",
+            id="unindented-passphrase-value",
+        ),
+        pytest.param(
+            "token=\npassword=\n  user=bob",
+            f"token=\npassword=\n  {REDACTED}",
+            id="indented-assignment-shaped-value",
+        ),
+        pytest.param(
+            "password=\r\ntoken:\r\n  AKIAsecretvalue keep",
+            f"password=\r\ntoken:\r\n  {REDACTED}",
+            id="crlf-continuation-value",
+        ),
+        pytest.param(
+            'password:\n  "hunter2" context\nuser=bob',
+            f'password:\n  "{REDACTED}" context\nuser=bob',
+            id="quoted-value-stops-at-closing-quote",
+        ),
+    ],
+)
+def test_redact_sensitive_text_follows_multiline_assignment_structure(value: str, expected: str) -> None:
+    """Indentation owns continuation values while same-indent assignments remain siblings."""
+    assert redact_sensitive_text(value) == expected
+
+
 def test_redact_sensitive_text_stays_linear_on_long_unbroken_runs() -> None:
     """Long base64url/hex-like blobs must scan linearly, not quadratically."""
     blob = "Ab3" * 40_000
@@ -280,6 +354,61 @@ def test_redact_sensitive_text_stays_linear_while_finding_value_terminator() -> 
     start = time.perf_counter()
     assert redact_sensitive_text(value) == f"password={REDACTED}"
     assert time.perf_counter() - start < 5.0
+
+
+def test_redact_sensitive_text_stays_linear_on_unclosed_quoted_assignments() -> None:
+    """Benign quote-started prefixes must not repeatedly rescan the remaining suffix."""
+    value = "a='x " * 8_000
+    start = time.perf_counter()
+    assert redact_sensitive_text(value) == value
+    assert time.perf_counter() - start < 1.0
+
+
+def test_redact_sensitive_text_stays_linear_through_deep_quoted_assignments() -> None:
+    """Deep alternating quotes must preserve structure while exposing the secret leaf."""
+    value = "api_key=hunter2"
+    for depth in range(10_000):
+        quote = "'" if depth % 2 == 0 else '"'
+        value = f"k={quote}{value}{quote}"
+    expected = value.replace("hunter2", REDACTED)
+
+    start = time.perf_counter()
+    assert redact_sensitive_text(value) == expected
+    assert time.perf_counter() - start < 1.0
+
+
+@pytest.mark.parametrize(
+    ("inner", "expected_inner"),
+    [
+        ("password: and user: bob", f"password: {REDACTED} user: bob"),
+        ("path.:authorization:\t&cookie,2}", f"path.:authorization:{REDACTED}&cookie,2}}"),
+        (
+            "password=x note=(api_key=y) token=z",
+            f"password={REDACTED} note=(api_key={REDACTED}) token={REDACTED}",
+        ),
+    ],
+    ids=("and-joined-assignment", "unquoted-enclosing-value", "ordered-secret-spans"),
+)
+def test_redact_sensitive_text_preserves_assignment_boundaries_through_deep_nesting(
+    inner: str,
+    expected_inner: str,
+) -> None:
+    """Iterative nested scans must preserve delimiters and unrelated suffixes."""
+    value = inner
+    expected = expected_inner
+    for depth in range(1_200):
+        quote = "'" if depth % 2 == 0 else '"'
+        value = f"outer={quote}{value}{quote}"
+        expected = f"outer={quote}{expected}{quote}"
+
+    assert redact_sensitive_text(value) == expected
+
+
+def test_redact_sensitive_text_redacts_set_cookie_assignment_in_embedded_json() -> None:
+    """A hyphenated secret key in embedded JSON must not expose its cookie value."""
+    value = 'json: {"set-cookie": "sid=abc; Path=/; HttpOnly"}'
+
+    assert redact_sensitive_text(value) == f'json: {{"set-cookie": "{REDACTED}"}}'
 
 
 def test_redact_sensitive_text_redacts_secret_assignments_with_long_keys() -> None:

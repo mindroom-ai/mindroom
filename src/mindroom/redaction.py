@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import math
 import re
+from array import array
+from bisect import bisect_right
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass, is_dataclass
 from functools import lru_cache
@@ -32,17 +34,18 @@ _API_KEY_MESSAGE_PATTERN = re.compile(
     r"(?::\s*|\s+))(?P<token>[A-Za-z0-9._~+/=-]+)",
     re.IGNORECASE,
 )
-# Starting only at the first whitespace in a run and making every run possessive prevents the lazy
-# value scan from repeatedly rescanning the same long suffix while looking for the next assignment.
-_NEXT_ASSIGNMENT_PATTERN = r"(?<!\s)\s++(?:and\s++)?[\"']?[A-Za-z0-9_.-]++[\"']?\s*+[:=]"
-# The key must start at a run boundary and be possessive: otherwise failed matches repeatedly
-# backtrack through long [A-Za-z0-9_.-] blobs (base64url, JWTs, hex dumps).
-_SECRET_ASSIGNMENT_PATTERN = re.compile(
+# Each inter-assignment boundary starts at the first whitespace in its run so indexed starts are unique.
+# Possessive runs keep the boundary scan linear on long whitespace and key-like suffixes.
+_NEXT_ASSIGNMENT_PATTERN = r"(?<!\s)\s++(?:and(?P<post_and_whitespace>\s++))?[\"']?[A-Za-z0-9_.-]++[\"']?\s*+[:=]"
+_ASSIGNMENT_PREFIX_PATTERN = re.compile(
     r"(?<![A-Za-z0-9_.-])"
-    r"(?P<prefix>[\"']?(?P<key>[A-Za-z0-9_.-]++)[\"']?\s*[:=]\s*)"
-    rf"(?:(?P<quote>[\"'])(?P<quoted_value>.*?)(?P=quote)|(?P<value>.+?))"
-    rf"(?=(?:{_NEXT_ASSIGNMENT_PATTERN})|[\r\n,&)\]}}]|$)",
+    r"[\"']?(?P<key>[A-Za-z0-9_.-]++)[\"']?\s*+[:=](?P<value_whitespace>\s*+)",
     re.IGNORECASE,
+)
+_NEXT_ASSIGNMENT_TERMINATOR_PATTERN = re.compile(_NEXT_ASSIGNMENT_PATTERN, re.IGNORECASE)
+_ASSIGNMENT_VALUE_TERMINATORS = frozenset("\r\n,&)]}")
+_ASSIGNMENT_VALUE_TERMINATOR_PATTERN = re.compile(
+    f"[{re.escape(''.join(sorted(_ASSIGNMENT_VALUE_TERMINATORS)))}]",
 )
 _TOKEN_LIKE_PATTERN = re.compile(
     r"(?<![A-Za-z0-9])(?P<token>("
@@ -281,36 +284,384 @@ def _redact_matched_token(match: re.Match[str], group_name: str = "token") -> st
     return full_match[:prefix_end] + REDACTED + full_match[suffix_start:]
 
 
-def _redact_nested_assignment_value(match: re.Match[str]) -> str:
-    quote = match.group("quote")
-    if quote is not None:
-        quoted_value = match.group("quoted_value")
-        if quoted_value is None:
-            return match.group(0)
-        return f"{match.group('prefix')}{quote}{redact_sensitive_text(quoted_value)}{quote}"
-    value = match.group("value")
-    if value is None:
-        return match.group(0)
-    return match.group("prefix") + redact_sensitive_text(value)
+@dataclass(frozen=True, slots=True)
+class _AssignmentBoundaries:
+    literal_terminator_starts: array[int]
+    assignment_terminator_starts: array[int]
+    assignment_terminator_ends: array[int]
+    line_break_starts: array[int]
+    single_quote_ends: array[int]
+    single_quote_terminator_ends: array[int]
+    double_quote_ends: array[int]
+    double_quote_terminator_ends: array[int]
 
 
-def _redact_secret_assignment(match: re.Match[str]) -> str:
-    key = match.group("key")
-    classification = _classify_key(key)
-    normalized_key = classification.normalized
-    if not classification.is_secret:
-        return _redact_nested_assignment_value(match)
-    value = match.group("value")
+@dataclass(frozen=True, slots=True)
+class _AssignmentValueMatch:
+    value_start: int
+    value_end: int
+    match_end: int
+    is_quoted: bool
+
+
+def _append_quote_boundary(
+    value: str,
+    boundary_start: int,
+    boundary_end: int,
+    boundaries: _AssignmentBoundaries,
+) -> None:
+    if boundary_start == 0:
+        return
+    quote_end = boundary_start - 1
+    if value[quote_end] == "'":
+        boundaries.single_quote_ends.append(quote_end)
+        boundaries.single_quote_terminator_ends.append(boundary_end)
+    elif value[quote_end] == '"':
+        boundaries.double_quote_ends.append(quote_end)
+        boundaries.double_quote_terminator_ends.append(boundary_end)
+
+
+def _index_assignment_boundaries(value: str) -> _AssignmentBoundaries:
+    """Merge C-level terminator scans into compact integer boundary buffers."""
+    index_type = "I" if len(value) <= (1 << 32) - 1 else "Q"
+    literal_terminator_starts = array(index_type)
+    assignment_terminator_starts = array(index_type)
+    assignment_terminator_ends = array(index_type)
+    line_break_starts = array(index_type)
+    single_quote_ends = array(index_type)
+    single_quote_terminator_ends = array(index_type)
+    double_quote_ends = array(index_type)
+    double_quote_terminator_ends = array(index_type)
+    boundaries = _AssignmentBoundaries(
+        literal_terminator_starts=literal_terminator_starts,
+        assignment_terminator_starts=assignment_terminator_starts,
+        assignment_terminator_ends=assignment_terminator_ends,
+        line_break_starts=line_break_starts,
+        single_quote_ends=single_quote_ends,
+        single_quote_terminator_ends=single_quote_terminator_ends,
+        double_quote_ends=double_quote_ends,
+        double_quote_terminator_ends=double_quote_terminator_ends,
+    )
+    literal_matches = iter(_ASSIGNMENT_VALUE_TERMINATOR_PATTERN.finditer(value))
+    literal_match = next(literal_matches, None)
+    assignment_matches = iter(_NEXT_ASSIGNMENT_TERMINATOR_PATTERN.finditer(value))
+    assignment_match = next(assignment_matches, None)
+
+    while literal_match is not None or assignment_match is not None:
+        literal_start = literal_match.start() if literal_match is not None else len(value)
+        assignment_start = assignment_match.start() if assignment_match is not None else len(value)
+        boundary_start = min(literal_start, assignment_start)
+        boundary_end = len(value)
+
+        if literal_start == boundary_start:
+            literal_terminator_starts.append(literal_start)
+            if literal_match is not None and literal_match.group() in "\r\n":
+                line_break_starts.append(literal_start)
+            boundary_end = literal_start + 1
+            literal_match = next(literal_matches, None)
+
+        if assignment_start == boundary_start:
+            assert assignment_match is not None
+            assignment_end = assignment_match.end()
+            assignment_terminator_starts.append(assignment_start)
+            assignment_terminator_ends.append(assignment_end)
+            boundary_end = min(boundary_end, assignment_end)
+            post_and_boundary = assignment_match.start("post_and_whitespace")
+            if post_and_boundary >= 0:
+                assignment_terminator_starts.append(post_and_boundary)
+                assignment_terminator_ends.append(assignment_end)
+            assignment_match = next(assignment_matches, None)
+
+        _append_quote_boundary(value, boundary_start, boundary_end, boundaries)
+
+    _append_quote_boundary(value, len(value), len(value), boundaries)
+    return boundaries
+
+
+def _next_position_before(
+    positions: array[int],
+    after: int,
+    region_end: int,
+) -> int | None:
+    candidate_index = bisect_right(positions, after)
+    if candidate_index >= len(positions):
+        return None
+    candidate = positions[candidate_index]
+    return candidate if candidate < region_end else None
+
+
+def _next_literal_terminator(
+    boundaries: _AssignmentBoundaries,
+    value_start: int,
+    region_end: int,
+) -> int:
+    literal_terminator = _next_position_before(
+        boundaries.literal_terminator_starts,
+        value_start,
+        region_end,
+    )
+    return region_end if literal_terminator is None else literal_terminator
+
+
+def _next_assignment_terminator(
+    boundaries: _AssignmentBoundaries,
+    value_start: int,
+    region_end: int,
+) -> int:
+    literal_terminator = _next_literal_terminator(boundaries, value_start, region_end)
+    assignment_index = bisect_right(boundaries.assignment_terminator_starts, value_start)
+    assignment_terminator: int | None = None
+    while assignment_index < len(boundaries.assignment_terminator_starts):
+        candidate = boundaries.assignment_terminator_starts[assignment_index]
+        if candidate >= region_end:
+            break
+        if boundaries.assignment_terminator_ends[assignment_index] <= region_end:
+            assignment_terminator = candidate
+            break
+        assignment_index += 1
+    return min(
+        candidate for candidate in (literal_terminator, assignment_terminator, region_end) if candidate is not None
+    )
+
+
+def _first_line_break(
+    boundaries: _AssignmentBoundaries,
+    value_start: int,
+    region_end: int,
+) -> int | None:
+    return _next_position_before(boundaries.line_break_starts, value_start, region_end)
+
+
+def _quoted_assignment_end(
+    value: str,
+    value_start: int,
+    region_end: int,
+    boundaries: _AssignmentBoundaries,
+) -> int | None:
+    """Return the first valid closing quote without scanning the remaining value."""
+    if value_start >= region_end or value[value_start] not in {"'", '"'}:
+        return None
+    quote = value[value_start]
+    if quote == "'":
+        candidates = boundaries.single_quote_ends
+        terminator_ends = boundaries.single_quote_terminator_ends
+    else:
+        candidates = boundaries.double_quote_ends
+        terminator_ends = boundaries.double_quote_terminator_ends
+    line_break = _first_line_break(boundaries, value_start, region_end)
+    quoted_region_end = region_end if line_break is None else line_break
+    candidate_index = bisect_right(candidates, value_start)
+    while candidate_index < len(candidates):
+        candidate = candidates[candidate_index]
+        if candidate >= quoted_region_end:
+            break
+        if terminator_ends[candidate_index] <= region_end:
+            return candidate
+        candidate_index += 1
+    local_end = region_end - 1
+    if quoted_region_end == region_end and local_end > value_start and value[local_end] == quote:
+        return local_end
+    return None
+
+
+def _multiline_quoted_assignment_end(
+    value: str,
+    value_start: int,
+    region_end: int,
+    boundaries: _AssignmentBoundaries,
+) -> int | None:
+    if value_start >= region_end or value[value_start] not in {"'", '"'}:
+        return None
+    quote = value[value_start]
+    line_break = _first_line_break(boundaries, value_start, region_end)
+    quoted_region_end = region_end if line_break is None else line_break
+    quote_end = value.find(quote, value_start + 1, quoted_region_end)
+    while quote_end >= 0:
+        boundary_start = quote_end + 1
+        if (
+            boundary_start == quoted_region_end
+            or value[boundary_start].isspace()
+            or value[boundary_start] in _ASSIGNMENT_VALUE_TERMINATORS
+        ):
+            return quote_end
+        quote_end = value.find(quote, boundary_start, quoted_region_end)
+    return None
+
+
+def _trailing_whitespace_value_span(
+    value: str,
+    prefix_match: re.Match[str],
+) -> tuple[int, int] | None:
+    whitespace_start, whitespace_end = prefix_match.span("value_whitespace")
+    carriage_return = value.find("\r", whitespace_start, whitespace_end)
+    line_feed = value.find("\n", whitespace_start, whitespace_end)
+    first_line_break = min(position for position in (carriage_return, line_feed, whitespace_end) if position >= 0)
+    candidate = first_line_break - 1
+    if candidate >= whitespace_start and value[candidate].isspace():
+        return candidate, first_line_break
+    return None
+
+
+def _line_indentation(value: str, position: int) -> int:
+    line_start = max(value.rfind("\r", 0, position), value.rfind("\n", 0, position)) + 1
+    leading_text = value[line_start:position]
+    return len(leading_text) if not leading_text.strip(" \t") else 0
+
+
+def _assignment_continuation_indentation(
+    value: str,
+    prefix_match: re.Match[str],
+) -> tuple[int, int] | None:
+    whitespace_start, whitespace_end = prefix_match.span("value_whitespace")
+    line_break = max(
+        value.rfind("\r", whitespace_start, whitespace_end),
+        value.rfind("\n", whitespace_start, whitespace_end),
+    )
+    if line_break < 0:
+        return None
+    key_indentation = _line_indentation(value, prefix_match.start())
+    value_indentation = prefix_match.end() - line_break - 1
+    return key_indentation, value_indentation
+
+
+def _assignment_value_match(
+    value: str,
+    prefix_match: re.Match[str],
+    region_end: int,
+    boundaries: _AssignmentBoundaries,
+) -> _AssignmentValueMatch | None:
+    value_start = prefix_match.end()
+    if value_start == region_end:
+        trailing_value_span = _trailing_whitespace_value_span(value, prefix_match)
+        if trailing_value_span is None:
+            return None
+        trailing_value_start, trailing_value_end = trailing_value_span
+        return _AssignmentValueMatch(
+            value_start=trailing_value_start,
+            value_end=trailing_value_end,
+            match_end=trailing_value_end,
+            is_quoted=False,
+        )
+
+    continuation_indentation = _assignment_continuation_indentation(value, prefix_match)
     if (
-        normalized_key == "authorization"
-        and value is not None
-        and (value.lower() in {"basic", "bearer"} or value.lower().startswith(f"bearer {REDACTED}"))
+        continuation_indentation is not None
+        and continuation_indentation[1] <= continuation_indentation[0]
+        and _ASSIGNMENT_PREFIX_PATTERN.match(value, value_start, region_end) is not None
     ):
-        return match.group(0)
-    quote = match.group("quote")
-    if quote is not None:
-        return f"{match.group('prefix')}{quote}{REDACTED}{quote}"
-    return match.group("prefix") + REDACTED
+        return None
+
+    quoted_end = (
+        _multiline_quoted_assignment_end(value, value_start, region_end, boundaries)
+        if continuation_indentation is not None
+        else _quoted_assignment_end(value, value_start, region_end, boundaries)
+    )
+    if quoted_end is not None:
+        return _AssignmentValueMatch(
+            value_start=value_start + 1,
+            value_end=quoted_end,
+            match_end=quoted_end + 1,
+            is_quoted=True,
+        )
+    value_end = (
+        _next_literal_terminator(boundaries, value_start, region_end)
+        if continuation_indentation is not None
+        else _next_assignment_terminator(boundaries, value_start, region_end)
+    )
+    return _AssignmentValueMatch(
+        value_start=value_start,
+        value_end=value_end,
+        match_end=value_end,
+        is_quoted=False,
+    )
+
+
+def _is_preserved_authorization_assignment(
+    classification: _KeyClassification,
+    value: str,
+    match: _AssignmentValueMatch,
+) -> bool:
+    if classification.normalized != "authorization" or match.is_quoted:
+        return False
+    assignment_value = value[match.value_start : match.value_end].lower()
+    return assignment_value in {"basic", "bearer"} or assignment_value.startswith(
+        f"bearer {REDACTED}",
+    )
+
+
+def _replace_spans_with_redaction(value: str, spans: list[tuple[int, int]]) -> str:
+    if not spans:
+        return value
+    parts: list[str] = []
+    copied_until = 0
+    for value_start, value_end in spans:
+        assert copied_until <= value_start <= value_end
+        parts.extend((value[copied_until:value_start], REDACTED))
+        copied_until = value_end
+    parts.append(value[copied_until:])
+    return "".join(parts)
+
+
+def _nested_assignment_regions(
+    value: str,
+    match: _AssignmentValueMatch,
+    region_end: int,
+) -> list[tuple[int, int]]:
+    """Partition nested scans only when a structural delimiter supplies a real value boundary."""
+    if not match.is_quoted and (
+        match.match_end == region_end or value[match.match_end] not in _ASSIGNMENT_VALUE_TERMINATORS
+    ):
+        return []
+    regions: list[tuple[int, int]] = []
+    if match.match_end < region_end:
+        regions.append((match.match_end, region_end))
+    if match.value_start < match.value_end:
+        regions.append((match.value_start, match.value_end))
+    return regions
+
+
+def _redact_secret_assignments(value: str) -> str:
+    """Redact nested assignment values with a forward-only region scan.
+
+    Pending regions are disjoint slices scheduled left-to-right after every parent prefix already searched.
+    Compact integer buffers index assignment terminators and valid global closing quotes only once.
+    Value matches are bounded before spans are recorded, so replacement cannot consume a terminator or unrelated suffix.
+    Accepted secret spans are disjoint because their regions resume after the complete match.
+    """
+    if "=" not in value and ":" not in value:
+        return value
+    if not any(
+        _classify_key(prefix_match.group("key")).is_secret
+        for prefix_match in _ASSIGNMENT_PREFIX_PATTERN.finditer(value)
+    ):
+        return value
+
+    boundaries = _index_assignment_boundaries(value)
+    redacted_spans: list[tuple[int, int]] = []
+    regions = [(0, len(value))]
+    while regions:
+        region_start, region_end = regions.pop()
+        search_start = region_start
+        while prefix_match := _ASSIGNMENT_PREFIX_PATTERN.search(value, search_start, region_end):
+            search_start = prefix_match.end()
+            classification = _classify_key(prefix_match.group("key"))
+            assignment_match = _assignment_value_match(value, prefix_match, region_end, boundaries)
+            if assignment_match is None:
+                continue
+            if not classification.is_secret:
+                nested_regions = _nested_assignment_regions(value, assignment_match, region_end)
+                if not nested_regions:
+                    continue
+                regions.extend(nested_regions)
+                break
+            if _is_preserved_authorization_assignment(classification, value, assignment_match):
+                search_start = assignment_match.match_end
+                continue
+
+            redacted_spans.append((assignment_match.value_start, assignment_match.value_end))
+            search_start = assignment_match.match_end
+
+    return _replace_spans_with_redaction(value, redacted_spans)
 
 
 def _redact_url(value: str) -> str:
@@ -397,7 +748,7 @@ def redact_sensitive_text(value: str, *, max_length: int | None = None) -> str:
     redacted = _BEARER_TOKEN_PATTERN.sub(_redact_matched_token, redacted)
     redacted = _API_KEY_MESSAGE_PATTERN.sub(_redact_matched_token, redacted)
     redacted = _TOKEN_LIKE_PATTERN.sub(_redact_matched_token, redacted)
-    redacted = _SECRET_ASSIGNMENT_PATTERN.sub(_redact_secret_assignment, redacted)
+    redacted = _redact_secret_assignments(redacted)
     return _truncate_text(redacted, max_length)
 
 
