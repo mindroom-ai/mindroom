@@ -393,8 +393,9 @@ class DeliveryGateway:
         identity: ResponseIdentity,
         redaction_reason: str,
         failure_reason: str | None = None,
+        propagate_cancelled: bool = False,
     ) -> str | None:
-        """Redact one visible response event and return a failure reason when cleanup fails."""
+        """Redact one visible event, optionally propagating cancellation, and return any cleanup failure."""
         self.deps.logger.warning(
             "Visible response was already delivered before suppression; attempting cleanup",
             response_kind=identity.response_kind,
@@ -409,6 +410,8 @@ class DeliveryGateway:
                 reason=redaction_reason,
             )
         except asyncio.CancelledError as error:
+            if propagate_cancelled:
+                raise
             return self._cancelled_error_failure_reason(error)
         except Exception as error:
             self.deps.logger.exception(
@@ -620,6 +623,7 @@ class DeliveryGateway:
                     identity=request.identity,
                     redaction_reason="Failed placeholder response before delivery",
                     failure_reason=failure_reason,
+                    propagate_cancelled=True,
                 )
                 if cleanup_failure is not None:
                     return FinalDeliveryOutcome(

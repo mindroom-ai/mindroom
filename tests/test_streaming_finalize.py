@@ -1167,3 +1167,28 @@ async def test_failed_cancelled_placeholder_cleanup_preserves_cancel_source(tmp_
     assert outcome.terminal_status == "error"
     assert outcome.final_visible_event_id == "$placeholder"
     assert outcome.cancel_source == "sync_restart"
+
+
+@pytest.mark.asyncio
+async def test_hook_failure_cleanup_propagates_restart_cancellation(tmp_path: Path) -> None:
+    """Cancellation during cleanup of an ordinary hook failure must reach source settlement."""
+    gateway = _delivery_gateway(tmp_path)
+    gateway.deps.response_hooks.apply_before_response.side_effect = RuntimeError("hook failed")
+    gateway.deps.redact_message_event.side_effect = asyncio.CancelledError("sync_restart")
+
+    with pytest.raises(asyncio.CancelledError, match="sync_restart"):
+        await gateway.deliver_final(
+            FinalDeliveryRequest(
+                target=MessageTarget.resolve("!room:localhost", "$thread", "$reply"),
+                existing_event_id="$placeholder",
+                existing_event_is_placeholder=True,
+                response_text="answer",
+                identity=ResponseIdentity(
+                    response_kind="ai",
+                    response_envelope=_envelope(),
+                    correlation_id="corr-hook-failure-cleanup-cancel",
+                ),
+                tool_trace=None,
+                extra_content=None,
+            ),
+        )
