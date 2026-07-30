@@ -12,10 +12,10 @@ from mindroom.embedder_health import (
 )
 from mindroom.embedding_errors import EmbedderRequestError, classified_embedder_error
 from mindroom.logging_config import get_logger
+from mindroom.memory_scope_ids import agent_scope_user_id
 from mindroom.timing import timed
 
 from ._policy import (
-    agent_scope_user_id,
     allowed_scope_storage_paths,
     build_team_user_id,
     effective_storage_paths_for_context,

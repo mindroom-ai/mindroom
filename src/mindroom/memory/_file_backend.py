@@ -12,11 +12,10 @@ from zoneinfo import ZoneInfo
 from mindroom.constants import resolve_config_relative_path
 from mindroom.embedding_errors import classified_embedder_error
 from mindroom.logging_config import get_logger
+from mindroom.memory_scope_ids import agent_name_from_scope_user_id, agent_scope_user_id
 from mindroom.timing import timed
 
 from ._policy import (
-    agent_name_from_scope_user_id,
-    agent_scope_user_id,
     allowed_scope_storage_paths,
     build_team_user_id,
     effective_storage_paths_for_context,
