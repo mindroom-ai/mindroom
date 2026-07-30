@@ -801,7 +801,7 @@ async def test_post_response_effects_queues_summary_with_stale_hint_inside_margi
         )
         for i in range(5)
     ]
-    conversation_cache.get_fresh_strict_thread_history = AsyncMock(return_value=thread_history)
+    conversation_cache.get_strict_thread_history = AsyncMock(return_value=thread_history)
     scheduled_tasks: list[asyncio.Task[None]] = []
 
     def schedule_background_task(
@@ -839,7 +839,7 @@ async def test_post_response_effects_queues_summary_with_stale_hint_inside_margi
         assert scheduled_tasks
         await asyncio.gather(*scheduled_tasks)
 
-    conversation_cache.get_fresh_strict_thread_history.assert_awaited_once_with(
+    conversation_cache.get_strict_thread_history.assert_awaited_once_with(
         "!room:localhost",
         "$thread",
         caller_label="thread_summary_background",
@@ -902,7 +902,7 @@ async def test_post_response_effects_queues_summary_with_entity_model_for_adhoc_
         )
         for i in range(5)
     ]
-    conversation_cache.get_fresh_strict_thread_history = AsyncMock(return_value=thread_history)
+    conversation_cache.get_strict_thread_history = AsyncMock(return_value=thread_history)
     scheduled_tasks: list[asyncio.Task[None]] = []
 
     def schedule_background_task(

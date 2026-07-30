@@ -30,6 +30,7 @@ from mindroom.handled_turns import TurnRecord
 from mindroom.inbound_turn_normalizer import TextNormalizationRequest
 from mindroom.matrix.media import is_audio_message_event, is_matrix_media_dispatch_event
 from mindroom.matrix.rooms import is_dm_room
+from mindroom.response_admission import ResponseAdmissionRefusedError
 from mindroom.response_payload_preparation import DispatchPayloadInputs
 from mindroom.timing import (
     DispatchPipelineTiming,
@@ -293,6 +294,19 @@ def _parsed_command_for_event(
     return command_parser.parse(event.body)
 
 
+def _turn_sources_all_from_requester(handled_turn: TurnRecord, requester_user_id: str) -> bool:
+    """Return whether every replayable source in one turn was sent by ``requester_user_id``.
+
+    Whole-turn suppression settles every source in a coalesced batch, so it is only safe when the
+    turn provably belongs to that one requester, and a source the record cannot attribute fails
+    closed. Redacted sources are excluded because they own no reply.
+    """
+    return all(
+        handled_turn.requester_id_for_source(source_event_id) == requester_user_id
+        for source_event_id in handled_turn.replay_source_event_ids
+    )
+
+
 async def _blocked_before_plan(
     controller: TurnController,
     room: nio.MatrixRoom,
@@ -315,9 +329,9 @@ async def _blocked_before_plan(
     ):
         return True
 
-    may_be_superseded = prepared.dispatch.envelope.origin.may_be_superseded_by_newer_requester_turn and all(
-        metadata.sender == requester_user_id
-        for metadata in (prepared.handled_turn.source_event_metadata or {}).values()
+    may_be_superseded = (
+        prepared.dispatch.envelope.origin.may_be_superseded_by_newer_requester_turn
+        and _turn_sources_all_from_requester(prepared.handled_turn, requester_user_id)
     )
     if prepared.replay_guard.degraded:
         skips_turn = await controller._has_newer_unresponded_cached_thread_event(
@@ -459,6 +473,10 @@ async def _apply_turn_plan(
             ),
         ),
         name=f"inbox_response:{prepared.event.event_id}",
+        recovery_proof_ready=lambda: (
+            prepared.dispatch.target.resolved_thread_id is not None
+            and controller.deps.interrupted_turn_rooms.contains(prepared.event.event_id)
+        ),
     )
     # Ownership moves synchronously after task creation. If this dispatch task
     # is cancelled while waiting for the lifecycle lock, its finally block must
@@ -490,6 +508,22 @@ async def _run_claimed_response(
         await response
     finally:
         controller.deps.turn_store.release_pending_turn_claim(turn_claim)
+
+
+async def _run_admitted_router_relay(
+    controller: TurnController,
+    relay: Callable[[], Awaitable[None]],
+) -> None:
+    """Keep config application outside one router selection and relay delivery."""
+    admission_gate = controller.deps.runtime.response_admission_gate
+    while not admission_gate.admit():
+        if not await controller.deps.response_runner.wait_for_admission_or_shutdown():
+            controller.deps.runtime.mark_callback_failed()
+            raise ResponseAdmissionRefusedError
+    try:
+        await relay()
+    finally:
+        admission_gate.release()
 
 
 async def _execute_route_plan(
@@ -526,12 +560,15 @@ async def _execute_route_plan(
         )
     if prepared.dispatch.scheduled_history_budget is not None:
         routing_kwargs["scheduled_prompt"] = prepared.event.body
-    await controller._execute_router_relay(
-        room,
-        route_event,
-        prepared.dispatch.context.thread_history,
-        prepared.dispatch.target.resolved_thread_id,
-        **routing_kwargs,
+    await _run_admitted_router_relay(
+        controller,
+        lambda: controller._execute_router_relay(
+            room,
+            route_event,
+            prepared.dispatch.context.thread_history,
+            prepared.dispatch.target.resolved_thread_id,
+            **routing_kwargs,
+        ),
     )
 
 

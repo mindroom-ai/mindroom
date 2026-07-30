@@ -7,6 +7,7 @@ import json
 import uuid
 from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING
+from unittest.mock import patch
 
 import aiosqlite
 import psycopg
@@ -15,13 +16,19 @@ from psycopg import sql
 from psycopg.conninfo import make_conninfo
 
 from mindroom.matrix.cache import (
-    ThreadCacheState,
     postgres_event_cache,
     sqlite_cache_maintenance,
     sqlite_event_cache,
 )
-from mindroom.matrix.cache.postgres_cache_maintenance import migrate_postgres_schema
-from mindroom.matrix.cache.postgres_event_cache import PostgresEventCache
+from mindroom.matrix.cache.postgres_cache_maintenance import (
+    _SENDER_BACKFILL_PAGE_ROWS,
+    _backfill_collapsed_read_columns,
+    migrate_postgres_schema,
+)
+from mindroom.matrix.cache.postgres_event_cache import (
+    _POSTGRES_EVENT_CACHE_SCHEMA_VERSION,
+    PostgresEventCache,
+)
 from mindroom.matrix.cache.sqlite_event_cache import SqliteEventCache
 
 if TYPE_CHECKING:
@@ -34,8 +41,7 @@ _THREAD_ID = "$root:localhost"
 _CHILD_ID = "$child:localhost"
 _MISSING_ID = "$missing:localhost"
 _ORPHAN_ID = "$orphan:localhost"
-_FUTURE_INVALIDATED_AT = 4_000_000_000.0
-_FUTURE_VALIDATED_AT = 5_000_000_000.0
+_FUTURE_GAP_MARKED_AT = 4_000_000_000.0
 
 
 def _message_event(event_id: str, *, thread_id: str | None = None) -> dict[str, object]:
@@ -49,12 +55,6 @@ def _message_event(event_id: str, *, thread_id: str | None = None) -> dict[str, 
         "origin_server_ts": 10,
         "content": content,
     }
-
-
-def _assert_missing_source_state(state: ThreadCacheState | None) -> None:
-    assert state is not None
-    assert state.validated_at is None
-    assert state.invalidation_reason == "schema_migration_missing_thread_event_source"
 
 
 async def _prepare_sqlite_version_10(db_path: Path) -> None:
@@ -199,18 +199,16 @@ async def _prepare_postgres_version_1(database_url: str, *, namespace: str, othe
                 namespace,
                 room_id,
                 thread_id,
-                validated_at,
-                invalidated_at,
-                invalidation_reason
+                gap_marked_at,
+                gap_reason
             )
-            VALUES (%s, %s, %s, %s, %s, 'preexisting_newer_invalidation')
+            VALUES (%s, %s, %s, %s, 'preexisting_newer_gap')
             """,
             (
                 namespace,
                 _ROOM_ID,
                 _THREAD_ID,
-                _FUTURE_VALIDATED_AT,
-                _FUTURE_INVALIDATED_AT,
+                _FUTURE_GAP_MARKED_AT,
             ),
         )
         await db.commit()
@@ -317,7 +315,7 @@ async def test_sqlite_startup_report_uses_nonblocking_read_snapshot(
     initialize_secondary = asyncio.create_task(secondary.initialize())
     try:
         await asyncio.wait_for(report_started.wait(), timeout=1)
-        await primary.mark_thread_stale(_ROOM_ID, _THREAD_ID, reason="concurrent_startup_report")
+        await primary.mark_thread_gap(_ROOM_ID, _THREAD_ID, reason="concurrent_startup_report")
     finally:
         release_report.set()
         await initialize_secondary
@@ -349,7 +347,7 @@ async def test_postgres_version_1_migration_is_namespace_safe_and_repairs_orphan
         try:
             diagnostics = cache.runtime_diagnostics()
             cached_thread = await cache.get_thread_events(_ROOM_ID, _THREAD_ID)
-            stale_state = await cache.get_thread_cache_state(_ROOM_ID, _THREAD_ID)
+            stale_state = await cache.get_thread_cache_gap(_ROOM_ID, _THREAD_ID)
 
             assert diagnostics["cache_schema_migrated_from"] == 1
             assert diagnostics["cache_orphan_edit_indexes_after"] == 0
@@ -380,7 +378,7 @@ async def test_postgres_version_1_migration_is_namespace_safe_and_repairs_orphan
             cursor = await db.execute(
                 "SELECT value FROM mindroom_event_cache_metadata WHERE key = 'schema_version'",
             )
-            assert await cursor.fetchone() == ("3",)
+            assert await cursor.fetchone() == ("5",)
             await cursor.close()
         finally:
             await cache.close()
@@ -401,10 +399,69 @@ async def test_postgres_version_1_migration_is_namespace_safe_and_repairs_orphan
             assert await cursor.fetchone() is None
             await cursor.close()
             assert await other_cache.get_thread_events(_ROOM_ID, _THREAD_ID) is None
-            other_stale_state = await other_cache.get_thread_cache_state(_ROOM_ID, _THREAD_ID)
+            other_stale_state = await other_cache.get_thread_cache_gap(_ROOM_ID, _THREAD_ID)
             assert other_stale_state is None
         finally:
             await other_cache.close()
+
+
+@pytest.mark.asyncio
+async def test_sender_backfill_skips_a_namespace_it_already_completed(
+    postgres_event_cache_url: str,
+) -> None:
+    """The second start does not rescan, which is the whole point of the marker.
+
+    Nothing indexes ``sender``, so an ungated backfill is a heap scan of the namespace on every
+    initialization inside the advisory-lock transaction that serializes other principals' startup,
+    and it rewrites every payload that genuinely carries no sender forever. Asserted by behaviour
+    rather than timing: a row forced back to '' after the marker exists survives the next start,
+    which can only happen if the statement did not run.
+    """
+    namespace = f"tenant_{uuid.uuid4().hex}"
+    async with _isolated_postgres_database(postgres_event_cache_url) as database_url:
+        first = PostgresEventCache(database_url=database_url, namespace=namespace)
+        await first.initialize()
+        await first.close()
+
+        setup = await psycopg.AsyncConnection.connect(database_url)
+        try:
+            await setup.execute(
+                """
+                INSERT INTO mindroom_event_cache_events(
+                    namespace, event_id, room_id, origin_server_ts, event_json, sender, cached_at
+                )
+                VALUES (%s, %s, %s, %s, %s, '', 0)
+                """,
+                (namespace, "$after_marker", _ROOM_ID, 1000, '{"event_id":"$after_marker","sender":"@a:localhost"}'),
+            )
+            await setup.commit()
+        finally:
+            await setup.close()
+
+        second = PostgresEventCache(database_url=database_url, namespace=namespace)
+        await second.initialize()
+        await second.close()
+
+        check = await psycopg.AsyncConnection.connect(database_url)
+        try:
+            cursor = await check.execute(
+                "SELECT sender FROM mindroom_event_cache_events WHERE namespace = %s AND event_id = %s",
+                (namespace, "$after_marker"),
+            )
+            assert await cursor.fetchone() == ("",), "the namespace was rescanned despite its completion marker"
+            await cursor.close()
+
+            cursor = await check.execute(
+                """
+                SELECT value FROM mindroom_event_cache_namespace_metadata
+                WHERE namespace = %s AND key = 'sender_backfilled'
+                """,
+                (namespace,),
+            )
+            assert await cursor.fetchone() == ("done",), "the marker is not namespace-scoped"
+            await cursor.close()
+        finally:
+            await check.close()
 
 
 @pytest.mark.asyncio
@@ -422,14 +479,14 @@ async def test_postgres_current_version_maintenance_avoids_exclusive_schema_lock
         maintainer = await psycopg.AsyncConnection.connect(database_url)
         try:
             await blocker.execute(
-                "LOCK TABLE mindroom_event_cache_thread_events IN ACCESS SHARE MODE",
+                "LOCK TABLE mindroom_event_cache_events IN ACCESS SHARE MODE",
             )
             await maintainer.execute("SET statement_timeout = '500ms'")
             migration_result = await migrate_postgres_schema(
                 maintainer,
                 namespace=namespace,
-                current_schema_version=3,
-                target_schema_version=3,
+                current_schema_version=_POSTGRES_EVENT_CACHE_SCHEMA_VERSION,
+                target_schema_version=_POSTGRES_EVENT_CACHE_SCHEMA_VERSION,
             )
             assert migration_result.migrated_from_schema_version is None
             assert migration_result.normalized_legacy_thread_payload_rows == 0
@@ -582,3 +639,230 @@ async def test_postgres_reconnect_rejects_changed_certification_generation(
     finally:
         await admin.close()
         await cache.close()
+
+
+@pytest.mark.asyncio
+async def test_sender_backfills_in_every_namespace_not_just_the_first(
+    postgres_event_cache_url: str,
+) -> None:
+    """Each principal's legacy rows get a sender, not only the one that wins the version bump.
+
+    ``schema_version`` is global to the database while every Matrix principal owns its own
+    namespace. Gating the backfill on that shared version let the first principal to start
+    backfill itself, write the new version, and strand every other principal's rows at the ''
+    default - which makes every event look like the same author, so a collapsed read can no longer
+    tell an author's own edit from a foreign one and lets the foreign replacement win.
+    """
+    first = f"tenant_{uuid.uuid4().hex}"
+    second = f"tenant_{uuid.uuid4().hex}"
+    async with _isolated_postgres_database(postgres_event_cache_url) as database_url:
+        setup = await psycopg.AsyncConnection.connect(database_url)
+        try:
+            await postgres_event_cache._create_postgres_event_cache_schema(setup)
+            for namespace in (first, second):
+                await setup.execute(
+                    """
+                    INSERT INTO mindroom_event_cache_events(
+                        namespace, event_id, room_id, origin_server_ts, event_json, sender, cached_at
+                    )
+                    VALUES (%s, %s, %s, %s, %s, '', 0)
+                    """,
+                    (namespace, "$legacy", _ROOM_ID, 1000, '{"event_id":"$legacy","sender":"@a:localhost"}'),
+                )
+            await setup.commit()
+        finally:
+            await setup.close()
+
+        for namespace in (first, second):
+            cache = PostgresEventCache(database_url=database_url, namespace=namespace)
+            await cache.initialize()
+            await cache.close()
+
+        check = await psycopg.AsyncConnection.connect(database_url)
+        try:
+            for namespace in (first, second):
+                cursor = await check.execute(
+                    "SELECT sender FROM mindroom_event_cache_events WHERE namespace = %s",
+                    (namespace,),
+                )
+                assert await cursor.fetchone() == ("@a:localhost",), f"{namespace} kept the sender default"
+                await cursor.close()
+        finally:
+            await check.close()
+
+
+@pytest.mark.asyncio
+async def test_sender_backfill_survives_a_payload_jsonb_cannot_parse(
+    postgres_event_cache_url: str,
+) -> None:
+    r"""Payloads PostgreSQL cannot cast must not stop a namespace from ever initializing.
+
+    ``event_json`` is always valid JSON because ``json.dumps`` wrote it, but ``jsonb`` accepts less
+    than JSON does. A NUL escape raises ``UntranslatableCharacter`` and a lone surrogate raises
+    ``InvalidTextRepresentation``, either of which aborts the whole statement - and with it the
+    migration transaction that ``_initialize_postgres_event_cache_db`` re-raises, so one such row
+    locks that namespace out of its cache permanently, on every restart. The NUL case is not
+    theoretical: it turns up when tool output captures binary content into a message body.
+
+    Both senders must still be recovered: decoding in Python is the exact inverse of the dump that
+    wrote the row, so an unparseable-to-PostgreSQL payload is not an unreadable one.
+    """
+    namespace = f"tenant_{uuid.uuid4().hex}"
+    # A real payload shape: a message body carrying a NUL escape, next to an ordinary event.
+    poisoned = json.dumps(
+        {"event_id": "$binary", "sender": "@tool:localhost", "content": {"body": "RIFF" + chr(0) + "WAVE"}},
+    )
+    # A lone surrogate is the other shape PostgreSQL rejects and json.dumps still emits.
+    surrogate = json.dumps(
+        {"event_id": "$surrogate", "sender": "@lone:localhost", "content": {"body": chr(0xD800)}},
+    )
+    assert "\\u0000" in poisoned, "the fixture must carry the escape the cast rejects"
+    assert "\\ud800" in surrogate, "the fixture must carry a lone surrogate"
+    async with _isolated_postgres_database(postgres_event_cache_url) as database_url:
+        setup = await psycopg.AsyncConnection.connect(database_url)
+        try:
+            await postgres_event_cache._create_postgres_event_cache_schema(setup)
+            for event_id, event_json in (
+                ("$binary", poisoned),
+                ("$surrogate", surrogate),
+                ("$ordinary", '{"event_id":"$ordinary","sender":"@a:localhost"}'),
+            ):
+                await setup.execute(
+                    """
+                    INSERT INTO mindroom_event_cache_events(
+                        namespace, event_id, room_id, origin_server_ts, event_json, sender, cached_at
+                    )
+                    VALUES (%s, %s, %s, %s, %s, '', 0)
+                    """,
+                    (namespace, event_id, _ROOM_ID, 1000, event_json),
+                )
+            await setup.commit()
+        finally:
+            await setup.close()
+
+        cache = PostgresEventCache(database_url=database_url, namespace=namespace)
+        await cache.initialize()
+        await cache.close()
+
+        check = await psycopg.AsyncConnection.connect(database_url)
+        try:
+            cursor = await check.execute(
+                "SELECT event_id, sender FROM mindroom_event_cache_events WHERE namespace = %s ORDER BY event_id",
+                (namespace,),
+            )
+            rows = await cursor.fetchall()
+            await cursor.close()
+        finally:
+            await check.close()
+        # Decoding in Python recovers the sender from every payload PostgreSQL cannot cast.
+        assert rows == [
+            ("$binary", "@tool:localhost"),
+            ("$ordinary", "@a:localhost"),
+            ("$surrogate", "@lone:localhost"),
+        ]
+
+
+@pytest.mark.asyncio
+async def test_sender_backfill_batches_each_page_into_one_statement(
+    postgres_event_cache_url: str,
+) -> None:
+    """The backfill must cost one UPDATE per page, not one per row.
+
+    It runs inside the advisory-lock transaction that serializes every other principal's startup,
+    so a round trip per row turns a large namespace into a multi-minute stall for every principal
+    behind it. Pagination alone does not fix that: it bounds how many payloads are held in memory
+    at once, not how many statements are issued.
+    """
+    namespace = f"tenant_{uuid.uuid4().hex}"
+    # Enough rows to need more than one page, so pagination and batching are both exercised.
+    row_count = _SENDER_BACKFILL_PAGE_ROWS + 7
+    async with _isolated_postgres_database(postgres_event_cache_url) as database_url:
+        setup = await psycopg.AsyncConnection.connect(database_url)
+        try:
+            await postgres_event_cache._create_postgres_event_cache_schema(setup)
+            for index in range(row_count):
+                await setup.execute(
+                    """
+                    INSERT INTO mindroom_event_cache_events(
+                        namespace, event_id, room_id, origin_server_ts, event_json, sender, cached_at
+                    )
+                    VALUES (%s, %s, %s, %s, %s, '', 0)
+                    """,
+                    (
+                        namespace,
+                        f"$event{index:05d}",
+                        _ROOM_ID,
+                        index,
+                        json.dumps({"event_id": f"$event{index:05d}", "sender": f"@user{index}:localhost"}),
+                    ),
+                )
+            await setup.commit()
+        finally:
+            await setup.close()
+
+        db = await psycopg.AsyncConnection.connect(database_url)
+        statements: list[str] = []
+        original_execute = db.execute
+
+        async def counting_execute(query, params=None, **kwargs):  # noqa: ANN001, ANN003, ANN202
+            statements.append(str(query))
+            return await original_execute(query, params, **kwargs)
+
+        try:
+            db.execute = counting_execute  # type: ignore[method-assign]
+            await _backfill_collapsed_read_columns(db, namespace=namespace)
+            db.execute = original_execute  # type: ignore[method-assign]
+            await db.commit()
+
+            cursor = await db.execute(
+                "SELECT count(*) FROM mindroom_event_cache_events WHERE namespace = %s AND sender <> ''",
+                (namespace,),
+            )
+            backfilled = (await cursor.fetchone())[0]
+            await cursor.close()
+        finally:
+            await db.close()
+
+        assert backfilled == row_count, "pagination must reach every row, not just the first page"
+        updates = [statement for statement in statements if statement.lstrip().startswith("UPDATE")]
+        pages = -(-row_count // _SENDER_BACKFILL_PAGE_ROWS)
+        assert len(updates) == pages, f"expected one UPDATE per page ({pages}), issued {len(updates)}"
+
+
+@pytest.mark.asyncio
+async def test_startup_on_current_schema_runs_no_alter_table(postgres_event_cache_url: str) -> None:
+    """A principal starting against an already-current schema must issue no ALTER TABLE.
+
+    ALTER TABLE takes ACCESS EXCLUSIVE on its target even when every clause is a no-op, and the
+    cache tables are shared by every namespace. Running the gap migration unconditionally would let
+    one starting agent stall all cache traffic for all of them, which is why the security migration
+    is version-gated and why this one has to be too.
+    """
+    async with _isolated_postgres_database(postgres_event_cache_url) as database_url:
+        namespace = f"ns_{uuid.uuid4().hex[:8]}"
+
+        first = postgres_event_cache.PostgresEventCache(database_url=database_url, namespace=namespace)
+        await first.initialize()
+        await first.close()
+
+        statements: list[str] = []
+        original_connect = psycopg.AsyncConnection.connect
+
+        async def recording_connect(*args: object, **kwargs: object) -> psycopg.AsyncConnection:
+            db = await original_connect(*args, **kwargs)
+            original_execute = db.execute
+
+            async def recording_execute(query, params=None, **execute_kwargs):  # noqa: ANN001, ANN003, ANN202
+                statements.append(str(query))
+                return await original_execute(query, params, **execute_kwargs)
+
+            db.execute = recording_execute  # type: ignore[method-assign]
+            return db
+
+        second = postgres_event_cache.PostgresEventCache(database_url=database_url, namespace=namespace)
+        with patch.object(psycopg.AsyncConnection, "connect", recording_connect):
+            await second.initialize()
+        await second.close()
+
+        altered = [statement for statement in statements if "ALTER TABLE" in statement.upper()]
+        assert not altered, f"startup on a current schema issued {len(altered)} ALTER TABLE statements: {altered}"

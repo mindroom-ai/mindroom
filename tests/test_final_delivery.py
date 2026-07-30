@@ -101,6 +101,62 @@ def test_final_delivery_outcome_cancelled_for_empty_prompt_is_not_retryable() ->
     assert outcome.mark_handled is False
 
 
+@pytest.mark.parametrize(
+    ("outcome", "expected"),
+    [
+        pytest.param(
+            FinalDeliveryOutcome(
+                terminal_status="completed",
+                event_id="$final",
+                is_visible_response=True,
+                final_visible_body="hello",
+                delivery_kind="sent",
+            ),
+            True,
+            id="successful-visible-body",
+        ),
+        pytest.param(
+            FinalDeliveryOutcome(
+                terminal_status="error",
+                event_id="$existing",
+                is_visible_response=True,
+                failure_reason="delivery_failed",
+            ),
+            False,
+            id="preserved-existing-body",
+        ),
+        pytest.param(
+            FinalDeliveryOutcome(
+                terminal_status="error",
+                event_id="$placeholder",
+                is_visible_response=True,
+                final_visible_body="Response delivery failed.",
+                delivery_kind="edited",
+                failure_reason="delivery_failed",
+            ),
+            False,
+            id="delivered-failure-note",
+        ),
+        pytest.param(
+            FinalDeliveryOutcome(
+                terminal_status="completed",
+                event_id="$existing",
+                is_visible_response=True,
+                delivery_kind="edited",
+            ),
+            False,
+            id="empty-existing-stream",
+        ),
+    ],
+)
+def test_final_delivery_outcome_identifies_substantive_delivery(
+    outcome: FinalDeliveryOutcome,
+    expected: bool,
+) -> None:
+    """Only a confirmed delivery with nonblank body text is substantive."""
+    assert outcome.delivered_substantive_content is expected
+
+
 def test_stream_transport_outcome_accepts_placeholder_only_visible_state() -> None:
     """Placeholder-only visibility must remain distinct from visible body."""
     outcome = StreamTransportOutcome(

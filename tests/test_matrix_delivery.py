@@ -55,3 +55,26 @@ def test_edit_fallback_preserves_replacement_message_type() -> None:
     assert content["msgtype"] == "m.notice"
     assert content["m.new_content"]["msgtype"] == "m.notice"
     assert content["m.mentions"] == {"user_ids": ["@user:localhost"]}
+
+
+def test_edit_envelope_discards_thread_relation() -> None:
+    """An edit must discard any caller thread relation before adding m.replace."""
+    replacement_with_fallback = {
+        "msgtype": "m.text",
+        "body": "edited",
+        "m.relates_to": {
+            "rel_type": "m.thread",
+            "event_id": "$thread_root",
+            "is_falling_back": True,
+            "m.in_reply_to": {"event_id": "$latest"},
+        },
+    }
+
+    edit_content = build_edit_event_content(
+        event_id="$original",
+        new_content=replacement_with_fallback,
+        new_text="edited",
+    )
+
+    assert "m.relates_to" not in edit_content["m.new_content"]
+    assert edit_content["m.relates_to"] == {"rel_type": "m.replace", "event_id": "$original"}

@@ -1256,14 +1256,14 @@ async def test_prepare_bound_team_execution_context_uses_team_renderer_for_trimm
     assert tuple((message.role, message.content) for message in prepared.messages) == (
         (
             "assistant",
-            "Previous team reply",
+            "\n\nPrevious team reply",
         ),
         ("user", "Analyze this."),
     )
     assert captured_prompts == [
         ("Analyze this.", None),
         ("Analyze this.", None),
-        ("assistant: Previous team reply\n\nAnalyze this.", None),
+        ("assistant: \n\nPrevious team reply\n\nAnalyze this.", None),
     ]
 
 

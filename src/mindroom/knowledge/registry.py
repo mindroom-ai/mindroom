@@ -18,11 +18,9 @@ from agno.vectordb.chroma import ChromaDb
 from mindroom.embedding_factory import create_configured_embedder, embedder_client_signature
 from mindroom.knowledge.availability import KnowledgeAvailability
 from mindroom.knowledge.index_metadata import (
-    coerce_nonnegative_metadata_int,
-    load_index_metadata_payload,
-    optional_metadata_str,
-    parse_index_metadata_fields,
-    write_index_metadata_payload,
+    PublishedIndexState,
+    load_published_index_state,
+    save_published_index_state,
 )
 from mindroom.knowledge.indexing_config import (
     IndexingSettings,
@@ -79,25 +77,6 @@ class KnowledgeSourceRoot:
 
 
 @dataclass(frozen=True)
-class PublishedIndexState:
-    """Persisted state for the published knowledge index."""
-
-    settings: IndexingSettings
-    status: Literal["resetting", "indexing", "complete", "failed"]
-    collection: str | None = None
-    last_published_at: str | None = None
-    published_revision: str | None = None
-    indexed_count: int | None = None
-    source_signature: str | None = None
-    refresh_job: Literal["idle", "pending", "running", "failed"] = "idle"
-    reason: str | None = None
-    last_error: str | None = None
-    updated_at: str | None = None
-    last_refresh_at: str | None = None
-    consecutive_refresh_failures: int = 0
-
-
-@dataclass(frozen=True)
 class _PublishedIndexHandle:
     """Read handle for the published knowledge index."""
 
@@ -132,7 +111,6 @@ _published_indexes: dict[PublishedIndexKey, _PublishedIndexHandle] = {}
 _CONSECUTIVE_REFRESH_FAILURE_ALERT_THRESHOLD = 3
 _PRIVATE_KNOWLEDGE_BASE_ID_PREFIX = "__agent_private__:"
 _MAX_PRIVATE_PUBLISHED_INDEXES = 128
-_PUBLISHED_INDEX_STATUSES = {"resetting", "indexing", "complete", "failed"}
 _P = ParamSpec("_P")
 _T = TypeVar("_T")
 
@@ -261,70 +239,6 @@ def published_index_storage_path(key: PublishedIndexKey) -> Path:
 def published_index_metadata_path(key: PublishedIndexKey) -> Path:
     """Return the single persisted state file for one knowledge base."""
     return published_index_storage_path(key) / "indexing_settings.json"
-
-
-def _coerce_refresh_job(value: object) -> Literal["idle", "pending", "running", "failed"]:
-    if value in {"idle", "pending", "running", "failed"}:
-        return cast('Literal["idle", "pending", "running", "failed"]', value)
-    return "idle"
-
-
-def load_published_index_state(metadata_path: Path) -> PublishedIndexState | None:
-    """Load published index metadata."""
-    payload = load_index_metadata_payload(metadata_path)
-    if payload is None:
-        return None
-    fields = parse_index_metadata_fields(payload, allowed_statuses=_PUBLISHED_INDEX_STATUSES)
-    if fields is None:
-        return None
-    (
-        settings,
-        status,
-        collection,
-        last_published_at,
-        published_revision,
-        indexed_count,
-        source_signature,
-    ) = fields
-    indexing_settings = IndexingSettings.from_metadata(settings)
-    if indexing_settings is None:
-        return None
-
-    return PublishedIndexState(
-        settings=indexing_settings,
-        status=cast('Literal["resetting", "indexing", "complete", "failed"]', status),
-        collection=collection,
-        last_published_at=last_published_at,
-        published_revision=published_revision,
-        indexed_count=indexed_count,
-        source_signature=source_signature,
-        refresh_job=_coerce_refresh_job(payload.get("refresh_job")),
-        reason=optional_metadata_str(payload.get("reason")),
-        last_error=optional_metadata_str(payload.get("last_error")),
-        updated_at=optional_metadata_str(payload.get("updated_at")),
-        last_refresh_at=optional_metadata_str(payload.get("last_refresh_at")),
-        consecutive_refresh_failures=coerce_nonnegative_metadata_int(payload.get("consecutive_refresh_failures")) or 0,
-    )
-
-
-def save_published_index_state(metadata_path: Path, state: PublishedIndexState) -> None:
-    """Atomically persist published index metadata."""
-    write_index_metadata_payload(
-        metadata_path,
-        settings=state.settings.to_metadata(),
-        status=state.status,
-        collection=state.collection,
-        last_published_at=state.last_published_at,
-        published_revision=state.published_revision,
-        indexed_count=state.indexed_count,
-        source_signature=state.source_signature,
-        refresh_job=state.refresh_job,
-        reason=state.reason,
-        last_error=state.last_error,
-        updated_at=state.updated_at,
-        last_refresh_at=state.last_refresh_at,
-        consecutive_refresh_failures=state.consecutive_refresh_failures,
-    )
 
 
 def published_index_refresh_state(

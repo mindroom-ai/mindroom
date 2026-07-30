@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import math
 import random
 import time
 from contextlib import suppress
@@ -25,6 +26,7 @@ from mindroom.cancellation import (
 from mindroom.constants import RuntimePaths, runtime_matrix_ssl_verify
 from mindroom.logging_config import get_logger
 from mindroom.matrix.health import (
+    MATRIX_SYNC_CACHE_WRITE_GRACE_SECONDS,
     MATRIX_SYNC_STARTUP_GRACE_SECONDS,
     MATRIX_SYNC_WATCHDOG_TIMEOUT_SECONDS,
     matrix_versions_url,
@@ -59,6 +61,7 @@ STARTUP_RETRY_MAX_DELAY_SECONDS = 60.0
 _CANCELLING_LOGGED_TASKS: set[asyncio.Task[Any]] = set()
 _MATRIX_SYNC_WATCHDOG_POLL_INTERVAL_SECONDS = 5.0
 _MATRIX_SYNC_STARTUP_TIMEOUT_ENV = "MINDROOM_MATRIX_SYNC_STARTUP_TIMEOUT_SECONDS"
+_MATRIX_SYNC_CACHE_WRITE_GRACE_ENV = "MINDROOM_MATRIX_SYNC_CACHE_WRITE_GRACE_SECONDS"
 _STALLED_RESTART_MAX_JITTER_SECONDS = 10.0
 
 
@@ -92,6 +95,7 @@ __all__ = [
     "log_cancelled_response_source",
     "log_startup_phase_finished",
     "log_startup_phase_started",
+    "matrix_sync_cache_write_grace_seconds",
     "matrix_sync_startup_timeout_seconds",
     "request_task_cancel",
     "retry_delay_seconds",
@@ -158,6 +162,22 @@ def matrix_sync_startup_timeout_seconds(runtime_paths: RuntimePaths) -> float:
     value = float(raw)
     if value <= 0:
         msg = f"{_MATRIX_SYNC_STARTUP_TIMEOUT_ENV} must be a positive number"
+        raise ValueError(msg)
+    return value
+
+
+def matrix_sync_cache_write_grace_seconds(runtime_paths: RuntimePaths) -> float:
+    """Return the finite grace for one active durable sync-cache phase."""
+    raw = (runtime_paths.env_value(_MATRIX_SYNC_CACHE_WRITE_GRACE_ENV) or "").strip()
+    if not raw:
+        return MATRIX_SYNC_CACHE_WRITE_GRACE_SECONDS
+    try:
+        value = float(raw)
+    except ValueError:
+        msg = f"{_MATRIX_SYNC_CACHE_WRITE_GRACE_ENV} must be a finite positive number"
+        raise ValueError(msg) from None
+    if not math.isfinite(value) or value <= 0:
+        msg = f"{_MATRIX_SYNC_CACHE_WRITE_GRACE_ENV} must be a finite positive number"
         raise ValueError(msg)
     return value
 
@@ -248,6 +268,7 @@ class _SyncIteration:
         against a first sync that never completes.
         """
         startup_timeout_seconds = matrix_sync_startup_timeout_seconds(bot.runtime_paths)
+        cache_write_grace_seconds = matrix_sync_cache_write_grace_seconds(bot.runtime_paths)
         startup_monotonic = time.monotonic()
         while bot.running and not sync_task.done():
             await asyncio.sleep(_MATRIX_SYNC_WATCHDOG_POLL_INTERVAL_SECONDS)
@@ -270,15 +291,44 @@ class _SyncIteration:
             elif sync_age_seconds <= MATRIX_SYNC_WATCHDOG_TIMEOUT_SECONDS:
                 continue
             else:
-                logger.error(
-                    "matrix_sync_watchdog_stalled",
-                    agent=bot.agent_name,
-                    active_response_count=bot.in_flight_response_count,
-                    last_sync_time=bot.last_sync_time.isoformat() if bot.last_sync_time is not None else None,
-                    restart_reason_category="sync_activity_timeout",
-                    resulting_action="cancel_receive_loop",
-                    stale_for_seconds=sync_age_seconds,
+                cache_write_progress = bot.sync_cache_write_progress()
+                now_monotonic = time.monotonic()
+                cache_write_seconds = (
+                    cache_write_progress.seconds_in_flight(now_monotonic) if cache_write_progress is not None else None
                 )
+                if cache_write_seconds is not None and cache_write_seconds <= cache_write_grace_seconds:
+                    logger.debug(
+                        "matrix_sync_watchdog_awaiting_cache_write",
+                        agent=bot.agent_name,
+                        active_response_count=bot.in_flight_response_count,
+                        cache_write_grace_seconds=cache_write_grace_seconds,
+                        cache_write_seconds_in_flight=cache_write_seconds,
+                        resulting_action="await_sync_cache_write",
+                        stale_for_seconds=sync_age_seconds,
+                    )
+                    continue
+                if cache_write_seconds is not None:
+                    logger.error(
+                        "matrix_sync_watchdog_stalled",
+                        agent=bot.agent_name,
+                        active_response_count=bot.in_flight_response_count,
+                        cache_write_grace_seconds=cache_write_grace_seconds,
+                        cache_write_seconds_in_flight=cache_write_seconds,
+                        last_sync_time=bot.last_sync_time.isoformat() if bot.last_sync_time is not None else None,
+                        restart_reason_category="cache_write_grace_exhausted",
+                        resulting_action="cancel_receive_loop",
+                        stale_for_seconds=sync_age_seconds,
+                    )
+                else:
+                    logger.error(
+                        "matrix_sync_watchdog_stalled",
+                        agent=bot.agent_name,
+                        active_response_count=bot.in_flight_response_count,
+                        last_sync_time=bot.last_sync_time.isoformat() if bot.last_sync_time is not None else None,
+                        restart_reason_category="sync_activity_timeout",
+                        resulting_action="cancel_receive_loop",
+                        stale_for_seconds=sync_age_seconds,
+                    )
 
             watchdog_cancelled_sync.set()
             request_task_cancel(sync_task, cancel_source="sync_restart")

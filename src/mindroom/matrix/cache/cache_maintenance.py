@@ -23,7 +23,7 @@ class CacheMaintenanceReport:
     thread_state_rows: int = 0
     room_state_rows: int = 0
     stale_thread_markers: int = 0
-    stale_room_markers: int = 0
+    room_gap_markers: int = 0
     orphan_edit_indexes_after: int = 0
     orphan_thread_indexes_after: int = 0
     repaired_edit_indexes: int = 0
@@ -45,7 +45,7 @@ class CacheMaintenanceReport:
             "cache_thread_state_rows": self.thread_state_rows,
             "cache_room_state_rows": self.room_state_rows,
             "cache_stale_thread_markers": self.stale_thread_markers,
-            "cache_stale_room_markers": self.stale_room_markers,
+            "cache_room_gap_markers": self.room_gap_markers,
             "cache_orphan_edit_indexes_after": self.orphan_edit_indexes_after,
             "cache_orphan_thread_indexes_after": self.orphan_thread_indexes_after,
             "cache_repaired_edit_indexes": self.repaired_edit_indexes,

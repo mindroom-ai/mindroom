@@ -740,7 +740,7 @@ async def test_deferred_desktop_uses_only_requester_agent_credentials(tmp_path: 
 async def test_native_tool_search_keeps_unconfigured_desktop_safe(tmp_path: Path) -> None:
     """Native deferred Desktop keeps one stable schema and fails closed until paired."""
     raw = _base_config_data()
-    raw["models"]["claude"] = {"provider": "anthropic", "id": "claude-opus-4-8"}  # type: ignore[index]
+    raw["models"]["claude"] = {"provider": "anthropic", "id": "claude-opus-5"}  # type: ignore[index]
     raw["agents"]["code"].update(  # type: ignore[union-attr,index]
         {
             "model": "claude",
@@ -1020,7 +1020,7 @@ def test_openclaw_compat_implies_matrix_messaging_tool(tmp_path: Path) -> None:
 def test_native_tool_search_attaches_deferred_toolkits_and_skips_homegrown_machinery(tmp_path: Path) -> None:
     """Claude-native tool search attaches all deferred toolkits and drops the manager machinery."""
     raw = _base_config_data()
-    raw["models"]["claude"] = {"provider": "anthropic", "id": "claude-opus-4-8"}  # type: ignore[index]
+    raw["models"]["claude"] = {"provider": "anthropic", "id": "claude-opus-5"}  # type: ignore[index]
     raw["agents"]["code"]["model"] = "claude"  # type: ignore[index]
     raw["agents"]["code"]["tools"] = [  # type: ignore[index]
         {"sleep": {"defer": True}},
@@ -1041,6 +1041,37 @@ def test_native_tool_search_attaches_deferred_toolkits_and_skips_homegrown_machi
     assert ("code", "thread-a") not in dynamic_toolkits_module._loaded_tools
 
 
+@pytest.mark.parametrize(
+    ("provider", "model_id"),
+    [
+        ("anthropic", "claude-opus-5"),
+        ("openai", "gpt-5.6"),
+    ],
+)
+def test_native_tool_search_prompt_lists_deferred_capability_domains(
+    tmp_path: Path,
+    provider: str,
+    model_id: str,
+) -> None:
+    """Native tool search should tell the model which capability domains it can discover."""
+    raw = _base_config_data()
+    raw["models"]["native"] = {"provider": provider, "id": model_id}  # type: ignore[index]
+    raw["agents"]["code"]["model"] = "native"  # type: ignore[index]
+    raw["agents"]["code"]["tools"] = [  # type: ignore[index]
+        {"sleep": {"defer": True}},
+        {"calculator": {"defer": True, "initial": True}},
+    ]
+    config = _validated_config(tmp_path, raw)
+
+    agent = create_agent("code", config, _runtime_paths(tmp_path), execution_identity=None, session_id="thread-a")
+
+    discovery_block = next(block for block in agent.instructions if block.startswith("## Deferred Tool Discovery"))
+    assert discovery_block in _render_system_prompt(agent)
+    assert "Deferred capability domains available through native tool search: sleep." in discovery_block
+    assert "search the deferred tool catalog before concluding that the capability is unavailable" in discovery_block
+    assert "calculator" not in discovery_block
+
+
 def test_native_tool_search_omits_fully_deferred_toolkit_instructions(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1048,7 +1079,7 @@ def test_native_tool_search_omits_fully_deferred_toolkit_instructions(
     """A native-search toolkit should not describe functions that are all deferred."""
     instruction_marker = _install_update_awareness_status(monkeypatch)
     raw = _base_config_data()
-    raw["models"]["claude"] = {"provider": "anthropic", "id": "claude-opus-4-8"}  # type: ignore[index]
+    raw["models"]["claude"] = {"provider": "anthropic", "id": "claude-opus-5"}  # type: ignore[index]
     raw["agents"]["code"]["model"] = "claude"  # type: ignore[index]
     raw["agents"]["code"]["tools"] = [{"update_awareness": {"defer": True}}]  # type: ignore[index]
     config = _validated_config(tmp_path, raw)
@@ -1142,7 +1173,7 @@ def test_native_tool_search_keeps_initial_toolkit_instructions(
     """An initially loaded deferred toolkit should keep its instructions inline."""
     instruction_marker = _install_update_awareness_status(monkeypatch)
     raw = _base_config_data()
-    raw["models"]["claude"] = {"provider": "anthropic", "id": "claude-opus-4-8"}  # type: ignore[index]
+    raw["models"]["claude"] = {"provider": "anthropic", "id": "claude-opus-5"}  # type: ignore[index]
     raw["agents"]["code"]["model"] = "claude"  # type: ignore[index]
     raw["agents"]["code"]["tools"] = [  # type: ignore[index]
         {"update_awareness": {"defer": True, "initial": True}},
@@ -1164,7 +1195,7 @@ def test_native_tool_search_drops_toolkit_emptied_by_include_filter(
     """Final assembly should discard a toolkit with no provider-visible functions."""
     instruction_marker = _install_update_awareness_status(monkeypatch)
     raw = _base_config_data()
-    raw["models"]["claude"] = {"provider": "anthropic", "id": "claude-opus-4-8"}  # type: ignore[index]
+    raw["models"]["claude"] = {"provider": "anthropic", "id": "claude-opus-5"}  # type: ignore[index]
     raw["agents"]["code"]["model"] = "claude"  # type: ignore[index]
     raw["agents"]["code"]["tools"] = [  # type: ignore[index]
         {"update_awareness": {"defer": True, "include_tools": []}},

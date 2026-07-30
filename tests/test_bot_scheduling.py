@@ -110,7 +110,6 @@ def _sync_turn_policy_runtime(bot: AgentBot) -> None:
     install_runtime_cache_support(bot)
     turn_store = unwrap_extracted_collaborator(bot._turn_store)
     turn_store.is_handled = MagicMock(return_value=False)
-    turn_store.visible_echo_for_sources = MagicMock(return_value=None)
     turn_store.record_turn = MagicMock()
     _replace_turn_policy_deps(bot, logger=bot.logger)
     replace_turn_controller_deps(bot, logger=bot.logger)

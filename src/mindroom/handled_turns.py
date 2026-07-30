@@ -79,9 +79,16 @@ class SourceEventMetadata:
 SourceEventRevision = tuple[int, str]
 
 
-def _prompt_source_event_id(source_event_metadata: Mapping[str, SourceEventMetadata] | None, event_id: str) -> str:
+def _prompt_source_event_id(
+    source_event_ids: tuple[str, ...],
+    source_event_metadata: Mapping[str, SourceEventMetadata] | None,
+    event_id: str,
+) -> str:
     """Return the physical prompt owner for a source or discovery alias."""
-    for source_id, metadata in (source_event_metadata or {}).items():
+    if event_id in source_event_ids:
+        return event_id
+    metadata_by_source = source_event_metadata or {}
+    for source_id, metadata in metadata_by_source.items():
         if metadata.discovery_event_id == event_id:
             return source_id
     return event_id
@@ -99,6 +106,7 @@ class TurnRecord:
     response_event_id: str | None = None
     completed: bool = True
     visible_echo_event_id: str | None = None
+    visible_echo_is_fallback: bool | None = None
     source_event_prompts: Mapping[str, str] | None = None
     source_event_revisions: Mapping[str, SourceEventRevision] | None = None
     suppressed_source_event_revisions: Mapping[str, SourceEventRevision] | None = None
@@ -147,7 +155,8 @@ class TurnRecord:
             source_event_ids,
             self.source_event_prompts,
             excluded_event_ids={
-                _prompt_source_event_id(source_event_metadata, event_id) for event_id in redacted_source_event_ids
+                _prompt_source_event_id(source_event_ids, source_event_metadata, event_id)
+                for event_id in redacted_source_event_ids
             },
         )
         source_event_revisions = _immutable_source_event_revisions(
@@ -167,8 +176,16 @@ class TurnRecord:
         object.__setattr__(self, "redacted_source_event_ids", redacted_source_event_ids)
         object.__setattr__(self, "pending_redaction_cleanup_event_ids", pending_redaction_cleanup_event_ids)
         object.__setattr__(self, "anchor_event_id", anchor_event_id)
-        object.__setattr__(self, "response_event_id", _normalize_string(self.response_event_id))
-        object.__setattr__(self, "visible_echo_event_id", _normalize_string(self.visible_echo_event_id))
+        response_event_id = _normalize_string(self.response_event_id)
+        visible_echo_event_id = _normalize_string(self.visible_echo_event_id)
+        visible_echo_is_fallback = (
+            self.visible_echo_is_fallback
+            if isinstance(self.visible_echo_is_fallback, bool) and visible_echo_event_id is not None
+            else None
+        )
+        object.__setattr__(self, "response_event_id", response_event_id)
+        object.__setattr__(self, "visible_echo_event_id", visible_echo_event_id)
+        object.__setattr__(self, "visible_echo_is_fallback", visible_echo_is_fallback)
         object.__setattr__(self, "source_event_prompts", source_event_prompts)
         object.__setattr__(self, "source_event_revisions", source_event_revisions)
         object.__setattr__(self, "suppressed_source_event_revisions", suppressed_source_event_revisions)
@@ -192,6 +209,7 @@ class TurnRecord:
         response_event_id: str | None = None,
         completed: bool = True,
         visible_echo_event_id: str | None = None,
+        visible_echo_is_fallback: bool | None = None,
         source_event_prompts: Mapping[str, str] | None = None,
         source_event_revisions: Mapping[str, object] | None = None,
         suppressed_source_event_revisions: Mapping[str, object] | None = None,
@@ -213,6 +231,7 @@ class TurnRecord:
             response_event_id=response_event_id,
             completed=completed,
             visible_echo_event_id=visible_echo_event_id,
+            visible_echo_is_fallback=visible_echo_is_fallback,
             source_event_prompts=source_event_prompts,
             source_event_revisions=typing.cast("Mapping[str, SourceEventRevision] | None", source_event_revisions),
             suppressed_source_event_revisions=typing.cast(
@@ -240,7 +259,19 @@ class TurnRecord:
 
     def prompt_source_event_id(self, event_id: str) -> str:
         """Return the physical prompt owner for a source or discovery alias."""
-        return _prompt_source_event_id(self.source_event_metadata, event_id)
+        return _prompt_source_event_id(self.source_event_ids, self.source_event_metadata, event_id)
+
+    def requester_id_for_source(self, event_id: str) -> str | None:
+        """Return the exact requester for one source, or None when the record cannot prove one.
+
+        A single-source turn is one requester by construction, so it falls back to the turn-level
+        requester. A coalesced turn needs per-source metadata: records persisted before that field
+        existed, and maps normalization pruned an entry from, cannot attribute their sources.
+        """
+        if self.source_event_metadata is None:
+            return self.requester_id if not self.is_coalesced else None
+        metadata = self.source_event_metadata.get(self.prompt_source_event_id(event_id))
+        return metadata.sender if metadata is not None else None
 
     @property
     def replay_source_event_ids(self) -> tuple[str, ...]:
@@ -273,6 +304,8 @@ class TurnRecordCodec:
             payload["discovery_event_ids"] = list(record.discovery_event_ids)
         if record.visible_echo_event_id is not None:
             payload["visible_echo_event_id"] = record.visible_echo_event_id
+        if record.visible_echo_is_fallback is not None:
+            payload["visible_echo_is_fallback"] = record.visible_echo_is_fallback
         if record.source_event_prompts is not None:
             payload["source_event_prompts"] = dict(record.source_event_prompts)
         if record.source_event_revisions is not None:
@@ -340,6 +373,7 @@ class TurnRecordCodec:
             response_event_id=response_event_id,
             completed=completed,
             visible_echo_event_id=_normalize_string(record.get("visible_echo_event_id")),
+            visible_echo_is_fallback=_bool_or_none(record.get("visible_echo_is_fallback")),
             source_event_prompts=_mapping_or_none(record.get("source_event_prompts")),
             source_event_revisions=_mapping_or_none(record.get("source_event_revisions")),
             suppressed_source_event_revisions=_mapping_or_none(
@@ -593,16 +627,6 @@ class HandledTurnLedger:
             self._ensure_loaded_locked()
             record = self._responses.get(source_event_id)
             return record.visible_echo_event_id if record is not None else None
-
-    def visible_echo_event_id_for_sources(self, source_event_ids: Sequence[str]) -> str | None:
-        """Return the first visible echo already tracked for one or more source events."""
-        with self._state.lock:
-            self._ensure_loaded_locked()
-            for event_id in _normalize_source_event_ids(source_event_ids):
-                record = self._responses.get(event_id)
-                if record is not None and record.visible_echo_event_id is not None:
-                    return record.visible_echo_event_id
-        return None
 
     def get_turn_record(self, source_event_id: str) -> TurnRecord | None:
         """Return the canonical record for one source event."""
@@ -943,6 +967,14 @@ def _project_redaction_alias(
         turn_record,
         source_event_ids=retained_source_event_ids,
         anchor_event_id=anchor_event_id,
+        source_event_metadata=(
+            {}
+            if turn_record.is_coalesced and turn_record.source_event_metadata is None
+            else turn_record.source_event_metadata
+        ),
+        # Turn-level requester context remains required for owed redaction cleanup; an explicit
+        # empty source map keeps per-source replay ownership fail-closed after projection.
+        requester_id=turn_record.requester_id,
     )
 
 
@@ -960,12 +992,22 @@ def _merge_same_identity_records(candidate: TurnRecord, existing: TurnRecord) ->
             *older.redacted_source_event_ids,
         ),
         visible_echo_event_id=newer.visible_echo_event_id or older.visible_echo_event_id,
+        visible_echo_is_fallback=(
+            newer.visible_echo_is_fallback
+            if newer.visible_echo_is_fallback is not None
+            else older.visible_echo_is_fallback
+        ),
     )
 
 
 def _normalize_string(value: object) -> str | None:
     """Return a non-empty string or None."""
     return value if isinstance(value, str) and value else None
+
+
+def _bool_or_none(value: object) -> bool | None:
+    """Return a strict boolean or None."""
+    return value if isinstance(value, bool) else None
 
 
 def _mapping_or_none(value: object) -> Mapping[str, Any] | None:
@@ -1035,7 +1077,7 @@ def _immutable_source_event_metadata(
     excluded_event_ids: set[str],
 ) -> Mapping[str, SourceEventMetadata] | None:
     """Normalize and freeze source metadata belonging to the canonical identity."""
-    if not source_event_metadata:
+    if source_event_metadata is None:
         return None
     metadata: dict[str, SourceEventMetadata] = {}
     for event_id in source_event_ids:
@@ -1049,7 +1091,7 @@ def _immutable_source_event_metadata(
         )
         if normalized is not None:
             metadata[event_id] = normalized
-    return MappingProxyType(metadata) if metadata else None
+    return MappingProxyType(metadata)
 
 
 def _responses_file_path(base_path: Path, agent_name: str) -> Path:

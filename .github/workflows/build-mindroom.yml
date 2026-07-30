@@ -2,10 +2,10 @@ name: Build MindRoom
 # Builds MindRoom instance images in parallel using native ARM64 runners
 
 on:
-  # Validate MindRoom images on direct pushes to main.
-  push:
-    branches: [ main ]
-  # Build (no push) on PRs to validate Dockerfiles
+  # Build (no push) on PRs to validate Dockerfiles. Merges to main are not
+  # rebuilt here: the same commits were already validated on their PR, and every
+  # main push is released by calver-auto-release.yml, which dispatches the
+  # publishing build below.
   pull_request:
     branches: [ main ]
     paths:
@@ -92,7 +92,7 @@ jobs:
             exit 1
           fi
           version="${ref_name#v}"
-        elif [[ "${{ github.event_name }}" == "pull_request" || "${{ github.event_name }}" == "push" ]]; then
+        elif [[ "${{ github.event_name }}" == "pull_request" ]]; then
           ref_name="$GITHUB_REF_NAME"
           version="0.0.0"
         else

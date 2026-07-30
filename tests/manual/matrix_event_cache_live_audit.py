@@ -1408,14 +1408,14 @@ async def _strict_thread_read_sequence(
             representation="omitted",
         )
         await cache.redact_event(room_id, strict_child_id)
-        await cache.mark_thread_stale(
+        await cache.mark_thread_gap(
             room_id,
             root_id,
             reason="live_audit_redaction",
         )
-        cache_state = await cache.get_thread_cache_state(room_id, root_id)
-        if thread_cache_rejection_reason(cache_state) != "thread_invalidated_after_validation":
-            msg = "Disposable cache redaction did not make the validated snapshot rejectable"
+        gap = await cache.get_thread_cache_gap(room_id, root_id)
+        if thread_cache_rejection_reason(gap) != "live_audit_redaction":
+            msg = "Disposable cache redaction did not make the stored snapshot rejectable"
             raise MatrixAuditError(msg)
         started = time.perf_counter()
         history = await fetch_dispatch_thread_snapshot(

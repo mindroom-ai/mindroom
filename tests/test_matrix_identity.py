@@ -22,7 +22,7 @@ from mindroom.matrix.identity import (
     parse_historical_matrix_user_id,
     try_parse_historical_matrix_user_id,
 )
-from mindroom.matrix.state import MatrixState
+from mindroom.matrix.state import MatrixState, _write_matrix_state_file
 from mindroom.matrix_identifiers import agent_username_localpart, unnamespaced_agent_name_from_username_localpart
 from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
 from tests.identity_helpers import entity_ids, persist_entity_accounts
@@ -371,20 +371,17 @@ class TestHelperFunctions:
         self.config = _bind_runtime_paths(self.config, tmp_path)
         runtime_paths = runtime_paths_for(self.config)
         state_file = constants_mod.matrix_state_file(runtime_paths=runtime_paths)
-        state_file.parent.mkdir(parents=True, exist_ok=True)
-        state_file.write_text(
-            yaml.safe_dump(
-                {
-                    "accounts": {
-                        "agent_general": {
-                            "username": "mindroom_general_oldns",
-                            "password": "pw",
-                            "known_user_ids": ["@mindroom_general_oldns:legacy.example.com"],
-                        },
+        _write_matrix_state_file(
+            state_file,
+            {
+                "accounts": {
+                    "agent_general": {
+                        "username": "mindroom_general_oldns",
+                        "password": "pw",
+                        "known_user_ids": ["@mindroom_general_oldns:legacy.example.com"],
                     },
                 },
-                sort_keys=False,
-            ),
+            },
         )
 
         state = MatrixState.load(runtime_paths=runtime_paths)
@@ -399,21 +396,17 @@ class TestHelperFunctions:
         self.config = _bind_runtime_paths(self.config, tmp_path)
         runtime_paths = runtime_paths_for(self.config)
         state_file = constants_mod.matrix_state_file(runtime_paths=runtime_paths)
-        state_file.parent.mkdir(parents=True, exist_ok=True)
-        state_file.write_text(
-            yaml.safe_dump(
-                {
-                    "accounts": {
-                        "agent_general": {
-                            "username": "actual_general",
-                            "password": "pw",
-                            "domain": "matrix.example",
-                        },
+        _write_matrix_state_file(
+            state_file,
+            {
+                "accounts": {
+                    "agent_general": {
+                        "username": "actual_general",
+                        "password": "pw",
+                        "domain": "matrix.example",
                     },
                 },
-                sort_keys=False,
-            ),
-            encoding="utf-8",
+            },
         )
 
         state = MatrixState.load(runtime_paths=runtime_paths)
@@ -432,20 +425,16 @@ class TestHelperFunctions:
         self.config = _bind_runtime_paths(self.config, tmp_path)
         runtime_paths = runtime_paths_for(self.config)
         state_file = constants_mod.matrix_state_file(runtime_paths=runtime_paths)
-        state_file.parent.mkdir(parents=True, exist_ok=True)
-        state_file.write_text(
-            yaml.safe_dump(
-                {
-                    "accounts": {
-                        "agent_general": {
-                            "username": "mindroom_general_oldns",
-                            "password": "pw",
-                        },
+        _write_matrix_state_file(
+            state_file,
+            {
+                "accounts": {
+                    "agent_general": {
+                        "username": "mindroom_general_oldns",
+                        "password": "pw",
                     },
                 },
-                sort_keys=False,
-            ),
-            encoding="utf-8",
+            },
         )
 
         def _fail_flock(*_args: object, **_kwargs: object) -> None:

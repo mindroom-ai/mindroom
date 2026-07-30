@@ -414,6 +414,7 @@ async def _spawn_followup_warnings(
     tag: str,
     summary_message_count: int = 1,
     last_summary_count: int | None = 1,
+    known_latest_thread_event_id: str | None = None,
 ) -> list[str]:
     warnings: list[str] = []
     try:
@@ -425,6 +426,7 @@ async def _spawn_followup_warnings(
             summary_message_count,
             "manual",
             context.conversation_cache,
+            known_latest_thread_event_id=known_latest_thread_event_id,
         )
     except Exception as exc:
         warnings.append(f"Failed to set thread summary: {exc}")
@@ -486,6 +488,10 @@ async def _spawn_session_payload(
         event_id=event_id,
         summary=summary,
         tag=tag,
+        # The spawn message is this thread's only event, so the newest event is
+        # the root we just sent. Reading history here would scan the homeserver
+        # for a thread that has no cache snapshot yet.
+        known_latest_thread_event_id=event_id,
     )
     payload_kwargs: dict[str, object] = {
         "session_key": spawned_session_key,
