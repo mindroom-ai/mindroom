@@ -365,9 +365,11 @@ def _trim_chunk_tails(
             if not chunk.body:
                 continue
             remove_count = min(overflow, len(chunk.body))
-            chunk.body = chunk.body[: len(chunk.body) - remove_count].rstrip()
-            chunk.omitted_chars += remove_count
-            omitted += remove_count
+            original_length = len(chunk.body)
+            chunk.body = chunk.body[: original_length - remove_count].rstrip()
+            actual_removed = original_length - len(chunk.body)
+            chunk.omitted_chars += actual_removed
+            omitted += actual_removed
     return omitted
 
 

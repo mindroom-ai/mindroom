@@ -32,6 +32,7 @@ from mindroom.agents import (
     _apply_preload_cap,
     _load_context_files,
     _prune_toolkit_functions,
+    _trim_chunk_tails,
     agent_build_can_overlap_file_memory,
     build_agent_toolkit,
     create_agent,
@@ -2431,6 +2432,22 @@ def _apply_test_preload_cap(chunks: list[_AdditionalContextChunk], max_preload_c
         truncation_marker_template=prompts.CONTEXT_TRUNCATION_MARKER_TEMPLATE,
         chunk_marker_template=prompts.CONTEXT_CHUNK_OMITTED_MARKER_TEMPLATE,
     )
+
+
+def test_trim_chunk_tails_counts_whitespace_removed_by_cleanup() -> None:
+    """Tail trimming must count whitespace removed after the requested slice."""
+    chunk = _AdditionalContextChunk(kind="personality", title="/ws/SOUL.md", body="alpha   beta")
+
+    omitted_chars = _trim_chunk_tails(
+        [[chunk]],
+        [chunk],
+        len("alpha   "),
+        render=lambda chunks: chunks[0].body,
+    )
+
+    assert chunk.body == "alpha"
+    assert chunk.omitted_chars == 7
+    assert omitted_chars == 7
 
 
 def test_preload_cap_truncates_context_files_in_order() -> None:
