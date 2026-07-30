@@ -22,7 +22,7 @@ from mindroom.matrix.media import MATRIX_MEDIA_EVENT_TYPES, MatrixMediaEvent, pa
 logger = get_logger(__name__)
 
 _DATABASE_NAME = "dispatch_obligations.sqlite3"
-_SCHEMA_VERSION = 3
+_SCHEMA_VERSION = 2
 _PENDING_STATE = "pending"
 _TOOL_APPROVAL_RESPONSE_EVENT_TYPE = "io.mindroom.tool_approval_response"
 
@@ -133,7 +133,7 @@ class DispatchObligationStore:
     @staticmethod
     def _initialize_schema(connection: sqlite3.Connection) -> None:
         current_version = connection.execute("PRAGMA user_version").fetchone()[0]
-        if current_version not in {0, 1, 2, _SCHEMA_VERSION}:
+        if current_version not in {0, 1, _SCHEMA_VERSION}:
             msg = f"Unsupported dispatch obligation schema version {current_version}"
             raise RuntimeError(msg)
         connection.execute(
