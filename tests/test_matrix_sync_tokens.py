@@ -23,6 +23,7 @@ from mindroom.coalescing_batch import CoalescedBatch, CoalescingKey, PendingEven
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
+from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.delivery_gateway import FinalizeStreamedResponseRequest, ResponseIdentity
 from mindroom.dispatch_handoff import PendingDispatchMetadata
 from mindroom.dispatch_obligations import DispatchCallbackKind
@@ -249,6 +250,33 @@ async def test_bot_start_restores_saved_sync_token(tmp_path: Path) -> None:
         await bot.start()
 
     assert client.next_batch == "s_saved"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("responder_fleet_ready", [False, True])
+async def test_orchestrated_router_start_gates_turn_recovery_on_responder_fleet(
+    tmp_path: Path,
+    responder_fleet_ready: bool,
+) -> None:
+    """Router startup must leave turn-backed replay gated until responders start."""
+    bot = _agent_bot(tmp_path, agent_name=ROUTER_AGENT_NAME)
+    bot.orchestrator = MagicMock()
+    bot.orchestrator.running = responder_fleet_ready
+    client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
+    recover_pending = AsyncMock()
+    bot._dispatch_obligation_runner.recover_pending = recover_pending
+
+    with (
+        patch.object(bot, "ensure_user_account", AsyncMock()),
+        patch("mindroom.bot.login_agent_user", AsyncMock(return_value=client)),
+        patch.object(bot, "_set_avatar_if_available", AsyncMock()),
+        patch.object(bot, "_set_presence_with_model_info", AsyncMock()),
+        patch("mindroom.bot.interactive.init_persistence"),
+    ):
+        await bot.start()
+
+    expected_kwargs = {} if responder_fleet_ready else {"turn_backed": False}
+    recover_pending.assert_awaited_once_with(**expected_kwargs)
 
 
 @pytest.mark.asyncio

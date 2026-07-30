@@ -716,17 +716,22 @@ class DispatchObligationRunner:
         callback_kind: DispatchCallbackKind,
     ) -> _DispatchObligation | None:
         """Persist exact work before its background task may be created."""
-        obligation = _DispatchObligation(
-            principal_id=self.store.principal_id,
-            entity_name=self.store.entity_name,
-            source_event_id=event.event_id,
-            callback_kind=callback_kind,
-            room_id=room.room_id,
-            event_source=dict(event.source),
-        )
-        if await self._settle_from_turn_store_if_owned(obligation):
-            return None
-        create_result = await asyncio.to_thread(self.store.create_pending, obligation)
+        try:
+            obligation = _DispatchObligation(
+                principal_id=self.store.principal_id,
+                entity_name=self.store.entity_name,
+                source_event_id=event.event_id,
+                callback_kind=callback_kind,
+                room_id=room.room_id,
+                event_source=dict(event.source),
+            )
+            if await self._settle_from_turn_store_if_owned(obligation):
+                return None
+            create_result = await asyncio.to_thread(self.store.create_pending, obligation)
+        except Exception:
+            if self.on_persist_failure is not None:
+                self.on_persist_failure()
+            raise
         return None if create_result is _DispatchCreateResult.ALREADY_TERMINAL else obligation
 
     async def run_persisted(
@@ -739,9 +744,11 @@ class DispatchObligationRunner:
         """Execute work whose exact durable obligation already exists."""
         await self._run_obligation(obligation, room=room, event=event)
 
-    async def recover_pending(self) -> None:
+    async def recover_pending(self, *, turn_backed: bool | None = None) -> None:
         """Retry every valid pending callback without waiting for another sync response."""
         for obligation in await asyncio.to_thread(self.store.pending):
+            if turn_backed is not None and (obligation.callback_kind in _TURN_BACKED_KINDS) != turn_backed:
+                continue
             try:
                 event = _parse_recovery_event(obligation)
                 await self._run_obligation(
@@ -841,12 +848,7 @@ class _DispatchObligationTaskWrapper:
 
     async def __call__(self, room: nio.MatrixRoom, event: nio.Event) -> None:
         """Persist one callback obligation before scheduling its execution."""
-        try:
-            obligation = await self.runner.persist(room, event, self.callback_kind)
-        except Exception:
-            if self.runner.on_persist_failure is not None:
-                self.runner.on_persist_failure()
-            raise
+        obligation = await self.runner.persist(room, event, self.callback_kind)
         if obligation is None:
             return
         create_background_task(
