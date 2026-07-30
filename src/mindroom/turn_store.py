@@ -26,9 +26,6 @@ from mindroom.handled_turns import (
 from mindroom.history.storage import invalidate_compacted_replay, read_scope_seen_event_ids
 from mindroom.session_ids import create_session_id
 
-_INTERRUPTED_REPLAY_STATE_KEY = "mindroom_replay_state"
-_INTERRUPTED_REPLAY_STATE = "interrupted"
-
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
@@ -103,10 +100,6 @@ class TurnStore:
     def warm(self) -> None:
         """Load the ledger before asynchronous startup recovery begins."""
         self._ledger.warm()
-
-    def flush(self) -> None:
-        """Wait until every handled-turn update queued so far is durable."""
-        self._ledger.flush()
 
     def record_turn(self, turn_record: TurnRecord) -> None:
         """Persist one terminal turn, preserving any previously recorded optional facts."""
@@ -807,13 +800,6 @@ class TurnStore:
             turn_record = TurnRecordCodec.from_run_metadata(run.metadata)
             if turn_record is None:
                 continue
-            if run.metadata.get(_INTERRUPTED_REPLAY_STATE_KEY) == _INTERRUPTED_REPLAY_STATE:
-                turn_record = replace(
-                    turn_record,
-                    source_event_revisions=None,
-                    suppressed_source_event_revisions=None,
-                    correlation_id=None,
-                )
             if (
                 original_event_id != turn_record.anchor_event_id
                 and original_event_id not in turn_record.indexed_event_ids
