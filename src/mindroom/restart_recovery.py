@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import asyncio
-from contextlib import suppress
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from enum import Enum, auto
 from typing import TYPE_CHECKING, Protocol
+from uuid import NAMESPACE_URL, uuid5
 
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.logging_config import get_logger
@@ -157,8 +157,50 @@ class _RestartRecoveryOperations:
     deliver_target: _DeliverTarget
 
 
+@dataclass
+class _OwnerMembershipSnapshots:
+    """Share joined-room discovery across one exact owner generation."""
+
+    tasks: dict[tuple[str, int], asyncio.Task[list[str] | None]] = field(default_factory=dict)
+
+    async def joined_rooms(self, owner: RecoveryOwner) -> list[str] | None:
+        """Return one generation snapshot, creating it on first use."""
+        key = owner.user_id, id(owner.generation)
+        task = self.tasks.get(key)
+        if task is None:
+            for task_key in tuple(self.tasks):
+                if task_key[0] == owner.user_id:
+                    self.tasks.pop(task_key)
+            task = asyncio.create_task(
+                get_joined_rooms(owner.client),
+                name=f"restart_recovery_membership:{owner.user_id}",
+            )
+            self.tasks[key] = task
+        try:
+            return await task
+        except asyncio.CancelledError:
+            self._discard(key, task)
+            raise
+        except Exception:
+            self._discard(key, task)
+            raise
+
+    def invalidate(self, owner: RecoveryOwner) -> None:
+        """Discard a snapshot that did not contain one desired room."""
+        self.tasks.pop((owner.user_id, id(owner.generation)), None)
+
+    def _discard(
+        self,
+        key: tuple[str, int],
+        task: asyncio.Task[list[str] | None],
+    ) -> None:
+        if self.tasks.get(key) is task:
+            self.tasks.pop(key)
+
+
 def build_matrix_restart_recovery_operations(runtime_paths: RuntimePaths) -> _RestartRecoveryOperations:
     """Build exact-owner Matrix operations for restart recovery."""
+    membership_snapshots = _OwnerMembershipSnapshots()
 
     async def recover_room(
         owner: RecoveryOwner,
@@ -167,7 +209,7 @@ def build_matrix_restart_recovery_operations(runtime_paths: RuntimePaths) -> _Re
         config: Config,
     ) -> _RoomRecoveryResult:
         try:
-            joined_room_ids = await get_joined_rooms(owner.client)
+            joined_room_ids = await membership_snapshots.joined_rooms(owner)
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -178,6 +220,7 @@ def build_matrix_restart_recovery_operations(runtime_paths: RuntimePaths) -> _Re
             )
             return _RoomRecoveryResult(retry=True)
         if joined_room_ids is None or request.room_id not in joined_room_ids:
+            membership_snapshots.invalidate(owner)
             return _RoomRecoveryResult(retry=True)
 
         cleanup_result = await cleanup_stale_streaming_room(
@@ -231,7 +274,27 @@ def build_matrix_restart_recovery_operations(runtime_paths: RuntimePaths) -> _Re
             target_user_id=owner.user_id,
             sender_is_owner=router.user_id == owner.user_id,
         )
-        delivered = await send_message_result(router.client, target.room_id, content)
+        transaction_id = str(
+            uuid5(
+                NAMESPACE_URL,
+                "\x00".join(
+                    (
+                        "mindroom.restart_recovery.v1",
+                        owner.user_id,
+                        target.room_id,
+                        target.thread_id or "",
+                        target.target_event_id,
+                        str(target.timestamp_ms),
+                    ),
+                ),
+            ),
+        )
+        delivered = await send_message_result(
+            router.client,
+            target.room_id,
+            content,
+            transaction_id=transaction_id,
+        )
         if delivered is None:
             return False
         try:
@@ -297,6 +360,19 @@ class _TargetJob:
 
 
 type _RecoveryJob = _RoomJob | _TargetJob
+_MAX_CONCURRENT_ROOM_ATTEMPTS = 2
+
+
+@dataclass(frozen=True)
+class _RoomAttemptResult:
+    """External room I/O result awaiting serialized coordinator settlement."""
+
+    owner: RecoveryOwner | None
+    config: Config | None
+    recovery: _RoomRecoveryResult | None
+
+
+type _AttemptResult = _RoomAttemptResult | bool
 
 
 def _restart_recovery_retry_delay(attempt: int) -> float:
@@ -323,7 +399,7 @@ class RestartRecoveryCoordinator:
         self._target_jobs: dict[_TargetKey, _TargetJob] = {}
         self._latest_target_versions: dict[_TargetKey, tuple[int, str]] = {}
         self._settled_target_versions: dict[_TargetKey, tuple[int, str]] = {}
-        self._active_job: _RecoveryJob | None = None
+        self._active_attempts: dict[asyncio.Task[_AttemptResult], _RecoveryJob] = {}
         self._worker_task: asyncio.Task[None] | None = None
         self._wake = asyncio.Event()
         self._startup_cutoff_ms: int | None = None
@@ -341,6 +417,7 @@ class RestartRecoveryCoordinator:
 
     def owner_ready(self, owner_user_id: str) -> None:
         """Wake recovery for one current ready owner generation."""
+        self._settle_finished_attempts()
         owner = self._current_owners().get(owner_user_id)
         if owner is not None:
             self._enqueue_desired_rooms(owner)
@@ -470,73 +547,156 @@ class RestartRecoveryCoordinator:
     async def _run(self) -> None:
         try:
             while not self._paused and not self._stopped:
-                job = self._next_due_job()
-                if job is None:
-                    await self._wait_for_work()
-                    continue
-                now = asyncio.get_running_loop().time()
-                if job.due_at > now:
-                    await self._wait_for_work(delay=job.due_at - now)
-                    continue
-                self._claim(job)
-                retry = True
-                try:
-                    retry = await self._process(job)
-                except asyncio.CancelledError:
-                    raise
-                except Exception:
-                    logger.warning("Restart recovery attempt failed", exc_info=True)
-                else:
-                    if not retry and isinstance(job, _TargetJob):
-                        self._settled_target_versions[job.key] = job.version
-                finally:
-                    if retry:
-                        self._retry_or_restore(job, cancelled=self._paused or self._stopped)
-                    self._active_job = None
+                self._settle_finished_attempts()
+                self._start_due_attempts()
+                await self._wait_for_progress(delay=self._next_start_delay())
         finally:
-            active_job = self._active_job
-            if active_job is not None and not self._stopped:
-                self._restore(active_job)
-                self._active_job = None
+            await self._drain_active_attempts()
 
-    def _next_due_job(self) -> _RecoveryJob | None:
-        jobs: list[_RecoveryJob] = [*self._room_jobs.values(), *self._target_jobs.values()]
-        if not jobs:
+    def _next_room_job(self) -> _RoomJob | None:
+        if not self._room_jobs:
             return None
-        return min(
-            jobs,
-            key=lambda job: (
-                job.due_at,
-                0 if isinstance(job, _RoomJob) else 1,
-                job.key,
-            ),
-        )
+        return min(self._room_jobs.values(), key=lambda job: (job.due_at, job.key))
 
-    async def _wait_for_work(self, *, delay: float | None = None) -> None:
-        self._wake.clear()
-        if delay is None:
-            await self._wake.wait()
+    def _next_target_job(self) -> _TargetJob | None:
+        if not self._target_jobs:
+            return None
+        return min(self._target_jobs.values(), key=lambda job: (job.due_at, job.key))
+
+    def _start_due_attempts(self) -> None:
+        now = asyncio.get_running_loop().time()
+        active_room_count = sum(isinstance(job, _RoomJob) for job in self._active_attempts.values())
+        while active_room_count < _MAX_CONCURRENT_ROOM_ATTEMPTS:
+            job = self._next_room_job()
+            if job is None or job.due_at > now:
+                break
+            self._start_attempt(job)
+            active_room_count += 1
+
+        if any(isinstance(job, _TargetJob) for job in self._active_attempts.values()):
             return
-        with suppress(TimeoutError):
-            await asyncio.wait_for(self._wake.wait(), timeout=delay)
+        target_job = self._next_target_job()
+        if target_job is not None and target_job.due_at <= now:
+            self._start_attempt(target_job)
 
-    def _claim(self, job: _RecoveryJob) -> None:
+    def _start_attempt(self, job: _RecoveryJob) -> None:
         if isinstance(job, _RoomJob):
             self._room_jobs.pop(job.key, None)
         else:
             self._target_jobs.pop(job.key, None)
-        self._active_job = job
+        task = asyncio.create_task(
+            self._process(job),
+            name=f"restart_recovery_attempt:{job.key}",
+        )
+        self._active_attempts[task] = job
 
-    async def _process(self, job: _RecoveryJob) -> bool:
+    def _next_start_delay(self) -> float | None:
+        due_times: list[float] = []
+        active_room_count = sum(isinstance(job, _RoomJob) for job in self._active_attempts.values())
+        if active_room_count < _MAX_CONCURRENT_ROOM_ATTEMPTS:
+            room_job = self._next_room_job()
+            if room_job is not None:
+                due_times.append(room_job.due_at)
+        if not any(isinstance(job, _TargetJob) for job in self._active_attempts.values()):
+            target_job = self._next_target_job()
+            if target_job is not None:
+                due_times.append(target_job.due_at)
+        if not due_times:
+            return None
+        return max(0.0, min(due_times) - asyncio.get_running_loop().time())
+
+    async def _wait_for_progress(self, *, delay: float | None) -> None:
+        self._wake.clear()
+        active_tasks = tuple(self._active_attempts)
+        if any(task.done() for task in active_tasks):
+            return
+        if not active_tasks and delay is None:
+            await self._wake.wait()
+            return
+        wake_task = asyncio.create_task(
+            self._wake.wait(),
+            name="restart_recovery_wake",
+        )
+        try:
+            await asyncio.wait(
+                (wake_task, *active_tasks),
+                timeout=delay,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+        finally:
+            wake_task.cancel()
+            await asyncio.gather(wake_task, return_exceptions=True)
+
+    def _settle_finished_attempts(self) -> None:
+        for task, job in tuple(self._active_attempts.items()):
+            if not task.done():
+                continue
+            self._active_attempts.pop(task)
+            self._settle_attempt(job, task)
+
+    def _settle_attempt(
+        self,
+        job: _RecoveryJob,
+        task: asyncio.Task[_AttemptResult],
+    ) -> None:
+        retry = True
+        try:
+            result = task.result()
+        except asyncio.CancelledError:
+            self._retry_or_restore(job, cancelled=True)
+            return
+        except Exception:
+            logger.warning("Restart recovery attempt failed", exc_info=True)
+        else:
+            if isinstance(job, _RoomJob):
+                assert isinstance(result, _RoomAttemptResult)
+                retry = self._settle_room_result(result)
+            else:
+                assert isinstance(result, bool)
+                retry = result
+                if not retry:
+                    self._settled_target_versions[job.key] = job.version
+        if retry:
+            self._retry_or_restore(job, cancelled=self._paused or self._stopped)
+
+    def _settle_room_result(self, attempt: _RoomAttemptResult) -> bool:
+        owner = attempt.owner
+        config = attempt.config
+        result = attempt.recovery
+        if owner is None or config is None or result is None or not self._owner_is_current(owner):
+            return True
+        if config.defaults.auto_resume_after_restart:
+            for interrupted_thread in result.interrupted_threads:
+                self._enqueue_target(owner.user_id, interrupted_thread)
+        return result.retry
+
+    async def _drain_active_attempts(self) -> None:
+        tasks = tuple(self._active_attempts)
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            drain = asyncio.gather(*tasks, return_exceptions=True)
+            while not drain.done():
+                try:
+                    await asyncio.shield(drain)
+                except asyncio.CancelledError:
+                    continue
+        self._settle_finished_attempts()
+
+    async def _process(self, job: _RecoveryJob) -> _AttemptResult:
         if isinstance(job, _RoomJob):
             return await self._process_room(job)
         return await self._process_target(job)
 
-    async def _process_room(self, job: _RoomJob) -> bool:
+    async def _process_room(self, job: _RoomJob) -> _RoomAttemptResult:
         config = self._current_config()
         owner = self._current_owners().get(job.owner_user_id)
         if config is None or owner is None or not owner.first_sync_complete:
-            return True
+            return _RoomAttemptResult(
+                owner=owner,
+                config=config,
+                recovery=None,
+            )
         owner_user_ids = frozenset(self._current_owners())
         result = await self._operations.recover_room(
             owner,
@@ -544,12 +704,11 @@ class RestartRecoveryCoordinator:
             owner_user_ids,
             config,
         )
-        if not self._owner_is_current(owner):
-            return True
-        if config.defaults.auto_resume_after_restart:
-            for interrupted_thread in result.interrupted_threads:
-                self._enqueue_target(owner.user_id, interrupted_thread)
-        return result.retry
+        return _RoomAttemptResult(
+            owner=owner,
+            config=config,
+            recovery=result,
+        )
 
     async def _process_target(self, job: _TargetJob) -> bool:
         config = self._current_config()

@@ -158,6 +158,7 @@ class _ScannedRoomMessageStates:
 
     message_states: dict[str, _MessageState]
     auto_resume_target_event_ids: set[str]
+    retry_required: bool = False
 
 
 @dataclass(frozen=True)
@@ -341,10 +342,14 @@ async def cleanup_stale_streaming_room(
     )
     message_states = scanned_state.message_states
     if not message_states:
-        return _StaleStreamCleanupResult(cleaned_count=0, interrupted_threads=())
+        return _StaleStreamCleanupResult(
+            cleaned_count=0,
+            interrupted_threads=(),
+            retry_required=scanned_state.retry_required,
+        )
 
     cleaned_count = 0
-    retry_required = False
+    retry_required = scanned_state.retry_required
     prior_edit_succeeded_by_bot: set[str] = set()
     interrupted_threads: list[InterruptedThread] = []
     candidate_items = sorted(
@@ -635,7 +640,7 @@ async def _scan_room_message_states(
     scan_policy: _CleanupScanPolicy,
 ) -> _ScannedRoomMessageStates:
     """Scan room history and return latest state by original event ID."""
-    message_states, message_events = await _collect_room_history_events(
+    message_states, message_events, retry_required = await _collect_room_history_events(
         client,
         room_id=room_id,
         cleanup_bot_user_ids=cleanup_bot_user_ids,
@@ -681,6 +686,7 @@ async def _scan_room_message_states(
     return _ScannedRoomMessageStates(
         message_states=message_states,
         auto_resume_target_event_ids=auto_resume_target_event_ids,
+        retry_required=retry_required,
     )
 
 
@@ -707,7 +713,7 @@ async def _collect_room_history_events(
     cleanup_bot_user_ids: set[str],
     now_ms: int,
     scan_policy: _CleanupScanPolicy,
-) -> tuple[dict[str, _MessageState], list[nio.RoomMessageText | nio.RoomMessageNotice]]:
+) -> tuple[dict[str, _MessageState], list[nio.RoomMessageText | nio.RoomMessageNotice], bool]:
     """Return visible room-message events plus tracked stop reactions."""
     message_states: dict[str, _MessageState] = {}
     message_events: list[nio.RoomMessageText | nio.RoomMessageNotice] = []
@@ -727,7 +733,7 @@ async def _collect_room_history_events(
                 room_id=room_id,
                 error=str(response),
             )
-            return {}, []
+            return message_states, message_events, True
 
         if not response.chunk:
             break
@@ -763,7 +769,7 @@ async def _collect_room_history_events(
             break
         from_token = response.end
 
-    return message_states, message_events
+    return message_states, message_events, False
 
 
 def _merge_bot_resolved_message_states(

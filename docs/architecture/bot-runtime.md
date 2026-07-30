@@ -151,6 +151,20 @@ Before a response starts, `TurnStore` removes the matching run and its causal su
 Redacted replay may remain in local session storage until that conversation's next response, but no model receives it.
 Semantic memory backends such as Mem0 have a separate lifecycle and are not altered by persisted replay cleanup.
 
+## Restart Recovery Lifecycle
+
+`RestartRecoveryCoordinator` is the single owner of startup cleanup, replacement-room handoffs, interrupted-target freshness checks, semantic retry state, and resume-delivery settlement.
+`InterruptedTurnRooms` records durable room handoff facts, but it does not schedule Matrix recovery or own retry timing.
+The coordinator retains room jobs by exact owner, room, startup scope, and terminal-only scope, while target jobs are newest-wins by exact owner, room, and thread.
+External Matrix work runs outside serialized bookkeeping with at most two concurrent room attempts and one target attempt.
+Completed attempts return to the coordinator worker for atomic generation fencing, target publication, retry restoration, and target watermark settlement.
+Concurrent room attempts share one joined-room snapshot for the exact owner generation.
+A missing desired room invalidates that snapshot so a later retry can observe a newly joined room.
+Room history failures and failed cleanup edits return typed retry outcomes, so an empty or partial scan cannot silently settle the room job.
+Each resume relay uses a deterministic Matrix transaction ID derived from the exact owner and interrupted target, so an accepted send with a lost response is safe to retry.
+The orchestrator pauses recovery before configuration mutation, and pause cancellation drains active attempt cleanup before any leased work is settled or restored.
+Resume keeps retained semantic work but resolves it only against current ready owner generations.
+
 ## Tool Dispatch Contracts
 
 There are now four active runtime contracts for tool and scheduling dispatch.

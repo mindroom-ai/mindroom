@@ -304,6 +304,176 @@ async def test_matrix_target_delivery_uses_router_and_mentions_exact_owner(tmp_p
 
 
 @pytest.mark.asyncio
+async def test_matrix_target_delivery_reuses_stable_transaction_id_after_lost_response(
+    tmp_path: Path,
+) -> None:
+    """An accepted send with a lost response must retry with the same Matrix transaction ID."""
+    owner = _owner()
+    router = _owner(
+        entity_name=ROUTER_AGENT_NAME,
+        user_id="@router:example.org",
+        rooms=frozenset(),
+    )
+    target = _target("$target", timestamp_ms=10)
+    operations = build_matrix_restart_recovery_operations(test_runtime_paths(tmp_path))
+    successful_delivery = delivered_matrix_side_effect("$same-event")
+    attempt = 0
+
+    async def deliver_once_lost(*args: object, **kwargs: object) -> object | None:
+        nonlocal attempt
+        attempt += 1
+        if attempt == 1:
+            return None
+        return await successful_delivery(*args, **kwargs)
+
+    with patch(
+        "mindroom.restart_recovery.send_message_result",
+        new=AsyncMock(side_effect=deliver_once_lost),
+    ) as send_message:
+        first = await operations.deliver_target(router, owner, target, _config(tmp_path))
+        second = await operations.deliver_target(router, owner, target, _config(tmp_path))
+
+    assert first is False
+    assert second is True
+    transaction_ids = [call.kwargs["transaction_id"] for call in send_message.await_args_list]
+    assert transaction_ids[0] == transaction_ids[1]
+
+
+@pytest.mark.asyncio
+async def test_matrix_room_recovery_shares_membership_discovery_for_owner_generation(
+    tmp_path: Path,
+) -> None:
+    """Concurrent rooms from one owner generation must share one membership read."""
+    room_ids = frozenset({"!first:example.org", "!second:example.org"})
+    owner = _owner(rooms=room_ids)
+    config = _config(tmp_path)
+    operations = build_matrix_restart_recovery_operations(test_runtime_paths(tmp_path))
+    requests = [
+        RoomRecoveryRequest(
+            room_id=room_id,
+            startup_cutoff_ms=123,
+            terminal_interrupted_only=False,
+        )
+        for room_id in room_ids
+    ]
+    membership_started = asyncio.Event()
+    release_membership = asyncio.Event()
+
+    async def joined_rooms(_client: nio.AsyncClient) -> list[str]:
+        membership_started.set()
+        await release_membership.wait()
+        return list(room_ids)
+
+    with (
+        patch(
+            "mindroom.restart_recovery.get_joined_rooms",
+            new=AsyncMock(side_effect=joined_rooms),
+        ) as get_rooms,
+        patch(
+            "mindroom.restart_recovery.cleanup_stale_streaming_room",
+            new=AsyncMock(
+                return_value=stale_stream_cleanup_module._StaleStreamCleanupResult(
+                    cleaned_count=0,
+                    interrupted_threads=(),
+                ),
+            ),
+        ),
+    ):
+        attempts = [
+            asyncio.create_task(
+                operations.recover_room(
+                    owner,
+                    request,
+                    frozenset({owner.user_id}),
+                    config,
+                ),
+            )
+            for request in requests
+        ]
+        await asyncio.wait_for(membership_started.wait(), timeout=1.0)
+        await asyncio.sleep(0)
+        release_membership.set()
+        results = await asyncio.gather(*attempts)
+        cached_result = await operations.recover_room(
+            owner,
+            requests[0],
+            frozenset({owner.user_id}),
+            config,
+        )
+        same_generation_calls = get_rooms.await_count
+        replacement_owner = _owner(
+            generation=object(),
+            rooms=room_ids,
+        )
+        replacement_result = await operations.recover_room(
+            replacement_owner,
+            requests[0],
+            frozenset({replacement_owner.user_id}),
+            config,
+        )
+
+    assert results == [RoomRecoveryResult(), RoomRecoveryResult()]
+    assert cached_result == RoomRecoveryResult()
+    assert replacement_result == RoomRecoveryResult()
+    assert same_generation_calls == 1
+    assert get_rooms.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_stalled_room_does_not_block_other_rooms_and_concurrency_is_bounded(
+    tmp_path: Path,
+) -> None:
+    """One stalled room must leave one bounded slot available for healthy rooms."""
+    blocked_room = "!a-blocked:example.org"
+    healthy_rooms = {"!b-healthy:example.org", "!c-healthy:example.org"}
+    owner = _owner(rooms=frozenset({blocked_room, *healthy_rooms}))
+    owners = {owner.user_id: owner}
+    blocked_started = asyncio.Event()
+    release_blocked = asyncio.Event()
+    healthy_finished = asyncio.Event()
+    finished_rooms: set[str] = set()
+    active = 0
+    max_active = 0
+
+    async def recover_room(
+        _owner: RecoveryOwner,
+        request: RoomRecoveryRequest,
+        _owner_user_ids: frozenset[str],
+        _config: Config,
+    ) -> RoomRecoveryResult:
+        nonlocal active, max_active
+        active += 1
+        max_active = max(max_active, active)
+        try:
+            if request.room_id == blocked_room:
+                blocked_started.set()
+                await release_blocked.wait()
+            else:
+                finished_rooms.add(request.room_id)
+                if finished_rooms == healthy_rooms:
+                    healthy_finished.set()
+            return RoomRecoveryResult()
+        finally:
+            active -= 1
+
+    coordinator = RestartRecoveryCoordinator(
+        current_config=lambda: _config(tmp_path),
+        current_owners=lambda: owners,
+        operations=_operations(recover_room=recover_room),
+    )
+    coordinator.start(startup_cutoff_ms=123)
+    await asyncio.wait_for(blocked_started.wait(), timeout=1.0)
+    try:
+        await asyncio.wait_for(healthy_finished.wait(), timeout=1.0)
+    finally:
+        release_blocked.set()
+        await coordinator.stop()
+
+    assert finished_rooms == healthy_rooms
+    assert 1 <= max_active <= 2
+
+
+@pytest.mark.asyncio
 async def test_room_failure_retries_without_external_notification(tmp_path: Path) -> None:
     """A transient room failure must retry even when no later ready event fires."""
     owner = _owner()
@@ -713,6 +883,10 @@ async def test_unrecoverable_target_is_settled_without_future_retry(tmp_path: Pa
     try:
         await asyncio.wait_for(freshness_checked.wait(), timeout=1.0)
         key = (owner.user_id, target.room_id, target.thread_id)
+        active_attempts = tuple(coordinator._active_attempts)
+        if active_attempts:
+            await asyncio.gather(*active_attempts)
+        coordinator._settle_finished_attempts()
         assert key in coordinator._settled_target_versions
         coordinator.enqueue_replacement_rooms(owner.user_id, {target.room_id})
         await asyncio.wait_for(second_scan.wait(), timeout=1.0)

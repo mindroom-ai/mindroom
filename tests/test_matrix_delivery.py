@@ -40,6 +40,21 @@ async def test_send_message_result_ignores_unverified_devices_in_encrypted_room(
     assert client.room_send.await_args.kwargs["ignore_unverified_devices"] is True
 
 
+@pytest.mark.asyncio
+async def test_send_message_result_forwards_explicit_transaction_id() -> None:
+    """A caller-owned transaction ID must reach nio unchanged."""
+    client = _mock_client()
+
+    await send_message_result(
+        client,
+        "!room:localhost",
+        {"body": "hello", "msgtype": "m.text"},
+        transaction_id="stable-recovery-transaction",
+    )
+
+    assert client.room_send.await_args.kwargs["tx_id"] == "stable-recovery-transaction"
+
+
 def test_edit_fallback_preserves_replacement_message_type() -> None:
     """A notice replacement must also be a notice to suppress edit mention pushes."""
     content = build_edit_event_content(

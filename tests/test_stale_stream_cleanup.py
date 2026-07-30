@@ -2435,3 +2435,28 @@ def test_bot_module_does_not_import_stale_stream_cleanup() -> None:
     assert "recover_stale_streaming_messages" not in bot_source, (
         "bot.py must not import or call recover_stale_streaming_messages; the orchestrator owns restart recovery"
     )
+
+
+@pytest.mark.asyncio
+async def test_room_messages_error_requests_typed_room_retry(tmp_path: Path) -> None:
+    """A rejected room history read must retain the semantic recovery job."""
+    config = _make_config(tmp_path)
+    client = make_matrix_client_mock(user_id=BOT_USER_ID)
+    client.room_messages.return_value = nio.RoomMessagesError.from_dict(
+        {"errcode": "M_FORBIDDEN", "error": "History unavailable"},
+        ROOM_ID,
+    )
+
+    result = await cleanup_stale_streaming_room(
+        client,
+        room_id=ROOM_ID,
+        actors={BOT_USER_ID: StaleStreamCleanupActor(client, MagicMock())},
+        bot_user_ids={BOT_USER_ID},
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+        startup_cutoff_ms=NOW_MS,
+    )
+
+    assert result.cleaned_count == 0
+    assert result.interrupted_threads == ()
+    assert result.retry_required is True
