@@ -195,7 +195,7 @@ def test_terminal_settlement_compacts_payload_before_invalid_replay_check(tmp_pa
         ).fetchone()
         schema_version = connection.execute("PRAGMA user_version").fetchone()[0]
     assert row == ("", "")
-    assert schema_version == 2
+    assert schema_version == 3
     invalid_replay = replace(
         obligation,
         room_id="!different:example.org",
@@ -781,6 +781,25 @@ async def test_task_wrapper_persists_before_background_execution(tmp_path: Path)
     release.set()
     await wait_for_background_tasks(timeout=1.0, owner=owner)
     assert not store.has_pending("$durable", DispatchCallbackKind.MESSAGE)
+
+
+@pytest.mark.asyncio
+async def test_recovered_rooms_require_a_durable_acceptance_receipt(tmp_path: Path) -> None:
+    """Recovery certification may use only a receipt written by the durable runner."""
+
+    async def callback(_room: nio.MatrixRoom, _event: nio.Event) -> DispatchCallbackResult:
+        return DispatchCallbackResult.SUCCEEDED
+
+    store = _store(tmp_path)
+    runner = _runner(store, callback)
+
+    accepted_room_ids = await runner.accept_recovered_rooms(
+        frozenset({_ROOM_ID}),
+        sync_token="s_recovered",  # noqa: S106
+    )
+
+    assert accepted_room_ids == frozenset({_ROOM_ID})
+    assert store.has_recovery_acceptance(_ROOM_ID, sync_token="s_recovered")  # noqa: S106
 
 
 @pytest.mark.asyncio

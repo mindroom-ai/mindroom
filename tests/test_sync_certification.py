@@ -136,6 +136,8 @@ def test_sync_cache_write_diagnostics_explains_uncertainty() -> None:
         "cache_limited_room_count": 1,
         "cache_recovered_room_count": 0,
         "cache_unrecovered_room_count": 0,
+        "cache_accepted_recovered_room_count": 0,
+        "cache_pending_recovery_room_count": 0,
         "cache_unclassified_limited_room_count": 1,
         "cache_error_count": 1,
         "cache_runtime_available": False,

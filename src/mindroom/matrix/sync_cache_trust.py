@@ -36,6 +36,7 @@ class SyncCacheTrust:
     checkpoint: SyncCheckpoint | None = None
     _awaiting_initial_window: bool = field(default=False, init=False, repr=False)
     _cache_scope_epoch: int = field(default=0, init=False, repr=False)
+    _pending_recovery_room_ids: frozenset[str] = field(default=frozenset(), init=False, repr=False)
 
     async def prepare_startup(self) -> str | None:
         """Initialize cache trust, then restore a valid checkpoint or start cold."""
@@ -56,7 +57,17 @@ class SyncCacheTrust:
         self.state = SyncTrustState.PENDING if loaded is not None else SyncTrustState.COLD
         self.checkpoint = None
         self._awaiting_initial_window = loaded is None
+        self._pending_recovery_room_ids = frozenset()
         return loaded.token if loaded is not None else None
+
+    def begin_recovery_obligation(self, room_ids: frozenset[str]) -> None:
+        """Fence continuity before waiting for recovered callbacks to be accepted."""
+        if not room_ids:
+            return
+        self._pending_recovery_room_ids |= room_ids
+        self.state = SyncTrustState.UNCERTAIN
+        self.checkpoint = None
+        self._clear_saved()
 
     def _load_valid_checkpoint(self) -> SyncCheckpoint | None:
         """Load a checkpoint only when the current cache generation proves it."""
@@ -133,13 +144,14 @@ class SyncCacheTrust:
         first_sync: bool,
     ) -> SyncCertificationDecision:
         """Plan certification without advancing runtime or durable continuity."""
+        effective_cache_result = self._effective_cache_result(cache_result)
         decision = certify_sync_response(
             self.state,
             next_batch=next_batch,
-            cache_result=cache_result,
+            cache_result=effective_cache_result,
             first_sync=first_sync,
         )
-        if cache_result.has_recovery_obligation and not self._awaiting_initial_window:
+        if effective_cache_result.has_recovery_obligation and not self._awaiting_initial_window:
             decision = replace(decision, reset_client_token=True)
         return replace(decision, cache_scope_epoch=self._cache_scope_epoch)
 
@@ -158,7 +170,11 @@ class SyncCacheTrust:
                 reason="cache_scope_invalidated",
                 cache_scope_epoch=self._cache_scope_epoch,
             )
-        self._apply_decision(decision, cache_result=cache_result)
+        effective_cache_result = self._effective_cache_result(cache_result)
+        self._pending_recovery_room_ids = (
+            effective_cache_result.pending_recovery_room_ids | effective_cache_result.unaccepted_recovered_room_ids
+        )
+        self._apply_decision(decision, cache_result=effective_cache_result)
         # Re-arm from applied trust so a replaced stale-scope decision cannot
         # license another since-less replay.
         if decision.reset_client_token:
@@ -166,6 +182,14 @@ class SyncCacheTrust:
         elif self.state is SyncTrustState.CERTIFIED:
             self._awaiting_initial_window = False
         return decision
+
+    def _effective_cache_result(self, cache_result: SyncCacheWriteResult) -> SyncCacheWriteResult:
+        """Attach unresolved recovery from earlier responses to this decision."""
+        pending_room_ids = self._pending_recovery_room_ids - cache_result.accepted_recovered_room_ids
+        return replace(
+            cache_result,
+            pending_recovery_room_ids=frozenset(pending_room_ids),
+        )
 
     def reject_unknown_pos(self) -> SyncCertificationDecision:
         """Invalidate a checkpoint rejected by the homeserver."""

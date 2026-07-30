@@ -22,7 +22,7 @@ from mindroom.matrix.media import MATRIX_MEDIA_EVENT_TYPES, MatrixMediaEvent, pa
 logger = get_logger(__name__)
 
 _DATABASE_NAME = "dispatch_obligations.sqlite3"
-_SCHEMA_VERSION = 2
+_SCHEMA_VERSION = 3
 _PENDING_STATE = "pending"
 _TOOL_APPROVAL_RESPONSE_EVENT_TYPE = "io.mindroom.tool_approval_response"
 
@@ -133,7 +133,7 @@ class DispatchObligationStore:
     @staticmethod
     def _initialize_schema(connection: sqlite3.Connection) -> None:
         current_version = connection.execute("PRAGMA user_version").fetchone()[0]
-        if current_version not in {0, 1, _SCHEMA_VERSION}:
+        if current_version not in {0, 1, 2, _SCHEMA_VERSION}:
             msg = f"Unsupported dispatch obligation schema version {current_version}"
             raise RuntimeError(msg)
         connection.execute(
@@ -168,8 +168,60 @@ class DispatchObligationStore:
                 """,
                 (_PENDING_STATE,),
             )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS recovery_dispatch_acceptances (
+                principal_id TEXT NOT NULL,
+                entity_name TEXT NOT NULL,
+                room_id TEXT NOT NULL,
+                sync_token TEXT NOT NULL,
+                accepted_at_ns INTEGER NOT NULL,
+                PRIMARY KEY (principal_id, entity_name, room_id, sync_token)
+            )
+            """,
+        )
         if current_version < _SCHEMA_VERSION:
             connection.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
+
+    def record_recovery_acceptance(self, room_ids: frozenset[str], *, sync_token: str) -> None:
+        """Durably record that nio dispatched recovered-room callbacks to MindRoom."""
+        if not room_ids:
+            return
+        if not sync_token:
+            msg = "Recovered dispatch acceptance requires a sync token"
+            raise ValueError(msg)
+        if any(not room_id for room_id in room_ids):
+            msg = "Recovered dispatch acceptance requires room IDs"
+            raise ValueError(msg)
+        accepted_at_ns = time.time_ns()
+        with self._lock, self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            connection.executemany(
+                """
+                INSERT INTO recovery_dispatch_acceptances (
+                    principal_id, entity_name, room_id, sync_token, accepted_at_ns
+                ) VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT (principal_id, entity_name, room_id, sync_token)
+                DO UPDATE SET accepted_at_ns = excluded.accepted_at_ns
+                """,
+                ((self.principal_id, self.entity_name, room_id, sync_token, accepted_at_ns) for room_id in room_ids),
+            )
+
+    def has_recovery_acceptance(self, room_id: str, *, sync_token: str) -> bool:
+        """Return whether this exact recovered room received a durable receipt."""
+        with self._lock, self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT 1
+                FROM recovery_dispatch_acceptances
+                WHERE principal_id = ?
+                  AND entity_name = ?
+                  AND room_id = ?
+                  AND sync_token = ?
+                """,
+                (self.principal_id, self.entity_name, room_id, sync_token),
+            ).fetchone()
+        return row is not None
 
     @staticmethod
     def _event_source_json(obligation: _DispatchObligation) -> str:
@@ -733,6 +785,44 @@ class DispatchObligationRunner:
                 self.on_persist_failure()
             raise
         return None if create_result is _DispatchCreateResult.ALREADY_TERMINAL else obligation
+
+    async def accept_recovered_rooms(
+        self,
+        room_ids: frozenset[str],
+        *,
+        sync_token: str,
+    ) -> frozenset[str]:
+        """Durably accept nio's recovered rooms after all source callbacks returned."""
+        if not room_ids:
+            return frozenset()
+        try:
+            await asyncio.to_thread(
+                self.store.record_recovery_acceptance,
+                room_ids,
+                sync_token=sync_token,
+            )
+            await self._verify_recovered_room_acceptance(room_ids, sync_token=sync_token)
+        except Exception:
+            if self.on_persist_failure is not None:
+                self.on_persist_failure()
+            raise
+        return room_ids
+
+    async def _verify_recovered_room_acceptance(
+        self,
+        room_ids: frozenset[str],
+        *,
+        sync_token: str,
+    ) -> None:
+        """Read back each receipt before allowing recovery certification."""
+        for room_id in room_ids:
+            if not await asyncio.to_thread(
+                self.store.has_recovery_acceptance,
+                room_id,
+                sync_token=sync_token,
+            ):
+                msg = f"Missing recovered dispatch acceptance for {room_id!r}"
+                raise RuntimeError(msg)
 
     async def run_persisted(
         self,

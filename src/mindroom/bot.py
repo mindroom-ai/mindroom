@@ -1295,6 +1295,15 @@ class AgentBot:
                         first_sync=first_sync_response,
                     )
                     raise
+                self._sync_cache_trust.begin_recovery_obligation(cache_result.recovered_room_ids)
+                accepted_recovered_room_ids = await self._dispatch_obligation_runner.accept_recovered_rooms(
+                    cache_result.recovered_room_ids,
+                    sync_token=_response.next_batch,
+                )
+                cache_result = replace(
+                    cache_result,
+                    accepted_recovered_room_ids=accepted_recovered_room_ids,
+                )
                 decision = self._plan_sync_response(
                     next_batch=_response.next_batch,
                     cache_result=cache_result,

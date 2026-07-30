@@ -1055,6 +1055,7 @@ def test_cache_scope_cleanup_between_plan_and_apply_forces_tokenless_recovery(tm
     assert load_sync_checkpoint(tmp_path, bot.agent_name) is None
 
 
+@pytest.mark.asyncio
 async def test_sync_response_side_effect_failure_preserves_raw_cache_checkpoint(tmp_path: Path) -> None:
     """A non-cache side effect failure must not poison independently durable raw continuity."""
     bot = _agent_bot(tmp_path)
