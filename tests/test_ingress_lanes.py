@@ -1106,7 +1106,11 @@ async def test_response_cancellation_drains_follow_up_queue(tmp_path: Path) -> N
             queued_signal.finish_response_turn()
             lifecycle_lock.release()
 
-    response_task = runner.track_inbox_response(blocked_response(), name="test_blocked_response")
+    response_task = runner.track_inbox_response(
+        blocked_response(),
+        name="test_blocked_response",
+        recovery_proof_ready=lambda: False,
+    )
     await asyncio.wait_for(response_running.wait(), timeout=1.0)
     with patch.object(bot._turn_controller, "handle_coalesced_batch", new=AsyncMock(side_effect=record_dispatch)):
         for event_id, sender in (("$f1", "@alice:localhost"), ("$f2", "@bob:localhost")):
@@ -1269,7 +1273,11 @@ async def test_bounded_inbox_drain_cancels_stuck_response(tmp_path: Path) -> Non
         finally:
             cleanup_count += 1
 
-    task = runner.track_inbox_response(stuck_response(), name="test_stuck_response")
+    task = runner.track_inbox_response(
+        stuck_response(),
+        name="test_stuck_response",
+        recovery_proof_ready=lambda: False,
+    )
     await asyncio.wait_for(started.wait(), timeout=1.0)
 
     assert await runner.drain_inbox_responses(cancel_after_seconds=0.05) is False
@@ -1296,7 +1304,11 @@ async def test_bounded_inbox_drain_preserves_cancel_message(tmp_path: Path) -> N
             cancelled_args.append(exc.args)
             raise
 
-    task = runner.track_inbox_response(stuck_response(), name="test_sync_restart_cancelled_response")
+    task = runner.track_inbox_response(
+        stuck_response(),
+        name="test_sync_restart_cancelled_response",
+        recovery_proof_ready=lambda: False,
+    )
     await asyncio.wait_for(started.wait(), timeout=1.0)
 
     try:
@@ -1326,7 +1338,11 @@ async def test_failed_inbox_response_is_contained_and_unregistered(tmp_path: Pat
         msg = "response failed"
         raise RuntimeError(msg)
 
-    task = runner.track_inbox_response(failing_response(), name="test_failing_response")
+    task = runner.track_inbox_response(
+        failing_response(),
+        name="test_failing_response",
+        recovery_proof_ready=lambda: False,
+    )
     await asyncio.gather(task, return_exceptions=True)
     await asyncio.sleep(0)
 

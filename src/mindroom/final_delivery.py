@@ -20,6 +20,7 @@ class StreamTransportOutcome:  # noqa: D101
     terminal_status: _TerminalStatus
     rendered_body: str | None
     visible_body_state: VisibleBodyState
+    terminal_update_committed: bool = False
     canonical_final_body_candidate: str | None = None
     failure_reason: str | None = None
     interactive_metadata: InteractiveMetadata | None = None
@@ -44,6 +45,7 @@ class FinalDeliveryOutcome:  # noqa: D101
     is_visible_response: bool = False
     final_visible_body: str | None = None
     delivery_kind: _VisibleDeliveryKind | None = None
+    cancel_source: Literal["user_stop", "sync_restart", "interrupted"] | None = None
     failure_reason: str | None = None
     suppressed: bool = False
     tool_trace: tuple[ToolTraceEntry, ...] = ()

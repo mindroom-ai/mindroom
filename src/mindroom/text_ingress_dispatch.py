@@ -460,6 +460,10 @@ async def _apply_turn_plan(
             ),
         ),
         name=f"inbox_response:{prepared.event.event_id}",
+        recovery_proof_ready=lambda: (
+            prepared.dispatch.target.resolved_thread_id is not None
+            and controller.deps.interrupted_turn_rooms.contains(prepared.event.event_id)
+        ),
     )
     # Ownership moves synchronously after task creation. If this dispatch task
     # is cancelled while waiting for the lifecycle lock, its finally block must

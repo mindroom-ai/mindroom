@@ -3014,6 +3014,7 @@ async def test_replaced_runtime_refuses_deferred_response_without_matrix_io(
             ),
         ),
         name="test_reload_admission_race",
+        recovery_proof_ready=lambda: False,
     )
     try:
         await asyncio.sleep(0)

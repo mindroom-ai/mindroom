@@ -1406,6 +1406,11 @@ class TurnController:
             ),
         )
 
+        record_interrupted_turn, record_deferred_outcome = self._build_response_settlement_callbacks(
+            room,
+            source_event_id=source_event_id,
+            handled_turn=selection_handled_turn,
+        )
         response_event_id = await self.deps.response_runner.generate_response(
             ResponseRequest(
                 prompt=selection_payload.prompt,
@@ -1421,6 +1426,8 @@ class TurnController:
                     target=response_target,
                     source_event_ids=selection_handled_turn.indexed_event_ids,
                 ),
+                on_interrupted_response_recoverable=record_interrupted_turn,
+                on_deferred_outcome_handled=record_deferred_outcome,
             ),
         )
         if response_event_id is not None:
@@ -1656,14 +1663,14 @@ class TurnController:
     def _build_response_settlement_callbacks(
         self,
         room: nio.MatrixRoom,
-        event: DispatchEvent,
         *,
+        source_event_id: str,
         handled_turn: TurnRecord,
     ) -> tuple[Callable[[], None], Callable[[str], None]]:
         """Build callbacks for interrupted-turn recording and deferred handled recording."""
 
         def record_interrupted_turn() -> None:
-            self.deps.interrupted_turn_rooms.register(event.event_id, room_id=room.room_id)
+            self.deps.interrupted_turn_rooms.register(source_event_id, room_id=room.room_id)
 
         def record_deferred_outcome(response_event_id: str) -> None:
             self._mark_source_events_responded(replace(handled_turn, response_event_id=response_event_id))
@@ -1763,7 +1770,7 @@ class TurnController:
 
             record_interrupted_turn, record_deferred_outcome = self._build_response_settlement_callbacks(
                 room,
-                event,
+                source_event_id=event.event_id,
                 handled_turn=handled_turn,
             )
             try:
@@ -1790,7 +1797,7 @@ class TurnController:
                                 target=dispatch.target,
                                 source_event_ids=handled_turn.indexed_event_ids,
                             ),
-                            on_sync_restart_cancelled=record_interrupted_turn,
+                            on_interrupted_response_recoverable=record_interrupted_turn,
                             on_deferred_outcome_handled=record_deferred_outcome,
                         ),
                         team_agents=action.form_team.eligible_members,
@@ -1817,7 +1824,7 @@ class TurnController:
                                 target=dispatch.target,
                                 source_event_ids=handled_turn.indexed_event_ids,
                             ),
-                            on_sync_restart_cancelled=record_interrupted_turn,
+                            on_interrupted_response_recoverable=record_interrupted_turn,
                             on_deferred_outcome_handled=record_deferred_outcome,
                         ),
                     )

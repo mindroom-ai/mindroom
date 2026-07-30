@@ -1,12 +1,12 @@
-"""Rooms whose turns were interrupted by a sync-restart shutdown.
+"""Track exact sources whose responses reached visible terminal interruption.
 
-Only a bot being replaced cancels responses with sync-restart provenance: an
-automatic receive-loop restart leaves live responses with their original owner.
-The interrupted response's placeholder becomes a terminal "[Response interrupted
-by service restart]" note, so the turn controller records its room here and the
-orchestrator hands those rooms to the replacement bot, whose stale-stream
-recovery re-drives the interrupted turns. Each source event is recorded once, so
-one interrupted turn cannot claim two recovery attempts.
+A registered source reached a visible terminal Matrix interruption note: the
+service-restart note for replacement or the generic note for orderly shutdown.
+A later restart scan can find either note without replaying the handled source.
+Replacement recovery can use the registered rooms directly, while orderly
+restart recovery discovers the note through that scan. Whether a discovered
+interruption resumes remains controlled by the runtime's auto-resume policy.
+Each exact source event is recorded once.
 """
 
 from __future__ import annotations
@@ -85,19 +85,23 @@ def interrupted_source_needs_retry(
 
 @dataclass
 class InterruptedTurnRooms:
-    """Hold the rooms of turns interrupted by a sync-restart shutdown."""
+    """Track rooms containing exact-source terminal interruption proofs."""
 
     _pending: dict[str, str] = field(default_factory=dict)
 
     @property
     def pending_room_ids(self) -> frozenset[str]:
-        """Return rooms whose interrupted turns still await replacement recovery."""
+        """Return rooms available to replacement recovery."""
         return frozenset(self._pending.values())
 
+    def contains(self, key: str) -> bool:
+        """Return whether one exact source reached a visible terminal interruption."""
+        return key in self._pending
+
     def register(self, key: str, *, room_id: str) -> bool:
-        """Record one interrupted source event; refuse anything already seen."""
+        """Record one exact source's terminal interruption proof once."""
         if key in self._pending:
             return False
         self._pending[key] = room_id
-        logger.info("sync_restart_interrupted_turn_recorded", source_event_id=key, pending_count=len(self._pending))
+        logger.info("interrupted_turn_recovery_recorded", source_event_id=key, pending_count=len(self._pending))
         return True

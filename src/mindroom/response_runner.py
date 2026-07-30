@@ -57,7 +57,9 @@ from mindroom.response_terminal import (
 )
 from mindroom.runtime_shutdown import GENERIC_SHUTDOWN, RuntimeShutdownIntent
 from mindroom.streaming import (
+    INTERRUPTED_RESPONSE_NOTE,
     PROGRESS_PLACEHOLDER,
+    RESTART_INTERRUPTED_RESPONSE_NOTE,
     ReplacementStreamingResponse,
     StreamingDeliveryError,
     StreamingResponse,
@@ -330,7 +332,7 @@ class ResponseRequest:
     prepare_source_turn: Callable[[], bool] | None = None
     pipeline_timing: DispatchPipelineTiming | None = None
     queued_notice_reservation: QueuedHumanNoticeReservation | None = None
-    on_sync_restart_cancelled: Callable[[], None] | None = None
+    on_interrupted_response_recoverable: Callable[[], None] | None = None
     sync_restart_retry_source_event_id: str | None = None
     on_deferred_outcome_handled: Callable[[str], None] | None = None
 
@@ -493,18 +495,35 @@ class ResponseRunner:
         default_factory=ResponseLifecycleCoordinator,
         init=False,
     )
-    _inbox_response_tasks: set[asyncio.Task[None]] = field(default_factory=set, init=False)
+    _inbox_response_tasks: dict[asyncio.Task[None], Callable[[], bool]] = field(default_factory=dict, init=False)
+    _incomplete_inbox_responses_recoverable: bool = field(default=True, init=False)
     _admission_shutdown_requested: asyncio.Event = field(default_factory=asyncio.Event, init=False, repr=False)
 
-    def track_inbox_response(self, response: Coroutine[Any, Any, None], *, name: str) -> asyncio.Task[None]:
+    def track_inbox_response(
+        self,
+        response: Coroutine[Any, Any, None],
+        *,
+        name: str,
+        recovery_proof_ready: Callable[[], bool],
+    ) -> asyncio.Task[None]:
         """Own one detached inbox response until it completes or a drain settles it."""
         task = asyncio.create_task(response, name=name)
-        self._inbox_response_tasks.add(task)
+        self._inbox_response_tasks[task] = recovery_proof_ready
         task.add_done_callback(self._finish_inbox_response_task)
         return task
 
+    @property
+    def pending_inbox_response_count(self) -> int:
+        """Return an event-loop-local snapshot of runner-owned unsettled responses."""
+        return sum(not task.done() for task in self._inbox_response_tasks)
+
+    @property
+    def incomplete_inbox_responses_recoverable(self) -> bool:
+        """Return whether every timed-out response has finished cleanup with recovery proof."""
+        return self._incomplete_inbox_responses_recoverable
+
     def _finish_inbox_response_task(self, task: asyncio.Task[None]) -> None:
-        self._inbox_response_tasks.discard(task)
+        self._inbox_response_tasks.pop(task, None)
         if task.cancelled():
             return
         error = task.exception()
@@ -533,6 +552,8 @@ class ResponseRunner:
         waiting for completion and one letting cancelled tasks run cleanup.
         """
         tasks = [task for task in self._inbox_response_tasks if not task.done()]
+        # Done callbacks pop tasks, so snapshot proofs before an await can run them.
+        recovery_checks = {task: self._inbox_response_tasks[task] for task in tasks}
         if not tasks:
             return True
         if cancel_after_seconds is None:
@@ -544,6 +565,8 @@ class ResponseRunner:
         for task in pending:
             request_task_cancel(task, cancel_source=shutdown_intent.cancel_source)
         await asyncio.wait(pending, timeout=cancel_after_seconds)
+        cancelled_responses_recoverable = all(task.done() and recovery_checks[task]() for task in pending)
+        self._incomplete_inbox_responses_recoverable &= cancelled_responses_recoverable
         return False
 
     def _client(self) -> nio.AsyncClient:
@@ -1142,26 +1165,38 @@ class ResponseRunner:
             scheduled_history_budget=request.scheduled_history_budget,
         )
 
-    def _notify_sync_restart_cancelled(
+    def _notify_interrupted_response_recoverable(
         self,
         request: ResponseRequest,
         final_outcome: FinalDeliveryOutcome,
-    ) -> None:
-        """Tell the dispatcher when a bot replacement interrupted a marked-handled turn.
+    ) -> bool:
+        """Tell the dispatcher when a marked-handled interrupted turn is recoverable.
 
-        Only turns that end as a visible interrupted note are reported: they get
-        recorded in the handled-turn ledger, so the replacement runtime's sync
-        replay dedups them away and room-scoped recovery is their only route back.
-        Unmarked turns are recovered by that replay instead; recovering them too
-        would answer twice.
+        Only turns whose terminal interruption update reached Matrix are
+        reported: restart cleanup can discover that note, while the handled-turn
+        ledger prevents source replay from answering it twice. Explicit user
+        stops are terminal user intent and must never schedule recovery.
         """
-        if request.on_sync_restart_cancelled is None or final_outcome.terminal_status != "cancelled":
-            return
-        if not final_outcome.mark_handled:
-            return
-        if cancel_source_from_failure_reason(final_outcome.failure_reason) != "sync_restart":
-            return
-        request.on_sync_restart_cancelled()
+        if request.on_interrupted_response_recoverable is None or final_outcome.terminal_status != "cancelled":
+            return False
+        if (
+            not final_outcome.mark_handled
+            or final_outcome.delivery_kind is None
+            or request.response_envelope.target.resolved_thread_id is None
+        ):
+            return False
+        cancel_source = final_outcome.cancel_source or cancel_source_from_failure_reason(final_outcome.failure_reason)
+        if cancel_source == "user_stop":
+            return False
+        expected_note = (
+            RESTART_INTERRUPTED_RESPONSE_NOTE if cancel_source == "sync_restart" else INTERRUPTED_RESPONSE_NOTE
+        )
+        if final_outcome.final_visible_body is None or not final_outcome.final_visible_body.rstrip().endswith(
+            expected_note,
+        ):
+            return False
+        request.on_interrupted_response_recoverable()
+        return True
 
     async def _begin_locked_turn(
         self,
@@ -1489,14 +1524,23 @@ class ResponseRunner:
             post_response_outcome=build_post_response_outcome(final_delivery_outcome),
             post_response_deps=post_response_deps,
         )
-        self._notify_sync_restart_cancelled(request, final_outcome)
+        interruption_recovery_registered = self._notify_interrupted_response_recoverable(request, final_outcome)
+        cancel_source = final_outcome.cancel_source
+        if cancel_source is None and final_outcome.terminal_status == "cancelled":
+            cancel_source = cancel_source_from_failure_reason(final_outcome.failure_reason)
+        source_handled = final_outcome.mark_handled and (
+            request.on_deferred_outcome_handled is None
+            or cancel_source is None
+            or cancel_source == "user_stop"
+            or interruption_recovery_registered
+        )
         if deferred_error is not None:
-            if final_outcome.mark_handled and request.on_deferred_outcome_handled is not None:
+            if source_handled and request.on_deferred_outcome_handled is not None:
                 response_event_id = final_outcome.final_visible_event_id
                 assert response_event_id is not None
                 request.on_deferred_outcome_handled(response_event_id)
             raise deferred_error
-        return final_outcome.final_visible_event_id if final_outcome.mark_handled else None
+        return final_outcome.final_visible_event_id if source_handled else None
 
     def _build_lifecycle(
         self,

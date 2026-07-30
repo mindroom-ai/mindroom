@@ -1739,61 +1739,78 @@ class AgentBot:
                 resulting_action="drain_then_cancel_response_runtime",
             )
         self._sync_shutting_down = True
-        self._response_runner.refuse_pending_admissions()
-        await self._cancel_startup_thread_prewarm()
-        if self.agent_name == ROUTER_AGENT_NAME:
-            await self._cancel_deferred_overdue_task_drain()
-        background_tasks_completed = await wait_for_background_tasks(
-            timeout=5.0,
-            owner=self._runtime_view,
-            shutdown_intent=shutdown_intent,
-        )
-        drain_result = await self._coalescing_gate.drain_all(
-            ready_timeout_seconds=5.0,
-            shutdown_intent=shutdown_intent,
-        )
-        responses_drained = await self._response_runner.drain_inbox_responses(
-            cancel_after_seconds=5.0,
-            shutdown_intent=shutdown_intent,
-        )
-        post_drain_background_tasks_completed = await wait_for_background_tasks(
-            timeout=5.0,
-            owner=self._runtime_view,
-            shutdown_intent=shutdown_intent,
-        )
-        callback_failure_count = self._runtime_view.callback_failure_count
-        if (
-            background_tasks_completed
-            and drain_result.completed
-            and responses_drained
-            and post_drain_background_tasks_completed
-            and callback_failure_count == 0
-            and self._sync_cache_trust.state is SyncTrustState.CERTIFIED
-        ):
-            self._sync_cache_trust.persist_current()
-        elif (
-            not background_tasks_completed
-            or not drain_result.completed
-            or not responses_drained
-            or not post_drain_background_tasks_completed
-            or callback_failure_count
-        ):
-            self._sync_cache_trust.discard()
-            self.logger.warning(
-                "sync_checkpoint_discarded",
-                agent_name=self.agent_name,
-                callback_failure_count=callback_failure_count,
-                background_tasks_completed=background_tasks_completed,
-                coalescing_drain_completed=drain_result.completed,
-                responses_drained=responses_drained,
-                post_drain_background_tasks_completed=post_drain_background_tasks_completed,
-                released_reservation_count=drain_result.released_reservation_count,
-                cancelled_unready_count=drain_result.cancelled_unready_count,
-                failed_ready_count=drain_result.failed_ready_count,
-                dropped_ready_count=drain_result.dropped_ready_count,
-                dispatch_failure_count=drain_result.dispatch_failure_count,
-                dispatch_cancelled_count=drain_result.dispatch_cancelled_count,
+        checkpoint_decision_completed = False
+        try:
+            self._response_runner.refuse_pending_admissions()
+            await self._cancel_startup_thread_prewarm()
+            if self.agent_name == ROUTER_AGENT_NAME:
+                await self._cancel_deferred_overdue_task_drain()
+            background_tasks_completed = await wait_for_background_tasks(
+                timeout=5.0,
+                owner=self._runtime_view,
+                shutdown_intent=shutdown_intent,
             )
+            drain_result = await self._coalescing_gate.drain_all(
+                ready_timeout_seconds=5.0,
+                shutdown_intent=shutdown_intent,
+            )
+            responses_drained = await self._response_runner.drain_inbox_responses(
+                cancel_after_seconds=5.0,
+                shutdown_intent=shutdown_intent,
+            )
+            pending_response_count = self._response_runner.pending_inbox_response_count
+            if not responses_drained:
+                self.logger.warning(
+                    "matrix_agent_response_drain_incomplete",
+                    agent_name=self.agent_name,
+                    active_response_count=self.in_flight_response_count,
+                    pending_response_count=pending_response_count,
+                    response_recovery_complete=self._response_runner.incomplete_inbox_responses_recoverable,
+                    restart_reason_category=restart_reason_category_for(shutdown_intent),
+                )
+            post_drain_background_tasks_completed = await wait_for_background_tasks(
+                timeout=5.0,
+                owner=self._runtime_view,
+                shutdown_intent=shutdown_intent,
+            )
+            callback_failure_count = self._runtime_view.callback_failure_count
+            source_checkpoint_safe = (
+                background_tasks_completed
+                and drain_result.completed
+                and post_drain_background_tasks_completed
+                and callback_failure_count == 0
+            )
+            # The checkpoint certifies source ingestion, not response completion.
+            # Incomplete response work is safe only after an explicit source-event
+            # recovery proof for every cancelled task.
+            checkpoint_recovery_safe = (
+                source_checkpoint_safe and self._response_runner.incomplete_inbox_responses_recoverable
+            )
+            if checkpoint_recovery_safe and self._sync_cache_trust.state is SyncTrustState.CERTIFIED:
+                self._sync_cache_trust.persist_current()
+            elif not checkpoint_recovery_safe:
+                self._sync_cache_trust.discard()
+                self.logger.warning(
+                    "sync_checkpoint_discarded",
+                    agent_name=self.agent_name,
+                    callback_failure_count=callback_failure_count,
+                    background_tasks_completed=background_tasks_completed,
+                    coalescing_drain_completed=drain_result.completed,
+                    pending_response_count=pending_response_count,
+                    response_recovery_complete=self._response_runner.incomplete_inbox_responses_recoverable,
+                    post_drain_background_tasks_completed=post_drain_background_tasks_completed,
+                    responses_drained=responses_drained,
+                    released_reservation_count=drain_result.released_reservation_count,
+                    cancelled_unready_count=drain_result.cancelled_unready_count,
+                    failed_ready_count=drain_result.failed_ready_count,
+                    dropped_ready_count=drain_result.dropped_ready_count,
+                    dispatch_failure_count=drain_result.dispatch_failure_count,
+                    dispatch_cancelled_count=drain_result.dispatch_cancelled_count,
+                )
+            checkpoint_decision_completed = True
+        finally:
+            if not checkpoint_decision_completed:
+                self._sync_cache_trust.discard()
 
     async def sync_forever(self) -> None:
         """Run the sync loop for this agent."""
