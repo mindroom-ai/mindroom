@@ -1014,6 +1014,10 @@ path = "mindroom.history.agno_team_patch"
 depends_on = ["mindroom.attachment_media"]
 
 [[modules]]
+path = "mindroom.history.agno_forked_request"
+depends_on = []
+
+[[modules]]
 path = "mindroom.history.compaction"
 depends_on = [
     "mindroom.claude_prompt_cache",
@@ -1021,8 +1025,11 @@ depends_on = [
     "mindroom.history.storage",
     "mindroom.history.summary_call",
     "mindroom.history.types",
+    "mindroom.history.warm_prefix",
     "mindroom.hooks",
     "mindroom.logging_config",
+    "mindroom.openai_tool_search",
+    "mindroom.prompt_cache_key",
     "mindroom.timing",
     "mindroom.token_budget",
     "mindroom.tool_system.runtime_context",
@@ -1046,6 +1053,13 @@ depends_on = [
     "mindroom.history.types",
     "mindroom.logging_config",
     "mindroom.timing",
+]
+
+[[modules]]
+path = "mindroom.history.warm_prefix"
+depends_on = [
+    "mindroom.history.agno_forked_request",
+    "mindroom.history.summary_call",
 ]
 
 [[modules]]
@@ -1105,6 +1119,7 @@ depends_on = [
     "mindroom.history.prompt_tokens",
     "mindroom.history.storage",
     "mindroom.history.types",
+    "mindroom.history.warm_prefix",
     "mindroom.logging_config",
     "mindroom.model_loading",
     "mindroom.team_scope",
@@ -3664,14 +3679,15 @@ expose = [
 ]
 from = ["mindroom.memory._backend"]
 
-# Public seam for compaction summary calls: one model-configuration path, one
-# replaceable request builder (future warm-prefix builder, PR #861), the single
+# Public seam for compaction summary calls: one model-configuration path, the
+# standalone request builder plus the warm-prefix request type, the single
 # resolved-timeout rule callers log, and the explicit budget-shrink retry policy.
 # Tested in tests/test_compaction_invariants.py.
 [[interfaces]]
 expose = [
     "CompactionSummaryOutputLimitError",
     "DEFAULT_SUMMARY_RETRY_POLICY",
+    "SummaryProviderRequest",
     "SummaryRetryPolicy",
     "build_summary_request_messages",
     "configure_summary_model",

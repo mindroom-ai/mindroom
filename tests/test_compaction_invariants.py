@@ -57,6 +57,7 @@ from mindroom.history.storage import (
 from mindroom.history.summary_call import (
     DEFAULT_SUMMARY_RETRY_POLICY,
     CompactionSummaryOutputLimitError,
+    SummaryProviderRequest,
     SummaryRetryDecision,
     SummaryRetryPolicy,
     _CompactionSummaryEmptyResultError,
@@ -72,6 +73,7 @@ from mindroom.history.types import (
     HistoryScopeState,
     ResolvedHistorySettings,
 )
+from mindroom.history.warm_prefix import WarmPrefixSummaryContext
 from mindroom.prompts import COMPACTION_SUMMARY_PROMPT
 from mindroom.token_budget import estimate_compaction_input_tokens
 from mindroom.vertex_claude_compat import MindroomVertexAIClaude
@@ -1526,8 +1528,11 @@ async def test_compaction_retries_empty_summary_result_with_smaller_input(tmp_pa
 async def test_retry_helper_switches_to_fallback_once_with_unchanged_prompt_and_input() -> None:
     """A primary refusal resends the unchanged prompt and input bytes once to the fallback model."""
     run = _completed_run("run-1")
+    working_session = _session([run])
     primary = FakeModel(id="summary-model", provider="fake")
     fallback = FakeModel(id="fallback-model-id", provider="fake")
+    warm_request = SummaryProviderRequest(messages=(Message(role="user", content="warm request"),))
+    build_warm_request = AsyncMock(return_value=warm_request)
     recovered_summary = SessionSummary(summary="recovered summary", updated_at=datetime.now(UTC))
     generate_summary = AsyncMock(
         side_effect=[ModelSafeguardRefusalError("provider-specific refusal wording"), recovered_summary],
@@ -1537,6 +1542,10 @@ async def test_retry_helper_switches_to_fallback_once_with_unchanged_prompt_and_
 
     with (
         patch("mindroom.history.compaction.generate_compaction_summary", new=generate_summary),
+        patch(
+            "mindroom.history.compaction.build_warm_prefix_summary_request",
+            new=build_warm_request,
+        ),
         patch("mindroom.history.compaction.asyncio.sleep", new=retry_sleep),
         patch("mindroom.history.compaction.logger", logger_mock),
     ):
@@ -1558,6 +1567,8 @@ async def test_retry_helper_switches_to_fallback_once_with_unchanged_prompt_and_
             fallback_model=fallback,
             fallback_model_name="fallback-model",
             fallback_input_budget=4_000,
+            warm_prefix=WarmPrefixSummaryContext(agent=_agent(None), instruction="summarize"),
+            working_session=working_session,
         )
 
     assert generated.summary is recovered_summary
@@ -1575,6 +1586,8 @@ async def test_retry_helper_switches_to_fallback_once_with_unchanged_prompt_and_
         COMPACTION_SUMMARY_PROMPT,
     ]
     assert [call.kwargs["timeout_seconds"] for call in generate_summary.await_args_list] == [420.0, 420.0]
+    assert [call.kwargs["provider_request"] for call in generate_summary.await_args_list] == [warm_request, None]
+    build_warm_request.assert_awaited_once()
     retry_sleep.assert_not_awaited()
     # Structured request/failure/completion logs identify the actual serving model.
     assert [
@@ -1597,6 +1610,57 @@ async def test_retry_helper_switches_to_fallback_once_with_unchanged_prompt_and_
         for call in logger_mock.info.call_args_list
         if call.args[0] == "Compaction summary chunk completed"
     ] == ["fallback-model"]
+
+
+@pytest.mark.asyncio
+async def test_retry_helper_falls_back_to_cold_request_when_warm_prefix_exceeds_context() -> None:
+    """A warm-only context overflow retries the same selected input without the extra prefix."""
+    run = _completed_run("run-1")
+    working_session = _session([run])
+    model = FakeModel(id="summary-model", provider="fake")
+    warm_request = SummaryProviderRequest(messages=(Message(role="user", content="warm request"),))
+    build_warm_request = AsyncMock(return_value=warm_request)
+    recovered_summary = SessionSummary(summary="recovered summary", updated_at=datetime.now(UTC))
+    generate_summary = AsyncMock(
+        side_effect=[
+            ContextWindowExceededError(message="warm request too large", model_name="fake", model_id="summary-model"),
+            recovered_summary,
+        ],
+    )
+
+    with (
+        patch("mindroom.history.compaction.generate_compaction_summary", new=generate_summary),
+        patch(
+            "mindroom.history.compaction.build_warm_prefix_summary_request",
+            new=build_warm_request,
+        ),
+    ):
+        generated = await _generate_compaction_summary_with_retry(
+            model=model,
+            model_name="summary-model",
+            previous_summary=None,
+            compactable_runs=[run],
+            initial_summary_input="serialized input",
+            initial_included_runs=[run],
+            summary_input_budget=4_000,
+            session_id="session-1",
+            scope=_SCOPE,
+            history_settings=_HISTORY_SETTINGS,
+            summary_prompt=COMPACTION_SUMMARY_PROMPT,
+            token_estimator=len,
+            estimate_kind="utf8_bytes_token_upper_bound",
+            timeout_seconds=420.0,
+            warm_prefix=WarmPrefixSummaryContext(agent=_agent(None), instruction="summarize"),
+            working_session=working_session,
+        )
+
+    assert generated.summary is recovered_summary
+    assert [call.kwargs["provider_request"] for call in generate_summary.await_args_list] == [warm_request, None]
+    assert [call.kwargs["summary_input"] for call in generate_summary.await_args_list] == [
+        "serialized input",
+        "serialized input",
+    ]
+    build_warm_request.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -1744,10 +1808,16 @@ async def test_compaction_fallback_serves_later_chunks_state_and_outcome(tmp_pat
     storage.upsert_session(session)
     primary = FakeModel(id="summary-model", provider="fake")
     fallback = FakeModel(id="fallback-model-id", provider="fake")
-    attempts: list[tuple[str, str]] = []
+    attempts: list[tuple[str, str, SummaryProviderRequest | None]] = []
 
-    async def flaky_summary(*, model: FakeModel, summary_input: str, **_kwargs: object) -> SessionSummary:
-        attempts.append((model.id, summary_input))
+    async def flaky_summary(
+        *,
+        model: FakeModel,
+        summary_input: str,
+        provider_request: SummaryProviderRequest | None,
+        **_kwargs: object,
+    ) -> SessionSummary:
+        attempts.append((model.id, summary_input, provider_request))
         if len(attempts) == 1:
             msg = "provider-specific refusal wording"
             raise ModelSafeguardRefusalError(msg)
@@ -1774,12 +1844,22 @@ async def test_compaction_fallback_serves_later_chunks_state_and_outcome(tmp_pat
             fallback_summary_model=fallback,
             fallback_summary_model_name="fallback-model",
             fallback_summary_input_budget=10_000,
+            warm_prefix=WarmPrefixSummaryContext(agent=_agent(None), instruction="summarize"),
         )
 
     assert outcome is not None
     # The primary sees both runs. Its smaller-context fallback rebuilds the
     # refused chunk with run 1, then keeps its own budget for run 2.
-    assert [model_id for model_id, _ in attempts] == ["summary-model", "fallback-model-id", "fallback-model-id"]
+    assert [model_id for model_id, _summary_input, _provider_request in attempts] == [
+        "summary-model",
+        "fallback-model-id",
+        "fallback-model-id",
+    ]
+    assert [provider_request is not None for _model_id, _summary_input, provider_request in attempts] == [
+        True,
+        False,
+        False,
+    ]
     assert "RUN1-MARKER" in attempts[0][1]
     assert "RUN2-MARKER" in attempts[0][1]
     assert "RUN1-MARKER" in attempts[1][1]

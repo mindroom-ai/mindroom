@@ -12,13 +12,19 @@ from html import escape
 from typing import TYPE_CHECKING, cast
 from uuid import uuid4
 
+from agno.exceptions import ContextWindowExceededError
 from agno.run.agent import RunOutput
 from agno.run.team import TeamRunOutput
+from agno.session.agent import AgentSession
 from agno.session.summary import SessionSummary
 from agno.utils.message import filter_tool_calls
 from pydantic import BaseModel
 
-from mindroom.claude_prompt_cache import as_anthropic_claude
+from mindroom.claude_prompt_cache import (
+    as_anthropic_claude,
+    claude_deferred_tool_names,
+    install_claude_deferred_tool_search,
+)
 from mindroom.constants import (
     AI_RUN_METADATA_KEY,
     MINDROOM_COMPACTION_METADATA_KEY,
@@ -48,8 +54,14 @@ from mindroom.history.types import (
     HistoryScopeState,
     ResolvedHistorySettings,
 )
+from mindroom.history.warm_prefix import WarmPrefixSummaryContext, build_warm_prefix_summary_request
 from mindroom.hooks import EVENT_COMPACTION_AFTER, EVENT_COMPACTION_BEFORE, CompactionHookContext, emit
 from mindroom.logging_config import get_logger
+from mindroom.openai_tool_search import (
+    install_openai_deferred_tool_search,
+    openai_deferred_tool_names,
+)
+from mindroom.prompt_cache_key import inherit_session_prompt_cache_key
 from mindroom.timing import timed
 from mindroom.token_budget import (
     CompactionEstimateKind,
@@ -64,7 +76,6 @@ if TYPE_CHECKING:
     from agno.db.base import BaseDb
     from agno.models.base import Model
     from agno.models.message import Message
-    from agno.session.agent import AgentSession
     from agno.session.team import TeamSession
 
     from mindroom.history.summary_call import SummaryRetryDecision
@@ -209,8 +220,23 @@ async def compact_scope_history(
     fallback_summary_input_budget: int | None = None,
     lifecycle_notice_event_id: str | None = None,
     progress_callback: Callable[[CompactionLifecycleProgress], Awaitable[None]] | None = None,
+    warm_prefix: WarmPrefixSummaryContext | None = None,
 ) -> CompactionOutcome | None:
     """Compact one scope by rewriting session.summary and session.runs."""
+    if warm_prefix is not None:
+        active_model = warm_prefix.agent.model
+        install_claude_deferred_tool_search(
+            summary_model,
+            deferred_tool_names=claude_deferred_tool_names(active_model),
+        )
+        install_openai_deferred_tool_search(
+            summary_model,
+            deferred_tool_names=openai_deferred_tool_names(active_model),
+        )
+        inherit_session_prompt_cache_key(
+            source_model=active_model,
+            target_model=summary_model,
+        )
     visible_runs = scope_visible_runs(session, scope)
     compactable_runs = _select_compaction_candidates(
         visible_runs=visible_runs,
@@ -287,6 +313,7 @@ async def compact_scope_history(
         progress_callback=progress_callback,
         collect_compaction_hook_messages=collect_compaction_hook_messages,
         before_persist_callback=emit_before_persist,
+        warm_prefix=warm_prefix,
     )
     if rewrite_result is None:
         _persist_cleared_force_state_if_needed(
@@ -384,6 +411,7 @@ async def _rewrite_working_session_for_compaction(  # noqa: C901
     fallback_summary_model_name: str | None = None,
     fallback_summary_input_budget: int | None = None,
     before_persist_callback: Callable[[Sequence[RunOutput | TeamRunOutput]], Awaitable[None]] | None = None,
+    warm_prefix: WarmPrefixSummaryContext | None = None,
 ) -> _CompactionRewriteResult | None:
     final_summary_text = _current_summary_text(working_session) or ""
     token_estimator, estimate_kind = _compaction_sizing(summary_model)
@@ -440,6 +468,8 @@ async def _rewrite_working_session_for_compaction(  # noqa: C901
             fallback_model=fallback_summary_model,
             fallback_model_name=fallback_summary_model_name,
             fallback_input_budget=fallback_summary_input_budget,
+            warm_prefix=warm_prefix if isinstance(working_session, AgentSession) else None,
+            working_session=working_session if isinstance(working_session, AgentSession) else None,
         )
         if new_summary.model is not summary_model:
             # A safeguard-refusal fallback served this chunk; it becomes the
@@ -451,6 +481,7 @@ async def _rewrite_working_session_for_compaction(  # noqa: C901
             fallback_summary_model = None
             fallback_summary_model_name = None
             fallback_summary_input_budget = None
+            warm_prefix = None
         included_runs = new_summary.included_runs
         generated_summary = new_summary.summary
         if before_persist_callback is not None:
@@ -575,7 +606,7 @@ def _sizing_log_fields(*, kind: CompactionEstimateKind, estimate: int, budget_to
     }
 
 
-async def _generate_compaction_summary_with_retry(  # noqa: PLR0915
+async def _generate_compaction_summary_with_retry(  # noqa: C901, PLR0915
     *,
     model: Model,
     model_name: str,
@@ -594,6 +625,8 @@ async def _generate_compaction_summary_with_retry(  # noqa: PLR0915
     fallback_model: Model | None = None,
     fallback_model_name: str | None = None,
     fallback_input_budget: int | None = None,
+    warm_prefix: WarmPrefixSummaryContext | None = None,
+    working_session: AgentSession | None = None,
 ) -> _GeneratedSummaryChunk:
     """Generate one summary chunk, retrying the same or smaller input when safe.
 
@@ -616,6 +649,11 @@ async def _generate_compaction_summary_with_retry(  # noqa: PLR0915
         token_estimator=token_estimator,
     )
     attempt = 1
+    warm_instruction = (
+        _warm_summary_instruction(warm_prefix.instruction, previous_summary)
+        if warm_prefix is not None and working_session is not None
+        else None
+    )
     while True:
         summary_input_estimate = token_estimator(summary_input)
         effective_timeout_seconds = effective_summary_timeout_seconds(model, timeout_seconds=timeout_seconds)
@@ -631,13 +669,23 @@ async def _generate_compaction_summary_with_retry(  # noqa: PLR0915
             **_sizing_log_fields(kind=estimate_kind, estimate=summary_input_estimate, budget_tokens=budget),
             timeout_seconds=timeout_seconds,
             effective_timeout_seconds=effective_timeout_seconds,
+            warm_prefix=warm_instruction is not None,
         )
         try:
+            provider_request = None
+            if warm_prefix is not None and working_session is not None and warm_instruction is not None:
+                provider_request = await build_warm_prefix_summary_request(
+                    agent=warm_prefix.agent,
+                    working_session=working_session,
+                    prefix_runs=[run for run in included_runs if isinstance(run, RunOutput)],
+                    final_instruction=warm_instruction,
+                )
             summary = await generate_compaction_summary(
                 model=model,
                 summary_input=summary_input,
                 summary_prompt=summary_prompt,
                 timeout_seconds=timeout_seconds,
+                provider_request=provider_request,
             )
         except Exception as exc:
             duration_ms = int((asyncio.get_running_loop().time() - started) * 1000)
@@ -655,6 +703,23 @@ async def _generate_compaction_summary_with_retry(  # noqa: PLR0915
                 duration_ms=duration_ms,
                 error=str(exc) or type(exc).__name__,
             )
+            if (
+                warm_prefix is not None
+                and warm_instruction is not None
+                and isinstance(exc, ContextWindowExceededError)
+                and attempt < retry_policy.max_attempts
+            ):
+                logger.info(
+                    "Warm-prefix summary request exceeded context; retrying standalone request",
+                    session_id=session_id,
+                    scope=scope.key,
+                    model_name=model_name,
+                    attempt=attempt,
+                )
+                warm_prefix = None
+                warm_instruction = None
+                attempt += 1
+                continue
             # The attempt bound covers the fallback call too: a refusal after an
             # earlier shrink or transient retry propagates instead of issuing a
             # third provider call.
@@ -693,6 +758,8 @@ async def _generate_compaction_summary_with_retry(  # noqa: PLR0915
                 fallback_model = None
                 fallback_model_name = None
                 fallback_input_budget = None
+                warm_prefix = None
+                warm_instruction = None
                 attempt += 1
                 continue
             retry_decision: SummaryRetryDecision | None = retry_policy.retry_budget(
@@ -745,6 +812,14 @@ async def _generate_compaction_summary_with_retry(  # noqa: PLR0915
             model_name=model_name,
             model_input_budget_tokens=budget,
         )
+
+
+def _warm_summary_instruction(instruction: str, previous_summary: str | None) -> str:
+    """Return the final warm-prefix user turn, embedding the previous summary when present."""
+    if previous_summary is None or not previous_summary.strip():
+        return instruction
+    escaped_summary = _escape_xml_content(previous_summary)
+    return f"{instruction}\n\n<previous_summary>\n{escaped_summary}\n</previous_summary>"
 
 
 @timed("system_prompt_assembly.history_prepare.compaction.summary_input_build")

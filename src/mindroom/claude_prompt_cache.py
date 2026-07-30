@@ -263,9 +263,12 @@ def _mark_last_tool(tools: object, cache_control: dict[str, str]) -> tuple[objec
     return tools, 0
 
 
-def _model_deferred_tool_names(model: AnthropicClaude) -> frozenset[str]:
+def claude_deferred_tool_names(model: object) -> frozenset[str]:
     """Return the wire tool names registered for deferred loading on one model."""
-    deferred_tool_names = vars(model).get(_DEFERRED_TOOL_NAMES_ATTR)
+    claude_model = as_anthropic_claude(model)
+    if claude_model is None:
+        return frozenset()
+    deferred_tool_names = vars(claude_model).get(_DEFERRED_TOOL_NAMES_ATTR)
     return deferred_tool_names if isinstance(deferred_tool_names, frozenset) else frozenset()
 
 
@@ -566,7 +569,7 @@ def prepare_claude_request_kwargs(
     prepared_kwargs = _request_kwargs_with_replay_safe_tool_search_results(request_kwargs)
     prepared_kwargs = _request_kwargs_with_deferred_tool_search(
         prepared_kwargs,
-        _model_deferred_tool_names(model),
+        claude_deferred_tool_names(model),
     )
     if model.cache_system_prompt:
         cache_control = _prompt_cache_control(extended_cache_time=model.extended_cache_time is True)

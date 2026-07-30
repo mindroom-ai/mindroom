@@ -354,6 +354,8 @@ Manual `compact_context` remains available when a compaction model and context w
 It still uses the active runtime window for the final replay-fit step, while an explicit `compaction.model` can supply the summary-generation window subject to the same minimum summary-input budget.
 If you set `compaction.model`, that summary model must also define its own `context_window` for the durable summary-generation pass.
 `compaction.fallback_model` must also name a configured model with its own `context_window`; a fallback naming the summary model's alias, or another alias resolving to the same provider and model ID, is ignored because it would resend the refused request to the same model.
+When `compaction.model` is unset (or names the active model), agent summary calls reproduce the provider-visible reply prefix so automatic caches and explicit system or tool breakpoints can be reused; an explicit different `compaction.model` sends a standalone summary request and should not expect to reuse the active reply prompt cache.
+Claude summary calls with tools use `tool_choice: none` to prevent side effects, so Claude reuses cached tools and system content but invalidates cached message blocks; tool-free Claude requests can also reuse the cached history prefix.
 Required compaction runs before the reply with a Matrix lifecycle notice that is edited in place.
 Otherwise MindRoom leaves the session unchanged and relies on replay fitting for that reply.
 Replay planning uses a chars/4 approximation and reserves headroom for the current prompt and output.

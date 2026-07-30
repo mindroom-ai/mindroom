@@ -6,9 +6,9 @@ It enforces the call-side half of the compaction invariants
 
 3. Summary calls get exactly one model configuration path.
    ``configure_summary_model`` applies all compaction-specific provider tuning in
-   one place: prompt-cache writes off, Claude thinking cleared (a thinking budget
-   at or above max_tokens is a 400 from Anthropic), SDK retries disabled, and
-   one SDK timeout coordinated with the caller's resolved chunk timeout
+   one place: cold-request prompt-cache writes off, cold-request Claude thinking
+   cleared, warm-request tools disabled on the provider wire, SDK retries
+   disabled, and one SDK timeout coordinated with the caller's resolved chunk timeout
    (``compaction.timeout_seconds``) instead of two uncoordinated timeouts in two
    modules. ``effective_summary_timeout_seconds`` is the only place that combines
    the resolved timeout with an authored provider timeout, so callers can log the
@@ -34,9 +34,9 @@ It enforces the call-side half of the compaction invariants
    and the retry wrapper can shrink input through ``SummaryRetryPolicy`` without
    depending on owned error-message text.
 
-``build_summary_request_messages`` is the single replaceable request builder; a
-future cache-friendly builder that reuses the active provider prefix (PR #861)
-plugs in behind it without another cross-cutting diff.
+The request has exactly two shapes: the standalone two-message request from
+``build_summary_request_messages``, or a pre-assembled ``SummaryProviderRequest``
+built by ``mindroom.history.warm_prefix`` that reproduces the reply-path prefix.
 """
 
 from __future__ import annotations
@@ -62,6 +62,7 @@ from mindroom.timing import timed
 if TYPE_CHECKING:
     from agno.models.base import Model
     from agno.models.response import ModelResponse
+    from agno.tools.function import Function
 
 logger = get_logger(__name__)
 
@@ -208,6 +209,16 @@ class SummaryRetryPolicy:
 DEFAULT_SUMMARY_RETRY_POLICY = SummaryRetryPolicy()
 
 
+@dataclass(frozen=True)
+class SummaryProviderRequest:
+    """Pre-assembled provider request for one warm-prefix summary call."""
+
+    messages: tuple[Message, ...]
+    tools: tuple[dict[str, object], ...] = ()
+    tool_choice: str | dict[str, object] | None = None
+    reuses_reply_prefix: bool = True
+
+
 def effective_summary_timeout_seconds(model: Model, *, timeout_seconds: float) -> float:
     """Return the timeout one summary request enforces after provider tuning (invariant 3).
 
@@ -220,7 +231,13 @@ def effective_summary_timeout_seconds(model: Model, *, timeout_seconds: float) -
     return min(claude_model.timeout, timeout_seconds)
 
 
-def configure_summary_model(model: Model, *, timeout_seconds: float) -> Model:
+def configure_summary_model(
+    model: Model,
+    *,
+    timeout_seconds: float,
+    reuses_reply_prefix: bool = False,
+    disables_tools: bool = False,
+) -> Model:
     """Apply all compaction-specific provider tuning to one loaded model (invariant 3).
 
     ``isinstance(model, Claude)`` covers the anthropic, vertexai_claude, and
@@ -236,9 +253,18 @@ def configure_summary_model(model: Model, *, timeout_seconds: float) -> Model:
             reason="provider_specific_tuning_only_defined_for_claude",
         )
         return model
-    claude_model.cache_system_prompt = False
-    claude_model.extended_cache_time = False
-    claude_model.thinking = None
+    if not reuses_reply_prefix:
+        claude_model.cache_system_prompt = False
+        claude_model.extended_cache_time = False
+        claude_model.thinking = None
+    request_params = dict(claude_model.request_params or {})
+    if disables_tools:
+        # Agno 2.6.12 accepts ``tool_choice`` on Claude invocation methods but
+        # does not forward it to the Anthropic-compatible wire request.
+        request_params["tool_choice"] = {"type": "none"}
+    else:
+        request_params.pop("tool_choice", None)
+    claude_model.request_params = request_params or None
     claude_model.timeout = effective_summary_timeout_seconds(model, timeout_seconds=timeout_seconds)
     client_params = dict(claude_model.client_params or {})
     client_params["max_retries"] = 0
@@ -320,13 +346,41 @@ async def generate_compaction_summary(
     summary_input: str,
     summary_prompt: str,
     timeout_seconds: float,
+    provider_request: SummaryProviderRequest | None = None,
 ) -> SessionSummary:
-    """Issue one compaction summary call with tuned provider config and one timeout."""
-    configured_model = configure_summary_model(model, timeout_seconds=timeout_seconds)
+    """Issue one compaction summary call with tuned provider config and one timeout.
+
+    A provider request preserves every provider-visible message field when
+    supplied; otherwise the standalone two-message summary request is built
+    from ``summary_prompt`` and ``summary_input``.
+    """
+    configured_model = configure_summary_model(
+        model,
+        timeout_seconds=timeout_seconds,
+        reuses_reply_prefix=provider_request.reuses_reply_prefix if provider_request is not None else False,
+        disables_tools=bool(provider_request and provider_request.tools),
+    )
     summary_output_limit = _summary_output_token_limit(configured_model)
 
     async def _request_summary() -> ModelResponse:
         try:
+            if provider_request is not None:
+                request_tools: list[Function | dict[str, object]] | None = (
+                    [dict(tool) for tool in provider_request.tools] if provider_request.tools else None
+                )
+                # ``from_history`` is internal Agno replay metadata, not a wire
+                # field. Clear it so provider adapters cannot silently trim a
+                # subset of compacted runs after the compaction layer selected
+                # and committed to summarizing all of them.
+                request_messages = [
+                    message.model_copy(deep=True, update={"from_history": False})
+                    for message in provider_request.messages
+                ]
+                return await model.aresponse(
+                    messages=request_messages,
+                    tools=request_tools,
+                    tool_choice=provider_request.tool_choice,
+                )
             return await model.aresponse(
                 messages=build_summary_request_messages(
                     summary_prompt=summary_prompt,
