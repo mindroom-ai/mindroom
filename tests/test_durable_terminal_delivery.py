@@ -148,6 +148,31 @@ async def test_checkpoint_reaches_disk_before_first_matrix_attempt(tmp_path: Pat
 
 
 @pytest.mark.asyncio
+async def test_retry_flushes_failed_checkpoint_write_before_matrix(tmp_path: Path) -> None:
+    """A memory-visible checkpoint must not reach Matrix before its queued write lands."""
+    store = _store(tmp_path)
+    _record_pending(store)
+    coordinator = _coordinator(store)
+    send = AsyncMock(return_value=_delivered())
+
+    with (
+        patch.object(store._ledger, "_persist_records", side_effect=OSError("disk full")),
+        patch("mindroom.terminal_delivery.send_message_result", new=send),
+    ):
+        with pytest.raises(OSError, match="disk full"):
+            await coordinator.commit_and_attempt(_intent())
+        await coordinator.retry_pending()
+
+    send.assert_not_awaited()
+
+    with patch("mindroom.terminal_delivery.send_message_result", new=send):
+        await coordinator.retry_pending()
+
+    send.assert_awaited_once()
+    assert store.terminal_checkpoint_records() == ()
+
+
+@pytest.mark.asyncio
 async def test_cancelled_first_attempt_returns_durable_debt(tmp_path: Path) -> None:
     """Cancellation after checkpoint commit must not make the turn rerunnable."""
     store = _store(tmp_path)
@@ -314,6 +339,39 @@ async def test_target_redaction_clears_checkpoint_before_retry(tmp_path: Path) -
     tombstone = store.get_turn_record(TARGET)
     assert tombstone is not None
     assert tombstone.redacted_source_event_ids == (TARGET,)
+    assert store.terminal_checkpoint_records() == ()
+
+
+@pytest.mark.asyncio
+async def test_target_tombstone_blocks_retry_after_owner_clear_failure(tmp_path: Path) -> None:
+    """A crash window after target tombstoning must never edit the redacted event."""
+    store = _store(tmp_path)
+    _record_pending(store)
+    blocked = _coordinator(store, ready=False)
+    assert (await blocked.commit_and_attempt(_intent())).status == "deferred"
+
+    original_update = store._ledger.update_handled_turn
+    update_count = 0
+
+    def fail_owner_clear(*args: object, **kwargs: object) -> object:
+        nonlocal update_count
+        update_count += 1
+        if update_count == 2:
+            message = "owner clear failed"
+            raise OSError(message)
+        return original_update(*args, **kwargs)
+
+    with (
+        patch.object(store._ledger, "update_handled_turn", side_effect=fail_owner_clear),
+        pytest.raises(OSError, match="owner clear failed"),
+    ):
+        store.mark_source_redacted(TARGET)
+
+    active = _coordinator(store)
+    with patch("mindroom.terminal_delivery.send_message_result", new=AsyncMock()) as send:
+        await active.retry_pending()
+
+    send.assert_not_awaited()
     assert store.terminal_checkpoint_records() == ()
 
 

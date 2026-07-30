@@ -101,6 +101,10 @@ class TurnStore:
         """Load the ledger before asynchronous startup recovery begins."""
         self._ledger.warm()
 
+    def flush(self) -> None:
+        """Wait until every handled-turn update queued so far is durable."""
+        self._ledger.flush()
+
     def record_turn(self, turn_record: TurnRecord) -> None:
         """Persist one terminal turn, preserving any previously recorded optional facts."""
         if not turn_record.source_event_ids:

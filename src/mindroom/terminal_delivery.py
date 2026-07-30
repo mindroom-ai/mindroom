@@ -212,12 +212,17 @@ class TerminalDeliveryCoordinator:
             return None
         return owner
 
-    async def _attempt_locked(
+    async def _attempt_locked(  # noqa: PLR0911
         self,
         record: TurnRecord,
         *,
         allow_unready: bool = False,
     ) -> TerminalDeliveryCommit:
+        try:
+            await asyncio.to_thread(self.deps.turn_store.flush)
+        except Exception:
+            self.deps.logger.exception("terminal_checkpoint_flush_failed")
+            return TerminalDeliveryCommit("deferred", "checkpoint_flush_failed")
         current = await asyncio.to_thread(
             self.deps.turn_store.terminal_checkpoint_for_sources,
             record.indexed_event_ids,
@@ -229,6 +234,19 @@ class TerminalDeliveryCoordinator:
             return await self._cleanup_redacted_checkpoint(current, checkpoint)
         target = current.conversation_target
         target_event_id = current.response_event_id
+        if target_event_id is not None and await asyncio.to_thread(
+            self.deps.turn_store.any_source_redacted,
+            (target_event_id,),
+        ):
+            cleared = await asyncio.to_thread(
+                self.deps.turn_store.clear_redacted_terminal_checkpoint,
+                current,
+                expected_transaction_id=checkpoint.transaction_id,
+            )
+            return TerminalDeliveryCommit(
+                "superseded" if cleared is not None else "deferred",
+                "target_redacted" if cleared is not None else "checkpoint_clear_rejected",
+            )
         client = self.deps.runtime.client
         if (
             self._stopping
