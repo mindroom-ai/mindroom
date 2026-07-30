@@ -202,6 +202,26 @@ class DispatchObligationStore:
             state=row["state"],
         )
 
+    def _pending_obligation_from_row(self, row: sqlite3.Row) -> _DispatchObligation:
+        """Decode one exact pending row without inventing source input."""
+        try:
+            callback_kind = DispatchCallbackKind(row["callback_kind"])
+            event_source = json.loads(row["event_source_json"])
+        except (ValueError, TypeError, json.JSONDecodeError) as exc:
+            msg = f"corrupt dispatch obligation {row['source_event_id']!r}/{row['callback_kind']!r}"
+            raise _DispatchObligationCorruptionError(msg) from exc
+        if not isinstance(event_source, dict):
+            msg = f"corrupt dispatch obligation {row['source_event_id']!r}/{row['callback_kind']!r}"
+            raise _DispatchObligationCorruptionError(msg)
+        return _DispatchObligation(
+            principal_id=self.principal_id,
+            entity_name=self.entity_name,
+            source_event_id=row["source_event_id"],
+            callback_kind=callback_kind,
+            room_id=row["room_id"],
+            event_source=event_source,
+        )
+
     def create_pending(self, obligation: _DispatchObligation) -> _DispatchCreateResult:
         """Durably create pending work before its callback can run."""
         self._validate_bound_key(obligation.key)
@@ -424,28 +444,31 @@ class DispatchObligationStore:
                 """,
                 (self.principal_id, self.entity_name, _PENDING_STATE),
             ).fetchall()
-        obligations: list[_DispatchObligation] = []
-        for row in rows:
-            try:
-                callback_kind = DispatchCallbackKind(row["callback_kind"])
-                event_source = json.loads(row["event_source_json"])
-            except (ValueError, TypeError, json.JSONDecodeError) as exc:
-                msg = f"corrupt dispatch obligation {row['source_event_id']!r}/{row['callback_kind']!r}"
-                raise _DispatchObligationCorruptionError(msg) from exc
-            if not isinstance(event_source, dict):
-                msg = f"corrupt dispatch obligation {row['source_event_id']!r}/{row['callback_kind']!r}"
-                raise _DispatchObligationCorruptionError(msg)
-            obligations.append(
-                _DispatchObligation(
-                    principal_id=self.principal_id,
-                    entity_name=self.entity_name,
-                    source_event_id=row["source_event_id"],
-                    callback_kind=callback_kind,
-                    room_id=row["room_id"],
-                    event_source=event_source,
+        return tuple(self._pending_obligation_from_row(row) for row in rows)
+
+    def pending_for(self, key: _DispatchObligationKey) -> _DispatchObligation | None:
+        """Reload the first durable payload for one still-pending exact key."""
+        self._validate_bound_key(key)
+        with self._lock, self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT source_event_id, callback_kind, room_id, event_source_json
+                FROM dispatch_obligations
+                WHERE principal_id = ?
+                  AND entity_name = ?
+                  AND source_event_id = ?
+                  AND callback_kind = ?
+                  AND state = ?
+                """,
+                (
+                    key.principal_id,
+                    key.entity_name,
+                    key.source_event_id,
+                    key.callback_kind.value,
+                    _PENDING_STATE,
                 ),
-            )
-        return tuple(obligations)
+            ).fetchone()
+        return None if row is None else self._pending_obligation_from_row(row)
 
     def has_pending(
         self,
@@ -728,11 +751,17 @@ class DispatchObligationRunner:
             if await self._settle_from_turn_store_if_owned(obligation):
                 return None
             create_result = await asyncio.to_thread(self.store.create_pending, obligation)
+            if create_result is _DispatchCreateResult.ALREADY_TERMINAL:
+                persisted_obligation = None
+            elif create_result is _DispatchCreateResult.ALREADY_PENDING:
+                persisted_obligation = await asyncio.to_thread(self.store.pending_for, obligation.key)
+            else:
+                persisted_obligation = obligation
         except Exception:
             if self.on_persist_failure is not None:
                 self.on_persist_failure()
             raise
-        return None if create_result is _DispatchCreateResult.ALREADY_TERMINAL else obligation
+        return persisted_obligation
 
     async def run_persisted(
         self,
@@ -742,6 +771,9 @@ class DispatchObligationRunner:
         event: nio.Event,
     ) -> None:
         """Execute work whose exact durable obligation already exists."""
+        if room.room_id != obligation.room_id or dict(event.source) != obligation.event_source:
+            room = self.room_for_id(obligation.room_id)
+            event = _parse_recovery_event(obligation)
         await self._run_obligation(obligation, room=room, event=event)
 
     async def recover_pending(self, *, turn_backed: bool | None = None) -> None:

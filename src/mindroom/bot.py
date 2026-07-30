@@ -523,7 +523,7 @@ class AgentBot:
             ),
             room_for_id=self._room_for_dispatch_obligation,
             turn_is_terminal=self._turn_store.is_durably_handled,
-            on_persist_failure=self._rewind_sync_after_dispatch_persistence_failure,
+            on_persist_failure=self._rewind_sync_after_pre_certification_failure,
         )
         self._post_response_effects_support = PostResponseEffectsSupport(
             runtime=self._runtime_view,
@@ -1157,15 +1157,15 @@ class AgentBot:
             cast("Any", self.client).next_batch = None
         return applied
 
-    def _rewind_sync_after_dispatch_persistence_failure(self) -> None:
-        """Replay work that failed before an exact durable obligation existed."""
+    def _rewind_sync_after_pre_certification_failure(self) -> None:
+        """Replay a classic sync that failed before its position was certified."""
         client = self.client
         if client is None:
             return
         retry_token = self._sync_cache_trust.retry_token()
         cast("Any", client).next_batch = retry_token
         self.logger.warning(
-            "dispatch_obligation_persistence_failed_replaying_sync",
+            "pre_certification_sync_side_effect_failed_replaying_sync",
             has_retry_token=retry_token is not None,
         )
 
@@ -1302,10 +1302,16 @@ class AgentBot:
                     hooks_were_armed=room_member_join_hooks_were_armed,
                     decision=decision,
                 )
-                await self._run_pre_certification_sync_response_side_effects(
-                    _response,
-                    room_member_join_hook_plan=room_member_join_hook_plan,
-                )
+                try:
+                    await self._run_pre_certification_sync_response_side_effects(
+                        _response,
+                        room_member_join_hook_plan=room_member_join_hook_plan,
+                    )
+                except BaseException:
+                    client = self.client
+                    if client is not None and cast("Any", client).next_batch != self._sync_cache_trust.retry_token():
+                        self._rewind_sync_after_pre_certification_failure()
+                    raise
                 decision = self._apply_sync_response_decision(decision, cache_result=cache_result)
                 if decision.reset_client_token:
                     room_member_join_hook_plan = _RoomMemberJoinSyncHookPlan(arm_after_response=False)
