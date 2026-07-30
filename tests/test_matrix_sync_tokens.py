@@ -17,7 +17,7 @@ import pytest
 from structlog.testing import capture_logs
 
 from mindroom.background_tasks import wait_for_background_tasks
-from mindroom.bot import AgentBot, _create_best_effort_task_wrapper
+from mindroom.bot import AgentBot, TeamBot, _create_best_effort_task_wrapper
 from mindroom.coalescing import CoalescingDrainResult, CoalescingGate, IngressAdmissionClosedError, ReadyPendingEvent
 from mindroom.coalescing_batch import CoalescedBatch, CoalescingKey, PendingEvent
 from mindroom.config.agent import AgentConfig
@@ -47,6 +47,7 @@ from mindroom.runtime_shutdown import (
     RuntimeShutdownIntent,
 )
 from mindroom.streaming import RESTART_INTERRUPTED_RESPONSE_NOTE, StreamingResponse
+from tests.bot_helpers import _configured_team_test_config, _configured_team_user
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
@@ -304,6 +305,38 @@ async def test_orchestrated_router_start_gates_turn_recovery_on_responder_fleet(
 
     expected_kwargs = {} if responder_fleet_ready else {"turn_backed": False}
     recover_pending.assert_awaited_once_with(**expected_kwargs)
+
+
+@pytest.mark.asyncio
+async def test_orchestrated_team_start_gates_turn_recovery_on_responder_fleet(
+    tmp_path: Path,
+) -> None:
+    """Team startup must leave turn-backed replay gated until its member fleet starts."""
+    config = _configured_team_test_config(tmp_path)
+    runtime_paths = runtime_paths_for(config)
+    bot = TeamBot(
+        _configured_team_user(config, runtime_paths),
+        tmp_path,
+        config=config,
+        runtime_paths=runtime_paths,
+        team_mode="coordinate",
+    )
+    install_runtime_cache_support(bot)
+    bot.orchestrator = MagicMock(running=False)
+    client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
+    recover_pending = AsyncMock()
+    bot._dispatch_obligation_runner.recover_pending = recover_pending
+
+    with (
+        patch.object(bot, "ensure_user_account", AsyncMock()),
+        patch("mindroom.bot.login_agent_user", AsyncMock(return_value=client)),
+        patch.object(bot, "_set_avatar_if_available", AsyncMock()),
+        patch.object(bot, "_set_presence_with_model_info", AsyncMock()),
+        patch("mindroom.bot.interactive.init_persistence"),
+    ):
+        await bot.start()
+
+    recover_pending.assert_awaited_once_with(turn_backed=False)
 
 
 @pytest.mark.asyncio
