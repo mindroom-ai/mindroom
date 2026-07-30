@@ -74,10 +74,8 @@ class SyncCacheWriteResult:
 
     @property
     def has_recovery_obligation(self) -> bool:
-        """Return whether typed recovery lacks an upstream callback-success certificate."""
-        return bool(
-            self.unclassified_limited_room_ids or self.recovered_room_ids or self.unrecovered_room_ids,
-        )
+        """Return whether nio left a limited room unclassified or unrecovered."""
+        return bool(self.unclassified_limited_room_ids or self.unrecovered_room_ids)
 
     @property
     def certified(self) -> bool:

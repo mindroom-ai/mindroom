@@ -43,7 +43,7 @@ dependencies = [
   "mdit-py-plugins>=0.5",
   "mem0ai>=0.1.115",
   # Arbitrary Olm to-device encryption uses the fork's tested internal API; update only with its round-trip tests.
-  "mindroom-nio[e2e]==0.32",
+  "mindroom-nio[e2e] @ git+https://github.com/mindroom-ai/mindroom-nio.git@2be72f0afcf3ea42f1d14fdabb1023055eeaf874",
   "openai",
   "packaging>=24",
   "pydantic>=2",
@@ -477,6 +477,8 @@ packages = [ "src/mindroom" ]
 [tool.hatch.build.targets.wheel.force-include]
 skills = "mindroom/_bundled_skills"
 [tool.hatch.build.targets.wheel.hooks.custom]
+[tool.hatch.metadata]
+allow-direct-references = true
 [tool.hatch.version]
 source = "vcs"
 [tool.hatch.version.raw-options]

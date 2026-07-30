@@ -66,7 +66,7 @@ Successful and intentionally ignored callbacks settle explicitly, while failures
 Recovery parses and invokes pending work without depending on a later Classic Sync token or Sliding Sync position.
 Message and media obligations remain pending when coalescing or a pending `TurnStore` record defers them, then yield only to durably persisted terminal turn truth.
 The registered `DispatchObligationRunner` source callback durably accepts each relevant event before background execution.
-Until nio publishes a recovered-room outcome that also certifies every non-live callback succeeded, `SyncCacheTrust` fails closed for recovered, unrecovered, and unclassified limited rooms.
+The pinned nio recovery contract publishes a recovered-room outcome only after every non-live callback succeeds, so `SyncCacheTrust` can certify a complete recovered response while unrecovered and unclassified limited rooms still fail closed.
 Classic Sync response-owned lifecycle hooks and their durable de-duplication markers complete before `SyncCacheTrust` certifies the response checkpoint.
 Separately registered nio event callbacks may continue in the background after their exact dispatch obligation is durable.
 

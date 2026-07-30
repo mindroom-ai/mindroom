@@ -1049,8 +1049,8 @@ async def test_on_sync_response_persists_latest_sync_token(tmp_path: Path) -> No
 
 
 @pytest.mark.asyncio
-async def test_recovered_sync_response_stays_uncertified_without_upstream_callback_success(tmp_path: Path) -> None:
-    """Local acceptance alone cannot make nio's current recovered label certify."""
+async def test_recovered_sync_response_certifies_after_nio_callback_success(tmp_path: Path) -> None:
+    """Pinned nio reports recovery only after its source callback succeeds."""
     bot = _agent_bot(tmp_path)
     bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
     room = nio.MatrixRoom("!room:localhost", bot.matrix_id.full_id)
@@ -1081,9 +1081,8 @@ async def test_recovered_sync_response_stays_uncertified_without_upstream_callba
         await wait_for_background_tasks(timeout=1.0, owner=bot._runtime_view)
 
     run_persisted.assert_awaited_once()
-    assert bot._sync_cache_trust.state is SyncTrustState.UNCERTAIN
-    assert bot.client.next_batch is None
-    assert _load_sync_token_value(tmp_path, bot.agent_name) is None
+    assert bot._sync_cache_trust.state is SyncTrustState.CERTIFIED
+    assert _load_sync_token_value(tmp_path, bot.agent_name) == "s_recovered"
 
 
 @pytest.mark.asyncio

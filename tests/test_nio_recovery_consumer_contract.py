@@ -117,8 +117,8 @@ def test_nio_sync_responses_publish_exact_typed_recovery_fields(response_type: t
         assert response_fields[field_name].default == frozenset()
 
 
-def test_restored_token_recovered_only_first_sync_stays_uncertified_without_callback_success(tmp_path: Path) -> None:
-    """Nio 0.32 recovered labels do not prove non-live callback acceptance."""
+def test_restored_token_recovered_only_first_sync_certifies_after_callback_success(tmp_path: Path) -> None:
+    """Pinned nio recovered labels prove non-live callback acceptance."""
     response = _sync_response(
         limited_room_ids=(_RECOVERED_ROOM,),
         recovered_room_ids=frozenset({_RECOVERED_ROOM}),
@@ -143,9 +143,9 @@ def test_restored_token_recovered_only_first_sync_stays_uncertified_without_call
         first_sync=True,
     )
 
-    assert decision.state is SyncTrustState.UNCERTAIN
-    assert decision.reset_client_token is True
-    assert load_sync_checkpoint(tmp_path, "code") is None
+    assert decision.state is SyncTrustState.CERTIFIED
+    assert decision.reset_client_token is False
+    assert load_sync_checkpoint(tmp_path, "code") is not None
 
 
 def test_earlier_recovered_gap_with_failed_cache_write_rewinds_continuity(tmp_path: Path) -> None:
@@ -175,8 +175,8 @@ def test_earlier_recovered_gap_with_failed_cache_write_rewinds_continuity(tmp_pa
     assert load_sync_checkpoint(tmp_path, "code") is None
 
 
-def test_earlier_recovered_gap_stays_uncertified_without_callback_success(tmp_path: Path) -> None:
-    """A recovered outcome outside the current window remains unsafe on nio 0.32."""
+def test_earlier_recovered_gap_certifies_after_callback_success(tmp_path: Path) -> None:
+    """Pinned nio preserves callback-success proof outside the current window."""
     response = _sync_response(
         limited_room_ids=(),
         recovered_room_ids=frozenset({_RECOVERED_ROOM}),
@@ -195,9 +195,9 @@ def test_earlier_recovered_gap_stays_uncertified_without_callback_success(tmp_pa
         first_sync=False,
     )
 
-    assert decision.state is SyncTrustState.UNCERTAIN
-    assert decision.checkpoint_to_save is None
-    assert decision.reset_client_token is True
+    assert decision.state is SyncTrustState.CERTIFIED
+    assert decision.checkpoint_to_save is not None
+    assert decision.reset_client_token is False
 
 
 @pytest.mark.parametrize(
