@@ -98,10 +98,10 @@ def _save_room_member_joins(path: Path, seen: dict[str, set[str]]) -> None:
             encoding="utf-8",
         )
         safe_replace(temp_path, path)
-    except OSError:
+    except OSError as exc:
         logger.exception("failed_to_save_room_member_joins", path=str(path))
         msg = f"Failed to persist completed room-member join tracking at {path}"
-        raise RuntimeError(msg) from None
+        raise RuntimeError(msg) from exc
     finally:
         temp_path.unlink(missing_ok=True)
 

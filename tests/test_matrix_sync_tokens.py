@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sqlite3
 import threading
 import uuid
 from datetime import UTC, datetime
@@ -1252,6 +1253,17 @@ async def test_dispatch_obligation_waits_for_terminal_turn_durability(tmp_path: 
         event.event_id,
         DispatchCallbackKind.MESSAGE,
     )
+    with sqlite3.connect(tmp_path / "tracking" / "dispatch_obligations.sqlite3") as connection:
+        terminal_kinds = connection.execute(
+            """
+            SELECT callback_kind
+            FROM dispatch_obligations
+            WHERE source_event_id = ?
+            ORDER BY callback_kind
+            """,
+            (event.event_id,),
+        ).fetchall()
+    assert terminal_kinds == [(DispatchCallbackKind.MESSAGE.value,)]
 
 
 @pytest.mark.asyncio

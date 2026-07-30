@@ -160,9 +160,8 @@ class SyncCacheTrust:
                 cache_scope_epoch=self._cache_scope_epoch,
             )
         self._apply_decision(decision, cache_result=cache_result)
-        # Re-arm from applied trust, not from the decision: _apply_decision rejects
-        # certification while a callback failure is outstanding, and a rejected
-        # certification must not license another since-less replay.
+        # Re-arm from applied trust so a replaced stale-scope decision cannot
+        # license another since-less replay.
         if decision.reset_client_token:
             self._awaiting_initial_window = True
         elif self.state is SyncTrustState.CERTIFIED:

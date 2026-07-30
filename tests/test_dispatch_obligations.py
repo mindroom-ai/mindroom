@@ -193,7 +193,9 @@ def test_terminal_settlement_compacts_payload_before_invalid_replay_check(tmp_pa
             "SELECT room_id, event_source_json FROM dispatch_obligations WHERE source_event_id = ?",
             (obligation.source_event_id,),
         ).fetchone()
+        schema_version = connection.execute("PRAGMA user_version").fetchone()[0]
     assert row == ("", "")
+    assert schema_version == 2
     invalid_replay = replace(
         obligation,
         room_id="!different:example.org",
@@ -222,6 +224,7 @@ def test_store_initialization_compacts_legacy_terminal_payloads(tmp_path: Path) 
                 obligation.source_event_id,
             ),
         )
+        connection.execute("PRAGMA user_version = 1")
 
     _store(tmp_path)
 

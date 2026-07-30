@@ -873,9 +873,10 @@ async def test_room_member_joined_save_failure_remains_retryable(
 
     monkeypatch.setattr(room_member_joins, "safe_replace", failing_replace)
 
-    with pytest.raises(RuntimeError, match="Failed to persist completed room-member join"):
+    with pytest.raises(RuntimeError, match="Failed to persist completed room-member join") as exc_info:
         await bot._on_room_member(room, _room_member_event(event_id="$join"))
 
+    assert isinstance(exc_info.value.__cause__, OSError)
     assert seen == ["$join"]
     assert not (bot.runtime_paths.storage_root / "tracking" / "room_member_joins.json").exists()
 

@@ -22,7 +22,7 @@ from mindroom.matrix.media import MATRIX_MEDIA_EVENT_TYPES, MatrixMediaEvent, pa
 logger = get_logger(__name__)
 
 _DATABASE_NAME = "dispatch_obligations.sqlite3"
-_SCHEMA_VERSION = 1
+_SCHEMA_VERSION = 2
 _PENDING_STATE = "pending"
 _TOOL_APPROVAL_RESPONSE_EVENT_TYPE = "io.mindroom.tool_approval_response"
 
@@ -133,7 +133,7 @@ class DispatchObligationStore:
     @staticmethod
     def _initialize_schema(connection: sqlite3.Connection) -> None:
         current_version = connection.execute("PRAGMA user_version").fetchone()[0]
-        if current_version not in {0, _SCHEMA_VERSION}:
+        if current_version not in {0, 1, _SCHEMA_VERSION}:
             msg = f"Unsupported dispatch obligation schema version {current_version}"
             raise RuntimeError(msg)
         connection.execute(
@@ -159,17 +159,17 @@ class DispatchObligationStore:
             )
             """,
         )
-        if current_version == 0:
+        if current_version == 1:
+            connection.execute(
+                """
+                UPDATE dispatch_obligations
+                SET room_id = '', event_source_json = ''
+                WHERE state != ?
+                """,
+                (_PENDING_STATE,),
+            )
+        if current_version < _SCHEMA_VERSION:
             connection.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
-        connection.execute(
-            """
-            UPDATE dispatch_obligations
-            SET room_id = '', event_source_json = ''
-            WHERE state != ?
-              AND (room_id != '' OR event_source_json != '')
-            """,
-            (_PENDING_STATE,),
-        )
 
     @staticmethod
     def _event_source_json(obligation: _DispatchObligation) -> str:
@@ -369,6 +369,44 @@ class DispatchObligationStore:
                     _DispatchTerminalOutcome.SUCCEEDED.value,
                     settled_at_ns,
                     settled_at_ns,
+                ),
+            )
+
+    def settle_pending_from_turn_store(self, source_event_ids: tuple[str, ...]) -> None:
+        """Compact only transient turn-backed rows after TurnStore becomes durable."""
+        if not source_event_ids:
+            return
+        if any(not source_event_id for source_event_id in source_event_ids):
+            msg = "TurnStore dispatch settlement requires source events"
+            raise ValueError(msg)
+        settled_at_ns = time.time_ns()
+        with self._lock, self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            connection.executemany(
+                """
+                UPDATE dispatch_obligations
+                SET room_id = '',
+                    event_source_json = '',
+                    state = ?,
+                    settled_at_ns = ?
+                WHERE principal_id = ?
+                  AND entity_name = ?
+                  AND source_event_id = ?
+                  AND callback_kind IN (?, ?)
+                  AND state = ?
+                """,
+                (
+                    (
+                        _DispatchTerminalOutcome.SUCCEEDED.value,
+                        settled_at_ns,
+                        self.principal_id,
+                        self.entity_name,
+                        source_event_id,
+                        DispatchCallbackKind.MESSAGE.value,
+                        DispatchCallbackKind.MEDIA.value,
+                        _PENDING_STATE,
+                    )
+                    for source_event_id in source_event_ids
                 ),
             )
 

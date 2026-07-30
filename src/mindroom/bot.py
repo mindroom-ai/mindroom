@@ -1815,11 +1815,9 @@ class AgentBot:
         await self._room_lifecycle.on_invite(room, event)
 
     def _settle_turn_dispatch_obligations(self, event_ids: tuple[str, ...]) -> None:
-        """Replace transient message/media obligations with durable TurnStore truth."""
+        """Replace pending turn-backed obligations with durable TurnStore truth."""
         try:
-            for event_id in event_ids:
-                for callback_kind in (DispatchCallbackKind.MESSAGE, DispatchCallbackKind.MEDIA):
-                    self._dispatch_obligation_store.settle_from_turn_store(event_id, callback_kind)
+            self._dispatch_obligation_store.settle_pending_from_turn_store(event_ids)
         except Exception:
             self.logger.exception(
                 "turn_dispatch_obligation_settlement_failed",
