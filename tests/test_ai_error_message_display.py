@@ -34,8 +34,6 @@ from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
     install_runtime_cache_support,
-    mark_response_ready,
-    record_pending_response_turn,
     replace_delivery_gateway_deps,
     replace_response_runner_deps,
     request_envelope,
@@ -80,7 +78,6 @@ def _mock_bot(tmp_path: Path) -> AgentBot:
     bot.enable_streaming = True
     bot.orchestrator = None
     install_runtime_cache_support(bot)
-    mark_response_ready(bot)
     bot._conversation_resolver.build_message_target = MagicMock(
         return_value=MessageTarget.resolve("!room:localhost", None, None, room_mode=True),
     )
@@ -135,7 +132,6 @@ def _response_request(
     thread_id: str | None = None,
     prompt: str = "Help me with something",
     existing_event_id: str | None = None,
-    correlation_id: str | None = None,
 ) -> ResponseRequest:
     """Build one response request for direct bot seam tests."""
     return ResponseRequest(
@@ -148,7 +144,6 @@ def _response_request(
             prompt=prompt,
         ),
         existing_event_id=existing_event_id,
-        correlation_id=correlation_id,
     )
 
 
@@ -173,33 +168,31 @@ class TestAIErrorDisplay:
 
         edited_messages = []
 
-        async def mock_terminal_edit(
+        async def mock_gateway_edit_message(
             client: object,  # noqa: ARG001
             room_id: str,  # noqa: ARG001
+            event_id: str,
             content: dict[str, object],
+            text: str,
             **_kwargs: object,
         ) -> DeliveredMatrixEvent:
-            relation = content["m.relates_to"]
-            replacement = content["m.new_content"]
-            assert isinstance(relation, dict)
-            assert isinstance(replacement, dict)
-            edited_messages.append((relation["event_id"], replacement["body"]))
+            edited_messages.append((event_id, text))
             return DeliveredMatrixEvent(event_id="$edit", content_sent=content)
 
         with (
             patch("mindroom.response_runner.ai_response") as mock_ai,
             patch(
-                "mindroom.terminal_delivery.send_message_result",
-                new=AsyncMock(side_effect=mock_terminal_edit),
+                "mindroom.delivery_gateway.edit_message_result",
+                new=AsyncMock(side_effect=mock_gateway_edit_message),
             ),
         ):
             _build_response_runner(bot)
             error_msg = "[test_agent] 🔴 Authentication failed. Please check your API key configuration."
             mock_ai.return_value = error_msg
 
-            request = _response_request(existing_event_id="$thinking_msg")
-            record_pending_response_turn(bot, request)
-            await bot._response_runner.process_and_respond(request)
+            await bot._response_runner.process_and_respond(
+                _response_request(existing_event_id="$thinking_msg"),
+            )
 
             assert len(edited_messages) == 1
             event_id, text = edited_messages[0]
@@ -537,15 +530,15 @@ class TestAIErrorDisplay:
 
         edited_messages = []
 
-        async def mock_terminal_edit(
+        async def mock_gateway_edit_message(
             client: object,  # noqa: ARG001
             room_id: str,  # noqa: ARG001
+            event_id: str,  # noqa: ARG001
             content: dict[str, object],
+            text: str,
             **_kwargs: object,
         ) -> DeliveredMatrixEvent:
-            replacement = content["m.new_content"]
-            assert isinstance(replacement, dict)
-            edited_messages.append(replacement["body"])
+            edited_messages.append(text)
             return DeliveredMatrixEvent(event_id="$edit", content_sent=content)
 
         error_messages = [
@@ -556,27 +549,25 @@ class TestAIErrorDisplay:
             "[test_agent] 🔴 Error: Invalid model specified. Please check your configuration.",
         ]
 
-        for index, error_msg in enumerate(error_messages):
+        for error_msg in error_messages:
             edited_messages.clear()
 
             with (
                 patch("mindroom.response_runner.ai_response") as mock_ai,
                 patch(
-                    "mindroom.terminal_delivery.send_message_result",
-                    new=AsyncMock(side_effect=mock_terminal_edit),
+                    "mindroom.delivery_gateway.edit_message_result",
+                    new=AsyncMock(side_effect=mock_gateway_edit_message),
                 ),
             ):
                 _build_response_runner(bot)
                 mock_ai.return_value = error_msg
 
-                request = _response_request(
-                    reply_to_event_id=f"$user_msg_{index}",
-                    prompt="Help me",
-                    existing_event_id=f"$thinking_{index}",
-                    correlation_id=f"error-{index}",
+                await bot._response_runner.process_and_respond(
+                    _response_request(
+                        prompt="Help me",
+                        existing_event_id=f"$thinking_{error_messages.index(error_msg)}",
+                    ),
                 )
-                record_pending_response_turn(bot, request)
-                await bot._response_runner.process_and_respond(request)
 
                 assert len(edited_messages) == 1
                 displayed_msg = edited_messages[0]

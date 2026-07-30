@@ -1990,7 +1990,7 @@ async def test_shutdown_discards_checkpoint_when_terminal_interruption_note_did_
                 ),
             )
             final_outcomes.append(final_outcome)
-            await bot._response_runner._notify_interrupted_response_recoverable(
+            bot._response_runner._notify_interrupted_response_recoverable(
                 ResponseRequest(
                     thread_history=(),
                     prompt="Hello",
@@ -2001,12 +2001,6 @@ async def test_shutdown_discards_checkpoint_when_terminal_interruption_note_did_
                     ),
                 ),
                 final_outcome,
-                ResponseIdentity(
-                    response_kind="ai",
-                    response_envelope=envelope,
-                    correlation_id=source_event_id,
-                    source_event_ids=(source_event_id,),
-                ),
             )
             raise
 

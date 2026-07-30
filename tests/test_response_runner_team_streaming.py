@@ -1566,9 +1566,6 @@ async def test_generate_team_response_helper_merges_raw_prompt_into_model_prompt
             message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
             orchestrator=_team_orchestrator(config, runtime_paths),
         )
-        coordinator.deps.resolver.deps.conversation_cache.get_latest_thread_event_id_if_needed.return_value = (
-            "$user_msg"
-        )
 
         resolution = await coordinator.generate_team_response_helper(
             _response_request(

@@ -962,7 +962,6 @@ depends_on = [
     "mindroom.constants",
     "mindroom.hooks",
     "mindroom.matrix.client_delivery",
-    "mindroom.response_identity",
     "mindroom.runtime_protocols",
     "mindroom.streaming",
     "mindroom.terminal_delivery",
@@ -972,17 +971,11 @@ depends_on = [
 path = "mindroom.terminal_delivery"
 depends_on = [
     "mindroom.handled_turns",
-    "mindroom.hooks",
-    "mindroom.interactive",
     "mindroom.matrix.client_delivery",
-    "mindroom.message_target",
-    "mindroom.response_identity",
-    "mindroom.turn_origin",
+    "mindroom.matrix.conversation_cache",
+    "mindroom.runtime_protocols",
+    "mindroom.turn_store",
 ]
-
-[[modules]]
-path = "mindroom.response_identity"
-depends_on = ["mindroom.hooks"]
 
 [[modules]]
 path = "mindroom.edit_regenerator"
@@ -1612,6 +1605,7 @@ depends_on = [
     "mindroom.memory._file_backend",
     "mindroom.memory._prompting",
     "mindroom.memory._shared",
+    "mindroom.prompt_templates",
     "mindroom.timing",
 ]
 visibility = ["mindroom.memory", "mindroom.memory.auto_flush"]
@@ -1694,6 +1688,7 @@ visibility = [
     "mindroom.agents",
     "mindroom.config.main",
     "mindroom.memory._prompting",
+    "mindroom.memory.functions",
 ]
 
 [[modules]]
@@ -2082,6 +2077,7 @@ visibility = [
     "mindroom.inbound_turn_normalizer",
     "mindroom.knowledge.utils",
     "mindroom.post_response_effects",
+    "mindroom.terminal_delivery",
     "mindroom.turn_policy",
 ]
 
@@ -2798,7 +2794,10 @@ depends_on = [
 
 [[modules]]
 path = "mindroom.redacted_turn_cleanup"
-depends_on = []
+depends_on = [
+    "mindroom.terminal_delivery",
+    "mindroom.turn_store",
+]
 visibility = ["mindroom.bot"]
 
 [[modules]]
@@ -3353,6 +3352,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.post_response_effects"
 depends_on = [
+    "mindroom.delivery_gateway",
     "mindroom.matrix.conversation_cache",
     "mindroom.runtime_protocols",
     "mindroom.thread_summary",

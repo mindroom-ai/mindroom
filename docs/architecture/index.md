@@ -81,7 +81,6 @@ MindRoom's architecture consists of several key components working together.
 | `routing.py` | Intelligent agent or team selection when no entity is mentioned |
 | `streaming.py` | Streaming state machine: placeholder, progressive edits, tool traces, cancellation |
 | `terminal_delivery.py` | Retry coordinator for exact terminal edits checkpointed on canonical TurnRecords |
-| `response_identity.py` | Leaf identity shared by response delivery and lifecycle |
 | `media_inputs.py` | Shared media-input container passed across bot, teams, and AI layers |
 | `media_fallback.py` | Retries model requests without inline media when models reject media inputs |
 | `file_memory_knowledge.py` | Shared resolution for agent file-memory semantic knowledge overlays |

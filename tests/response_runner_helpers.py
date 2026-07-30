@@ -19,7 +19,6 @@ from tests.conftest import (
     bind_runtime_paths,
     install_runtime_cache_support,
     make_matrix_client_mock,
-    mark_response_ready,
     message_origin,
     runtime_paths_for,
     test_runtime_paths,
@@ -54,7 +53,6 @@ def _bot(tmp_path: Path) -> AgentBot:
     bot = AgentBot(agent_user, tmp_path, config, runtime_paths_for(config), rooms=["!room:localhost"])
     bot.client = make_matrix_client_mock(user_id="@mindroom_general:localhost")
     install_runtime_cache_support(bot)
-    mark_response_ready(bot)
     wrap_extracted_collaborators(bot)
     return bot
 

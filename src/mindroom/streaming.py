@@ -60,11 +60,6 @@ if TYPE_CHECKING:
     from mindroom.tool_system.events import ToolTraceEntry
     from mindroom.tool_system.runtime_context import WorkerProgressEvent, WorkerProgressPump
 
-    TerminalEditCallback = Callable[
-        [str, str, str, list[ToolTraceEntry], interactive.InteractiveMetadata | None],
-        Awaitable[TerminalStreamDelivery],
-    ]
-
 logger = get_logger(__name__)
 
 __all__ = [
@@ -457,7 +452,20 @@ class StreamingResponse:
     pipeline_timing: DispatchPipelineTiming | None = None
     conversation_cache: ConversationCacheProtocol | None = None
     visible_event_id_callback: Callable[[str], None] | None = None
-    terminal_edit_callback: TerminalEditCallback | None = None
+    terminal_edit_callback: (
+        Callable[
+            [
+                str,
+                dict[str, Any],
+                str,
+                str,
+                list[ToolTraceEntry],
+                interactive.InteractiveMetadata | None,
+            ],
+            Awaitable[TerminalStreamDelivery],
+        ]
+        | None
+    ) = None
     preserve_existing_visible_on_empty_terminal: bool = False
     canonical_final_body_candidate: str | None = None
     _warmup_state: WorkerWarmupState = field(default_factory=WorkerWarmupState, init=False, repr=False)
@@ -855,25 +863,23 @@ class StreamingResponse:
                 canonical_final_body_candidate=canonical_final_body_candidate,
                 failure_reason=cancellation_failure_reason or "terminal_update_failed",
                 interactive_metadata=self._last_committed_interactive_metadata,
-                durable_lifecycle_managed=(
-                    self._terminal_delivery is not None and self._terminal_delivery.commit.lifecycle_managed
-                ),
             )
-        terminal_interactive_metadata = response.interactive_metadata
-        if self._terminal_delivery is not None:
-            attempted_rendered_body = self._terminal_delivery.rendered_body
-            terminal_interactive_metadata = self._terminal_delivery.interactive_metadata
+        terminal_delivery = self._terminal_delivery
         return StreamTransportOutcome(
             last_physical_stream_event_id=self.event_id,
             terminal_status=terminal_status,
-            rendered_body=attempted_rendered_body,
+            rendered_body=(
+                terminal_delivery.rendered_body if terminal_delivery is not None else attempted_rendered_body
+            ),
             visible_body_state=attempted_visible_body_state,
             terminal_update_committed=True,
+            terminal_transform_applied=terminal_delivery is not None,
             canonical_final_body_candidate=canonical_final_body_candidate,
             failure_reason=cancellation_failure_reason,
-            interactive_metadata=terminal_interactive_metadata,
-            durable_lifecycle_managed=(
-                self._terminal_delivery is not None and self._terminal_delivery.commit.lifecycle_managed
+            interactive_metadata=(
+                terminal_delivery.interactive_metadata
+                if terminal_delivery is not None
+                else response.interactive_metadata
             ),
         )
 
@@ -935,20 +941,22 @@ class StreamingResponse:
             if (
                 is_final
                 and self.event_id is not None
+                and prepared_delivery.committed_state.stream_status == STREAM_STATUS_COMPLETED
                 and self.terminal_edit_callback is not None
-                and prepared_delivery.content.get(STREAM_STATUS_KEY) == STREAM_STATUS_COMPLETED
             ):
                 self._terminal_delivery = await self.terminal_edit_callback(
                     self.event_id,
-                    prepared_delivery.display_text,
+                    build_edit_event_content(
+                        event_id=self.event_id,
+                        new_content=prepared_delivery.content,
+                        new_text=prepared_delivery.display_text,
+                    ),
+                    prepared_delivery.committed_state.rendered_body,
                     prepared_delivery.committed_state.accumulated_text,
                     prepared_delivery.committed_state.tool_trace,
                     prepared_delivery.committed_state.interactive_metadata,
                 )
-                send_succeeded = self._terminal_delivery.commit.status == "delivered" or (
-                    self._terminal_delivery.commit.status == "deferred"
-                    and self._terminal_delivery.commit.lifecycle_managed
-                )
+                send_succeeded = self._terminal_delivery.commit.status in {"delivered", "deferred"}
             else:
                 send_succeeded = await self._send_content(
                     client,
@@ -1844,9 +1852,22 @@ async def send_streaming_response(  # noqa: C901, PLR0912, PLR0915
     tool_trace_collector: list[ToolTraceEntry] | None = None,
     pipeline_timing: DispatchPipelineTiming | None = None,
     visible_event_id_callback: Callable[[str], None] | None = None,
+    terminal_edit_callback: (
+        Callable[
+            [
+                str,
+                dict[str, Any],
+                str,
+                str,
+                list[ToolTraceEntry],
+                interactive.InteractiveMetadata | None,
+            ],
+            Awaitable[TerminalStreamDelivery],
+        ]
+        | None
+    ) = None,
     latest_thread_event_id: str | None = None,
     conversation_cache: ConversationCacheProtocol | None = None,
-    terminal_edit_callback: TerminalEditCallback | None = None,
     preserve_existing_visible_on_empty_terminal: bool = False,
 ) -> StreamTransportOutcome:
     """Stream chunks to a Matrix room and return the canonical transport outcome."""

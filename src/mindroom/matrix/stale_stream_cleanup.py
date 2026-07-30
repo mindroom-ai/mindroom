@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -91,6 +92,12 @@ _TERMINAL_STREAM_STATUSES = frozenset(
 )
 
 
+@asynccontextmanager
+async def _allow_stale_cleanup() -> AsyncIterator[bool]:
+    """Allow cleanup when no durable-delivery owner is attached."""
+    yield True
+
+
 @dataclass(frozen=True)
 class _InterruptedThread:
     """One interrupted thread that can be resumed after restart."""
@@ -110,7 +117,9 @@ class StaleStreamCleanupActor:
 
     client: nio.AsyncClient
     conversation_cache: ConversationCacheProtocol | None
-    terminal_delivery_cleanup_guard: Callable[[str], AbstractAsyncContextManager[bool]]
+    terminal_delivery_cleanup_guard: Callable[[str], AbstractAsyncContextManager[bool]] = lambda _event_id: (
+        _allow_stale_cleanup()
+    )
 
 
 @dataclass(frozen=True)

@@ -82,13 +82,11 @@ from tests.conftest import (
     drain_coalescing,
     install_runtime_cache_support,
     make_matrix_client_mock,
-    mark_response_ready,
     message_origin,
     patch_response_runner_module,
     replace_response_runner_deps,
     request_envelope,
     runtime_paths_for,
-    terminal_delivery_coordinator_for,
     test_runtime_paths,
 )
 from tests.identity_helpers import persist_entity_accounts
@@ -334,7 +332,6 @@ class TestStreamingBehavior:
             runtime_paths=runtime_paths_for(config),
         )
         install_runtime_cache_support(helper_bot)
-        mark_response_ready(helper_bot)
         helper_bot.client = _make_matrix_client_mock()
 
         # Mock orchestrator
@@ -354,7 +351,6 @@ class TestStreamingBehavior:
             runtime_paths=runtime_paths_for(config),
         )
         install_runtime_cache_support(calc_bot)
-        mark_response_ready(calc_bot)
         calc_bot.client = _make_matrix_client_mock()
 
         # Mock orchestrator
@@ -476,7 +472,6 @@ class TestStreamingBehavior:
             runtime_paths=runtime_paths_for(config),
         )
         install_runtime_cache_support(calc_bot)
-        mark_response_ready(calc_bot)
         calc_bot.client = _make_matrix_client_mock()
 
         # Mock orchestrator
@@ -4056,10 +4051,6 @@ class TestStreamingBehavior:
                 redact_message_event=AsyncMock(return_value=True),
                 resolver=MagicMock(),
                 response_hooks=response_hooks,
-                terminal_delivery_coordinator=terminal_delivery_coordinator_for(
-                    runtime_paths_for(self.config),
-                    "helper",
-                ),
             ),
         )
         object.__setattr__(gateway, "edit_text", AsyncMock(return_value=True))
@@ -4162,10 +4153,6 @@ class TestStreamingBehavior:
                 redact_message_event=AsyncMock(return_value=True),
                 resolver=MagicMock(),
                 response_hooks=response_hooks,
-                terminal_delivery_coordinator=terminal_delivery_coordinator_for(
-                    runtime_paths_for(self.config),
-                    "helper",
-                ),
             ),
         )
         outcome = await gateway.finalize_streamed_response(
@@ -4270,10 +4257,6 @@ class TestStreamingBehavior:
                 redact_message_event=AsyncMock(return_value=True),
                 resolver=MagicMock(),
                 response_hooks=response_hooks,
-                terminal_delivery_coordinator=terminal_delivery_coordinator_for(
-                    runtime_paths_for(self.config),
-                    "helper",
-                ),
             ),
         )
 

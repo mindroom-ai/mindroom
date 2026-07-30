@@ -47,7 +47,6 @@ from tests.conftest import (
     install_runtime_cache_support,
     make_matrix_client_mock,
     make_visible_message,
-    mark_response_ready,
     message_origin,
     runtime_paths_for,
     test_runtime_paths,
@@ -150,8 +149,7 @@ def setup_test_bot(
         enable_streaming=enable_streaming,
     )
     bot.client = make_matrix_client_mock(user_id=agent.user_id)
-    install_runtime_cache_support(bot)
-    return mark_response_ready(bot)
+    return install_runtime_cache_support(bot)
 
 
 def _router_readiness_runtime(
@@ -184,7 +182,6 @@ def _router_readiness_runtime(
 
     router_bot = make_bot("router")
     target_bot = make_bot("general")
-    target_bot._first_sync_done = False
     orchestrator = _MultiAgentOrchestrator(runtime_paths)
     orchestrator.config = config
     orchestrator.agent_bots = {"router": router_bot, "general": target_bot}

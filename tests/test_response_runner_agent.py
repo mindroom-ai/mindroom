@@ -89,10 +89,8 @@ from tests.bot_helpers import (
 from tests.conftest import (
     delivered_matrix_event,
     delivered_matrix_side_effect,
-    mark_response_ready,
     message_origin,
     patch_response_runner_module,
-    record_pending_response_turn,
     replace_delivery_gateway_deps,
     request_envelope,
     runtime_paths_for,
@@ -2289,7 +2287,6 @@ class TestAgentBot(AgentBotTestBase):
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = _make_matrix_client_mock()
         _install_runtime_cache_support(bot)
-        mark_response_ready(bot)
         bot._knowledge_access_support.resolve_for_agent = MagicMock(return_value=_KnowledgeResolution(knowledge=None))
         thread_history = [
             _visible_message(
@@ -2300,20 +2297,6 @@ class TestAgentBot(AgentBotTestBase):
             )
             for i in range(4)
         ]
-        request = ResponseRequest(
-            prompt="Summarize this thread",
-            thread_history=thread_history,
-            user_id="@alice:localhost",
-            response_envelope=request_envelope(
-                room_id="!test:localhost",
-                reply_to_event_id="$event",
-                thread_id="$thread",
-                prompt="Summarize this thread",
-                user_id="@alice:localhost",
-                agent_name=bot.agent_name,
-            ),
-        )
-        record_pending_response_turn(bot, request)
 
         with (
             patch("mindroom.response_runner.typing_indicator", _noop_typing_indicator),
@@ -2324,7 +2307,7 @@ class TestAgentBot(AgentBotTestBase):
                 new=AsyncMock(side_effect=delivered_matrix_side_effect("$response")),
             ),
             patch(
-                "mindroom.terminal_delivery.send_message_result",
+                "mindroom.delivery_gateway.edit_message_result",
                 new=AsyncMock(side_effect=delivered_matrix_side_effect("$edit")),
             ),
             patch.object(
@@ -2344,7 +2327,21 @@ class TestAgentBot(AgentBotTestBase):
                 new_callable=AsyncMock,
             ) as mock_thread_summary,
         ):
-            await bot._response_runner.generate_response(request)
+            await bot._response_runner.generate_response(
+                ResponseRequest(
+                    prompt="Summarize this thread",
+                    thread_history=thread_history,
+                    user_id="@alice:localhost",
+                    response_envelope=request_envelope(
+                        room_id="!test:localhost",
+                        reply_to_event_id="$event",
+                        thread_id="$thread",
+                        prompt="Summarize this thread",
+                        user_id="@alice:localhost",
+                        agent_name=bot.agent_name,
+                    ),
+                ),
+            )
 
         if scheduled_tasks:
             await asyncio.gather(*scheduled_tasks)
@@ -2353,15 +2350,15 @@ class TestAgentBot(AgentBotTestBase):
         assert all(
             await_args.args == ("!test:localhost", "$thread") for await_args in mock_get_thread_history.await_args_list
         )
-        mock_thread_summary.assert_awaited_once()
-        summary_kwargs = mock_thread_summary.await_args.kwargs
-        assert summary_kwargs["client"] is bot.client
-        assert summary_kwargs["room_id"] == "!test:localhost"
-        assert summary_kwargs["thread_id"] == "$thread"
-        assert summary_kwargs["config"] is config
-        assert summary_kwargs["runtime_paths"] is bot.runtime_paths
-        assert summary_kwargs["conversation_cache"] is bot._conversation_cache
-        assert summary_kwargs["entity_name"] == bot.agent_name
+        mock_thread_summary.assert_awaited_once_with(
+            client=bot.client,
+            room_id="!test:localhost",
+            thread_id="$thread",
+            config=config,
+            runtime_paths=bot.runtime_paths,
+            conversation_cache=bot._conversation_cache,
+            entity_name=bot.agent_name,
+        )
         assert "thread_summary_!test:localhost_$thread" in scheduled_names
 
     @pytest.mark.asyncio

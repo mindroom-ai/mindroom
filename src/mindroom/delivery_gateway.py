@@ -39,7 +39,6 @@ from mindroom.matrix.client_delivery import (
 )
 from mindroom.matrix.mentions import format_message_with_mentions
 from mindroom.matrix.message_builder import build_message_content
-from mindroom.response_identity import ResponseIdentity  # noqa: TC001
 from mindroom.runtime_protocols import SupportsClientConfig  # noqa: TC001
 from mindroom.streaming import (
     StreamingResponse,
@@ -50,12 +49,7 @@ from mindroom.streaming import (
     interactive_response_for_visible_body,
     send_streaming_response,
 )
-from mindroom.terminal_delivery import (
-    PendingTerminalDelivery,
-    TerminalDeliveryCommit,
-    TerminalDeliveryCoordinator,
-    TerminalDeliveryIntent,
-)
+from mindroom.terminal_delivery import TerminalDeliveryCommit, TerminalDeliveryIntent
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable
@@ -71,8 +65,10 @@ if TYPE_CHECKING:
         CompactionLifecycleStart,
         CompactionOutcome,
     )
+    from mindroom.hooks import MessageEnvelope
     from mindroom.message_target import MessageTarget
     from mindroom.streaming import StreamInputChunk
+    from mindroom.terminal_delivery import TerminalDeliveryCoordinator
     from mindroom.timing import DispatchPipelineTiming
     from mindroom.tool_system.events import ToolTraceEntry
 
@@ -91,6 +87,15 @@ def _is_placeholder_delivery_failure(failure_reason: str) -> bool:
     return failure_reason in _PLACEHOLDER_DELIVERY_FAILURE_REASONS or failure_reason.startswith(
         "terminal_update_exception:",
     )
+
+
+@dataclass(frozen=True)
+class ResponseIdentity:
+    """Identify which visible response a delivery or hook call belongs to."""
+
+    response_kind: str
+    response_envelope: MessageEnvelope
+    correlation_id: str
 
 
 @dataclass
@@ -292,7 +297,6 @@ class StreamingDeliveryRequest:
     """Parameters for streamed Matrix delivery."""
 
     target: MessageTarget
-    identity: ResponseIdentity
     response_stream: AsyncIterator[StreamInputChunk]
     existing_event_id: str | None = None
     adopt_existing_placeholder: bool = False
@@ -304,6 +308,7 @@ class StreamingDeliveryRequest:
     pipeline_timing: DispatchPipelineTiming | None = None
     visible_event_id_callback: Callable[[str], None] | None = None
     preserve_existing_visible_on_empty_terminal: bool = False
+    identity: ResponseIdentity | None = None
 
 
 @dataclass(frozen=True)
@@ -317,7 +322,7 @@ class DeliveryGatewayDeps:
     redact_message_event: Callable[..., Awaitable[bool]]
     resolver: ConversationResolver
     response_hooks: ResponseHookService
-    terminal_delivery_coordinator: TerminalDeliveryCoordinator
+    terminal_delivery_coordinator: TerminalDeliveryCoordinator | None = None
 
 
 @dataclass(frozen=True)
@@ -348,12 +353,30 @@ class DeliveryGateway:
             raise RuntimeError(msg)
         return client
 
-    async def owned_terminal_delivery_for_turn(
+    async def _commit_terminal_edit(
         self,
+        *,
         identity: ResponseIdentity,
-    ) -> PendingTerminalDelivery | None:
-        """Return target facts only when a TurnRecord checkpoint owns this identity."""
-        return await self.deps.terminal_delivery_coordinator.owned_delivery(identity)
+        target: MessageTarget,
+        event_id: str,
+        wire_content: dict[str, Any],
+    ) -> TerminalDeliveryCommit:
+        """Commit one exact replacement payload before Matrix transport."""
+        coordinator = self.deps.terminal_delivery_coordinator
+        assert coordinator is not None
+        prepared_content = await prepare_message_content(
+            self._client(),
+            target.room_id,
+            wire_content,
+        )
+        return await coordinator.commit_and_attempt(
+            TerminalDeliveryIntent(
+                source_event_ids=(identity.response_envelope.source_event_id,),
+                target_event_id=event_id,
+                correlation_id=identity.correlation_id,
+                wire_content=prepared_content,
+            ),
+        )
 
     @staticmethod
     def _cancelled_error_failure_reason(error: asyncio.CancelledError) -> str:
@@ -476,61 +499,11 @@ class DeliveryGateway:
         )
         return FinalDeliveryOutcome(
             terminal_status="error",
-            event_id=None,
+            event_id=request.event_id,
+            is_visible_response=True,
             failure_reason=request.failure_reason,
             tool_trace=tuple(request.tool_trace or ()),
             extra_content=failure_extra_content,
-        )
-
-    async def _commit_terminal_edit(
-        self,
-        *,
-        target: MessageTarget,
-        target_event_id: str,
-        target_was_placeholder: bool,
-        identity: ResponseIdentity,
-        body: str,
-        tool_trace: list[ToolTraceEntry] | None,
-        extra_content: dict[str, Any] | None,
-        interactive_metadata: interactive.InteractiveMetadata | None,
-    ) -> TerminalDeliveryCommit:
-        """Freeze and commit one terminal edit on its canonical TurnRecord."""
-        client = self.deps.runtime.client
-        if client is None or not body.strip():
-            return TerminalDeliveryCommit(
-                status="deferred",
-                reason="terminal_intent_unavailable",
-                lifecycle_managed=False,
-            )
-        durable_extra_content = dict(extra_content or {})
-        durable_extra_content[constants.STREAM_STATUS_KEY] = constants.STREAM_STATUS_COMPLETED
-        new_content = await self._build_edit_content(
-            EditTextRequest(
-                target=target,
-                event_id=target_event_id,
-                new_text=body,
-                tool_trace=tool_trace,
-                extra_content=durable_extra_content,
-            ),
-        )
-        wire_content = await prepare_message_content(
-            client,
-            target.room_id,
-            build_edit_event_content(
-                event_id=target_event_id,
-                new_content=new_content,
-                new_text=body,
-            ),
-        )
-        return await self.deps.terminal_delivery_coordinator.commit_and_attempt(
-            TerminalDeliveryIntent(
-                target_event_id=target_event_id,
-                target_was_placeholder=target_was_placeholder,
-                identity=identity,
-                interactive_metadata=interactive_metadata,
-                body=body,
-                wire_content=wire_content,
-            ),
         )
 
     async def send_text(self, request: SendTextRequest) -> str | None:
@@ -598,11 +571,13 @@ class DeliveryGateway:
         )
         return None
 
-    async def _build_edit_content(self, request: EditTextRequest) -> dict[str, Any]:
-        """Build the replacement body before its Matrix edit envelope."""
+    async def edit_text(self, request: EditTextRequest) -> bool:
+        """Edit one existing response message."""
+        client = self._client()
         config = self.deps.runtime.config
+        target = request.target
         # The edit envelope discards any pre-existing relation before adding m.replace.
-        return format_message_with_mentions(
+        content = format_message_with_mentions(
             config,
             self.deps.runtime_paths,
             request.new_text,
@@ -610,11 +585,6 @@ class DeliveryGateway:
             extra_content=request.extra_content,
         )
 
-    async def edit_text(self, request: EditTextRequest) -> bool:
-        """Edit one existing response message."""
-        client = self._client()
-        target = request.target
-        content = await self._build_edit_content(request)
         failure_reason = "edit_message_result returned None"
         try:
             delivered = await edit_message_result(
@@ -770,52 +740,67 @@ class DeliveryGateway:
         display_text = interactive_response.formatted_text
 
         if request.existing_event_id is not None:
-            commit = await self._commit_terminal_edit(
-                target=request.target,
-                target_event_id=request.existing_event_id,
-                target_was_placeholder=request.existing_event_is_placeholder,
-                identity=request.identity,
-                body=display_text,
-                tool_trace=draft.tool_trace,
-                extra_content=draft.extra_content,
-                interactive_metadata=interactive_response.interactive_metadata,
+            if request.existing_event_is_placeholder and self.deps.terminal_delivery_coordinator is not None:
+                replacement_content = format_message_with_mentions(
+                    self.deps.runtime.config,
+                    self.deps.runtime_paths,
+                    display_text,
+                    tool_trace=draft.tool_trace,
+                    extra_content=draft.extra_content,
+                )
+                commit = await self._commit_terminal_edit(
+                    identity=request.identity,
+                    target=request.target,
+                    event_id=request.existing_event_id,
+                    wire_content=build_edit_event_content(
+                        event_id=request.existing_event_id,
+                        new_content=replacement_content,
+                        new_text=display_text,
+                    ),
+                )
+                if commit.status in {"delivered", "deferred"}:
+                    return FinalDeliveryOutcome(
+                        terminal_status="completed",
+                        event_id=request.existing_event_id,
+                        is_visible_response=True,
+                        final_visible_body=display_text,
+                        delivery_kind="edited",
+                        tool_trace=tuple(draft.tool_trace or ()),
+                        extra_content=draft.extra_content,
+                        interactive_metadata=interactive_response.interactive_metadata,
+                    )
+                return await self._finish_placeholder_delivery_failure(
+                    _PlaceholderFailureUpdateRequest(
+                        target=request.target,
+                        event_id=request.existing_event_id,
+                        identity=request.identity,
+                        failure_reason="terminal_checkpoint_rejected",
+                        tool_trace=draft.tool_trace,
+                        extra_content=draft.extra_content,
+                    ),
+                )
+            edited = await self.edit_text(
+                EditTextRequest(
+                    target=request.target,
+                    event_id=request.existing_event_id,
+                    new_text=display_text,
+                    tool_trace=draft.tool_trace,
+                    extra_content=draft.extra_content,
+                    retry_sync_recovery=True,
+                ),
             )
-            if commit.status == "delivered" or (commit.status == "deferred" and commit.lifecycle_managed):
+            if edited:
                 return FinalDeliveryOutcome(
                     terminal_status="completed",
                     event_id=request.existing_event_id,
                     is_visible_response=True,
                     final_visible_body=display_text,
                     delivery_kind="edited",
-                    durable_lifecycle_managed=commit.lifecycle_managed,
                     tool_trace=tuple(draft.tool_trace or ()),
                     extra_content=draft.extra_content,
                     interactive_metadata=interactive_response.interactive_metadata,
                 )
-            if commit.status == "superseded":
-                if request.existing_event_is_placeholder:
-                    cleanup_failure = await self._redact_visible_response_event(
-                        room_id=request.target.room_id,
-                        event_id=request.existing_event_id,
-                        identity=request.identity,
-                        redaction_reason="Superseded terminal placeholder",
-                        failure_reason=commit.reason,
-                    )
-                    return FinalDeliveryOutcome(
-                        terminal_status="error" if cleanup_failure is not None else "cancelled",
-                        event_id=None,
-                        failure_reason=cleanup_failure or commit.reason,
-                        tool_trace=tuple(draft.tool_trace or ()),
-                        extra_content=draft.extra_content,
-                    )
-                return FinalDeliveryOutcome(
-                    terminal_status="error",
-                    event_id=request.existing_event_id,
-                    is_visible_response=True,
-                    failure_reason=commit.reason,
-                    tool_trace=tuple(draft.tool_trace or ()),
-                    extra_content=draft.extra_content,
-                )
+
             if request.existing_event_is_placeholder:
                 return await self._finish_placeholder_delivery_failure(
                     _PlaceholderFailureUpdateRequest(
@@ -1083,53 +1068,71 @@ class DeliveryGateway:
             caller_label="delivery_stream",
         )
 
-        async def commit_terminal_edit(
-            event_id: str,
-            body: str,
-            canonical_body: str,
-            tool_trace: list[ToolTraceEntry],
-            interactive_metadata: interactive.InteractiveMetadata | None,
-        ) -> TerminalStreamDelivery:
-            transformed_body = body
-            transformed_metadata = interactive_metadata
-            try:
-                draft = await self.deps.response_hooks.apply_final_response_transform(
-                    identity=request.identity,
-                    response_text=canonical_body,
-                )
-            except asyncio.CancelledError:
-                self.deps.logger.warning(
-                    "Final streamed-response transform cancelled; preserving streamed body",
-                    correlation_id=request.identity.correlation_id,
-                )
-            except Exception:
-                self.deps.logger.exception(
-                    "Final streamed-response transform failed; preserving streamed body",
-                    correlation_id=request.identity.correlation_id,
-                )
-            else:
-                if draft.response_text != canonical_body and draft.response_text.strip():
-                    transformed = interactive.parse_and_format_interactive(
-                        draft.response_text,
-                        extract_mapping=True,
+        terminal_edit_callback = None
+        identity = request.identity
+        if (
+            self.deps.terminal_delivery_coordinator is not None
+            and identity is not None
+            and (request.existing_event_id is None or request.adopt_existing_placeholder)
+        ):
+
+            async def terminal_edit_callback(
+                event_id: str,
+                wire_content: dict[str, Any],
+                rendered_body: str,
+                canonical_body: str,
+                tool_trace: list[ToolTraceEntry],
+                interactive_metadata: interactive.InteractiveMetadata | None,
+            ) -> TerminalStreamDelivery:
+                final_wire_content = wire_content
+                final_rendered_body = rendered_body
+                final_interactive_metadata = interactive_metadata
+                try:
+                    transform = await self.deps.response_hooks.apply_final_response_transform(
+                        identity=identity,
+                        response_text=canonical_body,
                     )
-                    transformed_body = transformed.formatted_text
-                    transformed_metadata = transformed.interactive_metadata
-            commit = await self._commit_terminal_edit(
-                target=request.target,
-                target_event_id=event_id,
-                target_was_placeholder=(request.existing_event_id is None or request.adopt_existing_placeholder),
-                identity=request.identity,
-                body=transformed_body,
-                tool_trace=tool_trace if request.show_tool_calls else None,
-                extra_content=request.extra_content,
-                interactive_metadata=transformed_metadata,
-            )
-            return TerminalStreamDelivery(
-                commit=commit,
-                rendered_body=transformed_body,
-                interactive_metadata=transformed_metadata,
-            )
+                except asyncio.CancelledError:
+                    self.deps.logger.warning(
+                        "Final streamed-response transform cancelled; preserving streamed success",
+                        correlation_id=identity.correlation_id,
+                    )
+                except Exception:
+                    self.deps.logger.exception(
+                        "Final streamed-response transform failed; preserving streamed success",
+                        correlation_id=identity.correlation_id,
+                    )
+                else:
+                    if transform.response_text != canonical_body and transform.response_text.strip():
+                        transformed = interactive.parse_and_format_interactive(
+                            transform.response_text,
+                            extract_mapping=True,
+                        )
+                        final_rendered_body = transformed.formatted_text
+                        final_interactive_metadata = transformed.interactive_metadata
+                        replacement_content = format_message_with_mentions(
+                            self.deps.runtime.config,
+                            self.deps.runtime_paths,
+                            final_rendered_body,
+                            tool_trace=tool_trace,
+                            extra_content=request.extra_content,
+                        )
+                        final_wire_content = build_edit_event_content(
+                            event_id=event_id,
+                            new_content=replacement_content,
+                            new_text=final_rendered_body,
+                        )
+                commit = await self._commit_terminal_edit(
+                    identity=identity,
+                    target=request.target,
+                    event_id=event_id,
+                    wire_content=final_wire_content,
+                )
+                return TerminalStreamDelivery(
+                    commit=commit,
+                    rendered_body=final_rendered_body,
+                    interactive_metadata=final_interactive_metadata,
+                )
 
         return await send_streaming_response(
             client,
@@ -1146,9 +1149,9 @@ class DeliveryGateway:
             tool_trace_collector=request.tool_trace_collector,
             pipeline_timing=request.pipeline_timing,
             visible_event_id_callback=request.visible_event_id_callback,
+            terminal_edit_callback=terminal_edit_callback,
             latest_thread_event_id=latest_thread_event_id,
             conversation_cache=self.deps.resolver.deps.conversation_cache,
-            terminal_edit_callback=commit_terminal_edit,
             preserve_existing_visible_on_empty_terminal=(
                 request.preserve_existing_visible_on_empty_terminal
                 or (request.existing_event_id is not None and not request.adopt_existing_placeholder)
@@ -1485,42 +1488,43 @@ class DeliveryGateway:
                         is_visible_response=True,
                         final_visible_body=streamed_text,
                         failure_reason=failure_reason,
-                        durable_lifecycle_managed=stream_outcome.durable_lifecycle_managed,
                         tool_trace=tuple(request.tool_trace or ()),
                         extra_content=request.extra_content,
                     )
-                if not stream_outcome.durable_lifecycle_managed:
+                final_transform_draft = None
+                if not stream_outcome.terminal_transform_applied:
                     final_transform_draft = await self.deps.response_hooks.apply_final_response_transform(
                         identity=request.identity,
                         response_text=final_body_candidate,
                     )
-                    if (
-                        final_transform_draft.response_text != final_body_candidate
-                        and final_transform_draft.response_text.strip()
-                    ):
-                        try:
-                            final_outcome = await self._finalize_visible_replacement_edit(
-                                target=request.target,
-                                event_id=streamed_event_id,
-                                response_text=final_transform_draft.response_text,
-                                canonical_body_candidate=final_body_candidate,
-                                tool_trace=request.tool_trace,
-                                extra_content=request.extra_content,
-                                failure_reason=stream_outcome.failure_reason,
-                            )
-                        except asyncio.CancelledError:
-                            self.deps.logger.warning(
-                                "Final streamed-response transform edit cancelled; preserving streamed success",
-                                correlation_id=request.identity.correlation_id,
-                            )
-                        except Exception:
-                            self.deps.logger.exception(
-                                "Final streamed-response transform edit failed; preserving streamed success",
-                                correlation_id=request.identity.correlation_id,
-                            )
-                        else:
-                            if final_outcome is not None:
-                                return final_outcome
+                if (
+                    final_transform_draft is not None
+                    and final_transform_draft.response_text != final_body_candidate
+                    and final_transform_draft.response_text.strip()
+                ):
+                    try:
+                        final_outcome = await self._finalize_visible_replacement_edit(
+                            target=request.target,
+                            event_id=streamed_event_id,
+                            response_text=final_transform_draft.response_text,
+                            canonical_body_candidate=final_body_candidate,
+                            tool_trace=request.tool_trace,
+                            extra_content=request.extra_content,
+                            failure_reason=stream_outcome.failure_reason,
+                        )
+                    except asyncio.CancelledError:
+                        self.deps.logger.warning(
+                            "Final streamed-response transform edit cancelled; preserving streamed success",
+                            correlation_id=request.identity.correlation_id,
+                        )
+                    except Exception:
+                        self.deps.logger.exception(
+                            "Final streamed-response transform edit failed; preserving streamed success",
+                            correlation_id=request.identity.correlation_id,
+                        )
+                    else:
+                        if final_outcome is not None:
+                            return final_outcome
             except asyncio.CancelledError:
                 self.deps.logger.warning(
                     "Final streamed-response transform cancelled; preserving streamed success",
@@ -1545,7 +1549,6 @@ class DeliveryGateway:
                 final_visible_body=streamed_text or interactive_response.formatted_text,
                 delivery_kind=request.initial_delivery_kind,
                 failure_reason=stream_outcome.failure_reason,
-                durable_lifecycle_managed=stream_outcome.durable_lifecycle_managed,
                 tool_trace=tuple(request.tool_trace or ()),
                 extra_content=request.extra_content,
                 interactive_metadata=interactive_response.interactive_metadata,

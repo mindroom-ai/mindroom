@@ -108,7 +108,6 @@ if TYPE_CHECKING:
     from mindroom.conversation_resolver import ConversationResolver
     from mindroom.conversation_state_writer import ConversationStateWriter
     from mindroom.dispatch_source import ScheduledHistoryBudget
-    from mindroom.handled_turns import TurnRecord
     from mindroom.history.types import HistoryScope
     from mindroom.hooks import MessageEnvelope
     from mindroom.knowledge import KnowledgeAccessSupport
@@ -314,7 +313,6 @@ class ResponseRequest:
     thread_history: Sequence[ResolvedVisibleMessage]
     prompt: str
     response_envelope: MessageEnvelope
-    source_event_ids: tuple[str, ...] = ()
     model_prompt: str | None = None
     existing_event_id: str | None = None
     existing_event_is_placeholder: bool = False
@@ -337,8 +335,6 @@ class ResponseRequest:
     on_interrupted_response_recoverable: Callable[[], None] | None = None
     sync_restart_retry_source_event_id: str | None = None
     on_deferred_outcome_handled: Callable[[str], None] | None = None
-    recovered_terminal_delivery: bool = False
-    regeneration_turn_record: TurnRecord | None = None
 
     @property
     def room_id(self) -> str:
@@ -1128,8 +1124,6 @@ class ResponseRunner:
             response_kind=response_kind,
             response_envelope=request.response_envelope,
             correlation_id=self._correlation_id_for_request(request),
-            source_event_ids=request.source_event_ids or (request.response_envelope.source_event_id,),
-            regeneration_turn_record=request.regeneration_turn_record,
         )
 
     def _agent_turn_context(
@@ -1171,11 +1165,10 @@ class ResponseRunner:
             scheduled_history_budget=request.scheduled_history_budget,
         )
 
-    async def _notify_interrupted_response_recoverable(
+    def _notify_interrupted_response_recoverable(
         self,
         request: ResponseRequest,
         final_outcome: FinalDeliveryOutcome,
-        identity: ResponseIdentity,
     ) -> bool:
         """Tell the dispatcher when a marked-handled interrupted turn is recoverable.
 
@@ -1202,8 +1195,6 @@ class ResponseRunner:
             expected_note,
         ):
             return False
-        if await self.deps.delivery_gateway.owned_terminal_delivery_for_turn(identity) is not None:
-            return False
         request.on_interrupted_response_recoverable()
         return True
 
@@ -1214,7 +1205,6 @@ class ResponseRunner:
         resolved_target: MessageTarget,
         history_scope: HistoryScope,
         execution_identity: ToolExecutionIdentity,
-        response_kind: str,
         placeholder_message: str | None = None,
         early_placeholder_state: _EarlyPlaceholderState | None = None,
     ) -> ResponseRequest | None:
@@ -1226,6 +1216,8 @@ class ResponseRunner:
             execution_identity=execution_identity,
         ):
             return None
+        if request.on_lifecycle_lock_acquired is not None:
+            request.on_lifecycle_lock_acquired()
         request = self._request_with_locked_target(request, resolved_target)
         if request.prepare_source_turn is not None and await _run_locked_source_preparation(
             request.prepare_source_turn,
@@ -1243,25 +1235,12 @@ class ResponseRunner:
                         cancel_source="interrupted",
                         identity=self._response_identity(
                             request,
-                            response_kind=response_kind,
+                            response_kind="team" if history_scope.kind == "team" else "agent",
                         ),
                     ),
                 )
             return None
-        owned_delivery = await self.deps.delivery_gateway.owned_terminal_delivery_for_turn(
-            self._response_identity(request, response_kind=response_kind),
-        )
-        if owned_delivery is not None:
-            request = replace(
-                request,
-                existing_event_id=owned_delivery.target_event_id,
-                existing_event_is_placeholder=owned_delivery.target_was_placeholder,
-                recovered_terminal_delivery=True,
-            )
-            return self._request_with_locked_target(request, resolved_target)
-        if request.on_lifecycle_lock_acquired is not None:
-            request.on_lifecycle_lock_acquired()
-        excluded_history_event_id = None
+        placeholder_event_id = None
         if (
             placeholder_message is not None
             and request.existing_event_id is None
@@ -1279,7 +1258,6 @@ class ResponseRunner:
                 ),
             )
             if placeholder_event_id is not None:
-                excluded_history_event_id = placeholder_event_id
                 placeholder_state.placeholder_event_id = placeholder_event_id
                 placeholder_state.request = request
                 request = replace(
@@ -1292,7 +1270,7 @@ class ResponseRunner:
                     request.pipeline_timing.mark_first_visible_reply("placeholder")
         request = await self._prepare_request_after_lock(
             request,
-            exclude_history_event_id=excluded_history_event_id,
+            exclude_history_event_id=placeholder_event_id,
         )
         return self._request_with_locked_target(request, resolved_target)
 
@@ -1546,11 +1524,7 @@ class ResponseRunner:
             post_response_outcome=build_post_response_outcome(final_delivery_outcome),
             post_response_deps=post_response_deps,
         )
-        interruption_recovery_registered = await self._notify_interrupted_response_recoverable(
-            request,
-            final_outcome,
-            lifecycle.identity,
-        )
+        interruption_recovery_registered = self._notify_interrupted_response_recoverable(request, final_outcome)
         cancel_source = final_outcome.cancel_source
         if cancel_source is None and final_outcome.terminal_status == "cancelled":
             cancel_source = cancel_source_from_failure_reason(final_outcome.failure_reason)
@@ -1604,14 +1578,10 @@ class ResponseRunner:
             resolved_target=resolved_target,
             history_scope=resolved_history_scope,
             execution_identity=resolved_execution_identity,
-            response_kind=response_kind,
         )
         if prepared_request is None:
             return None
         request = prepared_request
-        if request.recovered_terminal_delivery:
-            assert request.existing_event_id is not None
-            return request.existing_event_id
         lifecycle = self._build_lifecycle(
             identity=self._response_identity(request, response_kind=response_kind),
             request=request,
@@ -1701,16 +1671,12 @@ class ResponseRunner:
             resolved_target=resolved_target,
             history_scope=session_scope,
             execution_identity=retry_execution_identity,
-            response_kind="team",
             placeholder_message="🤝 Team Response: Thinking...",
             early_placeholder_state=placeholder_state,
         )
         if prepared_request is None:
             return None
         request = prepared_request
-        if request.recovered_terminal_delivery:
-            assert request.existing_event_id is not None
-            return request.existing_event_id
         team_request = replace(team_request, request=request)
         reason = team_request.resolution_reason
         if reason is not None:
@@ -1957,7 +1923,6 @@ class ResponseRunner:
                         transport_outcome = await self.deps.delivery_gateway.deliver_stream(
                             StreamingDeliveryRequest(
                                 target=delivery_target,
-                                identity=response_identity,
                                 response_stream=response_stream,
                                 existing_event_id=delivery_request.existing_event_id,
                                 adopt_existing_placeholder=bool(delivery_request.existing_event_id)
@@ -1976,6 +1941,7 @@ class ResponseRunner:
                                 streaming_cls=ReplacementStreamingResponse,
                                 pipeline_timing=request.pipeline_timing,
                                 visible_event_id_callback=_note_visible_response_event_id,
+                                identity=response_identity,
                             ),
                         )
                         event_id = transport_outcome.last_physical_stream_event_id
@@ -2414,7 +2380,6 @@ class ResponseRunner:
         tool_trace: list[Any],
         run_metadata_content: dict[str, Any],
         attempt_run_id_collector: list[str],
-        response_identity: ResponseIdentity,
         pipeline_timing: DispatchPipelineTiming | None = None,
     ) -> StreamTransportOutcome:
         """Run one streaming AI request and send the streamed Matrix response."""
@@ -2484,7 +2449,6 @@ class ResponseRunner:
                 transport_outcome = await self.deps.delivery_gateway.deliver_stream(
                     StreamingDeliveryRequest(
                         target=runtime.resolved_target,
-                        identity=response_identity,
                         response_stream=wrapped_response_stream,
                         existing_event_id=request.existing_event_id,
                         adopt_existing_placeholder=bool(request.existing_event_id)
@@ -2495,6 +2459,7 @@ class ResponseRunner:
                         streaming_cls=StreamingResponse,
                         pipeline_timing=request.pipeline_timing,
                         visible_event_id_callback=note_visible_response_event_id,
+                        identity=self._response_identity(request, response_kind="ai"),
                     ),
                 )
                 if request.pipeline_timing is not None:
@@ -2738,7 +2703,6 @@ class ResponseRunner:
                     tool_trace=tool_trace,
                     run_metadata_content=run_metadata_content,
                     attempt_run_id_collector=attempt_run_ids,
-                    response_identity=response_identity,
                     pipeline_timing=request.pipeline_timing,
                 )
             finally:
@@ -2895,16 +2859,12 @@ class ResponseRunner:
             resolved_target=resolved_target,
             history_scope=history_scope,
             execution_identity=execution_identity,
-            response_kind="ai",
             placeholder_message="Thinking...",
             early_placeholder_state=placeholder_state,
         )
         if prepared_request is None:
             return None
         request = prepared_request
-        if request.recovered_terminal_delivery:
-            assert request.existing_event_id is not None
-            return request.existing_event_id
         memory_prompt, memory_thread_history, model_prompt_text, model_thread_history = (
             prepare_memory_and_model_context(
                 request.prompt,

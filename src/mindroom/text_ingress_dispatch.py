@@ -314,12 +314,6 @@ async def _blocked_before_plan(
     *,
     requester_user_id: str,
 ) -> bool:
-    checkpoint_owner = await asyncio.to_thread(
-        controller.deps.turn_store.terminal_checkpoint_for_sources,
-        prepared.handled_turn.source_event_ids,
-    )
-    if checkpoint_owner is not None:
-        return True
     if prepared.command is not None:
         await controller._execute_command_if_owned(
             room=room,

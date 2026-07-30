@@ -1339,12 +1339,6 @@ class TurnController:
             history_scope=self.deps.turn_store.response_history_scope(ResponseAction(kind="individual")),
             conversation_target=response_target,
         )
-        checkpoint_owner = await asyncio.to_thread(
-            self.deps.turn_store.terminal_checkpoint_for_sources,
-            selection_handled_turn.source_event_ids,
-        )
-        if checkpoint_owner is not None:
-            return
         pending_turn = await asyncio.to_thread(
             self.deps.turn_store.record_pending_turn,
             selection_handled_turn,
@@ -1427,7 +1421,6 @@ class TurnController:
                 user_id=user_id,
                 attachment_ids=selection_attachment_ids or None,
                 response_envelope=response_envelope,
-                source_event_ids=selection_handled_turn.source_event_ids,
                 matrix_run_metadata=selection_matrix_run_metadata,
                 prepare_source_turn=lambda: self.deps.turn_store.prepare_response_for_redactions(
                     target=response_target,
@@ -1790,7 +1783,6 @@ class TurnController:
                             prompt=event.body,
                             user_id=dispatch.requester_user_id,
                             response_envelope=dispatch.envelope,
-                            source_event_ids=handled_turn.source_event_ids,
                             correlation_id=dispatch.correlation_id,
                             matrix_run_metadata=matrix_run_metadata,
                             requires_model_history_refresh=dispatch.context.requires_model_history_refresh,
@@ -1818,7 +1810,6 @@ class TurnController:
                             prompt=event.body,
                             user_id=dispatch.requester_user_id,
                             response_envelope=dispatch.envelope,
-                            source_event_ids=handled_turn.source_event_ids,
                             correlation_id=dispatch.correlation_id,
                             matrix_run_metadata=matrix_run_metadata,
                             requires_model_history_refresh=dispatch.context.requires_model_history_refresh,

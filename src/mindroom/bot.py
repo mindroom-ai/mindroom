@@ -489,12 +489,6 @@ class AgentBot:
                 tool_runtime=self._tool_runtime_support,
             ),
         )
-        self._post_response_effects_support = PostResponseEffectsSupport(
-            runtime=self._runtime_view,
-            logger=self.logger,
-            runtime_paths=self.runtime_paths,
-            conversation_cache=self._conversation_cache,
-        )
         response_hooks = ResponseHookService(
             hook_context=self._hook_context_support,
         )
@@ -503,8 +497,6 @@ class AgentBot:
                 runtime=self._runtime_view,
                 turn_store=self._turn_store,
                 conversation_cache=self._conversation_cache,
-                response_hooks=response_hooks,
-                post_response_effects=self._post_response_effects_support,
                 redact_message_event=self._redact_message_event,
                 is_ready=self._terminal_delivery_ready,
                 logger=self.logger,
@@ -521,6 +513,13 @@ class AgentBot:
                 response_hooks=response_hooks,
                 terminal_delivery_coordinator=self._terminal_delivery_coordinator,
             ),
+        )
+        self._post_response_effects_support = PostResponseEffectsSupport(
+            runtime=self._runtime_view,
+            logger=self.logger,
+            runtime_paths=self.runtime_paths,
+            delivery_gateway=self._delivery_gateway,
+            conversation_cache=self._conversation_cache,
         )
         self._ingress_hook_runner = IngressHookRunner(
             hook_context=self._hook_context_support,
@@ -587,6 +586,7 @@ class AgentBot:
         self._redacted_turn_cleanup = RedactedTurnCleanup(
             RedactedTurnCleanupDeps(
                 conversation_cache=self._conversation_cache,
+                turn_store=self._turn_store,
                 terminal_delivery_coordinator=self._terminal_delivery_coordinator,
             ),
         )

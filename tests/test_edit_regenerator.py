@@ -17,7 +17,7 @@ from mindroom.constants import resolve_runtime_paths
 from mindroom.conversation_resolver import ConversationResolver, MessageContext
 from mindroom.dispatch_source import EDIT_SOURCE_KIND
 from mindroom.edit_regenerator import EditRegenerator, EditRegeneratorDeps
-from mindroom.handled_turns import SourceEventMetadata, TerminalEditCheckpoint, TurnRecord
+from mindroom.handled_turns import SourceEventMetadata, TurnRecord
 from mindroom.history.types import HistoryScope
 from mindroom.hooks.ingress import HookIngressPolicy
 from mindroom.matrix.event_info import EventInfo
@@ -66,18 +66,10 @@ class _Harness:
     generate_response: AsyncMock
     wait_for_turn_settled: AsyncMock
     interrupted_turn_rooms: InterruptedTurnRooms
-    authority: _MockTurnAuthority
     config: Config
     runtime_paths: RuntimePaths
     room: nio.MatrixRoom
     context: MessageContext
-
-
-@dataclass
-class _MockTurnAuthority:
-    """Mutable canonical authority owned by the direct test harness."""
-
-    record: TurnRecord | None
 
 
 def _message_context(*, thread_id: str | None = THREAD_ID) -> MessageContext:
@@ -165,7 +157,7 @@ def _edit_event(
     return event, EventInfo.from_event(source)
 
 
-def _harness(tmp_path: Path, *, turn_record: TurnRecord | None) -> _Harness:  # noqa: PLR0915
+def _harness(tmp_path: Path, *, turn_record: TurnRecord | None) -> _Harness:
     runtime_paths = resolve_runtime_paths(
         config_path=tmp_path / "config.yaml",
         storage_path=tmp_path,
@@ -189,12 +181,12 @@ def _harness(tmp_path: Path, *, turn_record: TurnRecord | None) -> _Harness:  # 
     )
 
     turn_store = MagicMock(spec=TurnStore)
-    authority = _MockTurnAuthority(turn_record)
-    turn_store.load_turn.side_effect = lambda **_kwargs: authority.record
-    turn_store.get_turn_record.side_effect = lambda _event_id: authority.record
+    current_turn_record = [turn_record]
+    turn_store.load_turn.side_effect = lambda **_kwargs: current_turn_record[0]
+    turn_store.get_turn_record.side_effect = lambda _event_id: current_turn_record[0]
 
     def record_turn(record: TurnRecord) -> None:
-        authority.record = record
+        current_turn_record[0] = record
 
     turn_store.record_turn.side_effect = record_turn
     turn_store.build_run_metadata.return_value = dict(RUN_METADATA)
@@ -206,65 +198,10 @@ def _harness(tmp_path: Path, *, turn_record: TurnRecord | None) -> _Harness:  # 
     generate_response = AsyncMock(return_value=NEW_RESPONSE_EVENT_ID)
     response_lock = asyncio.Lock()
 
-    def commit_terminal_authority(request: ResponseRequest) -> None:
-        candidate = request.regeneration_turn_record
-        if candidate is None:
-            return
-        active_store = regenerator.deps.turn_store
-        if active_store is turn_store:
-            authority.record = replace(
-                candidate,
-                completed=True,
-                terminal_edit_checkpoint=None,
-                settled_terminal_delivery_correlation_id=request.correlation_id,
-            )
-            return
-        current = active_store.get_turn_record(candidate.source_event_ids[0])
-        assert current is not None
-        transaction_id = f"terminal-{request.correlation_id}"
-        checkpoint = TerminalEditCheckpoint(
-            transaction_id=transaction_id,
-            wire_content={"body": "regenerated"},
-            response_text="regenerated",
-            response_kind="agent",
-            target_was_placeholder=False,
-            response_envelope={"source_event_id": request.response_envelope.source_event_id},
-            correlation_id=request.correlation_id,
-            after_response_claimed=True,
-        )
-        committed = active_store.commit_terminal_checkpoint(
-            current,
-            response_event_id=candidate.response_event_id or "",
-            checkpoint=checkpoint,
-            regeneration_turn_record=candidate,
-        )
-        assert committed is not None
-        cleared = active_store.clear_terminal_checkpoint(
-            committed,
-            expected_transaction_id=transaction_id,
-        )
-        assert cleared is not None
-
     async def run_locked_response(request: object) -> str | None:
         async with response_lock:
             assert isinstance(request, ResponseRequest)
-            interrupted = False
-            on_interrupted_response_recoverable = request.on_interrupted_response_recoverable
-
-            def record_interruption() -> None:
-                nonlocal interrupted
-                interrupted = True
-                if on_interrupted_response_recoverable is not None:
-                    on_interrupted_response_recoverable()
-
-            observed_request = replace(
-                request,
-                on_interrupted_response_recoverable=record_interruption,
-            )
-            response_event_id = await generate_response(observed_request)
-            if response_event_id is not None and not interrupted:
-                commit_terminal_authority(observed_request)
-            return response_event_id
+            return await generate_response(request)
 
     wait_for_turn_settled = AsyncMock()
     interrupted_turn_rooms = InterruptedTurnRooms()
@@ -290,7 +227,6 @@ def _harness(tmp_path: Path, *, turn_record: TurnRecord | None) -> _Harness:  # 
         generate_response=generate_response,
         wait_for_turn_settled=wait_for_turn_settled,
         interrupted_turn_rooms=interrupted_turn_rooms,
-        authority=authority,
         config=config,
         runtime_paths=runtime_paths,
         room=nio.MatrixRoom(room_id=ROOM_ID, own_user_id=f"@{AGENT_NAME}:example.org"),
@@ -307,16 +243,9 @@ def _assert_no_regeneration(harness: _Harness) -> None:
     harness.turn_store.record_turn.assert_not_called()
 
 
-def _mock_authority(harness: _Harness) -> TurnRecord:
-    """Return the harness's canonical committed turn."""
-    record = harness.authority.record
-    assert record is not None
-    return record
-
-
 @pytest.mark.asyncio
-async def test_simple_edit_regenerates_and_commits_candidate_authority(tmp_path: Path) -> None:
-    """An edited turn commits its candidate facts against the canonical response target."""
+async def test_simple_edit_regenerates_and_records_new_response(tmp_path: Path) -> None:
+    """An edited single-message turn regenerates with the edited body and records the new outcome."""
     record = _turn_record()
     harness = _harness(tmp_path, turn_record=record)
     event, event_info = _edit_event(new_body="what is 3+3?")
@@ -343,13 +272,9 @@ async def test_simple_edit_regenerates_and_commits_candidate_authority(tmp_path:
     metadata_kwargs = harness.turn_store.build_run_metadata.call_args.kwargs
     assert metadata_kwargs["additional_discovery_event_ids"] == ()
 
-    harness.turn_store.record_turn.assert_not_called()
-    candidate = request.regeneration_turn_record
-    assert candidate is not None
-    recorded = _mock_authority(harness)
-    assert recorded.response_event_id == RESPONSE_EVENT_ID
-    assert recorded.source_event_prompts == candidate.source_event_prompts
-    assert recorded.source_event_revisions == candidate.source_event_revisions
+    harness.turn_store.record_turn.assert_called_once()
+    recorded = harness.turn_store.record_turn.call_args.args[0]
+    assert recorded.response_event_id == NEW_RESPONSE_EVENT_ID
     assert recorded.source_event_ids == (ORIGINAL_EVENT_ID,)
     assert recorded.anchor_event_id == ORIGINAL_EVENT_ID
     assert recorded.response_owner == AGENT_NAME
@@ -378,7 +303,6 @@ async def test_lifecycle_lock_callback_removes_stale_runs(tmp_path: Path) -> Non
         source_event_revisions={
             ORIGINAL_EVENT_ID: (event.server_timestamp, event.event_id),
         },
-        correlation_id=event.event_id,
     )
 
 
@@ -418,7 +342,7 @@ async def test_newer_same_source_edit_rejects_older_callback_during_generation(t
 
     harness.generate_response.assert_awaited_once()
     assert harness.generate_response.await_args.args[0].prompt == "newest body"
-    recorded = _mock_authority(harness)
+    recorded = harness.turn_store.record_turn.call_args.args[0]
     assert recorded.source_event_prompts == {ORIGINAL_EVENT_ID: "newest body"}
     assert recorded.source_event_revisions == {
         ORIGINAL_EVENT_ID: (1_000_010, "$edit-z:example.org"),
@@ -539,7 +463,7 @@ async def test_concurrent_coalesced_sibling_edits_are_both_retained(tmp_path: Pa
             {first_event_id: "first edited", second_event_id: "second edited"},
         ),
     ]
-    recorded = _mock_authority(harness)
+    recorded = harness.turn_store.record_turn.call_args.args[0]
     assert recorded.source_event_prompts == {
         first_event_id: "first edited",
         second_event_id: "second edited",
@@ -646,11 +570,7 @@ async def test_newer_edit_arriving_under_response_lock_is_drained(tmp_path: Path
         "older body",
         "newest body",
     ]
-    assert [call.args[0].correlation_id for call in harness.generate_response.await_args_list] == [
-        "$edit-old:example.org",
-        "$edit-new:example.org",
-    ]
-    recorded = _mock_authority(harness)
+    recorded = harness.turn_store.record_turn.call_args.args[0]
     assert recorded.source_event_prompts == {ORIGINAL_EVENT_ID: "newest body"}
     assert recorded.source_event_revisions == {
         ORIGINAL_EVENT_ID: (1_000_020, "$edit-new:example.org"),
@@ -706,7 +626,7 @@ async def test_cancelled_drain_is_retried_by_waiting_newer_edit(tmp_path: Path) 
     await retry_task
 
     assert generation_count == 2
-    recorded = _mock_authority(harness)
+    recorded = harness.turn_store.record_turn.call_args.args[0]
     assert recorded.source_event_revisions == {
         ORIGINAL_EVENT_ID: (1_000_020, "$edit-retry:example.org"),
     }
@@ -743,7 +663,7 @@ async def test_persisted_revision_rejects_stale_edit_after_regenerator_restart(t
         server_timestamp=1_000_020,
     )
     await _handle_edit(first_harness, newer, newer_info)
-    persisted_record = _mock_authority(first_harness)
+    persisted_record = first_harness.turn_store.record_turn.call_args.args[0]
 
     restarted_harness = _harness(tmp_path, turn_record=persisted_record)
     older, older_info = _edit_event(
@@ -1095,8 +1015,8 @@ async def test_coalesced_edit_rebuilds_combined_prompt(tmp_path: Path) -> None:
     }
     assert metadata_call.kwargs["additional_discovery_event_ids"] == ()
 
-    recorded = _mock_authority(harness)
-    assert recorded.response_event_id == RESPONSE_EVENT_ID
+    recorded = harness.turn_store.record_turn.call_args.args[0]
+    assert recorded.response_event_id == NEW_RESPONSE_EVENT_ID
     assert recorded.source_event_prompts == {
         first_event_id: "edited first message",
         second_event_id: "second message",
@@ -1271,7 +1191,7 @@ async def test_coalesced_edit_preserves_tagged_source_metadata(tmp_path: Path) -
 
     handled_turn = harness.turn_store.build_run_metadata.call_args.args[0]
     assert handled_turn.source_event_metadata == record.source_event_metadata
-    recorded = _mock_authority(harness)
+    recorded = harness.turn_store.record_turn.call_args.args[0]
     assert recorded.source_event_metadata == record.source_event_metadata
 
 
@@ -1327,7 +1247,7 @@ async def test_multi_sender_coalesced_source_allows_only_its_sender_to_edit(
     request = harness.generate_response.await_args.args[0]
     assert request.user_id == sender
     assert "what is 3+3?" in request.prompt
-    assert _mock_authority(harness).source_event_revisions == {
+    assert harness.turn_store.record_turn.call_args.args[0].source_event_revisions == {
         original_event_id: (event.server_timestamp, event.event_id),
     }
 
@@ -1373,8 +1293,7 @@ async def test_physical_source_edit_outranks_colliding_discovery_alias(tmp_path:
     assert "human edited" in request.prompt
     assert "human base" not in request.prompt
     assert "relay base" in request.prompt
-    recorded = request.regeneration_turn_record
-    assert recorded is not None
+    recorded = harness.turn_store.record_turn.call_args.args[0]
     assert recorded.source_event_prompts == {
         relay_event_id: "relay base",
         human_event_id: "human edited",
@@ -1434,7 +1353,7 @@ async def test_coalesced_routed_alias_edit_updates_owned_relay_prompt(tmp_path: 
     request = harness.generate_response.await_args.args[0]
     assert "first edited" in request.prompt
     assert "first base" not in request.prompt
-    recorded = _mock_authority(harness)
+    recorded = harness.turn_store.record_turn.call_args.args[0]
     assert recorded.source_event_prompts == {first_relay: "first edited", second_relay: "second base"}
     assert recorded.source_event_revisions == {first_human: (event.server_timestamp, event.event_id)}
 
@@ -1597,8 +1516,9 @@ async def test_sync_restart_cancellation_leaves_interrupted_edit_uncommitted(tmp
         assert request.on_lifecycle_lock_acquired is not None
         request.on_lifecycle_lock_acquired()
         assert request.on_interrupted_response_recoverable is not None
-        assert request.on_deferred_outcome_handled is None
+        assert request.on_deferred_outcome_handled is not None
         request.on_interrupted_response_recoverable()
+        request.on_deferred_outcome_handled("$interrupted:example.org")
         raise asyncio.CancelledError
 
     harness.generate_response.side_effect = interrupt
@@ -1610,21 +1530,13 @@ async def test_sync_restart_cancellation_leaves_interrupted_edit_uncommitted(tmp
     assert attempts == 1
     assert harness.interrupted_turn_rooms.pending_room_ids == {ROOM_ID}
     harness.turn_store.record_turn.assert_not_called()
-    assert harness.authority.record == record
     assert harness.regenerator._mailboxes == {}
-    request = harness.generate_response.await_args.args[0]
-    candidate = request.regeneration_turn_record
-    assert candidate is not None
-    assert candidate.source_event_revisions == {
-        ORIGINAL_EVENT_ID: (event.server_timestamp, event.event_id),
-    }
     expected_record = replace(
         record,
         source_event_prompts={ORIGINAL_EVENT_ID: "latest after restart"},
         source_event_revisions={
             ORIGINAL_EVENT_ID: (event.server_timestamp, event.event_id),
         },
-        correlation_id=event.event_id,
     )
     harness.turn_store.remove_stale_runs_for_edit.assert_called_once_with(
         turn_record=expected_record,
@@ -1651,8 +1563,7 @@ async def test_restart_replays_durably_committed_interrupted_edit(tmp_path: Path
     request = harness.generate_response.await_args.args[0]
     assert request.prompt == "latest after process restart"
     assert request.sync_restart_retry_source_event_id == ORIGINAL_EVENT_ID
-    assert request.regeneration_turn_record is not None
-    recorded = _mock_authority(harness)
+    recorded = harness.turn_store.record_turn.call_args.args[0]
     assert recorded.source_event_revisions == {ORIGINAL_EVENT_ID: revision}
 
 
@@ -1677,12 +1588,6 @@ async def test_swallowed_sync_restart_leaves_edit_uncommitted(tmp_path: Path) ->
     assert attempts == 1
     assert harness.interrupted_turn_rooms.pending_room_ids == {ROOM_ID}
     harness.turn_store.record_turn.assert_not_called()
-    candidate = harness.generate_response.await_args.args[0].regeneration_turn_record
-    assert candidate is not None
-    assert candidate.source_event_revisions == {
-        ORIGINAL_EVENT_ID: (event.server_timestamp, event.event_id),
-    }
-    assert harness.authority.record == _turn_record()
     assert harness.regenerator._mailboxes == {}
 
 
@@ -1722,8 +1627,9 @@ async def test_sync_restart_leaves_every_waiting_coalesced_source_uncommitted(tm
         generation_started.set()
         await cancel_generation.wait()
         assert request.on_interrupted_response_recoverable is not None
-        assert request.on_deferred_outcome_handled is None
+        assert request.on_deferred_outcome_handled is not None
         request.on_interrupted_response_recoverable()
+        request.on_deferred_outcome_handled("$interrupted:example.org")
         raise asyncio.CancelledError
 
     harness.ingress_hook_runner.emit_message_received_hooks.side_effect = hook
@@ -1758,19 +1664,6 @@ async def test_sync_restart_leaves_every_waiting_coalesced_source_uncommitted(tm
     # Neither the driving edit nor its waiting sibling may commit, so replacement
     # recovery re-drives the whole coalesced turn.
     harness.turn_store.record_turn.assert_not_called()
-    candidate = harness.generate_response.await_args.args[0].regeneration_turn_record
-    assert candidate is not None
-    assert candidate.source_event_revisions == {
-        first_event_id: (first.server_timestamp, first.event_id),
-    }
-    assert harness.authority.record == _turn_record(
-        source_event_ids=(first_event_id, second_event_id),
-        source_event_prompts={
-            first_event_id: "first base",
-            second_event_id: "second base",
-        },
-        source_event_metadata=_source_metadata(first_event_id, second_event_id),
-    )
     assert harness.regenerator._mailboxes == {}
 
 

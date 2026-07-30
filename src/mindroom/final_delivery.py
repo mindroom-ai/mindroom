@@ -16,16 +16,25 @@ _VisibleDeliveryKind = Literal["sent", "edited"]
 
 
 @dataclass(frozen=True)
+class TerminalStreamDelivery:
+    """Result of routing one completed stream edit through durable transport."""
+
+    commit: TerminalDeliveryCommit
+    rendered_body: str
+    interactive_metadata: InteractiveMetadata | None
+
+
+@dataclass(frozen=True)
 class StreamTransportOutcome:  # noqa: D101
     last_physical_stream_event_id: str | None
     terminal_status: _TerminalStatus
     rendered_body: str | None
     visible_body_state: VisibleBodyState
     terminal_update_committed: bool = False
+    terminal_transform_applied: bool = False
     canonical_final_body_candidate: str | None = None
     failure_reason: str | None = None
     interactive_metadata: InteractiveMetadata | None = None
-    durable_lifecycle_managed: bool = False
 
     @property
     def visible_event_id(self) -> str | None:
@@ -41,15 +50,6 @@ class StreamTransportOutcome:  # noqa: D101
 
 
 @dataclass(frozen=True)
-class TerminalStreamDelivery:
-    """Durable result for one completed stream edit."""
-
-    commit: TerminalDeliveryCommit
-    rendered_body: str
-    interactive_metadata: InteractiveMetadata | None
-
-
-@dataclass(frozen=True)
 class FinalDeliveryOutcome:  # noqa: D101
     terminal_status: _TerminalStatus
     event_id: str | None
@@ -58,7 +58,6 @@ class FinalDeliveryOutcome:  # noqa: D101
     delivery_kind: _VisibleDeliveryKind | None = None
     cancel_source: Literal["user_stop", "sync_restart", "interrupted"] | None = None
     failure_reason: str | None = None
-    durable_lifecycle_managed: bool = False
     suppressed: bool = False
     tool_trace: tuple[ToolTraceEntry, ...] = ()
     extra_content: dict[str, Any] | None = None

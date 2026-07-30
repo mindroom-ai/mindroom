@@ -21,12 +21,8 @@ def _redaction_event() -> nio.RedactionEvent:
 async def test_redaction_tombstones_before_updating_advisory_cache() -> None:
     """Sync certification must not outrun the durable source tombstone."""
     ordering: list[str] = []
-    terminal_delivery_coordinator = MagicMock()
-
-    async def redact(*, room_id: str, event_id: str) -> None:
-        ordering.append(f"terminal:{room_id}:{event_id}")
-
-    terminal_delivery_coordinator.redact = AsyncMock(side_effect=redact)
+    turn_store = MagicMock()
+    turn_store.mark_source_redacted.side_effect = lambda event_id: ordering.append(f"tombstone:{event_id}")
     conversation_cache = MagicMock()
 
     async def apply_redaction(room_id: str, _event: nio.RedactionEvent) -> None:
@@ -36,7 +32,7 @@ async def test_redaction_tombstones_before_updating_advisory_cache() -> None:
     cleanup = RedactedTurnCleanup(
         RedactedTurnCleanupDeps(
             conversation_cache=conversation_cache,
-            terminal_delivery_coordinator=terminal_delivery_coordinator,
+            turn_store=turn_store,
         ),
     )
     room = nio.MatrixRoom(room_id=ROOM_ID, own_user_id="@agent:example.org")
@@ -44,28 +40,27 @@ async def test_redaction_tombstones_before_updating_advisory_cache() -> None:
 
     await cleanup.handle(room, event)
 
-    assert ordering == [f"terminal:{ROOM_ID}:{EVENT_ID}", f"cache:{ROOM_ID}"]
-    terminal_delivery_coordinator.redact.assert_awaited_once_with(room_id=ROOM_ID, event_id=EVENT_ID)
+    assert ordering == [f"tombstone:{EVENT_ID}", f"cache:{ROOM_ID}"]
+    turn_store.mark_source_redacted.assert_called_once_with(EVENT_ID)
     conversation_cache.apply_redaction.assert_awaited_once_with(ROOM_ID, event)
 
 
 @pytest.mark.asyncio
-async def test_failed_tombstone_still_applies_redaction_to_advisory_cache() -> None:
-    """The in-process cache should reflect Matrix truth even when persistence fails closed."""
-    terminal_delivery_coordinator = MagicMock()
-    terminal_delivery_coordinator.redact = AsyncMock(side_effect=RuntimeError("persist failed"))
+async def test_failed_tombstone_does_not_apply_redaction_to_cache() -> None:
+    """A failed durable barrier must leave the source available for sync replay."""
+    turn_store = MagicMock()
+    turn_store.mark_source_redacted.side_effect = RuntimeError("persist failed")
     conversation_cache = MagicMock()
     conversation_cache.apply_redaction = AsyncMock()
     cleanup = RedactedTurnCleanup(
         RedactedTurnCleanupDeps(
             conversation_cache=conversation_cache,
-            terminal_delivery_coordinator=terminal_delivery_coordinator,
+            turn_store=turn_store,
         ),
     )
     room = nio.MatrixRoom(room_id=ROOM_ID, own_user_id="@agent:example.org")
-    event = _redaction_event()
 
     with pytest.raises(RuntimeError, match="persist failed"):
-        await cleanup.handle(room, event)
+        await cleanup.handle(room, _redaction_event())
 
-    conversation_cache.apply_redaction.assert_awaited_once_with(ROOM_ID, event)
+    conversation_cache.apply_redaction.assert_not_awaited()
