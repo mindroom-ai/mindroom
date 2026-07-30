@@ -10,7 +10,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import nio
 import pytest
 
-from mindroom import inbound_turn_normalizer, interactive
+from mindroom import inbound_turn_normalizer, interactive, voice_handler
 from mindroom.cancellation import SYNC_RESTART_CANCEL_MSG
 from mindroom.coalescing import CoalescingGate, IngressAdmissionClosedError, ReadyPendingEvent
 from mindroom.coalescing_batch import CoalescingKey, PendingEvent
@@ -41,6 +41,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.coalescing_batch import CoalescedBatch
+    from mindroom.handled_turns import TurnRecord
 
 
 def _room(room_id: str = "!room:localhost") -> nio.MatrixRoom:
@@ -646,6 +647,54 @@ def _router_voice_echo_event(
             },
         ),
     )
+
+
+@pytest.mark.asyncio
+async def test_hung_voice_download_fallback_releases_later_sender_slot(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A timed-out fallback must settle voice readiness and release later sender work."""
+    bot = _make_bot(tmp_path, debounce_ms=0)
+    bot.config.voice.enabled = True
+    bot.config.voice.visible_router_echo = False
+    room = _make_room()
+    voice_note = _audio_event(event_id="$voice", thread_id="$voice-thread")
+    later_text = _text_event(event_id="$later", body="later", thread_id="$other-thread")
+    dispatched_source_ids: list[str] = []
+
+    async def record_dispatch(
+        _room: nio.MatrixRoom,
+        _event: nio.RoomMessageText,
+        _requester_user_id: str,
+        *,
+        handled_turn: TurnRecord | None = None,
+        **_metadata: object,
+    ) -> None:
+        if handled_turn is not None:
+            dispatched_source_ids.extend(handled_turn.source_event_ids)
+
+    async def hung_download(*_args: object, **_kwargs: object) -> None:
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(voice_handler, "_VOICE_NORMALIZATION_TOTAL_TIMEOUT_SECONDS", 0.05)
+    try:
+        with (
+            patch("mindroom.voice_handler._download_audio", side_effect=hung_download),
+            patch.object(
+                bot._turn_controller,
+                "_dispatch_text_message",
+                new=AsyncMock(side_effect=record_dispatch),
+            ),
+        ):
+            await bot._turn_controller.handle_media_event(room, voice_note)
+            await bot._turn_controller.handle_text_event(room, later_text)
+            await _wait_for(lambda: "$later" in dispatched_source_ids, deadline_seconds=1.0)
+
+        assert "$voice" in dispatched_source_ids
+        assert bot._coalescing_gate.lanes.all_settled()
+    finally:
+        await bot._coalescing_gate.drain_all(ready_timeout_seconds=0.1)
 
 
 @pytest.mark.asyncio
