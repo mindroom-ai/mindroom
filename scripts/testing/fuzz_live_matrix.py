@@ -116,6 +116,17 @@ class RestartRegressionObservation:
     response_callbacks_quiescent: bool
 
 
+@dataclass(frozen=True, slots=True)
+class _RestartEvidence:
+    """One consistent snapshot of replacement evidence."""
+
+    response_counts: tuple[int, int, int]
+    cached_event_pair_count: int
+    fresh_prompt_observed: bool
+    historical_in_fresh_prompt: bool
+    fresh_response_complete: bool
+
+
 def evaluate_restart_regression(observation: RestartRegressionObservation) -> tuple[str, ...]:
     """Return every violated restart invariant from one settled observation."""
     checks = (
@@ -847,7 +858,9 @@ class ManagedTuwunelStack:
         """Trigger a real entity replacement that adds one dormant room."""
         config = yaml.safe_load(self.config_path.read_text(encoding="utf-8"))
         config["agents"][AGENT_NAME]["rooms"].append(room_id)
-        self.config_path.write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
+        staged_path = self.config_path.with_suffix(".yaml.tmp")
+        staged_path.write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
+        staged_path.replace(self.config_path)
 
     def cached_restart_event_pair_count(self, room_id: str, event_ids: tuple[str, str]) -> int:
         """Count exact principal/event pairs cached for the restart room."""
@@ -1388,6 +1401,43 @@ class LiveFuzzRunner:
             "status": "PASS",
         }
 
+    def _collect_restart_evidence(
+        self,
+        dormant: LiveMatrixClient,
+        *,
+        historical_event_ids: tuple[str, str],
+        fresh_event_id: str,
+    ) -> _RestartEvidence:
+        """Collect one definitionally consistent restart evidence snapshot."""
+        events = tuple(dormant.seen_events.values())
+        agent = self._canonical_response_ids(events)
+        router = self._canonical_response_ids(events, sender_id=self.stack.router_id)
+        response_counts = tuple(
+            self._combined_response_count(source_event_id, agent, router)
+            for source_event_id in (*historical_event_ids, fresh_event_id)
+        )
+        cached_event_pair_count = self.stack.cached_restart_event_pair_count(
+            dormant.room_id,
+            historical_event_ids,
+        )
+        fresh_prompt_observed, historical_in_fresh_prompt = _restart_prompt_observation(
+            self.stack.log_path.read_text(encoding="utf-8", errors="replace"),
+            fresh_event_id,
+            historical_event_ids,
+        )
+        fresh_response_ids = agent.get(fresh_event_id, set()) | router.get(fresh_event_id, set())
+        fresh_response_complete = len(fresh_response_ids) == 1 and "END call=" in self._latest_event_body(
+            events,
+            next(iter(fresh_response_ids), ""),
+        )
+        return _RestartEvidence(
+            response_counts=(response_counts[0], response_counts[1], response_counts[2]),
+            cached_event_pair_count=cached_event_pair_count,
+            fresh_prompt_observed=fresh_prompt_observed,
+            historical_in_fresh_prompt=historical_in_fresh_prompt,
+            fresh_response_complete=fresh_response_complete,
+        )
+
     async def _wait_for_restart_observation(
         self,
         dormant: LiveMatrixClient,
@@ -1398,41 +1448,29 @@ class LiveFuzzRunner:
     ) -> RestartRegressionObservation:
         """Observe replacement output until the fresh response and callback stream settle."""
         deadline = time.monotonic() + self.reply_timeout
-        counts = (0, 0, 0)
-        cached_event_pairs = 0
-        fresh_prompt_observed = False
-        historical_in_fresh_prompt = False
+        evidence = _RestartEvidence(
+            response_counts=(0, 0, 0),
+            cached_event_pair_count=0,
+            fresh_prompt_observed=False,
+            historical_in_fresh_prompt=False,
+            fresh_response_complete=False,
+        )
         response_callbacks_quiescent = False
         positive_evidence_ready = False
         while time.monotonic() < deadline:
             await dormant.sync_incremental(timeout_ms=250, allow_limited=True)
-            agent = self._canonical_response_ids(dormant.seen_events.values())
-            router = self._canonical_response_ids(dormant.seen_events.values(), sender_id=self.stack.router_id)
-            counts = tuple(
-                self._combined_response_count(source_event_id, agent, router)
-                for source_event_id in (*historical_event_ids, fresh_event_id)
-            )
-            cached_event_pairs = self.stack.cached_restart_event_pair_count(
-                dormant.room_id,
-                historical_event_ids,
-            )
-            fresh_prompt_observed, historical_in_fresh_prompt = _restart_prompt_observation(
-                self.stack.log_path.read_text(encoding="utf-8", errors="replace"),
-                fresh_event_id,
-                historical_event_ids,
+            evidence = self._collect_restart_evidence(
+                dormant,
+                historical_event_ids=historical_event_ids,
+                fresh_event_id=fresh_event_id,
             )
             callback_count = self.stack.log_count("matrix_event_callback_started", dormant.room_id)
-            fresh_response_ids = agent.get(fresh_event_id, set()) | router.get(fresh_event_id, set())
-            fresh_response_complete = len(fresh_response_ids) == 1 and "END call=" in self._latest_event_body(
-                dormant.seen_events.values(),
-                next(iter(fresh_response_ids), ""),
-            )
             positive_evidence_ready = (
                 replacement_boundary_reached
-                and cached_event_pairs == 4
-                and counts[2] == 1
-                and fresh_prompt_observed
-                and fresh_response_complete
+                and evidence.cached_event_pair_count == 4
+                and evidence.response_counts[2] == 1
+                and evidence.fresh_prompt_observed
+                and evidence.fresh_response_complete
                 and callback_count > 0
             )
             if positive_evidence_ready:
@@ -1451,29 +1489,19 @@ class LiveFuzzRunner:
                 timeout_ms=max(round(self.settle_seconds * 1000), 0),
                 allow_limited=True,
             )
-            agent = self._canonical_response_ids(dormant.seen_events.values())
-            router = self._canonical_response_ids(dormant.seen_events.values(), sender_id=self.stack.router_id)
-            counts = tuple(
-                self._combined_response_count(source_event_id, agent, router)
-                for source_event_id in (*historical_event_ids, fresh_event_id)
-            )
-            cached_event_pairs = self.stack.cached_restart_event_pair_count(
-                dormant.room_id,
-                historical_event_ids,
-            )
-            fresh_prompt_observed, historical_in_fresh_prompt = _restart_prompt_observation(
-                self.stack.log_path.read_text(encoding="utf-8", errors="replace"),
-                fresh_event_id,
-                historical_event_ids,
+            evidence = self._collect_restart_evidence(
+                dormant,
+                historical_event_ids=historical_event_ids,
+                fresh_event_id=fresh_event_id,
             )
 
         return RestartRegressionObservation(
-            historical_output_counts=(counts[0], counts[1]),
+            historical_output_counts=(evidence.response_counts[0], evidence.response_counts[1]),
             replacement_boundary_reached=replacement_boundary_reached,
-            cached_event_pair_count=cached_event_pairs,
-            fresh_output_count=counts[2],
-            fresh_prompt_observed=fresh_prompt_observed,
-            historical_in_fresh_prompt=historical_in_fresh_prompt,
+            cached_event_pair_count=evidence.cached_event_pair_count,
+            fresh_output_count=evidence.response_counts[2],
+            fresh_prompt_observed=evidence.fresh_prompt_observed,
+            historical_in_fresh_prompt=evidence.historical_in_fresh_prompt,
             response_callbacks_quiescent=response_callbacks_quiescent,
         )
 

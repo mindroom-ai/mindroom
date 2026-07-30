@@ -8,6 +8,7 @@ import subprocess
 import time
 from contextlib import closing
 from dataclasses import replace
+from pathlib import Path
 from typing import Any, cast
 
 import pytest
@@ -298,6 +299,28 @@ def test_restart_regression_cache_probe_does_not_create_an_empty_database() -> N
         stack.close()
 
 
+def test_restart_config_update_atomically_replaces_file(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The live watcher must never observe a truncated replacement config."""
+    stack = ManagedTuwunelStack()
+    try:
+        stack.config_path.write_text("agents:\n  general:\n    rooms: [lobby]\n", encoding="utf-8")
+        replacements: list[tuple[Path, Path]] = []
+        replace_path = Path.replace
+
+        def record_replace(source: Path, destination: Path) -> Path:
+            replacements.append((source, destination))
+            return replace_path(source, destination)
+
+        monkeypatch.setattr(Path, "replace", record_replace)
+
+        stack.add_restart_room("!restart:example")
+
+        assert replacements == [(stack.config_path.with_suffix(".yaml.tmp"), stack.config_path)]
+        assert "!restart:example" in stack.config_path.read_text(encoding="utf-8")
+    finally:
+        stack.close()
+
+
 def test_restart_shutdown_rejects_nonzero_process_exit() -> None:
     """A bounded process exit is graceful only when shutdown succeeds."""
 
@@ -372,12 +395,16 @@ def test_restart_shutdown_rejects_forced_process_kill() -> None:
 @pytest.mark.parametrize(
     "marker",
     [
-        ("sync_checkpoint_discarded",),
-        ("sync_checkpoint_not_saved_after_incomplete_coalescing_drain",),
+        pytest.param("sync_checkpoint_discarded", id="current-main"),
+        pytest.param(
+            "sync_checkpoint_not_saved_after_incomplete_coalescing_drain",
+            id="exact-base",
+        ),
     ],
 )
 def test_restart_shutdown_failure_count_tracks_checkpoint_discard_markers(marker: str) -> None:
     """The harness must track the discard marker on its exact base and current main."""
+    assert isinstance(marker, str)
     stack = ManagedTuwunelStack()
     try:
         stack.log_path.write_text(f'{{"event": "{marker}"}}\n', encoding="utf-8")
