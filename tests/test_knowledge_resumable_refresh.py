@@ -2844,6 +2844,53 @@ async def test_unchanged_publish_stays_ready_when_checkpoint_cleanup_fails(
     assert load_candidate_checkpoint(storage) is not None, "failed cleanup unexpectedly removed the checkpoint"
 
 
+def test_prefetch_admits_a_file_that_exactly_fills_the_remaining_budget(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A file whose worst case exactly equals the remaining budget still fits.
+
+    The neighbouring cases cover comfortably-inside and far-too-large, so the
+    comparison could be off by one at the boundary without any of them
+    noticing: two 2,000-byte files under a 4,000-byte budget would prefetch
+    only the first.
+    """
+    monkeypatch.setattr(knowledge_manager_module, "_MAX_PREFETCH_TEXT_BYTES", 4_000)
+    docs_path = tmp_path / "docs"
+    docs_path.mkdir()
+    files = []
+    for index in range(2):
+        path = docs_path / f"exact{index}.md"
+        path.write_text("x" * 2_000, encoding="utf-8")
+        files.append(path)
+    config = _config(tmp_path, docs_path, chunk_size=100_000)
+
+    texts = _manager(config)._chunk_texts_for_batch(files)
+
+    assert len(texts) == 2, "a file that exactly fills the remaining budget was skipped"
+
+
+def test_prefetch_reads_text_sources_and_skips_parsed_ones(tmp_path: Path) -> None:
+    """The prefetch gate has to be exercised in both directions, not just the open one.
+
+    Every other prefetch case here writes markdown, so nothing observes a
+    refusal. Skipping matters for two reasons: re-reading a parsed format costs
+    a second parse rather than a decode, and the budget below is derived from
+    ``stat().st_size``, which bounds decoded text only for a text decode -- an
+    archive's extracted content can dwarf the file it came out of.
+    """
+    docs_path = tmp_path / "docs"
+    docs_path.mkdir()
+    rows = docs_path / "rows.csv"
+    rows.write_text("header,value\nalpha,1\nbeta,2\n", encoding="utf-8")
+    notes = docs_path / "notes.md"
+    notes.write_text("prose that is worth prefetching", encoding="utf-8")
+    manager = _manager(_config(tmp_path, docs_path))
+
+    assert manager._chunk_texts_for_prefetch(rows) == ()
+    assert manager._chunk_texts_for_prefetch(notes) != ()
+
+
 def test_prefetch_text_is_bounded_by_bytes_not_only_file_count(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Peak prefetch memory must not scale with how large the batch's files are."""
     monkeypatch.setattr(knowledge_manager_module, "_MAX_PREFETCH_TEXT_BYTES", 4_000)
