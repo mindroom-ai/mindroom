@@ -1756,19 +1756,17 @@ class AgentBot:
             and callback_failure_count == 0
         )
         # The checkpoint certifies source ingestion, not response completion.
-        # Incomplete response work is safe only after clean settlement or an
-        # explicit source-event recovery handoff for every cancelled task.
+        # Incomplete response work is safe only after an explicit source-event
+        # recovery proof for every cancelled task.
         checkpoint_recovery_safe = (
-            source_checkpoint_safe
-            and pending_response_count == 0
-            and self._response_runner.incomplete_inbox_responses_recoverable
+            source_checkpoint_safe and self._response_runner.incomplete_inbox_responses_recoverable
         )
         if checkpoint_recovery_safe and self._sync_cache_trust.state is SyncTrustState.CERTIFIED:
             self._sync_cache_trust.persist_current()
         elif not checkpoint_recovery_safe:
             self._sync_cache_trust.discard()
             self.logger.warning(
-                "sync_checkpoint_not_saved_after_incomplete_coalescing_drain",
+                "sync_checkpoint_discarded",
                 agent_name=self.agent_name,
                 callback_failure_count=callback_failure_count,
                 background_tasks_completed=background_tasks_completed,

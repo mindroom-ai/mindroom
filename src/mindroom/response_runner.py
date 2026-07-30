@@ -493,7 +493,7 @@ class ResponseRunner:
         default_factory=ResponseLifecycleCoordinator,
         init=False,
     )
-    _inbox_response_tasks: dict[asyncio.Task[None], Callable[[], bool] | None] = field(default_factory=dict, init=False)
+    _inbox_response_tasks: dict[asyncio.Task[None], Callable[[], bool]] = field(default_factory=dict, init=False)
     _incomplete_inbox_responses_recoverable: bool = field(default=True, init=False)
     _admission_shutdown_requested: asyncio.Event = field(default_factory=asyncio.Event, init=False, repr=False)
 
@@ -502,7 +502,7 @@ class ResponseRunner:
         response: Coroutine[Any, Any, None],
         *,
         name: str,
-        recovery_proof_ready: Callable[[], bool] | None = None,
+        recovery_proof_ready: Callable[[], bool],
     ) -> asyncio.Task[None]:
         """Own one detached inbox response until it completes or a drain settles it."""
         task = asyncio.create_task(response, name=name)
@@ -517,7 +517,7 @@ class ResponseRunner:
 
     @property
     def incomplete_inbox_responses_recoverable(self) -> bool:
-        """Return whether every response incomplete at timeout settled or has a handoff."""
+        """Return whether every timed-out response finished cleanup with recovery proof."""
         return self._incomplete_inbox_responses_recoverable
 
     def _finish_inbox_response_task(self, task: asyncio.Task[None]) -> None:
@@ -551,6 +551,7 @@ class ResponseRunner:
         """
         self._incomplete_inbox_responses_recoverable = True
         tasks = [task for task in self._inbox_response_tasks if not task.done()]
+        # Done callbacks pop tasks, so snapshot proofs before an await can run them.
         recovery_checks = {task: self._inbox_response_tasks[task] for task in tasks}
         if not tasks:
             return True
@@ -560,21 +561,10 @@ class ResponseRunner:
         _done, pending = await asyncio.wait(tasks, timeout=cancel_after_seconds)
         if not pending:
             return True
-        cancellation_requested: set[asyncio.Task[None]] = set()
         for task in pending:
-            if not task.done():
-                request_task_cancel(task, cancel_source=shutdown_intent.cancel_source)
-                if task.cancelling() > 0:
-                    cancellation_requested.add(task)
+            request_task_cancel(task, cancel_source=shutdown_intent.cancel_source)
         await asyncio.wait(pending, timeout=cancel_after_seconds)
-        self._incomplete_inbox_responses_recoverable = all(
-            task.done()
-            and (
-                (task not in cancellation_requested and not task.cancelled() and task.exception() is None)
-                or ((recovery_check := recovery_checks[task]) is not None and recovery_check())
-            )
-            for task in pending
-        )
+        self._incomplete_inbox_responses_recoverable = all(task.done() and recovery_checks[task]() for task in pending)
         return False
 
     def _client(self) -> nio.AsyncClient:

@@ -133,9 +133,8 @@ class _RecordingResponseRunner:
         response: Coroutine[Any, Any, None],
         *,
         name: str,
-        recovery_proof_ready: Callable[[], bool] | None = None,
+        recovery_proof_ready: Callable[[], bool],
     ) -> asyncio.Task[None]:
-        assert recovery_proof_ready is not None
         self.recovery_proof_checks.append(recovery_proof_ready)
         task = asyncio.get_running_loop().create_task(response, name=name)
         self.inbox_tasks.append(task)

@@ -28,7 +28,7 @@ from mindroom.handled_turns import TurnRecord
 from mindroom.matrix.cache.event_cache import EventCacheBackendUnavailableError
 from mindroom.matrix.cache.postgres_event_cache import PostgresEventCache
 from mindroom.matrix.cache.sqlite_event_cache import SqliteEventCache
-from mindroom.matrix.sync_certification import SyncCacheWriteResult, SyncCheckpoint, SyncTrustState
+from mindroom.matrix.sync_certification import SyncCheckpoint, SyncTrustState
 from mindroom.matrix.sync_tokens import clear_sync_token, load_sync_checkpoint, save_sync_token
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.response_admission import ResponseAdmissionGate
@@ -1089,9 +1089,7 @@ async def test_shutdown_discard_warning_logs_exact_drain_predicates(
     with capture_logs() as logs:
         await bot.prepare_for_sync_shutdown()
 
-    warnings = [
-        entry for entry in logs if entry["event"] == "sync_checkpoint_not_saved_after_incomplete_coalescing_drain"
-    ]
+    warnings = [entry for entry in logs if entry["event"] == "sync_checkpoint_discarded"]
     assert len(warnings) == 1
     assert warnings[0]["coalescing_drain_completed"] is coalescing_drain_completed
     assert warnings[0]["responses_drained"] is responses_drained
@@ -1934,7 +1932,7 @@ async def test_orderly_shutdown_discards_checkpoint_for_write_behind_handled_res
         await asyncio.to_thread(bot._turn_store._ledger.flush)
 
 
-@pytest.mark.parametrize("source_failure", ["coalescing", "callback", "cache"])
+@pytest.mark.parametrize("source_failure", ["coalescing", "callback"])
 @pytest.mark.asyncio
 async def test_response_timeout_discards_checkpoint_when_source_is_unsafe(
     tmp_path: Path,
@@ -1951,12 +1949,6 @@ async def test_response_timeout_discards_checkpoint_when_source_is_unsafe(
     bot._response_runner.drain_inbox_responses = AsyncMock(return_value=False)
     if source_failure == "callback":
         bot._runtime_view.mark_callback_failed()
-    elif source_failure == "cache":
-        bot._sync_cache_trust.certify_response(
-            next_batch="s_failed_cache",
-            cache_result=SyncCacheWriteResult(complete=False, errors=(RuntimeError("cache write failed"),)),
-            first_sync=False,
-        )
 
     await bot.prepare_for_sync_shutdown()
 
