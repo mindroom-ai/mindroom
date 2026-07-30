@@ -32,10 +32,6 @@ class _EventCache:
 @dataclass
 class _Runtime:
     event_cache: _EventCache
-    callback_failure_count: int = 0
-
-    def mark_callback_failed(self) -> None:
-        self.callback_failure_count += 1
 
 
 def _trust(tmp_path: Path, *, state: SyncTrustState) -> SyncCacheTrust:
