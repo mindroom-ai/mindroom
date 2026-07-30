@@ -54,6 +54,8 @@ RESTART_SEED = 20_260_729
 RESTART_SHUTDOWN_FAILURE_MARKERS = (
     "sync_checkpoint_discarded",
     "sync_checkpoint_not_saved_after_incomplete_coalescing_drain",
+    "matrix_agent_response_drain_incomplete",
+    "runtime_drain_incomplete_with_durable_dispatch_recovery",
 )
 
 
@@ -879,7 +881,7 @@ class ManagedTuwunelStack:
         return sum(all(marker in line for marker in markers) for line in log.splitlines())
 
     def restart_shutdown_failure_count(self) -> int:
-        """Count checkpoint discards caused by an incomplete orderly shutdown."""
+        """Count markers proving runtime drain or checkpoint preservation failed."""
         return sum(self.log_count(marker) for marker in RESTART_SHUTDOWN_FAILURE_MARKERS)
 
     def wait_for_log_count(self, markers: tuple[str, ...], minimum: int, timeout: float = 60) -> bool:

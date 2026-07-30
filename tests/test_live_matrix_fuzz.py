@@ -500,14 +500,19 @@ def test_restart_shutdown_rejects_forced_process_kill() -> None:
     "marker",
     [
         pytest.param("sync_checkpoint_discarded", id="current-main"),
+        pytest.param("matrix_agent_response_drain_incomplete", id="current-main-response-drain"),
+        pytest.param(
+            "runtime_drain_incomplete_with_durable_dispatch_recovery",
+            id="durable-dispatch-recovery",
+        ),
         pytest.param(
             "sync_checkpoint_not_saved_after_incomplete_coalescing_drain",
             id="exact-base",
         ),
     ],
 )
-def test_restart_shutdown_failure_count_tracks_checkpoint_discard_markers(marker: str) -> None:
-    """The harness must track the discard marker on its exact base and current main."""
+def test_restart_shutdown_failure_count_tracks_incomplete_drain_markers(marker: str) -> None:
+    """The harness must track every incomplete-drain marker across its acceptance stack."""
     assert isinstance(marker, str)
     stack = ManagedTuwunelStack()
     try:
@@ -518,18 +523,30 @@ def test_restart_shutdown_failure_count_tracks_checkpoint_discard_markers(marker
         stack.close()
 
 
+@pytest.mark.parametrize(
+    "marker",
+    [
+        pytest.param("sync_checkpoint_discarded", id="checkpoint-discarded"),
+        pytest.param("matrix_agent_response_drain_incomplete", id="current-main-response-drain"),
+        pytest.param(
+            "runtime_drain_incomplete_with_durable_dispatch_recovery",
+            id="durable-dispatch-recovery",
+        ),
+    ],
+)
 @pytest.mark.asyncio
-async def test_restart_observation_rejects_checkpoint_discard_from_replacement(
+async def test_restart_observation_rejects_incomplete_runtime_drain_from_replacement(
     monkeypatch: pytest.MonkeyPatch,
+    marker: str,
 ) -> None:
-    """A discard before final shutdown must fail instead of becoming the accepted baseline."""
+    """An incomplete runtime drain before final shutdown must not become the accepted baseline."""
     stack = ManagedTuwunelStack()
     try:
         stack.agent_id, stack.router_id = "@agent:example", "@router:example"
         stack.log_path.write_text(
             "matrix_event_callback_started !restart:example $fresh\n"
             "Preparing agent and prompt $fresh\n"
-            '{"event": "sync_checkpoint_discarded"}\n',
+            f'{{"event": "{marker}"}}\n',
             encoding="utf-8",
         )
         monkeypatch.setattr(stack, "cached_restart_event_pair_count", lambda _room_id, _event_ids: 4)

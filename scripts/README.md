@@ -61,7 +61,7 @@ It creates a dormant public room, writes explicitly agent-mentioned historical t
 The run sends the fresh request only after both replacement principals complete setup, the configuration update completes, and both principals durably cache both historical events.
 It then uses the runtime's orderly callback and response drain as a quiescence boundary before the final Matrix audit.
 The run passes only after both principals cache both historical events, neither exact historical event starts a callback, and the exact fresh event starts a callback.
-The agent-mentioned fresh request must produce exactly one agent response and no router response, no historical event may reach the fresh prompt or produce output, and checkpoint-discard markers must remain absent before and after the bounded quiescence drain.
+The agent-mentioned fresh request must produce exactly one agent response and no router response, no historical event may reach the fresh prompt or produce output, and checkpoint-discard plus incomplete-drain markers must remain absent before and after the bounded quiescence drain.
 
 The profile requires Docker, `just`, `uv`, Python 3.13, available local ports, and permission to create and remove an isolated Tuwunel instance.
 It starts its own deterministic model stub and disposable Matrix stack, so no external model credential is required.
