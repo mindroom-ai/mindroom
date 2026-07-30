@@ -146,6 +146,29 @@ def test_pending_row_survives_new_store_instance(tmp_path: Path) -> None:
     assert restarted.has_pending("$message", DispatchCallbackKind.MESSAGE)
 
 
+def test_pending_recovery_query_uses_pending_order_index(tmp_path: Path) -> None:
+    """Permanent tombstones must not be scanned or sorted to recover pending work."""
+    _store(tmp_path)
+    database_path = tmp_path / "tracking" / "dispatch_obligations.sqlite3"
+    with sqlite3.connect(database_path) as connection:
+        plan = connection.execute(
+            """
+            EXPLAIN QUERY PLAN
+            SELECT source_event_id, callback_kind, room_id, event_source_json
+            FROM dispatch_obligations
+            WHERE principal_id = ?
+              AND entity_name = ?
+              AND state = ?
+            ORDER BY created_at_ns, rowid
+            """,
+            (_PRINCIPAL_ID, _ENTITY_NAME, "pending"),
+        ).fetchall()
+
+    details = tuple(row[3] for row in plan)
+    assert any("USING INDEX dispatch_obligations_pending_recovery" in detail for detail in details)
+    assert all("USE TEMP B-TREE" not in detail for detail in details)
+
+
 def test_exact_callback_kind_keeps_distinct_obligations_for_one_event(tmp_path: Path) -> None:
     """Two callback purposes for one Matrix event must not settle each other."""
     store = _store(tmp_path)
@@ -734,31 +757,6 @@ async def test_deferred_message_remains_pending_until_turn_store_is_terminal(tmp
     await runner.recover_pending()
 
     assert not _store(tmp_path).has_pending("$deferred", DispatchCallbackKind.MESSAGE)
-
-
-@pytest.mark.asyncio
-async def test_pending_turn_store_record_does_not_retire_dispatch_obligation(tmp_path: Path) -> None:
-    """A generation-start record cannot replace exact callback work."""
-    terminal: set[str] = set()
-
-    async def callback(_room: nio.MatrixRoom, _event: nio.Event) -> DispatchCallbackResult:
-        return DispatchCallbackResult.DEFERRED
-
-    runner = _runner(
-        _store(tmp_path),
-        callback,
-        turn_is_terminal=terminal.__contains__,
-    )
-    room = nio.MatrixRoom(_ROOM_ID, _PRINCIPAL_ID)
-    event = _message_event("$pending-turn")
-
-    await runner.dispatch(room, event, DispatchCallbackKind.MESSAGE)
-    assert _store(tmp_path).has_pending("$pending-turn", DispatchCallbackKind.MESSAGE)
-
-    terminal.add("$pending-turn")
-    await runner.recover_pending()
-
-    assert not _store(tmp_path).has_pending("$pending-turn", DispatchCallbackKind.MESSAGE)
 
 
 @pytest.mark.asyncio

@@ -2147,7 +2147,6 @@ class TestMultiAgentOrchestrator:
         router_bot = MagicMock()
         router_bot.agent_name = ROUTER_AGENT_NAME
         router_bot.running = True
-        router_bot.first_sync_complete = False
         router_bot.first_sync_complete = True
         router_bot.recover_pending_turn_dispatch_obligations = AsyncMock()
 

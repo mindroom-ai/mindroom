@@ -351,6 +351,7 @@ class AgentBot:
         self.last_sync_time = None
         self._last_sync_monotonic = None
         self._first_sync_done = False
+        self._orchestrator_ready_handled = False
         self._sync_shutting_down = False
         self._hook_registry_state = HookRegistryState(HookRegistry.empty())
         self._room_member_callback_registered = False
@@ -1258,9 +1259,13 @@ class AgentBot:
         if first_sync_response:
             self._register_room_member_callback_after_initial_sync()
             await self._emit_agent_lifecycle_event(EVENT_BOT_READY)
-            orchestrator = self.orchestrator
-            if orchestrator is not None:
-                await orchestrator.handle_bot_ready(self)
+
+        orchestrator = self.orchestrator
+        if not self._orchestrator_ready_handled and orchestrator is not None:
+            await orchestrator.handle_bot_ready(self)
+            self._orchestrator_ready_handled = True
+
+        if first_sync_response:
             self._maybe_start_startup_thread_prewarm()
 
         if first_sync_response or has_deferred_overdue_tasks():
@@ -1665,6 +1670,7 @@ class AgentBot:
         self.last_sync_time = None
         self._last_sync_monotonic = None
         self._first_sync_done = False
+        self._orchestrator_ready_handled = False
         self._room_member_join_hooks_armed = False
         self._room_member_callback_registered = False
         clear_matrix_sync_state(self.agent_name)
