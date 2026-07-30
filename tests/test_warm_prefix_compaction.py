@@ -25,6 +25,10 @@ from agno.session.agent import AgentSession
 from agno.session.summary import SessionSummary
 
 from mindroom.agent_storage import create_session_storage, get_agent_session
+from mindroom.claude_prompt_cache import (
+    install_claude_deferred_tool_search,
+    prepare_claude_request_kwargs,
+)
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import CompactionConfig, CompactionOverrideConfig, DefaultsConfig, ModelConfig
@@ -40,10 +44,14 @@ from mindroom.history.summary_call import (
 )
 from mindroom.history.types import HistoryPolicy, HistoryScope, HistoryScopeState, ResolvedHistorySettings
 from mindroom.history.warm_prefix import WarmPrefixSummaryContext, build_warm_prefix_summary_request
+from mindroom.kimi_model import KimiChat
+from mindroom.openai_models import MindRoomOpenAIResponses
+from mindroom.openai_tool_search import install_openai_deferred_tool_search
 from mindroom.prompts import COMPACTION_SUMMARY_PROMPT, COMPACTION_WARM_SUMMARY_INSTRUCTION
 from tests.conftest import FakeModel, bind_runtime_paths
 
 if TYPE_CHECKING:
+    from agno.models.base import Model
     from agno.tools.function import Function
 
 _SCOPE = HistoryScope(kind="agent", scope_id="test_agent")
@@ -65,6 +73,42 @@ class _RecordingFakeModel(FakeModel):
             self.seen_messages = list(messages)
         self.seen_tools = kwargs.get("tools")  # type: ignore[assignment]
         self.seen_tool_choice = kwargs.get("tool_choice")  # type: ignore[assignment]
+        return ModelResponse(content="warm summary")
+
+
+class _RecordingOpenAIResponses(MindRoomOpenAIResponses):
+    """OpenAI Responses double that records the warm provider request."""
+
+    def __init__(self, **kwargs: object) -> None:
+        super().__init__(**kwargs)  # type: ignore[arg-type]
+        self.seen_tools: list[Function | dict] | None = None
+
+    async def aresponse(self, *_args: object, **kwargs: object) -> ModelResponse:
+        self.seen_tools = kwargs.get("tools")  # type: ignore[assignment]
+        return ModelResponse(content="warm summary")
+
+
+class _RecordingClaude(Claude):
+    """Claude double that records the warm provider request."""
+
+    def __init__(self, **kwargs: object) -> None:
+        super().__init__(**kwargs)  # type: ignore[arg-type]
+        self.seen_tools: list[Function | dict] | None = None
+
+    async def aresponse(self, *_args: object, **kwargs: object) -> ModelResponse:
+        self.seen_tools = kwargs.get("tools")  # type: ignore[assignment]
+        return ModelResponse(content="warm summary")
+
+
+class _RecordingKimiChat(KimiChat):
+    """Kimi double that records the warm provider request."""
+
+    def __init__(self, **kwargs: object) -> None:
+        super().__init__(**kwargs)  # type: ignore[arg-type]
+        self.seen_tools: list[Function | dict] | None = None
+
+    async def aresponse(self, *_args: object, **kwargs: object) -> ModelResponse:
+        self.seen_tools = kwargs.get("tools")  # type: ignore[assignment]
         return ModelResponse(content="warm summary")
 
 
@@ -132,6 +176,47 @@ def _make_config(tmp_path: Path) -> tuple[Config, RuntimePaths]:
         runtime_paths,
     )
     return config, runtime_paths
+
+
+async def _compact_with_warm_models(
+    tmp_path: Path,
+    *,
+    active_model: Model,
+    summary_model: Model,
+) -> None:
+    config, runtime_paths = _make_config(tmp_path)
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    session = _session([_completed_run("run-1", "MARKER")])
+    write_scope_state(session, _SCOPE, HistoryScopeState(force_compact_before_next_run=True))
+    storage.upsert_session(session)
+    agent = Agent(
+        id="test_agent",
+        name="Test Agent",
+        model=active_model,
+        tools=[_lookup_weather],
+        add_history_to_context=True,
+        store_history_messages=False,
+    )
+
+    outcome = await compact_scope_history(
+        storage=storage,
+        session=session,
+        scope=_SCOPE,
+        state=read_scope_state(session, _SCOPE),
+        history_settings=_HISTORY_SETTINGS,
+        available_history_budget=None,
+        summary_input_budget=50_000,
+        summary_model=summary_model,
+        summary_model_name="default",
+        replay_window_tokens=64_000,
+        threshold_tokens=None,
+        summary_prompt=COMPACTION_SUMMARY_PROMPT,
+        summary_timeout_seconds=DEFAULT_COMPACTION_TIMEOUT_SECONDS,
+        warm_prefix=WarmPrefixSummaryContext(agent=agent, instruction=COMPACTION_WARM_SUMMARY_INSTRUCTION),
+    )
+
+    assert outcome is not None
+    storage.close()
 
 
 # --- Warm-prefix model configuration (invariant 3 extension) ------------------
@@ -430,3 +515,67 @@ async def test_compact_scope_history_sends_warm_prefix_request(tmp_path: Path) -
     assert persisted.runs == []
     assert set(read_scope_state(persisted, _SCOPE).compacted_run_ids) == {"run-1", "run-2"}
     storage.close()
+
+
+@pytest.mark.asyncio
+async def test_compact_scope_history_preserves_active_model_deferred_tool_search(tmp_path: Path) -> None:
+    active_model = MindRoomOpenAIResponses(id="gpt-5.6")
+    install_openai_deferred_tool_search(active_model, deferred_tool_names=frozenset({"_lookup_weather"}))
+    summary_model = _RecordingOpenAIResponses(id="gpt-5.6")
+
+    await _compact_with_warm_models(
+        tmp_path,
+        active_model=active_model,
+        summary_model=summary_model,
+    )
+
+    assert summary_model.seen_tools is not None
+    request_params = summary_model.get_request_params(
+        tools=summary_model._format_tools(summary_model.seen_tools),
+        tool_choice="none",
+    )
+    assert request_params["tools"][0] == {"type": "tool_search"}
+    assert request_params["tools"][1]["name"] == "_lookup_weather"
+    assert request_params["tools"][1]["defer_loading"] is True
+
+
+@pytest.mark.asyncio
+async def test_compact_scope_history_preserves_active_claude_deferred_tool_search(tmp_path: Path) -> None:
+    active_model = Claude(id="claude-sonnet-5", cache_system_prompt=True)
+    install_claude_deferred_tool_search(active_model, deferred_tool_names=frozenset({"_lookup_weather"}))
+    summary_model = _RecordingClaude(id="claude-sonnet-5", cache_system_prompt=True)
+
+    await _compact_with_warm_models(
+        tmp_path,
+        active_model=active_model,
+        summary_model=summary_model,
+    )
+
+    assert summary_model.seen_tools is not None
+    request_kwargs = summary_model._prepare_request_kwargs(
+        "system",
+        tools=summary_model._format_tools(summary_model.seen_tools),
+    )
+    prepared_kwargs = prepare_claude_request_kwargs(summary_model, request_kwargs)
+    assert prepared_kwargs["tools"][0]["type"] == "tool_search_tool_regex_20251119"
+    assert prepared_kwargs["tools"][1]["name"] == "_lookup_weather"
+    assert prepared_kwargs["tools"][1]["defer_loading"] is True
+
+
+@pytest.mark.asyncio
+async def test_compact_scope_history_preserves_active_session_prompt_cache_key(tmp_path: Path) -> None:
+    active_model = KimiChat(id="k3", prompt_cache_key="mindroom-session-cache-key")
+    summary_model = _RecordingKimiChat(id="k3")
+
+    await _compact_with_warm_models(
+        tmp_path,
+        active_model=active_model,
+        summary_model=summary_model,
+    )
+
+    assert summary_model.seen_tools is not None
+    request_params = summary_model.get_request_params(
+        tools=summary_model._format_tools(summary_model.seen_tools),
+        tool_choice="none",
+    )
+    assert request_params["prompt_cache_key"] == "mindroom-session-cache-key"

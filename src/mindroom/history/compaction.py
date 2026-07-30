@@ -20,7 +20,11 @@ from agno.session.summary import SessionSummary
 from agno.utils.message import filter_tool_calls
 from pydantic import BaseModel
 
-from mindroom.claude_prompt_cache import as_anthropic_claude
+from mindroom.claude_prompt_cache import (
+    as_anthropic_claude,
+    claude_deferred_tool_names,
+    install_claude_deferred_tool_search,
+)
 from mindroom.constants import (
     AI_RUN_METADATA_KEY,
     MINDROOM_COMPACTION_METADATA_KEY,
@@ -53,6 +57,11 @@ from mindroom.history.types import (
 from mindroom.history.warm_prefix import WarmPrefixSummaryContext, build_warm_prefix_summary_request
 from mindroom.hooks import EVENT_COMPACTION_AFTER, EVENT_COMPACTION_BEFORE, CompactionHookContext, emit
 from mindroom.logging_config import get_logger
+from mindroom.openai_tool_search import (
+    install_openai_deferred_tool_search,
+    openai_deferred_tool_names,
+)
+from mindroom.prompt_cache_key import inherit_session_prompt_cache_key
 from mindroom.timing import timed
 from mindroom.token_budget import (
     CompactionEstimateKind,
@@ -214,6 +223,20 @@ async def compact_scope_history(
     warm_prefix: WarmPrefixSummaryContext | None = None,
 ) -> CompactionOutcome | None:
     """Compact one scope by rewriting session.summary and session.runs."""
+    if warm_prefix is not None:
+        active_model = warm_prefix.agent.model
+        install_claude_deferred_tool_search(
+            summary_model,
+            deferred_tool_names=claude_deferred_tool_names(active_model),
+        )
+        install_openai_deferred_tool_search(
+            summary_model,
+            deferred_tool_names=openai_deferred_tool_names(active_model),
+        )
+        inherit_session_prompt_cache_key(
+            source_model=active_model,
+            target_model=summary_model,
+        )
     visible_runs = scope_visible_runs(session, scope)
     compactable_runs = _select_compaction_candidates(
         visible_runs=visible_runs,

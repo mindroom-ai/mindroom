@@ -34,7 +34,6 @@ if TYPE_CHECKING:
     from collections.abc import Iterable, Sequence
 
     from agno.models.message import Message
-    from agno.models.openai import OpenAIResponses
     from agno.models.response import ModelResponse
 
 _OPENAI_RESPONSES_CLASS = ("agno.models.openai.responses", "OpenAIResponses")
@@ -90,7 +89,7 @@ def install_openai_deferred_tool_search(model: object, *, deferred_tool_names: f
     vars(model)[_DEFERRED_TOOL_NAMES_ATTR] = frozenset(deferred_tool_names)
 
 
-def model_deferred_tool_names(model: OpenAIResponses) -> frozenset[str]:
+def openai_deferred_tool_names(model: object) -> frozenset[str]:
     """Return the wire tool names registered for deferred loading on one model."""
     deferred_tool_names = vars(model).get(_DEFERRED_TOOL_NAMES_ATTR)
     return deferred_tool_names if isinstance(deferred_tool_names, frozenset) else frozenset()

@@ -1028,6 +1028,8 @@ depends_on = [
     "mindroom.history.warm_prefix",
     "mindroom.hooks",
     "mindroom.logging_config",
+    "mindroom.openai_tool_search",
+    "mindroom.prompt_cache_key",
     "mindroom.timing",
     "mindroom.token_budget",
     "mindroom.tool_system.runtime_context",

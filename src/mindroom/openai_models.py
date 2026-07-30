@@ -14,7 +14,7 @@ from openai.types.responses import ResponseOutputItemDoneEvent
 
 from mindroom.openai_tool_search import (
     formatted_input_with_tool_search_items,
-    model_deferred_tool_names,
+    openai_deferred_tool_names,
     record_tool_search_items,
     request_params_with_deferred_tool_search,
 )
@@ -137,7 +137,7 @@ class MindRoomOpenAIResponses(OpenAIResponses):
             tools=tools,
             tool_choice=tool_choice,
         )
-        return request_params_with_deferred_tool_search(request_params, model_deferred_tool_names(self))
+        return request_params_with_deferred_tool_search(request_params, openai_deferred_tool_names(self))
 
     def _format_messages(
         self,

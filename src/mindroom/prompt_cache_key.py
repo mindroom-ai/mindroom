@@ -3,14 +3,30 @@
 from __future__ import annotations
 
 import hashlib
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 if TYPE_CHECKING:
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
-__all__ = ["derive_session_prompt_cache_key"]
+__all__ = ["derive_session_prompt_cache_key", "inherit_session_prompt_cache_key"]
 
 _PROMPT_CACHE_KEY_PREFIX = "mindroom"
+
+
+@runtime_checkable
+class _SessionPromptCacheModel(Protocol):
+    """Model carrying a provider-side prompt-cache routing key."""
+
+    prompt_cache_key: str | None
+
+
+def inherit_session_prompt_cache_key(*, source_model: object, target_model: object) -> None:
+    """Copy a live model's session cache identity onto a dedicated model."""
+    if not isinstance(source_model, _SessionPromptCacheModel):
+        return
+    if not isinstance(target_model, _SessionPromptCacheModel):
+        return
+    target_model.prompt_cache_key = source_model.prompt_cache_key
 
 
 def derive_session_prompt_cache_key(identity: ToolExecutionIdentity) -> str | None:
