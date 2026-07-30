@@ -34,6 +34,7 @@ from mindroom.orchestration.runtime import (
     USER_STOP_CANCEL_MSG,
     CancelSource,
     cancel_failure_reason,
+    cancel_source_from_failure_reason,
     classify_cancel_source,
     log_cancelled_response,
 )
@@ -75,6 +76,7 @@ __all__ = [
     "build_cancelled_response_update",
     "build_restart_interrupted_body",
     "cancel_failure_reason",
+    "cancel_source_from_failure_reason",
     "clean_partial_reply_text",
     "interactive_response_for_visible_body",
     "is_interrupted_partial_reply",

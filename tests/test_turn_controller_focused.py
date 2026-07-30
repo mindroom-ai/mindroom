@@ -1905,3 +1905,37 @@ async def test_interactive_selection_without_response_stays_retryable(config: Co
     assert len(harness.runner.requests) == 1
     assert harness.turn_store.is_handled(selection.question_event_id) is False
     assert harness.turn_store.is_handled("$selection:localhost") is False
+
+
+@pytest.mark.asyncio
+async def test_interactive_selection_interruption_registers_exact_source_before_settlement(
+    config: Config,
+    tmp_path: Path,
+) -> None:
+    """A landed interruption must register the selection event before its durable handled write."""
+    harness = _build_harness(config, tmp_path)
+    harness.runner.deferred_sync_restart_error = asyncio.CancelledError("sync_restart")
+    room = nio.MatrixRoom(_ROOM_ID, _entity_user_id(config, "general"))
+    selection = interactive.InteractiveSelection(
+        question_event_id="$question:localhost",
+        question_text="Which option should I use?",
+        selection_key="2",
+        selected_label="Option 2",
+        selected_value="Option 2",
+        thread_id="$thread-root:localhost",
+    )
+    selection_event_id = "$selection:localhost"
+
+    with pytest.raises(asyncio.CancelledError, match="sync_restart"):
+        await harness.controller.handle_interactive_selection(
+            room,
+            selection=selection,
+            user_id=_SENDER,
+            source_event_id=selection_event_id,
+        )
+
+    assert harness.interrupted_turn_rooms.contains(selection_event_id)
+    record = harness.turn_store.get_turn_record(selection_event_id)
+    assert record is not None
+    assert record.response_event_id == "$response:localhost"
+    assert record.completed is True

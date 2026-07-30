@@ -1499,6 +1499,56 @@ async def test_uncommitted_interruption_rethrows_cancel_without_marking_source_h
 
 
 @pytest.mark.asyncio
+async def test_cancel_cleanup_error_does_not_mark_source_handled(tmp_path: Path) -> None:
+    """A failed cancellation cleanup must preserve replay instead of deduping the stale placeholder."""
+    coordinator = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    callbacks: list[str] = []
+    request = replace(
+        _plain_request(_target(thread_id="$thread")),
+        on_interrupted_response_recoverable=lambda: callbacks.append("recovery"),
+        on_deferred_outcome_handled=lambda _event_id: callbacks.append("handled"),
+    )
+    progress = response_runner._DeliveryProgress()
+    progress.settle(
+        FinalDeliveryOutcome(
+            terminal_status="error",
+            event_id="$placeholder",
+            is_visible_response=True,
+            cancel_source="sync_restart",
+            failure_reason="failed to redact cancelled placeholder",
+        ),
+    )
+    lifecycle = coordinator._build_lifecycle(
+        identity=coordinator._response_identity(request, response_kind="ai"),
+        request=request,
+    )
+
+    with (
+        patch.object(
+            coordinator,
+            "run_cancellable_response",
+            new=AsyncMock(return_value="$placeholder"),
+        ),
+        patch_response_runner_module(apply_post_response_effects=AsyncMock()),
+    ):
+        result = await coordinator._run_and_settle_locked_response(
+            request,
+            target=request.response_envelope.target,
+            lifecycle=lifecycle,
+            progress=progress,
+            response_function=AsyncMock(),
+            thinking_message=None,
+            user_id=request.user_id,
+            run_id="run-1",
+            build_post_response_outcome=lambda _outcome: ResponseOutcome(),
+            post_response_deps=PostResponseEffectsDeps(logger=get_logger("tests.post_response")),
+        )
+
+    assert result is None
+    assert callbacks == []
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("target", "delivery_kind"),
     [

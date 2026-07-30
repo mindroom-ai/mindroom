@@ -18,6 +18,7 @@ from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.constants import STREAM_STATUS_ERROR, STREAM_STATUS_KEY
 from mindroom.delivery_gateway import (
+    CancelledVisibleNoteRequest,
     DeliveryGateway,
     DeliveryGatewayDeps,
     FinalDeliveryRequest,
@@ -1140,3 +1141,29 @@ async def test_finalize_streamed_response_restart_interruption_preserves_cancell
     assert outcome.delivery_kind == "edited"
     response_hooks.emit_after_response.assert_not_awaited()
     response_hooks.emit_cancelled_response.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_failed_cancelled_placeholder_cleanup_preserves_cancel_source(tmp_path: Path) -> None:
+    """A failed cancellation edit and redaction must retain the original restart provenance."""
+    gateway = _delivery_gateway(tmp_path)
+    gateway.deps.redact_message_event.return_value = False
+
+    with patch.object(DeliveryGateway, "edit_text", new=AsyncMock(return_value=False)):
+        outcome = await gateway.deliver_cancelled_visible_note(
+            CancelledVisibleNoteRequest(
+                target=MessageTarget.resolve("!room:localhost", "$thread", "$reply"),
+                event_id="$placeholder",
+                existing_event_is_placeholder=True,
+                cancel_source="sync_restart",
+                identity=ResponseIdentity(
+                    response_kind="ai",
+                    response_envelope=_envelope(),
+                    correlation_id="corr-cancel-cleanup-failure",
+                ),
+            ),
+        )
+
+    assert outcome.terminal_status == "error"
+    assert outcome.final_visible_event_id == "$placeholder"
+    assert outcome.cancel_source == "sync_restart"

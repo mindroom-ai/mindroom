@@ -1185,7 +1185,7 @@ class ResponseRunner:
             or request.response_envelope.target.resolved_thread_id is None
         ):
             return False
-        cancel_source = cancel_source_from_failure_reason(final_outcome.failure_reason)
+        cancel_source = final_outcome.cancel_source or cancel_source_from_failure_reason(final_outcome.failure_reason)
         if cancel_source == "user_stop":
             return False
         expected_note = (
@@ -1525,10 +1525,13 @@ class ResponseRunner:
             post_response_deps=post_response_deps,
         )
         interruption_recovery_registered = self._notify_interrupted_response_recoverable(request, final_outcome)
+        cancel_source = final_outcome.cancel_source
+        if cancel_source is None and final_outcome.terminal_status == "cancelled":
+            cancel_source = cancel_source_from_failure_reason(final_outcome.failure_reason)
         source_handled = final_outcome.mark_handled and (
             request.on_deferred_outcome_handled is None
-            or final_outcome.terminal_status != "cancelled"
-            or cancel_source_from_failure_reason(final_outcome.failure_reason) == "user_stop"
+            or cancel_source is None
+            or cancel_source == "user_stop"
             or interruption_recovery_registered
         )
         if deferred_error is not None:

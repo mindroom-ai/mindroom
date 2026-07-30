@@ -45,6 +45,7 @@ class FinalDeliveryOutcome:  # noqa: D101
     is_visible_response: bool = False
     final_visible_body: str | None = None
     delivery_kind: _VisibleDeliveryKind | None = None
+    cancel_source: Literal["user_stop", "sync_restart", "interrupted"] | None = None
     failure_reason: str | None = None
     suppressed: bool = False
     tool_trace: tuple[ToolTraceEntry, ...] = ()

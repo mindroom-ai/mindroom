@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from html import escape as html_escape
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -39,6 +39,7 @@ from mindroom.streaming import (
     StreamingResponse,
     build_cancelled_response_update,
     cancel_failure_reason,
+    cancel_source_from_failure_reason,
     classify_cancel_source,
     interactive_response_for_visible_body,
     send_streaming_response,
@@ -590,6 +591,7 @@ class DeliveryGateway:
             )
         except asyncio.CancelledError as error:
             failure_reason = self._cancelled_error_failure_reason(error)
+            cancel_source = classify_cancel_source(error)
             if request.existing_event_id is not None and request.existing_event_is_placeholder:
                 cleanup_failure = await self._redact_visible_response_event(
                     room_id=request.target.room_id,
@@ -603,6 +605,7 @@ class DeliveryGateway:
                         terminal_status="error",
                         event_id=request.existing_event_id,
                         is_visible_response=True,
+                        cancel_source=cancel_source,
                         failure_reason=cleanup_failure,
                         tool_trace=tuple(request.tool_trace or ()),
                         extra_content=request.extra_content,
@@ -792,6 +795,7 @@ class DeliveryGateway:
                 is_visible_response=True,
                 final_visible_body=cancelled_text,
                 delivery_kind="edited",
+                cancel_source=request.cancel_source,
                 failure_reason=failure_reason,
                 extra_content=extra_content,
             )
@@ -801,6 +805,7 @@ class DeliveryGateway:
                 event_id=request.event_id,
                 is_visible_response=True,
                 final_visible_body=cancelled_text,
+                cancel_source=request.cancel_source,
                 failure_reason=failure_reason,
                 extra_content=extra_content,
             )
@@ -816,12 +821,14 @@ class DeliveryGateway:
                 terminal_status="error",
                 event_id=request.event_id,
                 is_visible_response=True,
+                cancel_source=request.cancel_source,
                 failure_reason=cleanup_failure,
                 extra_content=extra_content,
             )
         return FinalDeliveryOutcome(
             terminal_status="cancelled",
             event_id=None,
+            cancel_source=request.cancel_source,
             failure_reason=failure_reason,
             extra_content=extra_content,
         )
@@ -1097,6 +1104,8 @@ class DeliveryGateway:
             streamed_text = stream_outcome.visible_body_text
             final_body_candidate = stream_outcome.canonical_final_body_candidate or streamed_text
             if stream_outcome.terminal_status == "cancelled":
+                failure_reason = stream_outcome.failure_reason or "stream_finalize_cancelled"
+                cancel_source = cancel_source_from_failure_reason(failure_reason)
                 if (
                     request.initial_delivery_kind == "edited"
                     and stream_outcome.visible_body_state == "none"
@@ -1108,11 +1117,11 @@ class DeliveryGateway:
                             terminal_status="cancelled",
                             event_id=existing_visible_event_id,
                             is_visible_response=True,
-                            failure_reason=stream_outcome.failure_reason or "stream_finalize_cancelled",
+                            cancel_source=cancel_source,
+                            failure_reason=failure_reason,
                             tool_trace=tuple(request.tool_trace or ()),
                             extra_content=request.extra_content,
                         )
-                failure_reason = stream_outcome.failure_reason or "stream_finalize_cancelled"
                 if stream_outcome.visible_body_state == "placeholder_only":
                     cleanup_outcome = await self._cleanup_completed_placeholder_only_stream(
                         room_id=request.target.room_id,
@@ -1123,10 +1132,11 @@ class DeliveryGateway:
                         extra_content=request.extra_content,
                     )
                     if cleanup_outcome.event_id is not None:
-                        return cleanup_outcome
+                        return replace(cleanup_outcome, cancel_source=cancel_source)
                     return FinalDeliveryOutcome(
                         terminal_status="cancelled",
                         event_id=None,
+                        cancel_source=cancel_source,
                         failure_reason=failure_reason,
                         tool_trace=tuple(request.tool_trace or ()),
                         extra_content=request.extra_content,
@@ -1142,6 +1152,7 @@ class DeliveryGateway:
                         delivery_kind=request.initial_delivery_kind
                         if stream_outcome.terminal_update_committed
                         else None,
+                        cancel_source=cancel_source,
                         failure_reason=failure_reason,
                         tool_trace=tuple(request.tool_trace or ()),
                         extra_content=request.extra_content,
@@ -1151,6 +1162,7 @@ class DeliveryGateway:
                         terminal_status="cancelled",
                         event_id=request.existing_event_id,
                         is_visible_response=True,
+                        cancel_source=cancel_source,
                         failure_reason=failure_reason,
                         tool_trace=tuple(request.tool_trace or ()),
                         extra_content=request.extra_content,
@@ -1158,6 +1170,7 @@ class DeliveryGateway:
                 return FinalDeliveryOutcome(
                     terminal_status="cancelled",
                     event_id=None,
+                    cancel_source=cancel_source,
                     failure_reason=failure_reason,
                     tool_trace=tuple(request.tool_trace or ()),
                     extra_content=request.extra_content,
@@ -1392,7 +1405,7 @@ class DeliveryGateway:
                 extra_content=request.extra_content,
                 interactive_metadata=interactive_response.interactive_metadata,
             )
-        except asyncio.CancelledError:
+        except asyncio.CancelledError as error:
             visible_event_id = stream_outcome.visible_event_id
             event_id = visible_event_id
             if event_id is None and request.existing_event_id is not None and not request.existing_event_is_placeholder:
@@ -1403,7 +1416,8 @@ class DeliveryGateway:
                 event_id=event_id,
                 is_visible_response=event_id is not None,
                 final_visible_body=final_visible_body,
-                failure_reason="stream_finalize_cancelled",
+                cancel_source=classify_cancel_source(error),
+                failure_reason=self._cancelled_error_failure_reason(error),
                 tool_trace=tuple(request.tool_trace or ()),
                 extra_content=request.extra_content,
             )
@@ -1422,6 +1436,11 @@ class DeliveryGateway:
                 event_id=event_id,
                 is_visible_response=event_id is not None,
                 final_visible_body=final_visible_body,
+                cancel_source=(
+                    cancel_source_from_failure_reason(stream_outcome.failure_reason)
+                    if stream_outcome.terminal_status == "cancelled"
+                    else None
+                ),
                 failure_reason="stream_finalize_failed",
                 tool_trace=tuple(request.tool_trace or ()),
                 extra_content=request.extra_content,
