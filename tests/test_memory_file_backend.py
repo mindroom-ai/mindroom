@@ -15,6 +15,7 @@ from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.knowledge import KnowledgeBaseConfig
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
+from mindroom.file_memory_knowledge import resolve_file_memory_knowledge
 from mindroom.knowledge.availability import KnowledgeAvailability
 from mindroom.knowledge.utils import KnowledgeBaseAccessResolution
 from mindroom.memory import MemoryPromptParts
@@ -27,6 +28,7 @@ from mindroom.memory import list_all_agent_memories as public_list_all_agent_mem
 from mindroom.memory import search_agent_memories as public_search_agent_memories
 from mindroom.memory import store_conversation_memory as public_store_conversation_memory
 from mindroom.memory import update_agent_memory as public_update_agent_memory
+from mindroom.memory._shared import MemoryNotFoundError
 from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.timing import timing_scope
 from mindroom.tool_system.worker_routing import (
@@ -263,14 +265,15 @@ def config(storage_path: Path) -> Config:
 def test_semantic_memory_index_is_a_runtime_config_overlay(storage_path: Path, config: Config) -> None:
     """Synthetic file-memory indexes must not leak into authored config serialization."""
     root = storage_path / "workspace"
-    base_id = "file_memory_agent_general_test"
 
-    knowledge_config = semantic_file_search._memory_knowledge_config(
-        config,
-        base_id=base_id,
+    resolution = resolve_file_memory_knowledge(
+        scope_user_id="agent_general",
         root=root,
+        config=config,
         search_config=config.memory.search,
     )
+    knowledge_config = resolution.config
+    base_id = resolution.base_id
 
     assert knowledge_config.knowledge_bases[base_id].path == str(root.resolve())
     assert knowledge_config.runtime_knowledge_base_overlay(base_id) is knowledge_config.knowledge_bases[base_id]
@@ -822,6 +825,61 @@ async def test_file_backend_semantic_search_reads_daily_memory_root(storage_path
 
 
 @pytest.mark.asyncio
+async def test_semantic_search_ids_are_read_only_crud_locators(storage_path: Path, config: Config) -> None:
+    """A semantic result ID must not be advertised as a round-trippable CRUD ID."""
+    config.memory.backend = "file"
+    config.memory.search.mode = "semantic"
+    config.agents["general"].memory_backend = "file"
+    semantic_id = "semantic:memory/notes.md:1"
+
+    with patch(
+        "mindroom.memory._file_backend.search_semantic_file_memories",
+        return_value=[
+            {
+                "id": semantic_id,
+                "memory": "Read-only semantic match.",
+                "user_id": "agent_general",
+                "score": 1.0,
+                "metadata": {"source_file": "memory/notes.md", "semantic": True, "search_mode": "semantic"},
+            },
+        ],
+    ):
+        results = await search_agent_memories("semantic match", "general", storage_path, config, limit=5)
+
+    assert results[0]["id"] == semantic_id
+    assert await get_agent_memory(semantic_id, "general", storage_path, config) is None
+    with pytest.raises(MemoryNotFoundError):
+        await update_agent_memory(semantic_id, "replacement", "general", storage_path, config)
+    with pytest.raises(MemoryNotFoundError):
+        await delete_agent_memory(semantic_id, "general", storage_path, config)
+
+
+@pytest.mark.asyncio
+async def test_keyword_search_uses_fixed_memory_corpus_not_semantic_include_patterns(
+    storage_path: Path,
+    config: Config,
+) -> None:
+    """Keyword mode searches MEMORY.md and memory/**/*.md regardless of semantic includes."""
+    config.memory.backend = "file"
+    config.memory.search.mode = "keyword"
+    config.memory.search.include = ["notes/**/*.md"]
+    config.agents["general"].memory_backend = "file"
+    workspace = agent_workspace_root_path(storage_path, "general")
+    notes_file = workspace / "notes" / "custom.md"
+    memory_file = workspace / "memory" / "daily.md"
+    notes_file.parent.mkdir(parents=True)
+    memory_file.parent.mkdir(parents=True)
+    notes_file.write_text("customincludeuniquemarker\n", encoding="utf-8")
+    memory_file.write_text("fixedkeyworduniquemarker\n", encoding="utf-8")
+
+    custom_results = await search_agent_memories("customincludeuniquemarker", "general", storage_path, config)
+    memory_results = await search_agent_memories("fixedkeyworduniquemarker", "general", storage_path, config)
+
+    assert custom_results == []
+    assert [result["memory"] for result in memory_results] == ["fixedkeyworduniquemarker"]
+
+
+@pytest.mark.asyncio
 async def test_file_backend_semantic_search_falls_back_to_keyword_on_index_error(
     storage_path: Path,
     config: Config,
@@ -859,9 +917,13 @@ async def test_file_backend_cold_failed_index_degrades_instead_of_healthy_fallba
     """A never-built index kept down by an auth failure is not a healthy keyword fallback."""
     config.memory.backend = "file"
     config.memory.search.mode = "semantic"
+    config.memory.search.include = ["notes/**/*.md"]
     config.agents["general"].memory_backend = "file"
 
     await add_agent_memory("Keyword fallback memory", "general", storage_path, config)
+    custom_note = agent_workspace_root_path(storage_path, "general") / "notes" / "custom.md"
+    custom_note.parent.mkdir(parents=True)
+    custom_note.write_text("Custom semantic-only path.\n", encoding="utf-8")
 
     with patch(
         "mindroom.memory._file_backend.search_semantic_file_memories",
@@ -882,6 +944,7 @@ async def test_file_backend_cold_failed_index_degrades_instead_of_healthy_fallba
 
     assert outcome.degraded_reason == "embedder authentication failed (HTTP 401)"
     assert any(result.get("memory") == "Keyword fallback memory" for result in outcome.results)
+    assert all(result.get("memory") != "Custom semantic-only path." for result in outcome.results)
 
 
 @pytest.mark.asyncio

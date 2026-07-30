@@ -84,6 +84,8 @@ MindRoom's architecture consists of several key components working together.
 | `response_identity.py` | Leaf identity shared by response delivery and lifecycle |
 | `media_inputs.py` | Shared media-input container passed across bot, teams, and AI layers |
 | `media_fallback.py` | Retries model requests without inline media when models reject media inputs |
+| `file_memory_knowledge.py` | Shared resolution for agent file-memory semantic knowledge overlays |
+| `memory_scope_ids.py` | Cycle-free canonical agent memory scope identifiers |
 | `avatar_generation.py` | Generates and manages avatar assets for agents, rooms, and spaces |
 | `topic_generator.py` | AI-generated room topics |
 | `background_tasks.py` | Non-blocking async task management with GC protection |

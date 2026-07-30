@@ -1834,9 +1834,7 @@ def create_agent(
     _log_toolkits_without_unique_model_functions(tool_assembly.tools, agent_name=agent_name)
 
     entity_view = config.resolve_entity(agent_name)
-    knowledge_enabled = (
-        not disable_runtime_capabilities and bool(entity_view.knowledge_base_ids) and knowledge is not None
-    )
+    knowledge_enabled = not disable_runtime_capabilities and knowledge is not None
     knowledge_sources = (
         knowledge_source_descriptions(knowledge) if knowledge_enabled and isinstance(knowledge, Knowledge) else ()
     )

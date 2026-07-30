@@ -3335,12 +3335,18 @@ def test_agent_without_workspace_omits_skill_authoring_guidance(tmp_path: Path) 
     assert WORKSPACE_SKILL_AUTHORING_PROMPT not in agent.instructions
 
 
-def test_agent_knowledge_search_tool_description_lists_configured_sources(
+@pytest.mark.parametrize("has_memory_tool", [False, True])
+@pytest.mark.parametrize("async_mode", [False, True])
+@pytest.mark.asyncio
+async def test_agent_knowledge_search_tool_description_lists_configured_sources_by_capability(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    has_memory_tool: bool,
+    async_mode: bool,
 ) -> None:
-    """The model-facing knowledge search tool should explain what each source contains."""
+    """Sync and async knowledge tools recommend memory search only when that function exists."""
     config = _test_config()
+    config.agents["general"].tools = ["memory"] if has_memory_tool else []
     config.agents["general"].knowledge_bases = ["engineering", "product"]
     config.knowledge_bases = {
         "engineering": KnowledgeBaseConfig(
@@ -3365,6 +3371,11 @@ def test_agent_knowledge_search_tool_description_lists_configured_sources(
     knowledge = resolve_agent_knowledge_access("general", config, runtime_paths).knowledge
     assert knowledge is not None
     agent = _create_agent_for_test("general", config, knowledge=knowledge)
+    if has_memory_tool and not async_mode:
+        agent.tools = [
+            *(agent.tools or []),
+            Function(name="search_memories", entrypoint=lambda: "memory result"),
+        ]
     run_output = RunOutput(
         run_id="run-knowledge-description",
         agent_id="general",
@@ -3381,11 +3392,12 @@ def test_agent_knowledge_search_tool_description_lists_configured_sources(
         updated_at=1,
     )
 
-    search_tools = [
-        tool
-        for tool in agent.get_tools(run_output, run_context, session)
-        if isinstance(tool, Function) and tool.name == "search_knowledge_base"
-    ]
+    tools = (
+        await agent.aget_tools(run_output, run_context, session)
+        if async_mode
+        else agent.get_tools(run_output, run_context, session)
+    )
+    search_tools = [tool for tool in tools if isinstance(tool, Function) and tool.name == "search_knowledge_base"]
 
     assert len(search_tools) == 1
     description = search_tools[0].description
@@ -3396,6 +3408,79 @@ def test_agent_knowledge_search_tool_description_lists_configured_sources(
         "- product: Product requirements, feature specs, roadmap notes, and user-facing behavior decisions."
         in description
     )
+    assert "This list only describes sources available through search_knowledge_base." in description
+    recommendation = "For resilient memory search, team-visible memory, and memory IDs, use search_memories."
+    assert (recommendation in description) is has_memory_tool
+
+
+def test_memory_only_agent_gets_semantic_knowledge_search_description(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A ready file-memory index should enable and describe knowledge search without authored bases."""
+    config = _test_config()
+    runtime_paths = _runtime_paths(tmp_path)
+    config = _bind_runtime_paths(config, runtime_paths)
+    config.memory.backend = "file"
+    config.memory.search.mode = "semantic"
+    seen_base_ids: list[str] = []
+
+    def _get_published_index(base_id: str, **kwargs: object) -> object:
+        effective_config = kwargs["config"]
+        assert isinstance(effective_config, Config)
+        base_config = effective_config.knowledge_bases[base_id]
+        assert base_config.path == str(agent_workspace_root_path(runtime_paths.storage_root, "general").resolve())
+        seen_base_ids.append(base_id)
+        return SimpleNamespace(
+            key=SimpleNamespace(base_id=base_id),
+            index=SimpleNamespace(
+                knowledge=_queryable_knowledge_handle(),
+                state=SimpleNamespace(last_refresh_at=None, last_published_at=None),
+            ),
+            availability=KnowledgeAvailability.READY,
+            state=None,
+        )
+
+    monkeypatch.setattr("mindroom.knowledge.utils.get_published_index", _get_published_index)
+
+    knowledge = resolve_agent_knowledge_access("general", config, runtime_paths).knowledge
+    assert knowledge is not None
+    agent = _create_agent_for_test("general", config, knowledge=knowledge)
+    run_output = RunOutput(
+        run_id="run-memory-knowledge-description",
+        agent_id="general",
+        agent_name="GeneralAgent",
+        session_id="session-memory-knowledge-description",
+        input="hello",
+        content="ok",
+    )
+    run_context = RunContext(
+        run_id="run-memory-knowledge-description",
+        session_id="session-memory-knowledge-description",
+    )
+    session = AgentSession(
+        session_id="session-memory-knowledge-description",
+        agent_id="general",
+        created_at=1,
+        updated_at=1,
+    )
+
+    search_tools = [
+        tool
+        for tool in agent.get_tools(run_output, run_context, session)
+        if isinstance(tool, Function) and tool.name == "search_knowledge_base"
+    ]
+
+    assert len(search_tools) == 1
+    assert len(seen_base_ids) == 1
+    assert seen_base_ids[0].startswith("file_memory_agent_general_")
+    description = search_tools[0].description
+    assert description is not None
+    assert (
+        f"- {seen_base_ids[0]}: Configured file memory for this agent. "
+        "Read-only semantic search over configured Markdown paths (default: memory/**/*.md)."
+    ) in description
+    assert "use search_memories" not in description
 
 
 def test_agent_knowledge_search_tool_description_preserves_colon_space_source_ids(

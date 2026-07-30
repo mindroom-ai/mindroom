@@ -117,6 +117,8 @@ Matrix sync callback
 | `teams.py` | Multi-agent collaboration (coordinate vs collaborate modes) |
 | `agent_policy.py` | Canonical execution-policy derivation from authored agent config |
 | `memory/` | Mem0 memory: agent and team-scoped |
+| `file_memory_knowledge.py` | Shared resolution for agent file-memory semantic knowledge overlays |
+| `memory_scope_ids.py` | Cycle-free canonical agent memory scope identifiers |
 | `knowledge/` | Knowledge base / RAG file indexing with watcher |
 | `knowledge/file_listing.py` | Which files belong to a knowledge base: include patterns, traversal, symlink-safe inclusion rules |
 | `knowledge/collections.py` | Chroma collection lifecycle for one knowledge base: naming, opening, probing, deleting, reclaiming |

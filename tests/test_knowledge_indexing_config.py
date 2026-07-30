@@ -121,3 +121,13 @@ def test_skip_hidden_changes_corpus_key_but_not_query_key() -> None:
     current = replace(legacy, skip_hidden="True")
     assert legacy.corpus_compatibility_key() != current.corpus_compatibility_key()
     assert legacy.query_compatibility_key() == current.query_compatibility_key()
+
+
+def test_content_publication_gate_round_trips_and_changes_corpus_key() -> None:
+    """The runtime-overlay publication gate must persist and invalidate ungated empty indexes."""
+    ungated = _settings()
+    gated = replace(ungated, require_content_before_publish="True")
+
+    assert IndexingSettings.from_metadata(gated.to_metadata()) == gated
+    assert ungated.corpus_compatibility_key() != gated.corpus_compatibility_key()
+    assert ungated.query_compatibility_key() == gated.query_compatibility_key()
