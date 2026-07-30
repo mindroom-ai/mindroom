@@ -358,6 +358,8 @@ class AgentBot:
         self._last_sync_monotonic = None
         self._first_sync_done = False
         self._orchestrator_ready_handled = False
+        self._dispatch_persist_failure_epoch = 0
+        self._observed_dispatch_persist_failure_epoch = 0
         self._sync_shutting_down = False
         self._hook_registry_state = HookRegistryState(HookRegistry.empty())
         self._room_member_callback_registered = False
@@ -532,7 +534,7 @@ class AgentBot:
             ),
             room_for_id=self._room_for_dispatch_obligation,
             turn_is_terminal=self._turn_store.is_durably_handled,
-            on_persist_failure=self._rewind_sync_after_pre_certification_failure,
+            on_persist_failure=self._record_dispatch_persist_failure,
             source_admission=self._admit_dispatch_source,
         )
         self._post_response_effects_support = PostResponseEffectsSupport(
@@ -1226,6 +1228,54 @@ class AgentBot:
         if decision.state is SyncTrustState.CERTIFIED:
             self._room_lifecycle.observe_trusted_sync_rooms(response.rooms.join)
 
+    def _record_dispatch_persist_failure(self) -> None:
+        """Latch rejected source work until its containing response is rejected."""
+        self._dispatch_persist_failure_epoch += 1
+        self._rewind_sync_after_pre_certification_failure()
+
+    def _consume_dispatch_persist_failure(self) -> bool:
+        """Return whether unseen source rejection blocks this response's checkpoint."""
+        failure_epoch = self._dispatch_persist_failure_epoch
+        if failure_epoch == self._observed_dispatch_persist_failure_epoch:
+            return False
+        self._observed_dispatch_persist_failure_epoch = failure_epoch
+        client = self.client
+        retry_token = self._sync_cache_trust.retry_token()
+        if client is not None and cast("Any", client).next_batch != retry_token:
+            self._rewind_sync_after_pre_certification_failure()
+        self.logger.warning(
+            "matrix_sync_certification_rejected_after_dispatch_persist_failure",
+            dispatch_persist_failure_epoch=failure_epoch,
+        )
+        return True
+
+    def _handle_pre_certification_failure(self) -> None:
+        """Rewind one failed response and consume any durable-acceptance rejection."""
+        if self._consume_dispatch_persist_failure():
+            return
+        client = self.client
+        if client is not None and cast("Any", client).next_batch != self._sync_cache_trust.retry_token():
+            self._rewind_sync_after_pre_certification_failure()
+
+    def _apply_sync_response_after_dispatch_acceptance(
+        self,
+        decision: SyncCertificationDecision,
+        *,
+        cache_result: SyncCacheWriteResult,
+        room_member_join_hook_plan: _RoomMemberJoinSyncHookPlan,
+        response: nio.SyncResponse,
+    ) -> tuple[SyncCertificationDecision, _RoomMemberJoinSyncHookPlan, bool]:
+        """Apply certification only when every source callback reached durable ownership."""
+        if self._consume_dispatch_persist_failure():
+            return decision, _RoomMemberJoinSyncHookPlan(arm_after_response=False), True
+        applied = self._apply_sync_response_decision(decision, cache_result=cache_result)
+        room_member_join_hook_plan = self._apply_classic_sync_admission(
+            decision=applied,
+            response=response,
+            room_member_join_hook_plan=room_member_join_hook_plan,
+        )
+        return applied, room_member_join_hook_plan, False
+
     def seconds_since_last_sync_activity(self) -> float | None:
         """Return elapsed seconds since the last sync-loop activity seen by the watchdog."""
         if self._last_sync_monotonic is None:
@@ -1329,6 +1379,7 @@ class AgentBot:
     async def _on_sync_response(self, _response: nio.SyncResponse | nio.SlidingSyncResponse) -> None:
         """Track successful sync responses for health checks and watchdogs."""
         first_sync_response = not self._first_sync_done
+        dispatch_persist_failure_rejected_response = False
         room_member_join_hooks_were_armed = self._room_member_join_hooks_armed
         room_member_join_hook_plan = _RoomMemberJoinSyncHookPlan()
         self._mark_sync_progress()
@@ -1373,15 +1424,15 @@ class AgentBot:
                         response=_response,
                     )
                 except BaseException:
-                    client = self.client
-                    if client is not None and cast("Any", client).next_batch != self._sync_cache_trust.retry_token():
-                        self._rewind_sync_after_pre_certification_failure()
+                    self._handle_pre_certification_failure()
                     raise
-                decision = self._apply_sync_response_decision(decision, cache_result=cache_result)
-                room_member_join_hook_plan = self._apply_classic_sync_admission(
-                    decision=decision,
-                    response=_response,
-                    room_member_join_hook_plan=room_member_join_hook_plan,
+                decision, room_member_join_hook_plan, dispatch_persist_failure_rejected_response = (
+                    self._apply_sync_response_after_dispatch_acceptance(
+                        decision,
+                        cache_result=cache_result,
+                        room_member_join_hook_plan=room_member_join_hook_plan,
+                        response=_response,
+                    )
                 )
             self._mark_sync_progress()
         elif isinstance(_response, nio.SlidingSyncResponse):
@@ -1395,6 +1446,8 @@ class AgentBot:
                     room_id for room_id, room in _response.rooms.items() if room.membership == "join"
                 )
             self._mark_sync_progress()
+        if dispatch_persist_failure_rejected_response:
+            return
         self._first_sync_done = True
         self._room_member_join_hooks_armed = room_member_join_hook_plan.arm_after_response
 
