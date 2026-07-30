@@ -1542,10 +1542,8 @@ class AgentBot:
             # Keep durable tracking-state loading off the event loop at startup.
             await asyncio.to_thread(self._turn_store.warm)
             await asyncio.to_thread(interactive.init_persistence, self.runtime_paths.storage_root)
-            if (
-                self.orchestrator is not None
-                and not self.orchestrator.running
-                and (self.agent_name == ROUTER_AGENT_NAME or self.agent_name in self.config.teams)
+            if self.orchestrator is not None and (
+                self.agent_name == ROUTER_AGENT_NAME or self.agent_name in self.config.teams
             ):
                 await self._dispatch_obligation_runner.recover_pending(turn_backed=False)
             else:
@@ -1555,7 +1553,7 @@ class AgentBot:
 
             # Persist correctness-critical source events; keep ID-less auxiliary inputs best-effort.
             client.add_event_callback(
-                _create_best_effort_task_wrapper(self._on_invite, owner=self._runtime_view),
+                self._on_invite_before_sync_certification,  # ty: ignore[invalid-argument-type]
                 nio.InviteEvent,  # ty: ignore[invalid-argument-type]  # InviteEvent doesn't inherit Event
             )
             self._dispatch_obligation_runner.register_source_callbacks(
@@ -1835,6 +1833,18 @@ class AgentBot:
 
     async def _on_invite(self, room: nio.MatrixRoom, event: nio.InviteEvent) -> None:
         await self._room_lifecycle.on_invite(room, event)
+
+    async def _on_invite_before_sync_certification(
+        self,
+        room: nio.MatrixRoom,
+        event: nio.InviteEvent,
+    ) -> None:
+        """Finish invite handling before the containing classic sync can certify."""
+        try:
+            await self._on_invite(room, event)
+        except BaseException:
+            self._rewind_sync_after_pre_certification_failure()
+            raise
 
     def _settle_turn_dispatch_obligations(self, event_ids: tuple[str, ...]) -> None:
         """Replace pending turn-backed obligations with durable TurnStore truth."""

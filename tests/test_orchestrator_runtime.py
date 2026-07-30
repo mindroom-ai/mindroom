@@ -2177,6 +2177,9 @@ class TestMultiAgentOrchestrator:
             "general": member_bot,
         }
 
+        await orchestrator._recover_ready_turn_dispatch_obligations()
+        team_bot.recover_pending_turn_dispatch_obligations.assert_not_awaited()
+
         with (
             patch("mindroom.orchestrator.wait_for_matrix_homeserver", new=AsyncMock()),
             patch.object(orchestrator, "_resolve_bot_room_aliases"),
@@ -2193,6 +2196,53 @@ class TestMultiAgentOrchestrator:
             finally:
                 release_member.set()
             await startup_task
+
+        team_bot.recover_pending_turn_dispatch_obligations.assert_awaited_once_with()
+
+    @pytest.mark.asyncio
+    async def test_background_member_retry_releases_ready_team_turn_recovery(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """A member retry must release pending team turns once the whole team is running."""
+        config = _configured_team_test_config(tmp_path)
+        orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths_for(config))
+        orchestrator.config = config
+
+        router_bot = MagicMock()
+        router_bot.agent_name = ROUTER_AGENT_NAME
+        router_bot.running = True
+        router_bot.recover_pending_turn_dispatch_obligations = AsyncMock()
+
+        team_bot = MagicMock()
+        team_bot.agent_name = "support_team"
+        team_bot.running = True
+        team_bot.recover_pending_turn_dispatch_obligations = AsyncMock()
+
+        member_bot = MagicMock()
+        member_bot.agent_name = "general"
+        member_bot.running = False
+
+        async def start_member() -> bool:
+            member_bot.running = True
+            return True
+
+        member_bot.try_start = AsyncMock(side_effect=start_member)
+        orchestrator.agent_bots = {
+            ROUTER_AGENT_NAME: router_bot,
+            "support_team": team_bot,
+            "general": member_bot,
+        }
+
+        with (
+            patch.object(orchestrator, "_entities_blocked_by_failed_mcp_servers", return_value=set()),
+            patch.object(orchestrator, "_bind_started_runtime_support_services"),
+            patch.object(orchestrator, "_resolve_bot_room_aliases"),
+            patch.object(orchestrator, "_start_sync_task"),
+            patch.object(orchestrator, "_setup_rooms_and_memberships", new=AsyncMock()),
+            patch.object(orchestrator, "_recover_pending_replacement_rooms", new=AsyncMock()),
+        ):
+            await orchestrator._run_bot_start_retry("general")
 
         team_bot.recover_pending_turn_dispatch_obligations.assert_awaited_once_with()
 
@@ -3493,6 +3543,7 @@ class TestMultiAgentOrchestrator:
         router_bot.config = old_config
         router_bot.enable_streaming = True
         router_bot._set_presence_with_model_info = AsyncMock()
+        router_bot.recover_pending_turn_dispatch_obligations = AsyncMock()
         general_bot = MagicMock()
         general_bot.config = old_config
         general_bot.enable_streaming = True
@@ -3589,6 +3640,7 @@ class TestMultiAgentOrchestrator:
         router_bot.config = old_config
         router_bot.enable_streaming = True
         router_bot._set_presence_with_model_info = AsyncMock()
+        router_bot.recover_pending_turn_dispatch_obligations = AsyncMock()
         general_bot = MagicMock()
         general_bot.config = old_config
         general_bot.enable_streaming = True

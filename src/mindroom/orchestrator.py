@@ -245,6 +245,7 @@ class _MultiAgentOrchestrator:
     config_reload: ConfigReloadLifecycle = field(init=False)
     _mcp_manager: MCPServerManager | None = field(default=None, init=False)
     _config_update_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False)
+    _dispatch_recovery_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False)
     _response_admission_gate: ResponseAdmissionGate = field(default_factory=ResponseAdmissionGate, init=False)
     _mcp_catalog_change_task_owner: object = field(default_factory=object, init=False, repr=False)
     _pending_replacement_recovery_room_ids: dict[str, set[str]] = field(default_factory=dict, init=False)
@@ -530,6 +531,23 @@ class _MultiAgentOrchestrator:
                 running_bots.append(bot)
         return running_bots
 
+    async def _recover_ready_turn_dispatch_obligations(self) -> None:
+        """Recover fleet-dependent turns whose required runtimes are ready."""
+        async with self._dispatch_recovery_lock:
+            config = self.config
+            if config is None:
+                return
+            for entity_name in [ROUTER_AGENT_NAME, *sorted(config.teams)]:
+                bot = self.agent_bots.get(entity_name)
+                if bot is None or not bot.running:
+                    continue
+                if entity_name in config.teams and any(
+                    (member_bot := self.agent_bots.get(member_name)) is None or not member_bot.running
+                    for member_name in config.teams[entity_name].agents
+                ):
+                    continue
+                await bot.recover_pending_turn_dispatch_obligations()
+
     async def _try_start_bot_once(self, entity_name: str, bot: AgentBot | TeamBot) -> bool | None:
         """Run one bot start attempt and classify the result."""
         try:
@@ -567,6 +585,7 @@ class _MultiAgentOrchestrator:
                     logger.info("Bot recovered after startup failure", agent_name=entity_name)
                     bots_to_setup = self._bots_to_setup_after_background_start(entity_name)
                     self._bind_started_runtime_support_services([bot])
+                    await self._recover_ready_turn_dispatch_obligations()
                     config = self.config
                     if config is not None:
                         self._resolve_bot_room_aliases(bots_to_setup, config)
@@ -1208,9 +1227,7 @@ class _MultiAgentOrchestrator:
         self._bind_started_runtime_support_services(started_bots)
         log_startup_phase_finished("bind_runtime_support", phase_started)
 
-        for bot in started_bots:
-            if bot.agent_name == ROUTER_AGENT_NAME or bot.agent_name in config.teams:
-                await bot.recover_pending_turn_dispatch_obligations()
+        await self._recover_ready_turn_dispatch_obligations()
         self.running = True
 
         # Create sync tasks for each bot with automatic restart on failure.
@@ -1387,6 +1404,7 @@ class _MultiAgentOrchestrator:
             self.agent_bots.pop(entity_name, None)
 
         await self._remove_deleted_entities(plan.removed_entities)
+        await self._recover_ready_turn_dispatch_obligations()
         return changed_entities, start_results.retryable_entities, start_results.permanently_failed_entities
 
     async def _handle_mcp_catalog_change(self, server_id: str) -> None:
@@ -1443,6 +1461,7 @@ class _MultiAgentOrchestrator:
                 self.config,
                 start_sync_tasks=True,
             )
+            await self._recover_ready_turn_dispatch_obligations()
             if start_results.started_bots:
                 await self._setup_rooms_and_memberships(start_results.started_bots)
             await self._recover_pending_replacement_rooms(self.config)
