@@ -57,7 +57,9 @@ from mindroom.response_terminal import (
 )
 from mindroom.runtime_shutdown import GENERIC_SHUTDOWN, RuntimeShutdownIntent
 from mindroom.streaming import (
+    INTERRUPTED_RESPONSE_NOTE,
     PROGRESS_PLACEHOLDER,
+    RESTART_INTERRUPTED_RESPONSE_NOTE,
     ReplacementStreamingResponse,
     StreamingDeliveryError,
     StreamingResponse,
@@ -1179,7 +1181,15 @@ class ResponseRunner:
             return
         if not final_outcome.mark_handled:
             return
-        if cancel_source_from_failure_reason(final_outcome.failure_reason) == "user_stop":
+        cancel_source = cancel_source_from_failure_reason(final_outcome.failure_reason)
+        if cancel_source == "user_stop":
+            return
+        expected_note = (
+            RESTART_INTERRUPTED_RESPONSE_NOTE if cancel_source == "sync_restart" else INTERRUPTED_RESPONSE_NOTE
+        )
+        if final_outcome.final_visible_body is None or not final_outcome.final_visible_body.rstrip().endswith(
+            expected_note,
+        ):
             return
         request.on_interrupted_response_recoverable()
 

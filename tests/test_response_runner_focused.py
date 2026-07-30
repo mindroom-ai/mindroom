@@ -45,7 +45,7 @@ from mindroom.response_runner import (
     prepare_memory_and_model_context,
 )
 from mindroom.stop import StopManager
-from mindroom.streaming import StreamingDeliveryError
+from mindroom.streaming import INTERRUPTED_RESPONSE_NOTE, RESTART_INTERRUPTED_RESPONSE_NOTE, StreamingDeliveryError
 from mindroom.thread_summary import thread_summary_message_count_hint
 from mindroom.timing import DispatchPipelineTiming
 from mindroom.turn_policy import PreparedDispatch
@@ -1078,7 +1078,7 @@ async def test_agent_streaming_sync_restart_cancelled_outcome_registers_retry(tm
         terminal_status="cancelled",
         event_id="$stream",
         is_visible_response=True,
-        final_visible_body="partial",
+        final_visible_body=f"partial\n\n{RESTART_INTERRUPTED_RESPONSE_NOTE}",
         failure_reason="sync_restart_cancelled",
     )
 
@@ -1401,6 +1401,7 @@ async def test_terminal_settlement_registers_retry_before_rethrowing_cancel(tmp_
         terminal_status="cancelled",
         event_id="$response",
         is_visible_response=True,
+        final_visible_body=RESTART_INTERRUPTED_RESPONSE_NOTE,
         failure_reason="sync_restart_cancelled",
     )
     progress = response_runner._DeliveryProgress()
@@ -1444,15 +1445,16 @@ async def test_terminal_settlement_registers_retry_before_rethrowing_cancel(tmp_
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("failure_reason", "expected_recoveries"),
+    ("failure_reason", "final_visible_body", "expected_recoveries"),
     [
-        ("interrupted", ["recovery"]),
-        ("cancelled_by_user", []),
+        ("interrupted", INTERRUPTED_RESPONSE_NOTE, ["recovery"]),
+        ("cancelled_by_user", "partial answer", []),
     ],
 )
 async def test_terminal_interruption_registers_recovery_unless_user_stopped(
     tmp_path: Path,
     failure_reason: str,
+    final_visible_body: str,
     expected_recoveries: list[str],
 ) -> None:
     """A visible terminal interruption remains recoverable except after an explicit user stop."""
@@ -1469,6 +1471,7 @@ async def test_terminal_interruption_registers_recovery_unless_user_stopped(
             terminal_status="cancelled",
             event_id="$response",
             is_visible_response=True,
+            final_visible_body=final_visible_body,
             failure_reason=failure_reason,
         ),
     )

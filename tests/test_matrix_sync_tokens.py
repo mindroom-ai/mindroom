@@ -22,16 +22,20 @@ from mindroom.coalescing_batch import CoalescedBatch, CoalescingKey, PendingEven
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
+from mindroom.delivery_gateway import FinalizeStreamedResponseRequest, ResponseIdentity
 from mindroom.dispatch_handoff import PendingDispatchMetadata
 from mindroom.dispatch_source import VOICE_SOURCE_KIND
 from mindroom.handled_turns import TurnRecord
 from mindroom.matrix.cache.event_cache import EventCacheBackendUnavailableError
 from mindroom.matrix.cache.postgres_event_cache import PostgresEventCache
 from mindroom.matrix.cache.sqlite_event_cache import SqliteEventCache
+from mindroom.matrix.client import DeliveredMatrixEvent
 from mindroom.matrix.sync_certification import SyncCheckpoint, SyncTrustState
 from mindroom.matrix.sync_tokens import clear_sync_token, load_sync_checkpoint, save_sync_token
 from mindroom.matrix.users import AgentMatrixUser
+from mindroom.message_target import MessageTarget
 from mindroom.response_admission import ResponseAdmissionGate
+from mindroom.response_runner import ResponseRequest
 from mindroom.runtime_shutdown import (
     ENTITY_REMOVED_SHUTDOWN,
     GENERIC_SHUTDOWN,
@@ -39,12 +43,14 @@ from mindroom.runtime_shutdown import (
     SYNC_RESTART_SHUTDOWN,
     RuntimeShutdownIntent,
 )
+from mindroom.streaming import StreamingResponse
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
     install_runtime_cache_support,
     install_shutdown_drain_mocks,
     make_matrix_client_mock,
+    request_envelope,
     runtime_paths_for,
     test_runtime_paths,
     wrap_extracted_collaborators,
@@ -54,6 +60,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.coalescing import LaneSlot, _GateEntry
+    from mindroom.final_delivery import FinalDeliveryOutcome
 
 _CACHE_GENERATION = "test-cache-generation"
 
@@ -1874,6 +1881,104 @@ async def test_shutdown_discards_checkpoint_when_response_swallows_cancellation_
     assert response_task.done()
     assert not response_task.cancelled()
     assert response_task.exception() is None
+    assert bot._response_runner.incomplete_inbox_responses_recoverable is False
+    assert bot._sync_cache_trust.state is SyncTrustState.UNCERTAIN
+    assert _load_sync_token_value(tmp_path, bot.agent_name) is None
+
+
+@pytest.mark.parametrize(
+    "terminal_edit_effect",
+    [
+        pytest.param(None, id="failed"),
+        pytest.param(asyncio.CancelledError("terminal edit cancelled"), id="cancelled"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_shutdown_discards_checkpoint_when_terminal_interruption_note_did_not_land(
+    tmp_path: Path,
+    terminal_edit_effect: object,
+) -> None:
+    """A prior visible body cannot prove recovery when its terminal note edit fails."""
+    bot = _certified_shutdown_bot(tmp_path)
+    bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
+    room_id = "!room:localhost"
+    source_event_id = "$source"
+    target = MessageTarget.resolve(room_id, "$thread", source_event_id)
+    envelope = request_envelope(
+        room_id=room_id,
+        reply_to_event_id=source_event_id,
+        target=target,
+        agent_name=bot.agent_name,
+    )
+    streaming = StreamingResponse(
+        target=target,
+        config=bot.config,
+        runtime_paths=runtime_paths_for(bot.config),
+    )
+    streaming.event_id = "$response"
+    streaming.accumulated_text = "partial answer"
+    response_started = asyncio.Event()
+    final_outcomes: list[FinalDeliveryOutcome] = []
+
+    async def interrupted_response() -> None:
+        response_started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            transport_outcome = await streaming.finalize(bot.client, restart_interrupted=True)
+            final_outcome = await bot._response_runner.deps.delivery_gateway.finalize_streamed_response(
+                FinalizeStreamedResponseRequest(
+                    target=target,
+                    stream_transport_outcome=transport_outcome,
+                    initial_delivery_kind="sent",
+                    identity=ResponseIdentity(
+                        response_kind="ai",
+                        response_envelope=envelope,
+                        correlation_id=source_event_id,
+                    ),
+                    tool_trace=None,
+                    extra_content=None,
+                ),
+            )
+            final_outcomes.append(final_outcome)
+            bot._response_runner._notify_interrupted_response_recoverable(
+                ResponseRequest(
+                    thread_history=(),
+                    prompt="Hello",
+                    response_envelope=envelope,
+                    on_interrupted_response_recoverable=lambda: bot._interrupted_turn_rooms.register(
+                        source_event_id,
+                        room_id=room_id,
+                    ),
+                ),
+                final_outcome,
+            )
+            raise
+
+    edit_message = AsyncMock(
+        side_effect=[
+            DeliveredMatrixEvent(event_id="$partial-edit", content_sent={"body": "partial answer"}),
+            terminal_edit_effect,
+        ],
+    )
+    with patch("mindroom.streaming.edit_message_result", new=edit_message):
+        assert await streaming._send_or_edit_message(bot.client)
+        response_task = bot._response_runner.track_inbox_response(
+            interrupted_response(),
+            name="test_unlanded_terminal_interruption",
+            recovery_proof_ready=lambda: bot._interrupted_turn_rooms.contains(source_event_id),
+        )
+        await response_started.wait()
+        _install_fast_response_drain(bot)
+        await bot.prepare_for_sync_shutdown(shutdown_intent=SYNC_RESTART_SHUTDOWN)
+
+    await asyncio.gather(response_task, return_exceptions=True)
+    assert edit_message.await_count == 2
+    assert response_task.cancelled()
+    assert len(final_outcomes) == 1
+    assert final_outcomes[0].mark_handled is True
+    assert final_outcomes[0].final_visible_body == "partial answer"
+    assert not bot._interrupted_turn_rooms.contains(source_event_id)
     assert bot._response_runner.incomplete_inbox_responses_recoverable is False
     assert bot._sync_cache_trust.state is SyncTrustState.UNCERTAIN
     assert _load_sync_token_value(tmp_path, bot.agent_name) is None

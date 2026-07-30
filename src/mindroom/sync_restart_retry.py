@@ -1,7 +1,8 @@
 """Track exact sources whose responses reached visible terminal interruption.
 
-A registered source reached the generic ``**[Response interrupted]**`` Matrix
-note, which a later restart scan can find without replaying the handled source.
+A registered source reached a visible terminal Matrix interruption note: the
+service-restart note for replacement or the generic note for orderly shutdown.
+A later restart scan can find either note without replaying the handled source.
 Replacement recovery can use the registered rooms directly, while orderly
 restart recovery discovers the note through that scan. Whether a discovered
 interruption resumes remains controlled by the runtime's auto-resume policy.
@@ -102,5 +103,5 @@ class InterruptedTurnRooms:
         if key in self._pending:
             return False
         self._pending[key] = room_id
-        logger.info("sync_restart_interrupted_turn_recorded", source_event_id=key, pending_count=len(self._pending))
+        logger.info("interrupted_turn_recovery_recorded", source_event_id=key, pending_count=len(self._pending))
         return True

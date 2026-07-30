@@ -13,11 +13,13 @@ from agno.run.base import RunStatus
 from agno.run.team import TeamRunOutput
 from agno.session.agent import AgentSession
 from agno.session.team import TeamSession
+from structlog.testing import capture_logs
 
 from mindroom.constants import MATRIX_EVENT_ID_METADATA_KEY
 from mindroom.final_delivery import FinalDeliveryOutcome
 from mindroom.history.types import HistoryScope
 from mindroom.response_runner import PostLockRequestPreparationError, ResponseRequest, ResponseRunner
+from mindroom.streaming import INTERRUPTED_RESPONSE_NOTE, RESTART_INTERRUPTED_RESPONSE_NOTE
 from mindroom.sync_restart_retry import InterruptedTurnRooms, interrupted_source_needs_retry
 from tests.conftest import delivered_matrix_event, request_envelope, unwrap_extracted_collaborator
 from tests.response_runner_helpers import _bot, _plain_request, _target
@@ -191,8 +193,8 @@ async def test_team_resolution_fallback_obeys_locked_retry_guard(tmp_path: Path,
 
 
 @pytest.mark.asyncio
-async def test_team_resolution_fallback_sync_restart_registers_retry(tmp_path: Path) -> None:
-    """Cancellation while editing a fallback reason must retain the edit for retry."""
+async def test_team_resolution_fallback_without_terminal_note_does_not_register_retry(tmp_path: Path) -> None:
+    """Cancellation while editing a prior response cannot prove a terminal note landed."""
     bot = _bot(tmp_path)
     runner = unwrap_extracted_collaborator(bot._response_runner)
     target = _target(reply_to_event_id="$source")
@@ -230,7 +232,7 @@ async def test_team_resolution_fallback_sync_restart_registers_retry(tmp_path: P
         )
 
     assert response == "$existing"
-    assert retries == ["retry"]
+    assert retries == []
     assert edit_message.await_count == 1
 
 
@@ -243,11 +245,23 @@ def _request(on_interrupted_response_recoverable: Callable[[], None] | None = No
     )
 
 
-def _cancelled_outcome(*, failure_reason: str, visible: bool = True) -> FinalDeliveryOutcome:
+def _cancelled_outcome(
+    *,
+    failure_reason: str,
+    visible: bool = True,
+    final_visible_body: str | None = None,
+) -> FinalDeliveryOutcome:
+    if visible and final_visible_body is None:
+        final_visible_body = (
+            RESTART_INTERRUPTED_RESPONSE_NOTE
+            if failure_reason == "sync_restart_cancelled"
+            else INTERRUPTED_RESPONSE_NOTE
+        )
     return FinalDeliveryOutcome(
         terminal_status="cancelled",
         event_id="$interrupted_note" if visible else None,
         is_visible_response=visible,
+        final_visible_body=final_visible_body,
         failure_reason=failure_reason,
     )
 
@@ -279,6 +293,14 @@ def test_notify_ignores_user_stop_and_unmarked_turns() -> None:
 
     _notify(runner, request, _cancelled_outcome(failure_reason="cancelled_by_user"))
     _notify(runner, request, _cancelled_outcome(failure_reason="sync_restart_cancelled", visible=False))
+    _notify(
+        runner,
+        request,
+        _cancelled_outcome(
+            failure_reason="sync_restart_cancelled",
+            final_visible_body="partial answer",
+        ),
+    )
 
     assert calls == []
 
@@ -303,11 +325,13 @@ def test_interrupted_turn_rooms_record_each_source_once() -> None:
     """One interrupted source must claim exactly one room-scoped recovery slot."""
     rooms = InterruptedTurnRooms()
 
-    assert rooms.register("$event", room_id="!room:localhost") is True
+    with capture_logs() as logs:
+        assert rooms.register("$event", room_id="!room:localhost") is True
     assert rooms.register("$event", room_id="!other:localhost") is False
     assert rooms.contains("$event") is True
     assert rooms.contains("$missing") is False
     assert rooms.pending_room_ids == {"!room:localhost"}
+    assert [entry["event"] for entry in logs] == ["interrupted_turn_recovery_recorded"]
 
 
 def test_interrupted_turn_rooms_collect_every_interrupted_room() -> None:
