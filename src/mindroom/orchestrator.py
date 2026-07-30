@@ -1388,7 +1388,11 @@ class _MultiAgentOrchestrator:
 
     async def _handle_mcp_catalog_change(self, server_id: str) -> None:
         """Restart entities that reference one changed MCP catalog."""
-        if not self.running or self.config is None:
+        config = self.config
+        if not self.running or config is None:
+            return
+        if not config.get_entities_referencing_tools({mcp_tool_name(server_id)}):
+            clear_worker_validation_snapshot_cache()
             return
         await self.config_reload.apply_with_response_admission(
             partial(self._apply_mcp_catalog_change, server_id),

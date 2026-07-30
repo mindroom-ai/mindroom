@@ -152,13 +152,23 @@ def setup_test_bot(
     return install_runtime_cache_support(bot)
 
 
-def _router_readiness_runtime(tmp_path: Path) -> tuple[AgentBot, AgentBot, _MultiAgentOrchestrator, nio.MatrixRoom]:
+def _router_readiness_runtime(
+    tmp_path: Path,
+    *,
+    with_mcp_server: bool = False,
+) -> tuple[AgentBot, AgentBot, _MultiAgentOrchestrator, nio.MatrixRoom]:
     """Return a live router and one running target that has not completed first sync."""
     room_id = "!router-readiness:localhost"
     config = _runtime_bound_config(
         Config(
-            agents={"general": AgentConfig(display_name="General", rooms=[room_id], tools=["mcp_demo"])},
-            mcp_servers={"demo": {"transport": "stdio", "command": "npx"}},
+            agents={
+                "general": AgentConfig(
+                    display_name="General",
+                    rooms=[room_id],
+                    tools=["mcp_demo"] if with_mcp_server else [],
+                ),
+            },
+            mcp_servers={"demo": {"transport": "stdio", "command": "npx"}} if with_mcp_server else {},
             authorization={"default_room_access": True},
         ),
         tmp_path,
@@ -500,9 +510,21 @@ class TestRoutingRegression:
         assert router_bot._sync_cache_trust.checkpoint is None
 
     @pytest.mark.asyncio
-    async def test_mcp_catalog_restart_waits_for_admitted_router_relay_delivery(self, tmp_path: Path) -> None:
+    async def test_mcp_catalog_restart_waits_for_admitted_router_relay_delivery(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
         """MCP replacement must not stop the selected target during relay delivery."""
-        router_bot, target_bot, orchestrator, room = _router_readiness_runtime(tmp_path)
+        router_bot, target_bot, orchestrator, room = _router_readiness_runtime(
+            tmp_path,
+            with_mcp_server=True,
+        )
+        assert router_bot.config is orchestrator.config
+        monkeypatch.setattr(
+            "mindroom.orchestration.config_lifecycle._REPLACEMENT_DRAIN_IDLE_POLL_SECONDS",
+            0,
+        )
         router_bot._first_sync_done = target_bot._first_sync_done = True
         router_bot.admission_gate = target_bot.admission_gate = orchestrator._response_admission_gate
         orchestrator.running = True

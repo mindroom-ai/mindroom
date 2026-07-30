@@ -73,13 +73,13 @@ class TestBuildAgentStatusMessage:
                     model="claude",
                 ),
             },
-            models={"claude": ModelConfig(provider="anthropic", id="claude-opus-4-8")},
+            models={"claude": ModelConfig(provider="anthropic", id="claude-opus-5")},
             defaults={"tools": []},
         )
 
         status = build_agent_status_message("researcher", config)
 
-        assert "🤖 Model: anthropic/claude-opus-4-8" in status
+        assert "🤖 Model: anthropic/claude-opus-5" in status
         assert "💼 Research specialist focused on finding information" in status
         assert "🔧 4 tools available" in status
 

@@ -22,7 +22,7 @@ from mindroom.claude_prompt_cache import (
     TOOL_SEARCH_TOOL_TYPE,
 )
 from mindroom.claude_stream_retry import install_claude_stream_retry_hook
-from mindroom.error_handling import ModelSafeguardRefusalError
+from mindroom.error_handling import MODEL_SAFEGUARD_REFUSAL_MESSAGE, ModelSafeguardRefusalError
 from mindroom.vertex_claude_compat import (
     _VERTEX_TOOL_SEARCH_TOKEN_RESERVE,
     MindroomVertexAIClaude,
@@ -99,7 +99,7 @@ def test_safeguard_refusal_survives_agno_error_translation() -> None:
     """Agno must not replace the typed refusal with a generic provider error."""
     model = _model()
     error = ModelSafeguardRefusalError(
-        message="Vertex Claude returned stop_reason=refusal",
+        message=MODEL_SAFEGUARD_REFUSAL_MESSAGE,
         model_name=model.name,
         model_id=model.id,
     )
@@ -114,7 +114,7 @@ def test_safeguard_refusal_is_not_retryable_by_agno() -> None:
     """Agno's configured model retry loop must not repeat a refusal."""
     model = _model()
     error = ModelSafeguardRefusalError(
-        message="Vertex Claude returned stop_reason=refusal",
+        message=MODEL_SAFEGUARD_REFUSAL_MESSAGE,
         model_name=model.name,
         model_id=model.id,
     )

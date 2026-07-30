@@ -301,7 +301,7 @@ def test_different_providers_with_extra_kwargs() -> None:
             },
             "anthropic_model": {
                 "provider": "anthropic",
-                "id": "claude-opus-4-8",
+                "id": "claude-opus-5",
                 "extra_kwargs": {
                     "temperature": 0.2,
                     "max_tokens": 2048,
@@ -441,7 +441,7 @@ def test_bedrock_claude_provider_uses_runtime_env() -> None:
         models={
             "bedrock_model": ModelConfig(
                 provider="bedrock_claude",
-                id="anthropic.claude-opus-4-8",
+                id="anthropic.claude-opus-5",
                 context_window=1_000_000,
             ),
         },
@@ -459,7 +459,7 @@ def test_bedrock_claude_provider_uses_runtime_env() -> None:
     model = get_model_instance(config, runtime_paths, "bedrock_model")
 
     assert isinstance(model, AwsBedrockClaude)
-    assert model.id == "anthropic.claude-opus-4-8"
+    assert model.id == "anthropic.claude-opus-5"
     assert model.provider == "AwsBedrock"
     assert model.aws_access_key == "aws-access"
     assert model.aws_secret_key == "aws-secret"  # noqa: S105
@@ -488,7 +488,7 @@ def test_bedrock_claude_provider_respects_explicit_profile_over_env_static_keys(
         models={
             "bedrock_model": ModelConfig(
                 provider="bedrock_claude",
-                id="anthropic.claude-opus-4-8",
+                id="anthropic.claude-opus-5",
                 context_window=1_000_000,
                 extra_kwargs={"aws_profile": "my-explicit-profile"},
             ),
@@ -529,7 +529,7 @@ def test_bedrock_claude_provider_auto_installs_boto3(
         "models": {
             "bedrock_model": {
                 "provider": "bedrock_claude",
-                "id": "anthropic.claude-opus-4-8",
+                "id": "anthropic.claude-opus-5",
                 "extra_kwargs": {
                     "aws_access_key": "aws-access",
                     "aws_secret_key": "aws-secret",
@@ -1019,7 +1019,7 @@ def _wire_tool(name: str) -> dict[str, object]:
 @pytest.mark.parametrize(
     ("provider", "model_id", "expected"),
     [
-        ("anthropic", "claude-opus-4-8", True),
+        ("anthropic", "claude-opus-5", True),
         ("anthropic", "claude-sonnet-5", True),
         ("Anthropic", "claude-sonnet-4-5-20250929", True),
         ("vertexai_claude", "claude-haiku-4-5@20251001", True),
@@ -1031,7 +1031,7 @@ def _wire_tool(name: str) -> dict[str, object]:
         ("anthropic", "claude-3-5-sonnet-20241022", False),
         ("vertexai_claude", "claude-sonnet-4@20250514", False),
         ("openai", "gpt-5.6", False),
-        ("bedrock_claude", "anthropic.claude-opus-4-8", False),
+        ("bedrock_claude", "anthropic.claude-opus-5", False),
     ],
 )
 def test_native_tool_search_supported_gating(provider: str, model_id: str, *, expected: bool) -> None:
@@ -1041,7 +1041,7 @@ def test_native_tool_search_supported_gating(provider: str, model_id: str, *, ex
 
 def test_deferred_tool_search_tags_tools_and_injects_search_tool() -> None:
     """Deferred tools ship tagged and name-sorted after the search tool and non-deferred tools."""
-    model = Claude(id="claude-opus-4-8", api_key="test-key", cache_system_prompt=True)
+    model = Claude(id="claude-opus-5", api_key="test-key", cache_system_prompt=True)
     captured_kwargs = _install_fake_sync_client(model)
     # zeta_tool arrives pre-marked (as Agno's cache_tools flag would): the
     # marker must be stripped because deferred tools may not carry one.
@@ -1078,7 +1078,7 @@ def test_deferred_tool_search_skips_tools_marker_when_all_tools_deferred() -> No
     unverified, and deferred tools may never carry one, so the ladder leaves
     the tools array unmarked and relies on the system-prompt breakpoint.
     """
-    model = Claude(id="claude-opus-4-8", api_key="test-key", cache_system_prompt=True)
+    model = Claude(id="claude-opus-5", api_key="test-key", cache_system_prompt=True)
     captured_kwargs = _install_fake_sync_client(model)
     vars(model)["_prepare_request_kwargs"] = lambda *_args, **_kwargs: {"tools": [_wire_tool("alpha_tool")]}
     install_claude_deferred_tool_search(model, deferred_tool_names=frozenset({"alpha_tool"}))
@@ -1093,7 +1093,7 @@ def test_deferred_tool_search_skips_tools_marker_when_all_tools_deferred() -> No
 
 def test_deferred_tool_search_applies_without_cache_ladder_when_cache_disabled() -> None:
     """Deferred tagging is independent of the cache ladder gate."""
-    model = Claude(id="claude-opus-4-8", api_key="test-key", cache_system_prompt=False)
+    model = Claude(id="claude-opus-5", api_key="test-key", cache_system_prompt=False)
     captured_kwargs = _install_fake_sync_client(model)
     vars(model)["_prepare_request_kwargs"] = lambda *_args, **_kwargs: {"tools": [_wire_tool("alpha_tool")]}
     install_claude_deferred_tool_search(model, deferred_tool_names=frozenset({"alpha_tool"}))
@@ -1109,7 +1109,7 @@ def test_deferred_tool_search_applies_without_cache_ladder_when_cache_disabled()
 
 def test_deferred_tool_search_leaves_requests_without_matching_tools_unchanged() -> None:
     """The search tool is injected only when a deferred tool is present in the request."""
-    model = Claude(id="claude-opus-4-8", api_key="test-key", cache_system_prompt=True)
+    model = Claude(id="claude-opus-5", api_key="test-key", cache_system_prompt=True)
     captured_kwargs = _install_fake_sync_client(model)
     vars(model)["_prepare_request_kwargs"] = lambda *_args, **_kwargs: {"tools": [_wire_tool("always_tool")]}
     install_claude_deferred_tool_search(model, deferred_tool_names=frozenset({"other_tool"}))
@@ -1125,7 +1125,7 @@ def test_install_claude_deferred_tool_search_ignores_non_claude_and_empty_sets()
     install_claude_deferred_tool_search(llama, deferred_tool_names=frozenset({"alpha_tool"}))
     assert _DEFERRED_TOOL_NAMES_ATTR not in vars(llama)
 
-    claude = Claude(id="claude-opus-4-8", api_key="test-key", cache_system_prompt=False)
+    claude = Claude(id="claude-opus-5", api_key="test-key", cache_system_prompt=False)
     install_claude_deferred_tool_search(claude, deferred_tool_names=frozenset())
     assert _DEFERRED_TOOL_NAMES_ATTR not in vars(claude)
 
@@ -1171,7 +1171,7 @@ def _anthropic_response(content: list[dict[str, object]]) -> AnthropicMessage:
             "id": "msg_test",
             "type": "message",
             "role": "assistant",
-            "model": "claude-opus-4-8",
+            "model": "claude-opus-5",
             "content": content,
             "stop_reason": "end_turn",
             "stop_sequence": None,
@@ -1182,7 +1182,7 @@ def _anthropic_response(content: list[dict[str, object]]) -> AnthropicMessage:
 
 def test_server_tool_search_blocks_round_trip_in_assistant_history() -> None:
     """server_tool_use and tool_search_tool_result replay verbatim, in order, exactly once."""
-    model = Claude(id="claude-opus-4-8", api_key="test-key", cache_system_prompt=False)
+    model = Claude(id="claude-opus-5", api_key="test-key", cache_system_prompt=False)
     first_response = _anthropic_response(
         [
             {"type": "text", "text": "I'll search for a weather tool."},
@@ -1398,7 +1398,7 @@ def test_replay_safe_tool_search_results_returns_original_when_references_are_av
 @pytest.mark.asyncio
 async def test_prompt_cache_hook_drops_orphaned_search_use_from_streaming_replay() -> None:
     """Mixed client/server tool history must remain valid on the next streamed request."""
-    model = Claude(id="claude-opus-4-8", api_key="test-key", cache_system_prompt=False)
+    model = Claude(id="claude-opus-5", api_key="test-key", cache_system_prompt=False)
     captured_kwargs: list[dict[str, object]] = []
 
     class _EmptyAsyncStream:
@@ -1469,7 +1469,7 @@ async def test_prompt_cache_hook_drops_orphaned_search_use_from_streaming_replay
 @pytest.mark.asyncio
 async def test_prompt_cache_hook_constructs_async_stream_off_event_loop(*, use_beta: bool) -> None:
     """Slow synchronous SDK stream setup must not block unrelated async work."""
-    model = Claude(id="claude-opus-4-8", api_key="test-key", cache_system_prompt=False)
+    model = Claude(id="claude-opus-5", api_key="test-key", cache_system_prompt=False)
     stream_started = threading.Event()
     heartbeat_seen = threading.Event()
     allow_stream_return = threading.Event()
@@ -1566,7 +1566,7 @@ async def test_cancelled_async_stream_setup_does_not_orphan_sdk_request_coroutin
         api_key="test-key",
         http_client=httpx.AsyncClient(transport=_RecordingTransport()),
     )
-    model = Claude(id="claude-opus-4-8", api_key="test-key", cache_system_prompt=False)
+    model = Claude(id="claude-opus-5", api_key="test-key", cache_system_prompt=False)
     setup_started = threading.Event()
     allow_setup = threading.Event()
     setup_finished = threading.Event()
@@ -1679,7 +1679,7 @@ def test_prompt_cache_hook_sanitizes_replay_with_cache_disabled_and_no_deferred_
     model with no deferred tools must still send schema-clean history, while
     the disabled ladder stays inert.
     """
-    model = Claude(id="claude-opus-4-8", api_key="test-key", cache_system_prompt=False)
+    model = Claude(id="claude-opus-5", api_key="test-key", cache_system_prompt=False)
     captured_kwargs = _install_fake_sync_client(model)
     install_claude_prompt_cache_hook(model)
 

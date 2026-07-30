@@ -309,7 +309,7 @@ wheels = [
 
 [[package]]
 name = "anthropic"
-version = "0.97.0"
+version = "0.120.2"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "anyio" },
@@ -321,9 +321,9 @@ dependencies = [
     { name = "sniffio" },
     { name = "typing-extensions" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/14/93/f66ea8bfe39f2e6bb9da8e27fa5457ad2520e8f7612dfc547b17fad55c4d/anthropic-0.97.0.tar.gz", hash = "sha256:021e79fd8e21e90ad94dc5ba2bbbd8b1599f424f5b1fab6c06204009cab764be", size = 669502, upload-time = "2026-04-23T20:52:34.445Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/d7/10/4ca013cb166f226bd89e0aeb0fcaff94f45ddf716d4925ce89475d3c587b/anthropic-0.120.2.tar.gz", hash = "sha256:9722efc10c27a30a69f5338ddacdb35bc6a64297a4e4ba729bf83af873d5fb3a", size = 1008421, upload-time = "2026-07-28T17:38:26.986Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/53/b6/8e851369fa661ad0fef2ae6266bf3b7d52b78ccf011720058f4adaca59e2/anthropic-0.97.0-py3-none-any.whl", hash = "sha256:8a1a472dfabcfc0c52ff6a3eecf724ac7e07107a2f6e2367be55ceb42f5d5613", size = 662126, upload-time = "2026-04-23T20:52:32.377Z" },
+    { url = "https://files.pythonhosted.org/packages/63/af/0f5db57b9397a0f3b7fc204cbef143401a7cadaf982330f97f1ce3d39f34/anthropic-0.120.2-py3-none-any.whl", hash = "sha256:0f0bc2b381dc0eb41c8d886b815d79c2041cd2374f83aed36f574b6dc9c579c1", size = 1022851, upload-time = "2026-07-28T17:38:25.466Z" },
 ]
 
 [[package]]
@@ -4426,7 +4426,7 @@ requires-dist = [
     { name = "agno", extras = ["anthropic", "google", "ollama", "openai"], specifier = "==2.6.12" },
     { name = "aiohttp", specifier = ">=3.13.3" },
     { name = "aiosqlite", specifier = ">=0.20" },
-    { name = "anthropic", specifier = ">=0.77" },
+    { name = "anthropic", specifier = ">=0.120.2" },
     { name = "anyio", specifier = ">=4.10" },
     { name = "apify-client", marker = "platform_machine != 'aarch64' and extra == 'apify'", specifier = ">=1.12.2" },
     { name = "arxiv", marker = "extra == 'arxiv'" },
@@ -4515,7 +4515,7 @@ requires-dist = [
     { name = "mdit-py-plugins", specifier = ">=0.5" },
     { name = "mem0ai", specifier = ">=0.1.115" },
     { name = "mem0ai", marker = "extra == 'mem0'", specifier = ">=0.1.115" },
-    { name = "mindroom-nio", extras = ["e2e"], specifier = "==0.31" },
+    { name = "mindroom-nio", extras = ["e2e"], specifier = "==0.32.0" },
     { name = "moviepy", marker = "extra == 'moviepy-video-tools'" },
     { name = "neo4j", marker = "extra == 'neo4j'" },
     { name = "newspaper4k", marker = "extra == 'newspaper'" },
@@ -4625,7 +4625,7 @@ dev = [
 
 [[package]]
 name = "mindroom-nio"
-version = "0.31.0"
+version = "0.32.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "aiofiles" },
@@ -4637,9 +4637,9 @@ dependencies = [
     { name = "pycryptodome" },
     { name = "unpaddedbase64" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/f0/88/ff684847de83744240387dd2fa345feabc103cbde140c81ef770b6040fd7/mindroom_nio-0.31.0.tar.gz", hash = "sha256:972f43a6e3b6390ba7123f250162898ad8c35f525efb970e5f1d10c6bc18095c", size = 185977, upload-time = "2026-07-25T18:38:23.624Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/88/40/0cfaac88194adf12136f92f5dc077ebfcdd2d12c67025fc6d6e432a48080/mindroom_nio-0.32.0.tar.gz", hash = "sha256:1b573f65bb95bda23ac70b95a392df5b5ddf2ac848c0d006ddd6b7372eaa0158", size = 187664, upload-time = "2026-07-30T05:04:15.384Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/83/66/c62a1cb25f217f118e67f5437420bdd3005964a21e3a5182b5ee4d51943f/mindroom_nio-0.31.0-py3-none-any.whl", hash = "sha256:9f7a160db13dc4f90f37e0c0cf88d3c008ac47ac2e61b88672e1cf7130fed939", size = 214365, upload-time = "2026-07-25T18:38:22.069Z" },
+    { url = "https://files.pythonhosted.org/packages/fa/ce/9ffd8f9a26fdbed436f07ad06bdc2b421bbfce6115727a88e08e2957af40/mindroom_nio-0.32.0-py3-none-any.whl", hash = "sha256:e8ea11f662ddf2f6335d2c6d0030d6e24ad50d9204b4bb2bac4fd722593ab5af", size = 216052, upload-time = "2026-07-30T05:04:13.933Z" },
 ]
 
 [package.optional-dependencies]

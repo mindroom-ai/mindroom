@@ -1485,7 +1485,13 @@ async def test_config_update_serializes_manual_plugin_reload_and_mcp_catalog_cha
     tmp_path: Path,
 ) -> None:
     """Manual plugin reloads and MCP restarts must wait for config application."""
-    config = _runtime_bound_config(Config(), tmp_path)
+    config = _runtime_bound_config(
+        Config(
+            agents={"agent1": AgentConfig(display_name="Agent 1", tools=["mcp_demo"])},
+            mcp_servers={"demo": {"transport": "stdio", "command": "npx"}},
+        ),
+        tmp_path,
+    )
     orchestrator = _MultiAgentOrchestrator(runtime_paths_for(config))
     orchestrator.config = config
     orchestrator.running = True
@@ -1517,12 +1523,16 @@ async def test_config_update_serializes_manual_plugin_reload_and_mcp_catalog_cha
         assert not mcp_task.done()
         reload_plugins_mock.assert_not_called()
 
+        # The authoritative under-lock recheck must observe the config current
+        # when the queued MCP replacement finally applies.
+        replacement_config = _runtime_bound_config(Config(), tmp_path)
+        orchestrator.config = replacement_config
         finish_apply.set()
         assert await config_task is False
         assert await plugin_task is reload_result
         await mcp_task
 
-    reload_plugins_mock.assert_called_once_with(config, orchestrator.runtime_paths)
+    reload_plugins_mock.assert_called_once_with(replacement_config, orchestrator.runtime_paths)
 
 
 @pytest.mark.asyncio
@@ -1533,7 +1543,7 @@ async def test_queued_config_reload_waits_for_in_flight_response_without_event_i
 ) -> None:
     """Queued reloads should wait for tracked responses even without a Matrix event ID."""
     monkeypatch.setattr("mindroom.orchestration.config_lifecycle._CONFIG_RELOAD_DEBOUNCE_SECONDS", 0.01)
-    monkeypatch.setattr("mindroom.orchestration.config_lifecycle._CONFIG_RELOAD_IDLE_POLL_SECONDS", 0.01)
+    monkeypatch.setattr("mindroom.orchestration.config_lifecycle._REPLACEMENT_DRAIN_IDLE_POLL_SECONDS", 0.01)
 
     config = _runtime_bound_config(
         Config(
@@ -3020,10 +3030,11 @@ async def test_replaced_runtime_refuses_deferred_response_without_matrix_io(
         assert task.done()
         assert not task.cancelled()
         assert isinstance(task.exception(), ResponseAdmissionRefusedError)
+        assert str(task.exception()) == "Runtime replacement is restarting this entity"
         assert bot.in_flight_response_count == 0
         send_response.assert_not_awaited()
         assert any(
-            call.args and call.args[0] == "response_deferred_during_config_apply"
+            call.args and call.args[0] == "response_deferred_during_replacement"
             for call in refusal_logger.info.call_args_list
         )
         assert any(
@@ -3096,7 +3107,7 @@ async def test_shutdown_during_active_drain_cancels_reload(
 ) -> None:
     """Calling stop() during an active drain must cancel the reload without applying it."""
     monkeypatch.setattr("mindroom.orchestration.config_lifecycle._CONFIG_RELOAD_DEBOUNCE_SECONDS", 0.01)
-    monkeypatch.setattr("mindroom.orchestration.config_lifecycle._CONFIG_RELOAD_IDLE_POLL_SECONDS", 0.01)
+    monkeypatch.setattr("mindroom.orchestration.config_lifecycle._REPLACEMENT_DRAIN_IDLE_POLL_SECONDS", 0.01)
 
     orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
     orchestrator.running = True
