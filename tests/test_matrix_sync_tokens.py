@@ -29,7 +29,7 @@ from mindroom.handled_turns import TurnRecord
 from mindroom.matrix.cache.event_cache import EventCacheBackendUnavailableError
 from mindroom.matrix.cache.postgres_event_cache import PostgresEventCache
 from mindroom.matrix.cache.sqlite_event_cache import SqliteEventCache
-from mindroom.matrix.sync_certification import SyncCheckpoint, SyncTrustState
+from mindroom.matrix.sync_certification import SyncCacheWriteResult, SyncCheckpoint, SyncTrustState
 from mindroom.matrix.sync_tokens import clear_sync_token, load_sync_checkpoint, save_sync_token
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.response_admission import ResponseAdmissionGate
@@ -952,6 +952,27 @@ async def test_on_sync_response_persists_latest_sync_token(tmp_path: Path) -> No
     checkpoint = load_sync_checkpoint(tmp_path, bot.agent_name)
     assert checkpoint is not None
     assert checkpoint.token == "s_latest"  # noqa: S105
+
+
+def test_cache_scope_cleanup_between_plan_and_apply_forces_tokenless_recovery(tmp_path: Path) -> None:
+    """Bot wiring must apply the invalidation epoch before advancing nio's cursor."""
+    bot = _agent_bot(tmp_path)
+    bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
+    bot.client.next_batch = "s_stale_after_cleanup"
+    cache_result = SyncCacheWriteResult(complete=True)
+    decision = bot._plan_sync_response(
+        next_batch="s_stale_after_cleanup",
+        cache_result=cache_result,
+        first_sync=False,
+    )
+
+    assert bot._sync_cache_trust.invalidate_for_cache_scope_cleanup()
+    bot._apply_sync_response_decision(decision, cache_result=cache_result)
+
+    assert bot.client.next_batch is None
+    assert bot._sync_cache_trust.state is SyncTrustState.UNCERTAIN
+    assert bot._sync_cache_trust.checkpoint is None
+    assert load_sync_checkpoint(tmp_path, bot.agent_name) is None
 
 
 @pytest.mark.asyncio

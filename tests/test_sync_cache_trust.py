@@ -129,6 +129,31 @@ def test_planned_response_does_not_advance_checkpoint_until_applied(tmp_path: Pa
     assert trust.checkpoint == SyncCheckpoint("s_planned")
 
 
+def test_cache_scope_invalidation_rejects_stale_certification_plan(tmp_path: Path) -> None:
+    """A plan made before cache cleanup cannot restore or persist sync continuity."""
+    trust, _cache, _runtime = _trust(tmp_path)
+    trust.state = SyncTrustState.CERTIFIED
+    trust.checkpoint = SyncCheckpoint("s_before_cleanup")
+    trust.save(trust.checkpoint)
+    cache_result = SyncCacheWriteResult(complete=True)
+    decision = trust.plan_response(
+        next_batch="s_stale_after_cleanup",
+        cache_result=cache_result,
+        first_sync=False,
+    )
+
+    assert trust.invalidate_for_cache_scope_cleanup()
+    applied = trust.apply_response(decision, cache_result=cache_result)
+
+    assert applied.state is SyncTrustState.UNCERTAIN
+    assert applied.reset_client_token is True
+    assert applied.reason == "cache_scope_invalidated"
+    assert trust.state is SyncTrustState.UNCERTAIN
+    assert trust.checkpoint is None
+    assert trust.retry_token() is None
+    assert load_sync_checkpoint(tmp_path, "code") is None
+
+
 def test_positioned_limited_response_resets_sync_continuity(tmp_path: Path) -> None:
     """A limited response after a position must force one since-less replay."""
     trust, _cache, _runtime = _trust(tmp_path)

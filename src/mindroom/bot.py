@@ -1150,11 +1150,12 @@ class AgentBot:
         decision: SyncCertificationDecision,
         *,
         cache_result: SyncCacheWriteResult,
-    ) -> None:
+    ) -> SyncCertificationDecision:
         """Advance sync continuity after prerequisite durable work completes."""
-        self._sync_cache_trust.apply_response(decision, cache_result=cache_result)
-        if decision.reset_client_token and self.client is not None:
+        applied = self._sync_cache_trust.apply_response(decision, cache_result=cache_result)
+        if applied.reset_client_token and self.client is not None:
             cast("Any", self.client).next_batch = None
+        return applied
 
     def _rewind_sync_after_dispatch_persistence_failure(self) -> None:
         """Replay work that failed before an exact durable obligation existed."""
@@ -1305,7 +1306,9 @@ class AgentBot:
                     _response,
                     room_member_join_hook_plan=room_member_join_hook_plan,
                 )
-                self._apply_sync_response_decision(decision, cache_result=cache_result)
+                decision = self._apply_sync_response_decision(decision, cache_result=cache_result)
+                if decision.reset_client_token:
+                    room_member_join_hook_plan = _RoomMemberJoinSyncHookPlan(arm_after_response=False)
             self._mark_sync_progress()
         elif isinstance(_response, nio.SlidingSyncResponse):
             # Sliding sync never certifies the classic checkpoint, but the
@@ -1940,13 +1943,11 @@ class AgentBot:
                 return
 
             await self._emit_room_member_joined_hooks(join)
-            if not await asyncio.to_thread(
+            await asyncio.to_thread(
                 record_room_member_join_seen,
                 self.runtime_paths.storage_root,
                 join,
-            ):
-                msg = f"Failed to persist completed room-member join {join.event_id!r}"
-                raise RuntimeError(msg)
+            )
 
     async def _emit_room_member_joined_sync_state_hooks(
         self,
@@ -1987,13 +1988,14 @@ class AgentBot:
                 DispatchCallbackKind.ROOM_LIFECYCLE,
             )
         if events_to_record:
-            await asyncio.to_thread(
-                record_room_member_joins_seen_from_events,
-                tuple(events_to_record),
-                config=self.config,
-                runtime_paths=self.runtime_paths,
-                storage_root=self.runtime_paths.storage_root,
-            )
+            async with self._room_member_join_lock:
+                await asyncio.to_thread(
+                    record_room_member_joins_seen_from_events,
+                    tuple(events_to_record),
+                    config=self.config,
+                    runtime_paths=self.runtime_paths,
+                    storage_root=self.runtime_paths.storage_root,
+                )
 
     async def _emit_room_member_joined_sync_timeline_hooks(self, response: nio.SyncResponse) -> None:
         """Expose human joins from a restored-token catch-up sync timeline."""

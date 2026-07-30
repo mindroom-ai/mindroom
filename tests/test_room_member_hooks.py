@@ -200,6 +200,30 @@ async def test_router_emits_room_member_joined_once_per_room_user(tmp_path: Path
     assert context.matrix_admin is not None
 
 
+def test_room_member_marker_returns_normally_or_raises_without_boolean_status(tmp_path: Path) -> None:
+    """A duplicate marker is successful idempotence, not a false write result."""
+    bot = _router_bot(tmp_path)
+    join = room_member_joins.room_member_join_from_event(
+        _room(),
+        _room_member_event(),
+        config=bot.config,
+        runtime_paths=bot.runtime_paths,
+    )
+    assert join is not None
+
+    first_result = room_member_joins.record_room_member_join_seen(
+        bot.runtime_paths.storage_root,
+        join,
+    )
+    duplicate_result = room_member_joins.record_room_member_join_seen(
+        bot.runtime_paths.storage_root,
+        join,
+    )
+
+    assert first_result is None
+    assert duplicate_result is None
+
+
 @pytest.mark.asyncio
 async def test_cancelled_room_member_hook_does_not_suppress_durable_retry(tmp_path: Path) -> None:
     """The room/user de-dup marker must follow completed hook emission."""
@@ -406,9 +430,9 @@ async def test_sync_state_baseline_markers_batch_one_worker_write(
     save_threads: list[int] = []
     original_save = room_member_joins._save_room_member_joins
 
-    def tracked_save(path: Path, seen: dict[str, set[str]]) -> bool:
+    def tracked_save(path: Path, seen: dict[str, set[str]]) -> None:
         save_threads.append(threading.get_ident())
-        return original_save(path, seen)
+        original_save(path, seen)
 
     monkeypatch.setattr(room_member_joins, "_save_room_member_joins", tracked_save)
     events = [
@@ -433,6 +457,71 @@ async def test_sync_state_baseline_markers_batch_one_worker_write(
         room_id=room.room_id,
         user_id="@bob:localhost",
     )
+
+
+@pytest.mark.asyncio
+async def test_sync_state_marker_update_waits_for_live_marker_lock(tmp_path: Path) -> None:
+    """Sync baseline and live completion markers must serialize through one bot lock."""
+    bot = _router_bot(tmp_path)
+    room = _room()
+    bot.client.rooms = {room.room_id: room}
+    await bot._room_member_join_lock.acquire()
+    marker_task = asyncio.create_task(
+        bot._emit_room_member_joined_sync_state_hooks(
+            _sync_response_with_state(
+                room.room_id,
+                [_room_member_event(event_id="$baseline", prev_membership=None)],
+            ),
+            record_only=True,
+        ),
+    )
+    try:
+        await asyncio.sleep(0.05)
+        assert not marker_task.done()
+    finally:
+        bot._room_member_join_lock.release()
+        await marker_task
+
+    assert room_member_joins.room_member_join_is_seen(
+        bot.runtime_paths.storage_root,
+        room_id=room.room_id,
+        user_id="@alice:localhost",
+    )
+
+
+@pytest.mark.asyncio
+async def test_sync_state_lifecycle_dispatch_does_not_hold_marker_lock(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Lifecycle callback owns live de-dup, so sync orchestration cannot lock around dispatch."""
+    bot = _router_bot(tmp_path)
+    room = _room()
+    bot.client.rooms = {room.room_id: room}
+    dispatched: list[str] = []
+
+    @hook(EVENT_ROOM_MEMBER_JOINED)
+    async def joined(_ctx: RoomMemberJoinedContext) -> None:
+        pass
+
+    bot.hook_registry = HookRegistry.from_plugins([_plugin("onboarding", [joined])])
+
+    async def dispatch(
+        _room: nio.MatrixRoom,
+        event: nio.Event,
+        callback_kind: DispatchCallbackKind,
+    ) -> None:
+        assert not bot._room_member_join_lock.locked()
+        assert callback_kind is DispatchCallbackKind.ROOM_LIFECYCLE
+        dispatched.append(event.event_id)
+
+    monkeypatch.setattr(bot._dispatch_obligation_runner, "dispatch", dispatch)
+
+    await bot._emit_room_member_joined_sync_state_hooks(
+        _sync_response_with_state(room.room_id, [_room_member_event(event_id="$dispatch")]),
+    )
+
+    assert dispatched == ["$dispatch"]
 
 
 @pytest.mark.asyncio
@@ -810,10 +899,10 @@ async def test_room_member_joined_deduplicates_concurrent_same_user_marking(
     release_save = threading.Event()
     original_save = room_member_joins._save_room_member_joins
 
-    def delayed_save(path: Path, seen: dict[str, set[str]]) -> bool:
+    def delayed_save(path: Path, seen: dict[str, set[str]]) -> None:
         save_started.set()
         assert release_save.wait(timeout=2.0)
-        return original_save(path, seen)
+        original_save(path, seen)
 
     monkeypatch.setattr(room_member_joins, "_save_room_member_joins", delayed_save)
 
