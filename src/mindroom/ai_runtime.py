@@ -239,13 +239,13 @@ def _append_queued_notice_if_needed(
     notice_text: str,
 ) -> None:
     notice_context = _queued_message_notice_context.get()
+    if any(message.stop_after_tool_call for message in function_call_results):
+        return
     if notice_context is not None:
         _strip_queued_notice_messages(
             messages,
             response_turn_id=notice_context.response_turn_id,
         )
-    if any(message.stop_after_tool_call for message in function_call_results):
-        return
     if notice_context is None or notice_context.state is None or not notice_context.state.has_pending_human_messages():
         return
     messages.append(

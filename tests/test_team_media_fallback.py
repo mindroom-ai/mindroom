@@ -1753,7 +1753,11 @@ async def test_team_response_stream_event_only_stop_after_finalizes_delivered_no
             messages=messages,
             function_call_results=[stop_after_result],
         )
-        assert not _has_live_queued_notice(messages)
+        assert [(message.role, message.content) for message in messages] == [
+            ("tool", "first result"),
+            ("user", notice_text),
+            ("tool", "stop here"),
+        ]
 
         mock_team.db = prepared_scope_context.storage
         _cleanup_and_store(
@@ -1831,6 +1835,11 @@ async def test_team_response_stream_event_only_stop_after_finalizes_delivered_no
             response_turn_id=notice_context.response_turn_id,
             notice_text=notice_text,
         )
+        assert [(message.role, message.content) for message in run.messages or []] == [
+            ("tool", "first result"),
+            ("user", notice_text),
+            ("tool", "stop here"),
+        ]
 
 
 @pytest.mark.asyncio
