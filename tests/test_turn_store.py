@@ -181,12 +181,14 @@ def test_terminal_turn_notifies_only_after_durable_write(tmp_path: Path) -> None
             args=(TurnRecord.create(["$source"], response_event_id="$response"),),
         )
         record_thread.start()
-        assert persist_started.wait(timeout=2)
-        assert not notified.wait(timeout=0.1)
-        record_thread.join(timeout=0.1)
-        assert not record_thread.is_alive()
-        release_persist.set()
-        record_thread.join(timeout=2)
+        try:
+            assert persist_started.wait(timeout=2)
+            assert not notified.wait(timeout=0.1)
+            record_thread.join(timeout=0.1)
+            assert not record_thread.is_alive()
+        finally:
+            release_persist.set()
+            record_thread.join(timeout=2)
 
     assert not record_thread.is_alive()
     assert notified.wait(timeout=2)

@@ -87,7 +87,7 @@ def _load_room_member_joins(path: Path) -> dict[str, set[str]]:
     return seen
 
 
-def _save_room_member_joins(path: Path, seen: dict[str, set[str]]) -> bool:
+def _save_room_member_joins(path: Path, seen: dict[str, set[str]]) -> None:
     """Persist seen room-member joins atomically."""
     temp_path = path.with_name(f"{path.name}.{uuid4().hex}.tmp")
     payload = {room_id: sorted(user_ids) for room_id, user_ids in sorted(seen.items())}
@@ -98,25 +98,23 @@ def _save_room_member_joins(path: Path, seen: dict[str, set[str]]) -> bool:
             encoding="utf-8",
         )
         safe_replace(temp_path, path)
-    except OSError:
+    except OSError as exc:
         logger.exception("failed_to_save_room_member_joins", path=str(path))
         msg = f"Failed to persist completed room-member join tracking at {path}"
-        raise RuntimeError(msg) from None
-    else:
-        return True
+        raise RuntimeError(msg) from exc
     finally:
         temp_path.unlink(missing_ok=True)
 
 
-def _mark_room_member_join_seen(storage_root: Path, *, room_id: str, user_id: str) -> bool:
-    """Record one room/user pair and return whether it was first seen."""
-    return bool(_mark_room_member_joins_seen(storage_root, ((room_id, user_id),)))
+def _mark_room_member_join_seen(storage_root: Path, *, room_id: str, user_id: str) -> None:
+    """Record one room/user pair or raise when its durable write fails."""
+    _mark_room_member_joins_seen(storage_root, ((room_id, user_id),))
 
 
 def _mark_room_member_joins_seen(
     storage_root: Path,
     room_user_ids: Iterable[tuple[str, str]],
-) -> int:
+) -> None:
     """Record room/user pairs with one locked read and at most one durable write."""
     path = _room_member_join_tracking_path(storage_root)
     with _lock_for_room_member_join_path(path):
@@ -130,7 +128,6 @@ def _mark_room_member_joins_seen(
             added += 1
         if added:
             _save_room_member_joins(path, seen)
-        return added
 
 
 def _human_join_user_id(
@@ -159,14 +156,14 @@ def record_room_member_joins_seen_from_events(
     config: Config,
     runtime_paths: RuntimePaths,
     storage_root: Path,
-) -> int:
+) -> None:
     """Record human room-member events with one durable batch update."""
     room_user_ids: list[tuple[str, str]] = []
     for room, event in events:
         user_id = _human_join_user_id(event, config=config, runtime_paths=runtime_paths)
         if user_id is not None:
             room_user_ids.append((room.room_id, user_id))
-    return _mark_room_member_joins_seen(storage_root, room_user_ids)
+    _mark_room_member_joins_seen(storage_root, room_user_ids)
 
 
 def room_member_join_from_event(
@@ -214,9 +211,9 @@ def room_member_join_is_seen(
 def record_room_member_join_seen(
     storage_root: Path,
     join: RoomMemberJoin,
-) -> bool:
+) -> None:
     """Record one room/user join after its hook emission completes."""
-    return _mark_room_member_join_seen(
+    _mark_room_member_join_seen(
         storage_root,
         room_id=join.room_id,
         user_id=join.user_id,

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import sqlite3
+import threading
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import MagicMock
@@ -42,13 +43,11 @@ def _store(
     *,
     principal_id: str = _PRINCIPAL_ID,
     entity_name: str = _ENTITY_NAME,
-    terminal_limit: int = 10_000,
 ) -> DispatchObligationStore:
     return DispatchObligationStore(
         tracking_path=tmp_path / "tracking",
         principal_id=principal_id,
         entity_name=entity_name,
-        terminal_limit=terminal_limit,
     )
 
 
@@ -180,6 +179,63 @@ def test_terminal_settlement_survives_restart_and_blocks_recreation(
     assert restarted.create_pending(obligation) is _DispatchCreateResult.ALREADY_TERMINAL
 
 
+def test_terminal_settlement_compacts_payload_before_invalid_replay_check(tmp_path: Path) -> None:
+    """Terminal exact keys need no replay payload and must bypass later payload validation."""
+    store = _store(tmp_path)
+    obligation = _message_obligation("$compact")
+    store.create_pending(obligation)
+
+    store.settle(obligation.key, _DispatchTerminalOutcome.SUCCEEDED)
+
+    database_path = tmp_path / "tracking" / "dispatch_obligations.sqlite3"
+    with sqlite3.connect(database_path) as connection:
+        row = connection.execute(
+            "SELECT room_id, event_source_json FROM dispatch_obligations WHERE source_event_id = ?",
+            (obligation.source_event_id,),
+        ).fetchone()
+        schema_version = connection.execute("PRAGMA user_version").fetchone()[0]
+    assert row == ("", "")
+    assert schema_version == 2
+    invalid_replay = replace(
+        obligation,
+        room_id="!different:example.org",
+        event_source={"event_id": obligation.source_event_id, "not_json_safe": object()},
+    )
+    assert store.create_pending(invalid_replay) is _DispatchCreateResult.ALREADY_TERMINAL
+
+
+def test_store_initialization_compacts_legacy_terminal_payloads(tmp_path: Path) -> None:
+    """Opening an existing store must scrub payload retained by older terminal rows."""
+    store = _store(tmp_path)
+    obligation = _message_obligation("$legacy-terminal")
+    store.create_pending(obligation)
+    store.settle(obligation.key, _DispatchTerminalOutcome.SUCCEEDED)
+    database_path = tmp_path / "tracking" / "dispatch_obligations.sqlite3"
+    with sqlite3.connect(database_path) as connection:
+        connection.execute(
+            """
+            UPDATE dispatch_obligations
+            SET room_id = ?, event_source_json = ?
+            WHERE source_event_id = ?
+            """,
+            (
+                obligation.room_id,
+                '{"event_id":"$legacy-terminal","content":{"body":"legacy"}}',
+                obligation.source_event_id,
+            ),
+        )
+        connection.execute("PRAGMA user_version = 1")
+
+    _store(tmp_path)
+
+    with sqlite3.connect(database_path) as connection:
+        row = connection.execute(
+            "SELECT room_id, event_source_json FROM dispatch_obligations WHERE source_event_id = ?",
+            (obligation.source_event_id,),
+        ).fetchone()
+    assert row == ("", "")
+
+
 def test_existing_pending_payload_keeps_first_accepted_source(tmp_path: Path) -> None:
     """Transport-variant replays must keep the first durable source without failing."""
     store = _store(tmp_path)
@@ -208,8 +264,8 @@ def test_principal_and_entity_are_part_of_the_exact_identity(tmp_path: Path) -> 
     assert not other_entity.has_pending("$isolated", DispatchCallbackKind.MESSAGE)
 
 
-def test_turn_store_terminal_truth_removes_only_message_and_media_rows(tmp_path: Path) -> None:
-    """Turn truth may replace message/media obligations, never unrelated callback kinds."""
+def test_turn_store_terminal_truth_tombstones_only_message_and_media_rows(tmp_path: Path) -> None:
+    """Turn truth must block message/media replay without settling unrelated callbacks."""
     store = _store(tmp_path)
     message = _message_obligation("$turn")
     media = replace(message, callback_kind=DispatchCallbackKind.MEDIA)
@@ -223,25 +279,71 @@ def test_turn_store_terminal_truth_removes_only_message_and_media_rows(tmp_path:
     assert not store.has_pending("$turn", DispatchCallbackKind.MESSAGE)
     assert not store.has_pending("$turn", DispatchCallbackKind.MEDIA)
     assert store.has_pending("$turn", DispatchCallbackKind.REACTION)
+    assert store.create_pending(message) is _DispatchCreateResult.ALREADY_TERMINAL
+    assert store.create_pending(media) is _DispatchCreateResult.ALREADY_TERMINAL
+    assert store.create_pending(reaction) is _DispatchCreateResult.ALREADY_PENDING
     with pytest.raises(ValueError, match="message or media"):
         store.settle_from_turn_store("$turn", DispatchCallbackKind.REACTION)
 
 
-def test_terminal_pruning_never_removes_pending_work(tmp_path: Path) -> None:
-    """Bounding dedupe history must not bound still-owed callback work."""
-    store = _store(tmp_path, terminal_limit=2)
-    pending = _message_obligation("$pending")
-    store.create_pending(pending)
-    for index in range(4):
-        obligation = _message_obligation(f"$terminal-{index}")
-        store.create_pending(obligation)
-        store.settle(obligation.key, _DispatchTerminalOutcome.SUCCEEDED)
+def test_turn_store_terminal_truth_creates_missing_compact_tombstone(tmp_path: Path) -> None:
+    """TurnStore truth must permanently block exact replay even without a transient row."""
+    store = _store(tmp_path)
 
-    restarted = _store(tmp_path, terminal_limit=2)
+    store.settle_from_turn_store("$turn-only", DispatchCallbackKind.MESSAGE)
 
-    assert restarted.pending() == (pending,)
-    assert restarted.create_pending(_message_obligation("$terminal-3")) is _DispatchCreateResult.ALREADY_TERMINAL
-    assert restarted.create_pending(_message_obligation("$terminal-0")) is _DispatchCreateResult.CREATED
+    invalid_replay = replace(
+        _message_obligation("$turn-only"),
+        event_source={"event_id": "$turn-only", "not_json_safe": object()},
+    )
+    assert store.create_pending(invalid_replay) is _DispatchCreateResult.ALREADY_TERMINAL
+    database_path = tmp_path / "tracking" / "dispatch_obligations.sqlite3"
+    with sqlite3.connect(database_path) as connection:
+        row = connection.execute(
+            "SELECT room_id, event_source_json, state FROM dispatch_obligations WHERE source_event_id = ?",
+            ("$turn-only",),
+        ).fetchone()
+    assert row == ("", "", _DispatchTerminalOutcome.SUCCEEDED.value)
+
+
+def test_terminal_tombstones_are_not_globally_pruned(tmp_path: Path) -> None:
+    """Settling new work must never evict an older exact terminal identity."""
+    store = _store(tmp_path)
+    trigger = _message_obligation("$trigger")
+    store.create_pending(trigger)
+    database_path = tmp_path / "tracking" / "dispatch_obligations.sqlite3"
+    with sqlite3.connect(database_path) as connection:
+        connection.executemany(
+            """
+            INSERT INTO dispatch_obligations (
+                principal_id,
+                entity_name,
+                source_event_id,
+                callback_kind,
+                room_id,
+                event_source_json,
+                state,
+                created_at_ns,
+                settled_at_ns
+            ) VALUES (?, ?, ?, ?, '', '', ?, ?, ?)
+            """,
+            (
+                (
+                    _PRINCIPAL_ID,
+                    _ENTITY_NAME,
+                    f"$terminal-{index}",
+                    DispatchCallbackKind.MESSAGE.value,
+                    _DispatchTerminalOutcome.SUCCEEDED.value,
+                    index,
+                    index,
+                )
+                for index in range(10_001)
+            ),
+        )
+
+    store.settle(trigger.key, _DispatchTerminalOutcome.SUCCEEDED)
+
+    assert store.create_pending(_message_obligation("$terminal-0")) is _DispatchCreateResult.ALREADY_TERMINAL
 
 
 def test_malformed_persisted_source_is_not_invented_into_recovery(tmp_path: Path) -> None:
@@ -288,6 +390,109 @@ async def test_cancellation_leaves_callback_obligation_pending(tmp_path: Path) -
         await task
 
     assert _store(tmp_path).has_pending("$cancelled", DispatchCallbackKind.MESSAGE)
+
+
+@pytest.mark.asyncio
+async def test_callback_settlement_drains_repeated_cancellation_before_releasing_claim(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A duplicate cannot reclaim one exact key while its cancelled settlement still writes."""
+    attempts = 0
+
+    async def callback(_room: nio.MatrixRoom, _event: nio.Event) -> DispatchCallbackResult:
+        nonlocal attempts
+        attempts += 1
+        return DispatchCallbackResult.SUCCEEDED
+
+    store = _store(tmp_path)
+    runner = _runner(store, callback)
+    original_settle = store.settle
+    settle_started = threading.Event()
+    release_settle = threading.Event()
+    settle_calls = 0
+
+    def blocking_first_settle(
+        key: object,
+        outcome: _DispatchTerminalOutcome,
+    ) -> None:
+        nonlocal settle_calls
+        settle_calls += 1
+        if settle_calls == 1:
+            settle_started.set()
+            assert release_settle.wait(timeout=2)
+        original_settle(cast("Any", key), outcome)
+
+    monkeypatch.setattr(store, "settle", blocking_first_settle)
+    room = nio.MatrixRoom(_ROOM_ID, _PRINCIPAL_ID)
+    event = _message_event("$cancelled-settlement")
+    task = asyncio.create_task(runner.dispatch(room, event, DispatchCallbackKind.MESSAGE))
+    duplicate: asyncio.Task[None] | None = None
+    try:
+        assert await asyncio.to_thread(settle_started.wait, 2)
+        task.cancel()
+        await asyncio.sleep(0)
+        task.cancel()
+        duplicate = asyncio.create_task(runner.dispatch(room, event, DispatchCallbackKind.MESSAGE))
+        await asyncio.wait_for(duplicate, timeout=1)
+
+        assert attempts == 1
+        assert not task.done()
+    finally:
+        release_settle.set()
+        if duplicate is not None:
+            await asyncio.gather(duplicate, return_exceptions=True)
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert store.create_pending(_message_obligation(event.event_id)) is _DispatchCreateResult.ALREADY_TERMINAL
+
+
+@pytest.mark.asyncio
+async def test_turn_store_settlement_drains_repeated_cancellation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cancellation cannot outrun a TurnStore-owned permanent tombstone write."""
+
+    async def callback(_room: nio.MatrixRoom, _event: nio.Event) -> DispatchCallbackResult:
+        pytest.fail("terminal TurnStore truth must bypass callback execution")
+
+    store = _store(tmp_path)
+    runner = _runner(store, callback, turn_is_terminal=lambda _event_id: True)
+    original_settle = store.settle_from_turn_store
+    settle_started = threading.Event()
+    release_settle = threading.Event()
+    settle_finished = threading.Event()
+
+    def blocking_settle(source_event_id: str, callback_kind: DispatchCallbackKind) -> None:
+        settle_started.set()
+        assert release_settle.wait(timeout=2)
+        original_settle(source_event_id, callback_kind)
+        settle_finished.set()
+
+    monkeypatch.setattr(store, "settle_from_turn_store", blocking_settle)
+    task = asyncio.create_task(
+        runner.persist(
+            nio.MatrixRoom(_ROOM_ID, _PRINCIPAL_ID),
+            _message_event("$turn-store-cancelled"),
+            DispatchCallbackKind.MESSAGE,
+        ),
+    )
+    try:
+        assert await asyncio.to_thread(settle_started.wait, 2)
+        task.cancel()
+        await asyncio.sleep(0)
+        task.cancel()
+
+        assert not task.done()
+    finally:
+        release_settle.set()
+        assert await asyncio.to_thread(settle_finished.wait, 2)
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert store.create_pending(_message_obligation("$turn-store-cancelled")) is _DispatchCreateResult.ALREADY_TERMINAL
 
 
 @pytest.mark.asyncio

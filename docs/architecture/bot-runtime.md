@@ -60,7 +60,8 @@ Matrix callback
 ## Durable Dispatch Boundary
 
 `DispatchObligationStore` durably accepts each correctness-critical Matrix callback before background execution can fail or be cancelled.
-Its exact key combines the Matrix principal, entity, source event, and callback kind, while its replay payload retains the original room and event source.
+Its exact key combines the Matrix principal, entity, source event, and callback kind, while pending rows retain the original room and event source for replay.
+Settled rows become permanent exact-key tombstones and atomically scrub that replay payload, keeping terminal truth compact without allowing an old callback to reappear.
 Successful and intentionally ignored callbacks settle explicitly, while failures and cancellations remain pending for direct startup recovery.
 Recovery parses and invokes pending work without depending on a later Classic Sync token or Sliding Sync position.
 Message and media obligations remain pending when coalescing or a pending `TurnStore` record defers them, then yield only to durably persisted terminal turn truth.

@@ -11,9 +11,9 @@ from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
-from typing import TypeIs
 
 import nio
+from typing_extensions import TypeIs
 
 from mindroom.background_tasks import create_background_task
 from mindroom.logging_config import get_logger
@@ -22,7 +22,7 @@ from mindroom.matrix.media import MATRIX_MEDIA_EVENT_TYPES, MatrixMediaEvent, pa
 logger = get_logger(__name__)
 
 _DATABASE_NAME = "dispatch_obligations.sqlite3"
-_SCHEMA_VERSION = 1
+_SCHEMA_VERSION = 2
 _PENDING_STATE = "pending"
 _TOOL_APPROVAL_RESPONSE_EVENT_TYPE = "io.mindroom.tool_approval_response"
 
@@ -112,15 +112,11 @@ class DispatchObligationStore:
     tracking_path: Path
     principal_id: str
     entity_name: str
-    terminal_limit: int = 10_000
 
     def __post_init__(self) -> None:
         """Validate the bound identity and initialize the leaf database."""
         if not self.principal_id or not self.entity_name:
             msg = "Dispatch obligation store requires an exact principal and entity"
-            raise ValueError(msg)
-        if self.terminal_limit < 0:
-            msg = "Dispatch obligation terminal limit cannot be negative"
             raise ValueError(msg)
         self.tracking_path = Path(self.tracking_path)
         self._database_path = self.tracking_path / _DATABASE_NAME
@@ -137,7 +133,7 @@ class DispatchObligationStore:
     @staticmethod
     def _initialize_schema(connection: sqlite3.Connection) -> None:
         current_version = connection.execute("PRAGMA user_version").fetchone()[0]
-        if current_version not in {0, _SCHEMA_VERSION}:
+        if current_version not in {0, 1, _SCHEMA_VERSION}:
             msg = f"Unsupported dispatch obligation schema version {current_version}"
             raise RuntimeError(msg)
         connection.execute(
@@ -163,7 +159,16 @@ class DispatchObligationStore:
             )
             """,
         )
-        if current_version == 0:
+        if current_version == 1:
+            connection.execute(
+                """
+                UPDATE dispatch_obligations
+                SET room_id = '', event_source_json = ''
+                WHERE state != ?
+                """,
+                (_PENDING_STATE,),
+            )
+        if current_version < _SCHEMA_VERSION:
             connection.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
 
     @staticmethod
@@ -200,10 +205,9 @@ class DispatchObligationStore:
     def create_pending(self, obligation: _DispatchObligation) -> _DispatchCreateResult:
         """Durably create pending work before its callback can run."""
         self._validate_bound_key(obligation.key)
-        if not obligation.room_id or not obligation.source_event_id:
-            msg = "Dispatch obligation requires a room and source event"
+        if not obligation.source_event_id:
+            msg = "Dispatch obligation requires a source event"
             raise ValueError(msg)
-        event_source_json = self._event_source_json(obligation)
         key = obligation.key
         with self._lock, self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
@@ -225,6 +229,12 @@ class DispatchObligationStore:
                     ),
                 ).fetchone(),
             )
+            if existing is not None and existing.state != _PENDING_STATE:
+                return _DispatchCreateResult.ALREADY_TERMINAL
+            if not obligation.room_id:
+                msg = "Dispatch obligation requires a room"
+                raise ValueError(msg)
+            event_source_json = self._event_source_json(obligation)
             if existing is not None:
                 if existing.room_id != obligation.room_id or existing.event_source_json != event_source_json:
                     logger.warning(
@@ -232,11 +242,7 @@ class DispatchObligationStore:
                         source_event_id=key.source_event_id,
                         callback_kind=key.callback_kind.value,
                     )
-                return (
-                    _DispatchCreateResult.ALREADY_PENDING
-                    if existing.state == _PENDING_STATE
-                    else _DispatchCreateResult.ALREADY_TERMINAL
-                )
+                return _DispatchCreateResult.ALREADY_PENDING
             connection.execute(
                 """
                 INSERT INTO dispatch_obligations (
@@ -275,7 +281,10 @@ class DispatchObligationStore:
             cursor = connection.execute(
                 """
                 UPDATE dispatch_obligations
-                SET state = ?, settled_at_ns = ?
+                SET room_id = '',
+                    event_source_json = '',
+                    state = ?,
+                    settled_at_ns = ?
                 WHERE principal_id = ?
                   AND entity_name = ?
                   AND source_event_id = ?
@@ -312,59 +321,92 @@ class DispatchObligationStore:
                 if existing is None:
                     msg = f"Unknown dispatch obligation {key.source_event_id!r}"
                     raise KeyError(msg)
-            self._prune_terminal_locked(connection)
-
-    def _prune_terminal_locked(self, connection: sqlite3.Connection) -> None:
-        connection.execute(
-            """
-            DELETE FROM dispatch_obligations
-            WHERE principal_id = ?
-              AND entity_name = ?
-              AND state != ?
-              AND rowid NOT IN (
-                  SELECT rowid
-                  FROM dispatch_obligations
-                  WHERE principal_id = ?
-                    AND entity_name = ?
-                    AND state != ?
-                  ORDER BY settled_at_ns DESC, rowid DESC
-                  LIMIT ?
-              )
-            """,
-            (
-                self.principal_id,
-                self.entity_name,
-                _PENDING_STATE,
-                self.principal_id,
-                self.entity_name,
-                _PENDING_STATE,
-                self.terminal_limit,
-            ),
-        )
 
     def settle_from_turn_store(
         self,
         source_event_id: str,
         callback_kind: DispatchCallbackKind,
     ) -> None:
-        """Replace a message/media obligation with exact terminal turn truth."""
+        """Create a compact permanent tombstone from exact TurnStore truth."""
         if callback_kind not in {DispatchCallbackKind.MESSAGE, DispatchCallbackKind.MEDIA}:
             msg = "TurnStore can settle only a message or media dispatch obligation"
             raise ValueError(msg)
+        if not source_event_id:
+            msg = "TurnStore dispatch settlement requires a source event"
+            raise ValueError(msg)
+        settled_at_ns = time.time_ns()
         with self._lock, self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
             connection.execute(
                 """
-                DELETE FROM dispatch_obligations
-                WHERE principal_id = ?
-                  AND entity_name = ?
-                  AND source_event_id = ?
-                  AND callback_kind = ?
+                INSERT INTO dispatch_obligations (
+                    principal_id,
+                    entity_name,
+                    source_event_id,
+                    callback_kind,
+                    room_id,
+                    event_source_json,
+                    state,
+                    created_at_ns,
+                    settled_at_ns
+                ) VALUES (?, ?, ?, ?, '', '', ?, ?, ?)
+                ON CONFLICT (
+                    principal_id,
+                    entity_name,
+                    source_event_id,
+                    callback_kind
+                ) DO UPDATE SET
+                    room_id = '',
+                    event_source_json = '',
+                    state = excluded.state,
+                    settled_at_ns = excluded.settled_at_ns
                 """,
                 (
                     self.principal_id,
                     self.entity_name,
                     source_event_id,
                     callback_kind.value,
+                    _DispatchTerminalOutcome.SUCCEEDED.value,
+                    settled_at_ns,
+                    settled_at_ns,
+                ),
+            )
+
+    def settle_pending_from_turn_store(self, source_event_ids: tuple[str, ...]) -> None:
+        """Compact only transient turn-backed rows after TurnStore becomes durable."""
+        if not source_event_ids:
+            return
+        if any(not source_event_id for source_event_id in source_event_ids):
+            msg = "TurnStore dispatch settlement requires source events"
+            raise ValueError(msg)
+        settled_at_ns = time.time_ns()
+        with self._lock, self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            connection.executemany(
+                """
+                UPDATE dispatch_obligations
+                SET room_id = '',
+                    event_source_json = '',
+                    state = ?,
+                    settled_at_ns = ?
+                WHERE principal_id = ?
+                  AND entity_name = ?
+                  AND source_event_id = ?
+                  AND callback_kind IN (?, ?)
+                  AND state = ?
+                """,
+                (
+                    (
+                        _DispatchTerminalOutcome.SUCCEEDED.value,
+                        settled_at_ns,
+                        self.principal_id,
+                        self.entity_name,
+                        source_event_id,
+                        DispatchCallbackKind.MESSAGE.value,
+                        DispatchCallbackKind.MEDIA.value,
+                        _PENDING_STATE,
+                    )
+                    for source_event_id in source_event_ids
                 ),
             )
 
@@ -452,6 +494,24 @@ async def _admit_all_sources(
     _callback_kind: DispatchCallbackKind,
 ) -> bool:
     return True
+
+
+async def _run_store_settlement(
+    operation: Callable[..., None],
+    *args: object,
+) -> None:
+    """Finish one owned store settlement before propagating cancellation."""
+    worker_task = asyncio.create_task(asyncio.to_thread(operation, *args))
+    try:
+        await asyncio.shield(worker_task)
+    except asyncio.CancelledError:
+        while not worker_task.done():
+            try:
+                await asyncio.shield(worker_task)
+            except asyncio.CancelledError:
+                continue
+        worker_task.result()
+        raise
 
 
 def _parse_recovery_event(obligation: _DispatchObligation) -> nio.Event:
@@ -744,7 +804,7 @@ class DispatchObligationRunner:
             return False
         if not await asyncio.to_thread(self.turn_is_terminal, obligation.source_event_id):
             return False
-        await asyncio.to_thread(
+        await _run_store_settlement(
             self.store.settle_from_turn_store,
             obligation.source_event_id,
             obligation.callback_kind,
@@ -768,7 +828,7 @@ class DispatchObligationRunner:
             if result is _DispatchCallbackResult.SUCCEEDED
             else _DispatchTerminalOutcome.INTENTIONALLY_IGNORED
         )
-        await asyncio.to_thread(self.store.settle, obligation.key, outcome)
+        await _run_store_settlement(self.store.settle, obligation.key, outcome)
 
     async def _claim(self, key: _DispatchObligationKey) -> bool:
         async with self._active_lock:

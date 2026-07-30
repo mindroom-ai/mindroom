@@ -1152,10 +1152,11 @@ class AgentBot:
         decision: SyncCertificationDecision,
         *,
         cache_result: SyncCacheWriteResult,
-    ) -> None:
+    ) -> SyncCertificationDecision:
         """Advance sync continuity after prerequisite durable work completes."""
-        self._sync_cache_trust.apply_response(decision, cache_result=cache_result)
-        self._apply_cold_history_continuity_decision(decision)
+        applied = self._sync_cache_trust.apply_response(decision, cache_result=cache_result)
+        self._apply_cold_history_continuity_decision(applied)
+        return applied
 
     def _apply_cold_history_continuity_decision(
         self,
@@ -1316,8 +1317,10 @@ class AgentBot:
                     _response,
                     room_member_join_hook_plan=room_member_join_hook_plan,
                 )
-                self._apply_sync_response_decision(decision, cache_result=cache_result)
-                if not decision.reset_client_token:
+                decision = self._apply_sync_response_decision(decision, cache_result=cache_result)
+                if decision.reset_client_token:
+                    room_member_join_hook_plan = _RoomMemberJoinSyncHookPlan(arm_after_response=False)
+                else:
                     self._cold_history_fence.observe_continuation(_response.next_batch)
             self._mark_sync_progress()
         elif isinstance(_response, nio.SlidingSyncResponse):
@@ -1827,11 +1830,9 @@ class AgentBot:
         await self._room_lifecycle.on_invite(room, event)
 
     def _settle_turn_dispatch_obligations(self, event_ids: tuple[str, ...]) -> None:
-        """Replace transient message/media obligations with durable TurnStore truth."""
+        """Replace pending turn-backed obligations with durable TurnStore truth."""
         try:
-            for event_id in event_ids:
-                for callback_kind in (DispatchCallbackKind.MESSAGE, DispatchCallbackKind.MEDIA):
-                    self._dispatch_obligation_store.settle_from_turn_store(event_id, callback_kind)
+            self._dispatch_obligation_store.settle_pending_from_turn_store(event_ids)
         except Exception:
             self.logger.exception(
                 "turn_dispatch_obligation_settlement_failed",
@@ -1955,13 +1956,11 @@ class AgentBot:
                 return
 
             await self._emit_room_member_joined_hooks(join)
-            if not await asyncio.to_thread(
+            await asyncio.to_thread(
                 record_room_member_join_seen,
                 self.runtime_paths.storage_root,
                 join,
-            ):
-                msg = f"Failed to persist completed room-member join {join.event_id!r}"
-                raise RuntimeError(msg)
+            )
 
     async def _emit_room_member_joined_sync_state_hooks(
         self,
@@ -2002,13 +2001,14 @@ class AgentBot:
                 DispatchCallbackKind.ROOM_LIFECYCLE,
             )
         if events_to_record:
-            await asyncio.to_thread(
-                record_room_member_joins_seen_from_events,
-                tuple(events_to_record),
-                config=self.config,
-                runtime_paths=self.runtime_paths,
-                storage_root=self.runtime_paths.storage_root,
-            )
+            async with self._room_member_join_lock:
+                await asyncio.to_thread(
+                    record_room_member_joins_seen_from_events,
+                    tuple(events_to_record),
+                    config=self.config,
+                    runtime_paths=self.runtime_paths,
+                    storage_root=self.runtime_paths.storage_root,
+                )
 
     async def _emit_room_member_joined_sync_timeline_hooks(self, response: nio.SyncResponse) -> None:
         """Expose human joins from a restored-token catch-up sync timeline."""
