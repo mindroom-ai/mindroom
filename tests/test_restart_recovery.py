@@ -19,9 +19,7 @@ from mindroom.matrix.invited_rooms_store import invited_rooms_path, save_invited
 from mindroom.matrix.stale_stream_cleanup import InterruptedThread
 from mindroom.orchestrator import _MultiAgentOrchestrator
 from mindroom.restart_recovery import (
-    RecoveryOwner,
     RestartRecoveryCoordinator,
-    build_matrix_restart_recovery_operations,
 )
 from mindroom.restart_recovery import (
     _restart_recovery_retry_delay as restart_recovery_retry_delay,
@@ -30,9 +28,11 @@ from mindroom.restart_recovery import (
     _TargetSettlement as TargetSettlement,
 )
 from mindroom.restart_recovery_operations import (
+    RecoveryOwner,
     RestartRecoveryOperations,
     RestartTargetFreshness,
     RoomRecoveryRequest,
+    build_matrix_restart_recovery_operations,
 )
 from mindroom.restart_recovery_operations import (
     _RoomRecoveryResult as RoomRecoveryResult,
@@ -120,6 +120,9 @@ def _operations(
     freshness: _TargetFreshness | None = None,
     deliver: _DeliverTarget | None = None,
 ) -> RestartRecoveryOperations:
+    async def close() -> None:
+        return None
+
     async def current(
         _owner: RecoveryOwner,
         _target: InterruptedThread,
@@ -140,6 +143,7 @@ def _operations(
         target_freshness=freshness or current,
         deliver_target=deliver or delivered,
         discard_owner=lambda _owner_user_id: None,
+        close=close,
     )
 
 
@@ -266,7 +270,7 @@ async def test_matrix_room_recovery_propagates_cleanup_retry_requirement(
         )
 
     assert result == RoomRecoveryResult(
-        interrupted_threads=(interrupted,),
+        interrupted_threads=(),
         retry=True,
     )
 
@@ -303,6 +307,35 @@ async def test_matrix_target_delivery_uses_router_and_mentions_exact_owner(tmp_p
         "$resume",
         content,
     )
+
+
+@pytest.mark.asyncio
+async def test_matrix_target_delivery_propagates_cache_notification_failure(
+    tmp_path: Path,
+) -> None:
+    """A local cache bug after an idempotent send must remain visible."""
+    owner = _owner()
+    router = _owner(
+        entity_name=ROUTER_AGENT_NAME,
+        user_id="@router:example.org",
+        rooms=frozenset(),
+    )
+    router.conversation_cache.notify_outbound_message.side_effect = RuntimeError("cache bug")
+    operations = build_matrix_restart_recovery_operations(test_runtime_paths(tmp_path))
+
+    with (
+        patch(
+            "mindroom.restart_recovery_operations.send_message_result",
+            new=AsyncMock(side_effect=delivered_matrix_side_effect("$resume")),
+        ),
+        pytest.raises(RuntimeError, match="cache bug"),
+    ):
+        await operations.deliver_target(
+            router,
+            owner,
+            _target("$target", timestamp_ms=10),
+            _config(tmp_path),
+        )
 
 
 @pytest.mark.asyncio
@@ -532,6 +565,62 @@ async def test_discard_owner_releases_membership_snapshot_generation(tmp_path: P
 
 
 @pytest.mark.asyncio
+async def test_stop_drains_historical_membership_snapshots(tmp_path: Path) -> None:
+    """Stop must cancel and release snapshots absent from current owners."""
+
+    class Generation:
+        pass
+
+    generation = Generation()
+    generation_ref = weakref.ref(generation)
+    owner = _owner(generation=generation)
+    operations = build_matrix_restart_recovery_operations(test_runtime_paths(tmp_path))
+    coordinator = RestartRecoveryCoordinator(
+        current_config=lambda: _config(tmp_path),
+        current_owners=dict,
+        operations=operations,
+    )
+    lookup_started = asyncio.Event()
+
+    async def joined_rooms(_client: nio.AsyncClient) -> list[str]:
+        lookup_started.set()
+        await asyncio.Event().wait()
+        return []
+
+    with patch(
+        "mindroom.restart_recovery_operations.get_joined_rooms",
+        new=joined_rooms,
+    ):
+        recovery_task = asyncio.create_task(
+            operations.recover_room(
+                owner,
+                RoomRecoveryRequest(
+                    room_id="!code:example.org",
+                    startup_cutoff_ms=123,
+                    terminal_interrupted_only=False,
+                ),
+                frozenset({owner.user_id}),
+                _config(tmp_path),
+            ),
+        )
+        await asyncio.wait_for(lookup_started.wait(), timeout=1.0)
+        try:
+            await coordinator.stop()
+            await asyncio.sleep(0)
+            assert recovery_task.cancelled()
+        finally:
+            recovery_task.cancel()
+            await asyncio.gather(recovery_task, return_exceptions=True)
+
+    del recovery_task
+    del owner
+    del generation
+    gc.collect()
+
+    assert generation_ref() is None
+
+
+@pytest.mark.asyncio
 async def test_stalled_room_does_not_block_other_rooms_and_concurrency_is_bounded(
     tmp_path: Path,
 ) -> None:
@@ -583,6 +672,51 @@ async def test_stalled_room_does_not_block_other_rooms_and_concurrency_is_bounde
 
     assert finished_rooms == healthy_rooms
     assert 1 <= max_active <= 2
+
+
+@pytest.mark.asyncio
+async def test_shared_owner_wait_does_not_fill_both_slots_ahead_of_another_owner(
+    tmp_path: Path,
+) -> None:
+    """One owner's blocked room work must leave a slot for another owner."""
+    blocked_owner = _owner(
+        user_id="@blocked:example.org",
+        rooms=frozenset({"!blocked-a:example.org", "!blocked-b:example.org"}),
+    )
+    healthy_owner = _owner(
+        user_id="@healthy:example.org",
+        rooms=frozenset({"!healthy:example.org"}),
+    )
+    owners = {
+        blocked_owner.user_id: blocked_owner,
+        healthy_owner.user_id: healthy_owner,
+    }
+    release_blocked = asyncio.Event()
+    healthy_finished = asyncio.Event()
+
+    async def recover_room(
+        owner: RecoveryOwner,
+        _request: RoomRecoveryRequest,
+        _owner_user_ids: frozenset[str],
+        _config: Config,
+    ) -> RoomRecoveryResult:
+        if owner.user_id == blocked_owner.user_id:
+            await release_blocked.wait()
+        else:
+            healthy_finished.set()
+        return RoomRecoveryResult()
+
+    coordinator = RestartRecoveryCoordinator(
+        current_config=lambda: _config(tmp_path),
+        current_owners=lambda: owners,
+        operations=_operations(recover_room=recover_room),
+    )
+    coordinator.start(startup_cutoff_ms=123)
+    try:
+        await asyncio.wait_for(healthy_finished.wait(), timeout=0.2)
+    finally:
+        release_blocked.set()
+        await coordinator.stop()
 
 
 @pytest.mark.asyncio
@@ -1300,6 +1434,74 @@ async def test_generation_change_discards_stale_room_result(tmp_path: Path) -> N
 
 
 @pytest.mark.asyncio
+async def test_generation_change_allows_new_interruption_in_same_thread(
+    tmp_path: Path,
+) -> None:
+    """A closed target watermark must not cross an owner-generation boundary."""
+    old_generation = object()
+    new_generation = object()
+    room_id = "!code:example.org"
+    old_owner = _owner(generation=old_generation, rooms=frozenset({room_id}))
+    new_owner = _owner(generation=new_generation, rooms=frozenset({room_id}))
+    router = _owner(
+        entity_name=ROUTER_AGENT_NAME,
+        user_id="@router:example.org",
+        rooms=frozenset(),
+    )
+    owners = {old_owner.user_id: old_owner, router.user_id: router}
+    delivered_targets: list[str] = []
+    old_delivered = asyncio.Event()
+    new_delivered = asyncio.Event()
+
+    async def recover_room(
+        owner: RecoveryOwner,
+        _request: RoomRecoveryRequest,
+        _owner_user_ids: frozenset[str],
+        _config: Config,
+    ) -> RoomRecoveryResult:
+        target = (
+            _target("$old-generation", timestamp_ms=10)
+            if owner.generation is old_generation
+            else _target("$new-generation", timestamp_ms=20)
+        )
+        return RoomRecoveryResult(interrupted_threads=(target,))
+
+    async def deliver(
+        _router: RecoveryOwner,
+        _owner: RecoveryOwner,
+        target: InterruptedThread,
+        _config: Config,
+    ) -> bool:
+        delivered_targets.append(target.target_event_id)
+        if target.target_event_id == "$old-generation":
+            old_delivered.set()
+        else:
+            new_delivered.set()
+        return True
+
+    coordinator = RestartRecoveryCoordinator(
+        current_config=lambda: _config(tmp_path),
+        current_owners=lambda: owners,
+        operations=_operations(recover_room=recover_room, deliver=deliver),
+    )
+    coordinator.start(startup_cutoff_ms=123)
+    await asyncio.wait_for(old_delivered.wait(), timeout=1.0)
+    active_attempts = tuple(coordinator._active_attempts)
+    if active_attempts:
+        await asyncio.gather(*active_attempts)
+    coordinator._settle_finished_attempts()
+
+    owners[old_owner.user_id] = new_owner
+    coordinator.owner_ready(new_owner.user_id)
+    try:
+        await asyncio.wait_for(new_delivered.wait(), timeout=0.2)
+    finally:
+        await coordinator.stop()
+
+    assert delivered_targets == ["$old-generation", "$new-generation"]
+
+
+@pytest.mark.asyncio
 async def test_target_watermark_prevents_older_resurrection(tmp_path: Path) -> None:
     """Rescanning an older target after the newest succeeds must not resume it."""
     owner = _owner()
@@ -1447,7 +1649,7 @@ async def test_discard_owner_clears_target_watermarks(tmp_path: Path) -> None:
 
     key = (owner.user_id, target.room_id, target.thread_id)
     coordinator._advance_watermark(
-        owner.user_id,
+        owner,
         TargetSettlement(target=target, closed=False),
     )
     coordinator.discard_owner(owner.user_id)

@@ -16,6 +16,7 @@ from mindroom.config.main import Config
 from mindroom.constants import ROUTER_AGENT_NAME, resolve_runtime_paths
 from mindroom.matrix.client import PermanentMatrixStartupError
 from mindroom.matrix.identity import MatrixID
+from mindroom.matrix.users import AgentMatrixUser
 from mindroom.orchestrator import _MultiAgentOrchestrator
 from mindroom.scheduling import CronSchedule, ScheduledWorkflow, _parse_workflow_schedule
 from tests.conftest import make_event_cache_mock, make_event_cache_write_coordinator_mock, orchestrator_runtime_paths
@@ -28,6 +29,12 @@ if TYPE_CHECKING:
 def _mock_agent_bot(config: Config, *, enable_streaming: bool = True) -> MagicMock:
     """Build a bot-shaped mock with the runtime state expected by config reloads."""
     bot = MagicMock(spec=AgentBot)
+    bot.agent_user = AgentMatrixUser(
+        agent_name="mock",
+        user_id="@mock:localhost",
+        display_name="Mock",
+        password=None,
+    )
     bot.config = config
     bot.client = None
     bot._conversation_cache = object()

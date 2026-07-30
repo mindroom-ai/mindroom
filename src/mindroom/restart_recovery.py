@@ -13,8 +13,6 @@ from mindroom.restart_recovery_operations import (
     RestartRecoveryOperations,
     RestartTargetFreshness,
     RoomRecoveryRequest,
-    build_matrix_restart_recovery_operations,
-    build_restart_recovery_owners,
 )
 
 if TYPE_CHECKING:
@@ -24,13 +22,6 @@ if TYPE_CHECKING:
     from mindroom.matrix.stale_stream_cleanup import InterruptedThread
 
 logger = get_logger(__name__)
-
-__all__ = [
-    "RecoveryOwner",
-    "RestartRecoveryCoordinator",
-    "build_matrix_restart_recovery_operations",
-    "build_restart_recovery_owners",
-]
 
 type _TargetKey = tuple[str, str, str]
 type _RoomKey = tuple[str, str]
@@ -54,15 +45,12 @@ class _RoomWork:
     def key(self) -> _RoomKey:
         return self.owner_user_id, self.room_id
 
-    @property
-    def pending(self) -> bool:
-        return bool(self.requests or self.targets)
-
 
 @dataclass(frozen=True)
 class _TargetWatermark:
     """Monotonic settled state for one owner-room-thread."""
 
+    generation: object
     version: tuple[int, str]
     closed: bool = False
 
@@ -71,12 +59,6 @@ class _TargetWatermark:
 class _TargetSettlement:
     target: InterruptedThread
     closed: bool
-
-
-@dataclass(frozen=True)
-class _TargetAttempt:
-    retry: bool
-    closed: bool = False
 
 
 @dataclass(frozen=True)
@@ -166,6 +148,11 @@ class RestartRecoveryCoordinator:
         self._settle_finished_attempts()
         owner = self._current_owners().get(owner_user_id)
         if owner is not None:
+            self._target_watermarks = {
+                key: watermark
+                for key, watermark in self._target_watermarks.items()
+                if key[0] != owner_user_id or watermark.generation is owner.generation
+            }
             self._enqueue_desired_rooms(owner)
         due_at = asyncio.get_running_loop().time()
         self._room_jobs = {
@@ -221,8 +208,9 @@ class RestartRecoveryCoordinator:
         if task is not None:
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
-        for owner_user_id in self._current_owners():
-            self._operations.discard_owner(owner_user_id)
+        self._room_jobs.clear()
+        self._target_watermarks.clear()
+        await self._operations.close()
 
     def _enqueue_desired_rooms(self, owner: RecoveryOwner) -> None:
         if self._startup_cutoff_ms is None:
@@ -272,7 +260,11 @@ class RestartRecoveryCoordinator:
     def _next_work(self) -> _RoomWork | None:
         active_keys = {work.key for work in self._active_attempts.values()}
         eligible = [work for work in self._room_jobs.values() if work.key not in active_keys]
-        return min(eligible, key=lambda work: (work.due_at, work.key)) if eligible else None
+        if not eligible:
+            return None
+        active_owners = {work.owner_user_id for work in self._active_attempts.values()}
+        fair = [work for work in eligible if work.owner_user_id not in active_owners]
+        return min(fair or eligible, key=lambda work: (work.due_at, work.key))
 
     def _start_due_attempts(self) -> None:
         now = asyncio.get_running_loop().time()
@@ -339,23 +331,23 @@ class RestartRecoveryCoordinator:
             self._restore(work, cancelled=self._paused or self._stopped)
             return
         for settlement in result.settlements:
-            self._advance_watermark(work.owner_user_id, settlement)
+            self._advance_watermark(result.owner, settlement)
         remaining = replace(
             work,
             requests=result.retry_requests,
             targets=result.retry_targets,
         )
-        if remaining.pending:
+        if remaining.requests or remaining.targets:
             self._restore(remaining, cancelled=self._paused or self._stopped)
 
-    def _advance_watermark(self, owner_user_id: str, settlement: _TargetSettlement) -> None:
+    def _advance_watermark(self, owner: RecoveryOwner, settlement: _TargetSettlement) -> None:
         target = settlement.target
         assert target.thread_id is not None
-        key = owner_user_id, target.room_id, target.thread_id
+        key = owner.user_id, target.room_id, target.thread_id
         version = _target_version(target)
         current = self._target_watermarks.get(key)
-        if current is None or version > current.version:
-            self._target_watermarks[key] = _TargetWatermark(version, settlement.closed)
+        if current is None or current.generation is not owner.generation or version > current.version:
+            self._target_watermarks[key] = _TargetWatermark(owner.generation, version, settlement.closed)
         elif version == current.version and settlement.closed and not current.closed:
             self._target_watermarks[key] = replace(current, closed=True)
 
@@ -391,14 +383,14 @@ class RestartRecoveryCoordinator:
 
         retry_targets: list[InterruptedThread] = []
         settlements: list[_TargetSettlement] = []
-        for target in self._eligible_targets(owner.user_id, tuple(targets)):
+        for target in self._eligible_targets(owner, tuple(targets)):
             attempt = await self._process_target(owner, target, config)
             if not self._owner_is_current(owner):
                 return _RoomAttemptResult(owner, work.requests, work.targets, ())
-            if attempt.retry:
+            if attempt is None:
                 retry_targets.append(target)
             else:
-                settlements.append(_TargetSettlement(target, attempt.closed))
+                settlements.append(attempt)
         return _RoomAttemptResult(
             owner,
             tuple(retry_requests),
@@ -408,14 +400,18 @@ class RestartRecoveryCoordinator:
 
     def _eligible_targets(
         self,
-        owner_user_id: str,
+        owner: RecoveryOwner,
         targets: tuple[InterruptedThread, ...],
     ) -> tuple[InterruptedThread, ...]:
         eligible: list[InterruptedThread] = []
         for target in _newest_targets(targets):
             assert target.thread_id is not None
-            watermark = self._target_watermarks.get((owner_user_id, target.room_id, target.thread_id))
-            if watermark is None or (not watermark.closed and _target_version(target) > watermark.version):
+            watermark = self._target_watermarks.get((owner.user_id, target.room_id, target.thread_id))
+            if (
+                watermark is None
+                or watermark.generation is not owner.generation
+                or (not watermark.closed and _target_version(target) > watermark.version)
+            ):
                 eligible.append(target)
         return tuple(eligible)
 
@@ -424,17 +420,17 @@ class RestartRecoveryCoordinator:
         owner: RecoveryOwner,
         target: InterruptedThread,
         config: Config,
-    ) -> _TargetAttempt:
+    ) -> _TargetSettlement | None:
         if target.original_sender_id is None or not config.defaults.auto_resume_after_restart:
-            return _TargetAttempt(retry=False)
+            return _TargetSettlement(target, closed=False)
         freshness = await self._operations.target_freshness(owner, target, config)
         if freshness is RestartTargetFreshness.RETRY:
-            return _TargetAttempt(retry=True)
+            return None
         if freshness in {
             RestartTargetFreshness.NEWER_HUMAN,
             RestartTargetFreshness.UNRECOVERABLE,
         }:
-            return _TargetAttempt(retry=False)
+            return _TargetSettlement(target, closed=False)
         router = next(
             (
                 candidate
@@ -444,9 +440,9 @@ class RestartRecoveryCoordinator:
             None,
         )
         if router is None:
-            return _TargetAttempt(retry=True)
+            return None
         delivered = await self._deliver_target(router, owner, target, config)
-        return _TargetAttempt(retry=not delivered, closed=delivered)
+        return _TargetSettlement(target, closed=delivered) if delivered else None
 
     async def _deliver_target(
         self,

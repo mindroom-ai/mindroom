@@ -156,12 +156,13 @@ Semantic memory backends such as Mem0 have a separate lifecycle and are not alte
 `RestartRecoveryCoordinator` is the single owner of startup cleanup, replacement-room handoffs, interrupted-target freshness checks, semantic retry state, and resume-delivery settlement.
 `InterruptedTurnRooms` records durable room handoff facts, but it does not schedule Matrix recovery or own retry timing.
 The coordinator retains one work item and lease for each exact owner-room pair, with at most two leases active at once.
+When another owner has queued work, lease selection prefers that owner before assigning a second slot to an already-active owner.
 Each lease performs its room scans, newest-target selection, freshness checks, and resume delivery before releasing that owner-room pair.
-One monotonic watermark per exact owner, room, and thread fences superseded targets and closes a successfully resumed recovery lifecycle.
+One monotonic watermark per exact owner generation, room, and thread fences superseded targets and closes a successfully resumed recovery lifecycle.
 Concurrent owner-room leases share one joined-room snapshot for the exact owner generation.
-A dedicated Matrix operations collaborator explicitly owns that membership snapshot and releases it when the owner is discarded.
+A dedicated Matrix operations collaborator explicitly owns membership snapshots, releases discarded owners, and cancels and drains every retained snapshot during shutdown.
 A missing desired room invalidates that snapshot so a later retry can observe a newly joined room.
-Room history failures and failed cleanup edits return typed retry outcomes, so an empty or partial scan cannot silently settle the room job.
+Room history failures, transient requester-resolution failures, and failed cleanup edits return typed retry outcomes, and no interrupted targets publish from a partial scan.
 Each resume relay uses a deterministic Matrix transaction ID derived from the exact owner and interrupted target, so only a retry of that same target reuses the transaction ID.
 The orchestrator pauses recovery before configuration mutation, and pause cancellation drains active attempt cleanup before any leased work is settled or restored.
 Resume keeps retained semantic work but resolves it only against current ready owner generations.

@@ -162,6 +162,14 @@ class _ScannedRoomMessageStates:
 
 
 @dataclass(frozen=True)
+class _RequesterResolutionResult:
+    """Resolved requesters plus whether any transient read must retry."""
+
+    requester_ids_by_event_id: dict[str, str]
+    retry_required: bool = False
+
+
+@dataclass(frozen=True)
 class _CleanupScanPolicy:
     """History scan bounds for one startup stale-stream cleanup run."""
 
@@ -667,7 +675,7 @@ async def _scan_room_message_states(
         scanned_message_data_by_event_id.values(),
         bot_user_ids=bot_user_ids | set(trusted_sender_ids),
     )
-    requester_ids_by_event_id = await _derive_requester_ids_for_bot_messages(
+    requester_resolution = await _derive_requester_ids_for_bot_messages(
         client,
         resolved_messages=bot_resolved_messages,
         scanned_message_data_by_event_id=scanned_message_data_by_event_id,
@@ -680,13 +688,13 @@ async def _scan_room_message_states(
         message_states,
         bot_resolved_messages,
         bot_user_ids=cleanup_bot_user_ids,
-        requester_ids_by_event_id=requester_ids_by_event_id,
+        requester_ids_by_event_id=requester_resolution.requester_ids_by_event_id,
         scanned_message_data_by_event_id=scanned_message_data_by_event_id,
     )
     return _ScannedRoomMessageStates(
         message_states=message_states,
         auto_resume_target_event_ids=auto_resume_target_event_ids,
-        retry_required=retry_required,
+        retry_required=retry_required or requester_resolution.retry_required,
     )
 
 
@@ -877,9 +885,10 @@ async def _derive_requester_ids_for_bot_messages(
     bot_user_ids: set[str],
     config: Config,
     runtime_paths: RuntimePaths,
-) -> dict[str, str]:
+) -> _RequesterResolutionResult:
     """Return effective requester IDs for bot-authored messages."""
     requester_ids_by_event_id: dict[str, str] = {}
+    retry_required = False
     requester_cache: dict[str, str | None] = {}
     fetched_message_data_by_event_id: dict[str, ResolvedVisibleMessage | None] = {}
     trusted_sender_ids = set(
@@ -920,12 +929,16 @@ async def _derive_requester_ids_for_bot_messages(
                 event_id=target_event_id,
                 error=str(exc),
             )
+            retry_required = True
             continue
         if requester_user_id is None:
             continue
         requester_ids_by_event_id[target_event_id] = requester_user_id
 
-    return requester_ids_by_event_id
+    return _RequesterResolutionResult(
+        requester_ids_by_event_id=requester_ids_by_event_id,
+        retry_required=retry_required,
+    )
 
 
 async def _resolve_requester_for_bot_message(

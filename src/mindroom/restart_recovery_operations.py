@@ -25,7 +25,7 @@ from mindroom.matrix.stale_stream_cleanup import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping
+    from collections.abc import Awaitable, Callable, Mapping
 
     import nio
 
@@ -152,6 +152,7 @@ class RestartRecoveryOperations:
     target_freshness: _TargetFreshness
     deliver_target: _DeliverTarget
     discard_owner: Callable[[str], None]
+    close: Callable[[], Awaitable[None]]
 
 
 @dataclass(frozen=True)
@@ -200,6 +201,19 @@ class _OwnerMembershipSnapshots:
         snapshot = self.snapshots.pop(owner_user_id, None)
         if snapshot is not None and not snapshot.task.done():
             snapshot.task.cancel()
+
+    async def close(self) -> None:
+        """Cancel and drain every retained membership snapshot."""
+        snapshots = tuple(self.snapshots.values())
+        self.snapshots.clear()
+        for snapshot in snapshots:
+            if not snapshot.task.done():
+                snapshot.task.cancel()
+        if snapshots:
+            await asyncio.gather(
+                *(snapshot.task for snapshot in snapshots),
+                return_exceptions=True,
+            )
 
     def _discard(
         self,
@@ -250,10 +264,9 @@ def build_matrix_restart_recovery_operations(runtime_paths: RuntimePaths) -> Res
             startup_cutoff_ms=request.startup_cutoff_ms,
             terminal_interrupted_only=request.terminal_interrupted_only,
         )
-        return _RoomRecoveryResult(
-            interrupted_threads=cleanup_result.interrupted_threads,
-            retry=cleanup_result.retry_required,
-        )
+        if cleanup_result.retry_required:
+            return _RoomRecoveryResult(retry=True)
+        return _RoomRecoveryResult(interrupted_threads=cleanup_result.interrupted_threads)
 
     async def target_freshness(
         owner: RecoveryOwner,
@@ -309,19 +322,11 @@ def build_matrix_restart_recovery_operations(runtime_paths: RuntimePaths) -> Res
         )
         if delivered is None:
             return False
-        try:
-            router.conversation_cache.notify_outbound_message(
-                target.room_id,
-                delivered.event_id,
-                delivered.content_sent,
-            )
-        except Exception:
-            logger.warning(
-                "Failed to record queued auto-resume message",
-                room_id=target.room_id,
-                event_id=delivered.event_id,
-                exc_info=True,
-            )
+        router.conversation_cache.notify_outbound_message(
+            target.room_id,
+            delivered.event_id,
+            delivered.content_sent,
+        )
         logger.info(
             "Queued auto-resume after restart",
             room_id=target.room_id,
@@ -336,4 +341,5 @@ def build_matrix_restart_recovery_operations(runtime_paths: RuntimePaths) -> Res
         target_freshness=target_freshness,
         deliver_target=deliver_target,
         discard_owner=membership_snapshots.discard_owner,
+        close=membership_snapshots.close,
     )

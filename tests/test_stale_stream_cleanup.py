@@ -2337,8 +2337,8 @@ async def test_restart_marked_message_still_redacts_stale_stop_reactions(tmp_pat
 
 
 @pytest.mark.asyncio
-async def test_requester_resolution_exception_degrades_gracefully(tmp_path: Path) -> None:
-    """A room_get_event exception during requester resolution should not skip room cleanup."""
+async def test_requester_resolution_exception_requests_retry_after_cleanup(tmp_path: Path) -> None:
+    """A transient requester read must retain recovery after cleanup."""
     config = _make_config(tmp_path)
     client = AsyncMock(spec=nio.AsyncClient)
     # Bot message replies to $external-user-msg which is NOT in scanned history,
@@ -2355,15 +2355,26 @@ async def test_requester_resolution_exception_degrades_gracefully(tmp_path: Path
     client.room_get_event_relations = MagicMock(return_value=_aiter())
     client.room_get_event = AsyncMock(side_effect=RuntimeError("network timeout"))
 
-    with patch(
-        "mindroom.matrix.stale_stream_cleanup.edit_message_result",
-        new=AsyncMock(side_effect=delivered_matrix_side_effect("$edit")),
+    with (
+        patch("mindroom.matrix.stale_stream_cleanup.time.time", return_value=NOW_MS / 1000),
+        patch(
+            "mindroom.matrix.stale_stream_cleanup.edit_message_result",
+            new=AsyncMock(side_effect=delivered_matrix_side_effect("$edit")),
+        ),
     ):
-        cleaned, interrupted = await _run_cleanup(client, config, joined_rooms=[ROOM_ID])
+        result = await cleanup_stale_streaming_room(
+            client,
+            room_id=ROOM_ID,
+            actors={BOT_USER_ID: StaleStreamCleanupActor(client, None)},
+            bot_user_ids={BOT_USER_ID},
+            config=config,
+            runtime_paths=runtime_paths_for(config),
+        )
 
-    assert cleaned == 1
-    assert len(interrupted) == 1
-    assert interrupted[0].original_sender_id is None
+    assert result.cleaned_count == 1
+    assert len(result.interrupted_threads) == 1
+    assert result.interrupted_threads[0].original_sender_id is None
+    assert result.retry_required is True
 
 
 @pytest.mark.asyncio

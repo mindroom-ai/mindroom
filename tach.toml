@@ -1423,6 +1423,7 @@ depends_on = [
     "mindroom.orchestration.todo_poke_runtime",
     "mindroom.response_admission",
     "mindroom.restart_recovery",
+    "mindroom.restart_recovery_operations",
     "mindroom.runtime_support",
     "mindroom.scheduling_executor",
     "mindroom.tool_system.plugins",
@@ -1487,7 +1488,10 @@ depends_on = [
     "mindroom.matrix.invited_rooms_store",
     "mindroom.matrix.stale_stream_cleanup",
 ]
-visibility = ["mindroom.restart_recovery"]
+visibility = [
+    "mindroom.orchestrator",
+    "mindroom.restart_recovery",
+]
 
 [[modules]]
 path = "mindroom.response_admission"

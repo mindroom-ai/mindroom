@@ -60,9 +60,9 @@ from mindroom.mcp.registry import mcp_tool_name
 from mindroom.mcp.toolkit import bind_mcp_server_manager
 from mindroom.memory import MemoryAutoFlushWorker, auto_flush_enabled
 from mindroom.response_admission import ResponseAdmissionGate
-from mindroom.restart_recovery import (
+from mindroom.restart_recovery import RestartRecoveryCoordinator
+from mindroom.restart_recovery_operations import (
     RecoveryOwner,
-    RestartRecoveryCoordinator,
     build_matrix_restart_recovery_operations,
     build_restart_recovery_owners,
 )
