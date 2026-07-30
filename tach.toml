@@ -1422,6 +1422,7 @@ depends_on = [
     "mindroom.orchestration.runtime",
     "mindroom.orchestration.todo_poke_runtime",
     "mindroom.response_admission",
+    "mindroom.restart_recovery",
     "mindroom.runtime_support",
     "mindroom.scheduling_executor",
     "mindroom.tool_system.plugins",
@@ -1461,6 +1462,21 @@ depends_on = [
     "mindroom.tool_system.worker_routing",
     "mindroom.user_turn_time",
 ]
+
+[[modules]]
+path = "mindroom.restart_recovery"
+depends_on = [
+    "mindroom.bot",
+    "mindroom.config.main",
+    "mindroom.constants",
+    "mindroom.logging_config",
+    "mindroom.matrix.client_delivery",
+    "mindroom.matrix.client_room_admin",
+    "mindroom.matrix.conversation_cache",
+    "mindroom.matrix.invited_rooms_store",
+    "mindroom.matrix.stale_stream_cleanup",
+]
+visibility = ["mindroom.orchestrator"]
 
 [[modules]]
 path = "mindroom.response_admission"
@@ -2248,6 +2264,7 @@ visibility = [
     "mindroom.matrix.client",
     "mindroom.matrix.decrypt_failure",
     "mindroom.matrix.stale_stream_cleanup",
+    "mindroom.restart_recovery",
     "mindroom.scheduling",
     "mindroom.streaming",
     "mindroom.thread_summary",
@@ -2277,6 +2294,7 @@ visibility = [
     "mindroom.matrix.stale_stream_cleanup",
     "mindroom.orchestration.external_trigger_runtime",
     "mindroom.orchestrator",
+    "mindroom.restart_recovery",
 ]
 
 [[modules]]
