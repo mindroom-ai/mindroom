@@ -16,6 +16,7 @@ import nio
 import pytest
 from agno.models.ollama import Ollama
 
+from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.bot import AgentBot, TeamBot
 from mindroom.coalescing import CoalescingGate, ReadyPendingEvent
 from mindroom.coalescing_batch import CoalescingKey, PendingEvent
@@ -32,6 +33,7 @@ from mindroom.matrix.state import MatrixState
 from mindroom.matrix.sync_certification import SyncCheckpoint, SyncTrustState
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
+from mindroom.orchestration.runtime import EntityStartResults
 from mindroom.orchestrator import _MultiAgentOrchestrator
 from mindroom.routing import suggest_responder_for_message
 from mindroom.teams import TeamOutcome, TeamResolution
@@ -155,7 +157,8 @@ def _router_readiness_runtime(tmp_path: Path) -> tuple[AgentBot, AgentBot, _Mult
     room_id = "!router-readiness:localhost"
     config = _runtime_bound_config(
         Config(
-            agents={"general": AgentConfig(display_name="General", rooms=[room_id])},
+            agents={"general": AgentConfig(display_name="General", rooms=[room_id], tools=["mcp_demo"])},
+            mcp_servers={"demo": {"transport": "stdio", "command": "npx"}},
             authorization={"default_room_access": True},
         ),
         tmp_path,
@@ -495,6 +498,54 @@ class TestRoutingRegression:
         router_bot._sync_cache_trust.checkpoint = SyncCheckpoint("s_before_router_shutdown")
         await router_bot.prepare_for_sync_shutdown()
         assert router_bot._sync_cache_trust.checkpoint is None
+
+    @pytest.mark.asyncio
+    async def test_mcp_catalog_restart_waits_for_admitted_router_relay_delivery(self, tmp_path: Path) -> None:
+        """MCP replacement must not stop the selected target during relay delivery."""
+        router_bot, target_bot, orchestrator, room = _router_readiness_runtime(tmp_path)
+        router_bot._first_sync_done = target_bot._first_sync_done = True
+        router_bot.admission_gate = target_bot.admission_gate = orchestrator._response_admission_gate
+        orchestrator.running = True
+        send_started = asyncio.Event()
+        release_send = asyncio.Event()
+
+        async def blocking_room_send(**_: object) -> nio.RoomSendResponse:
+            send_started.set()
+            await release_send.wait()
+            return nio.RoomSendResponse.from_dict({"event_id": "$router-response"}, room_id=room.room_id)
+
+        router_bot.client.room_send.side_effect = blocking_room_send
+        relay_task = asyncio.create_task(
+            _run_admitted_router_relay(
+                router_bot._turn_controller,
+                lambda: _router_relay(router_bot, room, "$mcp-restart"),
+            ),
+        )
+        await send_started.wait()
+        assert router_bot.admission_gate.in_flight_response_count == 1
+
+        with (
+            patch("mindroom.orchestrator.stop_entities", new_callable=AsyncMock) as mock_stop,
+            patch.object(
+                orchestrator,
+                "_create_and_start_entities",
+                new=AsyncMock(return_value=EntityStartResults()),
+            ),
+        ):
+            await orchestrator._notify_mcp_catalog_change("demo")
+            try:
+                await asyncio.sleep(0)
+                assert mock_stop.await_count == 0
+            finally:
+                release_send.set()
+                await relay_task
+                assert await wait_for_background_tasks(
+                    timeout=1,
+                    owner=orchestrator._mcp_catalog_change_task_owner,
+                )
+
+        mock_stop.assert_awaited_once()
+        assert router_bot.admission_gate.closed is False
 
     @pytest.mark.asyncio
     async def test_router_removed_target_keeps_existing_no_responder_behavior(self, tmp_path: Path) -> None:

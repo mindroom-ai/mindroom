@@ -18,7 +18,7 @@ from mindroom import constants
 from mindroom.agents import ensure_default_agent_workspaces
 from mindroom.approval_transport import ApprovalMatrixTransport
 from mindroom.authorization import is_authorized_sender
-from mindroom.background_tasks import create_background_task
+from mindroom.background_tasks import create_background_task, wait_for_background_tasks
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.embedder_health import check_embedder_health, handle_embedder_config_reload
 from mindroom.entity_resolution import (
@@ -246,6 +246,7 @@ class _MultiAgentOrchestrator:
     _mcp_manager: MCPServerManager | None = field(default=None, init=False)
     _config_update_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False)
     _response_admission_gate: ResponseAdmissionGate = field(default_factory=ResponseAdmissionGate, init=False)
+    _mcp_catalog_change_task_owner: object = field(default_factory=object, init=False, repr=False)
     _pending_replacement_recovery_room_ids: dict[str, set[str]] = field(default_factory=dict, init=False)
     _runtime_support: OwnedRuntimeSupport = field(init=False)
     _event_cache_write_task_owner: object = field(default_factory=object, init=False)
@@ -647,7 +648,7 @@ class _MultiAgentOrchestrator:
         if manager is None:
             manager = MCPServerManager(
                 self.runtime_paths,
-                on_catalog_change=self._handle_mcp_catalog_change,
+                on_catalog_change=self._notify_mcp_catalog_change,
             )
             self._mcp_manager = manager
         bind_mcp_server_manager(manager)
@@ -1387,6 +1388,26 @@ class _MultiAgentOrchestrator:
 
     async def _handle_mcp_catalog_change(self, server_id: str) -> None:
         """Restart entities that reference one changed MCP catalog."""
+        if not self.running or self.config is None:
+            return
+        await self.config_reload.apply_with_response_admission(
+            partial(self._apply_mcp_catalog_change, server_id),
+            operation_name="MCP catalog restart",
+            request_is_current=lambda: self.running and self.config is not None,
+        )
+
+    async def _notify_mcp_catalog_change(self, server_id: str) -> None:
+        """Schedule a catalog restart so an admitted MCP call can release first."""
+        if not self.running:
+            return
+        create_background_task(
+            self._handle_mcp_catalog_change(server_id),
+            name=f"mcp_catalog_change:{server_id}",
+            owner=self._mcp_catalog_change_task_owner,
+        )
+
+    async def _apply_mcp_catalog_change(self, server_id: str) -> None:
+        """Apply one MCP catalog-triggered entity replacement."""
         async with self._config_update_lock:
             if not self.running or self.config is None:
                 return
@@ -1833,6 +1854,8 @@ class _MultiAgentOrchestrator:
         self._external_trigger_runtime.unbind()
         await shutdown_approval_runtime()
         await self.config_reload.cancel()
+        owner = self._mcp_catalog_change_task_owner
+        await wait_for_background_tasks(5.0, owner=owner, shutdown_intent=ORDERLY_SHUTDOWN)
         await self._startup_maintenance.cancel()
         await self._todo_poke_runtime.stop()
         await self._stop_memory_auto_flush_worker()

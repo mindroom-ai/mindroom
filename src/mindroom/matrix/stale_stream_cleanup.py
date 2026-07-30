@@ -394,7 +394,7 @@ async def _interrupted_target_remains_latest_human_work(
         return False
 
     try:
-        history = await conversation_cache.refresh_strict_thread_history_from_source(
+        history = await conversation_cache.refresh_startup_thread_history_from_source(
             interrupted_thread.room_id,
             interrupted_thread.thread_id,
             caller_label="startup_auto_resume_freshness",
