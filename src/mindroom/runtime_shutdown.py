@@ -29,6 +29,7 @@ StopReason = Literal["restart", "entity_removed", "shutdown"]
 RestartReasonCategory = Literal[
     "first_sync_timeout",
     "sync_activity_timeout",
+    "cache_write_grace_exhausted",
     "watchdog_stall",
     "sync_failure",
     "unexpected_sync_return",
