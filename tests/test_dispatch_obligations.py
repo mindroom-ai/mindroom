@@ -523,6 +523,36 @@ async def test_persisted_work_can_be_scheduled_after_durable_acceptance(tmp_path
 
 
 @pytest.mark.asyncio
+async def test_pending_duplicate_runs_first_durably_accepted_payload(tmp_path: Path) -> None:
+    """A conflicting duplicate must execute the payload already accepted on disk."""
+    received: list[tuple[str, str]] = []
+
+    async def callback(room: nio.MatrixRoom, event: nio.Event) -> DispatchCallbackResult:
+        assert isinstance(event, nio.RoomMessageText)
+        received.append((room.room_id, event.body))
+        return DispatchCallbackResult.SUCCEEDED
+
+    store = _store(tmp_path)
+    runner = _runner(store, callback)
+    first_room = nio.MatrixRoom(_ROOM_ID, _PRINCIPAL_ID)
+    first_event = _message_event("$first-payload")
+    assert await runner.persist(first_room, first_event, DispatchCallbackKind.MESSAGE) is not None
+
+    conflicting_source = dict(first_event.source)
+    conflicting_source["content"] = {"msgtype": "m.text", "body": "conflicting"}
+    conflicting_event = nio.Event.parse_event(conflicting_source)
+    assert isinstance(conflicting_event, nio.RoomMessageText)
+
+    await runner.dispatch(
+        nio.MatrixRoom("!conflicting:example.org", _PRINCIPAL_ID),
+        conflicting_event,
+        DispatchCallbackKind.MESSAGE,
+    )
+
+    assert received == [(_ROOM_ID, "hello")]
+
+
+@pytest.mark.asyncio
 async def test_failed_callback_retries_directly_without_later_sync_response(tmp_path: Path) -> None:
     """Restart recovery must invoke pending work from durable input alone."""
     attempts = 0

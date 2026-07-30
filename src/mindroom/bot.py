@@ -526,7 +526,7 @@ class AgentBot:
             ),
             room_for_id=self._room_for_dispatch_obligation,
             turn_is_terminal=self._turn_store.is_durably_handled,
-            on_persist_failure=self._rewind_sync_after_dispatch_persistence_failure,
+            on_persist_failure=self._rewind_sync_after_pre_certification_failure,
             source_admission=self._admit_dispatch_source,
         )
         self._post_response_effects_support = PostResponseEffectsSupport(
@@ -1168,15 +1168,15 @@ class AgentBot:
                 cast("Any", self.client).next_batch = None
             self._cold_history_fence.reset()
 
-    def _rewind_sync_after_dispatch_persistence_failure(self) -> None:
-        """Replay work that failed before an exact durable obligation existed."""
+    def _rewind_sync_after_pre_certification_failure(self) -> None:
+        """Replay a classic sync that failed before its position was certified."""
         client = self.client
         if client is None:
             return
         retry_token = self._sync_cache_trust.retry_token()
         cast("Any", client).next_batch = retry_token
         self.logger.warning(
-            "dispatch_obligation_persistence_failed_replaying_sync",
+            "pre_certification_sync_side_effect_failed_replaying_sync",
             has_retry_token=retry_token is not None,
         )
 
@@ -1194,6 +1194,21 @@ class AgentBot:
         if decrypt_notice_fenced:
             return False
         return await self._cold_history_fence.admit(source_event_id, callback_kind)
+
+    def _apply_classic_sync_admission(
+        self,
+        *,
+        decision: SyncCertificationDecision,
+        response: nio.SyncResponse,
+        room_member_join_hook_plan: _RoomMemberJoinSyncHookPlan,
+    ) -> _RoomMemberJoinSyncHookPlan:
+        """Apply certified Classic continuity to callback admission."""
+        if decision.reset_client_token:
+            return _RoomMemberJoinSyncHookPlan(arm_after_response=False)
+        self._cold_history_fence.observe_continuation(response.next_batch)
+        if decision.state is SyncTrustState.CERTIFIED:
+            self._room_lifecycle.observe_trusted_sync_rooms(response.rooms.join)
+        return room_member_join_hook_plan
 
     def seconds_since_last_sync_activity(self) -> float | None:
         """Return elapsed seconds since the last sync-loop activity seen by the watchdog."""
@@ -1328,17 +1343,22 @@ class AgentBot:
                     hooks_were_armed=room_member_join_hooks_were_armed,
                     decision=decision,
                 )
-                await self._run_pre_certification_sync_response_side_effects(
-                    _response,
+                try:
+                    await self._run_pre_certification_sync_response_side_effects(
+                        _response,
+                        room_member_join_hook_plan=room_member_join_hook_plan,
+                    )
+                except BaseException:
+                    client = self.client
+                    if client is not None and cast("Any", client).next_batch != self._sync_cache_trust.retry_token():
+                        self._rewind_sync_after_pre_certification_failure()
+                    raise
+                decision = self._apply_sync_response_decision(decision, cache_result=cache_result)
+                room_member_join_hook_plan = self._apply_classic_sync_admission(
+                    decision=decision,
+                    response=_response,
                     room_member_join_hook_plan=room_member_join_hook_plan,
                 )
-                decision = self._apply_sync_response_decision(decision, cache_result=cache_result)
-                if decision.reset_client_token:
-                    room_member_join_hook_plan = _RoomMemberJoinSyncHookPlan(arm_after_response=False)
-                else:
-                    self._cold_history_fence.observe_continuation(_response.next_batch)
-                if decision.state is SyncTrustState.CERTIFIED:
-                    self._room_lifecycle.observe_trusted_sync_rooms(_response.rooms.join)
             self._mark_sync_progress()
         elif isinstance(_response, nio.SlidingSyncResponse):
             # Sliding sync never certifies the classic checkpoint, but the
