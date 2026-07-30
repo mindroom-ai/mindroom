@@ -59,11 +59,11 @@ Gemini API docs call `gemini-3.1-flash-image-preview` Nano Banana 2, while Verte
 ```text
 Matrix sync callback
   -> bot.py (AgentBot/TeamBot runtime shell)
+  -> dispatch_obligations.py                                (durable exact callback acceptance and restart recovery)
   -> turn_controller.py (owns one turn: precheck -> normalize -> resolve -> coalesce -> decide -> execute -> record)
        -> ingress_validation.py                                  (trust, dedup, echo drop; commands exit before batching)
        -> inbound_turn_normalizer.py + conversation_resolver.py  (canonical turn input, conversation identity)
        -> ingress_lanes.py                                       (per-(room, sender) receipt-order FIFO; STT readiness waits here)
-       -> dispatch_obligations.py                                (durable exact callback acceptance and restart recovery)
        -> coalescing.py                                          (text dispatches immediately; media-tailed batches debounce)
        -> text_ingress_dispatch.py + turn_policy.py              (ignore / route / respond decision, command execution)
        -> response_runner.py -> ai.py / teams.py                 (lifecycle lock, entity envelopes)
