@@ -207,8 +207,13 @@ Set `CODEX_HOME` only if your Codex CLI state lives outside `~/.codex`.
 | `MINDROOM_DASHBOARD_CORS_ALLOW_ALL_ORIGINS` | Set to `true` to allow every dashboard API origin while disabling credentialed CORS responses | _(unset)_ |
 | `MINDROOM_NO_AUTO_INSTALL_TOOLS` | Set to `1`/`true`/`yes` to disable automatic tool dependency installation | _(unset — auto-install enabled)_ |
 | `MINDROOM_MATRIX_HOMESERVER_STARTUP_TIMEOUT_SECONDS` | Seconds to wait for homeserver to become reachable at startup (0 = skip). MindRoom polls the homeserver's `/_matrix/client/versions` endpoint with exponential backoff retry, detecting permanent errors (e.g., wrong URL) vs transient failures | _(wait indefinitely)_ |
+| `MINDROOM_MATRIX_SYNC_CACHE_WRITE_GRACE_SECONDS` | Finite positive seconds the sync watchdog and `/api/health` may wait for one active durable sync-cache phase before treating it as wedged | `600` |
 | `MINDROOM_DISPATCH_THREAD_READ_TIMEOUT_SECONDS` | Wall-clock seconds allowed for live dispatch-safe Matrix thread reads before dispatch proceeds with degraded thread evidence | `1.0` |
 | `MINDROOM_WORKER_BACKEND` | Worker backend for tool execution (`static_runner`, `docker`, or `kubernetes`) | `static_runner` |
+
+The sync cache-write grace is a hang backstop, not the ordinary Matrix transport timeout.
+Set it above the observed healthy cache-write p99 for the deployment.
+Raising it delays both watchdog cancellation and liveness failure only while a sync callback is actively completing its sequential durable cache phase.
 
 ### OpenAI-Compatible API
 
