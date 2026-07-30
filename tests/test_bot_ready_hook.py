@@ -483,6 +483,28 @@ async def test_bot_ready_fires_only_once(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_orchestrator_ready_notification_retries_after_failure(tmp_path: Path) -> None:
+    """A transient readiness failure must retry after the first sync was recorded."""
+    bot = _agent_bot(tmp_path)
+    bot.client = AsyncMock()
+    orchestrator = MagicMock()
+    orchestrator.handle_bot_ready = AsyncMock(side_effect=[RuntimeError("transient recovery failure"), None])
+    bot.orchestrator = orchestrator
+
+    with (
+        patch("mindroom.bot.mark_matrix_sync_success", return_value=datetime.now(UTC)),
+        pytest.raises(RuntimeError, match="transient recovery failure"),
+    ):
+        await bot._on_sync_response(MagicMock())
+
+    with patch("mindroom.bot.mark_matrix_sync_success", return_value=datetime.now(UTC)):
+        await bot._on_sync_response(MagicMock())
+
+    assert bot.first_sync_complete
+    assert orchestrator.handle_bot_ready.await_count == 2
+
+
+@pytest.mark.asyncio
 async def test_bot_ready_fires_after_agent_started(tmp_path: Path) -> None:
     """bot:ready must fire after agent:started since it depends on sync being established."""
     bot = _agent_bot(tmp_path)
