@@ -458,6 +458,7 @@ async def _rewrite_working_session_for_compaction(  # noqa: C901
             fallback_summary_model = None
             fallback_summary_model_name = None
             fallback_summary_input_budget = None
+            warm_prefix = None
         included_runs = new_summary.included_runs
         generated_summary = new_summary.summary
         if before_persist_callback is not None:

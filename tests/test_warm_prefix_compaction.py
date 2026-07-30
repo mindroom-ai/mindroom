@@ -9,9 +9,9 @@ their prompt cache instead of re-reading it at full price.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
-from types import SimpleNamespace
 from typing import TYPE_CHECKING
 
 import pytest
@@ -31,7 +31,7 @@ from mindroom.config.models import CompactionConfig, CompactionOverrideConfig, D
 from mindroom.constants import DEFAULT_COMPACTION_TIMEOUT_SECONDS, RuntimePaths, resolve_runtime_paths
 from mindroom.history.agno_forked_request import build_agent_provider_request_from_runs
 from mindroom.history.compaction import _warm_summary_instruction, compact_scope_history
-from mindroom.history.runtime import _warm_prefix_summary_context
+from mindroom.history.runtime import _warm_prefix_summary_context, resolve_agent_preparation_inputs
 from mindroom.history.storage import read_scope_state, write_scope_state
 from mindroom.history.summary_call import (
     SummaryProviderRequest,
@@ -192,6 +192,8 @@ async def test_forked_request_preserves_run_history_and_appends_instruction() ->
     session = _session([_completed_run("run-1", "FIRST-MARKER"), _completed_run("run-2", "SECOND-MARKER")])
     runs_before = [run.run_id for run in session.runs or []]
     replay_settings_before = (agent.add_history_to_context, agent.num_history_runs, agent.num_history_messages)
+    tools_before = agent.tools
+    tool_contents_before = list(agent.tools or ())
 
     request = await build_agent_provider_request_from_runs(
         agent=agent,
@@ -216,6 +218,8 @@ async def test_forked_request_preserves_run_history_and_appends_instruction() ->
     assert (agent.add_history_to_context, agent.num_history_runs, agent.num_history_messages) == (
         replay_settings_before
     )
+    assert agent.tools is tools_before
+    assert list(agent.tools or ()) == tool_contents_before
 
 
 @pytest.mark.asyncio
@@ -364,14 +368,13 @@ def test_warm_summary_instruction_without_previous_summary_is_bare() -> None:
 def test_warm_prefix_context_requires_active_model(tmp_path: Path) -> None:
     config, _runtime_paths = _make_config(tmp_path)
     agent = _agent()
-    active_inputs = SimpleNamespace(
-        execution_plan=SimpleNamespace(compaction_model_name="default"),
-        active_model_name="default",
+    active_inputs = resolve_agent_preparation_inputs(
+        agent=agent,
+        agent_name="test_agent",
+        full_prompt="current prompt",
+        config=config,
     )
-    dedicated_inputs = SimpleNamespace(
-        execution_plan=SimpleNamespace(compaction_model_name="cheap-summary"),
-        active_model_name="default",
-    )
+    dedicated_inputs = replace(active_inputs, active_model_name="different-reply-model")
 
     context = _warm_prefix_summary_context(agent=agent, resolved_inputs=active_inputs, config=config)
     assert context is not None

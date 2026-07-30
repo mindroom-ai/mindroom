@@ -1808,10 +1808,16 @@ async def test_compaction_fallback_serves_later_chunks_state_and_outcome(tmp_pat
     storage.upsert_session(session)
     primary = FakeModel(id="summary-model", provider="fake")
     fallback = FakeModel(id="fallback-model-id", provider="fake")
-    attempts: list[tuple[str, str]] = []
+    attempts: list[tuple[str, str, SummaryProviderRequest | None]] = []
 
-    async def flaky_summary(*, model: FakeModel, summary_input: str, **_kwargs: object) -> SessionSummary:
-        attempts.append((model.id, summary_input))
+    async def flaky_summary(
+        *,
+        model: FakeModel,
+        summary_input: str,
+        provider_request: SummaryProviderRequest | None,
+        **_kwargs: object,
+    ) -> SessionSummary:
+        attempts.append((model.id, summary_input, provider_request))
         if len(attempts) == 1:
             msg = "provider-specific refusal wording"
             raise ModelSafeguardRefusalError(msg)
@@ -1838,12 +1844,22 @@ async def test_compaction_fallback_serves_later_chunks_state_and_outcome(tmp_pat
             fallback_summary_model=fallback,
             fallback_summary_model_name="fallback-model",
             fallback_summary_input_budget=10_000,
+            warm_prefix=WarmPrefixSummaryContext(agent=_agent(None), instruction="summarize"),
         )
 
     assert outcome is not None
     # The primary sees both runs. Its smaller-context fallback rebuilds the
     # refused chunk with run 1, then keeps its own budget for run 2.
-    assert [model_id for model_id, _ in attempts] == ["summary-model", "fallback-model-id", "fallback-model-id"]
+    assert [model_id for model_id, _summary_input, _provider_request in attempts] == [
+        "summary-model",
+        "fallback-model-id",
+        "fallback-model-id",
+    ]
+    assert [provider_request is not None for _model_id, _summary_input, provider_request in attempts] == [
+        True,
+        False,
+        False,
+    ]
     assert "RUN1-MARKER" in attempts[0][1]
     assert "RUN2-MARKER" in attempts[0][1]
     assert "RUN1-MARKER" in attempts[1][1]
