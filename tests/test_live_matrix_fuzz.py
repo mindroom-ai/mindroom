@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import sqlite3
+import subprocess
 import time
 from contextlib import closing
 from dataclasses import replace
@@ -313,11 +314,60 @@ def test_restart_shutdown_rejects_nonzero_process_exit() -> None:
         stack.close()
 
 
-def test_restart_shutdown_failure_count_tracks_current_checkpoint_discard_marker() -> None:
-    """The harness must track the shutdown failure marker emitted on current main."""
+def test_restart_shutdown_rejects_forced_process_kill() -> None:
+    """An orderly-shutdown timeout must kill the process and remain non-graceful."""
+
+    class TimedOutProcess:
+        returncode: int | None = None
+
+        def __init__(self) -> None:
+            self.killed = False
+            self.wait_timeouts: list[float] = []
+
+        @staticmethod
+        def poll() -> None:
+            return None
+
+        @staticmethod
+        def send_signal(_signal: int) -> None:
+            return
+
+        def wait(self, *, timeout: float) -> int:
+            self.wait_timeouts.append(timeout)
+            if len(self.wait_timeouts) == 1:
+                command = "mindroom"
+                raise subprocess.TimeoutExpired(command, timeout)
+            return -9
+
+        def kill(self) -> None:
+            self.killed = True
+            self.returncode = -9
+
+    stack = ManagedTuwunelStack()
+    process = TimedOutProcess()
+    try:
+        stack._mindroom_process = cast("Any", process)
+
+        assert not stack.stop_mindroom_for_observation(timeout=1)
+        assert process.killed
+        assert process.wait_timeouts == [1, 10]
+        assert stack._mindroom_process is None
+    finally:
+        stack.close()
+
+
+@pytest.mark.parametrize(
+    "marker",
+    [
+        ("sync_checkpoint_discarded",),
+        ("sync_checkpoint_not_saved_after_incomplete_coalescing_drain",),
+    ],
+)
+def test_restart_shutdown_failure_count_tracks_checkpoint_discard_markers(marker: str) -> None:
+    """The harness must track the discard marker on its exact base and current main."""
     stack = ManagedTuwunelStack()
     try:
-        stack.log_path.write_text('{"event": "sync_checkpoint_discarded"}\n', encoding="utf-8")
+        stack.log_path.write_text(f'{{"event": "{marker}"}}\n', encoding="utf-8")
 
         assert stack.restart_shutdown_failure_count() == 1
     finally:
