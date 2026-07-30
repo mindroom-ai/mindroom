@@ -22,6 +22,7 @@ from tests.conftest import (
     bind_runtime_paths,
     drain_coalescing,
     install_generate_response_mock,
+    install_runtime_cache_support,
     orchestrator_runtime_paths,
     runtime_paths_for,
     test_runtime_paths,
@@ -281,6 +282,7 @@ class TestDMIntegration:
             runtime_paths=runtime_paths_for(config),
             rooms=[],
         )
+        install_runtime_cache_support(bot)
 
         bot.client = AsyncMock()
         bot.client.user_id = bot.agent_user.user_id
@@ -340,8 +342,8 @@ class TestDMIntegration:
             else "@mindroom_researcher:localhost"
         )
         bot.orchestrator = orchestrator
-        bot._generate_response = AsyncMock()
-        install_generate_response_mock(bot, bot._generate_response)
+        generate_response = AsyncMock()
+        install_generate_response_mock(bot, generate_response)
 
         # Mock helper functions
         async def mock_handle(*args: object, **kwargs: object) -> None:
@@ -405,8 +407,8 @@ class TestDMIntegration:
             await drain_coalescing(bot)
 
             # Verify the bot decided to respond even though not configured for the room
-            bot._generate_response.assert_called_once()
-            call_args = bot._generate_response.call_args
+            generate_response.assert_called_once()
+            call_args = generate_response.call_args
             assert call_args.kwargs["response_envelope"].target.room_id == "!dm:localhost"
             assert call_args.kwargs["prompt"] == "Hello researcher, can you help?"
 
@@ -438,8 +440,8 @@ class TestDMIntegration:
         bot.client = AsyncMock()
         bot.client.user_id = entity_ids(config, runtime_paths_for(config))["test_agent"].full_id
         bot.logger = MagicMock()
-        bot._generate_response = AsyncMock()
-        install_generate_response_mock(bot, bot._generate_response)
+        generate_response = AsyncMock()
+        install_generate_response_mock(bot, generate_response)
 
         async def mock_handle(*args: object, **kwargs: object) -> None:
             pass
@@ -498,7 +500,7 @@ class TestDMIntegration:
             await drain_coalescing(bot)
 
             # Verify the bot decided to respond in the DM room
-            bot._generate_response.assert_called_once()
-            call_args = bot._generate_response.call_args
+            generate_response.assert_called_once()
+            call_args = generate_response.call_args
             assert call_args[1]["response_envelope"].target.room_id == "!dm:localhost"
             assert call_args[1]["prompt"] == "Hello agent!"

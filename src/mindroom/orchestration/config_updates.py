@@ -35,6 +35,7 @@ _ENTITY_CONSTRUCTION_PROMPTS = frozenset(
         "PERSONALITY_CONTEXT_SECTION_HEADING",
         "QUEUED_MESSAGE_NOTICE_TEXT",
         "SKILLS_TOOL_USAGE_PROMPT",
+        "WORKSPACE_SKILL_AUTHORING_PROMPT",
     },
 )
 
@@ -107,6 +108,7 @@ def _identify_entities_to_restart(
     teams_to_restart = _get_changed_teams(config, new_config, agent_bots)
 
     entities_to_restart = agents_to_restart | teams_to_restart
+    entities_to_restart |= _call_agents_to_restart(config, new_config)
     if changed_mcp_servers:
         entities_to_restart |= _entities_referencing_mcp_servers(config, new_config, changed_mcp_servers)
 
@@ -114,6 +116,15 @@ def _identify_entities_to_restart(
         entities_to_restart.add("router")
 
     return entities_to_restart
+
+
+def _call_agents_to_restart(config: Config | None, new_config: Config) -> set[str]:
+    """Return call agents whose managers captured an obsolete config snapshot."""
+    if config is None or config.authored_model_dump() == new_config.authored_model_dump():
+        return set()
+    old_agents = set(config.calls.agents) if config.calls.enabled else set()
+    new_agents = set(new_config.calls.agents) if new_config.calls.enabled else set()
+    return old_agents | new_agents
 
 
 def _get_changed_agents(
@@ -154,7 +165,7 @@ def _get_changed_agents(
 
 def _culture_signature_for_agent(agent_name: str, config: Config) -> tuple[str, str, str] | None:
     """Return the relevant culture tuple used for restart decisions."""
-    assignment = config.get_agent_culture(agent_name)
+    assignment = config.resolve_entity(agent_name).culture
     if assignment is None:
         return None
     culture_name, culture_config = assignment
@@ -283,6 +294,17 @@ def build_config_update_plan(
                 entities=sorted(default_affected_entities),
             )
         entities_to_restart |= default_affected_entities
+
+    if current_config.matrix_sync != new_config.matrix_sync:
+        # The sync transport is chosen when a bot's sync loop starts, so every
+        # running entity must restart to pick up the new matrix_sync settings.
+        sync_affected_entities = existing_entities & configured_entities
+        if sync_affected_entities:
+            logger.info(
+                "matrix_sync_changed_restart_required",
+                entities=sorted(sync_affected_entities),
+            )
+        entities_to_restart |= sync_affected_entities
 
     added_entities = configured_entities - existing_entities
     new_entities = added_entities - entities_to_restart

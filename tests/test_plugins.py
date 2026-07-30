@@ -16,6 +16,7 @@ import pytest
 import mindroom.tool_system.metadata as metadata_module
 import mindroom.tool_system.plugin_imports as plugin_module
 import mindroom.tool_system.plugins as plugins_module
+import mindroom.tool_system.skills as skills_module
 import mindroom.tools  # noqa: F401
 from mindroom.config.main import Config, ConfigRuntimeValidationError, load_config
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
@@ -63,7 +64,7 @@ def _write_broken_tool_plugin(plugin_root: Path, tool_name: str = "broken_plugin
     )
     (plugin_root / "tools.py").write_text(
         "from agno.tools import Toolkit\n"
-        "from mindroom.tool_system.metadata import ToolCategory, register_tool_with_metadata\n"
+        "from mindroom.tool_system.declarations import ToolCategory\nfrom mindroom.tool_system.registration import register_tool_with_metadata\n"
         "\n"
         "class BrokenTool(Toolkit):\n"
         "    def __init__(self) -> None:\n"
@@ -92,7 +93,7 @@ def _write_pre_registration_broken_tool_plugin(plugin_root: Path, tool_name: str
     (plugin_root / "tools.py").write_text(
         "from definitely_missing_plugin_dependency import broken\n"
         "from agno.tools import Toolkit\n"
-        "from mindroom.tool_system.metadata import ToolCategory, register_tool_with_metadata\n"
+        "from mindroom.tool_system.declarations import ToolCategory\nfrom mindroom.tool_system.registration import register_tool_with_metadata\n"
         "\n"
         "class BrokenTool(Toolkit):\n"
         "    def __init__(self) -> None:\n"
@@ -110,6 +111,62 @@ def _write_pre_registration_broken_tool_plugin(plugin_root: Path, tool_name: str
     )
 
 
+def _write_constant_named_broken_tool_plugin(plugin_root: Path, tool_name: str = "constant_named_tool") -> None:
+    plugin_root.mkdir(parents=True)
+    (plugin_root / "mindroom.plugin.json").write_text(
+        json.dumps({"name": "broken_plugin", "tools_module": "tools.py", "skills": []}),
+        encoding="utf-8",
+    )
+    (plugin_root / "tools.py").write_text(
+        "from definitely_missing_plugin_dependency import broken\n"
+        "from agno.tools import Toolkit\n"
+        "from mindroom.tool_system.declarations import ToolCategory\nfrom mindroom.tool_system.registration import register_tool_with_metadata\n"
+        "\n"
+        f"TOOL_NAME = {tool_name!r}\n"
+        "\n"
+        "class BrokenTool(Toolkit):\n"
+        "    def __init__(self) -> None:\n"
+        "        super().__init__(name='broken', tools=[])\n"
+        "\n"
+        "@register_tool_with_metadata(\n"
+        "    name=TOOL_NAME,\n"
+        "    display_name='Constant Named Tool',\n"
+        "    description='Tool registered under a module-level constant name',\n"
+        "    category=ToolCategory.DEVELOPMENT,\n"
+        ")\n"
+        "def broken_plugin_tools():\n"
+        "    return BrokenTool\n",
+        encoding="utf-8",
+    )
+
+
+def _write_dynamic_named_broken_tool_plugin(plugin_root: Path, tool_name: str = "dynamic_plugin_tool") -> None:
+    plugin_root.mkdir(parents=True)
+    (plugin_root / "mindroom.plugin.json").write_text(
+        json.dumps({"name": "broken_plugin", "tools_module": "tools.py", "skills": []}),
+        encoding="utf-8",
+    )
+    (plugin_root / "tools.py").write_text(
+        "from definitely_missing_plugin_dependency import broken\n"
+        "from agno.tools import Toolkit\n"
+        "from mindroom.tool_system.declarations import ToolCategory\nfrom mindroom.tool_system.registration import register_tool_with_metadata\n"
+        "\n"
+        "class BrokenTool(Toolkit):\n"
+        "    def __init__(self) -> None:\n"
+        "        super().__init__(name='broken', tools=[])\n"
+        "\n"
+        "@register_tool_with_metadata(\n"
+        f"    name='_'.join({tool_name.split('_')!r}),\n"
+        "    display_name='Dynamic Named Tool',\n"
+        "    description='Tool whose registered name cannot be recovered statically',\n"
+        "    category=ToolCategory.DEVELOPMENT,\n"
+        ")\n"
+        "def broken_plugin_tools():\n"
+        "    return BrokenTool\n",
+        encoding="utf-8",
+    )
+
+
 def _write_mid_registration_broken_tool_plugin(plugin_root: Path) -> None:
     plugin_root.mkdir(parents=True)
     (plugin_root / "mindroom.plugin.json").write_text(
@@ -118,7 +175,7 @@ def _write_mid_registration_broken_tool_plugin(plugin_root: Path) -> None:
     )
     (plugin_root / "tools.py").write_text(
         "from agno.tools import Toolkit\n"
-        "from mindroom.tool_system.metadata import ToolCategory, register_tool_with_metadata\n"
+        "from mindroom.tool_system.declarations import ToolCategory\nfrom mindroom.tool_system.registration import register_tool_with_metadata\n"
         "\n"
         "class BrokenTool(Toolkit):\n"
         "    def __init__(self) -> None:\n"
@@ -155,7 +212,7 @@ def _write_working_tool_plugin(plugin_root: Path, *, plugin_name: str, tool_name
     )
     (plugin_root / "tools.py").write_text(
         "from agno.tools import Toolkit\n"
-        "from mindroom.tool_system.metadata import ToolCategory, register_tool_with_metadata\n"
+        "from mindroom.tool_system.declarations import ToolCategory\nfrom mindroom.tool_system.registration import register_tool_with_metadata\n"
         "\n"
         "class WorkingTool(Toolkit):\n"
         "    def __init__(self) -> None:\n"
@@ -264,7 +321,7 @@ def test_load_plugins_registers_tools_and_skills(tmp_path: Path) -> None:
     tools_path = plugin_root / "tools.py"
     tools_path.write_text(
         "from agno.tools import Toolkit\n"
-        "from mindroom.tool_system.metadata import ToolCategory, register_tool_with_metadata\n"
+        "from mindroom.tool_system.declarations import ToolCategory\nfrom mindroom.tool_system.registration import register_tool_with_metadata\n"
         "\n"
         "class DemoTool(Toolkit):\n"
         "    def __init__(self) -> None:\n"
@@ -327,7 +384,7 @@ def test_resolved_tool_metadata_for_runtime_does_not_mutate_live_registry(tmp_pa
     )
     (plugin_root / "tools.py").write_text(
         "from agno.tools import Toolkit\n"
-        "from mindroom.tool_system.metadata import ToolCategory, register_tool_with_metadata\n"
+        "from mindroom.tool_system.declarations import ToolCategory\nfrom mindroom.tool_system.registration import register_tool_with_metadata\n"
         "\n"
         "class DemoTool(Toolkit):\n"
         "    def __init__(self) -> None:\n"
@@ -393,7 +450,7 @@ def test_load_plugins_from_python_package(tmp_path: Path, monkeypatch: pytest.Mo
     tools_path = plugin_root / "tools.py"
     tools_path.write_text(
         "from agno.tools import Toolkit\n"
-        "from mindroom.tool_system.metadata import ToolCategory, register_tool_with_metadata\n"
+        "from mindroom.tool_system.declarations import ToolCategory\nfrom mindroom.tool_system.registration import register_tool_with_metadata\n"
         "\n"
         "class DemoTool(Toolkit):\n"
         "    def __init__(self) -> None:\n"
@@ -924,7 +981,7 @@ def test_validate_with_runtime_does_not_leak_plugin_tools_after_failure(tmp_path
     )
     (plugin_root / "tools.py").write_text(
         "from agno.tools import Toolkit\n"
-        "from mindroom.tool_system.metadata import ToolCategory, register_tool_with_metadata\n"
+        "from mindroom.tool_system.declarations import ToolCategory\nfrom mindroom.tool_system.registration import register_tool_with_metadata\n"
         "\n"
         "class DemoTool(Toolkit):\n"
         "    def __init__(self) -> None:\n"
@@ -999,7 +1056,7 @@ def test_validate_with_runtime_does_not_mutate_live_tool_registry_on_success(tmp
     )
     (plugin_root / "tools.py").write_text(
         "from agno.tools import Toolkit\n"
-        "from mindroom.tool_system.metadata import ToolCategory, register_tool_with_metadata\n"
+        "from mindroom.tool_system.declarations import ToolCategory\nfrom mindroom.tool_system.registration import register_tool_with_metadata\n"
         "\n"
         "class DemoTool(Toolkit):\n"
         "    def __init__(self) -> None:\n"
@@ -1114,7 +1171,7 @@ def test_validate_with_runtime_does_not_mutate_live_registry_for_package_helper_
     )
     (plugin_root / "helpers.py").write_text(
         "from agno.tools import Toolkit\n"
-        "from mindroom.tool_system.metadata import ToolCategory, register_tool_with_metadata\n"
+        "from mindroom.tool_system.declarations import ToolCategory\nfrom mindroom.tool_system.registration import register_tool_with_metadata\n"
         "\n"
         "class HelperTool(Toolkit):\n"
         "    def __init__(self) -> None:\n"
@@ -1190,7 +1247,7 @@ def test_load_plugins_removes_tools_for_successfully_removed_plugins(tmp_path: P
     )
     (plugin_root / "tools.py").write_text(
         "from agno.tools import Toolkit\n"
-        "from mindroom.tool_system.metadata import ToolCategory, register_tool_with_metadata\n"
+        "from mindroom.tool_system.declarations import ToolCategory\nfrom mindroom.tool_system.registration import register_tool_with_metadata\n"
         "\n"
         "class DemoTool(Toolkit):\n"
         "    def __init__(self) -> None:\n"
@@ -1267,7 +1324,7 @@ def test_load_plugins_re_registers_tools_when_plugin_is_re_enabled(tmp_path: Pat
     )
     (plugin_root / "tools.py").write_text(
         "from agno.tools import Toolkit\n"
-        "from mindroom.tool_system.metadata import ToolCategory, register_tool_with_metadata\n"
+        "from mindroom.tool_system.declarations import ToolCategory\nfrom mindroom.tool_system.registration import register_tool_with_metadata\n"
         "\n"
         "class DemoTool(Toolkit):\n"
         "    def __init__(self) -> None:\n"
@@ -1376,7 +1433,7 @@ def test_load_plugins_removes_stale_tools_when_enabled_plugin_changes_exports(tm
     tools_path = plugin_root / "tools.py"
     tools_path.write_text(
         "from agno.tools import Toolkit\n"
-        "from mindroom.tool_system.metadata import ToolCategory, register_tool_with_metadata\n"
+        "from mindroom.tool_system.declarations import ToolCategory\nfrom mindroom.tool_system.registration import register_tool_with_metadata\n"
         "\n"
         "class DemoTool(Toolkit):\n"
         "    def __init__(self) -> None:\n"
@@ -1409,7 +1466,7 @@ def test_load_plugins_removes_stale_tools_when_enabled_plugin_changes_exports(tm
 
         tools_path.write_text(
             "from agno.tools import Toolkit\n"
-            "from mindroom.tool_system.metadata import ToolCategory, register_tool_with_metadata\n"
+            "from mindroom.tool_system.declarations import ToolCategory\nfrom mindroom.tool_system.registration import register_tool_with_metadata\n"
             "\n"
             "class DemoTool(Toolkit):\n"
             "    def __init__(self) -> None:\n"
@@ -1454,7 +1511,7 @@ def test_load_plugins_rejects_built_in_tool_name_collisions(tmp_path: Path) -> N
     )
     (plugin_root / "tools.py").write_text(
         "from agno.tools import Toolkit\n"
-        "from mindroom.tool_system.metadata import ToolCategory, register_tool_with_metadata\n"
+        "from mindroom.tool_system.declarations import ToolCategory\nfrom mindroom.tool_system.registration import register_tool_with_metadata\n"
         "\n"
         "class DemoTool(Toolkit):\n"
         "    def __init__(self) -> None:\n"
@@ -1495,7 +1552,7 @@ def test_load_plugins_rejects_plugin_tool_name_collisions(tmp_path: Path) -> Non
     for root, display_name in ((first_root, "First Tool"), (second_root, "Second Tool")):
         (root / "tools.py").write_text(
             "from agno.tools import Toolkit\n"
-            "from mindroom.tool_system.metadata import ToolCategory, register_tool_with_metadata\n"
+            "from mindroom.tool_system.declarations import ToolCategory\nfrom mindroom.tool_system.registration import register_tool_with_metadata\n"
             "\n"
             "class DemoTool(Toolkit):\n"
             "    def __init__(self) -> None:\n"
@@ -1532,7 +1589,7 @@ def test_load_plugins_rejects_duplicate_tool_names_within_one_plugin(tmp_path: P
     )
     (plugin_root / "tools.py").write_text(
         "from agno.tools import Toolkit\n"
-        "from mindroom.tool_system.metadata import ToolCategory, register_tool_with_metadata\n"
+        "from mindroom.tool_system.declarations import ToolCategory\nfrom mindroom.tool_system.registration import register_tool_with_metadata\n"
         "\n"
         "class FirstTool(Toolkit):\n"
         "    def __init__(self) -> None:\n"
@@ -1583,7 +1640,7 @@ def test_load_plugins_preserves_tools_when_manifest_name_changes(tmp_path: Path)
     )
     (plugin_root / "tools.py").write_text(
         "from agno.tools import Toolkit\n"
-        "from mindroom.tool_system.metadata import ToolCategory, register_tool_with_metadata\n"
+        "from mindroom.tool_system.declarations import ToolCategory\nfrom mindroom.tool_system.registration import register_tool_with_metadata\n"
         "\n"
         "class DemoTool(Toolkit):\n"
         "    def __init__(self) -> None:\n"
@@ -1671,7 +1728,7 @@ def test_load_config_tolerates_missing_and_broken_plugins_on_startup(
     )
     (good_root / "tools.py").write_text(
         "from agno.tools import Toolkit\n"
-        "from mindroom.tool_system.metadata import ToolCategory, register_tool_with_metadata\n"
+        "from mindroom.tool_system.declarations import ToolCategory\nfrom mindroom.tool_system.registration import register_tool_with_metadata\n"
         "\n"
         "class DemoTool(Toolkit):\n"
         "    def __init__(self) -> None:\n"
@@ -1796,8 +1853,8 @@ def test_load_config_tolerates_agent_reference_to_tool_declared_by_broken_plugin
     with _preserved_plugin_loader_state():
         config = load_config(runtime_paths, tolerate_plugin_load_errors=True)
 
-        assert "broken_plugin_tool" not in config.get_agent_available_tools("assistant")
-        assert config.get_agent_available_tools("assistant") == ["shell", "scheduler"]
+        assert "broken_plugin_tool" not in config.resolve_entity("assistant").available_tools
+        assert config.resolve_entity("assistant").available_tools == ["shell", "scheduler"]
         assert any(
             call.args == ("Plugin tool unavailable because plugin failed to load",)
             and call.kwargs["tool_name"] == "broken_plugin_tool"
@@ -1849,12 +1906,297 @@ def test_load_config_tolerates_unavailable_ast_plugin_tool_with_authored_overrid
     with _preserved_plugin_loader_state():
         config = load_config(runtime_paths, tolerate_plugin_load_errors=True)
 
-        assert config.get_agent_available_tools("assistant") == ["scheduler"]
+        assert config.resolve_entity("assistant").available_tools == ["scheduler"]
         assert any(
             call.args == ("Plugin tool unavailable because plugin failed to load",)
             and call.kwargs["tool_name"] == "broken_plugin_tool"
             and call.kwargs["config_path"] == "agents.assistant.tools[0]"
             for call in mock_logger.warning.call_args_list
+        )
+
+
+def test_load_config_tolerates_broken_plugin_tool_named_by_module_constant(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Broken-plugin tool names assigned via module-level constants should still be recovered."""
+    plugin_root = tmp_path / "plugins" / "broken"
+    _write_constant_named_broken_tool_plugin(plugin_root)
+
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        (
+            "models:\n"
+            "  default:\n"
+            "    provider: openai\n"
+            "    id: gpt-5.6\n"
+            "router:\n"
+            "  model: default\n"
+            "agents:\n"
+            "  assistant:\n"
+            "    display_name: Assistant\n"
+            "    role: test\n"
+            "    tools:\n"
+            "      - shell\n"
+            "      - constant_named_tool\n"
+            "plugins:\n"
+            "  - ./plugins/broken\n"
+        ),
+        encoding="utf-8",
+    )
+    runtime_paths = resolve_runtime_paths(
+        config_path=config_path,
+        storage_path=config_path.parent / "mindroom_data",
+        process_env={
+            "MATRIX_HOMESERVER": "http://localhost:8008",
+            "MINDROOM_NAMESPACE": "",
+        },
+    )
+    mock_logger = MagicMock()
+    monkeypatch.setattr("mindroom.config.main.logger", mock_logger)
+
+    with _preserved_plugin_loader_state():
+        config = load_config(runtime_paths, tolerate_plugin_load_errors=True)
+
+        assert config.resolve_entity("assistant").available_tools == ["shell", "scheduler"]
+        assert any(
+            call.args == ("Plugin tool unavailable because plugin failed to load",)
+            and call.kwargs["tool_name"] == "constant_named_tool"
+            and call.kwargs["config_path"] == "agents.assistant.tools[1]"
+            for call in mock_logger.warning.call_args_list
+        )
+
+
+def test_load_config_disables_unknown_tool_when_plugin_tool_namespace_is_unresolved(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Unknown tools must not block tolerant startup while a failed plugin could explain them."""
+    plugin_root = tmp_path / "plugins" / "broken"
+    _write_dynamic_named_broken_tool_plugin(plugin_root)
+
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        (
+            "models:\n"
+            "  default:\n"
+            "    provider: openai\n"
+            "    id: gpt-5.6\n"
+            "router:\n"
+            "  model: default\n"
+            "agents:\n"
+            "  assistant:\n"
+            "    display_name: Assistant\n"
+            "    role: test\n"
+            "    tools:\n"
+            "      - shell\n"
+            "      - dynamic_plugin_tool:\n"
+            "          some_option: ignored\n"
+            "plugins:\n"
+            "  - ./plugins/broken\n"
+        ),
+        encoding="utf-8",
+    )
+    runtime_paths = resolve_runtime_paths(
+        config_path=config_path,
+        storage_path=config_path.parent / "mindroom_data",
+        process_env={
+            "MATRIX_HOMESERVER": "http://localhost:8008",
+            "MINDROOM_NAMESPACE": "",
+        },
+    )
+    mock_logger = MagicMock()
+    monkeypatch.setattr("mindroom.config.main.logger", mock_logger)
+
+    with _preserved_plugin_loader_state():
+        config = load_config(runtime_paths, tolerate_plugin_load_errors=True)
+
+        assert config.resolve_entity("assistant").available_tools == ["shell", "scheduler"]
+        assert any(
+            call.args
+            == (
+                "Unknown tool may belong to a plugin whose tool names could not be resolved; "
+                "disabling it for this run (verify the tool name is not a typo)",
+            )
+            and call.kwargs["tool_name"] == "dynamic_plugin_tool"
+            and call.kwargs["config_path"] == "agents.assistant.tools[1]"
+            and call.kwargs["unresolved_plugin_sources"] == ["broken_plugin"]
+            for call in mock_logger.warning.call_args_list
+        )
+
+
+def test_load_config_disables_unknown_tool_when_plugin_fails_before_manifest_resolution(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unresolved plugin manifest must leave its possible tool namespace unresolved."""
+    plugin_root = tmp_path / "plugins" / "broken"
+    plugin_root.mkdir(parents=True)
+
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        (
+            "models:\n"
+            "  default:\n"
+            "    provider: openai\n"
+            "    id: gpt-5.6\n"
+            "router:\n"
+            "  model: default\n"
+            "agents:\n"
+            "  assistant:\n"
+            "    display_name: Assistant\n"
+            "    role: test\n"
+            "    tools:\n"
+            "      - shell\n"
+            "      - manifestless_plugin_tool\n"
+            "plugins:\n"
+            "  - ./plugins/broken\n"
+        ),
+        encoding="utf-8",
+    )
+    runtime_paths = resolve_runtime_paths(
+        config_path=config_path,
+        storage_path=config_path.parent / "mindroom_data",
+        process_env={
+            "MATRIX_HOMESERVER": "http://localhost:8008",
+            "MINDROOM_NAMESPACE": "",
+        },
+    )
+    mock_logger = MagicMock()
+    monkeypatch.setattr("mindroom.config.main.logger", mock_logger)
+
+    with _preserved_plugin_loader_state():
+        config = load_config(runtime_paths, tolerate_plugin_load_errors=True)
+
+        assert config.resolve_entity("assistant").available_tools == ["shell", "scheduler"]
+        assert any(
+            call.args
+            == (
+                "Unknown tool may belong to a plugin whose tool names could not be resolved; "
+                "disabling it for this run (verify the tool name is not a typo)",
+            )
+            and call.kwargs["tool_name"] == "manifestless_plugin_tool"
+            and call.kwargs["config_path"] == "agents.assistant.tools[1]"
+            and call.kwargs["unresolved_plugin_sources"] == ["./plugins/broken"]
+            for call in mock_logger.warning.call_args_list
+        )
+
+
+def test_failed_hooks_only_plugin_does_not_hide_unknown_tool_typo(tmp_path: Path) -> None:
+    """A hooks-only failure cannot explain an unknown authored tool name."""
+    plugin_root = tmp_path / "plugins" / "broken"
+    plugin_root.mkdir(parents=True)
+    (plugin_root / "mindroom.plugin.json").write_text(
+        json.dumps({"name": "broken_hooks", "hooks_module": "hooks.py", "skills": []}),
+        encoding="utf-8",
+    )
+    (plugin_root / "hooks.py").write_text(
+        "from definitely_missing_plugin_dependency import broken\n",
+        encoding="utf-8",
+    )
+
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        (
+            "models:\n"
+            "  default:\n"
+            "    provider: openai\n"
+            "    id: gpt-5.6\n"
+            "router:\n"
+            "  model: default\n"
+            "agents:\n"
+            "  assistant:\n"
+            "    display_name: Assistant\n"
+            "    role: test\n"
+            "    tools:\n"
+            "      - typo_plugin_tool\n"
+            "plugins:\n"
+            "  - ./plugins/broken\n"
+        ),
+        encoding="utf-8",
+    )
+    runtime_paths = resolve_runtime_paths(
+        config_path=config_path,
+        storage_path=config_path.parent / "mindroom_data",
+        process_env={
+            "MATRIX_HOMESERVER": "http://localhost:8008",
+            "MINDROOM_NAMESPACE": "",
+        },
+    )
+
+    with pytest.raises(ConfigRuntimeValidationError, match="Unknown tool 'typo_plugin_tool'"):
+        load_config(runtime_paths, tolerate_plugin_load_errors=True)
+
+
+def test_load_config_treats_plugin_system_exit_as_load_error(tmp_path: Path) -> None:
+    """Plugin SystemExit should become strict validation failure or tolerant unavailability."""
+    plugin_root = tmp_path / "plugins" / "broken"
+    _write_pre_registration_broken_tool_plugin(plugin_root, tool_name="system_exit_tool")
+    tools_path = plugin_root / "tools.py"
+    tools_path.write_text(
+        tools_path.read_text(encoding="utf-8").replace(
+            "from definitely_missing_plugin_dependency import broken",
+            "raise SystemExit('plugin exit')",
+        ),
+        encoding="utf-8",
+    )
+
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        (
+            "models:\n"
+            "  default:\n"
+            "    provider: openai\n"
+            "    id: gpt-5.6\n"
+            "router:\n"
+            "  model: default\n"
+            "agents:\n"
+            "  assistant:\n"
+            "    display_name: Assistant\n"
+            "    role: test\n"
+            "    tools: [system_exit_tool]\n"
+            "plugins:\n"
+            "  - ./plugins/broken\n"
+        ),
+        encoding="utf-8",
+    )
+    runtime_paths = resolve_runtime_paths(
+        config_path=config_path,
+        storage_path=config_path.parent / "mindroom_data",
+        process_env={
+            "MATRIX_HOMESERVER": "http://localhost:8008",
+            "MINDROOM_NAMESPACE": "",
+        },
+    )
+
+    with _preserved_plugin_loader_state():
+        with pytest.raises(ConfigRuntimeValidationError, match="plugin exit"):
+            load_config(runtime_paths)
+
+        config = load_config(runtime_paths, tolerate_plugin_load_errors=True)
+
+    assert config.resolve_entity("assistant").available_tools == ["scheduler"]
+
+
+def test_load_config_propagates_plugin_keyboard_interrupt(tmp_path: Path) -> None:
+    """Operator interrupts during plugin validation should still terminate startup."""
+    plugin_root = tmp_path / "plugins" / "broken"
+    _write_pre_registration_broken_tool_plugin(plugin_root)
+    tools_path = plugin_root / "tools.py"
+    tools_path.write_text(
+        tools_path.read_text(encoding="utf-8").replace(
+            "from definitely_missing_plugin_dependency import broken",
+            "raise KeyboardInterrupt('stop')",
+        ),
+        encoding="utf-8",
+    )
+    runtime_paths = _minimal_runtime_paths(tmp_path)
+
+    with _preserved_plugin_loader_state(), pytest.raises(KeyboardInterrupt, match="stop"):
+        Config.validate_with_runtime(
+            {"plugins": ["./plugins/broken"]},
+            runtime_paths,
+            tolerate_plugin_load_errors=True,
         )
 
 
@@ -1952,7 +2294,7 @@ def test_load_config_tolerates_tool_declared_after_broken_plugin_registration(
     with _preserved_plugin_loader_state():
         config = load_config(runtime_paths, tolerate_plugin_load_errors=True)
 
-        assert config.get_agent_available_tools("assistant") == ["scheduler"]
+        assert config.resolve_entity("assistant").available_tools == ["scheduler"]
         assert any(
             call.args == ("Plugin tool unavailable because plugin failed to load",)
             and call.kwargs["tool_name"] == "declared_after_failure"
@@ -2004,8 +2346,8 @@ def test_load_config_tolerates_deferred_reference_to_tool_declared_by_broken_plu
     with _preserved_plugin_loader_state():
         config = load_config(runtime_paths, tolerate_plugin_load_errors=True)
 
-        assert config.get_agent_authored_deferred_tool_configs("assistant") == []
-        assert config.get_agent_available_tools("assistant") == ["scheduler"]
+        assert config.resolve_entity("assistant").authored_deferred_tool_configs == []
+        assert config.resolve_entity("assistant").available_tools == ["scheduler"]
         assert any(
             call.args == ("Plugin tool unavailable because plugin failed to load",)
             and call.kwargs["tool_name"] == "broken_plugin_tool"
@@ -2051,7 +2393,7 @@ def test_broken_plugin_unavailable_tool_does_not_shadow_builtin_tool(tmp_path: P
     with _preserved_plugin_loader_state():
         config = load_config(runtime_paths, tolerate_plugin_load_errors=True)
 
-        assert config.get_agent_available_tools("assistant") == ["shell", "scheduler"]
+        assert config.resolve_entity("assistant").available_tools == ["shell", "scheduler"]
 
 
 def test_broken_plugin_unavailable_tool_does_not_shadow_healthy_plugin_tool(tmp_path: Path) -> None:
@@ -2094,7 +2436,7 @@ def test_broken_plugin_unavailable_tool_does_not_shadow_healthy_plugin_tool(tmp_
     with _preserved_plugin_loader_state():
         config = load_config(runtime_paths, tolerate_plugin_load_errors=True)
 
-        assert config.get_agent_available_tools("assistant") == ["healthy_plugin_tool", "scheduler"]
+        assert config.resolve_entity("assistant").available_tools == ["healthy_plugin_tool", "scheduler"]
 
 
 def test_load_config_still_rejects_unknown_tool_without_broken_plugin_explanation(tmp_path: Path) -> None:
@@ -2183,7 +2525,7 @@ def test_load_plugins_skips_later_broken_plugin_and_keeps_earlier_tools(
     )
     (good_root / "tools.py").write_text(
         "from agno.tools import Toolkit\n"
-        "from mindroom.tool_system.metadata import ToolCategory, register_tool_with_metadata\n"
+        "from mindroom.tool_system.declarations import ToolCategory\nfrom mindroom.tool_system.registration import register_tool_with_metadata\n"
         "\n"
         "class DemoTool(Toolkit):\n"
         "    def __init__(self) -> None:\n"
@@ -2822,7 +3164,7 @@ def test_failed_strict_tool_plugin_reload_preserves_previous_live_registry(tmp_p
     tools_path = plugin_root / "tools.py"
     tools_path.write_text(
         "from agno.tools import Toolkit\n"
-        "from mindroom.tool_system.metadata import ToolCategory, register_tool_with_metadata\n"
+        "from mindroom.tool_system.declarations import ToolCategory\nfrom mindroom.tool_system.registration import register_tool_with_metadata\n"
         "\n"
         "class ReloadTool(Toolkit):\n"
         "    def __init__(self) -> None:\n"
@@ -2916,3 +3258,84 @@ def test_reload_plugins_skip_broken_plugins_keeps_healthy_plugin_when_explicit_p
         for module_name in set(sys.modules) - original_modules:
             if module_name.startswith("mindroom_plugin_"):
                 sys.modules.pop(module_name, None)
+
+
+def _write_skill_plugin(plugin_root: Path, *, description: str = "Demo skill") -> Path:
+    plugin_root.mkdir(parents=True, exist_ok=True)
+    (plugin_root / "mindroom.plugin.json").write_text(
+        json.dumps({"name": "skill-plugin", "skills": ["skills"]}),
+        encoding="utf-8",
+    )
+    skill_dir = plugin_root / "skills" / "demo-skill"
+    skill_dir.mkdir(parents=True, exist_ok=True)
+    skill_path = skill_dir / "SKILL.md"
+    skill_path.write_text(
+        f"---\nname: demo-skill\ndescription: {description}\n---\n\n# Demo\n",
+        encoding="utf-8",
+    )
+    return skill_path
+
+
+def test_repeated_load_plugins_with_unchanged_roots_keeps_skill_cache(tmp_path: Path) -> None:
+    """Warm per-agent plugin loads must not rescan unchanged plugin skill roots."""
+    plugin_root = tmp_path / "plugins" / "skill-plugin"
+    _write_skill_plugin(plugin_root)
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("agents: {}", encoding="utf-8")
+    config = _bind_runtime_paths(Config(plugins=["./plugins/skill-plugin"]), config_path)
+    skills_root = (plugin_root / "skills").resolve()
+
+    with _preserved_plugin_loader_state():
+        load_plugins(config, runtime_paths_for(config))
+        first_load = skills_module._load_root_skills(skills_root)
+        assert [skill.name for skill in first_load] == ["demo-skill"]
+
+        load_plugins(config, runtime_paths_for(config))
+
+        assert skills_module._load_root_skills(skills_root) is first_load
+        skills_module.clear_skill_cache()
+
+
+def test_reload_plugins_picks_up_skill_file_changes(tmp_path: Path) -> None:
+    """A plugin reload with unchanged roots must still surface edited skill files."""
+    plugin_root = tmp_path / "plugins" / "skill-plugin"
+    skill_path = _write_skill_plugin(plugin_root, description="Demo v1")
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("agents: {}", encoding="utf-8")
+    config = _bind_runtime_paths(Config(plugins=["./plugins/skill-plugin"]), config_path)
+    skills_root = (plugin_root / "skills").resolve()
+
+    with _preserved_plugin_loader_state():
+        load_plugins(config, runtime_paths_for(config))
+        first_load = skills_module._load_root_skills(skills_root)
+        assert first_load[0].description == "Demo v1"
+
+        old_mtime = skill_path.stat().st_mtime_ns
+        _write_skill_plugin(plugin_root, description="Demo v2")
+        os.utime(skill_path, ns=(old_mtime + 2_000_000_000, old_mtime + 2_000_000_000))
+        reload_plugins(config, runtime_paths_for(config))
+
+        refreshed = skills_module._load_root_skills(skills_root)
+        assert refreshed[0].description == "Demo v2"
+        skills_module.clear_skill_cache()
+
+
+def test_deactivating_plugins_clears_cached_plugin_skills(tmp_path: Path) -> None:
+    """Dropping plugin roots must invalidate skills cached for those roots."""
+    plugin_root = tmp_path / "plugins" / "skill-plugin"
+    _write_skill_plugin(plugin_root)
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("agents: {}", encoding="utf-8")
+    config = _bind_runtime_paths(Config(plugins=["./plugins/skill-plugin"]), config_path)
+    skills_root = (plugin_root / "skills").resolve()
+
+    with _preserved_plugin_loader_state():
+        load_plugins(config, runtime_paths_for(config))
+        first_load = skills_module._load_root_skills(skills_root)
+        assert [skill.name for skill in first_load] == ["demo-skill"]
+
+        plugins_module.deactivate_plugins()
+
+        assert _get_plugin_skill_roots() == []
+        assert skills_module._load_root_skills(skills_root) is not first_load
+        skills_module.clear_skill_cache()

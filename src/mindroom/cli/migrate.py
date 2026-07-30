@@ -9,14 +9,8 @@ from pathlib import Path
 import typer
 
 from mindroom import constants
-from mindroom.cli.config import console, format_validation_errors
+from mindroom.cli.config import CONFIG_PATH_OPTION, console, format_validation_errors
 
-_CONFIG_PATH_OPTION: Path | None = typer.Option(
-    None,
-    "--path",
-    "-p",
-    help="Override auto-detection and use this config file path.",
-)
 _OLD_CONFIG_INIT_MIND_MEMORY_TOOL_BLOCK = """\
     knowledge_bases:
       - mind_memory
@@ -146,7 +140,7 @@ def _write_text_atomic(path: Path, content: str) -> None:
 
 
 def config_migrate(
-    path: Path | None = _CONFIG_PATH_OPTION,
+    path: Path | None = CONFIG_PATH_OPTION,
 ) -> None:
     """Apply safe, text-preserving migrations to config.yaml."""
     config_file = _resolve_config_path(path)

@@ -16,7 +16,7 @@ def ensure_tool_registry_loaded(
     load_plugin_tools: bool = True,
 ) -> None:
     """Load core tools, then sync MCP and optional plugin tools when config is provided."""
-    import mindroom.tools  # noqa: F401, PLC0415  # import here to avoid tools_metadata cycle
+    import mindroom.tools  # noqa: F401, PLC0415  # Explicit built-in manifest loads on demand.
 
     if config is None:
         return

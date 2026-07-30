@@ -391,7 +391,7 @@ async def test_schedule_with_no_agent_mentions() -> None:
 
     assert task_id is not None
     assert "✅ Scheduled" in response
-    assert "New room-level thread root" in response
+    assert "New thread per fire" in response
     conversation_cache.get_thread_history.assert_not_called()
     available_agents = mock_parse.await_args.args[3]
     expected_agents = [

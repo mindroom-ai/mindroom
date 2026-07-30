@@ -18,6 +18,7 @@ from mindroom.config.main import Config
 from mindroom.custom_tools.matrix_api import MatrixApiTools, _MatrixSearchResponse
 from mindroom.custom_tools.matrix_helpers import check_rate_limit
 from mindroom.matrix.thread_bookkeeping import MutationThreadImpact
+from mindroom.message_target import MessageTarget
 from mindroom.tool_system.metadata import TOOL_METADATA, get_tool_by_name
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
 from tests.conftest import (
@@ -64,9 +65,11 @@ def _make_context(
     resolved_conversation_cache.notify_outbound_redaction = Mock()
     return ToolRuntimeContext(
         agent_name="general",
-        room_id=room_id,
-        thread_id="$thread:localhost",
-        resolved_thread_id="$thread:localhost",
+        target=MessageTarget.resolve(
+            room_id=room_id,
+            thread_id="$thread:localhost",
+            reply_to_event_id="$reply:localhost",
+        ),
         requester_id="@user:localhost",
         client=client,
         config=config,
@@ -74,7 +77,6 @@ def _make_context(
         conversation_cache=resolved_conversation_cache,
         event_cache=make_event_cache_mock(),
         room=None,
-        reply_to_event_id="$reply:localhost",
         storage_path=runtime_root,
     )
 
@@ -237,7 +239,7 @@ async def test_matrix_api_send_event_happy_path() -> None:
         room_id=ctx.room_id,
         message_type="com.example.event",
         content={"body": "hello"},
-        ignore_unverified_devices=False,
+        ignore_unverified_devices=True,
     )
 
 
@@ -316,7 +318,12 @@ async def test_matrix_api_send_event_room_message_preserves_raw_payload() -> Non
         room_id=ctx.room_id,
         message_type="m.room.message",
         content=content,
-        ignore_unverified_devices=False,
+        ignore_unverified_devices=True,
+    )
+    ctx.conversation_cache.notify_outbound_message.assert_called_once_with(
+        ctx.room_id,
+        "$send:localhost",
+        content,
     )
 
 
@@ -448,8 +455,8 @@ async def test_matrix_api_send_event_room_message_preserves_matrix_error_details
 
 
 @pytest.mark.asyncio
-async def test_matrix_api_send_event_room_mode_edit_with_cache_does_not_notify_thread_bookkeeping() -> None:
-    """Room-mode edits should not call threaded cache bookkeeping when the target is not in a thread."""
+async def test_matrix_api_send_event_room_mode_edit_records_point_cache_bookkeeping() -> None:
+    """Room-mode edits should be visible locally before the Matrix sync echo arrives."""
     tool = MatrixApiTools()
     ctx = _make_context()
     ctx.conversation_cache.get_thread_id_for_event.return_value = None
@@ -496,7 +503,11 @@ async def test_matrix_api_send_event_room_mode_edit_with_cache_does_not_notify_t
         )
 
     assert payload["status"] == "ok"
-    ctx.conversation_cache.notify_outbound_message.assert_not_called()
+    ctx.conversation_cache.notify_outbound_message.assert_called_once_with(
+        ctx.room_id,
+        "$send:localhost",
+        content,
+    )
 
 
 @pytest.mark.asyncio
@@ -715,8 +726,8 @@ async def test_matrix_api_redact_delegates_thread_classification_to_shared_helpe
 
 
 @pytest.mark.asyncio
-async def test_matrix_api_redact_room_level_target_does_not_notify_thread_bookkeeping() -> None:
-    """Room-level redactions should not call threaded cache bookkeeping when the target is not in a thread."""
+async def test_matrix_api_redact_room_level_target_records_point_cache_bookkeeping() -> None:
+    """Room-level redactions should delete local point-cache rows before the sync echo."""
     tool = MatrixApiTools()
     ctx = _make_context()
     ctx.conversation_cache.get_thread_id_for_event.return_value = None
@@ -760,7 +771,10 @@ async def test_matrix_api_redact_room_level_target_does_not_notify_thread_bookke
         )
 
     assert payload["status"] == "ok"
-    ctx.conversation_cache.notify_outbound_redaction.assert_not_called()
+    ctx.conversation_cache.notify_outbound_redaction.assert_called_once_with(
+        ctx.room_id,
+        "$target:localhost",
+    )
 
 
 @pytest.mark.asyncio
@@ -1938,7 +1952,7 @@ async def test_matrix_api_cross_room_access_allowed_uses_target_room_id(
             room_id="!other:localhost",
             message_type="com.example.event",
             content={"body": "x"},
-            ignore_unverified_devices=False,
+            ignore_unverified_devices=True,
         )
     elif action == "get_state":
         ctx.client.room_get_state_event.assert_awaited_once_with(

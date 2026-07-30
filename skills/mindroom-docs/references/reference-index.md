@@ -31,6 +31,8 @@ Generated from `docs/` via `.github/scripts/generate_skill_references.py`.
 | AI & Generation | `tools/ai-and-generation.md` | `tools/ai-and-generation/index.md` | `page__tools__ai-and-generation__index.md` |
 | Media & Content | `tools/media-and-content.md` | `tools/media-and-content/index.md` | `page__tools__media-and-content__index.md` |
 | Matrix & Attachments | `tools/matrix-and-attachments.md` | `tools/matrix-and-attachments/index.md` | `page__tools__matrix-and-attachments__index.md` |
+| Matrix Message Full Semantics | `tools/matrix-message.md` | `tools/matrix-message/index.md` | `page__tools__matrix-message__index.md` |
+| Matrix Desktop Bridge | `tools/desktop.md` | `tools/desktop/index.md` | `page__tools__desktop__index.md` |
 | Messaging & Social | `tools/messaging-and-social.md` | `tools/messaging-and-social/index.md` | `page__tools__messaging-and-social__index.md` |
 | Project Management | `tools/project-management.md` | `tools/project-management/index.md` | `page__tools__project-management__index.md` |
 | Calendar & Scheduling | `tools/calendar-and-scheduling.md` | `tools/calendar-and-scheduling/index.md` | `page__tools__calendar-and-scheduling__index.md` |
@@ -48,12 +50,15 @@ Generated from `docs/` via `.github/scripts/generate_skill_references.py`.
 | Knowledge Bases | `knowledge.md` | `knowledge/index.md` | `page__knowledge__index.md` |
 | Memory System | `memory.md` | `memory/index.md` | `page__memory__index.md` |
 | Voice Messages | `voice.md` | `voice/index.md` | `page__voice__index.md` |
+| Voice Calls | `voice-calls.md` | `voice-calls/index.md` | `page__voice-calls__index.md` |
 | Image Messages | `images.md` | `images/index.md` | `page__images__index.md` |
 | File & Video Attachments | `attachments.md` | `attachments/index.md` | `page__attachments__index.md` |
 | Chat Commands | `chat-commands.md` | `chat-commands/index.md` | `page__chat-commands__index.md` |
 | Interactive Q&A | `interactive.md` | `interactive/index.md` | `page__interactive__index.md` |
 | Streaming | `streaming.md` | `streaming/index.md` | `page__streaming__index.md` |
 | Scheduling | `scheduling.md` | `scheduling/index.md` | `page__scheduling__index.md` |
+| External Triggers | `external-triggers.md` | `external-triggers/index.md` | `page__external-triggers__index.md` |
+| Agent Callbacks | `agent-callbacks.md` | `agent-callbacks/index.md` | `page__agent-callbacks__index.md` |
 | Authorization | `authorization.md` | `authorization/index.md` | `page__authorization__index.md` |
 | Matrix Space | `matrix-space.md` | `matrix-space/index.md` | `page__matrix-space__index.md` |
 | OpenAI-Compatible API | `openai-api.md` | `openai-api/index.md` | `page__openai-api__index.md` |

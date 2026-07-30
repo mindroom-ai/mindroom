@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
+from agno.run.base import RunStatus
+
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
 
@@ -75,6 +77,7 @@ class AITurnState:
         assistant_text: str,
         completed_tools: Sequence[ToolTraceEntry],
         interrupted_tools: Sequence[ToolTraceEntry],
+        original_status: RunStatus = RunStatus.cancelled,
     ) -> None:
         """Record an interrupted top-level turn when a recorder is present."""
         self.assistant_text = assistant_text
@@ -87,6 +90,7 @@ class AITurnState:
             assistant_text=self.assistant_text,
             completed_tools=self.completed_tools,
             interrupted_tools=self.interrupted_tools,
+            original_status=original_status,
         )
 
     def record_interrupted_from_recorder(
@@ -94,6 +98,7 @@ class AITurnState:
         recorder: TurnRecorder,
         *,
         run_metadata: Mapping[str, Any] | None,
+        original_status: RunStatus = RunStatus.cancelled,
     ) -> None:
         """Mark the recorder interrupted using its already-canonical live state."""
         self.assistant_text = recorder.assistant_text
@@ -104,4 +109,5 @@ class AITurnState:
             assistant_text=self.assistant_text,
             completed_tools=self.completed_tools,
             interrupted_tools=self.interrupted_tools,
+            original_status=original_status,
         )

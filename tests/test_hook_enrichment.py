@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from mindroom.hooks import EnrichmentItem, render_enrichment_block
+from mindroom.hooks import EnrichmentItem, render_enrichment_block, render_transient_context
+from mindroom.hooks.enrichment import is_transient_context
 
 
 def test_render_enrichment_block_is_stable() -> None:
@@ -44,3 +45,12 @@ def test_render_enrichment_block_escapes_xml_sensitive_content() -> None:
         "</item>\n"
         "</mindroom_message_context>"
     )
+
+
+def test_render_transient_context_wraps_nonempty_parts() -> None:
+    """Transient wrapper should be recognizable without changing its body."""
+    rendered = render_transient_context(("memory", "enrichment"))
+
+    assert rendered == ("<mindroom_transient_context>\nmemory\n\nenrichment\n</mindroom_transient_context>")
+    assert is_transient_context(rendered) is True
+    assert render_transient_context(()) == ""

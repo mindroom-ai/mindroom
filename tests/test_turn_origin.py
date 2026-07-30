@@ -1,6 +1,7 @@
 """Tests for canonical inbound turn-origin policy."""
 
 from mindroom.dispatch_source import (
+    EXTERNAL_TRIGGER_SOURCE_KIND,
     HOOK_DISPATCH_SOURCE_KIND,
     HOOK_SOURCE_KIND,
     SCHEDULED_SOURCE_KIND,
@@ -97,6 +98,23 @@ def test_hook_dispatch_bypasses_agent_chatter_gate_but_plain_hook_does_not() -> 
     assert plain_hook.intent == TurnIntent.HOOK_MESSAGE
     assert not plain_hook.may_dispatch_without_mention
     assert not plain_hook.blocks_unmentioned_managed_sender
+
+
+def test_external_trigger_bypasses_router_notice_gate() -> None:
+    """Router-authored external triggers should keep automation intent."""
+    origin = classify_turn_origin(
+        transport_sender_id="@mindroom_router:localhost",
+        requester_id="@mindroom_router:localhost",
+        sender_entity_name="router",
+        requester_entity_name="router",
+        source_kind=EXTERNAL_TRIGGER_SOURCE_KIND,
+        original_sender=None,
+        trusted_user_relay=False,
+    )
+
+    assert origin.intent == TurnIntent.EXTERNAL_TRIGGER
+    assert origin.may_dispatch_without_mention
+    assert not origin.blocks_unmentioned_managed_sender
 
 
 def test_plain_hook_with_managed_requester_still_requires_mention() -> None:

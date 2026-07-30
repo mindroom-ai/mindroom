@@ -10,8 +10,7 @@ from typing import TYPE_CHECKING
 import nio
 from agno.run.cancel import acancel_run
 
-from mindroom.cancellation import USER_STOP_CANCEL_MSG, request_task_cancel
-from mindroom.config.matrix import ignore_unverified_devices_for_config
+from mindroom.cancellation import request_task_cancel
 from mindroom.logging_config import get_logger
 from mindroom.matrix.message_builder import build_reaction_content
 
@@ -20,7 +19,6 @@ if TYPE_CHECKING:
 
     from nio import AsyncClient
 
-    from mindroom.config.main import Config
     from mindroom.message_target import MessageTarget
 
 logger = get_logger(__name__)
@@ -128,13 +126,6 @@ class StopManager:
         if tracked is None or tracked.task.done():
             return None
         return tracked
-
-    def get_tracked_target(self, message_id: str) -> MessageTarget | None:
-        """Return the tracked delivery target for one message when available."""
-        tracked = self.tracked_messages.get(message_id)
-        if tracked is None:
-            return None
-        return tracked.target
 
     async def _probe_graceful_cancel(self, message_id: str, run_id: str, deadline: float) -> str:
         """Request Agno run cancellation for one known run during the post-cancel probe window."""
@@ -327,7 +318,7 @@ class StopManager:
                     run_id=tracked.run_id,
                     **target_log,
                 )
-                request_task_cancel(tracked.task, cancel_msg=USER_STOP_CANCEL_MSG)
+                request_task_cancel(tracked.task, cancel_source="user_stop")
                 if tracked.run_id:
                     logger.info(
                         "Scheduling best-effort Agno run cleanup after hard task cancel",
@@ -345,7 +336,7 @@ class StopManager:
                 **target_log,
             )
         else:
-            logger.warning("Stop reaction for untracked message", message_id=message_id)
+            logger.debug("Stop reaction for untracked message", message_id=message_id)
         return False
 
     async def add_stop_button(
@@ -353,7 +344,6 @@ class StopManager:
         client: AsyncClient,
         message_id: str,
         *,
-        config: Config,
         notify_outbound_event: Callable[[str, dict[str, object]], None] | None = None,
     ) -> str | None:
         """Add a stop button reaction to a tracked message."""
@@ -373,7 +363,7 @@ class StopManager:
                 room_id=tracked.target.room_id,
                 message_type="m.reaction",
                 content=reaction_content,
-                ignore_unverified_devices=ignore_unverified_devices_for_config(config),
+                ignore_unverified_devices=True,
             )
             if isinstance(response, nio.RoomSendResponse):
                 event_id = str(response.event_id)

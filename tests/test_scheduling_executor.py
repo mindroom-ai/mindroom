@@ -11,7 +11,12 @@ import pytest
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
-from mindroom.constants import ORIGINAL_SENDER_KEY, SOURCE_KIND_KEY
+from mindroom.constants import (
+    ORIGINAL_SENDER_KEY,
+    PER_FIRE_THREAD_ROOT_KEY,
+    SCHEDULED_HISTORY_LIMIT_KEY,
+    SOURCE_KIND_KEY,
+)
 from mindroom.dispatch_source import SCHEDULED_SOURCE_KIND
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.hooks import EVENT_SCHEDULE_FIRED, HookRegistry, ScheduleFiredContext, hook
@@ -61,12 +66,14 @@ def _workflow(
     room_id: str | None = "!room:localhost",
     thread_id: str | None = "$thread",
     new_thread: bool = False,
+    history_limit: int | None = None,
 ) -> ScheduledWorkflow:
     return ScheduledWorkflow(
         schedule_type="once",
         execute_at=datetime.now(UTC),
         message=message,
         description="executor test task",
+        history_limit=history_limit,
         room_id=room_id,
         thread_id=thread_id,
         new_thread=new_thread,
@@ -133,13 +140,42 @@ async def test_fire_task_with_valid_agent_delivers_in_thread(tmp_path: Path) -> 
     assert content["m.relates_to"]["event_id"] == "$thread"
     assert content[ORIGINAL_SENDER_KEY] == "@user:localhost"
     assert content[SOURCE_KIND_KEY] == SCHEDULED_SOURCE_KIND
+    assert SCHEDULED_HISTORY_LIMIT_KEY not in content
 
 
 @pytest.mark.asyncio
-async def test_fire_new_thread_task_posts_room_level_message(tmp_path: Path) -> None:
-    """new_thread tasks deliver the raw message at room level without the automated wrapper."""
+@pytest.mark.parametrize("history_limit", [0, 5])
+async def test_fire_task_with_history_limit_annotates_message_content(tmp_path: Path, history_limit: int) -> None:
+    """A per-schedule history limit rides on the fired message so dispatch can cap that turn."""
+    config = _agent_config(tmp_path)
+    workflow = _workflow("@research Poll the queue", history_limit=history_limit)
+    conversation_cache = _conversation_cache(latest_thread_event_id="$latest")
+
+    with patch(
+        "mindroom.hooks.sender._send_message_result",
+        new=AsyncMock(side_effect=delivered_matrix_side_effect("$delivered")),
+    ) as mock_send:
+        outcome = await execute_scheduled_workflow(
+            AsyncMock(),
+            workflow,
+            config,
+            runtime_paths_for(config),
+            conversation_cache,
+            task_id="task-1",
+        )
+
+    assert outcome.delivered is True
+    content = mock_send.await_args.args[2]
+    assert content[SOURCE_KIND_KEY] == SCHEDULED_SOURCE_KIND
+    assert content[SCHEDULED_HISTORY_LIMIT_KEY] == history_limit
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stale_thread_id", [None, "$stale-thread"])
+async def test_fire_new_thread_task_posts_room_level_message(tmp_path: Path, stale_thread_id: str | None) -> None:
+    """new_thread tasks deliver a relation-free root even when a stale thread_id is persisted."""
     config = _config(tmp_path)
-    workflow = _workflow("Kick off the weekly report", thread_id=None, new_thread=True)
+    workflow = _workflow("Kick off the weekly report", thread_id=stale_thread_id, new_thread=True)
     conversation_cache = _conversation_cache()
 
     with patch(
@@ -159,6 +195,31 @@ async def test_fire_new_thread_task_posts_room_level_message(tmp_path: Path) -> 
     content = mock_send.await_args.args[2]
     assert "⏰ [Automated Task]" not in content["body"]
     assert "m.relates_to" not in content
+    assert content[PER_FIRE_THREAD_ROOT_KEY] is True
+
+
+@pytest.mark.asyncio
+async def test_fire_room_level_task_without_new_thread_keeps_room_scope(tmp_path: Path) -> None:
+    """A room-level task without new_thread does not claim a per-fire root."""
+    config = _config(tmp_path)
+    workflow = _workflow("Check the shared queue", thread_id=None, new_thread=False)
+
+    with patch(
+        "mindroom.hooks.sender._send_message_result",
+        new=AsyncMock(side_effect=delivered_matrix_side_effect("$delivered")),
+    ) as mock_send:
+        outcome = await execute_scheduled_workflow(
+            AsyncMock(),
+            workflow,
+            config,
+            runtime_paths_for(config),
+            _conversation_cache(),
+        )
+
+    assert outcome.delivered is True
+    content = mock_send.await_args.args[2]
+    assert "m.relates_to" not in content
+    assert PER_FIRE_THREAD_ROOT_KEY not in content
 
 
 @pytest.mark.asyncio
@@ -290,9 +351,8 @@ async def test_hook_suppression_is_undelivered_outcome(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_send_scheduled_failure_notice_follows_workflow_target(tmp_path: Path) -> None:
+async def test_send_scheduled_failure_notice_follows_workflow_target() -> None:
     """Runner failure notices follow the workflow thread and reply to its latest event."""
-    config = _config(tmp_path)
     workflow = _workflow("Recurring job")
     target = MessageTarget.for_scheduled_task(workflow)
     conversation_cache = _conversation_cache(latest_thread_event_id="$latest")
@@ -306,7 +366,6 @@ async def test_send_scheduled_failure_notice_follows_workflow_target(tmp_path: P
             workflow,
             target,
             "❌ Recurring task failed: executor test task\nTask ID: task-9\nError: boom",
-            config,
             conversation_cache,
         )
 

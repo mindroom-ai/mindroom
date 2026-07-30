@@ -218,6 +218,7 @@ async def test_oauth_mcp_toolkit_returns_structured_oauth_required_payload(tmp_p
         "oauth_connection_required": True,
         "provider": "mcp_demo",
         "connect_url": "http://localhost:8765/api/oauth/mcp_demo/authorize?connect_token=opaque",
+        "requires_host_browser": True,
     }
 
 

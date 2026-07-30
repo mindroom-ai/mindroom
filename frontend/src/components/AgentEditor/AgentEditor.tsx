@@ -814,7 +814,7 @@ export function AgentEditor() {
 
         <FieldGroup
           label="Requester-Private State"
-          helperText="Enable requester-local state for one shared agent definition. Private agents cannot participate in teams yet, including through delegation from shared team members."
+          helperText="Enable requester-local state for one shared agent definition. Private agents cannot join configured teams or transitive delegation, but explicitly tagged ad hoc teams can include them for that requester."
           htmlFor="private_enabled"
         >
           <div className="flex items-center gap-2">

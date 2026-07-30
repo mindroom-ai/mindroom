@@ -194,7 +194,7 @@ def auto_flush_enabled(config: Config) -> bool:
 def _agent_uses_file_memory(config: Config, agent_name: str) -> bool:
     if agent_name not in config.agents:
         return False
-    return config.get_agent_memory_backend(agent_name) == "file"
+    return config.resolve_entity(agent_name).memory_backend == "file"
 
 
 def mark_auto_flush_dirty_session(
@@ -461,7 +461,7 @@ async def _extract_memory_summary(
         excerpt=excerpt,
     )
 
-    model_name = config.get_entity_model_name(agent_name)
+    model_name = config.resolve_entity(agent_name).model_name
     model = model_loading.get_model_instance(config, runtime_paths, model_name)
     extractor_agent = Agent(
         name="MemoryAutoFlushExtractor",

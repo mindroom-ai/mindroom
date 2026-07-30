@@ -10,12 +10,12 @@ import pytest
 
 from mindroom.constants import resolve_primary_runtime_paths
 from mindroom.embeddings import (
-    MindRoomOpenAIEmbedder,
     create_sentence_transformers_embedder,
     effective_knowledge_embedder_signature,
     effective_mem0_embedder_signature,
 )
 from mindroom.model_defaults import OPENAI_EMBEDDING_LARGE, SENTENCE_TRANSFORMERS_DEFAULT
+from mindroom.openai_embedder import MindRoomOpenAIEmbedder
 
 TEST_RUNTIME_PATHS = resolve_primary_runtime_paths(config_path=Path("config.yaml"))
 

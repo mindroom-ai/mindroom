@@ -20,15 +20,20 @@ from mindroom import runtime_env_policy
 # Agent names
 ROUTER_AGENT_NAME = "router"
 VISIBLE_ROUTER_VOICE_ECHO_KEY = "com.mindroom.visible_router_voice_echo"
-MINDROOM_COMPACTION_CHUNK_TIMEOUT_SECONDS = 180.0
+DEFAULT_MINDROOM_URL = "http://127.0.0.1:8765"
+DEFAULT_COMPACTION_TIMEOUT_SECONDS = 600.0
 DEFAULT_TOOL_OUTPUT_AUTO_SAVE_THRESHOLD_BYTES = 50 * 1024
+KNOWLEDGE_FILE_INDEX_CONCURRENCY_ENV = "MINDROOM_KNOWLEDGE_FILE_INDEX_CONCURRENCY"
+DEFAULT_MAX_CONCURRENT_KNOWLEDGE_FILE_INDEXES = 4
+MAX_ALLOWED_CONCURRENT_KNOWLEDGE_FILE_INDEXES = 128
 _MINDROOM_DISPATCH_THREAD_READ_TIMEOUT_SECONDS = 1.0
 _STANDARD_HISTORY_ROLES = frozenset({"user", "assistant", "tool"})
 _PROMPT_HISTORY_STORAGE_ROLES = frozenset({"system", "developer"})
 
 # Search order for existing files: env var > ./config.yaml > ~/.mindroom/config.yaml
 _CONFIG_SEARCH_PATHS = [Path("config.yaml"), Path.home() / ".mindroom" / "config.yaml"]
-_RUNTIME_PATH_ENV_KEYS = frozenset({"MINDROOM_CONFIG_PATH", "MINDROOM_STORAGE_PATH"})
+CONTROL_STATE_PATH_ENV = runtime_env_policy.CONTROL_STATE_PATH_ENV
+_RUNTIME_PATH_ENV_KEYS = frozenset({"MINDROOM_CONFIG_PATH", "MINDROOM_STORAGE_PATH", CONTROL_STATE_PATH_ENV})
 _SANDBOX_STARTUP_MANIFEST_RELATIVE_PATH = Path(".runtime") / "startup_manifest.json"
 _CONFIG_PATH_PLACEHOLDER_PATTERN = re.compile(r"\$(?:\{(?P<braced>[A-Z0-9_]+)\}|(?P<bare>[A-Z0-9_]+))")
 
@@ -137,6 +142,7 @@ class RuntimePaths:
     config_dir: Path
     env_path: Path
     storage_root: Path
+    control_state_root: Path | None = None
     process_env: Mapping[str, str] = field(default_factory=dict, repr=False)
     env_file_values: Mapping[str, str] = field(default_factory=dict, repr=False)
 
@@ -146,6 +152,8 @@ class RuntimePaths:
             return str(self.config_path)
         if name == "MINDROOM_STORAGE_PATH":
             return str(self.storage_root)
+        if name == CONTROL_STATE_PATH_ENV:
+            return str(self.control_state_root) if self.control_state_root is not None else default
         if name in self.process_env:
             return self.process_env[name]
         if name in self.env_file_values:
@@ -214,6 +222,17 @@ def _storage_root_from_env_values(env_file_values: dict[str, str], *, config_dir
     return _resolve_runtime_relative_path(value, base_dir=config_dir)
 
 
+def _control_state_root_from_env_values(env_values: Mapping[str, str], *, config_dir: Path) -> Path | None:
+    value = env_values.get(CONTROL_STATE_PATH_ENV)
+    if value is None or not value.strip():
+        return None
+    return _resolve_runtime_relative_path(value, base_dir=config_dir)
+
+
+def _default_control_state_root(storage_root: Path) -> Path:
+    return (storage_root / "control_state").resolve()
+
+
 def resolve_runtime_paths(
     *,
     config_path: Path | None = None,
@@ -244,12 +263,24 @@ def resolve_runtime_paths(
         resolved_storage_root = env_storage_root
     else:
         resolved_storage_root = (config_dir / "mindroom_data").resolve()
+    resolved_control_state_root = _control_state_root_from_env_values(
+        resolved_process_env,
+        config_dir=config_dir,
+    )
+    if resolved_control_state_root is None:
+        resolved_control_state_root = _control_state_root_from_env_values(
+            env_file_values,
+            config_dir=config_dir,
+        )
+    if resolved_control_state_root is None:
+        resolved_control_state_root = _default_control_state_root(resolved_storage_root)
 
     return RuntimePaths(
         config_path=resolved_config_path,
         config_dir=config_dir,
         env_path=env_path,
         storage_root=resolved_storage_root,
+        control_state_root=resolved_control_state_root,
         process_env=cast("Mapping[str, str]", MappingProxyType(resolved_process_env)),
         env_file_values=cast("Mapping[str, str]", MappingProxyType(env_file_values)),
     )
@@ -267,6 +298,7 @@ def _with_primary_runtime_env(paths: RuntimePaths) -> RuntimePaths:
         config_dir=paths.config_dir,
         env_path=paths.env_path,
         storage_root=paths.storage_root,
+        control_state_root=paths.control_state_root,
         process_env=cast("Mapping[str, str]", MappingProxyType(normalized_process_env)),
         env_file_values=paths.env_file_values,
     )
@@ -417,11 +449,12 @@ def deserialize_runtime_paths(payload: object) -> RuntimePaths:
         key: value for key, value in raw_env_file_values.items() if isinstance(key, str) and isinstance(value, str)
     }
     config_path = Path(raw_config_path).expanduser().resolve()
+    storage_root = Path(raw_storage_root).expanduser().resolve()
     return RuntimePaths(
         config_path=config_path,
         config_dir=config_path.parent,
         env_path=config_path.parent / ".env",
-        storage_root=Path(raw_storage_root).expanduser().resolve(),
+        storage_root=storage_root,
         process_env=cast("Mapping[str, str]", MappingProxyType(process_env)),
         env_file_values=cast("Mapping[str, str]", MappingProxyType(env_file_values)),
     )
@@ -489,6 +522,12 @@ def runtime_paths_with_storage_root(runtime_paths: RuntimePaths, storage_root: P
     normalized_process_env = dict(runtime_paths.process_env)
     normalized_process_env["MINDROOM_CONFIG_PATH"] = str(runtime_paths.config_path)
     normalized_process_env["MINDROOM_STORAGE_PATH"] = str(resolved_storage_root)
+    old_default_control_state_root = _default_control_state_root(runtime_paths.storage_root)
+    current_control_state_root = runtime_paths.control_state_root
+    if current_control_state_root is None or current_control_state_root == old_default_control_state_root:
+        resolved_control_state_root = _default_control_state_root(resolved_storage_root)
+    else:
+        resolved_control_state_root = current_control_state_root
     if resolved_storage_root == runtime_paths.storage_root and normalized_process_env == dict(
         runtime_paths.process_env,
     ):
@@ -498,6 +537,7 @@ def runtime_paths_with_storage_root(runtime_paths: RuntimePaths, storage_root: P
         config_dir=runtime_paths.config_dir,
         env_path=runtime_paths.env_path,
         storage_root=resolved_storage_root,
+        control_state_root=resolved_control_state_root,
         process_env=cast("Mapping[str, str]", MappingProxyType(normalized_process_env)),
         env_file_values=runtime_paths.env_file_values,
     )
@@ -609,6 +649,7 @@ def isolated_runtime_paths(runtime_paths: RuntimePaths) -> RuntimePaths:
         config_dir=runtime_paths.config_dir,
         env_path=runtime_paths.env_path,
         storage_root=runtime_paths.storage_root,
+        control_state_root=None,
         process_env=cast("Mapping[str, str]", MappingProxyType(process_env)),
         env_file_values=cast("Mapping[str, str]", MappingProxyType(env_file_values)),
     )
@@ -983,13 +1024,21 @@ def _find_config(*, process_env: Mapping[str, str]) -> Path:
 VOICE_PREFIX = "🎤 "
 ORIGINAL_SENDER_KEY = "com.mindroom.original_sender"
 SOURCE_KIND_KEY = "com.mindroom.source_kind"
+PER_FIRE_THREAD_ROOT_KEY = "com.mindroom.per_fire_thread_root"
+PER_FIRE_THREAD_ROOT_EVENT_ID_KEY = "com.mindroom.per_fire_thread_root_event_id"
+SCHEDULED_HISTORY_LIMIT_KEY = "com.mindroom.history_limit"
 HOOK_SOURCE_KEY = "com.mindroom.hook_source"
 HOOK_MESSAGE_RECEIVED_DEPTH_KEY = "com.mindroom.message_received_depth"
 SKIP_MENTIONS_KEY = "com.mindroom.skip_mentions"
 VOICE_RAW_AUDIO_FALLBACK_KEY = "com.mindroom.voice_raw_audio_fallback"
+VOICE_TRANSCRIPT_KEY = "com.mindroom.voice_transcript"
 ATTACHMENT_IDS_KEY = "com.mindroom.attachment_ids"
 AI_RUN_METADATA_KEY = "io.mindroom.ai_run"
+MATRIX_TURN_SCHEMA_VERSION_METADATA_KEY = "matrix_turn_schema_version"
+MATRIX_TURN_DISCOVERY_EVENT_IDS_METADATA_KEY = "matrix_turn_discovery_event_ids"
+MATRIX_TURN_REDACTED_SOURCE_EVENT_IDS_METADATA_KEY = "matrix_turn_redacted_source_event_ids"
 MATRIX_EVENT_ID_METADATA_KEY = "matrix_event_id"
+MATRIX_MESSAGE_TARGET_ENRICHMENT_KEY = "matrix_message_target"
 MATRIX_RESPONSE_EVENT_ID_METADATA_KEY = "matrix_response_event_id"
 MATRIX_RESPONSE_OWNER_METADATA_KEY = "matrix_response_owner"
 MATRIX_SEEN_EVENT_IDS_METADATA_KEY = "matrix_seen_event_ids"
@@ -997,6 +1046,8 @@ MATRIX_HISTORY_SCOPE_METADATA_KEY = "matrix_history_scope"
 MATRIX_CONVERSATION_TARGET_METADATA_KEY = "matrix_conversation_target"
 MATRIX_SOURCE_EVENT_IDS_METADATA_KEY = "matrix_source_event_ids"
 MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY = "matrix_source_event_prompts"
+MATRIX_SOURCE_EVENT_REVISIONS_METADATA_KEY = "matrix_source_event_revisions"
+MATRIX_SOURCE_EVENT_METADATA_KEY = "matrix_source_event_metadata"
 MINDROOM_COMPACTION_METADATA_KEY = "mindroom_compaction"
 MINDROOM_MATRIX_HISTORY_METADATA_KEY = "mindroom_matrix_history"
 COMPACTION_NOTICE_CONTENT_KEY = "io.mindroom.compaction"
@@ -1029,6 +1080,7 @@ PROVIDER_ENV_KEYS: dict[str, str] = {
     "deepseek": "DEEPSEEK_API_KEY",
     "cerebras": "CEREBRAS_API_KEY",
     "groq": "GROQ_API_KEY",
+    "zai": "ZAI_API_KEY",
     "ollama": "OLLAMA_HOST",
 }
 # Dedicated workers start with no mirrored/shared credentials by default.
@@ -1112,6 +1164,11 @@ def safe_replace(tmp_path: Path, target_path: Path) -> None:
         tmp_path.replace(target_path)
     except OSError:
         shutil.copy2(tmp_path, target_path)
+        target_fd = os.open(target_path, os.O_RDONLY)
+        try:
+            os.fsync(target_fd)
+        finally:
+            os.close(target_fd)
         tmp_path.unlink(missing_ok=True)
 
 

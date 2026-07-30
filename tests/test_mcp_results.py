@@ -156,3 +156,18 @@ def test_tool_result_from_call_result_attaches_mcp_app_resources() -> None:
         "content": [{"type": "text", "text": "chart ready"}],
         "isError": False,
     }
+
+
+@pytest.mark.parametrize("app_resources", [None, []])
+def test_tool_result_from_call_result_ignores_empty_mcp_app_resources(
+    app_resources: list[MCPAppResource] | None,
+) -> None:
+    """Return a plain ToolResult when no MCP App resource was accepted."""
+    result = tool_result_from_call_result(
+        "demo",
+        CallToolResult(content=[TextContent(type="text", text="chart ready")]),
+        app_resources=app_resources,
+    )
+
+    assert type(result) is ToolResult
+    assert result.content == "chart ready"

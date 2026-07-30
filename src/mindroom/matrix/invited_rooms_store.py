@@ -46,8 +46,12 @@ def load_invited_rooms(path: Path) -> set[str]:
     return set(room_ids)
 
 
-def save_invited_rooms(path: Path, room_ids: set[str]) -> None:
-    """Persist invited rooms atomically for one eligible entity."""
+def save_invited_rooms(path: Path, room_ids: set[str]) -> bool:
+    """Replace invited rooms atomically for one eligible entity.
+
+    Callers replacing a cached set must first merge fresh durable state so a
+    stale in-memory snapshot cannot discard another runtime component's write.
+    """
     temp_path = path.with_name(f"{path.name}.{uuid4().hex}.tmp")
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -58,8 +62,19 @@ def save_invited_rooms(path: Path, room_ids: set[str]) -> None:
         safe_replace(temp_path, path)
     except OSError:
         logger.exception("failed_to_save_invited_rooms", path=str(path))
+        return False
     finally:
         temp_path.unlink(missing_ok=True)
+    return True
+
+
+def remember_invited_room(path: Path, room_id: str) -> None:
+    """Add one room using fresh durable state."""
+    room_ids = load_invited_rooms(path)
+    if room_id in room_ids:
+        return
+    room_ids.add(room_id)
+    save_invited_rooms(path, room_ids)
 
 
 def should_accept_invites(config: Config, agent_name: str) -> bool:

@@ -9,14 +9,14 @@ from typing import Any, cast
 from agno.tools.file import FileTools as AgnoFileTools
 from agno.tools.file import log_debug, log_error
 
-from mindroom.tool_system.metadata import (
+from mindroom.tool_system.declarations import (
     ConfigField,
     SetupType,
     ToolCategory,
     ToolExecutionTarget,
     ToolStatus,
-    register_tool_with_metadata,
 )
+from mindroom.tool_system.registration import register_tool_with_metadata
 from mindroom.tools.path_safety import (
     blocked_file_action_message,
     format_path_for_output,

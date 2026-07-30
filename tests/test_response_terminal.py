@@ -7,7 +7,6 @@ import pytest
 from mindroom.response_terminal import (
     PendingVisibleResponse,
     TerminalFailureStatus,
-    build_placeholder_terminal_stream_transport_outcome,
     build_terminal_stream_transport_outcome,
 )
 
@@ -93,12 +92,22 @@ def test_terminal_stream_outcome_resolves_visible_placeholder_state(
 
 
 @pytest.mark.parametrize("terminal_status", ["cancelled", "error"])
-def test_placeholder_terminal_stream_outcome_matches_response_runner_cleanup_shape(
+def test_fresh_thinking_pre_delivery_failure_shape_is_placeholder_only(
     terminal_status: TerminalFailureStatus,
 ) -> None:
-    """Pre-delivery response runner failures should preserve placeholder cleanup fields."""
-    outcome = build_placeholder_terminal_stream_transport_outcome(
-        "$thinking",
+    """The fresh-thinking pre-delivery pending shape preserves placeholder cleanup.
+
+    This is the shape the response runner builds when the attempt runner
+    raised after sending a thinking message on a fresh turn: the tracked
+    event doubles as the run message so the dangling placeholder is cleaned.
+    """
+    outcome = build_terminal_stream_transport_outcome(
+        PendingVisibleResponse(
+            tracked_event_id="$thinking",
+            run_message_id="$thinking",
+            existing_event_id=None,
+            existing_event_is_placeholder=False,
+        ),
         terminal_status=terminal_status,
         failure_reason="delivery failed",
         placeholder_body="Thinking...",

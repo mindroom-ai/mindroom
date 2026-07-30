@@ -5,10 +5,8 @@ generation tracking and stale-write rejection, request-pinned snapshots, the
 file-watcher reload effects, and the concurrent-writer commit protocol.
 """
 
-import asyncio
 import copy
 import threading
-from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
@@ -330,7 +328,13 @@ class TestFileWatcherReload:
 
         def load_then_lose_race(
             paths: constants.RuntimePaths,
-        ) -> tuple[config_lifecycle.ConfigLoadResult, dict[str, Any] | None, Config | None, str | None]:
+        ) -> tuple[
+            config_lifecycle.ConfigLoadResult,
+            dict[str, Any] | None,
+            Config | None,
+            str | None,
+            frozenset[Path] | None,
+        ]:
             result = real_load(paths)
             with state.config_lock:
                 state.snapshot = config_lifecycle._published_snapshot(state.snapshot)
@@ -341,28 +345,6 @@ class TestFileWatcherReload:
         assert config_lifecycle.load_config_into_app(runtime_paths, loaded_app) is False
         # The concurrent commit's snapshot is left untouched by the stale load.
         assert _snapshot(loaded_app).generation == racing_generation
-
-    @pytest.mark.asyncio
-    async def test_watch_config_runs_reload_callback_on_change(self, runtime_paths: constants.RuntimePaths) -> None:
-        """The watcher seam invokes the reload callback when the file changes."""
-        reloads: list[bool] = []
-
-        async def fake_watch_file(
-            path: Path | str,
-            callback: Callable[[], Awaitable[None]],
-            stop_event: asyncio.Event | None,
-        ) -> None:
-            assert Path(path) == runtime_paths.config_path
-            assert stop_event is not None
-            await callback()
-
-        await config_lifecycle._watch_config(
-            asyncio.Event(),
-            runtime_paths,
-            lambda: reloads.append(True) or True,
-            watch_file_impl=fake_watch_file,
-        )
-        assert reloads == [True]
 
 
 class TestExternalWriterPublishing:

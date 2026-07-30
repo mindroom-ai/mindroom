@@ -442,6 +442,14 @@ class RoomConfig(BaseModel):
 
     display_name: str | None = Field(default=None, description="Human-readable Matrix room name")
     description: str = Field(default="", description="Dashboard-facing room purpose")
+    encrypted: bool | None = Field(
+        default=None,
+        description=(
+            "Whether this managed room should have Matrix end-to-end encryption enabled. "
+            "Unset inherits matrix_room_access.encrypt_managed_rooms. "
+            "Enabling encryption on a Matrix room is irreversible; MindRoom never disables it."
+        ),
+    )
 
     @field_validator("display_name")
     @classmethod
@@ -452,10 +460,12 @@ class RoomConfig(BaseModel):
 
     @model_serializer(mode="wrap")
     def serialize_model(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
-        """Omit empty display-name metadata from authored serialization."""
+        """Omit empty room metadata from authored serialization."""
         data = handler(self)
         if data.get("display_name") is None:
             data.pop("display_name", None)
+        if data.get("encrypted") is None:
+            data.pop("encrypted", None)
         return data
 
 

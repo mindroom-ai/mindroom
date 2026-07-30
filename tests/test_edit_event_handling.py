@@ -17,6 +17,7 @@ from mindroom.matrix.users import AgentMatrixUser
 from mindroom.turn_controller import _PrecheckedEvent
 from tests.conftest import (
     bind_runtime_paths,
+    install_generate_response_mock,
     install_runtime_cache_support,
     replace_turn_controller_deps,
     wrap_extracted_collaborators,
@@ -390,11 +391,10 @@ async def test_regular_agent_ignores_edits(tmp_path: Path) -> None:
         "sender": "@user:example.com",
     }
 
-    # Mock the generate_response method
-    with (
-        patch.object(bot, "_generate_response", new_callable=AsyncMock) as mock_generate,
-        patch.object(bot._turn_store, "load_turn", return_value=None),
-    ):
+    # Mock the generate_response seam covering both dispatch and edit-regeneration paths
+    mock_generate = AsyncMock()
+    install_generate_response_mock(bot, mock_generate)
+    with patch.object(bot._turn_store, "load_turn", return_value=None):
         # Process the edit event
         await bot._on_message(room, edit_event)
 

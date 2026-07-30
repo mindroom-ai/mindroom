@@ -28,11 +28,14 @@ from __future__ import annotations
 
 from copy import deepcopy
 from dataclasses import replace
-from typing import TYPE_CHECKING, Any
+from datetime import UTC, datetime
+from typing import TYPE_CHECKING, Any, TypeGuard
 
 from agno.db.base import SessionType
 from agno.run.agent import RunOutput
+from agno.run.base import RunStatus
 from agno.run.team import TeamRunOutput
+from agno.session.agent import AgentSession
 from agno.session.team import TeamSession
 
 from mindroom.constants import (
@@ -45,15 +48,45 @@ from mindroom.history.types import HistoryScope, HistoryScopeState
 from mindroom.metadata_merge import deep_merge_metadata
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable
+    from collections.abc import Callable, Iterable
 
     from agno.db.base import BaseDb
-    from agno.session.agent import AgentSession
 
 _COMPACTION_METADATA_VERSION = 2
 _MATRIX_HISTORY_METADATA_VERSION = 1
 _PENDING_COMPACTION_SCOPE_KEYS_SESSION_STATE_KEY = "mindroom_pending_compaction_scope_keys"
 _COMPACTED_RUN_ID_RETENTION_LIMIT = 1_024
+
+
+def is_model_history_visible_run(run: object) -> TypeGuard[RunOutput | TeamRunOutput]:
+    """Return whether one run is represented in Agno model history."""
+    return (
+        isinstance(run, (RunOutput, TeamRunOutput))
+        and run.parent_run_id is None
+        and run.status not in {RunStatus.paused, RunStatus.cancelled, RunStatus.error}
+    )
+
+
+def new_scope_session(*, session_id: str, scope_id: str, is_team: bool) -> AgentSession | TeamSession:
+    """Return one empty session row for a scope with no stored session yet."""
+    created_at = int(datetime.now(UTC).timestamp())
+    if is_team:
+        return TeamSession(
+            session_id=session_id,
+            team_id=scope_id,
+            metadata={},
+            runs=[],
+            created_at=created_at,
+            updated_at=created_at,
+        )
+    return AgentSession(
+        session_id=session_id,
+        agent_id=scope_id,
+        metadata={},
+        runs=[],
+        created_at=created_at,
+        updated_at=created_at,
+    )
 
 
 def read_scope_state(session: AgentSession | TeamSession, scope: HistoryScope) -> HistoryScopeState:
@@ -204,7 +237,7 @@ def read_scope_seen_event_ids(session: AgentSession | TeamSession, scope: Histor
     """Return the consumed Matrix event ids for one session scope."""
     seen_event_ids = _read_preserved_scope_seen_event_ids(session, scope)
     for run in session.runs or []:
-        if not isinstance(run, (RunOutput, TeamRunOutput)):
+        if not is_model_history_visible_run(run):
             continue
         if _scope_for_run(run) != scope:
             continue
@@ -213,9 +246,11 @@ def read_scope_seen_event_ids(session: AgentSession | TeamSession, scope: Histor
 
 
 def seen_event_ids_for_runs(runs: Iterable[RunOutput | TeamRunOutput]) -> set[str]:
-    """Return Matrix event ids already represented by run metadata."""
+    """Return Matrix event ids represented by model-history-visible runs."""
     seen_event_ids: set[str] = set()
     for run in runs:
+        if not is_model_history_visible_run(run):
+            continue
         seen_event_ids.update(_run_seen_event_ids(run))
     return seen_event_ids
 
@@ -254,6 +289,30 @@ def update_scope_seen_event_ids(
     states[scope.key] = set(updated_seen_ids)
     _write_scope_seen_event_states(session, states)
     return True
+
+
+def invalidate_compacted_replay(
+    session: AgentSession | TeamSession,
+    scope: HistoryScope,
+) -> bool:
+    """Drop summary-backed replay state so Matrix history can rebuild the scope."""
+    changed = False
+    if session.summary is not None:
+        session.summary = None
+        changed = True
+
+    state = read_scope_state(session, scope)
+    reset_state = HistoryScopeState(
+        compacted_run_ids=state.compacted_run_ids,
+        force_compact_before_next_run=state.force_compact_before_next_run,
+    )
+    if state != reset_state:
+        write_scope_state(session, scope, reset_state)
+        changed = True
+
+    if _clear_scope_seen_event_ids(session, scope):
+        changed = True
+    return changed
 
 
 def _metadata_with_merged_seen_event_ids(
@@ -381,7 +440,7 @@ def prune_reintroduced_runs(
     return True
 
 
-def latest_persisted_session(
+def _latest_persisted_session(
     storage: BaseDb,
     session: AgentSession | TeamSession,
 ) -> AgentSession | TeamSession:
@@ -391,7 +450,7 @@ def latest_persisted_session(
     return latest_session if isinstance(latest_session, type(session)) else session
 
 
-def adopt_session_fields(
+def _adopt_session_fields(
     session: AgentSession | TeamSession,
     source: AgentSession | TeamSession,
 ) -> None:
@@ -399,6 +458,27 @@ def adopt_session_fields(
     session.metadata = source.metadata
     session.runs = source.runs
     session.summary = source.summary
+
+
+def update_scope_state_on_latest(
+    storage: BaseDb,
+    session: AgentSession | TeamSession,
+    scope: HistoryScope,
+    update: Callable[[HistoryScopeState], HistoryScopeState],
+) -> HistoryScopeState:
+    """Apply one scope-state update against the freshest stored row and sync the session.
+
+    The update callable sees the latest persisted state, so it can refuse to write
+    (return its input unchanged) when the durable row moved since the caller read it.
+    """
+    target_session = _latest_persisted_session(storage, session)
+    latest_state = read_scope_state(target_session, scope)
+    next_state = update(latest_state)
+    if next_state != latest_state:
+        write_scope_state(target_session, scope, next_state)
+        storage.upsert_session(target_session)
+    _adopt_session_fields(session, target_session)
+    return next_state
 
 
 def record_compaction_chunk(
@@ -425,7 +505,7 @@ def record_compaction_chunk(
         replace(working_state, compacted_run_ids=compacted_run_ids_with(working_state, chunk_run_ids)),
     )
 
-    target_session = latest_persisted_session(storage, persisted_session)
+    target_session = _latest_persisted_session(storage, persisted_session)
     preexisting_tombstones = read_scope_state(target_session, scope).compacted_run_ids
     target_session.summary = working_session.summary
     target_session.metadata = _metadata_with_merged_seen_event_ids(
@@ -456,7 +536,7 @@ def record_compaction_chunk(
             working_session.runs or [],
         )
     storage.upsert_session(target_session)
-    adopt_session_fields(persisted_session, target_session)
+    _adopt_session_fields(persisted_session, target_session)
 
 
 def _sync_remaining_runs_from_working(
@@ -503,6 +583,27 @@ def _read_scope_seen_event_states_from_metadata(metadata: dict[str, Any] | None)
             continue
         parsed[scope_key] = {event_id for event_id in raw_seen_ids if isinstance(event_id, str) and event_id}
     return parsed
+
+
+def _clear_scope_seen_event_ids(session: AgentSession | TeamSession, scope: HistoryScope) -> bool:
+    session_metadata = dict(session.metadata or {})
+    raw_value = _valid_matrix_history_metadata(session_metadata)
+    if raw_value is None:
+        return False
+    raw_states = raw_value.get("states")
+    if not isinstance(raw_states, dict) or scope.key not in raw_states:
+        return False
+
+    next_states = dict(raw_states)
+    next_states.pop(scope.key)
+    if next_states:
+        matrix_history = dict(raw_value)
+        matrix_history["states"] = next_states
+        session_metadata[MINDROOM_MATRIX_HISTORY_METADATA_KEY] = matrix_history
+    else:
+        session_metadata.pop(MINDROOM_MATRIX_HISTORY_METADATA_KEY, None)
+    session.metadata = session_metadata
+    return True
 
 
 def _write_scope_seen_event_states(session: AgentSession | TeamSession, states: dict[str, set[str]]) -> None:

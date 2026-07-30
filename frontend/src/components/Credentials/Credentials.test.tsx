@@ -472,11 +472,15 @@ describe("Credentials", () => {
 
     render(<Credentials />);
 
+    const serviceBButton = await screen.findByRole("button", {
+      name: /service_b/i,
+    });
     await waitFor(() => {
-      expect(screen.getByText("service_b")).toBeInTheDocument();
+      // The fourth request is service A's pending credential load; switch only after that stale request starts.
+      expect((global.fetch as any).mock.calls).toHaveLength(4);
     });
 
-    fireEvent.click(screen.getByRole("button", { name: /service_b/i }));
+    fireEvent.click(serviceBButton);
 
     const editor = screen.getByPlaceholderText(
       '{"api_key":"..."}',

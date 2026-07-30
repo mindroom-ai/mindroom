@@ -8,7 +8,7 @@ fullnameOverride: ""
 replicaCount: 1
 
 image:
-  repository: ghcr.io/mindroom-ai/mindroom-cinny
+  repository: ghcr.io/mindroom-ai/mindroom-chat
   tag: latest
   digest: ""
   pullPolicy: Always
@@ -64,9 +64,27 @@ matrix:
   # Allow logging in to homeservers outside the configured entry.
   allowCustomHomeservers: false
 
+# Optional MatrixRTC discovery and same-origin proxy routes for voice and video calls.
+# LiveKit and the MatrixRTC authorization service must already exist.
+matrixRTC:
+  enabled: false
+  # Public MatrixRTC authorization service URL advertised through
+  # /.well-known/matrix/client, for example https://matrix.example.com/livekit/jwt.
+  livekitServiceUrl: ""
+  proxy:
+    # Proxy the conventional /livekit/jwt and /livekit/sfu paths through nginx.
+    enabled: false
+    # Internal MatrixRTC authorization service URL, for example http://matrixrtc-auth:8080.
+    jwtServiceUpstream: ""
+    # Internal LiveKit SFU URL, for example http://livekit:7880.
+    sfuUpstream: ""
+
 serviceWorker:
   # Register the client service worker, scoped to basePath.
   enabled: true
+  # Root-relative sibling application paths that the PWA navigation fallback
+  # must leave to the network. Requires client support for runtime exclusions.
+  navigationFallbackExcludePaths: []
 
 # Serve a cleanup service worker at the origin-root /sw.js.
 # A Matrix client that previously controlled the origin root can leave a
@@ -98,6 +116,9 @@ nginx:
   create: true
   existingConfigMap: ""
   key: default.conf
+  # Additional directives inserted into the chart-managed nginx server block.
+  # The snippet is evaluated as a Helm template before it is rendered.
+  serverSnippet: ""
   # Key in the nginx ConfigMap holding the root cleanup service worker script.
   # An existing ConfigMap must provide this key when rootServiceWorkerCleanup is enabled.
   cleanupWorkerKey: root-cleanup-sw.js

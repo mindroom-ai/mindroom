@@ -13,14 +13,15 @@ If STT is unavailable, disabled, or fails, the audio still remains available as 
 When a voice message is received:
 
 1. The audio event is handled through the shared media pipeline.
-2. Audio is downloaded and decrypted, if needed, and registered as a context-scoped attachment.
-3. If STT is configured and succeeds, the audio is transcribed and lightly normalized for mentions and commands.
-4. If STT is unavailable, disabled, or fails, MindRoom falls back to `🎤 [Attached voice message]`.
-5. The normalized text plus attachment metadata is dispatched using the normal routing and thread logic.
-6. If routing is ambiguous in a multi-responder room, the router posts a visible handoff message.
-7. If `voice.visible_router_echo` is enabled and the router is present and allowed to reply, the router also posts the normalized voice text as a display-only message.
-8. Otherwise, no extra router message is posted and the chosen agent or team replies directly.
-9. The responding entity receives the original audio attachment alongside the normalized prompt.
+2. If voice STT and `voice.visible_router_echo` are enabled and the router is present and allowed to reply, the router immediately posts `Router agent is transcribing…`.
+3. Audio is downloaded and decrypted, if needed, and registered as a context-scoped attachment while the placeholder is visible.
+4. If STT is configured and succeeds, the audio is transcribed and lightly normalized for mentions and commands.
+5. If STT is unavailable, disabled, or fails, MindRoom falls back to `🎤 [Attached voice message]`.
+6. The router replaces its placeholder with the normalized transcript or fallback text, or posts the fallback directly when STT is disabled.
+7. The normalized transcript or fallback prompt plus attachment metadata is dispatched using the normal routing and thread logic.
+8. If routing is ambiguous in a multi-responder room, the router posts a visible handoff message.
+9. Otherwise, no extra router message is posted and the chosen agent or team replies directly.
+10. The responding entity receives the original audio attachment alongside the normalized transcript or fallback prompt.
 
 ## Configuration
 
@@ -32,8 +33,8 @@ voice:
   visible_router_echo: true
   stt:
     provider: openai
-    model: whisper-1
-    # Optional: custom endpoint (without /v1 suffix)
+    model: gpt-4o-transcribe
+    # Optional: custom service root or /v1 base URL
     # host: http://localhost:8080
   intelligence:
     model: default  # Model used for command recognition
@@ -43,20 +44,21 @@ Or use the dashboard's Voice tab.
 
 With `voice.enabled: false`, audio messages are still surfaced as attachments with the fallback prompt.
 Enabling voice adds STT and command-recognition on top of that attachment flow.
-With `voice.visible_router_echo: true`, the router also posts the normalized transcript or fallback text for inspection when it is present in the room and allowed to reply.
+With `voice.visible_router_echo: true` and `voice.enabled: true`, the router immediately posts a transcription placeholder and replaces that message with the normalized transcript or fallback text when it is present in the room and allowed to reply.
+When `voice.enabled: false`, the router posts the fallback text directly without claiming that transcription is running.
 
 ## STT Providers
 
 MindRoom uses the OpenAI-compatible transcription API. Any service that implements the `/v1/audio/transcriptions` endpoint will work.
 
-### OpenAI Whisper (Cloud)
+### OpenAI Transcription (Cloud)
 
 ```yaml
 voice:
   enabled: true
   stt:
     provider: openai
-    model: whisper-1
+    model: gpt-4o-transcribe
 ```
 
 Requires `OPENAI_API_KEY` environment variable.
@@ -67,12 +69,12 @@ Requires `OPENAI_API_KEY` environment variable.
 voice:
   enabled: true
   stt:
-    provider: openai
+    provider: openai_compatible
     model: whisper-1
     host: http://localhost:8080
 ```
 
-Note: Do not include `/v1` in the host URL - MindRoom appends `/v1/audio/transcriptions` automatically.
+The host may be either the service root or its `/v1` base URL.
 
 Use with [faster-whisper-server](https://github.com/fedirz/faster-whisper-server) or similar OpenAI-compatible STT servers.
 
@@ -84,13 +86,14 @@ For self-hosted solutions that require authentication:
 voice:
   enabled: true
   stt:
-    provider: openai
+    provider: openai_compatible
     model: whisper-1
     host: http://localhost:8080
     api_key: your-custom-api-key
 ```
 
-If `api_key` is not set, MindRoom falls back to the `OPENAI_API_KEY` environment variable.
+If a custom endpoint has no `api_key`, MindRoom sends a non-secret placeholder rather than requiring a cloud key.
+Cloud OpenAI transcription falls back to the `OPENAI_API_KEY` environment variable.
 
 ## Command Recognition
 
@@ -152,7 +155,8 @@ If only one eligible agent or team is visible, that responder answers the normal
 If the audio caption or transcript explicitly mentions an agent or team, that targeted responder answers directly as well.
 In these cases, the router does not post an extra visible routing handoff.
 The transcript or fallback text is used internally for dispatch, not echoed to the room as a separate message.
-If `voice.visible_router_echo` is enabled, the router still posts a display-only copy of the normalized voice text, but responders ignore that echo and continue responding to the original audio event.
+If voice STT and `voice.visible_router_echo` are enabled, the router still posts a display-only placeholder and replaces it with the normalized transcript or fallback text, but responders ignore that echo and continue responding to the original audio event.
+With STT disabled, the router posts the display-only fallback directly.
 
 ### Multi-responder rooms where the router must choose
 
@@ -160,7 +164,8 @@ If multiple agents or teams are available and the audio does not already target 
 The router then posts a normal handoff message such as `@home could you help with this?`.
 The selected agent or team responds to that router handoff, and the handoff carries the original audio attachment metadata forward.
 This is the case where a visible router message appears.
-If `voice.visible_router_echo` is also enabled, the router first posts the normalized voice text as a display-only echo and then posts the normal handoff.
+If voice STT and `voice.visible_router_echo` are enabled, the router immediately posts a display-only transcription placeholder, replaces it with the normalized transcript or fallback text, and then posts the normal handoff.
+With STT disabled, the router posts the display-only fallback directly before the normal handoff.
 
 ### No router, or router cannot reply
 
@@ -172,7 +177,8 @@ If multiple eligible responders remain and the audio does not already target one
 
 ### Visibility rule
 
-By default, MindRoom posts a display-only router echo of normalized voice text when the router is allowed to process the event.
+By default, MindRoom immediately posts a display-only router transcription placeholder when voice STT is enabled and the router is allowed to process the event, then replaces it with the normalized transcript or fallback text.
+With STT disabled, MindRoom posts the display-only fallback directly.
 The router handoff message appears only when the router must disambiguate between multiple eligible responders.
 If the responder is already clear from room shape, thread context, or explicit targeting, the chosen agent or team replies directly to the original audio event.
 Set `voice.visible_router_echo: false` to suppress the display-only echo without changing which event responders actually answer.
@@ -182,6 +188,8 @@ Set `voice.visible_router_echo: false` to suppress the display-only echo without
 The original audio is always registered as a context-scoped attachment before dispatch continues.
 That means the responding agent or team can inspect the file directly, use audio-capable models, or fetch it later with the `attachments` tool.
 This is true whether the prompt came from a transcript, a fallback message, or a router handoff.
+For successful STT turns, MindRoom adds hidden model-facing guidance that says the `🎤` text is already the transcript and the raw audio attachment is optional.
+For raw fallback turns, MindRoom does not add that guidance because the audio attachment remains the primary content.
 
 ## Matrix Integration
 
@@ -202,17 +210,21 @@ Reply-permission checks still use the original human sender, not a later router 
 
 | Variable | Description |
 |----------|-------------|
-| `OPENAI_API_KEY` | For OpenAI Whisper API (used as fallback if no `api_key` configured) |
+| `OPENAI_API_KEY` | For OpenAI transcription (used as fallback if no `api_key` is configured) |
 
 ## Text-to-Speech Tools
 
 MindRoom also supports text-to-speech (TTS) through agent tools.
 These are separate from voice message transcription and allow agents to generate audio responses:
 
+- **Matrix Voice Message** - One-call OpenAI TTS delivery to the current Matrix room or thread via `matrix_voice_message`
 - **OpenAI** - Speech synthesis via `openai` tool
 - **ElevenLabs** - High-quality AI voices and sound effects via `eleven_labs` tool
 - **Cartesia** - Voice AI with optional voice localization via `cartesia` tool
 - **Groq** - Fast speech generation via `groq` tool
+
+Use `matrix_voice_message` when an agent should send a playable Opus Matrix voice note directly.
+It defaults to the current room and active thread, accepts `thread_id="room"` for room-level delivery, and can add readable text through `companion_message`.
 
 See the [Tools documentation](tools/index.md) for configuration details.
 

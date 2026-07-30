@@ -12,6 +12,7 @@ import OpenRouter from "@lobehub/icons/es/OpenRouter/components/Mono";
 import Perplexity from "@lobehub/icons/es/Perplexity/components/Mono";
 import Together from "@lobehub/icons/es/Together/components/Mono";
 import XAI from "@lobehub/icons/es/XAI/components/Mono";
+import ZAI from "@lobehub/icons/es/ZAI/components/Mono";
 import { Brain } from "lucide-react";
 
 export interface ProviderInfo {
@@ -159,6 +160,15 @@ export const PROVIDERS: Record<string, ProviderInfo> = {
     color:
       "bg-amber-500/10 text-amber-600 dark:text-amber-400 border-amber-500/20",
     icon: (className = "h-5 w-5") => <Cerebras className={className} />,
+    requiresApiKey: true,
+  },
+  zai: {
+    id: "zai",
+    name: "Z.ai",
+    description: "Configure your Z.ai API key for GLM models",
+    color:
+      "bg-slate-500/10 text-slate-600 dark:text-slate-400 border-slate-500/20",
+    icon: (className = "h-5 w-5") => <ZAI className={className} />,
     requiresApiKey: true,
   },
 };

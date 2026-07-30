@@ -5,17 +5,19 @@ Read-side invariants:
 1. Every thread read through this policy first waits for the room and same-thread write queue to drain
    (``wait_for_thread_idle``), so a read never observes cache state older than mutations already queued
    when the read began.
-   Startup prewarm deliberately bypasses this policy and relies on the write-time replacement guard
-   instead.
+   Startup prewarm bypasses this policy and relies on the backend replacement guard without occupying
+   the live write coordinator during its bulk room scan.
 
 2. Dispatch-safe modes (``DISPATCH_SNAPSHOT``, ``DISPATCH_FULL``) bound the whole wait-plus-fetch by one
    shared timeout and return an explicitly degraded empty result
    (``THREAD_HISTORY_SOURCE_DEGRADED``) instead of blocking dispatch; consumers must treat that result
-   as unusable for caching, memoization, and root proofs.
+   as unusable for caching and root proofs.
 
-3. ``ADVISORY_FULL`` and ``STRICT_FULL`` have no dispatch timeout and run through the same-thread
-   barrier; ``STRICT_FULL`` is intentionally not dispatch-safe because it may block for authoritative
-   post-lock model context.
+3. Each cache-miss refill is single-flight per full read contract, so one leader runs the homeserver
+   scan and concurrent matching readers share it. There is no admission gate, failure backoff, or cooldown.
+   ``ADVISORY_FULL``, ``STRICT_FULL``, and ``STRICT_SOURCE_REFRESH`` have no dispatch timeout; strict
+   modes are intentionally not dispatch-safe because they may block for authoritative post-lock model
+   context or a direct source refresh.
 
 4. A stale-cache thread tail is never used for MSC3440 latest-event fallback:
    ``get_latest_thread_event_id_if_needed`` falls back to the thread root instead.
@@ -42,13 +44,10 @@ from mindroom.matrix.thread_diagnostics import (
 from mindroom.timing import elapsed_ms_since
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
-
     import structlog
 
     from mindroom.bot_runtime_view import BotRuntimeView
     from mindroom.matrix.cache.write_coordinator import EventCacheWriteCoordinator
-    from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 
 
 _CACHE_COORDINATOR_TIMEOUT = "cache_coordinator_timeout"
@@ -68,15 +67,7 @@ class ThreadReadMode(Enum):
     DISPATCH_SNAPSHOT = auto()
     DISPATCH_FULL = auto()
     STRICT_FULL = auto()
-
-    @property
-    def full_history(self) -> bool:
-        """Return whether this mode requires fully hydrated thread history."""
-        return self in {
-            ThreadReadMode.ADVISORY_FULL,
-            ThreadReadMode.DISPATCH_FULL,
-            ThreadReadMode.STRICT_FULL,
-        }
+    STRICT_SOURCE_REFRESH = auto()
 
     @property
     def dispatch_safe(self) -> bool:
@@ -113,12 +104,14 @@ class ThreadReadPolicy:
         fetch_thread_history_from_client: _ThreadHistoryFetcher,
         fetch_dispatch_thread_history_from_client: _ThreadHistoryFetcher,
         fetch_dispatch_thread_snapshot_from_client: _ThreadHistoryFetcher,
+        refresh_thread_history_from_source: _ThreadHistoryFetcher,
     ) -> None:
         self._logger_getter = logger_getter
         self.runtime = runtime
         self.fetch_thread_history_from_client = fetch_thread_history_from_client
         self.fetch_dispatch_thread_history_from_client = fetch_dispatch_thread_history_from_client
         self.fetch_dispatch_thread_snapshot_from_client = fetch_dispatch_thread_snapshot_from_client
+        self.refresh_thread_history_from_source = refresh_thread_history_from_source
 
     @property
     def logger(self) -> structlog.stdlib.BoundLogger:
@@ -138,13 +131,7 @@ class ThreadReadPolicy:
             ThreadReadMode.DISPATCH_SNAPSHOT: self.fetch_dispatch_thread_snapshot_from_client,
             ThreadReadMode.DISPATCH_FULL: self.fetch_dispatch_thread_history_from_client,
             ThreadReadMode.STRICT_FULL: self.fetch_dispatch_thread_history_from_client,
-        }[mode]
-
-    def _operation_name_for_mode(self, mode: ThreadReadMode) -> str:
-        """Return the cache coordinator operation name for one queued read mode."""
-        return {
-            ThreadReadMode.ADVISORY_FULL: "matrix_cache_refresh_thread_history",
-            ThreadReadMode.STRICT_FULL: "matrix_cache_refresh_strict_thread_history",
+            ThreadReadMode.STRICT_SOURCE_REFRESH: self.refresh_thread_history_from_source,
         }[mode]
 
     async def _wait_for_pending_thread_cache_updates(self, room_id: str, thread_id: str) -> None:
@@ -155,19 +142,8 @@ class ThreadReadPolicy:
             room_id,
             thread_id,
             ignore_cancelled_room_fences=True,
+            coordination_scope=self.runtime.event_cache.principal_id,
         )
-
-    def _full_history_result(
-        self,
-        history: Sequence[ResolvedVisibleMessage],
-    ) -> ThreadHistoryResult:
-        if isinstance(history, ThreadHistoryResult):
-            return thread_history_result(
-                history,
-                is_full_history=True,
-                diagnostics=history.diagnostics,
-            )
-        return thread_history_result(list(history), is_full_history=True)
 
     def _degraded_dispatch_timeout_result(
         self,
@@ -221,20 +197,17 @@ class ThreadReadPolicy:
         thread_id: str,
         *,
         fetcher: _ThreadHistoryFetcher,
-        full_history: bool,
         caller_label: str,
         queue_wait_started: float,
     ) -> ThreadHistoryResult:
+        """Load one read and attach its coordinator queue wait."""
         coordinator_queue_wait_ms = elapsed_ms_since(queue_wait_started, clock=time.perf_counter)
-        thread_history = await fetcher(
+        return await fetcher(
             room_id,
             thread_id,
             caller_label=caller_label,
             coordinator_queue_wait_ms=coordinator_queue_wait_ms,
         )
-        if full_history:
-            return self._full_history_result(thread_history)
-        return thread_history
 
     async def _load_dispatch_thread_read(
         self,
@@ -242,7 +215,6 @@ class ThreadReadPolicy:
         thread_id: str,
         *,
         fetcher: _ThreadHistoryFetcher,
-        full_history: bool,
         caller_label: str,
         queue_wait_started: float,
         dispatch_timeout_seconds: float,
@@ -267,7 +239,6 @@ class ThreadReadPolicy:
                     room_id,
                     thread_id,
                     fetcher=fetcher,
-                    full_history=full_history,
                     caller_label=caller_label,
                     queue_wait_started=queue_wait_started,
                 ),
@@ -283,45 +254,6 @@ class ThreadReadPolicy:
                 dispatch_timeout_seconds=dispatch_timeout_seconds,
                 fetch_started=fetch_started,
             )
-
-    async def _run_thread_read(
-        self,
-        room_id: str,
-        thread_id: str,
-        *,
-        fetcher: _ThreadHistoryFetcher,
-        name: str,
-        full_history: bool,
-        caller_label: str,
-        queue_wait_started: float,
-    ) -> ThreadHistoryResult:
-        coordinator = self._coordinator()
-        if coordinator is None:
-            return await self._load_thread_read(
-                room_id,
-                thread_id,
-                fetcher=fetcher,
-                full_history=full_history,
-                caller_label=caller_label,
-                queue_wait_started=queue_wait_started,
-            )
-        return typing.cast(
-            "ThreadHistoryResult",
-            await coordinator.run_thread_update(
-                room_id,
-                thread_id,
-                lambda: self._load_thread_read(
-                    room_id,
-                    thread_id,
-                    fetcher=fetcher,
-                    full_history=full_history,
-                    caller_label=caller_label,
-                    queue_wait_started=queue_wait_started,
-                ),
-                name=name,
-                ignore_cancelled_room_fences=True,
-            ),
-        )
 
     async def read_thread(
         self,
@@ -358,18 +290,15 @@ class ThreadReadPolicy:
                 room_id,
                 thread_id,
                 fetcher=fetcher,
-                full_history=mode.full_history,
                 caller_label=caller_label,
                 queue_wait_started=queue_wait_started,
                 dispatch_timeout_seconds=dispatch_timeout_seconds,
             )
         await self._wait_for_pending_thread_cache_updates(room_id, thread_id)
-        return await self._run_thread_read(
+        return await self._load_thread_read(
             room_id,
             thread_id,
             fetcher=fetcher,
-            name=self._operation_name_for_mode(mode),
-            full_history=mode.full_history,
             caller_label=caller_label,
             queue_wait_started=queue_wait_started,
         )

@@ -2,8 +2,15 @@
 
 import pytest
 
-from mindroom.constants import VISIBLE_ROUTER_VOICE_ECHO_KEY
+from mindroom.constants import (
+    PER_FIRE_THREAD_ROOT_EVENT_ID_KEY,
+    PER_FIRE_THREAD_ROOT_KEY,
+    SCHEDULED_HISTORY_LIMIT_KEY,
+    SOURCE_KIND_KEY,
+    VISIBLE_ROUTER_VOICE_ECHO_KEY,
+)
 from mindroom.dispatch_source import (
+    EXTERNAL_TRIGGER_SOURCE_KIND,
     HOOK_DISPATCH_SOURCE_KIND,
     HOOK_SOURCE_KIND,
     IMAGE_SOURCE_KIND,
@@ -12,11 +19,30 @@ from mindroom.dispatch_source import (
     SCHEDULED_SOURCE_KIND,
     TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
     VOICE_SOURCE_KIND,
+    content_owns_per_fire_thread_root,
     is_visible_router_voice_echo_content,
+    scheduled_history_limit_from_content,
     source_kind_allows_internal_relay_detection,
+    source_kind_allows_self_authored_ingress,
     source_kind_allows_trusted_original_sender,
     source_kind_bypasses_coalescing,
 )
+
+
+@pytest.mark.parametrize(
+    ("content", "expected"),
+    [
+        pytest.param({SCHEDULED_HISTORY_LIMIT_KEY: 5}, 5, id="positive"),
+        pytest.param({SCHEDULED_HISTORY_LIMIT_KEY: 0}, 0, id="zero"),
+        pytest.param({SCHEDULED_HISTORY_LIMIT_KEY: -1}, None, id="negative"),
+        pytest.param({SCHEDULED_HISTORY_LIMIT_KEY: True}, None, id="bool"),
+        pytest.param({SCHEDULED_HISTORY_LIMIT_KEY: "5"}, None, id="string"),
+        pytest.param({}, None, id="absent"),
+    ],
+)
+def test_scheduled_history_limit_from_content(content: dict[str, object], expected: int | None) -> None:
+    """Only non-negative integer annotations count as a scheduled-turn history limit."""
+    assert scheduled_history_limit_from_content(content) == expected
 
 
 @pytest.mark.parametrize(
@@ -80,6 +106,34 @@ def test_source_kind_allows_trusted_original_sender_rejects_plain_turns(source_k
 
 
 @pytest.mark.parametrize(
+    ("content", "expected"),
+    [
+        ({SOURCE_KIND_KEY: SCHEDULED_SOURCE_KIND, PER_FIRE_THREAD_ROOT_KEY: True}, True),
+        ({SOURCE_KIND_KEY: EXTERNAL_TRIGGER_SOURCE_KIND, PER_FIRE_THREAD_ROOT_KEY: True}, True),
+        ({SOURCE_KIND_KEY: TRUSTED_INTERNAL_RELAY_SOURCE_KIND, PER_FIRE_THREAD_ROOT_KEY: True}, True),
+        (
+            {
+                PER_FIRE_THREAD_ROOT_KEY: True,
+                PER_FIRE_THREAD_ROOT_EVENT_ID_KEY: "$root",
+            },
+            True,
+        ),
+        ({SOURCE_KIND_KEY: HOOK_SOURCE_KIND, PER_FIRE_THREAD_ROOT_KEY: True}, False),
+        ({SOURCE_KIND_KEY: SCHEDULED_SOURCE_KIND, PER_FIRE_THREAD_ROOT_KEY: False}, False),
+        ({SOURCE_KIND_KEY: SCHEDULED_SOURCE_KIND, PER_FIRE_THREAD_ROOT_KEY: "$root"}, False),
+        ({PER_FIRE_THREAD_ROOT_EVENT_ID_KEY: "$root"}, False),
+        ({}, False),
+    ],
+)
+def test_content_owns_per_fire_thread_root_requires_explicit_boolean_marker(
+    content: dict[str, object],
+    expected: bool,
+) -> None:
+    """Only explicit automation or relayed-root metadata owns a per-fire root."""
+    assert content_owns_per_fire_thread_root(content) is expected
+
+
+@pytest.mark.parametrize(
     "source_kind",
     [
         "",
@@ -111,6 +165,36 @@ def test_source_kind_allows_internal_relay_detection_rejects_specialized_turns(
 ) -> None:
     """Specialized source kinds should not be reclassified as generic trusted relays."""
     assert not source_kind_allows_internal_relay_detection(source_kind)
+
+
+@pytest.mark.parametrize(
+    "source_kind",
+    [
+        HOOK_DISPATCH_SOURCE_KIND,
+        EXTERNAL_TRIGGER_SOURCE_KIND,
+    ],
+)
+def test_source_kind_allows_self_authored_ingress_for_dispatch_synthetic_turns(source_kind: str) -> None:
+    """Only dispatch-origin synthetic turns may bypass self-authored ingress suppression."""
+    assert source_kind_allows_self_authored_ingress(source_kind)
+
+
+@pytest.mark.parametrize(
+    "source_kind",
+    [
+        MESSAGE_SOURCE_KIND,
+        SCHEDULED_SOURCE_KIND,
+        HOOK_SOURCE_KIND,
+        TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
+        None,
+        "",
+    ],
+)
+def test_source_kind_allows_self_authored_ingress_rejects_plain_and_non_dispatch_turns(
+    source_kind: str | None,
+) -> None:
+    """Plain and non-dispatch source kinds should keep normal self-authored suppression."""
+    assert not source_kind_allows_self_authored_ingress(source_kind)
 
 
 @pytest.mark.parametrize("content", [None, [], "visible echo"])

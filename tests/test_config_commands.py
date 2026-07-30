@@ -29,7 +29,8 @@ from mindroom.commands.parsing import Command, CommandType, _CommandParser
 from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.main import Config, ConfigRuntimeValidationError
 from mindroom.constants import resolve_runtime_paths
-from mindroom.handled_turns import HandledTurnState
+from mindroom.delivery_gateway import SendTextRequest
+from mindroom.handled_turns import TurnRecord
 from mindroom.hooks import HookRegistry
 from mindroom.matrix.state import MatrixState
 from mindroom.message_target import MessageTarget
@@ -109,9 +110,7 @@ async def test_add_confirmation_reactions_sends_confirm_and_cancel_annotations()
     client = AsyncMock()
     response = MagicMock(spec=nio.RoomSendResponse)
     client.room_send.return_value = response
-    config = SimpleNamespace(matrix_delivery=SimpleNamespace(ignore_unverified_devices=False))
-
-    await add_confirmation_reactions(client, "!room:example.org", "$preview", config=config)
+    await add_confirmation_reactions(client, "!room:example.org", "$preview")
 
     assert [call.kwargs["content"] for call in client.room_send.await_args_list] == [
         {
@@ -129,6 +128,8 @@ async def test_add_confirmation_reactions_sends_confirm_and_cancel_annotations()
             },
         },
     ]
+    # Reactions must reach encrypted rooms; bots deliver to unverified devices.
+    assert all(call.kwargs["ignore_unverified_devices"] is True for call in client.room_send.await_args_list)
 
 
 class TestCommandParser:
@@ -489,8 +490,8 @@ async def test_handle_command_records_response_event_id_for_standard_reply(tmp_p
     )
 
     context.record_handled_turn.assert_called_once_with(
-        HandledTurnState.from_source_event_id(
-            "$event",
+        TurnRecord.create(
+            ["$event"],
             response_event_id="$reply",
         ),
     )
@@ -709,11 +710,10 @@ async def test_handle_command_config_set_confirmation_records_preview_event_id(t
         context.client,
         "!room:example.org",
         "$preview",
-        config=context.config,
     )
     context.record_handled_turn.assert_called_once_with(
-        HandledTurnState.from_source_event_id(
-            "$event",
+        TurnRecord.create(
+            ["$event"],
             response_event_id="$preview",
         ),
     )
@@ -785,8 +785,8 @@ async def test_handle_command_config_set_records_preview_before_post_send_failur
         )
 
     context.record_handled_turn.assert_called_once_with(
-        HandledTurnState.from_source_event_id(
-            "$event",
+        TurnRecord.create(
+            ["$event"],
             response_event_id="$preview",
         ),
     )
@@ -808,7 +808,7 @@ async def test_handle_confirmation_reaction_respects_disabled_config_command(tmp
         _conversation_resolver=SimpleNamespace(
             build_message_target=MagicMock(return_value=target),
         ),
-        _send_response=AsyncMock(),
+        _delivery_gateway=MagicMock(send_text=AsyncMock(return_value="$event")),
     )
     room = SimpleNamespace(room_id="!room:example.org")
     event = SimpleNamespace(sender="@admin:example.org", key="✅", reacts_to="$preview")
@@ -830,10 +830,12 @@ async def test_handle_confirmation_reaction_respects_disabled_config_command(tmp
         await handle_confirmation_reaction(bot, room, event, pending_change)
 
     mock_apply.assert_not_awaited()
-    bot._send_response.assert_awaited_once_with(
-        target=target,
-        response_text="❌ Config command disabled.",
-        skip_mentions=True,
+    bot._delivery_gateway.send_text.assert_awaited_once_with(
+        SendTextRequest(
+            target=target,
+            response_text="❌ Config command disabled.",
+            skip_mentions=True,
+        ),
     )
 
 
@@ -853,7 +855,7 @@ async def test_handle_confirmation_reaction_requires_current_admin(tmp_path: Pat
         _conversation_resolver=SimpleNamespace(
             build_message_target=MagicMock(return_value=target),
         ),
-        _send_response=AsyncMock(),
+        _delivery_gateway=MagicMock(send_text=AsyncMock(return_value="$event")),
     )
     room = SimpleNamespace(room_id="!room:example.org")
     event = SimpleNamespace(sender="@admin:example.org", key="✅", reacts_to="$preview")
@@ -875,10 +877,12 @@ async def test_handle_confirmation_reaction_requires_current_admin(tmp_path: Pat
         await handle_confirmation_reaction(bot, room, event, pending_change)
 
     mock_apply.assert_not_awaited()
-    bot._send_response.assert_awaited_once_with(
-        target=target,
-        response_text="❌ Admin only.",
-        skip_mentions=True,
+    bot._delivery_gateway.send_text.assert_awaited_once_with(
+        SendTextRequest(
+            target=target,
+            response_text="❌ Admin only.",
+            skip_mentions=True,
+        ),
     )
 
 
@@ -899,7 +903,7 @@ async def test_handle_confirmation_reaction_accepts_alias_backed_requester(tmp_p
         _conversation_resolver=SimpleNamespace(
             build_message_target=MagicMock(return_value=target),
         ),
-        _send_response=AsyncMock(),
+        _delivery_gateway=MagicMock(send_text=AsyncMock(return_value="$event")),
     )
     room = SimpleNamespace(room_id="!room:example.org")
     event = SimpleNamespace(sender="@telegram_admin:example.org", key="✅", reacts_to="$preview")
@@ -929,10 +933,12 @@ async def test_handle_confirmation_reaction_accepts_alias_backed_requester(tmp_p
         False,
         runtime_paths=bot.runtime_paths,
     )
-    bot._send_response.assert_awaited_once_with(
-        target=target,
-        response_text="✅ Configuration updated successfully.",
-        skip_mentions=True,
+    bot._delivery_gateway.send_text.assert_awaited_once_with(
+        SendTextRequest(
+            target=target,
+            response_text="✅ Configuration updated successfully.",
+            skip_mentions=True,
+        ),
     )
 
 
@@ -1231,6 +1237,59 @@ async def test_apply_config_change_returns_invalid_plugin_manifest_error(tmp_pat
 
     assert "Invalid configuration" in response
     assert "Invalid plugin name" in response
+
+
+@pytest.mark.asyncio
+async def test_apply_config_change_preserves_call_profile_authorship(tmp_path: Path) -> None:
+    """Confirmed edits preserve complete profiles and agent assignments."""
+    config_path = tmp_path / "runtime-config.yaml"
+    config_path.write_text(
+        yaml.safe_dump(
+            {
+                "agents": {
+                    "inherited": {"display_name": "Inherited"},
+                    "cleared": {"display_name": "Cleared"},
+                },
+                "calls": {
+                    "enabled": True,
+                    "profiles": {
+                        "openai-realtime": {
+                            "backend": "realtime",
+                            "model": "gpt-realtime-2.1",
+                            "credentials_service": "openai-voice",
+                            "voice": "marin",
+                        },
+                    },
+                    "agents": {
+                        "inherited": "openai-realtime",
+                        "cleared": "openai-realtime",
+                    },
+                },
+            },
+        ),
+        encoding="utf-8",
+    )
+
+    response = await apply_config_change(
+        "defaults.markdown",
+        False,
+        _runtime_paths_for_config(config_path),
+    )
+
+    saved = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    assert "Configuration updated successfully" in response
+    assert saved["calls"]["profiles"] == {
+        "openai-realtime": {
+            "backend": "realtime",
+            "model": "gpt-realtime-2.1",
+            "credentials_service": "openai-voice",
+            "voice": "marin",
+        },
+    }
+    assert saved["calls"]["agents"] == {
+        "cleared": "openai-realtime",
+        "inherited": "openai-realtime",
+    }
 
 
 @pytest.mark.asyncio

@@ -133,6 +133,11 @@ spec:
               mountPath: {{ include "mindroom-tuwunel.registrationTokenDir" . }}
               readOnly: true
             {{- end }}
+            {{- if .Values.tuwunel.appserviceRegistration.existingSecret }}
+            - name: appservice-registration
+              mountPath: {{ include "mindroom-tuwunel.appserviceDir" . }}
+              readOnly: true
+            {{- end }}
             {{- if .Values.tuwunel.oidc.enabled }}
             - name: oidc-client-secret
               mountPath: {{ include "mindroom-tuwunel.oidcClientSecretDir" . }}
@@ -155,6 +160,14 @@ spec:
             items:
               - key: {{ .Values.tuwunel.registrationToken.key }}
                 path: {{ .Values.tuwunel.registrationToken.key }}
+        {{- end }}
+        {{- if .Values.tuwunel.appserviceRegistration.existingSecret }}
+        - name: appservice-registration
+          secret:
+            secretName: {{ .Values.tuwunel.appserviceRegistration.existingSecret }}
+            items:
+              - key: {{ .Values.tuwunel.appserviceRegistration.key }}
+                path: {{ .Values.tuwunel.appserviceRegistration.key }}
         {{- end }}
         {{- if .Values.tuwunel.oidc.enabled }}
         - name: oidc-client-secret

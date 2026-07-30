@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from agno.knowledge.knowledge import Knowledge
+from mindroom.strict_knowledge import StrictSearchKnowledge
 
 
 @dataclass(frozen=True)
@@ -16,7 +16,7 @@ class KnowledgeSourceDescription:
 
 
 @dataclass
-class KnowledgeWithSourceDescriptions(Knowledge):
+class KnowledgeWithSourceDescriptions(StrictSearchKnowledge):
     """Knowledge handle carrying structured source descriptions for merged bases."""
 
     source_descriptions: tuple[KnowledgeSourceDescription, ...] = ()

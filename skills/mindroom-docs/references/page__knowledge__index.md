@@ -52,6 +52,9 @@ agents:
 Place files in `./knowledge_docs/`, then trigger a reindex from the dashboard/API or let MindRoom watch shared local bases with `watch: true`.
 Chat uses the last successfully published index and continues without blocking when a base is missing, stale, or failed.
 When a watched file changes, MindRoom marks the published index stale, refreshes in the background, and atomically publishes the replacement when it succeeds.
+A refresh builds that replacement by reusing the published index's stored vectors for every file whose content is unchanged, so it only embeds files that were added or edited.
+Changing `chunk_size`, `chunk_overlap`, the embedder, or any corpus filter invalidates the stored vectors, and the next refresh re-embeds the whole base.
+An explicit reindex from the dashboard or API rebuilds every vector instead of reusing any, which is how you replace an index you no longer trust.
 When `watch: false`, direct external file edits require explicit reindex, while dashboard/API upload and delete actions still schedule refresh after a successful mutation.
 Knowledge base IDs are the keys under `knowledge_bases`.
 Use a non-empty single path component such as `docs` or `company_docs`, not `""`, `.`, `..`, names containing `/` or `\`, or names containing line breaks.
@@ -112,11 +115,15 @@ knowledge_bases:
 | `include_extensions` | list | `null` | Exact set of file extensions to index instead of the default text-like set (semantic mode only) |
 | `extra_extensions` | list | `[]` | File extensions to index in addition to the default text-like set (semantic mode only) |
 | `exclude_extensions` | list | `[]` | File extensions to exclude after include filtering (semantic mode only) |
+| `skip_hidden` | bool | `true` | Skip hidden files and folders (path components starting with `.`) during indexing, such as the dot-prefixed temp files of writers that update knowledge folders in place. Git-backed bases ignore this field and use `git.skip_hidden` instead |
 | `git` | object | `null` | Optional Git repository sync settings |
 
+Set `skip_hidden: false` if your knowledge folder intentionally contains dot-prefixed files or directories that should be indexed.
 Use smaller `chunk_size` values when your embedding server has lower token or batch limits.
 `chunk_size` and `chunk_overlap` only affect semantic mode.
 If chunking is too large, semantic indexing retries will fail with embedder 500 errors.
+Semantic refreshes index up to 4 files concurrently by default.
+Set `MINDROOM_KNOWLEDGE_FILE_INDEX_CONCURRENCY` to an integer from 1 through 128 to tune this process-wide limit for large corpora; invalid values fail when knowledge managers start.
 
 ### File Type Filtering
 
@@ -138,6 +145,11 @@ The allowed set is always explicit configuration and never changes based on the 
 Non-text formats such as `.pdf`, `.docx`, or `.pptx` require their reader package (for example `pypdf`, `python-docx`, or `python-pptx`) in the MindRoom environment.
 When a reader package is missing, the refresh indexes every other file, logs a warning naming the file and the missing package, and records a partial-index error instead of publishing an index without the opted-in content.
 Extension filtering does not apply in `files` mode, which exposes every managed file.
+
+A `.json` file is normally split into one document per top-level JSON value, which keeps structured entries separately searchable.
+When such a file is not valid JSON, the refresh indexes its raw text instead of failing the file, and logs a warning naming the file and the line and column of the parse error.
+The file then counts as successfully indexed, so its content stays searchable, but it is chunked like plain text rather than split per JSON value.
+Fix the reported parse error to get structured chunking back.
 
 ### Private Agent Knowledge
 
@@ -262,7 +274,7 @@ knowledge_bases:
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `repo_url` | string | *required* | HTTPS repository URL to clone/fetch |
+| `repo_url` | string | *required* | Repository URL to clone/fetch. See the accepted forms below |
 | `branch` | string | `main` | Branch to track |
 | `poll_interval_seconds` | int | `300` | Interval for scheduling background Git refreshes |
 | `credentials_service` | string | `null` | Service name in CredentialsManager for private repos |
@@ -275,16 +287,42 @@ knowledge_bases:
 When `lfs: true`, install `git-lfs` on the runtime host for `uv run` or `uvx` flows.
 Bundled container images already include it.
 
+#### Accepted `repo_url` forms
+
+MindRoom writes `repo_url` into the checkout's `origin` remote, so a network form is accepted only when its host resolves; hostless local forms are accepted on their own terms. Anything else is refused rather than guessed at.
+
+| Form | Example |
+|------|---------|
+| URL with a host | `https://github.com/org/repo.git`, `ssh://git@host/org/repo.git` |
+| scp-style SSH | `git@github.com:org/repo.git`, `github.com:org/repo.git` |
+| Absolute local path | `/srv/repos/repo.git` |
+| `file:` URL | `file:///srv/repos/repo.git` |
+
+Refused, with an error naming the reason: relative and home-relative paths (`./repo.git`, `../repo.git`, `~/repo.git`, `repo.git`), URLs with an empty authority (`https:///org/repo.git`), URLs whose separator is percent-encoded or written as a lookalike codepoint, and anything embedding a second URL.
+
+**Do not embed credentials in `repo_url`.** A password in a well-formed URL is stripped before the remote is written, so it never reaches `.git/config` — but it is still in your config file, and still handed to Git for every command.
+A password MindRoom cannot strip with confidence is refused outright rather than written: that covers forms where the scheme has been dropped, such as `oauth2:TOKEN@gitlab.com:org/repo.git` or `x-access-token:TOKEN@github.com/org/repo.git`.
+Use `credentials_service` instead: those credentials are passed to Git for the duration of one command and are never written to disk.
+
+If a checkout already holds a credential-bearing remote from before this check existed, the refusal cannot clean it — delete the checkout directory so the next sync clones afresh.
+
 ### Sync Behavior
 
 - Chat and runtime requests never wait for Git sync or indexing.
 - Missing, stale, or failed knowledge schedules a per-binding refresh and the current request continues with availability metadata.
 - Explicit dashboard/API reindex or sync runs Git sync first for Git-backed bases.
-- Semantic Git refresh then rebuilds a candidate index, while files-only Git refresh publishes source metadata.
+- Semantic Git refresh then advances a candidate index, while files-only Git refresh publishes source metadata.
 - When `lfs: true`, MindRoom disables implicit LFS smudge during clone/checkout/reset and explicitly hydrates the checkout after sync, keeping the working tree complete even when indexing filters only include some file types.
 - Local edits to Git-tracked files are discarded during refresh sync, and tracked deletions are restored from the remote checkout.
+- Change detection for Git-backed bases is the tracked revision, not file contents: while the checkout stays on the revision the index was published from, MindRoom republishes the existing index without reading the corpus.
+- Consequently an out-of-band edit to a Git-backed checkout is not indexed while the revision is unchanged.
+- The checkout is MindRoom-owned; edit the repository and sync, or force a reindex, instead of editing the working tree.
 - Git-backed bases reject dashboard/API file upload and delete mutations; update the repository and sync or reindex instead.
 - Successful refresh publishes a new last successfully published index while failed refresh preserves the previous one and records the error in status metadata.
+- Semantic refresh is resumable: an interrupted or failed build keeps its private candidate index and continues it on the next refresh instead of restarting from zero.
+- A candidate is only continued when its recorded indexing settings, embedder identity, and source identity still match; otherwise it is discarded and one clean candidate is started.
+- Source changes during a build are reconciled against the candidate, so unchanged files keep their vectors, changed files are re-embedded, and deleted files have their vectors removed.
+- Transient embedding failures (timeouts, connection errors, HTTP 408/429/5xx) are retried with bounded backoff; permanent failures such as authentication errors stop the pass immediately and preserve the candidate.
 
 ### File Filtering with Patterns
 
@@ -369,15 +407,19 @@ memory:
     provider: openai        # or "ollama", "huggingface", or "sentence_transformers"
     config:
       model: text-embedding-3-small
+      credentials_service: embedder # Optional strict credential binding
       host: null             # For self-hosted (Ollama)
       dimensions: null       # Optional: embedding dimension override (e.g., 256)
 ```
 
 | Provider | Model Example | Notes |
 |----------|---------------|-------|
-| `openai` | `text-embedding-3-small` | Requires `OPENAI_API_KEY` |
+| `openai` | `text-embedding-3-small` | Key resolution below; keyless local endpoints allowed |
 | `ollama` | `nomic-embed-text` | Self-hosted, set `host` or `OLLAMA_HOST` |
 | `sentence_transformers` | `sentence-transformers/all-MiniLM-L6-v2` | Fully local Python runtime; auto-installs the optional extra on first use |
+
+The `openai` provider resolves its key in this order: explicit `memory.embedder.config.api_key`; then the service named by `memory.embedder.config.credentials_service`; or, when no service is named, the dedicated `embedder` credential followed by the shared `OPENAI_API_KEY`. A named service is a strict binding and never falls through to another provider key.
+See [Memory](https://docs.mindroom.chat/memory/) for the full embedder credential contract and failure surfacing.
 
 ## Storage
 
@@ -386,6 +428,11 @@ Each successful semantic refresh publishes a generation-specific ChromaDB collec
 The base ID is sanitized to alphanumerics, hyphens, and underscores only, and the hash is a digest of the resolved knowledge path.
 For PrivateAgentKnowledge, the effective private-root path is part of that hash, so each requester-local root gets an isolated index.
 File-mode refreshes may write lightweight source metadata, but local file-only bases do not need a vector database.
+
+While a semantic build is in progress, that directory also holds `candidate_index.json` and `candidate_index.jsonl`, the durable record of which files the in-progress candidate has already indexed.
+Those files are removed once the candidate is published.
+At most one owned candidate collection per knowledge base is retained, and superseded owned candidates are deleted.
+Collections whose ownership cannot be proven from the base identity are preserved and reported rather than removed, so unrelated collections in that directory may remain.
 
 The storage path defaults to `mindroom_data/` next to your `config.yaml`, or can be set with `MINDROOM_STORAGE_PATH`.
 
@@ -399,7 +446,7 @@ The web dashboard provides a Knowledge tab for managing knowledge bases without 
 - Configure Git sync settings
 - Upload and remove files for non-Git-backed bases
 - Trigger a full reindex or Git sync on demand
-- Monitor indexing status (file count vs. indexed count)
+- Monitor published indexing status (file count vs. indexed count)
 - Assign knowledge bases to agents from the Agents tab
 
 ## API Endpoints

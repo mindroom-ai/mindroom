@@ -216,7 +216,7 @@ class ScopedOAuthClientMixin:
         token_data = self._load_token_data()
         if not token_data:
             return None
-        if not oauth_credentials_have_required_scopes(self._oauth_provider, token_data):
+        if not self._stored_credentials_have_required_scopes(token_data):
             self._oauth_logger.warning(
                 "oauth_credentials_missing_required_scopes",
                 tool_name=self._oauth_tool_name,
@@ -237,6 +237,10 @@ class ScopedOAuthClientMixin:
             return None
         self._oauth_logger.info("oauth_credentials_loaded", tool_name=self._oauth_tool_name)
         return creds
+
+    def _stored_credentials_have_required_scopes(self, token_data: dict[str, Any]) -> bool:
+        """Return whether stored credentials can authenticate this toolkit."""
+        return oauth_credentials_have_required_scopes(self._oauth_provider, token_data)
 
     def _should_fallback_to_original_auth(self) -> bool:
         """Return whether the tool should defer to its original auth flow."""
@@ -269,7 +273,7 @@ class ScopedOAuthClientMixin:
         token_data = self._load_token_data()
         if (
             not token_data
-            or not oauth_credentials_have_required_scopes(self._oauth_provider, token_data)
+            or not self._stored_credentials_have_required_scopes(token_data)
             or not oauth_credentials_satisfy_identity_policy(self._oauth_provider, self._runtime_paths, token_data)
         ):
             raise self._connection_required()
@@ -281,6 +285,8 @@ class ScopedOAuthClientMixin:
             if self.creds.expired and self.creds.refresh_token:
                 self.creds.refresh(google_requests.Request())
                 refreshed = dict(token_data)
+                # Google auth refresh updates access-token state and preserves the
+                # stored refresh token, unlike rotating MCP provider refreshes.
                 refreshed["token"] = self.creds.token
                 refreshed_expires_at = self._expires_at_from_credentials(self.creds)
                 if refreshed_expires_at is not None:

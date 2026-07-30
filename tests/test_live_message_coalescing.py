@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import nio
 import pytest
 from pydantic import ValidationError
+from structlog.testing import capture_logs
 
 from mindroom.attachments import _attachment_id_for_event, load_attachment, register_local_attachment
 from mindroom.bot import AgentBot
@@ -33,6 +34,7 @@ from mindroom.constants import (
     SOURCE_KIND_KEY,
     VISIBLE_ROUTER_VOICE_ECHO_KEY,
     VOICE_RAW_AUDIO_FALLBACK_KEY,
+    VOICE_TRANSCRIPT_KEY,
 )
 from mindroom.conversation_resolver import MessageContext
 from mindroom.dispatch_handoff import (
@@ -52,7 +54,7 @@ from mindroom.dispatch_source import (
     TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
     VOICE_SOURCE_KIND,
 )
-from mindroom.handled_turns import HandledTurnState
+from mindroom.handled_turns import SourceEventMetadata, TurnRecord
 from mindroom.hooks import MessageEnvelope
 from mindroom.inbound_turn_normalizer import (
     BatchMediaAttachmentRequest,
@@ -219,7 +221,7 @@ def _respond_dispatch_plan(action: object | None = None) -> _DispatchPlan:
     )
 
 
-def _handled_turn_source_event_ids(handled_turn: HandledTurnState | None) -> list[str]:
+def _handled_turn_source_event_ids(handled_turn: TurnRecord | None) -> list[str]:
     """Return source event IDs from one handled-turn carrier for test assertions."""
     return list(handled_turn.source_event_ids) if handled_turn is not None else []
 
@@ -229,6 +231,40 @@ def _make_room(room_id: str = "!room:localhost") -> MagicMock:
     room.room_id = room_id
     room.canonical_alias = None
     return room
+
+
+@pytest.mark.asyncio
+async def test_duplicate_delivery_is_claimed_before_dispatch_resolution(tmp_path: Path) -> None:
+    """A replay arriving during cache resolution must not repeat that work."""
+    bot = _make_bot(tmp_path, debounce_ms=0)
+    room = _make_room()
+    event = _text_event(event_id="$duplicate", body="@test_agent hello")
+    resolution_started = asyncio.Event()
+    duplicate_reservation = MagicMock()
+
+    async def slow_normalize(*_args: object, **_kwargs: object) -> None:
+        resolution_started.set()
+        await asyncio.Event().wait()
+
+    normalizer = MagicMock()
+    normalizer.resolve_text_event = AsyncMock(side_effect=slow_normalize)
+    controller = replace_turn_controller_deps(bot, normalizer=normalizer)
+    first = asyncio.create_task(
+        controller._dispatch_text_message(room, event, "@user:localhost"),
+    )
+    await resolution_started.wait()
+    await controller._dispatch_text_message(
+        room,
+        event,
+        "@user:localhost",
+        queued_notice_reservation=duplicate_reservation,
+    )
+    first.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await first
+
+    normalizer.resolve_text_event.assert_awaited_once()
+    duplicate_reservation.cancel.assert_called_once_with()
 
 
 async def _wait_for(condition: Callable[[], bool], *, deadline_seconds: float = 0.5) -> None:
@@ -417,15 +453,11 @@ def _prepared_dispatch(
         correlation_id=event_id,
         envelope=MessageEnvelope(
             source_event_id=event_id,
-            room_id="!room:localhost",
             target=target,
-            requester_id=requester_user_id,
-            sender_id=requester_user_id,
             body=body,
             attachment_ids=(),
             mentioned_agents=(),
             agent_name="test_agent",
-            source_kind=source_kind,
             dispatch_policy_source_kind=dispatch_policy_source_kind,
             origin=message_origin(sender_id=requester_user_id, requester_id=requester_user_id, source_kind=source_kind),
         ),
@@ -452,7 +484,7 @@ async def test_single_message_dispatches_after_debounce_window(tmp_path: Path) -
         _requester_user_id: str,
         *,
         media_events: list[object] | None = None,
-        handled_turn: HandledTurnState | None = None,
+        handled_turn: TurnRecord | None = None,
         **_metadata: object,
     ) -> None:
         _ = handled_turn
@@ -487,7 +519,7 @@ async def test_two_rapid_text_messages_dispatch_one_combined_turn(tmp_path: Path
         _requester_user_id: str,
         *,
         media_events: list[object] | None = None,
-        handled_turn: HandledTurnState | None = None,
+        handled_turn: TurnRecord | None = None,
         **_metadata: object,
     ) -> None:
         _ = media_events, handled_turn
@@ -514,7 +546,11 @@ async def test_two_rapid_text_messages_dispatch_one_combined_turn(tmp_path: Path
         (
             "$m2",
             "The user sent the following messages in quick succession. "
-            "Treat them as one turn and respond once:\n\nfirst\nsecond",
+            "Treat them as one turn and respond once:\n\n"
+            "<messages>\n"
+            '<msg event_id="$m1" from="@user:localhost" ts="1970-01-01 00:00 UTC"><![CDATA[first]]></msg>\n'
+            '<msg event_id="$m2" from="@user:localhost" ts="1970-01-01 00:00 UTC"><![CDATA[second]]></msg>\n'
+            "</messages>",
             ["$m1", "$m2"],
         ),
     ]
@@ -569,7 +605,7 @@ async def test_image_and_text_coalesce_into_single_dispatch(tmp_path: Path) -> N
         _requester_user_id: str,
         *,
         media_events: list[object] | None = None,
-        handled_turn: HandledTurnState | None = None,
+        handled_turn: TurnRecord | None = None,
         **_metadata: object,
     ) -> None:
         _ = handled_turn
@@ -595,7 +631,11 @@ async def test_image_and_text_coalesce_into_single_dispatch(tmp_path: Path) -> N
     assert calls == [
         (
             "The user sent the following messages in quick succession. "
-            "Treat them as one turn and respond once:\n\n[Attached image]\ndescribe it",
+            "Treat them as one turn and respond once:\n\n"
+            "<messages>\n"
+            '<msg event_id="$img1" from="@user:localhost" ts="1970-01-01 00:00 UTC"><![CDATA[[Attached image]]]></msg>\n'
+            '<msg event_id="$m2" from="@user:localhost" ts="1970-01-01 00:00 UTC"><![CDATA[describe it]]></msg>\n'
+            "</messages>",
             ["$img1", "$m2"],
             1,
         ),
@@ -617,7 +657,7 @@ async def test_room_root_image_and_caption_coalesce_into_single_dispatch(tmp_pat
         _requester_user_id: str,
         *,
         media_events: list[object] | None = None,
-        handled_turn: HandledTurnState | None = None,
+        handled_turn: TurnRecord | None = None,
         **_metadata: object,
     ) -> None:
         calls.append((dispatched_event.body, _handled_turn_source_event_ids(handled_turn), len(media_events or [])))
@@ -631,7 +671,11 @@ async def test_room_root_image_and_caption_coalesce_into_single_dispatch(tmp_pat
     assert calls == [
         (
             "The user sent the following messages in quick succession. "
-            "Treat them as one turn and respond once:\n\n[Attached image]\ndescribe this",
+            "Treat them as one turn and respond once:\n\n"
+            "<messages>\n"
+            '<msg event_id="$img" from="@user:localhost" ts="1970-01-01 00:00 UTC"><![CDATA[[Attached image]]]></msg>\n'
+            '<msg event_id="$text" from="@user:localhost" ts="1970-01-01 00:00 UTC"><![CDATA[describe this]]></msg>\n'
+            "</messages>",
             ["$img", "$text"],
             1,
         ),
@@ -654,7 +698,7 @@ async def test_images_then_caption_coalesce_into_single_dispatch(tmp_path: Path)
         _requester_user_id: str,
         *,
         media_events: list[object] | None = None,
-        handled_turn: HandledTurnState | None = None,
+        handled_turn: TurnRecord | None = None,
         **_metadata: object,
     ) -> None:
         calls.append((_handled_turn_source_event_ids(handled_turn), len(media_events or [])))
@@ -705,7 +749,7 @@ async def test_each_thread_text_dispatches_immediately_as_own_turn(tmp_path: Pat
         _requester_user_id: str,
         *,
         media_events: list[object] | None = None,
-        handled_turn: HandledTurnState | None = None,
+        handled_turn: TurnRecord | None = None,
         **_metadata: object,
     ) -> None:
         _ = media_events, handled_turn
@@ -751,7 +795,7 @@ async def test_image_after_text_dispatch_is_a_second_batch(tmp_path: Path) -> No
         _requester_user_id: str,
         *,
         media_events: list[object] | None = None,
-        handled_turn: HandledTurnState | None = None,
+        handled_turn: TurnRecord | None = None,
         **_metadata: object,
     ) -> None:
         _ = handled_turn
@@ -797,7 +841,7 @@ async def test_different_senders_dispatch_separately(tmp_path: Path) -> None:
         _requester_user_id: str,
         *,
         media_events: list[object] | None = None,
-        handled_turn: HandledTurnState | None = None,
+        handled_turn: TurnRecord | None = None,
         **_metadata: object,
     ) -> None:
         _ = media_events, handled_turn
@@ -925,7 +969,7 @@ async def test_same_sender_different_threads_dispatch_separately(tmp_path: Path)
         _requester_user_id: str,
         *,
         media_events: list[object] | None = None,
-        handled_turn: HandledTurnState | None = None,
+        handled_turn: TurnRecord | None = None,
         **_metadata: object,
     ) -> None:
         _ = media_events, handled_turn
@@ -974,7 +1018,7 @@ async def test_room_message_and_plain_reply_to_known_thread_do_not_coalesce_toge
         _requester_user_id: str,
         *,
         media_events: list[object] | None = None,
-        handled_turn: HandledTurnState | None = None,
+        handled_turn: TurnRecord | None = None,
         **_metadata: object,
     ) -> None:
         _ = media_events, handled_turn
@@ -1040,7 +1084,7 @@ async def test_plain_reply_with_unproven_root_is_not_admitted_under_guessed_key(
         _requester_user_id: str,
         *,
         media_events: list[object] | None = None,
-        handled_turn: HandledTurnState | None = None,
+        handled_turn: TurnRecord | None = None,
         **_metadata: object,
     ) -> None:
         _ = media_events, handled_turn
@@ -1076,7 +1120,7 @@ async def test_command_executes_immediately_while_text_batch_debounces(tmp_path:
         _requester_user_id: str,
         *,
         media_events: list[object] | None = None,
-        handled_turn: HandledTurnState | None = None,
+        handled_turn: TurnRecord | None = None,
         **_metadata: object,
     ) -> None:
         _ = media_events, handled_turn
@@ -1111,7 +1155,7 @@ async def test_command_during_media_debounce_executes_immediately(tmp_path: Path
         _requester_user_id: str,
         *,
         media_events: list[object] | None = None,
-        handled_turn: HandledTurnState | None = None,
+        handled_turn: TurnRecord | None = None,
         **_metadata: object,
     ) -> None:
         _ = media_events
@@ -1156,7 +1200,7 @@ async def test_messages_during_active_response_wait_and_batch_after_completion(t
         _requester_user_id: str,
         *,
         media_events: list[object] | None = None,
-        handled_turn: HandledTurnState | None = None,
+        handled_turn: TurnRecord | None = None,
         **_metadata: object,
     ) -> None:
         _ = media_events, handled_turn
@@ -1303,7 +1347,7 @@ async def test_slow_thread_lookup_active_follow_up_stays_before_later_follow_up(
         _requester_user_id: str,
         *,
         media_events: list[object] | None = None,
-        handled_turn: HandledTurnState | None = None,
+        handled_turn: TurnRecord | None = None,
         **_metadata: object,
     ) -> None:
         _ = media_events
@@ -1391,7 +1435,7 @@ async def test_later_slow_thread_lookup_active_follow_up_lands_as_own_turn(tmp_p
         _requester_user_id: str,
         *,
         media_events: list[object] | None = None,
-        handled_turn: HandledTurnState | None = None,
+        handled_turn: TurnRecord | None = None,
         **_metadata: object,
     ) -> None:
         _ = media_events
@@ -1555,8 +1599,8 @@ async def test_active_follow_up_owner_includes_later_media_payload(tmp_path: Pat
         "Messages arrived while the previous response was still running. "
         "They are in chat timeline order. Respond once to the combined context:\n\n"
         "<queued_messages>\n"
-        '<msg event_id="$text" from="@alice:localhost"><![CDATA[text follow-up]]></msg>\n'
-        '<msg event_id="$img" from="@bob:localhost"><![CDATA[[Attached image]]]></msg>\n'
+        '<msg event_id="$text" from="@alice:localhost" ts="1970-01-01 00:00 UTC"><![CDATA[text follow-up]]></msg>\n'
+        '<msg event_id="$img" from="@bob:localhost" ts="1970-01-01 00:00 UTC"><![CDATA[[Attached image]]]></msg>\n'
         "</queued_messages>"
     )
 
@@ -1718,7 +1762,7 @@ async def test_command_executes_immediately_despite_unresolved_ingress(tmp_path:
         _requester_user_id: str,
         *,
         media_events: list[object] | None = None,
-        handled_turn: HandledTurnState | None = None,
+        handled_turn: TurnRecord | None = None,
         **_metadata: object,
     ) -> None:
         _ = media_events, handled_turn
@@ -2386,7 +2430,7 @@ async def test_enqueue_for_dispatch_returns_while_drain_dispatch_blocks(tmp_path
         _requester_user_id: str,
         *,
         media_events: list[object] | None = None,
-        handled_turn: HandledTurnState | None = None,
+        handled_turn: TurnRecord | None = None,
         **_metadata: object,
     ) -> None:
         _ = media_events
@@ -2456,7 +2500,7 @@ async def test_coalescing_exempt_source_kinds_bypass_gate(tmp_path: Path, source
         _requester_user_id: str,
         *,
         media_events: list[object] | None = None,
-        handled_turn: HandledTurnState | None = None,
+        handled_turn: TurnRecord | None = None,
         **_metadata: object,
     ) -> None:
         _ = media_events, handled_turn
@@ -2541,7 +2585,7 @@ async def test_untrusted_source_kind_content_does_not_bypass_or_promote(
         _requester_user_id: str,
         *,
         media_events: list[object] | None = None,
-        handled_turn: HandledTurnState | None = None,
+        handled_turn: TurnRecord | None = None,
         queued_notice_reservation: object | None = None,
         **_metadata: object,
     ) -> None:
@@ -2677,7 +2721,7 @@ async def test_overlapping_scheduled_checkins_coalesce(tmp_path: Path) -> None:
         _requester_user_id: str,
         *,
         media_events: list[object] | None = None,
-        handled_turn: HandledTurnState | None = None,
+        handled_turn: TurnRecord | None = None,
         **_metadata: object,
     ) -> None:
         _ = media_events, handled_turn
@@ -2731,7 +2775,7 @@ async def test_prepare_for_sync_shutdown_waits_for_active_flush_task(tmp_path: P
         _requester_user_id: str,
         *,
         media_events: list[object] | None = None,
-        handled_turn: HandledTurnState | None = None,
+        handled_turn: TurnRecord | None = None,
         **_metadata: object,
     ) -> None:
         _ = media_events, handled_turn
@@ -2775,7 +2819,7 @@ async def test_prepare_for_sync_shutdown_drains_pending_debounced_messages(tmp_p
         _requester_user_id: str,
         *,
         media_events: list[object] | None = None,
-        handled_turn: HandledTurnState | None = None,
+        handled_turn: TurnRecord | None = None,
         **_metadata: object,
     ) -> None:
         _ = media_events, handled_turn
@@ -2809,7 +2853,7 @@ async def test_prepare_for_sync_shutdown_drains_pending_media_debounce(tmp_path:
         _requester_user_id: str,
         *,
         media_events: list[object] | None = None,
-        handled_turn: HandledTurnState | None = None,
+        handled_turn: TurnRecord | None = None,
         **_metadata: object,
     ) -> None:
         _ = media_events
@@ -2849,7 +2893,7 @@ async def test_shutdown_during_in_flight_dispatch_flushes_remaining_without_wait
         _requester_user_id: str,
         *,
         media_events: list[object] | None = None,
-        handled_turn: HandledTurnState | None = None,
+        handled_turn: TurnRecord | None = None,
         **_metadata: object,
     ) -> None:
         _ = media_events, handled_turn
@@ -2910,7 +2954,7 @@ async def test_thread_followups_dispatch_while_first_turn_root_in_flight(tmp_pat
         _requester_user_id: str,
         *,
         media_events: list[object] | None = None,
-        handled_turn: HandledTurnState | None = None,
+        handled_turn: TurnRecord | None = None,
         **_metadata: object,
     ) -> None:
         _ = media_events, handled_turn
@@ -4038,7 +4082,7 @@ async def test_zero_debounce_dispatches_immediately(tmp_path: Path) -> None:
         _requester_user_id: str,
         *,
         media_events: list[object] | None = None,
-        handled_turn: HandledTurnState | None = None,
+        handled_turn: TurnRecord | None = None,
         **_metadata: object,
     ) -> None:
         _ = media_events, handled_turn
@@ -4073,7 +4117,7 @@ async def test_multiple_commands_each_dispatch_independently(tmp_path: Path) -> 
         _requester_user_id: str,
         *,
         media_events: list[object] | None = None,
-        handled_turn: HandledTurnState | None = None,
+        handled_turn: TurnRecord | None = None,
         **_metadata: object,
     ) -> None:
         _ = media_events, handled_turn
@@ -4155,6 +4199,120 @@ async def test_backlog_replay_skips_older_message_when_newer_exists(tmp_path: Pa
     # Older message should be skipped — resolve_dispatch_action never called
     action_mock.assert_not_awaited()
     assert bot._turn_store.is_handled("$m1")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("degraded", [False, True])
+@pytest.mark.parametrize("mixed_requesters", [False, True])
+async def test_backlog_replay_respects_coalesced_source_ownership(
+    tmp_path: Path,
+    *,
+    degraded: bool,
+    mixed_requesters: bool,
+) -> None:
+    """A newer requester turn supersedes a coalesced batch only when every source is theirs."""
+    bot = _make_bot(tmp_path)
+    room = _make_room()
+    primary_event = PreparedTextEvent(
+        sender="@bob:localhost",
+        event_id="$bob",
+        body="bob",
+        source={"content": {"msgtype": "m.text", "body": "bob"}},
+        server_timestamp=2000,
+    )
+    dispatch = _prepared_dispatch(
+        event_id="$bob",
+        requester_user_id="@bob:localhost",
+        body="bob",
+        thread_id="$thread",
+    )
+    newer_bob_message = ResolvedVisibleMessage(
+        sender="@bob:localhost",
+        body="newer bob",
+        timestamp=3000,
+        event_id="$newer-bob",
+        content={"body": "newer bob"},
+        thread_id="$thread",
+        latest_event_id="$newer-bob",
+    )
+    if degraded:
+        degraded_history = ThreadHistoryResult(
+            [newer_bob_message],
+            is_full_history=False,
+            diagnostics={
+                THREAD_HISTORY_SOURCE_DIAGNOSTIC: THREAD_HISTORY_SOURCE_DEGRADED,
+                THREAD_HISTORY_DEGRADED_DIAGNOSTIC: True,
+            },
+        )
+        dispatch.context.thread_history = degraded_history
+        dispatch.context.replay_guard_history = degraded_history
+        bot.event_cache.get_recent_room_events.return_value = [
+            _text_event(
+                event_id="$newer-bob",
+                body="newer bob",
+                sender="@bob:localhost",
+                server_timestamp=3000,
+                thread_id="$thread",
+            ).source,
+        ]
+    else:
+        _set_context_histories(dispatch, [newer_bob_message])
+    handled_turn = TurnRecord.create(
+        ["$alice", "$bob"],
+        source_event_metadata={
+            "$alice": SourceEventMetadata(
+                sender="@alice:localhost" if mixed_requesters else "@bob:localhost",
+                timestamp_ms=1000,
+            ),
+            "$bob": SourceEventMetadata(sender="@bob:localhost", timestamp_ms=2000),
+        },
+    )
+
+    plan_calls: list[PreparedDispatch] = []
+
+    async def prepare_dispatch(*_args: object, **_kwargs: object) -> object:
+        return prepared_dispatch_result(dispatch)
+
+    async def plan_turn(
+        _room: object,
+        _event: object,
+        prepared_dispatch: PreparedDispatch,
+        **_kwargs: object,
+    ) -> _DispatchPlan:
+        plan_calls.append(prepared_dispatch)
+        return _DispatchPlan(kind="ignore")
+
+    with (
+        capture_logs() as captured_logs,
+        patch.object(
+            bot._turn_controller,
+            "_prepare_dispatch",
+            new=prepare_dispatch,
+        ),
+        patch.object(bot._turn_policy, "plan_turn", new=plan_turn),
+    ):
+        await bot._turn_controller._dispatch_text_message(
+            room,
+            primary_event,
+            "@bob:localhost",
+            handled_turn=handled_turn,
+        )
+
+    assert plan_calls == ([dispatch] if mixed_requesters else [])
+    assert not any(
+        log.get("event") == "Thread replay guard degraded; proceeding without negative newer-message proof"
+        for log in captured_logs
+    )
+    if degraded and not mixed_requesters:
+        bot.event_cache.get_recent_room_events.assert_awaited_once_with(
+            room.room_id,
+            event_type="m.room.message",
+            since_ts_ms=2000,
+        )
+    else:
+        bot.event_cache.get_recent_room_events.assert_not_awaited()
+    assert bot._turn_store.is_handled("$alice") is not mixed_requesters
+    assert bot._turn_store.is_handled("$bob") is not mixed_requesters
 
 
 @pytest.mark.asyncio
@@ -4754,6 +4912,7 @@ async def test_backlog_replay_degraded_thread_history_fails_open_without_positiv
     action_mock = AsyncMock(return_value=_DispatchPlan(kind="ignore"))
     history_guard = MagicMock(wraps=bot._turn_controller._has_newer_unresponded_in_thread)
     with (
+        capture_logs() as captured_logs,
         patch.object(
             bot._turn_controller,
             "_prepare_dispatch",
@@ -4772,6 +4931,10 @@ async def test_backlog_replay_degraded_thread_history_fails_open_without_positiv
     )
     action_mock.assert_awaited_once()
     assert not bot._turn_store.is_handled("$m1")
+    assert any(
+        log.get("event") == "Thread replay guard degraded; proceeding without negative newer-message proof"
+        for log in captured_logs
+    )
 
 
 @pytest.mark.asyncio
@@ -4840,10 +5003,10 @@ async def test_thread_history_guard_does_not_interfere_with_normal_dispatch(tmp_
     )
     dispatch = _prepared_dispatch(event_id="$m1", body="hello")
     dispatch.context.thread_history = []
-    bot._send_response = AsyncMock(return_value="$placeholder")
-    bot._generate_response = AsyncMock(return_value="$response")
-    install_send_response_mock(bot, bot._send_response)
-    install_generate_response_mock(bot, bot._generate_response)
+    send_response = AsyncMock(return_value="$placeholder")
+    generate_response = AsyncMock(return_value="$response")
+    install_send_response_mock(bot, send_response)
+    install_generate_response_mock(bot, generate_response)
 
     with (
         patch.object(
@@ -5146,10 +5309,10 @@ async def test_newer_command_does_not_suppress_older_message(tmp_path: Path) -> 
         latest_event_id="$m2",
     )
     _set_context_histories(dispatch, [newer_cmd])
-    bot._send_response = AsyncMock(return_value="$placeholder")
-    bot._generate_response = AsyncMock(return_value="$response")
-    install_send_response_mock(bot, bot._send_response)
-    install_generate_response_mock(bot, bot._generate_response)
+    send_response = AsyncMock(return_value="$placeholder")
+    generate_response = AsyncMock(return_value="$response")
+    install_send_response_mock(bot, send_response)
+    install_generate_response_mock(bot, generate_response)
 
     action_mock = AsyncMock(return_value=_respond_dispatch_plan())
     with (
@@ -5196,10 +5359,10 @@ async def test_newer_command_with_whitespace_does_not_suppress(tmp_path: Path) -
         latest_event_id="$m2",
     )
     _set_context_histories(dispatch, [newer_cmd])
-    bot._send_response = AsyncMock(return_value="$placeholder")
-    bot._generate_response = AsyncMock(return_value="$response")
-    install_send_response_mock(bot, bot._send_response)
-    install_generate_response_mock(bot, bot._generate_response)
+    send_response = AsyncMock(return_value="$placeholder")
+    generate_response = AsyncMock(return_value="$response")
+    install_send_response_mock(bot, send_response)
+    install_generate_response_mock(bot, generate_response)
 
     action_mock = AsyncMock(return_value=_respond_dispatch_plan())
     with (
@@ -5254,10 +5417,10 @@ async def test_scheduled_event_not_suppressed(tmp_path: Path) -> None:
         latest_event_id="$s2",
     )
     _set_context_histories(dispatch, [newer_msg])
-    bot._send_response = AsyncMock(return_value="$placeholder")
-    bot._generate_response = AsyncMock(return_value="$response")
-    install_send_response_mock(bot, bot._send_response)
-    install_generate_response_mock(bot, bot._generate_response)
+    send_response = AsyncMock(return_value="$placeholder")
+    generate_response = AsyncMock(return_value="$response")
+    install_send_response_mock(bot, send_response)
+    install_generate_response_mock(bot, generate_response)
 
     action_mock = AsyncMock(return_value=_respond_dispatch_plan())
     with (
@@ -5304,10 +5467,10 @@ async def test_hook_event_not_suppressed(tmp_path: Path) -> None:
         latest_event_id="$h2",
     )
     _set_context_histories(dispatch, [newer_msg])
-    bot._send_response = AsyncMock(return_value="$placeholder")
-    bot._generate_response = AsyncMock(return_value="$response")
-    install_send_response_mock(bot, bot._send_response)
-    install_generate_response_mock(bot, bot._generate_response)
+    send_response = AsyncMock(return_value="$placeholder")
+    generate_response = AsyncMock(return_value="$response")
+    install_send_response_mock(bot, send_response)
+    install_generate_response_mock(bot, generate_response)
 
     action_mock = AsyncMock(return_value=_respond_dispatch_plan())
     with (
@@ -5356,10 +5519,10 @@ async def test_multiple_scheduled_fires_not_suppressed(tmp_path: Path) -> None:
         latest_event_id="$s2",
     )
     _set_context_histories(dispatch, [second_fire_msg])
-    bot._send_response = AsyncMock(return_value="$placeholder")
-    bot._generate_response = AsyncMock(return_value="$response")
-    install_send_response_mock(bot, bot._send_response)
-    install_generate_response_mock(bot, bot._generate_response)
+    send_response = AsyncMock(return_value="$placeholder")
+    generate_response = AsyncMock(return_value="$response")
+    install_send_response_mock(bot, send_response)
+    install_generate_response_mock(bot, generate_response)
 
     action_mock = AsyncMock(return_value=_respond_dispatch_plan())
     with (
@@ -6328,6 +6491,52 @@ async def test_trusted_voice_normalized_payload_metadata_reaches_envelope_and_pa
 
 
 @pytest.mark.asyncio
+async def test_trusted_voice_transcript_metadata_reaches_envelope_and_payload(
+    tmp_path: Path,
+) -> None:
+    """Successful voice transcript metadata should survive handoff as hidden payload guidance."""
+    bot = _make_bot(tmp_path, debounce_ms=0)
+    bot.config.agents["test_agent"].thread_mode = "room"
+    room = _make_room()
+    voice_event = PreparedTextEvent(
+        sender="@user:localhost",
+        event_id="$voice-transcript",
+        body="voice transcript",
+        source={
+            "content": {
+                "msgtype": "m.text",
+                "body": "voice transcript",
+                ATTACHMENT_IDS_KEY: ["voice-attachment"],
+                ORIGINAL_SENDER_KEY: "@user:localhost",
+                VOICE_TRANSCRIPT_KEY: True,
+            },
+        },
+        server_timestamp=1000,
+        source_kind_override="voice",
+    )
+    captured_extra_content: list[object] = []
+
+    envelopes, _media_batches, payload_requests = await _capture_gate_dispatches(
+        bot,
+        room,
+        [(voice_event, "voice", None, {"trust_internal_payload_metadata": True})],
+        captured_plan_extra_content=captured_extra_content,
+    )
+
+    assert envelopes[0].source_kind == "voice"
+    assert payload_requests[0].current_attachment_ids == ["voice-attachment"]
+    assert payload_requests[0].trusted_current_attachment_ids == ["voice-attachment"]
+    assert payload_requests[0].voice_transcript is True
+    assert captured_extra_content == [
+        {
+            ATTACHMENT_IDS_KEY: ["voice-attachment"],
+            ORIGINAL_SENDER_KEY: "@user:localhost",
+            VOICE_TRANSCRIPT_KEY: True,
+        },
+    ]
+
+
+@pytest.mark.asyncio
 async def test_coalesced_root_voice_attachment_is_trusted_when_later_text_is_primary(tmp_path: Path) -> None:
     """Root voice audio should stay in the current payload when later root text becomes primary."""
     bot = _make_bot(tmp_path, debounce_ms=10)
@@ -6559,7 +6768,7 @@ async def test_sidecar_hydration_refreshes_prompt_and_mentions_before_dispatch(t
         server_timestamp=1000,
     )
     captured_envelopes: list[MessageEnvelope] = []
-    captured_handled_turns: list[HandledTurnState] = []
+    captured_handled_turns: list[TurnRecord] = []
 
     async def record_plan(*args: object, **_kwargs: object) -> _DispatchPlan:
         dispatch = cast("PreparedDispatch", args[2])
@@ -6567,9 +6776,9 @@ async def test_sidecar_hydration_refreshes_prompt_and_mentions_before_dispatch(t
         return _respond_dispatch_plan()
 
     async def record_response(*_args: object, **kwargs: object) -> None:
-        captured_handled_turns.append(cast("HandledTurnState", kwargs["handled_turn"]))
+        captured_handled_turns.append(cast("TurnRecord", kwargs["handled_turn"]))
 
-    handled_turn = HandledTurnState.create(["$sidecar"], source_event_prompts={"$sidecar": "preview"})
+    handled_turn = TurnRecord.create(["$sidecar"], source_event_prompts={"$sidecar": "preview"})
     with (
         patch.object(
             bot._inbound_turn_normalizer,

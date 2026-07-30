@@ -6,7 +6,12 @@ import typing
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from mindroom.constants import ORIGINAL_SENDER_KEY, SOURCE_KIND_KEY
+from mindroom.constants import (
+    ORIGINAL_SENDER_KEY,
+    PER_FIRE_THREAD_ROOT_KEY,
+    SCHEDULED_HISTORY_LIMIT_KEY,
+    SOURCE_KIND_KEY,
+)
 from mindroom.dispatch_source import SCHEDULED_SOURCE_KIND
 from mindroom.hooks import (
     EVENT_SCHEDULE_FIRED,
@@ -120,7 +125,6 @@ async def send_scheduled_failure_notice(
     workflow: ScheduledWorkflow,
     target: MessageTarget,
     error_message: str,
-    config: Config,
     conversation_cache: ConversationCacheProtocol,
 ) -> None:
     """Send a visible failure notice that follows the scheduled workflow target."""
@@ -131,14 +135,13 @@ async def send_scheduled_failure_notice(
         error_message,
         conversation_cache,
     )
-    await send_and_track_message(client, workflow.room_id, error_content, config, conversation_cache)
+    await send_and_track_message(client, workflow.room_id, error_content, conversation_cache)
 
 
 async def _notify_scheduled_workflow_failure(
     client: nio.AsyncClient,
     workflow: ScheduledWorkflow,
     target: MessageTarget,
-    config: Config,
     error: Exception,
     conversation_cache: ConversationCacheProtocol,
 ) -> None:
@@ -153,7 +156,7 @@ async def _notify_scheduled_workflow_failure(
         conversation_cache,
     )
     try:
-        await send_and_track_message(client, workflow.room_id, error_content, config, conversation_cache)
+        await send_and_track_message(client, workflow.room_id, error_content, conversation_cache)
     except Exception:
         logger.exception("Failed to send scheduled workflow failure message")
 
@@ -221,7 +224,11 @@ async def execute_scheduled_workflow(
             if workflow.created_by:
                 content[ORIGINAL_SENDER_KEY] = workflow.created_by
             content[SOURCE_KIND_KEY] = SCHEDULED_SOURCE_KIND
-            delivered = await send_and_track_message(client, workflow.room_id, content, config, conversation_cache)
+            if workflow.new_thread:
+                content[PER_FIRE_THREAD_ROOT_KEY] = True
+            if workflow.history_limit is not None:
+                content[SCHEDULED_HISTORY_LIMIT_KEY] = workflow.history_limit
+            delivered = await send_and_track_message(client, workflow.room_id, content, conversation_cache)
             if delivered is None:
                 _raise_scheduled_workflow_send_error()
             logger.info(
@@ -237,7 +244,6 @@ async def execute_scheduled_workflow(
                 client,
                 workflow,
                 target,
-                config,
                 e,
                 conversation_cache,
             )

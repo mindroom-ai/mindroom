@@ -7,9 +7,9 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from mindroom.constants import ROUTER_AGENT_NAME
-from mindroom.entity_resolution import entity_identity_registry
+from mindroom.entity_resolution import current_entity_id, entity_identity_registry
 from mindroom.matrix.identity import MatrixID, parse_current_matrix_user_id
-from mindroom.matrix.message_builder import build_message_content, markdown_to_html
+from mindroom.matrix.message_builder import build_message_content, markdown_fenced_code_ranges, markdown_to_html
 from mindroom.matrix_identifiers import unnamespaced_agent_name_from_username_localpart
 from mindroom.tool_system.events import build_tool_trace_content, ensure_visible_tool_marker_spacing
 
@@ -103,6 +103,20 @@ def resolve_mentioned_user_ids_from_text(
     return _mentioned_user_ids_from_replacements(replacements)
 
 
+def format_entity_mention(
+    entity_name: str,
+    config: Config,
+    runtime_paths: RuntimePaths,
+) -> tuple[str, list[str], str]:
+    """Return one configured entity mention without resolving unrelated entities."""
+    resolution = _entity_mention_resolution_from_user_id(
+        entity_name,
+        current_entity_id(entity_name, runtime_paths).full_id,
+        config=config,
+    )
+    return resolution.plain_text, [resolution.user_id], resolution.markdown_text
+
+
 def _mentioned_user_ids_from_replacements(replacements: list[_MentionReplacement]) -> list[str]:
     """Return replacement user IDs without duplicates while preserving mention order."""
     mentioned_user_ids: list[str] = []
@@ -114,11 +128,19 @@ def _mentioned_user_ids_from_replacements(replacements: list[_MentionReplacement
 
 def _scan_mention_tokens(text: str) -> list[_MentionToken]:
     """Return ordered mention tokens from one message body."""
-    tokens = _scan_explicit_matrix_id_tokens(text)
+    if "@" not in text:
+        return []
+
+    fenced_code_ranges = markdown_fenced_code_ranges(text)
+    tokens = [
+        token
+        for token in _scan_explicit_matrix_id_tokens(text)
+        if not _range_overlaps_existing(token.start, token.end, fenced_code_ranges)
+    ]
     tokens.extend(
         _scan_entity_alias_tokens(
             text,
-            occupied_ranges=[(token.start, token.end) for token in tokens],
+            occupied_ranges=[*fenced_code_ranges, *((token.start, token.end) for token in tokens)],
         ),
     )
     return sorted(tokens, key=lambda token: token.start)
@@ -275,8 +297,21 @@ def _entity_mention_resolution(
     config: Config,
 ) -> _MentionResolution:
     """Return rendering data for one resolved local agent or team mention."""
+    return _entity_mention_resolution_from_user_id(
+        entity_name,
+        registry.current_id(entity_name).full_id,
+        config=config,
+    )
+
+
+def _entity_mention_resolution_from_user_id(
+    entity_name: str,
+    resolved_user_id: str,
+    *,
+    config: Config,
+) -> _MentionResolution:
+    """Return rendering data for one resolved entity user ID."""
     entity_config = config.agents.get(entity_name) or config.teams[entity_name]
-    resolved_user_id = registry.current_id(entity_name).full_id
     return _MentionResolution(
         plain_text=resolved_user_id,
         markdown_text=f"[@{entity_config.display_name}](https://matrix.to/#/{resolved_user_id})",

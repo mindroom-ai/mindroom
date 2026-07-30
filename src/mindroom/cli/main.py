@@ -21,9 +21,12 @@ from .config import (
     load_config_quiet,
     print_config_search_locations,
 )
+from .desktop import desktop_app
 from .local_stack import local_stack_setup
 from .migrate import config_migrate
+from .plugins import plugins_app
 from .service import service_app
+from .trigger import trigger_app
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -41,7 +44,9 @@ AI agents that live in Matrix and work everywhere via bridges.
   [cyan]mindroom config init[/cyan]   Create a starter config
   [cyan]mindroom run[/cyan]           Start the system\
 """
-_CONFIG_INIT_PROVIDER_CHOICES = "{openrouter,ollama,openai,azure,bedrock_claude,codex,claude,llama.cpp,vertexai_claude}"
+_CONFIG_INIT_PROVIDER_CHOICES = (
+    "{openrouter,ollama,openai,azure,bedrock_claude,codex,kimi,claude,llama.cpp,vertexai_claude}"
+)
 
 app = typer.Typer(
     help=_HELP,
@@ -56,9 +61,12 @@ avatars_app = typer.Typer(help="Generate and sync managed avatar assets.")
 threads_app = typer.Typer(help="Export Matrix threads to local files.")
 config_app.command("migrate")(config_migrate)
 app.add_typer(config_app, name="config")
+app.add_typer(plugins_app, name="plugins")
+app.add_typer(desktop_app, name="desktop")
 app.add_typer(avatars_app, name="avatars")
 app.add_typer(threads_app, name="threads")
 app.add_typer(service_app, name="service")
+app.add_typer(trigger_app, name="trigger")
 
 
 def _httpx_post(
@@ -225,7 +233,20 @@ async def _run(
 
 
 @app.command()
-def doctor() -> None:
+def doctor(
+    config_path: Path | None = typer.Option(  # noqa: B008
+        None,
+        "--config",
+        "-c",
+        help="Use this config file path. Defaults the storage location to the selected config directory unless --storage-path is set.",
+    ),
+    storage_path: Path | None = typer.Option(  # noqa: B008
+        None,
+        "--storage-path",
+        "-s",
+        help="Base directory for persistent MindRoom data (state, sessions, tracking)",
+    ),
+) -> None:
     """Check your environment for common issues.
 
     Runs connectivity, configuration, and credential checks in a single pass
@@ -233,7 +254,7 @@ def doctor() -> None:
     """
     from .doctor import doctor as doctor_command  # noqa: PLC0415
 
-    doctor_command()
+    doctor_command(config_path=config_path, storage_path=storage_path)
 
 
 @avatars_app.command("generate")
@@ -331,6 +352,17 @@ def _threads_export_command(
         "--max-thread-roots",
         help="Maximum thread roots to enumerate per room.",
     ),
+    prefer_cache: bool = typer.Option(
+        False,
+        "--prefer-cache",
+        help="Serve thread bodies from the durable event cache and only fetch from the homeserver "
+        "on miss or invalidation. Use alongside a running MindRoom that keeps the cache fresh.",
+    ),
+    invited_rooms: bool = typer.Option(
+        True,
+        "--invited-rooms/--no-invited-rooms",
+        help="Include rooms joined through authorized invites (user-created rooms).",
+    ),
 ) -> None:
     """Export Matrix threads to YAML files for grep/ripgrep search."""
     asyncio.run(
@@ -342,19 +374,25 @@ def _threads_export_command(
             watch=watch,
             interval=interval,
             max_thread_roots=max_thread_roots,
+            prefer_cache=prefer_cache,
+            include_invited_rooms=invited_rooms,
         ),
     )
 
 
 def _print_thread_export_stats(stats: ThreadExportStats) -> None:
     """Print one export-pass summary."""
+    unchanged_note = f" ({stats.threads_unchanged} unchanged)" if stats.threads_unchanged else ""
     console.print(
         f"Exported {stats.threads_exported}/{stats.threads_seen} threads "
-        f"from {stats.rooms_exported} room(s) to {stats.output_dir}",
+        f"from {stats.rooms_exported} room(s) to {stats.output_dir}{unchanged_note}",
     )
     if stats.truncated_rooms:
         console.print(f"[yellow]Warning:[/yellow] {stats.truncated_rooms} room(s) hit the thread enumeration limit")
     for failure in stats.failed_items:
+        if failure.room_key is None:
+            console.print(f"[red]Failed target:[/red] {failure.error}")
+            continue
         target = failure.thread_id or failure.room_id
         console.print(f"[red]Failed:[/red] {failure.room_key} {target}: {failure.error}")
 
@@ -383,6 +421,8 @@ async def _threads_export(
     watch: bool,
     interval: int,
     max_thread_roots: int,
+    prefer_cache: bool,
+    include_invited_rooms: bool,
 ) -> None:
     """Run one thread export command."""
     from mindroom.thread_export import export_threads_once  # noqa: PLC0415
@@ -404,6 +444,8 @@ async def _threads_export(
                 output_dir=output,
                 room_filter=room,
                 max_thread_roots=max_thread_roots,
+                prefer_cache=prefer_cache,
+                include_invited_rooms=include_invited_rooms,
             )
         except (OSError, RuntimeError) as exc:
             _handle_thread_export_error(exc, runtime_paths, watch=watch)

@@ -8,11 +8,19 @@ from functools import cached_property
 
 import httpx
 import nio
+from nio import crypto
 
 from mindroom.constants import RuntimePaths, runtime_matrix_homeserver, runtime_matrix_ssl_verify
 from mindroom.logging_config import get_logger
-from mindroom.matrix import provisioning
-from mindroom.matrix.client_session import login, matrix_client, matrix_startup_error, restore_login
+from mindroom.matrix import appservice, provisioning
+from mindroom.matrix.client_session import (
+    login,
+    matrix_client,
+    matrix_startup_error,
+    olm_store_exists,
+    restore_login,
+)
+from mindroom.matrix.cross_signing import ensure_agent_cross_signing
 from mindroom.matrix.identity import MatrixID, managed_account_key, parse_current_matrix_user_id
 from mindroom.matrix.state import MatrixState, matrix_state_for_runtime
 from mindroom.matrix_identifiers import agent_username_localpart, extract_server_name_from_homeserver
@@ -36,7 +44,7 @@ class AgentMatrixUser:
     agent_name: str
     user_id: str
     display_name: str
-    password: str
+    password: str | None
     device_id: str | None = None
     access_token: str | None = None
 
@@ -148,7 +156,7 @@ def _get_agent_credentials(
 def _save_agent_credentials(
     agent_name: str,
     username: str,
-    password: str,
+    password: str | None,
     runtime_paths: RuntimePaths,
     *,
     domain: str | None = None,
@@ -191,7 +199,7 @@ def _save_agent_credentials(
 def _persist_agent_session(
     agent_name: str,
     username: str,
-    password: str,
+    password: str | None,
     *,
     domain: str | None = None,
     device_id: str | None,
@@ -901,6 +909,8 @@ async def create_agent_user(
         AgentMatrixUser object with account details
 
     """
+    auth = appservice.resolve_managed_account_auth(runtime_paths)
+
     # Check if credentials already exist in matrix_state.yaml
     existing_creds = _get_agent_credentials(agent_name, runtime_paths)
     preferred_username = username
@@ -914,11 +924,11 @@ async def create_agent_user(
         )
         username_value = existing_creds["username"]
         password_value = existing_creds["password"]
-        if username_value is None or password_value is None:
+        if username_value is None or (auth.mode == "password" and password_value is None):
             msg = f"Stored Matrix credentials for {agent_name} are incomplete"
             raise matrix_startup_error(msg, permanent=True)
         matrix_username = username_value
-        password = password_value
+        password = password_value if auth.mode == "password" else None
         # Older persisted credentials may not include session fields yet.
         existing_device_id = existing_creds.get("device_id")
         existing_access_token = existing_creds.get("access_token")
@@ -929,7 +939,7 @@ async def create_agent_user(
         # Generate new credentials
         matrix_username = preferred_username or agent_username_localpart(agent_name, runtime_paths=runtime_paths)
         requested_username = matrix_username
-        password = secrets.token_urlsafe(24)
+        password = secrets.token_urlsafe(24) if auth.mode == "password" else None
         existing_device_id = None
         existing_access_token = None
         existing_domain = None
@@ -941,13 +951,24 @@ async def create_agent_user(
     user_id = MatrixID.from_username(matrix_username, existing_domain or server_name).full_id
 
     if registration_needed:
-        user_id = await _register_user(
-            homeserver=homeserver,
-            username=matrix_username,
-            password=password,
-            display_name=agent_display_name,
-            runtime_paths=runtime_paths,
-        )
+        if auth.mode == "appservice":
+            assert auth.appservice_token is not None
+            user_id = await appservice.register_appservice_user(
+                homeserver,
+                username=matrix_username,
+                expected_user_id=user_id,
+                token=auth.appservice_token,
+                runtime_paths=runtime_paths,
+            )
+        else:
+            assert password is not None
+            user_id = await _register_user(
+                homeserver=homeserver,
+                username=matrix_username,
+                password=password,
+                display_name=agent_display_name,
+                runtime_paths=runtime_paths,
+            )
         actual_matrix_id = MatrixID.parse(user_id)
         matrix_username = actual_matrix_id.username
         server_name = actual_matrix_id.domain
@@ -974,6 +995,35 @@ async def create_agent_user(
     )
 
 
+async def _login_agent_with_configured_auth(
+    homeserver: str,
+    agent_user: AgentMatrixUser,
+    expected_user_id: str,
+    auth: appservice.ManagedAccountAuth,
+    runtime_paths: RuntimePaths,
+) -> tuple[nio.AsyncClient, str]:
+    if auth.mode == "appservice":
+        assert auth.appservice_token is not None
+        client = await appservice.login_appservice_user(
+            homeserver,
+            user_id=expected_user_id,
+            token=auth.appservice_token,
+            runtime_paths=runtime_paths,
+        )
+        return client, "Matrix application-service login"
+
+    if agent_user.password is None:
+        msg = f"Stored Matrix password for {agent_user.agent_name} is missing"
+        raise matrix_startup_error(msg, permanent=True)
+    client = await login(
+        homeserver,
+        expected_user_id,
+        agent_user.password,
+        runtime_paths=runtime_paths,
+    )
+    return client, "Matrix password login"
+
+
 async def login_agent_user(
     homeserver: str,
     agent_user: AgentMatrixUser,
@@ -993,9 +1043,26 @@ async def login_agent_user(
         ValueError: If login fails
 
     """
+    auth = appservice.resolve_managed_account_auth(runtime_paths)
     expected_user_id = _validated_expected_agent_user_id(agent_user)
 
-    if agent_user.access_token and agent_user.device_id:
+    store_intact = not crypto.ENCRYPTION_ENABLED or (
+        agent_user.device_id is None or olm_store_exists(expected_user_id, agent_user.device_id, runtime_paths)
+    )
+    if not store_intact:
+        logger.warning(
+            "matrix_olm_store_missing_fresh_device_login",
+            agent=agent_user.agent_name,
+            user_id=expected_user_id,
+            device_id=agent_user.device_id,
+            hint=(
+                "The encryption store for this device is gone; restoring the session would wedge "
+                "its crypto identity. Logging in as a fresh device instead. Messages encrypted "
+                "only to the lost device stay undecryptable."
+            ),
+        )
+
+    if store_intact and agent_user.access_token and agent_user.device_id:
         try:
             restored_client = await restore_login(
                 homeserver,
@@ -1006,7 +1073,7 @@ async def login_agent_user(
             )
         except ValueError:
             logger.warning(
-                "matrix_login_restore_failed_falling_back_to_password",
+                "matrix_login_restore_failed_falling_back_to_configured_auth",
                 agent=agent_user.agent_name,
                 user_id=agent_user.user_id,
                 device_id=agent_user.device_id,
@@ -1021,7 +1088,7 @@ async def login_agent_user(
             except ValueError as exc:
                 await restored_client.close()
                 logger.warning(
-                    "matrix_login_restore_identity_mismatch_falling_back_to_password",
+                    "matrix_login_restore_identity_mismatch_falling_back_to_configured_auth",
                     agent=agent_user.agent_name,
                     expected_user_id=expected_user_id,
                     returned_user_id=restored_client.user_id,
@@ -1035,23 +1102,34 @@ async def login_agent_user(
                     runtime_paths,
                     matrix_id=matrix_id,
                 )
+                await ensure_agent_cross_signing(restored_client, agent_user)
                 return restored_client
 
-    client = await login(
+    client, login_source = await _login_agent_with_configured_auth(
         homeserver,
+        agent_user,
         expected_user_id,
-        agent_user.password,
-        runtime_paths=runtime_paths,
+        auth,
+        runtime_paths,
     )
     try:
         matrix_id = _validated_authenticated_agent_matrix_id(
             client,
             expected_user_id=expected_user_id,
-            source="Matrix password login",
+            source=login_source,
         )
     except ValueError:
         await client.close()
         raise
+
+    if auth.mode == "appservice":
+        display_response = await client.set_displayname(agent_user.display_name)
+        if isinstance(display_response, nio.ErrorResponse):
+            logger.warning(
+                "matrix_user_display_name_sync_failed",
+                user_id=expected_user_id,
+                error=str(display_response),
+            )
 
     _persist_authenticated_agent_session(
         agent_user,
@@ -1059,4 +1137,5 @@ async def login_agent_user(
         runtime_paths,
         matrix_id=matrix_id,
     )
+    await ensure_agent_cross_signing(client, agent_user)
     return client

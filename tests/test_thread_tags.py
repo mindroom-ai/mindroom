@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import math
 from typing import TYPE_CHECKING
@@ -13,13 +14,18 @@ import pytest
 from mindroom.matrix.client_thread_history import RoomThreadsPageError, enumerate_room_thread_root_ids
 from mindroom.matrix.conversation_cache import resolve_thread_root_event_id_for_client
 from mindroom.thread_tags import (
+    COERCED_TAG_MAX_LENGTH,
     THREAD_TAGS_EVENT_TYPE,
+    SetThreadTagsIfEmptyResult,
     ThreadTagsError,
     ThreadTagsListing,
+    ThreadTagsState,
+    coerce_tag_name,
     get_thread_tags,
     list_tagged_threads,
     remove_thread_tag,
     set_thread_tag,
+    set_thread_tags_if_empty,
 )
 
 if TYPE_CHECKING:
@@ -189,6 +195,31 @@ def _joined_members_response(*user_ids: str) -> nio.JoinedMembersResponse:
     )
 
 
+def _tag_writer_client(
+    user_id: str,
+    current_events: dict[str, dict[str, object]],
+) -> AsyncMock:
+    """Build one writable Matrix client backed by shared in-memory tag state."""
+    client = AsyncMock()
+    client.user_id = user_id
+    client.room_get_state_event.return_value = _power_levels_response(users={user_id: 50})
+
+    async def room_get_state(room_id: str) -> object:
+        assert room_id == "!room:localhost"
+        return _thread_tags_room_state_from_current(current_events)
+
+    async def room_put_state(**kwargs: object) -> object:
+        current_events[kwargs["state_key"]] = kwargs["content"]
+        return nio.RoomPutStateResponse.from_dict(
+            {"event_id": "$state"},
+            room_id="!room:localhost",
+        )
+
+    client.room_get_state.side_effect = room_get_state
+    client.room_put_state.side_effect = room_put_state
+    return client
+
+
 def _write_operation(
     client: AsyncMock,
     action: str,
@@ -325,6 +356,395 @@ async def test_set_thread_tag_writes_state_and_returns_state() -> None:
     assert list(state.tags) == ["resolved"]
     assert state.tags["resolved"].set_by == "@alice:localhost"
     assert state.tags["resolved"].note == "Fixed in abc123"
+
+
+@pytest.mark.asyncio
+async def test_manual_tag_started_first_prevents_automatic_tag_batch() -> None:
+    """A manual write holding the shared lock should win before the automatic empty check."""
+    current_events: dict[str, dict[str, object]] = {}
+    manual_client = _tag_writer_client("@manual:localhost", current_events)
+    automatic_client = _tag_writer_client("@automatic:localhost", current_events)
+    manual_put_entered = asyncio.Event()
+    release_manual_put = asyncio.Event()
+    automatic_started = asyncio.Event()
+    manual_task: asyncio.Task[ThreadTagsState] | None = None
+    automatic_task: asyncio.Task[SetThreadTagsIfEmptyResult] | None = None
+
+    async def blocked_manual_put(**kwargs: object) -> object:
+        manual_put_entered.set()
+        await release_manual_put.wait()
+        current_events[kwargs["state_key"]] = kwargs["content"]
+        return nio.RoomPutStateResponse.from_dict(
+            {"event_id": "$manual"},
+            room_id="!room:localhost",
+        )
+
+    async def run_automatic_batch() -> SetThreadTagsIfEmptyResult:
+        automatic_started.set()
+        return await set_thread_tags_if_empty(
+            automatic_client,
+            "!room:localhost",
+            "$manual-first-root:localhost",
+            ["auto-one", "auto-two"],
+            set_by="@automatic:localhost",
+        )
+
+    manual_client.room_put_state.side_effect = blocked_manual_put
+    try:
+        manual_task = asyncio.create_task(
+            set_thread_tag(
+                manual_client,
+                "!room:localhost",
+                "$manual-first-root:localhost",
+                "manual",
+                set_by="@manual:localhost",
+            ),
+        )
+        await asyncio.wait_for(manual_put_entered.wait(), timeout=1)
+
+        automatic_task = asyncio.create_task(run_automatic_batch())
+        await asyncio.wait_for(automatic_started.wait(), timeout=1)
+        automatic_client.room_get_state.assert_not_awaited()
+        automatic_client.room_put_state.assert_not_awaited()
+
+        release_manual_put.set()
+        await asyncio.gather(manual_task, automatic_task)
+    finally:
+        release_manual_put.set()
+        pending_tasks = [task for task in (manual_task, automatic_task) if task is not None]
+        if pending_tasks:
+            await asyncio.gather(*pending_tasks, return_exceptions=True)
+
+    result = automatic_task.result()
+    assert result == SetThreadTagsIfEmptyResult(
+        had_existing_tags=True,
+        applied_tags=(),
+        failed_tags=(),
+    )
+    assert set(current_events) == {_thread_tag_state_key("$manual-first-root:localhost", "manual")}
+
+
+@pytest.mark.asyncio
+async def test_manual_remove_started_first_prevents_automatic_tag_batch() -> None:
+    """A completed concurrent removal should preserve the manual choice to leave a thread untagged."""
+    thread_root_id = "$manual-remove-first-root:localhost"
+    manual_state_key = _thread_tag_state_key(thread_root_id, "manual")
+    current_events = {
+        manual_state_key: _tag_record_content(set_by="@manual:localhost"),
+    }
+    manual_client = _tag_writer_client("@manual:localhost", current_events)
+    automatic_client = _tag_writer_client("@automatic:localhost", current_events)
+    manual_remove_entered = asyncio.Event()
+    release_manual_remove = asyncio.Event()
+    automatic_started = asyncio.Event()
+    manual_task: asyncio.Task[ThreadTagsState] | None = None
+    automatic_task: asyncio.Task[SetThreadTagsIfEmptyResult] | None = None
+
+    async def blocked_manual_remove(**kwargs: object) -> object:
+        manual_remove_entered.set()
+        await release_manual_remove.wait()
+        current_events[kwargs["state_key"]] = kwargs["content"]
+        return nio.RoomPutStateResponse.from_dict(
+            {"event_id": "$manual-remove"},
+            room_id="!room:localhost",
+        )
+
+    async def run_automatic_batch() -> SetThreadTagsIfEmptyResult:
+        automatic_started.set()
+        return await set_thread_tags_if_empty(
+            automatic_client,
+            "!room:localhost",
+            thread_root_id,
+            ["auto"],
+            set_by="@automatic:localhost",
+        )
+
+    manual_client.room_put_state.side_effect = blocked_manual_remove
+    try:
+        manual_task = asyncio.create_task(
+            remove_thread_tag(
+                manual_client,
+                "!room:localhost",
+                thread_root_id,
+                "manual",
+                requester_user_id="@manual:localhost",
+            ),
+        )
+        await asyncio.wait_for(manual_remove_entered.wait(), timeout=1)
+
+        automatic_task = asyncio.create_task(run_automatic_batch())
+        await asyncio.wait_for(automatic_started.wait(), timeout=1)
+        automatic_client.room_get_state.assert_not_awaited()
+        automatic_client.room_put_state.assert_not_awaited()
+
+        release_manual_remove.set()
+        await asyncio.gather(manual_task, automatic_task)
+    finally:
+        release_manual_remove.set()
+        pending_tasks = [task for task in (manual_task, automatic_task) if task is not None]
+        if pending_tasks:
+            await asyncio.gather(*pending_tasks, return_exceptions=True)
+
+    assert manual_task.result().tags == {}
+    assert automatic_task.result() == SetThreadTagsIfEmptyResult(
+        had_existing_tags=False,
+        applied_tags=(),
+        failed_tags=(),
+        skipped_due_to_prior_mutation=True,
+    )
+    automatic_client.room_get_state.assert_awaited_once_with("!room:localhost")
+    automatic_client.room_put_state.assert_not_awaited()
+    assert current_events == {manual_state_key: {}}
+
+
+@pytest.mark.asyncio
+async def test_completed_manual_removal_survives_the_model_inference_gap() -> None:
+    """A durable tombstone should prevent auto tags even when no mutation call remains active."""
+    thread_root_id = "$removed-during-inference-root:localhost"
+    manual_state_key = _thread_tag_state_key(thread_root_id, "manual")
+    current_events = {
+        manual_state_key: _tag_record_content(set_by="@manual:localhost"),
+    }
+    manual_client = _tag_writer_client("@manual:localhost", current_events)
+    automatic_client = _tag_writer_client("@automatic:localhost", current_events)
+
+    removed_state = await remove_thread_tag(
+        manual_client,
+        "!room:localhost",
+        thread_root_id,
+        "manual",
+        requester_user_id="@manual:localhost",
+    )
+    result = await set_thread_tags_if_empty(
+        automatic_client,
+        "!room:localhost",
+        thread_root_id,
+        ["auto"],
+        set_by="@automatic:localhost",
+    )
+
+    assert removed_state.tags == {}
+    assert result == SetThreadTagsIfEmptyResult(
+        had_existing_tags=False,
+        applied_tags=(),
+        failed_tags=(),
+        skipped_due_to_prior_mutation=True,
+    )
+    automatic_client.room_put_state.assert_not_awaited()
+    assert current_events == {manual_state_key: {}}
+
+
+@pytest.mark.asyncio
+async def test_automatic_batch_serializes_manual_write_until_all_tags_finish() -> None:
+    """A manual write must not interleave with an automatic read-and-batch transaction."""
+    current_events: dict[str, dict[str, object]] = {}
+    automatic_client = _tag_writer_client("@automatic:localhost", current_events)
+    manual_client = _tag_writer_client("@manual:localhost", current_events)
+    automatic_put_entered = asyncio.Event()
+    release_automatic_put = asyncio.Event()
+    manual_started = asyncio.Event()
+    write_order: list[str] = []
+    automatic_task: asyncio.Task[SetThreadTagsIfEmptyResult] | None = None
+    manual_task: asyncio.Task[ThreadTagsState] | None = None
+
+    async def automatic_put(**kwargs: object) -> object:
+        state_key = kwargs["state_key"]
+        assert isinstance(state_key, str)
+        tag = json.loads(state_key)[1]
+        if tag == "auto-one":
+            automatic_put_entered.set()
+            await release_automatic_put.wait()
+        write_order.append(tag)
+        current_events[state_key] = kwargs["content"]
+        return nio.RoomPutStateResponse.from_dict(
+            {"event_id": f"${tag}"},
+            room_id="!room:localhost",
+        )
+
+    async def manual_put(**kwargs: object) -> object:
+        state_key = kwargs["state_key"]
+        assert isinstance(state_key, str)
+        tag = json.loads(state_key)[1]
+        write_order.append(tag)
+        current_events[state_key] = kwargs["content"]
+        return nio.RoomPutStateResponse.from_dict(
+            {"event_id": f"${tag}"},
+            room_id="!room:localhost",
+        )
+
+    async def run_manual_write() -> ThreadTagsState:
+        manual_started.set()
+        return await set_thread_tag(
+            manual_client,
+            "!room:localhost",
+            "$automatic-first-root:localhost",
+            "manual",
+            set_by="@manual:localhost",
+        )
+
+    automatic_client.room_put_state.side_effect = automatic_put
+    manual_client.room_put_state.side_effect = manual_put
+    try:
+        automatic_task = asyncio.create_task(
+            set_thread_tags_if_empty(
+                automatic_client,
+                "!room:localhost",
+                "$automatic-first-root:localhost",
+                ["auto-one", "auto-two"],
+                set_by="@automatic:localhost",
+            ),
+        )
+        await asyncio.wait_for(automatic_put_entered.wait(), timeout=1)
+
+        manual_task = asyncio.create_task(run_manual_write())
+        await asyncio.wait_for(manual_started.wait(), timeout=1)
+        manual_client.room_get_state_event.assert_not_awaited()
+        manual_client.room_put_state.assert_not_awaited()
+
+        release_automatic_put.set()
+        await asyncio.gather(automatic_task, manual_task)
+    finally:
+        release_automatic_put.set()
+        pending_tasks = [task for task in (automatic_task, manual_task) if task is not None]
+        if pending_tasks:
+            await asyncio.gather(*pending_tasks, return_exceptions=True)
+
+    result = automatic_task.result()
+    assert result == SetThreadTagsIfEmptyResult(
+        had_existing_tags=False,
+        applied_tags=("auto-one", "auto-two"),
+        failed_tags=(),
+    )
+    assert write_order == ["auto-one", "auto-two", "manual"]
+
+
+@pytest.mark.asyncio
+async def test_cancelled_automatic_batch_releases_thread_tag_mutation_lock() -> None:
+    """Cancellation during the empty-state read must not strand later manual writers."""
+    current_events: dict[str, dict[str, object]] = {}
+    automatic_client = _tag_writer_client("@automatic:localhost", current_events)
+    manual_client = _tag_writer_client("@manual:localhost", current_events)
+    automatic_read_entered = asyncio.Event()
+    hold_automatic_read = asyncio.Event()
+
+    async def blocked_automatic_read(_room_id: str) -> object:
+        automatic_read_entered.set()
+        await hold_automatic_read.wait()
+        return _thread_tags_room_state_from_current(current_events)
+
+    automatic_client.room_get_state.side_effect = blocked_automatic_read
+    automatic_task = asyncio.create_task(
+        set_thread_tags_if_empty(
+            automatic_client,
+            "!room:localhost",
+            "$cancelled-auto-root:localhost",
+            ["auto"],
+            set_by="@automatic:localhost",
+        ),
+    )
+    try:
+        await asyncio.wait_for(automatic_read_entered.wait(), timeout=1)
+        automatic_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await automatic_task
+
+        state = await asyncio.wait_for(
+            set_thread_tag(
+                manual_client,
+                "!room:localhost",
+                "$cancelled-auto-root:localhost",
+                "manual",
+                set_by="@manual:localhost",
+            ),
+            timeout=1,
+        )
+    finally:
+        hold_automatic_read.set()
+        if not automatic_task.done():
+            automatic_task.cancel()
+        await asyncio.gather(automatic_task, return_exceptions=True)
+
+    assert set(state.tags) == {"manual"}
+
+
+@pytest.mark.asyncio
+async def test_automatic_batch_does_not_block_mutations_for_another_thread() -> None:
+    """The mutation lock should serialize one thread without blocking unrelated threads."""
+    current_events: dict[str, dict[str, object]] = {}
+    automatic_client = _tag_writer_client("@automatic:localhost", current_events)
+    manual_client = _tag_writer_client("@manual:localhost", current_events)
+    automatic_put_entered = asyncio.Event()
+    release_automatic_put = asyncio.Event()
+
+    async def blocked_automatic_put(**kwargs: object) -> object:
+        automatic_put_entered.set()
+        await release_automatic_put.wait()
+        current_events[kwargs["state_key"]] = kwargs["content"]
+        return nio.RoomPutStateResponse.from_dict(
+            {"event_id": "$automatic"},
+            room_id="!room:localhost",
+        )
+
+    automatic_client.room_put_state.side_effect = blocked_automatic_put
+    automatic_task = asyncio.create_task(
+        set_thread_tags_if_empty(
+            automatic_client,
+            "!room:localhost",
+            "$blocked-root:localhost",
+            ["auto"],
+            set_by="@automatic:localhost",
+        ),
+    )
+    try:
+        await asyncio.wait_for(automatic_put_entered.wait(), timeout=1)
+        manual_state = await asyncio.wait_for(
+            set_thread_tag(
+                manual_client,
+                "!room:localhost",
+                "$unrelated-root:localhost",
+                "manual",
+                set_by="@manual:localhost",
+            ),
+            timeout=1,
+        )
+        assert set(manual_state.tags) == {"manual"}
+        assert not automatic_task.done()
+    finally:
+        release_automatic_put.set()
+        await asyncio.gather(automatic_task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_automatic_batch_continues_after_one_tag_write_fails() -> None:
+    """One failed automatic tag should not prevent later tags from being attempted."""
+    client = AsyncMock()
+    client.room_get_state.return_value = _thread_tags_room_state_response()
+    write_tag = AsyncMock(side_effect=[TimeoutError("timed out"), None])
+
+    with (
+        patch("mindroom.thread_tags._set_thread_tag_under_lock", new=write_tag),
+        patch("mindroom.thread_tags.logger.exception") as log_exception,
+    ):
+        result = await set_thread_tags_if_empty(
+            client,
+            "!room:localhost",
+            "$partial-auto-root:localhost",
+            ["first", "second"],
+            set_by="@automatic:localhost",
+        )
+
+    assert [call.args[3] for call in write_tag.await_args_list] == ["first", "second"]
+    log_exception.assert_called_once_with(
+        "Failed to write conditional thread tag",
+        room_id="!room:localhost",
+        thread_root_id="$partial-auto-root:localhost",
+        tag="first",
+    )
+    assert result == SetThreadTagsIfEmptyResult(
+        had_existing_tags=False,
+        applied_tags=("second",),
+        failed_tags=("first",),
+    )
 
 
 @pytest.mark.asyncio
@@ -1581,6 +2001,36 @@ async def test_set_thread_tag_rejects_invalid_tag_names(tag: str) -> None:
         )
 
     client.room_get_state_event.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    ("raw_tag", "expected"),
+    [
+        ("bug", "bug"),
+        ("  Follow Up  ", "follow-up"),
+        ("Feature\tRequest", "feature-request"),
+        ("needs_underscore", "needs-underscore"),
+        ("Beta -- Release!", "beta-release"),
+        ("-leading-and-trailing-", "leading-and-trailing"),
+        ("x" * (COERCED_TAG_MAX_LENGTH + 10), "x" * COERCED_TAG_MAX_LENGTH),
+    ],
+)
+def test_coerce_tag_name_normalizes_free_form_input(raw_tag: str, expected: str) -> None:
+    """Coercion lowercases, hyphenates separators, and truncates to the cap."""
+    assert coerce_tag_name(raw_tag) == expected
+
+
+@pytest.mark.parametrize("raw_tag", ["", "   ", "!!!", "---", None, 42])
+def test_coerce_tag_name_returns_none_when_nothing_survives(raw_tag: object) -> None:
+    """Input with no valid characters coerces to None instead of raising."""
+    assert coerce_tag_name(raw_tag) is None
+
+
+def test_coerce_tag_name_strips_hyphen_left_by_truncation() -> None:
+    """A truncation cut landing on a separator must not leave a trailing hyphen."""
+    raw_tag = "x" * (COERCED_TAG_MAX_LENGTH - 1) + " tail"
+
+    assert coerce_tag_name(raw_tag) == "x" * (COERCED_TAG_MAX_LENGTH - 1)
 
 
 @pytest.mark.asyncio

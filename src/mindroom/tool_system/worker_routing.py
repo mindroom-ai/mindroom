@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING, Literal, cast
 from mindroom.tool_system.context_bound_streams import context_bound_async_stream
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Awaitable, Callable, Collection, Iterator
+    from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 
     from mindroom.constants import RuntimePaths
 
@@ -23,6 +23,9 @@ _ExecutionChannel = Literal["matrix", "openai_compat"]
 
 _WORKER_DIRNAME_MAX_PREFIX_LENGTH = 80
 _DEFAULT_WORKER_NAME_PREFIX = "mindroom-worker"
+_DNS_LABEL_MAX_LENGTH = 63
+_WORKER_ID_DIGEST_LENGTH = 24
+_DESCRIPTIVE_WORKER_ID_DIGEST_LENGTH = 10
 _AGENT_WORKSPACE_DIRNAME = "workspace"
 _PRIVATE_INSTANCE_ROOT_DIRNAME = "private_instances"
 _SHARED_ONLY_INTEGRATION_NAMES = frozenset(
@@ -35,11 +38,16 @@ _LOCAL_ONLY_SHARED_INTEGRATION_TOOL_NAMES = frozenset(
     {
         "approved_egress",
         "attachments",
+        "callback_manager",
+        "desktop",
+        "external_trigger_manager",
         "gmail",
         "google_calendar",
+        "google_docs",
         "google_drive",
         "google_sheets",
         "homeassistant",
+        "todo",
     },
 )
 
@@ -226,15 +234,61 @@ def normalize_worker_key_part(value: str) -> str:
     return normalized or "default"
 
 
-def worker_id_for_key(worker_key: str, *, prefix: str) -> str:
-    """Return a DNS-safe resource name for one worker key (63-char label limit)."""
-    digest = hashlib.sha256(worker_key.encode("utf-8")).hexdigest()[:24]
-    normalized_prefix = prefix.strip().lower().strip("-") or _DEFAULT_WORKER_NAME_PREFIX
-    max_prefix_length = 63 - len(digest) - 1
+def _digest_and_safe_prefix(worker_key: str, prefix: str, *, digest_length: int) -> tuple[str, str]:
+    """Return the worker-key digest and a prefix normalized to a DNS-label-safe slug beside it."""
+    digest = hashlib.sha256(worker_key.encode("utf-8")).hexdigest()[:digest_length]
+    normalized_prefix = re.sub(r"[^a-z0-9-]+", "-", prefix.lower()).strip("-") or _DEFAULT_WORKER_NAME_PREFIX
+    max_prefix_length = _DNS_LABEL_MAX_LENGTH - len(digest) - 1
     safe_prefix = normalized_prefix[:max_prefix_length].rstrip("-")
     if not safe_prefix:
         safe_prefix = _DEFAULT_WORKER_NAME_PREFIX[:max_prefix_length].rstrip("-") or "worker"
+    return digest, safe_prefix
+
+
+def worker_id_for_key(worker_key: str, *, prefix: str) -> str:
+    """Return a DNS-safe resource name for one worker key (63-char label limit)."""
+    digest, safe_prefix = _digest_and_safe_prefix(worker_key, prefix, digest_length=_WORKER_ID_DIGEST_LENGTH)
     return f"{safe_prefix}-{digest}"
+
+
+def descriptive_worker_id_for_key(worker_key: str, *, prefix: str) -> str:
+    """Return a DNS-safe resource name that keeps the worker key's scope readable.
+
+    Embeds the key's tenant/scope/requester/agent parts as a lowercase slug
+    (dropping the `v1` version tag and the `default` tenant, and reducing
+    Matrix requesters to their localpart) so listings stay human-readable,
+    with a short digest for uniqueness after truncation.
+    """
+    digest, safe_prefix = _digest_and_safe_prefix(
+        worker_key,
+        prefix,
+        digest_length=_DESCRIPTIVE_WORKER_ID_DIGEST_LENGTH,
+    )
+    max_slug_length = max(0, _DNS_LABEL_MAX_LENGTH - len(safe_prefix) - len(digest) - 2)
+    slug = _worker_key_slug(worker_key, max_length=max_slug_length)
+    if not slug:
+        return f"{safe_prefix}-{digest}"
+    return f"{safe_prefix}-{slug}-{digest}"
+
+
+def _worker_key_slug(worker_key: str, *, max_length: int) -> str:
+    parts = worker_key.split(":")
+    if len(parts) >= 4 and parts[0] == "v1":
+        tenant, scope, rest = parts[1], parts[2], parts[3:]
+        if scope == "user":
+            rest = [_requester_localpart(":".join(rest))]
+        elif scope == "user_agent" and len(rest) >= 2:
+            rest = [_requester_localpart(":".join(rest[:-1])), rest[-1]]
+        parts = ([] if tenant == "default" else [tenant]) + [scope, *rest]
+    slug = re.sub(r"[^a-z0-9]+", "-", ":".join(parts).lower()).strip("-")
+    return slug[:max_length].rstrip("-")
+
+
+def _requester_localpart(requester: str) -> str:
+    """Return the localpart of a Matrix-style requester; other requesters pass through."""
+    if requester.startswith("@"):
+        return requester[1:].split(":", 1)[0]
+    return requester
 
 
 def _normalize_worker_requester_part(value: str) -> str:
@@ -376,40 +430,45 @@ def build_worker_target_from_runtime_env(
     )
 
 
+def build_agent_toolkit_worker_target(
+    worker_scope: WorkerScope | None,
+    agent_name: str,
+    *,
+    is_private: bool,
+    execution_identity: ToolExecutionIdentity | None,
+    runtime_paths: RuntimePaths,
+) -> ResolvedWorkerTarget:
+    """Build the worker target used when constructing one agent's registered toolkits.
+
+    Single source of truth for the `private_agent_names` derivation shared by
+    agent toolkit construction and dispatch-time tool composition.
+    """
+    if worker_scope == "user_agent":
+        private_agent_names = frozenset({agent_name}) if is_private else frozenset()
+    else:
+        private_agent_names = None
+    return build_worker_target_from_runtime_env(
+        worker_scope,
+        agent_name,
+        execution_identity=execution_identity,
+        runtime_paths=runtime_paths,
+        private_agent_names=private_agent_names,
+    )
+
+
 def worker_scope_allows_shared_only_integrations(worker_scope: WorkerScope | None) -> bool:
     """Return whether a worker scope can use shared-only dashboard integrations."""
     return worker_scope in (None, "shared")
 
 
-def _requires_shared_only_integration_scope(
-    name: str,
-    *,
-    configured_mcp_server_ids: Collection[str] | None = None,
-    oauth_mcp_server_ids: Collection[str] | None = None,
-) -> bool:
-    """Return whether a tool or dashboard integration is restricted to shared scope."""
-    if name in _SHARED_ONLY_INTEGRATION_NAMES:
-        return True
+def _requires_shared_only_integration_scope(name: str) -> bool:
+    """Return whether a tool or dashboard integration is restricted to shared scope.
 
-    from mindroom.mcp.registry import (  # noqa: PLC0415
-        mcp_server_id_from_tool_name,
-        mcp_tool_name,
-        mcp_tool_name_is_oauth_backed,
-    )
-
-    server_id = mcp_server_id_from_tool_name(name)
-    if server_id is not None:
-        return not (
-            mcp_tool_name_is_oauth_backed(name)
-            or (oauth_mcp_server_ids is not None and server_id in oauth_mcp_server_ids)
-        )
-    if configured_mcp_server_ids is None:
-        return False
-    for server_id in configured_mcp_server_ids:
-        if name != mcp_tool_name(server_id):
-            continue
-        return oauth_mcp_server_ids is None or server_id not in oauth_mcp_server_ids
-    return False
+    MCP registry tools are supported on every scope: OAuth-backed servers use
+    requester-scoped sessions, and non-OAuth servers always execute through the
+    shared server session without requester credentials.
+    """
+    return name in _SHARED_ONLY_INTEGRATION_NAMES
 
 
 def supports_tool_name_for_worker_scope(name: str, worker_scope: WorkerScope | None) -> bool:
@@ -422,22 +481,11 @@ def supports_tool_name_for_worker_scope(name: str, worker_scope: WorkerScope | N
 def unsupported_shared_only_integration_names(
     names: list[str],
     worker_scope: WorkerScope | None,
-    *,
-    configured_mcp_server_ids: Collection[str] | None = None,
-    oauth_mcp_server_ids: Collection[str] | None = None,
 ) -> list[str]:
     """Return shared-only integration names that are invalid for the effective execution scope."""
     if worker_scope_allows_shared_only_integrations(worker_scope):
         return []
-    return [
-        name
-        for name in names
-        if _requires_shared_only_integration_scope(
-            name,
-            configured_mcp_server_ids=configured_mcp_server_ids,
-            oauth_mcp_server_ids=oauth_mcp_server_ids,
-        )
-    ]
+    return [name for name in names if _requires_shared_only_integration_scope(name)]
 
 
 def tool_stays_local(name: str) -> bool:
@@ -662,6 +710,36 @@ def _private_instance_state_root_path(
 ) -> Path:
     """Return the canonical durable state root for one private agent instance."""
     return private_instance_scope_root_path(base_storage_path, worker_key) / _normalize_worker_dir_part(agent_name)
+
+
+def private_instance_state_root_for_requester(
+    base_storage_path: Path,
+    *,
+    requester_id: str,
+    agent_name: str,
+    worker_scope: WorkerScope,
+    runtime_paths: RuntimePaths,
+) -> Path | None:
+    """Return the private-instance state root one requester would own for an agent.
+
+    Instance directory names embed a one-way digest of the worker key, so ownership can only be
+    established by forward-computing the path a known requester would get and comparing it against
+    the directories that exist on disk.
+    """
+    identity = build_tool_execution_identity(
+        channel="matrix",
+        agent_name=agent_name,
+        runtime_paths=runtime_paths,
+        requester_id=requester_id,
+        room_id=None,
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id=None,
+    )
+    worker_key = resolve_worker_key(worker_scope, identity, agent_name=agent_name)
+    if worker_key is None:
+        return None
+    return _private_instance_state_root_path(base_storage_path, worker_key=worker_key, agent_name=agent_name)
 
 
 def _is_resolved_agent_state_root(path: Path, agent_name: str) -> bool:

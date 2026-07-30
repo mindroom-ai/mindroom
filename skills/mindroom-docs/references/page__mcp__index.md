@@ -1,9 +1,9 @@
 # MCP
 
 Model Context Protocol (MCP) is a standard way for AI applications to connect to external tool servers.
-MindRoom's Phase 1 MCP support acts as an MCP client for tools.
+MindRoom acts as an MCP client for tools and their optional MCP Apps interfaces.
 It connects to configured servers, discovers their tool catalogs, and exposes those tools to agents.
-MindRoom does not yet consume MCP resources or prompts.
+MindRoom consumes UI resources associated with MCP Apps tools, but it does not expose general MCP resources or prompts to agents.
 
 ## Configuration Overview
 
@@ -158,10 +158,20 @@ agents:
 These per-agent overrides filter the already discovered catalog for that agent assignment.
 They are useful when one server exposes many tools but one agent should see only a focused subset.
 
-Non-OAuth MCP integrations are treated as shared-only integrations.
-Agents using `worker_scope: user` or `worker_scope: user_agent` cannot use non-OAuth `mcp_<server_id>` tools.
-Use unscoped execution or `worker_scope: shared` for unauthenticated MCP servers and static-header MCP servers.
-OAuth-backed remote MCP servers are the exception because MindRoom loads a scoped OAuth token for the current requester at tool-call time.
+MCP tools are available on every worker scope, including private per-user agents.
+Non-OAuth `mcp_<server_id>` tools always execute through the shared MCP server session; requester identity and requester credentials are never passed to the server.
+OAuth-backed remote MCP servers instead load a scoped OAuth token for the current requester at tool-call time and keep one session per requester scope.
+
+## MCP Apps
+
+MindRoom negotiates the [`io.modelcontextprotocol/ui` MCP Apps extension](https://modelcontextprotocol.io/extensions/apps/overview) when it initializes each MCP session.
+It recognizes the current nested `_meta.ui.resourceUri` declaration and the deprecated flat `_meta["ui/resourceUri"]` declaration.
+Tools whose `_meta.ui.visibility` excludes `model` remain available to their app but are not exposed in the model-callable catalog.
+
+After a successful call to a UI-backed tool, MindRoom reads the declared `ui://` resource.
+It accepts a non-empty UTF-8 text resource or base64 blob only when the response URI matches the requested URI and its MIME type is `text/html;profile=mcp-app`.
+The accepted HTML, resource metadata, redacted tool input, and original MCP tool result are attached to the Matrix tool trace for clients that render MCP Apps.
+If the optional UI resource is missing, malformed, or unavailable, the successful tool call still returns its normal text result.
 
 ## OAuth-Backed Remote MCP
 
@@ -423,13 +433,17 @@ If reconnect also fails, the error is surfaced to the caller.
 
 If an MCP server sends a `tools/list_changed` notification, MindRoom refreshes that server's catalog.
 If the catalog changed, MindRoom restarts the agents and teams that reference that server so they pick up the updated tool list.
+The catalog-change callback schedules this replacement asynchronously so the triggering MCP tool call can finish before response draining starts.
+Configured servers with no dependent entity return before admission draining while still invalidating the worker validation snapshot cache.
+Referenced-entity replacement shares one serialized global response-admission owner with config reload.
+It waits up to 600 seconds for active Matrix responses to drain, then force-applies while keeping admission closed over the replacement window.
 
 ## Limitations
 
 - Phase 1 supports MCP tools only.
 - MCP resources and prompts are not exposed in MindRoom yet.
-- Non-OAuth MCP integrations are shared-only and cannot be used with `worker_scope: user` or `worker_scope: user_agent`.
-- OAuth-backed remote MCP integrations use requester-scoped OAuth credentials and can be used with isolating worker scopes.
+- Non-OAuth MCP integrations always use the shared server session, even on isolating worker scopes; per-requester isolation requires an OAuth-backed server.
+- OAuth-backed remote MCP integrations use requester-scoped OAuth credentials and sessions.
 - OAuth-backed remote MCP typed functions appear only after MindRoom has cached a requester-specific remote catalog.
 - `server_id` and `tool_prefix` must use letters, numbers, and underscores.
 - The final function name `<prefix>_<remote_tool_name>` must be 64 characters or fewer.

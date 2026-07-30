@@ -26,13 +26,15 @@ from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.custom_tools import dynamic_workflow as dynamic_workflow_module
-from mindroom.custom_tools.dynamic_workflow import DynamicWorkflowTools
+from mindroom.custom_tools.dynamic_workflow import _MINIMAL_SPEC_EXAMPLE, DynamicWorkflowTools
 from mindroom.dynamic_workflows.agno_adapter import build_agno_workflow_factory
 from mindroom.dynamic_workflows.runner import DynamicWorkflowExecutionError, execute_workflow_spec
 from mindroom.dynamic_workflows.service import DynamicWorkflowService
 from mindroom.dynamic_workflows.store import DynamicWorkflowStore
 from mindroom.dynamic_workflows.validation import DynamicWorkflowError
 from mindroom.entity_resolution import entity_identity_registry
+from mindroom.matrix.state import MatrixState
+from mindroom.message_target import MessageTarget
 from mindroom.tool_approval import ToolCallWorkflowOrigin, _matching_tool_approval_rule, _shutdown_approval_store
 from mindroom.tool_system.metadata import TOOL_METADATA
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, get_tool_runtime_context, tool_runtime_context
@@ -137,9 +139,11 @@ def _make_context(tmp_path: Path) -> ToolRuntimeContext:
     )
     return ToolRuntimeContext(
         agent_name="general",
-        room_id="!room:localhost",
-        thread_id="$thread:localhost",
-        resolved_thread_id="$thread:localhost",
+        target=MessageTarget.resolve(
+            room_id="!room:localhost",
+            thread_id="$thread:localhost",
+            reply_to_event_id="$event:localhost",
+        ),
         requester_id="@user:localhost",
         client=AsyncMock(),
         config=config,
@@ -147,7 +151,6 @@ def _make_context(tmp_path: Path) -> ToolRuntimeContext:
         conversation_cache=AsyncMock(),
         event_cache=make_event_cache_mock(),
         room=None,
-        reply_to_event_id="$event:localhost",
         storage_path=None,
     )
 
@@ -173,9 +176,11 @@ def _make_multi_agent_context(tmp_path: Path, *, room_agents: list[str]) -> Tool
     room.members_synced = True
     return ToolRuntimeContext(
         agent_name="general",
-        room_id="!room:localhost",
-        thread_id="$thread:localhost",
-        resolved_thread_id="$thread:localhost",
+        target=MessageTarget.resolve(
+            room_id="!room:localhost",
+            thread_id="$thread:localhost",
+            reply_to_event_id="$event:localhost",
+        ),
         requester_id="@user:localhost",
         client=AsyncMock(),
         config=config,
@@ -183,7 +188,6 @@ def _make_multi_agent_context(tmp_path: Path, *, room_agents: list[str]) -> Tool
         conversation_cache=AsyncMock(),
         event_cache=make_event_cache_mock(),
         room=room,
-        reply_to_event_id="$event:localhost",
         storage_path=None,
     )
 
@@ -1717,7 +1721,7 @@ def test_dynamic_workflow_tool_rejects_ephemeral_model_outside_caller_policy(tmp
             agents={"general": AgentConfig(display_name="General Agent", tools=["dynamic_workflow"], model="default")},
             models={
                 "default": ModelConfig(provider="anthropic", id="claude-sonnet-4-6"),
-                "opus": ModelConfig(provider="anthropic", id="claude-opus-4-8"),
+                "opus": ModelConfig(provider="anthropic", id="claude-opus-5"),
             },
         ),
         context.runtime_paths,
@@ -1737,7 +1741,7 @@ def test_dynamic_workflow_tool_rejects_ephemeral_model_outside_caller_policy(tmp
                             "tools": [],
                         },
                     ],
-                    permissions={"models": ["claude-opus-4-8"], "tools": []},
+                    permissions={"models": ["claude-opus-5"], "tools": []},
                 ),
             ),
         )
@@ -1755,7 +1759,7 @@ def test_dynamic_workflow_tool_enforces_permission_models_for_default_participan
             agents={"general": AgentConfig(display_name="General Agent", tools=["dynamic_workflow"], model="default")},
             models={
                 "default": ModelConfig(provider="anthropic", id="claude-sonnet-4-6"),
-                "opus": ModelConfig(provider="anthropic", id="claude-opus-4-8"),
+                "opus": ModelConfig(provider="anthropic", id="claude-opus-5"),
             },
         ),
         context.runtime_paths,
@@ -1774,7 +1778,7 @@ def test_dynamic_workflow_tool_enforces_permission_models_for_default_participan
                             "tools": [],
                         },
                     ],
-                    permissions={"models": ["claude-opus-4-8"], "tools": []},
+                    permissions={"models": ["claude-opus-5"], "tools": []},
                 ),
             ),
         )
@@ -1792,7 +1796,7 @@ def test_dynamic_workflow_tool_defaults_ephemeral_model_to_caller_runtime_model(
             agents={"general": AgentConfig(display_name="General Agent", tools=["dynamic_workflow"], model="opus")},
             models={
                 "default": ModelConfig(provider="anthropic", id="claude-sonnet-4-6"),
-                "opus": ModelConfig(provider="anthropic", id="claude-opus-4-8"),
+                "opus": ModelConfig(provider="anthropic", id="claude-opus-5"),
             },
         ),
         context.runtime_paths,
@@ -1897,7 +1901,7 @@ def test_dynamic_workflow_tool_revalidates_saved_revision_policy_before_run(tmp_
             agents={"general": AgentConfig(display_name="General Agent", tools=["dynamic_workflow"], model="default")},
             models={
                 "default": ModelConfig(provider="anthropic", id="claude-sonnet-4-6"),
-                "opus": ModelConfig(provider="anthropic", id="claude-opus-4-8"),
+                "opus": ModelConfig(provider="anthropic", id="claude-opus-5"),
             },
         ),
         context.runtime_paths,
@@ -1999,7 +2003,7 @@ def test_room_agent_participant_rebinds_context_and_uses_isolated_state(tmp_path
             },
             models={
                 "default": ModelConfig(provider="anthropic", id="claude-sonnet-4-6"),
-                "large": ModelConfig(provider="anthropic", id="claude-opus-4-8"),
+                "large": ModelConfig(provider="anthropic", id="claude-opus-5"),
             },
             room_models={"lobby": "large"},
             knowledge_bases={"reference": {"path": str(tmp_path / "knowledge")}},
@@ -2007,12 +2011,9 @@ def test_room_agent_participant_rebinds_context_and_uses_isolated_state(tmp_path
         context.runtime_paths,
     )
     runtime_paths = runtime_paths_for(config)
-    (runtime_paths.storage_root / "matrix_state.yaml").write_text(
-        yaml.safe_dump(
-            {"rooms": {"lobby": {"room_id": "!room:localhost", "alias": "#lobby:localhost", "name": "Lobby"}}},
-        ),
-        encoding="utf-8",
-    )
+    state = MatrixState.load(runtime_paths=runtime_paths)
+    state.add_room("lobby", room_id="!room:localhost", alias="#lobby:localhost", name="Lobby")
+    state.save(runtime_paths=runtime_paths)
     persist_entity_accounts(config, runtime_paths)
     context = replace(context, config=config, runtime_paths=runtime_paths)
     parent_loop = asyncio.new_event_loop()
@@ -2411,3 +2412,61 @@ def test_run_agent_raises_on_failed_agno_status(tmp_path: Path) -> None:
 
     with pytest.raises(dynamic_workflow_module.DynamicWorkflowExecutionError, match="provider auth failed"):
         asyncio.run(dynamic_workflow_module._arun_agent(context, fake_agent, "Write."))
+
+
+def test_validate_workflow_reports_all_spec_errors_in_one_call(tmp_path: Path) -> None:
+    """One validate_workflow call returns the full repair list, not one error per call."""
+    context = _make_context(tmp_path)
+    tool = DynamicWorkflowTools()
+
+    with tool_runtime_context(context):
+        payload = _tool_payload(
+            tool.validate_workflow(
+                {
+                    "steps": [],
+                    "schema_version": 2,
+                    "id": "x",
+                    "name": "X",
+                },
+            ),
+        )
+
+    assert payload["status"] == "error"
+    assert payload["errors"] == [
+        "Workflow spec contains unsupported field 'steps'.",
+        "Workflow spec field 'schema_version' must be 1.",
+        "Workflow spec field 'kind' is missing.",
+        "Workflow spec field 'participants' is missing.",
+        "Workflow spec field 'workflow' is missing.",
+    ]
+    assert payload["message"] == "\n".join(payload["errors"])
+    assert payload["minimal_valid_spec_example"] == _MINIMAL_SPEC_EXAMPLE
+
+
+def test_create_workflow_reports_all_spec_errors_in_one_call(tmp_path: Path) -> None:
+    """create_workflow rejects invalid specs with the same full error list."""
+    context = _make_context(tmp_path)
+    tool = DynamicWorkflowTools()
+
+    with tool_runtime_context(context):
+        payload = _tool_payload(tool.create_workflow({"schema_version": 1, "kind": "workflow"}))
+
+    assert payload["status"] == "error"
+    assert payload["errors"] == [
+        "Workflow spec field 'id' is missing.",
+        "Workflow spec field 'name' is missing.",
+        "Workflow spec field 'participants' is missing.",
+        "Workflow spec field 'workflow' is missing.",
+    ]
+
+
+def test_minimal_spec_example_in_tool_description_is_valid(tmp_path: Path) -> None:
+    """The minimal example advertised in the tool schema validates as-is."""
+    context = _make_context(tmp_path)
+    tool = DynamicWorkflowTools()
+
+    with tool_runtime_context(context):
+        payload = _tool_payload(tool.validate_workflow(json.loads(_MINIMAL_SPEC_EXAMPLE)))
+
+    assert payload["status"] == "ok"
+    assert payload["workflow_id"] == "my_flow"

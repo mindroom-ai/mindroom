@@ -18,11 +18,11 @@ if TYPE_CHECKING:
 
 
 def _agent_uses_file_memory_backend(config: Config, agent_name: str) -> bool:
-    return config.get_agent_memory_backend(agent_name) == "file"
+    return config.resolve_entity(agent_name).memory_backend == "file"
 
 
 def _agent_uses_disabled_memory_backend(config: Config, agent_name: str) -> bool:
-    return config.get_agent_memory_backend(agent_name) == "none"
+    return config.resolve_entity(agent_name).memory_backend == "none"
 
 
 def caller_uses_file_memory_backend(config: Config, caller_context: str | list[str]) -> bool:

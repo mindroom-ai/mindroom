@@ -36,8 +36,8 @@ MindRoom also includes `scheduler` in `defaults.tools` by default on this branch
 
 `google_calendar` exposes `list_events()`, `fetch_all_events()`, `find_available_slots()`, `list_calendars()`, `create_event()`, `update_event()`, and `delete_event()`.
 MindRoom loads the connected Google account from its unified credential store instead of relying on a per-process `token.json`.
-The OAuth provider requests a consistent Google Calendar scope, while MindRoom gates write methods with the `allow_update` setting.
-Write calls are still part of the tool surface, but they are only exposed when `allow_update: true` is configured.
+The OAuth provider requests narrowly targeted scopes for event access, calendar listing, availability, and working-hours settings, while MindRoom gates write methods with the `allow_update` setting.
+Write calls are enabled by default and can be removed from the tool surface with `allow_update: false`.
 When no usable MindRoom OAuth credentials exist, the wrapper raises `OAuthConnectionRequired` instead of falling back to Agno's local token flow.
 `find_available_slots()` derives openings from the user's current calendar events plus working-hours settings inferred from Google Calendar settings and locale.
 
@@ -46,7 +46,7 @@ When no usable MindRoom OAuth credentials exist, the wrapper raises `OAuthConnec
 | Option | Type | Required | Default | Notes |
 | --- | --- | --- | --- | --- |
 | `calendar_id` | `text` | `no` | `primary` | Google Calendar ID to query or update. |
-| `allow_update` | `boolean` | `no` | `false` | Expose create, update, and delete operations. |
+| `allow_update` | `boolean` | `no` | `true` | Expose create, update, and delete operations. |
 
 ### Example
 
@@ -75,7 +75,7 @@ create_event(
 ### Notes
 
 - `calendar_id` defaults to `primary`, and `list_calendars()` can return the other calendar IDs available to the connected account.
-- If the Google Calendar connection is missing the required calendar scope, `google_calendar` stays unavailable until the user reconnects and grants it.
+- If the Google Calendar connection is missing any required Calendar scope, `google_calendar` stays unavailable until the user reconnects and grants it.
 - Use the Google Services OAuth guides for consent-screen setup, redirect URIs, and environment variables.
 
 ## [`cal_com`]
@@ -141,6 +141,8 @@ get_upcoming_bookings(email="alex@example.com")
 `scheduler` exposes `schedule()`, `edit_schedule()`, `list_schedules()`, and `cancel_schedule()`.
 It reuses the same backend as `!schedule`, `!edit_schedule`, `!list_schedules`, and `!cancel_schedule`.
 By default `schedule()` posts back into the current room or thread scope, while `new_thread=True` schedules a future room-level root message.
+The optional `history_limit` argument caps how many recent messages the scheduled responder sees each time the task fires.
+Use `history_limit=0` for no prior conversation context, or a positive integer to keep that many recent messages.
 Scheduled tasks are stored in Matrix room state and persist across restarts.
 The scheduler validates mentioned agents and teams against the current room or thread before it saves a task.
 If no Matrix room context is available, the tool returns an unavailable error instead of creating a task.
@@ -161,8 +163,9 @@ agents:
 ```python
 schedule("tomorrow at 9am @ops check the deployment")
 schedule("every weekday at 8am post the on-call handoff summary", new_thread=True)
+schedule("every hour @ops check deployment health", history_limit=0)
 list_schedules()
-edit_schedule("a1b2c3d4", "tomorrow at 10am @ops check the deployment")
+edit_schedule("a1b2c3d4", "tomorrow at 10am @ops check the deployment", history_limit=5)
 cancel_schedule("a1b2c3d4")
 ```
 
@@ -170,6 +173,8 @@ cancel_schedule("a1b2c3d4")
 
 - `scheduler` needs no dashboard setup and is included in `defaults.tools` by default unless you explicitly disable that inheritance.
 - Editing preserves the original schedule type, so switching between one-time and recurring schedules requires cancelling the old task and creating a new one.
+- Editing preserves an existing history limit unless the edit request or explicit tool argument changes it.
+- Use natural-language edit phrases such as `restore full history` to remove a history limit through chat, or pass `history_limit` through the tool when the agent should set a concrete cap.
 - Conditional phrases such as `if` and `when` are converted into recurring polling schedules rather than real event subscriptions.
 - Use [Scheduling](../scheduling.md) for the full command syntax, timezone behavior, persistence details, and command-line aliases.
 

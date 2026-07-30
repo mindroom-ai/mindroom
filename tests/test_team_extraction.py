@@ -25,17 +25,9 @@ class TestExtractContent:
 
     def test_get_response_content_from_messages(self) -> None:
         """Test extracting content from messages when no direct content."""
-        msg1 = MagicMock(spec=Message)
-        msg1.role = "assistant"
-        msg1.content = "First message"
-
-        msg2 = MagicMock(spec=Message)
-        msg2.role = "user"  # Should be ignored
-        msg2.content = "User message"
-
-        msg3 = MagicMock(spec=Message)
-        msg3.role = "assistant"
-        msg3.content = " Second message"
+        msg1 = Message(role="assistant", content="First message")
+        msg2 = Message(role="user", content="User message")  # Should be ignored
+        msg3 = Message(role="assistant", content=" Second message")
 
         response = MagicMock()
         response.content = None
@@ -43,6 +35,18 @@ class TestExtractContent:
 
         result = _get_response_content(response)
         assert result == "First message\n\n Second message"
+
+    def test_get_response_content_skips_history_messages(self) -> None:
+        """Messages agno folded in from session history do not count as output."""
+        history = Message(role="assistant", content="Previous turn answer", from_history=True)
+        current = Message(role="assistant", content="Fresh answer")
+
+        response = MagicMock()
+        response.content = None
+        response.messages = [history, current]
+
+        result = _get_response_content(response)
+        assert result == "Fresh answer"
 
     def test_get_response_content_empty(self) -> None:
         """Test extracting content when no content available."""
@@ -281,9 +285,7 @@ class TestExtractTeamMemberContributions:
         agent1.messages = []
 
         # Agent with message content
-        msg = MagicMock(spec=Message)
-        msg.role = "assistant"
-        msg.content = "Message content"
+        msg = Message(role="assistant", content="Message content")
 
         agent2 = MagicMock(spec=RunOutput)
         agent2.agent_name = "message_agent"

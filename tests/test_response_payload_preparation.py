@@ -26,7 +26,7 @@ from mindroom.matrix.cache import ThreadHistoryResult
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.response_payload_preparation import DispatchPayloadInputs, ResponsePayloadPreparation
-from mindroom.response_runner import ResponseRequest
+from mindroom.response_runner import ResponseRequest, _ResponseGenerationOutcome
 from mindroom.turn_policy import PreparedDispatch
 from tests.conftest import (
     TEST_PASSWORD,
@@ -69,6 +69,7 @@ def _bot(tmp_path: Path) -> AgentBot:
     )
     bot = AgentBot(agent_user, tmp_path, config, runtime_paths_for(config), rooms=["!room:localhost"])
     bot.client = AsyncMock(spec=nio.AsyncClient)
+    bot.client.rooms = {}
     install_runtime_cache_support(bot)
     wrap_extracted_collaborators(bot)
     return bot
@@ -86,15 +87,11 @@ def _target(thread_id: str | None = None) -> MessageTarget:
 def _envelope(target: MessageTarget) -> MessageEnvelope:
     return MessageEnvelope(
         source_event_id="$event",
-        room_id="!room:localhost",
         target=target,
-        requester_id="@user:localhost",
-        sender_id="@user:localhost",
         body="hello",
         attachment_ids=(),
         mentioned_agents=(),
         agent_name="general",
-        source_kind="message",
         origin=message_origin(sender_id="@user:localhost", requester_id="@user:localhost", source_kind="message"),
     )
 
@@ -320,13 +317,16 @@ async def test_generate_response_invokes_preparer_exactly_once_under_lock(tmp_pa
         await response_function(None)
         return "$response"
 
-    async def fake_process_and_respond(_request: ResponseRequest, **_kwargs: object) -> FinalDeliveryOutcome:
-        return FinalDeliveryOutcome(
-            terminal_status="completed",
-            event_id="$response",
-            is_visible_response=True,
-            final_visible_body="ok",
-            delivery_kind="sent",
+    async def fake_process_and_respond(_request: ResponseRequest, **_kwargs: object) -> _ResponseGenerationOutcome:
+        return _ResponseGenerationOutcome(
+            delivery=FinalDeliveryOutcome(
+                terminal_status="completed",
+                event_id="$response",
+                is_visible_response=True,
+                final_visible_body="ok",
+                delivery_kind="sent",
+            ),
+            run_succeeded=True,
         )
 
     with (

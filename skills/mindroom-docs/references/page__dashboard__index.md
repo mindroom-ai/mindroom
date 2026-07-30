@@ -73,7 +73,7 @@ Configure AI model providers:
 - **Test connection** to verify model accessibility
 - **Provider API keys** section for configuring credentials
 
-**Runtime-supported providers:** OpenAI, Codex CLI subscription auth (`codex`), Anthropic, Google Gemini (`google`/`gemini`), Vertex AI Claude (`vertexai_claude`), Ollama, OpenRouter, Groq, DeepSeek, Cerebras
+**Runtime-supported providers:** OpenAI, Codex CLI ChatGPT authentication (`codex`), Anthropic, Google Gemini (`google`/`gemini`), Vertex AI Claude (`vertexai_claude`), Ollama, OpenRouter, Groq, DeepSeek, Cerebras
 
 ### Memory
 
@@ -82,6 +82,7 @@ Configure global memory defaults:
 - **Backend** - Global default backend (`mem0`, `file`, or `none`)
 - **Provider** - Ollama (local), OpenAI, or Sentence Transformers
 - **Model** - Provider-specific embedding models
+- **Credential service** - Strictly bind an OpenAI-compatible embedder to a dedicated stored key
 - **Host URL** - For Ollama provider
 - **File backend settings** - Path and file memory tuning options
 - **Auto-flush settings** - Background extraction and flush controls for file-backed memory
@@ -152,7 +153,7 @@ Manage OpenClaw-compatible skills:
 Configure voice message handling:
 
 - **Enable/disable** voice message support
-- **Speech-to-Text** - OpenAI Whisper or self-hosted
+- **Speech-to-Text** - OpenAI transcription or a self-hosted OpenAI-compatible service
 - **Command Intelligence** - Model selection for command recognition
 
 ### Integrations
@@ -205,6 +206,10 @@ The dashboard communicates with the backend API at `/api/`:
 | POST | `/api/config/agent-policies` | Get backend-derived agent policies for a draft config |
 
 When `/api/config/load` returns validation errors, the dashboard fetches `/api/config/raw`, opens the recovery editor, and saves a full replacement through `PUT /api/config/raw` before retrying the structured reload.
+
+When the loaded configuration is composed from multiple files via `!include`, structured save endpoints reject writes with HTTP 409 and the machine-readable error code `config_composed_from_includes`, distinguishing this permanent rejection from a retryable stale-write conflict.
+`POST /api/config/load` reports the includes state in the `x-mindroom-config-uses-includes` response header, `GET /api/config/raw` includes a `uses_includes` field in its response body, and the dashboard shows a banner explaining that changes must be made by editing the include source files directly.
+The raw recovery editor keeps working on the top-level file's literal text; see the configuration guide's section on splitting the configuration into multiple files for the full semantics.
 
 ### Credentials
 
@@ -282,7 +287,13 @@ MindRoom tracks runtime phases internally:
 | `ready` | Orchestrator booted, serving requests |
 | `failed` | Startup or runtime failure (detail message available) |
 
-Use `/api/health` for liveness probes and `/api/ready` for readiness probes in container orchestrators. Note: `/api/health` returns `503` when Matrix sync is stale (>180s without successful sync, after the 120s watchdog timeout has attempted recovery). Configure liveness probe `failureThreshold` to allow sufficient time for watchdog self-healing.
+When the semantic-search embedder is failing, the health payload additionally carries `"embedder": {"status": "failing", "detail": ...}` with the classified cause; this block is diagnostic only and never flips liveness.
+Use `/api/health` for liveness probes and `/api/ready` for readiness probes in container orchestrators.
+Ordinary Matrix transport silence still reaches the watchdog after 120 seconds and makes `/api/health` return `503` after 180 seconds without a successful sync.
+While a sync callback is actively completing its sequential durable cache phase, the watchdog and `/api/health` consume the same monotonic progress snapshot and defer for `MINDROOM_MATRIX_SYNC_CACHE_WRITE_GRACE_SECONDS` (default 600).
+Both stop deferring when that grace expires.
+Successful cache-phase completion refreshes both liveness clocks, so a long healthy write does not immediately return `503`.
+Configure liveness probe `failureThreshold` to allow sufficient time for watchdog self-healing.
 
 ### Tools & Matrix
 

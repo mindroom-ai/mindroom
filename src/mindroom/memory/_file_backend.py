@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, ClassVar, cast
 from zoneinfo import ZoneInfo
 
 from mindroom.constants import resolve_config_relative_path
+from mindroom.embedding_errors import classified_embedder_error
 from mindroom.logging_config import get_logger
 from mindroom.timing import timed
 
@@ -37,6 +38,7 @@ from ._shared import (
     FileMemoryResolution,
     MemoryNotFoundError,
     MemoryResult,
+    MemorySearchOutcome,
     new_memory_id,
 )
 
@@ -268,7 +270,7 @@ def _schedule_agent_semantic_refresh(
     runtime_paths: RuntimePaths,
     execution_identity: ToolExecutionIdentity | None = None,
 ) -> None:
-    search_config = config.get_agent_memory_search(agent_name)
+    search_config = config.resolve_entity(agent_name).memory_search
     if search_config.mode != "semantic":
         return
     schedule_semantic_file_memory_refresh(
@@ -347,9 +349,7 @@ def _search_scope_memory_entries(
     config: Config,
     *,
     limit: int,
-    timing_scope: str | None = None,
 ) -> list[MemoryResult]:
-    del timing_scope
     id_entries, _ = _load_scope_entries_for_search(scope_user_id, resolution, config)
     query_tokens = _extract_query_tokens(query)
 
@@ -572,10 +572,8 @@ def _load_scope_entrypoint_context(
     scope_user_id: str,
     resolution: FileMemoryResolution,
     config: Config,
-    timing_scope: str | None = None,
 ) -> str:
     """Load the scoped `MEMORY.md` entrypoint text."""
-    del timing_scope
     entrypoint_path = _scope_entrypoint_path(_scope_dir(scope_user_id, resolution, config, create=False))
     if not entrypoint_path.exists():
         return ""
@@ -744,7 +742,6 @@ def _search_agent_file_scope_memories(
     resolution: FileMemoryResolution,
     config: Config,
     limit: int,
-    timing_scope: str | None,
 ) -> list[MemoryResult]:
     return _search_scope_memory_entries(
         agent_scope_user_id(agent_name),
@@ -752,7 +749,6 @@ def _search_agent_file_scope_memories(
         resolution,
         config,
         limit=limit,
-        timing_scope=timing_scope,
     )
 
 
@@ -763,7 +759,6 @@ def _search_team_file_scope_memories(
     resolution: FileMemoryResolution,
     config: Config,
     limit: int,
-    timing_scope: str | None,
 ) -> list[MemoryResult]:
     return _search_scope_memory_entries(
         team_id,
@@ -771,7 +766,6 @@ def _search_team_file_scope_memories(
         resolution,
         config,
         limit=limit,
-        timing_scope=timing_scope,
     )
 
 
@@ -785,7 +779,6 @@ def _merge_team_scope_results(
     runtime_paths: RuntimePaths,
     limit: int,
     execution_identity: ToolExecutionIdentity | None,
-    timing_scope: str | None,
 ) -> list[MemoryResult]:
     """Merge keyword team-scope matches into one ranked result list (filesystem-bound)."""
     existing_memories = {result.get("memory", "") for result in results}
@@ -810,7 +803,6 @@ def _merge_team_scope_results(
                 team_resolution,
                 config,
                 limit,
-                timing_scope,
             ):
                 memory_text = memory.get("memory", "")
                 if memory_text in existing_memories:
@@ -871,13 +863,13 @@ class FileMemoryBackend:
         *,
         limit: int,
         execution_identity: ToolExecutionIdentity | None = None,
-        timing_scope: str | None = None,
-    ) -> list[MemoryResult]:
+    ) -> MemorySearchOutcome:
         """Search file-backed memories visible to an agent.
 
         Keyword scans read and score every memory file in the scope, so all
         file-reading paths run in worker threads (#1260); only the semantic
-        index query stays natively async.
+        index query stays natively async. A semantic-path failure falls back
+        to keyword matches and surfaces its classified cause in the outcome.
         """
         agent_resolution = await asyncio.to_thread(
             resolve_file_memory_resolution,
@@ -895,13 +887,13 @@ class FileMemoryBackend:
                 agent_resolution,
                 config,
                 limit,
-                timing_scope,
             )
             for result in results:
                 _tag_keyword_mode(result)
             return results
 
-        search_config = config.get_agent_memory_search(agent_name)
+        degraded_reason: str | None = None
+        search_config = config.resolve_entity(agent_name).memory_search
         if search_config.mode == "semantic":
             scope_user_id = agent_scope_user_id(agent_name)
             try:
@@ -914,15 +906,21 @@ class FileMemoryBackend:
                     search_config=search_config,
                     limit=limit,
                     execution_identity=execution_identity,
-                    timing_scope=timing_scope,
                 )
-            except SemanticFileMemoryIndexUnavailableError:
+            except SemanticFileMemoryIndexUnavailableError as exc:
+                # A cold index kept unpublished by a classified embedder
+                # failure degrades loudly; plain warm-up stays silent.
+                degraded_reason = exc.degraded_reason
                 logger.debug(
                     "File-memory semantic index unavailable; falling back to keyword search",
                     agent=agent_name,
+                    degraded_reason=degraded_reason,
                 )
                 results = await asyncio.to_thread(keyword_results)
-            except Exception:
+            except Exception as exc:
+                degraded_reason = (
+                    classified_embedder_error(exc) or f"semantic memory search failed ({type(exc).__name__})"
+                )
                 logger.exception(
                     "File-memory semantic search failed; falling back to keyword search",
                     agent=agent_name,
@@ -931,7 +929,7 @@ class FileMemoryBackend:
         else:
             results = await asyncio.to_thread(keyword_results)
 
-        return await asyncio.to_thread(
+        merged = await asyncio.to_thread(
             _merge_team_scope_results,
             results,
             query=query,
@@ -941,8 +939,8 @@ class FileMemoryBackend:
             runtime_paths=self.runtime_paths,
             limit=limit,
             execution_identity=execution_identity,
-            timing_scope=timing_scope,
         )
+        return MemorySearchOutcome(results=merged, degraded_reason=degraded_reason)
 
     async def list_all(
         self,
@@ -1191,7 +1189,6 @@ class FileMemoryBackend:
         config: Config,
         *,
         execution_identity: ToolExecutionIdentity | None = None,
-        timing_scope: str | None = None,
     ) -> str:
         """Load the stable scoped `MEMORY.md` entrypoint text for one agent."""
         resolution = resolve_file_memory_resolution(
@@ -1205,5 +1202,4 @@ class FileMemoryBackend:
             agent_scope_user_id(agent_name),
             resolution,
             config,
-            timing_scope=timing_scope,
         )

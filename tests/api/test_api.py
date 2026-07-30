@@ -6,12 +6,14 @@ import os
 import threading
 import time
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace, TracebackType
 from typing import Annotated, Any, NoReturn, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 from urllib.parse import parse_qs, urlparse
+from uuid import uuid4
 
 import jwt
 import pytest
@@ -29,11 +31,13 @@ from mindroom.api import workers as workers_api
 from mindroom.commands.config_commands import apply_config_change
 from mindroom.config.main import Config
 from mindroom.credentials import get_runtime_credentials_manager, save_scoped_credentials
+from mindroom.embedder_health import capture_embedder_health_recorder
+from mindroom.matrix.decrypt_failure import e2ee_stats
 from mindroom.matrix.health import mark_matrix_sync_loop_started, mark_matrix_sync_success, reset_matrix_sync_health
 from mindroom.matrix.state import MatrixState
 from mindroom.runtime_state import reset_runtime_state, set_runtime_ready, set_runtime_starting
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_key
-from mindroom.workers.models import WorkerHandle
+from mindroom.workers.models import WorkerHandle, WorkerMaintenanceResult
 from tests.api.conftest import trusted_upstream_headers, use_trusted_upstream_runtime
 
 TEST_WORKER_AUTH = "token"
@@ -637,10 +641,16 @@ def test_load_config_into_app_discards_stale_results_after_runtime_swap(tmp_path
 
     def _fake_load_result(
         runtime_paths: constants.RuntimePaths,
-    ) -> tuple[config_lifecycle.ConfigLoadResult, dict[str, Any] | None, Config | None, str | None]:
+    ) -> tuple[
+        config_lifecycle.ConfigLoadResult,
+        dict[str, Any] | None,
+        Config | None,
+        str | None,
+        frozenset[Path] | None,
+    ]:
         if runtime_paths == first_runtime:
             started.set()
-            allow_finish.wait(timeout=1)
+            allow_finish.wait()
             return (
                 config_lifecycle.ConfigLoadResult(
                     success=False,
@@ -650,23 +660,26 @@ def test_load_config_into_app_discards_stale_results_after_runtime_swap(tmp_path
                 None,
                 None,
                 "stale-old-source",
+                frozenset({first_runtime.config_path}),
             )
         return original_load_result(runtime_paths)
 
     main.initialize_api_app(fresh_app, first_runtime)
 
-    with patch.object(config_lifecycle, "_load_config_result", side_effect=_fake_load_result):
-        stale_thread = threading.Thread(
-            target=config_lifecycle.load_config_into_app,
-            args=(first_runtime, fresh_app),
-        )
-        stale_thread.start()
-        assert started.wait(timeout=1)
+    with (
+        patch.object(config_lifecycle, "_load_config_result", side_effect=_fake_load_result),
+        ThreadPoolExecutor(max_workers=1) as executor,
+    ):
+        stale_result = executor.submit(config_lifecycle.load_config_into_app, first_runtime, fresh_app)
+        try:
+            assert started.wait(timeout=1)
 
-        main.initialize_api_app(fresh_app, second_runtime)
-        assert config_lifecycle.load_config_into_app(second_runtime, fresh_app) is True
-        allow_finish.set()
-        stale_thread.join(timeout=1)
+            main.initialize_api_app(fresh_app, second_runtime)
+            assert config_lifecycle.load_config_into_app(second_runtime, fresh_app) is True
+        finally:
+            allow_finish.set()
+
+        assert stale_result.result(timeout=1) is False
 
     context = main._app_context(fresh_app)
     assert context.runtime_paths == second_runtime
@@ -877,6 +890,35 @@ def test_health_check(test_client: TestClient) -> None:
     assert data["last_sync_time"] is None
 
 
+def test_health_check_reports_recorded_embedder_failure(test_client: TestClient) -> None:
+    """A recorded embedder failure appears as an additive block without flipping status."""
+    reset_matrix_sync_health()
+    capture_embedder_health_recorder().record("embedder authentication failed (HTTP 401)")
+    try:
+        response = test_client.get("/api/health")
+    finally:
+        capture_embedder_health_recorder().record(None)
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status"] == "healthy"
+    assert data["embedder"] == {
+        "status": "failing",
+        "detail": "embedder authentication failed (HTTP 401)",
+    }
+
+
+def test_health_check_omits_embedder_block_when_healthy(test_client: TestClient) -> None:
+    """No embedder block appears while the embedder is healthy."""
+    reset_matrix_sync_health()
+    capture_embedder_health_recorder().record(None)
+
+    response = test_client.get("/api/health")
+
+    assert response.status_code == 200
+    assert "embedder" not in response.json()
+
+
 def test_health_check_reports_stale_matrix_sync(test_client: TestClient) -> None:
     """Ready runtimes should fail health checks when Matrix sync responses go stale."""
     reset_matrix_sync_health()
@@ -891,8 +933,24 @@ def test_health_check_reports_stale_matrix_sync(test_client: TestClient) -> None
     assert response.json() == {
         "status": "unhealthy",
         "last_sync_time": stale_sync_time.isoformat(),
+        "e2ee": e2ee_stats().as_dict(),
         "stale_sync_entities": ["router"],
     }
+    reset_matrix_sync_health()
+    reset_runtime_state()
+
+
+def test_health_reports_live_e2ee_counter_values(test_client: TestClient) -> None:
+    """The e2ee health field must serialize the real counters, not a stale copy."""
+    reset_matrix_sync_health()
+    set_runtime_ready()
+    before = test_client.get("/api/health").json()["e2ee"]
+
+    e2ee_stats().record_failure("!e2ee-health:localhost", f"$health{uuid4().hex}:localhost")
+
+    after = test_client.get("/api/health").json()["e2ee"]
+    assert after["decrypt_failures"] == before["decrypt_failures"] + 1
+    assert after.keys() == {"decrypt_failures", "key_requests_sent", "notices_sent"}
     reset_matrix_sync_health()
     reset_runtime_state()
 
@@ -936,6 +994,7 @@ def test_health_after_watchdog_restart_stays_unhealthy_until_sync(test_client: T
     assert response.json() == {
         "status": "unhealthy",
         "last_sync_time": stale_time.isoformat(),
+        "e2ee": e2ee_stats().as_dict(),
         "stale_sync_entities": ["router"],
     }
 
@@ -1097,6 +1156,10 @@ def test_worker_cleanup_once_cleans_workers(monkeypatch: pytest.MonkeyPatch) -> 
                 ),
             ]
 
+        def maintain_workers(self, *, now: float | None = None) -> WorkerMaintenanceResult:
+            assert now is None
+            return WorkerMaintenanceResult(cleaned=tuple(self.cleanup_idle_workers()), reconciled=())
+
     monkeypatch.setenv("MINDROOM_WORKER_BACKEND", "kubernetes")
     monkeypatch.setenv("MINDROOM_KUBERNETES_WORKER_IMAGE", "ghcr.io/mindroom-ai/mindroom:latest")
     monkeypatch.setenv("MINDROOM_KUBERNETES_WORKER_STORAGE_PVC_NAME", "mindroom-storage")
@@ -1126,12 +1189,18 @@ def test_worker_cleanup_once_cleans_workers(monkeypatch: pytest.MonkeyPatch) -> 
 
 def test_worker_cleanup_once_reconciles_drifted_worker_templates(monkeypatch: pytest.MonkeyPatch) -> None:
     """Each background cleanup pass should also reconcile drifted worker pod templates."""
+    maintained_managers: list[object] = []
 
     class _FakeWorkerManager:
         backend_name = "kubernetes"
 
         def cleanup_idle_workers(self) -> list[WorkerHandle]:
             return []
+
+        def maintain_workers(self, *, now: float | None = None) -> WorkerMaintenanceResult:
+            assert now is None
+            maintained_managers.append(self)
+            return WorkerMaintenanceResult(cleaned=(), reconciled=())
 
     worker_manager = _FakeWorkerManager()
     monkeypatch.setenv("MINDROOM_WORKER_BACKEND", "kubernetes")
@@ -1140,14 +1209,6 @@ def test_worker_cleanup_once_reconciles_drifted_worker_templates(monkeypatch: py
     monkeypatch.setattr(main, "primary_worker_backend_available", lambda *_args, **_kwargs: True)
     monkeypatch.setattr(main, "primary_worker_backend_name", lambda *_args, **_kwargs: "kubernetes")
     monkeypatch.setattr(main, "get_primary_worker_manager", lambda *_args, **_kwargs: worker_manager)
-    reconciled_managers: list[object] = []
-
-    def _fake_reconcile(manager: object) -> list[WorkerHandle]:
-        reconciled_managers.append(manager)
-        return []
-
-    monkeypatch.setattr(main, "reconcile_drifted_worker_templates", _fake_reconcile)
-
     runtime_paths = main._app_runtime_paths(main.app)
     runtime_config = Config.validate_with_runtime({}, runtime_paths)
     main._cleanup_workers_once(
@@ -1156,7 +1217,7 @@ def test_worker_cleanup_once_reconciles_drifted_worker_templates(monkeypatch: py
         worker_grantable_credentials=runtime_config.get_worker_grantable_credentials(),
     )
 
-    assert reconciled_managers == [worker_manager]
+    assert maintained_managers == [worker_manager]
 
 
 def test_list_workers_endpoint(test_client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1478,9 +1539,12 @@ def test_non_oauth_auth_provider_uses_required_credential_fields(tmp_path: Path)
     [
         ("google_drive", "shared", frozenset({"google_drive"})),
         ("google_calendar", "shared", frozenset({"google_calendar"})),
+        ("google_docs", "shared", frozenset({"google_docs"})),
         ("google_sheets", "shared", frozenset({"google_sheets"})),
         ("gmail", "shared", frozenset({"gmail"})),
-        ("google_drive_oauth", "shared", frozenset({"google_drive_oauth"})),
+        # Agent-scoped OAuth token services no longer inject themselves into the
+        # shared allowlist; they fall through to the context allowlist unchanged.
+        ("google_drive_oauth", "shared", frozenset({"weather"})),
         ("weather", "shared", frozenset({"weather"})),
         ("google_drive", "user", frozenset({"weather"})),
         ("google_drive", "user_agent", frozenset({"weather"})),
@@ -1524,6 +1588,7 @@ def test_get_tools_marks_shared_only_integrations_unsupported_for_isolating_work
     assert tools_by_name["spotify"]["execution_scope_supported"] is False
     assert tools_by_name["gmail"]["execution_scope_supported"] is True
     assert tools_by_name["google_calendar"]["execution_scope_supported"] is True
+    assert tools_by_name["google_docs"]["execution_scope_supported"] is True
     assert tools_by_name["google_sheets"]["execution_scope_supported"] is True
     assert "calculator" in tools_by_name
     assert tools_by_name["calculator"]["execution_scope_supported"] is True
@@ -1612,16 +1677,21 @@ def test_get_tools_explicit_unscoped_override_does_not_fall_back_to_saved_scope(
     assert tools_by_name["homeassistant"]["dashboard_configuration_supported"] is False
 
 
-def test_get_tools_unknown_agent_rejected(test_client: TestClient) -> None:
-    """Tool preview should reject unknown agents instead of falling back to shared state."""
+def test_get_tools_unknown_agent_previews_draft_scope(test_client: TestClient) -> None:
+    """Tool preview should serve unsaved draft agents as a non-authoritative scope preview."""
     config = _config_with_worker_scope("shared")
     runtime_paths = main._app_runtime_paths(main.app)
 
     with patch("mindroom.api.tools._read_tools_runtime_config", return_value=(config, runtime_paths)):
-        response = test_client.get("/api/tools/?agent_name=missing")
+        response = test_client.get("/api/tools/?agent_name=draft_agent&execution_scope=user")
 
-    assert response.status_code == 404
-    assert response.json()["detail"] == "Unknown agent: missing"
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status_authoritative"] is False
+    tools_by_name = {tool["name"]: tool for tool in payload["tools"]}
+    assert "calculator" in tools_by_name
+    assert tools_by_name["homeassistant"]["execution_scope_supported"] is False
+    assert tools_by_name["calculator"]["execution_scope_supported"] is True
 
 
 def test_get_tools_requires_agent_reply_permission_for_agent_scoped_status(test_client: TestClient) -> None:
@@ -1840,7 +1910,7 @@ def test_get_tools_requires_oauth_token_for_generic_auth_provider(test_client: T
     assert tool["name"] == "google_drive"
     assert tool["status"] == "requires_config"
 
-    manager.save_credentials(
+    manager.for_primary_runtime_agent_scope("general").save_credentials(
         "google_drive_oauth",
         {
             "token": "drive-token",
@@ -1850,7 +1920,7 @@ def test_get_tools_requires_oauth_token_for_generic_auth_provider(test_client: T
                 "openid",
                 "https://www.googleapis.com/auth/userinfo.email",
                 "https://www.googleapis.com/auth/userinfo.profile",
-                "https://www.googleapis.com/auth/drive.readonly",
+                "https://www.googleapis.com/auth/drive",
             ],
             "_source": "oauth",
         },
@@ -1905,10 +1975,10 @@ def test_get_tools_marks_google_oauth_tool_available_with_service_account(
     assert tool["status"] == "available"
 
 
-def test_get_tools_does_not_treat_requester_owned_scoped_credentials_as_dashboard_truth(
+def test_get_tools_does_not_treat_scoped_credentials_as_dashboard_truth(
     test_client: TestClient,
 ) -> None:
-    """Requester-owned scoped credentials must not flip isolated dashboard status to available."""
+    """Scoped credentials must not flip isolated dashboard status to available."""
     config = _config_with_worker_scope("user")
     runtime_paths = main._app_runtime_paths(main.app)
     tools = [
@@ -2707,7 +2777,7 @@ def test_get_raw_config_source_returns_current_invalid_file(
     response = test_client.get("/api/config/raw")
 
     assert response.status_code == 200
-    assert response.json() == {"source": invalid_source}
+    assert response.json() == {"source": invalid_source, "uses_includes": False}
 
 
 def test_get_raw_config_source_returns_replacement_text_for_non_utf8_invalid_file(
@@ -2723,7 +2793,7 @@ def test_get_raw_config_source_returns_replacement_text_for_non_utf8_invalid_fil
     response = test_client.get("/api/config/raw")
 
     assert response.status_code == 200
-    assert response.json() == {"source": "agents:\n  broken: \ufffd\n"}
+    assert response.json() == {"source": "agents:\n  broken: \ufffd\n", "uses_includes": False}
 
 
 def test_save_raw_config_source_can_recover_from_invalid_reload(
@@ -2859,7 +2929,7 @@ def test_external_raw_config_reload_advances_generation_for_same_authored_config
     reloaded_raw_response = test_client.get("/api/config/raw")
     assert reloaded_raw_response.status_code == 200
     assert int(reloaded_raw_response.headers[config_lifecycle.CONFIG_GENERATION_HEADER]) > initial_generation
-    assert reloaded_raw_response.json() == {"source": externally_edited_source}
+    assert reloaded_raw_response.json() == {"source": externally_edited_source, "uses_includes": False}
 
     stale_save_response = test_client.put(
         "/api/config/raw",
@@ -2942,71 +3012,6 @@ def test_first_party_config_writers_advance_generation_before_watcher_reload(
     )
 
     assert stale_save_response.status_code == 409
-
-
-def test_validate_raw_config_source_uses_unique_validation_files(tmp_path: Path) -> None:
-    """Concurrent raw validation should not let one request read another request's temp file."""
-    runtime_paths = _runtime_paths(tmp_path)
-    first_source = yaml.safe_dump(
-        {
-            "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
-            "router": {"model": "default"},
-            "agents": {"agent_a": {"display_name": "Agent A", "role": "role a", "rooms": []}},
-        },
-        sort_keys=True,
-    )
-    second_source = yaml.safe_dump(
-        {
-            "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
-            "router": {"model": "default"},
-            "agents": {"agent_b": {"display_name": "Agent B", "role": "role b", "rooms": []}},
-        },
-        sort_keys=True,
-    )
-    first_entered = threading.Event()
-    second_entered = threading.Event()
-    call_lock = threading.Lock()
-    call_count = 0
-    original_loader = config_lifecycle.load_runtime_config_model
-    results: list[tuple[Config, dict[str, Any]] | None] = [None, None]
-
-    def _interleaving_loader(
-        validation_runtime_paths: constants.RuntimePaths,
-        *,
-        tolerate_plugin_load_errors: bool = False,
-    ) -> Config:
-        nonlocal call_count
-        with call_lock:
-            call_count += 1
-            call_number = call_count
-        if call_number == 1:
-            first_entered.set()
-            assert second_entered.wait(timeout=5)
-        else:
-            assert first_entered.wait(timeout=5)
-            second_entered.set()
-        return original_loader(
-            validation_runtime_paths,
-            tolerate_plugin_load_errors=tolerate_plugin_load_errors,
-        )
-
-    def _run_validation(index: int, source: str) -> None:
-        results[index] = config_lifecycle._validate_raw_config_source(source, runtime_paths)
-
-    with patch("mindroom.api.config_lifecycle.load_runtime_config_model", side_effect=_interleaving_loader):
-        first_thread = threading.Thread(target=_run_validation, args=(0, first_source))
-        second_thread = threading.Thread(target=_run_validation, args=(1, second_source))
-        first_thread.start()
-        second_thread.start()
-        first_thread.join(timeout=5)
-        second_thread.join(timeout=5)
-
-    assert not first_thread.is_alive()
-    assert not second_thread.is_alive()
-    assert results[0] is not None
-    assert results[1] is not None
-    assert results[0][1]["agents"] == {"agent_a": {"display_name": "Agent A", "role": "role a", "rooms": []}}
-    assert results[1][1]["agents"] == {"agent_b": {"display_name": "Agent B", "role": "role b", "rooms": []}}
 
 
 def test_api_config_load_accepts_missing_plugin_path_in_degraded_mode(temp_config_file: Path) -> None:
@@ -3136,7 +3141,7 @@ def test_api_key_raw_endpoints_recover_from_invalid_reload(
         headers={"Authorization": "Bearer test-key"},
     )
     assert raw_response.status_code == 200
-    assert raw_response.json() == {"source": invalid_source}
+    assert raw_response.json() == {"source": invalid_source, "uses_includes": False}
 
     valid_source = yaml.safe_dump(_authored_config_payload("recovered"), sort_keys=True)
     save_response = api_key_client.put(
@@ -3276,7 +3281,11 @@ def test_cors_exposes_config_generation_header_for_credentialed_origins(tmp_path
     response = test_client.get("/api/health", headers={"Origin": "http://localhost:5173"})
 
     assert response.status_code == 200
-    assert response.headers["access-control-expose-headers"] == config_lifecycle.CONFIG_GENERATION_HEADER
+    exposed = {header.strip() for header in response.headers["access-control-expose-headers"].split(",")}
+    assert exposed == {
+        config_lifecycle.CONFIG_GENERATION_HEADER,
+        config_lifecycle.CONFIG_USES_INCLUDES_HEADER,
+    }
 
 
 def test_cors_wildcard_opt_in_disables_credentials(tmp_path: Path) -> None:
@@ -3652,7 +3661,7 @@ def test_agent_policies_endpoint_uses_backend_policy(test_client: TestClient) ->
                 "scope_label": "unscoped",
                 "scope_source": "unscoped",
                 "dashboard_credentials_supported": True,
-                "team_eligibility_reason": "Delegates to private agent 'mind', so it cannot participate in teams yet.",
+                "team_eligibility_reason": "Delegates to private agent 'mind', so it cannot participate in teams.",
                 "private_knowledge_base_id": None,
                 "private_workspace_enabled": False,
                 "private_agent_knowledge_enabled": False,
@@ -3664,7 +3673,7 @@ def test_agent_policies_endpoint_uses_backend_policy(test_client: TestClient) ->
                 "scope_label": "private.per=user",
                 "scope_source": "private.per",
                 "dashboard_credentials_supported": False,
-                "team_eligibility_reason": "Private agents cannot participate in teams yet.",
+                "team_eligibility_reason": "Private agents cannot be configured as team members.",
                 "private_knowledge_base_id": None,
                 "private_workspace_enabled": True,
                 "private_agent_knowledge_enabled": False,
@@ -4071,7 +4080,7 @@ def test_protected_raw_read_keeps_auth_time_snapshot_after_runtime_swap(tmp_path
         )
 
     assert response.status_code == 200
-    assert response.json() == {"source": source_a}
+    assert response.json() == {"source": source_a, "uses_includes": False}
 
 
 def test_protected_raw_write_rejects_runtime_swap_after_auth(tmp_path: Path) -> None:
@@ -5220,6 +5229,7 @@ def test_health_repeated_restarts_do_not_extend_first_sync_grace(test_client: Te
     assert response.json() == {
         "status": "unhealthy",
         "last_sync_time": None,
+        "e2ee": e2ee_stats().as_dict(),
         "stale_sync_entities": ["router"],
     }
     assert _matrix_sync_state["router"].loop_started_time == first_start_time

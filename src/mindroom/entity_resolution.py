@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Literal
 from mindroom.constants import ROUTER_AGENT_NAME, runtime_matrix_homeserver
 from mindroom.matrix import state as matrix_state
 from mindroom.matrix.identity import MatrixID, managed_account_key, managed_account_user_id
+from mindroom.matrix.invited_rooms_store import should_persist_invited_rooms
 from mindroom.matrix_identifiers import (
     extract_server_name_from_homeserver,
     room_alias_identifier_candidates,
@@ -15,6 +16,7 @@ from mindroom.matrix_identifiers import (
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Mapping
+    from collections.abc import Set as AbstractSet
 
     from mindroom.config.agent import AgentConfig, TeamConfig
     from mindroom.config.main import Config
@@ -29,6 +31,59 @@ class MissingManagedEntityAccountError(RuntimeError):
 
 class DuplicateManagedEntityIdentityError(RuntimeError):
     """Raised when persisted managed Matrix accounts are ambiguous."""
+
+
+def validate_call_agent_room_ownership(config: Config, runtime_paths: RuntimePaths) -> None:
+    """Reject runtime-resolved rooms assigned to more than one call agent."""
+    agents_by_room: dict[str, list[str]] = {}
+    for agent_name in config.calls.agents:
+        for room in config.agents[agent_name].rooms:
+            room_key = _call_room_ownership_key(room, runtime_paths)
+            agents_by_room.setdefault(room_key, []).append(agent_name)
+    conflicts = [
+        f"{room} ({', '.join(sorted(agent_names))})"
+        for room, agent_names in sorted(agents_by_room.items())
+        if len(agent_names) > 1
+    ]
+    if conflicts:
+        msg = "calls.agents configures multiple agents for room(s): " + "; ".join(conflicts)
+        raise ValueError(msg)
+
+
+def _call_room_ownership_key(room_ref: str, runtime_paths: RuntimePaths) -> str:
+    """Normalize a call-room reference before live Matrix state is available."""
+    resolved = matrix_state.resolve_room_id(room_ref, runtime_paths)
+    if resolved != room_ref:
+        return resolved
+    return room_alias_identifier_candidates(room_ref, runtime_paths)[-1]
+
+
+def configured_call_agent_name_for_room(
+    config: Config,
+    room_id: str,
+    runtime_paths: RuntimePaths,
+    *,
+    room_aliases: Iterable[str] = (),
+    invited_rooms_by_agent: Mapping[str, AbstractSet[str]],
+) -> str | None:
+    """Return the sole calls-enabled agent for a live room, failing on ambiguity."""
+    routable_names = configured_routable_entity_names_for_room(
+        config,
+        room_id,
+        runtime_paths,
+        room_aliases=room_aliases,
+    )
+    call_agents = set(routable_names).intersection(config.calls.agents)
+    for agent_name in config.calls.agents:
+        if not should_persist_invited_rooms(config, agent_name):
+            continue
+        if room_id in invited_rooms_by_agent.get(agent_name, ()):
+            call_agents.add(agent_name)
+    call_agents = sorted(call_agents)
+    if len(call_agents) > 1:
+        msg = f"calls.agents resolves multiple agents for live room {room_id}: {', '.join(call_agents)}"
+        raise ValueError(msg)
+    return call_agents[0] if call_agents else None
 
 
 def configured_bot_user_ids_for_room(
@@ -224,6 +279,11 @@ def entity_identity_registry(config: Config, runtime_paths: RuntimePaths) -> Ent
     return EntityIdentityRegistry(current_ids=current_ids)
 
 
+def current_entity_id(entity_name: str, runtime_paths: RuntimePaths) -> MatrixID:
+    """Return one persisted Matrix ID without resolving unrelated configured entities."""
+    return _persisted_entity_matrix_id(entity_name, _matrix_domain(runtime_paths), runtime_paths)
+
+
 def _persisted_entity_id_map(config: Config, runtime_paths: RuntimePaths) -> dict[str, MatrixID]:
     domain = _matrix_domain(runtime_paths)
     return {
@@ -360,7 +420,7 @@ def effective_entity_model_name(
         return "default"
     if room_override := resolve_room_scoped_model_override(config.room_models, room_id, runtime_paths):
         return room_override
-    return config.get_entity_model_name(entity_name)
+    return config.resolve_entity(entity_name).model_name
 
 
 def resolve_room_scoped_model_override(

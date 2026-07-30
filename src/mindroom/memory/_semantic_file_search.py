@@ -8,6 +8,7 @@ import time
 from typing import TYPE_CHECKING
 
 from mindroom.config.knowledge import KnowledgeBaseConfig
+from mindroom.embedding_errors import extract_classified_embedder_detail
 from mindroom.knowledge import (
     KnowledgeAvailability,
     KnowledgeRefreshScheduler,
@@ -39,7 +40,16 @@ _memory_refresh_scheduler = KnowledgeRefreshScheduler()
 
 
 class SemanticFileMemoryIndexUnavailableError(RuntimeError):
-    """Raised when semantic file memory should use keyword fallback for this request."""
+    """Raised when semantic file memory should use keyword fallback for this request.
+
+    ``degraded_reason`` carries the classified embedder failure that keeps the
+    index unpublished (a cold index whose refreshes fail on a bad credential);
+    it stays ``None`` for genuine warm-up, which falls back silently.
+    """
+
+    def __init__(self, message: str, *, degraded_reason: str | None = None) -> None:
+        super().__init__(message)
+        self.degraded_reason = degraded_reason
 
 
 def _safe_identifier(value: str) -> str:
@@ -69,8 +79,7 @@ def _memory_knowledge_config(
     root: Path,
     search_config: MemorySearchConfig,
 ) -> Config:
-    knowledge_config = config.model_copy(deep=True)
-    knowledge_config.knowledge_bases[base_id] = KnowledgeBaseConfig(
+    base_config = KnowledgeBaseConfig(
         mode="semantic",
         description="File-backed memory search index",
         path=str(root.resolve()),
@@ -80,7 +89,7 @@ def _memory_knowledge_config(
         include_extensions=[".md"],
         include_patterns=_memory_include_patterns(search_config),
     )
-    return knowledge_config
+    return config.with_runtime_knowledge_base_overlay(base_id, base_config)
 
 
 def schedule_semantic_file_memory_refresh(
@@ -149,14 +158,12 @@ def _search_knowledge_with_timing(
     *,
     query: str,
     limit: int,
-    timing_scope: str | None,
 ) -> list[Document]:
     search_start = time.monotonic()
     documents = knowledge.search(query=query, max_results=limit)
     emit_elapsed_timing(
         f"{_SEMANTIC_TIMING_PREFIX}.knowledge_search",
         search_start,
-        timing_scope=timing_scope,
         result_count=len(documents),
     )
     return documents
@@ -172,7 +179,6 @@ async def search_semantic_file_memories(
     search_config: MemorySearchConfig,
     limit: int,
     execution_identity: ToolExecutionIdentity | None = None,
-    timing_scope: str | None = None,
 ) -> list[MemoryResult]:
     """Search one file-memory scope through the published knowledge index pipeline."""
     base_id = _memory_knowledge_base_id(root, scope_user_id)
@@ -188,7 +194,6 @@ async def search_semantic_file_memories(
     emit_elapsed_timing(
         "system_prompt_assembly.memory_search.semantic.file_listing",
         list_start,
-        timing_scope=timing_scope,
         file_count=len(files),
         include_pattern_count=len(search_config.include),
         include_entrypoint=search_config.include_entrypoint,
@@ -207,7 +212,6 @@ async def search_semantic_file_memories(
     emit_elapsed_timing(
         f"{_SEMANTIC_TIMING_PREFIX}.published_index.resolve",
         resolve_start,
-        timing_scope=timing_scope,
         availability=resolution.availability.value,
     )
     refresh_scheduled = False
@@ -224,19 +228,20 @@ async def search_semantic_file_memories(
     emit_elapsed_timing(
         f"{_SEMANTIC_TIMING_PREFIX}.published_index.schedule_refresh",
         schedule_start,
-        timing_scope=timing_scope,
         refresh_scheduled=refresh_scheduled,
     )
     emit_elapsed_timing(
         "system_prompt_assembly.memory_search.semantic.published_index_access",
         access_start,
-        timing_scope=timing_scope,
         availability=resolution.availability.value,
         refresh_scheduled=refresh_scheduled,
     )
     if resolution.knowledge is None:
         msg = "Semantic file-memory index is not ready"
-        raise SemanticFileMemoryIndexUnavailableError(msg)
+        raise SemanticFileMemoryIndexUnavailableError(
+            msg,
+            degraded_reason=extract_classified_embedder_detail(resolution.last_error),
+        )
 
     query_start = time.monotonic()
     documents = await asyncio.to_thread(
@@ -244,12 +249,10 @@ async def search_semantic_file_memories(
         resolution.knowledge,
         query=query,
         limit=limit,
-        timing_scope=timing_scope,
     )
     emit_elapsed_timing(
         "system_prompt_assembly.memory_search.semantic.vector_query",
         query_start,
-        timing_scope=timing_scope,
         availability=resolution.availability.value,
     )
     results_start = time.monotonic()
@@ -257,7 +260,6 @@ async def search_semantic_file_memories(
     emit_elapsed_timing(
         f"{_SEMANTIC_TIMING_PREFIX}.result_conversion",
         results_start,
-        timing_scope=timing_scope,
         result_count=len(results),
     )
     return results

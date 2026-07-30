@@ -20,6 +20,7 @@ class StreamTransportOutcome:  # noqa: D101
     terminal_status: _TerminalStatus
     rendered_body: str | None
     visible_body_state: VisibleBodyState
+    terminal_update_committed: bool = False
     canonical_final_body_candidate: str | None = None
     failure_reason: str | None = None
     interactive_metadata: InteractiveMetadata | None = None
@@ -44,6 +45,7 @@ class FinalDeliveryOutcome:  # noqa: D101
     is_visible_response: bool = False
     final_visible_body: str | None = None
     delivery_kind: _VisibleDeliveryKind | None = None
+    cancel_source: Literal["user_stop", "sync_restart", "interrupted"] | None = None
     failure_reason: str | None = None
     suppressed: bool = False
     tool_trace: tuple[ToolTraceEntry, ...] = ()
@@ -61,6 +63,17 @@ class FinalDeliveryOutcome:  # noqa: D101
     @property
     def mark_handled(self) -> bool:  # noqa: D102
         return self.event_id is not None and self.is_visible_response and not self.suppressed
+
+    @property
+    def delivered_substantive_content(self) -> bool:
+        """Return whether this outcome proves that nonblank response text reached Matrix."""
+        return (
+            self.terminal_status == "completed"
+            and self.is_visible_response
+            and self.delivery_kind is not None
+            and self.final_visible_body is not None
+            and bool(self.final_visible_body.strip())
+        )
 
     @property
     def response_text(self) -> str:  # noqa: D102

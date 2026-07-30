@@ -1,22 +1,13 @@
-"""Shared inline-media fallback detection and model capability helpers."""
+"""Shared inline-media fallback and model capability helpers."""
 
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
-from agno.models.anthropic import Claude
-from agno.models.azure.openai_chat import AzureOpenAI
-from agno.models.cerebras import Cerebras
-from agno.models.deepseek import DeepSeek
-from agno.models.google import Gemini
-from agno.models.groq import Groq
-from agno.models.ollama import Ollama
-from agno.models.openai import OpenAIChat, OpenAIResponses
-from agno.models.openrouter import OpenRouter
-from agno.models.vertexai.claude import Claude as VertexAIClaude
+from agno.exceptions import ContextWindowExceededError, ModelProviderError
 
+from mindroom.error_handling import is_model_safeguard_refusal
 from mindroom.media_inputs import MediaInputs, MediaKind
 
 if TYPE_CHECKING:
@@ -25,6 +16,7 @@ if TYPE_CHECKING:
     from agno.models.base import Model
 
 __all__ = [
+    "MediaRetryDecision",
     "ModelMediaRoute",
     "append_inline_media_fallback_prompt",
     "build_model_media_route",
@@ -35,28 +27,9 @@ __all__ = [
 ]
 
 _INLINE_MEDIA_FALLBACK_MARKER = "[Inline media unavailable for this model]"
-_INLINE_MEDIA_FIELD_PATTERN = re.compile(
-    r"(?P<kind>document|image|audio|video)\.source\.base64(?:\.media_type)?",
-)
-_INLINE_MEDIA_MIME_MISMATCH_PATTERN = re.compile(r"image was specified using the .* media type")
-_INLINE_MEDIA_GENERIC_UNSUPPORTED_PATTERN = re.compile(r"(?:inline media|media input) is not supported")
-_MEDIA_KIND_PATTERN = r"audio|image|video|file|document"
-_INLINE_MEDIA_UNSUPPORTED_PATTERNS = (
-    re.compile(rf"(?P<kind>{_MEDIA_KIND_PATTERN}) input is not supported"),
-    re.compile(rf"(?P<kind>{_MEDIA_KIND_PATTERN}) inputs are not supported"),
-    re.compile(rf"does not support (?P<kind>{_MEDIA_KIND_PATTERN}) input"),
-    re.compile(rf"support input (?P<kind>{_MEDIA_KIND_PATTERN})"),
-    re.compile(rf"at most 0 (?P<kind>{_MEDIA_KIND_PATTERN})\(s\) may be provided"),
-)
-
-# Provider error vocabulary -> our MediaInputs kind (providers say "document" for files).
-_PROVIDER_MEDIA_KINDS: dict[str, MediaKind] = {
-    "audio": "audio",
-    "image": "image",
-    "video": "video",
-    "file": "file",
-    "document": "file",
-}
+_PAYLOAD_TOO_LARGE_STATUS = 413
+_RATE_LIMIT_STATUS = 429
+_SERVER_ERROR_STATUS = 500
 
 
 @dataclass(frozen=True, slots=True)
@@ -77,12 +50,24 @@ class _MediaFilterResult:
 
 
 @dataclass(frozen=True, slots=True)
-class _MediaRetryDecision:
-    """Retry policy after one provider media failure."""
+class MediaRetryDecision:
+    """Retry policy after one provider media failure.
+
+    ``teach_route_on_success`` carries the route whose capability cache should
+    learn ``removed_kinds`` once the without-media retry actually succeeds; the
+    attempt loop reports that via :meth:`record_retry_success`.
+    """
 
     should_retry: bool
     media_inputs: MediaInputs
     removed_kinds: frozenset[MediaKind]
+    teach_route_on_success: ModelMediaRoute | None = None
+
+    def record_retry_success(self) -> None:
+        """Teach the route cache from the successful without-media experiment."""
+        if self.teach_route_on_success is None or not self.removed_kinds:
+            return
+        _UNSUPPORTED_MEDIA_KINDS_BY_ROUTE.setdefault(self.teach_route_on_success, set()).update(self.removed_kinds)
 
 
 # Intentional process-lifetime pessimism: learned negative capability state is cleared by restart.
@@ -130,41 +115,34 @@ def retry_media_inputs_after_failure(
     media_inputs: MediaInputs,
     *,
     extra_present_kinds: frozenset[MediaKind] = frozenset(),
-) -> _MediaRetryDecision:
-    """Decide whether and how one media-bearing request should retry.
+) -> MediaRetryDecision:
+    """Decide how one media-bearing request should retry after a failure.
 
-    Explicit "kind is not supported" errors teach the route cache so later
-    requests pre-drop that kind; validation and ambiguous media errors retry
-    once without poisoning the cache. A kind can only be learned when it was
-    actually present in ``media_inputs`` or ``extra_present_kinds`` (media
-    pinned to thread-history messages in the run input).
+    Every failure of a media-bearing request retries once without media —
+    no error wording decides whether to retry, so unknown provider prose
+    (and streamed run errors that lost their HTTP status) degrade
+    gracefully instead of leaking a raw provider error to the user. The
+    route capability cache learns the dropped kinds once the retry actually
+    succeeds (via :meth:`MediaRetryDecision.record_retry_success`), except
+    when the error names a payload-size or context-overflow cause, where
+    dropping media can succeed for the wrong reason. A kind can only be
+    learned when it was actually present in ``media_inputs`` or
+    ``extra_present_kinds`` (media pinned to thread-history messages in the
+    run input).
     """
+    if is_model_safeguard_refusal(error):
+        return _no_media_retry_decision(media_inputs)
     present_kinds = media_inputs.kinds() | extra_present_kinds
     if not present_kinds:
         return _no_media_retry_decision(media_inputs)
 
-    error_text = str(error)
-    unsupported_kinds = _unsupported_media_kinds_from_error(error_text)
-    if unsupported_kinds:
-        return _media_retry_decision_for_kinds(
-            media_inputs,
-            unsupported_kinds,
-            present_kinds=present_kinds,
-            cache_route=route,
-        )
-
-    validation_kinds = _media_validation_kinds_from_error(error_text)
-    if validation_kinds:
-        return _media_retry_decision_for_kinds(media_inputs, validation_kinds, present_kinds=present_kinds)
-
-    if _is_ambiguous_media_error(error_text):
-        return _MediaRetryDecision(
-            should_retry=True,
-            media_inputs=_without_media_kinds(media_inputs, present_kinds),
-            removed_kinds=present_kinds,
-        )
-
-    return _no_media_retry_decision(media_inputs)
+    teaching_blocked = _capability_teaching_blocked(error, str(error).lower())
+    return MediaRetryDecision(
+        should_retry=True,
+        media_inputs=_without_media_kinds(media_inputs, present_kinds),
+        removed_kinds=present_kinds,
+        teach_route_on_success=None if teaching_blocked else route,
+    )
 
 
 def reset_model_media_capability_cache() -> None:
@@ -184,62 +162,34 @@ def append_inline_media_fallback_prompt(
     return f"{full_prompt.rstrip()}\n\n{_INLINE_MEDIA_FALLBACK_MARKER}\n{fallback_prompt}"
 
 
-def _media_retry_decision_for_kinds(
-    media_inputs: MediaInputs,
-    kinds: frozenset[MediaKind],
-    *,
-    present_kinds: frozenset[MediaKind],
-    cache_route: ModelMediaRoute | None = None,
-) -> _MediaRetryDecision:
-    removed_kinds = kinds & present_kinds
-    if not removed_kinds:
-        return _no_media_retry_decision(media_inputs)
-    if cache_route is not None:
-        _UNSUPPORTED_MEDIA_KINDS_BY_ROUTE.setdefault(cache_route, set()).update(removed_kinds)
-    return _MediaRetryDecision(
-        should_retry=True,
-        media_inputs=_without_media_kinds(media_inputs, removed_kinds),
-        removed_kinds=removed_kinds,
-    )
-
-
-def _no_media_retry_decision(media_inputs: MediaInputs) -> _MediaRetryDecision:
-    return _MediaRetryDecision(
+def _no_media_retry_decision(media_inputs: MediaInputs) -> MediaRetryDecision:
+    return MediaRetryDecision(
         should_retry=False,
         media_inputs=media_inputs,
         removed_kinds=frozenset(),
     )
 
 
-def _unsupported_media_kinds_from_error(error_text: str) -> frozenset[MediaKind]:
-    lowered_error_text = error_text.lower()
-    kinds: set[MediaKind] = set()
-    for pattern in _INLINE_MEDIA_UNSUPPORTED_PATTERNS:
-        for match in pattern.finditer(lowered_error_text):
-            kind = _canonical_media_kind(match.group("kind"))
-            if kind is not None:
-                kinds.add(kind)
-    return frozenset(kinds)
+def _capability_teaching_blocked(error: Exception | str, lowered_error_text: str) -> bool:
+    """Report when a retry success would not prove the media kinds unsupported.
 
-
-def _media_validation_kinds_from_error(error_text: str) -> frozenset[MediaKind]:
-    lowered_error_text = error_text.lower()
-    kinds = {
-        kind
-        for match in _INLINE_MEDIA_FIELD_PATTERN.finditer(lowered_error_text)
-        if (kind := _canonical_media_kind(match.group("kind"))) is not None
-    }
-    if _INLINE_MEDIA_MIME_MISMATCH_PATTERN.search(lowered_error_text):
-        kinds.add("image")
-    return frozenset(kinds)
-
-
-def _is_ambiguous_media_error(error_text: str) -> bool:
-    return bool(_INLINE_MEDIA_GENERIC_UNSUPPORTED_PATTERN.search(error_text.lower()))
-
-
-def _canonical_media_kind(provider_kind: str) -> MediaKind | None:
-    return _PROVIDER_MEDIA_KINDS.get(provider_kind)
+    Payload-size and context-overflow rejections shrink below the limit once
+    media is dropped, and transient failures (5xx outages, 429 rate limits)
+    can pass on the retry because the blip passed — in both cases a
+    successful retry says nothing about media capability. Status codes come
+    from the exception object, never from provider error prose; streamed run
+    errors arrive as bare text without a status and stay eligible to teach.
+    """
+    if isinstance(error, ContextWindowExceededError):
+        return True
+    if isinstance(error, ModelProviderError) and (
+        error.status_code in (_PAYLOAD_TOO_LARGE_STATUS, _RATE_LIMIT_STATUS)
+        or error.status_code >= _SERVER_ERROR_STATUS
+    ):
+        return True
+    if f"error code: {_PAYLOAD_TOO_LARGE_STATUS}" in lowered_error_text:
+        return True
+    return any(marker in lowered_error_text for marker in ModelProviderError.CONTEXT_WINDOW_PATTERNS)
 
 
 def _without_media_kinds(media_inputs: MediaInputs, kinds: frozenset[MediaKind]) -> MediaInputs:
@@ -251,37 +201,54 @@ def _without_media_kinds(media_inputs: MediaInputs, kinds: frozenset[MediaKind])
     )
 
 
+# The effective endpoint is dispatched on which endpoint attribute the model
+# exposes, not on its class, so this module never imports provider model
+# classes (and through them provider SDKs) just to route media errors (#1436).
+# Azure models keep the endpoint in azure_endpoint, Ollama in host, most
+# OpenAI-compatible providers in base_url, and Claude/Gemini only carry
+# client_params.
+@runtime_checkable
+class _HasAzureEndpoint(Protocol):
+    azure_endpoint: str | None
+    base_url: object
+    client_params: Mapping[str, object] | None
+
+
+@runtime_checkable
+class _HasHost(Protocol):
+    host: str | None
+    client_params: Mapping[str, object] | None
+
+
+@runtime_checkable
+class _HasBaseUrl(Protocol):
+    base_url: object
+    client_params: Mapping[str, object] | None
+
+
+@runtime_checkable
+class _HasClientParams(Protocol):
+    client_params: Mapping[str, object] | None
+
+
 def _route_endpoint(model: Model) -> str | None:
-    if isinstance(model, AzureOpenAI):
+    if isinstance(model, _HasAzureEndpoint):
         return _route_endpoint_text(
             model.azure_endpoint,
-            model.base_url,
+            str(model.base_url) if model.base_url is not None else None,
             _client_params_endpoint(model.client_params),
         )
-    if isinstance(model, Ollama):
+    if isinstance(model, _HasHost):
         return _route_endpoint_text(
             model.host,
             _client_params_endpoint(model.client_params),
         )
-    # VertexAIClaude subclasses the Anthropic Claude model but exposes a base_url,
-    # so it must be matched here, before the Claude/Gemini branch below.
-    if isinstance(
-        model,
-        (
-            VertexAIClaude,
-            Cerebras,
-            DeepSeek,
-            Groq,
-            OpenAIChat,
-            OpenAIResponses,
-            OpenRouter,
-        ),
-    ):
+    if isinstance(model, _HasBaseUrl):
         return _route_endpoint_text(
             str(model.base_url) if model.base_url is not None else None,
             _client_params_endpoint(model.client_params),
         )
-    if isinstance(model, (Claude, Gemini)):
+    if isinstance(model, _HasClientParams):
         return _client_params_endpoint(model.client_params)
     return None
 

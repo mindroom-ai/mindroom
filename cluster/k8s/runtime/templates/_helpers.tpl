@@ -482,11 +482,32 @@ app.kubernetes.io/managed-by: {{ .Release.Service | quote }}
 {{- printf "%s-bootstrap" (include "mindroom-runtime.agentVaultServerName" .) | trunc 63 | trimSuffix "-" -}}
 {{- end -}}
 
+{{- define "mindroom-runtime.agentVaultAccessGrantsName" -}}
+{{- printf "%s-access-grants" (include "mindroom-runtime.agentVaultServerName" .) | trunc 63 | trimSuffix "-" -}}
+{{- end -}}
+
+{{- define "mindroom-runtime.agentVaultAccessGrantsConfigPath" -}}
+/etc/mindroom-agent-vault-access-grants/access-grants.yaml
+{{- end -}}
+
+{{- define "mindroom-runtime.agentVaultAccessGrantsTokenPath" -}}
+{{- printf "/etc/agent-vault-access-grants/%s" .Values.workers.kubernetes.agentVault.accessGrants.adminTokenSecret.key -}}
+{{- end -}}
+
 {{- define "mindroom-runtime.agentVaultBootstrapLabels" -}}
 helm.sh/chart: {{ printf "%s-%s" .Chart.Name .Chart.Version | replace "+" "_" | quote }}
 app.kubernetes.io/name: {{ include "mindroom-runtime.agentVaultBootstrapName" . | quote }}
 app.kubernetes.io/instance: {{ .Release.Name | quote }}
 app.kubernetes.io/component: agent-vault-bootstrap
+app.kubernetes.io/version: {{ .Chart.AppVersion | quote }}
+app.kubernetes.io/managed-by: {{ .Release.Service | quote }}
+{{- end -}}
+
+{{- define "mindroom-runtime.agentVaultAccessGrantsLabels" -}}
+helm.sh/chart: {{ printf "%s-%s" .Chart.Name .Chart.Version | replace "+" "_" | quote }}
+app.kubernetes.io/name: {{ include "mindroom-runtime.agentVaultAccessGrantsName" . | quote }}
+app.kubernetes.io/instance: {{ .Release.Name | quote }}
+app.kubernetes.io/component: agent-vault-access-grants
 app.kubernetes.io/version: {{ .Chart.AppVersion | quote }}
 app.kubernetes.io/managed-by: {{ .Release.Service | quote }}
 {{- end -}}
@@ -514,6 +535,7 @@ openrouter: OPENROUTER_API_KEY
 deepseek: DEEPSEEK_API_KEY
 cerebras: CEREBRAS_API_KEY
 groq: GROQ_API_KEY
+zai: ZAI_API_KEY
 ollama: OLLAMA_HOST
 {{- end -}}
 

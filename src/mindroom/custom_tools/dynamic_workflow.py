@@ -26,7 +26,7 @@ from mindroom.custom_tools.tool_payloads import custom_tool_payload
 from mindroom.custom_tools.toolkit_functions import JSON_OBJECT_SCHEMA, register_toolkit_functions
 from mindroom.dynamic_workflows.runner import DynamicWorkflowExecutionError
 from mindroom.dynamic_workflows.service import DynamicWorkflowService
-from mindroom.dynamic_workflows.validation import DynamicWorkflowError
+from mindroom.dynamic_workflows.validation import DynamicWorkflowError, collect_workflow_spec_errors
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.tool_approval import ToolCallWorkflowOrigin
 from mindroom.tool_system.catalog import TOOL_METADATA, ensure_tool_registry_loaded
@@ -53,16 +53,35 @@ _WORKFLOW_RESTRICTED_TOOLS = frozenset(
 # call needs a human decision: allowed_tools (including "*") never pre-approves them.
 _WORKFLOW_NO_PREAPPROVAL_TOOLS = frozenset({"claude_agent", "config_manager", "scheduler", "subagents"})
 
+_MINIMAL_SPEC_EXAMPLE = (
+    '{"schema_version": 1, "kind": "workflow", "id": "my_flow", "name": "My Flow", '
+    '"participants": [{"id": "writer"}], '
+    '"workflow": [{"id": "draft", "participant": "writer", "prompt": "Write a haiku about {input.topic}."}]}'
+)
+
+_SPEC_PARAMETER_DESCRIPTION = (
+    "Declarative workflow spec. Minimal valid example: "
+    f"{_MINIMAL_SPEC_EXAMPLE} "
+    "Required fields: schema_version (must be 1), kind (must be 'workflow'), id, name, "
+    "participants (list of {id, ...}), workflow (list of steps such as "
+    "{id, participant, prompt})."
+)
+
 _TOOL_DESCRIPTIONS = {
     "create_workflow": (
         "Create a Dynamic Workflow from a declarative workflow spec. "
+        f"Minimal valid spec: {_MINIMAL_SPEC_EXAMPLE} "
         "Ephemeral participants may declare any registered tool when it is also granted in "
         "permissions.tools; participant tool calls require per-call user approval unless the "
         "tool is pre-approved by the dynamic_workflow allowed_tools config. System-mutating "
         "tools (claude_agent, config_manager, scheduler, subagents) always require per-call "
         "approval and can never be pre-approved."
     ),
-    "validate_workflow": "Validate a declarative Dynamic Workflow spec without saving it.",
+    "validate_workflow": (
+        "Validate a declarative Dynamic Workflow spec without saving it. "
+        "Reports every detected validation error in one call. "
+        f"Minimal valid spec: {_MINIMAL_SPEC_EXAMPLE}"
+    ),
     "update_workflow": "Create and publish a new Dynamic Workflow revision from a patch.",
     "run_workflow": "Run a Dynamic Workflow and persist step outputs plus report artifacts.",
     "get_workflow_run": "Read one Dynamic Workflow run record.",
@@ -75,7 +94,7 @@ _TOOL_PARAMETERS: dict[str, dict[str, object]] = {
     "create_workflow": {
         "type": "object",
         "properties": {
-            "spec": JSON_OBJECT_SCHEMA,
+            "spec": {**JSON_OBJECT_SCHEMA, "description": _SPEC_PARAMETER_DESCRIPTION},
             "scope": {"type": "string"},
             "reason": {"anyOf": [{"type": "string"}, {"type": "null"}]},
         },
@@ -83,7 +102,7 @@ _TOOL_PARAMETERS: dict[str, dict[str, object]] = {
     },
     "validate_workflow": {
         "type": "object",
-        "properties": {"spec": JSON_OBJECT_SCHEMA},
+        "properties": {"spec": {**JSON_OBJECT_SCHEMA, "description": _SPEC_PARAMETER_DESCRIPTION}},
         "required": ["spec"],
     },
     "update_workflow": {
@@ -172,6 +191,15 @@ class DynamicWorkflowTools(Toolkit):
             message="Dynamic Workflow tool context is unavailable in this runtime path.",
         )
 
+    @classmethod
+    def _spec_errors_payload(cls, spec_errors: list[str]) -> str:
+        return cls._payload(
+            "error",
+            message="\n".join(spec_errors),
+            errors=spec_errors,
+            minimal_valid_spec_example=_MINIMAL_SPEC_EXAMPLE,
+        )
+
     def create_workflow(
         self,
         spec: dict[str, Any],
@@ -182,6 +210,8 @@ class DynamicWorkflowTools(Toolkit):
         context = get_tool_runtime_context()
         if context is None:
             return self._context_error()
+        if spec_errors := collect_workflow_spec_errors(spec):
+            return self._spec_errors_payload(spec_errors)
         try:
             store, owner_id = dynamic_workflow_store_and_owner(context, scope)
             _validate_workflow_policy_for_context(context, spec)
@@ -208,6 +238,8 @@ class DynamicWorkflowTools(Toolkit):
         context = get_tool_runtime_context()
         if context is None:
             return self._context_error()
+        if spec_errors := collect_workflow_spec_errors(spec):
+            return self._spec_errors_payload(spec_errors)
         try:
             _validate_workflow_policy_for_context(context, spec)
             validated = dynamic_workflow_store(context).validate_workflow(spec)
@@ -551,7 +583,7 @@ async def _aexecute_room_agent_participant(
         context,
         agent_name=agent_name,
         active_model_name=active_model_name,
-        session_id=session_id,
+        target=replace(context.target, session_id=session_id),
     )
     execution_identity = build_execution_identity_from_runtime_context(participant_context)
     # Imported lazily to avoid the create_agent -> dynamic_workflow toolkit cycle.
@@ -680,7 +712,10 @@ async def _aexecute_ephemeral_agent_participant(
         context,
         config=run_config,
         active_model_name=model_name,
-        session_id=_participant_session_id(context, participant_id, run_scope=run_scope),
+        target=replace(
+            context.target,
+            session_id=_participant_session_id(context, participant_id, run_scope=run_scope),
+        ),
     )
     return await _arun_agent(participant_context, agent, prompt)
 
@@ -703,9 +738,8 @@ def _resolve_participant_toolkits(context: ToolRuntimeContext, participant: dict
         list(tool_names),
         tool_registry_preloaded=True,
     )
-    authored_overrides = {
-        entry.name: entry.tool_config_overrides for entry in context.config.get_agent_tool_configs(context.agent_name)
-    }
+    entity_view = context.config.resolve_entity(context.agent_name)
+    authored_overrides = {entry.name: entry.tool_config_overrides for entry in entity_view.tool_configs}
     toolkits: dict[str, Toolkit] = {}
     for tool_name in tool_names:
         toolkit = build_agent_toolkit(
@@ -714,7 +748,7 @@ def _resolve_participant_toolkits(context: ToolRuntimeContext, participant: dict
             config=context.config,
             runtime_paths=context.runtime_paths,
             worker_tools=worker_tools,
-            runtime_overrides=context.config.get_agent_tool_runtime_overrides(context.agent_name, tool_name),
+            runtime_overrides=entity_view.tool_runtime_overrides(tool_name),
             tool_config_overrides=authored_overrides.get(tool_name),
             execution_identity=execution_identity,
             session_id=context.session_id,
@@ -797,7 +831,7 @@ def _workflow_allowed_tools(context: ToolRuntimeContext) -> frozenset[str]:
     persisted = load_scoped_credentials("dynamic_workflow", credentials_manager=credentials_manager, worker_target=None)
     if persisted:
         values.update(persisted)
-    for entry in context.config.get_agent_tool_configs(context.agent_name):
+    for entry in context.config.resolve_entity(context.agent_name).tool_configs:
         if entry.name == "dynamic_workflow":
             values.update(entry.tool_config_overrides)
     raw_allowed = values.get("allowed_tools")
@@ -837,8 +871,7 @@ async def _arun_agent(context: ToolRuntimeContext, agent: Agent, prompt: str) ->
 
 
 def _participant_session_id(context: ToolRuntimeContext, participant_id: str, *, run_scope: str) -> str:
-    base_session_id = context.session_id or context.resolved_thread_id or context.thread_id or context.room_id
-    return f"{base_session_id}:dynamic_workflow:{run_scope}:{participant_id}"
+    return f"{context.session_id}:dynamic_workflow:{run_scope}:{participant_id}"
 
 
 def _resolve_participant_model_name(

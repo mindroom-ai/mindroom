@@ -6,16 +6,18 @@ APP_NAME="MindRoom"
 DISPLAY_NAME="MindRoom"
 INSTALL=false
 CREATE_DMG=false
+UNIVERSAL=false
 
 usage() {
     cat <<'EOF'
-Usage: macos/build-macos-app.sh [--install] [--dmg]
+Usage: macos/build-macos-app.sh [--install] [--dmg] [--universal]
 
 Build the native macOS menu bar app for MindRoom.
 
 Options:
   --install   Copy the built app to /Applications and open it.
   --dmg       Create dist/macos/MindRoom.dmg.
+  --universal Build and verify an app for Apple silicon and Intel Macs.
   -h, --help  Show this help text.
 
 Environment:
@@ -46,6 +48,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --dmg)
             CREATE_DMG=true
+            shift
+            ;;
+        --universal)
+            UNIVERSAL=true
             shift
             ;;
         -h|--help)
@@ -84,7 +90,11 @@ if [[ "$(uname -s)" != "Darwin" ]]; then
     exit 1
 fi
 
-for required_tool in swift sips iconutil; do
+REQUIRED_TOOLS=(swift sips iconutil)
+if [[ "$UNIVERSAL" == true ]]; then
+    REQUIRED_TOOLS+=(lipo)
+fi
+for required_tool in "${REQUIRED_TOOLS[@]}"; do
     if ! command -v "$required_tool" >/dev/null 2>&1; then
         echo "$required_tool is required to build the MindRoom app." >&2
         exit 1
@@ -143,6 +153,27 @@ sign_app() {
 
 first_find_match() {
     find "$@" -print | sed -n '1p'
+}
+
+require_architectures() {
+    local binary="$1"
+    shift
+    if [[ ! -f "$binary" ]]; then
+        echo "Required universal binary not found: $binary" >&2
+        exit 1
+    fi
+    local architectures
+    if ! architectures=$(lipo -archs "$binary"); then
+        echo "Could not inspect architectures for required universal binary: $binary" >&2
+        exit 1
+    fi
+    architectures=" $architectures "
+    for architecture in "$@"; do
+        if [[ "$architectures" != *" $architecture "* ]]; then
+            echo "$binary is missing the required $architecture architecture." >&2
+            exit 1
+        fi
+    done
 }
 
 resolve_app_version() {
@@ -284,9 +315,14 @@ quit_running_app() {
     pkill -x "$APP_NAME" >/dev/null 2>&1 || true
 }
 
+SWIFT_BUILD_ARGS=(-c release --package-path "$PACKAGE_DIR" --product "$APP_NAME")
+if [[ "$UNIVERSAL" == true ]]; then
+    SWIFT_BUILD_ARGS+=(--arch arm64 --arch x86_64)
+fi
+
 echo "Building $DISPLAY_NAME..."
-swift build -c release --package-path "$PACKAGE_DIR" --product "$APP_NAME"
-BIN_DIR=$(swift build -c release --package-path "$PACKAGE_DIR" --product "$APP_NAME" --show-bin-path)
+swift build "${SWIFT_BUILD_ARGS[@]}"
+BIN_DIR=$(swift build "${SWIFT_BUILD_ARGS[@]}" --show-bin-path)
 EXPECTED_BINARY="$BIN_DIR/$APP_NAME"
 BINARY="$EXPECTED_BINARY"
 
@@ -328,6 +364,22 @@ ditto "$SPARKLE_FRAMEWORK" "$APP_DIR/Contents/Frameworks/Sparkle.framework"
 cp "$UV_BINARY" "$APP_DIR/Contents/Resources/bin/uv"
 cp "$APP_ICON_ICNS" "$APP_DIR/Contents/Resources/MindRoom.icns"
 chmod 755 "$APP_DIR/Contents/MacOS/$APP_NAME" "$APP_DIR/Contents/Resources/bin/uv"
+
+if [[ "$UNIVERSAL" == true ]]; then
+    UNIVERSAL_BINARIES=(
+        "$APP_DIR/Contents/MacOS/$APP_NAME"
+        "$APP_DIR/Contents/Resources/bin/uv"
+        "$APP_DIR/Contents/Frameworks/Sparkle.framework/Sparkle"
+        "$APP_DIR/Contents/Frameworks/Sparkle.framework/Versions/Current/Autoupdate"
+        "$APP_DIR/Contents/Frameworks/Sparkle.framework/Versions/Current/Updater.app/Contents/MacOS/Updater"
+        "$APP_DIR/Contents/Frameworks/Sparkle.framework/Versions/Current/XPCServices/Downloader.xpc/Contents/MacOS/Downloader"
+        "$APP_DIR/Contents/Frameworks/Sparkle.framework/Versions/Current/XPCServices/Installer.xpc/Contents/MacOS/Installer"
+    )
+    for binary in "${UNIVERSAL_BINARIES[@]}"; do
+        require_architectures "$binary" arm64 x86_64
+    done
+    echo "Verified Apple silicon and Intel support."
+fi
 
 if ! otool -l "$APP_DIR/Contents/MacOS/$APP_NAME" | grep -q '@executable_path/../Frameworks'; then
     install_name_tool -add_rpath "@executable_path/../Frameworks" "$APP_DIR/Contents/MacOS/$APP_NAME"

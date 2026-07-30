@@ -217,6 +217,7 @@ The Docker backend starts one worker container per worker key and reuses it unti
 This is the simplest way to get one persistent container per agent without running Kubernetes.
 MindRoom builds a projected read-only config snapshot for each worker from `MINDROOM_DOCKER_WORKER_HOST_CONFIG_PATH`, rewrites config-relative paths into that snapshot, copies only the referenced config-relative assets needed for that worker into the snapshot, and mounts only the snapshot root into the container.
 MindRoom also sanitizes the projected worker `config.yaml`, removing sensitive config keys and authorization headers from the worker-visible snapshot before it is written.
+Control-plane-only sections that a worker never reads are cleared from that snapshot as well, including `teams`, `cultures`, `calls`, `room_models`, `bot_accounts`, `authorization`, and the Matrix room and space settings.
 Agent-scoped workers such as unscoped, `worker_scope: shared`, and `worker_scope: user_agent` snapshot only that agent's projected context files and assigned knowledge bases.
 `worker_scope: user` intentionally shares one worker across multiple agents, so it keeps the broader shared projection for that worker.
 Writable file-memory paths are rewritten into the worker's own state root instead of being mounted from the host config tree.
@@ -323,10 +324,15 @@ If you deploy that mode without Helm, see [Kubernetes Deployment](https://docs.m
 | `MINDROOM_SANDBOX_RUNNER_PORT` | Port the sandbox runner listens on | `8766` |
 | `MINDROOM_SANDBOX_RUNNER_MODE` | Set to `true` to indicate runner mode | `false` |
 | `MINDROOM_SANDBOX_PROXY_TOKEN` | Runner bearer token. Static runners use the shared primary token; Kubernetes dedicated workers receive a per-worker derived token. | _(required)_ |
-| `MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE` | `inprocess` or `subprocess` | `inprocess` |
-| `MINDROOM_SANDBOX_RUNNER_SUBPROCESS_TIMEOUT_SECONDS` | Subprocess timeout | `120` |
+| `MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE` | `inprocess`, `subprocess`, or `forkserver` | `inprocess` |
+| `MINDROOM_SANDBOX_RUNNER_SUBPROCESS_TIMEOUT_SECONDS` | Per-call timeout for `subprocess` and `forkserver` execution | `120` |
 | `MINDROOM_STORAGE_PATH` | Writable directory for tool registry init and worker-local caches (e.g., `/app/workspace/.mindroom`) | `mindroom_data` next to config _(will fail if not writable)_ |
 | `MINDROOM_CONFIG_PATH` | Path to config.yaml (for plugin tool registration) | _(optional)_ |
+
+`subprocess` runs every tool call in a fresh `python -m mindroom.api.sandbox_runner` child that re-imports the runtime on each call.
+`forkserver` keeps one warm template process per interpreter that imports the runtime once and forks a fresh child per call, preserving per-call process isolation while removing the per-call import cost.
+Dedicated Docker and Kubernetes workers default to `forkserver`.
+If the warm template fails to start, dispatch falls back to spawn-per-call and retries the template after a cooldown.
 
 ## Execution modes
 
@@ -368,7 +374,7 @@ There are two supported shapes:
 ### Per-worker Agent Vault egress (Kubernetes backend)
 
 For per-user/per-agent isolation, the Kubernetes worker backend gives each dedicated worker its own Agent Vault identity against a single shared Agent Vault server — no per-worker bridge pod, Service, or NetworkPolicy.
-When enabled, each worker pod gets an init container that logs in with the instance owner credential (read from the bootstrap Secret's `AGENT_VAULT_OWNER_PASSWORD` key, mounted only on the init container), creates the worker's vault if missing (`worker_id_for_key(worker_key, prefix=vaultNamePrefix)`), then creates — or rotates — a proxy-role Agent Vault agent for that vault and writes its token to an in-pod `emptyDir`.
+When enabled, each worker pod gets an init container that logs in with the instance owner credential (read from the bootstrap Secret's `AGENT_VAULT_OWNER_PASSWORD` key, mounted only on the init container), creates the worker's vault if missing (`descriptive_worker_id_for_key(worker_key, prefix=vaultNamePrefix)`, a readable scope slug plus a short digest), then creates — or rotates — a proxy-role Agent Vault agent for that vault and writes its token to an in-pod `emptyDir`.
 The sandbox runner reads that token at execution time and composes `http://<token>:@<proxy host>` for python/shell only (Agent Vault accepts the token as the proxy basic-auth username), so credentials are injected in transit.
 
 ```bash
@@ -403,8 +409,9 @@ For non-Kubernetes deployments, point worker egress at a shared proxy you run yo
 ### Self-service vault access
 
 The `agent_vault_access` tool lets a user ask their own agent for a link to manage that agent's vault.
-It resolves the caller's worker target to that worker's vault (`worker_id_for_key(worker_key, prefix)`, matching `agentVault.vaultNamePrefix`), grants the caller's Agent Vault account admin access to that vault through the API, and returns the gated UI link.
-It only self-grants for requester-isolated worker scopes (`user` or `user_agent`); shared worker vaults require operator-managed credentials.
+It resolves the caller's worker target to that worker's vault (`descriptive_worker_id_for_key(worker_key, prefix)`, matching `agentVault.vaultNamePrefix`), grants the caller's Agent Vault account admin access to that vault through the API, and returns the gated UI link.
+It only self-grants for requester-isolated worker scopes (`user` or `user_agent`).
+For shared worker scopes it returns the vault name and UI link without granting anything (`"access": "operator_managed"`): the link alone grants nothing because the UI enforces vault membership, and it is how the operator-designated admin discovers which vault backs the agent.
 Configure it per deployment:
 
 ```bash
@@ -414,6 +421,8 @@ MINDROOM_AGENT_VAULT_ACCESS_UI_BASE_URL=https://example.com/agent-vault
 MINDROOM_AGENT_VAULT_ACCESS_EMAIL_DOMAIN=example.com
 MINDROOM_AGENT_VAULT_ACCESS_VAULT_NAME_PREFIX=agent-vault  # must match workers.kubernetes.agentVault.vaultNamePrefix
 ```
+
+Agents on a shared worker scope never reach the grant API, so for them only `MINDROOM_AGENT_VAULT_ACCESS_UI_BASE_URL` (plus the matching vault name prefix) is required; the API URL, admin token, and email domain stay required for requester-isolated scopes.
 
 The tool maps a requester's Matrix localpart to `localpart@EMAIL_DOMAIN` for the account grant.
 That mapping only decides *UI management access*; it never changes which worker reaches which vault, so the runtime secret boundary stays the per-worker vault scope plus the in-pod proxy-role token.
@@ -432,8 +441,9 @@ It also proves garbage and missing proxy session tokens are refused.
 
 Shell commands that exceed their timeout return a background handle.
 Use `check_shell_command(handle)` to poll and `kill_shell_command(handle)` to stop the process.
-These handles are process-local to the sandbox runner: they survive multiple requests to the same runner process, but not runner restarts.
-To make that work, shell background-handle requests stay owned by the long-lived runner process even when `MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE=subprocess`.
+Handles are owned by a small worker-local shell supervisor process that the runner spawns on first shell use: they survive multiple requests to the same runner, but not runner or worker restarts.
+Shell requests run in per-request subprocesses like every other execution tool; the request process computes the shell env and cwd, then relays run/check/kill to the supervisor over a unix socket advertised via `MINDROOM_SANDBOX_SHELL_SUPERVISOR_SOCKET`.
+When the supervisor exits (runner shutdown, worker restart, or orphaning), it kills any still-running supervised process groups, so handles are invalidated without leaking processes.
 
 ## Workspace home contract
 
@@ -566,7 +576,7 @@ The `worker_tools` field has three states:
 
 Agent-level `worker_tools` overrides `defaults.worker_tools`.
 Registry-backed tools can be listed in `worker_tools`, and MindRoom will attempt to route them through the worker runtime.
-Some local-only tools stay in the primary runtime even when listed: `attachments`, `gmail`, `google_calendar`, `google_drive`, `google_sheets`, and `homeassistant`.
+Some local-only tools stay in the primary runtime even when listed: `attachments`, `desktop`, `gmail`, `google_calendar`, `google_docs`, `google_drive`, `google_sheets`, and `homeassistant`.
 With `MINDROOM_WORKER_BACKEND=static_runner`, a sandbox proxy URL (`MINDROOM_SANDBOX_PROXY_URL`) must be configured for selected execution tools to run.
 Without that URL, explicitly selected worker-routed tools fail closed unless `MINDROOM_SANDBOX_EXECUTION_MODE=off|local|disabled` or `MINDROOM_UNSAFE_ALLOW_LOCAL_EXECUTION_TOOLS=true` is set.
 If `worker_tools` is omitted and no static proxy URL is configured, simple local installs run those tools in the primary MindRoom process.
@@ -576,7 +586,7 @@ With `MINDROOM_WORKER_BACKEND=docker` or `MINDROOM_WORKER_BACKEND=kubernetes`, w
 
 `worker_tools` controls which tools run in the sandbox proxy.
 `worker_scope` controls how those sandbox runtimes are shared between calls.
-Some credential-backed tools always stay local regardless of `worker_tools`: `gmail`, `google_calendar`, `google_drive`, `google_sheets`, and `homeassistant`.
+Some credential-backed tools always stay local regardless of `worker_tools`: `gmail`, `google_calendar`, `google_docs`, `google_drive`, `google_sheets`, and `homeassistant`.
 Additionally, `spotify` is a shared-only integration that requires `worker_scope` unset or `shared` but can still be proxied through the sandbox.
 The built-in `memory`, `delegate`, and `self_config` tools are also created directly in the primary runtime today and are not routed through `worker_tools`.
 
@@ -619,7 +629,7 @@ With `MINDROOM_WORKER_BACKEND=docker` or `MINDROOM_WORKER_BACKEND=kubernetes`, M
 - `worker_scope` does **not** change where agent data is stored.
   All scopes read and write the same agent storage directory (`agents/<name>/`).
 - The dashboard's generic credential forms only work for unscoped agents and agents with `worker_scope=shared`.
-  OAuth providers that support scoped dashboard flows, such as the Google Drive, Gmail, Calendar, and Sheets providers, are the exception.
+  OAuth providers that support scoped dashboard flows, such as the Google Drive, Docs, Gmail, Calendar, and Sheets providers, are the exception.
   For those providers, the dashboard can connect scoped `user` and `user_agent` credentials, but the Google tools still execute in the primary MindRoom runtime.
   Tools without a scoped OAuth provider still manage `user` and `user_agent` credentials through their worker runtime.
 - `user` mode shares one runtime across multiple agents for a single user, so agents in that runtime can access each other's files.

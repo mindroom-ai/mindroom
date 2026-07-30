@@ -44,11 +44,6 @@ def _matrix_client_mock() -> AsyncMock:
     return make_matrix_client_mock()
 
 
-def _require_config(value: Config, text: str) -> str:
-    assert isinstance(value, Config)
-    return text
-
-
 @pytest.mark.asyncio
 async def test_streaming_e2e_worker_warmup_edit_sequence(tmp_path: Path) -> None:
     """Worker warmup notices should edit the placeholder stream body and disappear before content arrives."""
@@ -78,9 +73,9 @@ async def test_streaming_e2e_worker_warmup_edit_sequence(tmp_path: Path) -> None
         _room_id: str,
         content: dict[str, object],
         *,
-        config: Config,
+        retry_sync_recovery: bool = False,  # noqa: ARG001
     ) -> DeliveredMatrixEvent:
-        deliveries.append(("send", _require_config(config, str(content["body"]))))
+        deliveries.append(("send", str(content["body"])))
         return DeliveredMatrixEvent(event_id="$stream_1", content_sent=dict(content))
 
     async def record_edit(
@@ -90,9 +85,9 @@ async def test_streaming_e2e_worker_warmup_edit_sequence(tmp_path: Path) -> None
         new_content: dict[str, object],
         new_text: str,
         *,
-        config: Config,
+        retry_sync_recovery: bool = False,  # noqa: ARG001
     ) -> DeliveredMatrixEvent:
-        deliveries.append(("edit", _require_config(config, new_text)))
+        deliveries.append(("edit", new_text))
         return DeliveredMatrixEvent(event_id="$stream_edit", content_sent=dict(new_content))
 
     async def stream() -> AsyncGenerator[object, None]:
@@ -271,7 +266,7 @@ async def test_streaming_edits_e2e(  # noqa: C901, PLR0915
         *,
         ignore_unverified_devices: bool = False,
     ) -> object:
-        assert ignore_unverified_devices is False
+        assert ignore_unverified_devices is True
         event_id = f"$helper_{len(helper_events)}"
         helper_events.append(
             {
@@ -290,7 +285,7 @@ async def test_streaming_edits_e2e(  # noqa: C901, PLR0915
         *,
         ignore_unverified_devices: bool = False,
     ) -> object:
-        assert ignore_unverified_devices is False
+        assert ignore_unverified_devices is True
         event_id = f"$calc_{len(calc_events)}"
         calc_events.append(
             {
@@ -580,7 +575,7 @@ async def test_user_edits_with_mentions_e2e(tmp_path: Path) -> None:
             ignore_unverified_devices: bool = False,
         ) -> object:
             assert message_type == "m.room.message"
-            assert ignore_unverified_devices is False
+            assert ignore_unverified_devices is True
             event_id = f"$calc_{len(events_sent)}"
             events_sent.append(
                 {

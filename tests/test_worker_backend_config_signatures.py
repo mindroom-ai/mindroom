@@ -10,6 +10,7 @@ import pytest
 
 from mindroom.constants import resolve_primary_runtime_paths
 from mindroom.runtime_env_policy import CREDENTIALS_ENCRYPTION_KEY_ENV
+from mindroom.workers.backends._dedicated_worker_common import stable_signature_json
 from mindroom.workers.backends.docker_config import docker_backend_config_signature
 from mindroom.workers.backends.kubernetes_config import (
     KubernetesWorkerBackendConfig,
@@ -51,6 +52,11 @@ _FULL_KUBERNETES_ENV = {
     "MINDROOM_KUBERNETES_WORKER_ENV_JSON": '{"EXTRA_TWO": "2", "EXTRA_ONE": "1"}',
     "MINDROOM_KUBERNETES_WORKER_LABELS_JSON": '{"team": "platform"}',
     "MINDROOM_KUBERNETES_WORKER_ANNOTATIONS_JSON": '{"cluster-autoscaler.kubernetes.io/safe-to-evict": "false"}',
+    "MINDROOM_KUBERNETES_WORKER_EXTRA_CONTAINERS_JSON": (
+        '[{"name":"trigger-listener","image":"ghcr.io/mindroom-ai/trigger-listener:1",'
+        '"volumeMounts":[{"name":"trigger-state","mountPath":"/trigger/inbox"}]}]'
+    ),
+    "MINDROOM_KUBERNETES_WORKER_EXTRA_VOLUMES_JSON": '[{"name":"trigger-state","emptyDir":{}}]',
     "MINDROOM_KUBERNETES_WORKER_OWNER_DEPLOYMENT_NAME": "mindroom-primary",
     "MINDROOM_KUBERNETES_WORKER_MEMORY_REQUEST": "512Mi",
     "MINDROOM_KUBERNETES_WORKER_MEMORY_LIMIT": "2Gi",
@@ -93,6 +99,8 @@ def _legacy_kubernetes_backend_config_signature(
     extra_env_json = json.dumps(config.extra_env, sort_keys=True, separators=(",", ":"))
     extra_labels_json = json.dumps(config.extra_labels, sort_keys=True, separators=(",", ":"))
     extra_annotations_json = json.dumps(config.extra_annotations, sort_keys=True, separators=(",", ":"))
+    extra_containers_json = stable_signature_json(config.extra_containers)
+    extra_volumes_json = stable_signature_json(config.extra_volumes)
     resource_requests_json = json.dumps(config.resource_requests, sort_keys=True, separators=(",", ":"))
     resource_limits_json = json.dumps(config.resource_limits, sort_keys=True, separators=(",", ":"))
     return (
@@ -116,6 +124,8 @@ def _legacy_kubernetes_backend_config_signature(
         extra_env_json,
         extra_labels_json,
         extra_annotations_json,
+        extra_containers_json,
+        extra_volumes_json,
         config.owner_deployment_name or "",
         resource_requests_json,
         resource_limits_json,
@@ -185,6 +195,11 @@ def test_kubernetes_signature_is_stable_for_identical_config(tmp_path: Path) -> 
         ("MINDROOM_KUBERNETES_WORKER_ENV_JSON", '{"EXTRA_ONE": "changed"}'),
         ("MINDROOM_KUBERNETES_WORKER_LABELS_JSON", '{"team": "other"}'),
         ("MINDROOM_KUBERNETES_WORKER_ANNOTATIONS_JSON", '{"changed": "true"}'),
+        (
+            "MINDROOM_KUBERNETES_WORKER_EXTRA_CONTAINERS_JSON",
+            '[{"name":"changed-listener","image":"ghcr.io/mindroom-ai/trigger-listener:1"}]',
+        ),
+        ("MINDROOM_KUBERNETES_WORKER_EXTRA_VOLUMES_JSON", '[{"name":"changed-state","emptyDir":{}}]'),
         ("MINDROOM_KUBERNETES_WORKER_OWNER_DEPLOYMENT_NAME", "other-owner"),
         ("MINDROOM_KUBERNETES_WORKER_MEMORY_LIMIT", "4Gi"),
         ("MINDROOM_KUBERNETES_WORKER_CPU_REQUEST", "500m"),

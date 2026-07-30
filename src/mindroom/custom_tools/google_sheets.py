@@ -76,6 +76,9 @@ class GoogleSheetsTools(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin, A
     def _normalize_dashboard_config_kwargs(self, kwargs: dict[str, Any]) -> None:
         """Map dashboard field names onto Agno's constructor argument names."""
         for field_name, init_arg in _CONFIG_FIELD_INIT_ARG_ALIASES.items():
+            if field_name not in kwargs and init_arg not in kwargs:
+                kwargs[init_arg] = True
+                continue
             if field_name not in kwargs:
                 continue
             if init_arg in kwargs:

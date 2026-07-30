@@ -14,16 +14,21 @@ if TYPE_CHECKING:
 
 
 def append_knowledge_availability_enrichment(
-    system_enrichment_items: Sequence[EnrichmentItem],
+    enrichment_items: Sequence[EnrichmentItem],
     unavailable_bases: Mapping[str, KnowledgeAvailabilityDetail],
 ) -> tuple[EnrichmentItem, ...]:
-    """Append one volatile knowledge-availability notice when needed."""
+    """Append one transient knowledge-availability notice when needed."""
     notice = format_knowledge_availability_notice(unavailable_bases)
     if notice is None:
-        return tuple(system_enrichment_items)
+        return tuple(enrichment_items)
     return (
-        *system_enrichment_items,
-        EnrichmentItem(key="knowledge_availability", text=notice, cache_policy="volatile"),
+        *enrichment_items,
+        EnrichmentItem(
+            key="knowledge_availability",
+            text=notice,
+            cache_policy="volatile",
+            persist=False,
+        ),
     )
 
 

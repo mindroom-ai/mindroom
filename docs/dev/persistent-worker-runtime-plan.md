@@ -55,7 +55,7 @@ Dedicated Kubernetes workers are provisioned today and rely on the same agent-ow
 Phase 4 remains in progress as provider hardening, operator guidance, metrics, and broader rollout validation continue.
 Spotify and Home Assistant remain shared-only.
 Those integrations are supported only for agents without worker routing or with `worker_scope=shared`.
-The Google-backed `gmail`, `google_calendar`, `google_drive`, and `google_sheets` tools now use per-provider OAuth credentials.
+The Google-backed `gmail`, `google_calendar`, `google_docs`, `google_drive`, and `google_sheets` tools now use per-provider OAuth credentials.
 The dashboard can manage scoped Google OAuth tokens and editable Google tool settings for selected `user` and `user_agent` agents when a trusted Matrix requester identity is available.
 Generic dashboard credential management remains limited to unscoped agents and agents with `worker_scope=shared`.
 The `/v1` API remains intentionally restricted to unscoped agents and agents with `worker_scope=shared` until trusted requester identity is solved.
@@ -296,9 +296,9 @@ The target credentials model is:
 
 OAuth-heavy dashboard integrations used to be an explicit exception to isolated worker scopes.
 Spotify and Home Assistant remain shared-only.
-The Google-backed `gmail`, `google_calendar`, `google_drive`, and `google_sheets` tools now use scoped per-provider OAuth credentials.
+The Google-backed `gmail`, `google_calendar`, `google_docs`, `google_drive`, and `google_sheets` tools now use scoped per-provider OAuth credentials.
 The credential-backed `homeassistant` tool also stays local even for `worker_scope=shared` rather than being routed through the sandbox runner.
-Google-backed `gmail`, `google_calendar`, `google_drive`, and `google_sheets` tools use scoped per-provider OAuth credentials and stay in the primary runtime rather than running through the sandbox runner.
+Google-backed `gmail`, `google_calendar`, `google_docs`, `google_drive`, and `google_sheets` tools use scoped per-provider OAuth credentials and stay in the primary runtime rather than running through the sandbox runner.
 This keeps worker runtimes from needing Google OAuth client secrets while Google OAuth stays on the scoped provider model.
 Dashboard credential management follows the same product boundary more generally.
 The dashboard may read, write, and disconnect scoped Google OAuth token services and editable Google tool settings for selected `user` and `user_agent` agents when the request is bound to a Matrix requester identity.

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 from mindroom.workers.backend import WorkerBackendError
 
@@ -16,6 +16,7 @@ __all__ = [
     "read_float_env",
     "read_int_env",
     "read_json_mapping_env",
+    "read_json_object_list_env",
 ]
 
 
@@ -72,3 +73,25 @@ def read_json_mapping_env(env: Mapping[str, str], name: str) -> dict[str, str]:
         elif value is not None:
             cleaned[key] = str(value)
     return cleaned
+
+
+def read_json_object_list_env(env: Mapping[str, str], name: str) -> tuple[dict[str, object], ...]:
+    """Parse one JSON-list env value into object items, failing loudly when malformed."""
+    raw = read_env(env, name)
+    if not raw:
+        return ()
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        msg = f"{name} must contain a JSON list of objects."
+        raise WorkerBackendError(msg) from exc
+    if not isinstance(parsed, list):
+        msg = f"{name} must contain a JSON list of objects."
+        raise WorkerBackendError(msg)
+    items: list[dict[str, object]] = []
+    for index, item in enumerate(parsed):
+        if not isinstance(item, dict):
+            msg = f"{name}[{index}] must be a JSON object."
+            raise WorkerBackendError(msg)
+        items.append(cast("dict[str, object]", item))
+    return tuple(items)

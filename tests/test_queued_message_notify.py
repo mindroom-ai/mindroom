@@ -3,14 +3,16 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 from contextlib import contextmanager
 from dataclasses import replace
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, Protocol, Self, cast
+from typing import TYPE_CHECKING, Literal, Protocol, Self, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
 import pytest
+from agno.agent import Agent as AgnoAgent
 from agno.db.base import SessionType
 from agno.media import Image
 from agno.models.message import Message
@@ -23,7 +25,7 @@ from agno.session.team import TeamSession
 from mindroom import turn_controller
 from mindroom.ai import _PreparedAgentRun, ai_response, stream_agent_response
 from mindroom.ai_runtime import (
-    cleanup_queued_notice_state,
+    cleanup_queued_notice_state_async,
     install_queued_message_notice_hook,
     queued_message_signal_context,
 )
@@ -50,10 +52,11 @@ from mindroom.dispatch_source import (
     TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
     VOICE_SOURCE_KIND,
 )
+from mindroom.entity_resolution import current_internal_sender_ids
 from mindroom.final_delivery import FinalDeliveryOutcome
+from mindroom.history.runtime import open_bound_scope_session_context
 from mindroom.history.types import HistoryScope
 from mindroom.hooks import MessageEnvelope
-from mindroom.inbound_turn_normalizer import DispatchPayload
 from mindroom.interactive import InteractiveMetadata
 from mindroom.matrix.cache import ThreadHistoryResult
 from mindroom.matrix.client import ResolvedVisibleMessage
@@ -68,7 +71,12 @@ from mindroom.post_response_effects import (
 from mindroom.prompts import QUEUED_MESSAGE_NOTICE_TEXT
 from mindroom.response_lifecycle import _QueuedMessageState
 from mindroom.response_payload_preparation import DispatchPayloadInputs, ResponsePayloadPreparation
-from mindroom.response_runner import PostLockRequestPreparationError, ResponseRequest, ResponseRunner
+from mindroom.response_runner import (
+    PostLockRequestPreparationError,
+    ResponseRequest,
+    ResponseRunner,
+    _ResponseGenerationOutcome,
+)
 from mindroom.teams import TeamMode, _create_team_instance
 from mindroom.turn_controller import _PrecheckedEvent
 from mindroom.turn_policy import PreparedDispatch, ResponseAction, _DispatchPlan
@@ -78,6 +86,7 @@ from tests.conftest import (
     install_runtime_cache_support,
     make_event_cache_mock,
     make_event_cache_write_coordinator_mock,
+    make_turn_context,
     message_origin,
     prepared_dispatch_result,
     request_envelope,
@@ -143,6 +152,7 @@ def _bot(tmp_path: Path) -> AgentBot:
     )
     bot = AgentBot(agent_user, tmp_path, config, runtime_paths_for(config), rooms=["!room:localhost"])
     bot.client = AsyncMock(spec=nio.AsyncClient)
+    bot.client.rooms = {}
     install_runtime_cache_support(bot)
     wrap_extracted_collaborators(bot)
     return bot
@@ -165,15 +175,11 @@ def _envelope(
     )
     return MessageEnvelope(
         source_event_id=source_event_id,
-        room_id="!room:localhost",
         target=target,
-        requester_id=requester_id,
-        sender_id=sender_id,
         body="hello",
         attachment_ids=(),
         mentioned_agents=(),
         agent_name="general",
-        source_kind=source_kind,
         dispatch_policy_source_kind=dispatch_policy_source_kind,
         origin=origin or message_origin(sender_id=sender_id, requester_id=requester_id, source_kind=source_kind),
     )
@@ -355,6 +361,7 @@ class _FakeStorage:
     def __init__(self) -> None:
         self.session: AgentSession | TeamSession | None = None
         self.upserted = False
+        self.closed = False
 
     def get_session(self, session_id: str, _session_type: object) -> AgentSession | TeamSession | None:
         if self.session is None or self.session.session_id != session_id:
@@ -365,6 +372,9 @@ class _FakeStorage:
         self.session = session
         self.upserted = True
         return session
+
+    def close(self) -> None:
+        self.closed = True
 
 
 class _FakeModel:
@@ -544,7 +554,12 @@ def test_same_target_batch_reservation_consumes_all_pending_messages(tmp_path: P
 
 @contextmanager
 def _open_scope(storage: _FakeStorage) -> object:
-    yield SimpleNamespace(storage=storage, session=storage.session)
+    yield SimpleNamespace(
+        storage=storage,
+        storage_factory=lambda: storage,
+        session=storage.session,
+        scope=HistoryScope("agent", "general"),
+    )
 
 
 class _PrelockBarrierLock:
@@ -609,6 +624,47 @@ async def test_post_response_effects_skip_thread_summary_for_suppressed_delivery
         ),
     )
 
+    queue_thread_summary.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("terminal_status", "run_succeeded"),
+    [
+        ("error", False),
+        ("cancelled", False),
+        ("completed", False),
+    ],
+)
+@pytest.mark.asyncio
+async def test_post_response_effects_skip_thread_summary_for_unsuccessful_turn(
+    terminal_status: Literal["error", "cancelled", "completed"],
+    run_succeeded: bool,
+) -> None:
+    """Visible failed or cancelled turns must not enqueue thread enrichment."""
+    should_queue_thread_summary = MagicMock(return_value=True)
+    queue_thread_summary = MagicMock()
+
+    await apply_post_response_effects(
+        FinalDeliveryOutcome(
+            terminal_status=terminal_status,
+            event_id="$response",
+            is_visible_response=True,
+            final_visible_body="Turn did not complete",
+        ),
+        ResponseOutcome(
+            run_succeeded=run_succeeded,
+            thread_summary_room_id="!room:localhost",
+            thread_summary_thread_id="$thread",
+            thread_summary_message_count_hint=2,
+        ),
+        PostResponseEffectsDeps(
+            logger=MagicMock(),
+            should_queue_thread_summary=should_queue_thread_summary,
+            queue_thread_summary=queue_thread_summary,
+        ),
+    )
+
+    should_queue_thread_summary.assert_not_called()
     queue_thread_summary.assert_not_called()
 
 
@@ -745,6 +801,7 @@ async def test_post_response_effects_queues_summary_with_stale_hint_inside_margi
         )
         for i in range(5)
     ]
+    conversation_cache.get_strict_thread_history = AsyncMock(return_value=thread_history)
     scheduled_tasks: list[asyncio.Task[None]] = []
 
     def schedule_background_task(
@@ -760,10 +817,8 @@ async def test_post_response_effects_queues_summary_with_stale_hint_inside_margi
 
     with (
         patch("mindroom.post_response_effects.create_background_task", side_effect=schedule_background_task),
-        patch("mindroom.thread_summary._load_thread_history", new=AsyncMock(return_value=thread_history)) as mock_fetch,
         patch("mindroom.thread_summary._generate_summary", new=AsyncMock(return_value="Summary")) as mock_generate,
         patch("mindroom.thread_summary.send_thread_summary_event", new=AsyncMock(return_value="$summary")) as mock_send,
-        patch("mindroom.thread_summary._recover_last_summary_count", new=AsyncMock(return_value=0)),
     ):
         await apply_post_response_effects(
             FinalDeliveryOutcome(
@@ -784,8 +839,19 @@ async def test_post_response_effects_queues_summary_with_stale_hint_inside_margi
         assert scheduled_tasks
         await asyncio.gather(*scheduled_tasks)
 
-    mock_fetch.assert_awaited_once_with(conversation_cache, "!room:localhost", "$thread")
-    mock_generate.assert_awaited_once_with(thread_history, config, runtime_paths, model_name="default")
+    conversation_cache.get_strict_thread_history.assert_awaited_once_with(
+        "!room:localhost",
+        "$thread",
+        caller_label="thread_summary_background",
+    )
+    mock_generate.assert_awaited_once_with(
+        thread_history,
+        config,
+        runtime_paths,
+        model_name="default",
+        tag_vocabulary=None,
+        trusted_sender_ids=current_internal_sender_ids(config, runtime_paths),
+    )
     mock_send.assert_awaited_once_with(
         client,
         "!room:localhost",
@@ -794,7 +860,7 @@ async def test_post_response_effects_queues_summary_with_stale_hint_inside_margi
         5,
         "default",
         conversation_cache,
-        config=config,
+        initial_enrichment_complete=None,
     )
 
 
@@ -836,6 +902,7 @@ async def test_post_response_effects_queues_summary_with_entity_model_for_adhoc_
         )
         for i in range(5)
     ]
+    conversation_cache.get_strict_thread_history = AsyncMock(return_value=thread_history)
     scheduled_tasks: list[asyncio.Task[None]] = []
 
     def schedule_background_task(
@@ -851,12 +918,8 @@ async def test_post_response_effects_queues_summary_with_entity_model_for_adhoc_
 
     with (
         patch("mindroom.post_response_effects.create_background_task", side_effect=schedule_background_task),
-        patch("mindroom.thread_summary._load_thread_history", new=AsyncMock(return_value=thread_history)),
         patch("mindroom.thread_summary._generate_summary", new=AsyncMock(return_value="Summary")) as mock_generate,
         patch("mindroom.thread_summary.send_thread_summary_event", new=AsyncMock(return_value="$summary")),
-        patch("mindroom.thread_summary._recover_last_summary_count", new=AsyncMock(return_value=0)),
-        patch("mindroom.entity_resolution.matrix_state.get_room_alias_from_id", return_value=None),
-        patch("mindroom.entity_resolution.matrix_state.matrix_state_for_runtime", return_value=MagicMock(rooms={})),
     ):
         await apply_post_response_effects(
             FinalDeliveryOutcome(
@@ -878,7 +941,14 @@ async def test_post_response_effects_queues_summary_with_entity_model_for_adhoc_
         assert scheduled_tasks
         await asyncio.gather(*scheduled_tasks)
 
-    mock_generate.assert_awaited_once_with(thread_history, config, runtime_paths, model_name="qwen")
+    mock_generate.assert_awaited_once_with(
+        thread_history,
+        config,
+        runtime_paths,
+        model_name="qwen",
+        tag_vocabulary=None,
+        trusted_sender_ids=current_internal_sender_ids(config, runtime_paths),
+    )
 
 
 @pytest.mark.asyncio
@@ -900,11 +970,13 @@ async def test_generate_response_sets_queued_signal_for_human_ingress(tmp_path: 
             new=AsyncMock(return_value="$response"),
         ) as mock_locked:
             task = asyncio.create_task(
-                bot._generate_response(
-                    prompt="hello",
-                    thread_history=[],
-                    user_id="@user:localhost",
-                    response_envelope=response_envelope,
+                bot._response_runner.generate_response(
+                    ResponseRequest(
+                        prompt="hello",
+                        thread_history=[],
+                        user_id="@user:localhost",
+                        response_envelope=response_envelope,
+                    ),
                 ),
             )
             await asyncio.wait_for(queued_signal.wait(), timeout=0.2)
@@ -961,11 +1033,13 @@ async def test_generate_response_skips_signal_for_non_human_prompt_ingress(
             new=AsyncMock(return_value="$response"),
         ):
             task = asyncio.create_task(
-                bot._generate_response(
-                    prompt="hello",
-                    thread_history=[],
-                    user_id="@user:localhost",
-                    response_envelope=response_envelope,
+                bot._response_runner.generate_response(
+                    ResponseRequest(
+                        prompt="hello",
+                        thread_history=[],
+                        user_id="@user:localhost",
+                        response_envelope=response_envelope,
+                    ),
                 ),
             )
             with pytest.raises(asyncio.TimeoutError):
@@ -1031,11 +1105,13 @@ async def test_generate_response_sets_queued_signal_for_trusted_router_relay(tmp
             new=AsyncMock(return_value="$response"),
         ):
             task = asyncio.create_task(
-                bot._generate_response(
-                    prompt="hello",
-                    thread_history=[],
-                    user_id="@user:localhost",
-                    response_envelope=response_envelope,
+                bot._response_runner.generate_response(
+                    ResponseRequest(
+                        prompt="hello",
+                        thread_history=[],
+                        user_id="@user:localhost",
+                        response_envelope=response_envelope,
+                    ),
                 ),
             )
             await asyncio.wait_for(queued_signal.wait(), timeout=0.2)
@@ -1062,8 +1138,9 @@ async def test_generate_response_detects_active_turn_before_lock_is_held(tmp_pat
         request: ResponseRequest,
         *,
         resolved_target: MessageTarget,
+        early_placeholder_state: object,
     ) -> str:
-        del resolved_target
+        del resolved_target, early_placeholder_state
         return str(request.user_id)
 
     with (
@@ -1071,21 +1148,25 @@ async def test_generate_response_detects_active_turn_before_lock_is_held(tmp_pat
         patch.object(ResponseRunner, "generate_response_locked", new=fake_generate_response_locked),
     ):
         first_task = asyncio.create_task(
-            bot._generate_response(
-                prompt="hello",
-                thread_history=[],
-                user_id="first",
-                response_envelope=first_envelope,
+            bot._response_runner.generate_response(
+                ResponseRequest(
+                    prompt="hello",
+                    thread_history=[],
+                    user_id="first",
+                    response_envelope=first_envelope,
+                ),
             ),
         )
         await lock.first_waiting.wait()
 
         second_task = asyncio.create_task(
-            bot._generate_response(
-                prompt="stop",
-                thread_history=[],
-                user_id="second",
-                response_envelope=second_envelope,
+            bot._response_runner.generate_response(
+                ResponseRequest(
+                    prompt="stop",
+                    thread_history=[],
+                    user_id="second",
+                    response_envelope=second_envelope,
+                ),
             ),
         )
 
@@ -1120,12 +1201,15 @@ async def test_generate_response_waits_for_lock_before_starting_placeholder_life
                 ResponseRunner,
                 "process_and_respond",
                 new=AsyncMock(
-                    return_value=FinalDeliveryOutcome(
-                        terminal_status="completed",
-                        event_id="$response",
-                        is_visible_response=True,
-                        final_visible_body="ok",
-                        delivery_kind="sent",
+                    return_value=_ResponseGenerationOutcome(
+                        delivery=FinalDeliveryOutcome(
+                            terminal_status="completed",
+                            event_id="$response",
+                            is_visible_response=True,
+                            final_visible_body="ok",
+                            delivery_kind="sent",
+                        ),
+                        run_succeeded=True,
                     ),
                 ),
             ),
@@ -1139,11 +1223,13 @@ async def test_generate_response_waits_for_lock_before_starting_placeholder_life
             patch("mindroom.response_lifecycle.apply_post_response_effects", new=AsyncMock()),
         ):
             task = asyncio.create_task(
-                bot._generate_response(
-                    prompt="hello",
-                    thread_history=[],
-                    user_id="@user:localhost",
-                    response_envelope=response_envelope,
+                bot._response_runner.generate_response(
+                    ResponseRequest(
+                        prompt="hello",
+                        thread_history=[],
+                        user_id="@user:localhost",
+                        response_envelope=response_envelope,
+                    ),
                 ),
             )
             await asyncio.sleep(0.05)
@@ -1258,14 +1344,17 @@ async def test_generate_response_uses_post_lock_reproof_target(tmp_path: Path) -
     async def fake_process_and_respond(
         request: ResponseRequest,
         **_kwargs: object,
-    ) -> FinalDeliveryOutcome:
+    ) -> _ResponseGenerationOutcome:
         observed_delivery_targets.append(request.response_envelope.target)
-        return FinalDeliveryOutcome(
-            terminal_status="completed",
-            event_id="$response",
-            is_visible_response=True,
-            final_visible_body="ok",
-            delivery_kind="sent",
+        return _ResponseGenerationOutcome(
+            delivery=FinalDeliveryOutcome(
+                terminal_status="completed",
+                event_id="$response",
+                is_visible_response=True,
+                final_visible_body="ok",
+                delivery_kind="sent",
+            ),
+            run_succeeded=True,
         )
 
     with (
@@ -1331,14 +1420,17 @@ async def test_generate_response_keeps_locked_target_when_payload_preparation_re
     async def fake_process_and_respond(
         request: ResponseRequest,
         **_kwargs: object,
-    ) -> FinalDeliveryOutcome:
+    ) -> _ResponseGenerationOutcome:
         observed_delivery_targets.append(request.response_envelope.target)
-        return FinalDeliveryOutcome(
-            terminal_status="completed",
-            event_id="$response",
-            is_visible_response=True,
-            final_visible_body="ok",
-            delivery_kind="sent",
+        return _ResponseGenerationOutcome(
+            delivery=FinalDeliveryOutcome(
+                terminal_status="completed",
+                event_id="$response",
+                is_visible_response=True,
+                final_visible_body="ok",
+                delivery_kind="sent",
+            ),
+            run_succeeded=True,
         )
 
     def fake_build_lifecycle(**kwargs: object) -> _NoopResponseLifecycle:
@@ -1390,7 +1482,9 @@ async def test_generate_team_response_uses_post_lock_reproof_target(tmp_path: Pa
     """Team delivery/session setup must enter the runner with the finalized stable room target."""
     bot = _bot(tmp_path)
     bot.client = MagicMock()
-    bot.client.rooms = {}
+    cached_room = MagicMock(encrypted=False)
+    bot.client.rooms = {"!room:localhost": cached_room}
+    bot.client.room_send = AsyncMock()
     bot.client.room_typing = AsyncMock()
     bot.orchestrator = MagicMock()
     coordinator = unwrap_extracted_collaborator(bot._response_runner)
@@ -1456,7 +1550,9 @@ async def test_generate_team_response_keeps_locked_target_when_payload_preparati
     """Team response setup and delivery should keep the target selected before lock acquisition."""
     bot = _bot(tmp_path)
     bot.client = MagicMock()
-    bot.client.rooms = {}
+    cached_room = MagicMock(encrypted=False)
+    bot.client.rooms = {"!room:localhost": cached_room}
+    bot.client.room_send = AsyncMock()
     bot.client.room_typing = AsyncMock()
     bot.orchestrator = MagicMock()
     coordinator = unwrap_extracted_collaborator(bot._response_runner)
@@ -1584,13 +1680,15 @@ async def test_generate_team_response_helper_sets_queued_signal(tmp_path: Path) 
             new=AsyncMock(return_value="$team-response"),
         ) as mock_locked:
             task = asyncio.create_task(
-                bot._generate_team_response_helper(
+                bot._response_runner.generate_team_response_helper(
+                    ResponseRequest(
+                        thread_history=[],
+                        prompt="hello",
+                        user_id="@user:localhost",
+                        response_envelope=response_envelope,
+                    ),
                     team_agents=[],
                     team_mode="coordinate",
-                    thread_history=[],
-                    requester_user_id="@user:localhost",
-                    payload=DispatchPayload(prompt="hello"),
-                    response_envelope=response_envelope,
                 ),
             )
             await asyncio.wait_for(queued_signal.wait(), timeout=0.2)
@@ -1630,20 +1728,24 @@ async def test_generate_response_without_reservation_does_not_drain_human_backlo
     try:
         with patch.object(ResponseRunner, "generate_response_locked", new=fake_locked):
             task_b = asyncio.create_task(
-                bot._generate_response(
-                    prompt="hello",
-                    thread_history=[],
-                    user_id="@user:localhost",
-                    response_envelope=response_envelope_b,
+                bot._response_runner.generate_response(
+                    ResponseRequest(
+                        prompt="hello",
+                        thread_history=[],
+                        user_id="@user:localhost",
+                        response_envelope=response_envelope_b,
+                    ),
                 ),
             )
             await asyncio.wait_for(queued_signal.wait(), timeout=0.2)
             task_c = asyncio.create_task(
-                bot._generate_response(
-                    prompt="hello again",
-                    thread_history=[],
-                    user_id="@user:localhost",
-                    response_envelope=response_envelope_c,
+                bot._response_runner.generate_response(
+                    ResponseRequest(
+                        prompt="hello again",
+                        thread_history=[],
+                        user_id="@user:localhost",
+                        response_envelope=response_envelope_c,
+                    ),
                 ),
             )
             for _ in range(20):
@@ -1693,24 +1795,28 @@ async def test_generate_team_response_without_reservation_does_not_drain_human_b
     try:
         with patch.object(ResponseRunner, "generate_team_response_helper_locked", new=fake_locked):
             task_b = asyncio.create_task(
-                bot._generate_team_response_helper(
+                bot._response_runner.generate_team_response_helper(
+                    ResponseRequest(
+                        thread_history=[],
+                        prompt="hello",
+                        user_id="@user:localhost",
+                        response_envelope=response_envelope_b,
+                    ),
                     team_agents=[],
                     team_mode="coordinate",
-                    thread_history=[],
-                    requester_user_id="@user:localhost",
-                    payload=DispatchPayload(prompt="hello"),
-                    response_envelope=response_envelope_b,
                 ),
             )
             await asyncio.wait_for(queued_signal.wait(), timeout=0.2)
             task_c = asyncio.create_task(
-                bot._generate_team_response_helper(
+                bot._response_runner.generate_team_response_helper(
+                    ResponseRequest(
+                        thread_history=[],
+                        prompt="hello again",
+                        user_id="@user:localhost",
+                        response_envelope=response_envelope_c,
+                    ),
                     team_agents=[],
                     team_mode="coordinate",
-                    thread_history=[],
-                    requester_user_id="@user:localhost",
-                    payload=DispatchPayload(prompt="hello again"),
-                    response_envelope=response_envelope_c,
                 ),
             )
             for _ in range(20):
@@ -2917,13 +3023,9 @@ async def test_ai_response_preserves_stale_notice_before_prepare(tmp_path: Path)
     observed_notice_counts: list[int] = []
 
     async def fake_prepare(
-        _agent_name: str,
-        _prompt: str,
-        _runtime_paths: object,
-        _config: object,
-        _session_id: str | None = None,
+        _ctx: object,
+        *,
         scope_context: object | None = None,
-        *_args: object,
         **_kwargs: object,
     ) -> _PreparedAgentRun:
         assert scope_context is not None
@@ -2955,9 +3057,8 @@ async def test_ai_response_preserves_stale_notice_before_prepare(tmp_path: Path)
         patch("mindroom.ai.close_agent_runtime_state_dbs"),
     ):
         response = await ai_response(
-            agent_name="general",
+            make_turn_context("general", session_id="session-1"),
             prompt="hello",
-            session_id="session-1",
             runtime_paths=runtime_paths_for(config),
             config=config,
         )
@@ -3020,9 +3121,8 @@ async def test_ai_response_preserves_notice_in_run_output_and_session(tmp_path: 
         queued_message_signal_context(_StaticQueuedState(pending=True)),
     ):
         response = await ai_response(
-            agent_name="general",
+            make_turn_context("general", session_id="session-1"),
             prompt="hello",
-            session_id="session-1",
             runtime_paths=runtime_paths_for(config),
             config=config,
         )
@@ -3073,9 +3173,8 @@ async def test_ai_response_preserves_notice_in_session_after_exception(tmp_path:
         queued_message_signal_context(_StaticQueuedState(pending=True)),
     ):
         response = await ai_response(
-            agent_name="general",
+            make_turn_context("general", session_id="session-1"),
             prompt="hello",
-            session_id="session-1",
             runtime_paths=runtime_paths_for(config),
             config=config,
         )
@@ -3128,9 +3227,8 @@ async def test_stream_agent_response_preserves_notice_in_session(tmp_path: Path)
         chunks = [
             chunk
             async for chunk in stream_agent_response(
-                agent_name="general",
+                make_turn_context("general", session_id="session-1"),
                 prompt="hello",
-                session_id="session-1",
                 runtime_paths=runtime_paths_for(config),
                 config=config,
             )
@@ -3147,20 +3245,30 @@ def test_create_team_instance_installs_notice_hook_on_team_model(tmp_path: Path)
     config = _config(tmp_path)
     runtime_paths = runtime_paths_for(config)
     model = _FakeModel()
+    agent = AgnoAgent(id="general", name="General", model="openai:test-model")
 
     with (
+        open_bound_scope_session_context(
+            agents=[agent],
+            session_id="session-1",
+            runtime_paths=runtime_paths,
+            config=config,
+            execution_identity=None,
+        ) as scope_context,
         patch("mindroom.model_loading.get_model_instance", return_value=model),
         patch("mindroom.teams.Team", side_effect=lambda **kwargs: SimpleNamespace(model=kwargs["model"])),
         queued_message_signal_context(_StaticQueuedState(pending=True)),
     ):
+        assert scope_context is not None
         team = _create_team_instance(
-            agents=[],
+            agents=[agent],
             mode=TeamMode.COORDINATE,
             config=config,
             runtime_paths=runtime_paths,
             team_display_name="Queued Notice Team",
-            fallback_team_id="queued-notice-team",
+            scope_context=scope_context,
             execution_identity=None,
+            model_name="default",
         )
         messages = [Message(role="user", content="hello")]
         team.model.format_function_call_results(
@@ -3170,7 +3278,8 @@ def test_create_team_instance_installs_notice_hook_on_team_model(tmp_path: Path)
         assert _notice_count(messages) == 1
 
 
-def test_cleanup_queued_notice_state_strips_nested_team_member_responses() -> None:
+@pytest.mark.asyncio
+async def test_cleanup_queued_notice_state_strips_nested_team_member_responses() -> None:
     """Team cleanup should recurse into nested member responses."""
     run_output = TeamRunOutput(
         run_id="run-1",
@@ -3185,34 +3294,40 @@ def test_cleanup_queued_notice_state_strips_nested_team_member_responses() -> No
         ],
         status=RunStatus.completed,
     )
-    storage = _FakeStorage()
-    storage.session = TeamSession(
-        session_id="session-1",
-        runs=[
-            TeamRunOutput(
-                run_id="run-1",
-                session_id="session-1",
-                messages=[_queued_notice_message()],
-                member_responses=[
-                    RunOutput(
-                        run_id="member-run-1",
-                        session_id="session-1",
-                        messages=[_queued_notice_message()],
-                    ),
-                ],
-                status=RunStatus.completed,
-            ),
-        ],
-    )
+    created_storages: list[_FakeStorage] = []
 
-    cleanup_queued_notice_state(
+    def storage_factory() -> _FakeStorage:
+        storage = _FakeStorage()
+        storage.session = TeamSession(
+            session_id="session-1",
+            runs=[
+                TeamRunOutput(
+                    run_id="run-1",
+                    session_id="session-1",
+                    messages=[_queued_notice_message()],
+                    member_responses=[
+                        RunOutput(
+                            run_id="member-run-1",
+                            session_id="session-1",
+                            messages=[_queued_notice_message()],
+                        ),
+                    ],
+                    status=RunStatus.completed,
+                ),
+            ],
+        )
+        created_storages.append(storage)
+        return storage
+
+    await cleanup_queued_notice_state_async(
         run_output=run_output,
-        storage=storage,
+        storage_factory=storage_factory,
         session_id="session-1",
         session_type=SessionType.TEAM,
         entity_name="queued-notice-team",
     )
 
+    storage = created_storages[0]
     assert _notice_count(run_output.messages or []) == 0
     assert run_output.member_responses is not None
     nested_member_run = run_output.member_responses[0]
@@ -3227,3 +3342,60 @@ def test_cleanup_queued_notice_state_strips_nested_team_member_responses() -> No
     stored_member_run = stored_team_run.member_responses[0]
     assert isinstance(stored_member_run, RunOutput)
     assert _notice_count(stored_member_run.messages or []) == 0
+    assert storage.closed is True
+
+
+@pytest.mark.asyncio
+async def test_async_cleanup_keeps_session_storage_io_off_event_loop() -> None:
+    """Slow synchronous session storage must not stall concurrent asyncio work."""
+    request_started = threading.Event()
+    release_request = threading.Event()
+    created_storages: list[_BlockingStorage] = []
+    event_loop_thread_id = threading.get_ident()
+
+    class _BlockingStorage(_FakeStorage):
+        def __init__(self) -> None:
+            super().__init__()
+            self.created_thread_id = threading.get_ident()
+
+        def get_session(self, session_id: str, _session_type: object) -> AgentSession | TeamSession | None:
+            request_started.set()
+            release_request.wait(timeout=1)
+            return super().get_session(session_id, _session_type)
+
+    def storage_factory() -> _BlockingStorage:
+        storage = _BlockingStorage()
+        storage.session = AgentSession(
+            session_id="session-1",
+            runs=[
+                RunOutput(
+                    run_id="run-1",
+                    session_id="session-1",
+                    messages=[_queued_notice_message()],
+                ),
+            ],
+        )
+        created_storages.append(storage)
+        return storage
+
+    cleanup_task = asyncio.create_task(
+        cleanup_queued_notice_state_async(
+            run_output=None,
+            storage_factory=storage_factory,
+            session_id="session-1",
+            session_type=SessionType.AGENT,
+            entity_name="queued-notice-agent",
+        ),
+    )
+    try:
+        assert await asyncio.to_thread(request_started.wait, 1)
+        await asyncio.wait_for(asyncio.sleep(0), timeout=0.1)
+        assert not cleanup_task.done()
+    finally:
+        release_request.set()
+
+    await asyncio.wait_for(cleanup_task, timeout=1)
+    storage = created_storages[0]
+    assert storage.created_thread_id != event_loop_thread_id
+    assert storage.upserted is True
+    assert storage.closed is True

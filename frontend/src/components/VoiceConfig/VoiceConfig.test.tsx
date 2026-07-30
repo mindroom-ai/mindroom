@@ -48,7 +48,7 @@ describe("VoiceConfig", () => {
       enabled: true,
       visible_router_echo: true,
       stt: {
-        provider: "custom",
+        provider: "openai_compatible",
         model: "whisper-1",
         host: "http://localhost:8080",
         api_key: "",
@@ -88,12 +88,12 @@ describe("VoiceConfig", () => {
 
     expect(screen.getByText("Current Effective Settings")).toBeInTheDocument();
     expect(screen.getByText("OpenAI-compatible API")).toBeInTheDocument();
-    expect(screen.getByText("OpenAI")).toBeInTheDocument();
+    expect(screen.getAllByText("OpenAI-compatible")).not.toHaveLength(0);
     expect(
       screen.getByText("http://localhost:8080/v1/audio/transcriptions"),
     ).toBeInTheDocument();
     expect(
-      screen.getByText("OPENAI_API_KEY environment variable"),
+      screen.getByText("Non-secret compatibility placeholder"),
     ).toBeInTheDocument();
   });
 
@@ -114,6 +114,11 @@ describe("VoiceConfig", () => {
   });
 
   it("uses default openai endpoint when base url is cleared", async () => {
+    const config = createConfig();
+    if (!config.voice) throw new Error("Expected voice config");
+    config.voice.stt.provider = "openai";
+    setMockStore(config);
+
     render(<VoiceConfig />);
 
     const hostInput = document.getElementById(
@@ -141,7 +146,7 @@ describe("VoiceConfig", () => {
     });
   });
 
-  it("normalizes and saves voice settings as openai provider", async () => {
+  it("normalizes and saves voice settings without rewriting the provider", async () => {
     const config = createConfig();
     if (!config.voice) throw new Error("Expected voice config");
     config.voice.stt.host = "http://localhost:8080/";
@@ -160,10 +165,9 @@ describe("VoiceConfig", () => {
         enabled: true,
         visible_router_echo: true,
         stt: {
-          provider: "openai",
+          provider: "openai_compatible",
           model: "whisper-1",
           host: "http://localhost:8080",
-          api_key: "",
         },
         intelligence: {
           model: "default",
@@ -174,6 +178,31 @@ describe("VoiceConfig", () => {
         description: "Your voice settings have been updated successfully.",
       });
     });
+  });
+
+  it("does not append a duplicate v1 path", () => {
+    const config = createConfig();
+    if (!config.voice) throw new Error("Expected voice config");
+    config.voice.stt.host = "http://localhost:8080/v1/";
+    setMockStore(config);
+
+    render(<VoiceConfig />);
+
+    expect(
+      screen.getByText("http://localhost:8080/v1/audio/transcriptions"),
+    ).toBeInTheDocument();
+  });
+
+  it("uses the current transcription model for new voice config", () => {
+    const config = createConfig();
+    delete config.voice;
+    setMockStore(config);
+
+    render(<VoiceConfig />);
+
+    expect(document.getElementById("stt-model")).toHaveValue(
+      "gpt-4o-transcribe",
+    );
   });
 
   it("shows an error toast when saving fails", async () => {
@@ -267,7 +296,7 @@ describe("VoiceConfig", () => {
         enabled: true,
         visible_router_echo: true,
         stt: {
-          provider: "openai",
+          provider: "openai_compatible",
           model: "whisper-1",
           host: "http://localhost:8080",
           api_key: "",

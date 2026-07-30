@@ -14,6 +14,7 @@ import mindroom.tools  # noqa: F401
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.custom_tools.thread_summary import ThreadSummaryTools
+from mindroom.message_target import MessageTarget
 from mindroom.thread_summary import THREAD_SUMMARY_MAX_LENGTH, ThreadSummaryWriteError, _ThreadSummaryWriteResult
 from mindroom.tool_system.metadata import TOOL_METADATA, get_tool_by_name
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
@@ -33,9 +34,11 @@ def _make_context(
     )
     return ToolRuntimeContext(
         agent_name="general",
-        room_id=room_id,
-        thread_id=thread_id,
-        resolved_thread_id=thread_id,
+        target=MessageTarget.resolve(
+            room_id=room_id,
+            thread_id=thread_id,
+            reply_to_event_id=reply_to_event_id,
+        ),
         requester_id="@user:localhost",
         client=AsyncMock(),
         config=config,
@@ -43,7 +46,6 @@ def _make_context(
         conversation_cache=AsyncMock(),
         event_cache=make_event_cache_mock(),
         room=None,
-        reply_to_event_id=reply_to_event_id,
         storage_path=None,
     )
 
@@ -114,6 +116,7 @@ async def test_set_thread_summary_defaults_to_context_room_and_thread() -> None:
         "action": "set",
         "event_id": "$summary-event:localhost",
         "message_count": 3,
+        "pinned": True,
         "room_id": "!room:localhost",
         "status": "ok",
         "summary": "🧵 Ready for review",
@@ -132,7 +135,9 @@ async def test_set_thread_summary_defaults_to_context_room_and_thread() -> None:
         "$ctx-thread:localhost",
         "  🧵 Ready\nfor\t review  ",
         config=context.config,
+        runtime_paths=context.runtime_paths,
         conversation_cache=context.conversation_cache,
+        pin=True,
     )
 
 
@@ -163,7 +168,9 @@ async def test_set_thread_summary_returns_helper_summary() -> None:
         "$ctx-thread:localhost",
         "# **Fix** [ISSUE-116](http://example.com)",
         config=context.config,
+        runtime_paths=context.runtime_paths,
         conversation_cache=context.conversation_cache,
+        pin=True,
     )
 
 
@@ -214,7 +221,9 @@ async def test_set_thread_summary_normalizes_explicit_thread_id() -> None:
         "$thread-root:localhost",
         "done",
         config=context.config,
+        runtime_paths=context.runtime_paths,
         conversation_cache=context.conversation_cache,
+        pin=True,
     )
 
 
@@ -420,3 +429,51 @@ async def test_set_thread_summary_returns_error_when_send_raises() -> None:
     assert payload["status"] == "error"
     assert payload["thread_id"] == "$ctx-thread:localhost"
     assert payload["message"] == "Failed to send thread summary event."
+
+
+@pytest.mark.asyncio
+async def test_set_thread_summary_pins_by_default() -> None:
+    """Asking an agent to set a title should make it survive automatic re-summarization."""
+    tool = ThreadSummaryTools()
+    context = _make_context(thread_id="$ctx-thread:localhost")
+
+    with (
+        patch(
+            "mindroom.custom_tools.thread_summary.resolve_thread_root_event_id_for_client",
+            new=AsyncMock(return_value="$ctx-thread:localhost"),
+        ),
+        patch(
+            "mindroom.custom_tools.thread_summary.set_manual_thread_summary",
+            new=AsyncMock(return_value=_write_result(summary="A fixed title")),
+        ) as mock_set,
+        tool_runtime_context(context),
+    ):
+        payload = json.loads(await tool.set_thread_summary("A fixed title"))
+
+    assert payload["status"] == "ok"
+    assert payload["pinned"] is True
+    assert mock_set.await_args.kwargs["pin"] is True
+
+
+@pytest.mark.asyncio
+async def test_set_thread_summary_forwards_pin_false() -> None:
+    """pin=False writes a summary and releases the thread for automatic summaries."""
+    tool = ThreadSummaryTools()
+    context = _make_context(thread_id="$ctx-thread:localhost")
+
+    with (
+        patch(
+            "mindroom.custom_tools.thread_summary.resolve_thread_root_event_id_for_client",
+            new=AsyncMock(return_value="$ctx-thread:localhost"),
+        ),
+        patch(
+            "mindroom.custom_tools.thread_summary.set_manual_thread_summary",
+            new=AsyncMock(return_value=_write_result(summary="A routine title")),
+        ) as mock_set,
+        tool_runtime_context(context),
+    ):
+        payload = json.loads(await tool.set_thread_summary("A routine title", pin=False))
+
+    assert payload["status"] == "ok"
+    assert payload["pinned"] is False
+    assert mock_set.await_args.kwargs["pin"] is False

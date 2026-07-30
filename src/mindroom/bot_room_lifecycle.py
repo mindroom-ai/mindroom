@@ -13,6 +13,7 @@ from mindroom.authorization import is_authorized_sender
 from mindroom.commands.handler import generate_welcome_message_for_room
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.matrix.client_room_admin import get_joined_rooms, join_room
+from mindroom.matrix.decrypt_failure import raise_notice_floor
 from mindroom.matrix.invited_rooms_store import (
     invited_rooms_path,
     load_invited_rooms,
@@ -60,7 +61,9 @@ class BotRoomLifecycleDeps:
     get_logger: Callable[[], structlog.stdlib.BoundLogger]
     get_configured_rooms: Callable[[], Sequence[str]]
     send_response: _SendRoomResponse
+    on_room_joined: Callable[[str], Awaitable[None]]
     on_configured_room_joined: Callable[[str], Awaitable[None]]
+    on_room_left: Callable[[str], Awaitable[None]]
 
 
 class BotRoomLifecycle:
@@ -72,6 +75,7 @@ class BotRoomLifecycle:
     def __init__(self, deps: BotRoomLifecycleDeps) -> None:
         self.deps = deps
         self.invited_rooms = self.load_invited_rooms()
+        self._pending_forgotten_invited_rooms: set[str] = set()
         self._invite_join_locks: dict[str, asyncio.Lock] = {}
         self._welcome_locks: dict[str, asyncio.Lock] = {}
         self._handled_invite_room_ids: set[str] = set()
@@ -119,6 +123,11 @@ class BotRoomLifecycle:
         """Return whether this entity persists invited room IDs across restarts."""
         return should_persist_invited_rooms(self._config(), self.deps.agent_name)
 
+    async def _on_configured_room_joined(self, room_id: str) -> None:
+        """Apply common join state before configured-room setup."""
+        await self.deps.on_room_joined(room_id)
+        await self.deps.on_configured_room_joined(room_id)
+
     def invited_rooms_file_path(self) -> Path:
         """Return the durable path for invited room IDs for this entity."""
         return invited_rooms_path(self.deps.runtime_paths.storage_root, self.deps.agent_name)
@@ -129,18 +138,32 @@ class BotRoomLifecycle:
             return set()
         return load_invited_rooms(self.invited_rooms_file_path())
 
-    def save_invited_rooms(self) -> None:
-        """Persist invited room IDs for one eligible entity."""
+    def forget_invited_room(self, room_id: str) -> None:
+        """Stop preserving an ad-hoc room after this bot leaves it."""
         if not self.should_persist_invited_rooms():
+            self.invited_rooms.discard(room_id)
             return
-        save_invited_rooms(self.invited_rooms_file_path(), self.invited_rooms)
+        self._update_invited_room(room_id, remember=False)
+
+    def _update_invited_room(self, room_id: str, *, remember: bool) -> None:
+        """Merge one update with durable and in-memory state before saving."""
+        room_ids = load_invited_rooms(self.invited_rooms_file_path()) | self.invited_rooms
+        if remember:
+            self._pending_forgotten_invited_rooms.discard(room_id)
+            room_ids.add(room_id)
+        else:
+            self._pending_forgotten_invited_rooms.add(room_id)
+        room_ids.difference_update(self._pending_forgotten_invited_rooms)
+
+        if save_invited_rooms(self.invited_rooms_file_path(), room_ids):
+            self._pending_forgotten_invited_rooms.clear()
+        self.invited_rooms = room_ids
 
     async def join_configured_rooms(self) -> None:
         """Join all rooms this bot should preserve across restarts."""
         client = self._client()
         joined_rooms = await get_joined_rooms(client)
         current_rooms = set(joined_rooms or [])
-        current_rooms.update(client.rooms)
         desired_rooms = set(self.deps.get_configured_rooms())
         if self.should_persist_invited_rooms():
             desired_rooms.update(self.invited_rooms)
@@ -148,13 +171,17 @@ class BotRoomLifecycle:
         for room_id in desired_rooms:
             if room_id in current_rooms:
                 self._logger().debug("Already joined room", room_id=room_id)
-                await self.deps.on_configured_room_joined(room_id)
+                await self._on_configured_room_joined(room_id)
                 continue
 
             if await join_room(client, room_id):
                 current_rooms.add(room_id)
                 self._logger().info("Joined room", room_id=room_id)
-                await self.deps.on_configured_room_joined(room_id)
+                if client.user_id:
+                    # Pre-join encrypted history can never decrypt on this device;
+                    # don't post decrypt-failure notices for it.
+                    raise_notice_floor(client.user_id, room_id)
+                await self._on_configured_room_joined(room_id)
             else:
                 self._logger().warning("Failed to join room", room_id=room_id)
 
@@ -164,6 +191,7 @@ class BotRoomLifecycle:
         await leave_non_dm_rooms(
             client,
             room_ids if room_ids is not None else await self.rooms_to_leave(),
+            on_room_left=self.deps.on_room_left,
         )
 
     async def rooms_to_leave(self) -> list[str]:
@@ -275,8 +303,12 @@ class BotRoomLifecycle:
 
             self._handled_invite_room_ids.add(room.room_id)
             self._logger().info("Joined room", room_id=room.room_id)
-            if self.should_persist_invited_rooms() and room.room_id not in self.invited_rooms:
-                self.invited_rooms.add(room.room_id)
-                self.save_invited_rooms()
+            await self.deps.on_room_joined(room.room_id)
+            if client.user_id:
+                # Pre-join encrypted history can never decrypt on this device;
+                # don't post decrypt-failure notices for it.
+                raise_notice_floor(client.user_id, room.room_id)
+            if self.should_persist_invited_rooms():
+                self._update_invited_room(room.room_id, remember=True)
             if self.deps.agent_name == ROUTER_AGENT_NAME:
                 await self.send_welcome_message_if_empty(room.room_id, event.sender)

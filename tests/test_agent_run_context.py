@@ -9,7 +9,7 @@ from mindroom.knowledge.utils import KnowledgeAvailabilityDetail
 
 
 def test_append_knowledge_availability_enrichment_adds_volatile_notice() -> None:
-    """Unavailable knowledge should add one volatile system enrichment item."""
+    """Unavailable knowledge should add one volatile transient enrichment item."""
     existing = (EnrichmentItem(key="room", text="Room context", cache_policy="stable"),)
     enriched = append_knowledge_availability_enrichment(
         existing,
@@ -24,6 +24,7 @@ def test_append_knowledge_availability_enrichment_adds_volatile_notice() -> None
     assert enriched[:-1] == existing
     assert enriched[-1].key == "knowledge_availability"
     assert enriched[-1].cache_policy == "volatile"
+    assert enriched[-1].persist is False
     assert "Knowledge base `docs` is initializing" in enriched[-1].text
 
 

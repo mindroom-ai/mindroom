@@ -25,13 +25,12 @@ The configuration file has these top-level sections:
 10. **authorization** - Fine-grained user and room permissions
 11. **matrix_room_access** - Managed room access mode and discoverability
 12. **matrix_space** - Optional root Matrix Space for grouping rooms
-13. **matrix_delivery** - Outgoing Matrix delivery policy
-14. **mindroom_user** - Internal MindRoom user account settings
-15. **timezone** - Timezone for scheduled tasks (default: `UTC`)
-16. **bot_accounts** - Non-MindRoom bot Matrix user IDs (e.g., bridge bots)
-17. **rooms** - Managed Matrix room metadata for standalone rooms and dashboard-created rooms
-18. **room_models** - Per-room model overrides
-19. **plugins** - Plugin paths for tool/skill extensions
+13. **mindroom_user** - Internal MindRoom user account settings
+14. **timezone** - Timezone for scheduled tasks (default: `UTC`)
+15. **bot_accounts** - Non-MindRoom bot Matrix user IDs (e.g., bridge bots)
+16. **rooms** - Managed Matrix room metadata for standalone rooms and dashboard-created rooms
+17. **room_models** - Per-room model overrides
+18. **plugins** - Plugin paths for tool/skill extensions
 
 ## Model Configuration
 
@@ -56,7 +55,7 @@ models:
 
   openrouter:
     provider: "openrouter"
-    id: "anthropic/claude-sonnet-4-6"
+    id: "anthropic/claude-sonnet-5"
 ```
 
 Each model entry supports these fields:
@@ -65,7 +64,7 @@ Each model entry supports these fields:
 - **host** - Optional host URL (e.g., for Ollama or OpenAI-compatible servers)
 - **api_key** - Optional API key (usually set via env vars instead)
 - **extra_kwargs** - Additional provider-specific parameters (e.g., `base_url`)
-- **context_window** - Context window size in tokens; when set, MindRoom budgets persisted replay and applies a final replay-fit step, which may reduce replay, fall back to summary-only replay, or disable persisted replay entirely for that run
+- **context_window** - Actual provider context window size in tokens; when set, MindRoom uses it for compaction summary input and as the default replay-planning window unless compaction config sets a smaller `replay_window_tokens`, and applies a final replay-fit step that may reduce or disable persisted replay for that run; on `vertexai_claude` models it additionally enables request-time fitting that trims replayed history when a request would exceed the window
 
 ### Supported Providers
 
@@ -78,6 +77,7 @@ Each model entry supports these fields:
 - **vertexai_claude** - Claude models via Vertex AI (requires GCP credentials)
 - **groq** - Groq-hosted models (requires `GROQ_API_KEY`)
 - **deepseek** - DeepSeek models (requires `DEEPSEEK_API_KEY`)
+- **zai** - Z.ai GLM models (requires `ZAI_API_KEY`)
 - **cerebras** - Cerebras-hosted models (requires `CEREBRAS_API_KEY`)
 
 ## Memory Configuration
@@ -184,12 +184,18 @@ agents:
 - **num_history_runs**: Number of prior Agno runs to include as history context (per-agent override)
 - **num_history_messages**: Max messages from history (mutually exclusive with `num_history_runs`)
 - **compress_tool_results**: Compress tool results in history to save context (per-agent override, inherits a default of `false`, and can invalidate Anthropic/Vertex Claude prompt caches when enabled)
-- **compaction**: Optional per-agent required-compaction overrides (`enabled`, `threshold_tokens`, `threshold_percent`, `reserve_tokens`, `model`); when the active runtime model has a known `context_window`, MindRoom always computes a replay plan for the current run and reduces or disables persisted replay when needed.
+- **compaction**: Optional per-agent required-compaction overrides (`enabled`, `threshold_tokens`, `threshold_percent`, `replay_window_tokens`, `reserve_tokens`, `model`, `fallback_model`, `timeout_seconds`); when the active runtime model has a known `context_window`, MindRoom always computes a replay plan for the current run and reduces or disables persisted replay when needed.
 Automatic destructive compaction is enabled by default through `defaults.compaction`, but it runs only when raw history exceeds the hard replay budget for the next reply.
 `threshold_tokens` and `threshold_percent` set a soft trigger budget for planning metadata and compaction notices; crossing that soft trigger while still within the hard budget leaves the stored session unchanged and relies on replay fitting.
+`replay_window_tokens` can cap persisted replay and required-compaction planning below the model's real context window without lowering the provider request limit.
+If the active model window is unknown, an explicit `replay_window_tokens` still supplies the replay-planning window.
+Each compaction summary input chunk is sized independently from the selected compaction model's real `context_window`, after reserve, prompt overhead, and a safety margin.
+Each primary, retry, and fallback summary request uses `timeout_seconds`, which defaults to 600 seconds, while an explicitly shorter provider timeout remains the stricter cap.
+Destructive compaction requires the resolved summary input budget to exceed 2,000 tokens.
+With the default `reserve_tokens`, this makes destructive compaction unavailable when the compaction model's context window is roughly 10,000 tokens or smaller; lowering `reserve_tokens` restores availability for such small windows.
 Set `enabled: false` in defaults or the agent override to disable automatic pre-reply compaction.
 Manual `compact_context` records a durable request that runs before the next reply in the same conversation scope.
-Manual `compact_context` remains available when a compaction model and context window are configured.
+Manual `compact_context` remains available when a compaction model and context window are configured and the resolved summary input budget exceeds 2,000 tokens.
 Required compaction runs before the reply with a Matrix lifecycle notice that is edited in place; otherwise MindRoom leaves the session unchanged and relies on replay fitting for that reply.
 Compaction rewrites the live session so compacted history moves into `session.summary` while only recent raw runs remain in `session.runs`
 - **max_tool_calls_from_history**: Max tool call messages replayed from history (per-agent override)
@@ -228,6 +234,7 @@ teams:
       enabled: true
       threshold_percent: 0.8
       reserve_tokens: 16384
+      timeout_seconds: 600
     rooms:
       - lobby
 ```
@@ -290,10 +297,10 @@ Enable voice message processing with speech-to-text:
 ```yaml
 voice:
   enabled: false
-  visible_router_echo: true  # Post transcript as visible router message
+  visible_router_echo: true  # Show STT placeholder or direct fallback when STT is disabled
   stt:
     provider: openai
-    model: whisper-1
+    model: gpt-4o-transcribe
     # api_key: null  # Optional API key for STT service
     # host: null  # Optional host URL for self-hosted STT
   intelligence:
@@ -334,6 +341,7 @@ matrix_room_access:
   publish_to_room_directory: false
   invite_only_rooms: []  # Room keys that stay invite-only even in multi_user mode
   reconcile_existing_rooms: false  # Reconcile existing rooms on startup
+  room_admins: []  # Matrix user IDs granted admin power (100) in every managed room
 ```
 
 ## Matrix Space Configuration
@@ -352,18 +360,6 @@ Room-specific `authorization.room_permissions` users do not become root Space ad
 Root Space admin reconciliation is grant-only and preserves existing Matrix admins.
 Removing a user from `authorization.global_users` stops future MindRoom authorization but does not automatically demote that user in the Space.
 
-## Matrix Delivery Configuration
-
-Configure outgoing Matrix delivery policy:
-
-```yaml
-matrix_delivery:
-  ignore_unverified_devices: false  # Keep Matrix E2EE device-trust checks enabled by default
-```
-
-Set `ignore_unverified_devices` to `true` only when the operator intentionally accepts delivery to encrypted rooms that contain unverified devices.
-This can improve bot delivery semantics, but Matrix may encrypt outgoing messages for devices the bot has not verified.
-
 ## Defaults Configuration
 
 Default settings inherited by all agents unless overridden:
@@ -381,10 +377,12 @@ defaults:
     enabled: true
     threshold_percent: 0.8
     reserve_tokens: 16384
+    timeout_seconds: 600
   show_tool_calls: true
   allow_self_config: false
   max_preload_chars: 50000  # Hard cap for context_files preload
   tool_output_auto_save_threshold_bytes: 51200  # Auto-save supported tool outputs larger than 50 KiB
+  thread_summary_model: null  # Use the default model when unset
   thread_summary_temperature: 0.2  # Set null to omit temperature and use provider defaults
   thread_summary_first_threshold: 1  # First automatic thread summary after 1 message
   thread_summary_subsequent_interval: 10  # Re-summarize after each additional 10 messages
@@ -396,7 +394,11 @@ defaults:
 ```
 
 Automatic thread summaries use `defaults.thread_summary_temperature` when the selected provider supports runtime temperature overrides.
-MindRoom always omits temperature for Vertex Claude thread summaries because the provider rejects that field on this path.
+MindRoom always uses provider temperature defaults for Vertex Claude, Claude Opus 5, Sonnet 5, Fable 5, and direct Google Gemini 3.6 Flash and Gemini 3.5 Flash-Lite thread summaries.
+When a thread has no trusted prior summary, its first automatic summary call is summary-only so a useful thread title appears early.
+The next scheduled automatic summary refresh also returns one to three tags when the thread has no existing tags, whether the prior summary was automatic or manual.
+Initial tags therefore use the same summary model, room override, temperature, prompt, and background task as the refreshed summary.
+After initial enrichment completes, later summary refreshes never regenerate tags.
 
 ## Room Configuration
 
@@ -488,9 +490,11 @@ Below is a representative selection:
 
 ### Productivity Tools
 - **scheduler** - Schedule recurring tasks (included by default)
+- **todo** - Create persistent per-thread work plans with dependencies and templates
 - **gmail** - Gmail integration (requires Google OAuth)
 - **google_calendar** - Calendar management (requires Google OAuth)
-- **google_drive** - Google Drive file search and reading (requires Google OAuth)
+- **google_docs** - Google Docs creation, reading, and text editing (requires Google OAuth)
+- **google_drive** - Google Drive file reading and management (requires Google OAuth)
 - **google_sheets** - Spreadsheet operations (requires Google OAuth)
 - **homeassistant** - Home Assistant device control (requires OAuth or long-lived access token)
 - **spotify** - Spotify playback and library (requires OAuth)
@@ -604,9 +608,18 @@ Some tools need additional setup:
 - **email** - Configure SMTP server details
 
 ### Tools requiring OAuth:
-- **gmail**, **google_calendar**, **google_drive**, **google_sheets** - Google OAuth (configure via dashboard)
+- **gmail**, **google_calendar**, **google_docs**, **google_drive**, **google_sheets** - Google OAuth
 - **homeassistant** - Home Assistant OAuth or long-lived access token
-- **spotify** - Spotify OAuth (configure via dashboard)
+- **spotify** - Manually supplied Spotify OAuth access token
+
+The structured `OAuthConnectionRequired` flow applies only when a tool's MindRoom catalog metadata names an `auth_provider`, not to every tool in the list above or every `SetupType.OAUTH` integration.
+When the current agent already has one of these MindRoom-managed provider tools, call an appropriate safe status, read, or list operation from that tool.
+For an OAuth MCP server, use its generated `*_connection_status` or `*_list_tools` operation.
+If the operation returns `oauth_connection_required: true` and provides a `connect_url`, present that exact scoped link directly and do not send the user to the dashboard.
+If `requires_host_browser` is true, explain that the loopback URL (`localhost`, `127.0.0.1`, or `::1`) must be opened in a browser on the computer where MindRoom is running.
+Have the target agent retry the operation after the user connects.
+Do not promise that a newly configured tool can be called in the same run, because the current provider-visible tool schema may not include it yet.
+Use the dashboard only as a manual alternative when the structured result does not provide a `connect_url`.
 
 ### Tools requiring software:
 - **docker** - Install Docker on your system
@@ -634,7 +647,7 @@ models:
 
   smart:
     provider: "anthropic"
-    id: "claude-sonnet-4-6"
+    id: "claude-sonnet-5"
 
 # Agent configurations
 agents:
@@ -663,6 +676,7 @@ defaults:
   markdown: true
   enable_streaming: true
   tool_output_auto_save_threshold_bytes: 51200
+  thread_summary_model: null
   thread_summary_first_threshold: 1
   thread_summary_subsequent_interval: 10
 
@@ -671,6 +685,12 @@ router:
   model: "default"
   accept_invites: true
 
+# Managed room access
+matrix_room_access:
+  mode: single_user_private
+  room_admins:
+    - __MINDROOM_OWNER_USER_ID_FROM_PAIRING__
+
 # Timezone
 timezone: "America/Los_Angeles"
 
@@ -678,10 +698,10 @@ timezone: "America/Los_Angeles"
 authorization:
   default_room_access: false
   global_users:
-    - "__MINDROOM_OWNER_USER_ID_FROM_PAIRING__"
+    - __MINDROOM_OWNER_USER_ID_FROM_PAIRING__
   agent_reply_permissions:
     "*":
-      - "__MINDROOM_OWNER_USER_ID_FROM_PAIRING__"
+      - __MINDROOM_OWNER_USER_ID_FROM_PAIRING__
 ```
 
 ## Troubleshooting

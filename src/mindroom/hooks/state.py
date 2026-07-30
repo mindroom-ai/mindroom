@@ -5,9 +5,9 @@ from __future__ import annotations
 from functools import partial
 from typing import TYPE_CHECKING, Any, cast
 
-import nio
-
 if TYPE_CHECKING:
+    import nio
+
     from .types import HookRoomStatePutter, HookRoomStateQuerier
 
 
@@ -18,6 +18,10 @@ async def _query_hook_room_state(
     state_key: str | None = None,
 ) -> dict[str, Any] | None:
     """Query Matrix room state with hook adapter semantics."""
+    # Imported when a live client queries state so the tool-registry import
+    # chain stays free of the nio matrix-client import (#1436).
+    import nio  # noqa: PLC0415
+
     if state_key is not None:
         resp = await client.room_get_state_event(room_id, event_type, state_key)
         if isinstance(resp, nio.RoomGetStateEventError):
@@ -53,6 +57,8 @@ async def _put_hook_room_state(
     content: dict[str, Any],
 ) -> bool:
     """Write Matrix room state with hook adapter semantics."""
+    import nio  # noqa: PLC0415
+
     resp = await client.room_put_state(room_id, event_type, content, state_key=state_key)
     return not isinstance(resp, nio.RoomPutStateError)
 

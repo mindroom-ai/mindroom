@@ -3,19 +3,21 @@
 from __future__ import annotations
 
 from mindroom.tool_system.bootstrap import ensure_tool_registry_loaded
-from mindroom.tool_system.metadata import (
-    TOOL_METADATA,
+from mindroom.tool_system.declarations import (
     ConfigField,
     SetupType,
     ToolAuthoredOverrideValidator,
     ToolCategory,
-    ToolConfigOverrideError,
-    ToolInitOverrideError,
     ToolManagedInitArg,
     ToolMetadata,
-    ToolMetadataValidationError,
     ToolStatus,
     ToolValidationInfo,
+)
+from mindroom.tool_system.metadata import (
+    TOOL_METADATA,
+    ToolConfigOverrideError,
+    ToolInitOverrideError,
+    ToolMetadataValidationError,
     apply_authored_overrides,
     authored_tool_overrides_to_runtime,
     clear_resolved_tool_state_cache,
@@ -29,6 +31,7 @@ from mindroom.tool_system.metadata import (
     safe_tool_init_override_fields,
     sanitize_tool_init_overrides,
     serialize_tool_validation_snapshot,
+    unresolved_plugin_tool_sources_for_runtime,
     validate_authored_tool_entry_overrides,
 )
 
@@ -59,5 +62,6 @@ __all__ = [
     "safe_tool_init_override_fields",
     "sanitize_tool_init_overrides",
     "serialize_tool_validation_snapshot",
+    "unresolved_plugin_tool_sources_for_runtime",
     "validate_authored_tool_entry_overrides",
 ]

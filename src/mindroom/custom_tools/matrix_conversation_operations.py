@@ -8,10 +8,13 @@ from typing import TYPE_CHECKING, Any, Literal
 
 import nio
 
-from mindroom.config.matrix import ignore_unverified_devices_for_config
 from mindroom.constants import ORIGINAL_SENDER_KEY, SKIP_MENTIONS_KEY
 from mindroom.custom_tools.attachment_helpers import resolve_context_thread_id
-from mindroom.custom_tools.attachments import resolve_send_attachments, send_attachment_paths, send_context_attachments
+from mindroom.custom_tools.attachments import (
+    resolve_send_attachments,
+    send_context_attachments,
+    send_resolved_attachments,
+)
 from mindroom.interactive import (
     add_reaction_buttons,
     clear_interactive_question,
@@ -20,7 +23,7 @@ from mindroom.interactive import (
     should_create_interactive_question,
 )
 from mindroom.logging_config import get_logger
-from mindroom.matrix.client_delivery import edit_message_result, send_file_message, send_message_result
+from mindroom.matrix.client_delivery import edit_message_result, send_message_result
 from mindroom.matrix.client_thread_history import RoomThreadsPageError, get_room_threads_page
 from mindroom.matrix.client_visible_messages import extract_visible_message as extract_and_resolve_message
 from mindroom.matrix.client_visible_messages import (
@@ -96,7 +99,7 @@ class MatrixMessageOperations:
             latest_thread_event_id=latest_thread_event_id,
             extra_content=extra_content or None,
         )
-        delivered = await send_message_result(context.client, room_id, content, config=context.config)
+        delivered = await send_message_result(context.client, room_id, content)
         if delivered is not None:
             context.conversation_cache.notify_outbound_message(
                 room_id,
@@ -137,7 +140,6 @@ class MatrixMessageOperations:
             room_id,
             event_id,
             response.interactive_metadata.options_as_list(),
-            config=context.config,
         )
 
     async def _message_send_or_reply(  # noqa: C901, PLR0911, PLR0912
@@ -213,7 +215,7 @@ class MatrixMessageOperations:
             )
             attachment_count = len(attachment_ids) + len(attachment_file_paths)
             if text is None and attachment_count > 1 and effective_thread_id is None and not room_mode:
-                attachment_paths, resolved_attachment_ids, newly_registered_attachment_ids, resolve_error = (
+                attachments, resolved_attachment_ids, newly_registered_attachment_ids, resolve_error = (
                     resolve_send_attachments(
                         context,
                         attachment_ids=attachment_ids,
@@ -232,23 +234,15 @@ class MatrixMessageOperations:
                         message=resolve_error,
                     )
 
-                first_attachment_path = attachment_paths[0]
-                remaining_attachment_paths = attachment_paths[1:]
-                latest_thread_event_id = await context.conversation_cache.get_latest_thread_event_id_if_needed(
-                    room_id,
-                    effective_thread_id,
-                    caller_label="matrix_message_tool_attachment",
-                )
-                first_attachment_event_id = await send_file_message(
-                    context.client,
-                    room_id,
-                    first_attachment_path,
-                    config=context.config,
+                first_attachment = attachments[0]
+                remaining_attachments = attachments[1:]
+                first_attachment_event_ids, send_error = await send_resolved_attachments(
+                    context,
+                    room_id=room_id,
                     thread_id=effective_thread_id,
-                    latest_thread_event_id=latest_thread_event_id,
-                    conversation_cache=context.conversation_cache,
+                    attachments=[first_attachment],
                 )
-                if first_attachment_event_id is None:
+                if send_error is not None or not first_attachment_event_ids:
                     return self._result(
                         "error",
                         action=action,
@@ -259,16 +253,17 @@ class MatrixMessageOperations:
                         attachment_event_ids=[],
                         resolved_attachment_ids=resolved_attachment_ids,
                         newly_registered_attachment_ids=newly_registered_attachment_ids,
-                        message=f"Failed to send attachment: {first_attachment_path}",
+                        message=send_error or "Failed to send the first attachment.",
                     )
 
-                attachment_event_ids = [first_attachment_event_id]
+                first_attachment_event_id = first_attachment_event_ids[0]
+                attachment_event_ids = first_attachment_event_ids
                 attachment_thread_id = first_attachment_event_id
-                remaining_attachment_event_ids, send_error = await send_attachment_paths(
+                remaining_attachment_event_ids, send_error = await send_resolved_attachments(
                     context,
                     room_id=room_id,
                     thread_id=attachment_thread_id,
-                    attachment_paths=remaining_attachment_paths,
+                    attachments=remaining_attachments,
                 )
                 attachment_event_ids.extend(remaining_attachment_event_ids)
                 if send_error is not None:
@@ -357,7 +352,7 @@ class MatrixMessageOperations:
             room_id=room_id,
             message_type="m.reaction",
             content=build_reaction_content(target, reaction),
-            ignore_unverified_devices=ignore_unverified_devices_for_config(context.config),
+            ignore_unverified_devices=True,
         )
         if isinstance(response, nio.RoomSendResponse):
             return self._result(
@@ -639,16 +634,6 @@ class MatrixMessageOperations:
         if new_text is None:
             return self._result("error", action="edit", message="message is required for edit.")
 
-        latest_thread_event_id: str | None = None
-        if thread_id is not None:
-            latest_thread_event_id = await context.conversation_cache.get_latest_thread_event_id_if_needed(
-                room_id,
-                thread_id,
-                caller_label="matrix_message_tool_edit",
-            )
-            if latest_thread_event_id is None:
-                latest_thread_event_id = target
-
         clear_interactive_question(target)
         interactive_response = parse_and_format_interactive(new_text, extract_mapping=True)
         formatted_text = interactive_response.formatted_text
@@ -657,8 +642,6 @@ class MatrixMessageOperations:
             context.config,
             context.runtime_paths,
             formatted_text,
-            thread_event_id=thread_id,
-            latest_thread_event_id=latest_thread_event_id,
             extra_content=extras_content,
         )
         delivered = await edit_message_result(
@@ -667,7 +650,6 @@ class MatrixMessageOperations:
             target,
             content,
             formatted_text,
-            config=context.config,
             extra_content=extras_content,
         )
         if delivered is None:
@@ -700,7 +682,6 @@ class MatrixMessageOperations:
                 room_id,
                 target,
                 interactive_response.interactive_metadata.options_as_list(),
-                config=context.config,
             )
 
         return self._result(

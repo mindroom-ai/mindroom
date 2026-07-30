@@ -554,7 +554,7 @@ Based on your choice, I'll proceed accordingly."""
         assert question.option_labels["2"] == "Careful and manual"
 
         # Add reaction buttons
-        await interactive.add_reaction_buttons(mock_client, "!room:localhost", event_id, options, config=self.config)
+        await interactive.add_reaction_buttons(mock_client, "!room:localhost", event_id, options)
 
         # Should have added reactions
         assert mock_client.room_send.call_count == 2
@@ -1188,7 +1188,6 @@ Just let me know your preference!"""
             "!room:localhost",
             event_id,
             options or [],
-            config=self.config,
         )
 
         # Should have added 3 reactions

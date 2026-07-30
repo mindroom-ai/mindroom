@@ -1,16 +1,13 @@
-"""Tests for Matrix delivery configuration."""
+"""Tests for Matrix delivery trust behavior."""
 
 from __future__ import annotations
 
-from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock
 
 import nio
 import pytest
 
-from mindroom.config.main import Config
-from mindroom.matrix.client_delivery import send_message_result
-from tests.conftest import load_config_yaml
+from mindroom.matrix.client_delivery import build_edit_event_content, send_message_result
 
 
 def _mock_client(*, encrypted: bool = False) -> AsyncMock:
@@ -23,73 +20,61 @@ def _mock_client(*, encrypted: bool = False) -> AsyncMock:
     return client
 
 
-def test_matrix_delivery_default_keeps_device_trust_policy() -> None:
-    """Matrix delivery should not ignore unverified devices by default."""
-    config = Config()
-
-    assert config.matrix_delivery.ignore_unverified_devices is False
-
-
-def test_matrix_delivery_yaml_opt_in(tmp_path) -> None:  # noqa: ANN001
-    """Operators should be able to explicitly opt in to ignoring unverified devices."""
-    config_path = tmp_path / "config.yaml"
-    config_path.write_text(
-        "matrix_delivery:\n  ignore_unverified_devices: true\n",
-        encoding="utf-8",
-    )
-
-    config = load_config_yaml(config_path)
-
-    assert config.matrix_delivery.ignore_unverified_devices is True
-
-
 @pytest.mark.asyncio
-async def test_send_message_result_defaults_ignore_unverified_devices_to_false() -> None:
-    """Direct Matrix delivery should pass the safe nio default explicitly."""
+async def test_send_message_result_ignores_unverified_devices() -> None:
+    """Bots cannot interactively verify devices, so delivery always ignores device trust."""
     client = _mock_client()
 
-    await send_message_result(client, "!room:localhost", {"body": "hello", "msgtype": "m.text"}, config=Config())
-
-    assert client.room_send.await_args.kwargs["ignore_unverified_devices"] is False
-
-
-@pytest.mark.asyncio
-async def test_send_message_result_requires_config() -> None:
-    """Delivery helpers should not weaken Matrix trust policy behind an optional config fallback."""
-    client = _mock_client()
-    unchecked_send_message_result = cast("Any", send_message_result)
-
-    with pytest.raises(TypeError):
-        await unchecked_send_message_result(client, "!room:localhost", {"body": "hello", "msgtype": "m.text"})
-
-
-@pytest.mark.asyncio
-async def test_send_message_result_passes_matrix_delivery_opt_in_to_room_send() -> None:
-    """The Matrix delivery config opt-in should reach nio room_send."""
-    client = _mock_client()
-    config = Config(matrix_delivery={"ignore_unverified_devices": True})
-
-    await send_message_result(
-        client,
-        "!room:localhost",
-        {"body": "hello", "msgtype": "m.text"},
-        config=config,
-    )
+    await send_message_result(client, "!room:localhost", {"body": "hello", "msgtype": "m.text"})
 
     assert client.room_send.await_args.kwargs["ignore_unverified_devices"] is True
 
 
 @pytest.mark.asyncio
-async def test_send_message_result_passes_matrix_delivery_opt_in_to_encrypted_room_send() -> None:
-    """The Matrix delivery opt-in should reach nio for encrypted room sends."""
+async def test_send_message_result_ignores_unverified_devices_in_encrypted_room() -> None:
+    """Encrypted-room sends must not be blocked by nio's device-trust checks."""
     client = _mock_client(encrypted=True)
-    config = Config(matrix_delivery={"ignore_unverified_devices": True})
 
-    await send_message_result(
-        client,
-        "!room:localhost",
-        {"body": "hello", "msgtype": "m.text"},
-        config=config,
-    )
+    await send_message_result(client, "!room:localhost", {"body": "hello", "msgtype": "m.text"})
 
     assert client.room_send.await_args.kwargs["ignore_unverified_devices"] is True
+
+
+def test_edit_fallback_preserves_replacement_message_type() -> None:
+    """A notice replacement must also be a notice to suppress edit mention pushes."""
+    content = build_edit_event_content(
+        event_id="$original:localhost",
+        new_content={
+            "body": "Streaming answer",
+            "msgtype": "m.notice",
+            "m.mentions": {"user_ids": ["@user:localhost"]},
+        },
+        new_text="Streaming answer",
+    )
+
+    assert content["msgtype"] == "m.notice"
+    assert content["m.new_content"]["msgtype"] == "m.notice"
+    assert content["m.mentions"] == {"user_ids": ["@user:localhost"]}
+
+
+def test_edit_envelope_discards_thread_relation() -> None:
+    """An edit must discard any caller thread relation before adding m.replace."""
+    replacement_with_fallback = {
+        "msgtype": "m.text",
+        "body": "edited",
+        "m.relates_to": {
+            "rel_type": "m.thread",
+            "event_id": "$thread_root",
+            "is_falling_back": True,
+            "m.in_reply_to": {"event_id": "$latest"},
+        },
+    }
+
+    edit_content = build_edit_event_content(
+        event_id="$original",
+        new_content=replacement_with_fallback,
+        new_text="edited",
+    )
+
+    assert "m.relates_to" not in edit_content["m.new_content"]
+    assert edit_content["m.relates_to"] == {"rel_type": "m.replace", "event_id": "$original"}

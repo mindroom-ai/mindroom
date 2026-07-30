@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import binascii
 import hashlib
 import json
 from contextlib import AsyncExitStack
@@ -12,9 +13,10 @@ from datetime import timedelta
 from typing import TYPE_CHECKING, cast
 
 import mcp.types as mcp_types
-from mcp import ClientSession
+from authlib.common.errors import AuthlibBaseError
+from httpx import HTTPError
 
-from mindroom.credentials import get_runtime_credentials_manager, load_scoped_credentials, save_scoped_credentials
+from mindroom.credentials import get_runtime_credentials_manager, load_scoped_credentials
 from mindroom.logging_config import get_logger
 from mindroom.mcp.config import (
     MCPServerConfig,
@@ -26,10 +28,18 @@ from mindroom.mcp.errors import MCPConnectionError, MCPError, MCPProtocolError, 
 from mindroom.mcp.oauth import mcp_oauth_provider
 from mindroom.mcp.registry import mcp_server_id_from_tool_name, mcp_tool_name
 from mindroom.mcp.results import tool_result_from_call_result
+from mindroom.mcp.session import MCP_APP_HTML_MIME_TYPE
+from mindroom.mcp.session import MCPClientSession as ClientSession
 from mindroom.mcp.transports import build_transport_handle
 from mindroom.mcp.types import MCPAppResource, MCPDiscoveredTool, MCPServerCatalog, MCPServerState
-from mindroom.oauth.providers import OAuthConnectionRequired, OAuthProviderError
-from mindroom.oauth.service import build_oauth_connect_instruction, oauth_connect_url, oauth_credentials_usable
+from mindroom.oauth.providers import OAuthConnectionRequired, OAuthProviderError, OAuthRefreshRejectedError
+from mindroom.oauth.service import (
+    build_oauth_connect_instruction,
+    build_oauth_reconnect_instruction,
+    oauth_connect_url,
+    oauth_credentials_usable,
+    refresh_scoped_oauth_credentials_with_result,
+)
 from mindroom.tool_system.catalog import TOOL_METADATA, ensure_tool_registry_loaded, get_tool_by_name
 from mindroom.tool_system.dynamic_toolkits import visible_tool_surface
 
@@ -46,43 +56,61 @@ if TYPE_CHECKING:
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
 
 
-_MCP_APP_HTML_MIME_TYPE = "text/html;profile=mcp-app"
-
-
 def _mcp_tool_ui_resource_uri(tool: mcp_types.Tool) -> str | None:
     meta = tool.meta
     if not isinstance(meta, dict):
         return None
     ui_meta = meta.get("ui")
-    if not isinstance(ui_meta, dict):
-        return None
-    resource_uri = ui_meta.get("resourceUri")
+    resource_uri = (
+        ui_meta.get("resourceUri")
+        if isinstance(ui_meta, dict) and "resourceUri" in ui_meta
+        else meta.get("ui/resourceUri")
+    )
     if not isinstance(resource_uri, str):
         return None
     resource_uri = resource_uri.strip()
     return resource_uri if resource_uri.startswith("ui://") else None
 
 
-def _mcp_app_resource_from_content(content: object) -> MCPAppResource | None:
+def _mcp_tool_visible_to_model(tool: mcp_types.Tool) -> bool:
+    meta = tool.meta
+    if not isinstance(meta, dict):
+        return True
+    ui_meta = meta.get("ui")
+    if not isinstance(ui_meta, dict):
+        return True
+    visibility = ui_meta.get("visibility")
+    if visibility is None:
+        return True
+    return isinstance(visibility, list) and "model" in visibility
+
+
+def _mcp_app_resource_from_content(
+    content: object,
+    *,
+    expected_uri: str,
+) -> MCPAppResource | None:
     if not isinstance(content, mcp_types.TextResourceContents | mcp_types.BlobResourceContents):
         return None
 
     mime_type = content.mimeType or ""
-    if mime_type.lower() != _MCP_APP_HTML_MIME_TYPE:
+    if mime_type.lower() != MCP_APP_HTML_MIME_TYPE:
         return None
 
     uri = str(content.uri)
-    if not uri.startswith("ui://"):
+    if uri != expected_uri:
         return None
 
     if isinstance(content, mcp_types.TextResourceContents):
         html = content.text
     else:
         try:
-            html = base64.b64decode(content.blob).decode("utf-8")
-        except (ValueError, UnicodeDecodeError):
+            html = base64.b64decode(content.blob, validate=True).decode("utf-8")
+        except (binascii.Error, UnicodeDecodeError):
             return None
 
+    if not html.strip():
+        return None
     return MCPAppResource(uri=uri, mime_type=mime_type, html=html, meta=content.meta)
 
 
@@ -92,6 +120,7 @@ logger = get_logger(__name__)
 # unblocks its dependent agents no slower than the bot-start retry loop did.
 _DISCOVERY_RETRY_INITIAL_DELAY_SECONDS = 5.0
 _DISCOVERY_RETRY_MAX_DELAY_SECONDS = 60.0
+_OAUTH_REFRESH_REJECTED_REASON = "oauth_refresh_rejected"
 
 
 def _discovery_retry_delay_seconds(consecutive_failures: int) -> float:
@@ -324,13 +353,20 @@ class MCPServerManager:
         self,
         state: MCPServerState,
         worker_target: ResolvedWorkerTarget | None,
+        *,
+        reason: str | None = None,
     ) -> OAuthConnectionRequired:
         provider = mcp_oauth_provider(state.server_id, state.config)
         connect_url = oauth_connect_url(provider, self.runtime_paths, worker_target=worker_target)
+        if reason == _OAUTH_REFRESH_REJECTED_REASON:
+            message = build_oauth_reconnect_instruction(provider, connect_url)
+        else:
+            message = build_oauth_connect_instruction(provider, connect_url)
         return OAuthConnectionRequired(
-            build_oauth_connect_instruction(provider, connect_url),
+            message,
             provider_id=provider.id,
             connect_url=connect_url,
+            reason=reason,
         )
 
     def _request_session_key(
@@ -348,6 +384,43 @@ class MCPServerManager:
             worker_key=worker_key or "global",
         )
 
+    def _log_oauth_refresh_failure(
+        self,
+        state: MCPServerState,
+        provider_id: str,
+        credentials: Mapping[str, object],
+        exc: OAuthProviderError,
+    ) -> None:
+        refresh_token = credentials.get("refresh_token")
+        raw_expires_at = credentials.get("expires_at")
+        expires_at = (
+            float(raw_expires_at)
+            if not isinstance(raw_expires_at, bool) and isinstance(raw_expires_at, int | float)
+            else None
+        )
+        cause = exc.__cause__
+        safe_cause = isinstance(cause, AuthlibBaseError | HTTPError)
+        logger.warning(
+            "MCP OAuth token refresh failed",
+            provider_id=provider_id,
+            server_id=state.server_id,
+            has_refresh_token=isinstance(refresh_token, str) and bool(refresh_token),
+            expires_at=expires_at,
+            error_type=type(exc).__name__,
+            error=str(exc),
+            oauth_error=exc.oauth_error,
+            error_description=exc.oauth_error_description,
+            cause_type=type(cause).__name__ if safe_cause else None,
+            cause=str(cause) if safe_cause else None,
+        )
+
+    @staticmethod
+    def _oauth_refreshed_expires_at(credentials: Mapping[str, object]) -> float | None:
+        expires_at = credentials.get("expires_at")
+        if isinstance(expires_at, bool) or not isinstance(expires_at, int | float):
+            return None
+        return float(expires_at)
+
     async def _oauth_access_token(
         self,
         state: MCPServerState,
@@ -357,26 +430,37 @@ class MCPServerManager:
     ) -> str:
         provider = mcp_oauth_provider(state.server_id, state.config)
         manager = credentials_manager or get_runtime_credentials_manager(self.runtime_paths)
-        credentials = load_scoped_credentials(
-            provider.credential_service,
-            credentials_manager=manager,
-            worker_target=worker_target,
-        )
-        if not oauth_credentials_usable(provider, self.runtime_paths, credentials):
-            raise self._oauth_connection_required(state, worker_target)
-        assert credentials is not None
         try:
-            refreshed_credentials = await provider.refresh_token_data(credentials, self.runtime_paths)
-        except OAuthProviderError as exc:
-            raise self._oauth_connection_required(state, worker_target) from exc
-        if refreshed_credentials is not None:
-            save_scoped_credentials(
-                provider.credential_service,
-                refreshed_credentials,
+            refresh_result = await refresh_scoped_oauth_credentials_with_result(
+                provider,
+                self.runtime_paths,
                 credentials_manager=manager,
                 worker_target=worker_target,
             )
-            credentials = refreshed_credentials
+            credentials = refresh_result.credentials
+        except OAuthProviderError as exc:
+            failed_credentials = load_scoped_credentials(
+                provider.credential_service,
+                credentials_manager=manager,
+                worker_target=worker_target,
+            )
+            self._log_oauth_refresh_failure(state, provider.id, failed_credentials or {}, exc)
+            reason = _OAUTH_REFRESH_REJECTED_REASON if isinstance(exc, OAuthRefreshRejectedError) else None
+            raise self._oauth_connection_required(
+                state,
+                worker_target,
+                reason=reason,
+            ) from exc
+        if not oauth_credentials_usable(provider, self.runtime_paths, credentials):
+            raise self._oauth_connection_required(state, worker_target)
+        assert credentials is not None
+        if refresh_result.refreshed:
+            logger.info(
+                "MCP OAuth token refreshed",
+                provider_id=provider.id,
+                server_id=state.server_id,
+                expires_at=self._oauth_refreshed_expires_at(credentials),
+            )
         token = credentials.get("token") or credentials.get("access_token")
         if not isinstance(token, str) or not token:
             raise self._oauth_connection_required(state, worker_target)
@@ -504,8 +588,8 @@ class MCPServerManager:
         if tool is None or tool.ui_resource_uri is None:
             return None
 
-        resource_uri = mcp_types.AnyUrl(tool.ui_resource_uri)
         try:
+            resource_uri = mcp_types.AnyUrl(tool.ui_resource_uri)
             result = await session.read_resource(resource_uri)
         except Exception as exc:
             logger.warning(
@@ -513,7 +597,7 @@ class MCPServerManager:
                 server_id=state.server_id,
                 tool_name=tool.function_name,
                 remote_tool_name=tool.remote_name,
-                resource_uri=str(resource_uri),
+                resource_uri=tool.ui_resource_uri,
                 error=str(exc),
             )
             return None
@@ -521,7 +605,13 @@ class MCPServerManager:
         resources = [
             app_resource
             for content in result.contents
-            if (app_resource := _mcp_app_resource_from_content(content)) is not None
+            if (
+                app_resource := _mcp_app_resource_from_content(
+                    content,
+                    expected_uri=tool.ui_resource_uri,
+                )
+            )
+            is not None
         ]
         return resources or None
 
@@ -678,6 +768,8 @@ class MCPServerManager:
         filtered_tools: list[MCPDiscoveredTool] = []
         function_names: set[str] = set()
         for tool in discovered_tools:
+            if not _mcp_tool_visible_to_model(tool):
+                continue
             if exclude_tools and tool.name in exclude_tools:
                 continue
             if include_tools and tool.name not in include_tools:
@@ -1086,7 +1178,7 @@ class MCPServerManager:
         metadata = TOOL_METADATA.get(tool_name)
         if metadata is None or metadata.factory is not None:
             return set()
-        if tool_name == "memory" and config.get_agent_memory_backend(agent_name) == "none":
+        if tool_name == "memory" and config.resolve_entity(agent_name).memory_backend == "none":
             return set()
         return set(metadata.function_names)
 

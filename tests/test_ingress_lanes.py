@@ -10,7 +10,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import nio
 import pytest
 
-from mindroom import inbound_turn_normalizer, interactive
+from mindroom import inbound_turn_normalizer, interactive, voice_handler
+from mindroom.cancellation import SYNC_RESTART_CANCEL_MSG
 from mindroom.coalescing import CoalescingGate, IngressAdmissionClosedError, ReadyPendingEvent
 from mindroom.coalescing_batch import CoalescingKey, PendingEvent
 from mindroom.constants import ORIGINAL_SENDER_KEY, SOURCE_KIND_KEY, VISIBLE_ROUTER_VOICE_ECHO_KEY
@@ -22,6 +23,7 @@ from mindroom.dispatch_source import (
 )
 from mindroom.matrix.thread_membership import ThreadMembershipLookupError
 from mindroom.message_target import MessageTarget
+from mindroom.runtime_shutdown import SYNC_RESTART_SHUTDOWN
 from tests.conftest import prepared_dispatch_result, unwrap_extracted_collaborator
 from tests.test_live_message_coalescing import (
     _enqueue_for_dispatch,
@@ -39,6 +41,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.coalescing_batch import CoalescedBatch
+    from mindroom.handled_turns import TurnRecord
 
 
 def _room(room_id: str = "!room:localhost") -> nio.MatrixRoom:
@@ -647,6 +650,54 @@ def _router_voice_echo_event(
 
 
 @pytest.mark.asyncio
+async def test_hung_voice_download_fallback_releases_later_sender_slot(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A timed-out fallback must settle voice readiness and release later sender work."""
+    bot = _make_bot(tmp_path, debounce_ms=0)
+    bot.config.voice.enabled = True
+    bot.config.voice.visible_router_echo = False
+    room = _make_room()
+    voice_note = _audio_event(event_id="$voice", thread_id="$voice-thread")
+    later_text = _text_event(event_id="$later", body="later", thread_id="$other-thread")
+    dispatched_source_ids: list[str] = []
+
+    async def record_dispatch(
+        _room: nio.MatrixRoom,
+        _event: nio.RoomMessageText,
+        _requester_user_id: str,
+        *,
+        handled_turn: TurnRecord | None = None,
+        **_metadata: object,
+    ) -> None:
+        if handled_turn is not None:
+            dispatched_source_ids.extend(handled_turn.source_event_ids)
+
+    async def hung_download(*_args: object, **_kwargs: object) -> None:
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(voice_handler, "_VOICE_NORMALIZATION_TOTAL_TIMEOUT_SECONDS", 0.05)
+    try:
+        with (
+            patch("mindroom.voice_handler._download_audio", side_effect=hung_download),
+            patch.object(
+                bot._turn_controller,
+                "_dispatch_text_message",
+                new=AsyncMock(side_effect=record_dispatch),
+            ),
+        ):
+            await bot._turn_controller.handle_media_event(room, voice_note)
+            await bot._turn_controller.handle_text_event(room, later_text)
+            await _wait_for(lambda: "$later" in dispatched_source_ids, deadline_seconds=1.0)
+
+        assert "$voice" in dispatched_source_ids
+        assert bot._coalescing_gate.lanes.all_settled()
+    finally:
+        await bot._coalescing_gate.drain_all(ready_timeout_seconds=0.1)
+
+
+@pytest.mark.asyncio
 async def test_voice_echo_and_follow_up_slots_never_hold_another_conversation(tmp_path: Path) -> None:
     """Every resolving slot kind ahead in a sender's lane must settle during resolution.
 
@@ -1055,7 +1106,11 @@ async def test_response_cancellation_drains_follow_up_queue(tmp_path: Path) -> N
             queued_signal.finish_response_turn()
             lifecycle_lock.release()
 
-    response_task = runner.track_inbox_response(blocked_response(), name="test_blocked_response")
+    response_task = runner.track_inbox_response(
+        blocked_response(),
+        name="test_blocked_response",
+        recovery_proof_ready=lambda: False,
+    )
     await asyncio.wait_for(response_running.wait(), timeout=1.0)
     with patch.object(bot._turn_controller, "handle_coalesced_batch", new=AsyncMock(side_effect=record_dispatch)):
         for event_id, sender in (("$f1", "@alice:localhost"), ("$f2", "@bob:localhost")):
@@ -1218,7 +1273,11 @@ async def test_bounded_inbox_drain_cancels_stuck_response(tmp_path: Path) -> Non
         finally:
             cleanup_count += 1
 
-    task = runner.track_inbox_response(stuck_response(), name="test_stuck_response")
+    task = runner.track_inbox_response(
+        stuck_response(),
+        name="test_stuck_response",
+        recovery_proof_ready=lambda: False,
+    )
     await asyncio.wait_for(started.wait(), timeout=1.0)
 
     assert await runner.drain_inbox_responses(cancel_after_seconds=0.05) is False
@@ -1227,6 +1286,46 @@ async def test_bounded_inbox_drain_cancels_stuck_response(tmp_path: Path) -> Non
     await asyncio.sleep(0)
     assert not runner._inbox_response_tasks
     assert await runner.drain_inbox_responses() is True
+
+
+@pytest.mark.asyncio
+async def test_bounded_inbox_drain_preserves_cancel_message(tmp_path: Path) -> None:
+    """A sync-restart inbox drain preserves cancellation provenance."""
+    bot = _make_bot(tmp_path, debounce_ms=0)
+    runner = unwrap_extracted_collaborator(bot._response_runner)
+    started = asyncio.Event()
+    cancelled_args: list[tuple[object, ...]] = []
+
+    async def stuck_response() -> None:
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError as exc:
+            cancelled_args.append(exc.args)
+            raise
+
+    task = runner.track_inbox_response(
+        stuck_response(),
+        name="test_sync_restart_cancelled_response",
+        recovery_proof_ready=lambda: False,
+    )
+    await asyncio.wait_for(started.wait(), timeout=1.0)
+
+    try:
+        completed = await runner.drain_inbox_responses(
+            cancel_after_seconds=0.05,
+            shutdown_intent=SYNC_RESTART_SHUTDOWN,
+        )
+    finally:
+        if not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+    assert completed is False
+    assert task.cancelled()
+    assert cancelled_args == [(SYNC_RESTART_CANCEL_MSG,)]
+    await asyncio.sleep(0)
+    assert not runner._inbox_response_tasks
 
 
 @pytest.mark.asyncio
@@ -1239,7 +1338,11 @@ async def test_failed_inbox_response_is_contained_and_unregistered(tmp_path: Pat
         msg = "response failed"
         raise RuntimeError(msg)
 
-    task = runner.track_inbox_response(failing_response(), name="test_failing_response")
+    task = runner.track_inbox_response(
+        failing_response(),
+        name="test_failing_response",
+        recovery_proof_ready=lambda: False,
+    )
     await asyncio.gather(task, return_exceptions=True)
     await asyncio.sleep(0)
 

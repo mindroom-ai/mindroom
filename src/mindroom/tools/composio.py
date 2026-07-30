@@ -4,7 +4,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from mindroom.tool_system.metadata import ConfigField, SetupType, ToolCategory, ToolStatus, register_tool_with_metadata
+from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCategory, ToolStatus
+from mindroom.tool_system.registration import register_tool_with_metadata
 from mindroom.vendor_telemetry import disable_vendor_telemetry
 
 if TYPE_CHECKING:
@@ -159,6 +160,7 @@ if TYPE_CHECKING:
     ],
     dependencies=["composio-agno"],
     docs_url="https://docs.agno.com/tools/toolkits/others/composio",
+    supports_toolkit_filters=False,
     function_names=(
         "check_connected_account",
         "create_integration",

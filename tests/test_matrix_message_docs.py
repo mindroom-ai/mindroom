@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import inspect
+from pathlib import Path
 from typing import TYPE_CHECKING
+
+import markdown
 
 from mindroom.custom_tools.matrix_message import MatrixMessageTools
 
@@ -18,19 +22,59 @@ def _matrix_message_function() -> Function:
 
 
 def test_matrix_message_description_covers_critical_behavior() -> None:
-    """Processed description should explain the key matrix_message mechanics."""
+    """The compact processed description should retain every model-facing safety rule."""
     function = _matrix_message_function()
     description = function.description
 
     assert description is not None
-    assert "ignore_mentions" in description
+    assert len(description) <= 2_000
+    for action in ("send", "reply", "thread-reply", "react", "read", "room-threads", "thread-list", "edit", "context"):
+        assert f"`{action}`" in description
+
+    assert "`send` is room-level even inside a thread" in description
+    assert "`reply` and `thread-reply` inherit the current thread" in description
+    assert 'thread_id="room"' in description
+
+    assert "Mention safety for text send/reply/thread-reply" in description
+    assert "default `ignore_mentions=True`" in description
     assert "com.mindroom.skip_mentions" in description
     assert "com.mindroom.original_sender" in description
+    assert "Set `False` ONLY" in description
+    assert "handoff" in description
     assert "self-trigger" in description
-    assert 'thread_id="room"' in description
-    assert "combined limit" in description
-    assert "5 per call" in description
+    assert "then human requesters use `com.mindroom.original_sender`" in description
+
+    assert "only `send`, `reply`, and `thread-reply`" in description
+    assert "context-scoped `att_*` IDs or local file paths" in description
+    assert "combined maximum 5" in description
+    assert "text, attachments, or both, but not neither" in description
     assert "Relative paths resolve from the agent workspace" in description
+
+    assert "`message_extras` adds collapsible sections" in description
+    assert "`text/plain`" in description
+    assert "`text/markdown`" in description
+    assert "`text/html`" in description
+    assert "`text/html`; basic fragments only" in description
+    assert "no scripts/styles/images/forms/media/SVG/math/interactive elements" in description
+    assert "links only `http`/`https`/`mailto`" in description
+    assert "Full semantics: https://docs.mindroom.chat/tools/matrix-message/" in description
+
+
+def test_matrix_message_docstring_stays_within_hard_cap() -> None:
+    """The complete cleaned method docstring should stay within the issue's hard cap."""
+    docstring = inspect.getdoc(MatrixMessageTools.matrix_message)
+
+    assert docstring is not None
+    assert len(docstring) <= 2_500
+
+
+def test_matrix_message_reference_renders_section_and_argument_lists() -> None:
+    """The published long-form reference should render its seven lists."""
+    reference_path = Path(__file__).resolve().parents[1] / "docs" / "tools" / "matrix-message.md"
+    rendered = markdown.markdown(reference_path.read_text(encoding="utf-8"))
+
+    assert rendered.count("<ul>") == 7
+    assert "<li><code>action</code> (<code>str</code>):" in rendered
 
 
 def test_matrix_message_parameter_descriptions_are_exposed() -> None:
@@ -48,28 +92,22 @@ def test_matrix_message_parameter_descriptions_are_exposed() -> None:
     ignore_mentions_description = properties["ignore_mentions"]["description"]
     limit_description = properties["limit"]["description"]
 
-    assert "send" in action_description
-    assert "thread-reply" in action_description
-    assert "context" in action_description
+    assert "Action" in action_description
 
     assert "emoji" in message_description
-    assert "None" in message_description
 
     assert "att_*" in attachment_ids_description
-    assert "cannot exceed 5" in attachment_ids_description
-    assert "cannot exceed 5" in attachment_paths_description
-    assert "relative paths resolve from the agent workspace" in attachment_paths_description
+    assert "combined max 5" in attachment_ids_description
+    assert "Local paths" in attachment_paths_description
 
-    assert "current room context" in room_id_description
-    assert "react" in target_description
-    assert "edit" in target_description
+    assert "current by default" in room_id_description
+    assert "react/edit" in target_description
 
-    assert 'thread_id="room"' in thread_id_description
-    assert "room-level scope" in thread_id_description
+    assert '"room"' in thread_id_description
+    assert "room scope" in thread_id_description
 
-    assert "com.mindroom.skip_mentions" in ignore_mentions_description
-    assert "com.mindroom.original_sender" in ignore_mentions_description
-    assert "default `True`" in ignore_mentions_description
+    assert "`True`" in ignore_mentions_description
+    assert "intentional dispatch" in ignore_mentions_description
 
-    assert "defaults to 20" in limit_description
-    assert "capped at 50" in limit_description
+    assert "1-50" in limit_description
+    assert "default 20" in limit_description

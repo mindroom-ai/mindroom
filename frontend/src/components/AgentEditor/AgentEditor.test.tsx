@@ -1166,6 +1166,15 @@ describe("AgentEditor", () => {
     });
   });
 
+  it("preserves explicit compaction fallback model clears during normalization", () => {
+    expect(
+      normalizeAgentUpdates(mockAgent, { compaction: { fallback_model: null } })
+        .compaction,
+    ).toEqual({
+      fallback_model: null,
+    });
+  });
+
   it("enables authored compaction overrides and clears the inherited sibling threshold", () => {
     expect(
       normalizeAgentUpdates(mockAgent, {
@@ -1181,6 +1190,45 @@ describe("AgentEditor", () => {
     });
   });
 
+  it("preserves replay-window-only compaction overrides as enabled", () => {
+    expect(
+      normalizeAgentUpdates(mockAgent, {
+        compaction: { replay_window_tokens: 200_000 },
+      }).compaction,
+    ).toEqual({
+      enabled: true,
+      replay_window_tokens: 200_000,
+    });
+  });
+
+  it("preserves timeout-only compaction overrides as enabled", () => {
+    expect(
+      normalizeAgentUpdates(mockAgent, {
+        compaction: { timeout_seconds: 300 },
+      }).compaction,
+    ).toEqual({
+      enabled: true,
+      timeout_seconds: 300,
+    });
+  });
+
+  it("authors a replay window from the editor", async () => {
+    render(<AgentEditor />);
+
+    fireEvent.change(screen.getByLabelText("Replay Window Tokens"), {
+      target: { value: "200000" },
+    });
+
+    await waitFor(() => {
+      expect(mockStore.updateAgent).toHaveBeenCalledWith(
+        "test_agent",
+        expect.objectContaining({
+          compaction: { replay_window_tokens: 200_000 },
+        }),
+      );
+    });
+  });
+
   it("treats authored compaction overrides as enabled in the editor", () => {
     const compactionAgent: Agent = {
       ...mockAgent,
@@ -1192,6 +1240,30 @@ describe("AgentEditor", () => {
       config: {
         ...mockConfig,
         agents: { test_agent: compactionAgent },
+      },
+    });
+
+    render(<AgentEditor />);
+
+    expect(
+      screen.getByRole("checkbox", {
+        name: /enable automatic required compaction/i,
+      }),
+    ).toBeChecked();
+  });
+
+  it("treats a timeout-only override as enabled even when defaults disable compaction", () => {
+    const compactionAgent: Agent = {
+      ...mockAgent,
+      compaction: { timeout_seconds: 300 },
+    };
+    (useConfigStore as any).mockReturnValue({
+      ...mockStore,
+      agents: [compactionAgent],
+      config: {
+        ...mockConfig,
+        agents: { test_agent: compactionAgent },
+        defaults: { ...mockConfig.defaults, compaction: { enabled: false } },
       },
     });
 
@@ -1293,6 +1365,35 @@ describe("AgentEditor", () => {
     ).not.toBeChecked();
   });
 
+  it("shows automatic required compaction as disabled for a pure fallback model clear when defaults are disabled", () => {
+    const compactionAgent: Agent = {
+      ...mockAgent,
+      compaction: { fallback_model: null },
+    };
+    (useConfigStore as any).mockReturnValue({
+      ...mockStore,
+      agents: [compactionAgent],
+      config: {
+        ...mockConfig,
+        defaults: {
+          ...mockConfig.defaults,
+          compaction: {
+            enabled: false,
+            reserve_tokens: 16384,
+            threshold_percent: 0.8,
+          },
+        },
+        agents: { test_agent: compactionAgent },
+      },
+    });
+
+    render(<AgentEditor />);
+
+    expect(
+      screen.getByLabelText("Enable automatic required compaction"),
+    ).not.toBeChecked();
+  });
+
   it("shows automatic required compaction as disabled for an empty authored override when defaults are disabled", () => {
     const compactionAgent: Agent = {
       ...mockAgent,
@@ -1320,6 +1421,35 @@ describe("AgentEditor", () => {
     expect(
       screen.getByLabelText("Enable automatic required compaction"),
     ).not.toBeChecked();
+  });
+
+  it("shows replay-window-only compaction as enabled when defaults are disabled", () => {
+    const compactionAgent: Agent = {
+      ...mockAgent,
+      compaction: { replay_window_tokens: 200_000 },
+    };
+    (useConfigStore as any).mockReturnValue({
+      ...mockStore,
+      agents: [compactionAgent],
+      config: {
+        ...mockConfig,
+        defaults: {
+          ...mockConfig.defaults,
+          compaction: {
+            enabled: false,
+            reserve_tokens: 16384,
+            threshold_percent: 0.8,
+          },
+        },
+        agents: { test_agent: compactionAgent },
+      },
+    });
+
+    render(<AgentEditor />);
+
+    expect(
+      screen.getByLabelText("Enable automatic required compaction"),
+    ).toBeChecked();
   });
 
   it("shows automatic required compaction as enabled when defaults.compaction is omitted", () => {

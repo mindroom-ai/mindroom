@@ -77,7 +77,7 @@ async def test_add_search_get_update_delete_roundtrip(backend_env: BackendEnv) -
     backend, config, storage_path = backend_env.backend, backend_env.config, backend_env.storage_path
 
     await backend.add("Prefers green tea in the morning", "alpha", storage_path, config)
-    results = await backend.search("green tea", "alpha", storage_path, config, limit=5)
+    results = (await backend.search("green tea", "alpha", storage_path, config, limit=5)).results
     assert [result["memory"] for result in results] == ["Prefers green tea in the morning"]
     memory_id = results[0]["id"]
 
@@ -92,7 +92,7 @@ async def test_add_search_get_update_delete_roundtrip(backend_env: BackendEnv) -
 
     await backend.delete(memory_id, "alpha", storage_path, config)
     assert await backend.get(memory_id, "alpha", storage_path, config) is None
-    assert await backend.search("black coffee", "alpha", storage_path, config, limit=5) == []
+    assert (await backend.search("black coffee", "alpha", storage_path, config, limit=5)).results == []
     with pytest.raises(MemoryNotFoundError):
         await backend.delete(memory_id, "alpha", storage_path, config)
 
@@ -116,9 +116,9 @@ async def test_agent_scope_memories_invisible_to_other_agents(backend_env: Backe
     backend, config, storage_path = backend_env.backend, backend_env.config, backend_env.storage_path
 
     await backend.add("Alpha secret preference", "alpha", storage_path, config)
-    assert await backend.search("Alpha secret", "beta", storage_path, config, limit=5) == []
+    assert (await backend.search("Alpha secret", "beta", storage_path, config, limit=5)).results == []
 
-    alpha_results = await backend.search("Alpha secret", "alpha", storage_path, config, limit=5)
+    alpha_results = (await backend.search("Alpha secret", "alpha", storage_path, config, limit=5)).results
     assert len(alpha_results) == 1
     memory_id = alpha_results[0]["id"]
     assert await backend.get(memory_id, "beta", storage_path, config) is None
@@ -139,7 +139,7 @@ async def test_team_conversation_memory_visible_to_members_but_not_member_scoped
     )
 
     for member in ("alpha", "beta"):
-        results = await backend.search("Quarterly metrics", member, storage_path, config, limit=5)
+        results = (await backend.search("Quarterly metrics", member, storage_path, config, limit=5)).results
         assert [result["user_id"] for result in results] == ["team_alpha+beta"]
         assert results[0]["memory"] == "Quarterly metrics reviewed by the pair team"
 
@@ -153,9 +153,9 @@ async def test_single_agent_conversation_memory_stays_member_scoped(backend_env:
 
     await backend.store_conversation("Alpha solo reflection", "alpha", storage_path, "session-solo", config)
 
-    alpha_results = await backend.search("Alpha solo", "alpha", storage_path, config, limit=5)
+    alpha_results = (await backend.search("Alpha solo", "alpha", storage_path, config, limit=5)).results
     assert [result["user_id"] for result in alpha_results] == ["agent_alpha"]
-    assert await backend.search("Alpha solo", "beta", storage_path, config, limit=5) == []
+    assert (await backend.search("Alpha solo", "beta", storage_path, config, limit=5)).results == []
 
 
 def test_resolve_memory_backend_maps_scopes_to_adapters(tmp_path: Path) -> None:

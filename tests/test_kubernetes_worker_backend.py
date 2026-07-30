@@ -27,10 +27,10 @@ from mindroom.runtime_env_policy import CREDENTIALS_ENCRYPTION_KEY_ENV
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
     _private_instance_state_root_path,
+    descriptive_worker_id_for_key,
     resolve_unscoped_worker_key,
     resolve_worker_key,
     worker_dir_name,
-    worker_id_for_key,
 )
 from mindroom.workers.backend import WorkerBackendError
 from mindroom.workers.backends import kubernetes as kubernetes_backend_module
@@ -173,15 +173,18 @@ def _to_namespace(value: object, *, key: str | None = None) -> object:
 class _FakeAppsApi:
     def __init__(self) -> None:
         self.deployments: dict[str, object] = {}
+        self.read_names: list[str] = []
         self.created_bodies: list[dict[str, object]] = []
         self.patched_bodies: list[tuple[str, dict[str, object]]] = []
         self.deleted_names: list[str] = []
         self.list_label_selectors: list[str] = []
+        self.raw_list_count = 0
         self.delete_read_lag_by_name: dict[str, int] = {}
         self._active_delete_read_lag_by_name: dict[str, int] = {}
 
     def read_namespaced_deployment(self, name: str, namespace: str) -> object:
         _ = namespace
+        self.read_names.append(name)
         deployment = self.deployments.get(name)
         if deployment is None:
             raise _FakeApiError(404)
@@ -208,12 +211,17 @@ class _FakeAppsApi:
     def patch_namespaced_deployment(self, name: str, namespace: str, body: dict[str, object]) -> object:
         _ = namespace
         self.patched_bodies.append((name, body))
-        deployment = self.read_namespaced_deployment(name, namespace)
+        deployment = self.deployments.get(name)
+        if deployment is None:
+            raise _FakeApiError(404)
         metadata = body.get("metadata")
         if isinstance(metadata, dict):
             annotations = metadata.get("annotations")
             if isinstance(annotations, dict):
-                deployment.metadata.annotations = annotations
+                deployment.metadata.annotations = {
+                    **dict(deployment.metadata.annotations or {}),
+                    **annotations,
+                }
         spec = body.get("spec")
         if isinstance(spec, dict) and "replicas" in spec:
             deployment.spec.replicas = spec["replicas"]
@@ -230,7 +238,13 @@ class _FakeAppsApi:
             return
         self.deployments.pop(name, None)
 
-    def list_namespaced_deployment(self, namespace: str, label_selector: str) -> object:
+    def list_namespaced_deployment(
+        self,
+        namespace: str,
+        *,
+        label_selector: str,
+        _preload_content: bool = True,
+    ) -> object:
         _ = namespace
         self.list_label_selectors.append(label_selector)
         selectors = {}
@@ -244,9 +258,39 @@ class _FakeAppsApi:
             labels = deployment.metadata.labels
             return all(labels.get(key) == value for key, value in selectors.items())
 
-        return SimpleNamespace(
-            items=[deployment for deployment in self.deployments.values() if matches_selector(deployment)],
-        )
+        deployments = [deployment for deployment in self.deployments.values() if matches_selector(deployment)]
+        if _preload_content:
+            return SimpleNamespace(items=deployments)
+        self.raw_list_count += 1
+        payload = {
+            "items": [
+                {
+                    "metadata": {
+                        "name": deployment.metadata.name,
+                        "annotations": deployment.metadata.annotations,
+                        "labels": deployment.metadata.labels,
+                        "generation": deployment.metadata.generation,
+                        "uid": deployment.metadata.uid,
+                    },
+                    "spec": {"replicas": deployment.spec.replicas},
+                    "status": {
+                        "readyReplicas": deployment.status.ready_replicas,
+                        "observedGeneration": deployment.status.observed_generation,
+                    },
+                }
+                for deployment in deployments
+            ],
+        }
+        return _FakeRawResponse(json.dumps(payload).encode())
+
+
+class _FakeRawResponse:
+    def __init__(self, data: bytes) -> None:
+        self.data = data
+        self.released = False
+
+    def release_conn(self) -> None:
+        self.released = True
 
 
 class _FakeCoreApi:
@@ -254,6 +298,8 @@ class _FakeCoreApi:
         self.services: dict[str, object] = {}
         self.secrets: dict[str, object] = {}
         self.pods: dict[str, object] = {}
+        self.read_service_names: list[str] = []
+        self.read_secret_names: list[str] = []
         self.created_bodies: list[dict[str, object]] = []
         self.created_secret_bodies: list[dict[str, object]] = []
         self.patched_secret_bodies: list[tuple[str, object]] = []
@@ -262,6 +308,7 @@ class _FakeCoreApi:
 
     def read_namespaced_service(self, name: str, namespace: str) -> object:
         _ = namespace
+        self.read_service_names.append(name)
         service = self.services.get(name)
         if service is None:
             raise _FakeApiError(404)
@@ -286,6 +333,7 @@ class _FakeCoreApi:
 
     def read_namespaced_secret(self, name: str, namespace: str) -> object:
         _ = namespace
+        self.read_secret_names.append(name)
         secret = self.secrets.get(name)
         if secret is None:
             raise _FakeApiError(404)
@@ -362,6 +410,42 @@ class _FakeApiClient:
         name = path_params["name"]
         namespace = path_params["namespace"]
         return self._core_api.patch_namespaced_secret(name, namespace, body)
+
+
+def test_kubernetes_deployment_snapshot_tolerates_missing_status() -> None:
+    """A Deployment read before the controller writes status is unready, not fatal."""
+    payload = {
+        "metadata": {"name": "mindroom-worker", "labels": {}},
+        "spec": {"replicas": 1},
+    }
+
+    snapshot = kubernetes_resources_module._deployment_snapshot(payload)
+
+    assert snapshot.status.ready_replicas is None
+    assert snapshot.status.observed_generation is None
+
+
+def test_kubernetes_deployment_snapshot_tolerates_missing_labels() -> None:
+    """Labels are carried but never read; their absence must not fail the pass."""
+    payload = {
+        "metadata": {"name": "mindroom-worker"},
+        "spec": {"replicas": 1},
+        "status": {},
+    }
+
+    assert kubernetes_resources_module._deployment_snapshot(payload).metadata.labels == {}
+
+
+def test_kubernetes_deployment_snapshot_rejects_non_object_status() -> None:
+    """A structurally wrong status is still a malformed payload."""
+    payload = {
+        "metadata": {"name": "mindroom-worker", "labels": {}},
+        "spec": {"replicas": 1},
+        "status": "ready",
+    }
+
+    with pytest.raises(WorkerBackendError, match="non-object status"):
+        kubernetes_resources_module._deployment_snapshot(payload)
 
 
 def _backend(
@@ -559,7 +643,7 @@ def test_kubernetes_backend_ensures_worker_service_deployment_and_auth_secret(tm
     assert handle.auth_token not in json.dumps(deployment)
     assert deployment["spec"]["template"]["metadata"]["annotations"][_ANNOTATION_RUNNER_TOKEN_HASH]
     assert deployment["spec"]["template"]["metadata"]["annotations"][_ANNOTATION_RUNNER_TOKEN_HASH] != handle.auth_token
-    assert env_values["MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE"] == "subprocess"
+    assert env_values["MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE"] == "forkserver"
     assert env_values["MINDROOM_SANDBOX_RUNNER_PORT"] == "8766"
     manifest_path = env_values["MINDROOM_SANDBOX_STARTUP_MANIFEST_PATH"]
     assert manifest_path is not None
@@ -967,7 +1051,11 @@ def test_kubernetes_backend_recreate_failure_removes_orphaned_tenant_auth_secret
         storage_path=tmp_path / "mindroom-test-storage",
     )
     auth_secret_name = "mindroom-worker-auth-demo"  # noqa: S105
-    backend, apps_api, core_api = _backend(runtime_paths=runtime_paths, auth_secret_name=auth_secret_name)
+    backend, apps_api, core_api = _backend(
+        runtime_paths=runtime_paths,
+        auth_secret_name=auth_secret_name,
+        idle_timeout_seconds=600.0,
+    )
     handle = backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=10.0)
     deployment = apps_api.deployments[handle.worker_id]
     deployment.metadata.annotations[_ANNOTATION_TEMPLATE_HASH] = "stale"
@@ -981,7 +1069,7 @@ def test_kubernetes_backend_recreate_failure_removes_orphaned_tenant_auth_secret
     backend._resources._recreate_deployment = recreate_with_failure  # type: ignore[method-assign]
 
     with pytest.raises(WorkerBackendError, match="deployment recreate failed"):
-        backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=20.0)
+        backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=310.0)
 
     assert handle.worker_id not in apps_api.deployments
     assert handle.worker_id not in core_api.secrets[auth_secret_name].stringData
@@ -1560,7 +1648,7 @@ def test_kubernetes_backend_omits_backend_config_env_from_worker_env_and_manifes
     assert env_values["MINDROOM_SANDBOX_RUNNER_SUBPROCESS_TIMEOUT_SECONDS"] == "45"
     assert committed_runtime.env_value("MINDROOM_SANDBOX_RUNNER_SUBPROCESS_TIMEOUT_SECONDS") == "45"
     assert committed_runtime.env_value("MINDROOM_SANDBOX_RUNNER_MODE") == "true"
-    assert committed_runtime.env_value("MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE") == "subprocess"
+    assert committed_runtime.env_value("MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE") == "forkserver"
     assert committed_runtime.env_value("MINDROOM_SANDBOX_RUNNER_PORT") == "8766"
     assert env_names.count("MINDROOM_SANDBOX_PROXY_TOKEN") == 1
     assert env_values["MINDROOM_SANDBOX_PROXY_TOKEN"] is None
@@ -2046,6 +2134,116 @@ def _wire_fake_apis(backend: KubernetesWorkerBackend, apps_api: _FakeAppsApi, co
     backend._resources.api_exception_cls = _FakeApiError
 
 
+def _kubernetes_api_call_counts(apps_api: _FakeAppsApi, core_api: _FakeCoreApi) -> tuple[int, ...]:
+    return (
+        len(apps_api.read_names),
+        len(apps_api.created_bodies),
+        len(apps_api.patched_bodies),
+        len(apps_api.deleted_names),
+        len(core_api.read_service_names),
+        len(core_api.created_bodies),
+        len(core_api.read_secret_names),
+        len(core_api.created_secret_bodies),
+        len(core_api.patched_secret_bodies),
+        len(core_api.deleted_secret_names),
+    )
+
+
+def test_kubernetes_backend_reuses_recent_ready_worker_with_one_metadata_patch() -> None:
+    """A recently validated ready worker should skip cluster reconciliation."""
+    backend, apps_api, core_api = _backend()
+    first = backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=10.0)
+    calls_after_first_ensure = _kubernetes_api_call_counts(apps_api, core_api)
+
+    second = backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=20.0)
+
+    assert second.worker_id == first.worker_id
+    assert second.last_used_at == 20.0
+    calls_after_second_ensure = _kubernetes_api_call_counts(apps_api, core_api)
+    assert tuple(
+        after - before for before, after in zip(calls_after_first_ensure, calls_after_second_ensure, strict=True)
+    ) == (
+        0,
+        0,
+        1,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+    )
+    assert apps_api.deployments[first.worker_id].metadata.annotations["mindroom.ai/last-used-at"] == "20.0"
+
+
+def test_kubernetes_backend_reconciles_when_cached_worker_disappears() -> None:
+    """A missing cached Deployment should fall back to full reconciliation."""
+    backend, apps_api, _core_api = _backend()
+    first = backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=10.0)
+    apps_api.deployments.pop(first.worker_id)
+
+    recreated = backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=20.0)
+
+    assert recreated.status == "ready"
+    assert len(apps_api.created_bodies) == 2
+
+
+def test_kubernetes_backend_periodically_revalidates_cached_ready_worker() -> None:
+    """The ready cache should bound how long external cluster drift can stay hidden."""
+    backend, apps_api, core_api = _backend(idle_timeout_seconds=600.0)
+    backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=10.0)
+    calls_after_first_ensure = _kubernetes_api_call_counts(apps_api, core_api)
+
+    backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=309.0)
+    calls_before_revalidation = _kubernetes_api_call_counts(apps_api, core_api)
+    assert calls_before_revalidation[0] == calls_after_first_ensure[0]
+    assert calls_before_revalidation[2] == calls_after_first_ensure[2] + 1
+    assert calls_before_revalidation[4:] == calls_after_first_ensure[4:]
+
+    backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=310.0)
+    calls_after_revalidation = _kubernetes_api_call_counts(apps_api, core_api)
+    assert calls_after_revalidation[0] > calls_before_revalidation[0]
+    assert calls_after_revalidation[4] > calls_before_revalidation[4]
+    assert calls_after_revalidation[6] > calls_before_revalidation[6]
+
+
+def test_kubernetes_backend_cached_touch_uses_one_metadata_patch() -> None:
+    """A cached touch should persist usage without reading or reconciling cluster objects."""
+    backend, apps_api, _core_api = _backend()
+    handle = backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=10.0)
+    patch_count_after_ensure = len(apps_api.patched_bodies)
+    read_count_after_ensure = len(apps_api.read_names)
+
+    first_touch = backend.touch_worker(_TEST_SCOPED_WORKER_KEY_A, now=11.0)
+    second_touch = backend.touch_worker(_TEST_SCOPED_WORKER_KEY_A, now=12.0)
+
+    assert first_touch is not None
+    assert second_touch is not None
+    assert second_touch.last_used_at == 12.0
+    assert len(apps_api.patched_bodies) == patch_count_after_ensure + 2
+    assert len(apps_api.read_names) == read_count_after_ensure
+    assert backend.list_workers(now=12.0)[0].last_used_at == 12.0
+    assert apps_api.deployments[handle.worker_id].metadata.annotations["mindroom.ai/last-used-at"] == "12.0"
+    assert apps_api.deployments[handle.worker_id].metadata.annotations[ANNOTATION_WORKER_KEY] == (
+        _TEST_SCOPED_WORKER_KEY_A
+    )
+
+
+def test_kubernetes_backend_failure_invalidates_ready_cache() -> None:
+    """A failed worker must take the full restart path on its next ensure."""
+    backend, apps_api, core_api = _backend()
+    backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=10.0)
+    backend.record_failure(_TEST_SCOPED_WORKER_KEY_A, "worker failed", now=11.0)
+    calls_after_failure = _kubernetes_api_call_counts(apps_api, core_api)
+
+    restarted = backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=12.0)
+
+    assert restarted.status == "ready"
+    assert restarted.startup_count == 2
+    assert _kubernetes_api_call_counts(apps_api, core_api) != calls_after_failure
+
+
 def test_kubernetes_backend_reconciles_drifted_idle_worker_template(tmp_path: Path) -> None:
     """Reconciliation should recreate scaled-down workers whose pod template drifted from current config."""
     runtime_paths = resolve_primary_runtime_paths(
@@ -2059,7 +2257,7 @@ def test_kubernetes_backend_reconciles_drifted_idle_worker_template(tmp_path: Pa
     updated_backend, _, _ = _backend(runtime_paths=runtime_paths, resource_limits={"memory": "2Gi", "cpu": "1"})
     _wire_fake_apis(updated_backend, apps_api, core_api)
 
-    reconciled = updated_backend.reconcile_drifted_workers(now=90.0)
+    reconciled = updated_backend.maintain_workers(now=90.0).reconciled
 
     assert [worker.worker_key for worker in reconciled] == [_TEST_SCOPED_WORKER_KEY_A]
     assert reconciled[0].status == "idle"
@@ -2070,6 +2268,26 @@ def test_kubernetes_backend_reconciles_drifted_idle_worker_template(tmp_path: Pa
     container = recreated["spec"]["template"]["spec"]["containers"][0]
     assert container["resources"]["limits"] == {"memory": "2Gi", "cpu": "1"}
     assert recreated["metadata"]["annotations"]["mindroom.ai/created-at"] == "0.0"
+
+
+def test_kubernetes_backend_maintenance_lists_deployments_once(tmp_path: Path) -> None:
+    """Cleanup and reconciliation should share one lightweight Kubernetes list response."""
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=Path("config.yaml"),
+        storage_path=tmp_path / "mindroom-test-storage",
+    )
+    backend, apps_api, core_api = _backend(runtime_paths=runtime_paths)
+    backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=0.0)
+    updated_backend, _, _ = _backend(runtime_paths=runtime_paths, resource_limits={"memory": "2Gi", "cpu": "1"})
+    _wire_fake_apis(updated_backend, apps_api, core_api)
+    list_count_before = len(apps_api.list_label_selectors)
+
+    maintenance = updated_backend.maintain_workers(now=80.0)
+
+    assert len(apps_api.list_label_selectors) == list_count_before + 1
+    assert apps_api.raw_list_count == 1
+    assert [worker.worker_key for worker in maintenance.cleaned] == [_TEST_SCOPED_WORKER_KEY_A]
+    assert [worker.worker_key for worker in maintenance.reconciled] == [_TEST_SCOPED_WORKER_KEY_A]
 
 
 def test_kubernetes_backend_reconcile_defers_running_workers(tmp_path: Path) -> None:
@@ -2084,9 +2302,9 @@ def test_kubernetes_backend_reconcile_defers_running_workers(tmp_path: Path) -> 
     updated_backend, _, _ = _backend(runtime_paths=runtime_paths, resource_limits={"memory": "2Gi", "cpu": "1"})
     _wire_fake_apis(updated_backend, apps_api, core_api)
 
-    reconciled = updated_backend.reconcile_drifted_workers(now=10.0)
+    reconciled = updated_backend.maintain_workers(now=10.0).reconciled
 
-    assert reconciled == []
+    assert reconciled == ()
     assert apps_api.deleted_names == []
     assert len(apps_api.created_bodies) == 1
 
@@ -2105,9 +2323,9 @@ def test_kubernetes_backend_reconcile_leaves_unchanged_templates_alone(tmp_path:
     unchanged_backend, _, _ = _backend(runtime_paths=runtime_paths)
     _wire_fake_apis(unchanged_backend, apps_api, core_api)
 
-    reconciled = unchanged_backend.reconcile_drifted_workers(now=90.0)
+    reconciled = unchanged_backend.maintain_workers(now=90.0).reconciled
 
-    assert reconciled == []
+    assert reconciled == ()
     assert apps_api.deleted_names == []
     assert len(apps_api.created_bodies) == 1
     assert len(apps_api.patched_bodies) == patch_count_after_cleanup
@@ -2130,9 +2348,9 @@ def test_kubernetes_backend_reconcile_disabled_by_config(tmp_path: Path) -> None
     )
     _wire_fake_apis(updated_backend, apps_api, core_api)
 
-    reconciled = updated_backend.reconcile_drifted_workers(now=90.0)
+    reconciled = updated_backend.maintain_workers(now=90.0).reconciled
 
-    assert reconciled == []
+    assert reconciled == ()
     assert apps_api.deleted_names == []
     assert len(apps_api.created_bodies) == 1
 
@@ -2163,12 +2381,12 @@ def test_kubernetes_backend_reconcile_uses_persisted_private_visibility(tmp_path
 
     unchanged_backend, _, _ = _backend(runtime_paths=runtime_paths)
     _wire_fake_apis(unchanged_backend, apps_api, core_api)
-    assert unchanged_backend.reconcile_drifted_workers(now=90.0) == []
+    assert unchanged_backend.maintain_workers(now=90.0).reconciled == ()
 
     updated_backend, _, _ = _backend(runtime_paths=runtime_paths, resource_limits={"memory": "2Gi", "cpu": "1"})
     _wire_fake_apis(updated_backend, apps_api, core_api)
 
-    reconciled = updated_backend.reconcile_drifted_workers(now=100.0)
+    reconciled = updated_backend.maintain_workers(now=100.0).reconciled
 
     assert [worker.worker_key for worker in reconciled] == [worker_key]
     recreated = apps_api.created_bodies[-1]
@@ -2206,9 +2424,9 @@ def test_kubernetes_backend_reconcile_revalidates_live_state_before_recreating(t
 
     updated_backend._resources.list_deployments = _stale_snapshot
 
-    reconciled = updated_backend.reconcile_drifted_workers(now=90.0)
+    reconciled = updated_backend.maintain_workers(now=90.0).reconciled
 
-    assert reconciled == []
+    assert reconciled == ()
     live_deployment = apps_api.deployments[handle.worker_id]
     assert int(live_deployment.spec.replicas) == 1
     assert live_deployment.metadata.annotations[ANNOTATION_WORKER_KEY] == _TEST_SCOPED_WORKER_KEY_A
@@ -2250,9 +2468,9 @@ def test_kubernetes_backend_reconcile_defers_user_agent_workers_without_persiste
     _wire_fake_apis(updated_backend, apps_api, core_api)
 
     with caplog.at_level("WARNING", logger=kubernetes_backend_module.__name__):
-        reconciled = updated_backend.reconcile_drifted_workers(now=90.0)
+        reconciled = updated_backend.maintain_workers(now=90.0).reconciled
 
-    assert reconciled == []
+    assert reconciled == ()
     assert apps_api.deleted_names == []
     assert len(apps_api.created_bodies) == 1
     assert caplog.records == []
@@ -2264,7 +2482,7 @@ def test_kubernetes_backend_config_reads_reconcile_pod_templates_from_env(tmp_pa
     config_dir.mkdir(parents=True, exist_ok=True)
     config_path = config_dir / "config.yaml"
     config_path.write_text(
-        "models:\n  default:\n    provider: openai\n    id: gpt-5.5\nagents: {}\nrouter:\n  model: default\n",
+        "models:\n  default:\n    provider: openai\n    id: gpt-5.6\nagents: {}\nrouter:\n  model: default\n",
         encoding="utf-8",
     )
     base_env = (
@@ -2748,7 +2966,7 @@ def test_kubernetes_backend_warm_reconcile_failures_are_non_destructive(
         config_path=Path("config.yaml"),
         storage_path=tmp_path / "mindroom-test-storage",
     )
-    backend, apps_api, core_api = _backend(runtime_paths=runtime_paths)
+    backend, apps_api, core_api = _backend(runtime_paths=runtime_paths, idle_timeout_seconds=600.0)
     handle = backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=10.0)
 
     if failure_target == "apply_deployment":
@@ -2771,7 +2989,7 @@ def test_kubernetes_backend_warm_reconcile_failures_are_non_destructive(
     with pytest.raises(WorkerBackendError, match=error_message):
         backend.ensure_worker(
             WorkerSpec(_TEST_SCOPED_WORKER_KEY_A),
-            now=11.0,
+            now=310.0,
             progress_sink=events.append,
         )
 
@@ -2799,7 +3017,7 @@ def test_kubernetes_backend_existing_starting_worker_failures_record_failure(
         config_path=Path("config.yaml"),
         storage_path=tmp_path / "mindroom-test-storage",
     )
-    backend, apps_api, core_api = _backend(runtime_paths=runtime_paths)
+    backend, apps_api, core_api = _backend(runtime_paths=runtime_paths, idle_timeout_seconds=600.0)
     handle = backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=10.0)
     deployment = apps_api.deployments[handle.worker_id]
     deployment.metadata.annotations["mindroom.ai/worker-status"] = "starting"
@@ -2833,7 +3051,7 @@ def test_kubernetes_backend_existing_starting_worker_failures_record_failure(
     with pytest.raises(WorkerBackendError, match=error_message):
         backend.ensure_worker(
             WorkerSpec(_TEST_SCOPED_WORKER_KEY_A),
-            now=11.0,
+            now=310.0,
             progress_sink=events.append,
         )
 
@@ -3118,7 +3336,7 @@ def test_kubernetes_backend_adds_agent_vault_mint_init_container(tmp_path: Path)
     assert 'export HOME="/agent-vault"' not in mint_script
     mint_env = {e["name"]: e["value"] for e in mint["env"]}
     # The vault name is the worker's own deterministic vault, owner email is configured.
-    assert mint_env["AGENT_VAULT_VAULT"] == worker_id_for_key(worker_key, prefix="agent-vault")
+    assert mint_env["AGENT_VAULT_VAULT"] == descriptive_worker_id_for_key(worker_key, prefix="agent-vault")
     assert mint_env["AGENT_VAULT_OWNER_EMAIL"] == "vault-owner@example.test"
     # The owner password (bootstrap secret) is mounted only on the init container.
     assert any(m["name"] == "agent-vault-bootstrap" for m in mint["volumeMounts"])
@@ -3127,7 +3345,7 @@ def test_kubernetes_backend_adds_agent_vault_mint_init_container(tmp_path: Path)
     assert all(m["name"] != "agent-vault-bootstrap" for m in main["volumeMounts"])
     assert any(m["name"] == "agent-vault-token" and m.get("readOnly") for m in main["volumeMounts"])
     main_env = {e["name"]: e.get("value") for e in main["env"]}
-    expected_vault = worker_id_for_key(worker_key, prefix="agent-vault")
+    expected_vault = descriptive_worker_id_for_key(worker_key, prefix="agent-vault")
     assert main_env["MINDROOM_WORKER_EGRESS_PROXY_URL"] == "http://agent-vault:14322"
     assert main_env["MINDROOM_WORKER_EGRESS_PROXY_TOKEN_FILE"] == "/agent-vault/token"  # noqa: S105
     assert main_env["MINDROOM_WORKER_EGRESS_PROXY_VAULT"] == expected_vault
@@ -3237,3 +3455,24 @@ def test_kubernetes_backend_config_from_runtime_reads_agent_vault(tmp_path: Path
     assert config.agent_vault.owner_email == "vault-owner@example.test"
     signature = kubernetes_backend_config_signature(runtime_paths, auth_token="token")  # noqa: S106
     assert config.agent_vault.signature() in signature
+
+
+def test_scoped_storage_policy_planning_resolves_config_includes(tmp_path: Path) -> None:
+    """Scoped-storage planning parses split configs instead of failing on include tags."""
+    config_dir = tmp_path / "conf"
+    config_dir.mkdir()
+    (config_dir / "agents.yaml").write_text(
+        "code:\n  display_name: Code\n  role: Writes code\n  worker_scope: user\n",
+        encoding="utf-8",
+    )
+    config_path = config_dir / "config.yaml"
+    config_path.write_text("agents: !include agents.yaml\n", encoding="utf-8")
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=config_path,
+        storage_path=tmp_path / "storage",
+        process_env={},
+    )
+
+    policies = kubernetes_resources_module._resolved_agent_policies_for_runtime_paths(runtime_paths)
+
+    assert policies["code"].effective_execution_scope == "user"

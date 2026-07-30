@@ -12,7 +12,7 @@ When a user sends an image in a Matrix room:
 4. The responder replies with its analysis
 
 Image support works automatically for agents and teams -- no configuration is needed.
-The selected model must support vision (e.g., Claude, GPT-5.4).
+The selected model must support vision (e.g., Claude, GPT-5.6).
 
 ## Supported Formats
 
@@ -78,10 +78,14 @@ The retried prompt includes `[Inline media unavailable for this model]` to infor
 Agents can still reference the files via attachment IDs and tools.
 
 This fallback is transparent — no user action is required.
-It detects provider-specific error patterns such as unsupported media type, base64 field validation failures, and capability rejections.
+Any failure of a media-bearing request triggers one retry without media — no error wording decides whether to retry, so unknown provider prose degrades gracefully instead of surfacing a raw provider error.
+When the retry succeeds, the model route learns that the dropped media kinds are unsupported, and later requests omit them up front instead of paying a failed API call.
+This learned capability state is process-local and resets on restart.
+Payload-size and context-overflow rejections never teach the capability state, since dropping media can shrink an oversized request for reasons unrelated to media support.
+Transient failures (HTTP 5xx and 429 status codes on the provider exception) also never teach, since their retry can succeed simply because the outage or rate limit passed.
 
 ## Limitations
 
 - **Routing with multiple eligible responders** -- without an `@mention`, the router uses the image caption to select among candidates only when room configuration and reply permissions leave multiple eligible agents or teams.
 - **Bridge mention detection** uses `m.mentions` in the event, falling back to parsing HTML pills from `formatted_body` when `m.mentions` is absent (e.g., mautrix-telegram). Bridges that set neither may not trigger agent responses.
-- **Model support** -- the configured model must support vision. Text-only models will ignore the image or return an error. If the model rejects the image entirely, the [media fallback](#media-fallback) retries without the inline image.
+- **Model support** -- vision input requires a model that supports it. Text-only models reject inline images, and the [media fallback](#media-fallback) retries without them so the agent still answers with a note that it cannot view the attachment.

@@ -11,12 +11,13 @@ from mindroom.config.main import Config
 from mindroom.logging_config import get_logger
 from mindroom.mcp.oauth import mcp_oauth_providers_for_config
 from mindroom.oauth.google_calendar import google_calendar_oauth_provider
+from mindroom.oauth.google_docs import google_docs_oauth_provider
 from mindroom.oauth.google_drive import google_drive_oauth_provider
 from mindroom.oauth.google_gmail import google_gmail_oauth_provider
 from mindroom.oauth.google_sheets import google_sheets_oauth_provider
 from mindroom.oauth.providers import OAuthProvider
 from mindroom.tool_system import plugin_imports
-from mindroom.tool_system.metadata import TOOL_METADATA
+from mindroom.tool_system.catalog import TOOL_METADATA
 from mindroom.tool_system.plugins import load_plugin_module
 
 if TYPE_CHECKING:
@@ -46,6 +47,7 @@ def clear_oauth_provider_cache() -> None:
 def _builtin_oauth_providers() -> tuple[OAuthProvider, ...]:
     return (
         google_calendar_oauth_provider(),
+        google_docs_oauth_provider(),
         google_drive_oauth_provider(),
         google_gmail_oauth_provider(),
         google_sheets_oauth_provider(),
@@ -82,7 +84,7 @@ def _load_plugin_oauth_providers(
     skip_broken_plugins: bool,
 ) -> list[OAuthProvider]:
     providers: list[OAuthProvider] = []
-    plugin_bases = plugin_imports._collect_plugin_bases(
+    plugin_bases, _unresolved_plugin_sources = plugin_imports._collect_plugin_bases(
         config.plugins,
         runtime_paths,
         skip_broken_plugins=skip_broken_plugins,

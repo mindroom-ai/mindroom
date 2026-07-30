@@ -10,12 +10,34 @@ ROOT = Path(__file__).resolve().parents[1]
 RELEASE_WORKFLOW = ROOT / ".github" / "workflows" / "release.yml"
 README = ROOT / "README.md"
 MACOS_APP_DOC = ROOT / "docs" / "installation" / "macos-app.md"
+MACOS_BUILD_SCRIPT = ROOT / "macos" / "build-macos-app.sh"
 
 
 @pytest.fixture(scope="module")
 def release_workflow() -> str:
     """Return the release workflow text."""
     return RELEASE_WORKFLOW.read_text(encoding="utf-8")
+
+
+@pytest.fixture(scope="module")
+def macos_build_script() -> str:
+    """Return the macOS app build script text."""
+    return MACOS_BUILD_SCRIPT.read_text(encoding="utf-8")
+
+
+def test_release_builds_universal_macos_app(release_workflow: str, macos_build_script: str) -> None:
+    """Published app binaries must support both Apple silicon and Intel Macs."""
+    assert "uv-aarch64-apple-darwin.tar.gz" in release_workflow
+    assert "uv-x86_64-apple-darwin.tar.gz" in release_workflow
+    assert "shasum --algorithm 256 --check" in release_workflow
+    assert '"$RUNNER_TEMP/uv-aarch64-apple-darwin/uv"' in release_workflow
+    assert '"$RUNNER_TEMP/uv-x86_64-apple-darwin/uv"' in release_workflow
+    assert "UV_BINARY: ${{ runner.temp }}/uv-universal" in release_workflow
+    assert "macos/build-macos-app.sh --universal --dmg" in release_workflow
+    assert "--arch arm64 --arch x86_64" in macos_build_script
+    assert "Required universal binary not found: $binary" in macos_build_script
+    assert "Could not inspect architectures for required universal binary: $binary" in macos_build_script
+    assert 'require_architectures "$binary" arm64 x86_64' in macos_build_script
 
 
 def test_release_metadata_pr_reuses_open_metadata_pr(release_workflow: str) -> None:

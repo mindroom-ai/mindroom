@@ -139,14 +139,14 @@ To run serially for debugging, pass `-n0`: `python -m pytest tests/ -n0`.
 Each test has a 60-second timeout (`--timeout 60` in `addopts`).
 The 20 slowest tests are reported at the end of every run (`--durations 20`).
 
-### Automatic Coverage
+### Coverage
 
-Coverage runs automatically with every test invocation (`--cov=mindroom` in `addopts`).
-Reports are generated in three formats: terminal summary, HTML (`htmlcov/`), and XML (`coverage.xml`).
+Normal test runs skip coverage instrumentation so the fast feedback path stays fast.
+Run `just test-backend-coverage` for core backend coverage or `just test-saas-backend-coverage` for SaaS backend coverage.
 
-## Running All Tests
+## Running Standard Test Suites
 
-Use the convenience script to run both frontend and backend tests:
+Use `just test-standard` or the convenience script to run the core Python, core frontend, SaaS backend, SaaS frontend, and SaaS frontend API-command suites:
 
 ```bash
 ./run-tests.sh

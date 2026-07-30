@@ -1,6 +1,7 @@
 """Memory management for MindRoom agents and teams."""
 
 from mindroom.memory._prompting import strip_user_turn_time_prefix
+from mindroom.memory._shared import MemoryResult
 from mindroom.memory.auto_flush import (
     MemoryAutoFlushWorker,
     auto_flush_enabled,
@@ -9,7 +10,9 @@ from mindroom.memory.auto_flush import (
 )
 from mindroom.memory.functions import (
     MemoryPromptParts,
+    MemorySearchOutcome,
     add_agent_memory,
+    append_agent_daily_memory,
     build_memory_enhanced_prompt,
     build_memory_prompt_parts,
     delete_agent_memory,
@@ -23,7 +26,10 @@ from mindroom.memory.functions import (
 __all__ = [
     "MemoryAutoFlushWorker",
     "MemoryPromptParts",
+    "MemoryResult",
+    "MemorySearchOutcome",
     "add_agent_memory",
+    "append_agent_daily_memory",
     "auto_flush_enabled",
     "build_memory_enhanced_prompt",
     "build_memory_prompt_parts",

@@ -92,6 +92,8 @@ app.kubernetes.io/component: homeserver
 
 {{- define "mindroom-tuwunel.oidcClientSecretDir" -}}/etc/tuwunel/secrets/oidc{{- end -}}
 
+{{- define "mindroom-tuwunel.appserviceDir" -}}/etc/tuwunel/appservices{{- end -}}
+
 {{- define "mindroom-tuwunel.oidcClientSecretFile" -}}
 {{- printf "%s/%s" (include "mindroom-tuwunel.oidcClientSecretDir" .) .Values.tuwunel.oidc.clientSecret.key -}}
 {{- end -}}
@@ -113,6 +115,9 @@ mindroom_compact_edits_enabled = true
 {{- if .Values.tuwunel.registrationToken.existingSecret }}
 allow_registration = true
 registration_token_file = {{ include "mindroom-tuwunel.registrationTokenFile" . | quote }}
+{{- end }}
+{{- if .Values.tuwunel.appserviceRegistration.existingSecret }}
+appservice_dir = {{ include "mindroom-tuwunel.appserviceDir" . | quote }}
 {{- end }}
 {{- with .Values.tuwunel.extraConfig }}
 {{ . }}

@@ -89,6 +89,63 @@ describe("MemoryConfig", () => {
     expect(hostInput).toBeInTheDocument();
   });
 
+  it("binds the OpenAI embedder to a named credential service", async () => {
+    render(<MemoryConfig />);
+
+    const credentialsServiceInput = document.getElementById(
+      "credentials-service",
+    ) as HTMLInputElement;
+    fireEvent.change(credentialsServiceInput, {
+      target: { value: "embedding-production" },
+    });
+
+    await waitFor(() => {
+      expect(mockUpdateMemoryConfig).toHaveBeenCalledWith(
+        expect.objectContaining({
+          embedder: expect.objectContaining({
+            config: expect.objectContaining({
+              credentials_service: "embedding-production",
+            }),
+          }),
+        }),
+      );
+    });
+  });
+
+  it("removes a cleared credential service from saved config", async () => {
+    const configWithCredentialService: Partial<Config> = {
+      memory: {
+        embedder: {
+          provider: "openai",
+          config: {
+            model: "text-embedding-3-small",
+            credentials_service: "embedding-production",
+          },
+        },
+      },
+    };
+    (useConfigStore as any).mockReturnValue({
+      config: configWithCredentialService,
+      updateMemoryConfig: mockUpdateMemoryConfig,
+      saveConfig: mockSaveConfig,
+      isDirty: false,
+    });
+    render(<MemoryConfig />);
+
+    const credentialsServiceInput = document.getElementById(
+      "credentials-service",
+    ) as HTMLInputElement;
+    fireEvent.change(credentialsServiceInput, { target: { value: "" } });
+
+    await waitFor(() => {
+      const calls = mockUpdateMemoryConfig.mock.calls;
+      const nextConfig = calls[calls.length - 1]?.[0];
+      expect(nextConfig.embedder.config).not.toHaveProperty(
+        "credentials_service",
+      );
+    });
+  });
+
   it("updates team reads member memory toggle", async () => {
     render(<MemoryConfig />);
 
@@ -253,13 +310,14 @@ describe("MemoryConfig", () => {
     });
   });
 
-  it("shows API key notice for OpenAI without custom base URL", () => {
+  it("offers credential binding without assuming OPENAI_API_KEY", () => {
     render(<MemoryConfig />);
 
-    expect(screen.getByText(/OPENAI_API_KEY/)).toBeInTheDocument();
+    expect(document.getElementById("credentials-service")).toBeInTheDocument();
+    expect(screen.queryByText(/OPENAI_API_KEY/)).not.toBeInTheDocument();
   });
 
-  it("hides API key notice when base URL is set", () => {
+  it("keeps credential binding available for a custom base URL", () => {
     const configWithHost: Partial<Config> = {
       memory: {
         embedder: {
@@ -281,7 +339,7 @@ describe("MemoryConfig", () => {
 
     render(<MemoryConfig />);
 
-    expect(screen.queryByText(/OPENAI_API_KEY/)).not.toBeInTheDocument();
+    expect(document.getElementById("credentials-service")).toBeInTheDocument();
   });
 
   it("allows typing custom model name", async () => {

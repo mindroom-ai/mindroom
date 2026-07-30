@@ -20,12 +20,16 @@ from mindroom.config.main import Config
 from mindroom.custom_tools.attachments import AttachmentTools
 from mindroom.custom_tools.matrix_message import MatrixMessageTools
 from mindroom.interactive import parse_and_format_interactive
-from mindroom.matrix.client import RoomThreadsPageError
+from mindroom.matrix.client import DeliveredMatrixEvent, RoomThreadsPageError
 from mindroom.matrix.message_extras import MINDROOM_MESSAGE_EXTRAS_KEY
+from mindroom.matrix.state import MatrixState, _load_matrix_state_file_cached
+from mindroom.message_target import MessageTarget
+from mindroom.session_ids import create_session_id
 from mindroom.tool_system.metadata import TOOL_METADATA, get_tool_by_name
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
 from tests.conftest import (
     bind_runtime_paths,
+    delivered_matrix_event,
     delivered_matrix_side_effect,
     make_conversation_cache_mock,
     make_event_cache_mock,
@@ -105,9 +109,16 @@ def _make_context(
     conversation_cache.notify_outbound_redaction = Mock()
     return ToolRuntimeContext(
         agent_name="general",
-        room_id=room_id,
-        thread_id=thread_id,
-        resolved_thread_id=thread_id if resolved_thread_id is _DEFAULT_RESOLVED_THREAD_ID else resolved_thread_id,
+        target=MessageTarget(
+            room_id=room_id,
+            source_thread_id=thread_id,
+            resolved_thread_id=thread_id if resolved_thread_id is _DEFAULT_RESOLVED_THREAD_ID else resolved_thread_id,
+            reply_to_event_id=reply_to_event_id,
+            session_id=create_session_id(
+                room_id,
+                thread_id if resolved_thread_id is _DEFAULT_RESOLVED_THREAD_ID else resolved_thread_id,
+            ),
+        ),
         requester_id="@user:localhost",
         client=client,
         config=config,
@@ -115,7 +126,6 @@ def _make_context(
         conversation_cache=conversation_cache,
         event_cache=make_event_cache_mock() if event_cache is _DEFAULT_EVENT_CACHE else event_cache,
         room=None,
-        reply_to_event_id=reply_to_event_id,
         storage_path=storage_path,
         attachment_ids=attachment_ids,
     )
@@ -249,6 +259,51 @@ async def test_matrix_message_send_defaults_to_room_level() -> None:
 
 
 @pytest.mark.asyncio
+async def test_matrix_message_send_resolves_room_alias_before_send(tmp_path: Path) -> None:
+    """Explicit room aliases should resolve to room IDs before authorization and delivery."""
+    tool = MatrixMessageTools()
+    ctx = _make_context(storage_path=tmp_path, thread_id=None)
+    state = MatrixState()
+    state.add_room("ops", room_id="!ops:localhost", alias="#ops:localhost", name="Ops")
+    state.save(runtime_paths=ctx.runtime_paths)
+    _load_matrix_state_file_cached.cache_clear()
+
+    with (
+        patch("mindroom.custom_tools.matrix_message.room_access_allowed", return_value=True) as mock_access,
+        patch(
+            "mindroom.custom_tools.matrix_conversation_operations.send_message_result",
+            new=AsyncMock(side_effect=delivered_matrix_side_effect("$evt")),
+        ) as mock_send,
+        tool_runtime_context(ctx),
+    ):
+        payload = json.loads(await tool.matrix_message(action="send", message="hello", room_id="#ops:localhost"))
+
+    mock_access.assert_called_once_with(ctx, "!ops:localhost")
+    assert mock_send.await_args.args[1] == "!ops:localhost"
+    assert payload["status"] == "ok"
+    assert payload["room_id"] == "!ops:localhost"
+
+
+@pytest.mark.asyncio
+async def test_matrix_message_rejects_non_string_room_id_before_resolution(tmp_path: Path) -> None:
+    """Explicit room IDs should return structured type errors before alias resolution."""
+    tool = MatrixMessageTools()
+    ctx = _make_context(storage_path=tmp_path, thread_id=None)
+
+    with (
+        patch("mindroom.custom_tools.matrix_message.resolve_optional_room_id") as mock_resolve,
+        tool_runtime_context(ctx),
+    ):
+        payload = json.loads(
+            await tool.matrix_message(action="send", message="hello", room_id=123),  # type: ignore[arg-type]
+        )
+
+    mock_resolve.assert_not_called()
+    assert payload["status"] == "error"
+    assert payload["message"] == "room_id must be a string."
+
+
+@pytest.mark.asyncio
 async def test_matrix_message_send_includes_message_extras() -> None:
     """Send action should attach validated MindRoom message extras."""
     tool = MatrixMessageTools()
@@ -355,21 +410,6 @@ async def test_matrix_message_rejects_invalid_message_extras() -> None:
     mock_send.assert_not_awaited()
 
 
-def test_matrix_message_tool_description_documents_message_extras() -> None:
-    """The model-facing tool description should briefly explain extras with an example."""
-    description = MatrixMessageTools.matrix_message.__doc__
-
-    assert description is not None
-    assert "message_extras" in description
-    assert "text/plain" in description
-    assert "text/markdown" in description
-    assert "text/html" in description
-    assert "sanitized rich fragments" in description
-    assert "tables" in description
-    assert "Do not include scripts" in description
-    assert '"title": "Evidence"' in description
-
-
 @pytest.mark.asyncio
 async def test_matrix_message_send_room_sentinel_stays_room_level() -> None:
     """thread_id='room' should disable thread metadata for sends."""
@@ -467,7 +507,6 @@ async def test_matrix_message_send_interactive_block_registers_question_and_adds
             {"emoji": "✅", "label": "Approve", "value": "approve"},
             {"emoji": "❌", "label": "Reject", "value": "reject"},
         ],
-        config=ctx.config,
     )
 
 
@@ -558,7 +597,6 @@ async def test_matrix_message_send_supports_context_attachments(tmp_path: Path) 
         ctx.client,
         ctx.room_id,
         attachment.local_path,
-        config=ctx.config,
         thread_id="$evt",
         latest_thread_event_id="$evt",
         conversation_cache=ctx.conversation_cache,
@@ -615,7 +653,6 @@ async def test_matrix_message_send_with_attachment_in_room_mode_stays_room_level
         ctx.client,
         ctx.room_id,
         attachment.local_path,
-        config=ctx.config,
         thread_id=None,
         latest_thread_event_id=None,
         conversation_cache=ctx.conversation_cache,
@@ -666,7 +703,6 @@ async def test_matrix_message_reply_with_attachments_keeps_existing_thread(tmp_p
         ctx.client,
         ctx.room_id,
         attachment.local_path,
-        config=ctx.config,
         thread_id=ctx.thread_id,
         latest_thread_event_id=ctx.thread_id,
         conversation_cache=ctx.conversation_cache,
@@ -725,7 +761,6 @@ async def test_matrix_message_send_with_explicit_thread_and_attachments_keeps_ex
         ctx.client,
         ctx.room_id,
         attachment.local_path,
-        config=ctx.config,
         thread_id=explicit_thread_id,
         latest_thread_event_id=explicit_thread_id,
         conversation_cache=ctx.conversation_cache,
@@ -776,7 +811,6 @@ async def test_matrix_message_send_allows_attachment_only(tmp_path: Path) -> Non
         ctx.client,
         ctx.room_id,
         attachment.local_path,
-        config=ctx.config,
         thread_id=None,
         latest_thread_event_id=None,
         conversation_cache=ctx.conversation_cache,
@@ -811,13 +845,9 @@ async def test_matrix_message_send_multiple_attachments_only_auto_threads_under_
 
     with (
         patch(
-            "mindroom.custom_tools.matrix_conversation_operations.send_file_message",
-            new=AsyncMock(return_value="$file_root"),
-        ) as mock_send_file,
-        patch(
-            "mindroom.custom_tools.matrix_conversation_operations.send_attachment_paths",
-            new=AsyncMock(return_value=(["$file_child"], None)),
-        ) as mock_send_attachment_paths,
+            "mindroom.custom_tools.matrix_conversation_operations.send_resolved_attachments",
+            new=AsyncMock(side_effect=[(["$file_root"], None), (["$file_child"], None)]),
+        ) as mock_send_attachments,
         tool_runtime_context(ctx),
     ):
         payload = json.loads(
@@ -833,26 +863,17 @@ async def test_matrix_message_send_multiple_attachments_only_auto_threads_under_
     assert payload["attachment_thread_id"] == "$file_root"
     assert payload["attachment_event_ids"] == ["$file_root", "$file_child"]
     assert payload["resolved_attachment_ids"] == ["att_first", "att_second"]
-    mock_send_file.assert_awaited_once_with(
-        ctx.client,
-        ctx.room_id,
-        first_attachment.local_path,
-        config=ctx.config,
-        thread_id=None,
-        latest_thread_event_id=None,
-        conversation_cache=ctx.conversation_cache,
-    )
-    ctx.conversation_cache.get_latest_thread_event_id_if_needed.assert_awaited_once_with(
-        ctx.room_id,
-        None,
-        caller_label="matrix_message_tool_attachment",
-    )
-    mock_send_attachment_paths.assert_awaited_once()
-    assert mock_send_attachment_paths.await_args.args == (ctx,)
-    assert mock_send_attachment_paths.await_args.kwargs == {
+    assert mock_send_attachments.await_args_list[0].args == (ctx,)
+    assert mock_send_attachments.await_args_list[0].kwargs == {
+        "room_id": ctx.room_id,
+        "thread_id": None,
+        "attachments": [first_attachment.local_path],
+    }
+    assert mock_send_attachments.await_args_list[1].args == (ctx,)
+    assert mock_send_attachments.await_args_list[1].kwargs == {
         "room_id": ctx.room_id,
         "thread_id": "$file_root",
-        "attachment_paths": [second_attachment.local_path],
+        "attachments": [second_attachment.local_path],
     }
 
 
@@ -890,10 +911,6 @@ async def test_matrix_message_send_multiple_attachments_only_in_room_mode_stays_
 
     with (
         patch(
-            "mindroom.custom_tools.matrix_conversation_operations.send_file_message",
-            new=AsyncMock(return_value="$unexpected_root"),
-        ) as mock_matrix_send_file,
-        patch(
             "mindroom.custom_tools.attachments.send_file_message",
             new=AsyncMock(side_effect=["$file_one", "$file_two"]),
         ) as mock_send_file,
@@ -912,20 +929,17 @@ async def test_matrix_message_send_multiple_attachments_only_in_room_mode_stays_
     assert payload["attachment_thread_id"] is None
     assert payload["attachment_event_ids"] == ["$file_one", "$file_two"]
     assert payload["resolved_attachment_ids"] == ["att_room_first", "att_room_second"]
-    mock_matrix_send_file.assert_not_awaited()
     assert len(mock_send_file.await_args_list) == 2
     first_call = mock_send_file.await_args_list[0]
     second_call = mock_send_file.await_args_list[1]
     assert first_call.args == (ctx.client, ctx.room_id, first_attachment.local_path)
     assert first_call.kwargs == {
-        "config": ctx.config,
         "thread_id": None,
         "latest_thread_event_id": None,
         "conversation_cache": ctx.conversation_cache,
     }
     assert second_call.args == (ctx.client, ctx.room_id, second_attachment.local_path)
     assert second_call.kwargs == {
-        "config": ctx.config,
         "thread_id": None,
         "latest_thread_event_id": "$file_one",
         "conversation_cache": ctx.conversation_cache,
@@ -971,7 +985,6 @@ async def test_matrix_message_send_supports_attachment_file_paths(tmp_path: Path
         ctx.client,
         ctx.room_id,
         generated_file,
-        config=ctx.config,
         thread_id="$evt",
         latest_thread_event_id="$evt",
         conversation_cache=ctx.conversation_cache,
@@ -1014,7 +1027,6 @@ async def test_matrix_message_send_resolves_relative_attachment_file_paths_from_
         ctx.client,
         ctx.room_id,
         generated_file.resolve(),
-        config=ctx.config,
         thread_id="$evt",
         latest_thread_event_id="$evt",
         conversation_cache=ctx.conversation_cache,
@@ -1094,13 +1106,9 @@ async def test_matrix_message_send_multiple_attachments_only_returns_error_when_
 
     with (
         patch(
-            "mindroom.custom_tools.matrix_conversation_operations.send_file_message",
-            new=AsyncMock(return_value=None),
-        ) as mock_send_file,
-        patch(
-            "mindroom.custom_tools.matrix_conversation_operations.send_attachment_paths",
-            new=AsyncMock(return_value=([], None)),
-        ) as mock_send_attachment_paths,
+            "mindroom.custom_tools.matrix_conversation_operations.send_resolved_attachments",
+            new=AsyncMock(return_value=([], "Failed to send attachment: first")),
+        ) as mock_send_attachments,
         tool_runtime_context(ctx),
     ):
         payload = json.loads(
@@ -1118,16 +1126,12 @@ async def test_matrix_message_send_multiple_attachments_only_returns_error_when_
     assert payload["resolved_attachment_ids"] == ["att_first_fail", "att_second_fail"]
     assert payload["newly_registered_attachment_ids"] == []
     assert "Failed to send attachment" in payload["message"]
-    mock_send_file.assert_awaited_once_with(
-        ctx.client,
-        ctx.room_id,
-        first_attachment.local_path,
-        config=ctx.config,
+    mock_send_attachments.assert_awaited_once_with(
+        ctx,
+        room_id=ctx.room_id,
         thread_id=None,
-        latest_thread_event_id=None,
-        conversation_cache=ctx.conversation_cache,
+        attachments=[first_attachment.local_path],
     )
-    mock_send_attachment_paths.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -1243,7 +1247,7 @@ async def test_matrix_message_react_happy_path() -> None:
                 "key": "🔥",
             },
         },
-        ignore_unverified_devices=False,
+        ignore_unverified_devices=True,
     )
 
 
@@ -1344,7 +1348,6 @@ async def test_matrix_message_edit_processes_interactive_blocks() -> None:
             {"emoji": "✅", "label": "Approve", "value": "approve"},
             {"emoji": "❌", "label": "Reject", "value": "reject"},
         ],
-        config=ctx.config,
     )
 
 
@@ -1527,7 +1530,6 @@ async def test_matrix_message_edit_re_registers_interactive_question() -> None:
             {"emoji": "✅", "label": "Approve", "value": "approve"},
             {"emoji": "❌", "label": "Reject", "value": "reject"},
         ],
-        config=ctx.config,
     )
 
 
@@ -2628,12 +2630,22 @@ async def test_matrix_message_edit_happy_path() -> None:
     event_cache = MagicMock()
     ctx = _make_context(thread_id="$ctx-thread:localhost", event_cache=event_cache)
     ctx.conversation_cache.get_latest_thread_event_id_if_needed = AsyncMock(return_value="$latest")
+    sent_content: dict[str, object] = {}
+
+    async def _deliver_edit(
+        _client: object,
+        _room_id: str,
+        content: dict[str, object],
+        **_kwargs: object,
+    ) -> DeliveredMatrixEvent:
+        sent_content.update(content)
+        return delivered_matrix_event("$edit_evt", content)
 
     with (
         patch(
-            "mindroom.custom_tools.matrix_conversation_operations.edit_message_result",
-            new=AsyncMock(side_effect=delivered_matrix_side_effect("$edit_evt")),
-        ) as mock_edit,
+            "mindroom.matrix.client_delivery.send_message_result",
+            new=AsyncMock(side_effect=_deliver_edit),
+        ),
         tool_runtime_context(ctx),
     ):
         payload = json.loads(await tool.matrix_message(action="edit", message="updated text", target="$target"))
@@ -2642,21 +2654,13 @@ async def test_matrix_message_edit_happy_path() -> None:
     assert payload["action"] == "edit"
     assert payload["target"] == "$target"
     assert payload["event_id"] == "$edit_evt"
-    mock_edit.assert_awaited_once()
-    args = mock_edit.await_args.args
-    assert args[1] == ctx.room_id
-    assert args[2] == "$target"
-    assert args[4] == "updated text"
-    assert args[3]["body"] == "updated text"
-    assert args[3]["m.relates_to"]["rel_type"] == "m.thread"
-    assert args[3]["m.relates_to"]["event_id"] == "$ctx-thread:localhost"
-    assert args[3]["m.relates_to"]["is_falling_back"] is True
-    assert args[3]["m.relates_to"]["m.in_reply_to"]["event_id"] == "$latest"
-    ctx.conversation_cache.get_latest_thread_event_id_if_needed.assert_awaited_once_with(
-        ctx.room_id,
-        "$ctx-thread:localhost",
-        caller_label="matrix_message_tool_edit",
-    )
+    relation = sent_content["m.relates_to"]
+    assert relation == {"rel_type": "m.replace", "event_id": "$target"}
+    replacement = sent_content["m.new_content"]
+    assert isinstance(replacement, dict)
+    assert replacement["body"] == "updated text"
+    assert "m.relates_to" not in replacement
+    ctx.conversation_cache.get_latest_thread_event_id_if_needed.assert_not_awaited()
     ctx.conversation_cache.get_thread_history.assert_not_awaited()
 
 

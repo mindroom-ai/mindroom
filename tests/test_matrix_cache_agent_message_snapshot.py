@@ -175,6 +175,67 @@ async def test_get_latest_agent_message_snapshot_returns_streaming_status_for_th
 
 
 @pytest.mark.asyncio
+async def test_get_latest_agent_message_snapshot_ignores_foreign_sender_edits(
+    event_cache_factory: Callable[[], ConversationEventCache],
+) -> None:
+    """Snapshot edits must come from the same sender as the original message."""
+    cache = event_cache_factory()
+    await cache.initialize()
+    try:
+        await _replace_thread(
+            cache,
+            "!room:localhost",
+            "$thread-root",
+            [
+                _message_event(
+                    event_id="$thread-root",
+                    sender="@user:localhost",
+                    body="Question",
+                    origin_server_ts=1000,
+                ),
+                _message_event(
+                    event_id="$reply",
+                    sender="@agent:localhost",
+                    body="Working...",
+                    origin_server_ts=2000,
+                    relates_to={"rel_type": "m.thread", "event_id": "$thread-root"},
+                ),
+                _message_event(
+                    event_id="$reply-edit",
+                    sender="@agent:localhost",
+                    body="* Working...",
+                    origin_server_ts=3000,
+                    relates_to={"rel_type": "m.replace", "event_id": "$reply"},
+                    new_content={"body": "Finished"},
+                ),
+                _message_event(
+                    event_id="$forged-edit",
+                    sender="@attacker:localhost",
+                    body="* Working...",
+                    origin_server_ts=4000,
+                    relates_to={"rel_type": "m.replace", "event_id": "$reply"},
+                    new_content={"body": "Forged"},
+                ),
+            ],
+        )
+    finally:
+        await cache.close()
+
+    snapshot = await _read_snapshot(
+        event_cache_factory,
+        room_id="!room:localhost",
+        thread_id="$thread-root",
+        sender="@agent:localhost",
+        runtime_started_at=0.0,
+    )
+
+    assert snapshot == AgentMessageSnapshot(
+        content={"body": "Finished", "msgtype": "m.text"},
+        origin_server_ts=3000,
+    )
+
+
+@pytest.mark.asyncio
 async def test_get_latest_agent_message_snapshot_returns_room_level_message_when_thread_id_none(
     event_cache_factory: Callable[[], ConversationEventCache],
 ) -> None:
@@ -461,7 +522,7 @@ async def test_accessor_accepts_old_thread_cache_without_stale_marker(
                     relates_to={"rel_type": "m.thread", "event_id": "$thread-root"},
                 ),
             ],
-            validated_at=400.0,
+            fetch_started_at=400.0,
         )
     finally:
         await cache.close()
@@ -511,7 +572,7 @@ async def test_accessor_reuses_thread_cache_from_prior_bot_run(
                     relates_to={"rel_type": "m.thread", "event_id": "$thread-root"},
                 ),
             ],
-            validated_at=1000.0,
+            fetch_started_at=1000.0,
         )
     finally:
         await cache.close()
@@ -561,9 +622,9 @@ async def test_accessor_rejects_invalidated_thread_cache(
                     relates_to={"rel_type": "m.thread", "event_id": "$thread-root"},
                 ),
             ],
-            validated_at=1000.0,
+            fetch_started_at=1000.0,
         )
-        await cache.mark_thread_stale(
+        await cache.mark_thread_gap(
             "!room:localhost",
             "$thread-root",
             reason="test_invalidated",
@@ -571,7 +632,7 @@ async def test_accessor_rejects_invalidated_thread_cache(
     finally:
         await cache.close()
 
-    with pytest.raises(AgentMessageSnapshotUnavailable, match="thread_invalidated_after_validation"):
+    with pytest.raises(AgentMessageSnapshotUnavailable, match="test_invalidated"):
         await _read_snapshot(
             event_cache_factory,
             room_id="!room:localhost",
@@ -622,7 +683,7 @@ async def test_room_scope_returns_latest_by_origin_server_ts_not_cached_at(
                     relates_to={"rel_type": "m.thread", "event_id": "$thread-root"},
                 ),
             ],
-            validated_at=5000.0,
+            fetch_started_at=5000.0,
         )
     finally:
         await cache.close()

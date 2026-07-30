@@ -22,6 +22,7 @@ def _task(
     description: str = "Ping task",
     thread_id: str | None = "$thread123",
     new_thread: bool = False,
+    history_limit: int | None = None,
 ) -> ScheduledTaskRecord:
     cron_schedule = None
     if cron_fields:
@@ -33,6 +34,7 @@ def _task(
         cron_schedule=cron_schedule,
         message=message,
         description=description,
+        history_limit=history_limit,
         thread_id=thread_id,
         room_id=room_id,
         created_by="@user:localhost",
@@ -80,6 +82,7 @@ def test_list_schedules_success(test_client: TestClient) -> None:
             description="Daily task",
             thread_id=None,
             new_thread=True,
+            history_limit=5,
         ),
     ]
 
@@ -97,9 +100,11 @@ def test_list_schedules_success(test_client: TestClient) -> None:
     tasks_by_id = {task["task_id"]: task for task in data["tasks"]}
     assert tasks_by_id["once1234"]["schedule_type"] == "once"
     assert tasks_by_id["once1234"]["new_thread"] is False
+    assert tasks_by_id["once1234"]["history_limit"] is None
     assert tasks_by_id["cron1234"]["cron_expression"] == "0 9 * * *"
     assert tasks_by_id["cron1234"]["new_thread"] is True
     assert tasks_by_id["cron1234"]["thread_id"] is None
+    assert tasks_by_id["cron1234"]["history_limit"] == 5
 
 
 def test_list_schedules_invalid_cron_does_not_fail(test_client: TestClient) -> None:
@@ -229,7 +234,7 @@ async def test_update_schedule_does_not_resolve_cache_path_when_not_restarting()
             "mindroom.api.schedules.config_lifecycle.read_committed_runtime_config",
             return_value=(runtime_config, MagicMock()),
         ),
-        patch("mindroom.api.schedules.resolve_room_aliases", return_value=["test_room"]),
+        patch("mindroom.api.schedules.resolve_room_id", return_value="test_room"),
         patch("mindroom.api.schedules.get_room_alias_from_id", return_value=None),
         patch("mindroom.api.schedules.create_agent_user", return_value=_mock_agent_user()),
         patch("mindroom.api.schedules.login_agent_user", return_value=mock_client),

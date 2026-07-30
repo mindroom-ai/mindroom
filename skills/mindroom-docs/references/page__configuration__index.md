@@ -18,6 +18,88 @@ You can also validate a specific file directly:
 mindroom config validate --path /path/to/config.yaml
 ```
 
+## Splitting the Configuration Into Multiple Files
+
+Large configs can be split across multiple files with Home-Assistant-style include tags instead of keeping one monolithic `config.yaml`.
+
+| Tag | Result |
+|-----|--------|
+| `!include rel/path.yaml` | The parsed content of that YAML file, with nested include tags resolved recursively |
+| `!include_text rel/path.md` | The file's raw text as a string (UTF-8, one trailing newline stripped); a MindRoom extension for long prompt or instruction blocks |
+| `!include_dir_list rel/dir` | A list with one item per YAML file in the directory |
+| `!include_dir_named rel/dir` | A mapping of filename-without-extension to each file's parsed content |
+| `!include_dir_merge_list rel/dir` | The concatenation of the lists contained in each file |
+| `!include_dir_merge_named rel/dir` | The merge of the mappings contained in each file |
+
+A realistic split keeps each agent in its own file and long prompts in Markdown:
+
+```yaml
+# config.yaml
+agents: !include_dir_merge_named agents/
+models: !include models.yaml
+
+defaults:
+  tools: [scheduler]
+  markdown: true
+```
+
+```yaml
+# agents/researcher.yaml
+researcher:
+  display_name: Researcher
+  role: Deep research and analysis
+  model: default
+  tools: !include _shared/web_tools.yaml
+  instructions:
+    - !include_text ../prompts/researcher.md
+```
+
+```yaml
+# agents/_shared/web_tools.yaml
+- duckduckgo
+- website
+- browser
+```
+
+Relative paths resolve against the directory of the file containing the tag, so nested include trees compose naturally.
+Absolute paths are rejected, and every include must stay inside the top-level config file's directory (symlinks and `..` are resolved before the check), so config edits can never read arbitrary host files.
+Directory includes recurse into subdirectories, take only `.yaml`/`.yml` files, and process them in lexicographic order of their relative path.
+Files and directories whose name starts with `.` or `_` are skipped by directory includes.
+Explicit include paths may not contain hidden components: any path component starting with `.` (other than the `.` and `..` navigation components) is rejected, so `!include_text .env` fails with a clear include error.
+The `_` convention gives shared snippet files a home inside included trees, such as `agents/_shared/web_tools.yaml` above, which is pulled in via an explicit `!include`.
+Use such snippets instead of YAML anchors when sharing values between files, because YAML anchors are scoped to a single file and cannot cross an include boundary.
+
+Error handling is strict so a broken split fails loudly:
+
+- Include cycles are rejected with the full chain (`config.yaml -> agents/a.yaml -> config.yaml`).
+- Missing files and directories are reported with the including file and line.
+- `!include_dir_merge_named` raises on duplicate keys across files, naming both files, instead of silently letting the later file win as Home Assistant does.
+- `!include_dir_named` likewise raises on duplicate filename stems across subdirectories.
+- An empty included file resolves to `null` under `!include`, and contributes nothing to directory includes.
+
+Hot reload watches every included file, so editing any file in the include tree triggers the same config reload as editing `config.yaml`.
+A reload fires only after the watched files have been quiet for one full scan interval (about one second of added latency), so a multi-file update from `git pull` or a sync tool lands completely before the reload reads the tree.
+A watched file vanishing between scans also defers a pending reload by one scan, so a delete-and-recreate save cannot be read mid-rename.
+Deleting an included file does not trigger a reload by itself: the watcher deliberately treats a missing file as an in-progress editor save and waits until it reappears or another watched file changes.
+To remove an include file, delete the `!include` reference from the including file too — that edit triggers the reload.
+If a reload fails, every file the failed attempt read stays watched alongside the last good set, so fixing a newly added include file — even one the last good config never referenced — triggers the retry reload.
+
+When migrating an existing monolith, use `mindroom config resolve` to print the fully merged config with sorted keys, and diff the output before and after the split to prove equivalence:
+
+```bash
+mindroom config resolve > before.yaml
+# split config.yaml into include files
+mindroom config resolve > after.yaml
+diff before.yaml after.yaml
+```
+
+The dashboard config editor operates on whole-config structured saves, which cannot be mapped back to individual include files.
+When the loaded config resolved at least one include tag, structured saves from the dashboard and self-config tools are rejected with an error asking you to edit the source files instead.
+Rejected structured saves return HTTP 409 with the machine-readable error code `config_composed_from_includes`, so clients can tell this permanent rejection apart from a retryable stale-write conflict.
+`POST /api/config/load` reports the includes state in the `x-mindroom-config-uses-includes` response header, which the dashboard uses to show an up-front banner explaining that structured saves will be rejected.
+The raw config editor (`GET`/`PUT /api/config/raw`) keeps operating on the top-level file's literal text, and its response flags when includes are in use.
+`MINDROOM_CONFIG_TEMPLATE` seeding copies only the single template file, so bundled templates that use includes must ship the whole directory.
+
 ## MCP Servers
 
 MindRoom can connect to external Model Context Protocol servers through the top-level `mcp_servers` block.
@@ -34,6 +116,11 @@ Use `script: ./approval_scripts/review.py` to run `check(tool_name, arguments, a
 React to the approval card with `✅` to approve the tool call.
 Reply to the approval card with a message to deny the tool call and record that text as the denial reason.
 Only the original human requester can approve or deny their pending tool call.
+Approval cards show a redacted preview of the tool arguments in the `arguments` content field, and set `arguments_truncated: true` when that preview is shortened for display.
+When the preview is truncated, the complete redacted arguments are delivered with the card so clients can render them behind a "show full arguments" expander and the call stays approvable.
+They ride inline in a `full_arguments` content field when they fit the Matrix event, and otherwise as an uploaded JSON sidecar referenced by `full_arguments_url` plus `full_arguments_info` in plain rooms or `full_arguments_file` (standard Matrix encrypted-file schema) in encrypted rooms.
+When the complete redacted arguments cannot be delivered — over the 2MB completeness cap or because the sidecar upload failed — the card sets `approvable: false` and any approve action is converted into a denial, because a human must be able to review exactly what would run.
+Clients should disable or hide the approve action when `approvable` is `false`.
 Approval responses only resolve the live Matrix approval card in the same room; approval IDs are used only as a live client hint.
 If MindRoom restarts before a tool call is approved, the live tool call is cancelled.
 On startup, MindRoom attempts to mark recent unresolved approval cards sent by the current router as expired.
@@ -72,6 +159,8 @@ tool_approval:
 | `MATRIX_HOMESERVER` | Matrix homeserver URL | `http://localhost:8008` |
 | `MATRIX_SERVER_NAME` | Server name for federation | _(derived from homeserver)_ |
 | `MATRIX_SSL_VERIFY` | Verify SSL certificates | `true` |
+| `MINDROOM_DESKTOP_MATRIX_HOMESERVER` | Public Matrix URL printed by `!desktop setup` when it differs from the runtime's internal homeserver URL | `MATRIX_HOMESERVER` |
+| `MINDROOM_DESKTOP_CLOUDFLARE_ACCESS` | Include `--cloudflare-access` in the Desktop login and pairing commands printed by `!desktop setup` | `false` |
 
 ### API Keys
 
@@ -87,9 +176,11 @@ Set the API key for each provider you use in `config.yaml`:
 | `GOOGLE_API_KEY` | Google (Gemini) |
 | `OPENROUTER_API_KEY` | OpenRouter |
 | `DEEPSEEK_API_KEY` | DeepSeek |
+| `ZAI_API_KEY` | Z.ai (GLM models) |
 | `CEREBRAS_API_KEY` | Cerebras |
 | `GROQ_API_KEY` | Groq |
 | `OLLAMA_HOST` | Ollama (host URL, not a key) |
+| `EMBEDDER_API_KEY` | Dedicated semantic-search embedder key (optional; falls back to the shared `OPENAI_API_KEY`) |
 | `OPENAI_BASE_URL` | Base URL for OpenAI-compatible APIs (e.g., local inference servers) |
 
 All API key variables also support a `_FILE` suffix for file-based secrets (e.g., `ANTHROPIC_API_KEY_FILE=/run/secrets/anthropic-api-key`).
@@ -112,8 +203,13 @@ Set `CODEX_HOME` only if your Codex CLI state lives outside `~/.codex`.
 | `MINDROOM_DASHBOARD_CORS_ALLOW_ALL_ORIGINS` | Set to `true` to allow every dashboard API origin while disabling credentialed CORS responses | _(unset)_ |
 | `MINDROOM_NO_AUTO_INSTALL_TOOLS` | Set to `1`/`true`/`yes` to disable automatic tool dependency installation | _(unset — auto-install enabled)_ |
 | `MINDROOM_MATRIX_HOMESERVER_STARTUP_TIMEOUT_SECONDS` | Seconds to wait for homeserver to become reachable at startup (0 = skip). MindRoom polls the homeserver's `/_matrix/client/versions` endpoint with exponential backoff retry, detecting permanent errors (e.g., wrong URL) vs transient failures | _(wait indefinitely)_ |
+| `MINDROOM_MATRIX_SYNC_CACHE_WRITE_GRACE_SECONDS` | Finite positive seconds the sync watchdog and `/api/health` may wait for one active durable sync-cache phase before treating it as wedged | `600` |
 | `MINDROOM_DISPATCH_THREAD_READ_TIMEOUT_SECONDS` | Wall-clock seconds allowed for live dispatch-safe Matrix thread reads before dispatch proceeds with degraded thread evidence | `1.0` |
 | `MINDROOM_WORKER_BACKEND` | Worker backend for tool execution (`static_runner`, `docker`, or `kubernetes`) | `static_runner` |
+
+The sync cache-write grace is a hang backstop, not the ordinary Matrix transport timeout.
+Set it above the observed healthy cache-write p99 for the deployment.
+Raising it delays both watchdog cancellation and liveness failure only while a sync callback is actively completing its sequential durable cache phase.
 
 ### OpenAI-Compatible API
 
@@ -231,10 +327,10 @@ agents:
 models:
   default:
     provider: anthropic            # Required: openai, azure, anthropic, ollama, google, gemini, vertexai_claude, groq, cerebras, openrouter, deepseek
-    id: claude-sonnet-4-6            # Required: Model ID for the provider
+    id: claude-sonnet-5            # Required: Model ID for the provider
   sonnet:
     provider: anthropic            # Required: openai, azure, anthropic, ollama, google, gemini, vertexai_claude, groq, cerebras, openrouter, deepseek
-    id: claude-sonnet-4-6            # Required: Model ID for the provider
+    id: claude-sonnet-5            # Required: Model ID for the provider
     host: null                     # Optional: Host URL (e.g., for Ollama)
     api_key: null                  # Optional: API key (usually from env vars)
     extra_kwargs: null             # Optional: Provider-specific parameters
@@ -256,6 +352,7 @@ teams:
       enabled: true
       threshold_percent: 0.8
       reserve_tokens: 16384
+      timeout_seconds: 600
     rooms: []                      # Optional: Rooms to auto-join
 
 # Culture configurations (optional)
@@ -294,13 +391,18 @@ defaults:
   compaction:
     enabled: true
     threshold_percent: 0.8
+    # Summary input chunks use the selected compaction model's context window.
+    # Destructive compaction requires a resolved summary input budget greater than 2,000 tokens.
+    replay_window_tokens: null     # Optional operational cap; does not change the model's real context window
     reserve_tokens: 16384
+    timeout_seconds: 600           # Maximum seconds allowed for each compaction summary request
   max_tool_calls_from_history: null  # Limit tool call messages replayed from history (null = no limit)
   show_tool_calls: true            # Default: true (show tool details inline; hidden mode still allows generic worker warmup copy)
   worker_tools: null               # Default: null (tool names to route through workers; null = use MindRoom's default routing policy, [] = disable)
   worker_scope: null               # Default: null (no runtime reuse; set shared/user/user_agent to enable)
   worker_grantable_credentials: null  # Default: null (deny by default; list credential service names to make available inside isolated workers, e.g. [openai, github_private])
   allow_self_config: false         # Default: false (allow agents to modify their own config via a tool)
+  thread_summary_model: null       # Default: null (uses the default model)
   thread_summary_temperature: 0.2  # Default: 0.2 (set null to omit temperature and use provider defaults)
   thread_summary_first_threshold: 1  # Default: 1 (first automatic thread summary after first message)
   thread_summary_subsequent_interval: 10  # Default: 10 (messages between later automatic thread summaries)
@@ -312,9 +414,14 @@ defaults:
 
 MindRoom uses `defaults.thread_summary_temperature` for automatic thread summaries on providers that support runtime temperature overrides.
 Set it to `null` to omit the field and use provider defaults.
-MindRoom always omits temperature for Vertex Claude thread summaries because the provider rejects that field on this path.
+MindRoom always uses provider temperature defaults for Vertex Claude, Claude Opus 5, Sonnet 5, Fable 5, and direct Google Gemini 3.6 Flash and Gemini 3.5 Flash-Lite thread summaries.
 Use `room_thread_summary_models` when automatic summaries in a specific room should use a different model from `defaults.thread_summary_model`.
 Keys can be managed room aliases such as `lobby` or raw Matrix room IDs such as `!room:example.org`.
+
+When a thread has no trusted prior summary, its first automatic summary call is summary-only so a useful thread title appears early.
+The next scheduled automatic summary refresh also returns one to three topic tags when the thread has no existing tags, whether the prior summary was automatic or manual.
+This delayed initial enrichment uses the same summary model, room override, temperature, prompt, and background task as the refreshed summary.
+After initial enrichment completes, later summary refreshes do not regenerate or replace tags.
 
 `defaults.worker_grantable_credentials` is a list of credential service names.
 Use built-in names like `openai`, `azure`, `anthropic`, `google`, `openrouter`, `deepseek`, `cerebras`, `groq`, `ollama`, and `github_private`, or custom shared credential service names you saved through the dashboard or API.
@@ -340,7 +447,9 @@ Sandbox-proxied execution is stricter than direct local execution: ordinary runt
 # while keeping the rest of defaults.tools for that agent.
 # See agents.md for the full per-agent tool configuration syntax.
 # These thresholds only affect automatic thread summaries; manual `set_thread_summary`
-# tool calls write immediately and reset the automatic baseline from the new message count.
+# tool calls write immediately and pin the thread by default, which stops automatic
+# summaries entirely until a `pin=False` call releases it.
+# Automatic summaries are also skipped on threads tagged `resolved`.
 
 # Memory system configuration (optional)
 memory:
@@ -350,7 +459,8 @@ memory:
     provider: openai               # Default: openai (openai, ollama, huggingface, sentence_transformers)
     config:
       model: text-embedding-3-small  # Default embedding model
-      api_key: null                # Optional: From env var
+      credentials_service: null     # Optional: strict named credential binding (e.g. embedder)
+      api_key: null                # Optional: explicit embedder key (highest priority; see docs/memory.md)
       host: null                   # Optional: For self-hosted
       dimensions: null             # Optional: Embedding dimension override (e.g., 256)
   llm:                             # Optional: LLM for memory operations
@@ -416,14 +526,39 @@ knowledge_bases:
 # Voice message handling (optional)
 voice:
   enabled: false                   # Default: false
-  visible_router_echo: true        # Optional: show the normalized voice text from the router
+  visible_router_echo: true        # Optional: show router voice progress or direct fallback
   stt:
     provider: openai               # Default: openai
-    model: whisper-1               # Default: whisper-1
+    model: gpt-4o-transcribe       # Default: gpt-4o-transcribe
+    credentials_service: openai    # Named credential service for speech
     api_key: null
     host: null
   intelligence:
     model: default                 # Model for command recognition
+
+# Voice calls via Element Call / MatrixRTC (optional)
+calls:
+  enabled: false                   # Default: false
+  profiles:                        # Complete reusable backend-specific profiles
+    openai-realtime:
+      backend: realtime
+      model: gpt-realtime-2.1
+      credentials_service: openai
+      voice: marin
+    openai-cascaded:
+      backend: cascaded
+      model: default                 # Optional: top-level model alias overriding room/agent models for call turns
+      stt:
+        provider: openai
+        model: gpt-4o-transcribe
+        credentials_service: openai
+      tts:
+        provider: openai
+        model: tts-1
+        credentials_service: openai
+  agents:                          # Profile name by enabled agent (at most one agent per room)
+    assistant: openai-realtime
+  livekit_service_url: null        # Optional override for .well-known discovery
 
 # Internal MindRoom user account (optional, omit for hosted/public profiles)
 # When present, defaults are: username: mindroom_user, display_name: MindRoomUser
@@ -438,6 +573,8 @@ matrix_room_access:
   publish_to_room_directory: false # Publish managed rooms in server room directory
   invite_only_rooms: []            # Room keys/aliases/IDs that stay invite-only/private
   reconcile_existing_rooms: false  # Explicit migration of existing managed rooms
+  encrypt_managed_rooms: false     # Enable Matrix E2EE on managed rooms (irreversible per room)
+  room_admins: []                  # Matrix user IDs granted admin power (100) in every managed room
 
 # Authorization (optional)
 authorization:
@@ -479,9 +616,17 @@ matrix_space:
   enabled: true                    # Default: true (create a root Matrix Space for managed rooms)
   name: MindRoom                   # Default: "MindRoom" (display name for the root Space)
 
-# Matrix delivery policy (optional)
-matrix_delivery:
-  ignore_unverified_devices: false # Default: false (keep Matrix E2EE device-trust checks enabled)
+# Matrix sync transport (optional)
+# classic uses /v3/sync and backfills limited-timeline gaps from /messages.
+# sliding opts into MSC4186 Simplified Sliding Sync and requires a homeserver
+# advertising org.matrix.simplified_msc3575 (checked by `mindroom doctor`).
+# Sliding positions are connection-scoped, so a restarted backend replays at
+# most sliding_timeline_limit events per room; older undelivered events are
+# not recovered.
+# Changing matrix_sync restarts running agents to pick up the new transport.
+matrix_sync:
+  mode: classic                    # Default: classic
+  sliding_timeline_limit: 100      # Default: 100 (per-room window for sliding requests)
 
 # Timezone for scheduled tasks (optional)
 timezone: America/Los_Angeles      # Default: UTC
@@ -493,10 +638,6 @@ Room-specific `authorization.room_permissions` users are invited only through th
 Root Space admin reconciliation is grant-only and preserves existing Matrix admins.
 Removing a user from `authorization.global_users` stops future MindRoom authorization but does not automatically demote that user in the Space.
 Demote stale Space admins manually in a Matrix client when needed.
-
-`matrix_delivery.ignore_unverified_devices` is an explicit opt-in for outgoing encrypted Matrix sends.
-Leave it `false` to preserve Matrix E2EE device-trust checks.
-Setting it to `true` can improve bot delivery when rooms contain unverified devices, but Matrix may encrypt messages for devices the bot has not verified.
 
 ## Credential Seeds
 
@@ -544,11 +685,16 @@ No plaintext-to-encrypted migration is performed automatically, so configure the
 
 ## Debug Logging
 
-`debug.log_llm_requests` enables pre-provider request assembly logging for troubleshooting.
+Every completed model request emits a privacy-safe structured `LLM usage` log event with provider and model identifiers.
+When provider usage data is available, the event also includes provider-normalized context input tokens, uncached input tokens, and a cache-read ratio without prompt content.
+When provider usage data is unavailable, the event sets `usage_available` to false and omits token and prompt-cache counters.
+`debug.log_llm_requests` additionally enables best-effort provider-request logging for troubleshooting without changing model-call success or failure.
 When enabled, MindRoom writes JSONL request records under `debug.llm_request_log_dir` or `mindroom_data/logs/llm_requests` by default.
-Those records include prompts, messages, tool schemas, model parameters, correlation IDs, requester metadata, and source Matrix event metadata.
+Those records include prompts, messages, the final provider-prepared tool array after MindRoom wire transformations, model parameters, correlation IDs, requester metadata, and source Matrix event metadata.
 The same flag also records successful tool-call rows in `mindroom_data/tracking/tool_calls.jsonl` so tool activity can be correlated with LLM request logs.
 Tool failures are always recorded in `tool_calls.jsonl`, even when request logging is disabled.
+Tool-call rows include a `timing` object with result-ready, before-hook, approval, and tool-body durations when those phases are measured.
+Set `MINDROOM_TIMING=1` to emit additional structured debug timing events for stream-visible tool-call start, stream-visible tool-call completion, and full bridge completion.
 Audit logging remains enabled.
 Credential-bearing fields such as tokens, cookies, passwords, API keys, and authorization headers are redacted before log records are emitted.
 These artifacts can still contain sensitive non-credential prompt, argument, and result data.
@@ -624,6 +770,7 @@ Run `mindroom avatars sync --force` to replace existing Matrix room or root-spac
 - [Memory](https://docs.mindroom.chat/memory/) - Configure memory providers and behavior
 - [Knowledge Bases](https://docs.mindroom.chat/knowledge/) - Configure file-backed knowledge bases
 - [Voice](https://docs.mindroom.chat/voice/) - Configure speech-to-text voice processing
+- [Voice Calls](https://docs.mindroom.chat/voice-calls/) - Configure agents joining Element Call voice calls
 - [Authorization](https://docs.mindroom.chat/authorization/) - Configure user and room access control
 - [Matrix Space](https://docs.mindroom.chat/matrix-space/) - Configure the root Matrix Space for managed rooms
 - [Skills](https://docs.mindroom.chat/skills/) - Skill format, gating, and allowlists
@@ -649,6 +796,7 @@ Run `mindroom avatars sync --force` to replace existing Matrix room or root-spac
 - `authorization.aliases` maps bridge bot user IDs to canonical users so bridged messages inherit the same permissions (see [Authorization](https://docs.mindroom.chat/authorization/))
 - `authorization.room_permissions` accepts room IDs, full room aliases, and managed room keys
 - `matrix_room_access.mode` defaults to `single_user_private`; this preserves current private/invite-only behavior
+- `matrix_room_access.encrypt_managed_rooms` enables Matrix end-to-end encryption on managed rooms; per-room `rooms.<key>.encrypted` overrides it, enabling is irreversible, and MindRoom never disables encryption on a room
 - In `multi_user` mode, MindRoom sets managed room join rules and directory visibility from config
 - In `multi_user` mode, MindRoom also reconciles managed room power levels so `com.mindroom.thread.tags` can be written at PL0
 - Publishing to the room directory requires the managing service account (typically router) to have moderator/admin power in each room

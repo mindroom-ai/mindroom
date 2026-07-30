@@ -1,7 +1,6 @@
 """Test tool metadata JSON snapshot for dashboard consumption."""
 
 import gc
-import inspect
 import json
 import sys
 from dataclasses import replace
@@ -19,7 +18,7 @@ import mindroom.tool_system.metadata as metadata_module
 # Import tools to trigger tool registration
 import mindroom.tools  # noqa: F401
 import mindroom.tools.custom_api as custom_api_module
-from mindroom.config.main import Config, load_config
+from mindroom.config.main import Config, ConfigRuntimeValidationError, load_config
 from mindroom.constants import resolve_runtime_paths
 from mindroom.redaction import REDACTED
 from mindroom.server_fetch_url import ServerFetchUrlError
@@ -36,10 +35,10 @@ from mindroom.tool_system.metadata import (
     deserialize_tool_validation_snapshot,
     export_tools_metadata,
     get_tool_by_name,
-    register_tool_with_metadata,
     resolved_tool_validation_snapshot_for_runtime,
     serialize_tool_validation_snapshot,
 )
+from mindroom.tool_system.registration import register_tool_with_metadata
 from mindroom.tool_system.registry_state import (
     BUILTIN_TOOL_METADATA,
     BUILTIN_TOOL_REGISTRY,
@@ -50,14 +49,15 @@ from mindroom.tool_system.registry_state import (
     reconcile_dynamic_tool_state,
     restore_tool_registry_snapshot,
 )
-from mindroom.tool_system.worker_routing import ResolvedWorkerTarget, resolve_worker_target
+from mindroom.tool_system.worker_routing import (
+    ToolExecutionIdentity,
+    resolve_worker_target,
+)
 from mindroom.tools.crawl4ai import crawl4ai_tools
 from mindroom.tools.custom_api import custom_api_tools
 
 _BASE_TOOL_REGISTRY = TOOL_REGISTRY.copy()
 _BASE_TOOL_METADATA = TOOL_METADATA.copy()
-_SKIP_PARALLEL_FACTORY_IMPORTS = {"daytona", "openbb"}
-_OPTIONAL_TOOL_IMPORTS = frozenset({"telegram"})
 
 
 def _restore_builtin_tool_metadata_state() -> None:
@@ -66,6 +66,12 @@ def _restore_builtin_tool_metadata_state() -> None:
     TOOL_REGISTRY.update(_BASE_TOOL_REGISTRY)
     TOOL_METADATA.clear()
     TOOL_METADATA.update(_BASE_TOOL_METADATA)
+
+
+def _clear_module_origin_caches() -> None:
+    """Clear module-origin caches between tests."""
+    metadata_module._resolved_module_file.cache_clear()
+    metadata_module._module_file_within_root.cache_clear()
 
 
 def test_reconcile_dynamic_tool_state_replaces_only_owned_entries() -> None:
@@ -401,15 +407,48 @@ def test_module_origin_within_root_caches_path_resolution(
             resolve_calls += 1
         return original_resolve(self, *args, **kwargs)
 
-    metadata_module._resolved_module_file.cache_clear()
+    _clear_module_origin_caches()
     monkeypatch.setattr(metadata_module.Path, "resolve", counted_resolve)
     try:
         assert metadata_module._module_origin_within_root(module, plugin_root)
         assert metadata_module._module_origin_within_root(module, plugin_root)
     finally:
-        metadata_module._resolved_module_file.cache_clear()
+        _clear_module_origin_caches()
 
     assert resolve_calls == 1
+
+
+def test_module_origin_within_root_caches_containment_checks(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Plugin validation rescans all of sys.modules, so containment must resolve once."""
+    plugin_root = tmp_path / "plugins" / "demo"
+    plugin_root.mkdir(parents=True)
+    module_path = plugin_root / "helper.py"
+    module_path.write_text("VALUE = 1\n", encoding="utf-8")
+    module = ModuleType("demo.helper")
+    module.__file__ = str(module_path)
+    outside_module = ModuleType("outside.helper")
+    outside_module.__file__ = str(tmp_path / "outside.py")
+    containment_calls = 0
+    original_is_relative_to = Path.is_relative_to
+
+    def counted_is_relative_to(self: Path, *args: object, **kwargs: object) -> bool:
+        nonlocal containment_calls
+        containment_calls += 1
+        return original_is_relative_to(self, *args, **kwargs)
+
+    _clear_module_origin_caches()
+    monkeypatch.setattr(metadata_module.Path, "is_relative_to", counted_is_relative_to)
+    try:
+        for _ in range(5):
+            assert metadata_module._module_origin_within_root(module, plugin_root)
+            assert not metadata_module._module_origin_within_root(outside_module, plugin_root)
+    finally:
+        _clear_module_origin_caches()
+
+    assert containment_calls == 2
 
 
 def test_restore_tool_registry_snapshot_uses_sys_modules_snapshot(
@@ -452,6 +491,11 @@ def test_tool_metadata_consistency() -> None:
         assert metadata.category, f"Tool {tool_name} missing category"
         assert metadata.status, f"Tool {tool_name} missing status"
         assert metadata.setup_type, f"Tool {tool_name} missing setup_type"
+        if tool_name not in TOOL_REGISTRY:
+            assert metadata.managed_init_args == (), (
+                f"{tool_name} is metadata-only and should not declare managed init args: "
+                f"{[managed_arg.value for managed_arg in metadata.managed_init_args]}"
+            )
 
 
 def test_dynamic_tools_is_durable_metadata_only_builtin(tmp_path: Path) -> None:
@@ -486,41 +530,6 @@ def test_tool_metadata_does_not_advertise_env_var_fallbacks() -> None:
             lowered = text.lower()
             assert not any(phrase in lowered for phrase in forbidden_phrases), (
                 f"Tool metadata for {tool_name} still advertises env fallback: {text}"
-            )
-
-
-@pytest.mark.timeout(180)
-def test_registered_tools_declare_managed_init_args_for_explicit_constructor_inputs() -> None:
-    """Built-in tools must opt in explicitly instead of relying on hidden constructor inference."""
-    managed_arg_names = {managed_arg.value for managed_arg in ToolManagedInitArg}
-
-    for tool_name, tool_factory in TOOL_REGISTRY.items():
-        metadata = TOOL_METADATA[tool_name]
-        if tool_name in _SKIP_PARALLEL_FACTORY_IMPORTS:
-            continue
-        try:
-            tool_class = tool_factory()
-        except ImportError as exc:
-            if tool_name in _OPTIONAL_TOOL_IMPORTS:
-                continue
-            msg = f"Unexpected ImportError while loading tool {tool_name}: {exc}"
-            pytest.fail(msg)
-        init_signature = inspect.signature(tool_class.__init__)
-        constructor_param_names = {name for name in init_signature.parameters if name != "self"}
-        expected_managed_args = tuple(
-            managed_arg for managed_arg in ToolManagedInitArg if managed_arg.value in constructor_param_names
-        )
-        assert metadata.managed_init_args == expected_managed_args, (
-            f"{tool_name} declares constructor inputs "
-            f"{sorted(constructor_param_names & managed_arg_names)} but metadata lists "
-            f"{[managed_arg.value for managed_arg in metadata.managed_init_args]}"
-        )
-
-    for tool_name, metadata in TOOL_METADATA.items():
-        if tool_name not in TOOL_REGISTRY:
-            assert metadata.managed_init_args == (), (
-                f"{tool_name} is metadata-only and should not declare managed init args: "
-                f"{[managed_arg.value for managed_arg in metadata.managed_init_args]}"
             )
 
 
@@ -571,9 +580,11 @@ def test_get_tool_by_name_passes_declared_managed_init_args(tmp_path: Path) -> N
             *,
             runtime_paths: object,
             worker_target: object,
+            current_room_id: str | None,
         ) -> None:
             self.runtime_paths = runtime_paths
             self.worker_target = worker_target
+            self.current_room_id = current_room_id
             super().__init__(name=tool_name, tools=[])
 
     @register_tool_with_metadata(
@@ -584,6 +595,7 @@ def test_get_tool_by_name_passes_declared_managed_init_args(tmp_path: Path) -> N
         managed_init_args=(
             ToolManagedInitArg.RUNTIME_PATHS,
             ToolManagedInitArg.WORKER_TARGET,
+            ToolManagedInitArg.CURRENT_ROOM_ID,
         ),
     )
     def _explicit_runtime_tool_factory() -> type[ExplicitRuntimeToolkit]:
@@ -596,10 +608,19 @@ def test_get_tool_by_name_passes_declared_managed_init_args(tmp_path: Path) -> N
     )
 
     try:
+        execution_identity = ToolExecutionIdentity(
+            channel="matrix",
+            agent_name="general",
+            requester_id="@user:localhost",
+            room_id="!room:localhost",
+            thread_id="$thread:localhost",
+            resolved_thread_id="$thread:localhost",
+            session_id="session",
+        )
         worker_target = resolve_worker_target(
             "shared",
             "general",
-            execution_identity=None,
+            execution_identity=execution_identity,
             tenant_id=runtime_paths.env_value("CUSTOMER_ID"),
             account_id=runtime_paths.env_value("ACCOUNT_ID"),
         )
@@ -610,14 +631,8 @@ def test_get_tool_by_name_passes_declared_managed_init_args(tmp_path: Path) -> N
         )
         assert isinstance(tool, ExplicitRuntimeToolkit)
         assert tool.runtime_paths == runtime_paths
-        assert tool.worker_target == ResolvedWorkerTarget(
-            worker_scope="shared",
-            routing_agent_name="general",
-            execution_identity=None,
-            tenant_id=None,
-            account_id=None,
-            worker_key=None,
-        )
+        assert tool.worker_target == worker_target
+        assert tool.current_room_id == execution_identity.room_id
     finally:
         TOOL_REGISTRY.pop(tool_name, None)
         TOOL_METADATA.pop(tool_name, None)
@@ -790,6 +805,139 @@ def test_validate_authored_overrides_rejects_bad_types_and_password_fields() -> 
         TOOL_METADATA.pop(tool_name, None)
 
 
+def test_searxng_include_tools_override_filters_registered_functions(tmp_path: Path) -> None:
+    """Universal Agno toolkit filters should retain selected functions."""
+    runtime_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "storage",
+    )
+
+    tool = get_tool_by_name(
+        "searxng",
+        runtime_paths,
+        credential_overrides={"host": "https://search.example.com"},
+        tool_config_overrides={
+            "include_tools": ["search_web", "news_search", "image_search"],
+        },
+        disable_sandbox_proxy=True,
+        worker_target=None,
+    )
+
+    assert set(tool.functions) == {"search_web", "news_search", "image_search"}
+
+
+def test_searxng_empty_include_tools_override_filters_all_functions(tmp_path: Path) -> None:
+    """An explicit empty universal allowlist should expose no toolkit functions."""
+    runtime_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "storage",
+    )
+
+    tool = get_tool_by_name(
+        "searxng",
+        runtime_paths,
+        credential_overrides={"host": "https://search.example.com"},
+        tool_config_overrides={"include_tools": []},
+        disable_sandbox_proxy=True,
+        worker_target=None,
+    )
+
+    assert not tool.functions
+
+
+def test_file_empty_exclude_patterns_override_reaches_constructor(tmp_path: Path) -> None:
+    """Declared string-array fields should preserve an explicit empty list."""
+    runtime_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "storage",
+    )
+
+    tool = get_tool_by_name(
+        "file",
+        runtime_paths,
+        tool_config_overrides={"exclude_patterns": []},
+        disable_sandbox_proxy=True,
+        worker_target=None,
+    )
+
+    assert tool.exclude_patterns == []
+
+
+def test_custom_toolkit_exclude_tools_override_filters_async_functions(tmp_path: Path) -> None:
+    """Universal filters should work when a Toolkit subclass omits filter constructor kwargs."""
+    runtime_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "storage",
+    )
+
+    tool = get_tool_by_name(
+        "scheduler",
+        runtime_paths,
+        tool_config_overrides={"exclude_tools": ["cancel_schedule"]},
+        disable_sandbox_proxy=True,
+        worker_target=None,
+    )
+
+    assert set(tool.async_functions) == {
+        "schedule",
+        "edit_schedule",
+        "list_schedules",
+    }
+
+
+@pytest.mark.parametrize("tool_name", ["composio", "memory"])
+def test_non_toolkit_registration_rejects_universal_filters(tool_name: str) -> None:
+    """Universal filters should not validate for non-Toolkit catalog entries."""
+    with pytest.raises(ToolConfigOverrideError, match="unknown authored override field"):
+        _validate_authored_overrides(
+            tool_name,
+            {"include_tools": ["GITHUB_CREATE_ISSUE"]},
+            config_path_prefix="agents.code.tools[0]",
+        )
+
+
+def test_config_load_rejects_unknown_tool_override_key(tmp_path: Path) -> None:
+    """Config runtime validation should name the tool and unknown override key."""
+    runtime_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "storage",
+    )
+
+    with pytest.raises(ConfigRuntimeValidationError) as exc_info:
+        Config.validate_with_runtime(
+            {
+                "models": {
+                    "default": {
+                        "provider": "openai",
+                        "id": "gpt-5.6",
+                    },
+                },
+                "router": {"model": "default"},
+                "agents": {
+                    "research": {
+                        "display_name": "Research",
+                        "role": "Search the web",
+                        "model": "default",
+                        "tools": [
+                            {
+                                "searxng": {
+                                    "host": "https://search.example.com",
+                                    "fixed_max_results": 10,
+                                    "unknown_filter": ["search_web"],
+                                },
+                            },
+                        ],
+                    },
+                },
+            },
+            runtime_paths,
+        )
+
+    message = str(exc_info.value)
+    assert "searxng.unknown_filter" in message
+    assert "unknown authored override field" in message
+
+
 def test_tool_validation_snapshot_round_trips_mcp_override_validation(tmp_path: Path) -> None:
     """Validation snapshots should preserve explicit MCP override-validator semantics."""
     runtime_paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml")
@@ -832,6 +980,38 @@ def test_deserialize_tool_validation_snapshot_rejects_non_boolean_runtime_loadab
                     "agent_override_fields": [],
                     "authored_override_validator": "default",
                     "runtime_loadable": "yes",
+                },
+            },
+        )
+
+
+def test_deserialize_tool_validation_snapshot_rejects_non_boolean_room_context() -> None:
+    """Validation snapshot payloads should type-check room-context requirements strictly."""
+    with pytest.raises(TypeError, match="requires_room_context to a boolean"):
+        deserialize_tool_validation_snapshot(
+            {
+                "todo": {
+                    "config_fields": [],
+                    "agent_override_fields": [],
+                    "authored_override_validator": "default",
+                    "requires_room_context": "yes",
+                    "runtime_loadable": True,
+                },
+            },
+        )
+
+
+def test_deserialize_tool_validation_snapshot_rejects_non_boolean_toolkit_filter_support() -> None:
+    """Validation snapshot payloads should type-check toolkit-filter support strictly."""
+    with pytest.raises(TypeError, match="supports_toolkit_filters to a boolean"):
+        deserialize_tool_validation_snapshot(
+            {
+                "todo": {
+                    "config_fields": [],
+                    "agent_override_fields": [],
+                    "authored_override_validator": "default",
+                    "supports_toolkit_filters": "yes",
+                    "runtime_loadable": True,
                 },
             },
         )

@@ -2,70 +2,43 @@
 
 from __future__ import annotations
 
-import json
-import tempfile
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from pathlib import Path
 from typing import TYPE_CHECKING
 
 from mindroom.constants import tracking_dir
+from mindroom.durable_write import (
+    OverrideRecord,
+    load_cached_override_records,
+    write_bounded_override_records,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Container
+    from pathlib import Path
 
     from mindroom.constants import RuntimePaths
 
 _THREAD_MODELS_FILENAME = "thread_models.json"
 _MAX_TRACKED_THREADS = 1000
 
-# Parsed store keyed by path and invalidated by mtime, so per-turn model
-# resolution does not re-read and re-parse the file on every call.
-_load_cache: dict[Path, tuple[int, dict[str, dict[str, str]]]] = {}
-
 
 def _store_path(runtime_paths: RuntimePaths) -> Path:
     return tracking_dir(runtime_paths) / _THREAD_MODELS_FILENAME
 
 
-def _load_overrides(path: Path) -> dict[str, dict[str, str]]:
+def _is_valid_override(_thread_id: str, record: dict[object, object]) -> bool:
+    """Return whether one persisted thread-model record has the required shape."""
+    return isinstance(record.get("model"), str) and isinstance(record.get("set_at", ""), str)
+
+
+def _load_overrides(path: Path) -> dict[str, OverrideRecord]:
     """Load persisted overrides, treating a missing or unreadable file as empty."""
-    try:
-        mtime_ns = path.stat().st_mtime_ns
-    except OSError:
-        return {}
-    cached = _load_cache.get(path)
-    if cached is not None and cached[0] == mtime_ns:
-        return cached[1]
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
-        data = {}
-    if not isinstance(data, dict):
-        data = {}
-    # Records must keep the shape the store guarantees: a string model name
-    # and a string set_at so prune sorting cannot fail on mixed types.
-    overrides = {
-        thread_id: record
-        for thread_id, record in data.items()
-        if isinstance(record, dict)
-        and isinstance(record.get("model"), str)
-        and isinstance(record.get("set_at", ""), str)
-    }
-    _load_cache[path] = (mtime_ns, overrides)
-    return overrides
+    return load_cached_override_records(path, _is_valid_override)
 
 
-def _save_overrides(path: Path, overrides: dict[str, dict[str, str]]) -> None:
-    if len(overrides) > _MAX_TRACKED_THREADS:
-        newest = sorted(overrides.items(), key=lambda item: item[1].get("set_at", ""), reverse=True)
-        overrides = dict(newest[:_MAX_TRACKED_THREADS])
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.NamedTemporaryFile("w", dir=path.parent, suffix=".tmp", delete=False, encoding="utf-8") as temp_file:
-        temp_file.write(json.dumps(overrides, indent=2, sort_keys=True))
-        temp_path = Path(temp_file.name)
-    temp_path.replace(path)
-    _load_cache.pop(path, None)
+def _save_overrides(path: Path, overrides: dict[str, OverrideRecord]) -> None:
+    write_bounded_override_records(path, overrides, max_records=_MAX_TRACKED_THREADS)
 
 
 def _get_thread_model_override(runtime_paths: RuntimePaths, thread_id: str | None) -> str | None:
@@ -114,7 +87,7 @@ def set_thread_model_override(
 ) -> None:
     """Persist one thread's model override, replacing any previous one."""
     path = _store_path(runtime_paths)
-    overrides = dict(_load_overrides(path))
+    overrides = _load_overrides(path)
     overrides[thread_id] = {
         "model": model_name,
         "room_id": room_id,
@@ -127,7 +100,7 @@ def set_thread_model_override(
 def clear_thread_model_override(runtime_paths: RuntimePaths, thread_id: str) -> bool:
     """Remove one thread's model override; return whether one was present."""
     path = _store_path(runtime_paths)
-    overrides = dict(_load_overrides(path))
+    overrides = _load_overrides(path)
     if thread_id not in overrides:
         return False
     del overrides[thread_id]

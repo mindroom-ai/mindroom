@@ -8,14 +8,14 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from mindroom.tool_system.metadata import (
+from mindroom.tool_system.declarations import (
     ConfigField,
     SetupType,
     ToolCategory,
     ToolManagedInitArg,
     ToolStatus,
-    register_tool_with_metadata,
 )
+from mindroom.tool_system.registration import register_tool_with_metadata
 from mindroom.tools import (
     compact_context,  # noqa: F401
     delegate,  # noqa: F401
@@ -41,6 +41,7 @@ from mindroom.tools.browser import browser_tools
 from mindroom.tools.browserbase import browserbase_tools
 from mindroom.tools.cal_com import cal_com_tools
 from mindroom.tools.calculator import calculator_tools
+from mindroom.tools.callback_manager import callback_manager_tools
 from mindroom.tools.cartesia import cartesia_tools
 from mindroom.tools.claude_agent import claude_agent_tools
 from mindroom.tools.clickup import clickup_tools
@@ -54,6 +55,7 @@ from mindroom.tools.custom_api import custom_api_tools
 from mindroom.tools.dalle import dalle_tools
 from mindroom.tools.daytona import daytona_tools
 from mindroom.tools.desi_vocal import desi_vocal_tools
+from mindroom.tools.desktop import desktop_tools
 from mindroom.tools.discord import discord_tools
 from mindroom.tools.docker import docker_tools
 from mindroom.tools.duckdb import duckdb_tools
@@ -62,6 +64,7 @@ from mindroom.tools.e2b import e2b_tools
 from mindroom.tools.eleven_labs import eleven_labs_tools
 from mindroom.tools.email import email_tools
 from mindroom.tools.exa import exa_tools
+from mindroom.tools.external_trigger_manager import external_trigger_manager_tools
 from mindroom.tools.fal import fal_tools
 from mindroom.tools.file import file_tools
 from mindroom.tools.file_generation import file_generation_tools
@@ -73,8 +76,10 @@ from mindroom.tools.github import github_tools
 from mindroom.tools.gmail import gmail_tools
 from mindroom.tools.google_bigquery import google_bigquery_tools
 from mindroom.tools.google_calendar import google_calendar_tools
+from mindroom.tools.google_docs import google_docs_tools
 from mindroom.tools.google_drive import google_drive_tools
 from mindroom.tools.google_maps import google_maps_tools
+from mindroom.tools.google_scholar import google_scholar_tools
 from mindroom.tools.google_sheets import google_sheets_tools
 from mindroom.tools.googlesearch import googlesearch_tools
 from mindroom.tools.groq import groq_tools
@@ -87,6 +92,7 @@ from mindroom.tools.lumalabs import lumalabs_tools
 from mindroom.tools.matrix_api import matrix_api_tools
 from mindroom.tools.matrix_message import matrix_message_tools
 from mindroom.tools.matrix_room import matrix_room_tools
+from mindroom.tools.matrix_voice_message import matrix_voice_message_tools
 from mindroom.tools.mem0 import mem0_tools
 from mindroom.tools.modelslabs import modelslabs_tools
 from mindroom.tools.moviepy_video_tools import moviepy_video_tools
@@ -122,13 +128,16 @@ from mindroom.tools.subagents import subagents_tools
 from mindroom.tools.tavily import tavily_tools
 from mindroom.tools.telegram import telegram_tools
 from mindroom.tools.thread_model import thread_model_tools
+from mindroom.tools.thread_resolution import thread_resolution_tools
 from mindroom.tools.thread_summary import register_thread_summary_tools
 from mindroom.tools.thread_tags import thread_tags_tools
+from mindroom.tools.todo import todo_tools
 from mindroom.tools.todoist import todoist_tools
 from mindroom.tools.trafilatura import trafilatura_tools
 from mindroom.tools.trello import trello_tools
 from mindroom.tools.twilio import twilio_tools
 from mindroom.tools.unsplash import unsplash_tools
+from mindroom.tools.update_awareness import update_awareness_tools
 from mindroom.tools.visualization import visualization_tools
 from mindroom.tools.web_browser_tools import web_browser_tools
 from mindroom.tools.webex import webex_tools
@@ -163,6 +172,7 @@ __all__ = [
     "browserbase_tools",
     "cal_com_tools",
     "calculator_tools",
+    "callback_manager_tools",
     "cartesia_tools",
     "claude_agent_tools",
     "clickup_tools",
@@ -176,6 +186,7 @@ __all__ = [
     "dalle_tools",
     "daytona_tools",
     "desi_vocal_tools",
+    "desktop_tools",
     "discord_tools",
     "docker_tools",
     "duckdb_tools",
@@ -184,6 +195,7 @@ __all__ = [
     "eleven_labs_tools",
     "email_tools",
     "exa_tools",
+    "external_trigger_manager_tools",
     "fal_tools",
     "file_generation_tools",
     "file_tools",
@@ -195,8 +207,10 @@ __all__ = [
     "gmail_tools",
     "google_bigquery_tools",
     "google_calendar_tools",
+    "google_docs_tools",
     "google_drive_tools",
     "google_maps_tools",
+    "google_scholar_tools",
     "google_sheets_tools",
     "googlesearch_tools",
     "groq_tools",
@@ -209,6 +223,7 @@ __all__ = [
     "matrix_api_tools",
     "matrix_message_tools",
     "matrix_room_tools",
+    "matrix_voice_message_tools",
     "mem0_tools",
     "modelslabs_tools",
     "moviepy_video_tools",
@@ -245,12 +260,15 @@ __all__ = [
     "tavily_tools",
     "telegram_tools",
     "thread_model_tools",
+    "thread_resolution_tools",
     "thread_tags_tools",
+    "todo_tools",
     "todoist_tools",
     "trafilatura_tools",
     "trello_tools",
     "twilio_tools",
     "unsplash_tools",
+    "update_awareness_tools",
     "visualization_tools",
     "web_browser_tools",
     "webex_tools",

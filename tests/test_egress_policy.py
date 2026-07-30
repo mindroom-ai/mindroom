@@ -7,6 +7,9 @@ from typing import TYPE_CHECKING
 
 import pytest
 
+from mindroom.config.agent import AgentConfig
+from mindroom.config.main import Config
+from mindroom.config.models import ModelConfig
 from mindroom.egress.policy import (
     EgressGrantSubject,
     WorkerEgressPolicy,
@@ -249,10 +252,10 @@ def test_tool_and_worker_provisioning_resolve_the_same_policy(monkeypatch: pytes
         captured.update(payload)
         return {"expires_at": 123}
 
-    class Config:
-        def get_agent_execution_scope(self, agent_name: str) -> str:
-            del agent_name
-            return "user_agent"
+    real_config = Config(
+        agents={"assistant": AgentConfig(display_name="Assistant", worker_scope="user_agent")},
+        models={"default": ModelConfig(provider="openai", id="test-model")},
+    )
 
     class Context:
         agent_name = "assistant"
@@ -260,7 +263,7 @@ def test_tool_and_worker_provisioning_resolve_the_same_policy(monkeypatch: pytes
         resolved_thread_id = None
         thread_id = "$thread"
         requester_id = "@user:server"
-        config = Config()
+        config = real_config
 
     monkeypatch.setattr(approved_egress_module, "_post_grant", post_grant)
     monkeypatch.setattr(approved_egress_module, "get_tool_runtime_context", lambda: Context())
@@ -272,7 +275,7 @@ def test_tool_and_worker_provisioning_resolve_the_same_policy(monkeypatch: pytes
 
     result = asyncio.run(
         approved_egress_module.approved_egress_tools()().request_network_access(
-            "docs.example.com",
+            ["docs.example.com"],
             5,
             "Need docs",
         ),
@@ -299,10 +302,10 @@ def test_tool_static_allow_short_circuit_agrees_with_policy_decision(
 
     result = asyncio.run(
         approved_egress_module.approved_egress_tools()().request_network_access(
-            "docs.example.com",
+            ["docs.example.com"],
             5,
             "Need docs",
         ),
     )
 
-    assert "docs.example.com is already allowed" in result
+    assert "Already allowed by the static egress allowlist: docs.example.com" in result

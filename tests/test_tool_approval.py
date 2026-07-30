@@ -4,9 +4,10 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING, Any
-from unittest.mock import AsyncMock, MagicMock, call
+from typing import TYPE_CHECKING, Any, Literal
+from unittest.mock import AsyncMock, MagicMock
 
 import nio
 import pytest
@@ -22,6 +23,7 @@ from mindroom.approval_manager import (
     SentApprovalEvent,
     _ApprovalManager,
     _build_event_arguments_preview,
+    _build_full_event_arguments,
     _LiveApprovalWaiter,
     get_approval_store,
     initialize_approval_store,
@@ -45,6 +47,7 @@ from mindroom.tool_approval import (
     resolve_tool_approval_approver,
     tool_requires_approval_for_openai_compat,
 )
+from mindroom.tools import approved_egress as _approved_egress  # noqa: F401 - registers the approval exemption
 from tests.approval_test_support import resolve_pending_approval as _resolve_pending_approval
 from tests.conftest import bind_runtime_paths, test_runtime_paths
 from tests.identity_helpers import persist_entity_accounts
@@ -414,6 +417,55 @@ async def test_live_card_response_ignores_cached_terminal_edit_from_different_se
     assert decision is not None
     assert decision.status == "approved"
     editor.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_live_card_response_wins_when_approval_card_is_cached(tmp_path: Path) -> None:
+    cache = FakeEventCache()
+    sender = AsyncMock(return_value=SentApprovalEvent("$approval"))
+    editor = AsyncMock(return_value=True)
+    store = initialize_approval_store(
+        test_runtime_paths(tmp_path),
+        sender=sender,
+        editor=editor,
+        event_cache=cache,
+        transport_sender=lambda: "@mindroom_router:localhost",
+    )
+    task = asyncio.create_task(
+        store.request_approval(
+            tool_name="read_file",
+            arguments={"path": "notes.txt"},
+            room_id="!room:localhost",
+            requester_id="@user:localhost",
+            approver_user_id="@user:localhost",
+            timeout_seconds=30,
+        ),
+    )
+    pending = await _wait_for_pending(store, sender=sender)
+    await cache.store_event(
+        pending.card_event_id,
+        pending.room_id,
+        _approval_card(
+            approval_id=pending.approval_id,
+            event_id=pending.card_event_id,
+            room_id=pending.room_id,
+            sender=pending.card_sender_id,
+            approver=pending.approver_user_id,
+        ),
+    )
+
+    result = await store.handle_card_response(
+        room_id=pending.room_id,
+        sender_id=pending.approver_user_id,
+        card_event_id=pending.card_event_id,
+        status="approved",
+        reason=None,
+    )
+    decision = await task
+
+    assert result.resolved is True
+    assert decision.status == "approved"
+    assert editor.await_args.args[2]["status"] == "approved"
 
 
 @pytest.mark.asyncio
@@ -808,11 +860,15 @@ async def test_handle_live_approval_id_response_rejects_waiter_from_wrong_room(t
 
 
 @pytest.mark.asyncio
-async def test_handle_card_response_orphan_approval_falls_through_until_startup_cleanup(tmp_path: Path) -> None:
+@pytest.mark.parametrize("response_status", ["approved", "denied"])
+async def test_public_matrix_action_expires_trusted_pending_orphan_without_approving(
+    tmp_path: Path,
+    response_status: Literal["approved", "denied"],
+) -> None:
     cache = FakeEventCache()
     await cache.store_event("$approval", "!room:localhost", _approval_card())
     editor = AsyncMock(return_value=True)
-    store = _ApprovalManager(
+    store = initialize_approval_store(
         test_runtime_paths(tmp_path),
         editor=editor,
         event_cache=cache,
@@ -820,25 +876,64 @@ async def test_handle_card_response_orphan_approval_falls_through_until_startup_
         transport_sender=lambda: "@mindroom_router:localhost",
     )
 
-    result = await store.handle_card_response(
-        room_id="!room:localhost",
-        sender_id="@user:localhost",
-        card_event_id="$approval",
-        status="approved",
-        reason=None,
+    result = await handle_matrix_approval_action(
+        MatrixApprovalAction(
+            room_id="!room:localhost",
+            sender_id="@user:localhost",
+            card_event_id="$approval",
+            approval_id="approval-1",
+            status=response_status,
+            reason=None,
+        ),
     )
 
-    assert result.consumed is False
-    assert result.resolved is False
-    editor.assert_not_awaited()
-
-    assert await store.discard_pending_on_startup() == 1
+    assert result.consumed is True
+    assert result.resolved is True
+    assert store.has_live_work() is False
     assert editor.await_args.args[:2] == ("!room:localhost", "$approval")
-    assert editor.await_args.args[2]["status"] == "expired"
+    replacement = editor.await_args.args[2]
+    assert replacement["status"] == "expired"
+    assert replacement["resolution_reason"] == "Original tool request is no longer active."
+    assert replacement["resolved_by"] == "@user:localhost"
 
 
 @pytest.mark.asyncio
 async def test_request_approval_truncated_approval_fails_closed(tmp_path: Path) -> None:
+    runtime_paths = test_runtime_paths(tmp_path)
+    sender = AsyncMock(return_value=SentApprovalEvent("$approval"))
+    editor = AsyncMock(return_value=True)
+    store = initialize_approval_store(runtime_paths, sender=sender, editor=editor)
+    task = asyncio.create_task(
+        store.request_approval(
+            tool_name="write_file",
+            arguments={"content": "x" * 3_000_000},
+            room_id="!room:localhost",
+            requester_id="@user:localhost",
+            approver_user_id="@user:localhost",
+            timeout_seconds=30,
+        ),
+    )
+    pending = await _wait_for_pending(store, sender=sender)
+
+    card_content = sender.await_args.args[2]
+    assert card_content["arguments_truncated"] is True
+    assert card_content["approvable"] is False
+    assert "full_arguments" not in card_content
+
+    await _resolve_pending_approval(
+        store,
+        pending,
+        status="approved",
+    )
+    decision = await task
+
+    assert decision.status == "denied"
+    assert "too large to show in full" in (decision.reason or "")
+    assert editor.await_args.args[2]["status"] == "denied"
+
+
+@pytest.mark.asyncio
+async def test_request_approval_truncated_preview_with_full_arguments_can_be_approved(tmp_path: Path) -> None:
     runtime_paths = test_runtime_paths(tmp_path)
     sender = AsyncMock(return_value=SentApprovalEvent("$approval"))
     editor = AsyncMock(return_value=True)
@@ -855,6 +950,82 @@ async def test_request_approval_truncated_approval_fails_closed(tmp_path: Path) 
     )
     pending = await _wait_for_pending(store, sender=sender)
 
+    card_content = sender.await_args.args[2]
+    assert card_content["arguments_truncated"] is True
+    assert card_content["full_arguments"] == {"content": "x" * 10_000}
+    assert "approvable" not in card_content
+
+    await _resolve_pending_approval(
+        store,
+        pending,
+        status="approved",
+    )
+    decision = await task
+
+    assert decision.status == "approved"
+    assert editor.await_args.args[2]["status"] == "approved"
+
+
+@pytest.mark.asyncio
+async def test_request_approval_propagates_full_arguments_build_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def raise_unexpected(_arguments: dict[str, Any]) -> dict[str, Any] | None:
+        msg = "unexpected redaction failure"
+        raise ValueError(msg)
+
+    monkeypatch.setattr("mindroom.approval_manager._build_full_event_arguments", raise_unexpected)
+    runtime_paths = test_runtime_paths(tmp_path)
+    sender = AsyncMock(return_value=SentApprovalEvent("$approval"))
+    editor = AsyncMock(return_value=True)
+    store = initialize_approval_store(runtime_paths, sender=sender, editor=editor)
+
+    with pytest.raises(ValueError, match="unexpected redaction failure"):
+        await store.request_approval(
+            tool_name="write_file",
+            arguments={"content": "x" * 10_000},
+            room_id="!room:localhost",
+            requester_id="@user:localhost",
+            approver_user_id="@user:localhost",
+            timeout_seconds=30,
+        )
+
+    sender.assert_not_awaited()
+    editor.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_request_approval_honors_transport_stripped_full_arguments(tmp_path: Path) -> None:
+    """When the transport strips full arguments (failed sidecar upload), approve must fail closed."""
+    runtime_paths = test_runtime_paths(tmp_path)
+
+    async def send_without_full_arguments(
+        _room_id: str,
+        _thread_id: str | None,
+        content: dict[str, Any],
+    ) -> SentApprovalEvent:
+        sent_content = {key: value for key, value in content.items() if key != "full_arguments"}
+        sent_content["approvable"] = False
+        return SentApprovalEvent(event_id="$approval", sent_content=sent_content)
+
+    sender = AsyncMock(side_effect=send_without_full_arguments)
+    editor = AsyncMock(return_value=True)
+    store = initialize_approval_store(runtime_paths, sender=sender, editor=editor)
+    task = asyncio.create_task(
+        store.request_approval(
+            tool_name="write_file",
+            arguments={"content": "x" * 10_000},
+            room_id="!room:localhost",
+            requester_id="@user:localhost",
+            approver_user_id="@user:localhost",
+            timeout_seconds=30,
+        ),
+    )
+    pending = await _wait_for_pending(store, sender=sender)
+
+    assert pending.full_arguments_available is False
+
     await _resolve_pending_approval(
         store,
         pending,
@@ -863,8 +1034,53 @@ async def test_request_approval_truncated_approval_fails_closed(tmp_path: Path) 
     decision = await task
 
     assert decision.status == "denied"
-    assert "displayed arguments are truncated" in (decision.reason or "")
-    assert editor.await_args.args[2]["status"] == "denied"
+    assert "too large to show in full" in (decision.reason or "")
+
+
+@pytest.mark.asyncio
+async def test_request_approval_honors_transport_non_approvable_flag_with_stale_full_arguments(
+    tmp_path: Path,
+) -> None:
+    """An explicit transport veto must win over stale full-argument delivery metadata."""
+    runtime_paths = test_runtime_paths(tmp_path)
+
+    async def send_non_approvable(
+        _room_id: str,
+        _thread_id: str | None,
+        content: dict[str, Any],
+    ) -> SentApprovalEvent:
+        return SentApprovalEvent(
+            event_id="$approval",
+            sent_content={**content, "approvable": False},
+        )
+
+    sender = AsyncMock(side_effect=send_non_approvable)
+    editor = AsyncMock(return_value=True)
+    store = initialize_approval_store(runtime_paths, sender=sender, editor=editor)
+    task = asyncio.create_task(
+        store.request_approval(
+            tool_name="write_file",
+            arguments={"content": "x" * 10_000},
+            room_id="!room:localhost",
+            requester_id="@user:localhost",
+            approver_user_id="@user:localhost",
+            timeout_seconds=30,
+        ),
+    )
+    pending = await _wait_for_pending(store, sender=sender)
+
+    assert pending.approvable is False
+    assert pending.full_arguments_available is True
+
+    await _resolve_pending_approval(
+        store,
+        pending,
+        status="approved",
+    )
+    decision = await task
+
+    assert decision.status == "denied"
+    assert "too large to show in full" in (decision.reason or "")
 
 
 @pytest.mark.asyncio
@@ -876,7 +1092,7 @@ async def test_truncated_approval_action_sends_denial_notice(tmp_path: Path) -> 
     task = asyncio.create_task(
         store.request_approval(
             tool_name="write_file",
-            arguments={"content": "x" * 10_000},
+            arguments={"content": "x" * 3_000_000},
             room_id="!room:localhost",
             thread_id="$thread",
             requester_id="@user:localhost",
@@ -1251,7 +1467,149 @@ async def test_approval_transport_returns_event_after_successful_send_without_se
         },
     )
 
-    assert sent == SentApprovalEvent(event_id="$approval")
+    assert sent == SentApprovalEvent(
+        event_id="$approval",
+        sent_content={
+            "approval_id": "approval-1",
+            "tool_name": "read_file",
+            "arguments": {"path": "notes.txt"},
+            "status": "pending",
+        },
+    )
+
+
+def _approval_transport_orchestrator(tmp_path: Path) -> tuple[_MultiAgentOrchestrator, MagicMock]:
+    runtime_paths = test_runtime_paths(tmp_path)
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths)
+    orchestrator.config = bind_runtime_paths(Config(), runtime_paths)
+    orchestrator._capture_runtime_loop()
+
+    client = MagicMock()
+    client.user_id = "@mindroom_router:localhost"
+    client.rooms = {"!room:localhost": nio.MatrixRoom("!room:localhost", "@mindroom_router:localhost")}
+    client.room_send = AsyncMock(return_value=nio.RoomSendResponse(event_id="$approval", room_id="!room:localhost"))
+    bot = MagicMock(agent_name="router", running=True, client=client)
+    orchestrator.agent_bots = {"router": bot}
+    orchestrator._approval_transport.cache_approval_event_now = AsyncMock()
+    return orchestrator, client
+
+
+@pytest.mark.asyncio
+async def test_approval_transport_keeps_small_full_arguments_inline(tmp_path: Path) -> None:
+    orchestrator, client = _approval_transport_orchestrator(tmp_path)
+    client.upload = AsyncMock()
+
+    content = {
+        "approval_id": "approval-1",
+        "tool_name": "write_file",
+        "arguments": {"content": "preview"},
+        "arguments_truncated": True,
+        "full_arguments": {"content": "x" * 2_000},
+        "status": "pending",
+    }
+    sent = await orchestrator._approval_transport.send_approval_event_now("!room:localhost", None, content)
+
+    assert sent is not None
+    assert sent.sent_content == content
+    client.upload.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_approval_transport_offloads_oversized_full_arguments_to_sidecar(tmp_path: Path) -> None:
+    orchestrator, client = _approval_transport_orchestrator(tmp_path)
+    client.upload = AsyncMock(return_value=(nio.UploadResponse("mxc://localhost/full-args"), None))
+
+    full_arguments = {"content": "word " * 20_000}
+    sent = await orchestrator._approval_transport.send_approval_event_now(
+        "!room:localhost",
+        None,
+        {
+            "approval_id": "approval-1",
+            "tool_name": "write_file",
+            "arguments": {"content": "preview"},
+            "arguments_truncated": True,
+            "full_arguments": full_arguments,
+            "status": "pending",
+        },
+    )
+
+    assert sent is not None
+    sent_content = client.room_send.await_args.kwargs["content"]
+    assert "full_arguments" not in sent_content
+    assert sent_content["full_arguments_url"] == "mxc://localhost/full-args"
+    assert sent_content["full_arguments_info"]["mimetype"] == "application/json"
+    assert sent.sent_content == sent_content
+
+    uploaded_bytes = client.upload.await_args.kwargs["data_provider"](None, None).read()
+    assert json.loads(uploaded_bytes) == full_arguments
+
+
+@pytest.mark.asyncio
+async def test_approval_transport_offloads_encrypted_full_arguments_to_file_sidecar(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    orchestrator, client = _approval_transport_orchestrator(tmp_path)
+    client.rooms["!room:localhost"].encrypted = True
+    mxc_uri = "mxc://localhost/encrypted-full-args"
+    file_info = {
+        "url": mxc_uri,
+        "key": {"alg": "A256CTR", "k": "secret", "key_ops": ["encrypt", "decrypt"], "kty": "oct"},
+        "iv": "iv-value",
+        "hashes": {"sha256": "sha256-value"},
+        "v": "v2",
+        "size": 100_014,
+        "mimetype": "application/json",
+    }
+    upload_sidecar = AsyncMock(return_value=(mxc_uri, file_info))
+    monkeypatch.setattr("mindroom.approval_transport.upload_json_sidecar", upload_sidecar)
+
+    sent = await orchestrator._approval_transport.send_approval_event_now(
+        "!room:localhost",
+        None,
+        {
+            "approval_id": "approval-1",
+            "tool_name": "write_file",
+            "arguments": {"content": "preview"},
+            "arguments_truncated": True,
+            "full_arguments": {"content": "word " * 20_000},
+            "status": "pending",
+        },
+    )
+
+    assert sent is not None
+    sent_content = client.room_send.await_args.kwargs["content"]
+    assert sent_content["full_arguments_file"] == file_info
+    assert "full_arguments" not in sent_content
+    assert "full_arguments_url" not in sent_content
+    assert "full_arguments_info" not in sent_content
+    assert sent.sent_content == sent_content
+
+
+@pytest.mark.asyncio
+async def test_approval_transport_marks_card_non_approvable_when_sidecar_upload_fails(tmp_path: Path) -> None:
+    orchestrator, client = _approval_transport_orchestrator(tmp_path)
+    client.upload = AsyncMock(return_value=(nio.UploadError("boom"), None))
+
+    sent = await orchestrator._approval_transport.send_approval_event_now(
+        "!room:localhost",
+        None,
+        {
+            "approval_id": "approval-1",
+            "tool_name": "write_file",
+            "arguments": {"content": "preview"},
+            "arguments_truncated": True,
+            "full_arguments": {"content": "word " * 20_000},
+            "status": "pending",
+        },
+    )
+
+    assert sent is not None
+    sent_content = client.room_send.await_args.kwargs["content"]
+    assert "full_arguments" not in sent_content
+    assert "full_arguments_url" not in sent_content
+    assert sent_content["approvable"] is False
+    assert sent.sent_content == sent_content
 
 
 @pytest.mark.asyncio
@@ -1298,7 +1656,7 @@ async def test_approval_thread_relation_uses_requesting_agent_cache(tmp_path: Pa
     ) -> nio.RoomSendResponse:
         assert room_id == "!room:localhost"
         assert message_type == "io.mindroom.tool_approval"
-        assert ignore_unverified_devices is False
+        assert ignore_unverified_devices is True
         sent_contents.append(content)
         event_id = "$approval-edit" if "m.new_content" in content else "$approval"
         return nio.RoomSendResponse(event_id=event_id, room_id=room_id)
@@ -1340,16 +1698,16 @@ async def test_approval_thread_relation_uses_requesting_agent_cache(tmp_path: Pa
         },
     )
 
-    assert sent == SentApprovalEvent(event_id="$approval")
+    assert sent is not None
+    assert sent.event_id == "$approval"
+    assert sent.sent_content == sent_contents[0]
     assert edited is True
     assert sent_contents[0]["m.relates_to"]["m.in_reply_to"]["event_id"] == "$code-latest"
-    assert sent_contents[1]["m.new_content"]["m.relates_to"]["m.in_reply_to"]["event_id"] == "$code-latest"
-    assert code_bot.latest_thread_event_id_if_needed.await_count == 2
-    code_bot.latest_thread_event_id_if_needed.assert_has_awaits(
-        [
-            call("!room:localhost", "$thread", caller_label="approval_transport_thread_relation"),
-            call("!room:localhost", "$thread", caller_label="approval_transport_thread_relation"),
-        ],
+    assert "m.relates_to" not in sent_contents[1]["m.new_content"]
+    code_bot.latest_thread_event_id_if_needed.assert_awaited_once_with(
+        "!room:localhost",
+        "$thread",
+        caller_label="approval_transport_thread_relation",
     )
     router_bot.latest_thread_event_id_if_needed.assert_not_awaited()
 
@@ -1646,7 +2004,13 @@ async def test_card_response_for_resolved_card_is_not_consumed_without_live_wait
             },
         },
     )
-    store = _ApprovalManager(test_runtime_paths(tmp_path), event_cache=cache)
+    editor = AsyncMock(return_value=True)
+    store = _ApprovalManager(
+        test_runtime_paths(tmp_path),
+        editor=editor,
+        event_cache=cache,
+        transport_sender=lambda: "@mindroom_router:localhost",
+    )
 
     result = await store.handle_card_response(
         room_id="!room:localhost",
@@ -1658,10 +2022,85 @@ async def test_card_response_for_resolved_card_is_not_consumed_without_live_wait
 
     assert result.consumed is False
     assert result.resolved is False
+    editor.assert_not_awaited()
 
 
 @pytest.mark.asyncio
-async def test_card_response_for_cached_approval_is_not_consumed_without_live_waiter(tmp_path: Path) -> None:
+@pytest.mark.parametrize("card_status", ["approved", "denied", "expired"])
+async def test_card_response_for_terminal_original_card_is_untouched(
+    tmp_path: Path,
+    card_status: Literal["approved", "denied", "expired"],
+) -> None:
+    cache = FakeEventCache()
+    card = _approval_card()
+    card["content"]["status"] = card_status
+    await cache.store_event("$approval", "!room:localhost", card)
+    editor = AsyncMock(return_value=True)
+    store = _ApprovalManager(
+        test_runtime_paths(tmp_path),
+        editor=editor,
+        event_cache=cache,
+        transport_sender=lambda: "@mindroom_router:localhost",
+    )
+
+    result = await store.handle_card_response(
+        room_id="!room:localhost",
+        sender_id="@user:localhost",
+        card_event_id="$approval",
+        status="approved",
+        reason=None,
+    )
+
+    assert result.consumed is False
+    assert result.resolved is False
+    editor.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("card_status", [None, "invalid"])
+async def test_card_response_for_malformed_original_status_is_untouched(
+    tmp_path: Path,
+    card_status: str | None,
+) -> None:
+    cache = FakeEventCache()
+    card = _approval_card()
+    if card_status is None:
+        card["content"].pop("status")
+    else:
+        card["content"]["status"] = card_status
+    await cache.store_event("$approval", "!room:localhost", card)
+    editor = AsyncMock(return_value=True)
+    store = _ApprovalManager(
+        test_runtime_paths(tmp_path),
+        editor=editor,
+        event_cache=cache,
+        transport_sender=lambda: "@mindroom_router:localhost",
+    )
+
+    result = await store.handle_card_response(
+        room_id="!room:localhost",
+        sender_id="@user:localhost",
+        card_event_id="$approval",
+        status="approved",
+        reason=None,
+    )
+
+    assert result.consumed is False
+    assert result.resolved is False
+    editor.assert_not_awaited()
+
+
+def test_pending_approval_ignores_malformed_edit_status() -> None:
+    card = _approval_card()
+    card["content"]["status"] = "approved"
+    pending = PendingApproval.from_card_event(card, room_id="!room:localhost")
+
+    assert pending.latest_status({"content": None}) == "approved"
+    assert pending.latest_status({"content": {"status": "invalid"}}) == "approved"
+
+
+@pytest.mark.asyncio
+async def test_card_response_for_cached_orphan_rejects_non_approver(tmp_path: Path) -> None:
     cache = FakeEventCache()
     card = _approval_card()
     await cache.store_event("$approval", "!room:localhost", card)
@@ -1675,7 +2114,7 @@ async def test_card_response_for_cached_approval_is_not_consumed_without_live_wa
 
     result = await store.handle_card_response(
         room_id="!room:localhost",
-        sender_id="@user:localhost",
+        sender_id="@other:localhost",
         card_event_id="$approval",
         status="denied",
         reason="Too late.",
@@ -1799,9 +2238,9 @@ async def test_response_for_unknown_card_does_not_emit_terminal_edit(tmp_path: P
 
 
 @pytest.mark.asyncio
-async def test_response_for_unknown_card_does_not_read_cache(tmp_path: Path) -> None:
+async def test_response_for_unknown_card_uses_bounded_point_lookup(tmp_path: Path) -> None:
     cache = MagicMock()
-    cache.get_event = AsyncMock(side_effect=RuntimeError("cache should not run"))
+    cache.get_event = AsyncMock(return_value=None)
     editor = AsyncMock(return_value=True)
     store = _ApprovalManager(
         test_runtime_paths(tmp_path),
@@ -1820,12 +2259,12 @@ async def test_response_for_unknown_card_does_not_read_cache(tmp_path: Path) -> 
 
     assert result.consumed is False
     assert result.resolved is False
-    cache.get_event.assert_not_awaited()
+    cache.get_event.assert_awaited_once_with("!room:localhost", "$approval")
     editor.assert_not_awaited()
 
 
 @pytest.mark.asyncio
-async def test_card_response_ignores_same_router_cached_pending_without_history_scan(tmp_path: Path) -> None:
+async def test_card_response_expires_same_router_cached_pending_with_point_lookup(tmp_path: Path) -> None:
     cache = FakeEventCache()
     await cache.store_event("$approval", "!room:localhost", _approval_card())
     editor = AsyncMock(return_value=True)
@@ -1844,9 +2283,46 @@ async def test_card_response_ignores_same_router_cached_pending_without_history_
         reason="No.",
     )
 
-    assert result.consumed is False
-    assert result.resolved is False
-    editor.assert_not_awaited()
+    assert result.consumed is True
+    assert result.resolved is True
+    assert editor.await_args.args[2]["status"] == "expired"
+    assert editor.await_args.args[2]["resolution_reason"] == "Original tool request is no longer active."
+
+
+@pytest.mark.asyncio
+async def test_detached_card_response_ignores_untrusted_terminal_edit(tmp_path: Path) -> None:
+    cache = FakeEventCache()
+    card = _approval_card()
+    await cache.store_event("$approval", "!room:localhost", card)
+    await cache.store_event(
+        "$fake-edit",
+        "!room:localhost",
+        _approval_edit(
+            card,
+            event_id="$fake-edit",
+            sender="@attacker:localhost",
+            status="approved",
+        ),
+    )
+    editor = AsyncMock(return_value=True)
+    store = _ApprovalManager(
+        test_runtime_paths(tmp_path),
+        editor=editor,
+        event_cache=cache,
+        transport_sender=lambda: "@mindroom_router:localhost",
+    )
+
+    result = await store.handle_card_response(
+        room_id="!room:localhost",
+        sender_id="@user:localhost",
+        card_event_id="$approval",
+        status="denied",
+        reason=None,
+    )
+
+    assert result.consumed is True
+    assert result.resolved is True
+    assert editor.await_args.args[2]["status"] == "expired"
 
 
 @pytest.mark.asyncio
@@ -1876,7 +2352,33 @@ async def test_card_response_ignores_cross_router_matrix_only_card(tmp_path: Pat
 
 
 @pytest.mark.asyncio
-async def test_concurrent_cached_response_events_fall_through_without_terminal_edits(tmp_path: Path) -> None:
+async def test_card_response_ignores_cached_card_from_different_room(tmp_path: Path) -> None:
+    cache = FakeEventCache()
+    foreign_card = _approval_card(room_id="!other:localhost")
+    await cache.store_event("$approval", "!room:localhost", foreign_card)
+    editor = AsyncMock(return_value=True)
+    store = _ApprovalManager(
+        test_runtime_paths(tmp_path),
+        editor=editor,
+        event_cache=cache,
+        transport_sender=lambda: "@mindroom_router:localhost",
+    )
+
+    result = await store.handle_card_response(
+        room_id="!room:localhost",
+        sender_id="@user:localhost",
+        card_event_id="$approval",
+        status="approved",
+        reason=None,
+    )
+
+    assert result.consumed is False
+    assert result.resolved is False
+    editor.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_concurrent_cached_response_events_emit_one_expired_edit(tmp_path: Path) -> None:
     cache = FakeEventCache()
     await cache.store_event("$approval", "!room:localhost", _approval_card())
     edit_count = 0
@@ -1912,11 +2414,11 @@ async def test_concurrent_cached_response_events_fall_through_without_terminal_e
     )
     first_result, second_result = await asyncio.gather(first, second)
 
-    assert first_result.consumed is False
-    assert second_result.consumed is False
-    assert first_result.resolved is False
+    assert first_result.consumed is True
+    assert second_result.consumed is True
+    assert first_result.resolved is True
     assert second_result.resolved is False
-    assert edit_count == 0
+    assert edit_count == 1
 
 
 @pytest.mark.asyncio
@@ -2081,6 +2583,29 @@ async def test_discard_pending_on_startup_uses_cached_cards_without_history_scan
 
     assert await store.discard_pending_on_startup() == 1
     assert {call.args[1] for call in editor.await_args_list} == {"$cached-approval"}
+
+
+@pytest.mark.asyncio
+async def test_discard_pending_on_startup_expires_card_older_than_approval_timeout(tmp_path: Path) -> None:
+    cache = FakeEventCache()
+    old_timestamp = int((datetime.now(UTC) - timedelta(days=30)).timestamp() * 1000)
+    await cache.store_event(
+        "$old-approval",
+        "!room:localhost",
+        _approval_card(event_id="$old-approval", origin_server_ts=old_timestamp),
+    )
+    editor = AsyncMock(return_value=True)
+    store = _ApprovalManager(
+        test_runtime_paths(tmp_path),
+        editor=editor,
+        event_cache=cache,
+        approval_room_ids=lambda: {"!room:localhost"},
+        transport_sender=lambda: "@mindroom_router:localhost",
+    )
+
+    assert await store.discard_pending_on_startup() == 1
+    assert editor.await_args.args[1] == "$old-approval"
+    assert editor.await_args.args[2]["status"] == "expired"
 
 
 @pytest.mark.asyncio
@@ -2276,6 +2801,96 @@ def test_approval_arguments_preview_does_not_mark_literal_truncation_marker() ->
     assert truncated is False
 
 
+def test_full_event_arguments_returns_complete_payload() -> None:
+    arguments = {"content": "x" * 10_000, "path": "notes.txt"}
+
+    assert _build_full_event_arguments(arguments) == arguments
+
+
+def test_full_event_arguments_redacts_secrets_without_bypassing_truncation_checks() -> None:
+    arguments = {"api_key": "sk-live-1234567890abcdef", "content": "x" * 5_000}
+
+    full_arguments = _build_full_event_arguments(arguments)
+
+    assert full_arguments is not None
+    assert full_arguments["content"] == "x" * 5_000
+    assert "sk-live-1234567890abcdef" not in json.dumps(full_arguments)
+
+
+def test_full_event_arguments_rejects_payload_over_completeness_cap() -> None:
+    assert _build_full_event_arguments({"content": "x" * 3_000_000}) is None
+
+
+def test_full_event_arguments_accepts_sidecar_sized_payload() -> None:
+    payload = {"content": "x" * 100_000}
+
+    assert _build_full_event_arguments(payload) == payload
+
+
+def test_full_event_arguments_budgets_utf8_bytes_not_characters() -> None:
+    # 800k CJK chars stay under a character-based cap but encode to ~2.4MB, over the byte cap.
+    assert _build_full_event_arguments({"content": "汉" * 800_000}) is None
+    assert _build_full_event_arguments({"content": "汉" * 8_000}) == {"content": "汉" * 8_000}
+
+
+def test_full_event_arguments_accepts_structurally_complex_payload_below_byte_cap() -> None:
+    nested: object = "value"
+    for _ in range(20):
+        nested = {"nested": nested}
+    arguments = {"items": list(range(60_000)), "nested": nested}
+
+    assert _build_full_event_arguments(arguments) == arguments
+
+
+def test_pending_approval_parses_full_arguments_availability() -> None:
+    card = _approval_card(arguments_truncated=True)
+    assert PendingApproval.from_card_event(card, room_id="!room:localhost").full_arguments_available is False
+
+    card["content"]["full_arguments"] = {}
+    assert PendingApproval.from_card_event(card, room_id="!room:localhost").full_arguments_available is False
+
+    card["content"]["full_arguments"] = {"content": "x" * 10_000}
+    assert PendingApproval.from_card_event(card, room_id="!room:localhost").full_arguments_available is True
+
+
+def test_pending_approval_parses_sidecar_full_arguments_availability() -> None:
+    url_card = _approval_card(arguments_truncated=True)
+    url_card["content"]["full_arguments_url"] = "mxc://localhost/full-args"
+    assert PendingApproval.from_card_event(url_card, room_id="!room:localhost").full_arguments_available is False
+
+    url_card["content"]["full_arguments_info"] = {"size": 10_000, "mimetype": "application/json"}
+    assert PendingApproval.from_card_event(url_card, room_id="!room:localhost").full_arguments_available is True
+
+    file_card = _approval_card(arguments_truncated=True)
+    file_card["content"]["full_arguments_file"] = {}
+    assert PendingApproval.from_card_event(file_card, room_id="!room:localhost").full_arguments_available is False
+
+    file_card["content"]["full_arguments_file"] = {
+        "url": "mxc://localhost/full-args",
+        "key": {"alg": "A256CTR", "k": "secret", "key_ops": ["encrypt", "decrypt"], "kty": "oct"},
+        "iv": "iv-value",
+        "hashes": {"sha256": "sha256-value"},
+        "v": "v2",
+        "size": 10_000,
+        "mimetype": "application/json",
+    }
+    assert PendingApproval.from_card_event(file_card, room_id="!room:localhost").full_arguments_available is True
+
+
+def test_pending_approval_defaults_missing_approvable_flag_to_true() -> None:
+    card = _approval_card(arguments_truncated=True)
+
+    assert PendingApproval.from_card_event(card, room_id="!room:localhost").approvable is True
+
+
+@pytest.mark.parametrize(("value", "expected"), [(False, False), (True, True), (None, False), ("false", False)])
+def test_pending_approval_parses_explicit_approvable_flag(value: object, expected: bool) -> None:
+    card = _approval_card(arguments_truncated=True)
+    card["content"]["approvable"] = value
+
+    assert PendingApproval.from_card_event(card, room_id="!room:localhost").approvable is expected
+
+
 @pytest.mark.asyncio
 async def test_initialize_approval_store_rejects_storage_root_change_with_pending_waiter(tmp_path: Path) -> None:
     sender = AsyncMock(return_value=SentApprovalEvent("$approval"))
@@ -2400,6 +3015,49 @@ async def test_evaluate_tool_approval_rule_action_requires_approval(tmp_path: Pa
 
     assert requires_approval is True
     assert timeout_seconds > 0
+
+
+@pytest.mark.parametrize(
+    ("hostnames", "expected"),
+    [
+        (["docs.example.com"], False),
+        (["docs.example.com", "api.example.com"], False),
+        (["docs.example.com", "docs.other.test"], True),
+        (["docs.other.test"], True),
+        ([123], True),
+        (["https://docs.example.com"], True),
+        ("docs.example.com", True),
+        ([], True),
+    ],
+)
+@pytest.mark.asyncio
+async def test_evaluate_tool_approval_honors_tool_approval_exemption(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    hostnames: object,
+    expected: bool,
+) -> None:
+    """request_network_access calls where every hostname is statically allowlisted need no approval."""
+    monkeypatch.setenv("MINDROOM_APPROVED_EGRESS_ALLOWLIST", ".example.com")
+    runtime_paths = test_runtime_paths(tmp_path)
+    config = bind_runtime_paths(
+        Config(
+            agents={"code": AgentConfig(display_name="Code", role="Help with coding")},
+            models={"default": ModelConfig(provider="openai", id="gpt-5.4")},
+            tool_approval={"rules": [{"match": "request_network_access", "action": "require_approval"}]},
+        ),
+        runtime_paths,
+    )
+
+    requires_approval, _ = await evaluate_tool_approval(
+        config,
+        runtime_paths,
+        "request_network_access",
+        {"hostnames": hostnames, "ttl_minutes": 5, "reason": "Need docs."},
+        "code",
+    )
+
+    assert requires_approval is expected
 
 
 @pytest.mark.asyncio

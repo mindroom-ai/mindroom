@@ -20,10 +20,11 @@ from mindroom.delivery_gateway import (
     FinalDeliveryRequest,
     FinalizeStreamedResponseRequest,
     ResponseHookService,
+    ResponseIdentity,
 )
 from mindroom.dispatch_source import MESSAGE_SOURCE_KIND
 from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
-from mindroom.handled_turns import HandledTurnRecord
+from mindroom.handled_turns import TurnRecord
 from mindroom.history.types import HistoryScope
 from mindroom.hooks import (
     EVENT_MESSAGE_AFTER_RESPONSE,
@@ -45,7 +46,6 @@ from mindroom.message_target import MessageTarget
 from mindroom.post_response_effects import PostResponseEffectsDeps, ResponseOutcome
 from mindroom.response_lifecycle import ResponseLifecycle, ResponseLifecycleDeps
 from mindroom.response_runner import ResponseRequest
-from mindroom.turn_store import _LoadedTurnRecord
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
@@ -91,15 +91,11 @@ def _plugin(name: str, callbacks: list[object]) -> object:
 def _envelope(*, agent_name: str = "code", body: str = "hello") -> MessageEnvelope:
     return MessageEnvelope(
         source_event_id="$event",
-        room_id="!room:localhost",
         target=MessageTarget.resolve("!room:localhost", None, "$event"),
-        requester_id="@user:localhost",
-        sender_id="@user:localhost",
         body=body,
         attachment_ids=(),
         mentioned_agents=(),
         agent_name=agent_name,
-        source_kind=MESSAGE_SOURCE_KIND,
         origin=message_origin(
             sender_id="@user:localhost",
             requester_id="@user:localhost",
@@ -133,10 +129,12 @@ def _response_lifecycle(
             response_hooks=response_hooks,
             logger=get_logger("tests.response_lifecycle"),
         ),
-        response_kind="ai",
+        identity=ResponseIdentity(
+            response_kind="ai",
+            response_envelope=response_envelope,
+            correlation_id=correlation_id,
+        ),
         pipeline_timing=None,
-        response_envelope=response_envelope,
-        correlation_id=correlation_id,
     )
 
 
@@ -337,10 +335,12 @@ async def test_response_hook_service_emit_cancelled(tmp_path: Path) -> None:
     service = ResponseHookService(hook_context=hook_context)
 
     await service.emit_cancelled_response(
-        correlation_id="corr-svc",
-        envelope=_envelope(),
+        identity=ResponseIdentity(
+            response_kind="ai",
+            response_envelope=_envelope(),
+            correlation_id="corr-svc",
+        ),
         visible_response_event_id="$vis",
-        response_kind="ai",
     )
 
     assert len(seen) == 1
@@ -366,8 +366,11 @@ async def test_response_hook_service_skips_when_no_hooks(tmp_path: Path) -> None
 
     # Should not raise
     await service.emit_cancelled_response(
-        correlation_id="corr-noop",
-        envelope=_envelope(),
+        identity=ResponseIdentity(
+            response_kind="ai",
+            response_envelope=_envelope(),
+            correlation_id="corr-noop",
+        ),
     )
 
 
@@ -410,11 +413,12 @@ async def test_team_edit_regeneration_empty_prompt_emits_cancelled_hook_once(tmp
     """Edited team prompts that become blank must still emit one canonical cancelled hook."""
     bot = _team_bot(tmp_path)
     turn_store = bot._edit_regenerator.deps.turn_store
-    turn_record = HandledTurnRecord(
+    turn_record = TurnRecord(
         anchor_event_id="$original",
         source_event_ids=("$original",),
         response_event_id="$response",
         response_owner="team_bot",
+        requester_id="@user:localhost",
         history_scope=HistoryScope(kind="team", scope_id="team_bot"),
         conversation_target=MessageTarget.resolve("!room:localhost", None, "$original"),
     )
@@ -459,13 +463,10 @@ async def test_team_edit_regeneration_empty_prompt_emits_cancelled_hook_once(tmp
         patch.object(
             turn_store,
             "load_turn",
-            return_value=_LoadedTurnRecord(
-                record=turn_record,
-                requires_backfill=False,
-            ),
+            return_value=turn_record,
         ),
         patch.object(turn_store, "build_run_metadata", return_value={}),
-        patch.object(turn_store, "record_turn_record"),
+        patch.object(turn_store, "record_turn"),
         patch.object(turn_store, "remove_stale_runs_for_edit"),
         patch.object(bot._ingress_hook_runner, "emit_message_received_hooks", new=AsyncMock(return_value=False)),
     ):
@@ -521,9 +522,11 @@ async def test_suppressed_final_delivery_emits_cancelled_hook(
             target=MessageTarget.resolve("!room:localhost", None, "$event"),
             existing_event_id=None,
             response_text="suppressed",
-            response_kind="ai",
-            response_envelope=_envelope(),
-            correlation_id="corr-suppressed-final",
+            identity=ResponseIdentity(
+                response_kind="ai",
+                response_envelope=_envelope(),
+                correlation_id="corr-suppressed-final",
+            ),
             tool_trace=None,
             extra_content=None,
         ),
@@ -661,9 +664,11 @@ async def test_deliver_final_delivery_failure_emits_cancelled_hook(
                 existing_event_id=existing_event_id,
                 existing_event_is_placeholder=False,
                 response_text="visible response",
-                response_kind="ai",
-                response_envelope=_envelope(),
-                correlation_id="corr-delivery-failure",
+                identity=ResponseIdentity(
+                    response_kind="ai",
+                    response_envelope=_envelope(),
+                    correlation_id="corr-delivery-failure",
+                ),
                 tool_trace=None,
                 extra_content=None,
             ),
@@ -736,9 +741,11 @@ async def test_final_only_provider_runs_before_response_then_after_response_once
                 canonical_final_body_candidate="final body",
             ),
             initial_delivery_kind="sent",
-            response_kind="ai",
-            response_envelope=_envelope(),
-            correlation_id="corr-final-only-provider",
+            identity=ResponseIdentity(
+                response_kind="ai",
+                response_envelope=_envelope(),
+                correlation_id="corr-final-only-provider",
+            ),
             tool_trace=None,
             extra_content=None,
             existing_event_id="$thinking",
@@ -810,9 +817,11 @@ async def test_suppressed_placeholder_cleanup_failure_returns_typed_outcome_afte
             existing_event_id="$placeholder",
             existing_event_is_placeholder=True,
             response_text="suppressed",
-            response_kind="ai",
-            response_envelope=_envelope(),
-            correlation_id="corr-suppressed-cleanup-fail",
+            identity=ResponseIdentity(
+                response_kind="ai",
+                response_envelope=_envelope(),
+                correlation_id="corr-suppressed-cleanup-fail",
+            ),
             tool_trace=None,
             extra_content=None,
         ),
@@ -880,9 +889,11 @@ async def test_suppressed_placeholder_cleanup_exception_returns_typed_outcome_af
             existing_event_id="$placeholder",
             existing_event_is_placeholder=True,
             response_text="suppressed",
-            response_kind="ai",
-            response_envelope=_envelope(),
-            correlation_id="corr-suppressed-cleanup-exception",
+            identity=ResponseIdentity(
+                response_kind="ai",
+                response_envelope=_envelope(),
+                correlation_id="corr-suppressed-cleanup-exception",
+            ),
             tool_trace=None,
             extra_content=None,
         ),

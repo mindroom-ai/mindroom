@@ -5,17 +5,23 @@ from __future__ import annotations
 import logging
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 
 from mindroom.credential_policy import credential_service_policy
 from mindroom.credentials import get_runtime_credentials_manager, sync_shared_credentials_to_worker
+from mindroom.runtime_env_policy import CREDENTIALS_ENCRYPTION_KEY_ENV, credentials_encryption_key_value
 from mindroom.tool_system.worker_routing import resolved_worker_key_scope, worker_dir_name, worker_id_for_key
-from mindroom.workers.backend import WorkerBackendError, effective_idle_status, filter_and_sort_worker_handles
+from mindroom.workers.backend import (
+    WorkerBackendError,
+    effective_idle_status,
+    filter_and_sort_worker_handles,
+)
 from mindroom.workers.backends._lifecycle import mark_worker_failed, mark_worker_idle, touch_worker_lifecycle
 from mindroom.workers.models import (
     ProgressSink,
     WorkerHandle,
+    WorkerMaintenanceResult,
     WorkerReadyPhase,
     WorkerReadyProgress,
     WorkerSpec,
@@ -23,7 +29,11 @@ from mindroom.workers.models import (
 )
 
 from . import kubernetes_resources as resources
-from .kubernetes_config import KubernetesWorkerBackendConfig, kubernetes_backend_config_signature
+from .kubernetes_config import (
+    KubernetesWorkerBackendConfig,
+    credentials_encryption_key_hash,
+    kubernetes_backend_config_signature,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -40,6 +50,7 @@ __all__ = [
 _COLD_START_GRACE_SECONDS = 1.5
 _WAITING_PROGRESS_INTERVAL_SECONDS = 5.0
 _PROGRESS_REPORTER_JOIN_TIMEOUT_SECONDS = 1.0
+_READY_WORKER_REVALIDATE_SECONDS = 300.0
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +61,14 @@ class _ProgressReporterState:
     cold_start_emitted: bool = False
     next_waiting_elapsed: float = _WAITING_PROGRESS_INTERVAL_SECONDS
     reporter_done: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class _ReadyWorkerCacheEntry:
+    spec: WorkerSpec
+    handle: WorkerHandle
+    validated_at: float
+    credentials_encryption_key_hash: str | None
 
 
 def _noop_finalize_progress(_phase: WorkerReadyPhase, _error: str | None) -> None:
@@ -294,6 +313,8 @@ class KubernetesWorkerBackend:
         self._progress_sinks: dict[str, list[ProgressSink]] = {}
         self._progress_snapshots: dict[str, WorkerReadyProgress | None] = {}
         self._progress_sinks_lock = threading.Lock()
+        self._ready_workers: dict[str, _ReadyWorkerCacheEntry] = {}
+        self._ready_workers_lock = threading.Lock()
 
     @classmethod
     def from_runtime(
@@ -317,7 +338,8 @@ class KubernetesWorkerBackend:
 
     def shutdown(self) -> None:
         """Kubernetes workers are persistent; manager replacement leaves them running."""
-        return
+        with self._ready_workers_lock:
+            self._ready_workers.clear()
 
     def _register_progress_sink(self, worker_key: str, progress_sink: ProgressSink) -> None:
         with self._progress_sinks_lock:
@@ -362,6 +384,9 @@ class KubernetesWorkerBackend:
         try:
             with self._worker_lock(worker_key):
                 timestamp = time.time() if now is None else now
+                cached_handle = self._reuse_cached_ready_worker(spec, now=timestamp)
+                if cached_handle is not None:
+                    return cached_handle
                 worker_id = self._worker_id(worker_key)
                 state_subpath = self._state_subpath(worker_key)
                 existing = self._resources.read_deployment(worker_id)
@@ -433,11 +458,7 @@ class KubernetesWorkerBackend:
                             status="starting",
                         )
                         self._resources.patch_deployment(worker_id, annotations=annotations)
-                    sync_shared_credentials_to_worker(
-                        worker_key,
-                        allowed_services=self.worker_grantable_credentials,
-                        credentials_manager=get_runtime_credentials_manager(self.runtime_paths),
-                    )
+                    self._sync_shared_credentials(worker_key)
                     self._resources.apply_service(worker_id)
                     deployment = self._resources.wait_for_ready(
                         worker_id,
@@ -466,11 +487,17 @@ class KubernetesWorkerBackend:
                     raise WorkerBackendError(failure_reason) from exc
 
                 finalize_progress("ready", None)
-                deployment.metadata.annotations = {
+                final_deployment_annotations = {
                     **dict(deployment.metadata.annotations or {}),
                     **final_annotations,
                 }
-                return self._handle_from_deployment(deployment, now=timestamp)
+                handle = self._handle_from_deployment(
+                    deployment,
+                    now=timestamp,
+                    annotations_override=final_deployment_annotations,
+                )
+                self._store_ready_worker(spec, handle, validated_at=timestamp)
+                return handle
         finally:
             if progress_sink is not None:
                 self._unregister_progress_sink(worker_key, progress_sink)
@@ -478,19 +505,30 @@ class KubernetesWorkerBackend:
     def touch_worker(self, worker_key: str, *, now: float | None = None) -> WorkerHandle | None:
         """Refresh last-used metadata for one existing worker."""
         timestamp = time.time() if now is None else now
-        worker_id = self._worker_id(worker_key)
-        deployment = self._resources.read_deployment(worker_id)
-        if deployment is None:
-            return None
+        with self._worker_lock(worker_key):
+            cached_handle = self._touch_cached_worker(worker_key, now=timestamp)
+            if cached_handle is not None:
+                return cached_handle
 
-        annotations = dict(deployment.metadata.annotations or {})
-        resources.apply_lifecycle_annotations(
-            annotations,
-            touch_worker_lifecycle(resources.lifecycle_from_annotations(annotations, now=timestamp), now=timestamp),
-        )
-        self._resources.patch_deployment(worker_id, annotations=annotations)
-        deployment.metadata.annotations = annotations
-        return self._handle_from_deployment(deployment, now=timestamp)
+            worker_id = self._worker_id(worker_key)
+            deployment = self._resources.read_deployment(worker_id)
+            if deployment is None:
+                return None
+
+            annotations = dict(deployment.metadata.annotations or {})
+            resources.apply_lifecycle_annotations(
+                annotations,
+                touch_worker_lifecycle(
+                    resources.lifecycle_from_annotations(annotations, now=timestamp),
+                    now=timestamp,
+                ),
+            )
+            self._resources.patch_deployment(worker_id, annotations=annotations)
+            return self._handle_from_deployment(
+                deployment,
+                now=timestamp,
+                annotations_override=annotations,
+            )
 
     def list_workers(self, *, include_idle: bool = True, now: float | None = None) -> list[WorkerHandle]:
         """List workers known to this backend."""
@@ -503,54 +541,96 @@ class KubernetesWorkerBackend:
     def cleanup_idle_workers(self, *, now: float | None = None) -> list[WorkerHandle]:
         """Scale idle workers to zero while retaining their state."""
         timestamp = time.time() if now is None else now
+        return self._cleanup_idle_deployments(self._resources.list_deployments(), now=timestamp)
+
+    def _cleanup_idle_deployments(
+        self,
+        deployments: list[resources.KubernetesDeployment],
+        *,
+        now: float,
+    ) -> list[WorkerHandle]:
+        """Scale idle workers from one already-loaded Deployment snapshot."""
         cleaned: list[WorkerHandle] = []
-        for deployment in self._resources.list_deployments():
-            handle = self._handle_from_deployment(deployment, now=timestamp)
+        for deployment in deployments:
+            handle = self._handle_from_deployment(deployment, now=now)
             if handle.status != "idle" or int(deployment.spec.replicas or 0) == 0:
                 continue
             annotations = dict(deployment.metadata.annotations or {})
             resources.apply_lifecycle_annotations(
                 annotations,
-                mark_worker_idle(resources.lifecycle_from_annotations(annotations, now=timestamp)),
+                mark_worker_idle(resources.lifecycle_from_annotations(annotations, now=now)),
             )
             self._resources.patch_deployment(handle.worker_id, replicas=0, annotations=annotations)
             self._resources.delete_service(handle.worker_id)
             self._resources.delete_secret(handle.worker_id)
-            deployment.spec.replicas = 0
-            deployment.metadata.annotations = annotations
-            cleaned.append(self._handle_from_deployment(deployment, now=timestamp))
+            self._invalidate_ready_worker(handle.worker_key)
+            cleaned.append(
+                self._handle_from_deployment(
+                    deployment,
+                    now=now,
+                    annotations_override=annotations,
+                    replicas_override=0,
+                ),
+            )
         return cleaned
 
-    def reconcile_drifted_workers(self, *, now: float | None = None) -> list[WorkerHandle]:
-        """Recreate scaled-down worker Deployments whose pod template drifted from current config.
-
-        Running workers are left untouched; the ensure-time template-hash check
-        recreates them on their next provisioning after they scale down. The
-        listed snapshot only nominates candidates; each worker is re-validated
-        against a fresh read under its provisioning lock before recreation.
-        """
-        if not self.config.reconcile_pod_templates:
-            return []
-        timestamp = time.time() if now is None else now
+    def _reconcile_drifted_deployments(
+        self,
+        deployments: list[resources.KubernetesDeployment],
+        *,
+        now: float,
+        scaled_down_worker_ids: frozenset[str],
+    ) -> list[WorkerHandle]:
+        """Reconcile drifted workers from one already-loaded Deployment snapshot."""
         reconciled: list[WorkerHandle] = []
-        for deployment in self._resources.list_deployments():
-            handle = self._handle_from_deployment(deployment, now=timestamp)
-            if not self._is_reconcile_candidate(deployment, handle=handle):
+        for deployment in deployments:
+            handle = self._handle_from_deployment(deployment, now=now)
+            if not self._is_reconcile_candidate(
+                deployment,
+                handle=handle,
+                scaled_down=handle.worker_id in scaled_down_worker_ids,
+            ):
                 continue
             worker_lock = self._worker_lock(handle.worker_key)
             if not worker_lock.acquire(blocking=False):
                 continue
             try:
-                refreshed = self._reconcile_worker_deployment(handle, now=timestamp)
+                refreshed = self._reconcile_worker_deployment(handle, now=now)
             finally:
                 worker_lock.release()
             if refreshed is not None:
                 reconciled.append(refreshed)
         return reconciled
 
-    def _is_reconcile_candidate(self, deployment: resources.KubernetesDeployment, *, handle: WorkerHandle) -> bool:
-        """Return whether one Deployment is a scaled-down worker with a drifted pod template."""
-        if handle.status != "idle" or int(deployment.spec.replicas or 0) != 0:
+    def maintain_workers(self, *, now: float | None = None) -> WorkerMaintenanceResult:
+        """Clean and reconcile workers using one lightweight Deployment list."""
+        timestamp = time.time() if now is None else now
+        deployments = self._resources.list_deployments()
+        cleaned = self._cleanup_idle_deployments(deployments, now=timestamp)
+        reconciled = (
+            self._reconcile_drifted_deployments(
+                deployments,
+                now=timestamp,
+                scaled_down_worker_ids=frozenset(worker.worker_id for worker in cleaned),
+            )
+            if self.config.reconcile_pod_templates
+            else []
+        )
+        return WorkerMaintenanceResult(cleaned=tuple(cleaned), reconciled=tuple(reconciled))
+
+    def _is_reconcile_candidate(
+        self,
+        deployment: resources.KubernetesDeployment,
+        *,
+        handle: WorkerHandle,
+        scaled_down: bool,
+    ) -> bool:
+        """Return whether one Deployment is a scaled-down worker with a drifted pod template.
+
+        ``scaled_down`` marks workers this same maintenance pass just scaled to
+        zero, whose snapshot still reports the pre-cleanup replica count.
+        """
+        if handle.status != "idle" or (not scaled_down and int(deployment.spec.replicas or 0) != 0):
             return False
         annotations = dict(deployment.metadata.annotations or {})
         private_agent_names = resources.parse_private_agent_names_annotation(annotations)
@@ -584,7 +664,7 @@ class KubernetesWorkerBackend:
         if live is None:
             return None
         live_handle = self._handle_from_deployment(live, now=now)
-        if not self._is_reconcile_candidate(live, handle=live_handle):
+        if not self._is_reconcile_candidate(live, handle=live_handle, scaled_down=False):
             return None
         annotations = dict(live.metadata.annotations or {})
         try:
@@ -613,6 +693,24 @@ class KubernetesWorkerBackend:
     ) -> WorkerHandle:
         """Persist a failed worker startup or execution state."""
         timestamp = time.time() if now is None else now
+        with self._worker_lock(worker_key):
+            return self._record_failure_locked(
+                worker_key,
+                failure_reason,
+                now=timestamp,
+                annotations_override=annotations_override,
+            )
+
+    def _record_failure_locked(
+        self,
+        worker_key: str,
+        failure_reason: str,
+        *,
+        now: float,
+        annotations_override: dict[str, str] | None = None,
+    ) -> WorkerHandle:
+        """Persist failure state while holding the worker provisioning lock."""
+        self._invalidate_ready_worker(worker_key)
         worker_id = self._worker_id(worker_key)
         deployment = self._resources.read_deployment(worker_id)
         if deployment is None:
@@ -625,17 +723,118 @@ class KubernetesWorkerBackend:
         resources.apply_lifecycle_annotations(
             annotations,
             mark_worker_failed(
-                resources.lifecycle_from_annotations(annotations, now=timestamp),
-                now=timestamp,
+                resources.lifecycle_from_annotations(annotations, now=now),
+                now=now,
                 failure_reason=failure_reason,
             ),
         )
         self._resources.patch_deployment(worker_id, replicas=0, annotations=annotations)
         self._resources.delete_service(worker_id)
         self._resources.delete_secret(worker_id)
-        deployment.spec.replicas = 0
-        deployment.metadata.annotations = annotations
-        return self._handle_from_deployment(deployment, now=timestamp)
+        return self._handle_from_deployment(
+            deployment,
+            now=now,
+            annotations_override=annotations,
+            replicas_override=0,
+        )
+
+    def _sync_shared_credentials(self, worker_key: str) -> None:
+        sync_shared_credentials_to_worker(
+            worker_key,
+            allowed_services=self.worker_grantable_credentials,
+            credentials_manager=get_runtime_credentials_manager(self.runtime_paths),
+        )
+
+    def _reuse_cached_ready_worker(self, spec: WorkerSpec, *, now: float) -> WorkerHandle | None:
+        entry = self._cached_ready_worker(spec.worker_key, spec=spec, now=now)
+        if entry is None:
+            return None
+        try:
+            handle = self._patch_cached_worker_usage(entry, now=now)
+            if handle is None:
+                return None
+            self._sync_shared_credentials(spec.worker_key)
+        except WorkerBackendError:
+            self._invalidate_ready_worker(spec.worker_key)
+            raise
+        except Exception as exc:
+            self._invalidate_ready_worker(spec.worker_key)
+            raise WorkerBackendError(str(exc)) from exc
+        return handle
+
+    def _current_credentials_encryption_key_hash(self) -> str | None:
+        encryption_key = credentials_encryption_key_value(
+            self.runtime_paths.env_value(CREDENTIALS_ENCRYPTION_KEY_ENV),
+        )
+        return credentials_encryption_key_hash(encryption_key)
+
+    def _store_ready_worker(
+        self,
+        spec: WorkerSpec,
+        handle: WorkerHandle,
+        *,
+        validated_at: float,
+    ) -> None:
+        entry = _ReadyWorkerCacheEntry(
+            spec=spec,
+            handle=handle,
+            validated_at=validated_at,
+            credentials_encryption_key_hash=self._current_credentials_encryption_key_hash(),
+        )
+        with self._ready_workers_lock:
+            self._ready_workers[spec.worker_key] = entry
+
+    def _invalidate_ready_worker(self, worker_key: str) -> None:
+        with self._ready_workers_lock:
+            self._ready_workers.pop(worker_key, None)
+
+    def _cached_ready_worker(
+        self,
+        worker_key: str,
+        *,
+        spec: WorkerSpec | None = None,
+        now: float,
+    ) -> _ReadyWorkerCacheEntry | None:
+        with self._ready_workers_lock:
+            entry = self._ready_workers.get(worker_key)
+            if entry is None:
+                return None
+            cache_invalid = (
+                (spec is not None and entry.spec != spec)
+                or entry.credentials_encryption_key_hash != self._current_credentials_encryption_key_hash()
+                or now - entry.validated_at >= _READY_WORKER_REVALIDATE_SECONDS
+                or now - entry.handle.last_used_at >= self.idle_timeout_seconds
+            )
+            if cache_invalid:
+                self._ready_workers.pop(worker_key, None)
+                return None
+            return entry
+
+    def _touch_cached_worker(self, worker_key: str, *, now: float) -> WorkerHandle | None:
+        entry = self._cached_ready_worker(worker_key, now=now)
+        if entry is None:
+            return None
+        return self._patch_cached_worker_usage(entry, now=now)
+
+    def _patch_cached_worker_usage(self, entry: _ReadyWorkerCacheEntry, *, now: float) -> WorkerHandle | None:
+        handle = replace(entry.handle, last_used_at=now, status="ready", failure_reason=None)
+        exists = self._resources.patch_deployment_annotations(
+            handle.worker_id,
+            annotations={
+                resources.ANNOTATION_LAST_USED_AT: str(now),
+                resources.ANNOTATION_WORKER_STATUS: "ready",
+                resources.ANNOTATION_FAILURE_REASON: "",
+            },
+        )
+        if not exists:
+            self._invalidate_ready_worker(entry.spec.worker_key)
+            return None
+        self._store_ready_worker(
+            entry.spec,
+            handle,
+            validated_at=entry.validated_at,
+        )
+        return handle
 
     def _record_startup_failure_or_cleanup_secret(
         self,
@@ -651,7 +850,7 @@ class KubernetesWorkerBackend:
         deployment_after_failure = self._resources.read_deployment(worker_id)
         if deployment_after_failure is not None:
             if destructive_failure_allowed:
-                self.record_failure(
+                self._record_failure_locked(
                     worker_key,
                     failure_reason,
                     now=timestamp,
@@ -686,9 +885,16 @@ class KubernetesWorkerBackend:
         generation_ready = observed_generation is None or generation is None or observed_generation >= generation
         return generation_ready and ready >= desired
 
-    def _handle_from_deployment(self, deployment: resources.KubernetesDeployment, *, now: float) -> WorkerHandle:
+    def _handle_from_deployment(
+        self,
+        deployment: resources.KubernetesDeployment,
+        *,
+        now: float,
+        annotations_override: dict[str, str] | None = None,
+        replicas_override: int | None = None,
+    ) -> WorkerHandle:
         metadata = deployment.metadata
-        annotations = dict(metadata.annotations or {})
+        annotations = dict(metadata.annotations or {}) if annotations_override is None else dict(annotations_override)
         worker_key = annotations.get(resources.ANNOTATION_WORKER_KEY)
         if not worker_key:
             msg = f"Deployment '{metadata.name}' is missing worker metadata."
@@ -698,7 +904,12 @@ class KubernetesWorkerBackend:
         last_used_at = resources.parse_annotation_float(annotations, resources.ANNOTATION_LAST_USED_AT, now)
         created_at = resources.parse_annotation_float(annotations, resources.ANNOTATION_CREATED_AT, last_used_at)
         last_started_at = annotations.get(resources.ANNOTATION_LAST_STARTED_AT)
-        status = self._effective_status(deployment, now=now)
+        status = self._effective_status(
+            deployment,
+            now=now,
+            annotations_override=annotations,
+            replicas_override=replicas_override,
+        )
         endpoint_root = resources.service_host(worker_id, self.config.namespace, self.config.worker_port)
         return WorkerHandle(
             worker_id=worker_id,
@@ -723,12 +934,21 @@ class KubernetesWorkerBackend:
             },
         )
 
-    def _effective_status(self, deployment: resources.KubernetesDeployment, *, now: float) -> WorkerStatus:
-        annotations = dict(deployment.metadata.annotations or {})
+    def _effective_status(
+        self,
+        deployment: resources.KubernetesDeployment,
+        *,
+        now: float,
+        annotations_override: dict[str, str] | None = None,
+        replicas_override: int | None = None,
+    ) -> WorkerStatus:
+        annotations = (
+            dict(deployment.metadata.annotations or {}) if annotations_override is None else annotations_override
+        )
         stored_status = annotations.get(resources.ANNOTATION_WORKER_STATUS, "starting")
         if stored_status == "failed":
             return "failed"
-        replicas = int(deployment.spec.replicas or 0)
+        replicas = int(deployment.spec.replicas or 0) if replicas_override is None else replicas_override
         if replicas == 0:
             return "idle"
         if not self._deployment_ready(deployment):

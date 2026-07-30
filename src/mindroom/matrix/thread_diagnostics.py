@@ -5,12 +5,13 @@ This module is a deliberate dependency-cycle breaker between the cache package (
 
 Diagnostic semantics:
 
-1. ``thread_read_source`` distinguishes ``cache`` (trusted snapshot), ``homeserver`` (fresh fetch),
+1. ``thread_read_source`` distinguishes ``cache`` (a stored snapshot with no gap marker), ``homeserver`` (fresh fetch),
    ``stale_cache`` (advisory fallback after a failed refetch), and ``degraded`` (empty fail-open result
    from a dispatch timeout).
 
 2. ``is_thread_history_degraded`` is the planning-level check: both ``stale_cache`` and ``degraded``
-   reads count as degraded and must not be memoized or treated as authoritative context.
+   reads count as degraded and must not be treated as authoritative context. Thread reads are not
+   memoized, so there is no cached copy of one to guard against either.
 
 3. ``is_thread_history_source_degraded`` is the stricter proof-level check: only the explicit
    ``degraded`` source disqualifies a history from serving as thread-root proof, because a stale

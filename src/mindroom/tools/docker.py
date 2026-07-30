@@ -4,14 +4,14 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from mindroom.tool_system.metadata import (
+from mindroom.tool_system.declarations import (
     ConfigField,
     SetupType,
     ToolCategory,
     ToolExecutionTarget,
     ToolStatus,
-    register_tool_with_metadata,
 )
+from mindroom.tool_system.registration import register_tool_with_metadata
 
 if TYPE_CHECKING:
     from agno.tools.docker import DockerTools
@@ -35,9 +35,7 @@ if TYPE_CHECKING:
             type="string[]",
             required=False,
             default=None,
-            description=(
-                "Optional allowlist of Docker command functions to expose. Leave empty to expose all Docker commands."
-            ),
+            description="Optional allowlist of Docker command functions to expose. Leave unset to expose all commands.",
         ),
     ],
     dependencies=["docker"],

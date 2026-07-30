@@ -20,6 +20,7 @@ from agno.run import RunContext
 from agno.run.agent import RunOutput
 from agno.session import AgentSession
 from agno.tools.function import Function
+from agno.tools.toolkit import Toolkit
 from pydantic import ValidationError
 
 from mindroom.agent_storage import get_agent_runtime_state_dbs
@@ -27,6 +28,8 @@ from mindroom.agents import (
     _CULTURE_MANAGER_CACHE,
     _PRIVATE_CULTURE_MANAGER_CACHE,
     _load_context_files,
+    _prune_toolkit_functions,
+    agent_build_can_overlap_file_memory,
     build_agent_toolkit,
     create_agent,
     get_agent_toolkit_names,
@@ -41,14 +44,19 @@ from mindroom.config.agent import (
 from mindroom.config.knowledge import KnowledgeBaseConfig, KnowledgeGitConfig
 from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig, ModelConfig
-from mindroom.constants import RuntimePaths, resolve_runtime_paths
+from mindroom.constants import ROUTER_AGENT_NAME, RuntimePaths, resolve_runtime_paths
 from mindroom.credentials import CredentialsManager, load_scoped_credentials
 from mindroom.entity_resolution import managed_entity_power_user_ids_for_room
-from mindroom.history import close_team_runtime_state_dbs
+from mindroom.entity_rooms import get_rooms_for_entity
+from mindroom.history.runtime import close_team_runtime_state_dbs
 from mindroom.knowledge import resolve_agent_knowledge_access
 from mindroom.knowledge.availability import KnowledgeAvailability
 from mindroom.matrix.state import MatrixState
-from mindroom.prompts import HIDDEN_TOOL_CALLS_PROMPT, OPENAI_COMPAT_HISTORY_GUIDANCE
+from mindroom.prompts import (
+    HIDDEN_TOOL_CALLS_PROMPT,
+    OPENAI_COMPAT_HISTORY_GUIDANCE,
+    WORKSPACE_SKILL_AUTHORING_PROMPT,
+)
 from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.teams import materialize_exact_team_members
 from mindroom.tool_system.output_files import OUTPUT_PATH_ARGUMENT
@@ -181,6 +189,20 @@ def test_managed_entity_power_user_ids_for_room_includes_configured_teams(tmp_pa
     ]
 
 
+def test_get_rooms_for_entity_uses_authored_entity_rooms_only(tmp_path: Path) -> None:
+    """Tool-managed triggers should not widen static entity room membership."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = _bind_runtime_paths(
+        Config(
+            agents={"general": AgentConfig(display_name="GeneralAgent", rooms=["lobby"])},
+        ),
+        runtime_paths,
+    )
+
+    assert get_rooms_for_entity("general", config) == ["lobby"]
+    assert get_rooms_for_entity(ROUTER_AGENT_NAME, config) == ["lobby"]
+
+
 class _TestVectorDb:
     def exists(self) -> bool:
         return True
@@ -215,6 +237,7 @@ def _patch_published_knowledge(
                 state=SimpleNamespace(last_refresh_at=None, last_published_at=None),
             ),
             availability=KnowledgeAvailability.READY,
+            state=None,
         )
 
     monkeypatch.setattr("mindroom.knowledge.utils.get_published_index", _get_published_index)
@@ -244,6 +267,33 @@ def test_agent_identity_prompt_can_be_overridden_from_config() -> None:
     assert "## Custom Identity" in openai_compat_agent.role
     assert "Matrix=not available in OpenAI-compatible API" in openai_compat_agent.role
     assert "OpenAI-compatible API" in openai_compat_agent.role
+
+
+def test_default_mind_role_includes_effective_matrix_homeserver(tmp_path: Path) -> None:
+    """The default Mind should receive the homeserver resolved from its runtime environment."""
+    (tmp_path / ".env").write_text("MATRIX_HOMESERVER=https://from-env-file.example\n", encoding="utf-8")
+    runtime_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path,
+        process_env={"MATRIX_HOMESERVER": "https://matrix.self-hosted.example"},
+    )
+    config = _bind_runtime_paths(
+        Config(
+            agents={
+                "mind": AgentConfig(display_name="Mind", role="Setup assistant", tools=[]),
+                "general": AgentConfig(display_name="General", role="General assistant", tools=[]),
+            },
+            models={"default": ModelConfig(provider="openai", id="gpt-4o-mini")},
+        ),
+        runtime_paths,
+    )
+
+    mind = _create_agent_for_test("mind", config)
+    general = _create_agent_for_test("general", config)
+
+    assert "## MindRoom Runtime" in mind.role
+    assert "Active Matrix homeserver: `https://matrix.self-hosted.example`" in mind.role
+    assert "## MindRoom Runtime" not in general.role
 
 
 def test_agent_identity_prompt_uses_persisted_current_matrix_id(tmp_path: Path) -> None:
@@ -350,7 +400,7 @@ def test_config_round_trips_structured_agent_tool_entries() -> None:
         },
         "browser",
     ]
-    assert config.get_agent_tool_runtime_overrides("openclaw", "shell") == {
+    assert config.resolve_entity("openclaw").tool_runtime_overrides("shell") == {
         "extra_env_passthrough": "GITEA_TOKEN, WHISPER_URL",
         "shell_path_prepend": "/run/wrappers/bin",
     }
@@ -516,7 +566,7 @@ def test_openclaw_compat_expands_to_implied_tools() -> None:
     config.agents["summary"].tools = ["openclaw_compat"]
     config.agents["summary"].include_default_tools = False
 
-    assert config.get_agent_available_tools("summary") == [
+    assert config.resolve_entity("summary").available_tools == [
         "openclaw_compat",
         "shell",
         "coding",
@@ -542,7 +592,7 @@ def test_openclaw_compat_expansion_dedupes_preserving_order() -> None:
     ]
     config.defaults.tools = ["openclaw_compat", "python", "scheduler"]
 
-    assert config.get_agent_available_tools("summary") == [
+    assert config.resolve_entity("summary").available_tools == [
         "browser",
         "openclaw_compat",
         "shell",
@@ -573,7 +623,7 @@ def test_create_agent_uses_native_tool_lookups_for_openclaw_compat(
     _create_agent_for_test("summary", config=config)
 
     looked_up_tools = [call.args[0] for call in mock_get_tool_by_name.call_args_list]
-    assert looked_up_tools == config.get_agent_available_tools("summary")
+    assert looked_up_tools == config.resolve_entity("summary").available_tools
 
 
 @patch("mindroom.agents.get_tool_by_name")
@@ -1038,8 +1088,8 @@ def test_resolve_agent_runtime_uses_shared_agent_roots_for_shared_agents(tmp_pat
 
     runtime = resolve_agent_runtime("general", config, runtime_paths, execution_identity=None, create=True)
 
-    assert runtime.is_private is False
-    assert runtime.worker_key is None
+    assert runtime.execution.is_private is False
+    assert runtime.execution.worker_key is None
     assert runtime.state_root == agent_state_root_path(tmp_path, "general")
     assert runtime.workspace is None
     assert runtime.tool_base_dir is None
@@ -1089,9 +1139,9 @@ def test_resolve_agent_runtime_keeps_user_scope_worker_key_for_shared_agents(tmp
         create=True,
     )
 
-    assert runtime.is_private is False
-    assert runtime.execution_scope == "user"
-    assert runtime.worker_key == resolve_worker_key("user", identity, agent_name="general")
+    assert runtime.execution.is_private is False
+    assert runtime.execution.execution_scope == "user"
+    assert runtime.execution.worker_key == resolve_worker_key("user", identity, agent_name="general")
     assert runtime.state_root == agent_state_root_path(tmp_path, "general")
     assert runtime.workspace is None
     assert runtime.tool_base_dir is None
@@ -1110,9 +1160,9 @@ def test_resolve_agent_runtime_requires_explicit_shared_execution_identity(tmp_p
 
     runtime = resolve_agent_runtime("general", config, runtime_paths, execution_identity=None, create=True)
 
-    assert runtime.is_private is False
-    assert runtime.execution_scope == "shared"
-    assert runtime.worker_key is None
+    assert runtime.execution.is_private is False
+    assert runtime.execution.execution_scope == "shared"
+    assert runtime.execution.worker_key is None
     assert runtime.state_root == agent_state_root_path(tmp_path, "general")
     assert runtime.workspace is None
 
@@ -1152,8 +1202,8 @@ def test_resolve_agent_runtime_uses_private_instance_roots_for_private_agents(
     )
     expected_worker_key = resolve_worker_key("user", identity, agent_name="general")
     assert expected_worker_key is not None
-    assert runtime.is_private is True
-    assert runtime.worker_key == expected_worker_key
+    assert runtime.execution.is_private is True
+    assert runtime.execution.worker_key == expected_worker_key
     assert runtime.state_root == _private_instance_state_root_path(
         tmp_path,
         worker_key=expected_worker_key,
@@ -1240,7 +1290,7 @@ def test_resolve_agent_runtime_creates_workspace_knowledge_links_for_private_bas
     )
 
     assert runtime.workspace is not None
-    private_base_id = config.get_agent_private_knowledge_base_id("general")
+    private_base_id = config.resolve_entity("general").private_knowledge_base_id
     assert private_base_id is not None
     knowledge_link = runtime.workspace.root / "knowledge" / private_base_id
     assert knowledge_link.is_symlink()
@@ -1394,7 +1444,7 @@ def test_resolve_agent_runtime_skips_workspace_knowledge_links_for_private_root_
     )
 
     assert runtime.workspace is not None
-    private_base_id = config.get_agent_private_knowledge_base_id("general")
+    private_base_id = config.resolve_entity("general").private_knowledge_base_id
     assert private_base_id is not None
     knowledge_link = runtime.workspace.root / "knowledge" / private_base_id
     assert not knowledge_link.exists()
@@ -1694,7 +1744,7 @@ def test_openclaw_compat_implies_matrix_message_tool(mock_storage: MagicMock) ->
     config.agents["summary"].tools = ["openclaw_compat"]
     config.agents["summary"].include_default_tools = False
 
-    effective_tools = config.get_agent_available_tools("summary")
+    effective_tools = config.resolve_entity("summary").available_tools
     assert "openclaw_compat" in effective_tools
     assert "matrix_message" in effective_tools
 
@@ -1709,7 +1759,7 @@ def test_openclaw_compat_implied_matrix_message_does_not_duplicate() -> None:
     config.agents["summary"].tools = ["openclaw_compat", "matrix_message"]
     config.agents["summary"].include_default_tools = False
 
-    effective_tools = config.get_agent_available_tools("summary")
+    effective_tools = config.resolve_entity("summary").available_tools
     assert effective_tools.count("matrix_message") == 1
 
 
@@ -1719,7 +1769,7 @@ def test_matrix_message_implies_attachments_and_matrix_room_tools() -> None:
     config.agents["summary"].tools = ["matrix_message"]
     config.agents["summary"].include_default_tools = False
 
-    effective_tools = config.get_agent_available_tools("summary")
+    effective_tools = config.resolve_entity("summary").available_tools
     assert effective_tools == ["matrix_message", "attachments", "matrix_room"]
 
 
@@ -1729,7 +1779,7 @@ def test_matrix_message_implied_attachments_does_not_duplicate() -> None:
     config.agents["summary"].tools = ["matrix_message", "attachments"]
     config.agents["summary"].include_default_tools = False
 
-    effective_tools = config.get_agent_available_tools("summary")
+    effective_tools = config.resolve_entity("summary").available_tools
     assert effective_tools.count("attachments") == 1
 
 
@@ -2250,6 +2300,7 @@ def test_create_agent_scaffolds_default_mind_workspace_under_runtime_storage_roo
         models={"default": ModelConfig(provider="openai", id="gpt-4")},
     )
 
+    assert not agent_build_can_overlap_file_memory("mind", config, runtime_storage)
     agent = _create_agent_for_test("mind", config=_bind_runtime_paths(config, _runtime_paths(runtime_storage)))
 
     workspace = runtime_storage / "agents" / "mind" / "workspace"
@@ -2261,6 +2312,7 @@ def test_create_agent_scaffolds_default_mind_workspace_under_runtime_storage_roo
     assert (workspace / "HEARTBEAT.md").exists()
     assert (workspace / "MEMORY.md").exists()
     assert "## Personality Context" in agent.role
+    assert agent_build_can_overlap_file_memory("mind", config, runtime_storage)
 
 
 @patch("mindroom.agents.get_tool_by_name")
@@ -2804,6 +2856,60 @@ def test_create_agent_disabled_tool_names_omit_resolved_tools(
     assert "memory" not in built_tools
 
 
+def test_tool_function_filter_prunes_resolved_functions() -> None:
+    """Channel policies filter actual functions without dropping a safe toolkit peer."""
+    safe = Function(name="safe", entrypoint=lambda: "safe")
+    unsafe = Function(name="unsafe", entrypoint=lambda: "unsafe")
+    toolkit = Toolkit(name="mixed", tools=[safe, unsafe])
+
+    filtered = _prune_toolkit_functions(toolkit, lambda function: function.name == "safe")
+
+    assert filtered is toolkit
+    assert set(toolkit.functions) == {"safe"}
+    assert toolkit.async_functions == {}
+
+
+@pytest.mark.asyncio
+async def test_create_agent_tool_filter_applies_to_agno_generated_knowledge_function(tmp_path: Path) -> None:
+    """The stored channel policy filters functions Agno adds after construction."""
+    config = _test_config()
+    config.agents["general"].knowledge_bases = ["docs"]
+    config.knowledge_bases = {
+        "docs": KnowledgeBaseConfig(description="Reference docs.", path="./knowledge_docs/docs"),
+    }
+    config = _bind_runtime_paths(config, _runtime_paths(tmp_path))
+    seen: list[str] = []
+
+    def allow_call_function(function: Function) -> bool:
+        seen.append(function.name)
+        return function.name != "search_knowledge_base"
+
+    agent = _create_agent_for_test(
+        "general",
+        config,
+        knowledge=Knowledge(name="docs"),
+        tool_function_filter=allow_call_function,
+    )
+    run_output = RunOutput(
+        run_id="run-call-policy",
+        agent_id="general",
+        agent_name="GeneralAgent",
+        session_id="session-call-policy",
+    )
+    run_context = RunContext(run_id="run-call-policy", session_id="session-call-policy")
+    session = AgentSession(
+        session_id="session-call-policy",
+        agent_id="general",
+        created_at=1,
+        updated_at=1,
+    )
+
+    tools = await agent.aget_tools(run_output, run_context, session)
+
+    assert "search_knowledge_base" in seen
+    assert all(not isinstance(tool, Function) or tool.name != "search_knowledge_base" for tool in tools)
+
+
 @patch("mindroom.agent_storage.SqliteDb")
 def test_create_agent_disable_runtime_capabilities_omits_all_tools_and_skills(
     mock_storage: MagicMock,  # noqa: ARG001
@@ -3076,8 +3182,8 @@ def test_config_resolves_per_agent_memory_backend_override() -> None:
         memory={"backend": "mem0"},
     )
 
-    assert config.get_agent_memory_backend("general") == "mem0"
-    assert config.get_agent_memory_backend("writer") == "file"
+    assert config.resolve_entity("general").memory_backend == "mem0"
+    assert config.resolve_entity("writer").memory_backend == "file"
 
 
 def test_config_reports_mixed_memory_backend_usage() -> None:
@@ -3091,8 +3197,8 @@ def test_config_reports_mixed_memory_backend_usage() -> None:
     )
 
     assert config.uses_file_memory() is True
-    assert config.get_agent_memory_backend("general") == "file"
-    assert config.get_agent_memory_backend("writer") == "mem0"
+    assert config.resolve_entity("general").memory_backend == "file"
+    assert config.resolve_entity("writer").memory_backend == "mem0"
 
 
 def test_config_rejects_memory_file_path_even_with_mem0_backend() -> None:
@@ -3205,6 +3311,28 @@ def test_file_mode_agent_instructions_list_workspace_knowledge_path(tmp_path: Pa
     assert "- research: `knowledge/research`" in rendered_instructions
     assert "Research notes and decision records." in rendered_instructions
     assert "search_knowledge_base" in rendered_instructions
+
+
+def test_workspace_agent_instructions_include_skill_authoring_guidance(tmp_path: Path) -> None:
+    """Agents with workspace-rooted tools should learn they can author skills in their workspace."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = _bind_runtime_paths(_test_config(), runtime_paths)
+    config.agents["general"].memory_backend = "file"
+
+    agent = _create_agent_for_test("general", config)
+
+    assert WORKSPACE_SKILL_AUTHORING_PROMPT in agent.instructions
+
+
+def test_agent_without_workspace_omits_skill_authoring_guidance(tmp_path: Path) -> None:
+    """Agents without a workspace should not be told to write workspace skill files."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = _bind_runtime_paths(_test_config(), runtime_paths)
+    config.agents["general"].memory_backend = "mem0"
+
+    agent = _create_agent_for_test("general", config)
+
+    assert WORKSPACE_SKILL_AUTHORING_PROMPT not in agent.instructions
 
 
 def test_agent_knowledge_search_tool_description_lists_configured_sources(
@@ -3590,7 +3718,7 @@ def test_config_accepts_private_knowledge_path_dot_for_private_root() -> None:
         },
     )
 
-    private_base_id = config.get_agent_private_knowledge_base_id("mind")
+    private_base_id = config.resolve_entity("mind").private_knowledge_base_id
     assert private_base_id is not None
     assert config.get_knowledge_base_config(private_base_id).path == "."
 
@@ -3599,7 +3727,7 @@ def test_config_rejects_private_agents_in_teams() -> None:
     """Configured teams must not include private agents."""
     with pytest.raises(
         ValidationError,
-        match="Team 'mixed_team' includes private agent 'mind'; private agents cannot participate in teams yet",
+        match="Team 'mixed_team' includes private agent 'mind'; private agents are only supported in explicit Matrix ad hoc teams with requester identity",
     ):
         Config(
             agents={
@@ -3655,7 +3783,7 @@ def test_config_rejects_teams_with_members_that_delegate_to_private_agents() -> 
         ValidationError,
         match=(
             "Team 'mixed_team' includes agent 'leader' which reaches private agent 'mind' "
-            "via delegation; private agents cannot participate in teams yet"
+            "via delegation; private delegation is not supported for teams"
         ),
     ):
         Config(
@@ -3730,9 +3858,9 @@ def test_config_private_and_shared_knowledge_coexist() -> None:
         },
     )
 
-    private_base_id = config.get_agent_private_knowledge_base_id("mind")
+    private_base_id = config.resolve_entity("mind").private_knowledge_base_id
     assert private_base_id is not None
-    assert config.get_agent_knowledge_base_ids("mind") == ["company_docs", private_base_id]
+    assert config.resolve_entity("mind").knowledge_base_ids == ["company_docs", private_base_id]
     private_config = config.get_knowledge_base_config(private_base_id)
     assert private_config.path == "memory"
 
@@ -3751,8 +3879,8 @@ def test_template_dir_does_not_imply_private_knowledge() -> None:
         },
     )
 
-    assert config.get_agent_private_knowledge_base_id("mind") is None
-    assert config.get_agent_knowledge_base_ids("mind") == []
+    assert config.resolve_entity("mind").private_knowledge_base_id is None
+    assert config.resolve_entity("mind").knowledge_base_ids == []
 
 
 def test_get_private_knowledge_base_agent_requires_active_private_knowledge() -> None:
@@ -3837,12 +3965,12 @@ def test_config_accepts_valid_culture_assignment() -> None:
         },
     )
 
-    assignment = config.get_agent_culture("calculator")
+    assignment = config.resolve_entity("calculator").culture
     assert assignment is not None
     culture_name, culture_config = assignment
     assert culture_name == "engineering"
     assert culture_config.mode == "automatic"
-    assert config.get_agent_culture("unknown") is None
+    assert config.resolve_entity("unknown").culture is None
 
 
 def test_config_rejects_git_backed_private_knowledge_inside_private_memory_tree() -> None:
