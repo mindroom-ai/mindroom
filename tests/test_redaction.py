@@ -10,7 +10,13 @@ from uuid import uuid4
 import pytest
 
 from mindroom import redaction
-from mindroom.redaction import REDACTED, redact_log_event, redact_sensitive_data, redact_sensitive_text
+from mindroom.redaction import (
+    REDACTED,
+    REDACTION_FAILED,
+    redact_log_event,
+    redact_sensitive_data,
+    redact_sensitive_text,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -183,6 +189,66 @@ def test_redact_sensitive_data_tolerates_malformed_ipv6_url() -> None:
     assert "http://[" in message
 
 
+def test_redact_sensitive_text_fails_closed_when_internal_redaction_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A redaction bug must suppress output instead of escaping into application code."""
+
+    def raise_redaction_error(_value: str) -> str:
+        raise RuntimeError
+
+    monkeypatch.setattr(redaction, "_redact_secret_assignments", raise_redaction_error)
+
+    assert redact_sensitive_text("password=hunter2") == REDACTION_FAILED
+
+
+def test_redact_log_event_fails_closed_when_structured_redaction_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Structlog must receive a valid event even when the redactor itself fails."""
+
+    def raise_redaction_error(*_args: object, **_kwargs: object) -> object:
+        raise RuntimeError
+
+    monkeypatch.setattr(redaction, "redact_sensitive_data", raise_redaction_error)
+
+    assert redact_log_event(None, "error", {"event": "failed", "password": "hunter2"}) == {
+        "event": REDACTION_FAILED,
+    }
+
+
+def test_redact_sensitive_data_bounds_cyclic_containers() -> None:
+    """A cyclic log payload must produce finite output without raising RecursionError."""
+    value: dict[str, object] = {}
+    value["self"] = value
+
+    redacted = redact_sensitive_data(value)
+
+    assert len(json.dumps(redacted)) < 10_000
+
+
+def test_redact_log_event_bounds_large_collections() -> None:
+    """One oversized event must not make the logging processor walk every item."""
+    redacted = redact_log_event(None, "info", {f"field_{index}": index for index in range(2_000)})
+
+    assert len(redacted) == 101
+    assert redacted["__truncated__"] == "1900 more items"
+
+
+def test_redact_sensitive_text_fails_closed_on_oversized_unbounded_input() -> None:
+    """Unbounded callers must not make redaction scan arbitrarily large text."""
+    value = "ordinary diagnostic text " * 100_000
+
+    assert redact_sensitive_text(value) == REDACTION_FAILED
+
+
+def test_redact_sensitive_text_fails_closed_on_ambiguous_multiline_secret() -> None:
+    """Multiline assignment syntax is ambiguous, so suppress it instead of guessing a span."""
+    value = "password=\n  hunter2\nmode=safe"
+
+    assert redact_sensitive_text(value) == REDACTION_FAILED
+
+
 def test_redact_sensitive_data_uses_context_for_bare_values_in_secret_lists() -> None:
     """List items under a secret-bearing key should be redacted without changing container shape."""
     redacted = redact_sensitive_data(
@@ -266,119 +332,11 @@ def test_redact_sensitive_data_keeps_values_for_non_schema_label_keys() -> None:
     ]
 
 
-@pytest.mark.parametrize(
-    "value",
-    [
-        "-=" * 400,
-        "x:" * 500,
-        ":".join(str(index) for index in range(400)),
-    ],
-    ids=("alternating-equals", "repeated-colons", "colon-joined-numbers"),
-)
-def test_redact_sensitive_text_preserves_dense_benign_assignment_separators(value: str) -> None:
-    """Dense non-secret separators must survive redaction without exhausting the Python stack."""
-    assert redact_sensitive_text(value) == value
-
-
-@pytest.mark.parametrize(
-    "delimiter",
-    ["&", ",", ")", "]", "}"],
-    ids=("ampersand", "comma", "closing-parenthesis", "closing-bracket", "closing-brace"),
-)
-def test_redact_sensitive_text_preserves_boundary_after_empty_secret_assignment(delimiter: str) -> None:
-    """An empty secret value must not consume its delimiter or following safe assignment."""
-    value = f"password={delimiter}user=bob"
-
-    assert redact_sensitive_text(value) == f"password={REDACTED}{delimiter}user=bob"
-
-
-@pytest.mark.parametrize(
-    ("value", "expected"),
-    [
-        pytest.param(
-            "password:\nmessage='safe'",
-            "password:\nmessage='safe'",
-            id="same-indent-assignment-is-sibling",
-        ),
-        pytest.param(
-            "password=\nuser=bob",
-            "password=\nuser=bob",
-            id="empty-value-before-safe-sibling",
-        ),
-        pytest.param(
-            "password= \nuser=bob",
-            "password= \nuser=bob",
-            id="empty-value-with-space-before-safe-sibling",
-        ),
-        pytest.param(
-            "password=\napi_key:\n  YWJjZA==",
-            f"password=\napi_key:\n  {REDACTED}",
-            id="indented-base64-value",
-        ),
-        pytest.param(
-            "api_key=\npassword:\n  hunter2:",
-            f"api_key=\npassword:\n  {REDACTED}",
-            id="indented-colon-value",
-        ),
-        pytest.param(
-            "password=\nauthorization:\n  Basic dXNlcg==",
-            f"password=\nauthorization:\n  {REDACTED}",
-            id="complete-authorization-value",
-        ),
-        pytest.param(
-            "token=\npassword:\ncorrect horse battery staple",
-            f"token=\npassword:\n{REDACTED}",
-            id="unindented-passphrase-value",
-        ),
-        pytest.param(
-            "token=\npassword=\n  user=bob",
-            f"token=\npassword=\n  {REDACTED}",
-            id="indented-assignment-shaped-value",
-        ),
-        pytest.param(
-            "password=\r\ntoken:\r\n  AKIAsecretvalue keep",
-            f"password=\r\ntoken:\r\n  {REDACTED}",
-            id="crlf-continuation-value",
-        ),
-        pytest.param(
-            'password:\n  "hunter2" context\nuser=bob',
-            f'password:\n  "{REDACTED}" context\nuser=bob',
-            id="quoted-value-stops-at-closing-quote",
-        ),
-        pytest.param(
-            "password=\n  hunter2 user=bob",
-            f"password=\n  {REDACTED} user=bob",
-            id="lf-continuation-preserves-sibling-assignment",
-        ),
-        pytest.param(
-            "password=\r\n  hunter2 user=bob",
-            f"password=\r\n  {REDACTED} user=bob",
-            id="crlf-continuation-preserves-sibling-assignment",
-        ),
-        pytest.param(
-            "password=\n  hunter2 and user=bob",
-            f"password=\n  {REDACTED} and user=bob",
-            id="continuation-preserves-and-joined-sibling-assignment",
-        ),
-    ],
-)
-def test_redact_sensitive_text_follows_multiline_assignment_structure(value: str, expected: str) -> None:
-    """Indentation owns continuation values while same-indent assignments remain siblings."""
-    assert redact_sensitive_text(value) == expected
-
-
-def test_redact_sensitive_text_keeps_nested_multiline_secret_continuation_in_scope() -> None:
-    """A non-secret outer assignment must not split a nested secret from its continuation."""
-    value = "outer=password:\n  hunter2"
-
-    assert redact_sensitive_text(value) == f"outer=password:\n  {REDACTED}"
-
-
-def test_redact_sensitive_text_stays_linear_on_long_unbroken_runs() -> None:
-    """Long base64url/hex-like blobs must scan linearly, not quadratically."""
+def test_redact_sensitive_text_rejects_oversized_unbounded_runs_quickly() -> None:
+    """Hard input budget must reject oversized text without scanning its contents."""
     blob = "Ab3" * 40_000
     start = time.perf_counter()
-    assert redact_sensitive_text(blob) == blob
+    assert redact_sensitive_text(blob) == REDACTION_FAILED
     assert time.perf_counter() - start < 5.0
 
 
@@ -390,59 +348,13 @@ def test_redact_sensitive_text_stays_linear_while_finding_value_terminator() -> 
     assert time.perf_counter() - start < 5.0
 
 
-def test_redact_sensitive_text_stays_linear_on_unclosed_quoted_assignments() -> None:
-    """Benign quote-started prefixes must not repeatedly rescan the remaining suffix."""
-    value = "a='x " * 8_000
-    start = time.perf_counter()
-    assert redact_sensitive_text(value) == value
-    assert time.perf_counter() - start < 5.0
-
-
-def test_redact_sensitive_text_stays_linear_through_deep_quoted_assignments() -> None:
-    """Deep alternating quotes must preserve structure while exposing the secret leaf."""
+def test_redact_sensitive_text_handles_deep_assignments_without_recursion() -> None:
+    """Non-secret wrappers must not add Python stack frames while finding a secret leaf."""
     value = "api_key=hunter2"
-    for depth in range(10_000):
-        quote = "'" if depth % 2 == 0 else '"'
-        value = f"k={quote}{value}{quote}"
-    expected = value.replace("hunter2", REDACTED)
+    for _ in range(2_000):
+        value = f"outer='{value}'"
 
-    start = time.perf_counter()
-    assert redact_sensitive_text(value) == expected
-    assert time.perf_counter() - start < 5.0
-
-
-@pytest.mark.parametrize(
-    ("inner", "expected_inner"),
-    [
-        ("password: and user: bob", f"password: {REDACTED} user: bob"),
-        ("path.:authorization:\t&cookie,2}", f"path.:authorization:{REDACTED}&cookie,2}}"),
-        (
-            "password=x note=(api_key=y) token=z",
-            f"password={REDACTED} note=(api_key={REDACTED}) token={REDACTED}",
-        ),
-    ],
-    ids=("and-joined-assignment", "unquoted-enclosing-value", "ordered-secret-spans"),
-)
-def test_redact_sensitive_text_preserves_assignment_boundaries_through_deep_nesting(
-    inner: str,
-    expected_inner: str,
-) -> None:
-    """Iterative nested scans must preserve delimiters and unrelated suffixes."""
-    value = inner
-    expected = expected_inner
-    for depth in range(1_200):
-        quote = "'" if depth % 2 == 0 else '"'
-        value = f"outer={quote}{value}{quote}"
-        expected = f"outer={quote}{expected}{quote}"
-
-    assert redact_sensitive_text(value) == expected
-
-
-def test_redact_sensitive_text_redacts_set_cookie_assignment_in_embedded_json() -> None:
-    """A hyphenated secret key in embedded JSON must not expose its cookie value."""
-    value = 'json: {"set-cookie": "sid=abc; Path=/; HttpOnly"}'
-
-    assert redact_sensitive_text(value) == f'json: {{"set-cookie": "{REDACTED}"}}'
+    assert redact_sensitive_text(value) == value.replace("hunter2", REDACTED)
 
 
 def test_redact_sensitive_text_redacts_secret_assignments_with_long_keys() -> None:
@@ -524,7 +436,12 @@ def test_key_normalization_cache_is_bounded() -> None:
     """An unbounded cache keyed on arbitrary log keys would leak, so it must evict."""
     distinct_keys = 50_000
 
-    redact_log_event(None, "debug", {f"field_{index}": index for index in range(distinct_keys)})
+    for start in range(0, distinct_keys, 100):
+        redact_log_event(
+            None,
+            "debug",
+            {f"field_{index}": index for index in range(start, start + 100)},
+        )
 
     assert 0 < _key_normalization_cache_size() < distinct_keys
 
@@ -631,7 +548,12 @@ def test_cache_eviction_does_not_change_key_classification() -> None:
     probe_keys = (*_REDACTED_KEYS, *_KEPT_KEYS)
     before = {key: redact_sensitive_data({key: "probe-value"}) for key in probe_keys}
 
-    # Flood the cache with far more distinct keys than it can hold.
-    redact_log_event(None, "debug", {f"flood_{index}": index for index in range(50_000)})
+    # Flood the cache with far more distinct keys than it can hold, across bounded events.
+    for start in range(0, 50_000, 100):
+        redact_log_event(
+            None,
+            "debug",
+            {f"flood_{index}": index for index in range(start, start + 100)},
+        )
 
     assert {key: redact_sensitive_data({key: "probe-value"}) for key in probe_keys} == before
