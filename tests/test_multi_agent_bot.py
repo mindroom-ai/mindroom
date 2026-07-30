@@ -203,6 +203,10 @@ class TestAgentBot(AgentBotTestBase):
         )  # invite, message, redaction, reaction, audio, image/file/video, unknown-event, megolm callbacks
         registered_event_types = [call.args[1] for call in mock_client.add_event_callback.call_args_list]
         assert nio.MegolmEvent in registered_event_types  # undecryptable events must not vanish silently
+        invite_callback = next(
+            call.args[0] for call in mock_client.add_event_callback.call_args_list if call.args[1] is nio.InviteEvent
+        )
+        assert invite_callback == bot._on_invite_before_sync_certification
 
     @pytest.mark.asyncio
     @patch("mindroom.config.main.load_config")
