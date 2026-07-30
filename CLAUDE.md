@@ -106,7 +106,8 @@ Matrix sync callback
 | `handled_turns.py` | Disk-backed handled-turn ledger preventing duplicate responses |
 | `redacted_turn_cleanup.py` | Source-redaction tombstoning and serialized persisted replay cleanup |
 | `sync_restart_retry.py` | Exact sources with committed replacement or orderly terminal interruptions, available to replacement or next-startup recovery |
-| `restart_recovery.py` | Central restart-recovery coordinator with semantic retries, bounded room I/O, exact-generation fencing, and idempotent resume delivery |
+| `restart_recovery.py` | Unified owner-room restart-recovery scheduler with semantic retries, exact-generation fencing, and monotonic target watermarks |
+| `restart_recovery_operations.py` | Exact-owner Matrix scans, membership snapshots, freshness checks, and idempotent resume delivery |
 | `response_runner.py` | Response lifecycle execution (locking, streaming vs non-streaming, cancellation, detached inbox responses, shutdown drains) |
 | `response_turn.py` | Shared blocking/streaming response-turn drivers behind the agent and team envelopes (attempt loop, dynamic-tool continuation, empty-run retry, interrupt recording) |
 | `response_terminal.py` | Pending-visible classification and terminal stream outcomes for failed or cancelled turns |

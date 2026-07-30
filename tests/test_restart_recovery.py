@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import gc
+import weakref
 from typing import TYPE_CHECKING, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -25,15 +27,14 @@ from mindroom.restart_recovery import (
     _restart_recovery_retry_delay as restart_recovery_retry_delay,
 )
 from mindroom.restart_recovery import (
-    _RestartRecoveryOperations as RestartRecoveryOperations,
+    _TargetSettlement as TargetSettlement,
 )
-from mindroom.restart_recovery import (
-    _RestartTargetFreshness as RestartTargetFreshness,
+from mindroom.restart_recovery_operations import (
+    RestartRecoveryOperations,
+    RestartTargetFreshness,
+    RoomRecoveryRequest,
 )
-from mindroom.restart_recovery import (
-    _RoomRecoveryRequest as RoomRecoveryRequest,
-)
-from mindroom.restart_recovery import (
+from mindroom.restart_recovery_operations import (
     _RoomRecoveryResult as RoomRecoveryResult,
 )
 from tests.conftest import (
@@ -138,6 +139,7 @@ def _operations(
         recover_room=recover_room,
         target_freshness=freshness or current,
         deliver_target=deliver or delivered,
+        discard_owner=lambda _owner_user_id: None,
     )
 
 
@@ -164,10 +166,10 @@ async def test_matrix_room_recovery_retries_until_exact_owner_is_joined(tmp_path
 
     with (
         patch(
-            "mindroom.restart_recovery.get_joined_rooms",
+            "mindroom.restart_recovery_operations.get_joined_rooms",
             new=AsyncMock(return_value=["!other:example.org"]),
         ),
-        patch("mindroom.restart_recovery.cleanup_stale_streaming_room", new=AsyncMock()) as cleanup_room,
+        patch("mindroom.restart_recovery_operations.cleanup_stale_streaming_room", new=AsyncMock()) as cleanup_room,
     ):
         result = await operations.recover_room(
             owner,
@@ -196,11 +198,11 @@ async def test_matrix_room_recovery_scans_only_exact_owner_messages(tmp_path: Pa
 
     with (
         patch(
-            "mindroom.restart_recovery.get_joined_rooms",
+            "mindroom.restart_recovery_operations.get_joined_rooms",
             new=AsyncMock(return_value=["!code:example.org"]),
         ),
         patch(
-            "mindroom.restart_recovery.cleanup_stale_streaming_room",
+            "mindroom.restart_recovery_operations.cleanup_stale_streaming_room",
             new=AsyncMock(
                 return_value=stale_stream_cleanup_module._StaleStreamCleanupResult(
                     cleaned_count=1,
@@ -248,11 +250,11 @@ async def test_matrix_room_recovery_propagates_cleanup_retry_requirement(
 
     with (
         patch(
-            "mindroom.restart_recovery.get_joined_rooms",
+            "mindroom.restart_recovery_operations.get_joined_rooms",
             new=AsyncMock(return_value=["!code:example.org"]),
         ),
         patch(
-            "mindroom.restart_recovery.cleanup_stale_streaming_room",
+            "mindroom.restart_recovery_operations.cleanup_stale_streaming_room",
             new=AsyncMock(return_value=cleanup_result),
         ),
     ):
@@ -282,7 +284,7 @@ async def test_matrix_target_delivery_uses_router_and_mentions_exact_owner(tmp_p
     operations = build_matrix_restart_recovery_operations(test_runtime_paths(tmp_path))
 
     with patch(
-        "mindroom.restart_recovery.send_message_result",
+        "mindroom.restart_recovery_operations.send_message_result",
         new=AsyncMock(side_effect=delivered_matrix_side_effect("$resume")),
     ) as send_message:
         delivered = await operations.deliver_target(router, owner, target, _config(tmp_path))
@@ -327,7 +329,7 @@ async def test_matrix_target_delivery_reuses_stable_transaction_id_after_lost_re
         return await successful_delivery(*args, **kwargs)
 
     with patch(
-        "mindroom.restart_recovery.send_message_result",
+        "mindroom.restart_recovery_operations.send_message_result",
         new=AsyncMock(side_effect=deliver_once_lost),
     ) as send_message:
         first = await operations.deliver_target(router, owner, target, _config(tmp_path))
@@ -366,11 +368,11 @@ async def test_matrix_room_recovery_shares_membership_discovery_for_owner_genera
 
     with (
         patch(
-            "mindroom.restart_recovery.get_joined_rooms",
+            "mindroom.restart_recovery_operations.get_joined_rooms",
             new=AsyncMock(side_effect=joined_rooms),
         ) as get_rooms,
         patch(
-            "mindroom.restart_recovery.cleanup_stale_streaming_room",
+            "mindroom.restart_recovery_operations.cleanup_stale_streaming_room",
             new=AsyncMock(
                 return_value=stale_stream_cleanup_module._StaleStreamCleanupResult(
                     cleaned_count=0,
@@ -438,13 +440,12 @@ async def test_matrix_room_recovery_does_not_reuse_snapshot_after_generation_id_
     operations = build_matrix_restart_recovery_operations(test_runtime_paths(tmp_path))
 
     with (
-        patch("mindroom.restart_recovery.id", return_value=7, create=True),
         patch(
-            "mindroom.restart_recovery.get_joined_rooms",
+            "mindroom.restart_recovery_operations.get_joined_rooms",
             new=AsyncMock(side_effect=[[old_room], [new_room]]),
         ) as get_rooms,
         patch(
-            "mindroom.restart_recovery.cleanup_stale_streaming_room",
+            "mindroom.restart_recovery_operations.cleanup_stale_streaming_room",
             new=AsyncMock(
                 return_value=stale_stream_cleanup_module._StaleStreamCleanupResult(
                     cleaned_count=0,
@@ -477,6 +478,57 @@ async def test_matrix_room_recovery_does_not_reuse_snapshot_after_generation_id_
     assert old_result == RoomRecoveryResult()
     assert new_result == RoomRecoveryResult()
     assert get_rooms.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_discard_owner_releases_membership_snapshot_generation(tmp_path: Path) -> None:
+    """Owner discard must release the generation retained by membership discovery."""
+
+    class Generation:
+        pass
+
+    generation = Generation()
+    generation_ref = weakref.ref(generation)
+    owner = _owner(generation=generation)
+    operations = build_matrix_restart_recovery_operations(test_runtime_paths(tmp_path))
+    coordinator = RestartRecoveryCoordinator(
+        current_config=lambda: _config(tmp_path),
+        current_owners=dict,
+        operations=operations,
+    )
+
+    with (
+        patch(
+            "mindroom.restart_recovery_operations.get_joined_rooms",
+            new=AsyncMock(return_value=["!code:example.org"]),
+        ),
+        patch(
+            "mindroom.restart_recovery_operations.cleanup_stale_streaming_room",
+            new=AsyncMock(
+                return_value=stale_stream_cleanup_module._StaleStreamCleanupResult(
+                    cleaned_count=0,
+                    interrupted_threads=(),
+                ),
+            ),
+        ),
+    ):
+        await operations.recover_room(
+            owner,
+            RoomRecoveryRequest(
+                room_id="!code:example.org",
+                startup_cutoff_ms=123,
+                terminal_interrupted_only=False,
+            ),
+            frozenset({owner.user_id}),
+            _config(tmp_path),
+        )
+
+    coordinator.discard_owner(owner.user_id)
+    del owner
+    del generation
+    gc.collect()
+
+    assert generation_ref() is None
 
 
 @pytest.mark.asyncio
@@ -1017,7 +1069,7 @@ async def test_unrecoverable_target_is_settled_without_future_retry(tmp_path: Pa
         if active_attempts:
             await asyncio.gather(*active_attempts)
         coordinator._settle_finished_attempts()
-        assert key in coordinator._settled_target_versions
+        assert key in coordinator._target_watermarks
         coordinator.enqueue_replacement_rooms(owner.user_id, {target.room_id})
         await asyncio.wait_for(second_scan.wait(), timeout=1.0)
         await asyncio.sleep(0)
@@ -1308,6 +1360,72 @@ async def test_target_watermark_prevents_older_resurrection(tmp_path: Path) -> N
 
 
 @pytest.mark.asyncio
+async def test_newer_same_room_scan_does_not_send_second_resume_while_old_target_is_active(
+    tmp_path: Path,
+) -> None:
+    """One owner-room recovery lease must not deliver two target versions for one thread."""
+    owner = _owner()
+    router = _owner(
+        entity_name=ROUTER_AGENT_NAME,
+        user_id="@router:example.org",
+        rooms=frozenset(),
+    )
+    owners = {owner.user_id: owner, router.user_id: router}
+    old_target = _target("$old", timestamp_ms=10)
+    new_target = _target("$new", timestamp_ms=20)
+    first_delivery_started = asyncio.Event()
+    release_first_delivery = asyncio.Event()
+    second_scan_finished = asyncio.Event()
+    scan_count = 0
+    delivered_targets: list[str] = []
+
+    async def recover_room(
+        _owner: RecoveryOwner,
+        _request: RoomRecoveryRequest,
+        _owner_user_ids: frozenset[str],
+        _config: Config,
+    ) -> RoomRecoveryResult:
+        nonlocal scan_count
+        scan_count += 1
+        if scan_count == 1:
+            return RoomRecoveryResult(interrupted_threads=(old_target,))
+        second_scan_finished.set()
+        return RoomRecoveryResult(interrupted_threads=(new_target,))
+
+    async def deliver(
+        _router: RecoveryOwner,
+        _owner: RecoveryOwner,
+        target: InterruptedThread,
+        _config: Config,
+    ) -> bool:
+        delivered_targets.append(target.target_event_id)
+        if target.target_event_id == old_target.target_event_id:
+            first_delivery_started.set()
+            await release_first_delivery.wait()
+        return True
+
+    coordinator = RestartRecoveryCoordinator(
+        current_config=lambda: _config(tmp_path),
+        current_owners=lambda: owners,
+        operations=_operations(recover_room=recover_room, deliver=deliver),
+        retry_delay=lambda _attempt: 0.0,
+    )
+    coordinator.start(startup_cutoff_ms=123)
+    await asyncio.wait_for(first_delivery_started.wait(), timeout=1.0)
+    coordinator.enqueue_replacement_rooms(owner.user_id, {old_target.room_id})
+    release_first_delivery.set()
+    try:
+        await asyncio.wait_for(second_scan_finished.wait(), timeout=1.0)
+        for _ in range(10):
+            await asyncio.sleep(0)
+    finally:
+        release_first_delivery.set()
+        await coordinator.stop()
+
+    assert delivered_targets == ["$old"]
+
+
+@pytest.mark.asyncio
 async def test_discard_owner_clears_target_watermarks(tmp_path: Path) -> None:
     """Removing an owner must not suppress the same target after a later re-add."""
     owner = _owner()
@@ -1327,8 +1445,11 @@ async def test_discard_owner_clears_target_watermarks(tmp_path: Path) -> None:
     )
     target = _target("$target", timestamp_ms=10)
 
-    coordinator._enqueue_target(owner.user_id, target)
+    key = (owner.user_id, target.room_id, target.thread_id)
+    coordinator._advance_watermark(
+        owner.user_id,
+        TargetSettlement(target=target, closed=False),
+    )
     coordinator.discard_owner(owner.user_id)
-    coordinator._enqueue_target(owner.user_id, target)
 
-    assert tuple(coordinator._target_jobs) == ((owner.user_id, target.room_id, target.thread_id),)
+    assert key not in coordinator._target_watermarks
