@@ -63,6 +63,7 @@ Matrix sync callback
        -> ingress_validation.py                                  (trust, dedup, echo drop; commands exit before batching)
        -> inbound_turn_normalizer.py + conversation_resolver.py  (canonical turn input, conversation identity)
        -> ingress_lanes.py                                       (per-(room, sender) receipt-order FIFO; STT readiness waits here)
+       -> dispatch_obligations.py                                (durable exact callback acceptance and restart recovery)
        -> coalescing.py                                          (text dispatches immediately; media-tailed batches debounce)
        -> text_ingress_dispatch.py + turn_policy.py              (ignore / route / respond decision, command execution)
        -> response_runner.py -> ai.py / teams.py                 (lifecycle lock, entity envelopes)
@@ -92,6 +93,7 @@ Matrix sync callback
 | `text_ingress_dispatch.py` | Text ingress dispatch path used by TurnController |
 | `turn_policy.py` | Pure turn policy: decide ignore, route, or respond for inbound turns |
 | `dispatch_replay_guard.py` | Replay-guard checks for dispatch sequencing |
+| `dispatch_obligations.py` | Durable exact Matrix callback acceptance, settlement, and startup recovery |
 | `turn_store.py` | Unified durable turn access (wraps the handled-turn ledger) |
 | `handled_turns.py` | Disk-backed handled-turn ledger preventing duplicate responses |
 | `redacted_turn_cleanup.py` | Source-redaction tombstoning and serialized persisted replay cleanup |

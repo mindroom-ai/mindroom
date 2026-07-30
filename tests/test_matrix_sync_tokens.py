@@ -15,7 +15,7 @@ import pytest
 from structlog.testing import capture_logs
 
 from mindroom.background_tasks import wait_for_background_tasks
-from mindroom.bot import AgentBot, _create_task_wrapper
+from mindroom.bot import AgentBot, _create_best_effort_task_wrapper
 from mindroom.coalescing import CoalescingDrainResult, CoalescingGate, IngressAdmissionClosedError, ReadyPendingEvent
 from mindroom.coalescing_batch import CoalescedBatch, CoalescingKey, PendingEvent
 from mindroom.config.agent import AgentConfig
@@ -1114,7 +1114,7 @@ async def test_generic_callback_failure_does_not_poison_raw_checkpoint(tmp_path:
         msg = "canonical key lookup failed"
         raise RuntimeError(msg)
 
-    callback = _create_task_wrapper(failing_callback, owner=bot._runtime_view)
+    callback = _create_best_effort_task_wrapper(failing_callback, owner=bot._runtime_view)
     await callback()
     await wait_for_background_tasks(timeout=0.5, owner=bot._runtime_view)
 
@@ -1139,7 +1139,7 @@ async def test_callback_failure_preserves_saved_checkpoint_immediately(tmp_path:
         msg = "callback failed"
         raise RuntimeError(msg)
 
-    callback = _create_task_wrapper(failing_callback, owner=bot._runtime_view)
+    callback = _create_best_effort_task_wrapper(failing_callback, owner=bot._runtime_view)
     await callback()
     await wait_for_background_tasks(timeout=0.5, owner=bot._runtime_view)
 

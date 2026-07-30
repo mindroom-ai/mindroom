@@ -21,6 +21,7 @@ from mindroom.entity_resolution import mindroom_user_id
 from mindroom.hooks import EVENT_ROOM_MEMBER_JOINED, HookRegistry, RoomMemberJoinedContext, hook
 from mindroom.matrix import room_member_joins
 from mindroom.matrix.sync_certification import SyncCacheWriteResult, SyncTrustState
+from mindroom.matrix.sync_tokens import load_sync_checkpoint
 from mindroom.matrix.users import AgentMatrixUser
 from tests.conftest import TEST_PASSWORD, bind_runtime_paths, install_runtime_cache_support, test_runtime_paths
 from tests.identity_helpers import persist_entity_accounts
@@ -333,6 +334,7 @@ async def test_cancelled_sync_state_member_hook_is_directly_recoverable(
         "$state-retry",
         DispatchCallbackKind.ROOM_LIFECYCLE,
     )
+    assert load_sync_checkpoint(tmp_path, bot.agent_name) is None
 
     await bot._dispatch_obligation_runner.recover_pending()
 
@@ -341,6 +343,45 @@ async def test_cancelled_sync_state_member_hook_is_directly_recoverable(
         "$state-retry",
         DispatchCallbackKind.ROOM_LIFECYCLE,
     )
+
+
+@pytest.mark.asyncio
+async def test_sync_state_marker_failure_blocks_checkpoint_certification(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A baseline marker must reach disk before its source sync position can advance."""
+
+    @hook(EVENT_ROOM_MEMBER_JOINED)
+    async def joined(_ctx: RoomMemberJoinedContext) -> None:
+        pass
+
+    bot = _router_bot(tmp_path)
+    room = _room()
+    bot.client.rooms = {room.room_id: room}
+    bot.hook_registry = HookRegistry.from_plugins([_plugin("onboarding", [joined])])
+    monkeypatch.setattr(
+        bot._conversation_cache,
+        "cache_sync_timeline_for_certification",
+        AsyncMock(return_value=SyncCacheWriteResult(complete=True)),
+    )
+
+    def failing_replace(source: Path, target: Path) -> None:
+        del source, target
+        message = "marker unavailable"
+        raise OSError(message)
+
+    monkeypatch.setattr(room_member_joins, "safe_replace", failing_replace)
+
+    with pytest.raises(RuntimeError, match="room-member join tracking"):
+        await bot._on_sync_response(
+            _sync_response_with_state(
+                room.room_id,
+                [_room_member_event(event_id="$snapshot", prev_membership=None)],
+            ),
+        )
+
+    assert load_sync_checkpoint(tmp_path, bot.agent_name) is None
 
 
 @pytest.mark.asyncio

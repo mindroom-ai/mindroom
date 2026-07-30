@@ -51,7 +51,7 @@ class TurnStoreDeps:
     state_writer: ConversationStateWriter
     resolver: ConversationResolver
     tool_runtime: ToolRuntimeSupport
-    on_turn_persisted: Callable[[tuple[str, ...]], None] | None = None
+    on_terminal_turn_persisted: Callable[[tuple[str, ...]], None] | None = None
 
 
 @dataclass(frozen=True)
@@ -133,7 +133,9 @@ class TurnStore:
         self._ledger.update_handled_turn(
             turn_record.indexed_event_ids,
             terminal_record,
-            on_persisted=(self._notify_turn_persisted if self.deps.on_turn_persisted is not None else None),
+            on_persisted=(
+                self._notify_terminal_turn_persisted if self.deps.on_terminal_turn_persisted is not None else None
+            ),
         )
 
     def is_handled(self, event_id: str) -> bool:
@@ -247,17 +249,14 @@ class TurnStore:
                 timestamp=0.0,
             )
 
-        persisted = self._ledger.update_handled_turn(
+        return self._ledger.update_handled_turn(
             pending_record.indexed_event_ids,
             merge_pending,
             wait_for_persist=True,
         )
-        if persisted is not None:
-            self._notify_turn_persisted(persisted)
-        return persisted
 
-    def _notify_turn_persisted(self, turn_record: TurnRecord) -> None:
-        callback = self.deps.on_turn_persisted
+    def _notify_terminal_turn_persisted(self, turn_record: TurnRecord) -> None:
+        callback = self.deps.on_terminal_turn_persisted
         if callback is not None:
             callback(turn_record.indexed_event_ids)
 

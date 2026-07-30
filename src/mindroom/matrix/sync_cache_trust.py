@@ -116,6 +116,22 @@ class SyncCacheTrust:
         first_sync: bool,
     ) -> SyncCertificationDecision:
         """Apply the certification decision for one completed sync response."""
+        decision = self.plan_response(
+            next_batch=next_batch,
+            cache_result=cache_result,
+            first_sync=first_sync,
+        )
+        self.apply_response(decision, cache_result=cache_result)
+        return decision
+
+    def plan_response(
+        self,
+        *,
+        next_batch: str | None,
+        cache_result: SyncCacheWriteResult,
+        first_sync: bool,
+    ) -> SyncCertificationDecision:
+        """Plan certification without advancing runtime or durable continuity."""
         decision = certify_sync_response(
             self.state,
             next_batch=next_batch,
@@ -125,6 +141,15 @@ class SyncCacheTrust:
         limited_timeline = bool(cache_result.limited_room_ids)
         if limited_timeline and not self._awaiting_initial_window:
             decision = replace(decision, reset_client_token=True)
+        return decision
+
+    def apply_response(
+        self,
+        decision: SyncCertificationDecision,
+        *,
+        cache_result: SyncCacheWriteResult,
+    ) -> None:
+        """Apply a planned response after its prerequisite durable work completes."""
         self._apply_decision(decision, cache_result=cache_result)
         # Re-arm from applied trust, not from the decision: _apply_decision rejects
         # certification while a callback failure is outstanding, and a rejected
@@ -133,7 +158,6 @@ class SyncCacheTrust:
             self._awaiting_initial_window = True
         elif self.state is SyncTrustState.CERTIFIED:
             self._awaiting_initial_window = False
-        return decision
 
     def reject_unknown_pos(self) -> SyncCertificationDecision:
         """Invalidate a checkpoint rejected by the homeserver."""

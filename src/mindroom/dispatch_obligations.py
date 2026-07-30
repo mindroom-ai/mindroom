@@ -60,6 +60,10 @@ class _DispatchCallbackResult(StrEnum):
     DEFERRED = "deferred"
 
 
+class _DispatchObligationCorruptionError(RuntimeError):
+    """A pending row cannot be recovered without inventing source input."""
+
+
 @dataclass(frozen=True, slots=True)
 class _DispatchObligationKey:
     """Exact durable callback identity."""
@@ -221,8 +225,11 @@ class DispatchObligationStore:
             )
             if existing is not None:
                 if existing.room_id != obligation.room_id or existing.event_source_json != event_source_json:
-                    msg = "Existing dispatch obligation payload differs for the same exact key"
-                    raise ValueError(msg)
+                    logger.warning(
+                        "dispatch_obligation_replay_payload_differs",
+                        source_event_id=key.source_event_id,
+                        callback_kind=key.callback_kind.value,
+                    )
                 return (
                     _DispatchCreateResult.ALREADY_PENDING
                     if existing.state == _PENDING_STATE
@@ -360,7 +367,7 @@ class DispatchObligationStore:
             )
 
     def pending(self) -> tuple[_DispatchObligation, ...]:
-        """Return valid pending work oldest-first for this principal/entity."""
+        """Return pending work oldest-first, failing on unrecoverable durable input."""
         with self._lock, self._connect() as connection:
             rows = connection.execute(
                 """
@@ -378,20 +385,12 @@ class DispatchObligationStore:
             try:
                 callback_kind = DispatchCallbackKind(row["callback_kind"])
                 event_source = json.loads(row["event_source_json"])
-            except (ValueError, TypeError, json.JSONDecodeError):
-                logger.warning(
-                    "invalid_dispatch_obligation_ignored",
-                    source_event_id=row["source_event_id"],
-                    callback_kind=row["callback_kind"],
-                )
-                continue
+            except (ValueError, TypeError, json.JSONDecodeError) as exc:
+                msg = f"corrupt dispatch obligation {row['source_event_id']!r}/{row['callback_kind']!r}"
+                raise _DispatchObligationCorruptionError(msg) from exc
             if not isinstance(event_source, dict):
-                logger.warning(
-                    "invalid_dispatch_obligation_ignored",
-                    source_event_id=row["source_event_id"],
-                    callback_kind=row["callback_kind"],
-                )
-                continue
+                msg = f"corrupt dispatch obligation {row['source_event_id']!r}/{row['callback_kind']!r}"
+                raise _DispatchObligationCorruptionError(msg)
             obligations.append(
                 _DispatchObligation(
                     principal_id=self.principal_id,
@@ -445,6 +444,18 @@ _DecryptionFailureCallback = Callable[[nio.MatrixRoom, nio.MegolmEvent], Awaitab
 _TURN_BACKED_KINDS = frozenset({DispatchCallbackKind.MESSAGE, DispatchCallbackKind.MEDIA})
 
 
+def _parse_recovery_event(obligation: _DispatchObligation) -> nio.Event:
+    event = (
+        parse_matrix_media_event_source(obligation.event_source)
+        if obligation.callback_kind is DispatchCallbackKind.MEDIA
+        else nio.Event.parse_event(dict(obligation.event_source))
+    )
+    if event is None or isinstance(event, nio.BadEvent) or event.event_id != obligation.source_event_id:
+        msg = f"corrupt dispatch obligation event {obligation.source_event_id!r}/{obligation.callback_kind.value!r}"
+        raise _DispatchObligationCorruptionError(msg)
+    return event
+
+
 @dataclass(frozen=True, slots=True)
 class _CallbackBindings:
     on_message: _MessageCallback
@@ -455,6 +466,7 @@ class _CallbackBindings:
     on_redaction: _RedactionCallback
     on_decryption_failure: _DecryptionFailureCallback
     turn_is_persisted: Callable[[str], bool]
+    turn_is_terminal: Callable[[str], bool]
     source_is_deferred: Callable[[str], bool]
 
     def as_mapping(self) -> Mapping[DispatchCallbackKind, _DispatchCallback]:
@@ -469,9 +481,9 @@ class _CallbackBindings:
         }
 
     def _turn_result(self, source_event_id: str) -> _DispatchCallbackResult:
-        if self.turn_is_persisted(source_event_id):
+        if self.turn_is_terminal(source_event_id):
             return _DispatchCallbackResult.SUCCEEDED
-        if self.source_is_deferred(source_event_id):
+        if self.turn_is_persisted(source_event_id) or self.source_is_deferred(source_event_id):
             return _DispatchCallbackResult.DEFERRED
         return _DispatchCallbackResult.INTENTIONALLY_IGNORED
 
@@ -553,7 +565,7 @@ class DispatchObligationRunner:
     store: DispatchObligationStore
     callbacks: Mapping[DispatchCallbackKind, _DispatchCallback]
     room_for_id: Callable[[str], nio.MatrixRoom]
-    turn_is_persisted: Callable[[str], bool]
+    turn_is_terminal: Callable[[str], bool]
     _active: set[_DispatchObligationKey] = field(default_factory=set, init=False, repr=False)
     _active_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False, repr=False)
 
@@ -568,6 +580,7 @@ class DispatchObligationRunner:
         on_redaction: _RedactionCallback,
         on_decryption_failure: _DecryptionFailureCallback,
         turn_is_persisted: Callable[[str], bool],
+        turn_is_terminal: Callable[[str], bool],
         source_is_deferred: Callable[[str], bool],
     ) -> Mapping[DispatchCallbackKind, _DispatchCallback]:
         """Bind typed Matrix callbacks to explicit durable outcomes."""
@@ -580,6 +593,7 @@ class DispatchObligationRunner:
             on_redaction=on_redaction,
             on_decryption_failure=on_decryption_failure,
             turn_is_persisted=turn_is_persisted,
+            turn_is_terminal=turn_is_terminal,
             source_is_deferred=source_is_deferred,
         ).as_mapping()
 
@@ -668,24 +682,15 @@ class DispatchObligationRunner:
         """Retry every valid pending callback without waiting for another sync response."""
         for obligation in await asyncio.to_thread(self.store.pending):
             try:
-                event = (
-                    parse_matrix_media_event_source(obligation.event_source)
-                    if obligation.callback_kind is DispatchCallbackKind.MEDIA
-                    else nio.Event.parse_event(dict(obligation.event_source))
-                )
-                if event is None or isinstance(event, nio.BadEvent) or event.event_id != obligation.source_event_id:
-                    logger.error(
-                        "dispatch_obligation_recovery_event_invalid",
-                        source_event_id=obligation.source_event_id,
-                        callback_kind=obligation.callback_kind.value,
-                    )
-                    continue
+                event = _parse_recovery_event(obligation)
                 await self._run_obligation(
                     obligation,
                     room=self.room_for_id(obligation.room_id),
                     event=event,
                 )
             except asyncio.CancelledError:
+                raise
+            except _DispatchObligationCorruptionError:
                 raise
             except Exception:
                 logger.exception(
@@ -719,7 +724,7 @@ class DispatchObligationRunner:
     async def _settle_from_turn_store_if_owned(self, obligation: _DispatchObligation) -> bool:
         if obligation.callback_kind not in _TURN_BACKED_KINDS:
             return False
-        if not self.turn_is_persisted(obligation.source_event_id):
+        if not self.turn_is_terminal(obligation.source_event_id):
             return False
         await asyncio.to_thread(
             self.store.settle_from_turn_store,

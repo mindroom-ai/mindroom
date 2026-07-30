@@ -5,11 +5,13 @@ from __future__ import annotations
 import asyncio
 import sqlite3
 from dataclasses import replace
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, cast
+from unittest.mock import MagicMock
 
 import nio
 import pytest
 
+from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.dispatch_obligations import (
     DispatchCallbackKind,
     DispatchObligationRunner,
@@ -21,6 +23,10 @@ from mindroom.dispatch_obligations import (
 from mindroom.dispatch_obligations import (
     _DispatchCallbackResult as DispatchCallbackResult,
 )
+from mindroom.dispatch_obligations import (
+    _DispatchObligationTaskWrapper as DispatchObligationTaskWrapper,
+)
+from mindroom.matrix.media import MATRIX_MEDIA_EVENT_TYPES
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -104,13 +110,13 @@ def _runner(
     store: DispatchObligationStore,
     callback: Callable[[nio.MatrixRoom, nio.Event], Awaitable[DispatchCallbackResult]],
     *,
-    turn_is_persisted: Callable[[str], bool] = lambda _event_id: False,
+    turn_is_terminal: Callable[[str], bool] = lambda _event_id: False,
 ) -> DispatchObligationRunner:
     return DispatchObligationRunner(
         store=store,
         callbacks={DispatchCallbackKind.MESSAGE: callback},
         room_for_id=lambda room_id: nio.MatrixRoom(room_id, "@code:example.org"),
-        turn_is_persisted=turn_is_persisted,
+        turn_is_terminal=turn_is_terminal,
     )
 
 
@@ -160,15 +166,16 @@ def test_terminal_settlement_survives_restart_and_blocks_recreation(
     assert restarted.create_pending(obligation) is _DispatchCreateResult.ALREADY_TERMINAL
 
 
-def test_existing_pending_payload_cannot_be_reassigned(tmp_path: Path) -> None:
-    """An exact key must keep the original room and raw event it promises to replay."""
+def test_existing_pending_payload_keeps_first_accepted_source(tmp_path: Path) -> None:
+    """Transport-variant replays must keep the first durable source without failing."""
     store = _store(tmp_path)
     obligation = _message_obligation("$fixed")
     store.create_pending(obligation)
-    conflicting = replace(obligation, room_id="!other:example.org")
+    replay_source = dict(obligation.event_source)
+    replay_source["unsigned"] = {"age": 123}
+    conflicting = replace(obligation, event_source=replay_source)
 
-    with pytest.raises(ValueError, match="payload"):
-        store.create_pending(conflicting)
+    assert store.create_pending(conflicting) is _DispatchCreateResult.ALREADY_PENDING
 
     assert store.pending() == (obligation,)
 
@@ -224,7 +231,7 @@ def test_terminal_pruning_never_removes_pending_work(tmp_path: Path) -> None:
 
 
 def test_malformed_persisted_source_is_not_invented_into_recovery(tmp_path: Path) -> None:
-    """Invalid durable JSON must stay unresolved instead of becoming a guessed callback."""
+    """Invalid durable JSON must abort recovery and remain repairable pending work."""
     store = _store(tmp_path)
     obligation = _message_obligation("$broken")
     store.create_pending(obligation)
@@ -235,8 +242,10 @@ def test_malformed_persisted_source_is_not_invented_into_recovery(tmp_path: Path
             ("{", "$broken"),
         )
 
-    assert _store(tmp_path).pending() == ()
-    assert _store(tmp_path).has_pending("$broken", DispatchCallbackKind.MESSAGE)
+    restarted = _store(tmp_path)
+    with pytest.raises(RuntimeError, match="corrupt dispatch obligation"):
+        restarted.pending()
+    assert restarted.has_pending("$broken", DispatchCallbackKind.MESSAGE)
 
 
 @pytest.mark.asyncio
@@ -343,7 +352,7 @@ async def test_encrypted_media_recovery_uses_media_source_parser(tmp_path: Path)
         store=store,
         callbacks={DispatchCallbackKind.MEDIA: callback},
         room_for_id=lambda room_id: nio.MatrixRoom(room_id, _PRINCIPAL_ID),
-        turn_is_persisted=lambda _event_id: False,
+        turn_is_terminal=lambda _event_id: False,
     )
 
     await runner.recover_pending()
@@ -417,7 +426,7 @@ async def test_turn_store_terminal_truth_replaces_message_obligation(tmp_path: P
         handled.add(event.event_id)
         return DispatchCallbackResult.SUCCEEDED
 
-    runner = _runner(_store(tmp_path), callback, turn_is_persisted=handled.__contains__)
+    runner = _runner(_store(tmp_path), callback, turn_is_terminal=handled.__contains__)
     event = _message_event("$handled")
     room = nio.MatrixRoom(_ROOM_ID, _PRINCIPAL_ID)
 
@@ -439,7 +448,7 @@ async def test_deferred_message_remains_pending_until_turn_store_is_terminal(tmp
     runner = _runner(
         _store(tmp_path),
         callback,
-        turn_is_persisted=handled.__contains__,
+        turn_is_terminal=handled.__contains__,
     )
     room = nio.MatrixRoom(_ROOM_ID, _PRINCIPAL_ID)
     event = _message_event("$deferred")
@@ -451,3 +460,116 @@ async def test_deferred_message_remains_pending_until_turn_store_is_terminal(tmp
     await runner.recover_pending()
 
     assert not _store(tmp_path).has_pending("$deferred", DispatchCallbackKind.MESSAGE)
+
+
+@pytest.mark.asyncio
+async def test_pending_turn_store_record_does_not_retire_dispatch_obligation(tmp_path: Path) -> None:
+    """A generation-start record cannot replace exact callback work."""
+    terminal: set[str] = set()
+
+    async def callback(_room: nio.MatrixRoom, _event: nio.Event) -> DispatchCallbackResult:
+        return DispatchCallbackResult.DEFERRED
+
+    runner = _runner(
+        _store(tmp_path),
+        callback,
+        turn_is_terminal=terminal.__contains__,
+    )
+    room = nio.MatrixRoom(_ROOM_ID, _PRINCIPAL_ID)
+    event = _message_event("$pending-turn")
+
+    await runner.dispatch(room, event, DispatchCallbackKind.MESSAGE)
+    assert _store(tmp_path).has_pending("$pending-turn", DispatchCallbackKind.MESSAGE)
+
+    terminal.add("$pending-turn")
+    await runner.recover_pending()
+
+    assert not _store(tmp_path).has_pending("$pending-turn", DispatchCallbackKind.MESSAGE)
+
+
+@pytest.mark.asyncio
+async def test_bound_message_callback_defers_for_pending_turn_store_record() -> None:
+    """Typed callback settlement must distinguish pending and terminal turn truth."""
+    persisted = {"$bound"}
+    terminal: set[str] = set()
+
+    async def noop(_room: nio.MatrixRoom, _event: nio.Event) -> None:
+        pass
+
+    callbacks = DispatchObligationRunner.callbacks_for(
+        on_message=cast("Any", noop),
+        on_media=cast("Any", noop),
+        on_reaction=cast("Any", noop),
+        on_approval=cast("Any", noop),
+        on_room_lifecycle=cast("Any", noop),
+        on_redaction=cast("Any", noop),
+        on_decryption_failure=cast("Any", noop),
+        turn_is_persisted=persisted.__contains__,
+        turn_is_terminal=terminal.__contains__,
+        source_is_deferred=lambda _event_id: False,
+    )
+    callback = callbacks[DispatchCallbackKind.MESSAGE]
+    room = nio.MatrixRoom(_ROOM_ID, _PRINCIPAL_ID)
+    event = _message_event("$bound")
+
+    assert await callback(room, event) is DispatchCallbackResult.DEFERRED
+
+    terminal.add("$bound")
+
+    assert await callback(room, event) is DispatchCallbackResult.SUCCEEDED
+
+
+@pytest.mark.asyncio
+async def test_task_wrapper_persists_before_background_execution(tmp_path: Path) -> None:
+    """Returning to nio must require durable acceptance before background execution."""
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    owner = object()
+
+    async def callback(_room: nio.MatrixRoom, _event: nio.Event) -> DispatchCallbackResult:
+        entered.set()
+        await release.wait()
+        return DispatchCallbackResult.SUCCEEDED
+
+    store = _store(tmp_path)
+    runner = _runner(store, callback)
+    wrapper = runner.task_wrapper(DispatchCallbackKind.MESSAGE, owner=owner)
+    event = _message_event("$durable")
+
+    await wrapper(nio.MatrixRoom(_ROOM_ID, _PRINCIPAL_ID), event)
+
+    assert store.has_pending("$durable", DispatchCallbackKind.MESSAGE)
+    await entered.wait()
+    release.set()
+    await wait_for_background_tasks(timeout=1.0, owner=owner)
+    assert not store.has_pending("$durable", DispatchCallbackKind.MESSAGE)
+
+
+def test_correctness_callbacks_register_with_explicit_durable_kinds(tmp_path: Path) -> None:
+    """Every source-backed correctness callback must use the durable runner seam."""
+
+    async def callback(_room: nio.MatrixRoom, _event: nio.Event) -> DispatchCallbackResult:
+        return DispatchCallbackResult.SUCCEEDED
+
+    runner = _runner(_store(tmp_path), callback)
+    client = MagicMock(spec=nio.AsyncClient)
+
+    runner.register_source_callbacks(client, owner=object())
+
+    registrations = {
+        event_type: registered
+        for registered, event_type in (call.args for call in client.add_event_callback.call_args_list)
+    }
+    expected_kinds = {
+        nio.RoomMessageText: DispatchCallbackKind.MESSAGE,
+        nio.ReactionEvent: DispatchCallbackKind.REACTION,
+        nio.RedactionEvent: DispatchCallbackKind.REDACTION,
+        nio.UnknownEvent: DispatchCallbackKind.APPROVAL,
+        nio.MegolmEvent: DispatchCallbackKind.DECRYPTION_FAILURE,
+        **dict.fromkeys(MATRIX_MEDIA_EVENT_TYPES, DispatchCallbackKind.MEDIA),
+    }
+    assert expected_kinds.keys() <= registrations.keys()
+    for event_type, callback_kind in expected_kinds.items():
+        registered = registrations[event_type]
+        assert isinstance(registered, DispatchObligationTaskWrapper)
+        assert registered.callback_kind is callback_kind

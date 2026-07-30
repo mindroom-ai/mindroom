@@ -12,6 +12,7 @@ import pytest
 from mindroom.background_tasks import create_background_task, wait_for_background_tasks
 from mindroom.bot import AgentBot
 from mindroom.cancellation import SYNC_RESTART_CANCEL_MSG
+from mindroom.dispatch_obligations import DispatchCallbackKind, _DispatchObligationTaskWrapper
 from mindroom.hooks import EVENT_AGENT_STARTED
 from mindroom.matrix.cache import thread_cache_rejection_reason
 from mindroom.matrix.cache.event_cache import EventCacheBackendUnavailableError
@@ -75,7 +76,8 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
                     for callback in start_client.add_event_callback.call_args_list
                     if callback.args[1] is nio.RedactionEvent
                 )
-                assert redaction_callback == bot._on_redaction
+                assert isinstance(redaction_callback, _DispatchObligationTaskWrapper)
+                assert redaction_callback.callback_kind is DispatchCallbackKind.REDACTION
 
                 await bot.stop()
 
@@ -1539,12 +1541,12 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("failure", [RuntimeError("persist failed"), RuntimeError("cache failed")])
-    async def test_live_redaction_failure_rewinds_to_last_certified_sync(
+    async def test_live_redaction_failure_does_not_rewind_raw_sync_position(
         self,
         bot: AgentBot,
         failure: RuntimeError,
     ) -> None:
-        """A critical redaction failure must replay the sync delta on the same client."""
+        """Durable exact work, not raw token rewind, owns redaction retry."""
         room = nio.MatrixRoom(room_id="!test:localhost", own_user_id="@mindroom_agent:localhost")
         redaction_event = MagicMock(spec=nio.RedactionEvent)
         _save_certified_sync_token(bot, "s_before_redaction")
@@ -1561,7 +1563,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         ):
             await bot._on_redaction(room, redaction_event)
 
-        assert bot.client.next_batch == "s_before_redaction"
+        assert bot.client.next_batch == "s_after_redaction"
         assert _load_sync_token_value(bot.storage_path, bot.agent_name) == "s_before_redaction"
 
     @pytest.mark.asyncio

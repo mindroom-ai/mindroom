@@ -172,16 +172,16 @@ class _RoomMemberJoinSyncHookPlan:
     record_state_seen: bool = False
 
 
-def _create_task_wrapper(
+def _create_best_effort_task_wrapper(
     callback: Callable[..., Awaitable[None]],
     *,
     owner: BotRuntimeState | None = None,
 ) -> Callable[..., Awaitable[None]]:
-    """Create a wrapper that runs the callback as a background task.
+    """Run one explicitly best-effort callback as a background task.
 
-    This ensures the sync loop is never blocked by event processing,
-    allowing the bot to handle new events (like stop reactions) while
-    processing messages.
+    Use this only for auxiliary consumers or Matrix inputs without a stable
+    source event ID.
+    Correctness-critical source-backed events use ``DispatchObligationRunner``.
     """
 
     async def wrapper(*args: object, **kwargs: object) -> None:
@@ -498,7 +498,7 @@ class AgentBot:
                 state_writer=self._conversation_state_writer,
                 resolver=self._conversation_resolver,
                 tool_runtime=self._tool_runtime_support,
-                on_turn_persisted=self._settle_turn_dispatch_obligations,
+                on_terminal_turn_persisted=self._settle_turn_dispatch_obligations,
             ),
         )
         self._dispatch_obligation_runner = DispatchObligationRunner(
@@ -512,10 +512,11 @@ class AgentBot:
                 on_redaction=self._on_redaction,
                 on_decryption_failure=self._on_decryption_failure,
                 turn_is_persisted=lambda event_id: self._turn_store.get_turn_record(event_id) is not None,
+                turn_is_terminal=self._turn_store.is_handled,
                 source_is_deferred=self._coalescing_gate.has_pending_source_event,
             ),
             room_for_id=self._room_for_dispatch_obligation,
-            turn_is_persisted=lambda event_id: self._turn_store.get_turn_record(event_id) is not None,
+            turn_is_terminal=self._turn_store.is_handled,
         )
         self._post_response_effects_support = PostResponseEffectsSupport(
             runtime=self._runtime_view,
@@ -1123,6 +1124,31 @@ class AgentBot:
             cast("Any", self.client).next_batch = None
         return decision
 
+    def _plan_sync_response(
+        self,
+        *,
+        next_batch: str | None,
+        cache_result: SyncCacheWriteResult,
+        first_sync: bool,
+    ) -> SyncCertificationDecision:
+        """Plan sync certification without advancing the durable checkpoint."""
+        return self._sync_cache_trust.plan_response(
+            next_batch=next_batch,
+            cache_result=cache_result,
+            first_sync=first_sync,
+        )
+
+    def _apply_sync_response_decision(
+        self,
+        decision: SyncCertificationDecision,
+        *,
+        cache_result: SyncCacheWriteResult,
+    ) -> None:
+        """Advance sync continuity after prerequisite durable work completes."""
+        self._sync_cache_trust.apply_response(decision, cache_result=cache_result)
+        if decision.reset_client_token and self.client is not None:
+            cast("Any", self.client).next_batch = None
+
     def seconds_since_last_sync_activity(self) -> float | None:
         """Return elapsed seconds since the last sync-loop activity seen by the watchdog."""
         if self._last_sync_monotonic is None:
@@ -1179,23 +1205,26 @@ class AgentBot:
             record_state_seen=decision.state is SyncTrustState.CERTIFIED and not emit_certified_state,
         )
 
-    async def _run_sync_response_side_effects(
+    async def _run_pre_certification_sync_response_side_effects(
         self,
-        response: nio.SyncResponse | nio.SlidingSyncResponse,
+        response: nio.SyncResponse,
         *,
-        first_sync_response: bool,
         room_member_join_hook_plan: _RoomMemberJoinSyncHookPlan,
     ) -> None:
-        """Run sync-response side effects that must poison certification on failure."""
-        # The emit flags are only set by the classic-sync certification path.
-        if isinstance(response, nio.SyncResponse):
-            if room_member_join_hook_plan.record_state_seen:
-                await self._emit_room_member_joined_sync_state_hooks(response, record_only=True)
-            if room_member_join_hook_plan.emit_timeline:
-                await self._emit_room_member_joined_sync_timeline_hooks(response)
-            if room_member_join_hook_plan.emit_state:
-                await self._emit_room_member_joined_sync_state_hooks(response)
+        """Finish source-backed lifecycle work before certifying its sync position."""
+        if room_member_join_hook_plan.record_state_seen:
+            await self._emit_room_member_joined_sync_state_hooks(response, record_only=True)
+        if room_member_join_hook_plan.emit_timeline:
+            await self._emit_room_member_joined_sync_timeline_hooks(response)
+        if room_member_join_hook_plan.emit_state:
+            await self._emit_room_member_joined_sync_state_hooks(response)
 
+    async def _run_sync_response_side_effects(
+        self,
+        *,
+        first_sync_response: bool,
+    ) -> None:
+        """Run side effects that do not own raw sync checkpoint safety."""
         if first_sync_response:
             self._register_room_member_callback_after_initial_sync()
             await self._emit_agent_lifecycle_event(EVENT_BOT_READY)
@@ -1233,7 +1262,7 @@ class AgentBot:
                     first_sync=first_sync_response,
                 )
                 raise
-            decision = self._certify_sync_response(
+            decision = self._plan_sync_response(
                 next_batch=_response.next_batch,
                 cache_result=cache_result,
                 first_sync=first_sync_response,
@@ -1244,6 +1273,11 @@ class AgentBot:
                 hooks_were_armed=room_member_join_hooks_were_armed,
                 decision=decision,
             )
+            await self._run_pre_certification_sync_response_side_effects(
+                _response,
+                room_member_join_hook_plan=room_member_join_hook_plan,
+            )
+            self._apply_sync_response_decision(decision, cache_result=cache_result)
         elif isinstance(_response, nio.SlidingSyncResponse):
             # Sliding sync never certifies the classic checkpoint, but the
             # account's own kicks and bans still must fence and purge rooms.
@@ -1252,9 +1286,7 @@ class AgentBot:
         self._room_member_join_hooks_armed = room_member_join_hook_plan.arm_after_response
 
         await self._run_sync_response_side_effects(
-            _response,
             first_sync_response=first_sync_response,
-            room_member_join_hook_plan=room_member_join_hook_plan,
         )
         if self._calls_reconcile_pending:
             self._calls_reconcile_pending = False
@@ -1344,7 +1376,7 @@ class AgentBot:
             get_invited_rooms_by_agent=self._invited_call_rooms_by_agent,
         )
         client.add_event_callback(
-            _create_task_wrapper(
+            _create_best_effort_task_wrapper(
                 self._on_room_membership_event,
                 owner=self._runtime_view,
             ),
@@ -1353,14 +1385,14 @@ class AgentBot:
         if self._call_manager is None:
             return
         client.add_event_callback(
-            _create_task_wrapper(
+            _create_best_effort_task_wrapper(
                 self._call_manager.on_room_event,
                 owner=self._runtime_view,
             ),
             nio.UnknownEvent,
         )
         client.add_to_device_callback(
-            _create_task_wrapper(  # ty: ignore[invalid-argument-type]  # matrix-nio callback types are too strict here
+            _create_best_effort_task_wrapper(  # ty: ignore[invalid-argument-type]  # matrix-nio callback types are too strict here
                 self._call_manager.on_to_device_event,
                 owner=self._runtime_view,
             ),
@@ -1470,10 +1502,9 @@ class AgentBot:
             client = self.client
             assert client is not None
 
-            # Register event callbacks - wrap them to run as background tasks
-            # This ensures the sync loop is never blocked, allowing stop reactions to work
+            # Persist correctness-critical source events; keep ID-less auxiliary inputs best-effort.
             client.add_event_callback(
-                _create_task_wrapper(self._on_invite, owner=self._runtime_view),
+                _create_best_effort_task_wrapper(self._on_invite, owner=self._runtime_view),
                 nio.InviteEvent,  # ty: ignore[invalid-argument-type]  # InviteEvent doesn't inherit Event
             )
             self._dispatch_obligation_runner.register_source_callbacks(
@@ -1486,7 +1517,7 @@ class AgentBot:
                 client=client,
                 agent_name=self.agent_name,
                 runtime_paths=self.runtime_paths,
-                callback_wrapper=lambda callback: _create_task_wrapper(
+                callback_wrapper=lambda callback: _create_best_effort_task_wrapper(
                     callback,
                     owner=self._runtime_view,
                 ),
@@ -1893,7 +1924,7 @@ class AgentBot:
         record_only: bool = False,
     ) -> None:
         """Expose or record human joins that matrix-nio delivers through sync room state."""
-        if self.agent_name != ROUTER_AGENT_NAME or not self._first_sync_done or not self._room_member_join_hooks_armed:
+        if self.agent_name != ROUTER_AGENT_NAME:
             return
         if not record_only and not self.hook_registry.has_hooks(EVENT_ROOM_MEMBER_JOINED):
             return
@@ -1938,7 +1969,7 @@ class AgentBot:
 
     async def _emit_room_member_joined_sync_timeline_hooks(self, response: nio.SyncResponse) -> None:
         """Expose human joins from a restored-token catch-up sync timeline."""
-        if self.agent_name != ROUTER_AGENT_NAME or not self._first_sync_done or not self._room_member_join_hooks_armed:
+        if self.agent_name != ROUTER_AGENT_NAME:
             return
         if not self.hook_registry.has_hooks(EVENT_ROOM_MEMBER_JOINED):
             return

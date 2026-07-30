@@ -50,7 +50,7 @@ if TYPE_CHECKING:
 def _store(
     tmp_path: Path,
     *,
-    on_turn_persisted: Callable[[tuple[str, ...]], None] | None = None,
+    on_terminal_turn_persisted: Callable[[tuple[str, ...]], None] | None = None,
 ) -> TurnStore:
     return TurnStore(
         TurnStoreDeps(
@@ -59,7 +59,7 @@ def _store(
             state_writer=MagicMock(),
             resolver=MagicMock(),
             tool_runtime=MagicMock(),
-            on_turn_persisted=on_turn_persisted,
+            on_terminal_turn_persisted=on_terminal_turn_persisted,
         ),
     )
 
@@ -143,10 +143,10 @@ def _prepare_redaction(
     )
 
 
-def test_persisted_turn_notifies_exact_indexed_event_ids(tmp_path: Path) -> None:
-    """Both pending and terminal TurnStore truth must retire transient dispatch obligations."""
+def test_only_terminal_turn_notifies_exact_indexed_event_ids(tmp_path: Path) -> None:
+    """Pending TurnStore state must not retire callback work that startup cannot resume."""
     notifications: list[tuple[str, ...]] = []
-    store = _store(tmp_path, on_turn_persisted=notifications.append)
+    store = _store(tmp_path, on_terminal_turn_persisted=notifications.append)
     pending = TurnRecord.create(
         ["$source"],
         discovery_event_ids=["$alias"],
@@ -154,13 +154,12 @@ def test_persisted_turn_notifies_exact_indexed_event_ids(tmp_path: Path) -> None
     )
 
     store.record_pending_turn(pending)
+    assert notifications == []
+
     store.record_turn(pending)
     store._ledger.flush()
 
-    assert notifications == [
-        ("$source", "$alias"),
-        ("$source", "$alias"),
-    ]
+    assert notifications == [("$source", "$alias")]
 
 
 def test_terminal_turn_notifies_only_after_durable_write(tmp_path: Path) -> None:
@@ -168,7 +167,7 @@ def test_terminal_turn_notifies_only_after_durable_write(tmp_path: Path) -> None
     notified = threading.Event()
     persist_started = threading.Event()
     release_persist = threading.Event()
-    store = _store(tmp_path, on_turn_persisted=lambda _event_ids: notified.set())
+    store = _store(tmp_path, on_terminal_turn_persisted=lambda _event_ids: notified.set())
     original_persist = store._ledger._persist_records
 
     def blocking_persist(records: tuple[TurnRecord, ...]) -> None:

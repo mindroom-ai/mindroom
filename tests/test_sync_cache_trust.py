@@ -108,6 +108,27 @@ def test_complete_cache_delta_certifies_raw_sync_continuity(tmp_path: Path) -> N
     )
 
 
+def test_planned_response_does_not_advance_checkpoint_until_applied(tmp_path: Path) -> None:
+    """Callers may finish prerequisite durable work before certifying a sync position."""
+    trust, _cache, _runtime = _trust(tmp_path)
+
+    decision = trust.plan_response(
+        next_batch="s_planned",
+        cache_result=SyncCacheWriteResult(complete=True),
+        first_sync=False,
+    )
+
+    assert decision.checkpoint_to_save == SyncCheckpoint("s_planned")
+    assert trust.state is SyncTrustState.COLD
+    assert trust.checkpoint is None
+    assert load_sync_checkpoint(tmp_path, "code") is None
+
+    trust.apply_response(decision, cache_result=SyncCacheWriteResult(complete=True))
+
+    assert trust.state is SyncTrustState.CERTIFIED
+    assert trust.checkpoint == SyncCheckpoint("s_planned")
+
+
 def test_positioned_limited_response_resets_sync_continuity(tmp_path: Path) -> None:
     """A limited response after a position must force one since-less replay."""
     trust, _cache, _runtime = _trust(tmp_path)
