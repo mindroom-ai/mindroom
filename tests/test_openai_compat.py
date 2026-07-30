@@ -73,11 +73,6 @@ from tests.identity_helpers import persist_entity_accounts
 _TEST_MODEL = "openai:gpt-5.4"
 _QUEUED_NOTICE_MARKER_KEY = "mindroom_queued_message_notice"
 _QUEUED_NOTICE_RESPONSE_TURN_ID_KEY = "mindroom_queued_message_notice_response_turn_id"
-_QUEUED_NOTICE_HISTORY_TEXT = (
-    '\n\n<mindroom-history-note kind="queued-message-notice">\n'
-    "A queued-message notice was delivered.\n"
-    "</mindroom-history-note>\n\n"
-)
 
 
 def _make_test_agent(name: str) -> AgnoAgent:
@@ -4586,15 +4581,15 @@ class TestTeamCompletion:
                     if isinstance(run, (RunOutput, TeamRunOutput))
                     for message in collect_messages(run)
                 ]
-                factual_notices = [
+                persisted_notices = [
                     message
                     for message in persisted_messages
                     if isinstance(message.provider_data, dict)
                     and message.provider_data.get(_QUEUED_NOTICE_MARKER_KEY) == "persisted"
                 ]
-                assert len(factual_notices) == 1
-                assert factual_notices[0].content == _QUEUED_NOTICE_HISTORY_TEXT
-                assert factual_notices[0].provider_data == {
+                assert len(persisted_notices) == 1
+                assert persisted_notices[0].content == QUEUED_MESSAGE_NOTICE_TEXT
+                assert persisted_notices[0].provider_data == {
                     _QUEUED_NOTICE_MARKER_KEY: "persisted",
                     _QUEUED_NOTICE_RESPONSE_TURN_ID_KEY: prior_response_id,
                 }
@@ -4655,15 +4650,15 @@ class TestTeamCompletion:
             persisted_messages = [
                 message for run in scope_context.session.runs or [] for message in (run.messages or [])
             ]
-        factual_notices = [
+        persisted_notices = [
             message
             for message in persisted_messages
             if isinstance(message.provider_data, dict)
             and message.provider_data.get(_QUEUED_NOTICE_MARKER_KEY) == "persisted"
         ]
-        assert len(factual_notices) == 1
-        assert factual_notices[0].content == _QUEUED_NOTICE_HISTORY_TEXT
-        assert factual_notices[0].provider_data == {
+        assert len(persisted_notices) == 1
+        assert persisted_notices[0].content == QUEUED_MESSAGE_NOTICE_TEXT
+        assert persisted_notices[0].provider_data == {
             _QUEUED_NOTICE_MARKER_KEY: "persisted",
             _QUEUED_NOTICE_RESPONSE_TURN_ID_KEY: prior_response_id,
         }

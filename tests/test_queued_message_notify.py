@@ -351,11 +351,6 @@ async def test_response_lifecycle_rejects_mismatched_locked_response_target(tmp_
 
 _QUEUED_NOTICE_MARKER_KEY = "mindroom_queued_message_notice"
 _QUEUED_NOTICE_RESPONSE_TURN_ID_KEY = "mindroom_queued_message_notice_response_turn_id"
-_QUEUED_NOTICE_HISTORY_TEXT = (
-    '\n\n<mindroom-history-note kind="queued-message-notice">\n'
-    "A queued-message notice was delivered.\n"
-    "</mindroom-history-note>\n\n"
-)
 
 
 def _notice_messages(
@@ -3021,13 +3016,13 @@ def test_notice_hook_scopes_dedupe_to_response_turn_id() -> None:
         prior_notice = _queued_notice_message(
             "prior-response",
             marker="persisted",
-            content=_QUEUED_NOTICE_HISTORY_TEXT,
+            content=QUEUED_MESSAGE_NOTICE_TEXT,
             from_history=True,
         )
         current_stale_notice = _queued_notice_message(
             notice_context.response_turn_id,
             marker="persisted",
-            content=_QUEUED_NOTICE_HISTORY_TEXT,
+            content=QUEUED_MESSAGE_NOTICE_TEXT,
         )
         messages = [prior_notice, current_stale_notice]
         model.format_function_call_results(
@@ -3041,14 +3036,14 @@ def test_notice_hook_scopes_dedupe_to_response_turn_id() -> None:
     assert _notice_count(messages, marker=True, response_turn_id=notice_context.response_turn_id) == 1
 
 
-def test_notice_hook_preserves_prior_factual_replay() -> None:
-    """A prior factual replay note should survive later tool-result formatting byte-for-byte."""
+def test_notice_hook_preserves_prior_persisted_replay() -> None:
+    """A prior persisted notice should survive later tool-result formatting byte-for-byte."""
     model = _FakeModel()
     install_queued_message_notice_hook(model, notice_text=QUEUED_MESSAGE_NOTICE_TEXT)
     prior_notice = _queued_notice_message(
         "prior-response",
         marker="persisted",
-        content=_QUEUED_NOTICE_HISTORY_TEXT,
+        content=QUEUED_MESSAGE_NOTICE_TEXT,
         from_history=True,
     )
     original = prior_notice.model_dump()
@@ -3171,7 +3166,7 @@ def test_notice_hook_still_installs_when_media_handler_is_missing() -> None:
 
 @pytest.mark.asyncio
 async def test_ai_response_preserves_stale_notice_before_prepare(tmp_path: Path) -> None:
-    """Loaded session history should factualize a prior crash-left live notice."""
+    """Loaded session history should persist a prior crash-left live notice."""
     config = _config(tmp_path)
     storage = _FakeStorage()
     storage.session = AgentSession(
@@ -3237,7 +3232,7 @@ async def test_ai_response_preserves_stale_notice_before_prepare(tmp_path: Path)
         marker="persisted",
         response_turn_id="prior-response",
     )
-    assert [message.content for message in recovered] == [_QUEUED_NOTICE_HISTORY_TEXT]
+    assert [message.content for message in recovered] == [QUEUED_MESSAGE_NOTICE_TEXT]
 
 
 @pytest.mark.asyncio
@@ -3484,7 +3479,7 @@ def test_create_team_instance_installs_notice_hook_on_team_model(tmp_path: Path)
 
 @pytest.mark.asyncio
 async def test_response_finalization_collapses_nested_current_notice_state() -> None:
-    """Outer finalization should leave one factual note in the top-level completed run."""
+    """Outer finalization should leave one exact notice in the top-level completed run."""
     created_storages: list[_FakeStorage] = []
     model = _FakeModel()
     install_queued_message_notice_hook(model, notice_text=QUEUED_MESSAGE_NOTICE_TEXT)
@@ -3560,7 +3555,7 @@ async def test_response_finalization_collapses_nested_current_notice_state() -> 
 
 @pytest.mark.asyncio
 async def test_response_finalization_uses_newest_completed_same_turn_run_and_original_notice_position() -> None:
-    """Two completed attempts should leave one factual note at the newest attempt's notice position."""
+    """Two completed attempts should leave one exact notice at the newest notice position."""
     model = _FakeModel()
     install_queued_message_notice_hook(model, notice_text=QUEUED_MESSAGE_NOTICE_TEXT)
     storage = _FakeStorage()
@@ -3632,7 +3627,7 @@ async def test_response_finalization_uses_newest_completed_same_turn_run_and_ori
         ("user", "Second request"),
         ("assistant", "Second tool call"),
         ("tool", "Second result"),
-        ("user", _QUEUED_NOTICE_HISTORY_TEXT),
+        ("user", QUEUED_MESSAGE_NOTICE_TEXT),
         ("assistant", "Second final"),
     ]
     assert (
@@ -3987,13 +3982,14 @@ async def test_error_responses_never_attach_notices_to_prior_completed_run() -> 
 
 @pytest.mark.asyncio
 async def test_response_lifecycle_finalizes_notice_after_locked_operation() -> None:
-    """The lifecycle boundary should finalize registered attempts after the operation returns."""
+    """The lifecycle boundary should persist the exact notice shown to the model."""
     lifecycle = ResponseLifecycleCoordinator()
     target = MessageTarget.resolve("!room:localhost", "$thread", "$event")
     envelope = _envelope(source_event_id="$event", target=target)
     storage = _FakeStorage()
     model = _FakeModel()
-    install_queued_message_notice_hook(model, notice_text=QUEUED_MESSAGE_NOTICE_TEXT)
+    notice_text = "Custom queued notice."
+    install_queued_message_notice_hook(model, notice_text=notice_text)
     observed_live_counts: list[int] = []
 
     async def locked_operation(_target: MessageTarget) -> str:
@@ -4043,8 +4039,8 @@ async def test_response_lifecycle_finalizes_notice_after_locked_operation() -> N
     assert storage.session is not None
     stored_run = storage.session.runs[0]
     assert _notice_count(stored_run.messages or [], marker=True) == 0
-    factual = _notice_messages(stored_run.messages or [], marker="persisted")
-    assert [message.content for message in factual] == [_QUEUED_NOTICE_HISTORY_TEXT]
+    persisted_notices = _notice_messages(stored_run.messages or [], marker="persisted")
+    assert [message.content for message in persisted_notices] == [notice_text]
     assert storage.upsert_count == 1
 
 
@@ -4100,7 +4096,7 @@ async def test_response_lifecycle_finalizes_error_state_when_operation_raises() 
 
 
 @pytest.mark.asyncio
-async def test_response_turn_finalization_is_idempotent_for_one_factual_note() -> None:
+async def test_response_turn_finalization_is_idempotent_for_one_persisted_notice() -> None:
     """Repeated boundary finalization should not rewrite an already-normalized response."""
     storage = _FakeStorage()
     model = _FakeModel()
@@ -4112,15 +4108,15 @@ async def test_response_turn_finalization_is_idempotent_for_one_factual_note() -
             messages=injected_messages,
             function_call_results=[Message(role="tool", content="result")],
         )
-        factual = _queued_notice_message(
+        persisted_notice = _queued_notice_message(
             notice_context.response_turn_id,
             marker="persisted",
-            content=_QUEUED_NOTICE_HISTORY_TEXT,
+            content=QUEUED_MESSAGE_NOTICE_TEXT,
         )
         run = RunOutput(
             run_id="completed-run",
             session_id="session-1",
-            messages=[factual],
+            messages=[persisted_notice],
             status=RunStatus.completed,
         )
         storage.session = AgentSession(
@@ -4129,7 +4125,7 @@ async def test_response_turn_finalization_is_idempotent_for_one_factual_note() -
                 RunOutput(
                     run_id=run.run_id,
                     session_id=run.session_id,
-                    messages=[factual.model_copy(deep=True)],
+                    messages=[persisted_notice.model_copy(deep=True)],
                     status=run.status,
                 ),
             ],
@@ -4150,17 +4146,17 @@ async def test_response_turn_finalization_is_idempotent_for_one_factual_note() -
     assert (storage.session.runs[0].messages or [])[0].model_dump() == original_stored
 
 
-def test_pre_replay_crash_recovery_preserves_prior_factual_and_active_live_notice() -> None:
-    """Recovery should factualize prior live state without touching prior facts or the active response."""
+def test_pre_replay_crash_recovery_preserves_prior_persisted_and_active_live_notice() -> None:
+    """Recovery should persist prior live state without touching prior records or the active response."""
     storage = _FakeStorage()
 
     with queued_message_signal_context(_StaticQueuedState(pending=False)) as notice_context:
-        prior_factual = _queued_notice_message(
-            "already-factual",
+        prior_persisted = _queued_notice_message(
+            "already-persisted",
             marker="persisted",
-            content=_QUEUED_NOTICE_HISTORY_TEXT,
+            content=QUEUED_MESSAGE_NOTICE_TEXT,
         )
-        prior_dump = prior_factual.model_dump()
+        prior_dump = prior_persisted.model_dump()
         active_live = _queued_notice_message(notice_context.response_turn_id)
         storage.session = AgentSession(
             session_id="session-1",
@@ -4170,7 +4166,7 @@ def test_pre_replay_crash_recovery_preserves_prior_factual_and_active_live_notic
                     session_id="session-1",
                     messages=[
                         _queued_notice_message("crash-left"),
-                        prior_factual,
+                        prior_persisted,
                         active_live,
                     ],
                 ),
@@ -4186,8 +4182,8 @@ def test_pre_replay_crash_recovery_preserves_prior_factual_and_active_live_notic
 
     assert storage.session is not None
     stored_messages = storage.session.runs[0].messages or []
-    assert prior_factual.model_dump() == prior_dump
-    assert _notice_count(stored_messages, marker="persisted", response_turn_id="already-factual") == 1
+    assert prior_persisted.model_dump() == prior_dump
+    assert _notice_count(stored_messages, marker="persisted", response_turn_id="already-persisted") == 1
     assert _notice_count(stored_messages, marker="persisted", response_turn_id="crash-left") == 1
     assert _notice_count(stored_messages, marker=True, response_turn_id="crash-left") == 0
     assert _notice_count(stored_messages, marker=True, response_turn_id=notice_context.response_turn_id) == 1
@@ -4304,7 +4300,7 @@ async def _persist_notice_bearing_response(tmp_path: Path) -> str:
 async def test_prior_notice_survives_actual_next_provider_request_and_tool_round(
     tmp_path: Path,
 ) -> None:
-    """A factual notice should survive real SQLite replay and the next response's tool formatting."""
+    """The exact notice should survive real SQLite replay and next-response formatting."""
     response_1_id = await _persist_notice_bearing_response(tmp_path)
 
     response_2_storage = _queued_notice_storage(tmp_path)
@@ -4323,13 +4319,27 @@ async def test_prior_notice_survives_actual_next_provider_request_and_tool_round
         with queued_message_signal_context(_StaticQueuedState(pending=False)) as response_2_context:
             response_2 = await response_2_agent.arun("Second request", session_id="session-1")
             prior = next(
-                message for message in recording_model.seen_messages if message.content == _QUEUED_NOTICE_HISTORY_TEXT
+                message for message in recording_model.seen_messages if message.content == QUEUED_MESSAGE_NOTICE_TEXT
             )
             assert prior.from_history is True
             assert prior.provider_data == {
                 _QUEUED_NOTICE_MARKER_KEY: "persisted",
                 _QUEUED_NOTICE_RESPONSE_TURN_ID_KEY: response_1_id,
             }
+            assert [
+                (message.role, message.content)
+                for message in recording_model.seen_messages
+                if message.content
+                in {
+                    QUEUED_MESSAGE_NOTICE_TEXT,
+                    "First response handoff",
+                    "Second request",
+                }
+            ] == [
+                ("user", QUEUED_MESSAGE_NOTICE_TEXT),
+                ("assistant", "First response handoff"),
+                ("user", "Second request"),
+            ]
             original_prior = prior.model_dump()
 
             recording_model.format_function_call_results(
@@ -4363,12 +4373,12 @@ async def test_prior_notice_survives_actual_next_provider_request_and_tool_round
     assert persisted.runs is not None
     response_2_run = persisted.runs[-1]
     assert isinstance(response_2_run, RunOutput)
-    assert all(message.content != _QUEUED_NOTICE_HISTORY_TEXT for message in response_2_run.messages or [])
+    assert all(message.content != QUEUED_MESSAGE_NOTICE_TEXT for message in response_2_run.messages or [])
     response_1_run = persisted.runs[0]
     assert isinstance(response_1_run, RunOutput)
-    factual = _notice_messages(
+    persisted_notices = _notice_messages(
         response_1_run.messages or [],
         marker="persisted",
         response_turn_id=response_1_id,
     )
-    assert [message.content for message in factual] == [_QUEUED_NOTICE_HISTORY_TEXT]
+    assert [message.content for message in persisted_notices] == [QUEUED_MESSAGE_NOTICE_TEXT]

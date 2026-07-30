@@ -97,11 +97,6 @@ if TYPE_CHECKING:
 _TEST_MODEL = "openai:gpt-5.4"
 _QUEUED_NOTICE_MARKER_KEY = "mindroom_queued_message_notice"
 _QUEUED_NOTICE_RESPONSE_TURN_ID_KEY = "mindroom_queued_message_notice_response_turn_id"
-_QUEUED_NOTICE_HISTORY_TEXT = (
-    '\n\n<mindroom-history-note kind="queued-message-notice">\n'
-    "A queued-message notice was delivered.\n"
-    "</mindroom-history-note>\n\n"
-)
 
 
 def _make_test_agent(name: str) -> AgnoAgent:
@@ -176,7 +171,12 @@ def _has_live_queued_notice(messages: list[Message] | None, *, response_turn_id:
     )
 
 
-def _has_factual_queued_notice(messages: list[Message] | None, *, response_turn_id: str | None = None) -> bool:
+def _has_persisted_queued_notice(
+    messages: list[Message] | None,
+    *,
+    response_turn_id: str | None = None,
+    notice_text: str = QUEUED_MESSAGE_NOTICE_TEXT,
+) -> bool:
     return any(
         isinstance(message.provider_data, dict)
         and message.provider_data.get(_QUEUED_NOTICE_MARKER_KEY) == "persisted"
@@ -184,7 +184,7 @@ def _has_factual_queued_notice(messages: list[Message] | None, *, response_turn_
             response_turn_id is None
             or message.provider_data.get(_QUEUED_NOTICE_RESPONSE_TURN_ID_KEY) == response_turn_id
         )
-        and message.content == _QUEUED_NOTICE_HISTORY_TEXT
+        and message.content == notice_text
         for message in messages or []
     )
 
@@ -216,13 +216,13 @@ def _assert_retry_notice_finalized(
         assert scope_context.session is not None
         errored_run, completed_run = scope_context.session.runs or []
         assert not _has_live_queued_notice(errored_run.messages)
-        assert not _has_factual_queued_notice(errored_run.messages)
-        assert _has_factual_queued_notice(
+        assert not _has_persisted_queued_notice(errored_run.messages)
+        assert _has_persisted_queued_notice(
             completed_run.messages,
             response_turn_id=response_turn_id,
         )
         if check_compaction:
-            assert _QUEUED_NOTICE_HISTORY_TEXT not in {
+            assert QUEUED_MESSAGE_NOTICE_TEXT not in {
                 message.content
                 for message in _compaction_replay_messages(
                     errored_run,
@@ -683,7 +683,7 @@ async def test_team_response_retry_keeps_live_notice_until_response_boundary() -
             )
             for run in prepared_scope_context.session.runs or []
         )
-        assert not any(_has_factual_queued_notice(run.messages) for run in prepared_scope_context.session.runs or [])
+        assert not any(_has_persisted_queued_notice(run.messages) for run in prepared_scope_context.session.runs or [])
         completed_output = TeamRunOutput(
             run_id="run-2",
             team_id=team_id,
@@ -699,6 +699,7 @@ async def test_team_response_retry_keeps_live_notice_until_response_boundary() -
 
     with queued_message_signal_context(_PendingQueuedMessageState()) as notice_context:
         notice_context.notice_fired = True
+        notice_context.delivered_notice_text = QUEUED_MESSAGE_NOTICE_TEXT
         with (
             patch("mindroom.teams.create_agent", return_value=fake_agent),
             patch("mindroom.teams.resolve_agent_knowledge_access", return_value=_KnowledgeResolution(knowledge=None)),
@@ -1051,7 +1052,7 @@ async def test_team_response_recovers_prior_notice_and_finalizes_current_notice(
         assert not any(_has_live_queued_notice(run.messages) for run in scope_context.session.runs or [])
         assert (
             sum(
-                _has_factual_queued_notice(
+                _has_persisted_queued_notice(
                     run.messages,
                     response_turn_id=prior_response_id,
                 )
@@ -1063,6 +1064,7 @@ async def test_team_response_recovers_prior_notice_and_finalizes_current_notice(
 
     with queued_message_signal_context(_PendingQueuedMessageState()) as notice_context:
         notice_context.notice_fired = True
+        notice_context.delivered_notice_text = QUEUED_MESSAGE_NOTICE_TEXT
         with (
             patch("mindroom.teams.create_agent", return_value=fake_agent),
             patch("mindroom.teams.resolve_agent_knowledge_access", return_value=_KnowledgeResolution(knowledge=None)),
@@ -1096,14 +1098,14 @@ async def test_team_response_recovers_prior_notice_and_finalizes_current_notice(
         assert not any(_has_live_queued_notice(run.messages) for run in scope_context.session.runs or [])
         assert (
             sum(
-                _has_factual_queued_notice(run.messages, response_turn_id=prior_response_id)
+                _has_persisted_queued_notice(run.messages, response_turn_id=prior_response_id)
                 for run in scope_context.session.runs or []
             )
             == 1
         )
         assert (
             sum(
-                _has_factual_queued_notice(
+                _has_persisted_queued_notice(
                     run.messages,
                     response_turn_id=notice_context.response_turn_id,
                 )
@@ -1115,7 +1117,7 @@ async def test_team_response_recovers_prior_notice_and_finalizes_current_notice(
 
 @pytest.mark.asyncio
 async def test_prepare_materialized_team_execution_recovers_queued_notice_when_called_directly() -> None:
-    """Shared team preparation should factualize prior live notices even outside response helpers."""
+    """Shared team preparation should persist prior live notices outside response helpers."""
     config = _build_test_config()
     runtime_paths = runtime_paths_for(config)
     fake_agent = _make_test_agent("GeneralAgent")
@@ -1167,7 +1169,7 @@ async def test_prepare_materialized_team_execution_recovers_queued_notice_when_c
             assert not any(_has_live_queued_notice(run.messages) for run in prepared_scope_context.session.runs or [])
             assert (
                 sum(
-                    _has_factual_queued_notice(
+                    _has_persisted_queued_notice(
                         run.messages,
                         response_turn_id=prior_response_id,
                     )
@@ -1450,7 +1452,7 @@ async def test_prepare_bound_team_execution_context_truncates_long_fallback_mess
 
 @pytest.mark.asyncio
 async def test_team_response_finalizes_notice_from_completed_run_before_exception() -> None:
-    """A completed stored run should retain factual delivery evidence when later handling fails."""
+    """A completed stored run should retain the delivered notice when later handling fails."""
     config = _build_test_config()
     runtime_paths = runtime_paths_for(config)
     orchestrator = MagicMock()
@@ -1508,11 +1510,12 @@ async def test_team_response_finalizes_notice_from_completed_run_before_exceptio
         assert scope_context.session is not None
         prepared_scope_context = scope_context
         assert not any(_has_live_queued_notice(run.messages) for run in scope_context.session.runs or [])
-        assert not any(_has_factual_queued_notice(run.messages) for run in scope_context.session.runs or [])
+        assert not any(_has_persisted_queued_notice(run.messages) for run in scope_context.session.runs or [])
         return _prepared_team_execution_context(final_prompt="Analyze this.")
 
     with queued_message_signal_context(_PendingQueuedMessageState()) as notice_context:
         notice_context.notice_fired = True
+        notice_context.delivered_notice_text = QUEUED_MESSAGE_NOTICE_TEXT
         with (
             patch("mindroom.teams.create_agent", return_value=fake_agent),
             patch("mindroom.teams.resolve_agent_knowledge_access", return_value=_KnowledgeResolution(knowledge=None)),
@@ -1545,7 +1548,7 @@ async def test_team_response_finalizes_notice_from_completed_run_before_exceptio
         assert scope_context.session is not None
         assert not any(_has_live_queued_notice(run.messages) for run in scope_context.session.runs or [])
         assert any(
-            _has_factual_queued_notice(
+            _has_persisted_queued_notice(
                 run.messages,
                 response_turn_id=notice_context.response_turn_id,
             )
@@ -1555,7 +1558,7 @@ async def test_team_response_finalizes_notice_from_completed_run_before_exceptio
 
 @pytest.mark.asyncio
 async def test_team_response_stream_finalizes_notice_from_completed_run_before_exception() -> None:
-    """A completed streamed run should retain factual delivery evidence when later handling fails."""
+    """A completed streamed run should retain the delivered notice when later handling fails."""
     config = _build_test_config()
     runtime_paths = runtime_paths_for(config)
     orchestrator = MagicMock()
@@ -1612,7 +1615,7 @@ async def test_team_response_stream_finalizes_notice_from_completed_run_before_e
         assert scope_context.session is not None
         prepared_scope_context = scope_context
         assert not any(_has_live_queued_notice(run.messages) for run in scope_context.session.runs or [])
-        assert not any(_has_factual_queued_notice(run.messages) for run in scope_context.session.runs or [])
+        assert not any(_has_persisted_queued_notice(run.messages) for run in scope_context.session.runs or [])
         return _prepared_team_execution_context(final_prompt="Analyze this.")
 
     async def fake_team_response_stream_raw(**kwargs: object) -> AsyncIterator[object]:
@@ -1622,6 +1625,7 @@ async def test_team_response_stream_finalizes_notice_from_completed_run_before_e
 
     with queued_message_signal_context(_PendingQueuedMessageState()) as notice_context:
         notice_context.notice_fired = True
+        notice_context.delivered_notice_text = QUEUED_MESSAGE_NOTICE_TEXT
         with (
             patch("mindroom.teams.create_agent", return_value=fake_agent),
             patch("mindroom.teams.resolve_agent_knowledge_access", return_value=_KnowledgeResolution(knowledge=None)),
@@ -1664,7 +1668,7 @@ async def test_team_response_stream_finalizes_notice_from_completed_run_before_e
         assert scope_context.session is not None
         assert not any(_has_live_queued_notice(run.messages) for run in scope_context.session.runs or [])
         assert any(
-            _has_factual_queued_notice(
+            _has_persisted_queued_notice(
                 run.messages,
                 response_turn_id=notice_context.response_turn_id,
             )
@@ -1674,7 +1678,7 @@ async def test_team_response_stream_finalizes_notice_from_completed_run_before_e
 
 @pytest.mark.asyncio
 async def test_team_response_stream_event_only_stop_after_finalizes_delivered_notice() -> None:  # noqa: PLR0915
-    """An event-only stop-after stream should retain factual notice-delivery evidence."""
+    """An event-only stop-after stream should retain the exact delivered notice."""
     config = _build_test_config()
     config.teams["super_team"] = TeamConfig(
         display_name="Super Team",
@@ -1708,9 +1712,10 @@ async def test_team_response_stream_event_only_stop_after_finalizes_delivered_no
     model = mock_team.model
     assert model is not None
     assert not isinstance(model, str)
+    notice_text = "Custom team queued notice."
     install_queued_message_notice_hook(
         model,
-        notice_text=QUEUED_MESSAGE_NOTICE_TEXT,
+        notice_text=notice_text,
     )
     prepared_scope_context = None
 
@@ -1821,9 +1826,10 @@ async def test_team_response_stream_event_only_stop_after_finalizes_delivered_no
         assert scope_context.session is not None
         run = (scope_context.session.runs or [])[0]
         assert not _has_live_queued_notice(run.messages)
-        assert _has_factual_queued_notice(
+        assert _has_persisted_queued_notice(
             run.messages,
             response_turn_id=notice_context.response_turn_id,
+            notice_text=notice_text,
         )
 
 
@@ -3690,7 +3696,7 @@ async def test_team_response_stream_retry_keeps_live_notice_until_response_bound
             )
             for run in prepared_scope_context.session.runs or []
         )
-        assert not any(_has_factual_queued_notice(run.messages) for run in prepared_scope_context.session.runs or [])
+        assert not any(_has_persisted_queued_notice(run.messages) for run in prepared_scope_context.session.runs or [])
         completed_output = TeamRunOutput(
             run_id=current_run_id,
             team_id=team_id,
@@ -3715,6 +3721,7 @@ async def test_team_response_stream_retry_keeps_live_notice_until_response_bound
 
     with queued_message_signal_context(_PendingQueuedMessageState()) as notice_context:
         notice_context.notice_fired = True
+        notice_context.delivered_notice_text = QUEUED_MESSAGE_NOTICE_TEXT
         with (
             patch("mindroom.teams.create_agent", return_value=fake_agent),
             patch("mindroom.teams.resolve_agent_knowledge_access", return_value=_KnowledgeResolution(knowledge=None)),
