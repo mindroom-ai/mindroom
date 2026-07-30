@@ -121,8 +121,8 @@ def test_nio_sync_responses_publish_exact_typed_recovery_fields(response_type: t
         assert response_fields[field_name].default == frozenset()
 
 
-def test_restored_token_recovered_only_first_sync_resets_until_consumer_owns_gap(tmp_path: Path) -> None:
-    """Nio recovery alone cannot advance a restored checkpoint before durable consumer acceptance."""
+def test_restored_token_recovered_only_first_sync_certifies_after_nio_dispatch(tmp_path: Path) -> None:
+    """Typed recovered rooms prove nio dispatched every wrapped source callback."""
     response = _sync_response(
         limited_room_ids=(_RECOVERED_ROOM,),
         recovered_room_ids=frozenset({_RECOVERED_ROOM}),
@@ -147,13 +147,13 @@ def test_restored_token_recovered_only_first_sync_resets_until_consumer_owns_gap
         first_sync=True,
     )
 
-    assert decision.state is SyncTrustState.UNCERTAIN
-    assert decision.reset_client_token is True
-    assert load_sync_checkpoint(tmp_path, "code") is None
+    assert decision.state is SyncTrustState.CERTIFIED
+    assert decision.reset_client_token is False
+    assert load_sync_checkpoint(tmp_path, "code") is not None
 
 
-def test_recovered_outcome_from_earlier_gap_resets_continuity(tmp_path: Path) -> None:
-    """A recovered earlier gap remains unsafe until MindRoom durably owns its callbacks."""
+def test_recovered_outcome_from_earlier_gap_certifies_continuity(tmp_path: Path) -> None:
+    """Nio's typed recovery result arrives only after durable callback acceptance."""
     response = _sync_response(
         limited_room_ids=(),
         recovered_room_ids=frozenset({_RECOVERED_ROOM}),
@@ -172,9 +172,9 @@ def test_recovered_outcome_from_earlier_gap_resets_continuity(tmp_path: Path) ->
         first_sync=False,
     )
 
-    assert decision.state is SyncTrustState.UNCERTAIN
-    assert decision.checkpoint_to_save is None
-    assert decision.reset_client_token is True
+    assert decision.state is SyncTrustState.CERTIFIED
+    assert decision.checkpoint_to_save is not None
+    assert decision.reset_client_token is False
 
 
 @pytest.mark.parametrize(

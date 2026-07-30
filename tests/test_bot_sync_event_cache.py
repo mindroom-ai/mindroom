@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import threading
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, Mock, call, patch
@@ -711,66 +710,6 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         checkpoint = load_sync_checkpoint(bot.storage_path, bot.agent_name)
         assert checkpoint is not None
         assert checkpoint.token == "s_after_recovery"  # noqa: S105
-
-    @pytest.mark.asyncio
-    async def test_cancelled_recovery_acceptance_blocks_the_next_clean_response(self, bot: AgentBot) -> None:
-        """A crash before #1754 acceptance cannot let the next response certify the old gap."""
-        _save_certified_sync_token(bot, "s_before_recovery")
-        bot._runtime_view.mark_runtime_started()
-        bot._sync_cache_trust.state = SyncTrustState.PENDING
-        bot._first_sync_done = True
-        recovered_room_id = "!recovered:localhost"
-        entered = threading.Event()
-        release = threading.Event()
-        finished = threading.Event()
-
-        def block_acceptance(_room_ids: frozenset[str], *, sync_token: str) -> None:
-            entered.set()
-            try:
-                assert release.wait(timeout=1.0)
-                assert sync_token == "s_recovered"  # noqa: S105
-                raise OSError
-            finally:
-                finished.set()
-
-        recovered_response = self._sync_response({})
-        recovered_response.next_batch = "s_recovered"
-        clean_response = self._sync_response({})
-        clean_response.next_batch = "s_clean"
-        recovered_result = SyncCacheWriteResult(
-            complete=True,
-            recovered_room_ids=frozenset({recovered_room_id}),
-        )
-
-        with (
-            patch.object(
-                bot._conversation_cache,
-                "cache_sync_timeline_for_certification",
-                AsyncMock(side_effect=[recovered_result, SyncCacheWriteResult(complete=True)]),
-            ),
-            patch.object(bot._dispatch_obligation_store, "record_recovery_acceptance", block_acceptance),
-        ):
-            response_task = asyncio.create_task(
-                self._run_sync_response_without_startup_side_effects(bot, recovered_response),
-            )
-            try:
-                assert await asyncio.to_thread(entered.wait, 1.0)
-                response_task.cancel()
-                await asyncio.sleep(0)
-                assert not response_task.done()
-                response_task.cancel()
-                release.set()
-                with pytest.raises(asyncio.CancelledError):
-                    await response_task
-            finally:
-                release.set()
-                assert await asyncio.to_thread(finished.wait, 1.0)
-
-            await self._run_sync_response_without_startup_side_effects(bot, clean_response)
-
-        assert bot._sync_cache_trust.state is SyncTrustState.UNCERTAIN
-        assert _load_sync_token_value(bot.storage_path, bot.agent_name) is None
-        assert bot.client.next_batch is None
 
     @pytest.mark.asyncio
     async def test_empty_joined_rooms_first_sync_certifies_checkpoint(self, bot: AgentBot) -> None:

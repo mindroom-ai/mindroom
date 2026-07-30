@@ -37,8 +37,6 @@ class SyncCacheWriteResult:
     limited_room_ids: tuple[str, ...] = ()
     recovered_room_ids: frozenset[str] = frozenset()
     unrecovered_room_ids: frozenset[str] = frozenset()
-    accepted_recovered_room_ids: frozenset[str] = frozenset()
-    pending_recovery_room_ids: frozenset[str] = frozenset()
     errors: tuple[BaseException, ...] = ()
     runtime_available: bool | None = None
     task_count: int | None = None
@@ -75,21 +73,9 @@ class SyncCacheWriteResult:
         return tuple(room_id for room_id in self.limited_room_ids if room_id not in classified_room_ids)
 
     @property
-    def unaccepted_recovered_room_ids(self) -> frozenset[str]:
-        """Return recovered rooms without this response's durable dispatch receipt."""
-        return self.recovered_room_ids - self.accepted_recovered_room_ids
-
-    @property
-    def has_current_recovery_obligation(self) -> bool:
-        """Return whether this response still lacks recovery ownership."""
-        return bool(
-            self.unclassified_limited_room_ids or self.unaccepted_recovered_room_ids or self.unrecovered_room_ids,
-        )
-
-    @property
     def has_recovery_obligation(self) -> bool:
-        """Return whether current or earlier recovery lacks durable ownership."""
-        return self.has_current_recovery_obligation or bool(self.pending_recovery_room_ids)
+        """Return whether nio left a limited room unclassified or unrecovered."""
+        return bool(self.unclassified_limited_room_ids or self.unrecovered_room_ids)
 
     @property
     def certified(self) -> bool:
@@ -129,9 +115,7 @@ def _uncertain_reason(cache_result: SyncCacheWriteResult, *, next_batch: str | N
         return "missing_next_batch"
     if cache_result.errors:
         return "cache_write_failed"
-    if cache_result.pending_recovery_room_ids:
-        return "pending_recovery_obligation"
-    if cache_result.has_current_recovery_obligation:
+    if cache_result.has_recovery_obligation:
         return "limited_sync_timeline"
     if not cache_result.complete:
         return "cache_write_incomplete"
@@ -198,18 +182,12 @@ def _recovery_diagnostics(cache_result: SyncCacheWriteResult) -> dict[str, Any]:
         "cache_limited_room_count": len(cache_result.limited_room_ids),
         "cache_recovered_room_count": len(cache_result.recovered_room_ids),
         "cache_unrecovered_room_count": len(cache_result.unrecovered_room_ids),
-        "cache_accepted_recovered_room_count": len(cache_result.accepted_recovered_room_ids),
-        "cache_pending_recovery_room_count": len(cache_result.pending_recovery_room_ids),
         "cache_unclassified_limited_room_count": len(cache_result.unclassified_limited_room_ids),
     }
     if cache_result.limited_room_ids:
         diagnostics["cache_limited_room_ids"] = cache_result.limited_room_ids[:5]
     if cache_result.recovered_room_ids:
         diagnostics["cache_recovered_room_ids"] = tuple(sorted(cache_result.recovered_room_ids))[:5]
-    if cache_result.accepted_recovered_room_ids:
-        diagnostics["cache_accepted_recovered_room_ids"] = tuple(sorted(cache_result.accepted_recovered_room_ids))[:5]
-    if cache_result.pending_recovery_room_ids:
-        diagnostics["cache_pending_recovery_room_ids"] = tuple(sorted(cache_result.pending_recovery_room_ids))[:5]
     if cache_result.unrecovered_room_ids:
         diagnostics["cache_unrecovered_room_ids"] = tuple(sorted(cache_result.unrecovered_room_ids))[:5]
     if cache_result.unclassified_limited_room_ids:

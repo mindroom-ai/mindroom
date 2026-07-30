@@ -173,19 +173,6 @@ def _sync_response(
     return cast("nio.SyncResponse", response)
 
 
-def _recovered_sync_response(next_batch: str) -> nio.SyncResponse:
-    """Return one real nio producer response that reports an already-recovered gap."""
-    return nio.SyncResponse(
-        next_batch=next_batch,
-        rooms=nio.Rooms(invite={}, join={}, leave={}),
-        device_key_count=nio.DeviceOneTimeKeyCount(curve25519=0, signed_curve25519=0),
-        device_list=nio.DeviceList(changed=[], left=[]),
-        to_device_events=[],
-        presence_events=[],
-        recovered_room_ids=frozenset({"!recovered:localhost"}),
-    )
-
-
 def _pending(event: nio.RoomMessageText) -> PendingEvent:
     return PendingEvent(
         event=event,
@@ -1065,6 +1052,30 @@ async def test_on_sync_response_persists_latest_sync_token(tmp_path: Path) -> No
     checkpoint = load_sync_checkpoint(tmp_path, bot.agent_name)
     assert checkpoint is not None
     assert checkpoint.token == "s_latest"  # noqa: S105
+
+
+@pytest.mark.asyncio
+async def test_recovered_sync_response_certifies_after_nio_callback_completion(tmp_path: Path) -> None:
+    """A recovered nio result certifies because its source callback was already durable."""
+    bot = _agent_bot(tmp_path)
+    bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
+    response = _sync_response("s_recovered")
+    response.recovered_room_ids = frozenset({"!recovered:localhost"})
+    cache_result = SyncCacheWriteResult.from_sync_response(
+        response,
+        complete=True,
+        limited_room_ids=("!recovered:localhost",),
+    )
+
+    with patch.object(
+        bot._conversation_cache,
+        "cache_sync_timeline_for_certification",
+        AsyncMock(return_value=cache_result),
+    ):
+        await bot._on_sync_response(response)
+
+    assert bot._sync_cache_trust.state is SyncTrustState.CERTIFIED
+    assert _load_sync_token_value(tmp_path, bot.agent_name) == "s_recovered"
 
 
 def test_cache_scope_cleanup_between_plan_and_apply_forces_tokenless_recovery(tmp_path: Path) -> None:

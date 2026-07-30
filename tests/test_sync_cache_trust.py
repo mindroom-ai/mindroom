@@ -213,58 +213,6 @@ def test_limited_recovery_window_is_consumed_once_then_complete_delta_certifies(
     )
 
 
-def test_unaccepted_recovery_blocks_a_later_clean_response(tmp_path: Path) -> None:
-    """A clean later response cannot erase an earlier unaccepted recovery gap."""
-    trust, _cache, _runtime = _trust(tmp_path)
-    recovered_room_id = "!recovered:localhost"
-
-    recovered = trust.certify_response(
-        next_batch="s_recovered",
-        cache_result=SyncCacheWriteResult(
-            complete=True,
-            recovered_room_ids=frozenset({recovered_room_id}),
-        ),
-        first_sync=False,
-    )
-    clean = trust.certify_response(
-        next_batch="s_clean",
-        cache_result=SyncCacheWriteResult(complete=True),
-        first_sync=False,
-    )
-
-    assert recovered.reason == "limited_sync_timeline"
-    assert clean.state is SyncTrustState.UNCERTAIN
-    assert clean.reason == "pending_recovery_obligation"
-    assert load_sync_checkpoint(tmp_path, "code") is None
-
-
-def test_durable_recovery_acceptance_clears_the_matching_pending_gap(tmp_path: Path) -> None:
-    """Only the durable receipt for this recovered room may restore continuity."""
-    trust, _cache, _runtime = _trust(tmp_path)
-    recovered_room_id = "!recovered:localhost"
-
-    trust.certify_response(
-        next_batch="s_recovered",
-        cache_result=SyncCacheWriteResult(
-            complete=True,
-            recovered_room_ids=frozenset({recovered_room_id}),
-        ),
-        first_sync=False,
-    )
-    accepted = trust.certify_response(
-        next_batch="s_recovered_again",
-        cache_result=SyncCacheWriteResult(
-            complete=True,
-            recovered_room_ids=frozenset({recovered_room_id}),
-            accepted_recovered_room_ids=frozenset({recovered_room_id}),
-        ),
-        first_sync=False,
-    )
-
-    assert accepted.state is SyncTrustState.CERTIFIED
-    assert accepted.reason is None
-
-
 def test_sustained_limited_responses_reset_once_until_a_delta_certifies(tmp_path: Path) -> None:
     """Back-to-back gaps must cost one replay, not one every other response."""
     trust, _cache, _runtime = _trust(tmp_path)
