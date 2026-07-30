@@ -340,22 +340,18 @@ def _format_terminal_team_response(
     return _format_team_header(team_display_names) + _team_response_text(response)
 
 
-def _register_team_notice_attempt(
+def _register_team_notice_storage(
     *,
-    run_output: TeamRunOutput | RunOutput | None,
     scope_context: ScopeSessionContext | None,
     session_id: str | None,
     entity_name: str,
-    run_id: str | None = None,
 ) -> None:
-    """Register team attempt state for response-boundary notice finalization."""
-    ai_runtime.register_queued_notice_attempt(
-        run_output=run_output,
+    """Register team storage for response-boundary notice finalization."""
+    ai_runtime.register_queued_notice_storage(
         storage_factory=scope_context.storage_factory if scope_context is not None else None,
         session_id=session_id,
         session_type=SessionType.TEAM,
         entity_name=entity_name,
-        run_id=run_id,
     )
 
 
@@ -1485,7 +1481,6 @@ class _TeamTurnHolder:
 
     team: Team | None = None
     team_members: ResolvedExactTeamMembers | None = None
-    last_response: RunOutput | TeamRunOutput | None = None  # blocking turns only
     attempt_started: bool = False
     attempt_run_id: str | None = None
     render_partial: Callable[[], str] = _empty_partial_text  # streaming turns only
@@ -1516,7 +1511,6 @@ def _build_team_runtime_db_callbacks(
         # Cancel snapshots taken between this release and the next attempt must
         # not see the spent attempt's partials; its completed tools already
         # carried over via the turn state.
-        holder.last_response = None
         holder.render_partial = _empty_partial_text
         holder.tool_tracker = StreamingToolTracker()
 
@@ -2091,7 +2085,6 @@ async def team_response(  # noqa: C901, PLR0915
         pending_retry_decision: MediaRetryDecision | None = None
         for retried_after_media_fallback in (False, True):
             response = None
-            holder.last_response = None
             try:
                 response = await _run(attempt_run_input, attempt_run_id)
             except Exception as e:
@@ -2126,8 +2119,6 @@ async def team_response(  # noqa: C901, PLR0915
                 error_text = get_user_friendly_error_message(e, team_name)
                 return ExcludedAttempt(RunStatus.error, error_text, run_id=attempt_run_id)
 
-            if isinstance(response, (TeamRunOutput, RunOutput)):
-                holder.last_response = response
             if isinstance(response, (TeamRunOutput, RunOutput)) and is_errored_run_output(response):
                 error_text = str(response.content or "Unknown team error")
                 retry_decision = retry_media_inputs_after_failure(
@@ -2142,8 +2133,7 @@ async def team_response(  # noqa: C901, PLR0915
                         error=error_text,
                         removed_media_kinds=sorted(retry_decision.removed_kinds),
                     )
-                    _register_team_notice_attempt(
-                        run_output=response,
+                    _register_team_notice_storage(
                         scope_context=run.scope_context,
                         session_id=ctx.session_id,
                         entity_name=configured_team_name or team_name,
@@ -2288,8 +2278,7 @@ async def team_response(  # noqa: C901, PLR0915
         if not holder.attempt_started:
             return
         holder.attempt_started = False
-        _register_team_notice_attempt(
-            run_output=holder.last_response,
+        _register_team_notice_storage(
             scope_context=scope_context,
             session_id=ctx.session_id,
             entity_name=configured_team_name or team_name,
@@ -2773,8 +2762,7 @@ async def team_response_stream(  # noqa: C901, PLR0915
                     if isinstance(event, TeamRunOutput) and not _is_bound_team_output(event, team_id=bound_team_id):
                         logger.debug("Ignoring non-bound team run output", run_id=event.run_id)
                         continue
-                    _register_team_notice_attempt(
-                        run_output=event,
+                    _register_team_notice_storage(
                         scope_context=run.scope_context,
                         session_id=ctx.session_id,
                         entity_name=configured_team_name or team_label,
@@ -3144,12 +3132,10 @@ async def team_response_stream(  # noqa: C901, PLR0915
         if not holder.attempt_started:
             return
         holder.attempt_started = False
-        _register_team_notice_attempt(
-            run_output=None,
+        _register_team_notice_storage(
             scope_context=scope_context,
             session_id=ctx.session_id,
             entity_name=configured_team_name or team_label,
-            run_id=holder.attempt_run_id,
         )
 
     discard_team_empty_run = _build_team_empty_run_discard(

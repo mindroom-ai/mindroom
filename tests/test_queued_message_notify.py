@@ -29,7 +29,7 @@ from mindroom.ai import _PreparedAgentRun, ai_response, stream_agent_response
 from mindroom.ai_runtime import (
     install_queued_message_notice_hook,
     queued_message_signal_context,
-    register_queued_notice_attempt,
+    register_queued_notice_storage,
 )
 from mindroom.bot import AgentBot
 from mindroom.bot_runtime_view import BotRuntimeState
@@ -3529,8 +3529,7 @@ async def test_response_finalization_collapses_nested_current_notice_state() -> 
             created_storages.append(storage)
             return storage
 
-        register_queued_notice_attempt(
-            run_output=run_output,
+        register_queued_notice_storage(
             storage_factory=storage_factory,
             session_id="session-1",
             session_type=SessionType.TEAM,
@@ -3551,6 +3550,69 @@ async def test_response_finalization_collapses_nested_current_notice_state() -> 
     assert isinstance(stored_member_run, RunOutput)
     assert _notice_count(stored_member_run.messages or []) == 0
     assert storage.closed is True
+
+
+@pytest.mark.asyncio
+async def test_response_finalization_does_not_copy_notice_to_untouched_target() -> None:
+    """Finalization should persist a notice only in storage that contains its live marker."""
+    untouched_storage = _FakeStorage()
+    noticed_storage = _FakeStorage()
+    model = _FakeModel()
+    install_queued_message_notice_hook(model, notice_text=QUEUED_MESSAGE_NOTICE_TEXT)
+
+    with queued_message_signal_context(_StaticQueuedState(pending=True)) as notice_context:
+        noticed_messages = [Message(role="user", content="Outer request")]
+        model.format_function_call_results(
+            messages=noticed_messages,
+            function_call_results=[Message(role="tool", content="Outer tool result")],
+        )
+        untouched_run = RunOutput(
+            run_id="untouched-run",
+            session_id="shared-session",
+            messages=[
+                Message(role="user", content="Delegated request"),
+                Message(role="assistant", content="Delegated answer"),
+            ],
+            status=RunStatus.completed,
+        )
+        noticed_run = RunOutput(
+            run_id="noticed-run",
+            session_id="shared-session",
+            messages=noticed_messages,
+            status=RunStatus.completed,
+        )
+        untouched_storage.session = AgentSession(
+            session_id="shared-session",
+            runs=[untouched_run],
+        )
+        noticed_storage.session = AgentSession(
+            session_id="shared-session",
+            runs=[noticed_run],
+        )
+        register_queued_notice_storage(
+            storage_factory=lambda: untouched_storage,
+            session_id="shared-session",
+            session_type=SessionType.AGENT,
+            entity_name="delegated-agent",
+        )
+        register_queued_notice_storage(
+            storage_factory=lambda: noticed_storage,
+            session_id="shared-session",
+            session_type=SessionType.AGENT,
+            entity_name="outer-agent",
+        )
+
+        await ai_runtime.finalize_queued_notice_response_turn_async(notice_context)
+
+    assert untouched_storage.upsert_count == 0
+    assert untouched_storage.session is not None
+    assert [(message.role, message.content) for message in untouched_run.messages or []] == [
+        ("user", "Delegated request"),
+        ("assistant", "Delegated answer"),
+    ]
+    assert noticed_storage.upsert_count == 1
+    assert _notice_count(noticed_run.messages or [], marker=True) == 0
+    assert _notice_count(noticed_run.messages or [], marker="persisted") == 1
 
 
 @pytest.mark.asyncio
@@ -3608,14 +3670,12 @@ async def test_response_finalization_uses_newest_completed_same_turn_run_and_ori
                 ),
             ],
         )
-        for run_output in (first_run, second_run):
-            register_queued_notice_attempt(
-                run_output=run_output,
-                storage_factory=lambda: storage,
-                session_id="session-1",
-                session_type=SessionType.AGENT,
-                entity_name="general",
-            )
+        register_queued_notice_storage(
+            storage_factory=lambda: storage,
+            session_id="session-1",
+            session_type=SessionType.AGENT,
+            entity_name="general",
+        )
 
         await ai_runtime.finalize_queued_notice_response_turn_async(notice_context)
 
@@ -3683,8 +3743,7 @@ async def test_async_cleanup_keeps_session_storage_io_off_event_loop() -> None:
             created_storages.append(storage)
             return storage
 
-        register_queued_notice_attempt(
-            run_output=None,
+        register_queued_notice_storage(
             storage_factory=storage_factory,
             session_id="session-1",
             session_type=SessionType.AGENT,
@@ -3750,8 +3809,7 @@ async def test_response_turn_finalization_completes_when_cancelled_during_storag
                 ),
             ],
         )
-        register_queued_notice_attempt(
-            run_output=run_output,
+        register_queued_notice_storage(
             storage_factory=lambda: storage,
             session_id="session-1",
             session_type=SessionType.AGENT,
@@ -3831,8 +3889,7 @@ async def test_response_turn_finalization_defers_repeated_cancellation_during_st
                 ),
             ],
         )
-        register_queued_notice_attempt(
-            run_output=run_output,
+        register_queued_notice_storage(
             storage_factory=lambda: storage,
             session_id="session-1",
             session_type=SessionType.AGENT,
@@ -3868,7 +3925,7 @@ async def test_response_turn_finalization_defers_repeated_cancellation_during_st
 
 
 @pytest.mark.asyncio
-async def test_attempt_registration_deduplicates_one_session_across_fresh_factories() -> None:
+async def test_storage_registration_deduplicates_one_session_across_fresh_factories() -> None:
     """Fresh storage-factory closures for one session should cause one boundary open."""
     model = _FakeModel()
     install_queued_message_notice_hook(model, notice_text=QUEUED_MESSAGE_NOTICE_TEXT)
@@ -3908,8 +3965,7 @@ async def test_attempt_registration_deduplicates_one_session_across_fresh_factor
             return storage_factory
 
         for _ in range(2):
-            register_queued_notice_attempt(
-                run_output=run_output,
+            register_queued_notice_storage(
                 storage_factory=fresh_storage_factory(),
                 session_id="session-1",
                 session_type=SessionType.AGENT,
@@ -3959,8 +4015,7 @@ async def test_error_responses_never_attach_notices_to_prior_completed_run() -> 
                     status=error_run.status,
                 ),
             )
-            register_queued_notice_attempt(
-                run_output=error_run,
+            register_queued_notice_storage(
                 storage_factory=lambda: storage,
                 session_id="session-1",
                 session_type=SessionType.AGENT,
@@ -4016,8 +4071,7 @@ async def test_response_lifecycle_finalizes_notice_after_locked_operation() -> N
                 ),
             ],
         )
-        register_queued_notice_attempt(
-            run_output=run,
+        register_queued_notice_storage(
             storage_factory=lambda: storage,
             session_id="session-1",
             session_type=SessionType.AGENT,
@@ -4072,8 +4126,7 @@ async def test_response_lifecycle_finalizes_error_state_when_operation_raises() 
                 ),
             ],
         )
-        register_queued_notice_attempt(
-            run_output=None,
+        register_queued_notice_storage(
             storage_factory=lambda: storage,
             session_id="session-1",
             session_type=SessionType.AGENT,
@@ -4131,8 +4184,7 @@ async def test_response_turn_finalization_is_idempotent_for_one_persisted_notice
             ],
         )
         original_stored = (storage.session.runs[0].messages or [])[0].model_dump()
-        register_queued_notice_attempt(
-            run_output=run,
+        register_queued_notice_storage(
             storage_factory=lambda: storage,
             session_id="session-1",
             session_type=SessionType.AGENT,
@@ -4274,8 +4326,7 @@ async def _persist_notice_bearing_response(tmp_path: Path) -> str:
             )
         finally:
             storage.close()
-        register_queued_notice_attempt(
-            run_output=run_output,
+        register_queued_notice_storage(
             storage_factory=lambda: _queued_notice_storage(tmp_path),
             session_id="session-1",
             session_type=SessionType.AGENT,

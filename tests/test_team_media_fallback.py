@@ -194,7 +194,7 @@ class _PendingQueuedMessageState:
         return True
 
 
-def _assert_retry_notice_finalized(
+def _assert_retry_notice_not_relocated(
     *,
     agent: AgnoAgent,
     session_id: str,
@@ -217,7 +217,7 @@ def _assert_retry_notice_finalized(
         errored_run, completed_run = scope_context.session.runs or []
         assert not _has_live_queued_notice(errored_run.messages)
         assert not _has_persisted_queued_notice(errored_run.messages)
-        assert _has_persisted_queued_notice(
+        assert not _has_persisted_queued_notice(
             completed_run.messages,
             response_turn_id=response_turn_id,
         )
@@ -619,8 +619,8 @@ async def test_team_generic_invalid_request_retry_failure_does_not_teach() -> No
 
 
 @pytest.mark.asyncio
-async def test_team_response_retry_keeps_live_notice_until_response_boundary() -> None:
-    """Non-stream retries should retain current live state until the recovered response finishes."""
+async def test_team_response_retry_does_not_relocate_failed_attempt_notice() -> None:
+    """Non-stream retries should not copy a failed attempt's notice into the successful run."""
     config = _build_test_config()
     runtime_paths = runtime_paths_for(config)
     orchestrator = MagicMock()
@@ -699,7 +699,6 @@ async def test_team_response_retry_keeps_live_notice_until_response_boundary() -
 
     with queued_message_signal_context(_PendingQueuedMessageState()) as notice_context:
         notice_context.notice_fired = True
-        notice_context.delivered_notice_text = QUEUED_MESSAGE_NOTICE_TEXT
         with (
             patch("mindroom.teams.create_agent", return_value=fake_agent),
             patch("mindroom.teams.resolve_agent_knowledge_access", return_value=_KnowledgeResolution(knowledge=None)),
@@ -723,7 +722,7 @@ async def test_team_response_retry_keeps_live_notice_until_response_boundary() -
 
     assert attempts == 2
     assert "Recovered team response" in response
-    _assert_retry_notice_finalized(
+    _assert_retry_notice_not_relocated(
         agent=fake_agent,
         session_id="session-retry-clean",
         runtime_paths=runtime_paths,
@@ -1064,7 +1063,6 @@ async def test_team_response_recovers_prior_notice_and_finalizes_current_notice(
 
     with queued_message_signal_context(_PendingQueuedMessageState()) as notice_context:
         notice_context.notice_fired = True
-        notice_context.delivered_notice_text = QUEUED_MESSAGE_NOTICE_TEXT
         with (
             patch("mindroom.teams.create_agent", return_value=fake_agent),
             patch("mindroom.teams.resolve_agent_knowledge_access", return_value=_KnowledgeResolution(knowledge=None)),
@@ -1515,7 +1513,6 @@ async def test_team_response_finalizes_notice_from_completed_run_before_exceptio
 
     with queued_message_signal_context(_PendingQueuedMessageState()) as notice_context:
         notice_context.notice_fired = True
-        notice_context.delivered_notice_text = QUEUED_MESSAGE_NOTICE_TEXT
         with (
             patch("mindroom.teams.create_agent", return_value=fake_agent),
             patch("mindroom.teams.resolve_agent_knowledge_access", return_value=_KnowledgeResolution(knowledge=None)),
@@ -1599,6 +1596,7 @@ async def test_team_response_stream_finalizes_notice_from_completed_run_before_e
                 team_name="General Team",
                 session_id="session-stream-queued-error",
                 content="intermediate response",
+                messages=[_queued_notice_message(notice_context.response_turn_id)],
                 status=RunStatus.completed,
             ),
             prepared_scope_context.session,
@@ -1625,7 +1623,6 @@ async def test_team_response_stream_finalizes_notice_from_completed_run_before_e
 
     with queued_message_signal_context(_PendingQueuedMessageState()) as notice_context:
         notice_context.notice_fired = True
-        notice_context.delivered_notice_text = QUEUED_MESSAGE_NOTICE_TEXT
         with (
             patch("mindroom.teams.create_agent", return_value=fake_agent),
             patch("mindroom.teams.resolve_agent_knowledge_access", return_value=_KnowledgeResolution(knowledge=None)),
@@ -3632,8 +3629,8 @@ async def test_team_response_stream_tracks_retry_run_id_after_hard_cancellation(
 
 
 @pytest.mark.asyncio
-async def test_team_response_stream_retry_keeps_live_notice_until_response_boundary() -> None:  # noqa: PLR0915
-    """Streaming retries should retain current live state until the recovered response finishes."""
+async def test_team_response_stream_retry_does_not_relocate_failed_attempt_notice() -> None:  # noqa: PLR0915
+    """Streaming retries should not copy a failed attempt's notice into the successful run."""
     config = _build_test_config()
     config.teams["super_team"] = TeamConfig(
         display_name="Super Team",
@@ -3730,7 +3727,6 @@ async def test_team_response_stream_retry_keeps_live_notice_until_response_bound
 
     with queued_message_signal_context(_PendingQueuedMessageState()) as notice_context:
         notice_context.notice_fired = True
-        notice_context.delivered_notice_text = QUEUED_MESSAGE_NOTICE_TEXT
         with (
             patch("mindroom.teams.create_agent", return_value=fake_agent),
             patch("mindroom.teams.resolve_agent_knowledge_access", return_value=_KnowledgeResolution(knowledge=None)),
@@ -3762,7 +3758,7 @@ async def test_team_response_stream_retry_keeps_live_notice_until_response_bound
     assert attempts == 2
     assert len(chunks) == 1
     assert "Recovered streamed response" in str(chunks[0])
-    _assert_retry_notice_finalized(
+    _assert_retry_notice_not_relocated(
         agent=fake_agent,
         session_id="session-stream-retry-clean",
         runtime_paths=runtime_paths,

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable, Generator, Sequence
-from collections.abc import Set as AbstractSet
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
@@ -47,7 +46,7 @@ __all__ = [
     "next_retry_run_id",
     "note_attempt_run_id",
     "queued_message_signal_context",
-    "register_queued_notice_attempt",
+    "register_queued_notice_storage",
     "scrub_queued_notice_session_context",
 ]
 
@@ -141,8 +140,7 @@ class _QueuedMessageNoticeContext:
     state: _SupportsQueuedMessageState | None
     response_turn_id: str = field(default_factory=lambda: str(uuid4()))
     notice_fired: bool = False
-    delivered_notice_text: str | None = None
-    storage_targets: dict[tuple[str, SessionType], _QueuedNoticeStorageTarget] = field(default_factory=dict)
+    storage_targets: dict[tuple[str, str, SessionType], _QueuedNoticeStorageTarget] = field(default_factory=dict)
 
 
 @dataclass
@@ -151,7 +149,6 @@ class _QueuedNoticeStorageTarget:
     session_id: str
     session_type: SessionType
     entity_name: str
-    run_ids: set[str] = field(default_factory=set)
 
 
 _queued_message_notice_context: ContextVar[_QueuedMessageNoticeContext | None] = ContextVar(
@@ -258,7 +255,6 @@ def _append_queued_notice_if_needed(
             },
         ),
     )
-    notice_context.delivered_notice_text = notice_text
     if not notice_context.notice_fired:
         notice_context.notice_fired = True
         logger.info(
@@ -315,14 +311,10 @@ def _run_output_notice_messages(
     *,
     response_turn_id: str,
 ) -> list[Message]:
-    matches = [
-        message
-        for message in run_output.messages or []
-        if _is_queued_notice_message(
-            message,
-            response_turn_id=response_turn_id,
-        )
-    ]
+    matches = _top_level_queued_notice_messages(
+        run_output,
+        response_turn_id=response_turn_id,
+    )
     if isinstance(run_output, TeamRunOutput) and run_output.member_responses:
         for member_response in run_output.member_responses:
             if isinstance(member_response, RunOutput | TeamRunOutput):
@@ -333,6 +325,21 @@ def _run_output_notice_messages(
                     ),
                 )
     return matches
+
+
+def _top_level_queued_notice_messages(
+    run_output: RunOutput | TeamRunOutput,
+    *,
+    response_turn_id: str,
+) -> list[Message]:
+    return [
+        message
+        for message in run_output.messages or []
+        if _is_queued_notice_message(
+            message,
+            response_turn_id=response_turn_id,
+        )
+    ]
 
 
 def _new_persisted_queued_notice(response_turn_id: str, notice_text: str) -> Message:
@@ -349,8 +356,6 @@ def _new_persisted_queued_notice(response_turn_id: str, notice_text: str) -> Mes
 def _queued_notice_text_to_persist(
     *,
     destination_matches: Sequence[Message],
-    all_matches: Sequence[Message],
-    fallback_notice_text: str | None,
 ) -> str | None:
     destination_live_notice = next(
         (
@@ -362,18 +367,6 @@ def _queued_notice_text_to_persist(
     )
     if destination_live_notice is not None:
         return cast("str", destination_live_notice.content)
-    if fallback_notice_text is not None:
-        return fallback_notice_text
-    live_source = next(
-        (
-            message
-            for message in reversed(all_matches)
-            if _queued_notice_marker(message) is True and isinstance(message.content, str)
-        ),
-        None,
-    )
-    if live_source is not None:
-        return cast("str", live_source.content)
     persisted_source = next(
         (
             message
@@ -390,22 +383,18 @@ def _finalize_queued_notice_in_runs(
     runs: Sequence[RunOutput | TeamRunOutput],
     *,
     response_turn_id: str,
-    destination_run_ids: AbstractSet[str] = frozenset(),
-    fallback_notice_text: str | None = None,
 ) -> bool:
-    """Leave one exact persisted notice in the newest replayable owned run."""
-    owned_run_ids = set(destination_run_ids)
-    owned_run_ids.update(
-        run.run_id
-        for run in runs
-        if run.run_id is not None
-        and _run_output_notice_messages(
-            run,
-            response_turn_id=response_turn_id,
-        )
-    )
+    """Leave one exact persisted notice where the newest replayable run saw it."""
     destination = next(
-        (run for run in reversed(runs) if run.run_id in owned_run_ids and is_model_history_visible_run(run)),
+        (
+            run
+            for run in reversed(runs)
+            if is_model_history_visible_run(run)
+            and _top_level_queued_notice_messages(
+                run,
+                response_turn_id=response_turn_id,
+            )
+        ),
         None,
     )
     all_matches = [
@@ -420,21 +409,15 @@ def _finalize_queued_notice_in_runs(
         return False
 
     destination_matches = (
-        [
-            message
-            for message in destination.messages or []
-            if _is_queued_notice_message(
-                message,
-                response_turn_id=response_turn_id,
-            )
-        ]
+        _top_level_queued_notice_messages(
+            destination,
+            response_turn_id=response_turn_id,
+        )
         if destination is not None
         else []
     )
     notice_text = _queued_notice_text_to_persist(
         destination_matches=destination_matches,
-        all_matches=all_matches,
-        fallback_notice_text=fallback_notice_text,
     )
     if (
         notice_text is not None
@@ -480,7 +463,6 @@ def _finalize_queued_notice_in_runs(
 def _finalize_queued_notice_in_new_session_storage(
     target: _QueuedNoticeStorageTarget,
     response_turn_id: str,
-    notice_text: str | None,
 ) -> None:
     """Finalize one response in a worker-owned session storage handle."""
     storage = target.storage_factory()
@@ -497,30 +479,26 @@ def _finalize_queued_notice_in_new_session_storage(
         if _finalize_queued_notice_in_runs(
             _session_run_outputs(session),
             response_turn_id=response_turn_id,
-            destination_run_ids=target.run_ids,
-            fallback_notice_text=notice_text,
         ):
             storage.upsert_session(session)
     finally:
         storage.close()
 
 
-def register_queued_notice_attempt(
+def register_queued_notice_storage(
     *,
-    run_output: RunOutput | TeamRunOutput | None,
     storage_factory: Callable[[], BaseDb] | None,
     session_id: str | None,
     session_type: SessionType,
     entity_name: str,
-    run_id: str | None = None,
 ) -> None:
-    """Register attempt state for response-boundary queued-notice finalization."""
+    """Register storage touched by one response for queued-notice finalization."""
     notice_context = _queued_message_notice_context.get()
     if notice_context is None:
         return
     if storage_factory is None or not session_id:
         return
-    target_key = (session_id, session_type)
+    target_key = (entity_name, session_id, session_type)
     target = notice_context.storage_targets.get(target_key)
     if target is None:
         target = _QueuedNoticeStorageTarget(
@@ -530,15 +508,11 @@ def register_queued_notice_attempt(
             entity_name=entity_name,
         )
         notice_context.storage_targets[target_key] = target
-    registered_run_id = run_id or (run_output.run_id if run_output is not None else None)
-    if registered_run_id:
-        target.run_ids.add(registered_run_id)
 
 
 def _finalize_queued_notice_storage_targets(
     targets: Sequence[_QueuedNoticeStorageTarget],
     response_turn_id: str,
-    notice_text: str | None,
 ) -> None:
     """Finalize all durable targets for one response from a worker thread."""
     for target in targets:
@@ -546,7 +520,6 @@ def _finalize_queued_notice_storage_targets(
             _finalize_queued_notice_in_new_session_storage(
                 target,
                 response_turn_id,
-                notice_text,
             )
         except Exception:
             logger.exception(
@@ -571,7 +544,6 @@ async def finalize_queued_notice_response_turn_async(
             _finalize_queued_notice_storage_targets,
             tuple(notice_context.storage_targets.values()),
             notice_context.response_turn_id,
-            notice_context.delivered_notice_text,
         ),
     )
     try:
