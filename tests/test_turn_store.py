@@ -155,11 +155,42 @@ def test_persisted_turn_notifies_exact_indexed_event_ids(tmp_path: Path) -> None
 
     store.record_pending_turn(pending)
     store.record_turn(pending)
+    store._ledger.flush()
 
     assert notifications == [
         ("$source", "$alias"),
         ("$source", "$alias"),
     ]
+
+
+def test_terminal_turn_notifies_only_after_durable_write(tmp_path: Path) -> None:
+    """Dispatch truth must remain until its replacing TurnStore write reaches disk."""
+    notified = threading.Event()
+    persist_started = threading.Event()
+    release_persist = threading.Event()
+    store = _store(tmp_path, on_turn_persisted=lambda _event_ids: notified.set())
+    original_persist = store._ledger._persist_records
+
+    def blocking_persist(records: tuple[TurnRecord, ...]) -> None:
+        persist_started.set()
+        assert release_persist.wait(timeout=2)
+        original_persist(records)
+
+    with patch.object(store._ledger, "_persist_records", side_effect=blocking_persist):
+        record_thread = threading.Thread(
+            target=store.record_turn,
+            args=(TurnRecord.create(["$source"], response_event_id="$response"),),
+        )
+        record_thread.start()
+        assert persist_started.wait(timeout=2)
+        assert not notified.wait(timeout=0.1)
+        record_thread.join(timeout=0.1)
+        assert not record_thread.is_alive()
+        release_persist.set()
+        record_thread.join(timeout=2)
+
+    assert not record_thread.is_alive()
+    assert notified.wait(timeout=2)
 
 
 def test_pending_turn_claim_allows_only_one_concurrent_owner(tmp_path: Path) -> None:

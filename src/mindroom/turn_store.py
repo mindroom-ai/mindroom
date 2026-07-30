@@ -130,9 +130,11 @@ class TurnStore:
                 timestamp=0.0,
             )
 
-        persisted = self._ledger.update_handled_turn(turn_record.indexed_event_ids, terminal_record)
-        if persisted is not None:
-            self._notify_turn_persisted(persisted)
+        self._ledger.update_handled_turn(
+            turn_record.indexed_event_ids,
+            terminal_record,
+            on_persisted=(self._notify_turn_persisted if self.deps.on_turn_persisted is not None else None),
+        )
 
     def is_handled(self, event_id: str) -> bool:
         """Return whether one source event already has a terminal outcome."""
