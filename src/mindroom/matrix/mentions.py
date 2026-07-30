@@ -103,6 +103,15 @@ def resolve_mentioned_user_ids_from_text(
     return _mentioned_user_ids_from_replacements(replacements)
 
 
+def is_managed_entity_user_id(
+    user_id: str,
+    config: Config,
+    runtime_paths: RuntimePaths,
+) -> bool:
+    """Return whether one Matrix user ID belongs to a configured entity."""
+    return entity_identity_registry(config, runtime_paths).is_managed_user_id(user_id)
+
+
 def format_entity_mention(
     entity_name: str,
     config: Config,
