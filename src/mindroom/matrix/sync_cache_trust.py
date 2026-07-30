@@ -104,15 +104,9 @@ class SyncCacheTrust:
         self.checkpoint = None
         if self._clear_saved():
             return True
-        self.runtime.mark_callback_failed()
         self.runtime.event_cache.disable("sync_checkpoint_clear_failed")
-        self.logger.warning("matrix_cache_scope_cleanup_deferred_until_checkpoint_replay")
+        self.logger.warning("matrix_cache_scope_cleanup_checkpoint_clear_failed")
         return False
-
-    def mark_callback_failed(self) -> None:
-        """Poison sync continuity after a Matrix callback failure."""
-        self.runtime.mark_callback_failed()
-        self.invalidate_for_cache_scope_cleanup()
 
     def certify_response(
         self,
@@ -155,18 +149,6 @@ class SyncCacheTrust:
         cache_result: SyncCacheWriteResult | None = None,
     ) -> None:
         """Apply one certifier decision to trust state and durable storage."""
-        callback_failure_count = self.runtime.callback_failure_count
-        if callback_failure_count:
-            self.state = SyncTrustState.UNCERTAIN
-            self.checkpoint = None
-            self._clear_saved()
-            self.logger.warning(
-                "matrix_sync_certification_uncertain",
-                reason="callback_failed",
-                callback_failure_count=callback_failure_count,
-            )
-            return
-
         self.state = decision.state
         self.checkpoint = decision.checkpoint_to_save
         if decision.clear_saved_token:
@@ -188,17 +170,3 @@ class SyncCacheTrust:
         self.state = SyncTrustState.UNCERTAIN
         self.checkpoint = None
         self._clear_saved()
-
-    def retry_token(self) -> str | None:
-        """Select a generation-safe token for replaying a failed sync response."""
-        if self.checkpoint is not None:
-            return self.checkpoint.token
-        try:
-            saved = load_sync_checkpoint(self.storage_path, self.agent_name)
-        except OSError as exc:
-            self.logger.warning("matrix_sync_token_load_failed", error=str(exc))
-            return None
-        cache_generation = self.runtime.event_cache.cache_generation
-        if saved is None or cache_generation is None or saved.cache_generation != cache_generation:
-            return None
-        return saved.token

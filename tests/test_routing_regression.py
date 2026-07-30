@@ -493,11 +493,10 @@ class TestRoutingRegression:
             ),
         )
         await coalescing_gate.drain_all()
-        assert router_bot._runtime_view.callback_failure_count == 1
         router_bot._sync_cache_trust.state = SyncTrustState.CERTIFIED
         router_bot._sync_cache_trust.checkpoint = SyncCheckpoint("s_before_router_shutdown")
         await router_bot.prepare_for_sync_shutdown()
-        assert router_bot._sync_cache_trust.checkpoint is None
+        assert router_bot._sync_cache_trust.checkpoint == SyncCheckpoint("s_before_router_shutdown")
 
     @pytest.mark.asyncio
     async def test_mcp_catalog_restart_waits_for_admitted_router_relay_delivery(self, tmp_path: Path) -> None:

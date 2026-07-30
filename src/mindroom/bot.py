@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import time
 from dataclasses import dataclass, replace
-from functools import cached_property
+from functools import cached_property, partial
 from typing import TYPE_CHECKING, Any, cast
 from uuid import uuid4
 
@@ -40,7 +40,6 @@ from mindroom.matrix.conversation_cache import MatrixConversationCache
 from mindroom.matrix.decrypt_failure import handle_decrypt_failure, raise_notice_floor
 from mindroom.matrix.event_info import EventInfo, origin_server_ts_from_event_source
 from mindroom.matrix.health import clear_matrix_sync_state, mark_matrix_sync_loop_started, mark_matrix_sync_success
-from mindroom.matrix.media import MATRIX_MEDIA_EVENT_TYPES
 from mindroom.matrix.presence import build_agent_status_message, set_presence_status
 from mindroom.matrix.room_cleanup import cleanup_all_orphaned_bots
 from mindroom.matrix.rooms import leave_non_dm_rooms
@@ -86,6 +85,11 @@ from .delivery_gateway import (
     ResponseHookService,
     SendTextRequest,
 )
+from .dispatch_obligations import (
+    DispatchCallbackKind,
+    DispatchObligationRunner,
+    DispatchObligationStore,
+)
 from .edit_regenerator import EditRegenerator, EditRegeneratorDeps
 from .entity_rooms import get_rooms_for_entity
 from .inbound_turn_normalizer import InboundTurnNormalizer, InboundTurnNormalizerDeps
@@ -97,9 +101,12 @@ from .matrix.client_room_admin import get_joined_rooms
 from .matrix.client_session import PermanentMatrixStartupError
 from .matrix.room_member_joins import (
     RoomMemberJoin,
+    record_room_member_join_seen,
+    record_room_member_join_seen_from_event,
+    room_member_events_from_sync_state,
+    room_member_events_from_sync_timeline,
     room_member_join_from_event,
-    room_member_joins_from_sync_state,
-    room_member_joins_from_sync_timeline,
+    room_member_join_is_seen,
 )
 from .matrix.to_device import AuthenticatedToDeviceEvent
 from .media_inputs import MediaInputs
@@ -169,7 +176,6 @@ def _create_task_wrapper(
     callback: Callable[..., Awaitable[None]],
     *,
     owner: BotRuntimeState | None = None,
-    on_error: Callable[[], None] | None = None,
 ) -> Callable[..., Awaitable[None]]:
     """Create a wrapper that runs the callback as a background task.
 
@@ -187,10 +193,6 @@ def _create_task_wrapper(
                 # Task was cancelled, this is expected during shutdown
                 pass
             except Exception:
-                if on_error is not None:
-                    on_error()
-                elif owner is not None:
-                    owner.mark_callback_failed()
                 # Log the exception with full traceback
                 logger.exception("Error in event callback")
 
@@ -346,6 +348,7 @@ class AgentBot:
         self._hook_registry_state = HookRegistryState(HookRegistry.empty())
         self._room_member_callback_registered = False
         self._room_member_join_hooks_armed = False
+        self._room_member_join_lock = asyncio.Lock()
         self._sliding_sync_startup_warning_emitted = False
         self._runtime_view = BotRuntimeState(
             client=None,
@@ -405,6 +408,11 @@ class AgentBot:
             msg = f"Missing Matrix ID for {self.agent_name!r} during runtime initialization"
             raise PermanentMatrixStartupError(msg)
         runtime_matrix_id = self.matrix_id
+        self._dispatch_obligation_store = DispatchObligationStore(
+            tracking_path=self.storage_path / "tracking",
+            principal_id=runtime_matrix_id.full_id,
+            entity_name=self.agent_name,
+        )
         self._coalescing_gate = CoalescingGate(
             dispatch_batch=self._dispatch_coalesced_batch,
             debounce_seconds=lambda: self.config.defaults.coalescing.debounce_ms / 1000,
@@ -490,7 +498,24 @@ class AgentBot:
                 state_writer=self._conversation_state_writer,
                 resolver=self._conversation_resolver,
                 tool_runtime=self._tool_runtime_support,
+                on_turn_persisted=self._settle_turn_dispatch_obligations,
             ),
+        )
+        self._dispatch_obligation_runner = DispatchObligationRunner(
+            store=self._dispatch_obligation_store,
+            callbacks=DispatchObligationRunner.callbacks_for(
+                on_message=self._on_message,
+                on_media=self._on_media_message,
+                on_reaction=self._on_reaction,
+                on_approval=self._on_unknown_event,
+                on_room_lifecycle=partial(self._on_room_member, hooks_armed_at_delivery=True),
+                on_redaction=self._on_redaction,
+                on_decryption_failure=self._on_decryption_failure,
+                turn_is_persisted=lambda event_id: self._turn_store.get_turn_record(event_id) is not None,
+                source_is_deferred=self._coalescing_gate.has_pending_source_event,
+            ),
+            room_for_id=self._room_for_dispatch_obligation,
+            turn_is_persisted=lambda event_id: self._turn_store.get_turn_record(event_id) is not None,
         )
         self._post_response_effects_support = PostResponseEffectsSupport(
             runtime=self._runtime_view,
@@ -1116,26 +1141,18 @@ class AgentBot:
 
     def _create_room_member_task_wrapper(self) -> Callable[[nio.MatrixRoom, nio.Event], Awaitable[None]]:
         """Return a background callback that preserves delivery-time hook arming."""
+        durable_callback = self._dispatch_obligation_runner.task_wrapper(
+            DispatchCallbackKind.ROOM_LIFECYCLE,
+            owner=self._runtime_view,
+        )
 
         async def wrapper(room: nio.MatrixRoom, event: nio.Event) -> None:
             if not isinstance(event, nio.RoomMemberEvent):
                 return
             hooks_armed_at_delivery = self._first_sync_done and self._room_member_join_hooks_armed
-
-            async def error_handler() -> None:
-                try:
-                    await self._on_room_member(
-                        room,
-                        event,
-                        hooks_armed_at_delivery=hooks_armed_at_delivery,
-                    )
-                except asyncio.CancelledError:
-                    pass
-                except Exception:
-                    self._sync_cache_trust.mark_callback_failed()
-                    logger.exception("Error in event callback")
-
-            create_background_task(error_handler(), owner=self._runtime_view)
+            if not hooks_armed_at_delivery:
+                return
+            await durable_callback(room, event)
 
         return wrapper
 
@@ -1234,18 +1251,11 @@ class AgentBot:
         self._first_sync_done = True
         self._room_member_join_hooks_armed = room_member_join_hook_plan.arm_after_response
 
-        try:
-            await self._run_sync_response_side_effects(
-                _response,
-                first_sync_response=first_sync_response,
-                room_member_join_hook_plan=room_member_join_hook_plan,
-            )
-        except asyncio.CancelledError:
-            self._sync_cache_trust.mark_callback_failed()
-            raise
-        except Exception:
-            self._sync_cache_trust.mark_callback_failed()
-            raise
+        await self._run_sync_response_side_effects(
+            _response,
+            first_sync_response=first_sync_response,
+            room_member_join_hook_plan=room_member_join_hook_plan,
+        )
         if self._calls_reconcile_pending:
             self._calls_reconcile_pending = False
             call_manager = self._call_manager
@@ -1324,7 +1334,6 @@ class AgentBot:
 
     def _register_call_manager_callbacks(self, client: nio.AsyncClient) -> None:
         """Build the optional call manager and wire its Matrix callbacks."""
-        callback_failed = self._sync_cache_trust.mark_callback_failed
         self._call_manager = maybe_build_call_manager(
             agent_name=self.agent_name,
             config=self.config,
@@ -1338,7 +1347,6 @@ class AgentBot:
             _create_task_wrapper(
                 self._on_room_membership_event,
                 owner=self._runtime_view,
-                on_error=callback_failed,
             ),
             nio.RoomMemberEvent,
         )
@@ -1348,7 +1356,6 @@ class AgentBot:
             _create_task_wrapper(
                 self._call_manager.on_room_event,
                 owner=self._runtime_view,
-                on_error=callback_failed,
             ),
             nio.UnknownEvent,
         )
@@ -1356,7 +1363,6 @@ class AgentBot:
             _create_task_wrapper(  # ty: ignore[invalid-argument-type]  # matrix-nio callback types are too strict here
                 self._call_manager.on_to_device_event,
                 owner=self._runtime_view,
-                on_error=callback_failed,
             ),
             AuthenticatedToDeviceEvent,
         )
@@ -1460,52 +1466,19 @@ class AgentBot:
             # Keep durable tracking-state loading off the event loop at startup.
             await asyncio.to_thread(self._turn_store.warm)
             await asyncio.to_thread(interactive.init_persistence, self.runtime_paths.storage_root)
+            await self._dispatch_obligation_runner.recover_pending()
             client = self.client
             assert client is not None
-            callback_failed = self._sync_cache_trust.mark_callback_failed
 
             # Register event callbacks - wrap them to run as background tasks
             # This ensures the sync loop is never blocked, allowing stop reactions to work
             client.add_event_callback(
-                _create_task_wrapper(self._on_invite, owner=self._runtime_view, on_error=callback_failed),
+                _create_task_wrapper(self._on_invite, owner=self._runtime_view),
                 nio.InviteEvent,  # ty: ignore[invalid-argument-type]  # InviteEvent doesn't inherit Event
             )
-            client.add_event_callback(
-                _create_task_wrapper(self._on_message, owner=self._runtime_view, on_error=callback_failed),
-                nio.RoomMessageText,
-            )
-            client.add_event_callback(
-                self._on_redaction,
-                nio.RedactionEvent,
-            )
-            client.add_event_callback(
-                _create_task_wrapper(self._on_reaction, owner=self._runtime_view, on_error=callback_failed),
-                nio.ReactionEvent,
-            )
-
-            # Register media callbacks on all agents (each agent handles its own routing)
-            media_callback = _create_task_wrapper(
-                self._on_media_message,
+            self._dispatch_obligation_runner.register_source_callbacks(
+                client,
                 owner=self._runtime_view,
-                on_error=callback_failed,
-            )
-            for event_type in MATRIX_MEDIA_EVENT_TYPES:
-                client.add_event_callback(media_callback, event_type)
-            client.add_event_callback(
-                _create_task_wrapper(
-                    self._on_unknown_event,
-                    owner=self._runtime_view,
-                    on_error=callback_failed,
-                ),
-                nio.UnknownEvent,
-            )
-            client.add_event_callback(
-                _create_task_wrapper(
-                    self._on_decryption_failure,
-                    owner=self._runtime_view,
-                    on_error=callback_failed,
-                ),
-                nio.MegolmEvent,
             )
             self._register_call_manager_callbacks(client)
             register_desktop_pairing_receiver(
@@ -1516,7 +1489,6 @@ class AgentBot:
                 callback_wrapper=lambda callback: _create_task_wrapper(
                     callback,
                     owner=self._runtime_view,
-                    on_error=callback_failed,
                 ),
             )
             await self._set_presence_with_model_info()
@@ -1738,28 +1710,17 @@ class AgentBot:
             owner=self._runtime_view,
             shutdown_intent=shutdown_intent,
         )
-        callback_failure_count = self._runtime_view.callback_failure_count
-        if (
-            background_tasks_completed
-            and drain_result.completed
-            and responses_drained
-            and post_drain_background_tasks_completed
-            and callback_failure_count == 0
-            and self._sync_cache_trust.state is SyncTrustState.CERTIFIED
-        ):
+        if self._sync_cache_trust.state is SyncTrustState.CERTIFIED:
             self._sync_cache_trust.persist_current()
-        elif (
+        if (
             not background_tasks_completed
             or not drain_result.completed
             or not responses_drained
             or not post_drain_background_tasks_completed
-            or callback_failure_count
         ):
-            self._sync_cache_trust.discard()
             self.logger.warning(
-                "sync_checkpoint_discarded",
+                "runtime_drain_incomplete_with_durable_dispatch_recovery",
                 agent_name=self.agent_name,
-                callback_failure_count=callback_failure_count,
                 background_tasks_completed=background_tasks_completed,
                 coalescing_drain_completed=drain_result.completed,
                 responses_drained=responses_drained,
@@ -1787,6 +1748,25 @@ class AgentBot:
 
     async def _on_invite(self, room: nio.MatrixRoom, event: nio.InviteEvent) -> None:
         await self._room_lifecycle.on_invite(room, event)
+
+    def _settle_turn_dispatch_obligations(self, event_ids: tuple[str, ...]) -> None:
+        """Replace transient message/media obligations with durable TurnStore truth."""
+        try:
+            for event_id in event_ids:
+                for callback_kind in (DispatchCallbackKind.MESSAGE, DispatchCallbackKind.MEDIA):
+                    self._dispatch_obligation_store.settle_from_turn_store(event_id, callback_kind)
+        except Exception:
+            self.logger.exception(
+                "turn_dispatch_obligation_settlement_failed",
+                event_ids=event_ids,
+            )
+
+    def _room_for_dispatch_obligation(self, room_id: str) -> nio.MatrixRoom:
+        """Resolve one recovery room without depending on a new sync response."""
+        client = self.client
+        if client is not None and room_id in client.rooms:
+            return client.rooms[room_id]
+        return nio.MatrixRoom(room_id, self.matrix_id.full_id)
 
     async def _dispatch_coalesced_batch(self, batch: CoalescedBatch) -> None:
         """Delegate one flushed coalesced batch to the turn engine."""
@@ -1853,26 +1833,7 @@ class AgentBot:
     async def _on_redaction(self, room: nio.MatrixRoom, event: nio.Event) -> None:
         """Persist one redaction before updating advisory cache state."""
         assert isinstance(event, nio.RedactionEvent)
-        try:
-            await self._redacted_turn_cleanup.handle(room, event)
-        except asyncio.CancelledError:
-            self._rewind_sync_after_redaction_failure()
-            raise
-        except Exception:
-            self._rewind_sync_after_redaction_failure()
-            raise
-
-    def _rewind_sync_after_redaction_failure(self) -> None:
-        """Replay a sync response whose critical redaction callback did not finish."""
-        client = self.client
-        if client is None:
-            return
-        retry_token = self._sync_cache_trust.retry_token()
-        cast("Any", client).next_batch = retry_token
-        self.logger.warning(
-            "matrix_redaction_callback_failed_replaying_sync",
-            has_retry_token=retry_token is not None,
-        )
+        await self._redacted_turn_cleanup.handle(room, event)
 
     async def _on_reaction(self, room: nio.MatrixRoom, event: nio.ReactionEvent) -> None:
         """Handle reaction events for interactive questions, stop functionality, and config confirmations."""
@@ -1888,24 +1849,42 @@ class AgentBot:
     ) -> None:
         """Expose live human room joins to router-owned hooks."""
         hooks_armed = self._room_member_join_hooks_armed if hooks_armed_at_delivery is None else hooks_armed_at_delivery
-        if self.agent_name != ROUTER_AGENT_NAME or not self._first_sync_done or not hooks_armed:
+        if (
+            self.agent_name != ROUTER_AGENT_NAME
+            or not hooks_armed
+            or (hooks_armed_at_delivery is None and not self._first_sync_done)
+        ):
             return
         if not self.hook_registry.has_hooks(EVENT_ROOM_MEMBER_JOINED):
             return
 
-        join = room_member_join_from_event(
-            room,
-            event,
-            config=self.config,
-            runtime_paths=self.runtime_paths,
-            storage_root=self.runtime_paths.storage_root,
-            # Live callbacks are armed only after startup sync; prev_content may be absent.
-            require_previous_membership=False,
-        )
-        if join is None:
-            return
+        async with self._room_member_join_lock:
+            join = room_member_join_from_event(
+                room,
+                event,
+                config=self.config,
+                runtime_paths=self.runtime_paths,
+                # Live callbacks are armed only after startup sync; prev_content may be absent.
+                require_previous_membership=False,
+            )
+            if join is None:
+                return
+            if await asyncio.to_thread(
+                room_member_join_is_seen,
+                self.runtime_paths.storage_root,
+                room_id=join.room_id,
+                user_id=join.user_id,
+            ):
+                return
 
-        await self._emit_room_member_joined_hooks(join)
+            await self._emit_room_member_joined_hooks(join)
+            if not await asyncio.to_thread(
+                record_room_member_join_seen,
+                self.runtime_paths.storage_root,
+                join,
+            ):
+                msg = f"Failed to persist completed room-member join {join.event_id!r}"
+                raise RuntimeError(msg)
 
     async def _emit_room_member_joined_sync_state_hooks(
         self,
@@ -1922,15 +1901,40 @@ class AgentBot:
         if client is None:
             return
 
-        for join in room_member_joins_from_sync_state(
-            response,
-            rooms=client.rooms,
-            config=self.config,
-            runtime_paths=self.runtime_paths,
-            storage_root=self.runtime_paths.storage_root,
-            record_only=record_only,
-        ):
-            await self._emit_room_member_joined_hooks(join)
+        for room, event in room_member_events_from_sync_state(response, rooms=client.rooms):
+            if record_only:
+                record_room_member_join_seen_from_event(
+                    room,
+                    event,
+                    config=self.config,
+                    runtime_paths=self.runtime_paths,
+                    storage_root=self.runtime_paths.storage_root,
+                )
+                continue
+            if (
+                room_member_join_from_event(
+                    room,
+                    event,
+                    config=self.config,
+                    runtime_paths=self.runtime_paths,
+                    require_previous_membership=True,
+                )
+                is None
+            ):
+                if event.prev_membership in {None, "join"}:
+                    record_room_member_join_seen_from_event(
+                        room,
+                        event,
+                        config=self.config,
+                        runtime_paths=self.runtime_paths,
+                        storage_root=self.runtime_paths.storage_root,
+                    )
+                continue
+            await self._dispatch_obligation_runner.dispatch(
+                room,
+                event,
+                DispatchCallbackKind.ROOM_LIFECYCLE,
+            )
 
     async def _emit_room_member_joined_sync_timeline_hooks(self, response: nio.SyncResponse) -> None:
         """Expose human joins from a restored-token catch-up sync timeline."""
@@ -1942,14 +1946,23 @@ class AgentBot:
         if client is None:
             return
 
-        for join in room_member_joins_from_sync_timeline(
-            response,
-            rooms=client.rooms,
-            config=self.config,
-            runtime_paths=self.runtime_paths,
-            storage_root=self.runtime_paths.storage_root,
-        ):
-            await self._emit_room_member_joined_hooks(join)
+        for room, event in room_member_events_from_sync_timeline(response, rooms=client.rooms):
+            if (
+                room_member_join_from_event(
+                    room,
+                    event,
+                    config=self.config,
+                    runtime_paths=self.runtime_paths,
+                    require_previous_membership=False,
+                )
+                is None
+            ):
+                continue
+            await self._dispatch_obligation_runner.dispatch(
+                room,
+                event,
+                DispatchCallbackKind.ROOM_LIFECYCLE,
+            )
 
     async def _on_decryption_failure(self, room: nio.MatrixRoom, event: nio.MegolmEvent) -> None:
         client = self.client

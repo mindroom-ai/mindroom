@@ -23,10 +23,6 @@ _GENERATION = "cache-generation"
 @dataclass
 class _Runtime:
     event_cache: ConversationEventCache
-    callback_failure_count: int = 0
-
-    def mark_callback_failed(self) -> None:
-        self.callback_failure_count += 1
 
 
 def _trust(
@@ -93,21 +89,23 @@ def test_save_binds_checkpoint_to_current_cache_generation(tmp_path: Path) -> No
     )
 
 
-def test_callback_failure_blocks_later_certification(tmp_path: Path) -> None:
-    """A callback failure prevents later sync responses from restoring trust."""
-    trust, _cache, runtime = _trust(tmp_path)
-    trust.mark_callback_failed()
+def test_complete_cache_delta_certifies_raw_sync_continuity(tmp_path: Path) -> None:
+    """Exact callback recovery must not poison independently durable raw cache continuity."""
+    trust, _cache, _runtime = _trust(tmp_path)
 
-    trust.certify_response(
-        next_batch="s_after_failure",
+    decision = trust.certify_response(
+        next_batch="s_complete",
         cache_result=SyncCacheWriteResult(complete=True),
         first_sync=False,
     )
 
-    assert runtime.callback_failure_count == 1
-    assert trust.state is SyncTrustState.UNCERTAIN
-    assert trust.checkpoint is None
-    assert load_sync_checkpoint(tmp_path, "code") is None
+    assert decision.state is SyncTrustState.CERTIFIED
+    assert trust.state is SyncTrustState.CERTIFIED
+    assert trust.checkpoint == SyncCheckpoint("s_complete")
+    assert load_sync_checkpoint(tmp_path, "code") == SyncCheckpoint(
+        token="s_complete",  # noqa: S106
+        cache_generation=_GENERATION,
+    )
 
 
 def test_positioned_limited_response_resets_sync_continuity(tmp_path: Path) -> None:
@@ -189,39 +187,6 @@ def test_sustained_limited_responses_reset_once_until_a_delta_certifies(tmp_path
     assert [decision.reset_client_token for decision in decisions] == [True, False, False, False]
 
 
-def test_callback_rejected_certification_does_not_rearm_the_replay_guard(tmp_path: Path) -> None:
-    """A decision certified but rejected for callback failure must not re-arm the replay."""
-    trust, _cache, runtime = _trust(tmp_path)
-    trust.state = SyncTrustState.CERTIFIED
-
-    first = trust.certify_response(
-        next_batch="s_partial",
-        cache_result=SyncCacheWriteResult(
-            complete=False,
-            limited_room_ids=("!room:localhost",),
-        ),
-        first_sync=False,
-    )
-    runtime.mark_callback_failed()
-    trust.certify_response(
-        next_batch="s_complete",
-        cache_result=SyncCacheWriteResult(complete=True),
-        first_sync=False,
-    )
-    final = trust.certify_response(
-        next_batch="s_partial_again",
-        cache_result=SyncCacheWriteResult(
-            complete=False,
-            limited_room_ids=("!room:localhost",),
-        ),
-        first_sync=False,
-    )
-
-    assert first.reset_client_token is True
-    assert trust.state is SyncTrustState.UNCERTAIN
-    assert final.reset_client_token is False
-
-
 @pytest.mark.asyncio
 async def test_cold_limited_initial_window_does_not_reset_again(tmp_path: Path) -> None:
     """A since-less startup window may be limited without replaying itself forever."""
@@ -238,35 +203,6 @@ async def test_cold_limited_initial_window_does_not_reset_again(tmp_path: Path) 
     )
 
     assert decision.reset_client_token is False
-    assert trust.state is SyncTrustState.UNCERTAIN
-
-
-def test_callback_failure_preserves_pending_limited_recovery(tmp_path: Path) -> None:
-    """A callback failure after rewind must not make the initial window rewind again."""
-    trust, _cache, runtime = _trust(tmp_path)
-    trust.state = SyncTrustState.CERTIFIED
-
-    reset = trust.certify_response(
-        next_batch="s_partial",
-        cache_result=SyncCacheWriteResult(
-            complete=False,
-            limited_room_ids=("!room:localhost",),
-        ),
-        first_sync=False,
-    )
-    trust.mark_callback_failed()
-    initial = trust.certify_response(
-        next_batch="s_initial",
-        cache_result=SyncCacheWriteResult(
-            complete=False,
-            limited_room_ids=("!room:localhost",),
-        ),
-        first_sync=False,
-    )
-
-    assert reset.reset_client_token is True
-    assert runtime.callback_failure_count == 1
-    assert initial.reset_client_token is False
     assert trust.state is SyncTrustState.UNCERTAIN
 
 
@@ -291,7 +227,7 @@ def test_unknown_position_marks_next_limited_window_as_initial(tmp_path: Path) -
 @pytest.mark.asyncio
 async def test_clear_failure_disables_cache_and_skips_cold_cleanup(tmp_path: Path) -> None:
     """Failed deletion preserves rows and disables cache use for safe replay."""
-    trust, cache, runtime = _trust(tmp_path)
+    trust, cache, _runtime = _trust(tmp_path)
     save_sync_token(tmp_path, "code", "s_preserved", cache_generation=_GENERATION)
 
     with (
@@ -307,7 +243,6 @@ async def test_clear_failure_disables_cache_and_skips_cold_cleanup(tmp_path: Pat
         token = await trust.prepare_startup()
 
     assert token is None
-    assert runtime.callback_failure_count == 1
     assert load_sync_checkpoint(tmp_path, "code") is not None
     cache.disable.assert_called_once_with("sync_checkpoint_clear_failed")
     cache.purge_principal.assert_not_awaited()
@@ -334,33 +269,3 @@ async def test_failed_cold_start_cleanup_disables_principal_view(tmp_path: Path)
 
     cache.disable.assert_called_once_with("untrusted_principal_cache_cleanup_failed")
     assert trust.state is SyncTrustState.COLD
-
-
-def test_retry_token_prefers_current_certified_checkpoint(tmp_path: Path) -> None:
-    """An in-memory certified checkpoint is the first replay choice."""
-    trust, _cache, _runtime = _trust(tmp_path)
-    trust.checkpoint = SyncCheckpoint("s_current")
-    save_sync_token(tmp_path, "code", "s_saved", cache_generation=_GENERATION)
-
-    assert trust.retry_token() == "s_current"
-
-
-@pytest.mark.parametrize(
-    ("cache_generation", "saved_generation", "expected"),
-    [
-        (_GENERATION, _GENERATION, "s_saved"),
-        ("replacement-generation", _GENERATION, None),
-        (None, _GENERATION, None),
-    ],
-)
-def test_saved_retry_token_requires_current_generation(
-    tmp_path: Path,
-    cache_generation: str | None,
-    saved_generation: str,
-    expected: str | None,
-) -> None:
-    """A durable retry token is usable only with its original generation."""
-    trust, _cache, _runtime = _trust(tmp_path, cache_generation=cache_generation)
-    save_sync_token(tmp_path, "code", "s_saved", cache_generation=saved_generation)
-
-    assert trust.retry_token() == expected

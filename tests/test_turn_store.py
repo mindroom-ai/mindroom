@@ -9,6 +9,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
 from pathlib import Path
 from types import SimpleNamespace
+from typing import TYPE_CHECKING
 from unittest.mock import ANY, MagicMock, patch
 
 import pytest
@@ -42,8 +43,15 @@ from mindroom.text_ingress_dispatch import _run_claimed_response
 from mindroom.turn_store import TurnStore, TurnStoreDeps
 from tests.conftest import TEST_PASSWORD, bind_runtime_paths, runtime_paths_for, test_runtime_paths
 
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
-def _store(tmp_path: Path) -> TurnStore:
+
+def _store(
+    tmp_path: Path,
+    *,
+    on_turn_persisted: Callable[[tuple[str, ...]], None] | None = None,
+) -> TurnStore:
     return TurnStore(
         TurnStoreDeps(
             agent_name="agent",
@@ -51,6 +59,7 @@ def _store(tmp_path: Path) -> TurnStore:
             state_writer=MagicMock(),
             resolver=MagicMock(),
             tool_runtime=MagicMock(),
+            on_turn_persisted=on_turn_persisted,
         ),
     )
 
@@ -132,6 +141,25 @@ def _prepare_redaction(
         target=target,
         source_event_ids=("$later",),
     )
+
+
+def test_persisted_turn_notifies_exact_indexed_event_ids(tmp_path: Path) -> None:
+    """Both pending and terminal TurnStore truth must retire transient dispatch obligations."""
+    notifications: list[tuple[str, ...]] = []
+    store = _store(tmp_path, on_turn_persisted=notifications.append)
+    pending = TurnRecord.create(
+        ["$source"],
+        discovery_event_ids=["$alias"],
+        completed=False,
+    )
+
+    store.record_pending_turn(pending)
+    store.record_turn(pending)
+
+    assert notifications == [
+        ("$source", "$alias"),
+        ("$source", "$alias"),
+    ]
 
 
 def test_pending_turn_claim_allows_only_one_concurrent_owner(tmp_path: Path) -> None:

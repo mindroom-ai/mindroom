@@ -287,6 +287,29 @@ async def _admit_ready(
     )
 
 
+@pytest.mark.asyncio
+async def test_pending_source_event_tracks_queued_and_dispatched_work() -> None:
+    """The durable callback boundary must know when coalescing owns one exact source."""
+    release = asyncio.Event()
+
+    async def dispatch_batch(_batch: CoalescedBatch) -> None:
+        await release.wait()
+
+    gate = CoalescingGate(
+        dispatch_batch=dispatch_batch,
+        debounce_seconds=lambda: 0.0,
+        is_shutting_down=lambda: False,
+    )
+    key = CoalescingKey("!room:localhost", "$thread:localhost", "@user:localhost")
+    pending = _pending(_text_event("$owned:localhost", "hello", 1_000_000))
+
+    await _admit_ready(gate, key, pending)
+    assert gate.has_pending_source_event("$owned:localhost")
+
+    release.set()
+    await _wait_for(lambda: not gate.has_pending_source_event("$owned:localhost"))
+
+
 class FakeMonotonicClock:
     """Mutable monotonic clock for reservation timing tests."""
 
