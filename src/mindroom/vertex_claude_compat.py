@@ -11,13 +11,13 @@ from agno.models.vertexai.claude import Claude as VertexAIClaude
 from agno.utils.models.claude import format_messages, format_tools_for_model
 from agno.utils.tokens import count_schema_tokens
 
+from mindroom.claude_compat import ClaudeProviderCompat
 from mindroom.claude_prompt_cache import (
     SERVER_TOOL_USE_BLOCK_TYPE,
     TOOL_SEARCH_RESULT_BLOCK_TYPE,
     TOOL_SEARCH_TOOL_TYPE,
     prepare_claude_request_kwargs,
 )
-from mindroom.claude_safeguard import ClaudeSafeguardCompat
 from mindroom.logging_config import get_logger
 from mindroom.token_budget import approximate_o200k_tokens, stable_serialize
 
@@ -217,7 +217,7 @@ def _request_for_vertex_token_count(request_kwargs: dict[str, Any]) -> tuple[dic
 
 
 @dataclass
-class MindroomVertexAIClaude(ClaudeSafeguardCompat, VertexAIClaude):
+class MindroomVertexAIClaude(ClaudeProviderCompat, VertexAIClaude):
     """Vertex Claude model with Mindroom-specific provider compatibility fixes."""
 
     context_window: int | None = None

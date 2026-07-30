@@ -118,18 +118,22 @@ def test_anthropic_frontier_presets_use_current_models() -> None:
 
 
 def test_current_google_and_openrouter_specialist_models() -> None:
-    """Google media and OpenRouter specialist presets should use current stable IDs."""
+    """Google media and OpenRouter specialist presets should use current IDs."""
     openrouter_alternatives = dict(model_defaults.CONFIG_INIT_MODEL_ALTERNATIVES["openrouter"])
 
     assert model_defaults.GOOGLE_AVATAR_PROMPT == "gemini-3.5-flash-lite"
     assert model_defaults.GOOGLE_AVATAR_IMAGE == "gemini-3.1-flash-image"
     assert model_defaults.GOOGLE_IMAGE == "gemini-3.1-flash-image"
-    assert model_defaults.GOOGLE_VEO == "veo-3.1-generate-001"
-    assert model_defaults.GOOGLE_PROVIDER_DEFAULT_TEMPERATURE_MODEL_SUFFIXES == (
+    assert model_defaults.GOOGLE_VEO == "veo-3.1-generate-preview"
+    assert model_defaults.GOOGLE_PROVIDER_DEFAULT_SAMPLING_MODEL_SUFFIXES == (
         "gemini-3.6-flash",
         "gemini-3.5-flash-lite",
     )
-    assert model_defaults.CLAUDE_PROVIDER_DEFAULT_TEMPERATURE_MODEL_SUFFIXES == ("claude-fable-5",)
+    assert model_defaults.CLAUDE_PROVIDER_DEFAULT_SAMPLING_MODEL_SUFFIXES == (
+        "claude-fable-5",
+        "claude-opus-5",
+        "claude-sonnet-5",
+    )
     assert openrouter_alternatives["gemini_flash"] == model_defaults.ModelPreset(
         "openrouter",
         "google/gemini-3.6-flash",

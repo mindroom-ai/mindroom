@@ -21,8 +21,8 @@ from mindroom.logging_config import get_logger
 from mindroom.matrix.client_delivery import send_message_result
 from mindroom.matrix.message_builder import build_message_content
 from mindroom.model_defaults import (
-    CLAUDE_PROVIDER_DEFAULT_TEMPERATURE_MODEL_SUFFIXES,
-    GOOGLE_PROVIDER_DEFAULT_TEMPERATURE_MODEL_SUFFIXES,
+    CLAUDE_PROVIDER_DEFAULT_SAMPLING_MODEL_SUFFIXES,
+    GOOGLE_PROVIDER_DEFAULT_SAMPLING_MODEL_SUFFIXES,
 )
 from mindroom.model_instance_checks import isinstance_of_loaded
 from mindroom.thread_tag_vocabulary import (
@@ -117,10 +117,10 @@ def _summary_model_requires_provider_temperature(model: object) -> bool:
     return isinstance_of_loaded(model, _VERTEXAI_CLAUDE_CLASS) or (
         isinstance(model, _IdentifiedModel)
         and (
-            model.id.casefold().endswith(CLAUDE_PROVIDER_DEFAULT_TEMPERATURE_MODEL_SUFFIXES)
+            model.id.casefold().endswith(CLAUDE_PROVIDER_DEFAULT_SAMPLING_MODEL_SUFFIXES)
             or (
                 isinstance_of_loaded(model, _GOOGLE_GEMINI_CLASS)
-                and model.id.casefold().endswith(GOOGLE_PROVIDER_DEFAULT_TEMPERATURE_MODEL_SUFFIXES)
+                and model.id.casefold().endswith(GOOGLE_PROVIDER_DEFAULT_SAMPLING_MODEL_SUFFIXES)
             )
         )
     )

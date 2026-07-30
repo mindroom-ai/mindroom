@@ -8,14 +8,14 @@ import httpx
 from agno.models.aws.claude import Claude as AwsBedrockClaude
 from anthropic.lib.bedrock import AnthropicBedrockMantle, AsyncAnthropicBedrockMantle
 
-from mindroom.claude_safeguard import ClaudeSafeguardCompat
+from mindroom.claude_compat import ClaudeProviderCompat
 from mindroom.logging_config import get_logger
 
 logger = get_logger(__name__)
 
 
 @dataclass
-class MindRoomBedrockClaude(ClaudeSafeguardCompat, AwsBedrockClaude):
+class MindRoomBedrockClaude(ClaudeProviderCompat, AwsBedrockClaude):
     """Bedrock Claude model using the current Mantle Messages endpoint."""
 
     client: AnthropicBedrockMantle | None = None

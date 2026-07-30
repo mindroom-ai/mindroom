@@ -15,6 +15,7 @@ import pytest
 from agno.models.vertexai.claude import Claude as VertexAIClaude
 from pydantic import ValidationError
 
+from mindroom.anthropic_claude import MindRoomAnthropicClaude
 from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths
 from mindroom.entity_resolution import resolve_room_scoped_model_override
@@ -2351,6 +2352,19 @@ class TestGenerateSummary:
     async def test_generate_summary_omits_invalid_fable_temperature(self, model_id: str) -> None:
         """Fable requests through each supported provider must omit invalid temperature."""
         model = _TemperatureAwareIdentifiedModel(model_id, temperature=0.9)
+
+        _configure_summary_model_temperature(
+            model,
+            summary_temperature=0.2,
+            model_name="summary",
+        )
+
+        assert model.temperature is None
+
+    @pytest.mark.parametrize("model_id", ["claude-opus-5", "claude-sonnet-5"])
+    async def test_generate_summary_omits_invalid_current_direct_claude_temperature(self, model_id: str) -> None:
+        """Current direct Claude requests must omit deprecated sampling controls."""
+        model = MindRoomAnthropicClaude(id=model_id, api_key="dummy-key", temperature=0.9)
 
         _configure_summary_model_temperature(
             model,

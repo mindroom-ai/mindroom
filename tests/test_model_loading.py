@@ -304,6 +304,64 @@ def test_google_tool_loop_preserves_provider_call_ids(tmp_path: Path) -> None:
     assert function_response.id == "call-123"
 
 
+@pytest.mark.parametrize("model_id", ["claude-fable-5", "claude-opus-5", "claude-sonnet-5"])
+def test_current_direct_claude_omits_non_default_sampling_controls(tmp_path: Path, model_id: str) -> None:
+    """Current Claude requests must omit sampling controls rejected by the provider."""
+    config = bind_runtime_paths(
+        Config(
+            models={
+                "claude": ModelConfig(
+                    provider="anthropic",
+                    id=model_id,
+                    extra_kwargs={
+                        "api_key": "dummy-key",
+                        "temperature": 0.2,
+                        "top_p": 0.8,
+                        "top_k": 20,
+                    },
+                ),
+            },
+        ),
+        test_runtime_paths(tmp_path),
+    )
+    model = get_model_instance(config, runtime_paths_for(config), "claude")
+
+    request_params = model.get_request_params()
+
+    assert "temperature" not in request_params
+    assert "top_p" not in request_params
+    assert "top_k" not in request_params
+
+
+@pytest.mark.parametrize("model_id", ["gemini-3.6-flash", "gemini-3.5-flash-lite"])
+def test_current_direct_gemini_omits_deprecated_sampling_controls(tmp_path: Path, model_id: str) -> None:
+    """Current direct Gemini requests must omit deprecated sampling controls."""
+    config = bind_runtime_paths(
+        Config(
+            models={
+                "gemini": ModelConfig(
+                    provider="google",
+                    id=model_id,
+                    extra_kwargs={
+                        "api_key": "dummy-key",
+                        "temperature": 0.2,
+                        "top_p": 0.8,
+                        "top_k": 20,
+                    },
+                ),
+            },
+        ),
+        test_runtime_paths(tmp_path),
+    )
+    model = get_model_instance(config, runtime_paths_for(config), "gemini")
+
+    request_config = model.get_request_params()["config"]
+
+    assert request_config.temperature is None
+    assert request_config.top_p is None
+    assert request_config.top_k is None
+
+
 def test_anthropic_timeout_override_is_preserved(tmp_path: Path) -> None:
     """Explicit Claude timeout config wins over the default."""
     config = bind_runtime_paths(

@@ -3521,7 +3521,7 @@
         },
         {
           "authored_override": true,
-          "default": "veo-3.1-generate-001",
+          "default": "veo-3.1-generate-preview",
           "description": null,
           "label": "Video Generation Model",
           "name": "video_generation_model",

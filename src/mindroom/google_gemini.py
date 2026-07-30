@@ -7,14 +7,48 @@ from typing import TYPE_CHECKING
 
 from agno.models.google import Gemini
 from agno.utils.message import normalize_tool_messages
+from google.genai.types import GenerateContentConfig
+
+from mindroom.model_defaults import GOOGLE_PROVIDER_DEFAULT_SAMPLING_MODEL_SUFFIXES
 
 if TYPE_CHECKING:
+    from typing import Any
+
     from agno.models.message import Message
+
+_SAMPLING_CONTROL_NAMES = ("temperature", "top_p", "top_k")
 
 
 @dataclass
 class MindRoomGoogleGemini(Gemini):
     """Gemini model that preserves provider call IDs across tool loops."""
+
+    def get_request_params(
+        self,
+        system_message: str | None = None,
+        response_format: dict[str, Any] | type[Any] | None = None,
+        tools: list[dict[str, Any]] | None = None,
+        tool_choice: str | dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Build request parameters accepted by the selected Gemini generation."""
+        request_params = super().get_request_params(
+            system_message=system_message,
+            response_format=response_format,
+            tools=tools,
+            tool_choice=tool_choice,
+        )
+        if not self.id.casefold().endswith(GOOGLE_PROVIDER_DEFAULT_SAMPLING_MODEL_SUFFIXES):
+            return request_params
+
+        generation_config = request_params.get("config")
+        if isinstance(generation_config, GenerateContentConfig):
+            generation_config.temperature = None
+            generation_config.top_p = None
+            generation_config.top_k = None
+        elif isinstance(generation_config, dict):
+            for parameter_name in _SAMPLING_CONTROL_NAMES:
+                generation_config.pop(parameter_name, None)
+        return request_params
 
     def _format_messages(
         self,

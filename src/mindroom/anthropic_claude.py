@@ -6,9 +6,9 @@ from dataclasses import dataclass
 
 from agno.models.anthropic import Claude
 
-from mindroom.claude_safeguard import ClaudeSafeguardCompat
+from mindroom.claude_compat import ClaudeProviderCompat
 
 
 @dataclass
-class MindRoomAnthropicClaude(ClaudeSafeguardCompat, Claude):
+class MindRoomAnthropicClaude(ClaudeProviderCompat, Claude):
     """Anthropic Claude model that preserves safeguard refusal semantics."""

@@ -1,4 +1,4 @@
-"""Shared safeguard handling for Claude provider adapters."""
+"""Shared request and response compatibility for Claude provider adapters."""
 
 from __future__ import annotations
 
@@ -10,6 +10,7 @@ from anthropic.types.beta import BetaMessage
 
 from mindroom.error_handling import MODEL_SAFEGUARD_REFUSAL_MESSAGE, ModelSafeguardRefusalError
 from mindroom.logging_config import get_logger
+from mindroom.model_defaults import CLAUDE_PROVIDER_DEFAULT_SAMPLING_MODEL_SUFFIXES
 
 if TYPE_CHECKING:
     from typing import NoReturn
@@ -20,13 +21,29 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 _CLAUDE_SAFEGUARD_STOP_REASON = "refusal"
+_SAMPLING_CONTROL_NAMES = ("temperature", "top_p", "top_k")
 
 
-class ClaudeSafeguardCompat:
-    """Preserve Claude's successful-HTTP safeguard refusals as typed errors."""
+class ClaudeProviderCompat:
+    """Apply current Claude request constraints and preserve typed refusals."""
 
     id: str
     name: str
+
+    def get_request_params(
+        self,
+        response_format: dict[str, Any] | type[Any] | None = None,
+        tools: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        """Build request parameters accepted by the selected Claude generation."""
+        request_params = super().get_request_params(  # ty: ignore[unresolved-attribute]
+            response_format=response_format,
+            tools=tools,
+        )
+        if self.id.casefold().endswith(CLAUDE_PROVIDER_DEFAULT_SAMPLING_MODEL_SUFFIXES):
+            for parameter_name in _SAMPLING_CONTROL_NAMES:
+                request_params.pop(parameter_name, None)
+        return request_params
 
     def _raise_for_safeguard_refusal(self, provider_response: object) -> None:
         if isinstance(provider_response, (MessageStopEvent, ParsedMessageStopEvent, ParsedBetaMessageStopEvent)):
