@@ -18,6 +18,7 @@ from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.main import Config
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.conversation_resolver import MessageContext
+from mindroom.dispatch_source import AUTO_RESUME_MESSAGE, TRUSTED_INTERNAL_RELAY_SOURCE_KIND
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.logging_config import get_logger
 from mindroom.matrix.cache.thread_history_result import thread_history_result
@@ -113,16 +114,23 @@ def _context(
     )
 
 
-def _dispatch(context: MessageContext, *, agent_name: str) -> PreparedDispatch:
+def _dispatch(
+    context: MessageContext,
+    *,
+    agent_name: str,
+    prompt: str = "hello agents",
+    source_kind: str = "message",
+) -> PreparedDispatch:
     target = MessageTarget.resolve(_ROOM_ID, context.thread_id, _EVENT_ID)
     envelope = request_envelope(
         room_id=_ROOM_ID,
         reply_to_event_id=_EVENT_ID,
         thread_id=context.thread_id,
-        prompt="hello agents",
+        prompt=prompt,
         user_id=_SENDER,
         target=target,
         agent_name=agent_name,
+        source_kind=source_kind,
     )
     return PreparedDispatch(
         requester_user_id=_SENDER,
@@ -496,6 +504,35 @@ async def test_router_ignores_thread_with_unavailable_policy_history(config: Con
 
     assert plan.kind == "ignore"
     assert plan.ignore_reason == "router"
+
+
+@pytest.mark.asyncio
+async def test_router_responds_to_trusted_auto_resume_with_unavailable_history(config: Config) -> None:
+    """A router-owned interrupted turn resumes despite deferred thread hydration."""
+    policy = _policy_for(config, ROUTER_AGENT_NAME)
+    room = _room_with_members(
+        _SENDER,
+        _entity_id(config, ROUTER_AGENT_NAME).full_id,
+        _entity_id(config, "general").full_id,
+        _entity_id(config, "research").full_id,
+    )
+    context = _context(
+        thread_id="$thread:localhost",
+        thread_history=[make_visible_message(sender=_SENDER, body="earlier")],
+        full_history=False,
+    )
+    dispatch = _dispatch(
+        context,
+        agent_name=ROUTER_AGENT_NAME,
+        prompt=AUTO_RESUME_MESSAGE,
+        source_kind=TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
+    )
+
+    plan = await _plan(policy, room, dispatch)
+
+    assert plan.kind == "respond"
+    assert plan.response_action is not None
+    assert plan.response_action.kind == "individual"
 
 
 def test_prepared_dispatch_rejects_mismatched_envelope_target() -> None:

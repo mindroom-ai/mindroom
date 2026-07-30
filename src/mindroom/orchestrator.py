@@ -1184,6 +1184,17 @@ class _MultiAgentOrchestrator:
     async def handle_bot_ready(self, bot: AgentBot | TeamBot) -> None:
         """Handle bot-ready notifications through the public runtime protocol."""
         await self._approval_transport.handle_bot_ready(bot)
+        if self.agent_bots.get(bot.agent_name) is not bot or self.config is None:
+            return
+        startup_cutoff_ms = self._startup_maintenance.startup_cutoff_ms
+        if startup_cutoff_ms is not None:
+            await self._recover_stale_streams_after_restart(
+                self._running_startup_maintenance_bots(),
+                self.config,
+                startup_cutoff_ms,
+                self._startup_maintenance.recovery_state,
+            )
+        await self._recover_pending_replacement_rooms(self.config)
 
     async def _start_runtime(self) -> None:
         """Run the startup sequence before handing off to the sync loops."""

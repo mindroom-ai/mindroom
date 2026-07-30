@@ -43,10 +43,19 @@ class StartupMaintenanceController:
     mark_runtime_support_ready: _MarkRuntimeSupportReady
     task: asyncio.Task[None] | None = field(default=None, init=False)
     startup_cutoff_ms: int | None = field(default=None, init=False)
+    recovery_state: StaleStreamRecoveryState = field(
+        default_factory=StaleStreamRecoveryState,
+        init=False,
+    )
 
     def start(self, bots: list[_StartupBot], config: Config, *, startup_cutoff_ms: int) -> None:
         """Schedule detached startup maintenance for one startup generation."""
         self.startup_cutoff_ms = startup_cutoff_ms
+        self.recovery_state = StaleStreamRecoveryState()
+        self._schedule(bots, config, startup_cutoff_ms)
+
+    def _schedule(self, bots: list[_StartupBot], config: Config, startup_cutoff_ms: int) -> None:
+        """Schedule maintenance while preserving the current generation state."""
         self.task = create_logged_task(
             self._run(bots, config, startup_cutoff_ms),
             name="startup_maintenance",
@@ -73,10 +82,9 @@ class StartupMaintenanceController:
         bots = running_bots()
         if not bots:
             return
-        self.start(bots, config, startup_cutoff_ms=self.startup_cutoff_ms)
+        self._schedule(bots, config, self.startup_cutoff_ms)
 
     async def _run(self, bots: list[_StartupBot], config: Config, startup_cutoff_ms: int) -> None:
-        recovery_state = StaleStreamRecoveryState()
         room_setup_task = asyncio.create_task(
             self._run_phase(
                 "startup_maintenance.rooms_and_memberships",
@@ -92,7 +100,7 @@ class StartupMaintenanceController:
                     bots,
                     config,
                     startup_cutoff_ms,
-                    recovery_state,
+                    self.recovery_state,
                 ),
                 failure_message="Initial startup stale stream recovery failed",
             )
@@ -103,7 +111,7 @@ class StartupMaintenanceController:
                     bots,
                     config,
                     startup_cutoff_ms,
-                    recovery_state,
+                    self.recovery_state,
                 ),
                 failure_message="Joined-room delta stale stream recovery failed",
             )

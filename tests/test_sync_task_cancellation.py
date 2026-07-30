@@ -1875,7 +1875,7 @@ async def test_update_config_replays_cancelled_startup_maintenance_and_runs_appr
         orchestrator._startup_maintenance.task = old_maintenance_task
         await asyncio.wait_for(maintenance_started.wait(), timeout=1.0)
 
-        def replay_startup_maintenance(bots: list[object], config: object, *, startup_cutoff_ms: int) -> None:
+        def replay_startup_maintenance(bots: list[object], config: object, startup_cutoff_ms: int) -> None:
             replayed.append((bots, config, startup_cutoff_ms))
 
         with (
@@ -1887,7 +1887,7 @@ async def test_update_config_replays_cancelled_startup_maintenance_and_runs_appr
             patch.object(orchestrator, "_sync_runtime_support_services", new=AsyncMock()),
             patch.object(orchestrator, "_update_unchanged_bots", new=AsyncMock()),
             patch.object(orchestrator, "_emit_config_reloaded", new=AsyncMock()),
-            patch.object(orchestrator._startup_maintenance, "start", side_effect=replay_startup_maintenance),
+            patch.object(orchestrator._startup_maintenance, "_schedule", side_effect=replay_startup_maintenance),
             patch.object(
                 orchestrator._approval_transport,
                 "mark_startup_runtime_support_ready",

@@ -302,6 +302,9 @@ async def recover_stale_streaming_messages(
                 or not room_result.interrupted_threads
             ):
                 continue
+            recovery_state.retry_target_event_ids.update(
+                interrupted_thread.target_event_id for interrupted_thread in room_result.interrupted_threads
+            )
             auto_resume_result = await _auto_resume_interrupted_threads(
                 resume_client,
                 room_result.interrupted_threads,

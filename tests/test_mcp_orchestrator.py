@@ -1056,6 +1056,51 @@ async def test_pending_replacement_recovery_claims_once_and_requeues_failed_room
 
 
 @pytest.mark.asyncio
+async def test_current_bot_ready_retries_startup_and_replacement_recovery(tmp_path: Path) -> None:
+    """First-sync completion retries rooms deferred for the exact current generation."""
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=_runtime_paths(tmp_path))
+    config = _config_with_code_agent(tmp_path)
+    config.defaults.auto_resume_after_restart = True
+    orchestrator.config = config
+    router_bot = MagicMock(spec=AgentBot)
+    router_bot.agent_name = ROUTER_AGENT_NAME
+    router_bot.running = True
+    code_bot = MagicMock(spec=AgentBot)
+    code_bot.agent_name = "code"
+    code_bot.running = True
+    orchestrator.agent_bots = {ROUTER_AGENT_NAME: router_bot, "code": code_bot}
+    orchestrator._startup_maintenance.startup_cutoff_ms = 123456
+    startup_recovery_state = orchestrator._startup_maintenance.recovery_state
+
+    with (
+        patch.object(
+            orchestrator._approval_transport,
+            "handle_bot_ready",
+            new=AsyncMock(),
+        ),
+        patch.object(
+            orchestrator,
+            "_recover_stale_streams_after_restart",
+            new=AsyncMock(),
+        ) as recover_startup,
+        patch.object(
+            orchestrator,
+            "_recover_pending_replacement_rooms",
+            new=AsyncMock(),
+        ) as recover_replacement,
+    ):
+        await orchestrator.handle_bot_ready(code_bot)
+
+    recover_startup.assert_awaited_once_with(
+        [router_bot, code_bot],
+        config,
+        123456,
+        startup_recovery_state,
+    )
+    recover_replacement.assert_awaited_once_with(config)
+
+
+@pytest.mark.asyncio
 async def test_delayed_replacement_start_retries_pending_room_recovery(tmp_path: Path) -> None:
     """A transient replacement startup failure must not discard its interrupted-room handoff."""
     orchestrator = _MultiAgentOrchestrator(runtime_paths=_runtime_paths(tmp_path))

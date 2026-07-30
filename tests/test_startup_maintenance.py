@@ -115,16 +115,17 @@ async def test_startup_maintenance_continues_after_failed_recovery_and_room_setu
 
 @pytest.mark.asyncio
 async def test_startup_maintenance_cancel_reports_unfinished_and_replays_with_running_bots() -> None:
-    """Canceling unfinished maintenance reports replay and reuses fresh running bots."""
+    """Canceled replay keeps exact retry targets and reuses fresh running bots."""
     started = asyncio.Event()
     release = asyncio.Event()
+    recover_stale = AsyncMock()
 
     async def setup_rooms(_: list[object]) -> None:
         started.set()
         await release.wait()
 
     controller = StartupMaintenanceController(
-        recover_stale_streams=AsyncMock(),
+        recover_stale_streams=recover_stale,
         setup_rooms_and_memberships=setup_rooms,
         sync_runtime_support=AsyncMock(),
         mark_runtime_support_ready=AsyncMock(),
@@ -132,6 +133,8 @@ async def test_startup_maintenance_cancel_reports_unfinished_and_replays_with_ru
 
     controller.start([MagicMock()], MagicMock(), startup_cutoff_ms=123456)
     await asyncio.wait_for(started.wait(), timeout=1.0)
+    recovery_state = controller.recovery_state
+    recovery_state.retry_target_event_ids.add("$retry")
 
     should_replay = await controller.cancel()
 
@@ -142,15 +145,17 @@ async def test_startup_maintenance_cancel_reports_unfinished_and_replays_with_ru
     def running_bots() -> list[object]:
         return [running_bot]
 
-    replay_config = MagicMock()
-    with patch.object(controller, "start") as start:
-        controller.restart_after_config_reload(
-            config=replay_config,
-            running_bots=running_bots,
-        )
-
-    start.assert_called_once_with([running_bot], replay_config, startup_cutoff_ms=123456)
     release.set()
+    replay_config = MagicMock()
+    controller.restart_after_config_reload(
+        config=replay_config,
+        running_bots=running_bots,
+    )
+    await _wait_for_controller(controller)
+
+    assert controller.recovery_state is recovery_state
+    assert controller.recovery_state.retry_target_event_ids == {"$retry"}
+    assert recover_stale.await_args_list[-1].args[:3] == ([running_bot], replay_config, 123456)
 
 
 @pytest.mark.asyncio
