@@ -231,7 +231,7 @@ async def test_team_resolution_fallback_without_terminal_note_does_not_register_
             resolution_reason="No team available",
         )
 
-    assert response == "$existing"
+    assert response is None
     assert retries == []
     assert edit_message.await_count == 1
 
@@ -240,7 +240,7 @@ def _request(on_interrupted_response_recoverable: Callable[[], None] | None = No
     return ResponseRequest(
         thread_history=[],
         prompt="Hello",
-        response_envelope=request_envelope(),
+        response_envelope=request_envelope(thread_id="$thread"),
         on_interrupted_response_recoverable=on_interrupted_response_recoverable,
     )
 

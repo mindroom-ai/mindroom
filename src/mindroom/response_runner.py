@@ -1169,7 +1169,7 @@ class ResponseRunner:
         self,
         request: ResponseRequest,
         final_outcome: FinalDeliveryOutcome,
-    ) -> None:
+    ) -> bool:
         """Tell the dispatcher when a marked-handled interrupted turn is recoverable.
 
         Only turns whose terminal interruption update reached Matrix are
@@ -1178,22 +1178,25 @@ class ResponseRunner:
         stops are terminal user intent and must never schedule recovery.
         """
         if request.on_interrupted_response_recoverable is None or final_outcome.terminal_status != "cancelled":
-            return
-        if not final_outcome.mark_handled:
-            return
-        if final_outcome.delivery_kind is None:
-            return
+            return False
+        if (
+            not final_outcome.mark_handled
+            or final_outcome.delivery_kind is None
+            or request.response_envelope.target.resolved_thread_id is None
+        ):
+            return False
         cancel_source = cancel_source_from_failure_reason(final_outcome.failure_reason)
         if cancel_source == "user_stop":
-            return
+            return False
         expected_note = (
             RESTART_INTERRUPTED_RESPONSE_NOTE if cancel_source == "sync_restart" else INTERRUPTED_RESPONSE_NOTE
         )
         if final_outcome.final_visible_body is None or not final_outcome.final_visible_body.rstrip().endswith(
             expected_note,
         ):
-            return
+            return False
         request.on_interrupted_response_recoverable()
+        return True
 
     async def _begin_locked_turn(
         self,
@@ -1521,14 +1524,19 @@ class ResponseRunner:
             post_response_outcome=build_post_response_outcome(final_delivery_outcome),
             post_response_deps=post_response_deps,
         )
-        self._notify_interrupted_response_recoverable(request, final_outcome)
+        interruption_recovery_registered = self._notify_interrupted_response_recoverable(request, final_outcome)
+        source_handled = final_outcome.mark_handled and (
+            final_outcome.terminal_status != "cancelled"
+            or cancel_source_from_failure_reason(final_outcome.failure_reason) == "user_stop"
+            or interruption_recovery_registered
+        )
         if deferred_error is not None:
-            if final_outcome.mark_handled and request.on_deferred_outcome_handled is not None:
+            if source_handled and request.on_deferred_outcome_handled is not None:
                 response_event_id = final_outcome.final_visible_event_id
                 assert response_event_id is not None
                 request.on_deferred_outcome_handled(response_event_id)
             raise deferred_error
-        return final_outcome.final_visible_event_id if final_outcome.mark_handled else None
+        return final_outcome.final_visible_event_id if source_handled else None
 
     def _build_lifecycle(
         self,
