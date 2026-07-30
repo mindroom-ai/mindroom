@@ -36,7 +36,9 @@ _API_KEY_MESSAGE_PATTERN = re.compile(
 )
 # Each inter-assignment boundary starts at the first whitespace in its run so indexed starts are unique.
 # Possessive runs keep the boundary scan linear on long whitespace and key-like suffixes.
-_NEXT_ASSIGNMENT_PATTERN = r"(?<!\s)\s++(?:and(?P<post_and_whitespace>\s++))?[\"']?[A-Za-z0-9_.-]++[\"']?\s*+[:=]"
+_NEXT_ASSIGNMENT_PATTERN = (
+    r"(?<!\s)\s++(?:and(?P<post_and_whitespace>\s++))?[\"']?[A-Za-z0-9_.-]++[\"']?\s*+(?::|=(?!=))"
+)
 _ASSIGNMENT_PREFIX_PATTERN = re.compile(
     r"(?<![A-Za-z0-9_.-])"
     r"[\"']?(?P<key>[A-Za-z0-9_.-]++)[\"']?\s*+[:=](?P<value_whitespace>\s*+)",
@@ -563,11 +565,7 @@ def _assignment_value_match(
             match_end=quoted_end + 1,
             is_quoted=True,
         )
-    value_end = (
-        _next_literal_terminator(boundaries, value_start, region_end)
-        if continuation_indentation is not None
-        else _next_assignment_terminator(boundaries, value_start, region_end)
-    )
+    value_end = _next_assignment_terminator(boundaries, value_start, region_end)
     return _AssignmentValueMatch(
         value_start=value_start,
         value_end=value_end,

@@ -345,6 +345,21 @@ def test_redact_sensitive_text_preserves_boundary_after_empty_secret_assignment(
             f'password:\n  "{REDACTED}" context\nuser=bob',
             id="quoted-value-stops-at-closing-quote",
         ),
+        pytest.param(
+            "password=\n  hunter2 user=bob",
+            f"password=\n  {REDACTED} user=bob",
+            id="lf-continuation-preserves-sibling-assignment",
+        ),
+        pytest.param(
+            "password=\r\n  hunter2 user=bob",
+            f"password=\r\n  {REDACTED} user=bob",
+            id="crlf-continuation-preserves-sibling-assignment",
+        ),
+        pytest.param(
+            "password=\n  hunter2 and user=bob",
+            f"password=\n  {REDACTED} and user=bob",
+            id="continuation-preserves-and-joined-sibling-assignment",
+        ),
     ],
 )
 def test_redact_sensitive_text_follows_multiline_assignment_structure(value: str, expected: str) -> None:
