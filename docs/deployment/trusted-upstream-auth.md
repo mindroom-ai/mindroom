@@ -48,7 +48,7 @@ For private `user` and `user_agent` OAuth flows, the trusted identity must resol
 Prefer `MINDROOM_TRUSTED_UPSTREAM_MATRIX_USER_ID_HEADER` when your access layer can supply a real Matrix ID.
 When the access layer only supplies email, set `MINDROOM_TRUSTED_UPSTREAM_EMAIL_TO_MATRIX_USER_ID_TEMPLATE` to derive the Matrix ID from the trusted email localpart.
 For example, the template `@{localpart}:example.org` maps `alice@example.com` to `@alice:example.org`.
-The template must contain exactly one `{localpart}` placeholder.
+The template must contain exactly one `{localpart}` placeholder, no other braces, and must render a valid Matrix user ID.
 Derived Matrix IDs must pass MindRoom's Matrix user ID parser.
 
 ## Strict JWT Mode

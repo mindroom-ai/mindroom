@@ -2,12 +2,17 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 import pytest
 import yaml
 
 from mindroom.config.main import Config
 from mindroom.report_access_policy import ReportAccessPolicy
 from tests.conftest import test_runtime_paths
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 def _base_config() -> dict[str, object]:
@@ -62,7 +67,7 @@ def test_report_publishing_config_rejects_unknown_policy() -> None:
         )
 
 
-def test_origin_room_default_requires_trusted_browser_auth_at_runtime(tmp_path) -> None:  # noqa: ANN001
+def test_origin_room_default_requires_trusted_browser_auth_at_runtime(tmp_path: Path) -> None:
     """Runtime config loading should reject a protected default without viewer auth."""
     runtime_paths = test_runtime_paths(tmp_path)
 
@@ -76,7 +81,7 @@ def test_origin_room_default_requires_trusted_browser_auth_at_runtime(tmp_path) 
         )
 
 
-def test_origin_room_default_accepts_trusted_browser_auth_runtime(tmp_path) -> None:  # noqa: ANN001
+def test_origin_room_default_accepts_trusted_browser_auth_runtime(tmp_path: Path) -> None:
     """Protected defaults should load when trusted browser identity is enabled."""
     runtime_paths = test_runtime_paths(tmp_path)
     trusted_runtime_paths = runtime_paths.__class__(
@@ -105,15 +110,20 @@ def test_origin_room_default_accepts_trusted_browser_auth_runtime(tmp_path) -> N
 
 
 @pytest.mark.parametrize(
-    "template",
+    ("template", "expected_error"),
     [
-        "@alice:example.org",
-        "@{localpart}-{localpart}:example.org",
-        "@{localpart}:example.org{",
-        "@{localpart}:{other}",
+        ("@alice:example.org", r"exactly one \{localpart\} placeholder"),
+        ("@{localpart}-{localpart}:example.org", r"exactly one \{localpart\} placeholder"),
+        ("@{localpart}:example.org{", r"exactly one \{localpart\} placeholder"),
+        ("@{localpart}:{other}", r"exactly one \{localpart\} placeholder"),
+        ("@{localpart}:example.org.", "valid Matrix user ID"),
     ],
 )
-def test_origin_room_default_rejects_malformed_email_mapping(tmp_path, template: str) -> None:  # noqa: ANN001
+def test_origin_room_default_rejects_malformed_email_mapping(
+    tmp_path: Path,
+    template: str,
+    expected_error: str,
+) -> None:
     """Protected defaults should reject mappings that runtime auth cannot use."""
     runtime_paths = test_runtime_paths(tmp_path)
     trusted_runtime_paths = runtime_paths.__class__(
@@ -131,7 +141,7 @@ def test_origin_room_default_rejects_malformed_email_mapping(tmp_path, template:
         env_file_values=runtime_paths.env_file_values,
     )
 
-    with pytest.raises(ValueError, match=r"exactly one \{localpart\} placeholder"):
+    with pytest.raises(ValueError, match=expected_error):
         Config.validate_with_runtime(
             {
                 **_base_config(),

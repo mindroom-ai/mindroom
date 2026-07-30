@@ -41,6 +41,9 @@ from mindroom.workers.models import WorkerHandle
 from tests.api.conftest import trusted_upstream_headers, use_trusted_upstream_runtime
 
 TEST_WORKER_AUTH = "token"
+_EMAIL_TO_MATRIX_TEMPLATE_SHAPE_ERROR = (
+    "Trusted upstream email-to-Matrix template must contain exactly one {localpart} placeholder and no other braces"
+)
 
 
 def test_worker_api_modules_share_response_dtos_and_serializer() -> None:
@@ -4837,17 +4840,22 @@ def test_trusted_upstream_auth_email_template_requires_email_header_config(tmp_p
 
 
 @pytest.mark.parametrize(
-    "template",
+    ("template", "expected_detail"),
     [
-        "@alice:example.org",
-        "@{localpart}-{localpart}:example.org",
-        "@{localpart}:example.org{",
-        "@{localpart}:{other}",
+        ("@alice:example.org", _EMAIL_TO_MATRIX_TEMPLATE_SHAPE_ERROR),
+        ("@{localpart}-{localpart}:example.org", _EMAIL_TO_MATRIX_TEMPLATE_SHAPE_ERROR),
+        ("@{localpart}:example.org{", _EMAIL_TO_MATRIX_TEMPLATE_SHAPE_ERROR),
+        ("@{localpart}:{other}", _EMAIL_TO_MATRIX_TEMPLATE_SHAPE_ERROR),
+        (
+            "@{localpart}:example.org.",
+            "Trusted upstream email-to-Matrix template must produce a valid Matrix user ID",
+        ),
     ],
 )
-def test_trusted_upstream_auth_email_template_rejects_malformed_syntax(
+def test_trusted_upstream_auth_email_template_rejects_malformed_mapping(
     tmp_path: Path,
     template: str,
+    expected_detail: str,
 ) -> None:
     """Trusted auth should reject ambiguous or malformed email-to-Matrix templates."""
     runtime_paths = _runtime_paths(
@@ -4871,9 +4879,7 @@ def test_trusted_upstream_auth_email_template_rejects_malformed_syntax(
         )
 
     assert response.status_code == 500
-    assert response.json()["detail"] == (
-        "Trusted upstream email-to-Matrix template must contain exactly one {localpart} placeholder and no other braces"
-    )
+    assert response.json()["detail"] == expected_detail
 
 
 def test_trusted_upstream_auth_rejects_invalid_derived_matrix_user_id(tmp_path: Path) -> None:
@@ -4884,7 +4890,7 @@ def test_trusted_upstream_auth_rejects_invalid_derived_matrix_user_id(tmp_path: 
             "MINDROOM_TRUSTED_UPSTREAM_AUTH_ENABLED": "true",
             "MINDROOM_TRUSTED_UPSTREAM_USER_ID_HEADER": "X-Trusted-User",
             "MINDROOM_TRUSTED_UPSTREAM_EMAIL_HEADER": "X-Trusted-Email",
-            "MINDROOM_TRUSTED_UPSTREAM_EMAIL_TO_MATRIX_USER_ID_TEMPLATE": "@{localpart}:example.org.",
+            "MINDROOM_TRUSTED_UPSTREAM_EMAIL_TO_MATRIX_USER_ID_TEMPLATE": "@{localpart}:example.org",
         },
     )
     api_app = _trusted_auth_test_app(runtime_paths)
@@ -4894,7 +4900,7 @@ def test_trusted_upstream_auth_rejects_invalid_derived_matrix_user_id(tmp_path: 
             "/whoami",
             headers={
                 "X-Trusted-User": "alice",
-                "X-Trusted-Email": "alice@example.com",
+                "X-Trusted-Email": f"{'a' * 250}@example.com",
             },
         )
 

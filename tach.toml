@@ -101,7 +101,7 @@ depends_on = []
 
 [[modules]]
 path = "mindroom.email_to_matrix_mapping"
-depends_on = []
+depends_on = ["mindroom.matrix.identity"]
 
 [[modules]]
 path = "mindroom.report_viewer_auth"
