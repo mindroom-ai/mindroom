@@ -102,7 +102,7 @@ from .matrix.client_session import PermanentMatrixStartupError
 from .matrix.room_member_joins import (
     RoomMemberJoin,
     record_room_member_join_seen,
-    record_room_member_join_seen_from_event,
+    record_room_member_joins_seen_from_events,
     room_member_events_from_sync_state,
     room_member_events_from_sync_timeline,
     room_member_join_from_event,
@@ -512,11 +512,11 @@ class AgentBot:
                 on_redaction=self._on_redaction,
                 on_decryption_failure=self._on_decryption_failure,
                 turn_is_persisted=lambda event_id: self._turn_store.get_turn_record(event_id) is not None,
-                turn_is_terminal=self._turn_store.is_handled,
                 source_is_deferred=self._coalescing_gate.has_pending_source_event,
             ),
             room_for_id=self._room_for_dispatch_obligation,
-            turn_is_terminal=self._turn_store.is_handled,
+            turn_is_terminal=self._turn_store.is_durably_handled,
+            on_persist_failure=self._rewind_sync_after_dispatch_persistence_failure,
         )
         self._post_response_effects_support = PostResponseEffectsSupport(
             runtime=self._runtime_view,
@@ -1148,6 +1148,18 @@ class AgentBot:
         self._sync_cache_trust.apply_response(decision, cache_result=cache_result)
         if decision.reset_client_token and self.client is not None:
             cast("Any", self.client).next_batch = None
+
+    def _rewind_sync_after_dispatch_persistence_failure(self) -> None:
+        """Replay work that failed before an exact durable obligation existed."""
+        client = self.client
+        if client is None:
+            return
+        retry_token = self._sync_cache_trust.retry_token()
+        cast("Any", client).next_batch = retry_token
+        self.logger.warning(
+            "dispatch_obligation_persistence_failed_replaying_sync",
+            has_retry_token=retry_token is not None,
+        )
 
     def seconds_since_last_sync_activity(self) -> float | None:
         """Return elapsed seconds since the last sync-loop activity seen by the watchdog."""
@@ -1932,15 +1944,10 @@ class AgentBot:
         if client is None:
             return
 
+        events_to_record: list[tuple[nio.MatrixRoom, nio.RoomMemberEvent]] = []
         for room, event in room_member_events_from_sync_state(response, rooms=client.rooms):
             if record_only:
-                record_room_member_join_seen_from_event(
-                    room,
-                    event,
-                    config=self.config,
-                    runtime_paths=self.runtime_paths,
-                    storage_root=self.runtime_paths.storage_root,
-                )
+                events_to_record.append((room, event))
                 continue
             if (
                 room_member_join_from_event(
@@ -1953,18 +1960,20 @@ class AgentBot:
                 is None
             ):
                 if event.prev_membership in {None, "join"}:
-                    record_room_member_join_seen_from_event(
-                        room,
-                        event,
-                        config=self.config,
-                        runtime_paths=self.runtime_paths,
-                        storage_root=self.runtime_paths.storage_root,
-                    )
+                    events_to_record.append((room, event))
                 continue
             await self._dispatch_obligation_runner.dispatch(
                 room,
                 event,
                 DispatchCallbackKind.ROOM_LIFECYCLE,
+            )
+        if events_to_record:
+            await asyncio.to_thread(
+                record_room_member_joins_seen_from_events,
+                tuple(events_to_record),
+                config=self.config,
+                runtime_paths=self.runtime_paths,
+                storage_root=self.runtime_paths.storage_root,
             )
 
     async def _emit_room_member_joined_sync_timeline_hooks(self, response: nio.SyncResponse) -> None:

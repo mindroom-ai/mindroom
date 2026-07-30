@@ -194,3 +194,17 @@ class SyncCacheTrust:
         self.state = SyncTrustState.UNCERTAIN
         self.checkpoint = None
         self._clear_saved()
+
+    def retry_token(self) -> str | None:
+        """Return the generation-safe checkpoint for work rejected before durability."""
+        if self.checkpoint is not None:
+            return self.checkpoint.token
+        try:
+            saved = load_sync_checkpoint(self.storage_path, self.agent_name)
+        except OSError as exc:
+            self.logger.warning("matrix_sync_token_load_failed", error=str(exc))
+            return None
+        cache_generation = self.runtime.event_cache.cache_generation
+        if saved is None or cache_generation is None or saved.cache_generation != cache_generation:
+            return None
+        return saved.token

@@ -16,7 +16,7 @@ from mindroom.entity_resolution import entity_identity_registry, mindroom_user_i
 from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator, Mapping
+    from collections.abc import Iterable, Iterator, Mapping
     from pathlib import Path
 
     from mindroom.config.main import Config
@@ -110,15 +110,27 @@ def _save_room_member_joins(path: Path, seen: dict[str, set[str]]) -> bool:
 
 def _mark_room_member_join_seen(storage_root: Path, *, room_id: str, user_id: str) -> bool:
     """Record one room/user pair and return whether it was first seen."""
+    return bool(_mark_room_member_joins_seen(storage_root, ((room_id, user_id),)))
+
+
+def _mark_room_member_joins_seen(
+    storage_root: Path,
+    room_user_ids: Iterable[tuple[str, str]],
+) -> int:
+    """Record room/user pairs with one locked read and at most one durable write."""
     path = _room_member_join_tracking_path(storage_root)
     with _lock_for_room_member_join_path(path):
         seen = _load_room_member_joins(path)
-        room_user_ids = seen.setdefault(room_id, set())
-        if user_id in room_user_ids:
-            return False
-
-        room_user_ids.add(user_id)
-        return _save_room_member_joins(path, seen)
+        added = 0
+        for room_id, user_id in room_user_ids:
+            seen_in_room = seen.setdefault(room_id, set())
+            if user_id in seen_in_room:
+                continue
+            seen_in_room.add(user_id)
+            added += 1
+        if added:
+            _save_room_member_joins(path, seen)
+        return added
 
 
 def _human_join_user_id(
@@ -141,20 +153,20 @@ def _human_join_user_id(
     return user_id
 
 
-def record_room_member_join_seen_from_event(
-    room: nio.MatrixRoom,
-    event: nio.RoomMemberEvent,
+def record_room_member_joins_seen_from_events(
+    events: Iterable[tuple[nio.MatrixRoom, nio.RoomMemberEvent]],
     *,
     config: Config,
     runtime_paths: RuntimePaths,
     storage_root: Path,
-) -> bool:
-    """Record one human room-member join event without emitting hook payload data."""
-    user_id = _human_join_user_id(event, config=config, runtime_paths=runtime_paths)
-    if user_id is None:
-        return False
-
-    return _mark_room_member_join_seen(storage_root, room_id=room.room_id, user_id=user_id)
+) -> int:
+    """Record human room-member events with one durable batch update."""
+    room_user_ids: list[tuple[str, str]] = []
+    for room, event in events:
+        user_id = _human_join_user_id(event, config=config, runtime_paths=runtime_paths)
+        if user_id is not None:
+            room_user_ids.append((room.room_id, user_id))
+    return _mark_room_member_joins_seen(storage_root, room_user_ids)
 
 
 def room_member_join_from_event(

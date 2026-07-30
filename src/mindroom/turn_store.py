@@ -142,6 +142,10 @@ class TurnStore:
         """Return whether one source event already has a terminal outcome."""
         return self._ledger.has_responded(event_id)
 
+    def is_durably_handled(self, event_id: str) -> bool:
+        """Return terminal truth only after its handled-turn ledger write completes."""
+        return self._ledger.has_durably_responded(event_id)
+
     def visible_echo_for_source(self, source_event_id: str) -> str | None:
         """Return the tracked visible echo for one source event."""
         return self._ledger.get_visible_echo_event_id(source_event_id)

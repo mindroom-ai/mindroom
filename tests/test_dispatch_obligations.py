@@ -80,6 +80,20 @@ def _message_event(event_id: str) -> nio.RoomMessageText:
     return event
 
 
+def _unknown_event(event_id: str, event_type: str) -> nio.UnknownEvent:
+    event = nio.Event.parse_event(
+        {
+            "type": event_type,
+            "event_id": event_id,
+            "sender": "@user:example.org",
+            "origin_server_ts": 1_234,
+            "content": {},
+        },
+    )
+    assert isinstance(event, nio.UnknownEvent)
+    return event
+
+
 def _encrypted_image_source(event_id: str) -> dict[str, object]:
     return {
         "type": "m.room.message",
@@ -392,6 +406,31 @@ async def test_concurrent_duplicate_dispatch_runs_callback_once(tmp_path: Path) 
 
 
 @pytest.mark.asyncio
+async def test_queued_duplicate_does_not_run_after_first_copy_settles(tmp_path: Path) -> None:
+    """A duplicate queued before settlement must not execute after the active claim releases."""
+    attempts = 0
+
+    async def callback(_room: nio.MatrixRoom, _event: nio.Event) -> DispatchCallbackResult:
+        nonlocal attempts
+        attempts += 1
+        return DispatchCallbackResult.SUCCEEDED
+
+    store = _store(tmp_path)
+    runner = _runner(store, callback)
+    room = nio.MatrixRoom(_ROOM_ID, _PRINCIPAL_ID)
+    event = _message_event("$queued-duplicate")
+    first = await runner.persist(room, event, DispatchCallbackKind.MESSAGE)
+    duplicate = await runner.persist(room, event, DispatchCallbackKind.MESSAGE)
+    assert first is not None
+    assert duplicate is not None
+
+    await runner.run_persisted(first, room=room, event=event)
+    await runner.run_persisted(duplicate, room=room, event=event)
+
+    assert attempts == 1
+
+
+@pytest.mark.asyncio
 async def test_intentional_ignore_is_explicit_terminal_outcome(tmp_path: Path) -> None:
     """A callback may suppress replay only by explicitly declaring intentional ignore."""
 
@@ -488,10 +527,9 @@ async def test_pending_turn_store_record_does_not_retire_dispatch_obligation(tmp
 
 
 @pytest.mark.asyncio
-async def test_bound_message_callback_defers_for_pending_turn_store_record() -> None:
-    """Typed callback settlement must distinguish pending and terminal turn truth."""
+async def test_bound_message_callback_defers_for_persisted_turn_store_record() -> None:
+    """Typed callbacks defer persisted turn truth to the runner's durable settlement gate."""
     persisted = {"$bound"}
-    terminal: set[str] = set()
 
     async def noop(_room: nio.MatrixRoom, _event: nio.Event) -> None:
         pass
@@ -505,7 +543,6 @@ async def test_bound_message_callback_defers_for_pending_turn_store_record() -> 
         on_redaction=cast("Any", noop),
         on_decryption_failure=cast("Any", noop),
         turn_is_persisted=persisted.__contains__,
-        turn_is_terminal=terminal.__contains__,
         source_is_deferred=lambda _event_id: False,
     )
     callback = callbacks[DispatchCallbackKind.MESSAGE]
@@ -513,10 +550,6 @@ async def test_bound_message_callback_defers_for_pending_turn_store_record() -> 
     event = _message_event("$bound")
 
     assert await callback(room, event) is DispatchCallbackResult.DEFERRED
-
-    terminal.add("$bound")
-
-    assert await callback(room, event) is DispatchCallbackResult.SUCCEEDED
 
 
 @pytest.mark.asyncio
@@ -564,12 +597,58 @@ def test_correctness_callbacks_register_with_explicit_durable_kinds(tmp_path: Pa
         nio.RoomMessageText: DispatchCallbackKind.MESSAGE,
         nio.ReactionEvent: DispatchCallbackKind.REACTION,
         nio.RedactionEvent: DispatchCallbackKind.REDACTION,
-        nio.UnknownEvent: DispatchCallbackKind.APPROVAL,
         nio.MegolmEvent: DispatchCallbackKind.DECRYPTION_FAILURE,
         **dict.fromkeys(MATRIX_MEDIA_EVENT_TYPES, DispatchCallbackKind.MEDIA),
     }
-    assert expected_kinds.keys() <= registrations.keys()
+    assert {*expected_kinds, nio.UnknownEvent} <= registrations.keys()
     for event_type, callback_kind in expected_kinds.items():
         registered = registrations[event_type]
         assert isinstance(registered, DispatchObligationTaskWrapper)
         assert registered.callback_kind is callback_kind
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("event_type", "expected_attempts"),
+    [
+        ("io.example.unrelated", 0),
+        ("io.mindroom.tool_approval_response", 1),
+    ],
+)
+async def test_only_tool_approval_unknown_event_reaches_durable_acceptance(
+    tmp_path: Path,
+    event_type: str,
+    expected_attempts: int,
+) -> None:
+    """Only the exact custom approval event type may reach the durable callback."""
+    attempts = 0
+
+    async def callback(_room: nio.MatrixRoom, _event: nio.Event) -> DispatchCallbackResult:
+        nonlocal attempts
+        attempts += 1
+        return DispatchCallbackResult.SUCCEEDED
+
+    store = _store(tmp_path)
+    runner = DispatchObligationRunner(
+        store=store,
+        callbacks={DispatchCallbackKind.APPROVAL: callback},
+        room_for_id=lambda room_id: nio.MatrixRoom(room_id, _PRINCIPAL_ID),
+        turn_is_terminal=lambda _event_id: False,
+    )
+    client = MagicMock(spec=nio.AsyncClient)
+    owner = object()
+    runner.register_source_callbacks(client, owner=owner)
+    registered = next(
+        callback
+        for callback, event_type in (call.args for call in client.add_event_callback.call_args_list)
+        if event_type is nio.UnknownEvent
+    )
+
+    await registered(
+        nio.MatrixRoom(_ROOM_ID, _PRINCIPAL_ID),
+        _unknown_event("$unknown", event_type),
+    )
+    await wait_for_background_tasks(timeout=1.0, owner=owner)
+
+    assert attempts == expected_attempts
+    assert not store.has_pending("$unknown", DispatchCallbackKind.APPROVAL)
