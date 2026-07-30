@@ -57,8 +57,8 @@ The saturation profile uses a 180-second per-reply deadline because its slow 12-
 #### Config-replacement regression profile
 
 The `restart-regression` profile is a manual opt-in oracle for the agent and router replacement caused by a real `config.yaml` hot reload.
-It creates a dormant public room, writes historical text and media there, adds that room to the managed agent configuration, waits for both replacement principals and the completed configuration update, then sends one fresh request.
-The run sends the fresh request only after the replacement setup boundary completes.
+It creates a dormant public room, writes explicitly agent-mentioned historical text and media there, then adds that room to the managed agent configuration.
+The run sends the fresh request only after both replacement principals complete setup, the configuration update completes, and both principals durably cache both historical events.
 It then uses the runtime's orderly callback and response drain as a quiescence boundary before the final Matrix audit.
 The run passes only after both principals cache both historical events, the fresh request completes exactly once, no historical event reaches the fresh prompt, no historical reply appears, and the quiescence drain completes without bounded cancellation.
 

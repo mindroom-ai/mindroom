@@ -32,6 +32,24 @@ from scripts.testing.fuzz_live_matrix import (
 )
 
 
+class _RecordingDormantClient:
+    room_id = "!restart:example"
+
+    def __init__(self) -> None:
+        self.sent_payloads: list[tuple[str, str, dict[str, Any]]] = []
+
+    @property
+    def sent_txn_ids(self) -> list[str]:
+        return [txn_id for _event_type, txn_id, _content in self.sent_payloads]
+
+    async def create_public_room(self) -> None:
+        return
+
+    async def send_event(self, event_type: str, txn_id: str, content: dict[str, Any]) -> str:
+        self.sent_payloads.append((event_type, txn_id, content))
+        return f"${txn_id}"
+
+
 def test_live_scenario_is_deterministic_and_json_replayable() -> None:
     """A seed must produce a stable trace that survives JSON round-tripping."""
     scenario = live_scenario_from_seed(
@@ -185,27 +203,12 @@ async def test_restart_regression_does_not_send_fresh_event_before_replacement_b
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A missed replacement boundary must abort before the fresh event is sent."""
-
-    class DormantClient:
-        room_id = "!restart:example"
-
-        def __init__(self) -> None:
-            self.sent_txn_ids: list[str] = []
-
-        async def create_public_room(self) -> None:
-            return
-
-        async def send_event(self, event_type: str, txn_id: str, content: dict[str, Any]) -> str:
-            del event_type, content
-            self.sent_txn_ids.append(txn_id)
-            return f"${txn_id}"
-
     stack = ManagedTuwunelStack()
     try:
         stack.agent_id, stack.router_id = "@agent:example", "@router:example"
         monkeypatch.setattr(stack, "add_restart_room", lambda _room_id: None)
         monkeypatch.setattr(stack, "wait_for_log_count", lambda *_args, **_kwargs: False)
-        dormant = DormantClient()
+        dormant = _RecordingDormantClient()
         runner = LiveFuzzRunner(
             stack,
             (cast("LiveMatrixClient", dormant),),
@@ -218,6 +221,69 @@ async def test_restart_regression_does_not_send_fresh_event_before_replacement_b
             await runner._run_restart_regression()
 
         assert dormant.sent_txn_ids == ["restart-old-text", "restart-old-media"]
+    finally:
+        stack.close()
+
+
+@pytest.mark.asyncio
+async def test_restart_regression_does_not_send_fresh_event_before_historical_cache_boundary(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Lifecycle completion alone must not release the fresh event."""
+    stack = ManagedTuwunelStack()
+    try:
+        stack.agent_id, stack.router_id = "@agent:example", "@router:example"
+        monkeypatch.setattr(stack, "add_restart_room", lambda _room_id: None)
+        monkeypatch.setattr(stack, "wait_for_log_count", lambda *_args, **_kwargs: True)
+        monkeypatch.setattr(stack, "cached_restart_event_pair_count", lambda *_args, **_kwargs: 3)
+        dormant = _RecordingDormantClient()
+        runner = LiveFuzzRunner(
+            stack,
+            (cast("LiveMatrixClient", dormant),),
+            restart_regression_scenario(),
+            reply_timeout=0,
+            settle_seconds=0,
+        )
+
+        with pytest.raises(AssertionError, match="historical_event_pairs_cached"):
+            await runner._run_restart_regression()
+
+        assert dormant.sent_txn_ids == ["restart-old-text", "restart-old-media"]
+    finally:
+        stack.close()
+
+
+@pytest.mark.asyncio
+async def test_restart_regression_historical_text_explicitly_mentions_agent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Historical text must deterministically target the same agent as media."""
+    stack = ManagedTuwunelStack()
+    try:
+        stack.agent_id, stack.router_id = "@agent:example", "@router:example"
+        monkeypatch.setattr(stack, "add_restart_room", lambda _room_id: None)
+        monkeypatch.setattr(stack, "wait_for_log_count", lambda *_args, **_kwargs: False)
+        dormant = _RecordingDormantClient()
+        runner = LiveFuzzRunner(
+            stack,
+            (cast("LiveMatrixClient", dormant),),
+            restart_regression_scenario(),
+            reply_timeout=0,
+            settle_seconds=0,
+        )
+
+        with pytest.raises(AssertionError, match="replacement_setup_boundary_reached"):
+            await runner._run_restart_regression()
+
+        assert dormant.sent_payloads[0] == (
+            "m.room.message",
+            "restart-old-text",
+            {
+                "body": "Synthetic historical text @agent:example",
+                "m.mentions": {"user_ids": ["@agent:example"]},
+                "msgtype": "m.text",
+            },
+        )
     finally:
         stack.close()
 

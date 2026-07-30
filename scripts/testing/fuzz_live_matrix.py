@@ -872,6 +872,24 @@ class ManagedTuwunelStack:
             row = database.execute(query, (self.agent_id, self.router_id, room_id, *event_ids)).fetchone()
         return int(row[0]) if row is not None else 0
 
+    def wait_for_cached_restart_event_pairs(
+        self,
+        room_id: str,
+        event_ids: tuple[str, str],
+        *,
+        minimum: int,
+        timeout: float,
+    ) -> bool:
+        """Wait until both replacement principals durably cache historical events."""
+        deadline = time.monotonic() + timeout
+        while True:
+            if self.cached_restart_event_pair_count(room_id, event_ids) >= minimum:
+                return True
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return False
+            time.sleep(min(0.1, remaining))
+
     def _start_model_server(self) -> int:
         _ModelHandler.stream_segments = self._stream_segments
         _ModelHandler.stream_delay = self._stream_delay
@@ -1340,7 +1358,7 @@ class LiveFuzzRunner:
         historical_text = await dormant.send_event(
             "m.room.message",
             "restart-old-text",
-            {"body": "Synthetic historical text", "msgtype": "m.text"},
+            self._message_content("Synthetic historical text"),
         )
         historical_media = await dormant.send_event(
             "m.room.message",
@@ -1381,6 +1399,26 @@ class LiveFuzzRunner:
                 step=3,
             )
             raise AssertionError("restart regression invariant failures:\n" + failure)
+        historical_event_ids = (historical_text, historical_media)
+        historical_cache_ready = await asyncio.to_thread(
+            self.stack.wait_for_cached_restart_event_pairs,
+            dormant.room_id,
+            historical_event_ids,
+            minimum=4,
+            timeout=self.reply_timeout,
+        )
+        if not historical_cache_ready:
+            failure = restart_failure(
+                "historical_event_pairs_cached",
+                event_category="historical_events",
+                phase="replacement_sync",
+                observed=self.stack.cached_restart_event_pair_count(
+                    dormant.room_id,
+                    historical_event_ids,
+                ),
+                step=3,
+            )
+            raise AssertionError("restart regression invariant failures:\n" + failure)
         fresh = await dormant.send_event(
             "m.room.message",
             "restart-fresh",
@@ -1388,7 +1426,7 @@ class LiveFuzzRunner:
         )
         observation = await self._wait_for_restart_observation(
             dormant,
-            historical_event_ids=(historical_text, historical_media),
+            historical_event_ids=historical_event_ids,
             fresh_event_id=fresh,
             replacement_boundary_reached=replacement_boundary_reached,
         )
