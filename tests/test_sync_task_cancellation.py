@@ -2329,9 +2329,17 @@ async def test_new_agent_not_started_twice(tmp_path: Path) -> None:
 @pytest.mark.asyncio
 async def test_orchestrator_stop_cancels_all_tasks(tmp_path: Path) -> None:
     """Test that stop() cancels all sync tasks."""
+    shutdown_order: list[str] = []
+
+    async def track_catalog_drain(*_args: object, **_kwargs: object) -> None:
+        shutdown_order.append("catalog_drain")
+
     with (
         patch("mindroom.orchestrator.cancel_sync_task") as mock_cancel,
-        patch("mindroom.orchestrator.wait_for_background_tasks", new=AsyncMock()) as mock_wait,
+        patch(
+            "mindroom.orchestrator.wait_for_background_tasks",
+            new=AsyncMock(side_effect=track_catalog_drain),
+        ) as mock_wait,
     ):
         orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
 
@@ -2352,18 +2360,25 @@ async def test_orchestrator_stop_cancels_all_tasks(tmp_path: Path) -> None:
         # Create mock bots
         mock_bot1 = AsyncMock()
         mock_bot1.running = True
-        mock_bot1.stop = AsyncMock()
         mock_bot2 = AsyncMock()
         mock_bot2.running = True
-        mock_bot2.stop = AsyncMock()
+
+        async def track_entity_stop(*_args: object, **_kwargs: object) -> None:
+            shutdown_order.append("entity_teardown")
+
+        mock_bot1.stop = AsyncMock(side_effect=track_entity_stop)
+        mock_bot2.stop = AsyncMock(side_effect=track_entity_stop)
 
         orchestrator.agent_bots = {
             "agent1": mock_bot1,
             "router": mock_bot2,
         }
 
-        # Stop orchestrator
-        await orchestrator.stop()
+        async def track_mcp_stop() -> None:
+            shutdown_order.append("mcp_teardown")
+
+        with patch.object(orchestrator, "_stop_mcp_manager", new=AsyncMock(side_effect=track_mcp_stop)):
+            await orchestrator.stop()
 
         # Verify all tasks were cancelled
         assert set(cancelled) == {"agent1", "router"}
@@ -2376,6 +2391,8 @@ async def test_orchestrator_stop_cancels_all_tasks(tmp_path: Path) -> None:
         mock_bot2.stop.assert_awaited_once_with(shutdown_intent=ORDERLY_SHUTDOWN)
         owner = orchestrator._mcp_catalog_change_task_owner
         mock_wait.assert_awaited_once_with(5.0, owner=owner, shutdown_intent=ORDERLY_SHUTDOWN)
+        assert shutdown_order.index("catalog_drain") < shutdown_order.index("mcp_teardown")
+        assert shutdown_order.index("catalog_drain") < shutdown_order.index("entity_teardown")
 
 
 # ---------------------------------------------------------------------------

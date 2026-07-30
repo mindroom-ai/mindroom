@@ -783,6 +783,50 @@ async def test_task_wrapper_persists_before_background_execution(tmp_path: Path)
     assert not store.has_pending("$durable", DispatchCallbackKind.MESSAGE)
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("entrypoint", ["direct", "task-wrapper"])
+async def test_persist_failure_notifies_once_for_every_runner_entrypoint(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    entrypoint: str,
+) -> None:
+    """Direct and task-backed acceptance must share one persistence-failure boundary."""
+    failure_notifications = 0
+
+    def notify_failure() -> None:
+        nonlocal failure_notifications
+        failure_notifications += 1
+
+    async def callback(_room: nio.MatrixRoom, _event: nio.Event) -> DispatchCallbackResult:
+        return DispatchCallbackResult.SUCCEEDED
+
+    store = _store(tmp_path)
+    runner = DispatchObligationRunner(
+        store=store,
+        callbacks={DispatchCallbackKind.MESSAGE: callback},
+        room_for_id=lambda room_id: nio.MatrixRoom(room_id, _PRINCIPAL_ID),
+        turn_is_terminal=lambda _event_id: False,
+        on_persist_failure=notify_failure,
+    )
+
+    def fail_create(_obligation: _DispatchObligation) -> _DispatchCreateResult:
+        message = "dispatch database unavailable"
+        raise OSError(message)
+
+    monkeypatch.setattr(store, "create_pending", fail_create)
+    room = nio.MatrixRoom(_ROOM_ID, _PRINCIPAL_ID)
+    event = _message_event("$persist-failure")
+
+    if entrypoint == "direct":
+        persist = runner.dispatch(room, event, DispatchCallbackKind.MESSAGE)
+    else:
+        persist = runner.task_wrapper(DispatchCallbackKind.MESSAGE, owner=object())(room, event)
+    with pytest.raises(OSError, match="dispatch database unavailable"):
+        await persist
+
+    assert failure_notifications == 1
+
+
 def test_correctness_callbacks_register_with_explicit_durable_kinds(tmp_path: Path) -> None:
     """Every source-backed correctness callback must use the durable runner seam."""
 

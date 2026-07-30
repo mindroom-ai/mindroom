@@ -20,7 +20,7 @@ from mindroom.dispatch_obligations import DispatchCallbackKind
 from mindroom.entity_resolution import mindroom_user_id
 from mindroom.hooks import EVENT_ROOM_MEMBER_JOINED, HookRegistry, RoomMemberJoinedContext, hook
 from mindroom.matrix import room_member_joins
-from mindroom.matrix.sync_certification import SyncCacheWriteResult, SyncTrustState
+from mindroom.matrix.sync_certification import SyncCacheWriteResult, SyncCheckpoint, SyncTrustState
 from mindroom.matrix.sync_tokens import load_sync_checkpoint
 from mindroom.matrix.users import AgentMatrixUser
 from tests.conftest import TEST_PASSWORD, bind_runtime_paths, install_runtime_cache_support, test_runtime_paths
@@ -407,6 +407,50 @@ async def test_sync_state_marker_failure_blocks_checkpoint_certification(
         )
 
     assert load_sync_checkpoint(tmp_path, bot.agent_name) is None
+
+
+@pytest.mark.asyncio
+async def test_sync_room_lifecycle_persist_failure_rewinds_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Direct lifecycle acceptance failure must invoke the shared rewind exactly once."""
+
+    @hook(EVENT_ROOM_MEMBER_JOINED)
+    async def joined(_ctx: RoomMemberJoinedContext) -> None:
+        pass
+
+    bot = _router_bot(tmp_path)
+    room = _room()
+    bot.client.rooms = {room.room_id: room}
+    bot.client.next_batch = "s_after_failure"
+    bot._sync_cache_trust.state = SyncTrustState.CERTIFIED
+    bot._sync_cache_trust.checkpoint = SyncCheckpoint("s_before_failure")
+    bot.hook_registry = HookRegistry.from_plugins([_plugin("onboarding", [joined])])
+    monkeypatch.setattr(
+        bot._conversation_cache,
+        "cache_sync_timeline_for_certification",
+        AsyncMock(return_value=SyncCacheWriteResult(complete=True)),
+    )
+
+    def fail_create(_obligation: object) -> object:
+        message = "dispatch database unavailable"
+        raise OSError(message)
+
+    persist_failure = MagicMock(wraps=bot._rewind_sync_after_dispatch_persistence_failure)
+    bot._dispatch_obligation_runner.on_persist_failure = persist_failure
+    monkeypatch.setattr(bot._dispatch_obligation_store, "create_pending", fail_create)
+
+    with pytest.raises(OSError, match="dispatch database unavailable"):
+        await bot._on_sync_response(
+            _sync_response_with_state(
+                room.room_id,
+                [_room_member_event(event_id="$lifecycle-persist-failure")],
+            ),
+        )
+
+    persist_failure.assert_called_once_with()
+    assert bot.client.next_batch == "s_before_failure"
 
 
 @pytest.mark.asyncio

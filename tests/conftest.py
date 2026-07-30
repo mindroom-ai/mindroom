@@ -1411,6 +1411,7 @@ def install_shutdown_drain_mocks(
     *,
     coalescing_drain_result: CoalescingDrainResult,
     responses_drained: bool,
+    response_recovery_complete: bool,
 ) -> None:
     """Install exact shutdown drain outcomes through stable collaborator seams."""
     wrap_extracted_collaborators(bot, "_coalescing_gate", "_response_runner")
@@ -1418,6 +1419,9 @@ def install_shutdown_drain_mocks(
         return_value=coalescing_drain_result,
     )
     bot._response_runner.drain_inbox_responses = AsyncMock(return_value=responses_drained)
+    unwrap_extracted_collaborator(
+        bot._response_runner,
+    )._incomplete_inbox_responses_recoverable = response_recovery_complete
 
 
 def install_send_response_mock(bot: RuntimeBot, send_response: AsyncMock) -> None:
