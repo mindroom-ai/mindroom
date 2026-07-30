@@ -499,6 +499,7 @@ async def test_generate_prompt_uses_gemini_prompt_model() -> None:
     assert kwargs["model"] == generate_avatars._PROMPT_MODEL
     assert kwargs["contents"] == "Agent name: research\nRole: Finds information\nType: agents"
     assert kwargs["config"].system_instruction == AVATAR_AGENT_SYSTEM_PROMPT
+    assert kwargs["config"].temperature is None
 
 
 @pytest.mark.asyncio

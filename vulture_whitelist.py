@@ -100,7 +100,8 @@ _.async_get_embeddings_batch_and_usage  # unused method (src/mindroom/embeddings
 _.embed  # mem0 embedding adapter protocol (src/mindroom/memory/config.py)
 _.embed_batch  # mem0 embedding adapter protocol (src/mindroom/memory/config.py)
 _._handle_vector_db_insert  # Agno insertion callback override (src/mindroom/strict_knowledge.py)
-DEEPSEEK_REASONER  # used by scripts/utilities/rewrite_git_commits_ai.py
+_.generate_image  # Agno toolkit override (src/mindroom/custom_tools/gemini_media.py)
+DEEPSEEK_V4_PRO  # used by scripts/utilities/rewrite_git_commits_ai.py
 SAAS_MODEL_PRESETS  # used by scripts/sync_config.py
 _.to_config_dict  # used by scripts/sync_config.py
 _.serialize_datetime  # unused method (src/mindroom/matrix/state.py)
@@ -193,6 +194,7 @@ _reset_credentials_manager_cache  # unused function (src/mindroom/credentials.py
 _reset_handled_turn_ledger_runtime  # unused function (src/mindroom/handled_turns.py)
 _.has_pending  # consumed by the cold-dispatch fence contract (src/mindroom/dispatch_obligations.py)
 _reset_primary_worker_manager  # unused function (src/mindroom/workers/runtime.py)
+_reset_visible_voice_echo_barriers  # unused function (src/mindroom/visible_voice_echo.py)
 _.read_file_chunk  # unused method (src/mindroom/tools/file.py)
 _.download_file  # unused method (src/mindroom/custom_tools/google_drive.py)
 _.reject_legacy_defaults_fields  # unused method (src/mindroom/config/models.py)

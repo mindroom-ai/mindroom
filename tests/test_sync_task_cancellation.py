@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import math
 import time
 from contextlib import suppress
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -23,6 +25,15 @@ from mindroom.cancellation import (
 from mindroom.config.main import Config
 from mindroom.config.matrix import MatrixSyncConfig
 from mindroom.constants import RuntimePaths
+from mindroom.matrix.health import (
+    SyncCacheWriteProgress,
+    get_matrix_sync_cache_write_progress,
+    get_matrix_sync_health_snapshot,
+    mark_matrix_sync_loop_started,
+    mark_matrix_sync_success,
+    reset_matrix_sync_health,
+    track_matrix_sync_cache_write,
+)
 from mindroom.matrix.sync_loop import _sliding_sync_lists, _sliding_sync_room_subscriptions, sliding_own_membership_sets
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.orchestration import runtime as runtime_helpers
@@ -37,6 +48,7 @@ from mindroom.orchestration.runtime import (
     is_sync_restart_cancel,
     log_cancelled_response,
     log_cancelled_response_source,
+    matrix_sync_cache_write_grace_seconds,
     matrix_sync_startup_timeout_seconds,
     stop_entities,
     sync_forever_with_restart,
@@ -98,6 +110,9 @@ class _FakeBot:
         if self._last_sync_monotonic is None:
             return None
         return time.monotonic() - self._last_sync_monotonic
+
+    def sync_cache_write_progress(self) -> SyncCacheWriteProgress | None:
+        return get_matrix_sync_cache_write_progress(self.agent_name)
 
     @property
     def in_flight_response_count(self) -> int:
@@ -982,6 +997,122 @@ async def test_sync_error_updates_watchdog_clock(monkeypatch: pytest.MonkeyPatch
     assert bot.first_call_cancelled is False
 
 
+def test_sync_cache_write_progress_registry_clears_after_failure() -> None:
+    """A failed durable phase must not leave watchdog and health exempt forever."""
+    reset_matrix_sync_health()
+    try:
+        with suppress(RuntimeError), track_matrix_sync_cache_write("failed_agent"):
+            msg = "cache write failed"
+            raise RuntimeError(msg)
+
+        assert get_matrix_sync_cache_write_progress("failed_agent") is None
+    finally:
+        reset_matrix_sync_health()
+
+
+@pytest.mark.parametrize("raw", ["not-a-number", "nan", "inf", "-inf", "0", "-1"])
+def test_sync_cache_write_grace_rejects_non_finite_or_non_positive(raw: str) -> None:
+    """An invalid grace must not disable the bounded backstop."""
+    with pytest.raises(ValueError, match="must be a finite positive number"):
+        matrix_sync_cache_write_grace_seconds(
+            _fake_runtime_paths(MINDROOM_MATRIX_SYNC_CACHE_WRITE_GRACE_SECONDS=raw),
+        )
+
+
+@pytest.mark.parametrize("grace_seconds", [math.nan, math.inf, -math.inf, 0.0, -1.0])
+def test_health_rejects_invalid_cache_write_grace(grace_seconds: float) -> None:
+    """Every health caller must preserve the finite cache-write backstop."""
+    with pytest.raises(ValueError, match="cache_write_grace_seconds must be a finite positive number"):
+        get_matrix_sync_health_snapshot(cache_write_grace_seconds=grace_seconds)
+
+
+def test_health_reports_shared_cache_write_progress_past_grace() -> None:
+    """Health must stop excusing a durable phase after the shared grace expires."""
+    recent_sync_time = datetime.now(UTC) - timedelta(seconds=10)
+    reset_matrix_sync_health()
+    try:
+        mark_matrix_sync_loop_started("wedged_agent")
+        mark_matrix_sync_success("wedged_agent", recent_sync_time)
+        with track_matrix_sync_cache_write("wedged_agent"):
+            progress = get_matrix_sync_cache_write_progress("wedged_agent")
+            assert progress is not None
+
+            snapshot = get_matrix_sync_health_snapshot(
+                cache_write_grace_seconds=5.0,
+                now_monotonic=progress.started_monotonic + 6.0,
+            )
+
+        assert snapshot.stale_entities == ("wedged_agent",)
+    finally:
+        reset_matrix_sync_health()
+
+
+@pytest.mark.asyncio
+async def test_watchdog_defers_to_shared_cache_write_progress(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A slow durable phase must outlive the ordinary transport timeout."""
+    bot = _FakeBot(MINDROOM_MATRIX_SYNC_CACHE_WRITE_GRACE_SECONDS="1")
+    cache_write_finished = asyncio.Event()
+
+    async def sync_with_slow_cache_write() -> None:
+        bot.sync_calls += 1
+        bot._last_sync_monotonic = time.monotonic()
+        try:
+            with track_matrix_sync_cache_write(bot.agent_name):
+                await asyncio.sleep(0.1)
+        except asyncio.CancelledError:
+            bot.first_call_cancelled = True
+            raise
+        cache_write_finished.set()
+        bot.running = False
+
+    bot.sync_forever = sync_with_slow_cache_write
+    monkeypatch.setattr(runtime_helpers, "MATRIX_SYNC_WATCHDOG_TIMEOUT_SECONDS", 0.02)
+    monkeypatch.setattr(runtime_helpers, "_MATRIX_SYNC_WATCHDOG_POLL_INTERVAL_SECONDS", 0.005)
+
+    reset_matrix_sync_health()
+    try:
+        await sync_forever_with_restart(bot, max_retries=1)
+    finally:
+        reset_matrix_sync_health()
+
+    assert cache_write_finished.is_set()
+    assert bot.first_call_cancelled is False
+    assert bot.sync_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_watchdog_cancels_shared_cache_write_past_grace(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A wedged durable phase must still be cancelled after its finite grace."""
+    bot = _FakeBot(MINDROOM_MATRIX_SYNC_CACHE_WRITE_GRACE_SECONDS="0.04")
+
+    async def sync_with_wedged_cache_write() -> None:
+        bot.sync_calls += 1
+        bot._last_sync_monotonic = time.monotonic()
+        try:
+            with track_matrix_sync_cache_write(bot.agent_name):
+                await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            bot.first_call_cancelled = True
+            raise
+
+    bot.sync_forever = sync_with_wedged_cache_write
+    monkeypatch.setattr(runtime_helpers, "MATRIX_SYNC_WATCHDOG_TIMEOUT_SECONDS", 0.01)
+    monkeypatch.setattr(runtime_helpers, "_MATRIX_SYNC_WATCHDOG_POLL_INTERVAL_SECONDS", 0.005)
+    monkeypatch.setattr(runtime_helpers, "retry_delay_seconds", lambda *_args, **_kwargs: 0.0)
+    monkeypatch.setattr(runtime_helpers, "_stalled_restart_jitter_seconds", lambda: 0.0)
+
+    reset_matrix_sync_health()
+    try:
+        with capture_logs() as logs:
+            await sync_forever_with_restart(bot, max_retries=1)
+    finally:
+        reset_matrix_sync_health()
+
+    assert bot.first_call_cancelled is True
+    stall_logs = [entry for entry in logs if entry["event"] == "matrix_sync_watchdog_stalled"]
+    assert [entry["restart_reason_category"] for entry in stall_logs] == ["cache_write_grace_exhausted"]
+
+
 @pytest.mark.asyncio
 async def test_sync_iteration_wait_prioritizes_sync_failure() -> None:
     """The sync task failure should win if both child tasks finish together."""
@@ -1263,6 +1394,7 @@ async def test_sliding_sync_response_marks_sync_success() -> None:
     bot._calls_reconcile_pending = False
     bot._room_member_join_hooks_armed = False
     bot.orchestrator = None
+    bot._mark_sync_progress = AgentBot._mark_sync_progress.__get__(bot)
 
     await AgentBot._on_sync_response(bot, nio.SlidingSyncResponse("pos"))
 
@@ -1321,9 +1453,12 @@ def test_sliding_own_membership_sets_split_joins_invites_and_departures() -> Non
     assert departed_room_ids == {"!kicked:localhost", "!banned:localhost"}
 
 
-@pytest.mark.asyncio
-async def test_sliding_sync_remote_departure_fences_and_purges() -> None:
-    """A sliding response reporting a kick must fence, purge, and notify the call manager."""
+def _sliding_membership_progress_bot(
+    *,
+    purge_rooms: AsyncMock,
+    mark_room_joined: AsyncMock,
+) -> MagicMock:
+    """Build the typed bot seam used to observe Sliding membership cache writes."""
     bot = MagicMock(spec=AgentBot)
     bot.agent_name = "test_agent"
     bot.last_sync_time = None
@@ -1334,13 +1469,40 @@ async def test_sliding_sync_remote_departure_fences_and_purges() -> None:
     bot.orchestrator = None
     bot._local_departures_awaiting_sync = set()
     bot._sync_cache_trust = MagicMock()
+    bot.sync_cache_write_progress = AgentBot.sync_cache_write_progress.__get__(bot)
     bot._room_lifecycle = MagicMock()
-    bot._conversation_cache = MagicMock(purge_rooms=AsyncMock(), mark_room_joined=AsyncMock())
+    bot._conversation_cache = MagicMock(
+        purge_rooms=purge_rooms,
+        mark_room_joined=mark_room_joined,
+    )
     bot._call_manager = MagicMock(on_sync_room_membership=AsyncMock())
     bot._apply_own_room_membership_from_sliding_sync = AgentBot._apply_own_room_membership_from_sliding_sync.__get__(
         bot,
     )
     bot._apply_own_room_membership = AgentBot._apply_own_room_membership.__get__(bot)
+    return bot
+
+
+@pytest.mark.asyncio
+async def test_sliding_sync_remote_departure_fences_and_purges() -> None:
+    """A sliding response reporting a kick must fence, purge, and notify the call manager."""
+    purge_started = asyncio.Event()
+    allow_purge_finish = asyncio.Event()
+    mark_joined_started = asyncio.Event()
+    allow_mark_joined_finish = asyncio.Event()
+
+    async def delayed_purge(_room_ids: object) -> None:
+        purge_started.set()
+        await allow_purge_finish.wait()
+
+    async def delayed_mark_joined(_room_id: str) -> None:
+        mark_joined_started.set()
+        await allow_mark_joined_finish.wait()
+
+    bot = _sliding_membership_progress_bot(
+        purge_rooms=AsyncMock(side_effect=delayed_purge),
+        mark_room_joined=AsyncMock(side_effect=delayed_mark_joined),
+    )
 
     response = nio.SlidingSyncResponse(
         "pos",
@@ -1350,7 +1512,39 @@ async def test_sliding_sync_remote_departure_fences_and_purges() -> None:
         },
     )
 
-    await AgentBot._on_sync_response(bot, response)
+    reset_matrix_sync_health()
+    mark_matrix_sync_loop_started(bot.agent_name)
+    mark_matrix_sync_success(
+        bot.agent_name,
+        datetime.now(UTC) - timedelta(seconds=400),
+    )
+    response_task = asyncio.create_task(AgentBot._on_sync_response(bot, response))
+    try:
+        await asyncio.wait_for(purge_started.wait(), timeout=1.0)
+        purge_progress = bot.sync_cache_write_progress()
+        purge_health = get_matrix_sync_health_snapshot(
+            cache_write_grace_seconds=600.0,
+        )
+        assert purge_progress is not None
+        assert purge_health.stale_entities == ()
+
+        allow_purge_finish.set()
+        await asyncio.wait_for(mark_joined_started.wait(), timeout=1.0)
+        joined_progress = bot.sync_cache_write_progress()
+        joined_health = get_matrix_sync_health_snapshot(
+            cache_write_grace_seconds=600.0,
+        )
+        assert joined_progress is not None
+        assert joined_progress.started_monotonic == purge_progress.started_monotonic
+        assert joined_health.stale_entities == ()
+
+        allow_mark_joined_finish.set()
+        await asyncio.wait_for(response_task, timeout=1.0)
+    finally:
+        allow_purge_finish.set()
+        allow_mark_joined_finish.set()
+        await asyncio.gather(response_task, return_exceptions=True)
+        reset_matrix_sync_health()
 
     bot._sync_cache_trust.invalidate_for_cache_scope_cleanup.assert_called_once_with()
     bot._room_lifecycle.forget_invited_room.assert_called_once_with("!kicked:localhost")
@@ -1360,6 +1554,7 @@ async def test_sliding_sync_remote_departure_fences_and_purges() -> None:
         joined_room_ids={"!joined:localhost"},
         left_room_ids={"!kicked:localhost"},
     )
+    assert bot.sync_cache_write_progress() is None
 
 
 @pytest.mark.asyncio

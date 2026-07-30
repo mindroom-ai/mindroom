@@ -468,8 +468,11 @@ models:
   haiku:
     id: claude-haiku-4-5
     provider: anthropic
+  fable:
+    id: claude-fable-5
+    provider: anthropic
   opus:
-    id: claude-opus-4-8
+    id: claude-opus-5
     provider: anthropic
   sonnet:
     id: claude-sonnet-5
@@ -483,11 +486,11 @@ models:
     provider: openai
   # --- Google ---
   gemini_flash:
-    id: gemini-3.5-flash
+    id: gemini-3.6-flash
     provider: google
   # --- OpenRouter ---
   deepseek:
-    id: deepseek/deepseek-v3.2
+    id: deepseek/deepseek-v4-pro
     provider: openrouter
   nemotron:
     id: nvidia/nemotron-3-super-120b-a12b:free

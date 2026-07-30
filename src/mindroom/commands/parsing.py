@@ -371,7 +371,7 @@ Usage: `!config <operation>` - View and modify MindRoom configuration
 **Modifying Configuration:**
 - `!config set <path> <value>` - Set a configuration value
 - `!config set agents.analyst.display_name "Research Expert"` - Change display name
-- `!config set models.default.id gpt-4` - Change default model
+- `!config set models.default.id my-model` - Change default model
 - `!config set defaults.markdown false` - Disable markdown by default
 - `!config set timezone America/New_York` - Set timezone
 

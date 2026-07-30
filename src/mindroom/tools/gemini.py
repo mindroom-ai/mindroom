@@ -4,12 +4,12 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from mindroom.model_defaults import GOOGLE_IMAGEN, GOOGLE_VEO
+from mindroom.model_defaults import GOOGLE_IMAGE, GOOGLE_VEO
 from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCategory, ToolStatus
 from mindroom.tool_system.registration import register_tool_with_metadata
 
 if TYPE_CHECKING:
-    from agno.tools.models.gemini import GeminiTools
+    from mindroom.custom_tools.gemini_media import MindRoomGeminiTools
 
 
 @register_tool_with_metadata(
@@ -55,7 +55,7 @@ if TYPE_CHECKING:
             label="Image Generation Model",
             type="text",
             required=False,
-            default=GOOGLE_IMAGEN,
+            default=GOOGLE_IMAGE,
         ),
         ConfigField(
             name="video_generation_model",
@@ -90,8 +90,8 @@ if TYPE_CHECKING:
     docs_url="https://docs.agno.com/tools/toolkits/models/gemini",
     function_names=("generate_image", "generate_video"),
 )
-def gemini_tools() -> type[GeminiTools]:
+def gemini_tools() -> type[MindRoomGeminiTools]:
     """Return Gemini tools for image and video generation."""
-    from agno.tools.models.gemini import GeminiTools
+    from mindroom.custom_tools.gemini_media import MindRoomGeminiTools
 
-    return GeminiTools
+    return MindRoomGeminiTools
