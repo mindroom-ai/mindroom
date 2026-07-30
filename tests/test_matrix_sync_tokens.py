@@ -124,6 +124,20 @@ def _room_member_event(event_id: str = "$member-join") -> nio.RoomMemberEvent:
     return event
 
 
+def _sync_response(
+    next_batch: str,
+    *,
+    joined_rooms: dict[str, object] | None = None,
+) -> nio.SyncResponse:
+    """Return one typed successful sync response with no recovery obligations."""
+    response = MagicMock(spec=nio.SyncResponse)
+    response.next_batch = next_batch
+    response.rooms = MagicMock(join=joined_rooms or {})
+    response.recovered_room_ids = frozenset()
+    response.unrecovered_room_ids = frozenset()
+    return cast("nio.SyncResponse", response)
+
+
 def _pending(event: nio.RoomMessageText) -> PendingEvent:
     return PendingEvent(
         event=event,
@@ -766,9 +780,7 @@ async def test_legacy_plaintext_sync_token_starts_cold(tmp_path: Path) -> None:
     assert bot._sync_cache_trust.state is SyncTrustState.COLD
     assert not token_path.exists()
 
-    response = MagicMock(spec=nio.SyncResponse)
-    response.next_batch = "s_after_legacy"
-    response.rooms = MagicMock(join={})
+    response = _sync_response("s_after_legacy")
 
     await bot._on_sync_response(response)
 
@@ -876,9 +888,7 @@ async def test_unknown_pos_restored_first_sync_saves_later_checkpoint(tmp_path: 
     await bot._on_sync_error(sync_error)
 
     bot._first_sync_done = True
-    response = MagicMock(spec=nio.SyncResponse)
-    response.next_batch = "s_later"
-    response.rooms = MagicMock(join={})
+    response = _sync_response("s_later")
     await bot._on_sync_response(response)
 
     checkpoint = load_sync_checkpoint(tmp_path, bot.agent_name)
@@ -924,9 +934,10 @@ async def test_unknown_pos_non_restored_runtime_allows_later_checkpoint(tmp_path
     await bot._on_sync_error(sync_error)
 
     bot.client.next_batch = "s_later_after_unknown_pos"
-    response = MagicMock(spec=nio.SyncResponse)
-    response.next_batch = "s_later_after_unknown_pos"
-    response.rooms = MagicMock(join={"!room:localhost": MagicMock(timeline=MagicMock(events=[], limited=False))})
+    response = _sync_response(
+        "s_later_after_unknown_pos",
+        joined_rooms={"!room:localhost": MagicMock(timeline=MagicMock(events=[], limited=False))},
+    )
     await bot._on_sync_response(response)
 
     checkpoint = load_sync_checkpoint(tmp_path, bot.agent_name)
@@ -940,9 +951,7 @@ async def test_on_sync_response_persists_latest_sync_token(tmp_path: Path) -> No
     bot = _agent_bot(tmp_path)
     bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
     bot.client.next_batch = "s_latest"
-    response = MagicMock(spec=nio.SyncResponse)
-    response.next_batch = "s_latest"
-    response.rooms = MagicMock(join={})
+    response = _sync_response("s_latest")
 
     with patch("mindroom.bot.mark_matrix_sync_success", return_value=datetime.now(UTC)):
         await bot._on_sync_response(response)
@@ -959,9 +968,7 @@ async def test_sync_response_side_effect_failure_clears_certified_checkpoint(tmp
     bot = _agent_bot(tmp_path)
     bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
     bot.client.next_batch = "s_after_side_effect_failure"
-    response = MagicMock(spec=nio.SyncResponse)
-    response.next_batch = "s_after_side_effect_failure"
-    response.rooms = MagicMock(join={})
+    response = _sync_response("s_after_side_effect_failure")
     bot._emit_agent_lifecycle_event = AsyncMock(side_effect=RuntimeError("bot ready failed"))  # type: ignore[method-assign]
 
     with (

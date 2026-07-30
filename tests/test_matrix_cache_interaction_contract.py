@@ -1156,6 +1156,8 @@ async def test_cache_seam_preserves_unrecovered_outcome_from_an_earlier_gap(
     assert result.recovered_room_ids == frozenset()
     assert result.unrecovered_room_ids == frozenset({_ROOM_ID})
     assert result.certified is False
+    assert result.runtime_diagnostics is not None
+    assert result.runtime_diagnostics["cache_backend"] in {"postgres", "sqlite"}
 
 
 @pytest.mark.asyncio

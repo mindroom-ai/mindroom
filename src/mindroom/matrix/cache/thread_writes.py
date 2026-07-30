@@ -39,6 +39,7 @@ from __future__ import annotations
 import asyncio
 import time
 import typing
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
 import nio
@@ -1388,12 +1389,17 @@ class ThreadSyncWritePolicy:
         runtime_available = self._cache_ops.cache_runtime_available()
         pending_durable_write_room_ids = self._cache_ops.pending_durable_write_room_ids()
         complete = runtime_available and not errors and not pending_durable_write_room_ids
-        return SyncCacheWriteResult.from_sync_response(
+        result = SyncCacheWriteResult.from_sync_response(
             response,
             complete=complete,
             limited_room_ids=limited_room_ids,
             errors=errors,
             runtime_available=runtime_available,
             task_count=len(tasks),
-            runtime_diagnostics=None if complete else self._cache_ops.cache_runtime_diagnostics(),
+        )
+        if result.certified:
+            return result
+        return replace(
+            result,
+            runtime_diagnostics=self._cache_ops.cache_runtime_diagnostics(),
         )
