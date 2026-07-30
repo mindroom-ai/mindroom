@@ -43,6 +43,7 @@ class StartupMaintenanceController:
     sync_runtime_support: _SyncRuntimeSupport
     mark_runtime_support_ready: _MarkRuntimeSupportReady
     task: asyncio.Task[None] | None = field(default=None, init=False)
+    _tasks: set[asyncio.Task[None]] = field(default_factory=set, init=False, repr=False)
     startup_cutoff_ms: int | None = field(default=None, init=False)
     recovery_state: StaleStreamRecoveryState = field(
         default_factory=StaleStreamRecoveryState,
@@ -57,19 +58,29 @@ class StartupMaintenanceController:
 
     def _schedule(self, bots: list[_StartupBot], config: Config, startup_cutoff_ms: int) -> None:
         """Schedule maintenance while preserving the current generation state."""
-        self.task = create_logged_task(
-            self._run(bots, config, startup_cutoff_ms),
-            name="startup_maintenance",
-            failure_message="Startup maintenance task failed",
+        self._track_task(
+            create_logged_task(
+                self._run(bots, config, startup_cutoff_ms),
+                name="startup_maintenance",
+                failure_message="Startup maintenance task failed",
+            ),
         )
+
+    def _track_task(self, task: asyncio.Task[None]) -> None:
+        """Track every task represented by the serialized maintenance chain."""
+        self.task = task
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
 
     def schedule_ready_recovery(self, recovery: _ReadyRecovery) -> None:
         """Queue one bot-ready recovery after current startup maintenance."""
         previous_task = self.task
-        self.task = create_logged_task(
-            self._run_ready_recovery(previous_task, recovery),
-            name="startup_ready_recovery",
-            failure_message="Bot-ready restart recovery task failed",
+        self._track_task(
+            create_logged_task(
+                self._run_ready_recovery(previous_task, recovery),
+                name="startup_ready_recovery",
+                failure_message="Bot-ready restart recovery task failed",
+            ),
         )
 
     async def _run_ready_recovery(
@@ -87,11 +98,14 @@ class StartupMaintenanceController:
         )
 
     async def cancel(self) -> bool:
-        """Cancel detached startup maintenance and report whether unfinished work was interrupted."""
-        task = self.task
+        """Cancel all detached maintenance and report whether unfinished work was interrupted."""
+        tasks = set(self._tasks)
+        if self.task is not None:
+            tasks.add(self.task)
         self.task = None
-        should_replay = task is not None and not task.done()
-        await cancel_logged_task(task)
+        should_replay = any(not task.done() for task in tasks)
+        await asyncio.gather(*(cancel_logged_task(task) for task in tasks))
+        self._tasks.difference_update(tasks)
         return should_replay
 
     def restart_after_config_reload(
