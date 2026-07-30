@@ -30,7 +30,7 @@ from mindroom.matrix.cache.event_cache import EventCacheBackendUnavailableError
 from mindroom.matrix.cache.postgres_event_cache import PostgresEventCache
 from mindroom.matrix.cache.sqlite_event_cache import SqliteEventCache
 from mindroom.matrix.client import DeliveredMatrixEvent
-from mindroom.matrix.sync_certification import SyncCheckpoint, SyncTrustState
+from mindroom.matrix.sync_certification import SyncCacheWriteResult, SyncCheckpoint, SyncTrustState
 from mindroom.matrix.sync_tokens import clear_sync_token, load_sync_checkpoint, save_sync_token
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
@@ -167,6 +167,19 @@ def _sync_response(
     response.recovered_room_ids = frozenset()
     response.unrecovered_room_ids = frozenset()
     return cast("nio.SyncResponse", response)
+
+
+def _recovered_sync_response(next_batch: str) -> nio.SyncResponse:
+    """Return one real nio producer response that reports an already-recovered gap."""
+    return nio.SyncResponse(
+        next_batch=next_batch,
+        rooms=nio.Rooms(invite={}, join={}, leave={}),
+        device_key_count=nio.DeviceOneTimeKeyCount(curve25519=0, signed_curve25519=0),
+        device_list=nio.DeviceList(changed=[], left=[]),
+        to_device_events=[],
+        presence_events=[],
+        recovered_room_ids=frozenset({"!recovered:localhost"}),
+    )
 
 
 def _pending(event: nio.RoomMessageText) -> PendingEvent:
@@ -991,6 +1004,33 @@ async def test_on_sync_response_persists_latest_sync_token(tmp_path: Path) -> No
     checkpoint = load_sync_checkpoint(tmp_path, bot.agent_name)
     assert checkpoint is not None
     assert checkpoint.token == "s_latest"  # noqa: S105
+
+
+@pytest.mark.asyncio
+async def test_blocked_consumer_response_callback_cannot_certify_recovered_producer_gap(tmp_path: Path) -> None:
+    """A real nio producer outcome remains unsafe while MindRoom callback ownership is unproven."""
+    bot = _agent_bot(tmp_path)
+    bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
+    response = _recovered_sync_response("s_after_recovered")
+    callback_started = asyncio.Event()
+    release_callback = asyncio.Event()
+    cache_sync = bot._conversation_cache.cache_sync_timeline_for_certification
+
+    async def block_consumer_callback(sync_response: nio.SyncResponse) -> SyncCacheWriteResult:
+        callback_started.set()
+        await release_callback.wait()
+        return await cache_sync(sync_response)
+
+    bot._conversation_cache.cache_sync_timeline_for_certification = block_consumer_callback
+    callback_task = asyncio.create_task(bot._on_sync_response(response))
+    await callback_started.wait()
+
+    assert _load_sync_token_value(tmp_path, bot.agent_name) is None
+
+    release_callback.set()
+    await callback_task
+
+    assert _load_sync_token_value(tmp_path, bot.agent_name) is None
 
 
 @pytest.mark.asyncio

@@ -128,8 +128,7 @@ class SyncCacheTrust:
             cache_result=cache_result,
             first_sync=first_sync,
         )
-        failed_recovery_obligation = cache_result.has_recovery_obligation and not cache_result.certified
-        if failed_recovery_obligation and not self._awaiting_initial_window:
+        if cache_result.has_recovery_obligation and not self._awaiting_initial_window:
             decision = replace(decision, reset_client_token=True)
         self._apply_decision(decision, cache_result=cache_result)
         # Re-arm from applied trust, not from the decision: _apply_decision rejects

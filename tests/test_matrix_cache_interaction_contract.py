@@ -1122,10 +1122,10 @@ async def test_limited_sync_with_opaque_child_stays_gapped(
 
 
 @pytest.mark.asyncio
-async def test_recovered_limited_sync_certifies_after_local_cache_write(
+async def test_recovered_limited_sync_stays_uncertified_until_consumer_owns_callbacks(
     event_cache: ConversationEventCache,
 ) -> None:
-    """The cache seam should preserve nio's recovered outcome and certify local durability."""
+    """The cache seam must retain a recovered gap until callback ownership is durable."""
     response = _real_sync_response(
         limited_room_ids=(_ROOM_ID,),
         recovered_room_ids=frozenset({_ROOM_ID}),
@@ -1137,7 +1137,7 @@ async def test_recovered_limited_sync_certifies_after_local_cache_write(
     assert result.limited_room_ids == (_ROOM_ID,)
     assert result.recovered_room_ids == frozenset({_ROOM_ID})
     assert result.unrecovered_room_ids == frozenset()
-    assert result.certified is True
+    assert result.certified is False
 
 
 @pytest.mark.asyncio

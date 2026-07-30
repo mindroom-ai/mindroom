@@ -73,19 +73,14 @@ class SyncCacheWriteResult:
         return tuple(room_id for room_id in self.limited_room_ids if room_id not in classified_room_ids)
 
     @property
-    def recovery_complete(self) -> bool:
-        """Return whether nio closed every known recovery obligation."""
-        return not self.unrecovered_room_ids and not self.unclassified_limited_room_ids
-
-    @property
     def has_recovery_obligation(self) -> bool:
-        """Return whether this response reports or creates any recovery obligation."""
+        """Return whether recovery still lacks durable MindRoom callback ownership."""
         return bool(self.limited_room_ids or self.recovered_room_ids or self.unrecovered_room_ids)
 
     @property
     def certified(self) -> bool:
         """Return whether this result proves the sync delta reached durable cache."""
-        return self.complete and not self.errors and self.recovery_complete
+        return self.complete and not self.errors and not self.has_recovery_obligation
 
 
 @dataclass(frozen=True)
@@ -119,7 +114,7 @@ def _uncertain_reason(cache_result: SyncCacheWriteResult, *, next_batch: str | N
         return "missing_next_batch"
     if cache_result.errors:
         return "cache_write_failed"
-    if not cache_result.recovery_complete:
+    if cache_result.has_recovery_obligation:
         return "limited_sync_timeline"
     if not cache_result.complete:
         return "cache_write_incomplete"

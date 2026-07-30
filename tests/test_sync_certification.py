@@ -58,8 +58,8 @@ def test_successful_sync_certifies_checkpoint(
     assert decision.reset_client_token is False
 
 
-def test_recovered_limited_room_certifies_after_local_durability() -> None:
-    """An authoritative recovered outcome should supersede the wire's limited flag."""
+def test_recovered_limited_room_stays_uncertified_until_consumer_owns_callbacks() -> None:
+    """Nio's recovered outcome cannot replace MindRoom durable callback ownership."""
     room_id = "!recovered:localhost"
     cache_result = SyncCacheWriteResult(
         complete=True,
@@ -68,9 +68,8 @@ def test_recovered_limited_room_certifies_after_local_durability() -> None:
     )
 
     assert cache_result.unclassified_limited_room_ids == ()
-    assert cache_result.recovery_complete is True
     assert cache_result.has_recovery_obligation is True
-    assert cache_result.certified is True
+    assert cache_result.certified is False
 
 
 def test_recovery_outcomes_fail_closed_for_unrecovered_and_unclassified_rooms() -> None:
@@ -86,7 +85,6 @@ def test_recovery_outcomes_fail_closed_for_unrecovered_and_unclassified_rooms() 
     )
 
     assert cache_result.unclassified_limited_room_ids == (unclassified_room,)
-    assert cache_result.recovery_complete is False
     assert cache_result.has_recovery_obligation is True
     assert cache_result.certified is False
 
