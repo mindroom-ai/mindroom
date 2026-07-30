@@ -637,3 +637,83 @@ class TestVoiceHandler:
         assert compute_calls == 1
         assert cache_key in voice_handler._voice_normalization_cache
         assert cache_key not in voice_handler._voice_normalization_tasks
+
+    @pytest.mark.asyncio
+    async def test_process_transcription_returns_raw_transcription_when_normalizer_llm_hangs(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A hung normalizer LLM call must fail open to the raw transcription."""
+        config = _runtime_bound_config(
+            Config(
+                voice=VoiceConfig(enabled=True),
+                agents={"code": AgentConfig(display_name="CodeAgent", role="Code agent")},
+            ),
+        )
+        monkeypatch.setattr(voice_handler, "_VOICE_NORMALIZER_LLM_TIMEOUT_SECONDS", 0.05, raising=False)
+        arun_started = asyncio.Event()
+
+        class HungAgent:
+            def __init__(self, *_args: object, **_kwargs: object) -> None:
+                pass
+
+            async def arun(self, *_args: object, **_kwargs: object) -> None:
+                arun_started.set()
+                await asyncio.Event().wait()
+
+        with (
+            patch("mindroom.voice_handler.model_loading.get_model_instance", return_value=MagicMock()),
+            patch("mindroom.voice_handler.Agent", HungAgent),
+        ):
+            result = await asyncio.wait_for(
+                _process_transcription("turn on the lights", config),
+                timeout=2.0,
+            )
+
+        assert arun_started.is_set()
+        assert result == "turn on the lights"
+
+    @pytest.mark.asyncio
+    async def test_normalize_voice_message_fails_when_normalization_hangs(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        """A hung download must fail the shared normalization task instead of wedging waiters."""
+        config = _runtime_bound_config(Config(voice=VoiceConfig(enabled=True)))
+        monkeypatch.setattr(voice_handler, "_VOICE_NORMALIZATION_TOTAL_TIMEOUT_SECONDS", 0.05, raising=False)
+        client = AsyncMock()
+        room = _matrix_room("!test:server", members=("@alice:example.com",))
+        event = MagicMock(spec=nio.RoomMessageAudio)
+        event.event_id = "$hung_voice"
+        event.sender = "@alice:example.com"
+        event.body = "voice.ogg"
+        event.source = {"content": {"body": "voice.ogg"}}
+
+        voice_handler._voice_normalization_cache.clear()
+        voice_handler._voice_normalization_tasks.clear()
+
+        async def hung_download(*_args: object, **_kwargs: object) -> None:
+            await asyncio.Event().wait()
+
+        try:
+            with patch("mindroom.voice_handler._download_audio", side_effect=hung_download):
+                with pytest.raises(TimeoutError):
+                    await asyncio.wait_for(
+                        voice_handler._normalize_voice_message(
+                            client,
+                            tmp_path,
+                            room,
+                            event,
+                            config,
+                            runtime_paths_for(config),
+                            thread_id=None,
+                        ),
+                        timeout=2.0,
+                    )
+                await asyncio.sleep(0.01)
+                assert voice_handler._voice_normalization_tasks == {}
+        finally:
+            for task in voice_handler._voice_normalization_tasks.values():
+                task.cancel()
+            voice_handler._voice_normalization_tasks.clear()
