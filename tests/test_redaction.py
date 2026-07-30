@@ -210,10 +210,25 @@ def test_redact_log_event_fails_closed_when_structured_redaction_raises(
     def raise_redaction_error(*_args: object, **_kwargs: object) -> object:
         raise RuntimeError
 
-    monkeypatch.setattr(redaction, "redact_sensitive_data", raise_redaction_error)
+    monkeypatch.setattr(redaction, "_redact_sensitive_data", raise_redaction_error)
 
     assert redact_log_event(None, "error", {"event": "failed", "password": "hunter2"}) == {
         "event": REDACTION_FAILED,
+    }
+
+
+def test_redact_sensitive_data_uses_generic_mapping_fallback_when_internal_redaction_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A structured redaction bug must preserve mapping shape without claiming a log event."""
+
+    def raise_redaction_error(*_args: object, **_kwargs: object) -> object:
+        raise RuntimeError
+
+    monkeypatch.setattr(redaction, "_redact_sensitive_data", raise_redaction_error)
+
+    assert redact_sensitive_data({"command": "safe"}) == {
+        "__redaction_failed__": REDACTION_FAILED,
     }
 
 
@@ -370,6 +385,13 @@ def test_redact_sensitive_text_handles_deep_assignments_without_recursion() -> N
         value = f"outer='{value}'"
 
     assert redact_sensitive_text(value) == value.replace("hunter2", REDACTED)
+
+
+def test_redact_sensitive_text_redacts_quoted_secret_with_escaped_quote() -> None:
+    """An escaped quote inside a secret must not end the redacted value early."""
+    value = r'{"password": "hun\"ter2", "mode": "safe"}'
+
+    assert redact_sensitive_text(value) == r'{"password": "***redacted***", "mode": "safe"}'
 
 
 def test_redact_sensitive_text_redacts_secret_assignments_with_long_keys() -> None:

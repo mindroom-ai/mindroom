@@ -318,6 +318,18 @@ def _next_assignment_value_end(value: str, value_start: int) -> int:
     return min(match.start() if match is not None else len(value) for match in (literal_terminator, next_assignment))
 
 
+def _find_unescaped_quote(value: str, quote: str, start: int, end: int) -> int:
+    search_start = start
+    while (position := value.find(quote, search_start, end)) >= 0:
+        backslash_start = position
+        while backslash_start > start and value[backslash_start - 1] == "\\":
+            backslash_start -= 1
+        if (position - backslash_start) % 2 == 0:
+            return position
+        search_start = position + 1
+    return -1
+
+
 def _assignment_value_span(value: str, value_start: int) -> tuple[int, int, int] | None:
     if value_start >= len(value):
         return None
@@ -330,7 +342,6 @@ def _assignment_value_span(value: str, value_start: int) -> tuple[int, int, int]
         return value_start, value_end, value_end
 
     quote = value[value_start]
-    value_end = value.find(quote, value_start + 1)
     line_end = min(
         position
         for position in (
@@ -340,7 +351,8 @@ def _assignment_value_span(value: str, value_start: int) -> tuple[int, int, int]
         )
         if position >= 0
     )
-    if value_end < 0 or value_end > line_end:
+    value_end = _find_unescaped_quote(value, quote, value_start + 1, line_end)
+    if value_end < 0:
         raise _RedactionError
     return value_start + 1, value_end, value_end + 1
 
@@ -485,14 +497,18 @@ def _redact_sensitive_text(value: str, *, max_length: int | None) -> str:
     return _truncate_text(redacted, max_length)
 
 
-def redact_sensitive_text(value: str, *, max_length: int | None = None) -> str:
-    """Redact common credential patterns without letting redaction break its caller."""
-    if len(_bounded_redaction_input(value, max_length=max_length)) > _MAX_TEXT_INPUT_LENGTH:
-        return _truncate_text(REDACTION_FAILED, max_length)
+def _redact_sensitive_text_fail_closed(value: str, *, max_length: int | None) -> str:
     try:
         return _redact_sensitive_text(value, max_length=max_length)
     except Exception:
         return _truncate_text(REDACTION_FAILED, max_length)
+
+
+def redact_sensitive_text(value: str, *, max_length: int | None = None) -> str:
+    """Redact common credential patterns without letting redaction break its caller."""
+    if len(_bounded_redaction_input(value, max_length=max_length)) > _MAX_TEXT_INPUT_LENGTH:
+        return _truncate_text(REDACTION_FAILED, max_length)
+    return _redact_sensitive_text_fail_closed(value, max_length=max_length)
 
 
 def _normalized_structured_value(value: object) -> object:
@@ -585,13 +601,13 @@ def _redact_scalar_value(
         if _is_query_container(parent_key):
             redacted = _redact_query_fragment(value, max_length=max_string_length)
         else:
-            redacted = _redact_sensitive_text(value, max_length=max_string_length)
+            redacted = _redact_sensitive_text_fail_closed(value, max_length=max_string_length)
     elif isinstance(value, float):
         redacted = value if math.isfinite(value) else None
     elif value is None or isinstance(value, bool | int):
         redacted = value
     else:
-        redacted = _redact_sensitive_text(_safe_repr(value), max_length=max_string_length)
+        redacted = _redact_sensitive_text_fail_closed(_safe_repr(value), max_length=max_string_length)
     return redacted
 
 
@@ -645,9 +661,6 @@ def redact_sensitive_data(
     max_string_length: int | None = None,
     max_collection_items: int | None = None,
     max_depth: int | None = None,
-    _parent_key: str | None = None,
-    _depth: int = 0,
-    _force_redact: bool = False,
 ) -> _RedactedValue:
     """Redact structured data without letting redaction break its caller."""
     collection_limit = None if max_collection_items is None else max(max_collection_items, 0)
@@ -658,20 +671,17 @@ def redact_sensitive_data(
             max_string_length=max_string_length,
             max_collection_items=collection_limit,
             max_depth=depth_limit,
-            _parent_key=_parent_key,
-            _depth=_depth,
-            _force_redact=_force_redact,
         )
     except Exception:
         if isinstance(value, Mapping):
-            return {"event": REDACTION_FAILED}
+            return {"__redaction_failed__": REDACTION_FAILED}
         return REDACTION_FAILED
 
 
 def redact_log_event(_logger: object, _method_name: str, event_dict: dict[str, Any]) -> dict[str, Any]:
     """Structlog processor that redacts one structured event dictionary."""
     try:
-        redacted = redact_sensitive_data(
+        redacted = _redact_sensitive_data(
             event_dict,
             max_string_length=_MAX_TEXT_INPUT_LENGTH,
             max_collection_items=_MAX_LOG_COLLECTION_ITEMS,

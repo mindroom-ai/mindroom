@@ -527,7 +527,7 @@ def test_format_tool_started_survives_structured_redaction_failure() -> None:
         {"command": "password=\n  hunter2"},
     )
 
-    assert trace.args_preview == "event=[redaction failed]"
+    assert trace.args_preview == "command=[redaction failed]"
 
 
 def test_complete_pending_tool_block_roundtrip_with_marker_id() -> None:
