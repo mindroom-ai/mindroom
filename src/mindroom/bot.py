@@ -515,6 +515,7 @@ class AgentBot:
                 on_media=self._on_media_message,
                 on_reaction=self._on_reaction,
                 on_approval=self._on_unknown_event,
+                on_invite=self._on_invite,
                 on_room_lifecycle=partial(self._on_room_member, hooks_armed_at_delivery=True),
                 on_redaction=self._on_redaction,
                 on_decryption_failure=self._on_decryption_failure,
@@ -1841,7 +1842,11 @@ class AgentBot:
     ) -> None:
         """Finish invite handling before the containing classic sync can certify."""
         try:
-            await self._on_invite(room, event)
+            await self._dispatch_obligation_runner.dispatch(
+                room,
+                event,
+                DispatchCallbackKind.INVITE,
+            )
         except BaseException:
             self._rewind_sync_after_pre_certification_failure()
             raise

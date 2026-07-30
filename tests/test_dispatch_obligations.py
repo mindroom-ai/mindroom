@@ -774,6 +774,7 @@ async def test_bound_message_callback_defers_for_persisted_turn_store_record() -
         on_media=cast("Any", noop),
         on_reaction=cast("Any", noop),
         on_approval=cast("Any", noop),
+        on_invite=cast("Any", noop),
         on_room_lifecycle=cast("Any", noop),
         on_redaction=cast("Any", noop),
         on_decryption_failure=cast("Any", noop),

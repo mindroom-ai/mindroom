@@ -149,13 +149,19 @@ class MemoryTools(Toolkit):
         """Search your memories for information relevant to a query.
 
         Use this when you need to recall previously stored facts, notes, or context.
+        For file memory, semantic search uses configured Markdown paths
+        (default: memory/**/*.md). Keyword mode searches MEMORY.md and memory/**/*.md.
+        When semantic search is unavailable, it falls back to keyword search
+        over that same fixed corpus.
+        Persisted memory IDs and file:* IDs can be passed to get_memory, update_memory, or delete_memory.
+        semantic:* IDs are read-only locators.
 
         Args:
             query: What to search for in your memories.
             limit: Maximum number of results to return (default 5).
 
         Returns:
-            Formatted list of matching memories, or a message if none found.
+            Formatted list of matching memories and their IDs, or a message if none found.
 
         """
         try:

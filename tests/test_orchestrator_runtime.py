@@ -2071,11 +2071,11 @@ class TestMultiAgentOrchestrator:
         mock_schedule_retry.assert_awaited_once_with("general")
 
     @pytest.mark.asyncio
-    async def test_full_startup_releases_router_turn_recovery_after_responder_start(
+    async def test_full_startup_does_not_recover_router_before_first_sync(
         self,
         tmp_path: Path,
     ) -> None:
-        """Router turn replay must wait until the responder fleet start pass finishes."""
+        """Initial startup must wait for router and responder generation first syncs."""
         orchestrator = _MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path))
         orchestrator.config = MagicMock()
         responder_started = False
@@ -2084,6 +2084,7 @@ class TestMultiAgentOrchestrator:
         router_bot = MagicMock()
         router_bot.agent_name = ROUTER_AGENT_NAME
         router_bot.running = True
+        router_bot.first_sync_complete = False
         router_bot.try_start = AsyncMock(return_value=True)
         router_bot.stop = AsyncMock()
 
@@ -2096,6 +2097,7 @@ class TestMultiAgentOrchestrator:
         responder_bot = MagicMock()
         responder_bot.agent_name = "general"
         responder_bot.running = False
+        responder_bot.first_sync_complete = False
 
         async def start_responder() -> bool:
             nonlocal responder_started
@@ -2120,10 +2122,56 @@ class TestMultiAgentOrchestrator:
         ):
             await _run_orchestrator_start_until_ready(orchestrator)
 
+        router_bot.recover_pending_turn_dispatch_obligations.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_router_turn_recovery_waits_for_responder_first_sync(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Running generations must finish first sync before router replay can route to them."""
+        config = _runtime_bound_config(
+            Config(
+                agents={
+                    "general": AgentConfig(
+                        display_name="General",
+                        role="General assistant",
+                    ),
+                },
+            ),
+            tmp_path,
+        )
+        orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths_for(config))
+        orchestrator.config = config
+
+        router_bot = MagicMock()
+        router_bot.agent_name = ROUTER_AGENT_NAME
+        router_bot.running = True
+        router_bot.first_sync_complete = False
+        router_bot.first_sync_complete = True
+        router_bot.recover_pending_turn_dispatch_obligations = AsyncMock()
+
+        responder_bot = MagicMock()
+        responder_bot.agent_name = "general"
+        responder_bot.running = True
+        responder_bot.first_sync_complete = False
+
+        orchestrator.agent_bots = {
+            ROUTER_AGENT_NAME: router_bot,
+            "general": responder_bot,
+        }
+
+        await orchestrator._recover_ready_turn_dispatch_obligations()
+        router_bot.recover_pending_turn_dispatch_obligations.assert_not_awaited()
+
+        responder_bot.first_sync_complete = True
+        with patch.object(orchestrator._approval_transport, "handle_bot_ready", new=AsyncMock()):
+            await orchestrator.handle_bot_ready(responder_bot)
+
         router_bot.recover_pending_turn_dispatch_obligations.assert_awaited_once_with()
 
     @pytest.mark.asyncio
-    async def test_full_startup_releases_team_turn_recovery_after_slow_member_start(
+    async def test_full_startup_does_not_recover_team_before_member_first_sync(
         self,
         tmp_path: Path,
     ) -> None:
@@ -2145,6 +2193,7 @@ class TestMultiAgentOrchestrator:
         team_bot = MagicMock()
         team_bot.agent_name = "support_team"
         team_bot.running = False
+        team_bot.first_sync_complete = False
 
         async def start_team() -> bool:
             team_bot.running = True
@@ -2162,6 +2211,7 @@ class TestMultiAgentOrchestrator:
         member_bot = MagicMock()
         member_bot.agent_name = "general"
         member_bot.running = False
+        member_bot.first_sync_complete = False
 
         async def start_member() -> bool:
             member_starting.set()
@@ -2197,14 +2247,14 @@ class TestMultiAgentOrchestrator:
                 release_member.set()
             await startup_task
 
-        team_bot.recover_pending_turn_dispatch_obligations.assert_awaited_once_with()
+        team_bot.recover_pending_turn_dispatch_obligations.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_background_member_retry_releases_ready_team_turn_recovery(
+    async def test_background_member_retry_releases_team_recovery_after_first_sync(
         self,
         tmp_path: Path,
     ) -> None:
-        """A member retry must release pending team turns once the whole team is running."""
+        """A background start must wait for the new member generation's first sync."""
         config = _configured_team_test_config(tmp_path)
         orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths_for(config))
         orchestrator.config = config
@@ -2217,11 +2267,13 @@ class TestMultiAgentOrchestrator:
         team_bot = MagicMock()
         team_bot.agent_name = "support_team"
         team_bot.running = True
+        team_bot.first_sync_complete = True
         team_bot.recover_pending_turn_dispatch_obligations = AsyncMock()
 
         member_bot = MagicMock()
         member_bot.agent_name = "general"
         member_bot.running = False
+        member_bot.first_sync_complete = False
 
         async def start_member() -> bool:
             member_bot.running = True
@@ -2243,6 +2295,11 @@ class TestMultiAgentOrchestrator:
             patch.object(orchestrator, "_recover_pending_replacement_rooms", new=AsyncMock()),
         ):
             await orchestrator._run_bot_start_retry("general")
+
+        team_bot.recover_pending_turn_dispatch_obligations.assert_not_awaited()
+        member_bot.first_sync_complete = True
+        with patch.object(orchestrator._approval_transport, "handle_bot_ready", new=AsyncMock()):
+            await orchestrator.handle_bot_ready(member_bot)
 
         team_bot.recover_pending_turn_dispatch_obligations.assert_awaited_once_with()
 

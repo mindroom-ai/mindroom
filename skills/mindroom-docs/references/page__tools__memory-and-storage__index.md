@@ -37,12 +37,17 @@ Use [Matrix & Attachments](https://docs.mindroom.chat/tools/matrix-and-attachmen
 It complements MindRoom's automatic post-response memory extraction by letting the agent deliberately remember or inspect something on demand.
 The tool always uses the current agent's configured MindRoom memory backend, so the same calls work whether that agent uses built-in `mem0` storage or file-backed memory.
 Agents with `memory_backend: none` do not receive this tool.
-Search and list results include memory IDs, and those IDs are then used with `get_memory()`, `update_memory()`, and `delete_memory()`.
+Search and list results include identifiers or locators.
+Persisted memory IDs and file-backed `file:<path>:<line>` IDs can be used with `get_memory()`, `update_memory()`, and `delete_memory()`.
+Semantic file-memory matches use `semantic:<source_file>:<rank>` read-only locators that cannot be passed to the CRUD functions.
 The tool is bound to the current agent's MindRoom scope and can reach any agent or team memories that MindRoom makes visible to that agent.
 For file-backed memory, `search_memories()` follows `memory.search.mode`.
-Keyword mode scans markdown files directly.
-Semantic mode searches the agent's file-memory scope through a lazy embedding index and falls back to keyword search when embeddings are unavailable.
+Keyword mode scans `MEMORY.md` and `memory/**/*.md` directly.
+Semantic mode searches the agent's configured include patterns through a lazy embedding index and falls back to the fixed keyword corpus when embeddings are unavailable.
 Result metadata includes `search_mode` so callers can tell which path produced the result.
+File memory is already searchable on demand through `search_memories()`.
+When its agent-scoped semantic index is ready, configured file memory is also listed as a read-only source in `search_knowledge_base`.
+That knowledge surface is semantic-only and does not provide keyword fallback, team-visible memory, or memory IDs.
 
 ### Configuration
 

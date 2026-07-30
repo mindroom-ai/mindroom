@@ -28,7 +28,6 @@ from mindroom.constants import (
 from mindroom.error_handling import is_model_safeguard_refusal
 from mindroom.history.storage import (
     compacted_run_ids_with,
-    is_model_history_visible_run,
     record_compaction_chunk,
     remove_runs_by_id,
     seen_event_ids_for_runs,
@@ -48,6 +47,7 @@ from mindroom.history.types import (
     HistoryScopeState,
     ResolvedHistorySettings,
 )
+from mindroom.history_run_visibility import is_model_history_visible_run
 from mindroom.hooks import EVENT_COMPACTION_AFTER, EVENT_COMPACTION_BEFORE, CompactionHookContext, emit
 from mindroom.logging_config import get_logger
 from mindroom.timing import timed
@@ -73,6 +73,7 @@ logger = get_logger(__name__)
 
 _WRAPPER_OVERHEAD_TOKENS = 200
 _OVERSIZED_RUN_NOTE = "Run truncated to fit compaction budget."
+_QUEUED_MESSAGE_NOTICE_MARKER_KEY = "mindroom_queued_message_notice"
 _SUMMARY_METADATA_OMIT_KEYS = frozenset(
     {
         AI_RUN_METADATA_KEY,
@@ -1107,7 +1108,12 @@ def _strip_stale_anthropic_replay_fields(messages: list[Message]) -> int:
     """Strip stale Anthropic thinking replay fields from completed turns."""
     last_user_idx = -1
     for i in range(len(messages) - 1, -1, -1):
-        if messages[i].role == "user":
+        provider_data = messages[i].provider_data
+        is_queued_notice = isinstance(provider_data, dict) and provider_data.get(_QUEUED_MESSAGE_NOTICE_MARKER_KEY) in (
+            True,
+            "persisted",
+        )
+        if messages[i].role == "user" and not is_queued_notice:
             last_user_idx = i
             break
     if last_user_idx < 0:

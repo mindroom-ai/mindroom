@@ -3300,8 +3300,8 @@ async def test_orchestrator_runs_two_recovery_waves_around_room_setup(tmp_path: 
                 with suppress(asyncio.CancelledError):
                     await runtime_task
 
-    router_bot.recover_pending_turn_dispatch_obligations.assert_awaited_once_with()
-    assert call_order == ["wait", "turn_dispatch", "sync", "recover", "setup", "recover"]
+    router_bot.recover_pending_turn_dispatch_obligations.assert_not_awaited()
+    assert call_order == ["wait", "sync", "recover", "setup", "recover"]
 
 
 @pytest.mark.asyncio

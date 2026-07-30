@@ -539,11 +539,14 @@ class _MultiAgentOrchestrator:
                 return
             for entity_name in [ROUTER_AGENT_NAME, *sorted(config.teams)]:
                 bot = self.agent_bots.get(entity_name)
-                if bot is None or not bot.running:
-                    continue
-                if entity_name in config.teams and any(
-                    (member_bot := self.agent_bots.get(member_name)) is None or not member_bot.running
-                    for member_name in config.teams[entity_name].agents
+                required_entities = (
+                    configured_entity_names(config)
+                    if entity_name == ROUTER_AGENT_NAME
+                    else [entity_name, *config.teams[entity_name].agents]
+                )
+                if bot is None or any(
+                    self.entity_first_sync_complete(required_entity) is not True
+                    for required_entity in required_entities
                 ):
                     continue
                 await bot.recover_pending_turn_dispatch_obligations()
@@ -1189,6 +1192,7 @@ class _MultiAgentOrchestrator:
     async def handle_bot_ready(self, bot: AgentBot | TeamBot) -> None:
         """Handle bot-ready notifications through the public runtime protocol."""
         await self._approval_transport.handle_bot_ready(bot)
+        await self._recover_ready_turn_dispatch_obligations()
 
     async def _start_runtime(self) -> None:
         """Run the startup sequence before handing off to the sync loops."""
