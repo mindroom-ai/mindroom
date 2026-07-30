@@ -2419,8 +2419,8 @@ def test_agent_context_files_are_loaded_into_role(mock_storage: MagicMock, tmp_p
 
 def _preload_chunks() -> list[_AdditionalContextChunk]:
     return [
-        _AdditionalContextChunk(kind="personality", title="/ws/FIRST.md", body="FIRST_START " + "A" * 600),
-        _AdditionalContextChunk(kind="personality", title="/ws/SECOND.md", body="SECOND_START " + "B" * 600),
+        _AdditionalContextChunk(title="/ws/FIRST.md", body="FIRST_START " + "A" * 600),
+        _AdditionalContextChunk(title="/ws/SECOND.md", body="SECOND_START " + "B" * 600),
     ]
 
 
@@ -2436,10 +2436,9 @@ def _apply_test_preload_cap(chunks: list[_AdditionalContextChunk], max_preload_c
 
 def test_trim_chunk_tails_counts_whitespace_removed_by_cleanup() -> None:
     """Tail trimming must count whitespace removed after the requested slice."""
-    chunk = _AdditionalContextChunk(kind="personality", title="/ws/SOUL.md", body="alpha   beta")
+    chunk = _AdditionalContextChunk(title="/ws/SOUL.md", body="alpha   beta")
 
     omitted_chars = _trim_chunk_tails(
-        [[chunk]],
         [chunk],
         len("alpha   "),
         render=lambda chunks: chunks[0].body,
@@ -2473,6 +2472,32 @@ def test_preload_cap_keeps_the_dropped_file_path_visible() -> None:
 
     assert "### /ws/FIRST.md" in rendered
     assert f"[Truncated - {dropped_body_length} chars omitted. Read /ws/FIRST.md for the rest.]" in rendered
+
+
+def test_preload_cap_rejects_budget_too_small_for_required_markers() -> None:
+    """A hard cap must fail explicitly rather than slice away required file markers."""
+    chunks = [
+        _AdditionalContextChunk(
+            title=f"/workspace/context/file-{index}.md",
+            body="x" * 700,
+        )
+        for index in range(6)
+    ]
+
+    with pytest.raises(ValueError, match="cannot fit required context headings and omission markers"):
+        _apply_test_preload_cap(chunks, 400)
+
+
+def test_preload_cap_trims_last_context_body_instead_of_dropping_it() -> None:
+    """After dropping earlier files, the final file should keep as much leading content as fits."""
+    rendered, omitted_chars = _apply_test_preload_cap(_preload_chunks(), 1_000)
+
+    assert len(_preload_chunks()[0].body) < omitted_chars < sum(len(chunk.body) for chunk in _preload_chunks())
+    assert "FIRST_START" not in rendered
+    assert "SECOND_START" in rendered
+    assert "### /ws/FIRST.md" in rendered
+    assert "### /ws/SECOND.md" in rendered
+    assert len(rendered) <= 1_000
 
 
 def test_preload_cap_leaves_untruncated_context_unmarked() -> None:

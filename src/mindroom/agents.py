@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from functools import partial
 from pathlib import Path
@@ -119,14 +119,13 @@ class _CultureAgentSettings:
 
 @dataclass
 class _AdditionalContextChunk:
-    """Chunk of preload context with truncation priority metadata.
+    """Chunk of preload context with omission metadata.
 
     ``omitted_chars`` records what the preload cap removed from this chunk so
     the rendered section can tell the model which file was cut and by how much,
     instead of letting a dropped file vanish without a trace.
     """
 
-    kind: str
     title: str
     body: str
     omitted_chars: int = 0
@@ -275,7 +274,6 @@ def _load_context_files(
                 # The title is the full path so the rendered prompt tells the
                 # model exactly which file on disk each part came from.
                 _AdditionalContextChunk(
-                    kind="personality",
                     title=str(resolved_path),
                     body=body,
                 ),
@@ -320,50 +318,42 @@ def _render_context_chunks(
     return f"{section_heading}\n" + "\n\n".join(rendered) + "\n\n"
 
 
-def _build_preload_truncation_groups(
-    personality_chunks: list[_AdditionalContextChunk],
-) -> list[list[_AdditionalContextChunk]]:
-    """Return truncation groups ordered from least to most critical context."""
-    return [[chunk for chunk in personality_chunks if chunk.kind == "personality"]]
-
-
 def _drop_whole_chunks(
-    groups: list[list[_AdditionalContextChunk]],
-    personality_chunks: list[_AdditionalContextChunk],
+    chunks: list[_AdditionalContextChunk],
     max_preload_chars: int,
     *,
     render: Callable[[list[_AdditionalContextChunk]], str],
 ) -> int:
     """Drop entire chunk bodies (least critical first) until under the cap."""
     omitted = 0
-    for group in groups:
-        for chunk in group:
-            if len(render(personality_chunks)) <= max_preload_chars:
-                return omitted
-            if not chunk.body:
-                continue
-            omitted += len(chunk.body)
-            chunk.omitted_chars += len(chunk.body)
-            chunk.body = ""
+    remaining_body_chunks = sum(bool(chunk.body) for chunk in chunks)
+    for chunk in chunks:
+        if len(render(chunks)) <= max_preload_chars:
+            return omitted
+        if not chunk.body:
+            continue
+        if remaining_body_chunks == 1:
+            return omitted
+        omitted += len(chunk.body)
+        chunk.omitted_chars += len(chunk.body)
+        chunk.body = ""
+        remaining_body_chunks -= 1
     return omitted
 
 
 def _trim_chunk_tails(
-    groups: list[list[_AdditionalContextChunk]],
-    personality_chunks: list[_AdditionalContextChunk],
+    chunks: list[_AdditionalContextChunk],
     max_preload_chars: int,
     *,
     render: Callable[[list[_AdditionalContextChunk]], str],
 ) -> int:
     """Trim from the *end* of chunks to preserve headers/identity at the top."""
     omitted = 0
-    for group in groups:
-        for chunk in group:
-            overflow = len(render(personality_chunks)) - max_preload_chars
+    for chunk in chunks:
+        while chunk.body:
+            overflow = len(render(chunks)) - max_preload_chars
             if overflow <= 0:
                 return omitted
-            if not chunk.body:
-                continue
             remove_count = min(overflow, len(chunk.body))
             original_length = len(chunk.body)
             chunk.body = chunk.body[: original_length - remove_count].rstrip()
@@ -403,17 +393,30 @@ def _apply_preload_cap(
         truncation_marker_template,
         omitted_chars=sum(len(chunk.body) for chunk in personality_chunks),
     )
-    trim_budget = max(0, max_preload_chars - len(f"\n\n{marker_upper_bound}\n\n"))
+    marker_upper_bound_block = f"\n\n{marker_upper_bound}\n\n"
+    required_marker_chunks = [
+        replace(
+            chunk,
+            body="",
+            omitted_chars=chunk.omitted_chars + len(chunk.body),
+        )
+        for chunk in personality_chunks
+    ]
+    minimum_rendered = render(required_marker_chunks).rstrip("\n") + marker_upper_bound_block
+    if len(minimum_rendered) > max_preload_chars:
+        msg = (
+            f"max_preload_chars={max_preload_chars} cannot fit required context headings and omission markers; "
+            f"at least {len(minimum_rendered)} characters are required"
+        )
+        raise ValueError(msg)
+    trim_budget = max_preload_chars - len(marker_upper_bound_block)
 
-    groups = _build_preload_truncation_groups(personality_chunks)
     omitted_chars = _drop_whole_chunks(
-        groups,
         personality_chunks,
         trim_budget,
         render=render,
     )
     omitted_chars += _trim_chunk_tails(
-        groups,
         personality_chunks,
         trim_budget,
         render=render,
@@ -425,21 +428,7 @@ def _apply_preload_cap(
 
     marker = render_prompt_template(truncation_marker_template, omitted_chars=omitted_chars)
     marker_block = f"\n\n{marker}\n\n"
-    budget = max_preload_chars - len(marker_block)
-    if budget <= 0:
-        return marker_block[:max_preload_chars], omitted_chars
-    if len(rendered) > budget:
-        rendered = _clamp_rendered_context(rendered, budget, heading_prefix=f"{section_heading}\n")
     return rendered.rstrip("\n") + marker_block, omitted_chars
-
-
-def _clamp_rendered_context(rendered: str, budget: int, *, heading_prefix: str) -> str:
-    """Force rendered context under ``budget``, keeping the heading and the most critical tail."""
-    body_budget = budget - len(heading_prefix)
-    if not rendered.startswith(heading_prefix) or body_budget <= 0:
-        return rendered[len(rendered) - budget :]
-    body = rendered[len(heading_prefix) :]
-    return heading_prefix + body[len(body) - body_budget :]
 
 
 @timed("system_prompt_assembly.agent_create.additional_context")

@@ -2127,7 +2127,6 @@ def test_docker_projected_context_files_load_in_worker_runtime(tmp_path: Path) -
     )
 
     assert len(loaded) == 1
-    assert loaded[0].kind == "personality"
     assert loaded[0].body == "# Context"
     # The title is the worker-visible path, so the rendered prompt names a file
     # the worker runtime can actually open.
