@@ -1208,7 +1208,9 @@ class _MultiAgentOrchestrator:
         self._bind_started_runtime_support_services(started_bots)
         log_startup_phase_finished("bind_runtime_support", phase_started)
 
-        await router_bot.recover_pending_turn_dispatch_obligations()
+        for bot in started_bots:
+            if bot.agent_name == ROUTER_AGENT_NAME or bot.agent_name in config.teams:
+                await bot.recover_pending_turn_dispatch_obligations()
         self.running = True
 
         # Create sync tasks for each bot with automatic restart on failure.
