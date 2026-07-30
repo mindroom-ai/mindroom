@@ -357,6 +357,94 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         assert client.room_messages.await_count == 1
 
     @pytest.mark.asyncio
+    async def test_startup_source_refresh_preserves_concurrent_live_append(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """An older startup scan should not overwrite a live append that finishes mid-scan."""
+        room_id = "!test:localhost"
+        thread_id = "$thread:localhost"
+        event_cache = SqliteEventCache(tmp_path / "event_cache.db")
+        await event_cache.initialize()
+        coordinator = _runtime_write_coordinator()
+        root_event = _text_event(
+            event_id=thread_id,
+            body="Root",
+            sender="@user:localhost",
+            server_timestamp=1000,
+            room_id=room_id,
+        )
+        live_event = _text_event(
+            event_id="$live:localhost",
+            body="Live",
+            sender="@agent:localhost",
+            server_timestamp=2000,
+            room_id=room_id,
+            thread_id=thread_id,
+        )
+        await _replace_thread(event_cache, room_id, thread_id, [root_event.source])
+        client = _relations_client(
+            root_event=root_event,
+            thread_events=[],
+            next_batch="s_initial",
+        )
+        room_messages_response = client.room_messages.return_value
+        source_scan_started = asyncio.Event()
+        release_source_scan = asyncio.Event()
+        startup_refresh: asyncio.Task[ThreadHistoryResult] | None = None
+        live_append: asyncio.Task[None] | None = None
+
+        async def blocking_room_messages(*_args: object, **_kwargs: object) -> nio.RoomMessagesResponse:
+            source_scan_started.set()
+            await release_source_scan.wait()
+            return room_messages_response
+
+        client.room_messages = AsyncMock(side_effect=blocking_room_messages)
+        access = MatrixConversationCache(
+            logger=MagicMock(),
+            runtime=_conversation_runtime(
+                client=client,
+                event_cache=event_cache,
+                coordinator=coordinator,
+            ),
+        )
+
+        try:
+            startup_refresh = asyncio.create_task(
+                access.refresh_startup_thread_history_from_source(
+                    room_id,
+                    thread_id,
+                    caller_label="startup_auto_resume_freshness",
+                ),
+            )
+            await asyncio.wait_for(source_scan_started.wait(), timeout=1.0)
+
+            live_append = asyncio.create_task(
+                access.append_live_event(
+                    room_id,
+                    live_event,
+                    event_info=EventInfo.from_event(live_event.source),
+                ),
+            )
+            await asyncio.wait_for(live_append, timeout=1.0)
+
+            release_source_scan.set()
+            startup_result = await asyncio.wait_for(startup_refresh, timeout=1.0)
+            cached = await event_cache.get_thread_events(room_id, thread_id)
+        finally:
+            release_source_scan.set()
+            await asyncio.gather(
+                *(task for task in (startup_refresh, live_append) if task is not None),
+                return_exceptions=True,
+            )
+            await coordinator.close()
+            await event_cache.close()
+
+        assert startup_result.is_full_history is True
+        assert cached is not None
+        assert [event["event_id"] for event in cached] == [thread_id, "$live:localhost"]
+
+    @pytest.mark.asyncio
     async def test_live_redaction_resolution_does_not_block_same_room_read(self) -> None:
         """A same-room read must not wait on live redaction resolution before the queued cache write starts."""
         coordinator = _runtime_write_coordinator()

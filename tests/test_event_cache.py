@@ -837,6 +837,140 @@ async def test_strict_source_refresh_bypasses_usable_cache(
 
 
 @pytest.mark.asyncio
+async def test_startup_source_refresh_does_not_join_foreground_refill(
+    tmp_path: Path,
+) -> None:
+    """Startup refresh should finish without joining a blocked foreground refill."""
+    event_cache = SqliteEventCache(tmp_path / "event_cache.db")
+    await event_cache.initialize()
+    client = object()
+    conversation_cache = _conversation_cache_for_thread_reads(tmp_path, event_cache, client=client)
+    coordinator = EventCacheWriteCoordinator(logger=conversation_cache.logger)
+    conversation_cache.runtime.event_cache_write_coordinator = coordinator
+    first_source_call_started = asyncio.Event()
+    release_first_source_call = asyncio.Event()
+    second_source_call_started = asyncio.Event()
+    source_call_count = 0
+    foreground_refill: asyncio.Task[ThreadHistoryResult] | None = None
+    startup_refresh: asyncio.Task[ThreadHistoryResult] | None = None
+    foreground_history = thread_history_result(
+        [ResolvedVisibleMessage.synthetic(sender="@bot:localhost", body="Foreground", event_id="$foreground")],
+        is_full_history=True,
+    )
+    startup_history = thread_history_result(
+        [ResolvedVisibleMessage.synthetic(sender="@bot:localhost", body="Startup", event_id="$startup")],
+        is_full_history=True,
+        diagnostics={"thread_read_source": "homeserver"},
+    )
+
+    async def source_refresh(*_args: object, **kwargs: object) -> ThreadHistoryResult:
+        nonlocal source_call_count
+        source_call_count += 1
+        if source_call_count == 1:
+            first_source_call_started.set()
+            await release_first_source_call.wait()
+            return foreground_history
+        assert kwargs["hydrate_sidecars"] is True
+        assert kwargs["allow_stale_fallback"] is False
+        assert kwargs["caller_label"] == "startup_auto_resume_freshness"
+        second_source_call_started.set()
+        return startup_history
+
+    try:
+        with patch(
+            "mindroom.matrix.conversation_cache.refresh_thread_history_from_source",
+            AsyncMock(side_effect=source_refresh),
+        ):
+            foreground_refill = asyncio.create_task(
+                conversation_cache._refill_thread_from_client(
+                    "!room:localhost",
+                    "$thread:localhost",
+                    cache_reject_diagnostics=None,
+                    wants_full_history=True,
+                    allows_stale_fallback=False,
+                ),
+            )
+            await asyncio.wait_for(first_source_call_started.wait(), timeout=1.0)
+            foreground_single_flight = dict(conversation_cache._refill_single_flight._in_flight)
+            assert len(foreground_single_flight) == 1
+
+            startup_refresh = asyncio.create_task(
+                conversation_cache.refresh_startup_thread_history_from_source(
+                    "!room:localhost",
+                    "$thread:localhost",
+                    caller_label="startup_auto_resume_freshness",
+                ),
+            )
+            await asyncio.wait_for(second_source_call_started.wait(), timeout=1.0)
+            startup_result = await asyncio.wait_for(startup_refresh, timeout=1.0)
+
+            assert [message.event_id for message in startup_result] == ["$startup"]
+            assert startup_result.is_full_history is True
+            assert foreground_refill.done() is False
+            assert conversation_cache._refill_single_flight._in_flight == foreground_single_flight
+
+            release_first_source_call.set()
+            foreground_result = await asyncio.wait_for(foreground_refill, timeout=1.0)
+            assert [message.event_id for message in foreground_result] == ["$foreground"]
+    finally:
+        release_first_source_call.set()
+        await asyncio.gather(
+            *(task for task in (foreground_refill, startup_refresh) if task is not None),
+            return_exceptions=True,
+        )
+        await coordinator.close()
+        await event_cache.close()
+
+
+@pytest.mark.asyncio
+async def test_cancelled_startup_source_refresh_leaves_no_shared_refill_state(
+    tmp_path: Path,
+) -> None:
+    """Cancelling startup refresh should not retain coordinator or singleflight state."""
+    event_cache = SqliteEventCache(tmp_path / "event_cache.db")
+    await event_cache.initialize()
+    conversation_cache = _conversation_cache_for_thread_reads(tmp_path, event_cache, client=object())
+    coordinator = EventCacheWriteCoordinator(logger=conversation_cache.logger)
+    conversation_cache.runtime.event_cache_write_coordinator = coordinator
+    source_call_started = asyncio.Event()
+    release_source_call = asyncio.Event()
+    startup_refresh: asyncio.Task[ThreadHistoryResult] | None = None
+
+    async def blocking_source_refresh(*_args: object, **_kwargs: object) -> ThreadHistoryResult:
+        source_call_started.set()
+        await release_source_call.wait()
+        return thread_history_result([], is_full_history=True)
+
+    try:
+        with patch(
+            "mindroom.matrix.conversation_cache.refresh_thread_history_from_source",
+            AsyncMock(side_effect=blocking_source_refresh),
+        ):
+            startup_refresh = asyncio.create_task(
+                conversation_cache.refresh_startup_thread_history_from_source(
+                    "!room:localhost",
+                    "$thread:localhost",
+                    caller_label="startup_auto_resume_freshness",
+                ),
+            )
+            await asyncio.wait_for(source_call_started.wait(), timeout=1.0)
+            startup_refresh.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(startup_refresh, timeout=1.0)
+
+            assert conversation_cache._refill_single_flight._in_flight == {}
+            assert coordinator._room_states == {}
+    finally:
+        release_source_call.set()
+        await asyncio.gather(
+            *(task for task in (startup_refresh,) if task is not None),
+            return_exceptions=True,
+        )
+        await coordinator.close()
+        await event_cache.close()
+
+
+@pytest.mark.asyncio
 async def test_strict_thread_history_propagates_cache_coordinator_timeout(
     tmp_path: Path,
 ) -> None:
