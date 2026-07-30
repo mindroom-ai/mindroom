@@ -19,6 +19,11 @@ if TYPE_CHECKING:
 _SAMPLING_CONTROL_NAMES = ("temperature", "top_p", "top_k")
 
 
+def _provider_tool_call_id(value: object) -> str | None:
+    """Return a non-empty provider tool-call ID."""
+    return value if isinstance(value, str) and value else None
+
+
 @dataclass
 class MindRoomGoogleGemini(Gemini):
     """Gemini model that preserves provider call IDs across tool loops."""
@@ -57,10 +62,12 @@ class MindRoomGoogleGemini(Gemini):
     ) -> tuple[list[object], object]:
         normalized_messages = normalize_tool_messages(messages)
         tool_call_ids = [
-            tool_call.get("id") for message in normalized_messages for tool_call in (message.tool_calls or [])
+            _provider_tool_call_id(tool_call.get("id"))
+            for message in normalized_messages
+            for tool_call in (message.tool_calls or [])
         ]
         tool_response_ids = [
-            message.tool_call_id
+            _provider_tool_call_id(message.tool_call_id)
             for message in normalized_messages
             if message.role == "tool" and message.tool_call_id is not None and message.tool_name is not None
         ]
@@ -74,8 +81,12 @@ class MindRoomGoogleGemini(Gemini):
         for message in formatted_messages:
             for part in message.parts:
                 if part.function_call is not None:
-                    part.function_call.id = next(tool_call_id_iter)
+                    tool_call_id = next(tool_call_id_iter, None)
+                    if tool_call_id is not None:
+                        part.function_call.id = tool_call_id
                 if part.function_response is not None:
-                    part.function_response.id = next(tool_response_id_iter)
+                    tool_response_id = next(tool_response_id_iter, None)
+                    if tool_response_id is not None:
+                        part.function_response.id = tool_response_id
 
         return formatted_messages, system_message

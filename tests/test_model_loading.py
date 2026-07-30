@@ -304,6 +304,72 @@ def test_google_tool_loop_preserves_provider_call_ids(tmp_path: Path) -> None:
     assert function_response.id == "call-123"
 
 
+def test_google_tool_loop_omits_invalid_ids_without_shifting_valid_ids(tmp_path: Path) -> None:
+    """Malformed Gemini history must not put invalid or misaligned IDs on the wire."""
+    config = bind_runtime_paths(
+        Config(
+            models={
+                "gemini": ModelConfig(
+                    provider="google",
+                    id="gemini-3.6-flash",
+                    extra_kwargs={"api_key": "dummy-key"},
+                ),
+            },
+        ),
+        test_runtime_paths(tmp_path),
+    )
+    model = get_model_instance(config, runtime_paths_for(config), "gemini")
+    formatted_messages, _system_message = model._format_messages(
+        [
+            AgnoMessage(
+                role="assistant",
+                tool_calls=[
+                    {
+                        "id": 7,
+                        "type": "function",
+                        "function": {"name": "invalid", "arguments": "{}"},
+                    },
+                    {
+                        "id": "call-123",
+                        "type": "function",
+                        "function": {"name": "valid", "arguments": "{}"},
+                    },
+                ],
+            ),
+            AgnoMessage(
+                role="tool",
+                tool_call_id="",
+                tool_name="invalid",
+                content="invalid result",
+            ),
+            AgnoMessage(
+                role="tool",
+                tool_call_id="call-123",
+                tool_name="valid",
+                content="valid result",
+            ),
+        ],
+    )
+
+    function_calls = [
+        part.function_call for message in formatted_messages for part in message.parts if part.function_call is not None
+    ]
+    function_responses = [
+        part.function_response
+        for message in formatted_messages
+        for part in message.parts
+        if part.function_response is not None
+    ]
+    assert function_calls[0] is not None
+    assert function_calls[0].id is None
+    assert function_calls[1] is not None
+    assert function_calls[1].id == "call-123"
+    assert function_responses[0] is not None
+    assert function_responses[0].id is None
+    assert function_responses[1] is not None
+    assert function_responses[1].id == "call-123"
+
+
 @pytest.mark.parametrize("model_id", ["claude-fable-5", "claude-opus-5", "claude-sonnet-5"])
 def test_current_direct_claude_omits_non_default_sampling_controls(tmp_path: Path, model_id: str) -> None:
     """Current Claude requests must omit sampling controls rejected by the provider."""
