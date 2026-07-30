@@ -970,6 +970,11 @@ async def test_live_read_does_not_wait_for_running_startup_source_refresh(
 
             assert [message.event_id for message in live_result] == [thread_id]
             assert startup_refresh.done() is False
+
+            release_source_call.set()
+            startup_result = await asyncio.wait_for(startup_refresh, timeout=1.0)
+            assert startup_result == []
+            assert startup_result.is_full_history is True
     finally:
         release_source_call.set()
         await asyncio.gather(
