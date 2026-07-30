@@ -16,6 +16,7 @@ from mindroom.custom_tools.attachments import (
     send_resolved_attachments,
 )
 from mindroom.dispatch_source import TRUSTED_INTERNAL_RELAY_SOURCE_KIND
+from mindroom.entity_resolution import entity_identity_registry
 from mindroom.interactive import (
     add_reaction_buttons,
     clear_interactive_question,
@@ -32,7 +33,7 @@ from mindroom.matrix.client_visible_messages import (
     thread_root_body_preview,
     trusted_visible_sender_ids,
 )
-from mindroom.matrix.mentions import format_message_with_mentions, is_managed_entity_user_id
+from mindroom.matrix.mentions import format_message_with_mentions
 from mindroom.matrix.message_builder import build_reaction_content
 from mindroom.matrix.message_extras import build_message_extras_content
 
@@ -88,11 +89,10 @@ class MatrixMessageOperations:
         extra_content: dict[str, Any] = {}
         if ignore_mentions:
             extra_content[SKIP_MENTIONS_KEY] = True
-        elif context.requester_id != context.client.user_id and not is_managed_entity_user_id(
-            context.requester_id,
+        elif context.requester_id != context.client.user_id and not entity_identity_registry(
             context.config,
             context.runtime_paths,
-        ):
+        ).is_managed_user_id(context.requester_id):
             extra_content[ORIGINAL_SENDER_KEY] = context.requester_id
             extra_content[SOURCE_KIND_KEY] = TRUSTED_INTERNAL_RELAY_SOURCE_KIND
         if message_extras:
