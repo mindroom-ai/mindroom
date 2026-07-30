@@ -430,18 +430,23 @@ async def test_restart_rearms_decrypt_notice_fence_for_room_joined_before_crash(
     assert first_bot._room_lifecycle.decrypt_notice_is_fenced(room_id)
 
     restarted_bot = _agent_bot(tmp_path)
-    restarted_bot.client = make_matrix_client_mock(user_id=restarted_bot.agent_user.user_id)
-    join_room = AsyncMock(return_value=True)
+    restarted_client = make_matrix_client_mock(user_id=restarted_bot.agent_user.user_id)
     with (
+        patch.object(restarted_bot, "ensure_user_account", AsyncMock()),
+        patch(
+            "mindroom.bot.login_agent_user",
+            AsyncMock(return_value=restarted_client),
+        ),
+        patch.object(restarted_bot, "_set_avatar_if_available", AsyncMock()),
+        patch.object(restarted_bot, "_set_presence_with_model_info", AsyncMock()),
+        patch("mindroom.bot.interactive.init_persistence"),
         patch(
             "mindroom.bot_room_lifecycle.get_joined_rooms",
             AsyncMock(return_value=[room_id, unpersisted_invite_room_id]),
         ),
-        patch("mindroom.bot_room_lifecycle.join_room", join_room),
     ):
-        await restarted_bot.join_configured_rooms()
+        await restarted_bot.start()
 
-    join_room.assert_not_awaited()
     assert restarted_bot._room_lifecycle.decrypt_notice_is_fenced(room_id)
     assert restarted_bot._room_lifecycle.decrypt_notice_is_fenced(unpersisted_invite_room_id)
 
@@ -594,6 +599,42 @@ async def test_bot_start_restores_saved_sync_token(tmp_path: Path) -> None:
         await bot.start()
 
     assert client.next_batch == "s_saved"
+
+
+@pytest.mark.asyncio
+async def test_bot_start_rearms_joined_room_fence_before_restored_token_sync(
+    tmp_path: Path,
+) -> None:
+    """Restored-token sync cannot outrun restart fencing for joined rooms."""
+    room_id = "!room:localhost"
+    bot = _agent_bot(tmp_path)
+    save_sync_token(
+        tmp_path,
+        bot.agent_name,
+        "s_saved",
+        cache_generation=bot.event_cache.cache_generation,
+    )
+    client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
+    client.next_batch = None
+    get_joined_rooms = AsyncMock(return_value=[room_id])
+
+    with (
+        patch.object(bot, "ensure_user_account", AsyncMock()),
+        patch("mindroom.bot.login_agent_user", AsyncMock(return_value=client)),
+        patch.object(bot, "_set_avatar_if_available", AsyncMock()),
+        patch.object(bot, "_set_presence_with_model_info", AsyncMock()),
+        patch("mindroom.bot.interactive.init_persistence"),
+        patch("mindroom.bot_room_lifecycle.get_joined_rooms", get_joined_rooms),
+    ):
+        await bot.start()
+
+    get_joined_rooms.assert_awaited_once_with(client)
+    assert client.next_batch == "s_saved"
+    assert not await bot._admit_dispatch_source(
+        room_id,
+        "$restored-history",
+        DispatchCallbackKind.DECRYPTION_FAILURE,
+    )
 
 
 @pytest.mark.asyncio

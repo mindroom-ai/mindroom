@@ -131,6 +131,11 @@ class BotRoomLifecycle:
         """Clear join fences for rooms included in one trusted sync response."""
         self._decrypt_notice_fenced_room_ids.difference_update(room_ids)
 
+    async def rearm_decrypt_notice_fences_for_joined_rooms(self) -> None:
+        """Restore restart-lost join fences before sync callbacks can run."""
+        joined_rooms = await get_joined_rooms(self._client())
+        self._decrypt_notice_fenced_room_ids.update(joined_rooms or ())
+
     async def _join_room_with_decrypt_notice_fence(self, client: nio.AsyncClient, room_id: str) -> bool:
         """Fence decrypt callbacks before a live join can race its first sync."""
         self._decrypt_notice_fenced_room_ids.add(room_id)
@@ -180,7 +185,6 @@ class BotRoomLifecycle:
         client = self._client()
         joined_rooms = await get_joined_rooms(client)
         current_rooms = set(joined_rooms or [])
-        self._decrypt_notice_fenced_room_ids.update(current_rooms)
         desired_rooms = set(self.deps.get_configured_rooms())
         if self.should_persist_invited_rooms():
             desired_rooms.update(self.invited_rooms)

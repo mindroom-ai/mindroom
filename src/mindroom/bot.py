@@ -1584,6 +1584,7 @@ class AgentBot:
                 orchestrator.validate_managed_entity_identities()
             self._runtime_view.mark_runtime_started()
             await self._prepare_matrix_sync_continuity()
+            await self._room_lifecycle.rearm_decrypt_notice_fences_for_joined_rooms()
             await self._set_avatar_if_available()
             # Keep durable tracking-state loading off the event loop at startup.
             await asyncio.to_thread(self._turn_store.warm)
