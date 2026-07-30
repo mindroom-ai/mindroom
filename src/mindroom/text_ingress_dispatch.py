@@ -294,6 +294,19 @@ def _parsed_command_for_event(
     return command_parser.parse(event.body)
 
 
+def _turn_sources_all_from_requester(handled_turn: TurnRecord, requester_user_id: str) -> bool:
+    """Return whether every replayable source in one turn was sent by ``requester_user_id``.
+
+    Whole-turn suppression settles every source in a coalesced batch, so it is only safe when the
+    turn provably belongs to that one requester, and a source the record cannot attribute fails
+    closed. Redacted sources are excluded because they own no reply.
+    """
+    return all(
+        handled_turn.requester_id_for_source(source_event_id) == requester_user_id
+        for source_event_id in handled_turn.replay_source_event_ids
+    )
+
+
 async def _blocked_before_plan(
     controller: TurnController,
     room: nio.MatrixRoom,
@@ -316,9 +329,9 @@ async def _blocked_before_plan(
     ):
         return True
 
-    may_be_superseded = prepared.dispatch.envelope.origin.may_be_superseded_by_newer_requester_turn and all(
-        metadata.sender == requester_user_id
-        for metadata in (prepared.handled_turn.source_event_metadata or {}).values()
+    may_be_superseded = (
+        prepared.dispatch.envelope.origin.may_be_superseded_by_newer_requester_turn
+        and _turn_sources_all_from_requester(prepared.handled_turn, requester_user_id)
     )
     if prepared.replay_guard.degraded:
         skips_turn = await controller._has_newer_unresponded_cached_thread_event(

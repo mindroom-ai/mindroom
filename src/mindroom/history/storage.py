@@ -29,11 +29,9 @@ from __future__ import annotations
 from copy import deepcopy
 from dataclasses import replace
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any, TypeGuard
+from typing import TYPE_CHECKING, Any
 
 from agno.db.base import SessionType
-from agno.run.agent import RunOutput
-from agno.run.base import RunStatus
 from agno.run.team import TeamRunOutput
 from agno.session.agent import AgentSession
 from agno.session.team import TeamSession
@@ -45,26 +43,19 @@ from mindroom.constants import (
     MINDROOM_MATRIX_HISTORY_METADATA_KEY,
 )
 from mindroom.history.types import HistoryScope, HistoryScopeState
+from mindroom.history_run_visibility import is_model_history_visible_run
 from mindroom.metadata_merge import deep_merge_metadata
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable
 
     from agno.db.base import BaseDb
+    from agno.run.agent import RunOutput
 
 _COMPACTION_METADATA_VERSION = 2
 _MATRIX_HISTORY_METADATA_VERSION = 1
 _PENDING_COMPACTION_SCOPE_KEYS_SESSION_STATE_KEY = "mindroom_pending_compaction_scope_keys"
 _COMPACTED_RUN_ID_RETENTION_LIMIT = 1_024
-
-
-def is_model_history_visible_run(run: object) -> TypeGuard[RunOutput | TeamRunOutput]:
-    """Return whether one run is represented in Agno model history."""
-    return (
-        isinstance(run, (RunOutput, TeamRunOutput))
-        and run.parent_run_id is None
-        and run.status not in {RunStatus.paused, RunStatus.cancelled, RunStatus.error}
-    )
 
 
 def new_scope_session(*, session_id: str, scope_id: str, is_team: bool) -> AgentSession | TeamSession:

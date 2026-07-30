@@ -923,6 +923,69 @@ async def test_startup_source_refresh_does_not_join_foreground_refill(
 
 
 @pytest.mark.asyncio
+async def test_live_read_does_not_wait_for_running_startup_source_refresh(
+    tmp_path: Path,
+) -> None:
+    """A running startup scan must not occupy the live same-thread read lane."""
+    room_id = "!room:localhost"
+    thread_id = "$thread:localhost"
+    event_cache = SqliteEventCache(tmp_path / "event_cache.db")
+    await event_cache.initialize()
+    await _replace_thread(event_cache, room_id, thread_id, [_clear_payload(thread_id, body="Cached root")])
+    conversation_cache = _conversation_cache_for_thread_reads(tmp_path, event_cache, client=MagicMock())
+    coordinator = EventCacheWriteCoordinator(logger=conversation_cache.logger)
+    conversation_cache.runtime.event_cache_write_coordinator = coordinator
+    source_call_started = asyncio.Event()
+    release_source_call = asyncio.Event()
+    startup_refresh: asyncio.Task[ThreadHistoryResult] | None = None
+    live_read: asyncio.Task[ThreadHistoryResult] | None = None
+
+    async def blocking_source_refresh(*_args: object, **_kwargs: object) -> ThreadHistoryResult:
+        source_call_started.set()
+        await release_source_call.wait()
+        return thread_history_result([], is_full_history=True)
+
+    try:
+        with patch(
+            "mindroom.matrix.conversation_cache.refresh_thread_history_from_source",
+            AsyncMock(side_effect=blocking_source_refresh),
+        ):
+            startup_refresh = asyncio.create_task(
+                conversation_cache.refresh_startup_thread_history_from_source(
+                    room_id,
+                    thread_id,
+                    caller_label="startup_auto_resume_freshness",
+                ),
+            )
+            await asyncio.wait_for(source_call_started.wait(), timeout=1.0)
+
+            live_read = asyncio.create_task(
+                conversation_cache.get_dispatch_thread_history(
+                    room_id,
+                    thread_id,
+                    caller_label="live_dispatch",
+                ),
+            )
+            live_result = await asyncio.wait_for(live_read, timeout=1.0)
+
+            assert [message.event_id for message in live_result] == [thread_id]
+            assert startup_refresh.done() is False
+
+            release_source_call.set()
+            startup_result = await asyncio.wait_for(startup_refresh, timeout=1.0)
+            assert startup_result == []
+            assert startup_result.is_full_history is True
+    finally:
+        release_source_call.set()
+        await asyncio.gather(
+            *(task for task in (startup_refresh, live_read) if task is not None),
+            return_exceptions=True,
+        )
+        await coordinator.close()
+        await event_cache.close()
+
+
+@pytest.mark.asyncio
 async def test_cancelled_startup_source_refresh_leaves_no_shared_refill_state(
     tmp_path: Path,
 ) -> None:

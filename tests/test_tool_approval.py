@@ -31,6 +31,7 @@ from mindroom.approval_manager import (
 from mindroom.config.agent import AgentConfig
 from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.main import Config
+from mindroom.config.matrix import MindRoomUserConfig
 from mindroom.config.models import ModelConfig
 from mindroom.entity_resolution import entity_identity_registry, mindroom_user_id
 from mindroom.logging_config import get_logger
@@ -2930,12 +2931,14 @@ def test_resolve_tool_approval_approver_rejects_internal_users(tmp_path: Path) -
         Config(
             agents={"code": AgentConfig(display_name="Code", role="Help with coding", rooms=["!room:localhost"])},
             bot_accounts=["@bridge_bot:localhost"],
+            mindroom_user=MindRoomUserConfig(),
             models={"default": ModelConfig(provider="openai", id="gpt-5.4")},
         ),
         runtime_paths,
     )
     persist_entity_accounts(config, runtime_paths, usernames={"router": "actual_router", "code": "actual_code"})
     internal_user_id = mindroom_user_id(config, runtime_paths)
+    assert internal_user_id is not None
     agent_user_id = entity_identity_registry(config, runtime_paths).current_id("code").full_id
 
     assert resolve_tool_approval_approver(config, runtime_paths, None) is None

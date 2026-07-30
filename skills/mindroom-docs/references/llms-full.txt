@@ -1377,6 +1377,7 @@ knowledge_bases:
     mode: semantic
     path: ./knowledge_docs          # Folder containing documents for this base (Pydantic default)
     watch: false                   # Direct external edits require reindex; API mutations still schedule refresh
+    require_content_before_publish: false  # Keep a cold semantic index initializing until a managed file exists
     chunk_size: 5000               # Default: 5000 (max characters per indexed chunk)
     chunk_overlap: 0               # Default: 0 (overlapping characters between chunks)
     git:                           # Optional: Sync this folder from a Git repository
@@ -1889,6 +1890,11 @@ Learning data is persisted under `agents/<name>/learning/<agent>.db`, so it surv
 `context_files` are resolved relative to the agent's workspace directory (`agents/<name>/workspace/`).
 When the effective memory backend is `file`, the agent's canonical file memory root is that same workspace directory.
 Absolute paths and `..` traversal are rejected.
+
+Each part of the `Personality Context` section is headed by the resolved path of the file it was read from, and the section states that those files are already inlined so the agent does not spend a turn re-reading them.
+When the rendered section exceeds `defaults.max_preload_chars`, MindRoom drops earlier file bodies first, trims the final surviving body from its end, and leaves a per-file marker giving each affected path and omitted-character count, followed by a summary marker for the section.
+A dropped file therefore still appears with its path, so the agent can open it when it needs the omitted part.
+If the configured cap cannot contain the section heading plus all required per-file and summary markers, agent materialization fails explicitly instead of silently removing source paths.
 
 ## Per-Agent Tool Configuration
 
@@ -9304,12 +9310,17 @@ Use [Matrix & Attachments](https://docs.mindroom.chat/tools/matrix-and-attachmen
 It complements MindRoom's automatic post-response memory extraction by letting the agent deliberately remember or inspect something on demand.
 The tool always uses the current agent's configured MindRoom memory backend, so the same calls work whether that agent uses built-in `mem0` storage or file-backed memory.
 Agents with `memory_backend: none` do not receive this tool.
-Search and list results include memory IDs, and those IDs are then used with `get_memory()`, `update_memory()`, and `delete_memory()`.
+Search and list results include identifiers or locators.
+Persisted memory IDs and file-backed `file:<path>:<line>` IDs can be used with `get_memory()`, `update_memory()`, and `delete_memory()`.
+Semantic file-memory matches use `semantic:<source_file>:<rank>` read-only locators that cannot be passed to the CRUD functions.
 The tool is bound to the current agent's MindRoom scope and can reach any agent or team memories that MindRoom makes visible to that agent.
 For file-backed memory, `search_memories()` follows `memory.search.mode`.
-Keyword mode scans markdown files directly.
-Semantic mode searches the agent's file-memory scope through a lazy embedding index and falls back to keyword search when embeddings are unavailable.
+Keyword mode scans `MEMORY.md` and `memory/**/*.md` directly.
+Semantic mode searches the agent's configured include patterns through a lazy embedding index and falls back to the fixed keyword corpus when embeddings are unavailable.
 Result metadata includes `search_mode` so callers can tell which path produced the result.
+File memory is already searchable on demand through `search_memories()`.
+When its agent-scoped semantic index is ready, configured file memory is also listed as a read-only source in `search_knowledge_base`.
+That knowledge surface is semantic-only and does not provide keyword fallback, team-visible memory, or memory IDs.
 
 ### Configuration
 
@@ -11265,6 +11276,9 @@ If you switch to `mem0`, add `MEMORY.md` back to `context_files` if you still wa
 The `openclaw_compat` preset already expands to native shell, coding, duckduckgo, website, browser, scheduler, sub-agent orchestration, and `matrix_message` tools (`attachments` is auto-implied by `matrix_message`), so listing those tools individually is not necessary.
 Copy or sync your OpenClaw files into `agents/openclaw/workspace/` before using this config so `context_files`, file memory, and `search_memories` read the same canonical workspace.
 Direct external edits to daily memory files are picked up lazily on the next semantic memory search.
+File memory is already searchable on demand through `search_memories`.
+When its agent-scoped semantic index is ready, configured file memory is also listed as a read-only source in `search_knowledge_base`.
+Use `search_memories` for keyword fallback, team-visible memory, and memory IDs.
 Use `knowledge_bases` only for non-memory project documents that should be searchable as external knowledge.
 
 ## Recommended workspace layout
@@ -13089,6 +13103,7 @@ knowledge_bases:
     mode: semantic                    # "semantic" builds a vector search index; "files" skips embeddings
     path: ./knowledge_docs/my_docs   # Folder containing documents
     watch: false                      # Direct external edits require reindex; API mutations still schedule refresh
+    require_content_before_publish: false  # Keep a cold semantic index initializing until a managed file exists
     chunk_size: 5000                  # Max characters per chunk
     chunk_overlap: 0                  # Overlap between adjacent chunks
 ```
@@ -13099,6 +13114,7 @@ knowledge_bases:
 | `mode` | `semantic` or `files` | `semantic` | `semantic` builds an embedding-backed search index while `files` skips embeddings and lets workspace-aware agents inspect the source files directly |
 | `path` | string | `./knowledge_docs` | Folder path (relative to the config file directory or absolute) |
 | `watch` | bool | `true` | When true, shared local folders watch filesystem changes and schedule background published-index refresh without blocking reads. When false, direct external edits require explicit reindex; dashboard/API upload and delete actions still schedule refresh |
+| `require_content_before_publish` | bool | `false` | Keep a cold semantic index initializing until at least one managed source file exists |
 | `chunk_size` | int | `5000` | Maximum characters per chunk for text-like files (minimum: `128`) |
 | `chunk_overlap` | int | `0` | Overlap characters between adjacent chunks (must be `< chunk_size`) |
 | `include_patterns` | list | `[]` | Root-anchored glob patterns to include before extension filtering |
@@ -13603,14 +13619,20 @@ memory:
 It does not relocate canonical agent file memory (which always lives under the agent's workspace root).
 It can affect team file memory when the resolution determines the configured path should be used.
 `memory.search` controls how `search_memories` reads file-backed agent memory.
-`mode: keyword` scans markdown files directly.
+`mode: keyword` scans `MEMORY.md` and `memory/**/*.md` directly.
 `mode: semantic` builds a lazy per-agent or per-requester vector index under `mindroom_data/memory_search_db/` and uses `memory.embedder`.
-`include` contains root-relative glob patterns below the effective file-memory root.
-The default `memory/**/*.md` searches dated memory files and excludes `MEMORY.md`.
-Set `include_entrypoint: true` only if you also want `MEMORY.md` returned by search.
+`include` contains root-relative glob patterns for semantic search below the effective file-memory root.
+The default semantic include `memory/**/*.md` searches dated memory files and excludes `MEMORY.md`.
+Set `include_entrypoint: true` only if you also want `MEMORY.md` returned by semantic search.
 MindRoom already preloads `MEMORY.md` into the prompt, so the default avoids duplicate retrieval.
+That preload is introduced by a header naming the file's absolute path and stating that it is inlined automatically every turn, so the agent does not re-read it to recall its own memory.
+`max_entrypoint_lines` caps how much of the file is inlined; when it truncates, the preload ends with a marker reporting the included and total line counts, the active cap, and the path to read for the omitted lines.
+Semantic fallback uses the same fixed `MEMORY.md` and `memory/**/*.md` corpus as keyword mode rather than the semantic include patterns.
 Semantic mode applies to the agent's own file-memory scope.
 Team-visible file memory is still keyword searched.
+File memory is already searchable on demand through `search_memories`.
+When its agent-scoped semantic index is ready, configured file memory is also listed as a read-only source in `search_knowledge_base`.
+The knowledge surface is semantic-only and does not provide keyword fallback, team-visible memory, or memory IDs, so use `search_memories` when those capabilities matter.
 
 Per-agent override example:
 
@@ -13734,6 +13756,8 @@ agents:
 ```
 
 This exposes `add_memory`, `search_memories`, `list_memories`, `get_memory`, `update_memory`, and `delete_memory`.
+Persisted IDs and file-backed `file:<path>:<line>` IDs support read, update, and delete operations.
+Semantic file-memory results use read-only `semantic:<source_file>:<rank>` locators.
 
 ## Agno Learning
 
@@ -16109,6 +16133,8 @@ MindRoom's architecture consists of several key components working together.
 | `streaming.py` | Streaming state machine: placeholder, progressive edits, tool traces, cancellation |
 | `media_inputs.py` | Shared media-input container passed across bot, teams, and AI layers |
 | `media_fallback.py` | Retries model requests without inline media when models reject media inputs |
+| `file_memory_knowledge.py` | Shared resolution for agent file-memory semantic knowledge overlays |
+| `memory_scope_ids.py` | Cycle-free canonical agent memory scope identifiers |
 | `avatar_generation.py` | Generates and manages avatar assets for agents, rooms, and spaces |
 | `topic_generator.py` | AI-generated room topics |
 | `background_tasks.py` | Non-blocking async task management with GC protection |

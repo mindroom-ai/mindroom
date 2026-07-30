@@ -24,7 +24,7 @@ from mindroom.dispatch_source import (
     source_kind_bypasses_coalescing,
     source_kind_from_content,
 )
-from mindroom.entity_resolution import entity_identity_registry
+from mindroom.entity_resolution import entity_identity_registry, is_human_requester_id
 from mindroom.handled_turns import TurnRecord
 from mindroom.matrix.event_info import reply_to_event_id_from_content
 from mindroom.matrix.media import is_audio_message_event
@@ -92,6 +92,11 @@ class IngressValidator:
             trusted_requester = requester_id_from_trusted_original_sender(
                 original_sender=original_sender,
                 original_sender_entity_name=self.managed_entity_name_for_sender(original_sender),
+                original_sender_is_human=is_human_requester_id(
+                    original_sender,
+                    self.deps.runtime.config,
+                    self.deps.runtime_paths,
+                ),
                 source_kind=source_kind,
                 sender_trusts_original_sender=self.should_trust_original_sender_metadata(
                     sender=sender,
@@ -163,7 +168,11 @@ class IngressValidator:
         original_sender = content.get(ORIGINAL_SENDER_KEY)
         if not isinstance(original_sender, str) or not original_sender:
             return None
-        if self.managed_entity_name_for_sender(original_sender) is not None:
+        if not is_human_requester_id(
+            original_sender,
+            self.deps.runtime.config,
+            self.deps.runtime_paths,
+        ):
             return None
         if not self.should_trust_original_sender_metadata(
             sender=sender,
@@ -249,7 +258,11 @@ class IngressValidator:
             return (
                 original_sender is not None
                 and original_sender != ""
-                and self.managed_entity_name_for_sender(original_sender) is None
+                and is_human_requester_id(
+                    original_sender,
+                    self.deps.runtime.config,
+                    self.deps.runtime_paths,
+                )
             )
         return self.is_trusted_internal_relay_event(event)
 

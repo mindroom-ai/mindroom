@@ -10,7 +10,13 @@ from uuid import uuid4
 import pytest
 
 from mindroom import redaction
-from mindroom.redaction import REDACTED, redact_log_event, redact_sensitive_data, redact_sensitive_text
+from mindroom.redaction import (
+    REDACTED,
+    REDACTION_FAILED,
+    redact_log_event,
+    redact_sensitive_data,
+    redact_sensitive_text,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -183,6 +189,96 @@ def test_redact_sensitive_data_tolerates_malformed_ipv6_url() -> None:
     assert "http://[" in message
 
 
+def test_redact_sensitive_text_fails_closed_when_internal_redaction_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A redaction bug must suppress output instead of escaping into application code."""
+
+    def raise_redaction_error(_value: str) -> str:
+        raise RuntimeError
+
+    monkeypatch.setattr(redaction, "_redact_secret_assignments", raise_redaction_error)
+
+    assert redact_sensitive_text("password=hunter2") == REDACTION_FAILED
+
+
+def test_redact_log_event_fails_closed_when_structured_redaction_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Structlog must receive a valid event even when the redactor itself fails."""
+
+    def raise_redaction_error(*_args: object, **_kwargs: object) -> object:
+        raise RuntimeError
+
+    monkeypatch.setattr(redaction, "_redact_sensitive_data", raise_redaction_error)
+
+    assert redact_log_event(None, "error", {"event": "failed", "password": "hunter2"}) == {
+        "event": REDACTION_FAILED,
+    }
+
+
+def test_redact_sensitive_data_uses_generic_mapping_fallback_when_internal_redaction_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A structured redaction bug must preserve mapping shape without claiming a log event."""
+
+    def raise_redaction_error(*_args: object, **_kwargs: object) -> object:
+        raise RuntimeError
+
+    monkeypatch.setattr(redaction, "_redact_sensitive_data", raise_redaction_error)
+
+    assert redact_sensitive_data({"command": "safe"}) == {
+        "__redaction_failed__": REDACTION_FAILED,
+    }
+
+
+def test_redact_sensitive_data_bounds_cyclic_containers() -> None:
+    """A cyclic log payload must produce finite output without raising RecursionError."""
+    value: dict[str, object] = {}
+    value["self"] = value
+
+    redacted = redact_sensitive_data(value)
+
+    assert len(json.dumps(redacted)) < 10_000
+
+
+def test_redact_log_event_bounds_large_collections(monkeypatch: pytest.MonkeyPatch) -> None:
+    """One oversized event must not make the logging processor walk every item."""
+    context_label_checks = 0
+    original_is_context_secret_label_key = redaction._is_context_secret_label_key
+
+    def count_context_label_checks(value: object) -> bool:
+        nonlocal context_label_checks
+        context_label_checks += 1
+        return original_is_context_secret_label_key(value)
+
+    monkeypatch.setattr(redaction, "_is_context_secret_label_key", count_context_label_checks)
+    event: dict[str, object] = {"value": "hunter2"}
+    event.update({f"field_{index}": index for index in range(1_998)})
+    event["name"] = "password"
+
+    redacted = redact_log_event(None, "info", event)
+
+    assert len(redacted) == 101
+    assert redacted["__truncated__"] == "1900 more items"
+    assert redacted["value"] == REDACTED
+    assert context_label_checks == 0
+
+
+def test_redact_sensitive_text_fails_closed_on_oversized_unbounded_input() -> None:
+    """Unbounded callers must not make redaction scan arbitrarily large text."""
+    value = "ordinary diagnostic text " * 100_000
+
+    assert redact_sensitive_text(value) == REDACTION_FAILED
+
+
+def test_redact_sensitive_text_fails_closed_on_ambiguous_multiline_secret() -> None:
+    """Multiline assignment syntax is ambiguous, so suppress it instead of guessing a span."""
+    value = "password=\n  hunter2\nmode=safe"
+
+    assert redact_sensitive_text(value) == REDACTION_FAILED
+
+
 def test_redact_sensitive_data_uses_context_for_bare_values_in_secret_lists() -> None:
     """List items under a secret-bearing key should be redacted without changing container shape."""
     redacted = redact_sensitive_data(
@@ -266,11 +362,11 @@ def test_redact_sensitive_data_keeps_values_for_non_schema_label_keys() -> None:
     ]
 
 
-def test_redact_sensitive_text_stays_linear_on_long_unbroken_runs() -> None:
-    """Long base64url/hex-like blobs must scan linearly, not quadratically."""
+def test_redact_sensitive_text_rejects_oversized_unbounded_runs_quickly() -> None:
+    """Hard input budget must reject oversized text without scanning its contents."""
     blob = "Ab3" * 40_000
     start = time.perf_counter()
-    assert redact_sensitive_text(blob) == blob
+    assert redact_sensitive_text(blob) == REDACTION_FAILED
     assert time.perf_counter() - start < 5.0
 
 
@@ -280,6 +376,22 @@ def test_redact_sensitive_text_stays_linear_while_finding_value_terminator() -> 
     start = time.perf_counter()
     assert redact_sensitive_text(value) == f"password={REDACTED}"
     assert time.perf_counter() - start < 5.0
+
+
+def test_redact_sensitive_text_handles_deep_assignments_without_recursion() -> None:
+    """Non-secret wrappers must not add Python stack frames while finding a secret leaf."""
+    value = "api_key=hunter2"
+    for _ in range(2_000):
+        value = f"outer='{value}'"
+
+    assert redact_sensitive_text(value) == value.replace("hunter2", REDACTED)
+
+
+def test_redact_sensitive_text_redacts_quoted_secret_with_escaped_quote() -> None:
+    """An escaped quote inside a secret must not end the redacted value early."""
+    value = r'{"password": "hun\"ter2", "mode": "safe"}'
+
+    assert redact_sensitive_text(value) == r'{"password": "***redacted***", "mode": "safe"}'
 
 
 def test_redact_sensitive_text_redacts_secret_assignments_with_long_keys() -> None:
@@ -361,7 +473,12 @@ def test_key_normalization_cache_is_bounded() -> None:
     """An unbounded cache keyed on arbitrary log keys would leak, so it must evict."""
     distinct_keys = 50_000
 
-    redact_log_event(None, "debug", {f"field_{index}": index for index in range(distinct_keys)})
+    for start in range(0, distinct_keys, 100):
+        redact_log_event(
+            None,
+            "debug",
+            {f"field_{index}": index for index in range(start, start + 100)},
+        )
 
     assert 0 < _key_normalization_cache_size() < distinct_keys
 
@@ -468,7 +585,12 @@ def test_cache_eviction_does_not_change_key_classification() -> None:
     probe_keys = (*_REDACTED_KEYS, *_KEPT_KEYS)
     before = {key: redact_sensitive_data({key: "probe-value"}) for key in probe_keys}
 
-    # Flood the cache with far more distinct keys than it can hold.
-    redact_log_event(None, "debug", {f"flood_{index}": index for index in range(50_000)})
+    # Flood the cache with far more distinct keys than it can hold, across bounded events.
+    for start in range(0, 50_000, 100):
+        redact_log_event(
+            None,
+            "debug",
+            {f"flood_{index}": index for index in range(start, start + 100)},
+        )
 
     assert {key: redact_sensitive_data({key: "probe-value"}) for key in probe_keys} == before
