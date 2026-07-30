@@ -171,7 +171,11 @@ def matrix_sync_cache_write_grace_seconds(runtime_paths: RuntimePaths) -> float:
     raw = (runtime_paths.env_value(_MATRIX_SYNC_CACHE_WRITE_GRACE_ENV) or "").strip()
     if not raw:
         return MATRIX_SYNC_CACHE_WRITE_GRACE_SECONDS
-    value = float(raw)
+    try:
+        value = float(raw)
+    except ValueError:
+        msg = f"{_MATRIX_SYNC_CACHE_WRITE_GRACE_ENV} must be a finite positive number"
+        raise ValueError(msg) from None
     if not math.isfinite(value) or value <= 0:
         msg = f"{_MATRIX_SYNC_CACHE_WRITE_GRACE_ENV} must be a finite positive number"
         raise ValueError(msg)

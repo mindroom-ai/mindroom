@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import math
 import time
 from contextlib import suppress
 from datetime import UTC, datetime, timedelta
@@ -1009,13 +1010,20 @@ def test_sync_cache_write_progress_registry_clears_after_failure() -> None:
         reset_matrix_sync_health()
 
 
-@pytest.mark.parametrize("raw", ["nan", "inf", "-inf", "0", "-1"])
+@pytest.mark.parametrize("raw", ["not-a-number", "nan", "inf", "-inf", "0", "-1"])
 def test_sync_cache_write_grace_rejects_non_finite_or_non_positive(raw: str) -> None:
-    """A non-finite or non-positive grace must not disable the bounded backstop."""
+    """An invalid grace must not disable the bounded backstop."""
     with pytest.raises(ValueError, match="must be a finite positive number"):
         matrix_sync_cache_write_grace_seconds(
             _fake_runtime_paths(MINDROOM_MATRIX_SYNC_CACHE_WRITE_GRACE_SECONDS=raw),
         )
+
+
+@pytest.mark.parametrize("grace_seconds", [math.nan, math.inf, -math.inf, 0.0, -1.0])
+def test_health_rejects_invalid_cache_write_grace(grace_seconds: float) -> None:
+    """Every health caller must preserve the finite cache-write backstop."""
+    with pytest.raises(ValueError, match="cache_write_grace_seconds must be a finite positive number"):
+        get_matrix_sync_health_snapshot(cache_write_grace_seconds=grace_seconds)
 
 
 def test_health_reports_shared_cache_write_progress_past_grace() -> None:

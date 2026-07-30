@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -158,6 +159,9 @@ def get_matrix_sync_health_snapshot(
     The reported `last_sync_time` is the oldest successful sync among active
     entities, because any stale entity should surface as unhealthy.
     """
+    if not math.isfinite(cache_write_grace_seconds) or cache_write_grace_seconds <= 0:
+        msg = "cache_write_grace_seconds must be a finite positive number"
+        raise ValueError(msg)
     current_time = _normalize_sync_time(now or datetime.now(UTC))
     current_monotonic = time.monotonic() if now_monotonic is None else now_monotonic
     with _matrix_sync_lock:
