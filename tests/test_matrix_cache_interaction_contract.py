@@ -1122,10 +1122,10 @@ async def test_limited_sync_with_opaque_child_stays_gapped(
 
 
 @pytest.mark.asyncio
-async def test_recovered_limited_sync_certifies_after_nio_dispatches_callbacks(
+async def test_recovered_limited_sync_stays_uncertified_without_upstream_callback_success(
     event_cache: ConversationEventCache,
 ) -> None:
-    """Nio publishes a recovered room only after its source callback is durable."""
+    """Nio's current recovered result lacks non-live callback-success proof."""
     response = _real_sync_response(
         limited_room_ids=(_ROOM_ID,),
         recovered_room_ids=frozenset({_ROOM_ID}),
@@ -1137,7 +1137,7 @@ async def test_recovered_limited_sync_certifies_after_nio_dispatches_callbacks(
     assert result.limited_room_ids == (_ROOM_ID,)
     assert result.recovered_room_ids == frozenset({_ROOM_ID})
     assert result.unrecovered_room_ids == frozenset()
-    assert result.certified is True
+    assert result.certified is False
 
 
 @pytest.mark.asyncio

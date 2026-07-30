@@ -1049,8 +1049,8 @@ async def test_on_sync_response_persists_latest_sync_token(tmp_path: Path) -> No
 
 
 @pytest.mark.asyncio
-async def test_recovered_sync_response_certifies_after_nio_callback_completion(tmp_path: Path) -> None:
-    """A recovered nio result certifies because its source callback was already durable."""
+async def test_recovered_sync_response_stays_uncertified_without_upstream_callback_success(tmp_path: Path) -> None:
+    """Local acceptance alone cannot make nio's current recovered label certify."""
     bot = _agent_bot(tmp_path)
     bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
     room = nio.MatrixRoom("!room:localhost", bot.matrix_id.full_id)
@@ -1081,8 +1081,43 @@ async def test_recovered_sync_response_certifies_after_nio_callback_completion(t
         await wait_for_background_tasks(timeout=1.0, owner=bot._runtime_view)
 
     run_persisted.assert_awaited_once()
-    assert bot._sync_cache_trust.state is SyncTrustState.CERTIFIED
-    assert _load_sync_token_value(tmp_path, bot.agent_name) == "s_recovered"
+    assert bot._sync_cache_trust.state is SyncTrustState.UNCERTAIN
+    assert bot.client.next_batch is None
+    assert _load_sync_token_value(tmp_path, bot.agent_name) is None
+
+
+@pytest.mark.asyncio
+async def test_cancelled_limited_cache_write_rewinds_established_cursor(tmp_path: Path) -> None:
+    """Cancellation must discard the active cursor before a later response can certify it."""
+    bot = _agent_bot(tmp_path)
+    bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
+    bot.client.next_batch = "s_after"
+    bot._first_sync_done = True
+    bot._sync_cache_trust.state = SyncTrustState.CERTIFIED
+    bot._sync_cache_trust.checkpoint = SyncCheckpoint("s_before")
+    save_sync_token(
+        tmp_path,
+        bot.agent_name,
+        "s_before",
+        cache_generation=_CACHE_GENERATION,
+    )
+    response = _sync_response(
+        "s_after",
+        joined_rooms={"!room:localhost": MagicMock(timeline=MagicMock(events=[], limited=True))},
+    )
+
+    with (
+        patch.object(
+            bot._conversation_cache,
+            "cache_sync_timeline_for_certification",
+            AsyncMock(side_effect=asyncio.CancelledError()),
+        ),
+        pytest.raises(asyncio.CancelledError),
+    ):
+        await bot._on_sync_response(response)
+
+    assert bot.client.next_batch is None
+    assert _load_sync_token_value(tmp_path, bot.agent_name) is None
 
 
 def test_cache_scope_cleanup_between_plan_and_apply_forces_tokenless_recovery(tmp_path: Path) -> None:

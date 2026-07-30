@@ -117,8 +117,8 @@ def test_nio_sync_responses_publish_exact_typed_recovery_fields(response_type: t
         assert response_fields[field_name].default == frozenset()
 
 
-def test_restored_token_recovered_only_first_sync_certifies_after_nio_dispatch(tmp_path: Path) -> None:
-    """Typed recovered rooms prove nio dispatched every wrapped source callback."""
+def test_restored_token_recovered_only_first_sync_stays_uncertified_without_callback_success(tmp_path: Path) -> None:
+    """Nio 0.32 recovered labels do not prove non-live callback acceptance."""
     response = _sync_response(
         limited_room_ids=(_RECOVERED_ROOM,),
         recovered_room_ids=frozenset({_RECOVERED_ROOM}),
@@ -143,13 +143,40 @@ def test_restored_token_recovered_only_first_sync_certifies_after_nio_dispatch(t
         first_sync=True,
     )
 
-    assert decision.state is SyncTrustState.CERTIFIED
-    assert decision.reset_client_token is False
-    assert load_sync_checkpoint(tmp_path, "code") is not None
+    assert decision.state is SyncTrustState.UNCERTAIN
+    assert decision.reset_client_token is True
+    assert load_sync_checkpoint(tmp_path, "code") is None
 
 
-def test_recovered_outcome_from_earlier_gap_certifies_continuity(tmp_path: Path) -> None:
-    """Nio's typed recovery result arrives only after durable callback acceptance."""
+def test_earlier_recovered_gap_with_failed_cache_write_rewinds_continuity(tmp_path: Path) -> None:
+    """A local durable failure rewinds even when the wire window is no longer limited."""
+    response = _sync_response(
+        limited_room_ids=(),
+        recovered_room_ids=frozenset({_RECOVERED_ROOM}),
+        unrecovered_room_ids=frozenset(),
+    )
+    result = _cache_result(
+        response,
+        limited_room_ids=(),
+        complete=False,
+    )
+    trust = _trust(tmp_path, state=SyncTrustState.CERTIFIED)
+    save_sync_token(tmp_path, "code", "s_before", cache_generation=_CACHE_GENERATION)
+
+    decision = trust.certify_response(
+        next_batch=response.next_batch,
+        cache_result=result,
+        first_sync=False,
+    )
+
+    assert decision.state is SyncTrustState.UNCERTAIN
+    assert decision.checkpoint_to_save is None
+    assert decision.reset_client_token is True
+    assert load_sync_checkpoint(tmp_path, "code") is None
+
+
+def test_earlier_recovered_gap_stays_uncertified_without_callback_success(tmp_path: Path) -> None:
+    """A recovered outcome outside the current window remains unsafe on nio 0.32."""
     response = _sync_response(
         limited_room_ids=(),
         recovered_room_ids=frozenset({_RECOVERED_ROOM}),
@@ -168,9 +195,9 @@ def test_recovered_outcome_from_earlier_gap_certifies_continuity(tmp_path: Path)
         first_sync=False,
     )
 
-    assert decision.state is SyncTrustState.CERTIFIED
-    assert decision.checkpoint_to_save is not None
-    assert decision.reset_client_token is False
+    assert decision.state is SyncTrustState.UNCERTAIN
+    assert decision.checkpoint_to_save is None
+    assert decision.reset_client_token is True
 
 
 @pytest.mark.parametrize(

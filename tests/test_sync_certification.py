@@ -58,8 +58,8 @@ def test_successful_sync_certifies_checkpoint(
     assert decision.reset_client_token is False
 
 
-def test_recovered_limited_room_certifies_after_nio_dispatches_callbacks() -> None:
-    """Nio publishes recovered rooms only after MindRoom's source wrapper accepted them."""
+def test_recovered_limited_room_stays_uncertified_without_upstream_callback_success() -> None:
+    """A recovered label is unsafe until nio makes callback success part of its contract."""
     room_id = "!recovered:localhost"
     cache_result = SyncCacheWriteResult(
         complete=True,
@@ -68,8 +68,8 @@ def test_recovered_limited_room_certifies_after_nio_dispatches_callbacks() -> No
     )
 
     assert cache_result.unclassified_limited_room_ids == ()
-    assert cache_result.has_recovery_obligation is False
-    assert cache_result.certified is True
+    assert cache_result.has_recovery_obligation is True
+    assert cache_result.certified is False
 
 
 def test_recovery_outcomes_fail_closed_for_unrecovered_and_unclassified_rooms() -> None:
