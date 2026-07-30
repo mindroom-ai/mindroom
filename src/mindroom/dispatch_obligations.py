@@ -163,6 +163,17 @@ class DispatchObligationStore:
             )
             """,
         )
+        connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS dispatch_obligations_pending_recovery
+            ON dispatch_obligations (
+                principal_id,
+                entity_name,
+                created_at_ns
+            )
+            WHERE state = 'pending'
+            """,
+        )
         if current_version == 1:
             connection.execute(
                 """
