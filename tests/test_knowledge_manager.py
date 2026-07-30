@@ -379,12 +379,22 @@ async def test_file_memory_knowledge_is_cross_agent_isolated(tmp_path: Path) -> 
     assert all(alpha_marker not in document.content for document in beta_cross)
 
 
-def test_default_merged_search_represents_every_source_at_the_result_boundary(
+@pytest.mark.parametrize(
+    ("authored_source_count", "expected_result_count", "memory_source_expected"),
+    [
+        pytest.param(10, 11, True, id="all-sources-fit"),
+        pytest.param(25, 20, False, id="source-count-is-capped"),
+    ],
+)
+def test_default_merged_search_budget_is_bounded_while_representing_sources_that_fit(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    authored_source_count: int,
+    expected_result_count: int,
+    memory_source_expected: bool,
 ) -> None:
-    """The default result budget must include the appended memory source."""
-    authored_base_ids = [f"source_{index}" for index in range(10)]
+    """Merged defaults represent every source only until the bounded result budget is full."""
+    authored_base_ids = [f"source_{index}" for index in range(authored_source_count)]
     config = _file_memory_config(tmp_path, "helper")
     config.agents["helper"].knowledge_bases = authored_base_ids
     config.knowledge_bases.update(
@@ -427,8 +437,11 @@ def test_default_merged_search_represents_every_source_at_the_result_boundary(
     assert knowledge is not None
     documents = knowledge.search("anything")
 
-    assert len(documents) == 11
-    assert any(document.content.startswith("result from file_memory_agent_helper_") for document in documents)
+    assert len(documents) == expected_result_count
+    assert (
+        any(document.content.startswith("result from file_memory_agent_helper_") for document in documents)
+        is memory_source_expected
+    )
 
 
 def _record_git_sync(
@@ -6224,12 +6237,63 @@ async def test_refresh_scheduler_claim_is_exclusive_across_instances(
     await asyncio.wait_for(started.wait(), timeout=1)
     await asyncio.sleep(0)
 
-    assert calls == 1
-    assert len(matrix_scheduler._tasks) + len(api_scheduler._tasks) == 1
+    try:
+        assert calls == 1
+        assert len(matrix_scheduler._tasks) + len(api_scheduler._tasks) == 1
+        assert matrix_scheduler._pending == {}
+        assert api_scheduler._pending == {}
+        assert matrix_scheduler._claim_retry_handles == {}
+        assert api_scheduler._claim_retry_handles == {}
+    finally:
+        release.set()
+        await matrix_scheduler.shutdown()
+        await api_scheduler.shutdown()
 
-    release.set()
-    await matrix_scheduler.shutdown()
-    await api_scheduler.shutdown()
+
+@pytest.mark.asyncio
+async def test_refresh_scheduler_retries_request_after_direct_refresh_owner_finishes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A request rejected by a direct refresh claim must run after that owner finishes."""
+    docs_path = tmp_path / "docs"
+    config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
+    runtime_paths = runtime_paths_for(config)
+    scheduler = KnowledgeRefreshScheduler()
+    refresh_target = knowledge_registry.resolve_refresh_target(
+        "docs",
+        config=config,
+        runtime_paths=runtime_paths,
+    )
+    started = asyncio.Event()
+    calls = 0
+
+    async def _record_refresh(_base_id: str, **_kwargs: object) -> object:
+        nonlocal calls
+        calls += 1
+        started.set()
+        return object()
+
+    monkeypatch.setattr(
+        "mindroom.knowledge.refresh_scheduler.refresh_knowledge_binding_in_subprocess",
+        _record_refresh,
+    )
+
+    knowledge_refresh_locks.mark_refresh_active(refresh_target)
+    direct_claim_active = True
+    scheduler.schedule_refresh("docs", config=config, runtime_paths=runtime_paths)
+
+    try:
+        await asyncio.sleep(0)
+        assert calls == 0
+        knowledge_refresh_locks.mark_refresh_inactive(refresh_target)
+        direct_claim_active = False
+        await asyncio.wait_for(started.wait(), timeout=1)
+        assert calls == 1
+    finally:
+        if direct_claim_active:
+            knowledge_refresh_locks.mark_refresh_inactive(refresh_target)
+        await scheduler.shutdown()
 
 
 @pytest.mark.asyncio

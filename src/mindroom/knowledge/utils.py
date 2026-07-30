@@ -36,6 +36,7 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 _MAX_REFRESH_SCHEDULED_COOLDOWNS = 512
+_MAX_MERGED_SOURCE_COVERAGE_RESULTS = 20
 _refresh_scheduled_at: dict[RefreshCooldownKey, float] = {}
 
 
@@ -551,7 +552,10 @@ def _merge_knowledge(agent_name: str, knowledges: list[Knowledge]) -> Knowledge 
     return KnowledgeWithSourceDescriptions(
         name=f"{agent_name}_multi_knowledge",
         vector_db=_MultiKnowledgeVectorDb(vector_dbs=vector_db_sources),
-        max_results=max(len(queryable_knowledges), *(knowledge.max_results for knowledge in queryable_knowledges)),
+        max_results=max(
+            min(len(queryable_knowledges), _MAX_MERGED_SOURCE_COVERAGE_RESULTS),
+            *(knowledge.max_results for knowledge in queryable_knowledges),
+        ),
         source_descriptions=source_descriptions,
     )
 

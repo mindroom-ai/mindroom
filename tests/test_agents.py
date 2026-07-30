@@ -3336,13 +3336,15 @@ def test_agent_without_workspace_omits_skill_authoring_guidance(tmp_path: Path) 
 
 
 @pytest.mark.parametrize("has_memory_tool", [False, True])
+@pytest.mark.parametrize("async_mode", [False, True])
 @pytest.mark.asyncio
 async def test_agent_knowledge_search_tool_description_lists_configured_sources_by_capability(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     has_memory_tool: bool,
+    async_mode: bool,
 ) -> None:
-    """Knowledge search should only recommend memory search when that function exists."""
+    """Sync and async knowledge tools recommend memory search only when that function exists."""
     config = _test_config()
     config.agents["general"].tools = ["memory"] if has_memory_tool else []
     config.agents["general"].knowledge_bases = ["engineering", "product"]
@@ -3369,6 +3371,11 @@ async def test_agent_knowledge_search_tool_description_lists_configured_sources_
     knowledge = resolve_agent_knowledge_access("general", config, runtime_paths).knowledge
     assert knowledge is not None
     agent = _create_agent_for_test("general", config, knowledge=knowledge)
+    if has_memory_tool and not async_mode:
+        agent.tools = [
+            *(agent.tools or []),
+            Function(name="search_memories", entrypoint=lambda: "memory result"),
+        ]
     run_output = RunOutput(
         run_id="run-knowledge-description",
         agent_id="general",
@@ -3385,11 +3392,12 @@ async def test_agent_knowledge_search_tool_description_lists_configured_sources_
         updated_at=1,
     )
 
-    search_tools = [
-        tool
-        for tool in await agent.aget_tools(run_output, run_context, session)
-        if isinstance(tool, Function) and tool.name == "search_knowledge_base"
-    ]
+    tools = (
+        await agent.aget_tools(run_output, run_context, session)
+        if async_mode
+        else agent.get_tools(run_output, run_context, session)
+    )
+    search_tools = [tool for tool in tools if isinstance(tool, Function) and tool.name == "search_knowledge_base"]
 
     assert len(search_tools) == 1
     description = search_tools[0].description

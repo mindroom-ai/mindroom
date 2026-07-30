@@ -98,6 +98,7 @@ knowledge_bases:
     mode: semantic                    # "semantic" builds a vector search index; "files" skips embeddings
     path: ./knowledge_docs/my_docs   # Folder containing documents
     watch: false                      # Direct external edits require reindex; API mutations still schedule refresh
+    require_content_before_publish: false  # Keep a cold semantic index initializing until a managed file exists
     chunk_size: 5000                  # Max characters per chunk
     chunk_overlap: 0                  # Overlap between adjacent chunks
 ```
@@ -108,6 +109,7 @@ knowledge_bases:
 | `mode` | `semantic` or `files` | `semantic` | `semantic` builds an embedding-backed search index while `files` skips embeddings and lets workspace-aware agents inspect the source files directly |
 | `path` | string | `./knowledge_docs` | Folder path (relative to the config file directory or absolute) |
 | `watch` | bool | `true` | When true, shared local folders watch filesystem changes and schedule background published-index refresh without blocking reads. When false, direct external edits require explicit reindex; dashboard/API upload and delete actions still schedule refresh |
+| `require_content_before_publish` | bool | `false` | Keep a cold semantic index initializing until at least one managed source file exists |
 | `chunk_size` | int | `5000` | Maximum characters per chunk for text-like files (minimum: `128`) |
 | `chunk_overlap` | int | `0` | Overlap characters between adjacent chunks (must be `< chunk_size`) |
 | `include_patterns` | list | `[]` | Root-anchored glob patterns to include before extension filtering |
