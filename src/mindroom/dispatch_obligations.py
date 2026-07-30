@@ -11,9 +11,9 @@ from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
-from typing import TypeIs
 
 import nio
+from typing_extensions import TypeIs
 
 from mindroom.background_tasks import create_background_task
 from mindroom.logging_config import get_logger
