@@ -899,6 +899,34 @@ def test_fallback_thread_history_delimits_agent_audio_caption(tmp_path: Path) ->
     )
 
 
+def test_fallback_thread_history_delimits_agent_audio_caption_without_attachment() -> None:
+    """An agent audio caption remains labeled when no local attachment record exists."""
+    messages = _build_thread_history_messages(
+        "Current request",
+        [
+            make_visible_message(
+                sender="@mindroom_team:localhost",
+                body="The lab closes at 7:41 PM",
+                event_id="$reply",
+            ),
+            make_visible_message(
+                sender="@mindroom_team:localhost",
+                body="Lab turnaround",
+                event_id="$voice",
+                content={"msgtype": "m.audio", "body": "Lab turnaround"},
+            ),
+        ],
+        response_sender_id="@mindroom_team:localhost",
+        config=_config(),
+    )
+
+    assert [message.role for message in messages] == ["assistant", "assistant", "user"]
+    assert [message.content for message in messages[:2]] == [
+        "\n\nThe lab closes at 7:41 PM",
+        "\n\n[audio message: Lab turnaround]",
+    ]
+
+
 def test_fallback_thread_history_unmapped_agent_media_uses_bare_separator(tmp_path: Path) -> None:
     """Unmapped assistant media keeps its caption bare while remaining self-delimiting."""
     file_path = tmp_path / "report.pdf"
