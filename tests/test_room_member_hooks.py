@@ -370,9 +370,11 @@ async def test_cancelled_sync_state_member_hook_is_directly_recoverable(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("retry_token", [None, "s_before_marker_failure"])
 async def test_sync_state_marker_failure_blocks_checkpoint_certification(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    retry_token: str | None,
 ) -> None:
     """A baseline marker must reach disk before its source sync position can advance."""
 
@@ -383,6 +385,10 @@ async def test_sync_state_marker_failure_blocks_checkpoint_certification(
     bot = _router_bot(tmp_path)
     room = _room()
     bot.client.rooms = {room.room_id: room}
+    bot.client.next_batch = "s_after_marker_failure"
+    if retry_token is not None:
+        bot._sync_cache_trust.state = SyncTrustState.CERTIFIED
+        bot._sync_cache_trust.checkpoint = SyncCheckpoint(retry_token)
     bot.hook_registry = HookRegistry.from_plugins([_plugin("onboarding", [joined])])
     monkeypatch.setattr(
         bot._conversation_cache,
@@ -406,6 +412,7 @@ async def test_sync_state_marker_failure_blocks_checkpoint_certification(
         )
 
     assert load_sync_checkpoint(tmp_path, bot.agent_name) is None
+    assert bot.client.next_batch == retry_token
 
 
 @pytest.mark.asyncio
@@ -436,7 +443,7 @@ async def test_sync_room_lifecycle_persist_failure_rewinds_once(
         message = "dispatch database unavailable"
         raise OSError(message)
 
-    persist_failure = MagicMock(wraps=bot._rewind_sync_after_dispatch_persistence_failure)
+    persist_failure = MagicMock(wraps=bot._rewind_sync_after_pre_certification_failure)
     bot._dispatch_obligation_runner.on_persist_failure = persist_failure
     monkeypatch.setattr(bot._dispatch_obligation_store, "create_pending", fail_create)
 

@@ -587,17 +587,10 @@ class HandledTurnLedger:
                 return None
             for event_id in persisted_record.indexed_event_ids:
                 self._responses[event_id] = persisted_record
-            persist_future = self._schedule_persist_locked(persisted_record)
-        if on_persisted is not None:
-
-            def notify_after_persist(completion: Future[None]) -> None:
-                try:
-                    completion.result()
-                except Exception:
-                    return
-                on_persisted(persisted_record)
-
-            persist_future.add_done_callback(notify_after_persist)
+            persist_future = self._schedule_persist_locked(
+                persisted_record,
+                on_persisted=on_persisted,
+            )
         if wait_for_persist:
             persist_future.result()
         logger.debug("handled_turn_recorded", indexed_event_count=len(persisted_record.indexed_event_ids))
@@ -682,9 +675,24 @@ class HandledTurnLedger:
             self._ensure_persist_drain_locked()
         barrier.result()
 
-    def _schedule_persist_locked(self, turn_record: TurnRecord) -> Future[None]:
+    def _schedule_persist_locked(
+        self,
+        turn_record: TurnRecord,
+        *,
+        on_persisted: Callable[[TurnRecord], None] | None = None,
+    ) -> Future[None]:
         """Queue one write-behind disk merge for records already applied to memory."""
         completion: Future[None] = Future()
+        if on_persisted is not None:
+
+            def notify_after_persist(done: Future[None]) -> None:
+                try:
+                    done.result()
+                except Exception:
+                    return
+                on_persisted(turn_record)
+
+            completion.add_done_callback(notify_after_persist)
         with self._state.persist_lock:
             self._state.pending_persists.append(
                 _PersistRequest(records=(turn_record,), completion=completion),

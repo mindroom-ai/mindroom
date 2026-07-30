@@ -27,6 +27,7 @@ from mindroom.history.types import HistoryScope
 from mindroom.message_target import MessageTarget
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from concurrent.futures import Future
     from pathlib import Path
 
@@ -647,6 +648,36 @@ def test_exact_persist_waiter_does_not_wait_for_later_batches(temp_dir: Path) ->
     assert not first_thread.is_alive()
 
 
+def test_on_persisted_runs_on_worker_when_write_finishes_before_schedule_returns(
+    temp_dir: Path,
+) -> None:
+    """A fast persist must never notify inline on the ledger caller thread."""
+    tracker = HandledTurnLedger("test_persist_notification_thread", base_path=temp_dir)
+    tracker.warm()
+    caller_thread_id = threading.get_ident()
+    notification_thread_ids: list[int] = []
+    real_schedule = tracker._schedule_persist_locked
+
+    def schedule_after_completion(
+        turn_record: TurnRecord,
+        *,
+        on_persisted: Callable[[TurnRecord], None] | None = None,
+    ) -> Future[None]:
+        completion = real_schedule(turn_record, on_persisted=on_persisted)
+        completion.result(timeout=5)
+        return completion
+
+    with patch.object(tracker, "_schedule_persist_locked", side_effect=schedule_after_completion):
+        tracker.update_handled_turn(
+            ("$fast",),
+            lambda _existing: TurnRecord.create(["$fast"], completed=False),
+            on_persisted=lambda _record: notification_thread_ids.append(threading.get_ident()),
+        )
+
+    assert len(notification_thread_ids) == 1
+    assert notification_thread_ids[0] != caller_thread_id
+
+
 def test_transient_persist_failure_waiter_resolves_after_retry(temp_dir: Path) -> None:
     """A waiter must remain blocked until its successful retry persists."""
     tracker = HandledTurnLedger("test_transient_persist_waiter", base_path=temp_dir)
@@ -749,8 +780,12 @@ def test_second_persist_failure_does_not_fail_waiter_queued_during_retry(temp_di
             raise OSError(second_failure)
         real_persist(turn_records)
 
-    def schedule_and_signal(turn_record: TurnRecord) -> Future[None]:
-        completion = real_schedule(turn_record)
+    def schedule_and_signal(
+        turn_record: TurnRecord,
+        *,
+        on_persisted: Callable[[TurnRecord], None] | None = None,
+    ) -> Future[None]:
+        completion = real_schedule(turn_record, on_persisted=on_persisted)
         if "$later" in turn_record.indexed_event_ids:
             later_scheduled.set()
         return completion
