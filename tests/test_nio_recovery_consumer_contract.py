@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, fields, replace
-from typing import TYPE_CHECKING, Any, cast, get_type_hints
+from typing import TYPE_CHECKING, cast, get_type_hints
 
 import nio
 import pytest
@@ -100,16 +100,12 @@ def _cache_result(
     complete: bool,
     errors: tuple[BaseException, ...] = (),
 ) -> SyncCacheWriteResult:
-    """Call the post-release MindRoom factory after the upstream contract exists."""
-    result_type = cast("Any", SyncCacheWriteResult)
-    return cast(
-        "SyncCacheWriteResult",
-        result_type.from_sync_response(
-            response,
-            complete=complete,
-            limited_room_ids=limited_room_ids,
-            errors=errors,
-        ),
+    """Build the cache result from the exact typed upstream response."""
+    return SyncCacheWriteResult.from_sync_response(
+        response,
+        complete=complete,
+        limited_room_ids=limited_room_ids,
+        errors=errors,
     )
 
 
@@ -122,7 +118,7 @@ def test_nio_sync_responses_publish_exact_typed_recovery_fields(response_type: t
     for field_name in ("recovered_room_ids", "unrecovered_room_ids"):
         assert field_name in response_fields
         assert type_hints[field_name] == frozenset[str]
-        assert response_fields[field_name].default_factory is frozenset
+        assert response_fields[field_name].default == frozenset()
 
 
 def test_restored_token_recovered_only_first_sync_certifies_continuation(tmp_path: Path) -> None:

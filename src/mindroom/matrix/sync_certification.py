@@ -4,9 +4,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from mindroom.matrix.sync_token_values import normalize_sync_token
+
+if TYPE_CHECKING:
+    import nio
 
 
 class SyncTrustState(Enum):
@@ -32,15 +35,57 @@ class SyncCacheWriteResult:
 
     complete: bool
     limited_room_ids: tuple[str, ...] = ()
+    recovered_room_ids: frozenset[str] = frozenset()
+    unrecovered_room_ids: frozenset[str] = frozenset()
     errors: tuple[BaseException, ...] = ()
     runtime_available: bool | None = None
     task_count: int | None = None
     runtime_diagnostics: dict[str, object] | None = None
 
+    @classmethod
+    def from_sync_response(
+        cls,
+        response: nio.SyncResponse | nio.SlidingSyncResponse,
+        *,
+        complete: bool,
+        limited_room_ids: tuple[str, ...] = (),
+        errors: tuple[BaseException, ...] = (),
+        runtime_available: bool | None = None,
+        task_count: int | None = None,
+        runtime_diagnostics: dict[str, object] | None = None,
+    ) -> SyncCacheWriteResult:
+        """Build a cache result carrying nio's authoritative recovery outcome."""
+        return cls(
+            complete=complete,
+            limited_room_ids=limited_room_ids,
+            recovered_room_ids=response.recovered_room_ids,
+            unrecovered_room_ids=response.unrecovered_room_ids,
+            errors=errors,
+            runtime_available=runtime_available,
+            task_count=task_count,
+            runtime_diagnostics=runtime_diagnostics,
+        )
+
+    @property
+    def unclassified_limited_room_ids(self) -> tuple[str, ...]:
+        """Return current limited rooms missing an authoritative recovery outcome."""
+        classified_room_ids = self.recovered_room_ids | self.unrecovered_room_ids
+        return tuple(room_id for room_id in self.limited_room_ids if room_id not in classified_room_ids)
+
+    @property
+    def recovery_complete(self) -> bool:
+        """Return whether nio closed every known recovery obligation."""
+        return not self.unrecovered_room_ids and not self.unclassified_limited_room_ids
+
+    @property
+    def has_recovery_obligation(self) -> bool:
+        """Return whether this response reports or creates any recovery obligation."""
+        return bool(self.limited_room_ids or self.recovered_room_ids or self.unrecovered_room_ids)
+
     @property
     def certified(self) -> bool:
         """Return whether this result proves the sync delta reached durable cache."""
-        return self.complete and not self.limited_room_ids and not self.errors
+        return self.complete and not self.errors and self.recovery_complete
 
 
 @dataclass(frozen=True)
@@ -74,7 +119,7 @@ def _uncertain_reason(cache_result: SyncCacheWriteResult, *, next_batch: str | N
         return "missing_next_batch"
     if cache_result.errors:
         return "cache_write_failed"
-    if cache_result.limited_room_ids:
+    if not cache_result.recovery_complete:
         return "limited_sync_timeline"
     if not cache_result.complete:
         return "cache_write_incomplete"
@@ -121,6 +166,9 @@ def sync_cache_write_diagnostics(cache_result: SyncCacheWriteResult) -> dict[str
         "cache_write_complete": cache_result.complete,
         "cache_write_certified": cache_result.certified,
         "cache_limited_room_count": len(cache_result.limited_room_ids),
+        "cache_recovered_room_count": len(cache_result.recovered_room_ids),
+        "cache_unrecovered_room_count": len(cache_result.unrecovered_room_ids),
+        "cache_unclassified_limited_room_count": len(cache_result.unclassified_limited_room_ids),
         "cache_error_count": len(cache_result.errors),
     }
     if cache_result.runtime_available is not None:
@@ -131,6 +179,12 @@ def sync_cache_write_diagnostics(cache_result: SyncCacheWriteResult) -> dict[str
         diagnostics.update(cache_result.runtime_diagnostics)
     if cache_result.limited_room_ids:
         diagnostics["cache_limited_room_ids"] = cache_result.limited_room_ids[:5]
+    if cache_result.recovered_room_ids:
+        diagnostics["cache_recovered_room_ids"] = tuple(sorted(cache_result.recovered_room_ids))[:5]
+    if cache_result.unrecovered_room_ids:
+        diagnostics["cache_unrecovered_room_ids"] = tuple(sorted(cache_result.unrecovered_room_ids))[:5]
+    if cache_result.unclassified_limited_room_ids:
+        diagnostics["cache_unclassified_limited_room_ids"] = cache_result.unclassified_limited_room_ids[:5]
     if cache_result.errors:
         diagnostics["cache_error_types"] = tuple(type(error).__name__ for error in cache_result.errors[:5])
         diagnostics["cache_error_messages"] = tuple(str(error)[:200] for error in cache_result.errors[:5])

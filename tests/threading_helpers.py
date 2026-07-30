@@ -612,6 +612,8 @@ class ThreadingBehaviorTestBase:
         sync_response.__class__ = nio.SyncResponse
         sync_response.rooms = MagicMock()
         sync_response.rooms.join = joined_rooms
+        sync_response.recovered_room_ids = frozenset()
+        sync_response.unrecovered_room_ids = frozenset()
         return sync_response
 
     async def _run_sync_response_without_startup_side_effects(

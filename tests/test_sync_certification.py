@@ -58,6 +58,39 @@ def test_successful_sync_certifies_checkpoint(
     assert decision.reset_client_token is False
 
 
+def test_recovered_limited_room_certifies_after_local_durability() -> None:
+    """An authoritative recovered outcome should supersede the wire's limited flag."""
+    room_id = "!recovered:localhost"
+    cache_result = SyncCacheWriteResult(
+        complete=True,
+        limited_room_ids=(room_id,),
+        recovered_room_ids=frozenset({room_id}),
+    )
+
+    assert cache_result.unclassified_limited_room_ids == ()
+    assert cache_result.recovery_complete is True
+    assert cache_result.has_recovery_obligation is True
+    assert cache_result.certified is True
+
+
+def test_recovery_outcomes_fail_closed_for_unrecovered_and_unclassified_rooms() -> None:
+    """Every limited room must be recovered and no earlier gap may remain open."""
+    recovered_room = "!recovered:localhost"
+    unrecovered_room = "!unrecovered:localhost"
+    unclassified_room = "!unclassified:localhost"
+    cache_result = SyncCacheWriteResult(
+        complete=True,
+        limited_room_ids=(recovered_room, unrecovered_room, unclassified_room),
+        recovered_room_ids=frozenset({recovered_room}),
+        unrecovered_room_ids=frozenset({unrecovered_room}),
+    )
+
+    assert cache_result.unclassified_limited_room_ids == (unclassified_room,)
+    assert cache_result.recovery_complete is False
+    assert cache_result.has_recovery_obligation is True
+    assert cache_result.certified is False
+
+
 @pytest.mark.parametrize(
     ("cache_result", "reason"),
     [
@@ -103,12 +136,16 @@ def test_sync_cache_write_diagnostics_explains_uncertainty() -> None:
         "cache_write_complete": False,
         "cache_write_certified": False,
         "cache_limited_room_count": 1,
+        "cache_recovered_room_count": 0,
+        "cache_unrecovered_room_count": 0,
+        "cache_unclassified_limited_room_count": 1,
         "cache_error_count": 1,
         "cache_runtime_available": False,
         "cache_task_count": 3,
         "cache_backend": "postgres",
         "cache_postgres_unavailable_reason": "connection closed",
         "cache_limited_room_ids": ("!room:localhost",),
+        "cache_unclassified_limited_room_ids": ("!room:localhost",),
         "cache_error_types": ("RuntimeError",),
         "cache_error_messages": ("cache failed",),
     }
