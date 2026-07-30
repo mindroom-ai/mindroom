@@ -1150,6 +1150,23 @@ async def _load_scanned_or_fetched_message_data(
     return scanned_message_data
 
 
+def _requester_event_response(
+    response: object,
+    *,
+    event_id: str,
+) -> nio.RoomGetEventResponse | None:
+    """Return one exact requester event or classify why it is unavailable."""
+    if isinstance(response, nio.RoomGetEventResponse):
+        return response
+    if not isinstance(response, nio.RoomGetEventError):
+        msg = f"Unexpected requester Matrix event response for {event_id}"
+        raise TypeError(msg)
+    if response.status_code == "M_NOT_FOUND":
+        return None
+    msg = f"Failed to resolve requester Matrix event {event_id}: {response.message}"
+    raise RuntimeError(msg)
+
+
 async def _fetch_message_data_for_event_id(
     client: nio.AsyncClient,
     *,
@@ -1162,8 +1179,11 @@ async def _fetch_message_data_for_event_id(
     if event_id in fetched_message_data_by_event_id:
         return fetched_message_data_by_event_id[event_id]
 
-    response = await client.room_get_event(room_id, event_id)
-    if not isinstance(response, nio.RoomGetEventResponse):
+    response = _requester_event_response(
+        await client.room_get_event(room_id, event_id),
+        event_id=event_id,
+    )
+    if response is None:
         fetched_message_data_by_event_id[event_id] = None
         return None
 

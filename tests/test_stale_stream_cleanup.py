@@ -2377,6 +2377,65 @@ async def test_requester_resolution_exception_requests_retry_after_cleanup(tmp_p
     assert result.retry_required is True
 
 
+@pytest.mark.parametrize(
+    ("lookup_response", "expected_retry"),
+    [
+        pytest.param(
+            nio.RoomGetEventError("Forbidden", status_code="M_FORBIDDEN"),
+            True,
+            id="matrix-error",
+        ),
+        pytest.param(object(), True, id="malformed"),
+        pytest.param(
+            nio.RoomGetEventError("Missing", status_code="M_NOT_FOUND"),
+            False,
+            id="not-found",
+        ),
+    ],
+)
+@pytest.mark.asyncio
+async def test_requester_resolution_response_classifies_retry_after_cleanup(
+    tmp_path: Path,
+    lookup_response: object,
+    expected_retry: bool,
+) -> None:
+    """Requester lookup responses must distinguish definitive absence from retry."""
+    config = _make_config(tmp_path)
+    client = AsyncMock(spec=nio.AsyncClient)
+    client.room_messages.return_value = _room_messages_response(
+        _make_message_event(
+            event_id="$message",
+            body="Needs cleanup",
+            timestamp_ms=NOW_MS - STALE_AGE_MS,
+            relates_to=_thread_reply_relation("$thread-root", "$external-user-msg"),
+            extra_content={STREAM_STATUS_KEY: "streaming"},
+        ),
+    )
+    client.room_get_event_relations = MagicMock(return_value=_aiter())
+    client.room_get_event = AsyncMock(return_value=lookup_response)
+
+    with (
+        patch("mindroom.matrix.stale_stream_cleanup.time.time", return_value=NOW_MS / 1000),
+        patch(
+            "mindroom.matrix.stale_stream_cleanup.edit_message_result",
+            new=AsyncMock(side_effect=delivered_matrix_side_effect("$edit")),
+        ),
+    ):
+        result = await cleanup_stale_streaming_room(
+            client,
+            room_id=ROOM_ID,
+            actors={BOT_USER_ID: StaleStreamCleanupActor(client, None)},
+            bot_user_ids={BOT_USER_ID},
+            config=config,
+            runtime_paths=runtime_paths_for(config),
+        )
+
+    assert result.cleaned_count == 1
+    assert len(result.interrupted_threads) == 1
+    assert result.interrupted_threads[0].original_sender_id is None
+    assert result.retry_required is expected_retry
+
+
 @pytest.mark.asyncio
 async def test_requester_resolution_respects_max_depth(tmp_path: Path) -> None:
     """Requester resolution should stop after max_depth to prevent unbounded API calls."""
