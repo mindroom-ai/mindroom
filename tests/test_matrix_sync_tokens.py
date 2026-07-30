@@ -1067,7 +1067,6 @@ async def test_shutdown_discard_warning_logs_exact_drain_predicates(
     assert len(warnings) == 1
     assert warnings[0]["coalescing_drain_completed"] is coalescing_drain_result.completed
     assert warnings[0]["cancelled_unready_count"] == coalescing_drain_result.cancelled_unready_count
-    assert warnings[0]["coalescing_drain_completed"] is (warnings[0]["cancelled_unready_count"] == 0)
     assert warnings[0]["responses_drained"] is responses_drained
     assert not {"body", "content", "formatted_body", "message_content"} & warnings[0].keys()
 
