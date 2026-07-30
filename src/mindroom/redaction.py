@@ -514,7 +514,8 @@ def _redact_mapping(
     force_redact: bool,
 ) -> dict[str, _RedactedValue]:
     redacted: dict[str, _RedactedValue] = {}
-    has_secret_context_label = _mapping_has_secret_context_label(value)
+    mapping_is_truncated = max_collection_items is not None and len(value) > max_collection_items
+    has_secret_context_label = mapping_is_truncated or _mapping_has_secret_context_label(value)
     parent_is_query_container = _is_query_container(parent_key)
     for index, (key, item) in enumerate(value.items()):
         if max_collection_items is not None and index >= max_collection_items:

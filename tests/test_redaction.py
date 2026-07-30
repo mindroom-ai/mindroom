@@ -227,12 +227,27 @@ def test_redact_sensitive_data_bounds_cyclic_containers() -> None:
     assert len(json.dumps(redacted)) < 10_000
 
 
-def test_redact_log_event_bounds_large_collections() -> None:
+def test_redact_log_event_bounds_large_collections(monkeypatch: pytest.MonkeyPatch) -> None:
     """One oversized event must not make the logging processor walk every item."""
-    redacted = redact_log_event(None, "info", {f"field_{index}": index for index in range(2_000)})
+    context_label_checks = 0
+    original_is_context_secret_label_key = redaction._is_context_secret_label_key
+
+    def count_context_label_checks(value: object) -> bool:
+        nonlocal context_label_checks
+        context_label_checks += 1
+        return original_is_context_secret_label_key(value)
+
+    monkeypatch.setattr(redaction, "_is_context_secret_label_key", count_context_label_checks)
+    event: dict[str, object] = {"value": "hunter2"}
+    event.update({f"field_{index}": index for index in range(1_998)})
+    event["name"] = "password"
+
+    redacted = redact_log_event(None, "info", event)
 
     assert len(redacted) == 101
     assert redacted["__truncated__"] == "1900 more items"
+    assert redacted["value"] == REDACTED
+    assert context_label_checks == 0
 
 
 def test_redact_sensitive_text_fails_closed_on_oversized_unbounded_input() -> None:
