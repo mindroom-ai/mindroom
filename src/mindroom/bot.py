@@ -1206,9 +1206,17 @@ class AgentBot:
         if decision.reset_client_token:
             return _RoomMemberJoinSyncHookPlan(arm_after_response=False)
         self._cold_history_fence.observe_continuation(response.next_batch)
+        return room_member_join_hook_plan
+
+    def _clear_certified_join_decrypt_fences(
+        self,
+        *,
+        decision: SyncCertificationDecision,
+        response: nio.SyncResponse,
+    ) -> None:
+        """Clear exact pending joins before certifying their trusted response."""
         if decision.state is SyncTrustState.CERTIFIED:
             self._room_lifecycle.observe_trusted_sync_rooms(response.rooms.join)
-        return room_member_join_hook_plan
 
     def seconds_since_last_sync_activity(self) -> float | None:
         """Return elapsed seconds since the last sync-loop activity seen by the watchdog."""
@@ -1347,6 +1355,10 @@ class AgentBot:
                     await self._run_pre_certification_sync_response_side_effects(
                         _response,
                         room_member_join_hook_plan=room_member_join_hook_plan,
+                    )
+                    self._clear_certified_join_decrypt_fences(
+                        decision=decision,
+                        response=_response,
                     )
                 except BaseException:
                     client = self.client
@@ -1584,7 +1596,7 @@ class AgentBot:
                 orchestrator.validate_managed_entity_identities()
             self._runtime_view.mark_runtime_started()
             await self._prepare_matrix_sync_continuity()
-            await self._room_lifecycle.rearm_decrypt_notice_fences_for_joined_rooms()
+            await self._room_lifecycle.restore_pending_join_decrypt_fences()
             await self._set_avatar_if_available()
             # Keep durable tracking-state loading off the event loop at startup.
             await asyncio.to_thread(self._turn_store.warm)

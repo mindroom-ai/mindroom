@@ -412,12 +412,12 @@ async def test_sliding_trusted_sync_clears_joined_room_decrypt_notice_fence(
 
 
 @pytest.mark.asyncio
-async def test_restart_rearms_decrypt_notice_fence_for_room_joined_before_crash(
+async def test_restart_loads_only_exact_unfinished_join_decrypt_fence(
     tmp_path: Path,
 ) -> None:
-    """Server-confirmed membership must restore a lost in-memory join fence."""
+    """Restart must distinguish an unfinished join from a long-trusted room."""
     room_id = "!room:localhost"
-    unpersisted_invite_room_id = "!invite-before-persist:localhost"
+    trusted_room_id = "!trusted:localhost"
     first_bot = _agent_bot(tmp_path)
     first_bot.client = make_matrix_client_mock(user_id=first_bot.agent_user.user_id)
 
@@ -442,13 +442,13 @@ async def test_restart_rearms_decrypt_notice_fence_for_room_joined_before_crash(
         patch("mindroom.bot.interactive.init_persistence"),
         patch(
             "mindroom.bot_room_lifecycle.get_joined_rooms",
-            AsyncMock(return_value=[room_id, unpersisted_invite_room_id]),
+            AsyncMock(return_value=[room_id, trusted_room_id]),
         ),
     ):
         await restarted_bot.start()
 
     assert restarted_bot._room_lifecycle.decrypt_notice_is_fenced(room_id)
-    assert restarted_bot._room_lifecycle.decrypt_notice_is_fenced(unpersisted_invite_room_id)
+    assert not restarted_bot._room_lifecycle.decrypt_notice_is_fenced(trusted_room_id)
 
 
 @pytest.mark.asyncio
@@ -602,10 +602,10 @@ async def test_bot_start_restores_saved_sync_token(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_bot_start_rearms_joined_room_fence_before_restored_token_sync(
+async def test_bot_start_leaves_trusted_joined_room_unfenced_for_catch_up(
     tmp_path: Path,
 ) -> None:
-    """Restored-token sync cannot outrun restart fencing for joined rooms."""
+    """A joined room without unfinished join state may report real Megolm loss."""
     room_id = "!room:localhost"
     bot = _agent_bot(tmp_path)
     save_sync_token(
@@ -630,11 +630,37 @@ async def test_bot_start_rearms_joined_room_fence_before_restored_token_sync(
 
     get_joined_rooms.assert_awaited_once_with(client)
     assert client.next_batch == "s_saved"
-    assert not await bot._admit_dispatch_source(
+    assert await bot._admit_dispatch_source(
         room_id,
-        "$restored-history",
+        "$trusted-catch-up",
         DispatchCallbackKind.DECRYPTION_FAILURE,
     )
+
+
+@pytest.mark.asyncio
+async def test_bot_start_fails_when_joined_rooms_query_cannot_verify_fences(
+    tmp_path: Path,
+) -> None:
+    """Startup cannot silently unfence pending joins when membership is unknown."""
+    bot = _agent_bot(tmp_path)
+    client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
+    get_joined_rooms = AsyncMock(return_value=None)
+
+    with (
+        patch.object(bot, "ensure_user_account", AsyncMock()),
+        patch("mindroom.bot.login_agent_user", AsyncMock(return_value=client)),
+        patch.object(bot, "_set_avatar_if_available", AsyncMock()),
+        patch.object(bot, "_set_presence_with_model_info", AsyncMock()),
+        patch("mindroom.bot.interactive.init_persistence"),
+        patch("mindroom.bot_room_lifecycle.get_joined_rooms", get_joined_rooms),
+        pytest.raises(RuntimeError, match="joined rooms"),
+    ):
+        await bot.start()
+
+    get_joined_rooms.assert_awaited_once_with(client)
+    client.close.assert_awaited_once_with()
+    assert bot.client is None
+    assert not bot.running
 
 
 @pytest.mark.asyncio
