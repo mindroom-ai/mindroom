@@ -106,7 +106,7 @@ def InterruptedThread(  # noqa: N802
             resolved_bot_user_id = BOT_USER_ID
     if owner_actor is None:
         owner_cache = AsyncMock()
-        owner_cache.refresh_strict_thread_history_from_source.return_value = _authoritative_history(
+        owner_cache.refresh_startup_thread_history_from_source.return_value = _authoritative_history(
             _history_message(target_event_id),
         )
         owner_cache.notify_outbound_message = Mock()
@@ -411,7 +411,7 @@ def _auto_resume_conversation_cache(interrupted: list[InterruptedThreadRecord]) 
             ],
         )
 
-    conversation_cache.refresh_strict_thread_history_from_source = AsyncMock(
+    conversation_cache.refresh_startup_thread_history_from_source = AsyncMock(
         side_effect=history_for_thread,
     )
     conversation_cache.notify_outbound_message = Mock()
@@ -1026,7 +1026,7 @@ async def test_auto_resume_router_interruption_uses_router_cache_without_self_me
         )
 
     assert resumed_count == 1
-    router_cache.refresh_strict_thread_history_from_source.assert_awaited_once()
+    router_cache.refresh_startup_thread_history_from_source.assert_awaited_once()
     mock_send.assert_awaited_once()
     content = mock_send.await_args.args[2]
     assert content["body"] == AUTO_RESUME_MESSAGE
@@ -1096,8 +1096,8 @@ async def test_auto_resume_classifies_later_activity_by_effective_sender_and_his
         ),
     ]
     conversation_cache = _auto_resume_conversation_cache(interrupted)
-    conversation_cache.refresh_strict_thread_history_from_source.side_effect = None
-    conversation_cache.refresh_strict_thread_history_from_source.return_value = _authoritative_history(
+    conversation_cache.refresh_startup_thread_history_from_source.side_effect = None
+    conversation_cache.refresh_startup_thread_history_from_source.return_value = _authoritative_history(
         _history_message("$target", timestamp=100),
         _history_message("$newer", sender=newer_sender, timestamp=100, content=newer_content),
     )
@@ -1136,8 +1136,8 @@ async def test_prior_auto_resume_relay_does_not_suppress_sibling_resume(tmp_path
         ),
     ]
     conversation_cache = _auto_resume_conversation_cache(interrupted)
-    conversation_cache.refresh_strict_thread_history_from_source.side_effect = None
-    conversation_cache.refresh_strict_thread_history_from_source.return_value = _authoritative_history(
+    conversation_cache.refresh_startup_thread_history_from_source.side_effect = None
+    conversation_cache.refresh_startup_thread_history_from_source.return_value = _authoritative_history(
         _history_message("$target"),
         _history_message(
             "$prior-resume",
@@ -1192,36 +1192,36 @@ async def test_auto_resume_fails_closed_without_authoritative_target_history(
     ]
     conversation_cache = None if history_case == "missing" else _auto_resume_conversation_cache(interrupted)
     if conversation_cache is not None and history_case == "failed":
-        conversation_cache.refresh_strict_thread_history_from_source.side_effect = RuntimeError("history failed")
+        conversation_cache.refresh_startup_thread_history_from_source.side_effect = RuntimeError("history failed")
     elif conversation_cache is not None and history_case == "incomplete":
-        conversation_cache.refresh_strict_thread_history_from_source.side_effect = None
-        conversation_cache.refresh_strict_thread_history_from_source.return_value = thread_history_result(
+        conversation_cache.refresh_startup_thread_history_from_source.side_effect = None
+        conversation_cache.refresh_startup_thread_history_from_source.return_value = thread_history_result(
             [_history_message("$target")],
             is_full_history=False,
             diagnostics={"thread_read_source": "homeserver"},
         )
     elif conversation_cache is not None and history_case == "degraded":
-        conversation_cache.refresh_strict_thread_history_from_source.side_effect = None
-        conversation_cache.refresh_strict_thread_history_from_source.return_value = thread_history_result(
+        conversation_cache.refresh_startup_thread_history_from_source.side_effect = None
+        conversation_cache.refresh_startup_thread_history_from_source.return_value = thread_history_result(
             [_history_message("$target")],
             is_full_history=True,
             diagnostics={"thread_read_source": "homeserver", "thread_read_degraded": True},
         )
     elif conversation_cache is not None and history_case == "opaque":
-        conversation_cache.refresh_strict_thread_history_from_source.side_effect = OpaqueEncryptedThreadHistoryError(
+        conversation_cache.refresh_startup_thread_history_from_source.side_effect = OpaqueEncryptedThreadHistoryError(
             "opaque history",
         )
     elif conversation_cache is not None and history_case == "missing_target":
-        conversation_cache.refresh_strict_thread_history_from_source.side_effect = None
-        conversation_cache.refresh_strict_thread_history_from_source.return_value = _authoritative_history(
+        conversation_cache.refresh_startup_thread_history_from_source.side_effect = None
+        conversation_cache.refresh_startup_thread_history_from_source.return_value = _authoritative_history(
             _history_message("$other"),
         )
     elif conversation_cache is not None and history_case == "untrusted_sender":
         state = MatrixState.load(runtime_paths_for(config))
         state.accounts.pop(managed_account_key("other"))
         state.save(runtime_paths_for(config))
-        conversation_cache.refresh_strict_thread_history_from_source.side_effect = None
-        conversation_cache.refresh_strict_thread_history_from_source.return_value = _authoritative_history(
+        conversation_cache.refresh_startup_thread_history_from_source.side_effect = None
+        conversation_cache.refresh_startup_thread_history_from_source.return_value = _authoritative_history(
             _history_message("$target"),
             _history_message("$later", sender=OTHER_BOT_USER_ID),
         )
@@ -1240,7 +1240,7 @@ async def test_auto_resume_fails_closed_without_authoritative_target_history(
     assert resumed_count == 0
     mock_send.assert_not_awaited()
     if conversation_cache is not None:
-        conversation_cache.refresh_strict_thread_history_from_source.assert_awaited_once_with(
+        conversation_cache.refresh_startup_thread_history_from_source.assert_awaited_once_with(
             ROOM_ID,
             "$thread",
             caller_label="startup_auto_resume_freshness",
@@ -1263,7 +1263,7 @@ async def test_auto_resume_propagates_cancelled_source_refresh(tmp_path: Path) -
         ),
     ]
     conversation_cache = _auto_resume_conversation_cache(interrupted)
-    conversation_cache.refresh_strict_thread_history_from_source.side_effect = asyncio.CancelledError
+    conversation_cache.refresh_startup_thread_history_from_source.side_effect = asyncio.CancelledError
 
     with (
         patch("mindroom.matrix.stale_stream_cleanup.send_message_result", new=AsyncMock()) as mock_send,
@@ -1280,7 +1280,7 @@ async def test_auto_resume_propagates_cancelled_source_refresh(tmp_path: Path) -
         )
 
     mock_send.assert_not_awaited()
-    conversation_cache.refresh_strict_thread_history_from_source.assert_awaited_once()
+    conversation_cache.refresh_startup_thread_history_from_source.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -1299,8 +1299,8 @@ async def test_auto_resume_source_refresh_sees_newer_human_missing_from_startup_
         ),
     ]
     conversation_cache = _auto_resume_conversation_cache(interrupted)
-    conversation_cache.refresh_strict_thread_history_from_source.side_effect = None
-    conversation_cache.refresh_strict_thread_history_from_source.return_value = _authoritative_history(
+    conversation_cache.refresh_startup_thread_history_from_source.side_effect = None
+    conversation_cache.refresh_startup_thread_history_from_source.return_value = _authoritative_history(
         _history_message("$target"),
         _history_message("$newer-human", sender=USER_ID),
     )
@@ -1317,7 +1317,7 @@ async def test_auto_resume_source_refresh_sees_newer_human_missing_from_startup_
         )
 
     assert resumed_count == 0
-    conversation_cache.refresh_strict_thread_history_from_source.assert_awaited_once_with(
+    conversation_cache.refresh_startup_thread_history_from_source.assert_awaited_once_with(
         ROOM_ID,
         "$thread",
         caller_label="startup_auto_resume_freshness",
@@ -1361,7 +1361,7 @@ async def test_auto_resume_checks_freshness_after_delay_before_each_delivery(tmp
             messages.append(_history_message("$human-later", sender=USER_ID))
         return _authoritative_history(*messages)
 
-    conversation_cache.refresh_strict_thread_history_from_source.side_effect = history_for_call
+    conversation_cache.refresh_startup_thread_history_from_source.side_effect = history_for_call
 
     with (
         patch(
@@ -2300,7 +2300,7 @@ async def test_recent_mid_tool_shutdown_marker_resumes_only_without_newer_human_
             ),
         )
     conversation_cache = AsyncMock()
-    conversation_cache.refresh_strict_thread_history_from_source.return_value = _authoritative_history(
+    conversation_cache.refresh_startup_thread_history_from_source.return_value = _authoritative_history(
         *history_messages,
     )
     conversation_cache.notify_outbound_message = Mock()
@@ -3312,8 +3312,8 @@ async def test_recovery_selects_joined_owner_for_freshness_and_router_for_relay(
     owner_client = make_matrix_client_mock(user_id=BOT_USER_ID)
     interrupted = InterruptedThread(ROOM_ID, "$thread", "$target", "Partial", "test_agent", original_sender_id=USER_ID)
     router_cache = _auto_resume_conversation_cache([interrupted])
-    router_cache.refresh_strict_thread_history_from_source.side_effect = None
-    router_cache.refresh_strict_thread_history_from_source.return_value = _authoritative_history()
+    router_cache.refresh_startup_thread_history_from_source.side_effect = None
+    router_cache.refresh_startup_thread_history_from_source.return_value = _authoritative_history()
     owner_cache = _auto_resume_conversation_cache([interrupted])
     actors = {
         "@actual_router:localhost": _cleanup_actor(router_client, router_cache),
@@ -3349,8 +3349,8 @@ async def test_recovery_selects_joined_owner_for_freshness_and_router_for_relay(
         )
 
     assert result.resumed_count == 1
-    assert owner_cache.refresh_strict_thread_history_from_source.await_count == 1
-    router_cache.refresh_strict_thread_history_from_source.assert_not_awaited()
+    assert owner_cache.refresh_startup_thread_history_from_source.await_count == 1
+    router_cache.refresh_startup_thread_history_from_source.assert_not_awaited()
     mock_send.assert_awaited_once()
     assert mock_send.await_args.args[0] is router_client
 
@@ -3460,8 +3460,8 @@ async def test_failed_router_relay_keeps_room_retryable_for_post_join_recovery(t
 
     assert recovered_result == StaleStreamRecoveryResult(room_count=1, cleaned_count=0, resumed_count=1)
     assert scanned_room_ids == {ROOM_ID}
-    assert owner_cache.refresh_strict_thread_history_from_source.await_count == 2
-    router_cache.refresh_strict_thread_history_from_source.assert_not_awaited()
+    assert owner_cache.refresh_startup_thread_history_from_source.await_count == 2
+    router_cache.refresh_startup_thread_history_from_source.assert_not_awaited()
     mock_edit.assert_awaited_once()
     assert mock_send.await_count == 2
     assert all(call.args[0] is router_client for call in mock_send.await_args_list)
@@ -3548,8 +3548,8 @@ async def test_missing_owner_keeps_room_retryable_for_post_join_recovery(tmp_pat
 
     assert recovered_result == StaleStreamRecoveryResult(room_count=1, cleaned_count=0, resumed_count=1)
     assert scanned_room_ids == {ROOM_ID}
-    owner_cache.refresh_strict_thread_history_from_source.assert_awaited_once()
-    router_cache.refresh_strict_thread_history_from_source.assert_not_awaited()
+    owner_cache.refresh_startup_thread_history_from_source.assert_awaited_once()
+    router_cache.refresh_startup_thread_history_from_source.assert_not_awaited()
     mock_send.assert_awaited_once()
     assert mock_send.await_args.args[0] is router_client
 
@@ -3564,7 +3564,7 @@ async def test_transient_freshness_failure_retries_then_sends_once(tmp_path: Pat
     now_ms = int(stale_stream_cleanup_module.time.time() * 1000)
     router_cache = _auto_resume_conversation_cache([])
     owner_cache = _auto_resume_conversation_cache([])
-    owner_cache.refresh_strict_thread_history_from_source.side_effect = [
+    owner_cache.refresh_startup_thread_history_from_source.side_effect = [
         TimeoutError("transient source failure"),
         _authoritative_history(_history_message("$target")),
     ]
@@ -3626,7 +3626,7 @@ async def test_transient_freshness_failure_retries_then_sends_once(tmp_path: Pat
 
     assert second.resumed_count == 1
     assert scanned_room_ids == {ROOM_ID}
-    assert owner_cache.refresh_strict_thread_history_from_source.await_count == 2
+    assert owner_cache.refresh_startup_thread_history_from_source.await_count == 2
     mock_send.assert_awaited_once()
 
 
@@ -3641,8 +3641,8 @@ async def test_unready_owner_generation_retries_until_exact_replacement_is_ready
     router_cache = _auto_resume_conversation_cache([])
     unready_cache = _auto_resume_conversation_cache([])
     ready_cache = _auto_resume_conversation_cache([])
-    ready_cache.refresh_strict_thread_history_from_source.side_effect = None
-    ready_cache.refresh_strict_thread_history_from_source.return_value = _authoritative_history(
+    ready_cache.refresh_startup_thread_history_from_source.side_effect = None
+    ready_cache.refresh_startup_thread_history_from_source.return_value = _authoritative_history(
         _history_message("$target"),
     )
     actors = {
@@ -3707,8 +3707,8 @@ async def test_unready_owner_generation_retries_until_exact_replacement_is_ready
         )
 
     assert ready.resumed_count == 1
-    unready_cache.refresh_strict_thread_history_from_source.assert_not_awaited()
-    ready_cache.refresh_strict_thread_history_from_source.assert_awaited_once()
+    unready_cache.refresh_startup_thread_history_from_source.assert_not_awaited()
+    ready_cache.refresh_startup_thread_history_from_source.assert_awaited_once()
     mock_send.assert_awaited_once()
 
 
@@ -3893,9 +3893,9 @@ async def test_auto_resume_uses_each_interrupted_owner_cache(tmp_path: Path) -> 
         )
 
     assert resumed_count == 2
-    first_cache.refresh_strict_thread_history_from_source.assert_awaited_once()
-    second_cache.refresh_strict_thread_history_from_source.assert_awaited_once()
-    router_cache.refresh_strict_thread_history_from_source.assert_not_awaited()
+    first_cache.refresh_startup_thread_history_from_source.assert_awaited_once()
+    second_cache.refresh_startup_thread_history_from_source.assert_awaited_once()
+    router_cache.refresh_startup_thread_history_from_source.assert_not_awaited()
     assert mock_send.await_count == 2
     assert all(item.args[0] is router_client for item in mock_send.await_args_list)
 

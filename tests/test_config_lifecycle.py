@@ -46,18 +46,15 @@ def _make_lifecycle(
     )
 
 
-def test_drain_state_tracks_wait_warning_force_and_reset() -> None:
-    """Drain-state helpers should model wait, warning, force, and reset transitions."""
+def test_drain_state_tracks_wait_warning_and_force() -> None:
+    """Drain-state helpers should model wait, warning, and force transitions."""
     state = _ConfigReloadDrainState()
 
     assert state.waiting_for_idle is False
-    assert state.should_reset_for_request(1.0) is False
 
-    state.begin_wait(now=10.0, requested_at=1.0)
+    state.begin_wait(now=10.0)
 
     assert state.waiting_for_idle is True
-    assert state.should_reset_for_request(1.0) is False
-    assert state.should_reset_for_request(2.0) is True
     assert (
         state.should_warn(
             now=10.5,
@@ -95,12 +92,6 @@ def test_drain_state_tracks_wait_warning_force_and_reset() -> None:
     )
     assert state.should_force_reload(now=11.9, force_after_seconds=2.0) is False
     assert state.should_force_reload(now=12.0, force_after_seconds=2.0) is True
-
-    state.reset()
-
-    assert state.waiting_for_idle is False
-    assert state.should_reset_for_request(2.0) is False
-    assert state.should_force_reload(now=1e9, force_after_seconds=2.0) is False
 
 
 @pytest.mark.asyncio
@@ -173,6 +164,41 @@ async def test_reload_drains_active_responses_before_applying(
 
 
 @pytest.mark.asyncio
+async def test_replacement_admission_serializes_config_and_mcp_owners(tmp_path: Path) -> None:
+    """Concurrent replacement flows must never share or prematurely reopen gate ownership."""
+    gate = ResponseAdmissionGate()
+    lifecycle = _make_lifecycle(tmp_path, response_admission_gate=gate)
+    mcp_started = asyncio.Event()
+    config_started = asyncio.Event()
+
+    async def apply_mcp_restart() -> None:
+        mcp_started.set()
+        await asyncio.Future()
+
+    async def apply_config_reload() -> None:
+        config_started.set()
+        await asyncio.Future()
+
+    mcp_task = asyncio.create_task(
+        lifecycle.apply_with_response_admission(apply_mcp_restart, operation_name="MCP catalog restart"),
+    )
+    await mcp_started.wait()
+    config_task = asyncio.create_task(
+        lifecycle.apply_with_response_admission(apply_config_reload, operation_name="configuration reload"),
+    )
+    await asyncio.sleep(0)
+    assert gate.closed
+    assert not config_started.is_set()
+    mcp_task.cancel()
+    await asyncio.gather(mcp_task, return_exceptions=True)
+    await asyncio.wait_for(config_started.wait(), timeout=1)
+    assert gate.closed
+    config_task.cancel()
+    await asyncio.gather(config_task, return_exceptions=True)
+    assert gate.closed is False
+
+
+@pytest.mark.asyncio
 async def test_stuck_drain_warns_then_stops_deferring(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -180,7 +206,6 @@ async def test_stuck_drain_warns_then_stops_deferring(
     """A wedged drain should warn, keep waiting, and only stop deferring at the bound."""
     warning_after_seconds = 0.5
     force_after_seconds = 1_000.0
-    requested_at = 1.0
     wait_started_at = 10.0
     monkeypatch.setattr("mindroom.orchestration.config_lifecycle._CONFIG_RELOAD_IDLE_POLL_SECONDS", 0)
     monkeypatch.setattr(
@@ -201,7 +226,6 @@ async def test_stuck_drain_warns_then_stops_deferring(
 
     should_defer = await lifecycle._should_defer_reload_for_active_responses(
         drain_state=drain_state,
-        requested_at=requested_at,
         active_response_count=1,
         loop=loop,
     )
@@ -210,7 +234,6 @@ async def test_stuck_drain_warns_then_stops_deferring(
     # Past the warning threshold but still inside the bound: warn and keep waiting.
     should_defer = await lifecycle._should_defer_reload_for_active_responses(
         drain_state=drain_state,
-        requested_at=requested_at,
         active_response_count=1,
         loop=loop,
     )
@@ -224,7 +247,6 @@ async def test_stuck_drain_warns_then_stops_deferring(
     # At the bound: stop deferring so the change cannot be starved forever.
     should_defer = await lifecycle._should_defer_reload_for_active_responses(
         drain_state=drain_state,
-        requested_at=requested_at,
         active_response_count=1,
         loop=loop,
     )

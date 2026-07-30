@@ -1409,13 +1409,13 @@ def patch_response_runner_module(**changes: object) -> Generator[None, None, Non
 def install_shutdown_drain_mocks(
     bot: RuntimeBot,
     *,
-    coalescing_drain_completed: bool,
+    coalescing_drain_result: CoalescingDrainResult,
     responses_drained: bool,
 ) -> None:
     """Install exact shutdown drain outcomes through stable collaborator seams."""
     wrap_extracted_collaborators(bot, "_coalescing_gate", "_response_runner")
     bot._coalescing_gate.drain_all = AsyncMock(
-        return_value=CoalescingDrainResult(completed=coalescing_drain_completed),
+        return_value=coalescing_drain_result,
     )
     bot._response_runner.drain_inbox_responses = AsyncMock(return_value=responses_drained)
 

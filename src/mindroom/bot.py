@@ -1757,7 +1757,7 @@ class AgentBot:
         ):
             self._sync_cache_trust.discard()
             self.logger.warning(
-                "sync_checkpoint_not_saved_after_incomplete_coalescing_drain",
+                "sync_checkpoint_discarded",
                 agent_name=self.agent_name,
                 callback_failure_count=callback_failure_count,
                 background_tasks_completed=background_tasks_completed,

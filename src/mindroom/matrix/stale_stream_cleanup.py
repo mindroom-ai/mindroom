@@ -474,7 +474,7 @@ async def _interrupted_target_freshness(
         return _FreshnessOutcome.RETRY
 
     try:
-        history = await interrupted_thread.owner_actor.conversation_cache.refresh_strict_thread_history_from_source(
+        history = await interrupted_thread.owner_actor.conversation_cache.refresh_startup_thread_history_from_source(
             interrupted_thread.room_id,
             interrupted_thread.thread_id,
             caller_label="startup_auto_resume_freshness",

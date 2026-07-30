@@ -190,6 +190,15 @@ class ConversationCacheProtocol(Protocol):
     ) -> ThreadReadResult:
         """Refresh strict full history directly from Matrix."""
 
+    async def refresh_startup_thread_history_from_source(
+        self,
+        room_id: str,
+        thread_id: str,
+        *,
+        caller_label: str = "unknown",
+    ) -> ThreadReadResult:
+        """Refresh startup-only strict history without entering live cache coordination."""
+
     async def get_thread_id_for_event(self, room_id: str, event_id: str) -> str | None:
         """Resolve the cached thread root for one event when known."""
 
@@ -1020,6 +1029,25 @@ class MatrixConversationCache(ConversationCacheProtocol):
             room_id,
             thread_id,
             mode=ThreadReadMode.STRICT_SOURCE_REFRESH,
+            caller_label=caller_label,
+        )
+
+    async def refresh_startup_thread_history_from_source(
+        self,
+        room_id: str,
+        thread_id: str,
+        *,
+        caller_label: str = "unknown",
+    ) -> ThreadReadResult:
+        """Refresh startup-only strict history without entering live cache coordination."""
+        return await refresh_thread_history_from_source(
+            self._require_client(),
+            room_id,
+            thread_id,
+            self.runtime.event_cache,
+            hydrate_sidecars=True,
+            allow_stale_fallback=False,
+            trusted_sender_ids=self._trusted_sender_ids(),
             caller_label=caller_label,
         )
 
