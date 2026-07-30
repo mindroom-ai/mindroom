@@ -584,6 +584,41 @@ async def test_handle_mcp_catalog_change_restarts_dependent_entities(tmp_path: P
 
 
 @pytest.mark.asyncio
+async def test_unreferenced_mcp_catalog_change_skips_response_drain(tmp_path: Path) -> None:
+    """A configured server with no dependents should not wait for unrelated responses."""
+    runtime_paths = _runtime_paths(tmp_path)
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths)
+    orchestrator.config = Config.validate_with_runtime(
+        {
+            "mcp_servers": {
+                "demo": {
+                    "transport": "stdio",
+                    "command": "npx",
+                },
+            },
+            "agents": {
+                "plain": {
+                    "display_name": "Plain",
+                    "role": "No MCP",
+                },
+            },
+        },
+        runtime_paths,
+    )
+    orchestrator.running = True
+    assert orchestrator._response_admission_gate.admit()
+
+    try:
+        with patch("mindroom.orchestrator.clear_worker_validation_snapshot_cache") as mock_clear_snapshot_cache:
+            await asyncio.wait_for(orchestrator._handle_mcp_catalog_change("demo"), timeout=0.1)
+    finally:
+        orchestrator._response_admission_gate.release()
+
+    mock_clear_snapshot_cache.assert_called_once_with()
+    assert orchestrator._response_admission_gate.closed is False
+
+
+@pytest.mark.asyncio
 async def test_handle_mcp_catalog_change_sets_up_rooms_before_trigger_runtime_rebind(tmp_path: Path) -> None:
     """MCP restarts refresh rooms before publishing trigger runtime."""
     runtime_paths = _runtime_paths(tmp_path)

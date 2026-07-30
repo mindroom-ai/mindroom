@@ -72,7 +72,7 @@ from tests.conftest import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Coroutine
+    from collections.abc import AsyncIterator, Callable, Coroutine
     from pathlib import Path
     from unittest.mock import AsyncMock
 
@@ -111,6 +111,7 @@ class _RecordingResponseRunner:
     requests: list[ResponseRequest] = field(default_factory=list)
     team_requests: list[ResponseRequest] = field(default_factory=list)
     inbox_tasks: list[asyncio.Task[None]] = field(default_factory=list)
+    recovery_proof_checks: list[Callable[[], bool]] = field(default_factory=list)
 
     def active_thread_ids_for_room(self, room_id: str) -> frozenset[str | None]:  # noqa: ARG002
         return frozenset()
@@ -127,7 +128,14 @@ class _RecordingResponseRunner:
         msg = "Queued-notice reservations are not part of these focused turn tests"
         raise AssertionError(msg)
 
-    def track_inbox_response(self, response: Coroutine[Any, Any, None], *, name: str) -> asyncio.Task[None]:
+    def track_inbox_response(
+        self,
+        response: Coroutine[Any, Any, None],
+        *,
+        name: str,
+        recovery_proof_ready: Callable[[], bool],
+    ) -> asyncio.Task[None]:
+        self.recovery_proof_checks.append(recovery_proof_ready)
         task = asyncio.get_running_loop().create_task(response, name=name)
         self.inbox_tasks.append(task)
         return task
@@ -147,9 +155,9 @@ class _RecordingResponseRunner:
             return None
         if self.deferred_sync_restart_error is not None:
             assert self.response_event_id is not None
-            assert request.on_sync_restart_cancelled is not None
+            assert request.on_interrupted_response_recoverable is not None
             assert request.on_deferred_outcome_handled is not None
-            request.on_sync_restart_cancelled()
+            request.on_interrupted_response_recoverable()
             request.on_deferred_outcome_handled(self.response_event_id)
             raise self.deferred_sync_restart_error
         return self.response_event_id
@@ -1278,6 +1286,57 @@ async def test_room_mode_plain_user_message_keeps_room_session(tmp_path: Path) -
     target = harness.runner.requests[0].response_envelope.target
     assert target.resolved_thread_id is None
     assert target.session_id == _ROOM_ID
+    harness.interrupted_turn_rooms.register(event.event_id, room_id=room.room_id)
+    assert harness.runner.recovery_proof_checks[0]() is False
+
+
+@pytest.mark.asyncio
+async def test_write_behind_handled_thread_does_not_prove_recovery(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """In-memory handled state cannot prove that shutdown recovery is durable."""
+    config = _single_agent_config(tmp_path, "thread")
+    harness = _build_harness(config, tmp_path)
+    room = _room_with_members(config, "general")
+    event = _text_event("hello there")
+    response_started = asyncio.Event()
+    release_response = asyncio.Event()
+    generate_response = harness.runner.generate_response
+
+    async def generate_with_barrier(request: ResponseRequest) -> str | None:
+        response_started.set()
+        await release_response.wait()
+        return await generate_response(request)
+
+    monkeypatch.setattr(harness.runner, "generate_response", generate_with_barrier)
+    delivery = asyncio.create_task(harness.deliver(room, event))
+    await response_started.wait()
+
+    real_persist = harness.turn_store._ledger._persist_records
+    persist_started = threading.Event()
+    release_persist = threading.Event()
+
+    def persist_with_barrier(turn_records: tuple[TurnRecord, ...]) -> None:
+        persist_started.set()
+        if not release_persist.wait(timeout=5):
+            msg = "test did not release terminal-turn persistence"
+            raise TimeoutError(msg)
+        real_persist(turn_records)
+
+    monkeypatch.setattr(harness.turn_store._ledger, "_persist_records", persist_with_barrier)
+    release_response.set()
+
+    try:
+        await delivery
+        assert await asyncio.to_thread(persist_started.wait, 5)
+        assert harness.runner.requests[0].response_envelope.target.resolved_thread_id == event.event_id
+        assert harness.turn_store.is_handled(event.event_id)
+        assert not harness.interrupted_turn_rooms.pending_room_ids
+        assert harness.runner.recovery_proof_checks[0]() is False
+    finally:
+        release_persist.set()
+        await asyncio.to_thread(harness.turn_store._ledger.flush)
 
 
 @pytest.mark.asyncio
@@ -1330,16 +1389,36 @@ async def test_user_message_cannot_spoof_scheduled_thread_promotion(tmp_path: Pa
 async def test_deferred_sync_restart_records_handled_outcome_before_rethrow(
     config: Config,
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A turn interrupted by bot replacement must settle durably before rethrowing."""
     harness = _build_harness(config, tmp_path)
     harness.runner.deferred_sync_restart_error = asyncio.CancelledError("sync_restart")
     room = _room_with_members(config, "general")
     event = _text_event("please survive the sync restart")
+    response_started = asyncio.Event()
+    release_response = asyncio.Event()
+    generate_response = harness.runner.generate_response
 
+    async def generate_with_barrier(request: ResponseRequest) -> str | None:
+        response_started.set()
+        await release_response.wait()
+        return await generate_response(request)
+
+    monkeypatch.setattr(harness.runner, "generate_response", generate_with_barrier)
+    delivery = asyncio.create_task(harness.deliver(room, event))
+    await response_started.wait()
+    recovery_ready = harness.runner.recovery_proof_checks[0]
+    assert recovery_ready() is False
+    harness.interrupted_turn_rooms.register("$different", room_id=room.room_id)
+    assert recovery_ready() is False
+
+    release_response.set()
     with pytest.raises(asyncio.CancelledError, match="sync_restart"):
-        await harness.deliver(room, event)
+        await delivery
 
+    assert recovery_ready() is True
+    assert harness.interrupted_turn_rooms.contains(event.event_id)
     assert harness.interrupted_turn_rooms.pending_room_ids == {room.room_id}
     assert harness.runner.requests[0].sync_restart_retry_source_event_id is None
     assert harness.turn_store.is_handled(event.event_id) is True
@@ -1826,3 +1905,37 @@ async def test_interactive_selection_without_response_stays_retryable(config: Co
     assert len(harness.runner.requests) == 1
     assert harness.turn_store.is_handled(selection.question_event_id) is False
     assert harness.turn_store.is_handled("$selection:localhost") is False
+
+
+@pytest.mark.asyncio
+async def test_interactive_selection_interruption_registers_exact_source_before_settlement(
+    config: Config,
+    tmp_path: Path,
+) -> None:
+    """A landed interruption must register the selection event before its durable handled write."""
+    harness = _build_harness(config, tmp_path)
+    harness.runner.deferred_sync_restart_error = asyncio.CancelledError("sync_restart")
+    room = nio.MatrixRoom(_ROOM_ID, _entity_user_id(config, "general"))
+    selection = interactive.InteractiveSelection(
+        question_event_id="$question:localhost",
+        question_text="Which option should I use?",
+        selection_key="2",
+        selected_label="Option 2",
+        selected_value="Option 2",
+        thread_id="$thread-root:localhost",
+    )
+    selection_event_id = "$selection:localhost"
+
+    with pytest.raises(asyncio.CancelledError, match="sync_restart"):
+        await harness.controller.handle_interactive_selection(
+            room,
+            selection=selection,
+            user_id=_SENDER,
+            source_event_id=selection_event_id,
+        )
+
+    assert harness.interrupted_turn_rooms.contains(selection_event_id)
+    record = harness.turn_store.get_turn_record(selection_event_id)
+    assert record is not None
+    assert record.response_event_id == "$response:localhost"
+    assert record.completed is True

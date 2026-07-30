@@ -1,4 +1,4 @@
-"""Debounced config-reload lifecycle for the orchestrator."""
+"""Debounced config reload and shared response-admission replacement lifecycle."""
 
 from __future__ import annotations
 
@@ -30,18 +30,18 @@ logger = get_logger(__name__)
 
 
 _CONFIG_RELOAD_DEBOUNCE_SECONDS = 2.0
-_CONFIG_RELOAD_IDLE_POLL_SECONDS = 0.5
-_CONFIG_RELOAD_DRAIN_WARNING_AFTER_SECONDS = 30.0
-_CONFIG_RELOAD_DRAIN_WARNING_INTERVAL_SECONDS = 30.0
+_REPLACEMENT_DRAIN_IDLE_POLL_SECONDS = 0.5
+_REPLACEMENT_DRAIN_WARNING_AFTER_SECONDS = 30.0
+_REPLACEMENT_DRAIN_WARNING_INTERVAL_SECONDS = 30.0
 # The in-flight count includes responses still queued behind a conversation lock,
 # so a busy install may never observe a fully idle moment. Bound the wait rather
-# than letting a config change be deferred forever.
-_CONFIG_RELOAD_DRAIN_FORCE_AFTER_SECONDS = 600.0
+# than letting a replacement be deferred forever.
+_REPLACEMENT_DRAIN_FORCE_AFTER_SECONDS = 600.0
 
 
 @dataclass
-class _ConfigReloadDrainState:
-    """Track response-drain state for a queued config reload."""
+class _ReplacementDrainState:
+    """Track response-drain state for one replacement apply."""
 
     waiting_for_idle: bool = False
     wait_started_at: float | None = None
@@ -77,18 +77,19 @@ class _ConfigReloadDrainState:
         """Record the time a drain warning was logged."""
         self.last_warning_at = now
 
-    def should_force_reload(self, *, now: float, force_after_seconds: float) -> bool:
+    def should_force_apply(self, *, now: float, force_after_seconds: float) -> bool:
         """Return whether the drain has waited long enough to stop deferring."""
         return self.wait_started_at is not None and self.wait_seconds(now) >= force_after_seconds
 
 
 @dataclass
 class ConfigReloadLifecycle:
-    """Own debounced config reloads: queueing, response drain, and plan dispatch.
+    """Own debounced config reloads and serialized replacement admission.
 
     The orchestrator stays the owner of applying a plan (restarting bots,
-    reconciling accounts and rooms); this collaborator owns when a reload
-    runs and how the new config is diffed into a plan.
+    reconciling accounts and rooms). This collaborator owns when a config
+    reload runs, how it is diffed into a plan, and the global admission window
+    shared by config reloads and asynchronous MCP catalog replacements.
     """
 
     runtime_paths: RuntimePaths
@@ -165,52 +166,54 @@ class ConfigReloadLifecycle:
         if delay_seconds > 0:
             await asyncio.sleep(delay_seconds)
 
-    async def _should_defer_reload_for_active_responses(
+    async def _should_defer_replacement_for_active_responses(
         self,
         *,
-        drain_state: _ConfigReloadDrainState,
+        drain_state: _ReplacementDrainState,
         active_response_count: int,
         loop: asyncio.AbstractEventLoop,
-        operation_name: str = "configuration reload",
+        operation_name: str,
     ) -> bool:
         """Return whether one replacement apply should keep waiting for responses.
 
         Only called with responses actually in flight: the caller applies
         immediately when ``close_if_idle()`` succeeds.
         """
-        titled_operation_name = operation_name[0].upper() + operation_name[1:]
         now = loop.time()
         if not drain_state.waiting_for_idle:
             logger.info(
-                f"Deferring {operation_name} until active responses finish",
+                "Deferring replacement until active responses finish",
+                operation=operation_name,
                 active_response_count=active_response_count,
             )
             drain_state.begin_wait(now=now)
         elif drain_state.should_warn(
             now=now,
-            warning_after_seconds=_CONFIG_RELOAD_DRAIN_WARNING_AFTER_SECONDS,
-            warning_interval_seconds=_CONFIG_RELOAD_DRAIN_WARNING_INTERVAL_SECONDS,
+            warning_after_seconds=_REPLACEMENT_DRAIN_WARNING_AFTER_SECONDS,
+            warning_interval_seconds=_REPLACEMENT_DRAIN_WARNING_INTERVAL_SECONDS,
         ):
             logger.warning(
-                f"{titled_operation_name} still waiting for active responses to finish",
+                "Replacement still waiting for active responses to finish",
+                operation=operation_name,
                 active_response_count=active_response_count,
                 drain_wait_seconds=round(drain_state.wait_seconds(now), 1),
             )
             drain_state.mark_warning(now)
 
-        if drain_state.should_force_reload(
+        if drain_state.should_force_apply(
             now=now,
-            force_after_seconds=_CONFIG_RELOAD_DRAIN_FORCE_AFTER_SECONDS,
+            force_after_seconds=_REPLACEMENT_DRAIN_FORCE_AFTER_SECONDS,
         ):
             logger.error(
-                f"Applying {operation_name} while responses are still active",
+                "Applying replacement while responses are still active",
+                operation=operation_name,
                 active_response_count=active_response_count,
                 drain_wait_seconds=round(drain_state.wait_seconds(now), 1),
-                timeout_seconds=_CONFIG_RELOAD_DRAIN_FORCE_AFTER_SECONDS,
+                timeout_seconds=_REPLACEMENT_DRAIN_FORCE_AFTER_SECONDS,
             )
             return False
 
-        await asyncio.sleep(_CONFIG_RELOAD_IDLE_POLL_SECONDS)
+        await asyncio.sleep(_REPLACEMENT_DRAIN_IDLE_POLL_SECONDS)
         return True
 
     async def _apply_with_closed_admission(
@@ -238,19 +241,27 @@ class ConfigReloadLifecycle:
         operation: Callable[[], Awaitable[None]],
         *,
         operation_name: str,
-        request_is_current: Callable[[], bool] | None = None,
-    ) -> bool:
-        """Drain responses, own admission, then run one serialized replacement apply."""
-        is_current = request_is_current or (lambda: True)
+        request_is_current: Callable[[], bool],
+    ) -> None:
+        """Run one global serialized replacement after a bounded response drain.
+
+        Config reloads call this from their debounced task. MCP catalog changes
+        call it from an orchestrator-owned background task so an admitted tool
+        call cannot wait on its own slot. The drain defers for at most 600
+        seconds before closing admission over a forced apply.
+        """
         loop = asyncio.get_running_loop()
-        drain_state = _ConfigReloadDrainState()
+        drain_state = _ReplacementDrainState()
         async with self._response_admission_apply_lock:
-            while is_current():
+            while request_is_current():
                 if self.response_admission_gate.close_if_idle():
                     if drain_state.waiting_for_idle:
-                        logger.info(f"Active responses finished; applying {operation_name}")
+                        logger.info(
+                            "Active responses finished; applying replacement",
+                            operation=operation_name,
+                        )
                     break
-                if await self._should_defer_reload_for_active_responses(
+                if await self._should_defer_replacement_for_active_responses(
                     drain_state=drain_state,
                     active_response_count=self.response_admission_gate.in_flight_response_count,
                     loop=loop,
@@ -260,10 +271,9 @@ class ConfigReloadLifecycle:
                 self.response_admission_gate.close()
                 break
             else:
-                return False
+                return
 
             await self._apply_with_closed_admission(operation)
-        return True
 
     async def _apply_queued_config_reload(self) -> None:
         """Apply one queued config reload attempt and log the result."""

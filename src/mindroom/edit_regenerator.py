@@ -345,7 +345,7 @@ class EditRegenerator:
                         dict.fromkeys((*record.replay_source_event_ids, driving_edit.original_event_id)),
                     ),
                 ),
-                on_sync_restart_cancelled=record_interrupted_turn,
+                on_interrupted_response_recoverable=record_interrupted_turn,
                 sync_restart_retry_source_event_id=retry_source_event_id,
                 on_deferred_outcome_handled=lambda response_event_id: (
                     self.deps.turn_store.record_turn(replace(record, response_event_id=response_event_id))

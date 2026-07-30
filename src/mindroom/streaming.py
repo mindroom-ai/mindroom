@@ -34,6 +34,7 @@ from mindroom.orchestration.runtime import (
     USER_STOP_CANCEL_MSG,
     CancelSource,
     cancel_failure_reason,
+    cancel_source_from_failure_reason,
     classify_cancel_source,
     log_cancelled_response,
 )
@@ -75,6 +76,7 @@ __all__ = [
     "build_cancelled_response_update",
     "build_restart_interrupted_body",
     "cancel_failure_reason",
+    "cancel_source_from_failure_reason",
     "clean_partial_reply_text",
     "interactive_response_for_visible_body",
     "is_interrupted_partial_reply",
@@ -783,7 +785,8 @@ class StreamingResponse:
                 retry_on_failure=retry_terminal_update,
                 retry_without_backoff=retry_terminal_update_immediately,
             )
-        except asyncio.CancelledError:
+        except asyncio.CancelledError as cancelled_error:
+            terminal_cancel_source = resolved_cancel_source or classify_cancel_source(cancelled_error)
             logger.warning(
                 "Terminal streaming update was cancelled before it landed",
                 event_id=self.event_id,
@@ -797,11 +800,11 @@ class StreamingResponse:
             ) = self._committed_terminal_snapshot()
             return StreamTransportOutcome(
                 last_physical_stream_event_id=self.event_id,
-                terminal_status=terminal_status,
+                terminal_status="cancelled",
                 rendered_body=committed_rendered_body,
                 visible_body_state=committed_visible_body_state,
                 canonical_final_body_candidate=canonical_final_body_candidate,
-                failure_reason=cancellation_failure_reason or "terminal_update_cancelled",
+                failure_reason=cancel_failure_reason(terminal_cancel_source),
                 interactive_metadata=self._last_committed_interactive_metadata,
             )
         except Exception as exc:
@@ -851,6 +854,7 @@ class StreamingResponse:
             terminal_status=terminal_status,
             rendered_body=attempted_rendered_body,
             visible_body_state=attempted_visible_body_state,
+            terminal_update_committed=True,
             canonical_final_body_candidate=canonical_final_body_candidate,
             failure_reason=cancellation_failure_reason,
             interactive_metadata=response.interactive_metadata,

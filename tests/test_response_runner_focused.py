@@ -19,15 +19,21 @@ import pytest
 from mindroom import background_tasks as background_tasks_module
 from mindroom import response_runner
 from mindroom.background_tasks import wait_for_background_tasks
+from mindroom.cancellation import request_task_cancel
 from mindroom.constants import STREAM_STATUS_KEY, STREAM_STATUS_PENDING
 from mindroom.conversation_resolver import ConversationResolver, MessageContext
-from mindroom.delivery_gateway import DeliveryGateway, SendTextRequest
+from mindroom.delivery_gateway import (
+    DeliveryGateway,
+    FinalizeStreamedResponseRequest,
+    SendTextRequest,
+)
 from mindroom.dispatch_source import ScheduledHistoryBudget
 from mindroom.entity_resolution import current_internal_sender_ids
 from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
 from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.logging_config import get_logger
 from mindroom.matrix.cache import ThreadHistoryResult
+from mindroom.matrix.client import DeliveredMatrixEvent
 from mindroom.post_response_effects import PostResponseEffectsDeps, ResponseOutcome, apply_post_response_effects
 from mindroom.response_attempt import ResponseAttemptDeps, ResponseAttemptRequest, ResponseAttemptRunner
 from mindroom.response_lifecycle import ResponseLifecycleCoordinator
@@ -44,7 +50,12 @@ from mindroom.response_runner import (
     prepare_memory_and_model_context,
 )
 from mindroom.stop import StopManager
-from mindroom.streaming import StreamingDeliveryError
+from mindroom.streaming import (
+    INTERRUPTED_RESPONSE_NOTE,
+    RESTART_INTERRUPTED_RESPONSE_NOTE,
+    StreamingDeliveryError,
+    StreamingResponse,
+)
 from mindroom.thread_summary import thread_summary_message_count_hint
 from mindroom.timing import DispatchPipelineTiming
 from mindroom.turn_policy import PreparedDispatch
@@ -68,6 +79,7 @@ from tests.response_runner_helpers import (
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable
     from pathlib import Path
+    from typing import Literal
 
     from nio import AsyncClient
 
@@ -112,6 +124,50 @@ def _completed_outcome(event_id: str = "$response", body: str = "ok") -> FinalDe
         final_visible_body=body,
         delivery_kind="sent",
     )
+
+
+@pytest.mark.asyncio
+async def test_repeated_inbox_drains_keep_failed_recovery_proof_fail_closed() -> None:
+    """Later recoverable and empty drains must not erase an earlier unsafe cancellation."""
+    runner = ResponseRunner(deps=MagicMock())
+    response_started = asyncio.Event()
+
+    async def interrupted_response() -> None:
+        response_started.set()
+        await asyncio.Event().wait()
+
+    response_task = runner.track_inbox_response(
+        interrupted_response(),
+        name="test_unrecoverable_interrupted_response",
+        recovery_proof_ready=lambda: False,
+    )
+    await response_started.wait()
+
+    assert await runner.drain_inbox_responses(cancel_after_seconds=0) is False
+    assert runner.incomplete_inbox_responses_recoverable is False
+    await asyncio.gather(response_task, return_exceptions=True)
+    await asyncio.sleep(0)
+
+    recoverable_response_started = asyncio.Event()
+
+    async def recoverable_interrupted_response() -> None:
+        recoverable_response_started.set()
+        await asyncio.Event().wait()
+
+    recoverable_response_task = runner.track_inbox_response(
+        recoverable_interrupted_response(),
+        name="test_recoverable_interrupted_response",
+        recovery_proof_ready=lambda: True,
+    )
+    await recoverable_response_started.wait()
+
+    assert await runner.drain_inbox_responses(cancel_after_seconds=0.01) is False
+    assert runner.incomplete_inbox_responses_recoverable is False
+    await asyncio.gather(recoverable_response_task, return_exceptions=True)
+    await asyncio.sleep(0)
+
+    assert await runner.drain_inbox_responses(cancel_after_seconds=0) is True
+    assert runner.incomplete_inbox_responses_recoverable is False
 
 
 class RecordingStopManager(StopManager):
@@ -326,6 +382,7 @@ async def test_begin_locked_turn_waits_for_cancelled_source_preparation(tmp_path
     runner = unwrap_extracted_collaborator(bot._response_runner)
     preparation_started = threading.Event()
     allow_preparation_finish = threading.Event()
+    retries: list[str] = []
 
     def prepare_source_turn() -> bool:
         preparation_started.set()
@@ -338,6 +395,7 @@ async def test_begin_locked_turn_waits_for_cancelled_source_preparation(tmp_path
         user_id="@user:localhost",
         response_envelope=_envelope(target, source_event_id="$event"),
         prepare_source_turn=prepare_source_turn,
+        on_interrupted_response_recoverable=lambda: retries.append("retry"),
     )
     preparation_task = asyncio.create_task(
         runner._begin_locked_turn(
@@ -352,13 +410,14 @@ async def test_begin_locked_turn_waits_for_cancelled_source_preparation(tmp_path
     )
     await asyncio.wait_for(asyncio.to_thread(preparation_started.wait, 1), timeout=2)
 
-    preparation_task.cancel()
+    request_task_cancel(preparation_task, cancel_source="sync_restart")
     await asyncio.sleep(0)
 
     assert preparation_task.done() is False
     allow_preparation_finish.set()
     with pytest.raises(asyncio.CancelledError):
         await preparation_task
+    assert retries == []
 
 
 @pytest.mark.asyncio
@@ -1074,7 +1133,8 @@ async def test_agent_streaming_sync_restart_cancelled_outcome_registers_retry(tm
         terminal_status="cancelled",
         event_id="$stream",
         is_visible_response=True,
-        final_visible_body="partial",
+        final_visible_body=f"partial\n\n{RESTART_INTERRUPTED_RESPONSE_NOTE}",
+        delivery_kind="edited",
         failure_reason="sync_restart_cancelled",
     )
 
@@ -1101,8 +1161,8 @@ async def test_agent_streaming_sync_restart_cancelled_outcome_registers_retry(tm
     ):
         result = await coordinator.generate_response(
             replace(
-                _plain_request(_target()),
-                on_sync_restart_cancelled=lambda: retries.append("retry"),
+                _plain_request(_target(thread_id="$thread")),
+                on_interrupted_response_recoverable=lambda: retries.append("retry"),
             ),
         )
 
@@ -1389,14 +1449,16 @@ async def test_terminal_settlement_registers_retry_before_rethrowing_cancel(tmp_
     coordinator = unwrap_extracted_collaborator(bot._response_runner)
     order: list[str] = []
     request = replace(
-        _plain_request(_target()),
-        on_sync_restart_cancelled=lambda: order.append("retry"),
+        _plain_request(_target(thread_id="$thread")),
+        on_interrupted_response_recoverable=lambda: order.append("retry"),
         on_deferred_outcome_handled=lambda event_id: order.append(f"handled:{event_id}"),
     )
     delivery_outcome = FinalDeliveryOutcome(
         terminal_status="cancelled",
         event_id="$response",
         is_visible_response=True,
+        final_visible_body=RESTART_INTERRUPTED_RESPONSE_NOTE,
+        delivery_kind="edited",
         failure_reason="sync_restart_cancelled",
     )
     progress = response_runner._DeliveryProgress()
@@ -1439,6 +1501,315 @@ async def test_terminal_settlement_registers_retry_before_rethrowing_cancel(tmp_
 
 
 @pytest.mark.asyncio
+async def test_uncommitted_interruption_rethrows_cancel_without_marking_source_handled(tmp_path: Path) -> None:
+    """Checkpoint replay must remain actionable when no terminal recovery note landed."""
+    coordinator = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    order: list[str] = []
+    request = replace(
+        _plain_request(_target(thread_id="$thread")),
+        on_interrupted_response_recoverable=lambda: order.append("retry"),
+        on_deferred_outcome_handled=lambda event_id: order.append(f"handled:{event_id}"),
+    )
+    progress = response_runner._DeliveryProgress()
+    progress.note_delivery_started("$response")
+    progress.settle(
+        FinalDeliveryOutcome(
+            terminal_status="cancelled",
+            event_id="$response",
+            is_visible_response=True,
+            final_visible_body=RESTART_INTERRUPTED_RESPONSE_NOTE,
+            failure_reason="sync_restart_cancelled",
+        ),
+    )
+    lifecycle = coordinator._build_lifecycle(
+        identity=coordinator._response_identity(request, response_kind="ai"),
+        request=request,
+    )
+    post_effects = AsyncMock(side_effect=lambda *_args: order.append("post_effects"))
+
+    with (
+        patch.object(
+            coordinator,
+            "run_cancellable_response",
+            new=AsyncMock(side_effect=asyncio.CancelledError("sync_restart")),
+        ),
+        patch_response_runner_module(apply_post_response_effects=post_effects),
+        pytest.raises(asyncio.CancelledError, match="sync_restart"),
+    ):
+        await coordinator._run_and_settle_locked_response(
+            request,
+            target=request.response_envelope.target,
+            lifecycle=lifecycle,
+            progress=progress,
+            response_function=AsyncMock(),
+            thinking_message=None,
+            user_id=request.user_id,
+            run_id="run-1",
+            build_post_response_outcome=lambda _outcome: ResponseOutcome(),
+            post_response_deps=PostResponseEffectsDeps(logger=get_logger("tests.post_response")),
+        )
+
+    assert order == ["post_effects"]
+
+
+@pytest.mark.asyncio
+async def test_cancel_cleanup_error_does_not_mark_source_handled(tmp_path: Path) -> None:
+    """A failed cancellation cleanup must preserve replay instead of deduping the stale placeholder."""
+    coordinator = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    callbacks: list[str] = []
+    request = replace(
+        _plain_request(_target(thread_id="$thread")),
+        on_interrupted_response_recoverable=lambda: callbacks.append("recovery"),
+        on_deferred_outcome_handled=lambda _event_id: callbacks.append("handled"),
+    )
+    progress = response_runner._DeliveryProgress()
+    progress.settle(
+        FinalDeliveryOutcome(
+            terminal_status="error",
+            event_id="$placeholder",
+            is_visible_response=True,
+            cancel_source="sync_restart",
+            failure_reason="failed to redact cancelled placeholder",
+        ),
+    )
+    lifecycle = coordinator._build_lifecycle(
+        identity=coordinator._response_identity(request, response_kind="ai"),
+        request=request,
+    )
+
+    with (
+        patch.object(
+            coordinator,
+            "run_cancellable_response",
+            new=AsyncMock(return_value="$placeholder"),
+        ),
+        patch_response_runner_module(apply_post_response_effects=AsyncMock()),
+    ):
+        result = await coordinator._run_and_settle_locked_response(
+            request,
+            target=request.response_envelope.target,
+            lifecycle=lifecycle,
+            progress=progress,
+            response_function=AsyncMock(),
+            thinking_message=None,
+            user_id=request.user_id,
+            run_id="run-1",
+            build_post_response_outcome=lambda _outcome: ResponseOutcome(),
+            post_response_deps=PostResponseEffectsDeps(logger=get_logger("tests.post_response")),
+        )
+
+    assert result is None
+    assert callbacks == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("terminal_error", [False, True], ids=["success", "error"])
+async def test_terminal_send_cancellation_preserves_source_replay(
+    tmp_path: Path,
+    terminal_error: bool,
+) -> None:
+    """A restart cancel during a normal terminal edit must reach gateway and source settlement."""
+    coordinator = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    target = _target(thread_id="$thread")
+    callbacks: list[str] = []
+    request = replace(
+        _plain_request(target),
+        on_interrupted_response_recoverable=lambda: callbacks.append("recovery"),
+        on_deferred_outcome_handled=lambda _event_id: callbacks.append("handled"),
+    )
+    streaming = StreamingResponse(
+        target=target,
+        config=coordinator.deps.runtime.config,
+        runtime_paths=coordinator.deps.runtime_paths,
+    )
+    streaming.event_id = "$response"
+    streaming.accumulated_text = "partial answer"
+    delivered = DeliveredMatrixEvent(
+        event_id="$response",
+        content_sent={"body": "partial answer"},
+    )
+    with patch("mindroom.streaming.edit_message_result", new=AsyncMock(return_value=delivered)):
+        assert await streaming._send_or_edit_message(coordinator._client(), is_final=False)
+
+    with patch(
+        "mindroom.streaming.edit_message_result",
+        new=AsyncMock(side_effect=asyncio.CancelledError("sync_restart")),
+    ):
+        transport_outcome = await streaming.finalize(
+            coordinator._client(),
+            error=RuntimeError("generation failed") if terminal_error else None,
+        )
+
+    final_outcome = await coordinator.deps.delivery_gateway.finalize_streamed_response(
+        FinalizeStreamedResponseRequest(
+            target=target,
+            stream_transport_outcome=transport_outcome,
+            initial_delivery_kind="sent",
+            identity=coordinator._response_identity(request, response_kind="ai"),
+            tool_trace=None,
+            extra_content=None,
+        ),
+    )
+    progress = response_runner._DeliveryProgress()
+    progress.settle(final_outcome)
+    lifecycle = coordinator._build_lifecycle(
+        identity=coordinator._response_identity(request, response_kind="ai"),
+        request=request,
+    )
+    with (
+        patch.object(
+            coordinator,
+            "run_cancellable_response",
+            new=AsyncMock(return_value="$response"),
+        ),
+        patch_response_runner_module(apply_post_response_effects=AsyncMock()),
+    ):
+        result = await coordinator._run_and_settle_locked_response(
+            request,
+            target=target,
+            lifecycle=lifecycle,
+            progress=progress,
+            response_function=AsyncMock(),
+            thinking_message=None,
+            user_id=request.user_id,
+            run_id="run-1",
+            build_post_response_outcome=lambda _outcome: ResponseOutcome(),
+            post_response_deps=PostResponseEffectsDeps(logger=get_logger("tests.post_response")),
+        )
+
+    assert transport_outcome.terminal_status == "cancelled"
+    assert transport_outcome.failure_reason == "sync_restart_cancelled"
+    assert final_outcome.cancel_source == "sync_restart"
+    assert result is None
+    assert callbacks == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("target", "delivery_kind"),
+    [
+        pytest.param(_target(thread_id="$thread"), None, id="terminal-update-not-committed"),
+        pytest.param(_target(thread_id=None), "edited", id="threadless"),
+    ],
+)
+async def test_unrecoverable_interruption_remains_unhandled_without_outer_cancel(
+    tmp_path: Path,
+    target: MessageTarget,
+    delivery_kind: Literal["edited"] | None,
+) -> None:
+    """A cancelled outcome needs a landed, threaded recovery note before dedup."""
+    coordinator = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    callbacks: list[str] = []
+    request = replace(
+        _plain_request(target),
+        on_interrupted_response_recoverable=lambda: callbacks.append("recovery"),
+        on_deferred_outcome_handled=lambda _event_id: callbacks.append("handled"),
+    )
+    progress = response_runner._DeliveryProgress()
+    progress.settle(
+        FinalDeliveryOutcome(
+            terminal_status="cancelled",
+            event_id="$response",
+            is_visible_response=True,
+            final_visible_body=RESTART_INTERRUPTED_RESPONSE_NOTE,
+            delivery_kind=delivery_kind,
+            failure_reason="sync_restart_cancelled",
+        ),
+    )
+    lifecycle = coordinator._build_lifecycle(
+        identity=coordinator._response_identity(request, response_kind="ai"),
+        request=request,
+    )
+
+    with (
+        patch.object(
+            coordinator,
+            "run_cancellable_response",
+            new=AsyncMock(return_value="$response"),
+        ),
+        patch_response_runner_module(apply_post_response_effects=AsyncMock()),
+    ):
+        result = await coordinator._run_and_settle_locked_response(
+            request,
+            target=target,
+            lifecycle=lifecycle,
+            progress=progress,
+            response_function=AsyncMock(),
+            thinking_message=None,
+            user_id=request.user_id,
+            run_id="run-1",
+            build_post_response_outcome=lambda _outcome: ResponseOutcome(),
+            post_response_deps=PostResponseEffectsDeps(logger=get_logger("tests.post_response")),
+        )
+
+    assert result is None
+    assert callbacks == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("failure_reason", "final_visible_body", "expected_recoveries"),
+    [
+        ("interrupted", INTERRUPTED_RESPONSE_NOTE, ["recovery"]),
+        ("cancelled_by_user", "partial answer", []),
+    ],
+)
+async def test_terminal_interruption_registers_recovery_unless_user_stopped(
+    tmp_path: Path,
+    failure_reason: str,
+    final_visible_body: str,
+    expected_recoveries: list[str],
+) -> None:
+    """A visible terminal interruption remains recoverable except after an explicit user stop."""
+    bot = _bot(tmp_path)
+    coordinator = unwrap_extracted_collaborator(bot._response_runner)
+    recoveries: list[str] = []
+    request = replace(
+        _plain_request(_target(thread_id="$thread")),
+        on_interrupted_response_recoverable=lambda: recoveries.append("recovery"),
+    )
+    progress = response_runner._DeliveryProgress()
+    progress.settle(
+        FinalDeliveryOutcome(
+            terminal_status="cancelled",
+            event_id="$response",
+            is_visible_response=True,
+            final_visible_body=final_visible_body,
+            delivery_kind="edited",
+            failure_reason=failure_reason,
+        ),
+    )
+    lifecycle = coordinator._build_lifecycle(
+        identity=coordinator._response_identity(request, response_kind="ai"),
+        request=request,
+    )
+
+    with (
+        patch.object(
+            coordinator,
+            "run_cancellable_response",
+            new=AsyncMock(return_value="$response"),
+        ),
+        patch_response_runner_module(apply_post_response_effects=AsyncMock()),
+    ):
+        result = await coordinator._run_and_settle_locked_response(
+            request,
+            target=request.response_envelope.target,
+            lifecycle=lifecycle,
+            progress=progress,
+            response_function=AsyncMock(),
+            thinking_message=None,
+            user_id=request.user_id,
+            run_id="run-1",
+            build_post_response_outcome=lambda _outcome: ResponseOutcome(),
+            post_response_deps=PostResponseEffectsDeps(logger=get_logger("tests.post_response")),
+        )
+
+    assert result == "$response"
+    assert recoveries == expected_recoveries
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "delivery_outcome",
     [
@@ -1462,7 +1833,7 @@ async def test_terminal_settlement_late_cancel_keeps_settled_outcome_canonical(
     order: list[str] = []
     request = replace(
         _plain_request(_target()),
-        on_sync_restart_cancelled=lambda: order.append("retry"),
+        on_interrupted_response_recoverable=lambda: order.append("retry"),
         on_deferred_outcome_handled=lambda event_id: order.append(f"handled:{event_id}"),
     )
     progress = response_runner._DeliveryProgress()
