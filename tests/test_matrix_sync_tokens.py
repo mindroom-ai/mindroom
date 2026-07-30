@@ -1140,6 +1140,38 @@ async def test_shutdown_timeout_does_not_save_checkpoint_for_post_drain_backgrou
 
 
 @pytest.mark.asyncio
+async def test_shutdown_cancellation_during_post_drain_wait_discards_unsafe_checkpoint(tmp_path: Path) -> None:
+    """Cancellation after an unsafe drain must poison the certified checkpoint."""
+    bot = _certified_shutdown_bot(tmp_path)
+    bot._coalescing_gate.drain_all = AsyncMock(
+        return_value=CoalescingDrainResult(completed=False, cancelled_unready_count=1),
+    )
+    post_drain_wait_started = asyncio.Event()
+    wait_call_count = 0
+
+    async def wait_with_post_drain_barrier(**_kwargs: object) -> bool:
+        nonlocal wait_call_count
+        wait_call_count += 1
+        if wait_call_count == 1:
+            return True
+        post_drain_wait_started.set()
+        await asyncio.Event().wait()
+        return True
+
+    with patch("mindroom.bot.wait_for_background_tasks", new=wait_with_post_drain_barrier):
+        shutdown_task = asyncio.create_task(bot.prepare_for_sync_shutdown())
+        await post_drain_wait_started.wait()
+        shutdown_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await shutdown_task
+
+    assert wait_call_count == 2
+    assert bot._sync_cache_trust.state is SyncTrustState.UNCERTAIN
+    assert bot._sync_cache_trust.checkpoint is None
+    assert _load_sync_token_value(tmp_path, bot.agent_name) is None
+
+
+@pytest.mark.asyncio
 async def test_callback_failure_discards_checkpoint_with_generic_event(tmp_path: Path) -> None:
     """A callback-only discard must not blame an incomplete shutdown."""
     bot = _agent_bot(tmp_path)
