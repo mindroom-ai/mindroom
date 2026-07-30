@@ -519,7 +519,7 @@ class ResponseRunner:
 
     @property
     def incomplete_inbox_responses_recoverable(self) -> bool:
-        """Return whether every timed-out response finished cleanup with recovery proof."""
+        """Return whether every timed-out response has finished cleanup with recovery proof."""
         return self._incomplete_inbox_responses_recoverable
 
     def _finish_inbox_response_task(self, task: asyncio.Task[None]) -> None:
@@ -551,7 +551,6 @@ class ResponseRunner:
         A bounded drain may take up to two cancel_after_seconds windows: one
         waiting for completion and one letting cancelled tasks run cleanup.
         """
-        self._incomplete_inbox_responses_recoverable = True
         tasks = [task for task in self._inbox_response_tasks if not task.done()]
         # Done callbacks pop tasks, so snapshot proofs before an await can run them.
         recovery_checks = {task: self._inbox_response_tasks[task] for task in tasks}
@@ -566,7 +565,8 @@ class ResponseRunner:
         for task in pending:
             request_task_cancel(task, cancel_source=shutdown_intent.cancel_source)
         await asyncio.wait(pending, timeout=cancel_after_seconds)
-        self._incomplete_inbox_responses_recoverable = all(task.done() and recovery_checks[task]() for task in pending)
+        cancelled_responses_recoverable = all(task.done() and recovery_checks[task]() for task in pending)
+        self._incomplete_inbox_responses_recoverable &= cancelled_responses_recoverable
         return False
 
     def _client(self) -> nio.AsyncClient:

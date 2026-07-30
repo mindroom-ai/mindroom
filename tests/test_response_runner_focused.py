@@ -126,6 +126,50 @@ def _completed_outcome(event_id: str = "$response", body: str = "ok") -> FinalDe
     )
 
 
+@pytest.mark.asyncio
+async def test_repeated_inbox_drains_keep_failed_recovery_proof_fail_closed() -> None:
+    """Later recoverable and empty drains must not erase an earlier unsafe cancellation."""
+    runner = ResponseRunner(deps=MagicMock())
+    response_started = asyncio.Event()
+
+    async def interrupted_response() -> None:
+        response_started.set()
+        await asyncio.Event().wait()
+
+    response_task = runner.track_inbox_response(
+        interrupted_response(),
+        name="test_unrecoverable_interrupted_response",
+        recovery_proof_ready=lambda: False,
+    )
+    await response_started.wait()
+
+    assert await runner.drain_inbox_responses(cancel_after_seconds=0) is False
+    assert runner.incomplete_inbox_responses_recoverable is False
+    await asyncio.gather(response_task, return_exceptions=True)
+    await asyncio.sleep(0)
+
+    recoverable_response_started = asyncio.Event()
+
+    async def recoverable_interrupted_response() -> None:
+        recoverable_response_started.set()
+        await asyncio.Event().wait()
+
+    recoverable_response_task = runner.track_inbox_response(
+        recoverable_interrupted_response(),
+        name="test_recoverable_interrupted_response",
+        recovery_proof_ready=lambda: True,
+    )
+    await recoverable_response_started.wait()
+
+    assert await runner.drain_inbox_responses(cancel_after_seconds=0.01) is False
+    assert runner.incomplete_inbox_responses_recoverable is False
+    await asyncio.gather(recoverable_response_task, return_exceptions=True)
+    await asyncio.sleep(0)
+
+    assert await runner.drain_inbox_responses(cancel_after_seconds=0) is True
+    assert runner.incomplete_inbox_responses_recoverable is False
+
+
 class RecordingStopManager(StopManager):
     """Real StopManager whose deferred clear is made immediate and observable."""
 
