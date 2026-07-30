@@ -1367,6 +1367,57 @@ async def test_dispatch_persistence_failure_rewinds_classic_cursor(
 
 
 @pytest.mark.asyncio
+async def test_swallowed_dispatch_persistence_failure_cannot_certify_response(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A response callback must reject the token whose source callback failed acceptance."""
+    bot = _agent_bot(tmp_path)
+    bot.client = make_matrix_client_mock(user_id=bot.matrix_id.full_id)
+    bot.client.next_batch = "s_after_failure"
+    bot._first_sync_done = True
+    bot._sync_cache_trust.state = SyncTrustState.CERTIFIED
+    bot._sync_cache_trust.checkpoint = SyncCheckpoint("s_before_failure")
+    cache_generation = bot.event_cache.cache_generation
+    assert cache_generation is not None
+    save_sync_token(
+        tmp_path,
+        bot.agent_name,
+        "s_before_failure",
+        cache_generation=cache_generation,
+    )
+
+    def fail_persist(*_args: object, **_kwargs: object) -> None:
+        message = "dispatch database unavailable"
+        raise OSError(message)
+
+    monkeypatch.setattr(bot._dispatch_obligation_store, "create_pending", fail_persist)
+    wrapper = bot._dispatch_obligation_runner.task_wrapper(
+        DispatchCallbackKind.MESSAGE,
+        owner=bot._runtime_view,
+    )
+    with pytest.raises(OSError, match="dispatch database unavailable"):
+        await wrapper(
+            nio.MatrixRoom("!room:localhost", bot.matrix_id.full_id),
+            _text_event("$unpersisted-response", "hello", 1),
+        )
+    assert bot.client.next_batch == "s_before_failure"
+
+    response = MagicMock(spec=nio.SyncResponse)
+    response.next_batch = "s_after_failure"
+    response.rooms = MagicMock(join={})
+    with patch("mindroom.bot.mark_matrix_sync_success", return_value=datetime.now(UTC)):
+        await bot._on_sync_response(response)
+
+    checkpoint = load_sync_checkpoint(tmp_path, bot.agent_name)
+    assert checkpoint is not None
+    assert checkpoint.token == "s_before_failure"  # noqa: S105
+
+    restarted = _agent_bot(tmp_path)
+    assert await restarted._sync_cache_trust.prepare_startup() == "s_before_failure"
+
+
+@pytest.mark.asyncio
 async def test_dispatch_creation_drains_repeated_cancellation_before_rewind(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
