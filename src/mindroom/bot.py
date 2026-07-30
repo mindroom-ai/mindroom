@@ -184,6 +184,7 @@ def _create_best_effort_task_wrapper(
     callback: Callable[..., Awaitable[None]],
     *,
     owner: BotRuntimeState | None = None,
+    admit: Callable[..., bool] | None = None,
 ) -> Callable[..., Awaitable[None]]:
     """Run one explicitly best-effort callback as a background task.
 
@@ -193,6 +194,9 @@ def _create_best_effort_task_wrapper(
     """
 
     async def wrapper(*args: object, **kwargs: object) -> None:
+        if admit is not None and not admit(*args, **kwargs):
+            return
+
         # Create the task but don't await it - let it run in background
         async def error_handler() -> None:
             try:
@@ -1481,18 +1485,11 @@ class AgentBot:
             get_invited_rooms_by_agent=self._invited_call_rooms_by_agent,
         )
 
-        async def on_room_membership_event(room: nio.MatrixRoom, event: nio.RoomMemberEvent) -> None:
-            if await self._admit_dispatch_source(
-                room.room_id,
-                event.event_id,
-                DispatchCallbackKind.ROOM_LIFECYCLE,
-            ):
-                await self._on_room_membership_event(room, event)
-
         client.add_event_callback(
             _create_best_effort_task_wrapper(
-                on_room_membership_event,
+                self._on_room_membership_event,
                 owner=self._runtime_view,
+                admit=self._admit_live_call_event,
             ),
             nio.RoomMemberEvent,
         )
@@ -1500,18 +1497,11 @@ class AgentBot:
         if call_manager is None:
             return
 
-        async def on_call_room_event(room: nio.MatrixRoom, event: nio.UnknownEvent) -> None:
-            if await self._admit_dispatch_source(
-                room.room_id,
-                event.event_id,
-                DispatchCallbackKind.ROOM_LIFECYCLE,
-            ):
-                await call_manager.on_room_event(room, event)
-
         client.add_event_callback(
             _create_best_effort_task_wrapper(
-                on_call_room_event,
+                call_manager.on_room_event,
                 owner=self._runtime_view,
+                admit=self._admit_live_call_event,
             ),
             nio.UnknownEvent,
         )
@@ -1522,6 +1512,10 @@ class AgentBot:
             ),
             AuthenticatedToDeviceEvent,
         )
+
+    def _admit_live_call_event(self, _room: nio.MatrixRoom, _event: nio.Event) -> bool:
+        """Admit call-runtime room state only when continuity exists at delivery."""
+        return not self._cold_history_fence.is_cold
 
     async def _apply_own_room_membership_from_sync(self, response: nio.SyncResponse) -> None:
         """Apply this bot's authoritative joined/left room sections before other sync work."""

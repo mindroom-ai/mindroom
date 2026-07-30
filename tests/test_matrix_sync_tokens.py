@@ -1761,6 +1761,7 @@ async def test_invite_failure_rewinds_classic_cursor_before_response_certificati
     bot.client.next_batch = "s_after_invite"
     bot._sync_cache_trust.state = SyncTrustState.CERTIFIED
     bot._sync_cache_trust.checkpoint = SyncCheckpoint("s_before_invite")
+    bot._cold_history_fence.start(trusted_continuation="s_before_invite")
     bot._room_lifecycle.on_invite = AsyncMock(side_effect=RuntimeError("join failed"))
     room = nio.MatrixRoom("!invited:localhost", bot.matrix_id.full_id)
     event = nio.InviteEvent.parse_event(
@@ -1839,6 +1840,7 @@ async def test_dispatch_creation_drains_repeated_cancellation_before_rewind(
     bot.client.next_batch = "s_after_cancel"
     bot._sync_cache_trust.state = SyncTrustState.CERTIFIED
     bot._sync_cache_trust.checkpoint = SyncCheckpoint("s_before_cancel")
+    bot._cold_history_fence.start(trusted_continuation="s_before_cancel")
     create_started = threading.Event()
     release_create = threading.Event()
     original_create = bot._dispatch_obligation_store.create_pending

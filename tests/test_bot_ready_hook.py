@@ -19,6 +19,10 @@ from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.config.plugin import PluginEntryConfig
 from mindroom.constants import SOURCE_KIND_KEY
+from mindroom.dispatch_obligations import (
+    DispatchCallbackKind,
+    _DispatchObligation,
+)
 from mindroom.hooks import (
     EVENT_AGENT_STARTED,
     EVENT_AGENT_STOPPED,
@@ -282,6 +286,77 @@ async def test_call_manager_room_callbacks_reject_cold_history(tmp_path: Path) -
 
     call_manager.on_room_membership_event.assert_awaited_once_with(room, membership_event)
     call_manager.on_room_event.assert_awaited_once_with(room, call_event)
+
+
+@pytest.mark.asyncio
+async def test_call_manager_room_callbacks_capture_cold_admission_at_delivery(tmp_path: Path) -> None:
+    """Opening continuity after delivery cannot admit a callback delivered cold."""
+    bot = _agent_bot(tmp_path)
+    client = MagicMock(spec=nio.AsyncClient)
+    call_manager = MagicMock()
+    call_manager.on_room_membership_event = AsyncMock()
+    room = nio.MatrixRoom("!room:localhost", bot.agent_user.user_id)
+    membership_event = nio.RoomMemberEvent.from_dict(
+        {
+            "event_id": "$historical-member",
+            "sender": "@owner:localhost",
+            "origin_server_ts": 1,
+            "type": "m.room.member",
+            "state_key": bot.agent_user.user_id,
+            "content": {"membership": "leave"},
+        },
+    )
+    assert isinstance(membership_event, nio.RoomMemberEvent)
+
+    with patch("mindroom.bot.maybe_build_call_manager", return_value=call_manager):
+        bot._register_call_manager_callbacks(client)
+
+    membership_callback = client.add_event_callback.call_args_list[0].args[0]
+    await membership_callback(room, membership_event)
+    bot._cold_history_fence.observe_continuation("s_warm")
+    await wait_for_background_tasks(timeout=1.0, owner=bot._runtime_view)
+
+    call_manager.on_room_membership_event.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_pending_room_lifecycle_does_not_admit_call_manager_mutation(tmp_path: Path) -> None:
+    """A router-hook retry cannot license an unrelated call-runtime mutation."""
+    bot = _agent_bot(tmp_path)
+    client = MagicMock(spec=nio.AsyncClient)
+    call_manager = MagicMock()
+    call_manager.on_room_membership_event = AsyncMock()
+    room = nio.MatrixRoom("!room:localhost", bot.agent_user.user_id)
+    membership_event = nio.RoomMemberEvent.from_dict(
+        {
+            "event_id": "$pending-router-hook",
+            "sender": "@owner:localhost",
+            "origin_server_ts": 1,
+            "type": "m.room.member",
+            "state_key": bot.agent_user.user_id,
+            "content": {"membership": "join"},
+        },
+    )
+    assert isinstance(membership_event, nio.RoomMemberEvent)
+    bot._dispatch_obligation_store.create_pending(
+        _DispatchObligation(
+            principal_id=bot._dispatch_obligation_store.principal_id,
+            entity_name=bot._dispatch_obligation_store.entity_name,
+            source_event_id=membership_event.event_id,
+            callback_kind=DispatchCallbackKind.ROOM_LIFECYCLE,
+            room_id=room.room_id,
+            event_source=dict(membership_event.source),
+        ),
+    )
+
+    with patch("mindroom.bot.maybe_build_call_manager", return_value=call_manager):
+        bot._register_call_manager_callbacks(client)
+
+    membership_callback = client.add_event_callback.call_args_list[0].args[0]
+    await membership_callback(room, membership_event)
+    await wait_for_background_tasks(timeout=1.0, owner=bot._runtime_view)
+
+    call_manager.on_room_membership_event.assert_not_awaited()
 
 
 def test_room_membership_cleanup_registers_without_call_runtime(tmp_path: Path) -> None:
