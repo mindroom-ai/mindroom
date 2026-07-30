@@ -353,12 +353,21 @@ async def test_interrupted_target_freshness_classifies_effective_later_sender(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("history_case", ["missing", "failed", "incomplete", "missing_target"])
-async def test_interrupted_target_freshness_retries_unusable_history(
+@pytest.mark.parametrize(
+    ("history_case", "expected"),
+    [
+        ("missing", InterruptedTargetFreshness.RETRY),
+        ("failed", InterruptedTargetFreshness.RETRY),
+        ("incomplete", InterruptedTargetFreshness.RETRY),
+        ("missing_target", InterruptedTargetFreshness.UNRECOVERABLE),
+    ],
+)
+async def test_interrupted_target_freshness_classifies_unusable_history(
     tmp_path: Path,
     history_case: str,
+    expected: InterruptedTargetFreshness,
 ) -> None:
-    """Recovery must retry rather than guess when authoritative history is unavailable."""
+    """Retry unavailable proof, but settle an authoritative missing target."""
     config = _make_config(tmp_path)
     interrupted = InterruptedThread(
         ROOM_ID,
@@ -389,7 +398,7 @@ async def test_interrupted_target_freshness_retries_unusable_history(
         conversation_cache=conversation_cache,
     )
 
-    assert freshness is InterruptedTargetFreshness.RETRY
+    assert freshness is expected
 
 
 @pytest.mark.asyncio

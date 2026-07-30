@@ -109,6 +109,7 @@ class _RestartTargetFreshness(Enum):
 
     CURRENT = auto()
     NEWER_HUMAN = auto()
+    UNRECOVERABLE = auto()
     RETRY = auto()
 
 
@@ -210,6 +211,7 @@ def build_matrix_restart_recovery_operations(runtime_paths: RuntimePaths) -> _Re
         return {
             InterruptedTargetFreshness.CURRENT: _RestartTargetFreshness.CURRENT,
             InterruptedTargetFreshness.NEWER_HUMAN: _RestartTargetFreshness.NEWER_HUMAN,
+            InterruptedTargetFreshness.UNRECOVERABLE: _RestartTargetFreshness.UNRECOVERABLE,
             InterruptedTargetFreshness.RETRY: _RestartTargetFreshness.RETRY,
         }[freshness]
 
@@ -562,7 +564,10 @@ class RestartRecoveryCoordinator:
             return True
         if freshness is _RestartTargetFreshness.RETRY:
             return True
-        if freshness is _RestartTargetFreshness.NEWER_HUMAN:
+        if freshness in {
+            _RestartTargetFreshness.NEWER_HUMAN,
+            _RestartTargetFreshness.UNRECOVERABLE,
+        }:
             return False
         router = next(
             (

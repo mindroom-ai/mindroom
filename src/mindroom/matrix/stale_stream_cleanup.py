@@ -115,6 +115,7 @@ class InterruptedTargetFreshness(Enum):
 
     CURRENT = auto()
     NEWER_HUMAN = auto()
+    UNRECOVERABLE = auto()
     RETRY = auto()
 
 
@@ -210,6 +211,12 @@ async def interrupted_target_freshness(
             history,
             target_event_id=interrupted_thread.target_event_id,
         )
+        if later_messages is None:
+            logger.warning(
+                "Skipping auto-resume because interrupted target is absent from authoritative history",
+                target_event_id=interrupted_thread.target_event_id,
+            )
+            return InterruptedTargetFreshness.UNRECOVERABLE
         remains_latest = _later_thread_activity_is_internal(
             later_messages,
             config=config,
@@ -236,8 +243,8 @@ def _authoritative_history_after_target(
     history: ThreadReadResult,
     *,
     target_event_id: str,
-) -> Sequence[ResolvedVisibleMessage]:
-    """Return history entries after an exact target or raise when history is unusable."""
+) -> Sequence[ResolvedVisibleMessage] | None:
+    """Return entries after an exact target, or ``None`` when it is absent."""
     history_source = history.diagnostics.get(THREAD_HISTORY_SOURCE_DIAGNOSTIC)
     if not history.is_full_history or is_thread_history_degraded(history):
         msg = "Thread history is incomplete or degraded"
@@ -250,8 +257,7 @@ def _authoritative_history_after_target(
         None,
     )
     if target_index is None:
-        msg = f"Interrupted target absent from thread history: {target_event_id}"
-        raise ValueError(msg)
+        return None
     return history[target_index + 1 :]
 
 

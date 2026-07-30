@@ -405,6 +405,72 @@ async def test_target_freshness_and_delivery_failures_retry_autonomously(tmp_pat
     assert delivery_attempts == 2
 
 
+@pytest.mark.asyncio
+async def test_unrecoverable_target_is_settled_without_future_retry(tmp_path: Path) -> None:
+    """Authoritative target absence must settle the exact version permanently."""
+    owner = _owner()
+    owners = {owner.user_id: owner}
+    target = _target("$missing", timestamp_ms=10)
+    second_scan = asyncio.Event()
+    freshness_checked = asyncio.Event()
+    scan_count = 0
+    freshness_attempts = 0
+
+    async def recover_room(
+        _owner: RecoveryOwner,
+        _request: RoomRecoveryRequest,
+        _owner_user_ids: frozenset[str],
+        _config: Config,
+    ) -> RoomRecoveryResult:
+        nonlocal scan_count
+        scan_count += 1
+        if scan_count == 2:
+            second_scan.set()
+        return RoomRecoveryResult(interrupted_threads=(target,))
+
+    async def freshness(
+        _owner: RecoveryOwner,
+        _target: InterruptedThread,
+        _config: Config,
+    ) -> RestartTargetFreshness:
+        nonlocal freshness_attempts
+        freshness_attempts += 1
+        freshness_checked.set()
+        return RestartTargetFreshness.UNRECOVERABLE
+
+    async def deliver(
+        _router: RecoveryOwner,
+        _owner: RecoveryOwner,
+        _target: InterruptedThread,
+        _config: Config,
+    ) -> bool:
+        pytest.fail("unrecoverable target must not be delivered")
+
+    coordinator = RestartRecoveryCoordinator(
+        current_config=lambda: _config(tmp_path),
+        current_owners=lambda: owners,
+        operations=_operations(
+            recover_room=recover_room,
+            freshness=freshness,
+            deliver=deliver,
+        ),
+        retry_delay=lambda _attempt: 0.0,
+    )
+    coordinator.start(startup_cutoff_ms=123)
+
+    try:
+        await asyncio.wait_for(freshness_checked.wait(), timeout=1.0)
+        key = (owner.user_id, target.room_id, target.thread_id)
+        assert key in coordinator._settled_target_versions
+        coordinator.enqueue_replacement_rooms(owner.user_id, {target.room_id})
+        await asyncio.wait_for(second_scan.wait(), timeout=1.0)
+        await asyncio.sleep(0)
+    finally:
+        await coordinator.stop()
+
+    assert freshness_attempts == 1
+
+
 def test_orchestrator_recovery_owner_includes_persisted_accepted_invites(
     tmp_path: Path,
 ) -> None:
