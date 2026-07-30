@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sqlite3
 import threading
 import uuid
 from datetime import UTC, datetime
@@ -16,14 +17,16 @@ import pytest
 from structlog.testing import capture_logs
 
 from mindroom.background_tasks import wait_for_background_tasks
-from mindroom.bot import AgentBot, _create_task_wrapper
+from mindroom.bot import AgentBot, _create_best_effort_task_wrapper
 from mindroom.coalescing import CoalescingDrainResult, CoalescingGate, IngressAdmissionClosedError, ReadyPendingEvent
 from mindroom.coalescing_batch import CoalescedBatch, CoalescingKey, PendingEvent
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
+from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.delivery_gateway import FinalizeStreamedResponseRequest, ResponseIdentity
 from mindroom.dispatch_handoff import PendingDispatchMetadata
+from mindroom.dispatch_obligations import DispatchCallbackKind
 from mindroom.dispatch_source import VOICE_SOURCE_KIND
 from mindroom.handled_turns import TurnRecord
 from mindroom.matrix.cache.event_cache import EventCacheBackendUnavailableError
@@ -277,6 +280,33 @@ async def test_bot_start_restores_saved_sync_token(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("responder_fleet_ready", [False, True])
+async def test_orchestrated_router_start_gates_turn_recovery_on_responder_fleet(
+    tmp_path: Path,
+    responder_fleet_ready: bool,
+) -> None:
+    """Router startup must leave turn-backed replay gated until responders start."""
+    bot = _agent_bot(tmp_path, agent_name=ROUTER_AGENT_NAME)
+    bot.orchestrator = MagicMock()
+    bot.orchestrator.running = responder_fleet_ready
+    client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
+    recover_pending = AsyncMock()
+    bot._dispatch_obligation_runner.recover_pending = recover_pending
+
+    with (
+        patch.object(bot, "ensure_user_account", AsyncMock()),
+        patch("mindroom.bot.login_agent_user", AsyncMock(return_value=client)),
+        patch.object(bot, "_set_avatar_if_available", AsyncMock()),
+        patch.object(bot, "_set_presence_with_model_info", AsyncMock()),
+        patch("mindroom.bot.interactive.init_persistence"),
+    ):
+        await bot.start()
+
+    expected_kwargs = {} if responder_fleet_ready else {"turn_backed": False}
+    recover_pending.assert_awaited_once_with(**expected_kwargs)
+
+
+@pytest.mark.asyncio
 async def test_leave_cleanup_restart_purges_only_current_sqlite_principal(tmp_path: Path) -> None:
     """A restart after leave cleanup interruption must discard only the departed principal."""
     principal_id = "@mindroom_code:localhost"
@@ -500,7 +530,7 @@ async def test_leave_purges_before_failing_call_reconciliation(
 
 @pytest.mark.asyncio
 async def test_checkpoint_clear_failure_defers_durable_leave_cleanup_for_replay(tmp_path: Path) -> None:
-    """A failed checkpoint unlink must preserve old durable rows and poison this runtime."""
+    """A failed checkpoint unlink must preserve old durable rows and disable cache use."""
     principal_id = "@mindroom_code:localhost"
     room_id = "!left:localhost"
     event_id = "$stale"
@@ -532,7 +562,6 @@ async def test_checkpoint_clear_failure_defers_durable_leave_cleanup_for_replay(
     with patch("mindroom.matrix.sync_cache_trust.clear_sync_token", side_effect=clear_failure):
         await bot._apply_own_room_membership_from_sync(response)
 
-    assert bot._runtime_view.callback_failure_count == 1
     assert bot._sync_cache_trust.state is SyncTrustState.UNCERTAIN
     assert bot._sync_cache_trust.checkpoint is None
     assert _load_sync_token_value(tmp_path, bot.agent_name) == "s_before_leave"
@@ -542,7 +571,6 @@ async def test_checkpoint_clear_failure_defers_durable_leave_cleanup_for_replay(
     await reopened_root.initialize()
     reopened_cache = reopened_root.for_principal(principal_id)
     bot.event_cache = reopened_cache
-    bot._runtime_view.callback_failure_count = 0
     bot.client = make_matrix_client_mock(user_id=principal_id)
     bot.client.next_batch = None
     try:
@@ -1006,36 +1034,29 @@ async def test_on_sync_response_persists_latest_sync_token(tmp_path: Path) -> No
     assert checkpoint.token == "s_latest"  # noqa: S105
 
 
-@pytest.mark.asyncio
-async def test_blocked_consumer_response_callback_cannot_certify_recovered_producer_gap(tmp_path: Path) -> None:
-    """A real nio producer outcome remains unsafe while MindRoom callback ownership is unproven."""
+def test_cache_scope_cleanup_between_plan_and_apply_forces_tokenless_recovery(tmp_path: Path) -> None:
+    """Bot wiring must apply the invalidation epoch before advancing nio's cursor."""
     bot = _agent_bot(tmp_path)
     bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
-    response = _recovered_sync_response("s_after_recovered")
-    callback_started = asyncio.Event()
-    release_callback = asyncio.Event()
-    cache_sync = bot._conversation_cache.cache_sync_timeline_for_certification
+    bot.client.next_batch = "s_stale_after_cleanup"
+    cache_result = SyncCacheWriteResult(complete=True)
+    decision = bot._plan_sync_response(
+        next_batch="s_stale_after_cleanup",
+        cache_result=cache_result,
+        first_sync=False,
+    )
 
-    async def block_consumer_callback(sync_response: nio.SyncResponse) -> SyncCacheWriteResult:
-        callback_started.set()
-        await release_callback.wait()
-        return await cache_sync(sync_response)
+    assert bot._sync_cache_trust.invalidate_for_cache_scope_cleanup()
+    bot._apply_sync_response_decision(decision, cache_result=cache_result)
 
-    bot._conversation_cache.cache_sync_timeline_for_certification = block_consumer_callback
-    callback_task = asyncio.create_task(bot._on_sync_response(response))
-    await callback_started.wait()
-
-    assert _load_sync_token_value(tmp_path, bot.agent_name) is None
-
-    release_callback.set()
-    await callback_task
-
-    assert _load_sync_token_value(tmp_path, bot.agent_name) is None
+    assert bot.client.next_batch is None
+    assert bot._sync_cache_trust.state is SyncTrustState.UNCERTAIN
+    assert bot._sync_cache_trust.checkpoint is None
+    assert load_sync_checkpoint(tmp_path, bot.agent_name) is None
 
 
-@pytest.mark.asyncio
-async def test_sync_response_side_effect_failure_clears_certified_checkpoint(tmp_path: Path) -> None:
-    """A post-certification sync side effect failure must poison the saved token."""
+async def test_sync_response_side_effect_failure_preserves_raw_cache_checkpoint(tmp_path: Path) -> None:
+    """A non-cache side effect failure must not poison independently durable raw continuity."""
     bot = _agent_bot(tmp_path)
     bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
     bot.client.next_batch = "s_after_side_effect_failure"
@@ -1048,10 +1069,9 @@ async def test_sync_response_side_effect_failure_clears_certified_checkpoint(tmp
     ):
         await bot._on_sync_response(response)
 
-    assert bot._runtime_view.callback_failure_count == 1
-    assert bot._sync_cache_trust.state is SyncTrustState.UNCERTAIN
-    assert bot._sync_cache_trust.checkpoint is None
-    assert _load_sync_token_value(tmp_path, bot.agent_name) is None
+    assert bot._sync_cache_trust.state is SyncTrustState.CERTIFIED
+    assert bot._sync_cache_trust.checkpoint == SyncCheckpoint("s_after_side_effect_failure")
+    assert _load_sync_token_value(tmp_path, bot.agent_name) == "s_after_side_effect_failure"
 
 
 @pytest.mark.asyncio
@@ -1103,8 +1123,8 @@ async def test_response_runtime_shutdown_log_names_its_agent_and_reason(
 
 
 @pytest.mark.asyncio
-async def test_shutdown_timeout_does_not_save_checkpoint_for_cancelled_ingress(tmp_path: Path) -> None:
-    """Incomplete bounded drains must not save certified shutdown checkpoints."""
+async def test_shutdown_timeout_preserves_checkpoint_for_durable_ingress_recovery(tmp_path: Path) -> None:
+    """Incomplete durable ingress drains must not poison raw cache continuity."""
     bot = _agent_bot(tmp_path)
     bot._sync_cache_trust.state = SyncTrustState.CERTIFIED
     bot._sync_cache_trust.checkpoint = SyncCheckpoint("s_shutdown")
@@ -1114,7 +1134,7 @@ async def test_shutdown_timeout_does_not_save_checkpoint_for_cancelled_ingress(t
 
     await bot.prepare_for_sync_shutdown()
 
-    assert _load_sync_token_value(tmp_path, bot.agent_name) is None
+    assert _load_sync_token_value(tmp_path, bot.agent_name) == "s_shutdown"
 
 
 @pytest.mark.parametrize(
@@ -1125,13 +1145,13 @@ async def test_shutdown_timeout_does_not_save_checkpoint_for_cancelled_ingress(t
     ],
 )
 @pytest.mark.asyncio
-async def test_shutdown_discard_warning_logs_exact_drain_predicates(
+async def test_shutdown_recovery_warning_logs_exact_drain_predicates(
     tmp_path: Path,
     coalescing_drain_result: CoalescingDrainResult,
     responses_drained: bool,
     response_recovery_complete: bool,
 ) -> None:
-    """Checkpoint-discard logs should identify which content-free drain predicate failed."""
+    """Durable-recovery logs should identify which content-free drain predicate failed."""
     bot = _agent_bot(tmp_path)
     install_shutdown_drain_mocks(
         bot,
@@ -1143,7 +1163,7 @@ async def test_shutdown_discard_warning_logs_exact_drain_predicates(
     with capture_logs() as logs:
         await bot.prepare_for_sync_shutdown()
 
-    warnings = [entry for entry in logs if entry["event"] == "sync_checkpoint_discarded"]
+    warnings = [entry for entry in logs if entry["event"] == "runtime_drain_incomplete_with_durable_dispatch_recovery"]
     assert len(warnings) == 1
     assert warnings[0]["coalescing_drain_completed"] is coalescing_drain_result.completed
     assert warnings[0]["cancelled_unready_count"] == coalescing_drain_result.cancelled_unready_count
@@ -1153,8 +1173,8 @@ async def test_shutdown_discard_warning_logs_exact_drain_predicates(
 
 
 @pytest.mark.asyncio
-async def test_shutdown_timeout_does_not_save_checkpoint_for_unsettled_callbacks(tmp_path: Path) -> None:
-    """Shutdown must not checkpoint if callback tasks timed out before the gate drain."""
+async def test_shutdown_timeout_preserves_checkpoint_for_unsettled_callbacks(tmp_path: Path) -> None:
+    """Durably accepted callback timeouts must not poison raw cache continuity."""
     bot = _agent_bot(tmp_path)
     bot._sync_cache_trust.state = SyncTrustState.CERTIFIED
     bot._sync_cache_trust.checkpoint = SyncCheckpoint("s_shutdown")
@@ -1163,14 +1183,14 @@ async def test_shutdown_timeout_does_not_save_checkpoint_for_unsettled_callbacks
     with patch("mindroom.bot.wait_for_background_tasks", new=AsyncMock(return_value=False)):
         await bot.prepare_for_sync_shutdown()
 
-    assert bot._sync_cache_trust.state is SyncTrustState.UNCERTAIN
-    assert bot._sync_cache_trust.checkpoint is None
-    assert _load_sync_token_value(tmp_path, bot.agent_name) is None
+    assert bot._sync_cache_trust.state is SyncTrustState.CERTIFIED
+    assert bot._sync_cache_trust.checkpoint == SyncCheckpoint("s_shutdown")
+    assert _load_sync_token_value(tmp_path, bot.agent_name) == "s_shutdown"
 
 
 @pytest.mark.asyncio
-async def test_shutdown_timeout_does_not_save_checkpoint_for_post_drain_background_work(tmp_path: Path) -> None:
-    """Shutdown must prove owner background work is settled after the gate drain too."""
+async def test_post_drain_background_timeout_preserves_raw_checkpoint(tmp_path: Path) -> None:
+    """Post-drain callback recovery must remain independent from raw cache continuity."""
     bot = _agent_bot(tmp_path)
     bot._sync_cache_trust.state = SyncTrustState.CERTIFIED
     bot._sync_cache_trust.checkpoint = SyncCheckpoint("s_shutdown")
@@ -1181,14 +1201,14 @@ async def test_shutdown_timeout_does_not_save_checkpoint_for_post_drain_backgrou
         await bot.prepare_for_sync_shutdown()
 
     assert wait_for_background_tasks.await_count == 2
-    assert bot._sync_cache_trust.state is SyncTrustState.UNCERTAIN
-    assert bot._sync_cache_trust.checkpoint is None
-    assert _load_sync_token_value(tmp_path, bot.agent_name) is None
+    assert bot._sync_cache_trust.state is SyncTrustState.CERTIFIED
+    assert bot._sync_cache_trust.checkpoint == SyncCheckpoint("s_shutdown")
+    assert _load_sync_token_value(tmp_path, bot.agent_name) == "s_shutdown"
 
 
 @pytest.mark.asyncio
-async def test_shutdown_cancellation_during_post_drain_wait_discards_unsafe_checkpoint(tmp_path: Path) -> None:
-    """Cancellation after an unsafe drain must poison the certified checkpoint."""
+async def test_shutdown_cancellation_during_post_drain_wait_keeps_raw_checkpoint(tmp_path: Path) -> None:
+    """Durable dispatch recovery keeps raw continuity independent from shutdown cancellation."""
     bot = _certified_shutdown_bot(tmp_path)
     bot._coalescing_gate.drain_all = AsyncMock(
         return_value=CoalescingDrainResult(completed=False, cancelled_unready_count=1),
@@ -1213,14 +1233,14 @@ async def test_shutdown_cancellation_during_post_drain_wait_discards_unsafe_chec
             await shutdown_task
 
     assert wait_call_count == 2
-    assert bot._sync_cache_trust.state is SyncTrustState.UNCERTAIN
-    assert bot._sync_cache_trust.checkpoint is None
-    assert _load_sync_token_value(tmp_path, bot.agent_name) is None
+    assert bot._sync_cache_trust.state is SyncTrustState.CERTIFIED
+    assert bot._sync_cache_trust.checkpoint == SyncCheckpoint("s_shutdown")
+    assert _load_sync_token_value(tmp_path, bot.agent_name) == "s_previous"
 
 
 @pytest.mark.asyncio
-async def test_callback_failure_discards_checkpoint_with_generic_event(tmp_path: Path) -> None:
-    """A callback-only discard must not blame an incomplete shutdown."""
+async def test_generic_callback_failure_does_not_poison_raw_checkpoint(tmp_path: Path) -> None:
+    """Best-effort callback failure must not affect independently durable raw cache state."""
     bot = _agent_bot(tmp_path)
     bot._sync_cache_trust.state = SyncTrustState.CERTIFIED
     bot._sync_cache_trust.checkpoint = SyncCheckpoint("s_after_bad_callback")
@@ -1230,28 +1250,22 @@ async def test_callback_failure_discards_checkpoint_with_generic_event(tmp_path:
         msg = "canonical key lookup failed"
         raise RuntimeError(msg)
 
-    callback = _create_task_wrapper(failing_callback, owner=bot._runtime_view)
+    callback = _create_best_effort_task_wrapper(failing_callback, owner=bot._runtime_view)
     await callback()
     await wait_for_background_tasks(timeout=0.5, owner=bot._runtime_view)
 
     with capture_logs() as logs:
         await bot.prepare_for_sync_shutdown()
 
-    assert bot._sync_cache_trust.state is SyncTrustState.UNCERTAIN
-    assert bot._sync_cache_trust.checkpoint is None
-    assert _load_sync_token_value(tmp_path, bot.agent_name) is None
-    warnings = [entry for entry in logs if entry["event"] == "sync_checkpoint_discarded"]
-    assert len(warnings) == 1
-    assert warnings[0]["callback_failure_count"] == 1
-    assert warnings[0]["background_tasks_completed"] is True
-    assert warnings[0]["coalescing_drain_completed"] is True
-    assert warnings[0]["responses_drained"] is True
-    assert warnings[0]["post_drain_background_tasks_completed"] is True
+    assert bot._sync_cache_trust.state is SyncTrustState.CERTIFIED
+    assert bot._sync_cache_trust.checkpoint == SyncCheckpoint("s_after_bad_callback")
+    assert _load_sync_token_value(tmp_path, bot.agent_name) == "s_after_bad_callback"
+    assert not [entry for entry in logs if entry["event"] == "runtime_drain_incomplete_with_durable_dispatch_recovery"]
 
 
 @pytest.mark.asyncio
-async def test_callback_failure_clears_saved_checkpoint_immediately(tmp_path: Path) -> None:
-    """A failed Matrix callback must clear already-persisted sync continuity."""
+async def test_callback_failure_preserves_saved_checkpoint_immediately(tmp_path: Path) -> None:
+    """A failed best-effort callback must leave raw sync continuity unchanged."""
     bot = _agent_bot(tmp_path)
     save_sync_token(tmp_path, bot.agent_name, "s_before_failure", cache_generation=_CACHE_GENERATION)
     bot._sync_cache_trust.state = SyncTrustState.CERTIFIED
@@ -1261,48 +1275,111 @@ async def test_callback_failure_clears_saved_checkpoint_immediately(tmp_path: Pa
         msg = "callback failed"
         raise RuntimeError(msg)
 
-    callback = _create_task_wrapper(
-        failing_callback,
-        owner=bot._runtime_view,
-        on_error=bot._sync_cache_trust.mark_callback_failed,
-    )
+    callback = _create_best_effort_task_wrapper(failing_callback, owner=bot._runtime_view)
     await callback()
     await wait_for_background_tasks(timeout=0.5, owner=bot._runtime_view)
 
-    assert bot._runtime_view.callback_failure_count == 1
-    assert bot._sync_cache_trust.state is SyncTrustState.UNCERTAIN
-    assert bot._sync_cache_trust.checkpoint is None
-    assert _load_sync_token_value(tmp_path, bot.agent_name) is None
+    assert bot._sync_cache_trust.state is SyncTrustState.CERTIFIED
+    assert bot._sync_cache_trust.checkpoint == SyncCheckpoint("s_before_failure")
+    assert _load_sync_token_value(tmp_path, bot.agent_name) == "s_before_failure"
 
 
 @pytest.mark.asyncio
-async def test_room_member_callback_failure_prevents_certified_checkpoint(tmp_path: Path) -> None:
-    """Room-member callback exceptions must use the same sync-failure accounting."""
+async def test_dispatch_persistence_failure_rewinds_classic_cursor(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Work rejected before durable acceptance must replay from the certified cursor."""
     bot = _agent_bot(tmp_path)
-    save_sync_token(
-        tmp_path,
-        bot.agent_name,
-        "s_before_member_failure",
-        cache_generation=_CACHE_GENERATION,
-    )
+    bot.client = make_matrix_client_mock(user_id=bot.matrix_id.full_id)
+    bot.client.next_batch = "s_after_failure"
     bot._sync_cache_trust.state = SyncTrustState.CERTIFIED
-    bot._sync_cache_trust.checkpoint = SyncCheckpoint("s_before_member_failure")
-    bot._on_room_member = AsyncMock(side_effect=RuntimeError("member callback failed"))  # type: ignore[method-assign]
-    wrapper = bot._create_room_member_task_wrapper()
-    room = nio.MatrixRoom("!room:localhost", bot.agent_user.user_id)
+    bot._sync_cache_trust.checkpoint = SyncCheckpoint("s_before_failure")
 
-    await wrapper(room, _room_member_event())
-    await wait_for_background_tasks(timeout=0.5, owner=bot._runtime_view)
+    def fail_persist(*_args: object, **_kwargs: object) -> None:
+        message = "dispatch database unavailable"
+        raise OSError(message)
 
-    assert bot._runtime_view.callback_failure_count == 1
-    assert bot._sync_cache_trust.state is SyncTrustState.UNCERTAIN
-    assert bot._sync_cache_trust.checkpoint is None
-    assert _load_sync_token_value(tmp_path, bot.agent_name) is None
+    monkeypatch.setattr(bot._dispatch_obligation_store, "create_pending", fail_persist)
+    wrapper = bot._dispatch_obligation_runner.task_wrapper(
+        DispatchCallbackKind.MESSAGE,
+        owner=bot._runtime_view,
+    )
+
+    with pytest.raises(OSError, match="dispatch database unavailable"):
+        await wrapper(
+            nio.MatrixRoom("!room:localhost", bot.matrix_id.full_id),
+            _text_event("$unpersisted", "hello", 1),
+        )
+
+    assert bot.client.next_batch == "s_before_failure"
 
 
 @pytest.mark.asyncio
-async def test_incomplete_shutdown_drain_poison_persists_across_repeated_shutdown(tmp_path: Path) -> None:
-    """A later no-op shutdown call must not save a checkpoint after unsafe drain work."""
+async def test_dispatch_obligation_waits_for_terminal_turn_durability(tmp_path: Path) -> None:
+    """In-memory terminal state must not retire exact work before its ledger fsync."""
+    bot = _agent_bot(tmp_path)
+    room = nio.MatrixRoom("!room:localhost", bot.matrix_id.full_id)
+    event = _text_event("$write-behind", "hello", 1)
+    obligation = await bot._dispatch_obligation_runner.persist(
+        room,
+        event,
+        DispatchCallbackKind.MESSAGE,
+    )
+    assert obligation is not None
+
+    persist_started = threading.Event()
+    release_persist = threading.Event()
+    original_persist = bot._turn_store._ledger._persist_records
+
+    def blocking_persist(records: tuple[TurnRecord, ...]) -> None:
+        persist_started.set()
+        assert release_persist.wait(timeout=2)
+        original_persist(records)
+
+    with patch.object(bot._turn_store._ledger, "_persist_records", side_effect=blocking_persist):
+        bot._turn_store.record_turn(TurnRecord.create([event.event_id], response_event_id="$response"))
+        assert await asyncio.to_thread(persist_started.wait, 2)
+        run_task = asyncio.create_task(
+            bot._dispatch_obligation_runner.run_persisted(
+                obligation,
+                room=room,
+                event=event,
+            ),
+        )
+        try:
+            await asyncio.sleep(0.05)
+            pending_before_durable_turn = bot._dispatch_obligation_store.has_pending(
+                event.event_id,
+                DispatchCallbackKind.MESSAGE,
+            )
+            task_done_before_durable_turn = run_task.done()
+        finally:
+            release_persist.set()
+            await asyncio.gather(run_task, return_exceptions=True)
+
+    assert pending_before_durable_turn
+    assert not task_done_before_durable_turn
+    assert not bot._dispatch_obligation_store.has_pending(
+        event.event_id,
+        DispatchCallbackKind.MESSAGE,
+    )
+    with sqlite3.connect(tmp_path / "tracking" / "dispatch_obligations.sqlite3") as connection:
+        terminal_kinds = connection.execute(
+            """
+            SELECT callback_kind
+            FROM dispatch_obligations
+            WHERE source_event_id = ?
+            ORDER BY callback_kind
+            """,
+            (event.event_id,),
+        ).fetchall()
+    assert terminal_kinds == [(DispatchCallbackKind.MESSAGE.value,)]
+
+
+@pytest.mark.asyncio
+async def test_incomplete_shutdown_drain_remains_recoverable_across_repeated_shutdown(tmp_path: Path) -> None:
+    """Repeated shutdown keeps raw continuity while durable callbacks own retry."""
     bot = _agent_bot(tmp_path)
     save_sync_token(tmp_path, bot.agent_name, "s_previous", cache_generation=_CACHE_GENERATION)
     bot._sync_cache_trust.state = SyncTrustState.CERTIFIED
@@ -1317,9 +1394,9 @@ async def test_incomplete_shutdown_drain_poison_persists_across_repeated_shutdow
     await bot.prepare_for_sync_shutdown()
     await bot.prepare_for_sync_shutdown()
 
-    assert bot._sync_cache_trust.state is SyncTrustState.UNCERTAIN
-    assert bot._sync_cache_trust.checkpoint is None
-    assert _load_sync_token_value(tmp_path, bot.agent_name) is None
+    assert bot._sync_cache_trust.state is SyncTrustState.CERTIFIED
+    assert bot._sync_cache_trust.checkpoint == SyncCheckpoint("s_shutdown")
+    assert _load_sync_token_value(tmp_path, bot.agent_name) == "s_shutdown"
 
 
 @pytest.mark.asyncio
@@ -1853,7 +1930,7 @@ async def test_shutdown_in_flight_dispatch_cancellation_marks_drain_incomplete()
         "response_rooms",
         "handoff_indexes",
         "remains_pending",
-        "checkpoint_preserved",
+        "response_recovery_complete",
         "shutdown_intent",
         "restart_reason_category",
     ),
@@ -1889,16 +1966,16 @@ async def test_shutdown_in_flight_dispatch_cancellation_marks_drain_incomplete()
     ],
 )
 @pytest.mark.asyncio
-async def test_shutdown_preserves_checkpoint_only_when_each_cancelled_response_has_source_recovery(
+async def test_shutdown_tracks_exact_source_recovery_without_gating_raw_checkpoint(
     tmp_path: Path,
     response_rooms: tuple[str, ...],
     handoff_indexes: frozenset[int],
     remains_pending: bool,
-    checkpoint_preserved: bool,
+    response_recovery_complete: bool,
     shutdown_intent: RuntimeShutdownIntent,
-    restart_reason_category: str,
+    restart_reason_category: str,  # noqa: ARG001
 ) -> None:
-    """Every settled cancellation needs its exact source recovery handoff."""
+    """Terminal interruption proof remains exact while obligations own source replay."""
     bot = _certified_shutdown_bot(tmp_path)
     response_started = [asyncio.Event() for _room_id in response_rooms]
     release_response = asyncio.Event()
@@ -1925,27 +2002,22 @@ async def test_shutdown_preserves_checkpoint_only_when_each_cancelled_response_h
     ]
     await asyncio.gather(*(event.wait() for event in response_started))
     _install_fast_response_drain(bot)
-    with capture_logs() as logs:
-        await bot.prepare_for_sync_shutdown(shutdown_intent=shutdown_intent)
+    await bot.prepare_for_sync_shutdown(shutdown_intent=shutdown_intent)
 
     release_response.set()
     await asyncio.gather(*response_tasks, return_exceptions=True)
     assert all(task.cancelled() for task in response_tasks) == (not remains_pending)
-    expected_state = SyncTrustState.CERTIFIED if checkpoint_preserved else SyncTrustState.UNCERTAIN
-    assert bot._sync_cache_trust.state is expected_state
-    expected_token = "s_shutdown" if checkpoint_preserved else None
-    assert _load_sync_token_value(tmp_path, bot.agent_name) == expected_token
+    assert bot._response_runner.incomplete_inbox_responses_recoverable is response_recovery_complete
+    assert bot._sync_cache_trust.state is SyncTrustState.CERTIFIED
+    assert _load_sync_token_value(tmp_path, bot.agent_name) == "s_shutdown"
     assert bot.pending_sync_restart_retry_room_ids == {response_rooms[index] for index in handoff_indexes}
-    incomplete_log = next(entry for entry in logs if entry["event"] == "matrix_agent_response_drain_incomplete")
-    assert incomplete_log["restart_reason_category"] == restart_reason_category
-    assert incomplete_log["response_recovery_complete"] is checkpoint_preserved
 
 
 @pytest.mark.asyncio
-async def test_shutdown_discards_checkpoint_when_response_swallows_cancellation_without_handoff(
+async def test_shutdown_keeps_raw_checkpoint_when_response_swallows_cancellation_without_handoff(
     tmp_path: Path,
 ) -> None:
-    """An accepted cancellation needs exact recovery even if the task returns cleanly."""
+    """Missing response proof cannot poison separately durable source continuity."""
     bot = _certified_shutdown_bot(tmp_path)
     response_started = asyncio.Event()
 
@@ -1970,8 +2042,8 @@ async def test_shutdown_discards_checkpoint_when_response_swallows_cancellation_
     assert not response_task.cancelled()
     assert response_task.exception() is None
     assert bot._response_runner.incomplete_inbox_responses_recoverable is False
-    assert bot._sync_cache_trust.state is SyncTrustState.UNCERTAIN
-    assert _load_sync_token_value(tmp_path, bot.agent_name) is None
+    assert bot._sync_cache_trust.state is SyncTrustState.CERTIFIED
+    assert _load_sync_token_value(tmp_path, bot.agent_name) == "s_shutdown"
 
 
 @pytest.mark.parametrize(
@@ -1989,7 +2061,7 @@ async def test_shutdown_discards_checkpoint_when_response_swallows_cancellation_
     ],
 )
 @pytest.mark.asyncio
-async def test_shutdown_discards_checkpoint_when_terminal_interruption_note_did_not_land(
+async def test_shutdown_keeps_raw_checkpoint_when_terminal_interruption_note_did_not_land(
     tmp_path: Path,
     terminal_edit_effect: object,
     prior_visible_body: str,
@@ -2076,12 +2148,12 @@ async def test_shutdown_discards_checkpoint_when_terminal_interruption_note_did_
     assert final_outcomes[0].final_visible_body == prior_visible_body
     assert not bot._interrupted_turn_rooms.contains(source_event_id)
     assert bot._response_runner.incomplete_inbox_responses_recoverable is False
-    assert bot._sync_cache_trust.state is SyncTrustState.UNCERTAIN
-    assert _load_sync_token_value(tmp_path, bot.agent_name) is None
+    assert bot._sync_cache_trust.state is SyncTrustState.CERTIFIED
+    assert _load_sync_token_value(tmp_path, bot.agent_name) == "s_shutdown"
 
 
 @pytest.mark.asyncio
-async def test_orderly_shutdown_discards_checkpoint_for_write_behind_handled_response_without_handoff(
+async def test_orderly_shutdown_keeps_raw_checkpoint_for_write_behind_handled_response_without_handoff(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2126,36 +2198,32 @@ async def test_orderly_shutdown_discards_checkpoint_for_write_behind_handled_res
         assert not response_task.cancelled()
         assert bot._turn_store.is_handled(source_event_id)
         assert bot._response_runner.incomplete_inbox_responses_recoverable is False
-        assert bot._sync_cache_trust.state is SyncTrustState.UNCERTAIN
-        assert _load_sync_token_value(tmp_path, bot.agent_name) is None
+        assert bot._sync_cache_trust.state is SyncTrustState.CERTIFIED
+        assert _load_sync_token_value(tmp_path, bot.agent_name) == "s_shutdown"
     finally:
         release_persist.set()
         await asyncio.to_thread(bot._turn_store._ledger.flush)
 
 
-@pytest.mark.parametrize("source_failure", ["coalescing", "callback"])
 @pytest.mark.asyncio
-async def test_response_timeout_discards_checkpoint_when_source_is_unsafe(
+async def test_response_timeout_keeps_raw_checkpoint_when_dispatch_recovery_is_pending(
     tmp_path: Path,
-    source_failure: str,
 ) -> None:
-    """Response cancellation cannot preserve continuity across source uncertainty."""
+    """Durable callback obligations keep raw continuity independent from drain state."""
     bot = _certified_shutdown_bot(tmp_path)
     bot._coalescing_gate.drain_all = AsyncMock(
         return_value=CoalescingDrainResult(
-            completed=source_failure != "coalescing",
-            cancelled_unready_count=int(source_failure == "coalescing"),
+            completed=False,
+            cancelled_unready_count=1,
         ),
     )
     bot._response_runner.drain_inbox_responses = AsyncMock(return_value=False)
-    if source_failure == "callback":
-        bot._runtime_view.mark_callback_failed()
 
     await bot.prepare_for_sync_shutdown()
 
-    assert bot._sync_cache_trust.state is SyncTrustState.UNCERTAIN
-    assert bot._sync_cache_trust.checkpoint is None
-    assert _load_sync_token_value(tmp_path, bot.agent_name) is None
+    assert bot._sync_cache_trust.state is SyncTrustState.CERTIFIED
+    assert bot._sync_cache_trust.checkpoint == SyncCheckpoint("s_shutdown")
+    assert _load_sync_token_value(tmp_path, bot.agent_name) == "s_shutdown"
 
 
 @pytest.mark.asyncio

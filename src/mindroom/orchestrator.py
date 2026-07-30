@@ -986,7 +986,7 @@ class _MultiAgentOrchestrator:
             set_runtime_failed(str(exc))
             raise
 
-    async def _start_router_bot(self) -> AgentBot | TeamBot:
+    async def _start_router_bot(self) -> AgentBot:
         """Start the router bot, retrying until it succeeds."""
         config = self._require_config()
         if ROUTER_AGENT_NAME in self._entities_blocked_by_failed_mcp_servers({ROUTER_AGENT_NAME}, config):
@@ -1208,6 +1208,7 @@ class _MultiAgentOrchestrator:
         self._bind_started_runtime_support_services(started_bots)
         log_startup_phase_finished("bind_runtime_support", phase_started)
 
+        await router_bot.recover_pending_turn_dispatch_obligations()
         self.running = True
 
         # Create sync tasks for each bot with automatic restart on failure.

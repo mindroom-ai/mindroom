@@ -505,7 +505,6 @@ async def _run_admitted_router_relay(
     admission_gate = controller.deps.runtime.response_admission_gate
     while not admission_gate.admit():
         if not await controller.deps.response_runner.wait_for_admission_or_shutdown():
-            controller.deps.runtime.mark_callback_failed()
             raise ResponseAdmissionRefusedError
     try:
         await relay()

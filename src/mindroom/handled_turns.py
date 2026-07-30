@@ -561,6 +561,7 @@ class HandledTurnLedger:
         update: Callable[[Mapping[str, TurnRecord]], TurnRecord],
         *,
         wait_for_persist: bool = False,
+        on_persisted: Callable[[TurnRecord], None] | None = None,
     ) -> TurnRecord | None:
         """Atomically update one record, optionally waiting for its exact persist."""
         normalized_lookup_event_ids = _normalize_source_event_ids(lookup_event_ids)
@@ -587,6 +588,16 @@ class HandledTurnLedger:
             for event_id in persisted_record.indexed_event_ids:
                 self._responses[event_id] = persisted_record
             persist_future = self._schedule_persist_locked(persisted_record)
+        if on_persisted is not None:
+
+            def notify_after_persist(completion: Future[None]) -> None:
+                try:
+                    completion.result()
+                except Exception:
+                    return
+                on_persisted(persisted_record)
+
+            persist_future.add_done_callback(notify_after_persist)
         if wait_for_persist:
             persist_future.result()
         logger.debug("handled_turn_recorded", indexed_event_count=len(persisted_record.indexed_event_ids))
@@ -596,10 +607,22 @@ class HandledTurnLedger:
         """Return whether the source event has a terminal recorded outcome."""
         with self._state.lock:
             self._ensure_loaded_locked()
-            record = self._responses.get(event_id)
-            if record is None:
+            return self._has_responded_locked(event_id)
+
+    def has_durably_responded(self, event_id: str) -> bool:
+        """Return terminal truth only after all preceding ledger writes reach disk."""
+        with self._state.lock:
+            self._ensure_loaded_locked()
+            if not self._has_responded_locked(event_id):
                 return False
-            return record.completed or event_id in record.redacted_source_event_ids
+            self._wait_for_pending_persists_locked()
+            return self._has_responded_locked(event_id)
+
+    def _has_responded_locked(self, event_id: str) -> bool:
+        record = self._responses.get(event_id)
+        if record is None:
+            return False
+        return record.completed or event_id in record.redacted_source_event_ids
 
     def get_visible_echo_event_id(self, source_event_id: str) -> str | None:
         """Return the tracked visible echo event ID for one source event."""

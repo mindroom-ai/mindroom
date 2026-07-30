@@ -88,6 +88,15 @@ path = "mindroom.dynamic_workflows"
 depends_on = ["mindroom.durable_write"]
 
 [[modules]]
+path = "mindroom.dispatch_obligations"
+depends_on = [
+    "mindroom.background_tasks",
+    "mindroom.logging_config",
+    "mindroom.matrix.media",
+]
+visibility = ["mindroom.bot"]
+
+[[modules]]
 path = "mindroom.report_publishing"
 depends_on = ["mindroom.durable_write"]
 
@@ -2712,6 +2721,7 @@ depends_on = [
     "mindroom.conversation_state_writer",
     "mindroom.delivery_gateway",
     "mindroom.desktop.pairing_receiver",
+    "mindroom.dispatch_obligations",
     "mindroom.edit_regenerator",
     "mindroom.entity_resolution",
     "mindroom.hooks",
