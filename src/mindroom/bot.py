@@ -1538,7 +1538,11 @@ class AgentBot:
             # Keep durable tracking-state loading off the event loop at startup.
             await asyncio.to_thread(self._turn_store.warm)
             await asyncio.to_thread(interactive.init_persistence, self.runtime_paths.storage_root)
-            if self.agent_name == ROUTER_AGENT_NAME and self.orchestrator is not None and not self.orchestrator.running:
+            if (
+                self.orchestrator is not None
+                and not self.orchestrator.running
+                and (self.agent_name == ROUTER_AGENT_NAME or self.agent_name in self.config.teams)
+            ):
                 await self._dispatch_obligation_runner.recover_pending(turn_backed=False)
             else:
                 await self._dispatch_obligation_runner.recover_pending()
@@ -1593,7 +1597,7 @@ class AgentBot:
             raise
 
     async def recover_pending_turn_dispatch_obligations(self) -> None:
-        """Release router turn replay after the responder startup pass."""
+        """Release fleet-dependent turn replay after the responder startup pass."""
         await self._dispatch_obligation_runner.recover_pending(turn_backed=True)
 
     async def try_start(self) -> bool:
