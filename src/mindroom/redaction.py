@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 import re
 from array import array
-from bisect import bisect_right
+from bisect import bisect_left, bisect_right
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass, is_dataclass
 from functools import lru_cache
@@ -380,10 +380,10 @@ def _index_assignment_boundaries(value: str) -> _AssignmentBoundaries:
 
 def _next_position_before(
     positions: array[int],
-    after: int,
+    start: int,
     region_end: int,
 ) -> int | None:
-    candidate_index = bisect_right(positions, after)
+    candidate_index = bisect_left(positions, start)
     if candidate_index >= len(positions):
         return None
     candidate = positions[candidate_index]
@@ -607,11 +607,21 @@ def _nested_assignment_regions(
     match: _AssignmentValueMatch,
     region_end: int,
 ) -> list[tuple[int, int]]:
-    """Partition nested scans only when a structural delimiter supplies a real value boundary."""
+    """Partition nested scans without separating a trailing prefix from its continuation."""
     if not match.is_quoted and (
         match.match_end == region_end or value[match.match_end] not in _ASSIGNMENT_VALUE_TERMINATORS
     ):
         return []
+    if (
+        not match.is_quoted
+        and value[match.value_start] not in {"'", '"'}
+        and value[match.match_end] in "\r\n"
+        and any(
+            prefix_match.end() == match.value_end
+            for prefix_match in _ASSIGNMENT_PREFIX_PATTERN.finditer(value, match.value_start, match.value_end)
+        )
+    ):
+        return [(match.value_start, region_end)]
     regions: list[tuple[int, int]] = []
     if match.match_end < region_end:
         regions.append((match.match_end, region_end))
