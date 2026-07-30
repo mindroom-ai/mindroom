@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import json
 
 import pytest
 from agno.tools.function import ToolResult
@@ -171,3 +172,30 @@ def test_tool_result_from_call_result_ignores_empty_mcp_app_resources(
 
     assert type(result) is ToolResult
     assert result.content == "chart ready"
+
+
+def test_tool_result_from_call_result_keeps_mcp_app_result_json_safe() -> None:
+    """MCP App notifications must be serializable even when MCP models contain typed URIs."""
+    result = tool_result_from_call_result(
+        "demo",
+        CallToolResult(
+            content=[
+                ResourceLink(
+                    type="resource_link",
+                    uri="file:///report.csv",
+                    name="report",
+                ),
+            ],
+        ),
+        app_resources=[
+            MCPAppResource(
+                uri="ui://demo/chart",
+                mime_type="text/html;profile=mcp-app",
+                html="<html></html>",
+            ),
+        ],
+    )
+
+    assert isinstance(result, MCPAppToolResult)
+    serialized = json.loads(json.dumps(result.mcp_app_tool_result))
+    assert serialized["content"][0]["uri"] == "file:///report.csv"

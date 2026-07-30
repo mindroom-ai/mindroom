@@ -608,7 +608,7 @@ class MCPServerManager:
             if (
                 app_resource := _mcp_app_resource_from_content(
                     content,
-                    expected_uri=tool.ui_resource_uri,
+                    expected_uri=str(resource_uri),
                 )
             )
             is not None

@@ -130,6 +130,6 @@ def tool_result_from_call_result(
             images=images or None,
             audios=audios or None,
             mcp_app_resources=app_resources,
-            mcp_app_tool_result=result.model_dump(by_alias=True, exclude_none=True),
+            mcp_app_tool_result=result.model_dump(mode="json", by_alias=True, exclude_none=True),
         )
     return ToolResult(content=content, images=images or None, audios=audios or None)
