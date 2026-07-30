@@ -240,7 +240,7 @@ async def _run_cleanup(
     client.user_id = BOT_USER_ID
     assert joined_rooms == [ROOM_ID]
     with patch("mindroom.matrix.stale_stream_cleanup.time.time", return_value=now_ms / 1000):
-        return await cleanup_stale_streaming_room(
+        result = await cleanup_stale_streaming_room(
             client,
             room_id=ROOM_ID,
             actors={BOT_USER_ID: StaleStreamCleanupActor(client, None)},
@@ -250,6 +250,7 @@ async def _run_cleanup(
             startup_cutoff_ms=startup_cutoff_ms,
             terminal_interrupted_only=terminal_interrupted_only,
         )
+    return result.cleaned_count, list(result.interrupted_threads)
 
 
 def _history_message(
@@ -2221,10 +2222,14 @@ async def test_shared_room_cleanup_routes_edits_through_each_message_owner(tmp_p
         ),
         patch(
             "mindroom.matrix.stale_stream_cleanup._cleanup_candidate_message",
-            new=AsyncMock(return_value=(True, None)),
+            new=AsyncMock(
+                return_value=stale_stream_cleanup_module._CandidateCleanupResult(
+                    edited=True,
+                ),
+            ),
         ) as cleanup_candidate,
     ):
-        cleaned_count, interrupted = await cleanup_stale_streaming_room(
+        result = await cleanup_stale_streaming_room(
             first_client,
             room_id=ROOM_ID,
             actors=actors,
@@ -2234,9 +2239,67 @@ async def test_shared_room_cleanup_routes_edits_through_each_message_owner(tmp_p
             startup_cutoff_ms=NOW_MS,
         )
 
-    assert cleaned_count == 2
-    assert interrupted == []
+    assert result.cleaned_count == 2
+    assert result.interrupted_threads == ()
     assert [call.args[0] for call in cleanup_candidate.await_args_list] == [first_client, second_client]
+
+
+@pytest.mark.asyncio
+async def test_room_cleanup_continues_after_failed_edit_and_requests_retry(
+    tmp_path: Path,
+) -> None:
+    """One failed edit must not starve later candidates, but must keep the room retryable."""
+    config = _make_config(tmp_path)
+    client = make_matrix_client_mock(user_id=BOT_USER_ID)
+    actor = StaleStreamCleanupActor(client, MagicMock())
+    scanned_state = stale_stream_cleanup_module._ScannedRoomMessageStates(
+        message_states={
+            "$failed": stale_stream_cleanup_module._MessageState(
+                latest_body="First partial",
+                latest_timestamp=NOW_MS - STALE_AGE_MS,
+                latest_event_id="$failed",
+                stream_status="streaming",
+                bot_user_id=BOT_USER_ID,
+            ),
+            "$cleaned": stale_stream_cleanup_module._MessageState(
+                latest_body="Second partial",
+                latest_timestamp=NOW_MS - STALE_AGE_MS + 1,
+                latest_event_id="$cleaned",
+                stream_status="streaming",
+                bot_user_id=BOT_USER_ID,
+            ),
+        },
+        auto_resume_target_event_ids=set(),
+    )
+
+    with (
+        patch("mindroom.matrix.stale_stream_cleanup.time.time", return_value=NOW_MS / 1000),
+        patch(
+            "mindroom.matrix.stale_stream_cleanup._scan_room_message_states",
+            new=AsyncMock(return_value=scanned_state),
+        ),
+        patch(
+            "mindroom.matrix.stale_stream_cleanup._edit_stale_message",
+            new=AsyncMock(side_effect=[False, True]),
+        ) as edit_stale_message,
+        patch(
+            "mindroom.matrix.stale_stream_cleanup._redact_stop_reactions",
+            new=AsyncMock(),
+        ),
+    ):
+        result = await cleanup_stale_streaming_room(
+            client,
+            room_id=ROOM_ID,
+            actors={BOT_USER_ID: actor},
+            bot_user_ids={BOT_USER_ID},
+            config=config,
+            runtime_paths=runtime_paths_for(config),
+            startup_cutoff_ms=NOW_MS,
+        )
+
+    assert result.cleaned_count == 1
+    assert result.retry_required is True
+    assert edit_stale_message.await_count == 2
 
 
 @pytest.mark.asyncio

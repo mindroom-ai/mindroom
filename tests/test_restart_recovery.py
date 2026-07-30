@@ -3,15 +3,16 @@
 from __future__ import annotations
 
 import asyncio
-from types import SimpleNamespace
 from typing import TYPE_CHECKING, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
 import pytest
 
+from mindroom.bot import AgentBot
 from mindroom.config.main import Config
 from mindroom.constants import ROUTER_AGENT_NAME
+from mindroom.matrix import stale_stream_cleanup as stale_stream_cleanup_module
 from mindroom.matrix.invited_rooms_store import invited_rooms_path, save_invited_rooms
 from mindroom.matrix.stale_stream_cleanup import InterruptedThread
 from mindroom.orchestrator import _MultiAgentOrchestrator
@@ -200,7 +201,12 @@ async def test_matrix_room_recovery_scans_only_exact_owner_messages(tmp_path: Pa
         ),
         patch(
             "mindroom.restart_recovery.cleanup_stale_streaming_room",
-            new=AsyncMock(return_value=(1, [interrupted])),
+            new=AsyncMock(
+                return_value=stale_stream_cleanup_module._StaleStreamCleanupResult(
+                    cleaned_count=1,
+                    interrupted_threads=(interrupted,),
+                ),
+            ),
         ) as cleanup_room,
     ):
         result = await operations.recover_room(
@@ -218,6 +224,49 @@ async def test_matrix_room_recovery_scans_only_exact_owner_messages(tmp_path: Pa
     }
     assert cleanup_room.await_args.kwargs["actors"][owner.user_id].client is owner.client
     assert cleanup_room.await_args.kwargs["bot_user_ids"] == {owner.user_id, other_owner.user_id}
+
+
+@pytest.mark.asyncio
+async def test_matrix_room_recovery_propagates_cleanup_retry_requirement(
+    tmp_path: Path,
+) -> None:
+    """Any failed room edit must keep the semantic room job retryable."""
+    owner = _owner()
+    config = _config(tmp_path)
+    interrupted = _target("$target", timestamp_ms=10)
+    operations = build_matrix_restart_recovery_operations(test_runtime_paths(tmp_path))
+    request = RoomRecoveryRequest(
+        room_id="!code:example.org",
+        startup_cutoff_ms=123,
+        terminal_interrupted_only=False,
+    )
+    cleanup_result = stale_stream_cleanup_module._StaleStreamCleanupResult(
+        cleaned_count=1,
+        interrupted_threads=(interrupted,),
+        retry_required=True,
+    )
+
+    with (
+        patch(
+            "mindroom.restart_recovery.get_joined_rooms",
+            new=AsyncMock(return_value=["!code:example.org"]),
+        ),
+        patch(
+            "mindroom.restart_recovery.cleanup_stale_streaming_room",
+            new=AsyncMock(return_value=cleanup_result),
+        ),
+    ):
+        result = await operations.recover_room(
+            owner,
+            request,
+            frozenset({owner.user_id}),
+            config,
+        )
+
+    assert result == RoomRecoveryResult(
+        interrupted_threads=(interrupted,),
+        retry=True,
+    )
 
 
 @pytest.mark.asyncio
@@ -452,6 +501,163 @@ async def test_target_freshness_and_delivery_failures_retry_autonomously(tmp_pat
 
 
 @pytest.mark.asyncio
+async def test_cancelled_pause_drains_successful_delivery_and_settles_target(  # noqa: PLR0915
+    tmp_path: Path,
+) -> None:
+    """An ambiguous cancellation must not resend a delivery that eventually succeeds."""
+    owner = _owner()
+    router = _owner(
+        entity_name=ROUTER_AGENT_NAME,
+        user_id="@router:example.org",
+        rooms=frozenset(),
+    )
+    owners = {owner.user_id: owner, router.user_id: router}
+    target = _target("$target", timestamp_ms=10)
+    delivery_started = asyncio.Event()
+    release_delivery = asyncio.Event()
+    second_scan_finished = asyncio.Event()
+    delivery_cancelled = False
+    delivery_attempts = 0
+    scan_count = 0
+
+    async def recover_room(
+        _owner: RecoveryOwner,
+        _request: RoomRecoveryRequest,
+        _owner_user_ids: frozenset[str],
+        _config: Config,
+    ) -> RoomRecoveryResult:
+        nonlocal scan_count
+        scan_count += 1
+        if scan_count == 2:
+            second_scan_finished.set()
+        return RoomRecoveryResult(interrupted_threads=(target,))
+
+    async def deliver(
+        _router: RecoveryOwner,
+        _owner: RecoveryOwner,
+        _target: InterruptedThread,
+        _config: Config,
+    ) -> bool:
+        nonlocal delivery_attempts, delivery_cancelled
+        delivery_attempts += 1
+        delivery_started.set()
+        try:
+            await release_delivery.wait()
+        except asyncio.CancelledError:
+            delivery_cancelled = True
+            raise
+        return True
+
+    coordinator = RestartRecoveryCoordinator(
+        current_config=lambda: _config(tmp_path),
+        current_owners=lambda: owners,
+        operations=_operations(recover_room=recover_room, deliver=deliver),
+        retry_delay=lambda _attempt: 0.0,
+    )
+    coordinator.start(startup_cutoff_ms=123)
+    await asyncio.wait_for(delivery_started.wait(), timeout=1.0)
+
+    pause_task = asyncio.create_task(coordinator.pause())
+    try:
+        await asyncio.sleep(0)
+        assert not pause_task.done()
+        pause_task.cancel()
+        await asyncio.sleep(0)
+        assert not pause_task.done()
+        pause_task.cancel()
+        await asyncio.sleep(0)
+        assert not pause_task.done()
+    finally:
+        release_delivery.set()
+    with pytest.raises(asyncio.CancelledError):
+        await pause_task
+
+    coordinator.resume()
+    coordinator.enqueue_replacement_rooms(owner.user_id, {target.room_id})
+    try:
+        await asyncio.wait_for(second_scan_finished.wait(), timeout=1.0)
+        await asyncio.sleep(0)
+    finally:
+        await coordinator.stop()
+
+    assert delivery_cancelled is False
+    assert delivery_attempts == 1
+
+
+@pytest.mark.asyncio
+async def test_cancelled_pause_drains_failed_delivery_and_restores_target(
+    tmp_path: Path,
+) -> None:
+    """A drained delivery failure must retry the exact target after resume."""
+    owner = _owner()
+    router = _owner(
+        entity_name=ROUTER_AGENT_NAME,
+        user_id="@router:example.org",
+        rooms=frozenset(),
+    )
+    owners = {owner.user_id: owner, router.user_id: router}
+    target = _target("$target", timestamp_ms=10)
+    delivery_started = asyncio.Event()
+    release_delivery = asyncio.Event()
+    delivered = asyncio.Event()
+    delivery_cancelled = False
+    delivery_attempts = 0
+
+    async def recover_room(
+        _owner: RecoveryOwner,
+        _request: RoomRecoveryRequest,
+        _owner_user_ids: frozenset[str],
+        _config: Config,
+    ) -> RoomRecoveryResult:
+        return RoomRecoveryResult(interrupted_threads=(target,))
+
+    async def deliver(
+        _router: RecoveryOwner,
+        _owner: RecoveryOwner,
+        _target: InterruptedThread,
+        _config: Config,
+    ) -> bool:
+        nonlocal delivery_attempts, delivery_cancelled
+        delivery_attempts += 1
+        if delivery_attempts == 1:
+            delivery_started.set()
+            try:
+                await release_delivery.wait()
+            except asyncio.CancelledError:
+                delivery_cancelled = True
+                raise
+            return False
+        delivered.set()
+        return True
+
+    coordinator = RestartRecoveryCoordinator(
+        current_config=lambda: _config(tmp_path),
+        current_owners=lambda: owners,
+        operations=_operations(recover_room=recover_room, deliver=deliver),
+        retry_delay=lambda _attempt: 0.0,
+    )
+    coordinator.start(startup_cutoff_ms=123)
+    await asyncio.wait_for(delivery_started.wait(), timeout=1.0)
+
+    pause_task = asyncio.create_task(coordinator.pause())
+    try:
+        await asyncio.sleep(0)
+        assert not pause_task.done()
+    finally:
+        release_delivery.set()
+    await pause_task
+
+    coordinator.resume()
+    try:
+        await asyncio.wait_for(delivered.wait(), timeout=1.0)
+    finally:
+        await coordinator.stop()
+
+    assert delivery_cancelled is False
+    assert delivery_attempts == 2
+
+
+@pytest.mark.asyncio
 async def test_unrecoverable_target_is_settled_without_future_retry(tmp_path: Path) -> None:
     """Authoritative target absence must settle the exact version permanently."""
     owner = _owner()
@@ -529,18 +735,17 @@ def test_orchestrator_recovery_owner_includes_persisted_accepted_invites(
         {"!invited:example.org"},
     )
     client = MagicMock(spec=nio.AsyncClient)
-    bot = SimpleNamespace(
-        agent_name="code",
-        agent_user=SimpleNamespace(user_id="@code:example.org"),
-        client=client,
-        rooms=["!configured:example.org"],
-        running=True,
-        first_sync_complete=True,
-        _conversation_cache=MagicMock(),
-    )
+    bot = MagicMock(spec=AgentBot)
+    bot.agent_name = "code"
+    bot.agent_user = MagicMock(user_id="@code:example.org")
+    bot.client = client
+    bot.rooms = ["!configured:example.org"]
+    bot.running = True
+    bot.first_sync_complete = True
+    bot._conversation_cache = MagicMock()
     orchestrator = _MultiAgentOrchestrator(runtime_paths)
     orchestrator.config = config
-    orchestrator.agent_bots = {"code": bot}  # type: ignore[dict-item]
+    orchestrator.agent_bots = {"code": bot}
 
     owners = orchestrator._restart_recovery_owners()
 

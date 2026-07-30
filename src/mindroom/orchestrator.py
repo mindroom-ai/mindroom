@@ -1136,21 +1136,27 @@ class _MultiAgentOrchestrator:
             return
         logger.info("All agent bots started successfully")
 
-    def _capture_replacement_recovery_rooms(
+    def _reconcile_stopped_recovery_owners(
         self,
-        replaced_bots: dict[str, AgentBot | TeamBot],
+        stopped_bots: dict[str, AgentBot | TeamBot],
+        *,
+        configured_entities: set[str],
     ) -> None:
-        """Retain interrupted rooms after their old bot generation stops."""
-        for bot in replaced_bots.values():
+        """Retain configured handoffs and discard owners removed after stop."""
+        for entity_name, bot in stopped_bots.items():
+            owner_user_id = bot.agent_user.user_id
+            if not owner_user_id:
+                continue
+            if entity_name not in configured_entities:
+                self._restart_recovery.discard_owner(owner_user_id)
+                continue
             room_ids = set(bot.pending_sync_restart_retry_room_ids)
             if not room_ids:
                 continue
-            owner_user_id = bot.agent_user.user_id
-            if owner_user_id:
-                self._restart_recovery.enqueue_replacement_rooms(
-                    owner_user_id,
-                    room_ids,
-                )
+            self._restart_recovery.enqueue_replacement_rooms(
+                owner_user_id,
+                room_ids,
+            )
 
     def _replacement_bots(self, entity_names: set[str]) -> dict[str, AgentBot | TeamBot]:
         """Retain bot references across replacement shutdown."""
@@ -1342,7 +1348,7 @@ class _MultiAgentOrchestrator:
             return set()
 
         self._external_trigger_runtime.unbind_for_entity_changes(affected_entities)
-        replaced_bots = self._replacement_bots(affected_entities)
+        stopped_bots = self._replacement_bots(affected_entities)
         for entity_name in affected_entities:
             await self._cancel_bot_start_task(entity_name)
         await stop_entities(
@@ -1351,7 +1357,10 @@ class _MultiAgentOrchestrator:
             self._sync_tasks,
             restart_entities=affected_entities & set(configured_entity_names(new_config)),
         )
-        self._capture_replacement_recovery_rooms(replaced_bots)
+        self._reconcile_stopped_recovery_owners(
+            stopped_bots,
+            configured_entities=set(configured_entity_names(new_config)),
+        )
         return affected_entities
 
     async def _restart_changed_entities(
@@ -1362,7 +1371,7 @@ class _MultiAgentOrchestrator:
     ) -> tuple[set[str], list[str], list[str]]:
         """Restart or create entities affected by the config change."""
         entities_to_stop = plan.entities_to_restart - (already_stopped_entities or set())
-        replaced_bots = self._replacement_bots(plan.entities_to_restart)
+        stopped_bots = self._replacement_bots(plan.entities_to_restart)
         if entities_to_stop:
             self._external_trigger_runtime.unbind_for_entity_changes(entities_to_stop)
             for entity_name in entities_to_stop:
@@ -1374,7 +1383,10 @@ class _MultiAgentOrchestrator:
                 restart_entities=entities_to_stop & plan.configured_entities,
             )
 
-        self._capture_replacement_recovery_rooms(replaced_bots)
+        self._reconcile_stopped_recovery_owners(
+            stopped_bots,
+            configured_entities=plan.configured_entities,
+        )
         entities_to_recreate = plan.entities_to_restart & plan.configured_entities
         changed_entities = entities_to_recreate | plan.new_entities
         start_results = await self._create_and_start_entities(
@@ -1382,12 +1394,6 @@ class _MultiAgentOrchestrator:
             plan.new_config,
             start_sync_tasks=True,
         )
-
-        removed_restarted_entities = plan.entities_to_restart - plan.configured_entities
-        for entity_name in removed_restarted_entities:
-            bot = self.agent_bots.pop(entity_name, None)
-            if bot is not None and bot.agent_user.user_id:
-                self._restart_recovery.discard_owner(bot.agent_user.user_id)
 
         await self._remove_deleted_entities(plan.removed_entities)
         self._schedule_ready_turn_dispatch_recovery()
@@ -1434,7 +1440,7 @@ class _MultiAgentOrchestrator:
                     entities=sorted(changed_entities),
                 )
                 self._external_trigger_runtime.unbind_for_entity_changes(changed_entities)
-                replaced_bots = self._replacement_bots(changed_entities)
+                stopped_bots = self._replacement_bots(changed_entities)
                 for entity_name in changed_entities:
                     await self._cancel_bot_start_task(entity_name)
                 await stop_entities(
@@ -1443,7 +1449,10 @@ class _MultiAgentOrchestrator:
                     self._sync_tasks,
                     restart_entities=changed_entities,
                 )
-                self._capture_replacement_recovery_rooms(replaced_bots)
+                self._reconcile_stopped_recovery_owners(
+                    stopped_bots,
+                    configured_entities=set(configured_entity_names(self.config)),
+                )
                 start_results = await self._create_and_start_entities(
                     changed_entities,
                     self.config,

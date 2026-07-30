@@ -683,6 +683,7 @@ async def test_mcp_catalog_replacement_recovers_interrupted_rooms(tmp_path: Path
     old_team_bot = MagicMock(spec=AgentBot)
     old_team_bot.running = False
     old_team_bot.pending_sync_restart_retry_room_ids = frozenset()
+    old_team_bot.agent_user = MagicMock(user_id="@dev_team:example.org")
     new_code_bot = MagicMock(spec=AgentBot)
     new_code_bot.agent_name = "code"
     new_code_bot.running = True
@@ -732,6 +733,8 @@ async def test_router_restart_unbinds_external_trigger_runtime_before_stop_and_s
     orchestrator.config = config
     router_bot = MagicMock(spec=AgentBot)
     router_bot.running = False
+    router_bot.agent_user = MagicMock(user_id="@router:example.org")
+    router_bot.pending_sync_restart_retry_room_ids = frozenset()
     orchestrator.agent_bots = {ROUTER_AGENT_NAME: router_bot}
     order: list[str] = []
     external_trigger_runtime_bound = True
@@ -806,6 +809,8 @@ async def test_external_trigger_target_restart_unbinds_runtime_before_stop(tmp_p
         ROUTER_AGENT_NAME: router_bot,
         "code": code_bot,
     }
+    orchestrator.agent_bots["code"].agent_user = MagicMock(user_id="@code:example.org")
+    orchestrator.agent_bots["code"].pending_sync_restart_retry_room_ids = frozenset()
     order: list[str] = []
     external_trigger_runtime_bound = True
     plan = ConfigUpdatePlan(
@@ -927,6 +932,53 @@ async def test_entity_replacement_recovers_rooms_after_old_bot_is_removed(
 
 
 @pytest.mark.asyncio
+async def test_removed_entity_discards_prepop_recovery_owner(
+    tmp_path: Path,
+) -> None:
+    """A normal stop that pops a removed bot must discard all owner recovery state."""
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=_runtime_paths(tmp_path))
+    config = _config_with_code_agent(tmp_path)
+    orchestrator.config = config
+    old_bot = MagicMock(spec=AgentBot)
+    old_bot.pending_sync_restart_retry_room_ids = frozenset()
+    old_bot.agent_user = MagicMock(user_id="@code:example.org")
+    orchestrator.agent_bots = {"code": old_bot}
+    plan = ConfigUpdatePlan(
+        new_config=Config.validate_with_runtime({}, _runtime_paths(tmp_path)),
+        changed_mcp_servers=set(),
+        configured_entities=set(),
+        entities_to_restart={"code"},
+        new_entities=set(),
+        removed_entities=set(),
+        mindroom_user_changed=False,
+        matrix_room_access_changed=False,
+        matrix_space_changed=False,
+        authorization_changed=False,
+    )
+
+    async def stop_removed_bot(
+        entities: set[str],
+        agent_bots: dict[str, AgentBot],
+        *_args: object,
+        **_kwargs: object,
+    ) -> None:
+        old_bot.pending_sync_restart_retry_room_ids = frozenset({"!interrupted:example.org"})
+        for entity_name in entities:
+            agent_bots.pop(entity_name, None)
+
+    with (
+        patch("mindroom.orchestrator.stop_entities", new=AsyncMock(side_effect=stop_removed_bot)),
+        patch.object(orchestrator, "_create_and_start_entities", new=AsyncMock(return_value=EntityStartResults())),
+        patch.object(orchestrator._restart_recovery, "discard_owner") as discard_owner,
+        patch.object(orchestrator._restart_recovery, "enqueue_replacement_rooms") as enqueue_replacement_rooms,
+    ):
+        await orchestrator._restart_changed_entities(plan)
+
+    discard_owner.assert_called_once_with("@code:example.org")
+    enqueue_replacement_rooms.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_mcp_prestop_captures_rooms_before_old_bot_is_removed(tmp_path: Path) -> None:
     """The MCP pre-stop path must hand interrupted rooms to the replacement generation."""
     orchestrator = _MultiAgentOrchestrator(runtime_paths=_runtime_paths(tmp_path))
@@ -1008,6 +1060,56 @@ async def test_mcp_prestop_captures_rooms_before_old_bot_is_removed(tmp_path: Pa
 
 
 @pytest.mark.asyncio
+async def test_mcp_prestop_discards_removed_prepop_recovery_owner(
+    tmp_path: Path,
+) -> None:
+    """MCP pre-stop must discard a removed owner even after stop pops its bot."""
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=_runtime_paths(tmp_path))
+    current_config = _config(tmp_path, command="old-command")
+    new_config = Config.validate_with_runtime(
+        {
+            "mcp_servers": {
+                "demo": {
+                    "transport": "stdio",
+                    "command": "new-command",
+                },
+            },
+        },
+        _runtime_paths(tmp_path),
+    )
+    orchestrator.config = current_config
+    old_bot = MagicMock(spec=AgentBot)
+    old_bot.pending_sync_restart_retry_room_ids = frozenset()
+    old_bot.agent_user = MagicMock(user_id="@code:example.org")
+    orchestrator.agent_bots = {"code": old_bot}
+
+    async def stop_removed_bot(
+        entities: set[str],
+        agent_bots: dict[str, AgentBot],
+        *_args: object,
+        **_kwargs: object,
+    ) -> None:
+        old_bot.pending_sync_restart_retry_room_ids = frozenset({"!interrupted:example.org"})
+        for entity_name in entities:
+            agent_bots.pop(entity_name, None)
+
+    with (
+        patch("mindroom.orchestrator.stop_entities", new=AsyncMock(side_effect=stop_removed_bot)),
+        patch.object(orchestrator._restart_recovery, "discard_owner") as discard_owner,
+        patch.object(orchestrator._restart_recovery, "enqueue_replacement_rooms") as enqueue_replacement_rooms,
+    ):
+        pre_stopped_entities = await orchestrator._stop_entities_before_mcp_sync(
+            current_config,
+            new_config,
+            {"demo"},
+        )
+
+    assert "code" in pre_stopped_entities
+    discard_owner.assert_called_once_with("@code:example.org")
+    enqueue_replacement_rooms.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_apply_config_update_plan_unbinds_runtime_before_restarted_entity_stop(
     tmp_path: Path,
 ) -> None:
@@ -1027,6 +1129,8 @@ async def test_apply_config_update_plan_unbinds_runtime_before_restarted_entity_
         ROUTER_AGENT_NAME: router_bot,
         "code": code_bot,
     }
+    orchestrator.agent_bots["code"].agent_user = MagicMock(user_id="@code:example.org")
+    orchestrator.agent_bots["code"].pending_sync_restart_retry_room_ids = frozenset()
     plan = ConfigUpdatePlan(
         new_config=new_config,
         changed_mcp_servers=set(),
@@ -1122,6 +1226,8 @@ async def test_apply_config_update_plan_rebinds_trigger_runtime_after_support_se
         ROUTER_AGENT_NAME: router_bot,
         "code": code_bot,
     }
+    orchestrator.agent_bots["code"].agent_user = MagicMock(user_id="@code:example.org")
+    orchestrator.agent_bots["code"].pending_sync_restart_retry_room_ids = frozenset()
     plan = ConfigUpdatePlan(
         new_config=new_config,
         changed_mcp_servers=set(),
@@ -1281,6 +1387,8 @@ async def test_update_config_stops_mcp_entities_before_syncing_manager(tmp_path:
         ROUTER_AGENT_NAME: MagicMock(spec=AgentBot),
         "code": MagicMock(spec=AgentBot),
     }
+    orchestrator.agent_bots["code"].agent_user = MagicMock(user_id="@code:example.org")
+    orchestrator.agent_bots["code"].pending_sync_restart_retry_room_ids = frozenset()
     updated_config = Config.validate_with_runtime(
         {
             "agents": {

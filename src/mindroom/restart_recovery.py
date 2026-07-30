@@ -180,7 +180,7 @@ def build_matrix_restart_recovery_operations(runtime_paths: RuntimePaths) -> _Re
         if joined_room_ids is None or request.room_id not in joined_room_ids:
             return _RoomRecoveryResult(retry=True)
 
-        _cleaned_count, interrupted_threads = await cleanup_stale_streaming_room(
+        cleanup_result = await cleanup_stale_streaming_room(
             owner.client,
             room_id=request.room_id,
             actors={
@@ -195,7 +195,10 @@ def build_matrix_restart_recovery_operations(runtime_paths: RuntimePaths) -> _Re
             startup_cutoff_ms=request.startup_cutoff_ms,
             terminal_interrupted_only=request.terminal_interrupted_only,
         )
-        return _RoomRecoveryResult(interrupted_threads=tuple(interrupted_threads))
+        return _RoomRecoveryResult(
+            interrupted_threads=cleanup_result.interrupted_threads,
+            retry=cleanup_result.retry_required,
+        )
 
     async def target_freshness(
         owner: RecoveryOwner,
@@ -573,7 +576,29 @@ class RestartRecoveryCoordinator:
             ),
             None,
         )
-        return router is None or not await self._operations.deliver_target(router, owner, job.target, config)
+        return router is None or not await self._deliver_target(router, owner, job.target, config)
+
+    async def _deliver_target(
+        self,
+        router: RecoveryOwner,
+        owner: RecoveryOwner,
+        target: InterruptedThread,
+        config: Config,
+    ) -> bool:
+        """Drain one exact delivery through repeated coordinator cancellation."""
+        task = asyncio.create_task(
+            self._operations.deliver_target(router, owner, target, config),
+            name=f"restart_recovery_delivery:{target.target_event_id}",
+        )
+        try:
+            return await asyncio.shield(task)
+        except asyncio.CancelledError:
+            while not task.done():
+                try:
+                    await asyncio.shield(task)
+                except asyncio.CancelledError:
+                    continue
+            return task.result()
 
     def _owner_is_current(self, owner: RecoveryOwner) -> bool:
         current = self._current_owners().get(owner.user_id)

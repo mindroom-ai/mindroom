@@ -110,6 +110,24 @@ class StaleStreamCleanupActor:
     conversation_cache: ConversationCacheProtocol | None
 
 
+@dataclass(frozen=True)
+class _StaleStreamCleanupResult:
+    """Outcome from one exact-owner room cleanup."""
+
+    cleaned_count: int
+    interrupted_threads: tuple[InterruptedThread, ...]
+    retry_required: bool = False
+
+
+@dataclass(frozen=True)
+class _CandidateCleanupResult:
+    """Outcome from one stale-room candidate."""
+
+    edited: bool = False
+    interrupted_thread: InterruptedThread | None = None
+    retry_required: bool = False
+
+
 class InterruptedTargetFreshness(Enum):
     """Authoritative freshness state for one interrupted target."""
 
@@ -301,10 +319,10 @@ async def cleanup_stale_streaming_room(
     runtime_paths: RuntimePaths,
     startup_cutoff_ms: int | None = None,
     terminal_interrupted_only: bool = False,
-) -> tuple[int, list[InterruptedThread]]:
+) -> _StaleStreamCleanupResult:
     """Scan one room once and let each bot account repair its own messages."""
     if not actors:
-        return 0, []
+        return _StaleStreamCleanupResult(cleaned_count=0, interrupted_threads=())
     current_time_ms = int(time.time() * 1000)
     scan_policy = _cleanup_scan_policy(
         config,
@@ -323,9 +341,10 @@ async def cleanup_stale_streaming_room(
     )
     message_states = scanned_state.message_states
     if not message_states:
-        return 0, []
+        return _StaleStreamCleanupResult(cleaned_count=0, interrupted_threads=())
 
     cleaned_count = 0
+    retry_required = False
     prior_edit_succeeded_by_bot: set[str] = set()
     interrupted_threads: list[InterruptedThread] = []
     candidate_items = sorted(
@@ -339,7 +358,7 @@ async def cleanup_stale_streaming_room(
         actor = actors.get(bot_user_id) if bot_user_id is not None else None
         if bot_user_id is None or actor is None:
             continue
-        edited, interrupted = await _process_stale_room_candidate(
+        candidate_result = await _process_stale_room_candidate(
             actor,
             bot_user_id=bot_user_id,
             room_id=room_id,
@@ -353,13 +372,18 @@ async def cleanup_stale_streaming_room(
             scan_policy=scan_policy,
             prior_edit_succeeded=bot_user_id in prior_edit_succeeded_by_bot,
         )
-        if edited:
+        if candidate_result.edited:
             cleaned_count += 1
             prior_edit_succeeded_by_bot.add(bot_user_id)
-        if interrupted is not None:
-            interrupted_threads.append(interrupted)
+        if candidate_result.interrupted_thread is not None:
+            interrupted_threads.append(candidate_result.interrupted_thread)
+        retry_required = retry_required or candidate_result.retry_required
 
-    return cleaned_count, interrupted_threads
+    return _StaleStreamCleanupResult(
+        cleaned_count=cleaned_count,
+        interrupted_threads=tuple(interrupted_threads),
+        retry_required=retry_required,
+    )
 
 
 async def _process_stale_room_candidate(
@@ -376,7 +400,7 @@ async def _process_stale_room_candidate(
     current_time_ms: int,
     scan_policy: _CleanupScanPolicy,
     prior_edit_succeeded: bool,
-) -> tuple[bool, InterruptedThread | None]:
+) -> _CandidateCleanupResult:
     """Repair or classify one bot-owned candidate from a shared room scan."""
     assert state.latest_body is not None
     agent_name = _agent_name_for_bot_user_id(bot_user_id, config, runtime_paths)
@@ -385,9 +409,9 @@ async def _process_stale_room_candidate(
         now_ms=current_time_ms,
         scan_policy=scan_policy,
     ):
-        return False, None
+        return _CandidateCleanupResult()
     if scan_policy.terminal_interrupted_only and not _has_resumable_interrupted_note(state):
-        return False, None
+        return _CandidateCleanupResult()
     if _is_cleanup_candidate(state):
         return await _cleanup_candidate_message(
             actor.client,
@@ -402,7 +426,7 @@ async def _process_stale_room_candidate(
             prior_edit_succeeded=prior_edit_succeeded,
         )
     if not (_has_restart_interrupted_note(state.latest_body) or _has_resumable_interrupted_note(state)):
-        return False, None
+        return _CandidateCleanupResult()
     return await _handle_interrupted_message(
         actor.client,
         room_id=room_id,
@@ -433,7 +457,7 @@ async def _handle_interrupted_message(
     conversation_cache: ConversationCacheProtocol | None = None,
     agent_name: str,
     prior_edit_succeeded: bool,
-) -> tuple[bool, InterruptedThread | None]:
+) -> _CandidateCleanupResult:
     """Handle an interrupted response or restart marker seen during startup cleanup."""
     interrupted = None
     if can_auto_resume and target_event_id not in auto_resume_target_event_ids:
@@ -443,7 +467,7 @@ async def _handle_interrupted_message(
             state=state,
             agent_name=agent_name,
         )
-    repaired = await _repair_restart_marked_message_metadata(
+    repaired, retry_required = await _repair_restart_marked_message_metadata(
         client,
         room_id=room_id,
         target_event_id=target_event_id,
@@ -460,7 +484,11 @@ async def _handle_interrupted_message(
         history_reaction_event_ids=_self_stop_reaction_event_ids(state),
         bot_user_ids=bot_user_ids,
     )
-    return repaired, interrupted
+    return _CandidateCleanupResult(
+        edited=repaired,
+        interrupted_thread=interrupted,
+        retry_required=retry_required,
+    )
 
 
 async def _repair_restart_marked_message_metadata(
@@ -473,16 +501,16 @@ async def _repair_restart_marked_message_metadata(
     runtime_paths: RuntimePaths,
     conversation_cache: ConversationCacheProtocol | None = None,
     prior_edit_succeeded: bool,
-) -> bool:
+) -> tuple[bool, bool]:
     """Repair non-terminal stream metadata on already restart-marked messages."""
     assert state.latest_body is not None
     if not _has_non_terminal_stream_status(state.latest_content):
-        return False
+        return False, False
 
     try:
         if prior_edit_succeeded:
             await asyncio.sleep(_RATE_LIMIT_DELAY_SECONDS)
-        return await _edit_stale_message(
+        repaired = await _edit_stale_message(
             client,
             room_id=room_id,
             target_event_id=target_event_id,
@@ -499,7 +527,9 @@ async def _repair_restart_marked_message_metadata(
             event_id=target_event_id,
             error=str(exc),
         )
-        return False
+        return False, True
+    else:
+        return repaired, not repaired
 
 
 async def _cleanup_one_stale_message(
@@ -562,12 +592,12 @@ async def _cleanup_candidate_message(
     conversation_cache: ConversationCacheProtocol | None = None,
     agent_name: str,
     prior_edit_succeeded: bool,
-) -> tuple[bool, InterruptedThread | None]:
+) -> _CandidateCleanupResult:
     """Best-effort cleanup of one stale candidate message."""
     try:
         if prior_edit_succeeded:
             await asyncio.sleep(_RATE_LIMIT_DELAY_SECONDS)
-        return await _cleanup_one_stale_message(
+        edited, interrupted = await _cleanup_one_stale_message(
             client,
             room_id=room_id,
             target_event_id=target_event_id,
@@ -578,6 +608,11 @@ async def _cleanup_candidate_message(
             conversation_cache=conversation_cache,
             agent_name=agent_name,
         )
+        return _CandidateCleanupResult(
+            edited=edited,
+            interrupted_thread=interrupted,
+            retry_required=not edited,
+        )
     except Exception as exc:
         logger.warning(
             "Failed stale message cleanup",
@@ -585,7 +620,7 @@ async def _cleanup_candidate_message(
             event_id=target_event_id,
             error=str(exc),
         )
-        return False, None
+        return _CandidateCleanupResult(retry_required=True)
 
 
 async def _scan_room_message_states(
