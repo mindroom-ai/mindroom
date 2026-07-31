@@ -193,8 +193,50 @@ def test_positioned_limited_response_resets_sync_continuity(tmp_path: Path) -> N
     assert load_sync_checkpoint(tmp_path, "code") is None
 
 
-def test_limited_recovery_window_is_consumed_once_then_complete_delta_certifies(tmp_path: Path) -> None:
-    """Recovery must avoid reset loops and certify only after a complete delta."""
+def test_consecutive_cache_failures_keep_rewinding_until_certified(tmp_path: Path) -> None:
+    """Each uncached response must be replayed before a later checkpoint can certify."""
+    trust, _cache, _runtime = _trust(tmp_path)
+    trust.state = SyncTrustState.CERTIFIED
+
+    first_failure = trust.certify_response(
+        next_batch="s1",
+        cache_result=SyncCacheWriteResult(
+            complete=False,
+            errors=(RuntimeError("first cache write failed"),),
+        ),
+        first_sync=False,
+    )
+    second_failure = trust.certify_response(
+        next_batch="s2",
+        cache_result=SyncCacheWriteResult(
+            complete=False,
+            errors=(RuntimeError("second cache write failed"),),
+        ),
+        first_sync=False,
+    )
+
+    assert first_failure.reset_client_token is True
+    assert second_failure.reset_client_token is True
+    assert trust.state is SyncTrustState.UNCERTAIN
+    assert trust.checkpoint is None
+    assert load_sync_checkpoint(tmp_path, "code") is None
+
+    success = trust.certify_response(
+        next_batch="s3",
+        cache_result=SyncCacheWriteResult(complete=True),
+        first_sync=False,
+    )
+
+    assert success.reset_client_token is False
+    assert trust.state is SyncTrustState.CERTIFIED
+    assert load_sync_checkpoint(tmp_path, "code") == SyncCheckpoint(
+        token="s3",  # noqa: S106
+        cache_generation=_GENERATION,
+    )
+
+
+def test_limited_recovery_keeps_rewinding_until_complete_delta_certifies(tmp_path: Path) -> None:
+    """Each unresolved recovery window must replay until a complete delta certifies."""
     trust, _cache, _runtime = _trust(tmp_path)
     trust.state = SyncTrustState.CERTIFIED
 
@@ -221,7 +263,7 @@ def test_limited_recovery_window_is_consumed_once_then_complete_delta_certifies(
     )
 
     assert positioned.reset_client_token is True
-    assert initial.reset_client_token is False
+    assert initial.reset_client_token is True
     assert initial.state is SyncTrustState.UNCERTAIN
     assert complete.state is SyncTrustState.CERTIFIED
     assert load_sync_checkpoint(tmp_path, "code") == SyncCheckpoint(
@@ -230,8 +272,8 @@ def test_limited_recovery_window_is_consumed_once_then_complete_delta_certifies(
     )
 
 
-def test_sustained_limited_responses_reset_once_until_a_delta_certifies(tmp_path: Path) -> None:
-    """Back-to-back gaps must cost one replay, not one every other response."""
+def test_sustained_limited_responses_keep_rewinding_until_a_delta_certifies(tmp_path: Path) -> None:
+    """Back-to-back unresolved gaps must not donate an incremental cursor."""
     trust, _cache, _runtime = _trust(tmp_path)
     trust.state = SyncTrustState.CERTIFIED
 
@@ -247,12 +289,12 @@ def test_sustained_limited_responses_reset_once_until_a_delta_certifies(tmp_path
         for index in range(4)
     ]
 
-    assert [decision.reset_client_token for decision in decisions] == [True, False, False, False]
+    assert all(decision.reset_client_token for decision in decisions)
 
 
 @pytest.mark.asyncio
-async def test_cold_limited_initial_window_does_not_reset_again(tmp_path: Path) -> None:
-    """A since-less startup window may be limited without replaying itself forever."""
+async def test_cold_limited_initial_window_rewinds_until_certified(tmp_path: Path) -> None:
+    """A cold response cannot donate a cursor until its cache result certifies."""
     trust, _cache, _runtime = _trust(tmp_path)
 
     assert await trust.prepare_startup() is None
@@ -265,12 +307,12 @@ async def test_cold_limited_initial_window_does_not_reset_again(tmp_path: Path) 
         first_sync=True,
     )
 
-    assert decision.reset_client_token is False
+    assert decision.reset_client_token is True
     assert trust.state is SyncTrustState.UNCERTAIN
 
 
-def test_unknown_position_marks_next_limited_window_as_initial(tmp_path: Path) -> None:
-    """M_UNKNOWN_POS recovery consumes the next since-less limited window."""
+def test_unknown_position_limited_window_keeps_rewinding_until_certified(tmp_path: Path) -> None:
+    """M_UNKNOWN_POS recovery cannot advance past an uncertified window."""
     trust, _cache, _runtime = _trust(tmp_path)
 
     unknown = trust.reject_unknown_pos()
@@ -284,7 +326,7 @@ def test_unknown_position_marks_next_limited_window_as_initial(tmp_path: Path) -
     )
 
     assert unknown.reset_client_token is True
-    assert initial.reset_client_token is False
+    assert initial.reset_client_token is True
 
 
 @pytest.mark.asyncio
