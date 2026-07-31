@@ -1228,11 +1228,14 @@ class DispatchObligationRunner:
                         if obligation is None:
                             continue
                         event = _parse_recovery_event(obligation)
-                        await self._run_obligation(
-                            obligation,
-                            room=self.room_for_id(obligation.room_id),
-                            event=event,
-                        )
+                        with turn_dispatch_recovery_scope(
+                            active=obligation.callback_kind in _TURN_BACKED_KINDS,
+                        ):
+                            await self._run_obligation(
+                                obligation,
+                                room=self.room_for_id(obligation.room_id),
+                                event=event,
+                            )
                     except asyncio.CancelledError:
                         raise
                     except _DispatchObligationCorruptionError:

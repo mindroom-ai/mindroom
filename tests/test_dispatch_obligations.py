@@ -26,6 +26,7 @@ from mindroom.dispatch_obligations import (
 from mindroom.dispatch_obligations import (
     _DispatchCallbackResult as DispatchCallbackResult,
 )
+from mindroom.dispatch_recovery_context import turn_dispatch_recovery_active
 from mindroom.dispatch_source import IMAGE_SOURCE_KIND, MEDIA_SOURCE_KIND, VOICE_SOURCE_KIND
 from mindroom.matrix.media import MatrixMediaEvent, parse_matrix_media_event_source
 
@@ -1283,6 +1284,41 @@ async def test_direct_dispatch_failure_retries_autonomously(tmp_path: Path) -> N
 
     assert attempts == 2
     assert not store.has_pending("$direct-retry", DispatchCallbackKind.MESSAGE)
+
+
+@pytest.mark.asyncio
+async def test_turn_callback_retry_preserves_recovery_deferral(tmp_path: Path) -> None:
+    """A retried turn must not settle work that startup replay would defer."""
+    attempts = 0
+    owner = object()
+
+    async def callback(_room: nio.MatrixRoom, _event: nio.Event) -> DispatchCallbackResult:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            message = "transient worker failure"
+            raise RuntimeError(message)
+        return DispatchCallbackResult.DEFERRED if turn_dispatch_recovery_active() else DispatchCallbackResult.SUCCEEDED
+
+    store = _store(tmp_path)
+    runner = _runner(
+        store,
+        callback,
+        background_task_owner=owner,
+        retry_initial_delay_seconds=0,
+        retry_max_delay_seconds=0,
+    )
+
+    with pytest.raises(RuntimeError, match="transient worker failure"):
+        await runner.dispatch(
+            nio.MatrixRoom(_ROOM_ID, _PRINCIPAL_ID),
+            _message_event("$recovery-scope"),
+            DispatchCallbackKind.MESSAGE,
+        )
+    await wait_for_background_tasks(timeout=1, owner=owner)
+
+    assert attempts == 2
+    assert store.has_pending("$recovery-scope", DispatchCallbackKind.MESSAGE)
 
 
 def test_deferred_turn_retry_schedules_only_the_exact_callback_kind(tmp_path: Path) -> None:
