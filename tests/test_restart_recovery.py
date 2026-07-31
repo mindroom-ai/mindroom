@@ -94,6 +94,9 @@ def _owner(
 ) -> RecoveryOwner:
     client = MagicMock(spec=nio.AsyncClient)
     client.user_id = user_id
+    client.rooms = {room_id: nio.MatrixRoom(room_id=room_id, own_user_id=user_id) for room_id in rooms}
+    client.encrypted_rooms = set()
+    client.store = None
     return RecoveryOwner(
         entity_name=entity_name,
         user_id=user_id,
@@ -102,6 +105,26 @@ def _owner(
         conversation_cache=cast("ConversationCacheProtocol", MagicMock()),
         desired_room_ids=rooms,
         first_sync_complete=ready,
+    )
+
+
+def _hide_encrypted_room(
+    owner: RecoveryOwner,
+    room_id: str,
+    *,
+    members: nio.JoinedMembersResponse | nio.JoinedMembersError | None = None,
+) -> None:
+    owner.client.rooms = {}
+    owner.client.room_get_state_event = AsyncMock(
+        return_value=nio.RoomGetStateEventResponse(
+            content={"algorithm": "m.megolm.v1.aes-sha2"},
+            event_type="m.room.encryption",
+            state_key="",
+            room_id=room_id,
+        ),
+    )
+    owner.client.joined_members = AsyncMock(
+        return_value=(members if members is not None else nio.JoinedMembersResponse(members=[], room_id=room_id)),
     )
 
 
@@ -531,6 +554,49 @@ async def test_matrix_room_recovery_retries_only_failed_cleanup_owner(
 
 
 @pytest.mark.asyncio
+async def test_matrix_room_recovery_hydrates_hidden_encrypted_room_before_cleanup(
+    tmp_path: Path,
+) -> None:
+    """Stale edits must see encrypted delivery state before cleanup starts."""
+    owner = _owner()
+    room_id = "!code:example.org"
+    _hide_encrypted_room(owner, room_id)
+    operations = build_matrix_restart_recovery_operations(test_runtime_paths(tmp_path))
+
+    async def cleanup(*_args: object, **_kwargs: object) -> stale_stream_cleanup_module.StaleStreamCleanupResult:
+        assert owner.client.rooms[room_id].encrypted is True
+        return stale_stream_cleanup_module.StaleStreamCleanupResult(
+            cleaned_count=0,
+            interrupted_threads=(),
+        )
+
+    with (
+        patch(
+            "mindroom.restart_recovery_operations.get_joined_rooms",
+            new=AsyncMock(return_value=[room_id]),
+        ),
+        patch(
+            "mindroom.restart_recovery_operations.cleanup_stale_streaming_room",
+            new=AsyncMock(side_effect=cleanup),
+        ) as cleanup_room,
+    ):
+        result = await operations.recover_room(
+            (owner,),
+            RoomRecoveryRequest(
+                room_id=room_id,
+                startup_cutoff_ms=123,
+                terminal_interrupted_only=False,
+            ),
+            frozenset({owner.user_id}),
+            _config(tmp_path),
+        )
+
+    assert result == RoomRecoveryResult()
+    cleanup_room.assert_awaited_once()
+    owner.client.joined_members.assert_awaited_once_with(room_id)
+
+
+@pytest.mark.asyncio
 async def test_matrix_target_delivery_by_exact_owner_mentions_intended_responder(
     tmp_path: Path,
 ) -> None:
@@ -551,6 +617,61 @@ async def test_matrix_target_delivery_by_exact_owner_mentions_intended_responder
         "@Code [System: Previous response was interrupted by service restart. Please continue where you left off.]"
     )
     assert content["m.mentions"] == {"user_ids": [owner.user_id]}
+
+
+@pytest.mark.asyncio
+async def test_matrix_target_delivery_hydrates_hidden_encrypted_room(
+    tmp_path: Path,
+) -> None:
+    """A joined room outside the Sliding Sync window must remain deliverable."""
+    owner = _owner()
+    target = _target("$target", timestamp_ms=10)
+    _hide_encrypted_room(owner, target.room_id)
+    owner.client.room_send = AsyncMock(
+        return_value=nio.RoomSendResponse(
+            event_id="$resume",
+            room_id=target.room_id,
+        ),
+    )
+    operations = build_matrix_restart_recovery_operations(test_runtime_paths(tmp_path))
+
+    delivered = await operations.deliver_target(owner, target, _config(tmp_path))
+
+    assert delivered is RestartDeliveryOutcome.DELIVERED
+    assert owner.client.rooms[target.room_id].encrypted is True
+    assert target.room_id in owner.client.encrypted_rooms
+    owner.client.room_get_state_event.assert_awaited_once_with(
+        target.room_id,
+        "m.room.encryption",
+    )
+    owner.client.room_send.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_matrix_target_delivery_rolls_back_incomplete_encrypted_room(
+    tmp_path: Path,
+) -> None:
+    """Failed member hydration must not leave a sendable-looking cache entry."""
+    owner = _owner()
+    target = _target("$target", timestamp_ms=10)
+    _hide_encrypted_room(
+        owner,
+        target.room_id,
+        members=nio.JoinedMembersError(
+            "forbidden",
+            "M_FORBIDDEN",
+            room_id=target.room_id,
+        ),
+    )
+    owner.client.room_send = AsyncMock()
+    operations = build_matrix_restart_recovery_operations(test_runtime_paths(tmp_path))
+
+    delivered = await operations.deliver_target(owner, target, _config(tmp_path))
+
+    assert delivered is RestartDeliveryOutcome.RETRY
+    assert target.room_id not in owner.client.rooms
+    assert target.room_id not in owner.client.encrypted_rooms
+    owner.client.room_send.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -1996,6 +2117,44 @@ async def test_requester_retry_does_not_fence_same_target_after_resolution(
 
 
 @pytest.mark.asyncio
+async def test_terminal_unresolved_requester_warns_before_settlement(
+    tmp_path: Path,
+) -> None:
+    """A permanently unresumable target must remain visible to operators."""
+    owner = _owner()
+    target = _target(
+        "$target",
+        timestamp_ms=10,
+        original_sender_id=None,
+    )
+    coordinator = RestartRecoveryCoordinator(
+        current_config=lambda: _config(tmp_path),
+        current_owners=lambda: {owner.user_id: owner},
+        operations=_operations(
+            recover_room=AsyncMock(
+                return_value=RoomRecoveryResult(interrupted_threads=(target,)),
+            ),
+        ),
+    )
+
+    with patch("mindroom.restart_recovery.logger.warning") as warning:
+        coordinator.start(startup_cutoff_ms=123)
+        try:
+            await _wait_until(
+                lambda: not coordinator._room_jobs and not coordinator._active_attempts,
+            )
+        finally:
+            await coordinator.stop()
+
+    warning.assert_called_once_with(
+        "Skipping auto-resume because requester identity could not be resolved",
+        room_id=target.room_id,
+        thread_id=target.thread_id,
+        target_event_id=target.target_event_id,
+    )
+
+
+@pytest.mark.asyncio
 async def test_unresolved_room_alias_is_terminal_until_owner_refresh(
     tmp_path: Path,
 ) -> None:
@@ -3020,6 +3179,13 @@ async def test_startup_discovers_server_joined_rooms_outside_local_scope(
     """Startup recovery must scan joined rooms omitted from the local sync window."""
     hidden_room_id = "!outside-sliding-window:example.org"
     owner = _owner(rooms=frozenset())
+    owner.client.room_get_state_event = AsyncMock(
+        return_value=nio.RoomGetStateEventError(
+            "not found",
+            "M_NOT_FOUND",
+            room_id=hidden_room_id,
+        ),
+    )
     owners = {owner.user_id: owner}
     scanned = asyncio.Event()
 

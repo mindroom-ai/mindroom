@@ -11,7 +11,7 @@ from uuid import NAMESPACE_URL, uuid5
 
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.logging_config import get_logger
-from mindroom.matrix.client_delivery import send_message_result
+from mindroom.matrix.client_delivery import hydrate_joined_room_for_delivery, send_message_result
 from mindroom.matrix.client_room_admin import get_joined_rooms
 from mindroom.matrix.stale_stream_cleanup import (
     InterruptedTargetFreshness,
@@ -258,6 +258,17 @@ async def _recover_room(
             unjoined_owner_user_ids=frozenset(unjoined_owner_user_ids),
         )
 
+    joined_owners, hydration_retry_owner_user_ids = await _hydrate_joined_owners(
+        tuple(joined_owners),
+        request.room_id,
+    )
+    retry_owner_user_ids.update(hydration_retry_owner_user_ids)
+    if not joined_owners:
+        return _RoomRecoveryResult(
+            retry_owner_user_ids=frozenset(retry_owner_user_ids),
+            unjoined_owner_user_ids=frozenset(unjoined_owner_user_ids),
+        )
+
     scan_owner = next(
         (owner for owner in joined_owners if owner.entity_name == ROUTER_AGENT_NAME),
         min(joined_owners, key=lambda owner: owner.user_id),
@@ -294,6 +305,35 @@ async def _recover_room(
         retry_owner_user_ids=frozenset(retry_cleanup_owner_user_ids),
         unjoined_owner_user_ids=frozenset(unjoined_owner_user_ids),
     )
+
+
+async def _hydrate_joined_owners(
+    owners: tuple[RecoveryOwner, ...],
+    room_id: str,
+) -> tuple[list[RecoveryOwner], set[str]]:
+    """Hydrate independent owner clients concurrently before room cleanup."""
+    results = await asyncio.gather(
+        *(hydrate_joined_room_for_delivery(owner.client, room_id) for owner in owners),
+        return_exceptions=True,
+    )
+    ready_owners: list[RecoveryOwner] = []
+    retry_owner_user_ids: set[str] = set()
+    for owner, result in zip(owners, results):
+        if isinstance(result, asyncio.CancelledError):
+            raise result
+        if isinstance(result, BaseException):
+            logger.warning(
+                "Failed to hydrate joined room before restart recovery",
+                owner_user_id=owner.user_id,
+                room_id=room_id,
+                exc_info=(type(result), result, result.__traceback__),
+            )
+            retry_owner_user_ids.add(owner.user_id)
+        elif result:
+            ready_owners.append(owner)
+        else:
+            retry_owner_user_ids.add(owner.user_id)
+    return ready_owners, retry_owner_user_ids
 
 
 def build_matrix_restart_recovery_operations(
@@ -353,6 +393,8 @@ def build_matrix_restart_recovery_operations(
             config=config,
             intended_responder_user_id=owner.user_id,
         )
+        if not await hydrate_joined_room_for_delivery(owner.client, target.room_id):
+            return RestartDeliveryOutcome.RETRY
         transaction_id = str(
             uuid5(
                 NAMESPACE_URL,

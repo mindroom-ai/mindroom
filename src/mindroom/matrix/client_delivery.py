@@ -191,6 +191,52 @@ def cached_room(client: nio.AsyncClient, room_id: str) -> nio.MatrixRoom | None:
     return _cached_rooms(client).get(room_id)
 
 
+async def _remote_room_encrypted(client: nio.AsyncClient, room_id: str) -> bool | None:
+    """Return authoritative room encryption state when readable."""
+    response = await client.room_get_state_event(room_id, "m.room.encryption")
+    if isinstance(response, nio.RoomGetStateEventResponse):
+        return True
+    if isinstance(response, nio.RoomGetStateEventError) and response.status_code == "M_NOT_FOUND":
+        return False
+    return None
+
+
+async def hydrate_joined_room_for_delivery(
+    client: nio.AsyncClient,
+    room_id: str,
+) -> bool:
+    """Seed nio's delivery state for one remotely confirmed joined room."""
+    rooms = client.rooms
+    if room_id in rooms:
+        return True
+
+    encrypted = await _remote_room_encrypted(client, room_id)
+    if encrypted is None:
+        logger.error(
+            "matrix_room_delivery_cache_hydration_failed",
+            room_id=room_id,
+            hint="Unable to determine room encryption state before delivery.",
+        )
+        return False
+
+    inserted_room = nio.MatrixRoom(room_id=room_id, own_user_id=client.user_id or "")
+    inserted_room.encrypted = encrypted
+    room = rooms.setdefault(room_id, inserted_room)
+    if room is not inserted_room or not encrypted:
+        return True
+
+    members = await client.joined_members(room_id)
+    if not isinstance(members, nio.JoinedMembersResponse):
+        if rooms.get(room_id) is inserted_room:
+            rooms.pop(room_id)
+        return False
+
+    client.encrypted_rooms.add(room_id)
+    if client.store is not None:
+        client.store.save_encrypted_rooms({room_id})
+    return True
+
+
 def _cached_rooms(client: nio.AsyncClient) -> Mapping[str, nio.MatrixRoom]:
     """Return the client room cache when nio has initialized it."""
     rooms = client.rooms
@@ -217,8 +263,8 @@ async def _cached_or_remote_room_encrypted(client: nio.AsyncClient, room_id: str
     if room is not None:
         return bool(room.encrypted)
 
-    encryption_state = await client.room_get_state_event(room_id, "m.room.encryption")
-    if isinstance(encryption_state, nio.RoomGetStateEventResponse):
+    encrypted = await _remote_room_encrypted(client, room_id)
+    if encrypted is True:
         logger.error(
             "matrix_encrypted_media_upload_requires_synced_room_cache",
             room_id=room_id,
@@ -226,7 +272,7 @@ async def _cached_or_remote_room_encrypted(client: nio.AsyncClient, room_id: str
             hint="Wait for initial sync to populate nio's room cache before uploading encrypted media.",
         )
         return None
-    if isinstance(encryption_state, nio.RoomGetStateEventError) and encryption_state.status_code == "M_NOT_FOUND":
+    if encrypted is False:
         return False
     logger.error(
         "matrix_media_upload_requires_known_encryption_state",
@@ -259,8 +305,8 @@ async def send_message_result(
     room = rooms.get(room_id) if isinstance(rooms, Mapping) else None
     cache_bypass = isinstance(rooms, Mapping) and room is None
     if cache_bypass:
-        encryption_state = await client.room_get_state_event(room_id, "m.room.encryption")
-        if isinstance(encryption_state, nio.RoomGetStateEventResponse):
+        encrypted = await _remote_room_encrypted(client, room_id)
+        if encrypted is True:
             logger.error(
                 "matrix_encrypted_room_send_requires_synced_room_cache",
                 room_id=room_id,
@@ -268,9 +314,7 @@ async def send_message_result(
                 hint="Wait for initial sync to populate nio's room cache before sending to encrypted rooms.",
             )
             return None
-        if not (
-            isinstance(encryption_state, nio.RoomGetStateEventError) and encryption_state.status_code == "M_NOT_FOUND"
-        ):
+        if encrypted is None:
             logger.error(
                 "matrix_room_send_requires_known_encryption_state",
                 room_id=room_id,
@@ -708,6 +752,7 @@ __all__ = [
     "cached_room",
     "can_send_to_encrypted_room",
     "edit_message_result",
+    "hydrate_joined_room_for_delivery",
     "send_audio_message",
     "send_file_message",
     "send_message_result",

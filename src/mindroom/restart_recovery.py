@@ -107,6 +107,16 @@ def _restart_recovery_retry_delay(attempt: int) -> float:
     return min(60.0, 2.0 ** max(1, attempt))
 
 
+async def _drain_future[T](future: asyncio.Future[T]) -> T:
+    """Return one owned future's result despite repeated caller cancellation."""
+    while not future.done():
+        try:
+            await asyncio.shield(future)
+        except asyncio.CancelledError:
+            continue
+    return future.result()
+
+
 async def _cancel_and_drain_tasks[T](tasks: tuple[asyncio.Task[T], ...]) -> None:
     """Drain owned tasks despite repeated cancellation of the lifecycle task."""
     for task in tasks:
@@ -114,11 +124,7 @@ async def _cancel_and_drain_tasks[T](tasks: tuple[asyncio.Task[T], ...]) -> None
     if not tasks:
         return
     drain = asyncio.gather(*tasks, return_exceptions=True)
-    while not drain.done():
-        try:
-            await asyncio.shield(drain)
-        except asyncio.CancelledError:
-            continue
+    await _drain_future(drain)
 
 
 def _target_version(target: InterruptedThread) -> tuple[int, str]:
@@ -270,7 +276,6 @@ class RestartRecoveryCoordinator:
         self._room_jobs.clear()
         self._target_watermarks.clear()
         self._completed_startup_scans.clear()
-        await self._drain_inflight_work()
         await self._operations.close()
 
     def _require_config(self) -> Config:
@@ -798,7 +803,15 @@ class RestartRecoveryCoordinator:
         target: InterruptedThread,
         config: Config,
     ) -> _TargetSettlement | None:
-        if target.original_sender_id is None or not config.defaults.auto_resume_after_restart:
+        if target.original_sender_id is None:
+            logger.warning(
+                "Skipping auto-resume because requester identity could not be resolved",
+                room_id=target.room_id,
+                thread_id=target.thread_id,
+                target_event_id=target.target_event_id,
+            )
+            return _TargetSettlement(target, closed=False)
+        if not config.defaults.auto_resume_after_restart:
             return _TargetSettlement(target, closed=False)
         delivery = await self._deliver_target(owner, target, config)
         if delivery is RestartDeliveryOutcome.RETRY:
@@ -830,12 +843,4 @@ class RestartRecoveryCoordinator:
                 self._operations.deliver_target(owner, target, config),
                 name=f"restart_recovery_delivery:{target.target_event_id}",
             )
-            try:
-                return await asyncio.shield(task)
-            except asyncio.CancelledError:
-                while not task.done():
-                    try:
-                        await asyncio.shield(task)
-                    except asyncio.CancelledError:
-                        continue
-                return task.result()
+            return await _drain_future(task)
