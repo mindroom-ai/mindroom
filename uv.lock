@@ -4515,7 +4515,7 @@ requires-dist = [
     { name = "mdit-py-plugins", specifier = ">=0.5" },
     { name = "mem0ai", specifier = ">=0.1.115" },
     { name = "mem0ai", marker = "extra == 'mem0'", specifier = ">=0.1.115" },
-    { name = "mindroom-nio", extras = ["e2e"], git = "https://github.com/mindroom-ai/mindroom-nio.git?rev=30cf7139894bb778ea1d866d84db8022b380b16b" },
+    { name = "mindroom-nio", extras = ["e2e"], git = "https://github.com/mindroom-ai/mindroom-nio.git?rev=44673d17b88b17474ae0bfb4da422bc7a11ba94a" },
     { name = "moviepy", marker = "extra == 'moviepy-video-tools'" },
     { name = "neo4j", marker = "extra == 'neo4j'" },
     { name = "newspaper4k", marker = "extra == 'newspaper'" },
@@ -4626,7 +4626,7 @@ dev = [
 [[package]]
 name = "mindroom-nio"
 version = "0.32.0"
-source = { git = "https://github.com/mindroom-ai/mindroom-nio.git?rev=30cf7139894bb778ea1d866d84db8022b380b16b#30cf7139894bb778ea1d866d84db8022b380b16b" }
+source = { git = "https://github.com/mindroom-ai/mindroom-nio.git?rev=44673d17b88b17474ae0bfb4da422bc7a11ba94a#44673d17b88b17474ae0bfb4da422bc7a11ba94a" }
 dependencies = [
     { name = "aiofiles" },
     { name = "aiohttp" },
