@@ -330,11 +330,7 @@ class _MultiAgentOrchestrator:
         config = self.config
         if config is None:
             return {}
-        return build_restart_recovery_owners(
-            self.agent_bots,
-            config=config,
-            runtime_paths=self.runtime_paths,
-        )
+        return build_restart_recovery_owners(self.agent_bots)
 
     async def _pause_restart_recovery(self) -> None:
         """Pause recovery without leaving it paused if this caller is cancelled."""

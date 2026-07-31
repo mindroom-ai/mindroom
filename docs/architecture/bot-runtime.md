@@ -162,9 +162,9 @@ Each lease performs one shared room scan, newest-target selection, freshness che
 One monotonic watermark per exact owner generation, room, and thread fences superseded targets and closes a successfully resumed recovery lifecycle.
 Concurrent room leases share one joined-room snapshot for each exact owner generation.
 A dedicated Matrix operations collaborator explicitly owns membership snapshots, releases discarded owners, and cancels and drains every retained snapshot during shutdown.
-A shared scan waits until every enrolled owner is ready and joined, and a missing desired room invalidates only that owner's snapshot so a later retry can observe the join.
+A shared scan includes every currently joined owner, while a missing desired room invalidates and retries only that owner's snapshot so one unavailable owner cannot block its peers.
 Unresolved room aliases remain outside retry state until room setup resolves them, and later readiness notifications do not recreate a completed same-generation scan.
-Room history failures, transient requester-resolution failures, and failed cleanup edits return typed retry outcomes, and no interrupted targets publish from a partial scan.
+Room history failures, transient requester-resolution failures, and failed cleanup edits return typed retry outcomes, and interrupted targets publish only for owners whose scan state is authoritative.
 Each resume relay uses a deterministic Matrix transaction ID derived from the exact owner and interrupted target, so only a retry of that same target reuses the transaction ID.
 The orchestrator pauses recovery before configuration mutation, and pause cancellation drains active attempt cleanup before any leased work is settled or restored.
 Resume keeps retained semantic work but resolves it only against current ready owner generations.

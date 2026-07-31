@@ -12,11 +12,6 @@ from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_delivery import send_message_result
 from mindroom.matrix.client_room_admin import get_joined_rooms
-from mindroom.matrix.invited_rooms_store import (
-    invited_rooms_path,
-    load_invited_rooms,
-    should_persist_invited_rooms,
-)
 from mindroom.matrix.stale_stream_cleanup import (
     InterruptedTargetFreshness,
     StaleStreamCleanupActor,
@@ -38,6 +33,8 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
+_AUTO_RESUME_DELIVERY_INTERVAL_SECONDS = 2.0
+
 
 @dataclass(frozen=True)
 class RecoveryOwner:
@@ -54,9 +51,6 @@ class RecoveryOwner:
 
 def build_restart_recovery_owners(
     bots: Mapping[str, AgentBot | TeamBot],
-    *,
-    config: Config,
-    runtime_paths: RuntimePaths,
 ) -> dict[str, RecoveryOwner]:
     """Snapshot current exact owner generations and their durable room scope."""
     owners: dict[str, RecoveryOwner] = {}
@@ -65,20 +59,13 @@ def build_restart_recovery_owners(
         user_id = bot.agent_user.user_id
         if client is None or not user_id:
             continue
-        desired_room_ids = set(bot.rooms)
-        if should_persist_invited_rooms(config, bot.agent_name):
-            desired_room_ids.update(
-                load_invited_rooms(
-                    invited_rooms_path(runtime_paths.storage_root, bot.agent_name),
-                ),
-            )
         owners[user_id] = RecoveryOwner(
             entity_name=bot.agent_name,
             user_id=user_id,
             generation=bot,
             client=client,
-            conversation_cache=bot._conversation_cache,
-            desired_room_ids=frozenset(desired_room_ids),
+            conversation_cache=bot.conversation_cache,
+            desired_room_ids=bot.restart_recovery_room_ids,
             first_sync_complete=bot.running and bot.first_sync_complete,
         )
     return owners
@@ -230,7 +217,7 @@ async def _recover_room(
     owner_user_ids: frozenset[str],
     config: Config,
 ) -> _RoomRecoveryResult:
-    """Recover one room scan after every exact owner has joined."""
+    """Recover joined owners now while retaining only unavailable owners."""
     assert owners
     membership_results = await asyncio.gather(
         *(membership_snapshots.joined_rooms(owner) for owner in owners),
@@ -259,9 +246,9 @@ async def _recover_room(
             continue
         joined_owners.append(owner)
 
-    if retry_owner_user_ids:
+    if not joined_owners:
         return _RoomRecoveryResult(
-            retry_owner_user_ids=frozenset(owner.user_id for owner in owners),
+            retry_owner_user_ids=frozenset(retry_owner_user_ids),
         )
 
     scan_owner = next(
@@ -285,6 +272,7 @@ async def _recover_room(
         terminal_interrupted_only=request.terminal_interrupted_only,
     )
     retry_cleanup_owner_user_ids = set(cleanup_result.retry_bot_user_ids)
+    retry_cleanup_owner_user_ids.update(retry_owner_user_ids)
     if cleanup_result.room_retry_required:
         retry_cleanup_owner_user_ids.update(owner.user_id for owner in joined_owners)
     return _RoomRecoveryResult(
@@ -296,6 +284,8 @@ async def _recover_room(
 def build_matrix_restart_recovery_operations(runtime_paths: RuntimePaths) -> RestartRecoveryOperations:
     """Build exact-owner Matrix operations for restart recovery."""
     membership_snapshots = _OwnerMembershipSnapshots()
+    delivery_lock = asyncio.Lock()
+    next_delivery_at = 0.0
 
     async def recover_room(
         owners: tuple[RecoveryOwner, ...],
@@ -336,34 +326,44 @@ def build_matrix_restart_recovery_operations(runtime_paths: RuntimePaths) -> Res
         target: InterruptedThread,
         config: Config,
     ) -> bool:
-        content = build_auto_resume_content(
-            target,
-            config=config,
-            runtime_paths=runtime_paths,
-            target_user_id=owner.user_id,
-            sender_is_owner=router.user_id == owner.user_id,
-        )
-        transaction_id = str(
-            uuid5(
-                NAMESPACE_URL,
-                "\x00".join(
-                    (
-                        "mindroom.restart_recovery.v1",
-                        owner.user_id,
-                        target.room_id,
-                        target.thread_id or "",
-                        target.target_event_id,
-                        str(target.timestamp_ms),
+        nonlocal next_delivery_at
+        async with delivery_lock:
+            delay = next_delivery_at - asyncio.get_running_loop().time()
+            if delay > 0:
+                await asyncio.sleep(delay)
+                freshness = await target_freshness(owner, target, config)
+                if freshness is not RestartTargetFreshness.CURRENT:
+                    return False
+            content = build_auto_resume_content(
+                target,
+                config=config,
+                target_user_id=owner.user_id,
+                sender_is_owner=router.user_id == owner.user_id,
+            )
+            transaction_id = str(
+                uuid5(
+                    NAMESPACE_URL,
+                    "\x00".join(
+                        (
+                            "mindroom.restart_recovery.v1",
+                            owner.user_id,
+                            target.room_id,
+                            target.thread_id or "",
+                            target.target_event_id,
+                            str(target.timestamp_ms),
+                        ),
                     ),
                 ),
-            ),
-        )
-        delivered = await send_message_result(
-            router.client,
-            target.room_id,
-            content,
-            transaction_id=transaction_id,
-        )
+            )
+            try:
+                delivered = await send_message_result(
+                    router.client,
+                    target.room_id,
+                    content,
+                    transaction_id=transaction_id,
+                )
+            finally:
+                next_delivery_at = asyncio.get_running_loop().time() + _AUTO_RESUME_DELIVERY_INTERVAL_SECONDS
         if delivered is None:
             return False
         router.conversation_cache.notify_outbound_message(

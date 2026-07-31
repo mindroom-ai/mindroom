@@ -15,7 +15,6 @@ from mindroom.bot import AgentBot
 from mindroom.config.main import Config
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.matrix import stale_stream_cleanup as stale_stream_cleanup_module
-from mindroom.matrix.invited_rooms_store import invited_rooms_path, save_invited_rooms
 from mindroom.matrix.stale_stream_cleanup import InterruptedThread
 from mindroom.orchestrator import _MultiAgentOrchestrator
 from mindroom.restart_recovery import RestartRecoveryCoordinator
@@ -216,10 +215,10 @@ async def test_matrix_room_recovery_retries_until_exact_owner_is_joined(tmp_path
 
 
 @pytest.mark.asyncio
-async def test_shared_room_does_not_scan_until_every_owner_is_joined(
+async def test_shared_room_scans_joined_owner_and_retries_only_missing_owner(
     tmp_path: Path,
 ) -> None:
-    """One missing owner membership must retain the whole shared scan."""
+    """One missing membership must not block recovery for a joined owner."""
     room_id = "!code:example.org"
     owner = _owner(rooms=frozenset({room_id}))
     router = _owner(
@@ -244,7 +243,12 @@ async def test_shared_room_does_not_scan_until_every_owner_is_joined(
         ),
         patch(
             "mindroom.restart_recovery_operations.cleanup_stale_streaming_room",
-            new=AsyncMock(),
+            new=AsyncMock(
+                return_value=stale_stream_cleanup_module._StaleStreamCleanupResult(
+                    cleaned_count=0,
+                    interrupted_threads=(),
+                ),
+            ),
         ) as cleanup_room,
     ):
         result = await operations.recover_room(
@@ -255,9 +259,10 @@ async def test_shared_room_does_not_scan_until_every_owner_is_joined(
         )
 
     assert result == RoomRecoveryResult(
-        retry_owner_user_ids=frozenset({owner.user_id, router.user_id}),
+        retry_owner_user_ids=frozenset({router.user_id}),
     )
-    cleanup_room.assert_not_awaited()
+    cleanup_room.assert_awaited_once()
+    assert set(cleanup_room.await_args.kwargs["actors"]) == {owner.user_id}
 
 
 @pytest.mark.asyncio
@@ -565,6 +570,60 @@ async def test_matrix_target_delivery_by_exact_owner_omits_self_mention(tmp_path
 
 
 @pytest.mark.asyncio
+async def test_matrix_target_delivery_paces_router_sends(tmp_path: Path) -> None:
+    """Concurrent-room recovery must not burst visible relays through one router."""
+    owner = _owner()
+    router = _owner(
+        entity_name=ROUTER_AGENT_NAME,
+        user_id="@router:example.org",
+        rooms=frozenset(),
+    )
+    operations = build_matrix_restart_recovery_operations(test_runtime_paths(tmp_path))
+
+    with (
+        patch(
+            "mindroom.restart_recovery_operations.send_message_result",
+            new=AsyncMock(side_effect=delivered_matrix_side_effect("$resume")),
+        ) as send_message,
+        patch(
+            "mindroom.restart_recovery_operations.asyncio.sleep",
+            new=AsyncMock(),
+        ) as sleep,
+        patch(
+            "mindroom.restart_recovery_operations.interrupted_target_freshness",
+            new=AsyncMock(
+                side_effect=(
+                    stale_stream_cleanup_module.InterruptedTargetFreshness.CURRENT,
+                    stale_stream_cleanup_module.InterruptedTargetFreshness.NEWER_HUMAN,
+                ),
+            ),
+        ),
+    ):
+        assert await operations.deliver_target(
+            router,
+            owner,
+            _target("$first", timestamp_ms=10, thread_id="$thread-a"),
+            _config(tmp_path),
+        )
+        assert await operations.deliver_target(
+            router,
+            owner,
+            _target("$second", timestamp_ms=20, thread_id="$thread-b"),
+            _config(tmp_path),
+        )
+        assert not await operations.deliver_target(
+            router,
+            owner,
+            _target("$third", timestamp_ms=30, thread_id="$thread-c"),
+            _config(tmp_path),
+        )
+
+    assert sleep.await_count == 2
+    assert all(0 < call.args[0] <= 2.0 for call in sleep.await_args_list)
+    assert send_message.await_count == 2
+
+
+@pytest.mark.asyncio
 async def test_matrix_target_delivery_propagates_cache_notification_failure(
     tmp_path: Path,
 ) -> None:
@@ -616,10 +675,22 @@ async def test_matrix_target_delivery_reuses_stable_transaction_id_after_lost_re
             return None
         return await successful_delivery(*args, **kwargs)
 
-    with patch(
-        "mindroom.restart_recovery_operations.send_message_result",
-        new=AsyncMock(side_effect=deliver_once_lost),
-    ) as send_message:
+    with (
+        patch(
+            "mindroom.restart_recovery_operations.send_message_result",
+            new=AsyncMock(side_effect=deliver_once_lost),
+        ) as send_message,
+        patch(
+            "mindroom.restart_recovery_operations.asyncio.sleep",
+            new=AsyncMock(),
+        ),
+        patch(
+            "mindroom.restart_recovery_operations.interrupted_target_freshness",
+            new=AsyncMock(
+                return_value=stale_stream_cleanup_module.InterruptedTargetFreshness.CURRENT,
+            ),
+        ),
+    ):
         first = await operations.deliver_target(router, owner, target, _config(tmp_path))
         second = await operations.deliver_target(router, owner, target, _config(tmp_path))
 
@@ -1946,17 +2017,13 @@ async def test_unrecoverable_target_is_settled_without_future_retry(tmp_path: Pa
     assert freshness_attempts == 1
 
 
-def test_orchestrator_recovery_owner_includes_persisted_accepted_invites(
+def test_orchestrator_recovery_owner_uses_live_room_scope_without_disk_read(
     tmp_path: Path,
 ) -> None:
-    """Startup recovery scope must include durable ad-hoc accepted rooms."""
+    """Repeated owner snapshots must reuse the bot lifecycle's loaded room scope."""
     config = _config(tmp_path)
     config.agents["code"].accept_invites = True
     runtime_paths = test_runtime_paths(tmp_path)
-    save_invited_rooms(
-        invited_rooms_path(runtime_paths.storage_root, "code"),
-        {"!invited:example.org"},
-    )
     client = MagicMock(spec=nio.AsyncClient)
     bot = MagicMock(spec=AgentBot)
     bot.agent_name = "code"
@@ -1965,17 +2032,28 @@ def test_orchestrator_recovery_owner_includes_persisted_accepted_invites(
     bot.rooms = ["!configured:example.org"]
     bot.running = True
     bot.first_sync_complete = True
-    bot._conversation_cache = MagicMock()
+    bot.conversation_cache = MagicMock()
+    bot.restart_recovery_room_ids = frozenset(
+        {"!configured:example.org", "!invited:example.org"},
+    )
     orchestrator = _MultiAgentOrchestrator(runtime_paths)
     orchestrator.config = config
     orchestrator.agent_bots = {"code": bot}
 
-    owners = orchestrator._restart_recovery_owners()
+    with patch(
+        "mindroom.restart_recovery_operations.load_invited_rooms",
+        new=MagicMock(),
+        create=True,
+    ) as load_invited_rooms:
+        owners = orchestrator._restart_recovery_owners()
+        refreshed_owners = orchestrator._restart_recovery_owners()
 
     assert owners["@code:example.org"].desired_room_ids == frozenset(
         {"!configured:example.org", "!invited:example.org"},
     )
+    assert refreshed_owners["@code:example.org"].desired_room_ids == owners["@code:example.org"].desired_room_ids
     assert owners["@code:example.org"].generation is bot
+    load_invited_rooms.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -2169,7 +2247,7 @@ async def test_generation_change_discards_stale_room_result(tmp_path: Path) -> N
 async def test_generation_change_allows_new_interruption_in_same_thread(
     tmp_path: Path,
 ) -> None:
-    """A closed target watermark must not cross an owner-generation boundary."""
+    """Replacement intent must run without repeating the completed startup scan."""
     old_generation = object()
     new_generation = object()
     room_id = "!code:example.org"
@@ -2182,15 +2260,17 @@ async def test_generation_change_allows_new_interruption_in_same_thread(
     )
     owners = {old_owner.user_id: old_owner, router.user_id: router}
     delivered_targets: list[str] = []
+    requests: list[RoomRecoveryRequest] = []
     old_delivered = asyncio.Event()
     new_delivered = asyncio.Event()
 
     async def recover_room(
         owner: RecoveryOwner,
-        _request: RoomRecoveryRequest,
+        request: RoomRecoveryRequest,
         _owner_user_ids: frozenset[str],
         _config: Config,
     ) -> RoomRecoveryResult:
+        requests.append(request)
         target = (
             _target("$old-generation", timestamp_ms=10)
             if owner.generation is old_generation
@@ -2225,12 +2305,18 @@ async def test_generation_change_allows_new_interruption_in_same_thread(
 
     owners[old_owner.user_id] = new_owner
     coordinator.owner_ready(new_owner.user_id)
+    assert not coordinator._room_jobs
+    coordinator.enqueue_replacement_rooms(new_owner.user_id, {room_id})
     try:
         await asyncio.wait_for(new_delivered.wait(), timeout=0.2)
     finally:
         await coordinator.stop()
 
     assert delivered_targets == ["$old-generation", "$new-generation"]
+    assert [(request.startup_cutoff_ms, request.terminal_interrupted_only) for request in requests] == [
+        (123, False),
+        (None, True),
+    ]
 
 
 @pytest.mark.asyncio

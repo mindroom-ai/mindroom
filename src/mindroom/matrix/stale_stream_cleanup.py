@@ -30,12 +30,7 @@ from mindroom.dispatch_source import (
     TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
     is_auto_resume_relay_body,
 )
-from mindroom.entity_resolution import (
-    MissingManagedEntityAccountError,
-    current_entity_id,
-    current_internal_sender_ids,
-    entity_identity_registry,
-)
+from mindroom.entity_resolution import current_internal_sender_ids, entity_identity_registry
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_delivery import edit_message_result
 from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage, resolve_latest_visible_messages
@@ -1657,19 +1652,16 @@ def build_auto_resume_content(
     interrupted_thread: InterruptedThread,
     *,
     config: Config,
-    runtime_paths: RuntimePaths,
-    target_user_id: str | None = None,
+    target_user_id: str,
     sender_is_owner: bool = False,
 ) -> dict[str, object]:
     """Build the router-authored visible resume relay for one interrupted agent."""
-    if target_user_id is None and not sender_is_owner:
-        target_user_id = _current_configured_entity_user_id(interrupted_thread.agent_name, config, runtime_paths)
     display_name = _entity_display_name(interrupted_thread.agent_name, config)
 
     body = AUTO_RESUME_MESSAGE
     formatted_body: str | None = None
     mentioned_user_ids: list[str] | None = None
-    if target_user_id is not None and not sender_is_owner:
+    if not sender_is_owner:
         body = f"@{display_name} {AUTO_RESUME_MESSAGE}"
         formatted_body = markdown_to_html(
             f"[@{display_name}](https://matrix.to/#/{target_user_id}) {AUTO_RESUME_MESSAGE}",
@@ -1691,21 +1683,6 @@ def build_auto_resume_content(
         latest_thread_event_id=interrupted_thread.target_event_id,
         extra_content=extra_content,
     )
-
-
-def _current_configured_entity_user_id(
-    entity_name: str,
-    config: Config,
-    runtime_paths: RuntimePaths,
-) -> str | None:
-    """Return one configured entity user ID without resolving unrelated entities."""
-    if entity_name not in config.agents and entity_name not in config.teams:
-        return None
-    try:
-        return current_entity_id(entity_name, runtime_paths).full_id
-    except MissingManagedEntityAccountError:
-        logger.debug("auto_resume_target_entity_account_unavailable", entity_name=entity_name)
-        return None
 
 
 def _entity_display_name(agent_name: str, config: Config) -> str:

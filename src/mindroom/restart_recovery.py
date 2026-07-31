@@ -156,7 +156,7 @@ class RestartRecoveryCoordinator:
         self._retry_delay = retry_delay
         self._room_jobs: dict[_RoomKey, _RoomWork] = {}
         self._target_watermarks: dict[_TargetKey, _TargetWatermark] = {}
-        self._completed_scan_generations: dict[tuple[_RoomKey, str], object] = {}
+        self._completed_startup_scans: set[tuple[_RoomKey, str]] = set()
         self._ready_generations: dict[str, object] = {}
         self._active_attempts: dict[asyncio.Task[_RoomAttemptResult], _RoomWork] = {}
         self._worker_task: asyncio.Task[None] | None = None
@@ -223,9 +223,7 @@ class RestartRecoveryCoordinator:
         self._target_watermarks = {
             key: watermark for key, watermark in self._target_watermarks.items() if key[0] != owner_user_id
         }
-        self._completed_scan_generations = {
-            key: generation for key, generation in self._completed_scan_generations.items() if key[1] != owner_user_id
-        }
+        self._completed_startup_scans = {key for key in self._completed_startup_scans if key[1] != owner_user_id}
         self._ready_generations.pop(owner_user_id, None)
         self._operations.discard_owner(owner_user_id)
 
@@ -258,7 +256,7 @@ class RestartRecoveryCoordinator:
             await asyncio.gather(task, return_exceptions=True)
         self._room_jobs.clear()
         self._target_watermarks.clear()
-        self._completed_scan_generations.clear()
+        self._completed_startup_scans.clear()
         self._ready_generations.clear()
         await self._operations.close()
 
@@ -276,9 +274,10 @@ class RestartRecoveryCoordinator:
                 request.startup_cutoff_ms,
                 request.terminal_interrupted_only,
             )
-            if self._completed_scan_generations.get(
-                (key, owner.user_id),
-            ) is owner.generation or self._owner_has_pending_work(key, owner.user_id):
+            if (key, owner.user_id) in self._completed_startup_scans or self._owner_has_pending_work(
+                key,
+                owner.user_id,
+            ):
                 continue
             self._enqueue_request(owner.user_id, request)
 
@@ -418,10 +417,12 @@ class RestartRecoveryCoordinator:
             if owner is not None:
                 self._advance_watermark(owner, settlement)
         completed_owner_user_ids = work.owner_user_ids - result.retry_owner_user_ids
-        for owner_user_id in completed_owner_user_ids:
-            owner = result.owners.get(owner_user_id)
-            if owner is not None:
-                self._completed_scan_generations[(work.key, owner_user_id)] = owner.generation
+        if not work.terminal_interrupted_only:
+            self._completed_startup_scans.update(
+                (work.key, owner_user_id)
+                for owner_user_id in completed_owner_user_ids
+                if owner_user_id in result.owners
+            )
         remaining = replace(
             work,
             owner_user_ids=result.retry_owner_user_ids,
