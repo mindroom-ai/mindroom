@@ -1115,6 +1115,14 @@ class TestJoinRoom:
         [
             (
                 nio.JoinError("forbidden", "M_FORBIDDEN"),
+                RoomJoinOutcome.RETRYABLE_FAILURE,
+            ),
+            (
+                nio.JoinError("not found", "M_NOT_FOUND"),
+                RoomJoinOutcome.RETRYABLE_FAILURE,
+            ),
+            (
+                nio.JoinError("bad state", "M_BAD_STATE"),
                 RoomJoinOutcome.TERMINAL_FAILURE,
             ),
             (
@@ -1126,7 +1134,13 @@ class TestJoinRoom:
                 RoomJoinOutcome.RETRYABLE_FAILURE,
             ),
         ],
-        ids=["terminal-join-error", "retryable-join-error", "non-join-error"],
+        ids=[
+            "ambiguous-forbidden-join-error",
+            "ambiguous-not-found-join-error",
+            "terminal-join-error",
+            "retryable-join-error",
+            "non-join-error",
+        ],
     )
     async def test_classifies_join_failures(
         self,
