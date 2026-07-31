@@ -114,6 +114,45 @@ async def test_cold_window_admits_only_exact_pending_event_and_kind() -> None:
 
 
 @pytest.mark.asyncio
+async def test_source_admission_owns_invite_and_decrypt_fence_policy() -> None:
+    """Current invites bypass history while pending joins suppress decrypt notices."""
+    obligations = _PendingObligations()
+    fence = ColdHistoryFence(
+        obligations,
+        decrypt_notice_is_fenced=lambda room_id: room_id == "!joining:localhost",
+    )
+
+    invite = await fence.admit_source(
+        "!invited:localhost",
+        "$invite",
+        DispatchCallbackKind.INVITE,
+    )
+    decrypt = await fence.admit_source(
+        "!joining:localhost",
+        "$encrypted",
+        DispatchCallbackKind.DECRYPTION_FAILURE,
+    )
+
+    assert invite is DispatchSourceAdmission.ACCEPTED
+    assert decrypt is DispatchSourceAdmission.DECRYPT_NOTICE_FENCED
+    assert obligations.reads == []
+
+
+def test_incomplete_transport_recovery_rearms_fence() -> None:
+    """Unrecovered rooms keep arbitrary callbacks fenced despite a continuation."""
+    fence = ColdHistoryFence(_PendingObligations())
+    fence.start(trusted_continuation="s_before_gap")
+
+    complete = fence.observe_recovery(
+        continuation="s_after_gap",
+        unrecovered_room_ids=frozenset({"!room:localhost"}),
+    )
+
+    assert not complete
+    assert fence.is_cold
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("continuation", ["s_after_cold", "pos_after_cold"])
 async def test_matrix_continuation_opens_ordinary_dispatch(continuation: str) -> None:
     """A Matrix-issued continuation opens ordinary callback dispatch."""

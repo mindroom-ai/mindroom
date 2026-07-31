@@ -450,6 +450,42 @@ async def test_classic_unrecovered_gap_keeps_fence_cold_and_rejects_checkpoint(
 
 
 @pytest.mark.asyncio
+async def test_classic_token_reset_rearms_open_cold_history_fence(
+    tmp_path: Path,
+) -> None:
+    """A since-less replay cannot admit history through a previously opened fence."""
+    bot = _agent_bot(tmp_path)
+    bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
+    bot.client.next_batch = "s_after_gap"
+    bot._first_sync_done = True
+    bot._sync_cache_trust.state = SyncTrustState.CERTIFIED
+    bot._cold_history_fence.start(trusted_continuation="s_before_gap")
+    response = MagicMock(spec=nio.SyncResponse)
+    response.next_batch = "s_after_gap"
+    response.unrecovered_room_ids = frozenset()
+    response.rooms = MagicMock(join={}, leave={})
+
+    with patch.object(
+        bot._conversation_cache,
+        "cache_sync_timeline_for_certification",
+        new=AsyncMock(
+            return_value=SyncCacheWriteResult(
+                complete=False,
+                limited_room_ids=("!gap:localhost",),
+            ),
+        ),
+    ):
+        await bot._on_sync_response(response)
+
+    assert bot.client.next_batch is None
+    assert bot._cold_history_fence.is_cold
+    assert not await bot._cold_history_fence.admit(
+        "$historical",
+        DispatchCallbackKind.MESSAGE,
+    )
+
+
+@pytest.mark.asyncio
 async def test_tokenless_pre_certification_failure_rearms_cold_fence(
     tmp_path: Path,
 ) -> None:
@@ -1270,7 +1306,7 @@ async def test_checkpoint_clear_failure_defers_durable_leave_cleanup_for_replay(
     response.rooms = MagicMock(join={}, leave={room_id: MagicMock()})
     clear_failure = OSError("checkpoint directory unavailable")
 
-    with patch.object(bot._sync_continuity_store, "replace_checkpoint", side_effect=clear_failure):
+    with patch.object(bot._sync_continuity_store, "clear_checkpoint", side_effect=clear_failure):
         await bot._apply_own_room_membership_from_sync(response)
 
     assert bot._sync_cache_trust.state is SyncTrustState.UNCERTAIN
@@ -1625,8 +1661,8 @@ async def test_cache_generation_rejects_token_after_reset_crash_window(tmp_path:
 
 
 @pytest.mark.asyncio
-async def test_invalid_utf8_continuity_record_fails_startup_closed(tmp_path: Path) -> None:
-    """Malformed bytes cannot silently discard unknown join-fence state."""
+async def test_invalid_utf8_continuity_record_repairs_and_starts_cold(tmp_path: Path) -> None:
+    """Malformed bytes must repair to a cold record instead of bricking startup."""
     bot = _agent_bot(tmp_path)
     bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
     bot.client.next_batch = None
@@ -1635,8 +1671,9 @@ async def test_invalid_utf8_continuity_record_fails_startup_closed(tmp_path: Pat
     token_path.parent.mkdir(parents=True, exist_ok=True)
     token_path.write_bytes(b"\xff\xfe\xfd")
 
-    with pytest.raises(RuntimeError, match="continuity"):
-        await bot._sync_cache_trust.prepare_startup()
+    assert await bot._sync_cache_trust.prepare_startup() is None
+    assert bot._sync_cache_trust.state is SyncTrustState.COLD
+    assert bot._sync_continuity_store.load() == SyncContinuityRecord()
 
 
 @pytest.mark.asyncio

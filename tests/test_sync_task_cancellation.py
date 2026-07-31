@@ -22,6 +22,7 @@ from mindroom.cancellation import (
     cancel_failure_reason,
     cancel_message_for_source,
 )
+from mindroom.cold_history_fence import ColdHistoryFence
 from mindroom.config.main import Config
 from mindroom.config.matrix import MatrixSyncConfig
 from mindroom.constants import RuntimePaths
@@ -1468,9 +1469,14 @@ def _sliding_membership_progress_bot(
     bot._room_member_join_hooks_armed = True
     bot.orchestrator = None
     bot._local_departures_awaiting_sync = set()
-    bot._sync_cache_trust = MagicMock()
+    bot._sync_cache_trust = MagicMock(
+        invalidate_for_cache_scope_cleanup=AsyncMock(),
+    )
+    bot._cold_history_fence = MagicMock(spec=ColdHistoryFence, is_cold=False)
     bot.sync_cache_write_progress = AgentBot.sync_cache_write_progress.__get__(bot)
-    bot._room_lifecycle = MagicMock()
+    bot._room_lifecycle = MagicMock(
+        observe_trusted_sync_rooms=AsyncMock(),
+    )
     bot._conversation_cache = MagicMock(
         purge_rooms=purge_rooms,
         mark_room_joined=mark_room_joined,
@@ -1480,6 +1486,7 @@ def _sliding_membership_progress_bot(
         bot,
     )
     bot._apply_own_room_membership = AgentBot._apply_own_room_membership.__get__(bot)
+    bot._handle_sliding_sync_response = AgentBot._handle_sliding_sync_response.__get__(bot)
     return bot
 
 
@@ -1565,6 +1572,7 @@ async def test_sliding_sync_error_skips_classic_token_rejection() -> None:
     bot._first_sync_done = True
     bot._room_member_join_hooks_armed = True
     bot._sync_cache_trust = MagicMock()
+    bot._cold_history_fence = MagicMock(spec=ColdHistoryFence)
     bot.logger = MagicMock()
     error = nio.SlidingSyncError("connection expired", "M_UNKNOWN_POS")
 
@@ -1573,6 +1581,7 @@ async def test_sliding_sync_error_skips_classic_token_rejection() -> None:
     bot._sync_cache_trust.reject_unknown_pos.assert_not_called()
     assert bot._room_member_join_hooks_armed is True
     bot.logger.warning.assert_not_called()
+    bot._cold_history_fence.reset.assert_called_once_with()
     bot._warn_if_sliding_sync_never_succeeded.assert_called_once_with(error)
 
 

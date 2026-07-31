@@ -607,19 +607,25 @@ class ThreadingBehaviorTestBase:
         # No cleanup needed since we're using mocks
 
     @staticmethod
-    def _sync_response(joined_rooms: object) -> MagicMock:
-        sync_response = MagicMock()
-        sync_response.__class__ = nio.SyncResponse
-        sync_response.rooms = MagicMock()
-        sync_response.rooms.join = joined_rooms
-        return sync_response
+    def _sync_response(joined_rooms: dict[str, nio.RoomInfo]) -> nio.SyncResponse:
+        return nio.SyncResponse(
+            next_batch="",
+            rooms=nio.Rooms(invite={}, join=joined_rooms, leave={}),
+            device_key_count=nio.DeviceOneTimeKeyCount(
+                curve25519=None,
+                signed_curve25519=None,
+            ),
+            device_list=nio.DeviceList(changed=[], left=[]),
+            to_device_events=[],
+            presence_events=[],
+        )
 
     async def _run_sync_response_without_startup_side_effects(
         self,
         bot: AgentBot,
         sync_response: nio.SyncResponse,
     ) -> None:
-        if bot.client is not None and not isinstance(sync_response.next_batch, str):
+        if bot.client is not None and not sync_response.next_batch:
             sync_response.next_batch = bot.client.next_batch
         orchestrator = bot.orchestrator
         bot_ready_context = (

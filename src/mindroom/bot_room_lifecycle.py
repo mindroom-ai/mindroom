@@ -235,10 +235,7 @@ class BotRoomLifecycle:
         """Join all rooms this bot should preserve across restarts."""
         client = self._client()
         joined_rooms = await get_joined_rooms(client)
-        if joined_rooms is None:
-            msg = "Could not reconcile configured rooms because joined rooms are unavailable"
-            raise RuntimeError(msg)
-        current_rooms = set(joined_rooms)
+        current_rooms = set(joined_rooms or ())
         desired_rooms = set(self.deps.get_configured_rooms())
         if self.should_persist_invited_rooms():
             desired_rooms.update(self.invited_rooms)

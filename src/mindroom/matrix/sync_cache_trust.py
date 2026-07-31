@@ -2,9 +2,8 @@
 
 from __future__ import annotations
 
-import asyncio
 from dataclasses import dataclass, field, replace
-from typing import TYPE_CHECKING, TypeVar
+from typing import TYPE_CHECKING
 
 from mindroom.matrix.sync_certification import (
     SyncCacheWriteResult,
@@ -15,45 +14,15 @@ from mindroom.matrix.sync_certification import (
     handle_unknown_pos,
     sync_cache_write_diagnostics,
 )
+from mindroom.owned_blocking import run_owned_blocking_operation
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterable
+    from collections.abc import Iterable
 
     import structlog
 
     from mindroom.bot_runtime_view import BotRuntimeView
     from mindroom.matrix.sync_continuity import SyncContinuityRecord, SyncContinuityStore
-
-_ContinuityResult = TypeVar("_ContinuityResult")
-
-
-async def _run_continuity_operation(
-    operation: Callable[..., _ContinuityResult],
-    *args: object,
-    **kwargs: object,
-) -> _ContinuityResult:
-    """Finish one continuity operation off-loop before propagating cancellation."""
-    worker_task = asyncio.create_task(asyncio.to_thread(operation, *args, **kwargs))
-    try:
-        return await asyncio.shield(worker_task)
-    except asyncio.CancelledError as cancellation:
-        worker_error: Exception | None = None
-        while not worker_task.done():
-            try:
-                await asyncio.shield(worker_task)
-            except asyncio.CancelledError:
-                continue
-            except Exception as exc:
-                worker_error = exc
-                break
-        if worker_error is None:
-            try:
-                worker_task.result()
-            except Exception as exc:
-                worker_error = exc
-        if worker_error is not None:
-            raise cancellation from worker_error
-        raise
 
 
 @dataclass
@@ -80,9 +49,12 @@ class SyncCacheTrust:
             self.logger.warning("matrix_principal_event_cache_init_failed", error=str(exc))
 
         try:
-            record = await _run_continuity_operation(self.continuity_store.load)
+            record = await run_owned_blocking_operation(self.continuity_store.load)
         except OSError as exc:
             self.logger.warning("matrix_sync_token_load_failed", error=str(exc))
+            record = None
+        except RuntimeError as exc:
+            self.logger.warning("matrix_sync_continuity_invalid", error=str(exc))
             record = None
         self._saved_checkpoint = None if record is None else record.checkpoint
         loaded = self._load_valid_checkpoint(self._saved_checkpoint)
@@ -119,7 +91,7 @@ class SyncCacheTrust:
         if cache_generation is None:
             msg = "Cannot persist Matrix sync continuity without a cache generation"
             raise RuntimeError(msg)
-        record = await _run_continuity_operation(
+        record = await run_owned_blocking_operation(
             self.continuity_store.replace_checkpoint,
             SyncCheckpoint(token=checkpoint.token, cache_generation=cache_generation),
         )
@@ -130,7 +102,7 @@ class SyncCacheTrust:
         """Clear the durable checkpoint, returning whether invalidation succeeded."""
         self._saved_checkpoint = None
         try:
-            await _run_continuity_operation(self.continuity_store.replace_checkpoint, None)
+            await run_owned_blocking_operation(self.continuity_store.clear_checkpoint)
         except OSError as exc:
             self.logger.warning("matrix_sync_token_clear_failed", error=str(exc))
             return False
@@ -234,7 +206,7 @@ class SyncCacheTrust:
     async def reject_unknown_pos(self) -> SyncCertificationDecision:
         """Invalidate a checkpoint rejected by the homeserver."""
         decision = handle_unknown_pos()
-        await self._apply_decision(decision, force_clear=True)
+        await self._apply_decision(decision)
         self._awaiting_initial_window = True
         return decision
 
@@ -244,7 +216,6 @@ class SyncCacheTrust:
         *,
         cache_result: SyncCacheWriteResult | None = None,
         joined_room_ids: Iterable[str] = (),
-        force_clear: bool = False,
     ) -> SyncContinuityRecord | None:
         """Apply one certifier decision to trust state and durable storage."""
         if decision.checkpoint_to_save is not None:
@@ -252,7 +223,7 @@ class SyncCacheTrust:
             if cache_generation is None:
                 msg = "Cannot certify Matrix sync continuity without a cache generation"
                 raise RuntimeError(msg)
-            record = await _run_continuity_operation(
+            record = await run_owned_blocking_operation(
                 self.continuity_store.accept_classic_response,
                 SyncCheckpoint(
                     token=decision.checkpoint_to_save.token,
@@ -262,14 +233,17 @@ class SyncCacheTrust:
             )
             self._saved_checkpoint = record.checkpoint
         elif decision.clear_saved_token:
-            if self._saved_checkpoint is None and not force_clear:
-                record = None
-            else:
-                record = await _run_continuity_operation(
-                    self.continuity_store.replace_checkpoint,
-                    None,
-                )
+            # Fail runtime closed before awaiting the durable fresh-read transform.
+            # Cancellation may propagate only after that worker commits, so no
+            # stale runtime checkpoint may survive long enough to be re-persisted.
+            self.state = decision.state
+            self.checkpoint = None
             self._saved_checkpoint = None
+            if decision.reset_client_token:
+                self._awaiting_initial_window = True
+            record = await run_owned_blocking_operation(
+                self.continuity_store.clear_checkpoint,
+            )
         else:
             record = None
         self.state = decision.state
@@ -284,12 +258,6 @@ class SyncCacheTrust:
         assert self.state is SyncTrustState.CERTIFIED
         assert self.checkpoint is not None
         await self.save(self.checkpoint)
-
-    async def discard(self) -> None:
-        """Discard runtime and durable checkpoint trust."""
-        self.state = SyncTrustState.UNCERTAIN
-        self.checkpoint = None
-        await self._clear_saved()
 
     def retry_token(self) -> str | None:
         """Return the generation-safe checkpoint for work rejected before durability."""

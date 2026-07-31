@@ -91,15 +91,36 @@ depends_on = ["mindroom.durable_write"]
 path = "mindroom.dispatch_obligations"
 depends_on = [
     "mindroom.background_tasks",
+    "mindroom.dispatch_admission",
     "mindroom.logging_config",
     "mindroom.matrix.media",
+    "mindroom.owned_blocking",
 ]
 visibility = ["mindroom.bot"]
 
 [[modules]]
+path = "mindroom.dispatch_admission"
+depends_on = []
+visibility = [
+    "mindroom.cold_history_fence",
+    "mindroom.dispatch_obligations",
+]
+
+[[modules]]
 path = "mindroom.cold_history_fence"
-depends_on = ["mindroom.matrix.sync_token_values"]
+depends_on = [
+    "mindroom.dispatch_admission",
+    "mindroom.matrix.sync_token_values",
+]
 visibility = ["mindroom.bot"]
+
+[[modules]]
+path = "mindroom.owned_blocking"
+depends_on = []
+visibility = [
+    "mindroom.dispatch_obligations",
+    "mindroom.matrix.sync_cache_trust",
+]
 
 [[modules]]
 path = "mindroom.report_publishing"
@@ -2025,6 +2046,7 @@ path = "mindroom.matrix.sync_cache_trust"
 depends_on = [
     "mindroom.matrix.sync_certification",
     "mindroom.matrix.sync_continuity",
+    "mindroom.owned_blocking",
 ]
 visibility = ["mindroom.bot"]
 

@@ -189,6 +189,19 @@ def test_obsolete_or_corrupt_continuity_record_fails_closed(
         SyncContinuityStore(tmp_path, "code").load()
 
 
+def test_checkpoint_clear_repairs_invalid_continuity_record(tmp_path: Path) -> None:
+    """Fail-closed checkpoint invalidation must restore a usable cold record."""
+    path = tmp_path / "sync_continuity" / "code.json"
+    path.parent.mkdir(parents=True)
+    path.write_text('{"version":"future"}', encoding="utf-8")
+    store = SyncContinuityStore(tmp_path, "code")
+
+    record = store.clear_checkpoint()
+
+    assert record == SyncContinuityRecord()
+    assert store.load() == SyncContinuityRecord()
+
+
 def test_legacy_token_path_is_ignored_without_compatibility_parsing(tmp_path: Path) -> None:
     """Old token formats cannot collide with the unified continuity record."""
     path = tmp_path / "sync_tokens" / "code.token"

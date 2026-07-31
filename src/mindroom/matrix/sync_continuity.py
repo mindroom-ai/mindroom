@@ -43,6 +43,13 @@ class SyncContinuityStore:
         normalized = _normalize_checkpoint(checkpoint) if checkpoint is not None else None
         return self._update(lambda current: replace(current, checkpoint=normalized))
 
+    def clear_checkpoint(self) -> SyncContinuityRecord:
+        """Clear checkpoint trust and repair an invalid record to cold state."""
+        return self._update(
+            lambda current: replace(current, checkpoint=None),
+            recover_invalid=True,
+        )
+
     def update_join_fences(
         self,
         *,
@@ -82,12 +89,21 @@ class SyncContinuityStore:
     def _update(
         self,
         transform: Callable[[SyncContinuityRecord], SyncContinuityRecord],
+        *,
+        recover_invalid: bool = False,
     ) -> SyncContinuityRecord:
         """Serialize one transform over freshly loaded durable state."""
         with advisory_file_lock(self._lock_path, exclusive=True):
-            current = self._load_locked()
+            invalid_record = False
+            try:
+                current = self._load_locked()
+            except RuntimeError:
+                if not recover_invalid:
+                    raise
+                current = SyncContinuityRecord()
+                invalid_record = True
             updated = transform(current)
-            if updated == current:
+            if updated == current and not invalid_record:
                 return current
             write_json_file_durable(
                 self._path,

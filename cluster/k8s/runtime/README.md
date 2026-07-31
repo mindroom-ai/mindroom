@@ -124,10 +124,10 @@ stateStorage:
     enabled: true
     mountPath: /app/agent_data/encryption_keys
     subPath: encryption_keys
-  syncTokens:
+  syncContinuity:
     enabled: true
-    mountPath: /app/agent_data/sync_tokens
-    subPath: sync_tokens
+    mountPath: /app/agent_data/sync_continuity
+    subPath: sync_continuity
   initPermissions:
     enabled: true
     runAsUser: 1000

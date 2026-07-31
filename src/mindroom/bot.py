@@ -431,7 +431,10 @@ class AgentBot:
             principal_id=runtime_matrix_id.full_id,
             entity_name=self.agent_name,
         )
-        self._cold_history_fence = ColdHistoryFence(self._dispatch_obligation_store)
+        self._cold_history_fence = ColdHistoryFence(
+            self._dispatch_obligation_store,
+            decrypt_notice_is_fenced=self._room_lifecycle.decrypt_notice_is_fenced,
+        )
         self._coalescing_gate = CoalescingGate(
             dispatch_batch=self._dispatch_coalesced_batch,
             debounce_seconds=lambda: self.config.defaults.coalescing.debounce_ms / 1000,
@@ -1184,8 +1187,11 @@ class AgentBot:
         decision: SyncCertificationDecision,
     ) -> None:
         """Apply one cache-certification rewind to the Classic client cursor."""
-        if decision.reset_client_token and self.client is not None:
+        if not decision.reset_client_token:
+            return
+        if self.client is not None:
             cast("Any", self.client).next_batch = None
+        self._cold_history_fence.reset()
 
     def _rewind_sync_after_pre_certification_failure(self) -> None:
         """Replay a classic sync that failed before its position was certified."""
@@ -1216,18 +1222,12 @@ class AgentBot:
         source_event_id: str,
         callback_kind: DispatchCallbackKind,
     ) -> DispatchSourceAdmission:
-        """Admit current invites, then apply history fences to replayable callbacks."""
-        if callback_kind is DispatchCallbackKind.INVITE:
-            return DispatchSourceAdmission.ACCEPTED
-        decrypt_notice_fenced = (
-            callback_kind is DispatchCallbackKind.DECRYPTION_FAILURE
-            and self._room_lifecycle.decrypt_notice_is_fenced(room_id)
+        """Delegate source admission with current room decrypt-fence state."""
+        return await self._cold_history_fence.admit_source(
+            room_id,
+            source_event_id,
+            callback_kind,
         )
-        if decrypt_notice_fenced:
-            return DispatchSourceAdmission.DECRYPT_NOTICE_FENCED
-        if await self._cold_history_fence.admit(source_event_id, callback_kind):
-            return DispatchSourceAdmission.ACCEPTED
-        return DispatchSourceAdmission.COLD_HISTORY_FENCED
 
     async def _handle_rejected_dispatch_source(
         self,
@@ -1238,7 +1238,7 @@ class AgentBot:
     ) -> None:
         """Report one fenced drop and preserve encrypted-event recovery effects."""
         source_event_id = event.event_id if isinstance(event, nio.Event) else "invite"
-        self.logger.warning(
+        self.logger.debug(
             "matrix_dispatch_source_fenced",
             room_id=room.room_id,
             source_event_id=source_event_id,
@@ -1252,17 +1252,6 @@ class AgentBot:
                 suppress_notice=True,
             )
 
-    def _apply_classic_sync_admission(
-        self,
-        *,
-        decision: SyncCertificationDecision,
-        room_member_join_hook_plan: _RoomMemberJoinSyncHookPlan,
-    ) -> _RoomMemberJoinSyncHookPlan:
-        """Apply cache-certification output to Classic room-member hooks."""
-        if decision.reset_client_token:
-            return _RoomMemberJoinSyncHookPlan(arm_after_response=False)
-        return room_member_join_hook_plan
-
     def _apply_transport_recovery_outcome(
         self,
         *,
@@ -1270,16 +1259,17 @@ class AgentBot:
         unrecovered_room_ids: frozenset[str],
         transport: str,
     ) -> None:
-        """Set callback admission from nio's exact transport recovery outcome."""
-        if unrecovered_room_ids:
-            self._cold_history_fence.reset()
-            self.logger.warning(
-                "matrix_sync_recovery_incomplete",
-                transport=transport,
-                unrecovered_room_ids=sorted(unrecovered_room_ids),
-            )
+        """Expose incomplete transport recovery through operator telemetry."""
+        if self._cold_history_fence.observe_recovery(
+            continuation=continuation,
+            unrecovered_room_ids=unrecovered_room_ids,
+        ):
             return
-        self._cold_history_fence.observe_continuation(continuation)
+        self.logger.warning(
+            "matrix_sync_recovery_incomplete",
+            transport=transport,
+            unrecovered_room_ids=sorted(unrecovered_room_ids),
+        )
 
     def _record_dispatch_persist_failure(self) -> None:
         """Latch rejected source work until its containing response is rejected."""
@@ -1324,10 +1314,8 @@ class AgentBot:
             cache_result=cache_result,
             joined_room_ids=response.rooms.join,
         )
-        room_member_join_hook_plan = self._apply_classic_sync_admission(
-            decision=applied,
-            room_member_join_hook_plan=room_member_join_hook_plan,
-        )
+        if applied.reset_client_token:
+            room_member_join_hook_plan = _RoomMemberJoinSyncHookPlan(arm_after_response=False)
         return applied, room_member_join_hook_plan, False
 
     def seconds_since_last_sync_activity(self) -> float | None:
@@ -1591,7 +1579,6 @@ class AgentBot:
         if _response.status_code == "M_UNKNOWN_POS":
             decision = await self._sync_cache_trust.reject_unknown_pos()
             self._apply_classic_client_rewind_decision(decision)
-            self._cold_history_fence.reset()
             self._room_member_join_hooks_armed = False
             self.logger.warning(
                 "matrix_sync_token_rejected",

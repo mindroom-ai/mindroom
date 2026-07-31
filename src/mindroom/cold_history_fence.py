@@ -6,6 +6,7 @@ import asyncio
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Protocol
 
+from mindroom.dispatch_admission import DispatchSourceAdmission
 from mindroom.matrix.sync_token_values import normalize_sync_token
 
 if TYPE_CHECKING:
@@ -24,11 +25,24 @@ class _PendingDispatchObligations(Protocol):
         ...
 
 
+class _DecryptNoticeFence(Protocol):
+    """Room-scoped join fence queried during callback admission."""
+
+    def __call__(self, room_id: str, /) -> bool:
+        """Return whether decrypt notices remain fenced for one room."""
+        ...
+
+
+def _decrypt_not_fenced(_room_id: str) -> bool:
+    return False
+
+
 @dataclass(slots=True)
 class ColdHistoryFence:
     """Admit only exact durable retries during a continuity-less sync window."""
 
     obligations: _PendingDispatchObligations
+    decrypt_notice_is_fenced: _DecryptNoticeFence = _decrypt_not_fenced
     _has_trusted_continuation: bool = False
 
     @property
@@ -43,6 +57,19 @@ class ColdHistoryFence:
     def observe_continuation(self, continuation: object) -> None:
         """Set ordinary admission from the continuation in one Matrix response."""
         self._has_trusted_continuation = normalize_sync_token(continuation) is not None
+
+    def observe_recovery(
+        self,
+        *,
+        continuation: object,
+        unrecovered_room_ids: frozenset[str],
+    ) -> bool:
+        """Apply one transport recovery outcome and report whether it completed."""
+        if unrecovered_room_ids:
+            self.reset()
+            return False
+        self.observe_continuation(continuation)
+        return True
 
     def reset(self) -> None:
         """Rearm exact-only admission after transport continuity is rejected."""
@@ -61,3 +88,18 @@ class ColdHistoryFence:
             source_event_id,
             callback_kind,
         )
+
+    async def admit_source(
+        self,
+        room_id: str,
+        source_event_id: str,
+        callback_kind: DispatchCallbackKind,
+    ) -> DispatchSourceAdmission:
+        """Apply invite, decrypt-notice, and cold-history admission policy."""
+        if callback_kind.value == "invite":
+            return DispatchSourceAdmission.ACCEPTED
+        if callback_kind.value == "decryption_failure" and self.decrypt_notice_is_fenced(room_id):
+            return DispatchSourceAdmission.DECRYPT_NOTICE_FENCED
+        if await self.admit(source_event_id, callback_kind):
+            return DispatchSourceAdmission.ACCEPTED
+        return DispatchSourceAdmission.COLD_HISTORY_FENCED

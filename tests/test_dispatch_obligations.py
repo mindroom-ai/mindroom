@@ -20,7 +20,6 @@ from mindroom.dispatch_obligations import (
     _DispatchCreateResult,
     _DispatchObligation,
     _DispatchTerminalOutcome,
-    _run_owned_store_operation,
 )
 from mindroom.dispatch_obligations import (
     _DispatchCallbackResult as DispatchCallbackResult,
@@ -32,6 +31,7 @@ from mindroom.dispatch_obligations import (
     _DispatchObligationTaskWrapper as DispatchObligationTaskWrapper,
 )
 from mindroom.matrix.media import MATRIX_MEDIA_EVENT_TYPES
+from mindroom.owned_blocking import run_owned_blocking_operation
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -478,7 +478,7 @@ async def test_cancelled_store_operation_preserves_cancellation_when_worker_fail
         message = "store write failed"
         raise RuntimeError(message)
 
-    task = asyncio.create_task(_run_owned_store_operation(failing_store_operation))
+    task = asyncio.create_task(run_owned_blocking_operation(failing_store_operation))
     assert await asyncio.to_thread(worker_started.wait, 5)
 
     task.cancel()

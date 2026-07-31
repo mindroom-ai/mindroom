@@ -12,14 +12,15 @@ from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
-from typing import TypeVar
 
 import nio
 from typing_extensions import TypeIs
 
 from mindroom.background_tasks import create_background_task
+from mindroom.dispatch_admission import DispatchSourceAdmission
 from mindroom.logging_config import get_logger
 from mindroom.matrix.media import MATRIX_MEDIA_EVENT_TYPES, MatrixMediaEvent, parse_matrix_media_event_source
+from mindroom.owned_blocking import run_owned_blocking_operation
 
 logger = get_logger(__name__)
 
@@ -28,7 +29,6 @@ _PENDING_STATE = "pending"
 _RETRY_INITIAL_DELAY_SECONDS = 1.0
 _RETRY_MAX_DELAY_SECONDS = 30.0
 _TOOL_APPROVAL_RESPONSE_EVENT_TYPE = "io.mindroom.tool_approval_response"
-_StoreResult = TypeVar("_StoreResult")
 
 
 class DispatchCallbackKind(StrEnum):
@@ -42,14 +42,6 @@ class DispatchCallbackKind(StrEnum):
     ROOM_LIFECYCLE = "room_lifecycle"
     REDACTION = "redaction"
     DECRYPTION_FAILURE = "decryption_failure"
-
-
-class DispatchSourceAdmission(StrEnum):
-    """Typed outcome for one source event at the replay fence."""
-
-    ACCEPTED = "accepted"
-    COLD_HISTORY_FENCED = "cold_history_fenced"
-    DECRYPT_NOTICE_FENCED = "decrypt_notice_fenced"
 
 
 class _DispatchTerminalOutcome(StrEnum):
@@ -567,34 +559,6 @@ async def _admit_all_sources(
     return DispatchSourceAdmission.ACCEPTED
 
 
-async def _run_owned_store_operation(
-    operation: Callable[..., _StoreResult],
-    *args: object,
-) -> _StoreResult:
-    """Finish one owned store operation before propagating cancellation."""
-    worker_task = asyncio.create_task(asyncio.to_thread(operation, *args))
-    try:
-        return await asyncio.shield(worker_task)
-    except asyncio.CancelledError as cancellation:
-        worker_error: Exception | None = None
-        while not worker_task.done():
-            try:
-                await asyncio.shield(worker_task)
-            except asyncio.CancelledError:
-                continue
-            except Exception as exc:
-                worker_error = exc
-                break
-        if worker_error is None:
-            try:
-                worker_task.result()
-            except Exception as exc:
-                worker_error = exc
-        if worker_error is not None:
-            raise cancellation from worker_error
-        raise
-
-
 def _invite_source_event_id(room_id: str, event_source_json: str) -> str:
     digest = hashlib.sha256(f"{room_id}\0{event_source_json}".encode()).hexdigest()
     return f"invite:{digest}"
@@ -923,7 +887,7 @@ class DispatchObligationRunner:
                 return None
             if await self._settle_from_turn_store_if_owned(obligation):
                 return None
-            create_result = await _run_owned_store_operation(self.store.create_pending, obligation)
+            create_result = await run_owned_blocking_operation(self.store.create_pending, obligation)
             if create_result is _DispatchCreateResult.ALREADY_TERMINAL:
                 persisted_obligation = None
             elif create_result is _DispatchCreateResult.ALREADY_PENDING:
@@ -1106,7 +1070,7 @@ class DispatchObligationRunner:
             return False
         if not await asyncio.to_thread(self.turn_is_terminal, obligation.source_event_id):
             return False
-        await _run_owned_store_operation(
+        await run_owned_blocking_operation(
             self.store.settle_from_turn_store,
             obligation.source_event_id,
             obligation.callback_kind,
@@ -1126,14 +1090,14 @@ class DispatchObligationRunner:
         if await self._settle_from_turn_store_if_owned(obligation):
             return
         if obligation.callback_kind is DispatchCallbackKind.INVITE:
-            await _run_owned_store_operation(self.store.discard_pending, obligation.key)
+            await run_owned_blocking_operation(self.store.discard_pending, obligation.key)
             return
         outcome = (
             _DispatchTerminalOutcome.SUCCEEDED
             if result is _DispatchCallbackResult.SUCCEEDED
             else _DispatchTerminalOutcome.INTENTIONALLY_IGNORED
         )
-        await _run_owned_store_operation(self.store.settle, obligation.key, outcome)
+        await run_owned_blocking_operation(self.store.settle, obligation.key, outcome)
 
     async def _claim(self, key: _DispatchObligationKey) -> bool:
         async with self._active_lock:
