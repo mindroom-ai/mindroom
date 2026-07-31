@@ -328,7 +328,7 @@ class DispatchObligationStore:
         self._validate_bound_key(key)
         with self._lock, self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
-            cursor = connection.execute(
+            connection.execute(
                 """
                 UPDATE dispatch_obligations
                 SET room_id = '',
@@ -351,26 +351,6 @@ class DispatchObligationStore:
                     _PENDING_STATE,
                 ),
             )
-            if cursor.rowcount == 0:
-                existing = connection.execute(
-                    """
-                    SELECT state
-                    FROM dispatch_obligations
-                    WHERE principal_id = ?
-                      AND entity_name = ?
-                      AND source_event_id = ?
-                      AND callback_kind = ?
-                    """,
-                    (
-                        key.principal_id,
-                        key.entity_name,
-                        key.source_event_id,
-                        key.callback_kind.value,
-                    ),
-                ).fetchone()
-                if existing is None:
-                    msg = f"Unknown dispatch obligation {key.source_event_id!r}"
-                    raise KeyError(msg)
 
     def discard_pending(self, key: _DispatchObligationKey) -> None:
         """Remove successful work whose source has no permanent Matrix event ID."""
@@ -592,14 +572,6 @@ async def _run_owned_store_operation(
         if worker_error is not None:
             raise cancellation from worker_error
         raise
-
-
-async def _run_store_settlement(
-    operation: Callable[..., None],
-    *args: object,
-) -> None:
-    """Finish one owned store settlement before propagating cancellation."""
-    await _run_owned_store_operation(operation, *args)
 
 
 def _invite_source_event_id(room_id: str, event_source_json: str) -> str:
@@ -921,11 +893,7 @@ class DispatchObligationRunner:
                 persisted_obligation = await asyncio.to_thread(self.store.pending_for, obligation.key)
             else:
                 persisted_obligation = obligation
-        except asyncio.CancelledError:
-            if self.on_persist_failure is not None:
-                self.on_persist_failure()
-            raise
-        except Exception:
+        except (asyncio.CancelledError, Exception):
             if self.on_persist_failure is not None:
                 self.on_persist_failure()
             raise
@@ -1101,7 +1069,7 @@ class DispatchObligationRunner:
             return False
         if not await asyncio.to_thread(self.turn_is_terminal, obligation.source_event_id):
             return False
-        await _run_store_settlement(
+        await _run_owned_store_operation(
             self.store.settle_from_turn_store,
             obligation.source_event_id,
             obligation.callback_kind,
@@ -1121,14 +1089,14 @@ class DispatchObligationRunner:
         if await self._settle_from_turn_store_if_owned(obligation):
             return
         if obligation.callback_kind is DispatchCallbackKind.INVITE:
-            await _run_store_settlement(self.store.discard_pending, obligation.key)
+            await _run_owned_store_operation(self.store.discard_pending, obligation.key)
             return
         outcome = (
             _DispatchTerminalOutcome.SUCCEEDED
             if result is _DispatchCallbackResult.SUCCEEDED
             else _DispatchTerminalOutcome.INTENTIONALLY_IGNORED
         )
-        await _run_store_settlement(self.store.settle, obligation.key, outcome)
+        await _run_owned_store_operation(self.store.settle, obligation.key, outcome)
 
     async def _claim(self, key: _DispatchObligationKey) -> bool:
         async with self._active_lock:
