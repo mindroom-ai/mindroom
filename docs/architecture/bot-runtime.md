@@ -85,7 +85,8 @@ Classic Sync response-owned lifecycle hooks and their durable de-duplication mar
 Live `room-member-joined` hooks are at-least-once because hook emission happens before the durable seen marker, so a marker write failure replays the hook instead of losing it.
 Invite and response-owned lifecycle paths use the same runner directly because they are outside nio timeline fanout.
 The matching ordinary nio event callbacks only load and execute already-persisted work after every admission callback succeeds, and may then continue in the background.
-Auxiliary call-manager membership, unknown-event, and to-device callbacks plus desktop pairing receivers remain best-effort because they do not share a stable durable callback identity, so their failures are logged without replay ownership.
+Auxiliary call-manager membership and unknown-event callbacks remain best-effort reconciliation wakeups because their standalone event payloads cannot replay the current room call state; the manager reconciles joined rooms after sync and retries transient state fetches directly.
+To-device call inputs and desktop pairing receivers also remain best-effort because they do not share a stable replayable timeline-event identity, so failures in these auxiliary paths are logged without dispatch-obligation ownership.
 
 ## Completed Simplifications
 
