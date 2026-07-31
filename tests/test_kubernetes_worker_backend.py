@@ -1730,6 +1730,52 @@ def test_kubernetes_backend_mounts_only_scoped_agent_root_for_shared_workers() -
     assert env_values["MINDROOM_SHARED_CREDENTIALS_PATH"] == f"{expected_worker_root}/.shared_credentials"
 
 
+def test_kubernetes_backend_mounts_assigned_knowledge_outside_shared_agent_root_read_only(tmp_path: Path) -> None:
+    """Assigned knowledge under shared storage should be visible without widening agent storage."""
+    storage_root = tmp_path / "storage"
+    knowledge_root = storage_root / "knowledge" / "shared-docs"
+    knowledge_root.mkdir(parents=True)
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        f"""
+agents:
+  code:
+    display_name: Code
+    role: Code test
+    model: default
+    worker_scope: shared
+    knowledge_bases: [shared_docs]
+knowledge_bases:
+  shared_docs:
+    path: {knowledge_root}
+    include_patterns: [docs/**/*.md]
+models:
+  default:
+    provider: openai
+    id: gpt-5.4
+router:
+  model: default
+""".lstrip(),
+        encoding="utf-8",
+    )
+    runtime_paths = resolve_primary_runtime_paths(config_path=config_path, storage_path=storage_root)
+    backend, apps_api, _core_api = _backend(runtime_paths=runtime_paths)
+
+    backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=10.0)
+
+    deployment = apps_api.created_bodies[0]
+    volume_mounts = deployment["spec"]["template"]["spec"]["containers"][0]["volumeMounts"]
+    knowledge_mount = next(
+        mount for mount in volume_mounts if mount["mountPath"] == "/app/worker/knowledge/shared-docs"
+    )
+    assert knowledge_mount == {
+        "name": "worker-storage",
+        "mountPath": "/app/worker/knowledge/shared-docs",
+        "subPath": "knowledge/shared-docs",
+        "readOnly": True,
+    }
+
+
 def test_kubernetes_backend_uses_custom_worker_prefix_for_storage_path() -> None:
     """Custom worker prefixes should only affect the dedicated worker storage root."""
     backend, apps_api, _core_api = _backend(storage_subpath_prefix="sandbox-workers")

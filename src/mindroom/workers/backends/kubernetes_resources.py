@@ -31,7 +31,7 @@ import yaml
 
 from mindroom import constants
 from mindroom.config.yaml_includes import load_yaml_config_source
-from mindroom.constants import RuntimePaths
+from mindroom.constants import RuntimePaths, resolve_config_relative_path
 from mindroom.runtime_env_policy import (
     CREDENTIALS_ENCRYPTION_KEY_ENV,
     KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY,
@@ -43,7 +43,11 @@ from mindroom.runtime_env_policy import (
     credentials_encryption_key_value,
     worker_extra_env,
 )
-from mindroom.tool_system.worker_routing import descriptive_worker_id_for_key
+from mindroom.tool_system.worker_routing import (
+    descriptive_worker_id_for_key,
+    resolved_worker_key_scope,
+    worker_key_agent_name,
+)
 from mindroom.workers.backend import WorkerBackendError
 from mindroom.workers.backends._dedicated_worker_common import (
     plan_scoped_visible_state_roots,
@@ -582,7 +586,7 @@ def _deployment_snapshot(payload: object) -> KubernetesDeployment:
     )
 
 
-def _resolved_agent_policies_for_runtime_paths(runtime_paths: RuntimePaths) -> dict[str, ResolvedAgentPolicy]:
+def _worker_config_data_for_runtime_paths(runtime_paths: RuntimePaths) -> dict[str, object]:
     try:
         config_data, _source_files = load_yaml_config_source(runtime_paths.config_path)
     except OSError:
@@ -592,7 +596,18 @@ def _resolved_agent_policies_for_runtime_paths(runtime_paths: RuntimePaths) -> d
         raise WorkerBackendError(msg) from exc
     if not isinstance(config_data, dict):
         return {}
-    return resolved_agent_policies_from_config_data(cast("dict[str, object]", config_data))
+    return cast("dict[str, object]", config_data)
+
+
+def _resolved_agent_policies_for_runtime_paths(
+    runtime_paths: RuntimePaths,
+    *,
+    config_data: dict[str, object] | None = None,
+) -> dict[str, ResolvedAgentPolicy]:
+    loaded_config_data = (
+        config_data if config_data is not None else _worker_config_data_for_runtime_paths(runtime_paths)
+    )
+    return resolved_agent_policies_from_config_data(loaded_config_data)
 
 
 class KubernetesResourceManager:
@@ -615,7 +630,11 @@ class KubernetesResourceManager:
         self.storage_root = storage_root.expanduser().resolve()
         self.tool_validation_snapshot = tool_validation_snapshot
         self.worker_grantable_credentials = worker_grantable_credentials
-        self.resolved_agent_policies = _resolved_agent_policies_for_runtime_paths(runtime_paths)
+        self.config_data = _worker_config_data_for_runtime_paths(runtime_paths)
+        self.resolved_agent_policies = _resolved_agent_policies_for_runtime_paths(
+            runtime_paths,
+            config_data=self.config_data,
+        )
         self.apps_api: _AppsApiProtocol | None = None
         self.core_api: _CoreApiProtocol | None = None
         self.api_exception_cls: type[_ApiStatusError] | None = None
@@ -1612,6 +1631,7 @@ class KubernetesResourceManager:
                 resolved_agent_policies=self.resolved_agent_policies,
             )
         ]
+        mounts.extend(self._knowledge_storage_mounts(worker_key, mounted_storage_root=mounted_storage_root))
         mounts.append(
             {
                 "name": WORKER_STORAGE_VOLUME_NAME,
@@ -1625,3 +1645,70 @@ class KubernetesResourceManager:
             duplicate_label="Kubernetes mountPath",
         )
         return mounts
+
+    def _knowledge_storage_mounts(
+        self,
+        worker_key: str,
+        *,
+        mounted_storage_root: Path,
+    ) -> list[dict[str, object]]:
+        return [
+            {
+                "name": WORKER_STORAGE_VOLUME_NAME,
+                "mountPath": str(mounted_storage_root / relative_path),
+                "subPath": str(relative_path),
+                "readOnly": True,
+            }
+            for relative_path in self._assigned_knowledge_storage_paths(worker_key)
+        ]
+
+    def _assigned_knowledge_storage_paths(self, worker_key: str) -> tuple[Path, ...]:
+        raw_agents = self.config_data.get("agents")
+        raw_knowledge_bases = self.config_data.get("knowledge_bases")
+        if not isinstance(raw_agents, Mapping) or not isinstance(raw_knowledge_bases, Mapping):
+            return ()
+        agent_configs = cast("Mapping[str, object]", raw_agents)
+        knowledge_base_configs = cast("Mapping[str, object]", raw_knowledge_bases)
+
+        scope = resolved_worker_key_scope(worker_key)
+        if scope == "user":
+            agent_names = tuple(
+                agent_name
+                for agent_name, policy in self.resolved_agent_policies.items()
+                if policy.effective_execution_scope == "user"
+            )
+        else:
+            agent_name = worker_key_agent_name(worker_key)
+            expected_scope = None if scope == "unscoped" else scope
+            policy = self.resolved_agent_policies.get(agent_name) if agent_name is not None else None
+            agent_names = (
+                (agent_name,)
+                if agent_name is not None and policy is not None and policy.effective_execution_scope == expected_scope
+                else ()
+            )
+
+        base_ids: set[str] = set()
+        for agent_name in agent_names:
+            raw_agent = agent_configs.get(agent_name)
+            if not isinstance(raw_agent, Mapping):
+                continue
+            raw_base_ids = cast("Mapping[str, object]", raw_agent).get("knowledge_bases")
+            if isinstance(raw_base_ids, list):
+                base_ids.update(base_id for base_id in raw_base_ids if isinstance(base_id, str))
+
+        relative_paths: set[Path] = set()
+        for base_id in base_ids:
+            raw_base = knowledge_base_configs.get(base_id)
+            if not isinstance(raw_base, Mapping):
+                continue
+            raw_path = cast("Mapping[str, object]", raw_base).get("path")
+            if not isinstance(raw_path, str):
+                continue
+            source_path = resolve_config_relative_path(raw_path, self.runtime_paths)
+            try:
+                relative_paths.add(source_path.relative_to(self.storage_root))
+            except ValueError:
+                continue
+        ordered_paths = list(relative_paths)
+        ordered_paths.sort(key=lambda path: path.as_posix())
+        return tuple(ordered_paths)
