@@ -42,25 +42,22 @@ import httpx
 import yaml
 
 if TYPE_CHECKING:
-    from collections.abc import Collection, Mapping
+    from collections.abc import Callable, Collection, Mapping
     from io import TextIOWrapper
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 INSTANCE_REGISTRY = PROJECT_ROOT / "local" / "instances" / "deploy" / "instances.json"
 MODEL_ID = "mindroom-live-fuzz"
 RESTART_MODEL_ID = "mindroom-live-fuzz-replacement"
+RECOVERED_MODEL_ID = "mindroom-live-fuzz-recovered"
 ORIGINAL_RUNTIME_GENERATION_MARKER = "runtime-generation=original"
 REPLACEMENT_RUNTIME_GENERATION_MARKER = "runtime-generation=replacement"
+RECOVERED_RUNTIME_GENERATION_MARKER = "runtime-generation=recovered"
+FRESH_RESTART_REQUEST = "Synthetic fresh startup request"
 AGENT_NAME = "general"
 ROUTER_NAME = "router"
 ROOM_KEY = "lobby"
-RESTART_SEED = 20_260_729
-RESTART_SHUTDOWN_FAILURE_MARKERS = (
-    "sync_checkpoint_discarded",
-    "sync_checkpoint_not_saved_after_incomplete_coalescing_drain",
-    "matrix_agent_response_drain_incomplete",
-    "runtime_drain_incomplete_with_durable_dispatch_recovery",
-)
+RESTART_SHUTDOWN_FAILURE_MARKER = "runtime_drain_incomplete_with_durable_dispatch_recovery"
 
 
 def _required_int(value: Mapping[str, object], key: str) -> int:
@@ -99,14 +96,11 @@ def restart_failure(
     observed: int | bool,
     step: int,
 ) -> str:
-    """Format replay coordinates without accepting message content."""
+    """Format content-free restart failure coordinates."""
     if not isinstance(observed, (int, bool)):
         msg = "Restart failure observation must be an integer or boolean"
         raise TypeError(msg)
-    return (
-        f"invariant={invariant} seed={RESTART_SEED} step={step} thread=0 "
-        f"event_category={event_category} phase={phase} observed={observed}"
-    )
+    return f"invariant={invariant} step={step} event_category={event_category} phase={phase} observed={observed}"
 
 
 @dataclass(frozen=True, slots=True)
@@ -116,11 +110,13 @@ class RestartRegressionObservation:
     historical_output_counts: tuple[int, int]
     historical_callback_counts: tuple[int, int]
     replacement_boundary_reached: bool
+    recovery_boundary_reached: bool
     cached_event_pair_count: int
     fresh_agent_output_count: int
     fresh_router_output_count: int
-    fresh_callback_observed: bool
-    replacement_generation_response_observed: bool
+    fresh_callback_count: int
+    recovered_generation_response_observed: bool
+    fresh_obligation_recovered: bool
     fresh_prompt_observed: bool
     historical_in_fresh_prompt: bool
     response_callbacks_quiescent: bool
@@ -134,8 +130,9 @@ class _RestartEvidence:
     historical_callback_counts: tuple[int, int]
     fresh_agent_output_count: int
     fresh_router_output_count: int
-    fresh_callback_observed: bool
-    replacement_generation_response_observed: bool
+    fresh_callback_count: int
+    recovered_generation_response_observed: bool
+    fresh_obligation_recovered: bool
     cached_event_pair_count: int
     fresh_prompt_observed: bool
     historical_in_fresh_prompt: bool
@@ -170,6 +167,14 @@ def evaluate_restart_regression(observation: RestartRegressionObservation) -> tu
             3,
         ),
         (
+            "recovery_setup_boundary_reached",
+            observation.recovery_boundary_reached,
+            True,
+            "lifecycle",
+            "hard_restart",
+            4,
+        ),
+        (
             "historical_event_pairs_cached",
             observation.cached_event_pair_count,
             4,
@@ -198,7 +203,7 @@ def evaluate_restart_regression(observation: RestartRegressionObservation) -> tu
             observation.fresh_agent_output_count,
             1,
             "fresh_user",
-            "replacement_startup",
+            "recovery_startup",
             4,
         ),
         (
@@ -206,23 +211,31 @@ def evaluate_restart_regression(observation: RestartRegressionObservation) -> tu
             observation.fresh_router_output_count,
             0,
             "fresh_user",
-            "replacement_startup",
+            "recovery_startup",
             4,
         ),
         (
-            "fresh_callback_observed",
-            observation.fresh_callback_observed,
-            True,
+            "fresh_callback_replayed_after_restart",
+            observation.fresh_callback_count,
+            2,
             "fresh_user",
-            "replacement_startup",
+            "recovery_startup",
             4,
         ),
         (
-            "replacement_generation_response_observed",
-            observation.replacement_generation_response_observed,
+            "recovered_generation_response_observed",
+            observation.recovered_generation_response_observed,
             True,
             "fresh_user",
-            "replacement_startup",
+            "recovery_startup",
+            4,
+        ),
+        (
+            "fresh_dispatch_obligation_recovered",
+            observation.fresh_obligation_recovered,
+            True,
+            "fresh_user",
+            "recovery_startup",
             4,
         ),
         (
@@ -296,6 +309,23 @@ def _restart_prompt_observation(log: str, fresh_event_id: str, old_event_ids: tu
     """Report fresh prompt presence and any historical-event overlap."""
     fresh_lines = [line for line in log.splitlines() if "Preparing agent and prompt" in line and fresh_event_id in line]
     return bool(fresh_lines), any(event_id in line for line in fresh_lines for event_id in old_event_ids)
+
+
+def _log_count(log: str, *markers: str) -> int:
+    """Count log lines containing every content-free marker."""
+    return sum(all(marker in line for marker in markers) for line in log.splitlines())
+
+
+def _wait_until(predicate: Callable[[], bool], *, timeout: float) -> bool:
+    """Poll one content-free live invariant until its bounded deadline."""
+    deadline = time.monotonic() + timeout
+    while True:
+        if predicate():
+            return True
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return False
+        time.sleep(min(0.1, remaining))
 
 
 @dataclass(frozen=True, slots=True)
@@ -668,6 +698,8 @@ class _ModelHandler(BaseHTTPRequestHandler):
     call_ids = itertools.count(1)
     stream_segments = 4
     stream_delay = 0.001
+    blocked_request_started = threading.Event()
+    blocked_request_release = threading.Event()
 
     def _send_json(self, payload: Mapping[str, object]) -> None:
         body = json.dumps(payload).encode()
@@ -689,6 +721,11 @@ class _ModelHandler(BaseHTTPRequestHandler):
                             "object": "model",
                             "owned_by": "mindroom-fuzz",
                         },
+                        {
+                            "id": RECOVERED_MODEL_ID,
+                            "object": "model",
+                            "owned_by": "mindroom-fuzz",
+                        },
                     ],
                 },
             )
@@ -702,21 +739,27 @@ class _ModelHandler(BaseHTTPRequestHandler):
         content_length = int(self.headers.get("Content-Length", "0"))
         payload = json.loads(self.rfile.read(content_length))
         call_id = next(self.call_ids)
-        generation_marker = (
-            REPLACEMENT_RUNTIME_GENERATION_MARKER
-            if payload.get("model") == RESTART_MODEL_ID
-            else ORIGINAL_RUNTIME_GENERATION_MARKER
+        model_id = payload.get("model")
+        if model_id == RESTART_MODEL_ID and FRESH_RESTART_REQUEST in json.dumps(payload):
+            self.blocked_request_started.set()
+            self.blocked_request_release.wait(timeout=120)
+        generation_marker = {
+            RESTART_MODEL_ID: REPLACEMENT_RUNTIME_GENERATION_MARKER,
+            RECOVERED_MODEL_ID: RECOVERED_RUNTIME_GENERATION_MARKER,
+        }.get(
+            model_id,
+            ORIGINAL_RUNTIME_GENERATION_MARKER,
         )
         content = self._response_text(call_id, generation_marker)
         if payload.get("stream") is True:
-            self._send_stream(call_id, content)
+            self._send_stream(call_id, content, str(model_id))
             return
         self._send_json(
             {
                 "id": f"live-fuzz-response-{call_id}",
                 "object": "chat.completion",
                 "created": int(time.time()),
-                "model": MODEL_ID,
+                "model": model_id,
                 "choices": [
                     {
                         "index": 0,
@@ -733,7 +776,7 @@ class _ModelHandler(BaseHTTPRequestHandler):
         segments = " ".join(f"segment-{index:03d}" for index in range(cls.stream_segments))
         return f"LIVE-FUZZ call={call_id} {generation_marker} {segments} END call={call_id}"
 
-    def _send_stream(self, call_id: int, content: str) -> None:
+    def _send_stream(self, call_id: int, content: str, model_id: str) -> None:
         self.send_response(HTTPStatus.OK)
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Cache-Control", "no-cache")
@@ -743,7 +786,7 @@ class _ModelHandler(BaseHTTPRequestHandler):
             "id": f"live-fuzz-response-{call_id}",
             "object": "chat.completion.chunk",
             "created": int(time.time()),
-            "model": MODEL_ID,
+            "model": model_id,
         }
         self._write_sse(
             {
@@ -871,12 +914,37 @@ class ManagedTuwunelStack:
         self._stop_mindroom()
         self._start_mindroom()
 
+    def wait_for_blocked_restart_request(self, *, timeout: float) -> bool:
+        """Wait until the pre-restart generation has an exact fresh request in flight."""
+        return _ModelHandler.blocked_request_started.wait(timeout=timeout)
+
+    def restart_mindroom_for_recovery(self) -> tuple[int, int]:
+        """Hard-stop an in-flight turn and boot a distinguishable recovery generation."""
+        process = self._mindroom_process
+        if process is None:
+            msg = "MindRoom is not running"
+            raise RuntimeError(msg)
+        if process.poll() is not None:
+            msg = "MindRoom exited before the hard-restart boundary"
+            raise RuntimeError(msg)
+        old_pid = process.pid
+        process.kill()
+        process.wait(timeout=10)
+        self._mindroom_process = None
+        self._set_model_id(RECOVERED_MODEL_ID)
+        _ModelHandler.blocked_request_release.set()
+        self._start_mindroom()
+        replacement = self._mindroom_process
+        assert replacement is not None
+        return old_pid, replacement.pid
+
     def stop_mindroom_for_observation(self, *, timeout: float) -> bool:
         """Stop MindRoom and report whether its response and callback drain stayed bounded."""
         return self._stop_mindroom(timeout=timeout)
 
     def close(self) -> None:
         """Stop child processes and delete the exact disposable instance."""
+        _ModelHandler.blocked_request_release.set()
         self._stop_mindroom()
         if self._log_handle is not None:
             self._log_handle.close()
@@ -901,9 +969,9 @@ class ManagedTuwunelStack:
 
     def diagnostic_counts(self) -> dict[str, int]:
         """Count saturation signals in the complete runtime output."""
-        if not self.log_path.exists():
+        log = self.read_log()
+        if not log:
             return {}
-        log = self.log_path.read_text(encoding="utf-8", errors="replace")
         return {
             "cache_coordinator_timeouts": log.count("thread_read_error=cache_coordinator_timeout"),
             "degraded_thread_reads": log.count("matrix_cache_thread_read_degraded"),
@@ -913,31 +981,35 @@ class ManagedTuwunelStack:
 
     def log_count(self, *markers: str) -> int:
         """Count lines containing every content-free lifecycle marker."""
-        if not self.log_path.exists():
-            return 0
-        log = self.log_path.read_text(encoding="utf-8", errors="replace")
-        return sum(all(marker in line for marker in markers) for line in log.splitlines())
+        return _log_count(self.read_log(), *markers)
+
+    def read_log(self) -> str:
+        """Read the complete MindRoom log once."""
+        return self.log_path.read_text(encoding="utf-8", errors="replace") if self.log_path.exists() else ""
 
     def restart_shutdown_failure_count(self) -> int:
-        """Count markers proving runtime drain or checkpoint preservation failed."""
-        return sum(self.log_count(marker) for marker in RESTART_SHUTDOWN_FAILURE_MARKERS)
+        """Count the production marker proving durable-recovery drain failure."""
+        return _log_count(self.read_log(), RESTART_SHUTDOWN_FAILURE_MARKER)
 
     def wait_for_log_count(self, markers: tuple[str, ...], minimum: int, timeout: float = 60) -> bool:
         """Wait for a bounded lifecycle milestone."""
-        deadline = time.monotonic() + timeout
-        while True:
-            if self.log_count(*markers) >= minimum:
-                return True
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                return False
-            time.sleep(min(0.1, remaining))
+        return _wait_until(lambda: self.log_count(*markers) >= minimum, timeout=timeout)
 
     def add_restart_room(self, room_id: str) -> None:
         """Trigger a real entity replacement that adds one dormant room."""
         config = yaml.safe_load(self.config_path.read_text(encoding="utf-8"))
         config["agents"][AGENT_NAME]["rooms"].append(room_id)
         config["models"]["default"]["id"] = RESTART_MODEL_ID
+        self._replace_config(config)
+
+    def _set_model_id(self, model_id: str) -> None:
+        """Atomically select the deterministic model used by the next runtime."""
+        config = yaml.safe_load(self.config_path.read_text(encoding="utf-8"))
+        config["models"]["default"]["id"] = model_id
+        self._replace_config(config)
+
+    def _replace_config(self, config: dict[str, Any]) -> None:
+        """Atomically replace the managed configuration."""
         staged_path = self.config_path.with_suffix(".yaml.tmp")
         staged_path.write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
         staged_path.replace(self.config_path)
@@ -952,6 +1024,38 @@ class ManagedTuwunelStack:
             row = database.execute(query, (self.agent_id, self.router_id, room_id, *event_ids)).fetchone()
         return int(row[0]) if row is not None else 0
 
+    def restart_dispatch_obligation_state(self, event_id: str) -> str | None:
+        """Return the exact agent message obligation state without creating storage."""
+        database_path = self.storage_path / "tracking" / "dispatch_obligations.sqlite3"
+        if not database_path.is_file():
+            return None
+        with closing(sqlite3.connect(database_path)) as database:
+            row = database.execute(
+                """
+                SELECT state
+                FROM dispatch_obligations
+                WHERE principal_id = ?
+                  AND entity_name = ?
+                  AND source_event_id = ?
+                  AND callback_kind = 'message'
+                """,
+                (self.agent_id, AGENT_NAME, event_id),
+            ).fetchone()
+        return str(row[0]) if row is not None else None
+
+    def wait_for_restart_dispatch_obligation_state(
+        self,
+        event_id: str,
+        *,
+        expected: str,
+        timeout: float,
+    ) -> bool:
+        """Wait until the exact fresh callback reaches one durable state."""
+        return _wait_until(
+            lambda: self.restart_dispatch_obligation_state(event_id) == expected,
+            timeout=timeout,
+        )
+
     def wait_for_cached_restart_event_pairs(
         self,
         room_id: str,
@@ -961,18 +1065,16 @@ class ManagedTuwunelStack:
         timeout: float,
     ) -> bool:
         """Wait until both replacement principals durably cache historical events."""
-        deadline = time.monotonic() + timeout
-        while True:
-            if self.cached_restart_event_pair_count(room_id, event_ids) >= minimum:
-                return True
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                return False
-            time.sleep(min(0.1, remaining))
+        return _wait_until(
+            lambda: self.cached_restart_event_pair_count(room_id, event_ids) >= minimum,
+            timeout=timeout,
+        )
 
     def _start_model_server(self) -> int:
         _ModelHandler.stream_segments = self._stream_segments
         _ModelHandler.stream_delay = self._stream_delay
+        _ModelHandler.blocked_request_started.clear()
+        _ModelHandler.blocked_request_release.clear()
         self._model_server = ThreadingHTTPServer(("127.0.0.1", 0), _ModelHandler)
         port = self._model_server.server_address[1]
         self._model_thread = threading.Thread(
@@ -1512,20 +1614,100 @@ class LiveFuzzRunner:
         fresh = await dormant.send_event(
             "m.room.message",
             "restart-fresh",
-            self._message_content("Synthetic fresh startup request"),
+            self._message_content(FRESH_RESTART_REQUEST),
         )
+        callback_markers = (
+            "matrix_event_callback_started",
+            f"agent_name={AGENT_NAME}",
+            dormant.room_id,
+            fresh,
+        )
+        callback_accepted = await asyncio.to_thread(
+            self.stack.wait_for_log_count,
+            callback_markers,
+            1,
+            timeout=self.reply_timeout,
+        )
+        if not callback_accepted:
+            failure = restart_failure(
+                "fresh_callback_accepted_before_restart",
+                event_category="fresh_user",
+                phase="pre_restart",
+                observed=False,
+                step=4,
+            )
+            raise AssertionError("restart regression invariant failures:\n" + failure)
+        obligation_pending = await asyncio.to_thread(
+            self.stack.wait_for_restart_dispatch_obligation_state,
+            fresh,
+            expected="pending",
+            timeout=self.reply_timeout,
+        )
+        if not obligation_pending:
+            failure = restart_failure(
+                "fresh_dispatch_obligation_pending_before_restart",
+                event_category="fresh_user",
+                phase="pre_restart",
+                observed=False,
+                step=4,
+            )
+            raise AssertionError("restart regression invariant failures:\n" + failure)
+        request_in_flight = await asyncio.to_thread(
+            self.stack.wait_for_blocked_restart_request,
+            timeout=self.reply_timeout,
+        )
+        if not request_in_flight:
+            failure = restart_failure(
+                "fresh_model_request_in_flight_before_restart",
+                event_category="fresh_user",
+                phase="pre_restart",
+                observed=False,
+                step=4,
+            )
+            raise AssertionError("restart regression invariant failures:\n" + failure)
+
+        recovery_markers = (
+            ("agent_setup_complete", self.stack.agent_id),
+            ("agent_setup_complete", self.stack.router_id),
+        )
+        recovery_counts = tuple(self.stack.log_count(*markers) for markers in recovery_markers)
+        old_pid, replacement_pid = await asyncio.to_thread(self.stack.restart_mindroom_for_recovery)
+        self.restart_count += 1
+        recovery_results = await asyncio.gather(
+            *(
+                asyncio.to_thread(
+                    self.stack.wait_for_log_count,
+                    markers,
+                    count + 1,
+                    timeout=self.reply_timeout,
+                )
+                for markers, count in zip(recovery_markers, recovery_counts, strict=True)
+            ),
+        )
+        recovery_boundary_reached = old_pid != replacement_pid and all(recovery_results)
+        if not recovery_boundary_reached:
+            failure = restart_failure(
+                "recovery_setup_boundary_reached",
+                event_category="lifecycle",
+                phase="hard_restart",
+                observed=False,
+                step=4,
+            )
+            raise AssertionError("restart regression invariant failures:\n" + failure)
+
         observation = await self._wait_for_restart_observation(
             dormant,
             historical_event_ids=historical_event_ids,
             fresh_event_id=fresh,
             replacement_boundary_reached=replacement_boundary_reached,
+            recovery_boundary_reached=recovery_boundary_reached,
         )
         failures = evaluate_restart_regression(observation)
         if failures:
             raise AssertionError("restart regression invariant failures:\n" + "\n".join(failures))
         return {
             "historical_event_pairs_cached": observation.cached_event_pair_count,
-            "historical_outputs": 0,
+            "historical_outputs": sum(observation.historical_output_counts),
             "status": "PASS",
         }
 
@@ -1538,13 +1720,14 @@ class LiveFuzzRunner:
     ) -> _RestartEvidence:
         """Collect one definitionally consistent restart evidence snapshot."""
         events = tuple(dormant.seen_events.values())
+        log = self.stack.read_log()
         agent = self._canonical_response_ids(events)
         router = self._canonical_response_ids(events, sender_id=self.stack.router_id)
         historical_output_counts = tuple(
             self._combined_response_count(source_event_id, agent, router) for source_event_id in historical_event_ids
         )
         historical_callback_counts = tuple(
-            self.stack.log_count("matrix_event_callback_started", dormant.room_id, event_id)
+            _log_count(log, "matrix_event_callback_started", dormant.room_id, event_id)
             for event_id in historical_event_ids
         )
         cached_event_pair_count = self.stack.cached_restart_event_pair_count(
@@ -1552,7 +1735,7 @@ class LiveFuzzRunner:
             historical_event_ids,
         )
         fresh_prompt_observed, historical_in_fresh_prompt = _restart_prompt_observation(
-            self.stack.log_path.read_text(encoding="utf-8", errors="replace"),
+            log,
             fresh_event_id,
             historical_event_ids,
         )
@@ -1570,13 +1753,15 @@ class LiveFuzzRunner:
             historical_callback_counts=(historical_callback_counts[0], historical_callback_counts[1]),
             fresh_agent_output_count=len(fresh_agent_response_ids),
             fresh_router_output_count=len(fresh_router_response_ids),
-            fresh_callback_observed=self.stack.log_count(
+            fresh_callback_count=_log_count(
+                log,
                 "matrix_event_callback_started",
+                f"agent_name={AGENT_NAME}",
                 dormant.room_id,
                 fresh_event_id,
-            )
-            > 0,
-            replacement_generation_response_observed=(REPLACEMENT_RUNTIME_GENERATION_MARKER in fresh_response_body),
+            ),
+            recovered_generation_response_observed=(RECOVERED_RUNTIME_GENERATION_MARKER in fresh_response_body),
+            fresh_obligation_recovered=(self.stack.restart_dispatch_obligation_state(fresh_event_id) == "succeeded"),
             cached_event_pair_count=cached_event_pair_count,
             fresh_prompt_observed=fresh_prompt_observed,
             historical_in_fresh_prompt=historical_in_fresh_prompt,
@@ -1590,6 +1775,7 @@ class LiveFuzzRunner:
         historical_event_ids: tuple[str, str],
         fresh_event_id: str,
         replacement_boundary_reached: bool,
+        recovery_boundary_reached: bool,
     ) -> RestartRegressionObservation:
         """Observe replacement output until the fresh response and callback stream settle."""
         deadline = time.monotonic() + self.reply_timeout
@@ -1598,8 +1784,9 @@ class LiveFuzzRunner:
             historical_callback_counts=(0, 0),
             fresh_agent_output_count=0,
             fresh_router_output_count=0,
-            fresh_callback_observed=False,
-            replacement_generation_response_observed=False,
+            fresh_callback_count=0,
+            recovered_generation_response_observed=False,
+            fresh_obligation_recovered=False,
             cached_event_pair_count=0,
             fresh_prompt_observed=False,
             historical_in_fresh_prompt=False,
@@ -1616,12 +1803,14 @@ class LiveFuzzRunner:
             )
             positive_evidence_ready = (
                 replacement_boundary_reached
+                and recovery_boundary_reached
                 and evidence.cached_event_pair_count == 4
                 and evidence.historical_callback_counts == (0, 0)
                 and evidence.fresh_agent_output_count == 1
                 and evidence.fresh_router_output_count == 0
-                and evidence.fresh_callback_observed
-                and evidence.replacement_generation_response_observed
+                and evidence.fresh_callback_count == 2
+                and evidence.recovered_generation_response_observed
+                and evidence.fresh_obligation_recovered
                 and evidence.fresh_prompt_observed
                 and evidence.fresh_response_complete
             )
@@ -1653,11 +1842,13 @@ class LiveFuzzRunner:
             historical_output_counts=evidence.historical_output_counts,
             historical_callback_counts=evidence.historical_callback_counts,
             replacement_boundary_reached=replacement_boundary_reached,
+            recovery_boundary_reached=recovery_boundary_reached,
             cached_event_pair_count=evidence.cached_event_pair_count,
             fresh_agent_output_count=evidence.fresh_agent_output_count,
             fresh_router_output_count=evidence.fresh_router_output_count,
-            fresh_callback_observed=evidence.fresh_callback_observed,
-            replacement_generation_response_observed=evidence.replacement_generation_response_observed,
+            fresh_callback_count=evidence.fresh_callback_count,
+            recovered_generation_response_observed=evidence.recovered_generation_response_observed,
+            fresh_obligation_recovered=evidence.fresh_obligation_recovered,
             fresh_prompt_observed=evidence.fresh_prompt_observed,
             historical_in_fresh_prompt=evidence.historical_in_fresh_prompt,
             response_callbacks_quiescent=response_callbacks_quiescent,
@@ -2145,9 +2336,8 @@ def main() -> None:
                 settle_seconds=args.settle_seconds,
             ),
         )
-        result["seed"] = (
-            RESTART_SEED if scenario.profile == "restart-regression" else args.seed if args.trace is None else "trace"
-        )
+        if scenario.profile != "restart-regression":
+            result["seed"] = args.seed if args.trace is None else "trace"
         result.update(stack.diagnostic_counts())
         print(json.dumps(result, sort_keys=True))
     except Exception:

@@ -54,15 +54,16 @@ uv run python scripts/testing/fuzz_live_matrix.py --profile saturation
 
 The saturation profile uses a 180-second per-reply deadline because its slow 12-way stream workload intentionally queues much more work than normal fuzz runs.
 
-#### Config-replacement regression profile
+#### Restart-recovery regression profile
 
-The `restart-regression` profile is a manual opt-in oracle for the agent and router replacement caused by a real `config.yaml` hot reload.
+The `restart-regression` profile is a manual opt-in oracle for config replacement, cold-history suppression, and durable callback recovery across a hard MindRoom restart.
 It creates a dormant public room, writes explicitly agent-mentioned historical text and media there, then adds that room to the managed agent configuration.
-The run sends the fresh request only after both replacement principals complete setup, the configuration update completes, and both principals durably cache both historical events.
-It also requires config-reload shutdown evidence for both old bot generations and changes the deterministic model ID during reload so only the replacement generation can emit the accepted response marker.
-It then uses the runtime's orderly callback and response drain as a quiescence boundary before the final Matrix audit.
-The run passes only after both principals cache both historical events, neither exact historical event starts a callback, and the exact fresh event starts a callback.
-The agent-mentioned fresh request must produce exactly one agent response and no router response, no historical event may reach the fresh prompt or produce output, and checkpoint-discard plus incomplete-drain markers must remain absent before and after the bounded quiescence drain.
+The run waits for config-reload shutdown of both old bots, setup of both replacement bots, configuration-update completion, and durable caching of all four principal/event pairs.
+It sends the fresh request only after that cold-history boundary, then waits for the exact callback, its pending durable obligation, and a deterministic model request held in flight.
+The harness hard-kills MindRoom, switches to a recovery-only deterministic model while the process is down, boots a new PID, and waits for both recovered bots to complete setup.
+The run passes only when the pending obligation becomes succeeded, the exact fresh callback runs once before and once after restart, and the recovered generation produces exactly one complete agent response and no router response.
+Neither historical event may start a callback, reach the fresh prompt, or produce output.
+An orderly final shutdown must complete without the production durable-recovery drain-failure marker.
 
 The profile requires Docker, `just`, `uv`, Python 3.13, available local ports, and permission to create and remove an isolated Tuwunel instance.
 It starts its own deterministic model stub and disposable Matrix stack, so no external model credential is required.
@@ -75,10 +76,9 @@ uv run python scripts/testing/fuzz_live_matrix.py \
   --failure-log restart-regression.log
 ```
 
-`--reply-timeout` bounds lifecycle, cache, prompt, response, and quiescence observation.
-`--settle-seconds` controls the final Matrix long-poll after the quiescence drain.
+`--reply-timeout` bounds lifecycle, cache, durable-obligation, model-latch, response, and final-drain observation.
+`--settle-seconds` controls the final Matrix long-poll after the orderly drain.
 `--failure-log` preserves the complete MindRoom log when the oracle fails without printing content-bearing runtime output to the terminal.
-`--save-trace` writes the fixed profile trace, and `--trace` loads that JSON through the normal validated replay path.
 `--seed`, `--steps`, `--threads`, `--max-batch-size`, and `--restart-interval` do not change this fixed profile.
 Failures report content-free invariant coordinates, while the optional failure log contains the raw diagnostics needed for local investigation.
 

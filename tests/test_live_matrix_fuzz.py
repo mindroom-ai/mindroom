@@ -5,16 +5,20 @@ from __future__ import annotations
 import asyncio
 import sqlite3
 import subprocess
+import threading
 import time
 from contextlib import closing
 from dataclasses import replace
 from pathlib import Path
 from typing import Any, cast
 
+import httpx
 import pytest
 
+from mindroom.dispatch_obligations import DispatchObligationStore
 from mindroom.matrix.cache.sqlite_event_cache import _initialize_event_cache_db
 from scripts.testing.fuzz_live_matrix import (
+    PROJECT_ROOT,
     ExactReplyOracle,
     LiveFuzzRunner,
     LiveFuzzScenario,
@@ -23,6 +27,7 @@ from scripts.testing.fuzz_live_matrix import (
     LiveOperationKind,
     ManagedTuwunelStack,
     RestartRegressionObservation,
+    _ModelHandler,
     _restart_prompt_observation,
     evaluate_restart_regression,
     live_scenario_from_seed,
@@ -66,7 +71,7 @@ def _restart_response(
     sender: str,
     source: str,
     *,
-    body: str = "LIVE-FUZZ runtime-generation=replacement END call=1",
+    body: str = "LIVE-FUZZ runtime-generation=recovered END call=1",
 ) -> dict[str, Any]:
     return {
         "event_id": event_id,
@@ -184,11 +189,12 @@ def test_live_scenario_rejects_ambiguous_same_thread_reply_batch() -> None:
         scenario.validate()
 
 
-def test_restart_regression_scenario_is_allowed_and_json_replayable() -> None:
-    """The manual profile must survive the same trace parser used by replay."""
+def test_restart_regression_scenario_has_fixed_empty_shape() -> None:
+    """The manual profile owns its deterministic operations outside the fuzz trace."""
     scenario = restart_regression_scenario()
 
-    assert LiveFuzzScenario.from_json(scenario.to_json()) == scenario
+    assert scenario == LiveFuzzScenario(thread_count=1, batches=(), profile="restart-regression")
+    scenario.validate()
 
 
 def test_restart_regression_scenario_rejects_declared_batches_ignored_by_fixed_runner() -> None:
@@ -209,11 +215,13 @@ def test_restart_regression_evaluator_accepts_pass_and_rejects_bad_directions() 
         historical_output_counts=(0, 0),
         historical_callback_counts=(0, 0),
         replacement_boundary_reached=True,
+        recovery_boundary_reached=True,
         cached_event_pair_count=4,
         fresh_agent_output_count=1,
         fresh_router_output_count=0,
-        fresh_callback_observed=True,
-        replacement_generation_response_observed=True,
+        fresh_callback_count=2,
+        recovered_generation_response_observed=True,
+        fresh_obligation_recovered=True,
         fresh_prompt_observed=True,
         historical_in_fresh_prompt=False,
         response_callbacks_quiescent=True,
@@ -226,10 +234,12 @@ def test_restart_regression_evaluator_accepts_pass_and_rejects_bad_directions() 
             passing,
             historical_output_counts=(1, 0),
             historical_callback_counts=(0, 1),
+            recovery_boundary_reached=False,
             fresh_agent_output_count=0,
             fresh_router_output_count=1,
-            fresh_callback_observed=False,
-            replacement_generation_response_observed=False,
+            fresh_callback_count=1,
+            recovered_generation_response_observed=False,
+            fresh_obligation_recovered=False,
             historical_in_fresh_prompt=True,
             response_callbacks_quiescent=False,
         ),
@@ -237,10 +247,12 @@ def test_restart_regression_evaluator_accepts_pass_and_rejects_bad_directions() 
 
     assert any("invariant=historical_output_suppressed" in failure for failure in failures)
     assert any("invariant=historical_callback_suppressed" in failure for failure in failures)
+    assert any("invariant=recovery_setup_boundary_reached" in failure for failure in failures)
     assert any("invariant=fresh_agent_response_exactly_once" in failure for failure in failures)
     assert any("invariant=fresh_router_response_suppressed" in failure for failure in failures)
-    assert any("invariant=fresh_callback_observed" in failure for failure in failures)
-    assert any("invariant=replacement_generation_response_observed" in failure for failure in failures)
+    assert any("invariant=fresh_callback_replayed_after_restart" in failure for failure in failures)
+    assert any("invariant=recovered_generation_response_observed" in failure for failure in failures)
+    assert any("invariant=fresh_dispatch_obligation_recovered" in failure for failure in failures)
     assert any("invariant=historical_events_absent_from_fresh_prompt" in failure for failure in failures)
     assert any("invariant=response_callbacks_quiescent" in failure for failure in failures)
 
@@ -322,6 +334,87 @@ async def test_restart_regression_boundary_requires_old_runtime_shutdown(
             "agent=router",
             "restart_reason_category=config_reload",
         ) in observed_markers
+    finally:
+        stack.close()
+
+
+@pytest.mark.asyncio
+async def test_restart_regression_crosses_fresh_obligation_over_hard_restart(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The fresh callback must be durable and in flight before the process is killed."""
+    stack = ManagedTuwunelStack()
+    order: list[str] = []
+    try:
+        stack.agent_id, stack.router_id = "@agent:example", "@router:example"
+        monkeypatch.setattr(stack, "add_restart_room", lambda _room_id: None)
+
+        def wait_for_log(markers: tuple[str, ...], *_args: object, **_kwargs: object) -> bool:
+            if markers == (
+                "matrix_event_callback_started",
+                "agent_name=general",
+                "!restart:example",
+                "$restart-fresh",
+            ):
+                order.append("durable-callback")
+            return True
+
+        monkeypatch.setattr(stack, "wait_for_log_count", wait_for_log)
+        monkeypatch.setattr(stack, "wait_for_cached_restart_event_pairs", lambda *_args, **_kwargs: True)
+        monkeypatch.setattr(stack, "cached_restart_event_pair_count", lambda *_args, **_kwargs: 4)
+        monkeypatch.setattr(
+            stack,
+            "wait_for_restart_dispatch_obligation_state",
+            lambda *_args, **_kwargs: order.append("obligation-pending") or True,
+        )
+        monkeypatch.setattr(
+            stack,
+            "wait_for_blocked_restart_request",
+            lambda *_args, **_kwargs: order.append("model-in-flight") or True,
+            raising=False,
+        )
+        monkeypatch.setattr(
+            stack,
+            "restart_mindroom_for_recovery",
+            lambda: order.append("hard-restart") or (10, 11),
+            raising=False,
+        )
+        dormant = _RecordingDormantClient()
+        runner = LiveFuzzRunner(
+            stack,
+            (cast("LiveMatrixClient", dormant),),
+            restart_regression_scenario(),
+            reply_timeout=1,
+            settle_seconds=0,
+        )
+
+        async def observe(*_args: object, **_kwargs: object) -> RestartRegressionObservation:
+            return RestartRegressionObservation(
+                historical_output_counts=(0, 0),
+                historical_callback_counts=(0, 0),
+                replacement_boundary_reached=True,
+                recovery_boundary_reached=True,
+                cached_event_pair_count=4,
+                fresh_agent_output_count=1,
+                fresh_router_output_count=0,
+                fresh_callback_count=2,
+                recovered_generation_response_observed=True,
+                fresh_obligation_recovered=True,
+                fresh_prompt_observed=True,
+                historical_in_fresh_prompt=False,
+                response_callbacks_quiescent=True,
+            )
+
+        monkeypatch.setattr(runner, "_wait_for_restart_observation", observe)
+
+        await runner._run_restart_regression()
+
+        assert order == [
+            "durable-callback",
+            "obligation-pending",
+            "model-in-flight",
+            "hard-restart",
+        ]
     finally:
         stack.close()
 
@@ -466,6 +559,50 @@ def test_restart_regression_cache_probe_does_not_create_an_empty_database() -> N
         stack.close()
 
 
+def test_restart_regression_reads_exact_durable_obligation_state() -> None:
+    """The recovery oracle must follow the exact agent message obligation."""
+    stack = ManagedTuwunelStack()
+    try:
+        stack.agent_id = "@agent:example"
+        DispatchObligationStore(
+            tracking_path=stack.storage_path / "tracking",
+            principal_id=stack.agent_id,
+            entity_name="general",
+        )
+        database_path = stack.storage_path / "tracking" / "dispatch_obligations.sqlite3"
+        with closing(sqlite3.connect(database_path)) as database:
+            database.execute(
+                """
+                INSERT INTO dispatch_obligations(
+                    principal_id,
+                    entity_name,
+                    source_event_id,
+                    callback_kind,
+                    room_id,
+                    event_source_json,
+                    state,
+                    created_at_ns,
+                    settled_at_ns
+                ) VALUES (?, 'general', '$fresh', 'message', '!room:example', '{}', 'pending', 1, NULL)
+                """,
+                (stack.agent_id,),
+            )
+            database.commit()
+
+        assert stack.restart_dispatch_obligation_state("$fresh") == "pending"
+        assert stack.restart_dispatch_obligation_state("$other") is None
+
+        with closing(sqlite3.connect(database_path)) as database:
+            database.execute(
+                "UPDATE dispatch_obligations SET state = 'succeeded', settled_at_ns = 2",
+            )
+            database.commit()
+
+        assert stack.restart_dispatch_obligation_state("$fresh") == "succeeded"
+    finally:
+        stack.close()
+
+
 def test_restart_config_update_atomically_replaces_file(monkeypatch: pytest.MonkeyPatch) -> None:
     """The live watcher must never observe a truncated replacement config."""
     stack = ManagedTuwunelStack()
@@ -489,6 +626,89 @@ def test_restart_config_update_atomically_replaces_file(monkeypatch: pytest.Monk
         assert "!restart:example" in stack.config_path.read_text(encoding="utf-8")
         assert "mindroom-live-fuzz-replacement" in stack.config_path.read_text(encoding="utf-8")
     finally:
+        stack.close()
+
+
+def test_restart_recovery_hard_kills_and_boots_new_model_generation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The crossed-boundary restart must preserve storage but change PID and model."""
+
+    class Process:
+        def __init__(self, pid: int) -> None:
+            self.pid = pid
+            self.killed = False
+
+        @staticmethod
+        def poll() -> None:
+            return None
+
+        def kill(self) -> None:
+            self.killed = True
+
+        @staticmethod
+        def wait(*, timeout: float) -> int:
+            assert timeout == 10
+            return -9
+
+    stack = ManagedTuwunelStack()
+    old_process = Process(10)
+    new_process = Process(11)
+    try:
+        stack.config_path.write_text(
+            "models:\n  default:\n    id: mindroom-live-fuzz-replacement\n",
+            encoding="utf-8",
+        )
+        stack._mindroom_process = cast("Any", old_process)
+        monkeypatch.setattr(stack, "_start_mindroom", lambda: setattr(stack, "_mindroom_process", new_process))
+
+        assert stack.restart_mindroom_for_recovery() == (10, 11)
+        assert old_process.killed
+        assert "mindroom-live-fuzz-recovered" in stack.config_path.read_text(encoding="utf-8")
+    finally:
+        stack._mindroom_process = None
+        stack.close()
+
+
+def test_restart_model_latch_blocks_only_pre_restart_fresh_request() -> None:
+    """The old request must remain in flight while the recovered generation stays runnable."""
+    stack = ManagedTuwunelStack()
+    response_body: list[str] = []
+    try:
+        model_port = stack._start_model_server()
+
+        def send_blocked_request() -> None:
+            response = httpx.post(
+                f"http://127.0.0.1:{model_port}/v1/chat/completions",
+                json={
+                    "model": "mindroom-live-fuzz-replacement",
+                    "messages": [{"role": "user", "content": "Synthetic fresh startup request"}],
+                },
+                timeout=5,
+            )
+            response_body.append(response.json()["choices"][0]["message"]["content"])
+
+        request_thread = threading.Thread(target=send_blocked_request)
+        request_thread.start()
+        assert stack.wait_for_blocked_restart_request(timeout=1)
+        assert request_thread.is_alive()
+
+        recovered = httpx.post(
+            f"http://127.0.0.1:{model_port}/v1/chat/completions",
+            json={
+                "model": "mindroom-live-fuzz-recovered",
+                "messages": [{"role": "user", "content": "Synthetic fresh startup request"}],
+            },
+            timeout=5,
+        )
+        assert "runtime-generation=recovered" in recovered.json()["choices"][0]["message"]["content"]
+
+        _ModelHandler.blocked_request_release.set()
+        request_thread.join(timeout=5)
+        assert not request_thread.is_alive()
+        assert "runtime-generation=replacement" in response_body[0]
+    finally:
+        _ModelHandler.blocked_request_release.set()
         stack.close()
 
 
@@ -563,24 +783,10 @@ def test_restart_shutdown_rejects_forced_process_kill() -> None:
         stack.close()
 
 
-@pytest.mark.parametrize(
-    "marker",
-    [
-        pytest.param("sync_checkpoint_discarded", id="current-main"),
-        pytest.param("matrix_agent_response_drain_incomplete", id="current-main-response-drain"),
-        pytest.param(
-            "runtime_drain_incomplete_with_durable_dispatch_recovery",
-            id="durable-dispatch-recovery",
-        ),
-        pytest.param(
-            "sync_checkpoint_not_saved_after_incomplete_coalescing_drain",
-            id="exact-base",
-        ),
-    ],
-)
-def test_restart_shutdown_failure_count_tracks_incomplete_drain_markers(marker: str) -> None:
-    """The harness must track every incomplete-drain marker across its acceptance stack."""
-    assert isinstance(marker, str)
+def test_restart_shutdown_failure_count_tracks_emitted_durable_recovery_marker() -> None:
+    """The harness must gate on the production marker emitted by its recovery path."""
+    marker = "runtime_drain_incomplete_with_durable_dispatch_recovery"
+    assert any(marker in path.read_text(encoding="utf-8") for path in (PROJECT_ROOT / "src").rglob("*.py"))
     stack = ManagedTuwunelStack()
     try:
         stack.log_path.write_text(f'{{"event": "{marker}"}}\n', encoding="utf-8")
@@ -590,33 +796,24 @@ def test_restart_shutdown_failure_count_tracks_incomplete_drain_markers(marker: 
         stack.close()
 
 
-@pytest.mark.parametrize(
-    "marker",
-    [
-        pytest.param("sync_checkpoint_discarded", id="checkpoint-discarded"),
-        pytest.param("matrix_agent_response_drain_incomplete", id="current-main-response-drain"),
-        pytest.param(
-            "runtime_drain_incomplete_with_durable_dispatch_recovery",
-            id="durable-dispatch-recovery",
-        ),
-    ],
-)
 @pytest.mark.asyncio
 async def test_restart_observation_rejects_incomplete_runtime_drain_from_replacement(
     monkeypatch: pytest.MonkeyPatch,
-    marker: str,
 ) -> None:
     """An incomplete runtime drain before final shutdown must not become the accepted baseline."""
+    marker = "runtime_drain_incomplete_with_durable_dispatch_recovery"
     stack = ManagedTuwunelStack()
     try:
         stack.agent_id, stack.router_id = "@agent:example", "@router:example"
         stack.log_path.write_text(
-            "matrix_event_callback_started !restart:example $fresh\n"
+            "matrix_event_callback_started agent_name=general !restart:example $fresh\n"
+            "matrix_event_callback_started agent_name=general !restart:example $fresh\n"
             "Preparing agent and prompt $fresh\n"
             f'{{"event": "{marker}"}}\n',
             encoding="utf-8",
         )
         monkeypatch.setattr(stack, "cached_restart_event_pair_count", lambda _room_id, _event_ids: 4)
+        monkeypatch.setattr(stack, "restart_dispatch_obligation_state", lambda _event_id: "succeeded")
         monkeypatch.setattr(stack, "stop_mindroom_for_observation", lambda *, timeout: timeout > 0)
         dormant = _StaticObservationClient(
             (_restart_response("$agent-response", stack.agent_id, "$fresh"),),
@@ -634,6 +831,7 @@ async def test_restart_observation_rejects_incomplete_runtime_drain_from_replace
             historical_event_ids=("$old-text", "$old-media"),
             fresh_event_id="$fresh",
             replacement_boundary_reached=True,
+            recovery_boundary_reached=True,
         )
 
         assert not observation.response_callbacks_quiescent
@@ -651,10 +849,14 @@ async def test_restart_observation_rejects_old_media_callback_as_fresh_evidence(
     try:
         stack.agent_id, stack.router_id = "@agent:example", "@router:example"
         stack.log_path.write_text(
-            "matrix_event_callback_started !restart:example $old-media\nPreparing agent and prompt $fresh\n",
+            "matrix_event_callback_started !restart:example $old-media\n"
+            "matrix_event_callback_started agent_name=general !restart:example $fresh\n"
+            "matrix_event_callback_started agent_name=general !restart:example $fresh\n"
+            "Preparing agent and prompt $fresh\n",
             encoding="utf-8",
         )
         monkeypatch.setattr(stack, "cached_restart_event_pair_count", lambda _room_id, _event_ids: 4)
+        monkeypatch.setattr(stack, "restart_dispatch_obligation_state", lambda _event_id: "succeeded")
 
         def record_stop(*, timeout: float) -> bool:
             stop_calls.append(timeout)
@@ -677,6 +879,7 @@ async def test_restart_observation_rejects_old_media_callback_as_fresh_evidence(
             historical_event_ids=("$old-text", "$old-media"),
             fresh_event_id="$fresh",
             replacement_boundary_reached=True,
+            recovery_boundary_reached=True,
         )
 
         assert stop_calls == []
@@ -695,10 +898,13 @@ async def test_restart_observation_rejects_router_only_fresh_response(
     try:
         stack.agent_id, stack.router_id = "@agent:example", "@router:example"
         stack.log_path.write_text(
-            "matrix_event_callback_started !restart:example $fresh\nPreparing agent and prompt $fresh\n",
+            "matrix_event_callback_started agent_name=general !restart:example $fresh\n"
+            "matrix_event_callback_started agent_name=general !restart:example $fresh\n"
+            "Preparing agent and prompt $fresh\n",
             encoding="utf-8",
         )
         monkeypatch.setattr(stack, "cached_restart_event_pair_count", lambda _room_id, _event_ids: 4)
+        monkeypatch.setattr(stack, "restart_dispatch_obligation_state", lambda _event_id: "succeeded")
 
         def record_stop(*, timeout: float) -> bool:
             stop_calls.append(timeout)
@@ -721,6 +927,7 @@ async def test_restart_observation_rejects_router_only_fresh_response(
             historical_event_ids=("$old-text", "$old-media"),
             fresh_event_id="$fresh",
             replacement_boundary_reached=True,
+            recovery_boundary_reached=True,
         )
 
         assert stop_calls == []
@@ -739,10 +946,13 @@ async def test_restart_observation_rejects_old_runtime_generation_response(
     try:
         stack.agent_id, stack.router_id = "@agent:example", "@router:example"
         stack.log_path.write_text(
-            "matrix_event_callback_started !restart:example $fresh\nPreparing agent and prompt $fresh\n",
+            "matrix_event_callback_started agent_name=general !restart:example $fresh\n"
+            "matrix_event_callback_started agent_name=general !restart:example $fresh\n"
+            "Preparing agent and prompt $fresh\n",
             encoding="utf-8",
         )
         monkeypatch.setattr(stack, "cached_restart_event_pair_count", lambda _room_id, _event_ids: 4)
+        monkeypatch.setattr(stack, "restart_dispatch_obligation_state", lambda _event_id: "succeeded")
 
         def record_stop(*, timeout: float) -> bool:
             stop_calls.append(timeout)
@@ -755,7 +965,7 @@ async def test_restart_observation_rejects_old_runtime_generation_response(
                     "$old-runtime-response",
                     stack.agent_id,
                     "$fresh",
-                    body="LIVE-FUZZ runtime-generation=original END call=1",
+                    body="LIVE-FUZZ runtime-generation=replacement END call=1",
                 ),
             ),
         )
@@ -772,6 +982,7 @@ async def test_restart_observation_rejects_old_runtime_generation_response(
             historical_event_ids=("$old-text", "$old-media"),
             fresh_event_id="$fresh",
             replacement_boundary_reached=True,
+            recovery_boundary_reached=True,
         )
 
         assert stop_calls == []
@@ -856,7 +1067,7 @@ async def test_restart_observation_rejects_historical_output_arriving_during_cal
             "sender": sender,
             "type": "m.room.message",
             "content": {
-                "body": "LIVE-FUZZ runtime-generation=replacement END call=1",
+                "body": "LIVE-FUZZ runtime-generation=recovered END call=1",
                 "m.relates_to": {
                     "rel_type": "m.thread",
                     "event_id": source,
@@ -869,10 +1080,13 @@ async def test_restart_observation_rejects_historical_output_arriving_during_cal
     try:
         stack.agent_id, stack.router_id = "@agent:example", "@router:example"
         stack.log_path.write_text(
-            "matrix_event_callback_started !restart:example $fresh\nPreparing agent and prompt $fresh\n",
+            "matrix_event_callback_started agent_name=general !restart:example $fresh\n"
+            "matrix_event_callback_started agent_name=general !restart:example $fresh\n"
+            "Preparing agent and prompt $fresh\n",
             encoding="utf-8",
         )
         monkeypatch.setattr(stack, "cached_restart_event_pair_count", lambda _room_id, _event_ids: 4)
+        monkeypatch.setattr(stack, "restart_dispatch_obligation_state", lambda _event_id: "succeeded")
         dormant = DormantClient()
 
         def drain_callbacks(*, timeout: float) -> bool:
@@ -884,7 +1098,7 @@ async def test_restart_observation_rejects_historical_output_arriving_during_cal
                 "$old-text",
             )
             with stack.log_path.open("a", encoding="utf-8") as log:
-                log.write('{"event": "sync_checkpoint_discarded"}\n')
+                log.write('{"event": "runtime_drain_incomplete_with_durable_dispatch_recovery"}\n')
             return True
 
         monkeypatch.setattr(stack, "stop_mindroom_for_observation", drain_callbacks)
@@ -901,6 +1115,7 @@ async def test_restart_observation_rejects_historical_output_arriving_during_cal
             historical_event_ids=("$old-text", "$old-media"),
             fresh_event_id="$fresh",
             replacement_boundary_reached=True,
+            recovery_boundary_reached=True,
         )
 
         assert dormant.sync_count == 2
