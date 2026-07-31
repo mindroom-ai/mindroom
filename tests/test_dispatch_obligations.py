@@ -1186,6 +1186,27 @@ def test_deferred_turn_retry_schedules_only_the_exact_callback_kind(tmp_path: Pa
 
 
 @pytest.mark.asyncio
+async def test_deferred_turn_retry_without_obligation_skips_backoff(tmp_path: Path) -> None:
+    """A stale retry request must not hold runtime shutdown through its backoff."""
+
+    async def callback(_room: nio.MatrixRoom, _event: nio.Event) -> DispatchCallbackResult:
+        return DispatchCallbackResult.SUCCEEDED
+
+    owner = object()
+    runner = _runner(
+        _store(tmp_path),
+        callback,
+        background_task_owner=owner,
+        retry_initial_delay_seconds=60,
+        retry_max_delay_seconds=60,
+    )
+
+    runner.retry_pending_turn_source("$missing", DispatchCallbackKind.MESSAGE)
+
+    assert await wait_for_background_tasks(timeout=1, owner=owner) is True
+
+
+@pytest.mark.asyncio
 async def test_terminal_turn_settlement_retries_autonomously(tmp_path: Path) -> None:
     """A failed terminal compaction must retry without restart or a fabricated callback key."""
 

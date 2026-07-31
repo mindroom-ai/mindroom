@@ -1201,6 +1201,16 @@ class DispatchObligationRunner:
         retry_delay_seconds = self._retry_initial_delay_seconds
         try:
             while self._retry_keys:
+                for key in tuple(self._retry_keys):
+                    is_pending = await asyncio.to_thread(
+                        self.store.has_pending,
+                        key.source_event_id,
+                        key.callback_kind,
+                    )
+                    if not is_pending:
+                        self._retry_keys.pop(key, None)
+                if not self._retry_keys:
+                    break
                 await asyncio.sleep(retry_delay_seconds)
                 for key in tuple(self._retry_keys):
                     completed_attempts = self._retry_keys.pop(key)
