@@ -284,12 +284,8 @@ def commit_selection(selection: InteractiveSelection) -> None:
     if selection.claimed_question is None:
         return
     with _thread_lock:
-        if _persistence_file is not None and _persistence_lock_file is not None:
-            _persistence_file.parent.mkdir(parents=True, exist_ok=True)
-            with advisory_file_lock(_persistence_lock_file):
-                persisted_questions = _load_persisted_questions()
-                persisted_questions.pop(selection.question_event_id, None)
-                _write_active_questions_atomically_locked(persisted_questions)
+        _deleted_question_ids.add(selection.question_event_id)
+        _persist_local_changes_locked(rebuild_on_read_error=False)
         _claimed_question_ids.discard(selection.question_event_id)
         _dirty_question_ids.discard(selection.question_event_id)
         _deleted_question_ids.discard(selection.question_event_id)
@@ -342,28 +338,36 @@ def _refresh_active_questions_locked() -> None:
     _set_active_questions_locked(_apply_local_changes_locked(persisted_questions))
 
 
-def _save_active_questions_locked() -> None:
-    """Persist active questions when persistence is enabled.
+def _persist_local_changes_locked(*, rebuild_on_read_error: bool) -> None:
+    """Merge and persist local question changes through the sole write path.
 
     This method must be called while holding ``_thread_lock``.
     """
     if _persistence_file is None or _persistence_lock_file is None:
         return
 
+    _persistence_file.parent.mkdir(parents=True, exist_ok=True)
+    with advisory_file_lock(_persistence_lock_file):
+        try:
+            persisted_questions = _load_persisted_questions()
+        except Exception as exc:
+            if not rebuild_on_read_error:
+                raise
+            persisted_questions = dict(_active_questions)
+            logger.warning(
+                "Failed to read persisted interactive questions before save; rebuilding file from in-memory questions",
+                path=str(_persistence_file),
+                error=str(exc),
+            )
+        merged_questions = _apply_local_changes_locked(persisted_questions)
+        _write_active_questions_atomically_locked(merged_questions)
+        _replace_active_questions_locked(merged_questions)
+
+
+def _save_active_questions_locked() -> None:
+    """Best-effort persist active questions when persistence is enabled."""
     try:
-        _persistence_file.parent.mkdir(parents=True, exist_ok=True)
-        with advisory_file_lock(_persistence_lock_file):
-            try:
-                merged_questions = _apply_local_changes_locked(_load_persisted_questions())
-            except Exception as exc:
-                merged_questions = dict(_active_questions)
-                logger.warning(
-                    "Failed to read persisted interactive questions before save; rebuilding file from in-memory questions",
-                    path=str(_persistence_file),
-                    error=str(exc),
-                )
-            _write_active_questions_atomically_locked(merged_questions)
-            _replace_active_questions_locked(merged_questions)
+        _persist_local_changes_locked(rebuild_on_read_error=True)
     except Exception as exc:
         logger.warning(
             "Failed to persist interactive questions; continuing in-memory",

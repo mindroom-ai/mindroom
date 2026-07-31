@@ -1690,6 +1690,48 @@ async def test_interactive_selection_persistence_failure_prevents_ack_and_genera
 
 
 @pytest.mark.asyncio
+async def test_interactive_selection_claim_conflict_accepts_racing_terminal_turn(
+    config: Config,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A completed owner that wins the pending-record race is a clean terminal outcome."""
+    harness = _build_harness(config, tmp_path)
+    room = nio.MatrixRoom(_ROOM_ID, _entity_user_id(config, "general"))
+    selection = interactive.InteractiveSelection(
+        question_event_id="$question:localhost",
+        question_text="Which option should I use?",
+        selection_key="1",
+        selected_label="Option 1",
+        selected_value="Option 1",
+        thread_id="$thread-root:localhost",
+    )
+    real_record_pending = harness.turn_store.record_pending_turn
+
+    def lose_claim_race(_turn_record: TurnRecord) -> None:
+        monkeypatch.setattr(harness.turn_store, "record_pending_turn", real_record_pending)
+        harness.turn_store.record_turn(
+            TurnRecord.create(
+                [selection.question_event_id],
+                response_event_id="$racing-response:localhost",
+            ),
+        )
+        harness.turn_store._ledger.flush()
+
+    monkeypatch.setattr(harness.turn_store, "record_pending_turn", lose_claim_race)
+
+    await harness.controller.handle_interactive_selection(
+        room,
+        selection=selection,
+        user_id=_SENDER,
+        source_event_id="$selection:localhost",
+    )
+
+    assert harness.gateway.sent == []
+    assert harness.runner.requests == []
+
+
+@pytest.mark.asyncio
 async def test_interactive_selection_replacement_refusal_uses_checkpoint_replay(
     config: Config,
     tmp_path: Path,

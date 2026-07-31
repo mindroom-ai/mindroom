@@ -215,7 +215,7 @@ def _record_room_member_join_seen(
     _mark_room_member_joins_seen(storage_root, ((join.room_id, join.user_id),))
 
 
-async def emit_room_member_join_once(
+async def emit_room_member_join_at_least_once(
     room: nio.MatrixRoom,
     event: nio.RoomMemberEvent,
     *,
@@ -225,7 +225,7 @@ async def emit_room_member_join_once(
     lock: asyncio.Lock,
     emit: Callable[[RoomMemberJoin], Awaitable[None]],
 ) -> bool:
-    """Emit one eligible unseen live join, then durably mark it complete."""
+    """Emit an unseen live join, accepting replay until its marker persists."""
     async with lock:
         join = _room_member_join_from_event(
             room,

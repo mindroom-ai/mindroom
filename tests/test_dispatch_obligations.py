@@ -21,10 +21,12 @@ from mindroom.dispatch_obligations import (
     _DispatchObligation,
     _DispatchTerminalOutcome,
     _run_owned_store_operation,
+    callback_kind_for_source_kind,
 )
 from mindroom.dispatch_obligations import (
     _DispatchCallbackResult as DispatchCallbackResult,
 )
+from mindroom.dispatch_source import IMAGE_SOURCE_KIND, MEDIA_SOURCE_KIND, VOICE_SOURCE_KIND
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -78,6 +80,35 @@ def _message_event(event_id: str) -> nio.RoomMessageText:
     event = nio.Event.parse_event(_message_obligation(event_id).event_source)
     assert isinstance(event, nio.RoomMessageText)
     return event
+
+
+def test_store_database_name_identifies_entity_and_principal(tmp_path: Path) -> None:
+    """Operators must be able to map one leaf database back to its entity."""
+    store = _store(tmp_path)
+
+    assert store._database_path.name.startswith("dispatch_obligations-code-")
+    assert store._database_path.name.endswith(".sqlite3")
+
+
+def test_store_operations_do_not_repeat_tracking_directory_creation(tmp_path: Path) -> None:
+    """Only store construction should create its tracking directory."""
+    store = _store(tmp_path)
+
+    with patch("pathlib.Path.mkdir") as mkdir:
+        store.pending()
+
+    mkdir.assert_not_called()
+
+
+@pytest.mark.parametrize("source_kind", [IMAGE_SOURCE_KIND, MEDIA_SOURCE_KIND, VOICE_SOURCE_KIND])
+def test_media_source_kinds_map_to_media_dispatch(source_kind: str) -> None:
+    """Coalescing retries must use the callback kind owned by dispatch obligations."""
+    assert callback_kind_for_source_kind(source_kind) is DispatchCallbackKind.MEDIA
+
+
+def test_text_source_kind_maps_to_message_dispatch() -> None:
+    """Ordinary text retries must return to the message callback owner."""
+    assert callback_kind_for_source_kind("message") is DispatchCallbackKind.MESSAGE
 
 
 def _unknown_event(event_id: str, event_type: str) -> nio.UnknownEvent:

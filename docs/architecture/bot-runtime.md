@@ -60,13 +60,14 @@ Matrix callback
 ## Durable Dispatch Boundary
 
 Nio pre-fanout admission callbacks persist each correctness-critical Matrix timeline callback before any ordinary event callback can run.
-Each exact Matrix principal and entity stores pending replay payloads and permanent compact tombstones in its own `tracking/dispatch_obligations-<identity-sha256>.sqlite3` file.
+Each exact Matrix principal and entity stores pending replay payloads and permanent compact tombstones in its own `tracking/dispatch_obligations-<entity>-<principal-sha256-prefix>.sqlite3` file.
 This file boundary prevents one entity's admission write from waiting on another entity's SQLite write transaction.
 Its exact key combines the Matrix principal, entity, source event, and callback kind, while pending rows retain the original room and event source for replay.
 Settled rows become permanent exact-key tombstones and atomically scrub that replay payload, keeping terminal truth compact without allowing an old callback to reappear.
 Each entity database therefore grows by one compact row per exact callback over the lifetime of the instance.
 Operators can inspect growth by running `SELECT state, COUNT(*) FROM dispatch_obligations GROUP BY state;` against each dispatch-obligation database.
 Terminal rows must not be deleted unless duplicate callback execution after future Matrix redelivery is acceptable.
+Classic Sync tokens are opaque and may be invalidated, forcing a no-`since` sync whose limited timeline backfill can redeliver an older event, so there is no checkpoint-relative pruning frontier that preserves exact de-duplication.
 Successful and intentionally ignored callbacks settle explicitly, while failures and cancellations remain pending for direct startup recovery.
 Callback failures remain autonomously retry-owned with capped exponential backoff until they settle or deterministic corruption parks them for operator repair.
 Recovery parses and invokes pending work without depending on a later Classic Sync token or Sliding Sync position.
@@ -77,8 +78,10 @@ Deleting an unrecoverable pending row is a last resort that accepts losing that 
 Message and media obligations remain pending when coalescing or a pending `TurnStore` record defers them, then yield only to durably persisted terminal turn truth.
 Raw sync-cache continuity remains owned separately by `SyncCacheTrust`, so a durable pending dispatch obligation is sufficient to preserve a certified checkpoint.
 Classic Sync response-owned lifecycle hooks and their durable de-duplication markers complete before `SyncCacheTrust` certifies the response checkpoint.
+Live `room-member-joined` hooks are at-least-once because hook emission happens before the durable seen marker, so a marker write failure replays the hook instead of losing it.
 Invite and response-owned lifecycle paths use the same runner directly because they are outside nio timeline fanout.
 The matching ordinary nio event callbacks only load and execute already-persisted work after every admission callback succeeds, and may then continue in the background.
+Auxiliary call-manager membership, unknown-event, and to-device callbacks plus desktop pairing receivers remain best-effort because they do not share a stable durable callback identity, so their failures are logged without replay ownership.
 
 ## Completed Simplifications
 

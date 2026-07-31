@@ -96,8 +96,8 @@ from .dispatch_obligations import (
     DispatchCallbackKind,
     DispatchObligationRunner,
     DispatchObligationStore,
+    callback_kind_for_source_kind,
 )
-from .dispatch_source import IMAGE_SOURCE_KIND, MEDIA_SOURCE_KIND, VOICE_SOURCE_KIND
 from .edit_regenerator import EditRegenerator, EditRegeneratorDeps
 from .entity_rooms import get_rooms_for_entity
 from .inbound_turn_normalizer import InboundTurnNormalizer, InboundTurnNormalizerDeps
@@ -109,7 +109,7 @@ from .matrix.client_room_admin import get_joined_rooms
 from .matrix.client_session import PermanentMatrixStartupError
 from .matrix.room_member_joins import (
     RoomMemberJoin,
-    emit_room_member_join_once,
+    emit_room_member_join_at_least_once,
     record_room_member_joins_seen_from_events,
     room_member_sync_state_plan,
     room_member_sync_timeline_events,
@@ -1137,18 +1137,6 @@ class AgentBot:
             cast("Any", self.client).next_batch = None
         return decision
 
-    def _apply_sync_response_decision(
-        self,
-        decision: SyncCertificationDecision,
-        *,
-        cache_result: SyncCacheWriteResult,
-    ) -> SyncCertificationDecision:
-        """Advance sync continuity after prerequisite durable work completes."""
-        applied = self._sync_cache_trust.apply_response(decision, cache_result=cache_result)
-        if applied.reset_client_token and self.client is not None:
-            cast("Any", self.client).next_batch = None
-        return applied
-
     def _rewind_sync_after_pre_certification_failure(self) -> None:
         """Replay a classic sync that failed before its position was certified."""
         client = self.client
@@ -1161,28 +1149,21 @@ class AgentBot:
             has_retry_token=retry_token is not None,
         )
 
-    def _record_dispatch_persist_failure(self) -> None:
-        """Latch rejected source work until its containing response is rejected."""
-        self._sync_cache_trust.record_dispatch_persist_failure()
-        self._rewind_sync_after_pre_certification_failure()
-
-    def _rewind_unseen_dispatch_persist_failure(self) -> bool:
-        """Rewind when trust reports an unseen durable-acceptance rejection."""
-        if not self._sync_cache_trust.consume_dispatch_persist_failure():
-            return False
-        client = self.client
-        retry_token = self._sync_cache_trust.retry_token()
-        if client is not None and cast("Any", client).next_batch != retry_token:
-            self._rewind_sync_after_pre_certification_failure()
-        return True
-
-    def _handle_pre_certification_failure(self) -> None:
-        """Rewind one failed response and consume any durable-acceptance rejection."""
-        if self._rewind_unseen_dispatch_persist_failure():
-            return
+    def _rewind_sync_if_token_advanced(self) -> None:
+        """Rewind only when nio advanced beyond the last certified position."""
         client = self.client
         if client is not None and cast("Any", client).next_batch != self._sync_cache_trust.retry_token():
             self._rewind_sync_after_pre_certification_failure()
+
+    def _record_dispatch_persist_failure(self) -> None:
+        """Latch rejected source work until its containing response is rejected."""
+        self._sync_cache_trust.record_dispatch_persist_failure()
+        self._rewind_sync_if_token_advanced()
+
+    def _handle_pre_certification_failure(self) -> None:
+        """Rewind one failed response and consume any durable-acceptance rejection."""
+        self._sync_cache_trust.reject_response_before_certification()
+        self._rewind_sync_if_token_advanced()
 
     def _apply_sync_response_after_dispatch_acceptance(
         self,
@@ -1192,9 +1173,15 @@ class AgentBot:
         room_member_join_hook_plan: _RoomMemberJoinSyncHookPlan,
     ) -> tuple[SyncCertificationDecision, _RoomMemberJoinSyncHookPlan, bool]:
         """Apply certification only when every source callback reached durable ownership."""
-        if self._rewind_unseen_dispatch_persist_failure():
+        applied, rejected = self._sync_cache_trust.apply_response_after_dispatch_acceptance(
+            decision,
+            cache_result=cache_result,
+        )
+        if rejected:
+            self._rewind_sync_if_token_advanced()
             return decision, _RoomMemberJoinSyncHookPlan(arm_after_response=False), True
-        applied = self._apply_sync_response_decision(decision, cache_result=cache_result)
+        if applied.reset_client_token and self.client is not None:
+            cast("Any", self.client).next_batch = None
         if applied.reset_client_token:
             room_member_join_hook_plan = _RoomMemberJoinSyncHookPlan(arm_after_response=False)
         return applied, room_member_join_hook_plan, False
@@ -1895,15 +1882,8 @@ class AgentBot:
         )
 
     def _settle_turn_dispatch_obligations(self, event_ids: tuple[str, ...]) -> None:
-        """Replace pending turn-backed obligations with durable TurnStore truth."""
-        try:
-            self._dispatch_obligation_store.settle_pending_from_turn_store(event_ids)
-        except Exception:
-            self.logger.exception(
-                "turn_dispatch_obligation_settlement_failed",
-                event_ids=event_ids,
-            )
-            self._dispatch_obligation_runner.retry_turn_settlement(event_ids)
+        """Hand terminal obligation compaction to the event-loop retry owner."""
+        self._dispatch_obligation_runner.retry_turn_settlement(event_ids)
 
     def _room_for_dispatch_obligation(self, room_id: str) -> nio.MatrixRoom:
         """Resolve one recovery room without depending on a new sync response."""
@@ -1919,14 +1899,9 @@ class AgentBot:
     def _retry_failed_coalesced_dispatch(self, pending_events: tuple[PendingEvent, ...]) -> None:
         """Return failed gate sources to their exact durable callback owner."""
         for pending_event in pending_events:
-            callback_kind = (
-                DispatchCallbackKind.MEDIA
-                if pending_event.source_kind in {IMAGE_SOURCE_KIND, MEDIA_SOURCE_KIND, VOICE_SOURCE_KIND}
-                else DispatchCallbackKind.MESSAGE
-            )
             self._dispatch_obligation_runner.retry_pending_turn_source(
                 pending_event.event.event_id,
-                callback_kind,
+                callback_kind_for_source_kind(pending_event.source_kind),
             )
 
     def _log_matrix_event_callback_started(
@@ -2008,7 +1983,7 @@ class AgentBot:
         if not self.hook_registry.has_hooks(EVENT_ROOM_MEMBER_JOINED):
             return
 
-        await emit_room_member_join_once(
+        await emit_room_member_join_at_least_once(
             room,
             event,
             config=self.config,
@@ -2195,17 +2170,12 @@ class AgentBot:
                 # active turn; the sender's lane slot must settle now, not at
                 # response completion.
                 await reservation_owner.release()
-                try:
-                    await self._turn_controller.handle_interactive_selection(
-                        room,
-                        selection=result,
-                        user_id=event.sender,
-                        source_event_id=event.event_id,
-                    )
-                    interactive.commit_selection(result)
-                except BaseException:
-                    interactive.restore_selection(result)
-                    raise
+                await self._turn_controller.handle_interactive_selection(
+                    room,
+                    selection=result,
+                    user_id=event.sender,
+                    source_event_id=event.event_id,
+                )
                 return
         finally:
             await reservation_owner.release()

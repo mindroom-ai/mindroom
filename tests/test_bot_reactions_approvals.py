@@ -205,7 +205,7 @@ class TestAgentBot(AgentBotTestBase):
             with (
                 patch.object(
                     bot._turn_controller,
-                    "handle_interactive_selection",
+                    "_execute_interactive_selection",
                     new=AsyncMock(side_effect=OSError("pending write failed")),
                 ),
                 pytest.raises(OSError, match="pending write failed"),

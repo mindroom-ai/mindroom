@@ -40,6 +40,8 @@ _LEDGER_RECORDS_KEY = "records"
 # Let independent agent ledgers make progress without allowing unbounded
 # concurrent durable writes and fsync pressure.
 _PERSIST_EXECUTOR_MAX_WORKERS = 8
+_PERSIST_RETRY_INITIAL_DELAY_SECONDS = 0.05
+_PERSIST_RETRY_MAX_DELAY_SECONDS = 5.0
 
 
 @dataclass(frozen=True)
@@ -482,6 +484,7 @@ class _PersistRequest:
 
     records: tuple[TurnRecord, ...]
     completion: Future[None] | None
+    on_persisted: Callable[[], None] | None = None
 
 
 @dataclass
@@ -494,6 +497,9 @@ class _LedgerState:
     persist_lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
     pending_persists: list[_PersistRequest] = field(default_factory=list, repr=False)
     persist_active: bool = False
+    persist_retry_timer: threading.Timer | None = field(default=None, repr=False)
+    persist_retry_delay_seconds: float = _PERSIST_RETRY_INITIAL_DELAY_SECONDS
+    shutting_down: bool = False
 
 
 _LEDGER_STATES: dict[str, _LedgerState] = {}
@@ -530,7 +536,14 @@ def _reset_handled_turn_ledger_runtime() -> None:
     with _LEDGER_RUNTIME_LOCK:
         executor = _PERSIST_EXECUTOR
         _PERSIST_EXECUTOR = None
+        states = tuple(_LEDGER_STATES.values())
         _LEDGER_STATES.clear()
+    for state in states:
+        with state.persist_lock:
+            state.shutting_down = True
+            if state.persist_retry_timer is not None:
+                state.persist_retry_timer.cancel()
+                state.persist_retry_timer = None
     if executor is not None:
         executor.shutdown(wait=True)
 
@@ -709,26 +722,20 @@ class HandledTurnLedger:
     ) -> Future[None]:
         """Queue one write-behind disk merge for records already applied to memory."""
         completion: Future[None] = Future()
-        if on_persisted is not None:
-
-            def notify_after_persist(done: Future[None]) -> None:
-                try:
-                    done.result()
-                except Exception:
-                    return
-                on_persisted(turn_record)
-
-            completion.add_done_callback(notify_after_persist)
         with self._state.persist_lock:
             self._state.pending_persists.append(
-                _PersistRequest(records=(turn_record,), completion=completion),
+                _PersistRequest(
+                    records=(turn_record,),
+                    completion=completion,
+                    on_persisted=(lambda: on_persisted(turn_record)) if on_persisted is not None else None,
+                ),
             )
             self._ensure_persist_drain_locked()
         return completion
 
     def _ensure_persist_drain_locked(self) -> None:
         """Start this ledger's sole drain while ``persist_lock`` is held."""
-        if self._state.persist_active:
+        if self._state.persist_active or self._state.shutting_down:
             return
         self._state.persist_active = True
         try:
@@ -744,6 +751,7 @@ class HandledTurnLedger:
             with self._state.persist_lock:
                 if not self._state.pending_persists:
                     self._state.persist_active = False
+                    self._reset_persist_retry_locked()
                     return
                 requests = tuple(self._state.pending_persists)
                 self._state.pending_persists.clear()
@@ -752,6 +760,7 @@ class HandledTurnLedger:
                 if not retry_available and all(request.completion is None for request in requests):
                     self._state.pending_persists[0:0] = requests
                     self._state.persist_active = False
+                    self._schedule_persist_retry_locked()
                     return
             records = tuple(record for request in requests for record in request.records)
             try:
@@ -760,7 +769,6 @@ class HandledTurnLedger:
             except Exception as exc:
                 self._requeue_failed_persist_batch(
                     requests,
-                    records,
                     exc,
                     retry_available=retry_available,
                 )
@@ -771,12 +779,53 @@ class HandledTurnLedger:
             for request in requests:
                 if request.completion is not None and not request.completion.done():
                     request.completion.set_result(None)
+                if request.on_persisted is not None:
+                    try:
+                        request.on_persisted()
+                    except Exception:
+                        logger.exception("handled_turn_persist_notification_failed", agent=self.agent_name)
             retry_available = True
+
+    def _schedule_persist_retry_locked(self) -> None:
+        """Schedule one delayed autonomous retry without occupying a persist worker."""
+        if self._state.shutting_down:
+            return
+        existing_retry_timer = self._state.persist_retry_timer
+        if existing_retry_timer is not None and existing_retry_timer.is_alive():
+            return
+        delay_seconds = self._state.persist_retry_delay_seconds
+
+        def retry_pending() -> None:
+            self._retry_pending_persists(scheduled_retry_timer)
+
+        scheduled_retry_timer = threading.Timer(delay_seconds, retry_pending)
+        scheduled_retry_timer.daemon = True
+        self._state.persist_retry_timer = scheduled_retry_timer
+        self._state.persist_retry_delay_seconds = min(
+            delay_seconds * 2,
+            _PERSIST_RETRY_MAX_DELAY_SECONDS,
+        )
+        scheduled_retry_timer.start()
+
+    def _retry_pending_persists(self, retry_timer: threading.Timer) -> None:
+        """Return delayed failed records to their ledger's sole drain."""
+        with self._state.persist_lock:
+            if self._state.persist_retry_timer is not retry_timer:
+                return
+            self._state.persist_retry_timer = None
+            self._ensure_persist_drain_locked()
+
+    def _reset_persist_retry_locked(self) -> None:
+        """Reset retry backoff after the pending queue drains successfully."""
+        retry_timer = self._state.persist_retry_timer
+        if retry_timer is not None:
+            retry_timer.cancel()
+            self._state.persist_retry_timer = None
+        self._state.persist_retry_delay_seconds = _PERSIST_RETRY_INITIAL_DELAY_SECONDS
 
     def _requeue_failed_persist_batch(
         self,
         requests: tuple[_PersistRequest, ...],
-        records: tuple[TurnRecord, ...],
         error: Exception,
         *,
         retry_available: bool,
@@ -793,12 +842,18 @@ class HandledTurnLedger:
             if retry_available:
                 self._state.pending_persists[0:0] = requests
                 return
-            # Keep the records for a later drain, but drop their waiters: the
-            # callers below are about to be told this attempt failed.
-            self._state.pending_persists.insert(
-                0,
-                _PersistRequest(records=records, completion=None),
+            # Keep records and post-persist notifications for autonomous retry,
+            # but drop waiters that are about to receive this bounded failure.
+            retry_requests = tuple(
+                _PersistRequest(
+                    records=request.records,
+                    completion=None,
+                    on_persisted=request.on_persisted,
+                )
+                for request in requests
+                if request.records
             )
+            self._state.pending_persists[0:0] = retry_requests
         attempted_completions = tuple(
             request.completion
             for request in requests

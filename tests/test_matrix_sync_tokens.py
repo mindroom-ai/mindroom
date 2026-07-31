@@ -17,7 +17,7 @@ import pytest
 from structlog.testing import capture_logs
 
 from mindroom.background_tasks import wait_for_background_tasks
-from mindroom.bot import AgentBot, TeamBot, _create_best_effort_task_wrapper
+from mindroom.bot import AgentBot, TeamBot, _create_best_effort_task_wrapper, _RoomMemberJoinSyncHookPlan
 from mindroom.coalescing import CoalescingDrainResult, CoalescingGate, IngressAdmissionClosedError, ReadyPendingEvent
 from mindroom.coalescing_batch import CoalescedBatch, CoalescingKey, PendingEvent
 from mindroom.config.agent import AgentConfig
@@ -113,11 +113,11 @@ def test_dispatch_recovery_room_contract_prefers_cache_and_guarantees_room_id(tm
     assert bot._room_for_dispatch_obligation("!missing:localhost").room_id == "!missing:localhost"
 
 
-def test_terminal_turn_settlement_failure_keeps_same_runtime_retry_owner(
+def test_terminal_turn_settlement_hands_sqlite_work_to_event_loop_owner(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A failed callback-tombstone compaction must schedule an autonomous retry."""
+    """Handled-turn persistence callbacks must not run obligation SQLite inline."""
     bot = _agent_bot(tmp_path)
     retry_turn_settlement = MagicMock()
     monkeypatch.setattr(
@@ -126,14 +126,12 @@ def test_terminal_turn_settlement_failure_keeps_same_runtime_retry_owner(
         retry_turn_settlement,
         raising=False,
     )
-    monkeypatch.setattr(
-        bot._dispatch_obligation_store,
-        "settle_pending_from_turn_store",
-        MagicMock(side_effect=OSError("dispatch store unavailable")),
-    )
+    settle_pending = MagicMock()
+    monkeypatch.setattr(bot._dispatch_obligation_store, "settle_pending_from_turn_store", settle_pending)
 
     bot._settle_turn_dispatch_obligations(("$message",))
 
+    settle_pending.assert_not_called()
     retry_turn_settlement.assert_called_once_with(("$message",))
 
 
@@ -1201,7 +1199,11 @@ def test_cache_scope_cleanup_between_plan_and_apply_forces_tokenless_recovery(tm
     )
 
     assert bot._sync_cache_trust.invalidate_for_cache_scope_cleanup()
-    bot._apply_sync_response_decision(decision, cache_result=cache_result)
+    bot._apply_sync_response_after_dispatch_acceptance(
+        decision,
+        cache_result=cache_result,
+        room_member_join_hook_plan=_RoomMemberJoinSyncHookPlan(),
+    )
 
     assert bot.client.next_batch is None
     assert bot._sync_cache_trust.state is SyncTrustState.UNCERTAIN

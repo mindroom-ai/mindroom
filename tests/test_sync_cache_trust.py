@@ -146,6 +146,39 @@ def test_dispatch_persist_failure_is_consumed_once_per_epoch(tmp_path: Path) -> 
     assert trust.consume_dispatch_persist_failure()
 
 
+def test_dispatch_acceptance_policy_rejects_failed_response_then_applies_next(tmp_path: Path) -> None:
+    """SyncCacheTrust must own the failure-epoch gate around planned certification."""
+    trust, _cache, _runtime = _trust(tmp_path)
+    cache_result = SyncCacheWriteResult(complete=True)
+    failed_decision = trust.plan_response(
+        next_batch="s_failed",
+        cache_result=cache_result,
+        first_sync=False,
+    )
+    trust.record_dispatch_persist_failure()
+
+    rejected_decision, rejected = trust.apply_response_after_dispatch_acceptance(
+        failed_decision,
+        cache_result=cache_result,
+    )
+
+    assert rejected is True
+    assert rejected_decision is failed_decision
+    assert trust.state is SyncTrustState.COLD
+    next_decision = trust.plan_response(
+        next_batch="s_next",
+        cache_result=cache_result,
+        first_sync=False,
+    )
+    applied_decision, rejected = trust.apply_response_after_dispatch_acceptance(
+        next_decision,
+        cache_result=cache_result,
+    )
+    assert rejected is False
+    assert applied_decision is next_decision
+    assert trust.state is SyncTrustState.CERTIFIED
+
+
 def test_cache_scope_invalidation_rejects_stale_certification_plan(tmp_path: Path) -> None:
     """A plan made before cache cleanup cannot restore or persist sync continuity."""
     trust, _cache, _runtime = _trust(tmp_path)

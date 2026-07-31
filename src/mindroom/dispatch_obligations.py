@@ -19,6 +19,7 @@ import nio
 from typing_extensions import TypeIs
 
 from mindroom.background_tasks import create_background_task
+from mindroom.dispatch_source import IMAGE_SOURCE_KIND, MEDIA_SOURCE_KIND, VOICE_SOURCE_KIND
 from mindroom.logging_config import get_logger
 from mindroom.matrix.media import MATRIX_MEDIA_EVENT_TYPES, MatrixMediaEvent, parse_matrix_media_event_source
 
@@ -75,8 +76,18 @@ class _DispatchObligationCorruptionError(RuntimeError):
 
 
 def _database_name(principal_id: str, entity_name: str) -> str:
-    identity_digest = hashlib.sha256(f"{principal_id}\0{entity_name}".encode()).hexdigest()
-    return f"dispatch_obligations-{identity_digest}.sqlite3"
+    if ".." in entity_name or "/" in entity_name or "\\" in entity_name:
+        msg = f"Invalid dispatch-obligation entity name: {entity_name!r}"
+        raise ValueError(msg)
+    principal_digest = hashlib.sha256(principal_id.encode()).hexdigest()[:12]
+    return f"dispatch_obligations-{entity_name}-{principal_digest}.sqlite3"
+
+
+def callback_kind_for_source_kind(source_kind: str) -> DispatchCallbackKind:
+    """Return the durable callback owner for one coalescing source kind."""
+    if source_kind in {IMAGE_SOURCE_KIND, MEDIA_SOURCE_KIND, VOICE_SOURCE_KIND}:
+        return DispatchCallbackKind.MEDIA
+    return DispatchCallbackKind.MESSAGE
 
 
 @dataclass(frozen=True, slots=True)
@@ -132,6 +143,7 @@ class DispatchObligationStore:
             msg = "Dispatch obligation store requires an exact principal and entity"
             raise ValueError(msg)
         self.tracking_path = Path(self.tracking_path)
+        self.tracking_path.mkdir(parents=True, exist_ok=True)
         self._database_path = self.tracking_path / _database_name(
             self.principal_id,
             self.entity_name,
@@ -142,7 +154,6 @@ class DispatchObligationStore:
             self._initialize_schema(connection)
 
     def _connect(self) -> sqlite3.Connection:
-        self.tracking_path.mkdir(parents=True, exist_ok=True)
         connection = sqlite3.connect(self._database_path)
         connection.row_factory = sqlite3.Row
         connection.execute(f"PRAGMA busy_timeout = {_SQLITE_BUSY_TIMEOUT_MILLISECONDS}")
@@ -927,7 +938,6 @@ class DispatchObligationRunner:
         retry_delay_seconds = self._retry_initial_delay_seconds
         try:
             while self._turn_settlement_retry_ids:
-                await asyncio.sleep(retry_delay_seconds)
                 source_event_ids = tuple(self._turn_settlement_retry_ids)
                 try:
                     await _run_owned_store_operation(
@@ -941,12 +951,14 @@ class DispatchObligationRunner:
                         "turn_dispatch_obligation_settlement_retry_failed",
                         source_event_ids=source_event_ids,
                     )
+                    await asyncio.sleep(retry_delay_seconds)
+                    retry_delay_seconds = min(
+                        retry_delay_seconds * 2,
+                        self._retry_max_delay_seconds,
+                    )
                 else:
                     self._turn_settlement_retry_ids.difference_update(source_event_ids)
-                retry_delay_seconds = min(
-                    retry_delay_seconds * 2,
-                    self._retry_max_delay_seconds,
-                )
+                    retry_delay_seconds = self._retry_initial_delay_seconds
         finally:
             self._turn_settlement_retry_task = None
 
