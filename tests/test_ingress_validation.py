@@ -70,7 +70,7 @@ def test_trusted_relay_resolves_requester_and_allows_self_authored_ingress(tmp_p
             original_sender_id=human_sender,
         ),
         config=config,
-        mention_user_id=ids["test_agent"].full_id,
+        intended_responder_user_id=ids["test_agent"].full_id,
     )
 
     assert content[ORIGINAL_SENDER_KEY] == human_sender

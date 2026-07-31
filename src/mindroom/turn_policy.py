@@ -10,9 +10,7 @@ from mindroom.authorization import is_sender_allowed_for_agent_reply, responder_
 from mindroom.constants import MATRIX_MESSAGE_TARGET_ENRICHMENT_KEY, ROUTER_AGENT_NAME, RuntimePaths
 from mindroom.dispatch_source import (
     ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
-    TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
     ScheduledHistoryBudget,
-    is_auto_resume_relay_body,
 )
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.hooks import (
@@ -599,17 +597,7 @@ class TurnPolicy:
         context = dispatch.context
         planning_thread_history = context.planning_thread_history
         requester_user_id = dispatch.requester_user_id
-        if (
-            dispatch.envelope.source_kind == TRUSTED_INTERNAL_RELAY_SOURCE_KIND
-            and is_auto_resume_relay_body(dispatch.envelope.body)
-            and not context.mentioned_agents
-            and not context.has_non_agent_mentions
-        ):
-            plan = _DispatchPlan(
-                kind="respond",
-                response_action=ResponseAction(kind="individual"),
-            )
-        elif is_router_only_agent_mention(
+        if is_router_only_agent_mention(
             context.mentioned_agents,
             has_non_agent_mentions=context.has_non_agent_mentions,
             config=self.deps.runtime.config,

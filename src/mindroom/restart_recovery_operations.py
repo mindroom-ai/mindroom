@@ -82,9 +82,14 @@ class RoomRecoveryRequest:
     startup_cutoff_ms: int | None
     terminal_interrupted_only: bool
 
+    @property
+    def key(self) -> tuple[str, int | None, bool]:
+        """Return the canonical semantic request key."""
+        return self.room_id, self.startup_cutoff_ms, self.terminal_interrupted_only
+
 
 @dataclass(frozen=True)
-class RoomRecoveryResult:
+class _RoomRecoveryResult:
     """Result of one shared room recovery attempt."""
 
     interrupted_threads: tuple[InterruptedThread, ...] = ()
@@ -101,14 +106,14 @@ class RestartDeliveryOutcome(Enum):
 
 type _RecoverRoom = Callable[
     [tuple[RecoveryOwner, ...], RoomRecoveryRequest, frozenset[str], Config],
-    Awaitable[RoomRecoveryResult],
+    Awaitable[_RoomRecoveryResult],
 ]
 type _TargetFreshness = Callable[
     [RecoveryOwner, InterruptedThread, Config],
     Awaitable[InterruptedTargetFreshness],
 ]
 type _DeliverTarget = Callable[
-    [RecoveryOwner, RecoveryOwner, InterruptedThread, Config],
+    [RecoveryOwner, InterruptedThread, Config],
     Coroutine[Any, Any, RestartDeliveryOutcome],
 ]
 
@@ -205,7 +210,7 @@ async def _recover_room(
     request: RoomRecoveryRequest,
     owner_user_ids: frozenset[str],
     config: Config,
-) -> RoomRecoveryResult:
+) -> _RoomRecoveryResult:
     """Recover joined owners now while retaining only unavailable owners."""
     assert owners
     membership_results = await asyncio.gather(
@@ -236,7 +241,7 @@ async def _recover_room(
         joined_owners.append(owner)
 
     if not joined_owners:
-        return RoomRecoveryResult(
+        return _RoomRecoveryResult(
             retry_owner_user_ids=frozenset(retry_owner_user_ids),
         )
 
@@ -271,7 +276,7 @@ async def _recover_room(
         retry_owner_count=len(retry_cleanup_owner_user_ids),
         room_id=request.room_id,
     )
-    return RoomRecoveryResult(
+    return _RoomRecoveryResult(
         interrupted_threads=cleanup_result.interrupted_threads,
         retry_owner_user_ids=frozenset(retry_cleanup_owner_user_ids),
     )
@@ -287,7 +292,7 @@ def build_matrix_restart_recovery_operations(runtime_paths: RuntimePaths) -> Res
         request: RoomRecoveryRequest,
         owner_user_ids: frozenset[str],
         config: Config,
-    ) -> RoomRecoveryResult:
+    ) -> _RoomRecoveryResult:
         return await _recover_room(
             membership_snapshots,
             runtime_paths,
@@ -310,7 +315,6 @@ def build_matrix_restart_recovery_operations(runtime_paths: RuntimePaths) -> Res
         )
 
     async def deliver_target(
-        sender: RecoveryOwner,
         owner: RecoveryOwner,
         target: InterruptedThread,
         config: Config,
@@ -327,7 +331,7 @@ def build_matrix_restart_recovery_operations(runtime_paths: RuntimePaths) -> Res
         content = build_auto_resume_content(
             target,
             config=config,
-            mention_user_id=(None if sender.user_id == owner.user_id else owner.user_id),
+            intended_responder_user_id=owner.user_id,
         )
         transaction_id = str(
             uuid5(
@@ -346,7 +350,7 @@ def build_matrix_restart_recovery_operations(runtime_paths: RuntimePaths) -> Res
         )
         try:
             delivered = await send_message_result(
-                sender.client,
+                owner.client,
                 target.room_id,
                 content,
                 transaction_id=transaction_id,
@@ -355,7 +359,7 @@ def build_matrix_restart_recovery_operations(runtime_paths: RuntimePaths) -> Res
             next_delivery_at = asyncio.get_running_loop().time() + _AUTO_RESUME_DELIVERY_INTERVAL_SECONDS
         if delivered is None:
             return RestartDeliveryOutcome.RETRY
-        sender.conversation_cache.notify_outbound_message(
+        owner.conversation_cache.notify_outbound_message(
             target.room_id,
             delivered.event_id,
             delivered.content_sent,

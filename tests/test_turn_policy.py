@@ -507,8 +507,10 @@ async def test_router_ignores_thread_with_unavailable_policy_history(config: Con
 
 
 @pytest.mark.asyncio
-async def test_router_responds_to_trusted_auto_resume_with_unavailable_history(config: Config) -> None:
-    """A router-owned interrupted turn resumes despite deferred thread hydration."""
+async def test_router_does_not_infer_auto_resume_responder_from_unmentioned_relay(
+    config: Config,
+) -> None:
+    """An unmentioned internal relay must not make the router infer ownership."""
     policy = _policy_for(config, ROUTER_AGENT_NAME)
     room = _room_with_members(
         _SENDER,
@@ -530,9 +532,50 @@ async def test_router_responds_to_trusted_auto_resume_with_unavailable_history(c
 
     plan = await _plan(policy, room, dispatch)
 
-    assert plan.kind == "respond"
-    assert plan.response_action is not None
-    assert plan.response_action.kind == "individual"
+    assert plan.kind == "ignore"
+    assert plan.ignore_reason == "router"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("full_history", [True, False])
+async def test_explicit_auto_resume_owner_is_only_responder(
+    config: Config,
+    *,
+    full_history: bool,
+) -> None:
+    """An explicit resume target must select only that owner with any history state."""
+    owner_id = _entity_id(config, "general")
+    room = _room_with_members(
+        _SENDER,
+        _entity_id(config, ROUTER_AGENT_NAME).full_id,
+        owner_id.full_id,
+        _entity_id(config, "research").full_id,
+    )
+    history = [
+        make_visible_message(sender=_SENDER, body="please help"),
+        make_visible_message(sender=owner_id.full_id, body="interrupted"),
+    ]
+    responding_entities: set[str] = set()
+
+    for entity_name in (ROUTER_AGENT_NAME, "general", "research"):
+        context = _context(
+            mentioned=[owner_id],
+            am_i_mentioned=entity_name == "general",
+            thread_id="$thread:localhost",
+            thread_history=history,
+            full_history=full_history,
+        )
+        dispatch = _dispatch(
+            context,
+            agent_name=entity_name,
+            prompt=f"@General {AUTO_RESUME_MESSAGE}",
+            source_kind=TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
+        )
+        plan = await _plan(_policy_for(config, entity_name), room, dispatch)
+        if plan.kind == "respond":
+            responding_entities.add(entity_name)
+
+    assert responding_entities == {"general"}
 
 
 def test_prepared_dispatch_rejects_mismatched_envelope_target() -> None:

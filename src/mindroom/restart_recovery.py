@@ -1,9 +1,9 @@
-"""Serialized restart recovery with semantic retry state."""
+"""Serialized restart recovery with per-owner semantic retry state."""
 
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 
 from mindroom.logging_config import get_logger
@@ -14,7 +14,6 @@ from mindroom.restart_recovery_operations import (
     RestartDeliveryOutcome,
     RestartRecoveryOperations,
     RoomRecoveryRequest,
-    RoomRecoveryResult,
 )
 
 if TYPE_CHECKING:
@@ -27,6 +26,7 @@ logger = get_logger(__name__)
 
 type _TargetKey = tuple[str, str, str]
 type _RoomKey = tuple[str, int | None, bool]
+type _JobKey = tuple[_RoomKey, str]
 
 
 _MAX_CONCURRENT_MATRIX_READ_PHASES = 8
@@ -34,44 +34,40 @@ _MAX_RESTART_RECOVERY_ATTEMPTS = 6
 
 
 @dataclass(frozen=True)
-class _OwnedTarget:
-    """One interrupted target bound to its exact recovery owner."""
+class _OwnerRoomWork:
+    """One exact owner's retained work for one semantic room request."""
 
+    request: RoomRecoveryRequest
     owner_user_id: str
-    target: InterruptedThread
+    generation: object | None
+    targets: tuple[InterruptedThread, ...] = ()
+    matrix_attempt: int = 0
+    readiness_probe: int = 0
+    due_at: float | None = 0.0
+
+    @property
+    def key(self) -> _JobKey:
+        return self.request.key, self.owner_user_id
+
+    @property
+    def room_id(self) -> str:
+        return self.request.room_id
 
 
 @dataclass(frozen=True)
-class _RoomWork:
-    """All retained recovery work for one room scan scope."""
+class _RoomLease:
+    """One shared room scan over exact per-owner jobs."""
 
-    room_id: str
-    startup_cutoff_ms: int | None
-    terminal_interrupted_only: bool
-    owner_user_ids: frozenset[str] = frozenset()
-    targets: tuple[_OwnedTarget, ...] = ()
-    attempt: int = 0
-    due_at: float = 0.0
+    request: RoomRecoveryRequest
+    jobs: tuple[_OwnerRoomWork, ...]
 
     @property
-    def key(self) -> _RoomKey:
-        return (
-            self.room_id,
-            self.startup_cutoff_ms,
-            self.terminal_interrupted_only,
-        )
-
-    @property
-    def request(self) -> RoomRecoveryRequest:
-        return RoomRecoveryRequest(
-            room_id=self.room_id,
-            startup_cutoff_ms=self.startup_cutoff_ms,
-            terminal_interrupted_only=self.terminal_interrupted_only,
-        )
+    def room_id(self) -> str:
+        return self.request.room_id
 
     @property
     def all_owner_user_ids(self) -> frozenset[str]:
-        return self.owner_user_ids | frozenset(target.owner_user_id for target in self.targets)
+        return frozenset(job.owner_user_id for job in self.jobs)
 
 
 @dataclass(frozen=True)
@@ -91,13 +87,23 @@ class _TargetSettlement:
 
 
 @dataclass(frozen=True)
+class _OwnerAttemptResult:
+    """One leased owner's independent outcome."""
+
+    work: _OwnerRoomWork
+    owner: RecoveryOwner | None
+    retry_targets: tuple[InterruptedThread, ...] = ()
+    settlements: tuple[_TargetSettlement, ...] = ()
+    readiness_unavailable: bool = False
+    matrix_failed: bool = False
+    cancelled: bool = False
+
+
+@dataclass(frozen=True)
 class _RoomAttemptResult:
-    owners: Mapping[str, RecoveryOwner]
-    retry_owner_user_ids: frozenset[str]
-    retry_targets: tuple[_OwnedTarget, ...]
-    settlements: tuple[_TargetSettlement, ...]
-    collaborator_unavailable: bool = False
-    owner_discard_epochs: Mapping[str, int] = field(default_factory=dict)
+    """Independent owner outcomes from one shared room scan."""
+
+    outcomes: tuple[_OwnerAttemptResult, ...]
 
 
 def _restart_recovery_retry_delay(attempt: int) -> float:
@@ -109,43 +115,24 @@ def _target_version(target: InterruptedThread) -> tuple[int, str]:
     return target.timestamp_ms, target.target_event_id
 
 
-def _newest_targets(targets: tuple[_OwnedTarget, ...]) -> tuple[_OwnedTarget, ...]:
-    newest: dict[tuple[str, str], _OwnedTarget] = {}
-    for owned_target in targets:
-        target = owned_target.target
+def _newest_targets(targets: tuple[InterruptedThread, ...]) -> tuple[InterruptedThread, ...]:
+    newest: dict[str, InterruptedThread] = {}
+    for target in targets:
         if target.thread_id is None:
             continue
-        key = owned_target.owner_user_id, target.thread_id
-        current = newest.get(key)
-        if current is None or _target_version(target) > _target_version(current.target):
-            newest[key] = owned_target
+        current = newest.get(target.thread_id)
+        if current is None or _target_version(target) > _target_version(current):
+            newest[target.thread_id] = target
     return tuple(
         sorted(
             newest.values(),
-            key=lambda owned_target: (
-                owned_target.owner_user_id,
-                owned_target.target.thread_id or "",
-                _target_version(owned_target.target),
-            ),
+            key=lambda target: (target.thread_id or "", _target_version(target)),
         ),
     )
 
 
-def _merge_work(left: _RoomWork, right: _RoomWork) -> _RoomWork:
-    assert left.key == right.key
-    return _RoomWork(
-        room_id=left.room_id,
-        startup_cutoff_ms=left.startup_cutoff_ms,
-        terminal_interrupted_only=left.terminal_interrupted_only,
-        owner_user_ids=left.owner_user_ids | right.owner_user_ids,
-        targets=_newest_targets((*left.targets, *right.targets)),
-        attempt=min(left.attempt, right.attempt),
-        due_at=min(left.due_at, right.due_at),
-    )
-
-
 class RestartRecoveryCoordinator:
-    """Own room recovery leases and monotonic owner-target watermarks."""
+    """Own per-owner room jobs and monotonic owner-target watermarks."""
 
     def __init__(
         self,
@@ -159,13 +146,10 @@ class RestartRecoveryCoordinator:
         self._current_owners = current_owners
         self._operations = operations
         self._retry_delay = retry_delay
-        self._room_jobs: dict[_RoomKey, _RoomWork] = {}
+        self._room_jobs: dict[_JobKey, _OwnerRoomWork] = {}
         self._target_watermarks: dict[_TargetKey, _TargetWatermark] = {}
         self._completed_startup_scans: set[tuple[_RoomKey, str]] = set()
-        self._replacement_room_intents: set[tuple[str, str]] = set()
-        self._owner_discard_epochs: dict[str, int] = {}
-        self._ready_generations: dict[str, object] = {}
-        self._active_attempts: dict[asyncio.Task[_RoomAttemptResult], _RoomWork] = {}
+        self._active_attempts: dict[asyncio.Task[_RoomAttemptResult], _RoomLease] = {}
         self._matrix_read_slots = asyncio.Semaphore(_MAX_CONCURRENT_MATRIX_READ_PHASES)
         self._delivery_lock = asyncio.Lock()
         self._worker_task: asyncio.Task[None] | None = None
@@ -184,32 +168,25 @@ class RestartRecoveryCoordinator:
         self._ensure_worker()
 
     def owner_ready(self, owner_user_id: str) -> None:
-        """Refresh desired rooms and wake retained work for one owner."""
+        """Refresh one owner and grant retained work a fresh bounded budget."""
         self._settle_finished_attempts()
         owner = self._current_owners().get(owner_user_id)
         if owner is not None:
-            if owner.first_sync_complete:
-                self._ready_generations[owner_user_id] = owner.generation
-            else:
-                self._ready_generations.pop(owner_user_id, None)
             self._target_watermarks = {
                 key: watermark
                 for key, watermark in self._target_watermarks.items()
                 if key[0] != owner_user_id or watermark.generation is owner.generation
             }
+            self._refresh_owner_jobs(owner, grant_fresh_budget=True)
             self._enqueue_desired_rooms(owner)
-            self._enqueue_replacement_intents(owner_user_id)
-        due_at = asyncio.get_running_loop().time()
-        self._room_jobs = {
-            key: replace(work, due_at=due_at) if owner_user_id in work.all_owner_user_ids else work
-            for key, work in self._room_jobs.items()
-        }
         self._ensure_worker()
 
     def enqueue_replacement_rooms(self, owner_user_id: str, room_ids: set[str]) -> None:
         """Retain terminal interrupted-room handoffs across bot replacement."""
+        config = self._current_config()
+        if config is not None and not config.defaults.auto_resume_after_restart:
+            return
         for room_id in room_ids:
-            self._replacement_room_intents.add((owner_user_id, room_id))
             self._enqueue_request(
                 owner_user_id,
                 RoomRecoveryRequest(
@@ -217,31 +194,19 @@ class RestartRecoveryCoordinator:
                     startup_cutoff_ms=None,
                     terminal_interrupted_only=True,
                 ),
+                grant_fresh_budget=True,
             )
         self._ensure_worker()
 
     def discard_owner(self, owner_user_id: str) -> None:
-        """Discard one removed owner's work, watermark, and membership snapshot."""
-        self._owner_discard_epochs[owner_user_id] = self._owner_discard_epochs.get(owner_user_id, 0) + 1
-        retained_jobs: dict[_RoomKey, _RoomWork] = {}
-        for key, work in self._room_jobs.items():
-            retained = replace(
-                work,
-                owner_user_ids=work.owner_user_ids - {owner_user_id},
-                targets=tuple(target for target in work.targets if target.owner_user_id != owner_user_id),
-            )
-            if retained.owner_user_ids or retained.targets:
-                retained_jobs[key] = retained
-        self._room_jobs = retained_jobs
+        """Discard one removed owner's jobs, watermarks, and membership snapshot."""
+        self._room_jobs = {key: work for key, work in self._room_jobs.items() if work.owner_user_id != owner_user_id}
         self._target_watermarks = {
             key: watermark for key, watermark in self._target_watermarks.items() if key[0] != owner_user_id
         }
         self._completed_startup_scans = {key for key in self._completed_startup_scans if key[1] != owner_user_id}
-        self._replacement_room_intents = {
-            intent for intent in self._replacement_room_intents if intent[0] != owner_user_id
-        }
-        self._ready_generations.pop(owner_user_id, None)
         self._operations.discard_owner(owner_user_id)
+        self._wake.set()
 
     async def pause(self) -> None:
         """Pause before config mutation and drain active leases."""
@@ -254,9 +219,17 @@ class RestartRecoveryCoordinator:
             await asyncio.gather(task, return_exceptions=True)
 
     def resume(self) -> None:
-        """Resume retained work against current owner generations."""
+        """Resume retained work against current config and owner generations."""
         if self._stopped:
             return
+        config = self._current_config()
+        if config is not None and not config.defaults.auto_resume_after_restart:
+            self._room_jobs = {
+                key: work for key, work in self._room_jobs.items() if not work.request.terminal_interrupted_only
+            }
+        for owner in self._current_owners().values():
+            self._refresh_owner_jobs(owner, grant_fresh_budget=True)
+            self._enqueue_desired_rooms(owner)
         self._paused = False
         self._ensure_worker()
 
@@ -273,10 +246,28 @@ class RestartRecoveryCoordinator:
         self._room_jobs.clear()
         self._target_watermarks.clear()
         self._completed_startup_scans.clear()
-        self._replacement_room_intents.clear()
-        self._owner_discard_epochs.clear()
-        self._ready_generations.clear()
         await self._operations.close()
+
+    def _refresh_owner_jobs(
+        self,
+        owner: RecoveryOwner,
+        *,
+        grant_fresh_budget: bool,
+    ) -> None:
+        now = asyncio.get_running_loop().time()
+        for key, work in tuple(self._room_jobs.items()):
+            if work.owner_user_id != owner.user_id:
+                continue
+            generation_changed = work.generation is not owner.generation
+            if generation_changed or grant_fresh_budget:
+                self._room_jobs[key] = replace(
+                    work,
+                    generation=owner.generation,
+                    matrix_attempt=0,
+                    readiness_probe=0,
+                    due_at=now,
+                )
+        self._wake.set()
 
     def _enqueue_desired_rooms(self, owner: RecoveryOwner) -> None:
         if self._startup_cutoff_ms is None:
@@ -287,63 +278,41 @@ class RestartRecoveryCoordinator:
                 startup_cutoff_ms=self._startup_cutoff_ms,
                 terminal_interrupted_only=False,
             )
-            key = (
-                request.room_id,
-                request.startup_cutoff_ms,
-                request.terminal_interrupted_only,
-            )
-            if (key, owner.user_id) in self._completed_startup_scans or self._owner_has_pending_work(
-                key,
-                owner.user_id,
-            ):
+            key = request.key, owner.user_id
+            if (request.key, owner.user_id) in self._completed_startup_scans or key in self._room_jobs:
                 continue
             self._enqueue_request(owner.user_id, request)
 
-    def _enqueue_replacement_intents(self, owner_user_id: str) -> None:
-        for intent_owner_user_id, room_id in self._replacement_room_intents:
-            if intent_owner_user_id != owner_user_id:
-                continue
-            request = RoomRecoveryRequest(
-                room_id=room_id,
-                startup_cutoff_ms=None,
-                terminal_interrupted_only=True,
-            )
-            key = (
-                request.room_id,
-                request.startup_cutoff_ms,
-                request.terminal_interrupted_only,
-            )
-            if not self._owner_has_pending_work(key, owner_user_id):
-                self._enqueue_request(owner_user_id, request)
-
-    def _owner_has_pending_work(
+    def _enqueue_request(
         self,
-        key: _RoomKey,
         owner_user_id: str,
-    ) -> bool:
-        queued = self._room_jobs.get(key)
-        if queued is not None and owner_user_id in queued.all_owner_user_ids:
-            return True
-        return any(
-            work.key == key and owner_user_id in work.all_owner_user_ids for work in self._active_attempts.values()
-        )
-
-    def _enqueue_request(self, owner_user_id: str, request: RoomRecoveryRequest) -> None:
+        request: RoomRecoveryRequest,
+        *,
+        grant_fresh_budget: bool = False,
+    ) -> None:
         if not request.room_id.startswith("!"):
             return
-        work = _RoomWork(
-            room_id=request.room_id,
-            startup_cutoff_ms=request.startup_cutoff_ms,
-            terminal_interrupted_only=request.terminal_interrupted_only,
-            owner_user_ids=frozenset({owner_user_id}),
-            due_at=asyncio.get_running_loop().time(),
-        )
-        self._queue(work)
+        key = request.key, owner_user_id
+        existing = self._room_jobs.get(key)
+        owner = self._current_owners().get(owner_user_id)
+        generation = None if owner is None else owner.generation
+        now = asyncio.get_running_loop().time()
+        if existing is None:
+            self._room_jobs[key] = _OwnerRoomWork(
+                request=request,
+                owner_user_id=owner_user_id,
+                generation=generation,
+                due_at=now,
+            )
+        elif existing.generation is not generation or grant_fresh_budget:
+            self._room_jobs[key] = replace(
+                existing,
+                generation=generation,
+                matrix_attempt=0,
+                readiness_probe=0,
+                due_at=now,
+            )
         self._wake.set()
-
-    def _queue(self, work: _RoomWork) -> None:
-        existing = self._room_jobs.get(work.key)
-        self._room_jobs[work.key] = work if existing is None else _merge_work(existing, work)
 
     def _ensure_worker(self) -> None:
         if self._paused or self._stopped:
@@ -367,46 +336,62 @@ class RestartRecoveryCoordinator:
         finally:
             await self._drain_active_attempts()
 
-    def _eligible_work(self) -> list[_RoomWork]:
-        active_room_ids = {work.room_id for work in self._active_attempts.values()}
-        return [work for work in self._room_jobs.values() if work.room_id not in active_room_ids]
+    def _active_room_ids(self) -> set[str]:
+        return {lease.room_id for lease in self._active_attempts.values()}
 
-    def _next_due_work(self, now: float) -> _RoomWork | None:
-        eligible = [work for work in self._eligible_work() if work.due_at <= now]
+    def _eligible_work(self) -> list[_OwnerRoomWork]:
+        active_room_ids = self._active_room_ids()
+        return [
+            work for work in self._room_jobs.values() if work.room_id not in active_room_ids and work.due_at is not None
+        ]
+
+    def _next_due_work(self, now: float) -> _OwnerRoomWork | None:
+        eligible = [work for work in self._eligible_work() if work.due_at is not None and work.due_at <= now]
         if not eligible:
             return None
         active_owners = set().union(
-            *(work.all_owner_user_ids for work in self._active_attempts.values()),
+            *(lease.all_owner_user_ids for lease in self._active_attempts.values()),
         )
         return min(
             eligible,
             key=lambda work: (
-                not work.all_owner_user_ids.isdisjoint(active_owners),
-                work.due_at,
+                work.owner_user_id in active_owners,
+                work.due_at or 0.0,
                 work.room_id,
-                work.startup_cutoff_ms or -1,
-                work.terminal_interrupted_only,
+                work.request.startup_cutoff_ms or -1,
+                work.request.terminal_interrupted_only,
+                work.owner_user_id,
             ),
         )
 
     def _start_due_attempts(self) -> None:
         now = asyncio.get_running_loop().time()
         while True:
-            work = self._next_due_work(now)
-            if work is None:
+            seed = self._next_due_work(now)
+            if seed is None:
                 return
-            self._room_jobs.pop(work.key)
-            task = asyncio.create_task(
-                self._process_room(work),
-                name=f"restart_recovery_room:{work.key}",
+            jobs = tuple(
+                sorted(
+                    (
+                        work
+                        for work in self._room_jobs.values()
+                        if work.request == seed.request and work.due_at is not None and work.due_at <= now
+                    ),
+                    key=lambda work: work.owner_user_id,
+                ),
             )
-            self._active_attempts[task] = work
+            lease = _RoomLease(seed.request, jobs)
+            task = asyncio.create_task(
+                self._process_room(lease),
+                name=f"restart_recovery_room:{seed.request.key}",
+            )
+            self._active_attempts[task] = lease
 
     def _next_start_delay(self) -> float | None:
         eligible = self._eligible_work()
         if not eligible:
             return None
-        due_at = min(work.due_at for work in eligible)
+        due_at = min(work.due_at for work in eligible if work.due_at is not None)
         return max(0.0, due_at - asyncio.get_running_loop().time())
 
     async def _wait_for_progress(self, *, delay: float | None) -> None:
@@ -429,69 +414,120 @@ class RestartRecoveryCoordinator:
             await asyncio.gather(wake_task, return_exceptions=True)
 
     def _settle_finished_attempts(self) -> None:
-        for task, work in tuple(self._active_attempts.items()):
+        for task, lease in tuple(self._active_attempts.items()):
             if not task.done():
                 continue
             self._active_attempts.pop(task)
-            self._settle_attempt(work, task)
+            self._settle_attempt(lease, task)
 
     def _settle_attempt(
         self,
-        work: _RoomWork,
+        lease: _RoomLease,
         task: asyncio.Task[_RoomAttemptResult],
     ) -> None:
         try:
             result = task.result()
         except asyncio.CancelledError:
-            self._restore(work, cancelled=True)
+            self._restore_cancelled(lease)
             return
         except Exception:
             logger.warning("Restart recovery attempt failed", exc_info=True)
-            self._restore(work, cancelled=self._paused or self._stopped)
+            self._restore_failed_lease(lease)
             return
+        for outcome in result.outcomes:
+            self._settle_owner_outcome(outcome)
 
-        def owner_is_current(owner_user_id: str) -> bool:
-            return result.owner_discard_epochs.get(owner_user_id, 0) == self._owner_discard_epochs.get(owner_user_id, 0)
-
-        for settlement in result.settlements:
-            owner = result.owners.get(settlement.owner_user_id)
-            if owner is not None and owner_is_current(settlement.owner_user_id):
+    def _settle_owner_outcome(self, outcome: _OwnerAttemptResult) -> None:
+        work = outcome.work
+        if self._room_jobs.get(work.key) is not work:
+            return
+        owner = outcome.owner
+        if owner is not None:
+            for settlement in outcome.settlements:
                 self._advance_watermark(owner, settlement)
-        completed_owner_user_ids = work.owner_user_ids - result.retry_owner_user_ids
-        if not work.terminal_interrupted_only:
-            self._completed_startup_scans.update(
-                (work.key, owner_user_id)
-                for owner_user_id in completed_owner_user_ids
-                if owner_user_id in result.owners and owner_is_current(owner_user_id)
+        if outcome.cancelled:
+            self._room_jobs[work.key] = replace(
+                work,
+                targets=_newest_targets(outcome.retry_targets),
+                due_at=asyncio.get_running_loop().time(),
             )
-        remaining = replace(
+            return
+        if outcome.readiness_unavailable:
+            self._retry_readiness(work)
+            return
+        if outcome.matrix_failed:
+            self._retry_matrix(work, outcome.retry_targets)
+            return
+        self._room_jobs.pop(work.key)
+        if not work.request.terminal_interrupted_only:
+            self._completed_startup_scans.add((work.request.key, work.owner_user_id))
+
+    def _restore_cancelled(self, lease: _RoomLease) -> None:
+        if self._stopped:
+            return
+        now = asyncio.get_running_loop().time()
+        for work in lease.jobs:
+            if self._room_jobs.get(work.key) is work:
+                self._room_jobs[work.key] = replace(work, due_at=now)
+
+    def _restore_failed_lease(self, lease: _RoomLease) -> None:
+        if self._stopped:
+            return
+        owners = self._current_owners()
+        for work in lease.jobs:
+            if self._room_jobs.get(work.key) is not work:
+                continue
+            owner = owners.get(work.owner_user_id)
+            if owner is None or owner.generation is not work.generation or not owner.first_sync_complete:
+                self._retry_readiness(work)
+            else:
+                self._retry_matrix(work, work.targets)
+
+    def _retry_readiness(self, work: _OwnerRoomWork) -> None:
+        if work.readiness_probe >= _MAX_RESTART_RECOVERY_ATTEMPTS:
+            due_at: float | None = None
+            logger.warning(
+                "Restart recovery owner unavailable; parking retained owner work",
+                owner_user_id=work.owner_user_id,
+                probe=work.readiness_probe,
+                room_id=work.room_id,
+            )
+        else:
+            probe = work.readiness_probe + 1
+            due_at = asyncio.get_running_loop().time() + self._retry_delay(probe)
+            work = replace(work, readiness_probe=probe)
+        self._room_jobs[work.key] = replace(work, due_at=due_at)
+
+    def _retry_matrix(
+        self,
+        work: _OwnerRoomWork,
+        retry_targets: tuple[InterruptedThread, ...],
+    ) -> None:
+        attempt = work.matrix_attempt + 1
+        if attempt >= _MAX_RESTART_RECOVERY_ATTEMPTS:
+            self._completed_startup_scans.discard((work.request.key, work.owner_user_id))
+            self._room_jobs[work.key] = replace(
+                work,
+                targets=(),
+                matrix_attempt=attempt,
+                readiness_probe=0,
+                due_at=None,
+            )
+            logger.warning(
+                "Restart recovery exhausted retries; parking retained owner work",
+                attempt=attempt,
+                owner_user_id=work.owner_user_id,
+                room_id=work.room_id,
+                target_event_ids=sorted(target.target_event_id for target in retry_targets),
+            )
+            return
+        self._room_jobs[work.key] = replace(
             work,
-            owner_user_ids=frozenset(
-                owner_user_id for owner_user_id in result.retry_owner_user_ids if owner_is_current(owner_user_id)
-            ),
-            targets=tuple(target for target in result.retry_targets if owner_is_current(target.owner_user_id)),
+            targets=_newest_targets(retry_targets),
+            matrix_attempt=attempt,
+            readiness_probe=0,
+            due_at=asyncio.get_running_loop().time() + self._retry_delay(attempt),
         )
-        if work.terminal_interrupted_only:
-            completed_replacement_owner_user_ids = {
-                owner_user_id
-                for owner_user_id in work.all_owner_user_ids - remaining.all_owner_user_ids
-                if owner_is_current(owner_user_id)
-            }
-            self._replacement_room_intents.difference_update(
-                (owner_user_id, work.room_id) for owner_user_id in completed_replacement_owner_user_ids
-            )
-        if remaining.owner_user_ids or remaining.targets:
-            became_ready = any(
-                (owner := result.owners.get(owner_user_id)) is not None
-                and not owner.first_sync_complete
-                and self._ready_generations.get(owner_user_id) is owner.generation
-                for owner_user_id in result.retry_owner_user_ids
-            )
-            self._restore(
-                remaining,
-                cancelled=self._paused or self._stopped or became_ready,
-                attempt_failed=not result.collaborator_unavailable,
-            )
 
     def _advance_watermark(self, owner: RecoveryOwner, settlement: _TargetSettlement) -> None:
         target = settlement.target
@@ -517,97 +553,43 @@ class RestartRecoveryCoordinator:
                     continue
         self._settle_finished_attempts()
 
-    async def _process_room(self, work: _RoomWork) -> _RoomAttemptResult:
+    async def _process_room(self, lease: _RoomLease) -> _RoomAttemptResult:
         config = self._current_config()
         owners = dict(self._current_owners())
-        owner_discard_epochs = {
-            owner_user_id: self._owner_discard_epochs.get(owner_user_id, 0) for owner_user_id in work.all_owner_user_ids
-        }
+        if (
+            config is not None
+            and lease.request.terminal_interrupted_only
+            and not config.defaults.auto_resume_after_restart
+        ):
+            return _RoomAttemptResult(
+                tuple(_OwnerAttemptResult(work=work, owner=owners.get(work.owner_user_id)) for work in lease.jobs),
+            )
         if config is None:
             return _RoomAttemptResult(
-                owners,
-                work.owner_user_ids,
-                work.targets,
-                (),
-                collaborator_unavailable=True,
-                owner_discard_epochs=owner_discard_epochs,
+                tuple(
+                    _OwnerAttemptResult(
+                        work=work,
+                        owner=None,
+                        retry_targets=work.targets,
+                        readiness_unavailable=True,
+                    )
+                    for work in lease.jobs
+                ),
             )
+        ready, outcomes = self._partition_ready_jobs(lease, owners)
+        if not ready:
+            return _RoomAttemptResult(tuple(outcomes.values()))
 
-        unavailable_owner_user_ids = {
-            owner_user_id
-            for owner_user_id in work.owner_user_ids
-            if (owner := owners.get(owner_user_id)) is None or not owner.first_sync_complete
-        }
-        retry_owner_user_ids = set(unavailable_owner_user_ids)
-        scan_owners = tuple(
-            owner
-            for owner_user_id in sorted(work.owner_user_ids - unavailable_owner_user_ids)
-            if (owner := owners.get(owner_user_id)) is not None
-        )
-        targets = list(work.targets)
-        if scan_owners:
-            async with self._matrix_read_slots:
-                scan_retry_owner_user_ids, recovered_targets = await self._recover_scan(
-                    scan_owners,
-                    work,
-                    owners,
-                    config,
-                )
-            retry_owner_user_ids.update(scan_retry_owner_user_ids)
-            targets.extend(recovered_targets)
-
-        retry_targets: list[_OwnedTarget] = []
-        settlements: list[_TargetSettlement] = []
-        collaborator_unavailable = bool(unavailable_owner_user_ids)
-        eligible_targets = self._eligible_targets(owners, tuple(targets))
-        for index, owned_target in enumerate(eligible_targets):
-            owner = owners.get(owned_target.owner_user_id)
-            if owner is None or not owner.first_sync_complete:
-                retry_targets.append(owned_target)
-                collaborator_unavailable = True
-                continue
-            try:
-                attempt = await self._process_target(
-                    owner,
-                    owned_target.target,
-                    config,
-                )
-            except asyncio.CancelledError:
-                retry_targets.extend(eligible_targets[index:])
-                break
-            if attempt is None:
-                retry_targets.append(owned_target)
-            else:
-                settlements.append(attempt)
-            if (lease := asyncio.current_task()) is not None and lease.cancelling():
-                retry_targets.extend(eligible_targets[index + 1 :])
-                break
-        return _RoomAttemptResult(
-            owners,
-            frozenset(retry_owner_user_ids),
-            tuple(retry_targets),
-            tuple(settlements),
-            collaborator_unavailable,
-            owner_discard_epochs,
-        )
-
-    async def _recover_scan(
-        self,
-        scan_owners: tuple[RecoveryOwner, ...],
-        work: _RoomWork,
-        owners: Mapping[str, RecoveryOwner],
-        config: Config,
-    ) -> tuple[set[str], list[_OwnedTarget]]:
-        result: RoomRecoveryResult = await self._operations.recover_room(
-            scan_owners,
-            work.request,
-            frozenset(owners),
-            config,
-        )
-        retry_owner_user_ids = set(result.retry_owner_user_ids)
-        owners_by_entity = {owner.entity_name: owner for owner in scan_owners}
-        recovered_targets: list[_OwnedTarget] = []
-        for target in result.interrupted_threads:
+        async with self._matrix_read_slots:
+            recovered = await self._operations.recover_room(
+                tuple(ready[owner_user_id] for owner_user_id in sorted(ready)),
+                lease.request,
+                frozenset(owners),
+                config,
+            )
+        recovered_by_owner: dict[str, list[InterruptedThread]] = {owner_user_id: [] for owner_user_id in ready}
+        owners_by_entity = {owner.entity_name: owner for owner in ready.values()}
+        for target in recovered.interrupted_threads:
             owner = owners_by_entity.get(target.agent_name)
             if owner is None:
                 logger.warning(
@@ -617,23 +599,102 @@ class RestartRecoveryCoordinator:
                     target_event_id=target.target_event_id,
                 )
                 continue
-            if target.original_sender_id is None and owner.user_id in retry_owner_user_ids:
+            if target.original_sender_id is None and owner.user_id in recovered.retry_owner_user_ids:
                 continue
-            recovered_targets.append(_OwnedTarget(owner.user_id, target))
-        return retry_owner_user_ids, recovered_targets
+            recovered_by_owner[owner.user_id].append(target)
+
+        for work in lease.jobs:
+            owner = ready.get(work.owner_user_id)
+            if owner is None:
+                continue
+            targets = _newest_targets(
+                (*work.targets, *recovered_by_owner[work.owner_user_id]),
+            )
+            if (task := asyncio.current_task()) is not None and task.cancelling():
+                outcomes[work.owner_user_id] = _OwnerAttemptResult(
+                    work=work,
+                    owner=owner,
+                    retry_targets=targets,
+                    cancelled=True,
+                )
+                continue
+            outcome = await self._process_owner_targets(
+                work,
+                owner,
+                targets,
+                config,
+                scan_failed=owner.user_id in recovered.retry_owner_user_ids,
+            )
+            outcomes[work.owner_user_id] = outcome
+        return _RoomAttemptResult(
+            tuple(outcomes[job.owner_user_id] for job in lease.jobs),
+        )
+
+    @staticmethod
+    def _partition_ready_jobs(
+        lease: _RoomLease,
+        owners: Mapping[str, RecoveryOwner],
+    ) -> tuple[dict[str, RecoveryOwner], dict[str, _OwnerAttemptResult]]:
+        """Split one lease into exact ready owners and retained readiness waits."""
+        ready: dict[str, RecoveryOwner] = {}
+        outcomes: dict[str, _OwnerAttemptResult] = {}
+        for work in lease.jobs:
+            owner = owners.get(work.owner_user_id)
+            if owner is None or owner.generation is not work.generation or not owner.first_sync_complete:
+                outcomes[work.owner_user_id] = _OwnerAttemptResult(
+                    work=work,
+                    owner=owner,
+                    retry_targets=work.targets,
+                    readiness_unavailable=True,
+                )
+            else:
+                ready[work.owner_user_id] = owner
+        return ready, outcomes
+
+    async def _process_owner_targets(
+        self,
+        work: _OwnerRoomWork,
+        owner: RecoveryOwner,
+        targets: tuple[InterruptedThread, ...],
+        config: Config,
+        *,
+        scan_failed: bool,
+    ) -> _OwnerAttemptResult:
+        retry_targets: list[InterruptedThread] = []
+        settlements: list[_TargetSettlement] = []
+        cancelled = False
+        eligible_targets = self._eligible_targets(owner, targets)
+        for index, target in enumerate(eligible_targets):
+            try:
+                attempt = await self._process_target(owner, target, config)
+            except asyncio.CancelledError:
+                retry_targets.extend(eligible_targets[index:])
+                cancelled = True
+                break
+            if attempt is None:
+                retry_targets.append(target)
+            else:
+                settlements.append(attempt)
+            if (lease := asyncio.current_task()) is not None and lease.cancelling():
+                retry_targets.extend(eligible_targets[index + 1 :])
+                cancelled = True
+                break
+        return _OwnerAttemptResult(
+            work=work,
+            owner=owner,
+            retry_targets=tuple(retry_targets),
+            settlements=tuple(settlements),
+            matrix_failed=scan_failed or bool(retry_targets),
+            cancelled=cancelled,
+        )
 
     def _eligible_targets(
         self,
-        owners: Mapping[str, RecoveryOwner],
-        targets: tuple[_OwnedTarget, ...],
-    ) -> tuple[_OwnedTarget, ...]:
-        eligible: list[_OwnedTarget] = []
-        for owned_target in _newest_targets(targets):
-            owner = owners.get(owned_target.owner_user_id)
-            if owner is None:
-                eligible.append(owned_target)
-                continue
-            target = owned_target.target
+        owner: RecoveryOwner,
+        targets: tuple[InterruptedThread, ...],
+    ) -> tuple[InterruptedThread, ...]:
+        eligible: list[InterruptedThread] = []
+        for target in _newest_targets(targets):
             assert target.thread_id is not None
             watermark = self._target_watermarks.get((owner.user_id, target.room_id, target.thread_id))
             if (
@@ -641,7 +702,7 @@ class RestartRecoveryCoordinator:
                 or watermark.generation is not owner.generation
                 or (not watermark.closed and _target_version(target) > watermark.version)
             ):
-                eligible.append(owned_target)
+                eligible.append(target)
         return tuple(eligible)
 
     async def _process_target(
@@ -661,7 +722,7 @@ class RestartRecoveryCoordinator:
             InterruptedTargetFreshness.UNRECOVERABLE,
         }:
             return _TargetSettlement(target, closed=False, owner_user_id=owner.user_id)
-        delivery = await self._deliver_target(owner, owner, target, config)
+        delivery = await self._deliver_target(owner, target, config)
         if delivery is RestartDeliveryOutcome.RETRY:
             return None
         return _TargetSettlement(
@@ -672,7 +733,6 @@ class RestartRecoveryCoordinator:
 
     async def _deliver_target(
         self,
-        sender: RecoveryOwner,
         owner: RecoveryOwner,
         target: InterruptedThread,
         config: Config,
@@ -680,7 +740,7 @@ class RestartRecoveryCoordinator:
         """Drain one exact delivery through repeated coordinator cancellation."""
         async with self._delivery_lock:
             task = asyncio.create_task(
-                self._operations.deliver_target(sender, owner, target, config),
+                self._operations.deliver_target(owner, target, config),
                 name=f"restart_recovery_delivery:{target.target_event_id}",
             )
             try:
@@ -692,33 +752,3 @@ class RestartRecoveryCoordinator:
                     except asyncio.CancelledError:
                         continue
                 return task.result()
-
-    def _restore(
-        self,
-        work: _RoomWork,
-        *,
-        cancelled: bool,
-        attempt_failed: bool = True,
-    ) -> None:
-        if self._stopped:
-            return
-        if not cancelled:
-            attempt = work.attempt + int(attempt_failed)
-            if attempt_failed and attempt >= _MAX_RESTART_RECOVERY_ATTEMPTS:
-                self._completed_startup_scans.difference_update(
-                    (work.key, owner_user_id) for owner_user_id in work.all_owner_user_ids
-                )
-                logger.warning(
-                    "Restart recovery exhausted retries; dropping retained work",
-                    attempt=attempt,
-                    owner_user_ids=sorted(work.owner_user_ids),
-                    room_id=work.room_id,
-                    target_event_ids=sorted(target.target.target_event_id for target in work.targets),
-                )
-                return
-            work = replace(
-                work,
-                attempt=attempt,
-                due_at=(asyncio.get_running_loop().time() + self._retry_delay(max(1, attempt))),
-            )
-        self._queue(work)

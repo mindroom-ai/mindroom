@@ -1652,20 +1652,15 @@ def build_auto_resume_content(
     interrupted_thread: InterruptedThread,
     *,
     config: Config,
-    mention_user_id: str | None,
+    intended_responder_user_id: str,
 ) -> dict[str, object]:
-    """Build the router-authored visible resume relay for one interrupted agent."""
+    """Build a visible resume relay explicitly targeting its interrupted owner."""
     display_name = _entity_display_name(interrupted_thread.agent_name, config)
 
-    body = AUTO_RESUME_MESSAGE
-    formatted_body: str | None = None
-    mentioned_user_ids: list[str] | None = None
-    if mention_user_id is not None:
-        body = f"@{display_name} {AUTO_RESUME_MESSAGE}"
-        formatted_body = markdown_to_html(
-            f"[@{display_name}](https://matrix.to/#/{mention_user_id}) {AUTO_RESUME_MESSAGE}",
-        )
-        mentioned_user_ids = [mention_user_id]
+    body = f"@{display_name} {AUTO_RESUME_MESSAGE}"
+    formatted_body = markdown_to_html(
+        f"[@{display_name}](https://matrix.to/#/{intended_responder_user_id}) {AUTO_RESUME_MESSAGE}",
+    )
 
     extra_content = None
     if interrupted_thread.original_sender_id is not None:
@@ -1676,7 +1671,7 @@ def build_auto_resume_content(
     return build_message_content(
         body=body,
         formatted_body=formatted_body,
-        mentioned_user_ids=mentioned_user_ids,
+        mentioned_user_ids=[intended_responder_user_id],
         thread_event_id=interrupted_thread.thread_id,
         reply_to_event_id=interrupted_thread.target_event_id,
         latest_thread_event_id=interrupted_thread.target_event_id,
