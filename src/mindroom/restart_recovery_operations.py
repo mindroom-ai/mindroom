@@ -9,7 +9,6 @@ from enum import Enum, auto
 from typing import TYPE_CHECKING, Any
 from uuid import NAMESPACE_URL, uuid5
 
-from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_delivery import hydrate_joined_room_for_delivery, send_message_result
 from mindroom.matrix.client_room_admin import get_joined_rooms
@@ -269,42 +268,63 @@ async def _recover_room(
             unjoined_owner_user_ids=frozenset(unjoined_owner_user_ids),
         )
 
-    scan_owner = next(
-        (owner for owner in joined_owners if owner.entity_name == ROUTER_AGENT_NAME),
-        min(joined_owners, key=lambda owner: owner.user_id),
-    )
-    cleanup_result: StaleStreamCleanupResult = await cleanup_stale_streaming_room(
-        scan_owner.client,
-        room_id=request.room_id,
-        actors={
-            owner.user_id: StaleStreamCleanupActor(
-                client=owner.client,
-                conversation_cache=owner.conversation_cache,
-            )
-            for owner in joined_owners
-        },
-        bot_user_ids=set(owner_user_ids),
+    cleaned_count, interrupted_threads, retry_cleanup_owner_user_ids = await _cleanup_joined_owners(
+        joined_owners,
+        request=request,
+        owner_user_ids=owner_user_ids,
         config=config,
         runtime_paths=runtime_paths,
-        startup_cutoff_ms=request.startup_cutoff_ms,
-        terminal_interrupted_only=request.terminal_interrupted_only,
+        retry_owner_user_ids=retry_owner_user_ids,
     )
-    retry_cleanup_owner_user_ids = set(cleanup_result.retry_bot_user_ids)
-    retry_cleanup_owner_user_ids.update(retry_owner_user_ids)
-    if cleanup_result.room_retry_required:
-        retry_cleanup_owner_user_ids.update(owner.user_id for owner in joined_owners)
     logger.info(
         "Restart recovery room scan completed",
-        cleaned_count=cleanup_result.cleaned_count,
-        interrupted_count=len(cleanup_result.interrupted_threads),
+        cleaned_count=cleaned_count,
+        interrupted_count=len(interrupted_threads),
         retry_owner_count=len(retry_cleanup_owner_user_ids),
         room_id=request.room_id,
     )
     return _RoomRecoveryResult(
-        interrupted_threads=cleanup_result.interrupted_threads,
+        interrupted_threads=interrupted_threads,
         retry_owner_user_ids=frozenset(retry_cleanup_owner_user_ids),
         unjoined_owner_user_ids=frozenset(unjoined_owner_user_ids),
     )
+
+
+async def _cleanup_joined_owners(
+    joined_owners: list[RecoveryOwner],
+    *,
+    request: RoomRecoveryRequest,
+    owner_user_ids: frozenset[str],
+    config: Config,
+    runtime_paths: RuntimePaths,
+    retry_owner_user_ids: set[str],
+) -> tuple[int, tuple[InterruptedThread, ...], set[str]]:
+    """Scan each ready owner's Matrix-visible history for its own messages."""
+    cleaned_count = 0
+    interrupted_threads: list[InterruptedThread] = []
+    retry_cleanup_owner_user_ids = set(retry_owner_user_ids)
+    for owner in joined_owners:
+        cleanup_result: StaleStreamCleanupResult = await cleanup_stale_streaming_room(
+            owner.client,
+            room_id=request.room_id,
+            actors={
+                owner.user_id: StaleStreamCleanupActor(
+                    client=owner.client,
+                    conversation_cache=owner.conversation_cache,
+                ),
+            },
+            bot_user_ids=set(owner_user_ids),
+            config=config,
+            runtime_paths=runtime_paths,
+            startup_cutoff_ms=request.startup_cutoff_ms,
+            terminal_interrupted_only=request.terminal_interrupted_only,
+        )
+        cleaned_count += cleanup_result.cleaned_count
+        interrupted_threads.extend(cleanup_result.interrupted_threads)
+        retry_cleanup_owner_user_ids.update(cleanup_result.retry_bot_user_ids)
+        if cleanup_result.room_retry_required:
+            retry_cleanup_owner_user_ids.add(owner.user_id)
+    return cleaned_count, tuple(interrupted_threads), retry_cleanup_owner_user_ids
 
 
 async def _hydrate_joined_owners(

@@ -329,13 +329,17 @@ class _MultiAgentOrchestrator:
         """Snapshot current exact owner generations for detached recovery."""
         return build_restart_recovery_owners(self.agent_bots)
 
+    def _resume_restart_recovery_if_running(self) -> None:
+        """Resume recovery only while the orchestrator can still process it."""
+        if self.running and self.config is not None:
+            self._restart_recovery.resume()
+
     async def _pause_restart_recovery(self) -> None:
         """Pause recovery without leaving it paused if this caller is cancelled."""
         try:
             await self._restart_recovery.pause()
         except asyncio.CancelledError:
-            if self.running and self.config is not None:
-                self._restart_recovery.resume()
+            self._resume_restart_recovery_if_running()
             raise
 
     async def _stop_memory_auto_flush_worker(self) -> None:
@@ -1464,7 +1468,7 @@ class _MultiAgentOrchestrator:
                         entities=start_results.permanently_failed_entities,
                     )
             finally:
-                self._restart_recovery.resume()
+                self._resume_restart_recovery_if_running()
 
     async def _reconcile_post_update_rooms(
         self,
@@ -1615,7 +1619,7 @@ class _MultiAgentOrchestrator:
                     config=self.config,
                     running_bots=self._running_startup_maintenance_bots,
                 )
-            self._restart_recovery.resume()
+            self._resume_restart_recovery_if_running()
 
     def _router_bot(self) -> AgentBot | TeamBot | None:
         """Return the router bot when it exists and has an active client."""

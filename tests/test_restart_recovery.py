@@ -22,6 +22,7 @@ from mindroom.matrix.stale_stream_cleanup import (
     InterruptedTargetFreshness,
     InterruptedThread,
 )
+from mindroom.orchestration.config_updates import ConfigUpdatePlan
 from mindroom.orchestrator import _MultiAgentOrchestrator
 from mindroom.restart_recovery import RestartRecoveryCoordinator
 from mindroom.restart_recovery import (
@@ -98,6 +99,7 @@ def _owner(
     client.rooms = {room_id: nio.MatrixRoom(room_id=room_id, own_user_id=user_id) for room_id in rooms}
     client.encrypted_rooms = set()
     client.store = None
+    client.olm = None
     return RecoveryOwner(
         entity_name=entity_name,
         user_id=user_id,
@@ -360,8 +362,8 @@ async def test_matrix_room_recovery_scans_only_exact_owner_messages(tmp_path: Pa
 
 
 @pytest.mark.asyncio
-async def test_shared_room_startup_scans_once_with_all_joined_owners(tmp_path: Path) -> None:
-    """Co-resident bots must share one uncached room-history scan."""
+async def test_shared_room_startup_scans_through_each_joined_owner(tmp_path: Path) -> None:
+    """Each owner must scan history that Matrix may expose only to that user."""
     room_id = "!code:example.org"
     owner = _owner(rooms=frozenset({room_id}))
     router = _owner(
@@ -400,8 +402,58 @@ async def test_shared_room_startup_scans_once_with_all_joined_owners(tmp_path: P
         finally:
             await coordinator.stop()
 
-    cleanup_room.assert_awaited_once()
-    assert set(cleanup_room.await_args.kwargs["actors"]) == set(owners)
+    assert cleanup_room.await_count == 2
+    assert {call.args[0] for call in cleanup_room.await_args_list} == {
+        owner.client,
+        router.client,
+    }
+    assert {next(iter(call.kwargs["actors"])) for call in cleanup_room.await_args_list} == set(owners)
+    assert all(len(call.kwargs["actors"]) == 1 for call in cleanup_room.await_args_list)
+
+
+@pytest.mark.asyncio
+async def test_shared_room_merges_targets_visible_to_different_owners(tmp_path: Path) -> None:
+    """Per-user history visibility must not hide one co-resident owner's stale target."""
+    room_id = "!code:example.org"
+    owner = _owner(rooms=frozenset({room_id}))
+    router = _owner(
+        entity_name=ROUTER_AGENT_NAME,
+        user_id="@router:example.org",
+        rooms=frozenset({room_id}),
+    )
+    owner_target = _target("$owner-target", timestamp_ms=10)
+    router_target = _target("$router-target", timestamp_ms=20, agent_name=ROUTER_AGENT_NAME)
+    operations = build_matrix_restart_recovery_operations(test_runtime_paths(tmp_path))
+
+    async def cleanup(
+        scan_client: nio.AsyncClient,
+        **_kwargs: object,
+    ) -> stale_stream_cleanup_module.StaleStreamCleanupResult:
+        target = owner_target if scan_client is owner.client else router_target
+        return stale_stream_cleanup_module.StaleStreamCleanupResult(
+            cleaned_count=1,
+            interrupted_threads=(target,),
+        )
+
+    with (
+        patch(
+            "mindroom.restart_recovery_operations.get_joined_rooms",
+            new=AsyncMock(return_value=[room_id]),
+        ),
+        patch(
+            "mindroom.restart_recovery_operations.cleanup_stale_streaming_room",
+            new=AsyncMock(side_effect=cleanup),
+        ) as cleanup_room,
+    ):
+        result = await operations.recover_room(
+            (owner, router),
+            RoomRecoveryRequest(room_id, 123, False),
+            frozenset({owner.user_id, router.user_id}),
+            _config(tmp_path),
+        )
+
+    assert cleanup_room.await_count == 2
+    assert set(result.interrupted_threads) == {owner_target, router_target}
 
 
 @pytest.mark.asyncio
@@ -514,6 +566,22 @@ async def test_matrix_room_recovery_retries_only_failed_cleanup_owner(
     )
     operations = build_matrix_restart_recovery_operations(test_runtime_paths(tmp_path))
 
+    async def cleanup(
+        _scan_client: nio.AsyncClient,
+        **kwargs: object,
+    ) -> stale_stream_cleanup_module.StaleStreamCleanupResult:
+        actors = cast("dict[str, object]", kwargs["actors"])
+        if healthy_owner.user_id in actors:
+            return stale_stream_cleanup_module.StaleStreamCleanupResult(
+                cleaned_count=1,
+                interrupted_threads=(interrupted,),
+            )
+        return stale_stream_cleanup_module.StaleStreamCleanupResult(
+            cleaned_count=0,
+            interrupted_threads=(),
+            retry_bot_user_ids=frozenset({failed_owner.user_id}),
+        )
+
     with (
         patch(
             "mindroom.restart_recovery_operations.get_joined_rooms",
@@ -521,13 +589,7 @@ async def test_matrix_room_recovery_retries_only_failed_cleanup_owner(
         ),
         patch(
             "mindroom.restart_recovery_operations.cleanup_stale_streaming_room",
-            new=AsyncMock(
-                return_value=stale_stream_cleanup_module.StaleStreamCleanupResult(
-                    cleaned_count=1,
-                    interrupted_threads=(interrupted,),
-                    retry_bot_user_ids=frozenset({failed_owner.user_id}),
-                ),
-            ),
+            new=AsyncMock(side_effect=cleanup),
         ),
         patch("mindroom.restart_recovery_operations.logger.info") as info,
     ):
@@ -709,6 +771,40 @@ async def test_cancelled_encrypted_room_hydration_rolls_back_owned_cache_entry()
 
     assert room_id not in owner.client.rooms
     assert room_id not in owner.client.encrypted_rooms
+
+
+@pytest.mark.asyncio
+async def test_cancelled_hydration_preserves_room_adopted_by_concurrent_sync() -> None:
+    """Rollback must not delete a room object that nio sync adopted and populated."""
+    owner = _owner()
+    room_id = "!hidden:example.org"
+    _hide_encrypted_room(owner, room_id)
+    hydration_started = asyncio.Event()
+
+    async def joined_members(_room_id: str) -> nio.JoinedMembersResponse:
+        hydration_started.set()
+        await asyncio.Event().wait()
+        return nio.JoinedMembersResponse(members=[], room_id=room_id)
+
+    owner.client.joined_members.side_effect = joined_members
+    hydration = asyncio.create_task(hydrate_joined_room_for_delivery(owner.client, room_id))
+    await asyncio.wait_for(hydration_started.wait(), timeout=1.0)
+
+    sync_room = owner.client.rooms.get(room_id)
+    if sync_room is None:
+        sync_room = nio.MatrixRoom(room_id=room_id, own_user_id=owner.user_id)
+        owner.client.rooms[room_id] = sync_room
+    sync_room.encrypted = True
+    sync_room.add_member("@human:example.org", "Human", None)
+    owner.client.encrypted_rooms.add(room_id)
+
+    hydration.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await hydration
+
+    assert owner.client.rooms[room_id] is sync_room
+    assert "@human:example.org" in sync_room.users
+    assert room_id in owner.client.encrypted_rooms
 
 
 @pytest.mark.asyncio
@@ -3567,6 +3663,64 @@ async def test_orchestrator_cancelled_pause_does_not_resume_during_shutdown(tmp_
 
     with pytest.raises(asyncio.CancelledError):
         await orchestrator._pause_restart_recovery()
+
+    orchestrator._restart_recovery.resume.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_catalog_restart_finally_does_not_resume_recovery_during_shutdown(tmp_path: Path) -> None:
+    """Catalog-restart cleanup must not reactivate recovery after shutdown starts."""
+    orchestrator = _MultiAgentOrchestrator(test_runtime_paths(tmp_path))
+    orchestrator.running = True
+    orchestrator.config = MagicMock(spec=Config)
+    orchestrator.config.get_entities_referencing_tools.return_value = {"code"}
+    orchestrator._restart_recovery.pause = AsyncMock()
+    orchestrator._restart_recovery.resume = MagicMock()
+    orchestrator._replacement_bots = MagicMock(return_value={})
+    orchestrator._external_trigger_runtime.unbind_for_entity_changes = MagicMock()
+
+    async def shutdown_during_restart(_entity_name: str) -> None:
+        orchestrator.running = False
+        raise asyncio.CancelledError
+
+    orchestrator._cancel_bot_start_task = AsyncMock(side_effect=shutdown_during_restart)
+
+    with pytest.raises(asyncio.CancelledError):
+        await orchestrator._apply_mcp_catalog_change("server")
+
+    orchestrator._restart_recovery.resume.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_config_reload_finally_does_not_resume_recovery_during_shutdown(tmp_path: Path) -> None:
+    """Config-reload cleanup must not reactivate recovery after shutdown starts."""
+    orchestrator = _MultiAgentOrchestrator(test_runtime_paths(tmp_path))
+    config = _config(tmp_path)
+    orchestrator.running = True
+    orchestrator.config = config
+    orchestrator._restart_recovery.pause = AsyncMock()
+    orchestrator._restart_recovery.resume = MagicMock()
+    plan = ConfigUpdatePlan(
+        new_config=config,
+        changed_mcp_servers=set(),
+        configured_entities={ROUTER_AGENT_NAME, "code"},
+        entities_to_restart=set(),
+        new_entities=set(),
+        removed_entities=set(),
+        mindroom_user_changed=False,
+        matrix_room_access_changed=False,
+        matrix_space_changed=False,
+        authorization_changed=False,
+    )
+
+    async def shutdown_during_reload(_new_config: Config, _plan: ConfigUpdatePlan) -> None:
+        orchestrator.running = False
+        raise asyncio.CancelledError
+
+    orchestrator._prepare_accounts_for_config_update = AsyncMock(side_effect=shutdown_during_reload)
+
+    with pytest.raises(asyncio.CancelledError):
+        await orchestrator._apply_config_update_plan(config, plan, ())
 
     orchestrator._restart_recovery.resume.assert_not_called()
 

@@ -161,7 +161,7 @@ Semantic memory backends such as Mem0 have a separate lifecycle and are not alte
 Configured rooms and the local Matrix cache seed recovery work immediately.
 The coordinator also enumerates every owner's authoritative joined-room list, so Sliding Sync window limits cannot omit older direct-message, space, or configured rooms.
 Owner room discovery, room recovery scans, and initial target freshness checks share one semaphore with at most eight concurrent read-bearing operations.
-A room-recovery lease holds its slot across the complete scan and cleanup phase, including any required cache hydration and repair writes.
+A room-recovery lease holds its slot while it scans each ready owner's Matrix history view and completes any required cache hydration or repair writes.
 One unavailable owner cannot block discovery or recovery for joined peers.
 The coordinator merges exact owners into one work item for each room and recovery policy.
 Distinct policies for the same room never run concurrently.
@@ -177,7 +177,7 @@ Due selection gives each due owner cohort a read-queue position before repeated-
 | Owner readiness or configuration resume arrives | Invalidate retained membership state, refresh authoritative room scope, and re-enroll parked work with fresh budgets. |
 | Owner is removed | Delete its jobs, target watermarks, discovery task, and membership snapshot. |
 
-Each lease performs one shared room scan, newest-target selection, freshness checks, and resume delivery before releasing its room.
+Each lease merges the outcomes from every ready owner's Matrix history view before newest-target selection, freshness checks, and resume delivery.
 Room history failures, transient requester-resolution failures, and failed cleanup edits return typed retry outcomes.
 Resolved partial targets may settle while targets without an authoritative requester remain retained for retry.
 Unresolved room aliases remain outside retry state until room setup resolves them.
