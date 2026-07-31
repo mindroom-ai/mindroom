@@ -106,7 +106,7 @@ class StaleStreamCleanupActor:
 
 
 @dataclass(frozen=True)
-class _StaleStreamCleanupResult:
+class StaleStreamCleanupResult:
     """Outcome from one shared room cleanup."""
 
     cleaned_count: int
@@ -324,10 +324,10 @@ async def cleanup_stale_streaming_room(
     runtime_paths: RuntimePaths,
     startup_cutoff_ms: int | None = None,
     terminal_interrupted_only: bool = False,
-) -> _StaleStreamCleanupResult:
+) -> StaleStreamCleanupResult:
     """Scan one room once and let each bot account repair its own messages."""
     if not actors:
-        return _StaleStreamCleanupResult(cleaned_count=0, interrupted_threads=())
+        return StaleStreamCleanupResult(cleaned_count=0, interrupted_threads=())
     current_time_ms = int(time.time() * 1000)
     scan_policy = _cleanup_scan_policy(
         config,
@@ -346,7 +346,7 @@ async def cleanup_stale_streaming_room(
     )
     message_states = scanned_state.message_states
     if not message_states:
-        return _StaleStreamCleanupResult(
+        return StaleStreamCleanupResult(
             cleaned_count=0,
             interrupted_threads=(),
             room_retry_required=scanned_state.retry_required,
@@ -389,7 +389,7 @@ async def cleanup_stale_streaming_room(
         if candidate_result.retry_required:
             retry_bot_user_ids.add(bot_user_id)
 
-    return _StaleStreamCleanupResult(
+    return StaleStreamCleanupResult(
         cleaned_count=cleaned_count,
         interrupted_threads=tuple(interrupted_threads),
         room_retry_required=scanned_state.retry_required,
@@ -1652,8 +1652,7 @@ def build_auto_resume_content(
     interrupted_thread: InterruptedThread,
     *,
     config: Config,
-    target_user_id: str,
-    sender_is_owner: bool = False,
+    mention_user_id: str | None,
 ) -> dict[str, object]:
     """Build the router-authored visible resume relay for one interrupted agent."""
     display_name = _entity_display_name(interrupted_thread.agent_name, config)
@@ -1661,12 +1660,12 @@ def build_auto_resume_content(
     body = AUTO_RESUME_MESSAGE
     formatted_body: str | None = None
     mentioned_user_ids: list[str] | None = None
-    if not sender_is_owner:
+    if mention_user_id is not None:
         body = f"@{display_name} {AUTO_RESUME_MESSAGE}"
         formatted_body = markdown_to_html(
-            f"[@{display_name}](https://matrix.to/#/{target_user_id}) {AUTO_RESUME_MESSAGE}",
+            f"[@{display_name}](https://matrix.to/#/{mention_user_id}) {AUTO_RESUME_MESSAGE}",
         )
-        mentioned_user_ids = [target_user_id]
+        mentioned_user_ids = [mention_user_id]
 
     extra_content = None
     if interrupted_thread.original_sender_id is not None:

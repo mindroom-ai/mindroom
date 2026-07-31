@@ -798,6 +798,9 @@ class AgentBot:
     def restart_recovery_room_ids(self) -> frozenset[str]:
         """Return the in-memory room scope eligible for restart recovery."""
         room_ids = set(self.rooms)
+        client = self.client
+        if client is not None:
+            room_ids.update(room_id for room_id in client.rooms if room_id.startswith("!"))
         if self._room_lifecycle.should_persist_invited_rooms():
             room_ids.update(self._room_lifecycle.invited_rooms)
         return frozenset(room_ids)

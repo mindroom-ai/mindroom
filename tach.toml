@@ -1470,6 +1470,7 @@ depends_on = [
     "mindroom.constants",
     "mindroom.logging_config",
     "mindroom.matrix.stale_stream_cleanup",
+    "mindroom.orchestration.runtime",
     "mindroom.restart_recovery_operations",
 ]
 visibility = ["mindroom.orchestrator"]
@@ -2760,7 +2761,6 @@ depends_on = [
     "mindroom.constants",
     "mindroom.entity_resolution",
     "mindroom.matrix.client_delivery",
-    "mindroom.matrix.client_room_admin",
     "mindroom.matrix.client_visible_messages",
     "mindroom.matrix.event_info",
     "mindroom.matrix.message_content",

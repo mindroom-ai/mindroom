@@ -8,11 +8,14 @@ from typing import TYPE_CHECKING
 
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.logging_config import get_logger
+from mindroom.orchestration.runtime import create_logged_task
 from mindroom.restart_recovery_operations import (
     RecoveryOwner,
+    RestartDeliveryOutcome,
     RestartRecoveryOperations,
     RestartTargetFreshness,
     RoomRecoveryRequest,
+    RoomRecoveryResult,
 )
 
 if TYPE_CHECKING:
@@ -28,6 +31,8 @@ type _RoomKey = tuple[str, int | None, bool]
 
 
 _MAX_CONCURRENT_MATRIX_READ_PHASES = 8
+_MAX_CONCURRENT_DELIVERY_ADMISSIONS = 1
+_MAX_RESTART_RECOVERY_ATTEMPTS = 6
 
 
 @dataclass(frozen=True)
@@ -160,6 +165,7 @@ class RestartRecoveryCoordinator:
         self._ready_generations: dict[str, object] = {}
         self._active_attempts: dict[asyncio.Task[_RoomAttemptResult], _RoomWork] = {}
         self._matrix_read_slots = asyncio.Semaphore(_MAX_CONCURRENT_MATRIX_READ_PHASES)
+        self._delivery_slots = asyncio.Semaphore(_MAX_CONCURRENT_DELIVERY_ADMISSIONS)
         self._worker_task: asyncio.Task[None] | None = None
         self._wake = asyncio.Event()
         self._startup_cutoff_ms: int | None = None
@@ -195,7 +201,7 @@ class RestartRecoveryCoordinator:
             key: replace(work, due_at=due_at) if owner_user_id in work.all_owner_user_ids else work
             for key, work in self._room_jobs.items()
         }
-        self._wake.set()
+        self._ensure_worker()
 
     def enqueue_replacement_rooms(self, owner_user_id: str, room_ids: set[str]) -> None:
         """Retain terminal interrupted-room handoffs across bot replacement."""
@@ -208,6 +214,7 @@ class RestartRecoveryCoordinator:
                     terminal_interrupted_only=True,
                 ),
             )
+        self._ensure_worker()
 
     def discard_owner(self, owner_user_id: str) -> None:
         """Discard one removed owner's work, watermark, and membership snapshot."""
@@ -318,7 +325,11 @@ class RestartRecoveryCoordinator:
         if task is not None and not task.done():
             self._wake.set()
             return
-        self._worker_task = asyncio.create_task(self._run(), name="restart_recovery")
+        self._worker_task = create_logged_task(
+            self._run(),
+            name="restart_recovery",
+            failure_message="Restart recovery worker failed",
+        )
 
     async def _run(self) -> None:
         try:
@@ -531,7 +542,7 @@ class RestartRecoveryCoordinator:
         owners: Mapping[str, RecoveryOwner],
         config: Config,
     ) -> tuple[set[str], list[_OwnedTarget]]:
-        result = await self._operations.recover_room(
+        result: RoomRecoveryResult = await self._operations.recover_room(
             scan_owners,
             work.request,
             frozenset(owners),
@@ -543,8 +554,13 @@ class RestartRecoveryCoordinator:
         for target in result.interrupted_threads:
             owner = owners_by_entity.get(target.agent_name)
             if owner is None:
-                msg = f"Restart target has no owner in room scan: {target.agent_name}"
-                raise ValueError(msg)
+                logger.warning(
+                    "Restart target has no current owner; skipping",
+                    agent_name=target.agent_name,
+                    room_id=target.room_id,
+                    target_event_id=target.target_event_id,
+                )
+                continue
             if target.original_sender_id is None and owner.user_id in retry_owner_user_ids:
                 continue
             recovered_targets.append(_OwnedTarget(owner.user_id, target))
@@ -600,8 +616,14 @@ class RestartRecoveryCoordinator:
         )
         if router is None:
             return None
-        delivered = await self._deliver_target(router, owner, target, config)
-        return _TargetSettlement(target, closed=True, owner_user_id=owner.user_id) if delivered else None
+        delivery = await self._deliver_target(router, owner, target, config)
+        if delivery is RestartDeliveryOutcome.RETRY:
+            return None
+        return _TargetSettlement(
+            target,
+            closed=delivery is RestartDeliveryOutcome.DELIVERED,
+            owner_user_id=owner.user_id,
+        )
 
     async def _deliver_target(
         self,
@@ -609,27 +631,37 @@ class RestartRecoveryCoordinator:
         owner: RecoveryOwner,
         target: InterruptedThread,
         config: Config,
-    ) -> bool:
+    ) -> RestartDeliveryOutcome:
         """Drain one exact delivery through repeated coordinator cancellation."""
-        task = asyncio.create_task(
-            self._operations.deliver_target(router, owner, target, config),
-            name=f"restart_recovery_delivery:{target.target_event_id}",
-        )
-        try:
-            return await asyncio.shield(task)
-        except asyncio.CancelledError:
-            while not task.done():
-                try:
-                    await asyncio.shield(task)
-                except asyncio.CancelledError:
-                    continue
-            return task.result()
+        async with self._delivery_slots:
+            task = asyncio.create_task(
+                self._operations.deliver_target(router, owner, target, config),
+                name=f"restart_recovery_delivery:{target.target_event_id}",
+            )
+            try:
+                return await asyncio.shield(task)
+            except asyncio.CancelledError:
+                while not task.done():
+                    try:
+                        await asyncio.shield(task)
+                    except asyncio.CancelledError:
+                        continue
+                return task.result()
 
     def _restore(self, work: _RoomWork, *, cancelled: bool) -> None:
         if self._stopped:
             return
         if not cancelled:
             attempt = work.attempt + 1
+            if attempt >= _MAX_RESTART_RECOVERY_ATTEMPTS:
+                logger.warning(
+                    "Restart recovery exhausted retries; dropping retained work",
+                    attempt=attempt,
+                    owner_user_ids=sorted(work.owner_user_ids),
+                    room_id=work.room_id,
+                    target_event_ids=sorted(target.target.target_event_id for target in work.targets),
+                )
+                return
             work = replace(
                 work,
                 attempt=attempt,

@@ -15,6 +15,7 @@ from mindroom.matrix.client_room_admin import get_joined_rooms
 from mindroom.matrix.stale_stream_cleanup import (
     InterruptedTargetFreshness,
     StaleStreamCleanupActor,
+    StaleStreamCleanupResult,
     build_auto_resume_content,
     cleanup_stale_streaming_room,
     interrupted_target_freshness,
@@ -82,7 +83,7 @@ class RoomRecoveryRequest:
 
 
 @dataclass(frozen=True)
-class _RoomRecoveryResult:
+class RoomRecoveryResult:
     """Result of one shared room recovery attempt."""
 
     interrupted_threads: tuple[InterruptedThread, ...] = ()
@@ -98,6 +99,14 @@ class RestartTargetFreshness(Enum):
     RETRY = auto()
 
 
+class RestartDeliveryOutcome(Enum):
+    """Settlement state from one admitted resume delivery."""
+
+    DELIVERED = auto()
+    TERMINAL = auto()
+    RETRY = auto()
+
+
 class _RecoverRoom(Protocol):
     async def __call__(
         self,
@@ -105,7 +114,7 @@ class _RecoverRoom(Protocol):
         request: RoomRecoveryRequest,
         owner_user_ids: frozenset[str],
         config: Config,
-    ) -> _RoomRecoveryResult:
+    ) -> RoomRecoveryResult:
         """Recover one scan scope through its exact current owners."""
         ...
 
@@ -128,7 +137,7 @@ class _DeliverTarget(Protocol):
         owner: RecoveryOwner,
         target: InterruptedThread,
         config: Config,
-    ) -> bool:
+    ) -> RestartDeliveryOutcome:
         """Deliver one target through the current router."""
         ...
 
@@ -225,7 +234,7 @@ async def _recover_room(
     request: RoomRecoveryRequest,
     owner_user_ids: frozenset[str],
     config: Config,
-) -> _RoomRecoveryResult:
+) -> RoomRecoveryResult:
     """Recover joined owners now while retaining only unavailable owners."""
     assert owners
     membership_results = await asyncio.gather(
@@ -256,7 +265,7 @@ async def _recover_room(
         joined_owners.append(owner)
 
     if not joined_owners:
-        return _RoomRecoveryResult(
+        return RoomRecoveryResult(
             retry_owner_user_ids=frozenset(retry_owner_user_ids),
         )
 
@@ -264,7 +273,7 @@ async def _recover_room(
         (owner for owner in joined_owners if owner.entity_name == ROUTER_AGENT_NAME),
         min(joined_owners, key=lambda owner: owner.user_id),
     )
-    cleanup_result = await cleanup_stale_streaming_room(
+    cleanup_result: StaleStreamCleanupResult = await cleanup_stale_streaming_room(
         scan_owner.client,
         room_id=request.room_id,
         actors={
@@ -284,7 +293,14 @@ async def _recover_room(
     retry_cleanup_owner_user_ids.update(retry_owner_user_ids)
     if cleanup_result.room_retry_required:
         retry_cleanup_owner_user_ids.update(owner.user_id for owner in joined_owners)
-    return _RoomRecoveryResult(
+    logger.info(
+        "Restart recovery room scan completed",
+        cleaned_count=cleanup_result.cleaned_count,
+        interrupted_count=len(cleanup_result.interrupted_threads),
+        retry_owner_count=len(retry_cleanup_owner_user_ids),
+        room_id=request.room_id,
+    )
+    return RoomRecoveryResult(
         interrupted_threads=cleanup_result.interrupted_threads,
         retry_owner_user_ids=frozenset(retry_cleanup_owner_user_ids),
     )
@@ -301,7 +317,7 @@ def build_matrix_restart_recovery_operations(runtime_paths: RuntimePaths) -> Res
         request: RoomRecoveryRequest,
         owner_user_ids: frozenset[str],
         config: Config,
-    ) -> _RoomRecoveryResult:
+    ) -> RoomRecoveryResult:
         return await _recover_room(
             membership_snapshots,
             runtime_paths,
@@ -334,20 +350,21 @@ def build_matrix_restart_recovery_operations(runtime_paths: RuntimePaths) -> Res
         owner: RecoveryOwner,
         target: InterruptedThread,
         config: Config,
-    ) -> bool:
+    ) -> RestartDeliveryOutcome:
         nonlocal next_delivery_at
         async with delivery_lock:
             delay = next_delivery_at - asyncio.get_running_loop().time()
             if delay > 0:
                 await asyncio.sleep(delay)
                 freshness = await target_freshness(owner, target, config)
+                if freshness is RestartTargetFreshness.RETRY:
+                    return RestartDeliveryOutcome.RETRY
                 if freshness is not RestartTargetFreshness.CURRENT:
-                    return False
+                    return RestartDeliveryOutcome.TERMINAL
             content = build_auto_resume_content(
                 target,
                 config=config,
-                target_user_id=owner.user_id,
-                sender_is_owner=router.user_id == owner.user_id,
+                mention_user_id=(None if router.user_id == owner.user_id else owner.user_id),
             )
             transaction_id = str(
                 uuid5(
@@ -374,7 +391,7 @@ def build_matrix_restart_recovery_operations(runtime_paths: RuntimePaths) -> Res
             finally:
                 next_delivery_at = asyncio.get_running_loop().time() + _AUTO_RESUME_DELIVERY_INTERVAL_SECONDS
         if delivered is None:
-            return False
+            return RestartDeliveryOutcome.RETRY
         router.conversation_cache.notify_outbound_message(
             target.room_id,
             delivered.event_id,
@@ -387,7 +404,7 @@ def build_matrix_restart_recovery_operations(runtime_paths: RuntimePaths) -> Res
             target_event_id=target.target_event_id,
             event_id=delivered.event_id,
         )
-        return True
+        return RestartDeliveryOutcome.DELIVERED
 
     return RestartRecoveryOperations(
         recover_room=recover_room,

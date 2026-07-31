@@ -327,9 +327,6 @@ class _MultiAgentOrchestrator:
 
     def _restart_recovery_owners(self) -> dict[str, RecoveryOwner]:
         """Snapshot current exact owner generations for detached recovery."""
-        config = self.config
-        if config is None:
-            return {}
         return build_restart_recovery_owners(self.agent_bots)
 
     async def _pause_restart_recovery(self) -> None:
