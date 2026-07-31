@@ -374,13 +374,11 @@ async def test_restart_regression_crosses_fresh_obligation_over_hard_restart(
             stack,
             "wait_for_blocked_restart_request",
             lambda *_args, **_kwargs: order.append("model-in-flight") or True,
-            raising=False,
         )
         monkeypatch.setattr(
             stack,
             "restart_mindroom_for_recovery",
             lambda: order.append("hard-restart") or (10, 11),
-            raising=False,
         )
         dormant = _RecordingDormantClient()
         runner = LiveFuzzRunner(
