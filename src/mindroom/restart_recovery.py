@@ -179,7 +179,10 @@ class RestartRecoveryCoordinator:
         self._settle_finished_attempts()
         owner = self._current_owners().get(owner_user_id)
         if owner is not None:
-            self._ready_generations[owner_user_id] = owner.generation
+            if owner.first_sync_complete:
+                self._ready_generations[owner_user_id] = owner.generation
+            else:
+                self._ready_generations.pop(owner_user_id, None)
             self._target_watermarks = {
                 key: watermark
                 for key, watermark in self._target_watermarks.items()
@@ -501,12 +504,16 @@ class RestartRecoveryCoordinator:
             if owner is None:
                 retry_targets.append(owned_target)
                 continue
-            attempt = await self._process_target(
-                owner,
-                owned_target.target,
-                config,
-                owners,
-            )
+            try:
+                attempt = await self._process_target(
+                    owner,
+                    owned_target.target,
+                    config,
+                    owners,
+                )
+            except asyncio.CancelledError:
+                retry_targets.extend(eligible_targets[index:])
+                break
             if attempt is None:
                 retry_targets.append(owned_target)
             else:
@@ -535,8 +542,6 @@ class RestartRecoveryCoordinator:
             config,
         )
         retry_owner_user_ids = set(result.retry_owner_user_ids)
-        if result.retry:
-            retry_owner_user_ids.update(owner.user_id for owner in scan_owners)
         owners_by_entity = {owner.entity_name: owner for owner in scan_owners}
         recovered_targets: list[_OwnedTarget] = []
         for target in result.interrupted_threads:
@@ -544,6 +549,8 @@ class RestartRecoveryCoordinator:
             if owner is None:
                 msg = f"Restart target has no owner in room scan: {target.agent_name}"
                 raise ValueError(msg)
+            if target.original_sender_id is None and owner.user_id in retry_owner_user_ids:
+                continue
             recovered_targets.append(_OwnedTarget(owner.user_id, target))
         return retry_owner_user_ids, recovered_targets
 

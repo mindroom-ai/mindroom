@@ -98,7 +98,6 @@ class _RoomRecoveryResult:
     """Result of one shared room recovery attempt."""
 
     interrupted_threads: tuple[InterruptedThread, ...] = ()
-    retry: bool = False
     retry_owner_user_ids: frozenset[str] = frozenset()
 
 

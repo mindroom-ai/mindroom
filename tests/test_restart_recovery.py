@@ -23,6 +23,9 @@ from mindroom.restart_recovery import (
     _restart_recovery_retry_delay as restart_recovery_retry_delay,
 )
 from mindroom.restart_recovery import (
+    _RoomAttemptResult as RoomAttemptResult,
+)
+from mindroom.restart_recovery import (
     _RoomWork as RoomWork,
 )
 from mindroom.restart_recovery import (
@@ -104,6 +107,7 @@ def _target(
     room_id: str = "!code:example.org",
     thread_id: str = "$thread",
     agent_name: str = "code",
+    original_sender_id: str | None = "@alice:example.org",
 ) -> InterruptedThread:
     return InterruptedThread(
         room_id=room_id,
@@ -111,7 +115,7 @@ def _target(
         target_event_id=target_event_id,
         partial_text="Partial",
         agent_name=agent_name,
-        original_sender_id="@alice:example.org",
+        original_sender_id=original_sender_id,
         timestamp_ms=timestamp_ms,
     )
 
@@ -132,10 +136,7 @@ def _operations(
         return RoomRecoveryResult(
             interrupted_threads=tuple(target for result in results for target in result.interrupted_threads),
             retry_owner_user_ids=frozenset(
-                {
-                    *(owner.user_id for owner, result in zip(owners, results) if result.retry),
-                    *(owner_user_id for result in results for owner_user_id in result.retry_owner_user_ids),
-                },
+                owner_user_id for result in results for owner_user_id in result.retry_owner_user_ids
             ),
         )
 
@@ -540,6 +541,27 @@ async def test_matrix_target_delivery_uses_router_and_mentions_exact_owner(tmp_p
         "$resume",
         content,
     )
+
+
+@pytest.mark.asyncio
+async def test_matrix_target_delivery_by_exact_owner_omits_self_mention(tmp_path: Path) -> None:
+    """An owner-authored resume must not mention its own Matrix account."""
+    owner = _owner()
+    target = _target("$target", timestamp_ms=10)
+    operations = build_matrix_restart_recovery_operations(test_runtime_paths(tmp_path))
+
+    with patch(
+        "mindroom.restart_recovery_operations.send_message_result",
+        new=AsyncMock(side_effect=delivered_matrix_side_effect("$resume")),
+    ) as send_message:
+        delivered = await operations.deliver_target(owner, owner, target, _config(tmp_path))
+
+    assert delivered is True
+    content = send_message.await_args.args[2]
+    assert content["body"] == (
+        "[System: Previous response was interrupted by service restart. Please continue where you left off.]"
+    )
+    assert "m.mentions" not in content
 
 
 @pytest.mark.asyncio
@@ -976,7 +998,7 @@ async def test_future_fair_owner_retry_does_not_hide_due_active_owner_work(
     replacement_started = asyncio.Event()
 
     async def recover_room(
-        _owner: RecoveryOwner,
+        owner: RecoveryOwner,
         request: RoomRecoveryRequest,
         _owner_user_ids: frozenset[str],
         _config: Config,
@@ -985,7 +1007,7 @@ async def test_future_fair_owner_retry_does_not_hide_due_active_owner_work(
             blocked_started.set()
             await release_blocked.wait()
         elif request.room_id == retry_room:
-            return RoomRecoveryResult(retry=True)
+            return RoomRecoveryResult(retry_owner_user_ids=frozenset({owner.user_id}))
         else:
             replacement_started.set()
         return RoomRecoveryResult()
@@ -1073,7 +1095,7 @@ async def test_room_failure_retries_without_external_notification(tmp_path: Path
         nonlocal attempts
         attempts += 1
         if attempts == 1:
-            return RoomRecoveryResult(retry=True)
+            return RoomRecoveryResult(retry_owner_user_ids=frozenset({owner.user_id}))
         recovered.set()
         return RoomRecoveryResult()
 
@@ -1137,6 +1159,129 @@ async def test_ready_owner_immediately_retries_startup_and_replacement_room_inte
         await coordinator.stop()
 
     assert set(processed_requests) == {startup_request, replacement_request}
+
+
+@pytest.mark.asyncio
+async def test_early_owner_refresh_backs_off_until_first_sync_then_progresses(
+    tmp_path: Path,
+) -> None:
+    """Room setup before first sync must not spin or hide the later ready edge."""
+    generation = object()
+    owner = _owner(generation=generation, ready=False)
+    owners = {owner.user_id: owner}
+    recover_room = AsyncMock(return_value=RoomRecoveryResult())
+    retry_attempts: list[int] = []
+
+    def retry_delay(attempt: int) -> float:
+        retry_attempts.append(attempt)
+        return 60.0
+
+    coordinator = RestartRecoveryCoordinator(
+        current_config=lambda: _config(tmp_path),
+        current_owners=lambda: owners,
+        operations=_operations(recover_room=recover_room),
+        retry_delay=retry_delay,
+    )
+    coordinator._startup_cutoff_ms = 123
+    coordinator.owner_ready(owner.user_id)
+    coordinator._paused = False
+    work = next(iter(coordinator._room_jobs.values()))
+    coordinator._room_jobs.clear()
+
+    async def unavailable_result() -> RoomAttemptResult:
+        return RoomAttemptResult(
+            owners=dict(owners),
+            retry_owner_user_ids=frozenset({owner.user_id}),
+            retry_targets=(),
+            settlements=(),
+        )
+
+    attempt = asyncio.create_task(unavailable_result())
+    await attempt
+    coordinator._active_attempts[attempt] = work
+    coordinator._settle_finished_attempts()
+
+    retained = next(iter(coordinator._room_jobs.values()))
+    assert retry_attempts == [1]
+    assert retained.attempt == 1
+    assert retained.due_at > asyncio.get_running_loop().time()
+    assert owner.user_id not in coordinator._ready_generations
+
+    owners[owner.user_id] = _owner(generation=generation, ready=True)
+    coordinator.owner_ready(owner.user_id)
+    ready_work = next(iter(coordinator._room_jobs.values()))
+    assert ready_work.due_at <= asyncio.get_running_loop().time()
+
+    result = await coordinator._process_room(ready_work)
+
+    assert not result.retry_owner_user_ids
+    recover_room.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_requester_retry_does_not_fence_same_target_after_resolution(
+    tmp_path: Path,
+) -> None:
+    """An indeterminate requester must remain unsettled until its retry resolves."""
+    owner = _owner()
+    router = _owner(
+        entity_name=ROUTER_AGENT_NAME,
+        user_id="@router:example.org",
+        rooms=frozenset(),
+    )
+    owners = {owner.user_id: owner, router.user_id: router}
+    unresolved = _target(
+        "$target",
+        timestamp_ms=10,
+        original_sender_id=None,
+    )
+    resolved = _target("$target", timestamp_ms=10)
+    scans = 0
+    second_scan_finished = asyncio.Event()
+    delivered_targets: list[str] = []
+
+    async def recover_room(
+        _owner: RecoveryOwner,
+        _request: RoomRecoveryRequest,
+        _owner_user_ids: frozenset[str],
+        _config: Config,
+    ) -> RoomRecoveryResult:
+        nonlocal scans
+        scans += 1
+        if scans == 1:
+            return RoomRecoveryResult(
+                interrupted_threads=(unresolved,),
+                retry_owner_user_ids=frozenset({owner.user_id}),
+            )
+        second_scan_finished.set()
+        return RoomRecoveryResult(interrupted_threads=(resolved,))
+
+    async def deliver(
+        _router: RecoveryOwner,
+        _owner: RecoveryOwner,
+        target: InterruptedThread,
+        _config: Config,
+    ) -> bool:
+        delivered_targets.append(target.target_event_id)
+        return True
+
+    coordinator = RestartRecoveryCoordinator(
+        current_config=lambda: _config(tmp_path),
+        current_owners=lambda: owners,
+        operations=_operations(recover_room=recover_room, deliver=deliver),
+        retry_delay=lambda _attempt: 0.0,
+    )
+    coordinator.start(startup_cutoff_ms=123)
+    try:
+        await asyncio.wait_for(second_scan_finished.wait(), timeout=1.0)
+        await _wait_until(
+            lambda: not coordinator._room_jobs and all(task.done() for task in coordinator._active_attempts),
+        )
+    finally:
+        await coordinator.stop()
+
+    assert scans == 2
+    assert delivered_targets == ["$target"]
 
 
 @pytest.mark.asyncio
@@ -1565,6 +1710,89 @@ async def test_pause_drains_current_delivery_without_starting_later_target(
     release_delivery.set()
     await pause_task
     assert delivered_targets == ["$first"]
+
+    coordinator.resume()
+    try:
+        await asyncio.wait_for(second_delivered.wait(), timeout=1.0)
+    finally:
+        await coordinator.stop()
+
+    assert delivered_targets == ["$first", "$second"]
+
+
+@pytest.mark.asyncio
+async def test_pause_during_later_freshness_settles_prior_delivery_and_retains_target(
+    tmp_path: Path,
+) -> None:
+    """Cancellation outside delivery must preserve partial attempt progress."""
+    owner = _owner()
+    router = _owner(
+        entity_name=ROUTER_AGENT_NAME,
+        user_id="@router:example.org",
+        rooms=frozenset(),
+    )
+    owners = {owner.user_id: owner, router.user_id: router}
+    first = _target("$first", timestamp_ms=10, thread_id="$thread-a")
+    second = _target("$second", timestamp_ms=20, thread_id="$thread-b")
+    second_freshness_started = asyncio.Event()
+    second_delivered = asyncio.Event()
+    second_freshness_attempts = 0
+    delivered_targets: list[str] = []
+
+    async def recover_room(
+        _owner: RecoveryOwner,
+        _request: RoomRecoveryRequest,
+        _owner_user_ids: frozenset[str],
+        _config: Config,
+    ) -> RoomRecoveryResult:
+        return RoomRecoveryResult(interrupted_threads=(first, second))
+
+    async def freshness(
+        _owner: RecoveryOwner,
+        target: InterruptedThread,
+        _config: Config,
+    ) -> RestartTargetFreshness:
+        nonlocal second_freshness_attempts
+        if target is second:
+            second_freshness_attempts += 1
+            if second_freshness_attempts == 1:
+                second_freshness_started.set()
+                await asyncio.Event().wait()
+        return RestartTargetFreshness.CURRENT
+
+    async def deliver(
+        _router: RecoveryOwner,
+        _owner: RecoveryOwner,
+        target: InterruptedThread,
+        _config: Config,
+    ) -> bool:
+        delivered_targets.append(target.target_event_id)
+        if target is second:
+            second_delivered.set()
+        return True
+
+    coordinator = RestartRecoveryCoordinator(
+        current_config=lambda: _config(tmp_path),
+        current_owners=lambda: owners,
+        operations=_operations(
+            recover_room=recover_room,
+            freshness=freshness,
+            deliver=deliver,
+        ),
+        retry_delay=lambda _attempt: 0.0,
+    )
+    coordinator.start(startup_cutoff_ms=123)
+    await asyncio.wait_for(second_freshness_started.wait(), timeout=1.0)
+
+    await coordinator.pause()
+
+    first_key = (owner.user_id, first.room_id, first.thread_id)
+    retained_targets = tuple(
+        target.target.target_event_id for work in coordinator._room_jobs.values() for target in work.targets
+    )
+    assert delivered_targets == ["$first"]
+    assert coordinator._target_watermarks[first_key].closed is True
+    assert retained_targets == ("$second",)
 
     coordinator.resume()
     try:
