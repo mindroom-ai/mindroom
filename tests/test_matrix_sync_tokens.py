@@ -1155,26 +1155,60 @@ async def test_on_sync_response_persists_latest_sync_token(tmp_path: Path) -> No
 
 
 @pytest.mark.asyncio
-async def test_recovered_sync_response_certifies_after_nio_callback_success(tmp_path: Path) -> None:
-    """Pinned nio reports recovery only after its source callback succeeds."""
+@pytest.mark.parametrize(
+    ("persist_fails", "expected_checkpoint"),
+    [
+        (False, "s_after_recovered"),
+        (True, "s_before_recovered"),
+    ],
+    ids=["persisted", "persistence-failed"],
+)
+async def test_aggregate_admission_persistence_gates_recovered_checkpoint(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    persist_fails: bool,
+    expected_checkpoint: str,
+) -> None:
+    """Recovered certification advances only after aggregate admission persists its obligation."""
     bot = _agent_bot(tmp_path)
     bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
-    room = nio.MatrixRoom("!room:localhost", bot.matrix_id.full_id)
-    event = _text_event("$recovered-source", "hello", 1)
-    source_admission = bot._dispatch_obligation_runner.admission_callback(
-        DispatchCallbackKind.MESSAGE,
+    bot.client.next_batch = "s_after_recovered"
+    bot._first_sync_done = True
+    bot._sync_cache_trust.state = SyncTrustState.CERTIFIED
+    bot._sync_cache_trust.checkpoint = SyncCheckpoint("s_before_recovered")
+    save_sync_token(
+        tmp_path,
+        bot.agent_name,
+        "s_before_recovered",
+        cache_generation=_CACHE_GENERATION,
     )
+    room = nio.MatrixRoom("!room:localhost", bot.matrix_id.full_id)
+    event = _text_event("$recovered-source-failed" if persist_fails else "$recovered-source", "hello", 1)
+    bot._dispatch_obligation_runner.register_source_callbacks(
+        bot.client,
+        owner=bot._runtime_view,
+    )
+    aggregate_admission = bot.client.add_event_admission_callback.call_args.args[0]
+    assert bot.client.add_event_admission_callback.call_count == 1
     source_callback = bot._dispatch_obligation_runner.task_wrapper(
         DispatchCallbackKind.MESSAGE,
         owner=bot._runtime_view,
     )
-    response = _sync_response("s_recovered")
+    response = _sync_response("s_after_recovered")
     response.recovered_room_ids = frozenset({room.room_id})
     cache_result = SyncCacheWriteResult.from_sync_response(
         response,
         complete=True,
         limited_room_ids=(room.room_id,),
     )
+
+    if persist_fails:
+
+        def fail_persist(*_args: object, **_kwargs: object) -> None:
+            message = "dispatch database unavailable"
+            raise OSError(message)
+
+        monkeypatch.setattr(bot._dispatch_obligation_store, "create_pending", fail_persist)
 
     with (
         patch.object(bot._dispatch_obligation_runner, "run_persisted", AsyncMock()) as run_persisted,
@@ -1184,15 +1218,30 @@ async def test_recovered_sync_response_certifies_after_nio_callback_success(tmp_
             AsyncMock(return_value=cache_result),
         ),
     ):
-        await source_admission(room, event)
-        await source_callback(room, event)
-        assert bot._dispatch_obligation_store.has_pending(event.event_id, DispatchCallbackKind.MESSAGE)
+        if persist_fails:
+            with pytest.raises(
+                nio.CallbackNotAcceptedError,
+                match="dispatch database unavailable",
+            ) as exc_info:
+                await aggregate_admission(room, event)
+            assert isinstance(exc_info.value.__cause__, OSError)
+        else:
+            await aggregate_admission(room, event)
+            assert bot._dispatch_obligation_store.has_pending(
+                event.event_id,
+                DispatchCallbackKind.MESSAGE,
+            )
+            await source_callback(room, event)
         await bot._on_sync_response(response)
         await wait_for_background_tasks(timeout=1.0, owner=bot._runtime_view)
 
-    run_persisted.assert_awaited_once()
+    if persist_fails:
+        run_persisted.assert_not_awaited()
+    else:
+        run_persisted.assert_awaited_once()
     assert bot._sync_cache_trust.state is SyncTrustState.CERTIFIED
-    assert _load_sync_token_value(tmp_path, bot.agent_name) == "s_recovered"
+    assert bot.client.next_batch == expected_checkpoint
+    assert _load_sync_token_value(tmp_path, bot.agent_name) == expected_checkpoint
 
 
 @pytest.mark.asyncio
@@ -1709,56 +1758,6 @@ async def test_nio_accepts_late_non_acceptance_without_live_replay(
         DispatchCallbackKind.MESSAGE,
     )
     schedule_retry.assert_called_once()
-
-
-@pytest.mark.asyncio
-async def test_swallowed_dispatch_persistence_failure_cannot_certify_response(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A response callback must reject the token whose source callback failed acceptance."""
-    bot = _agent_bot(tmp_path)
-    bot.client = make_matrix_client_mock(user_id=bot.matrix_id.full_id)
-    bot.client.next_batch = "s_after_failure"
-    bot._first_sync_done = True
-    bot._sync_cache_trust.state = SyncTrustState.CERTIFIED
-    bot._sync_cache_trust.checkpoint = SyncCheckpoint("s_before_failure")
-    cache_generation = bot.event_cache.cache_generation
-    assert cache_generation is not None
-    save_sync_token(
-        tmp_path,
-        bot.agent_name,
-        "s_before_failure",
-        cache_generation=cache_generation,
-    )
-
-    def fail_persist(*_args: object, **_kwargs: object) -> None:
-        message = "dispatch database unavailable"
-        raise OSError(message)
-
-    monkeypatch.setattr(bot._dispatch_obligation_store, "create_pending", fail_persist)
-    admission = bot._dispatch_obligation_runner.admission_callback(DispatchCallbackKind.MESSAGE)
-    with pytest.raises(
-        nio.CallbackNotAcceptedError,
-        match="dispatch database unavailable",
-    ) as exc_info:
-        await admission(
-            nio.MatrixRoom("!room:localhost", bot.matrix_id.full_id),
-            _text_event("$unpersisted-response", "hello", 1),
-        )
-    assert isinstance(exc_info.value.__cause__, OSError)
-    assert bot.client.next_batch == "s_before_failure"
-
-    response = _sync_response("s_after_failure")
-    with patch("mindroom.bot.mark_matrix_sync_success", return_value=datetime.now(UTC)):
-        await bot._on_sync_response(response)
-
-    checkpoint = load_sync_checkpoint(tmp_path, bot.agent_name)
-    assert checkpoint is not None
-    assert checkpoint.token == "s_before_failure"  # noqa: S105
-
-    restarted = _agent_bot(tmp_path)
-    assert await restarted._sync_cache_trust.prepare_startup() == "s_before_failure"
 
 
 @pytest.mark.asyncio
