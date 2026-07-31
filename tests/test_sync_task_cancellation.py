@@ -2473,12 +2473,17 @@ async def test_orchestrator_stop_cancels_all_tasks(tmp_path: Path) -> None:
             assert not orchestrator._sync_tasks
             assert all(not bot.running for bot in orchestrator.agent_bots.values())
 
-        orchestrator._restart_recovery.stop = AsyncMock(side_effect=track_recovery_stop)
-
         async def track_mcp_stop() -> None:
             shutdown_order.append("mcp_teardown")
 
-        with patch.object(orchestrator, "_stop_mcp_manager", new=AsyncMock(side_effect=track_mcp_stop)):
+        with (
+            patch.object(
+                orchestrator._restart_recovery,
+                "stop",
+                new=AsyncMock(side_effect=track_recovery_stop),
+            ),
+            patch.object(orchestrator, "_stop_mcp_manager", new=AsyncMock(side_effect=track_mcp_stop)),
+        ):
             await orchestrator.stop()
 
         # Verify all tasks were cancelled

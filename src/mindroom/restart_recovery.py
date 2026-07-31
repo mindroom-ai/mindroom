@@ -272,7 +272,7 @@ class RestartRecoveryCoordinator:
         self._room_jobs.clear()
         self._target_watermarks.clear()
         self._completed_startup_scans.clear()
-        await self._drain_owner_room_discoveries()
+        await self._drain_inflight_work()
         await self._operations.close()
 
     def _require_config(self) -> Config:
@@ -374,8 +374,7 @@ class RestartRecoveryCoordinator:
                 self._start_due_attempts()
                 await self._wait_for_progress(delay=self._next_start_delay())
         finally:
-            await self._drain_owner_room_discoveries()
-            await self._drain_active_attempts()
+            await self._drain_inflight_work()
 
     def _start_owner_room_discovery(self, owner: RecoveryOwner) -> None:
         self._cancel_owner_room_discoveries(owner.user_id)
@@ -439,10 +438,13 @@ class RestartRecoveryCoordinator:
             for room_id in room_ids:
                 self._enqueue_startup_room(owner.user_id, room_id)
 
-    async def _drain_owner_room_discoveries(self) -> None:
-        tasks = tuple(self._owner_room_discoveries)
-        await _cancel_and_drain_tasks(tasks)
+    async def _drain_inflight_work(self) -> None:
+        """Cancel every admitted task before draining any one task."""
+        discoveries = tuple(self._owner_room_discoveries)
+        attempts = tuple(self._active_attempts)
+        await _cancel_and_drain_tasks((*discoveries, *attempts))
         self._owner_room_discoveries.clear()
+        self._settle_finished_attempts()
 
     def _active_room_ids(self) -> set[str]:
         return {lease.room_id for lease in self._active_attempts.values()}
@@ -661,13 +663,6 @@ class RestartRecoveryCoordinator:
             self._target_watermarks[key] = _TargetWatermark(owner.generation, version, settlement.closed)
         elif version == current.version and settlement.closed and not current.closed:
             self._target_watermarks[key] = replace(current, closed=True)
-
-    async def _drain_active_attempts(self) -> None:
-        # The lease drain must survive repeated cancellation while an admitted
-        # delivery independently drains its already-started Matrix side effect.
-        tasks = tuple(self._active_attempts)
-        await _cancel_and_drain_tasks(tasks)
-        self._settle_finished_attempts()
 
     async def _process_room(self, lease: _RoomLease) -> tuple[_OwnerAttemptResult, ...]:
         config = self._require_config()

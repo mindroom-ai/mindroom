@@ -3176,18 +3176,20 @@ async def test_repeated_pause_cancellation_drains_worker_before_propagating(
 
 
 @pytest.mark.asyncio
-async def test_repeated_pause_cancellation_drains_discovery_before_active_lease(  # noqa: PLR0915
+async def test_pause_cancels_discovery_and_active_lease_together(
     tmp_path: Path,
 ) -> None:
-    """Discovery cleanup must not let repeated cancellation orphan an active lease."""
+    """Slow discovery cleanup must not leave a lease free to start another send."""
     owner = _owner()
     owners = {owner.user_id: owner}
+    first_target = _target("$first", timestamp_ms=10, thread_id="$first-thread")
+    second_target = _target("$second", timestamp_ms=20, thread_id="$second-thread")
     discovery_started = asyncio.Event()
     discovery_cleanup_started = asyncio.Event()
     release_discovery_cleanup = asyncio.Event()
-    attempt_started = asyncio.Event()
-    attempt_cleanup_started = asyncio.Event()
-    release_attempt_cleanup = asyncio.Event()
+    first_delivery_started = asyncio.Event()
+    release_first_delivery = asyncio.Event()
+    second_delivery_started = asyncio.Event()
 
     async def joined_rooms(_owner: RecoveryOwner) -> list[str]:
         discovery_started.set()
@@ -3208,20 +3210,22 @@ async def test_repeated_pause_cancellation_drains_discovery_before_active_lease(
         _owner_user_ids: frozenset[str],
         _config: Config,
     ) -> RoomRecoveryResult:
-        attempt_started.set()
-        try:
-            await asyncio.Event().wait()
-        finally:
-            attempt_cleanup_started.set()
-            while not release_attempt_cleanup.is_set():
-                try:
-                    await asyncio.shield(release_attempt_cleanup.wait())
-                except asyncio.CancelledError:
-                    continue
-        return RoomRecoveryResult()
+        return RoomRecoveryResult(interrupted_threads=(first_target, second_target))
+
+    async def deliver(
+        _owner: RecoveryOwner,
+        target: InterruptedThread,
+        _config: Config,
+    ) -> bool:
+        if target is first_target:
+            first_delivery_started.set()
+            await release_first_delivery.wait()
+        else:
+            second_delivery_started.set()
+        return True
 
     operations = dataclasses.replace(
-        _operations(recover_room=recover_room),
+        _operations(recover_room=recover_room, deliver=deliver),
         joined_rooms=joined_rooms,
     )
     coordinator = RestartRecoveryCoordinator(
@@ -3232,40 +3236,24 @@ async def test_repeated_pause_cancellation_drains_discovery_before_active_lease(
     )
     coordinator.start(startup_cutoff_ms=123)
     await asyncio.wait_for(discovery_started.wait(), timeout=1.0)
-    await asyncio.wait_for(attempt_started.wait(), timeout=1.0)
+    await asyncio.wait_for(first_delivery_started.wait(), timeout=1.0)
 
     pause_task = asyncio.create_task(coordinator.pause())
     try:
         await asyncio.wait_for(discovery_cleanup_started.wait(), timeout=1.0)
-        pause_task.cancel()
-        await asyncio.sleep(0)
-        pause_task.cancel()
-        await asyncio.sleep(0)
-        assert not pause_task.done()
+        release_first_delivery.set()
+        await _wait_until(
+            lambda: second_delivery_started.is_set() or all(task.done() for task in coordinator._active_attempts),
+        )
+        assert not second_delivery_started.is_set()
 
         release_discovery_cleanup.set()
-        await asyncio.wait_for(attempt_cleanup_started.wait(), timeout=1.0)
-        pause_task.cancel()
-        await asyncio.sleep(0)
-        assert not pause_task.done()
-
-        release_attempt_cleanup.set()
-        with pytest.raises(asyncio.CancelledError):
-            await pause_task
+        await asyncio.wait_for(pause_task, timeout=1.0)
         assert not coordinator._active_attempts
     finally:
         release_discovery_cleanup.set()
-        release_attempt_cleanup.set()
-        for task in coordinator._owner_room_discoveries:
-            task.cancel()
-        for task in coordinator._active_attempts:
-            task.cancel()
-        await asyncio.gather(
-            pause_task,
-            *coordinator._owner_room_discoveries,
-            *coordinator._active_attempts,
-            return_exceptions=True,
-        )
+        release_first_delivery.set()
+        await asyncio.gather(pause_task, return_exceptions=True)
         await coordinator.stop()
 
 
