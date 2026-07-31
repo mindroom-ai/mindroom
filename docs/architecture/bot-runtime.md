@@ -155,13 +155,15 @@ Semantic memory backends such as Mem0 have a separate lifecycle and are not alte
 
 `RestartRecoveryCoordinator` is the single owner of startup cleanup, replacement-room handoffs, interrupted-target freshness checks, semantic retry state, and resume-delivery settlement.
 `InterruptedTurnRooms` records durable room handoff facts, but it does not schedule Matrix recovery or own retry timing.
-The coordinator retains one work item and lease for each exact owner-room pair, with at most two leases active at once.
-When another owner has queued work, lease selection prefers that owner before assigning a second slot to an already-active owner.
-Each lease performs its room scans, newest-target selection, freshness checks, and resume delivery before releasing that owner-room pair.
+The coordinator merges exact owners into one work item for each room and recovery policy.
+At most eight unrelated rooms have active leases, and distinct policies for the same room never scan concurrently.
+Lease selection ranks only due work and then prefers work whose owners do not already have an active lease.
+Each lease performs one shared room scan, newest-target selection, freshness checks, and resume delivery before releasing that room.
 One monotonic watermark per exact owner generation, room, and thread fences superseded targets and closes a successfully resumed recovery lifecycle.
-Concurrent owner-room leases share one joined-room snapshot for the exact owner generation.
+Concurrent room leases share one joined-room snapshot for each exact owner generation.
 A dedicated Matrix operations collaborator explicitly owns membership snapshots, releases discarded owners, and cancels and drains every retained snapshot during shutdown.
-A missing desired room invalidates that snapshot so a later retry can observe a newly joined room.
+A shared scan waits until every enrolled owner is ready and joined, and a missing desired room invalidates only that owner's snapshot so a later retry can observe the join.
+Unresolved room aliases remain outside retry state until room setup resolves them, and later readiness notifications do not recreate a completed same-generation scan.
 Room history failures, transient requester-resolution failures, and failed cleanup edits return typed retry outcomes, and no interrupted targets publish from a partial scan.
 Each resume relay uses a deterministic Matrix transaction ID derived from the exact owner and interrupted target, so only a retry of that same target reuses the transaction ID.
 The orchestrator pauses recovery before configuration mutation, and pause cancellation drains active attempt cleanup before any leased work is settled or restored.

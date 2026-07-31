@@ -140,7 +140,7 @@ def _merge_work(left: _RoomWork, right: _RoomWork) -> _RoomWork:
 
 
 class RestartRecoveryCoordinator:
-    """Own bounded owner-room recovery leases and their monotonic target watermarks."""
+    """Own bounded room recovery leases and monotonic owner-target watermarks."""
 
     def __init__(
         self,

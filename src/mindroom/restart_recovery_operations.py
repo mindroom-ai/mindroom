@@ -86,7 +86,7 @@ def build_restart_recovery_owners(
 
 @dataclass(frozen=True)
 class RoomRecoveryRequest:
-    """One semantic owner-room recovery request."""
+    """One semantic room scan request shared by exact owners."""
 
     room_id: str
     startup_cutoff_ms: int | None
