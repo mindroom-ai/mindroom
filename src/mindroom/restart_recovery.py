@@ -114,6 +114,20 @@ def _restart_recovery_retry_delay(attempt: int) -> float:
     return min(60.0, 2.0 ** max(1, attempt))
 
 
+async def _cancel_and_drain_tasks[T](tasks: tuple[asyncio.Task[T], ...]) -> None:
+    """Drain owned tasks despite repeated cancellation of the lifecycle task."""
+    for task in tasks:
+        task.cancel()
+    if not tasks:
+        return
+    drain = asyncio.gather(*tasks, return_exceptions=True)
+    while not drain.done():
+        try:
+            await asyncio.shield(drain)
+        except asyncio.CancelledError:
+            continue
+
+
 def _target_version(target: InterruptedThread) -> tuple[int, str]:
     return target.timestamp_ms, target.target_event_id
 
@@ -435,10 +449,7 @@ class RestartRecoveryCoordinator:
 
     async def _drain_owner_room_discoveries(self) -> None:
         tasks = tuple(self._owner_room_discoveries)
-        for task in tasks:
-            task.cancel()
-        if tasks:
-            await asyncio.gather(*tasks, return_exceptions=True)
+        await _cancel_and_drain_tasks(tasks)
         self._owner_room_discoveries.clear()
 
     def _active_room_ids(self) -> set[str]:
@@ -660,18 +671,10 @@ class RestartRecoveryCoordinator:
             self._target_watermarks[key] = replace(current, closed=True)
 
     async def _drain_active_attempts(self) -> None:
-        # The lease drain must survive cancellation while an admitted delivery
-        # independently drains its already-started Matrix side effect.
+        # The lease drain must survive repeated cancellation while an admitted
+        # delivery independently drains its already-started Matrix side effect.
         tasks = tuple(self._active_attempts)
-        for task in tasks:
-            task.cancel()
-        if tasks:
-            drain = asyncio.gather(*tasks, return_exceptions=True)
-            while not drain.done():
-                try:
-                    await asyncio.shield(drain)
-                except asyncio.CancelledError:
-                    continue
+        await _cancel_and_drain_tasks(tasks)
         self._settle_finished_attempts()
 
     async def _process_room(self, lease: _RoomLease) -> tuple[_OwnerAttemptResult, ...]:

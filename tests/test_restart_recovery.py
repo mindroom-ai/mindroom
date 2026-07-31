@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import gc
 import weakref
 from typing import TYPE_CHECKING, cast
@@ -3092,6 +3093,100 @@ async def test_repeated_pause_cancellation_drains_worker_before_propagating(
         await coordinator.stop()
 
     assert attempts == 2
+
+
+@pytest.mark.asyncio
+async def test_repeated_pause_cancellation_drains_discovery_before_active_lease(  # noqa: PLR0915
+    tmp_path: Path,
+) -> None:
+    """Discovery cleanup must not let repeated cancellation orphan an active lease."""
+    owner = _owner()
+    owners = {owner.user_id: owner}
+    discovery_started = asyncio.Event()
+    discovery_cleanup_started = asyncio.Event()
+    release_discovery_cleanup = asyncio.Event()
+    attempt_started = asyncio.Event()
+    attempt_cleanup_started = asyncio.Event()
+    release_attempt_cleanup = asyncio.Event()
+
+    async def joined_rooms(_owner: RecoveryOwner) -> list[str]:
+        discovery_started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            discovery_cleanup_started.set()
+            while not release_discovery_cleanup.is_set():
+                try:
+                    await asyncio.shield(release_discovery_cleanup.wait())
+                except asyncio.CancelledError:
+                    continue
+        return []
+
+    async def recover_room(
+        _owner: RecoveryOwner,
+        _request: RoomRecoveryRequest,
+        _owner_user_ids: frozenset[str],
+        _config: Config,
+    ) -> RoomRecoveryResult:
+        attempt_started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            attempt_cleanup_started.set()
+            while not release_attempt_cleanup.is_set():
+                try:
+                    await asyncio.shield(release_attempt_cleanup.wait())
+                except asyncio.CancelledError:
+                    continue
+        return RoomRecoveryResult()
+
+    operations = dataclasses.replace(
+        _operations(recover_room=recover_room),
+        joined_rooms=joined_rooms,
+    )
+    coordinator = RestartRecoveryCoordinator(
+        current_config=lambda: _config(tmp_path),
+        current_owners=lambda: owners,
+        operations=operations,
+        retry_delay=lambda _attempt: 0.0,
+    )
+    coordinator.start(startup_cutoff_ms=123)
+    await asyncio.wait_for(discovery_started.wait(), timeout=1.0)
+    await asyncio.wait_for(attempt_started.wait(), timeout=1.0)
+
+    pause_task = asyncio.create_task(coordinator.pause())
+    try:
+        await asyncio.wait_for(discovery_cleanup_started.wait(), timeout=1.0)
+        pause_task.cancel()
+        await asyncio.sleep(0)
+        pause_task.cancel()
+        await asyncio.sleep(0)
+        assert not pause_task.done()
+
+        release_discovery_cleanup.set()
+        await asyncio.wait_for(attempt_cleanup_started.wait(), timeout=1.0)
+        pause_task.cancel()
+        await asyncio.sleep(0)
+        assert not pause_task.done()
+
+        release_attempt_cleanup.set()
+        with pytest.raises(asyncio.CancelledError):
+            await pause_task
+        assert not coordinator._active_attempts
+    finally:
+        release_discovery_cleanup.set()
+        release_attempt_cleanup.set()
+        for task in coordinator._owner_room_discoveries:
+            task.cancel()
+        for task in coordinator._active_attempts:
+            task.cancel()
+        await asyncio.gather(
+            pause_task,
+            *coordinator._owner_room_discoveries,
+            *coordinator._active_attempts,
+            return_exceptions=True,
+        )
+        await coordinator.stop()
 
 
 @pytest.mark.asyncio
