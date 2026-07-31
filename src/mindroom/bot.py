@@ -1821,6 +1821,16 @@ class AgentBot:
             cancel_after_seconds=5.0,
             shutdown_intent=shutdown_intent,
         )
+        pending_response_count = self._response_runner.pending_inbox_response_count
+        if not responses_drained:
+            self.logger.warning(
+                "matrix_agent_response_drain_incomplete",
+                agent_name=self.agent_name,
+                active_response_count=self.in_flight_response_count,
+                pending_response_count=pending_response_count,
+                response_recovery_complete=self._response_runner.incomplete_inbox_responses_recoverable,
+                restart_reason_category=restart_reason_category_for(shutdown_intent),
+            )
         post_drain_background_tasks_completed = await wait_for_background_tasks(
             timeout=5.0,
             owner=self._runtime_view,
