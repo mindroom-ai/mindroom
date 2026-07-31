@@ -57,6 +57,7 @@ from mindroom.matrix.sync_certification import (
     SyncCertificationDecision,
     SyncTrustState,
 )
+from mindroom.matrix.sync_continuity import SyncContinuityStore
 from mindroom.matrix.sync_loop import run_matrix_sync_forever, sliding_own_membership_sets
 from mindroom.matrix.users import AgentMatrixUser, login_agent_user
 from mindroom.matrix_rtc.call_manager import CallManager, maybe_build_call_manager
@@ -136,7 +137,7 @@ from .turn_store import TurnStore, TurnStoreDeps
 from .visible_voice_echo import VisibleVoiceEchoDeps, VisibleVoiceEchoLifecycle
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
+    from collections.abc import Awaitable, Callable, Iterable
     from datetime import datetime
     from pathlib import Path
 
@@ -331,6 +332,7 @@ class AgentBot:
     _turn_controller: TurnController
     _room_lifecycle: BotRoomLifecycle
     _local_departures_awaiting_sync: set[str]
+    _sync_continuity_store: SyncContinuityStore
     _sync_cache_trust: SyncCacheTrust
     _cold_history_fence: ColdHistoryFence
 
@@ -376,9 +378,9 @@ class AgentBot:
             event_cache_write_coordinator=None,
             startup_thread_prewarm_registry=None,
         )
+        self._sync_continuity_store = SyncContinuityStore(self.storage_path, self.agent_name)
         self._sync_cache_trust = SyncCacheTrust(
-            storage_path=self.storage_path,
-            agent_name=self.agent_name,
+            continuity_store=self._sync_continuity_store,
             runtime=self._runtime_view,
             logger=self.logger,
         )
@@ -408,6 +410,7 @@ class AgentBot:
                 agent_user=self.agent_user,
                 runtime=self._runtime_view,
                 runtime_paths=self.runtime_paths,
+                continuity_store=self._sync_continuity_store,
                 get_logger=lambda: self.logger,
                 get_configured_rooms=lambda: self.rooms,
                 send_response=send_room_lifecycle_response,
@@ -1163,9 +1166,15 @@ class AgentBot:
         decision: SyncCertificationDecision,
         *,
         cache_result: SyncCacheWriteResult,
+        joined_room_ids: Iterable[str] = (),
     ) -> SyncCertificationDecision:
         """Advance sync continuity after prerequisite durable work completes."""
-        applied = self._sync_cache_trust.apply_response(decision, cache_result=cache_result)
+        applied, record = self._sync_cache_trust.apply_response(
+            decision,
+            cache_result=cache_result,
+            joined_room_ids=joined_room_ids,
+        )
+        self._room_lifecycle.apply_continuity_record(record)
         self._apply_cold_history_continuity_decision(applied)
         return applied
 
@@ -1219,16 +1228,6 @@ class AgentBot:
         self._cold_history_fence.observe_continuation(response.next_batch)
         return room_member_join_hook_plan
 
-    def _clear_certified_join_decrypt_fences(
-        self,
-        *,
-        decision: SyncCertificationDecision,
-        response: nio.SyncResponse,
-    ) -> None:
-        """Clear exact pending joins before certifying their trusted response."""
-        if decision.state is SyncTrustState.CERTIFIED:
-            self._room_lifecycle.observe_trusted_sync_rooms(response.rooms.join)
-
     def _record_dispatch_persist_failure(self) -> None:
         """Latch rejected source work until its containing response is rejected."""
         self._dispatch_persist_failure_epoch += 1
@@ -1269,7 +1268,11 @@ class AgentBot:
         """Apply certification only when every source callback reached durable ownership."""
         if self._consume_dispatch_persist_failure():
             return decision, _RoomMemberJoinSyncHookPlan(arm_after_response=False), True
-        applied = self._apply_sync_response_decision(decision, cache_result=cache_result)
+        applied = self._apply_sync_response_decision(
+            decision,
+            cache_result=cache_result,
+            joined_room_ids=response.rooms.join,
+        )
         room_member_join_hook_plan = self._apply_classic_sync_admission(
             decision=applied,
             response=response,
@@ -1420,21 +1423,17 @@ class AgentBot:
                         _response,
                         room_member_join_hook_plan=room_member_join_hook_plan,
                     )
-                    self._clear_certified_join_decrypt_fences(
-                        decision=decision,
-                        response=_response,
+                    decision, room_member_join_hook_plan, dispatch_persist_failure_rejected_response = (
+                        self._apply_sync_response_after_dispatch_acceptance(
+                            decision,
+                            cache_result=cache_result,
+                            room_member_join_hook_plan=room_member_join_hook_plan,
+                            response=_response,
+                        )
                     )
                 except BaseException:
                     self._handle_pre_certification_failure()
                     raise
-                decision, room_member_join_hook_plan, dispatch_persist_failure_rejected_response = (
-                    self._apply_sync_response_after_dispatch_acceptance(
-                        decision,
-                        cache_result=cache_result,
-                        room_member_join_hook_plan=room_member_join_hook_plan,
-                        response=_response,
-                    )
-                )
             self._mark_sync_progress()
         elif isinstance(_response, nio.SlidingSyncResponse):
             # Sliding sync never certifies the classic checkpoint, but the

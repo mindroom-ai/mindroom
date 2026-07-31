@@ -29,7 +29,6 @@ from mindroom.matrix.cache.write_coordinator import EventCacheWriteCoordinator
 from mindroom.matrix.client import ResolvedVisibleMessage
 from mindroom.matrix.conversation_cache import MatrixConversationCache
 from mindroom.matrix.event_info import EventInfo
-from mindroom.matrix.sync_tokens import load_sync_checkpoint, save_sync_token
 from mindroom.matrix.thread_bookkeeping import MutationThreadImpact
 from mindroom.matrix.thread_diagnostics import (
     THREAD_HISTORY_SOURCE_DIAGNOSTIC,
@@ -53,6 +52,7 @@ from tests.conftest import (
     wrap_extracted_collaborators,
 )
 from tests.event_cache_test_support import replace_thread_unconditionally as _replace_thread
+from tests.sync_continuity_helpers import load_sync_checkpoint, save_sync_token
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, Callable, Coroutine, Sequence

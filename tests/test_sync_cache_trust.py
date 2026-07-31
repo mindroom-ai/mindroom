@@ -10,7 +10,8 @@ import pytest
 
 from mindroom.matrix.sync_cache_trust import SyncCacheTrust
 from mindroom.matrix.sync_certification import SyncCacheWriteResult, SyncCheckpoint, SyncTrustState
-from mindroom.matrix.sync_tokens import load_sync_checkpoint, save_sync_token
+from mindroom.matrix.sync_continuity import SyncContinuityStore
+from tests.sync_continuity_helpers import load_sync_checkpoint, save_sync_token
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -36,8 +37,7 @@ def _trust(
     cache.purge_principal = AsyncMock()
     runtime = _Runtime(event_cache=cache)
     trust = SyncCacheTrust(
-        storage_path=tmp_path,
-        agent_name="code",
+        continuity_store=SyncContinuityStore(tmp_path, "code"),
         runtime=runtime,
         logger=MagicMock(),
     )
@@ -143,7 +143,7 @@ def test_cache_scope_invalidation_rejects_stale_certification_plan(tmp_path: Pat
     )
 
     assert trust.invalidate_for_cache_scope_cleanup()
-    applied = trust.apply_response(decision, cache_result=cache_result)
+    applied, _record = trust.apply_response(decision, cache_result=cache_result)
 
     assert applied.state is SyncTrustState.UNCERTAIN
     assert applied.reset_client_token is True
@@ -277,12 +277,14 @@ async def test_clear_failure_disables_cache_and_skips_cold_cleanup(tmp_path: Pat
     save_sync_token(tmp_path, "code", "s_preserved", cache_generation=_GENERATION)
 
     with (
-        patch(
-            "mindroom.matrix.sync_cache_trust.load_sync_checkpoint",
+        patch.object(
+            trust.continuity_store,
+            "load",
             side_effect=OSError("checkpoint unreadable"),
         ),
-        patch(
-            "mindroom.matrix.sync_cache_trust.clear_sync_token",
+        patch.object(
+            trust.continuity_store,
+            "replace_checkpoint",
             side_effect=OSError("checkpoint cannot be removed"),
         ),
     ):

@@ -3,17 +3,15 @@
 from __future__ import annotations
 
 import asyncio
-import json
 from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Protocol, cast
+from typing import TYPE_CHECKING, Protocol
 
 import nio
 
 from mindroom.authorization import is_authorized_sender
 from mindroom.commands.handler import generate_welcome_message_for_room
 from mindroom.constants import ROUTER_AGENT_NAME
-from mindroom.durable_write import write_json_file_durable
 from mindroom.matrix.client_room_admin import RoomJoinOutcome, get_joined_rooms, join_room
 from mindroom.matrix.invited_rooms_store import (
     invited_rooms_path,
@@ -34,6 +32,7 @@ if TYPE_CHECKING:
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
+    from mindroom.matrix.sync_continuity import SyncContinuityRecord, SyncContinuityStore
     from mindroom.matrix.users import AgentMatrixUser
 
 
@@ -59,6 +58,7 @@ class BotRoomLifecycleDeps:
     agent_user: AgentMatrixUser
     runtime: SupportsClientConfig
     runtime_paths: RuntimePaths
+    continuity_store: SyncContinuityStore
     get_logger: Callable[[], structlog.stdlib.BoundLogger]
     get_configured_rooms: Callable[[], Sequence[str]]
     send_response: _SendRoomResponse
@@ -81,7 +81,9 @@ class BotRoomLifecycle:
         self._welcome_locks: dict[str, asyncio.Lock] = {}
         self._handled_invite_room_ids: set[str] = set()
         self._welcomed_room_ids: set[str] = set()
-        self._decrypt_notice_fenced_room_ids = self._load_decrypt_notice_fences()
+        self._decrypt_notice_fenced_room_ids = set(
+            self.deps.continuity_store.load().pending_join_decrypt_fences,
+        )
 
     def _lock_for_room(self, locks: dict[str, asyncio.Lock], room_id: str) -> asyncio.Lock:
         lock = locks.get(room_id)
@@ -131,8 +133,12 @@ class BotRoomLifecycle:
 
     def observe_trusted_sync_rooms(self, room_ids: Iterable[str]) -> None:
         """Clear join fences for rooms included in one trusted sync response."""
-        remaining_room_ids = self._decrypt_notice_fenced_room_ids.difference(room_ids)
-        self._replace_decrypt_notice_fences(remaining_room_ids)
+        record = self.deps.continuity_store.update_join_fences(remove=room_ids)
+        self.apply_continuity_record(record)
+
+    def apply_continuity_record(self, record: SyncContinuityRecord) -> None:
+        """Expose join fences from one already-persisted continuity update."""
+        self._decrypt_notice_fenced_room_ids = set(record.pending_join_decrypt_fences)
 
     async def restore_pending_join_decrypt_fences(self) -> None:
         """Validate durable unfinished-join fences before sync can start."""
@@ -142,8 +148,8 @@ class BotRoomLifecycle:
         if joined_rooms is None:
             msg = "Could not verify pending join decrypt fences because joined rooms are unavailable"
             raise RuntimeError(msg)
-        pending_joined_room_ids = self._decrypt_notice_fenced_room_ids.intersection(joined_rooms)
-        self._replace_decrypt_notice_fences(pending_joined_room_ids)
+        record = self.deps.continuity_store.update_join_fences(retain=joined_rooms)
+        self.apply_continuity_record(record)
 
     async def _join_room_with_decrypt_notice_fence(
         self,
@@ -151,10 +157,10 @@ class BotRoomLifecycle:
         room_id: str,
     ) -> RoomJoinOutcome:
         """Fence decrypt callbacks before a live join can race its first sync."""
-        self._replace_decrypt_notice_fences(self._decrypt_notice_fenced_room_ids | {room_id})
+        self.apply_continuity_record(self.deps.continuity_store.update_join_fences(add=(room_id,)))
         join_outcome = await join_room(client, room_id)
         if join_outcome is RoomJoinOutcome.TERMINAL_FAILURE:
-            self._replace_decrypt_notice_fences(self._decrypt_notice_fenced_room_ids - {room_id})
+            self.apply_continuity_record(self.deps.continuity_store.update_join_fences(remove=(room_id,)))
         return join_outcome
 
     async def _on_configured_room_joined(self, room_id: str) -> None:
@@ -165,37 +171,6 @@ class BotRoomLifecycle:
     def invited_rooms_file_path(self) -> Path:
         """Return the durable path for invited room IDs for this entity."""
         return invited_rooms_path(self.deps.runtime_paths.storage_root, self.deps.agent_name)
-
-    def _decrypt_notice_fences_file_path(self) -> Path:
-        """Return the durable unfinished-join fence path for this entity."""
-        return self.invited_rooms_file_path().with_name("pending_join_decrypt_fences.json")
-
-    def _load_decrypt_notice_fences(self) -> set[str]:
-        """Load exact room joins that still await trusted sync membership."""
-        path = self._decrypt_notice_fences_file_path()
-        if not path.exists():
-            return set()
-        try:
-            room_ids = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError, UnicodeDecodeError) as exc:
-            msg = f"Failed to load pending join decrypt fences from {path}"
-            raise RuntimeError(msg) from exc
-        if not isinstance(room_ids, list) or any(not isinstance(room_id, str) for room_id in room_ids):
-            msg = f"Invalid pending join decrypt fences at {path}"
-            raise RuntimeError(msg)
-        return set(cast("list[str]", room_ids))
-
-    def _replace_decrypt_notice_fences(self, room_ids: set[str]) -> None:
-        """Durably replace exact unfinished joins before exposing new state."""
-        if room_ids == self._decrypt_notice_fenced_room_ids:
-            return
-        write_json_file_durable(
-            self._decrypt_notice_fences_file_path(),
-            sorted(room_ids),
-            indent=2,
-            trailing_newline=True,
-        )
-        self._decrypt_notice_fenced_room_ids = room_ids
 
     def load_invited_rooms(self) -> set[str]:
         """Load invited rooms persisted for one eligible entity."""

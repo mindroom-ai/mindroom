@@ -35,7 +35,7 @@ from mindroom.matrix.cache.postgres_event_cache import PostgresEventCache
 from mindroom.matrix.cache.sqlite_event_cache import SqliteEventCache
 from mindroom.matrix.client import DeliveredMatrixEvent
 from mindroom.matrix.sync_certification import SyncCacheWriteResult, SyncCheckpoint, SyncTrustState
-from mindroom.matrix.sync_tokens import clear_sync_token, load_sync_checkpoint, save_sync_token
+from mindroom.matrix.sync_continuity import SyncContinuityRecord, SyncContinuityStore
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.response_admission import ResponseAdmissionGate
@@ -60,6 +60,7 @@ from tests.conftest import (
     test_runtime_paths,
     wrap_extracted_collaborators,
 )
+from tests.sync_continuity_helpers import clear_sync_token, load_sync_checkpoint, save_sync_token
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -432,6 +433,40 @@ async def test_sliding_trusted_sync_clears_joined_room_decrypt_notice_fence(
 
 
 @pytest.mark.asyncio
+async def test_sliding_fence_settlement_restart_is_globally_cold(
+    tmp_path: Path,
+) -> None:
+    """Sliding may preserve Classic checkpoint state only because restart has no trusted pos."""
+    room_id = "!room:localhost"
+    store = SyncContinuityStore(tmp_path, "code")
+    store.replace_checkpoint(SyncCheckpoint("s_classic", cache_generation=_CACHE_GENERATION))
+    store.update_join_fences(add=(room_id,))
+    bot = _agent_bot(tmp_path)
+    bot.config.matrix_sync = MatrixSyncConfig(mode="sliding")
+    bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
+    bot._first_sync_done = True
+
+    await bot._on_sync_response(
+        nio.SlidingSyncResponse(
+            "pos_after_join",
+            rooms={room_id: nio.SlidingSyncRoom(membership="join")},
+        ),
+    )
+
+    assert store.load() == SyncContinuityRecord(
+        checkpoint=SyncCheckpoint("s_classic", cache_generation=_CACHE_GENERATION),
+    )
+    restarted = _agent_bot(tmp_path)
+    restarted.config.matrix_sync = MatrixSyncConfig(mode="sliding")
+    restarted.client = make_matrix_client_mock(user_id=restarted.agent_user.user_id)
+
+    await restarted._prepare_matrix_sync_continuity()
+
+    assert restarted._cold_history_fence.is_cold
+    assert not restarted._room_lifecycle.decrypt_notice_is_fenced(room_id)
+
+
+@pytest.mark.asyncio
 async def test_restart_loads_only_exact_unfinished_join_decrypt_fence(
     tmp_path: Path,
 ) -> None:
@@ -540,13 +575,14 @@ def test_load_sync_token_returns_none_when_missing(tmp_path: Path) -> None:
     assert _load_sync_token_value(tmp_path, "code") is None
 
 
-def test_load_sync_token_returns_none_for_whitespace_only_file(tmp_path: Path) -> None:
-    """Whitespace-only token files should be treated as missing."""
+def test_whitespace_only_continuity_record_fails_closed(tmp_path: Path) -> None:
+    """Whitespace-only continuity cannot silently become a cold restart."""
     token_path = _token_path(tmp_path)
     token_path.parent.mkdir(parents=True, exist_ok=True)
     token_path.write_text(" \n\t ", encoding="utf-8")
 
-    assert _load_sync_token_value(tmp_path, "code") is None
+    with pytest.raises(RuntimeError, match="continuity"):
+        _load_sync_token_value(tmp_path, "code")
 
 
 def test_save_sync_token_round_trip(tmp_path: Path) -> None:
@@ -555,9 +591,12 @@ def test_save_sync_token_round_trip(tmp_path: Path) -> None:
 
     token_path = _token_path(tmp_path)
     assert json.loads(token_path.read_text(encoding="utf-8")) == {
-        "cache_generation": _CACHE_GENERATION,
-        "token": "s12345",
-        "version": "mindroom-sync-token-v2",
+        "checkpoint": {
+            "cache_generation": _CACHE_GENERATION,
+            "token": "s12345",
+        },
+        "pending_join_decrypt_fences": [],
+        "version": "mindroom-sync-continuity-v1",
     }
     assert _load_sync_token_value(tmp_path, "code") == "s12345"
     checkpoint = load_sync_checkpoint(tmp_path, "code")
@@ -566,8 +605,8 @@ def test_save_sync_token_round_trip(tmp_path: Path) -> None:
     assert checkpoint.cache_generation == _CACHE_GENERATION
 
 
-def test_v1_certified_record_is_invalidated_by_principal_owned_cache_schema(tmp_path: Path) -> None:
-    """Pre-v11 certified records cannot establish cache trust after the schema reset."""
+def test_obsolete_certified_record_fails_closed(tmp_path: Path) -> None:
+    """Obsolete records cannot silently establish or discard continuity."""
     token_path = _token_path(tmp_path)
     token_path.parent.mkdir(parents=True, exist_ok=True)
     token_path.write_text(
@@ -575,17 +614,18 @@ def test_v1_certified_record_is_invalidated_by_principal_owned_cache_schema(tmp_
         encoding="utf-8",
     )
 
-    assert load_sync_checkpoint(tmp_path, "code") is None
+    with pytest.raises(RuntimeError, match="continuity"):
+        load_sync_checkpoint(tmp_path, "code")
 
 
-def test_clear_sync_token_removes_saved_token(tmp_path: Path) -> None:
-    """Clearing should remove an existing persisted token."""
+def test_clear_sync_token_preserves_empty_continuity_record(tmp_path: Path) -> None:
+    """Clearing a checkpoint keeps the unified record available for join fences."""
     save_sync_token(tmp_path, "code", "s12345", cache_generation=_CACHE_GENERATION)
 
     clear_sync_token(tmp_path, "code")
 
     assert _load_sync_token_value(tmp_path, "code") is None
-    assert not _token_path(tmp_path).exists()
+    assert SyncContinuityStore(tmp_path, "code").load() == SyncContinuityRecord()
 
 
 def test_clear_sync_token_is_idempotent(tmp_path: Path) -> None:
@@ -1020,7 +1060,7 @@ async def test_checkpoint_clear_failure_defers_durable_leave_cleanup_for_replay(
     response.rooms = MagicMock(join={}, leave={room_id: MagicMock()})
     clear_failure = OSError("checkpoint directory unavailable")
 
-    with patch("mindroom.matrix.sync_cache_trust.clear_sync_token", side_effect=clear_failure):
+    with patch.object(bot._sync_continuity_store, "replace_checkpoint", side_effect=clear_failure):
         await bot._apply_own_room_membership_from_sync(response)
 
     assert bot._sync_cache_trust.state is SyncTrustState.UNCERTAIN
@@ -1290,8 +1330,8 @@ async def test_bot_start_purges_untrusted_cache_without_checkpoint_when_generati
 
 
 @pytest.mark.asyncio
-async def test_legacy_plaintext_sync_token_starts_cold(tmp_path: Path) -> None:
-    """Plaintext tokens cannot restore continuity without cache-generation proof."""
+async def test_legacy_plaintext_sync_token_fails_startup_closed(tmp_path: Path) -> None:
+    """Plaintext tokens cannot discard unknown join-fence state during startup."""
     bot = _agent_bot(tmp_path)
     token_path = _token_path(tmp_path, agent_name=bot.agent_name)
     token_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1306,22 +1346,12 @@ async def test_legacy_plaintext_sync_token_starts_cold(tmp_path: Path) -> None:
         patch.object(bot, "_set_avatar_if_available", AsyncMock()),
         patch.object(bot, "_set_presence_with_model_info", AsyncMock()),
         patch("mindroom.bot.interactive.init_persistence"),
+        pytest.raises(RuntimeError, match="continuity"),
     ):
         await bot.start()
 
     assert client.next_batch is None
-    assert bot._sync_cache_trust.state is SyncTrustState.COLD
-    assert not token_path.exists()
-
-    response = MagicMock(spec=nio.SyncResponse)
-    response.next_batch = "s_after_legacy"
-    response.rooms = MagicMock(join={})
-
-    await bot._on_sync_response(response)
-
-    checkpoint = load_sync_checkpoint(tmp_path, bot.agent_name)
-    assert checkpoint is not None
-    assert checkpoint.token == "s_after_legacy"  # noqa: S105
+    assert token_path.exists()
 
 
 @pytest.mark.asyncio
@@ -1370,14 +1400,14 @@ async def test_cache_generation_rejects_token_after_reset_crash_window(tmp_path:
 
         assert bot.client.next_batch is None
         assert bot._sync_cache_trust.state is SyncTrustState.COLD
-        assert not _token_path(tmp_path).exists()
+        assert load_sync_checkpoint(tmp_path, bot.agent_name) is None
     finally:
         await restarted_root.close()
 
 
 @pytest.mark.asyncio
-async def test_restore_saved_sync_token_ignores_invalid_utf8(tmp_path: Path) -> None:
-    """Malformed token bytes should fall back to a cold sync instead of crashing startup."""
+async def test_invalid_utf8_continuity_record_fails_startup_closed(tmp_path: Path) -> None:
+    """Malformed bytes cannot silently discard unknown join-fence state."""
     bot = _agent_bot(tmp_path)
     bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
     bot.client.next_batch = None
@@ -1386,9 +1416,8 @@ async def test_restore_saved_sync_token_ignores_invalid_utf8(tmp_path: Path) -> 
     token_path.parent.mkdir(parents=True, exist_ok=True)
     token_path.write_bytes(b"\xff\xfe\xfd")
 
-    bot.client.next_batch = await bot._sync_cache_trust.prepare_startup()
-
-    assert bot.client.next_batch is None
+    with pytest.raises(RuntimeError, match="continuity"):
+        await bot._sync_cache_trust.prepare_startup()
 
 
 @pytest.mark.asyncio
@@ -1843,7 +1872,7 @@ async def test_swallowed_dispatch_persistence_failure_cannot_certify_response(
     bot._sync_cache_trust.checkpoint = SyncCheckpoint("s_before_failure")
     bot._cold_history_fence.start(trusted_continuation="s_before_failure")
     room_id = "!room:localhost"
-    bot._room_lifecycle._replace_decrypt_notice_fences({room_id})
+    bot._room_lifecycle.apply_continuity_record(bot._sync_continuity_store.update_join_fences(add=(room_id,)))
     cache_generation = bot.event_cache.cache_generation
     assert cache_generation is not None
     save_sync_token(
@@ -1872,7 +1901,14 @@ async def test_swallowed_dispatch_persistence_failure_cannot_certify_response(
     response = MagicMock(spec=nio.SyncResponse)
     response.next_batch = "s_after_failure"
     response.rooms = MagicMock(join={room_id: MagicMock()})
-    with patch("mindroom.bot.mark_matrix_sync_success", return_value=datetime.now(UTC)):
+    with (
+        patch.object(
+            bot._conversation_cache,
+            "cache_sync_timeline_for_certification",
+            new=AsyncMock(return_value=SyncCacheWriteResult(complete=True)),
+        ),
+        patch("mindroom.bot.mark_matrix_sync_success", return_value=datetime.now(UTC)),
+    ):
         await bot._on_sync_response(response)
 
     assert bot._room_lifecycle.decrypt_notice_is_fenced(room_id)
@@ -1882,6 +1918,51 @@ async def test_swallowed_dispatch_persistence_failure_cannot_certify_response(
 
     restarted = _agent_bot(tmp_path)
     assert await restarted._sync_cache_trust.prepare_startup() == "s_before_failure"
+
+
+@pytest.mark.asyncio
+async def test_continuity_write_failure_preserves_prior_pair_and_runtime_trust(
+    tmp_path: Path,
+) -> None:
+    """Failed atomic replacement must propagate before runtime certification changes."""
+    room_id = "!room:localhost"
+    bot = _agent_bot(tmp_path)
+    bot.client = make_matrix_client_mock(user_id=bot.matrix_id.full_id)
+    cache_generation = bot.event_cache.cache_generation
+    assert cache_generation is not None
+    old_checkpoint = SyncCheckpoint("s_before_failure", cache_generation=cache_generation)
+    bot._sync_continuity_store.replace_checkpoint(old_checkpoint)
+    bot._room_lifecycle.apply_continuity_record(bot._sync_continuity_store.update_join_fences(add=(room_id,)))
+    bot._sync_cache_trust.state = SyncTrustState.CERTIFIED
+    bot._sync_cache_trust.checkpoint = SyncCheckpoint("s_before_failure")
+    bot.client.next_batch = "s_after_failure"
+    bot._first_sync_done = True
+    response = MagicMock(spec=nio.SyncResponse)
+    response.next_batch = "s_after_failure"
+    response.rooms = MagicMock(join={room_id: MagicMock()})
+
+    with (
+        patch.object(
+            bot._conversation_cache,
+            "cache_sync_timeline_for_certification",
+            new=AsyncMock(return_value=SyncCacheWriteResult(complete=True)),
+        ),
+        patch(
+            "mindroom.matrix.sync_continuity.write_json_file_durable",
+            side_effect=OSError("continuity unavailable"),
+        ),
+        pytest.raises(OSError, match="continuity unavailable"),
+    ):
+        await bot._on_sync_response(response)
+
+    assert bot._sync_cache_trust.state is SyncTrustState.CERTIFIED
+    assert bot._sync_cache_trust.checkpoint == SyncCheckpoint("s_before_failure")
+    assert bot.client.next_batch == "s_before_failure"
+    assert bot._sync_continuity_store.load() == SyncContinuityRecord(
+        checkpoint=old_checkpoint,
+        pending_join_decrypt_fences=frozenset({room_id}),
+    )
+    assert bot._room_lifecycle.decrypt_notice_is_fenced(room_id)
 
 
 @pytest.mark.asyncio

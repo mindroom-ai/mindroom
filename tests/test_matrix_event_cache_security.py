@@ -29,6 +29,7 @@ from mindroom.matrix.cache.thread_cache_gap import mark_thread_gap_fail_closed
 from mindroom.matrix.message_content import resolve_event_source_content
 from mindroom.matrix.rooms import leave_non_dm_rooms
 from mindroom.matrix.sync_cache_trust import SyncCacheTrust
+from mindroom.matrix.sync_continuity import SyncContinuityStore
 from tests.event_cache_test_support import replace_thread_unconditionally
 
 if TYPE_CHECKING:
@@ -946,8 +947,7 @@ async def test_failed_startup_cleanup_disables_only_the_affected_principal(
         monkeypatch.setattr(module, "purge_principal_locked", fail_purge)
         runtime = MagicMock(event_cache=alice, callback_failure_count=0)
         trust = SyncCacheTrust(
-            storage_path=tmp_path,
-            agent_name="alice",
+            continuity_store=SyncContinuityStore(tmp_path, "alice"),
             runtime=runtime,
             logger=MagicMock(),
         )
