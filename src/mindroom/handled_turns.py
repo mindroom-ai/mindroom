@@ -628,7 +628,9 @@ class HandledTurnLedger:
             self._ensure_loaded_locked()
             if not self._has_responded_locked(event_id):
                 return False
-            self._wait_for_pending_persists_locked()
+            barrier = self._schedule_persist_barrier_locked()
+        barrier.result()
+        with self._state.lock:
             return self._has_responded_locked(event_id)
 
     def _has_responded_locked(self, event_id: str) -> bool:
@@ -689,11 +691,15 @@ class HandledTurnLedger:
 
     def _wait_for_pending_persists_locked(self) -> None:
         """Wait for the exact FIFO prefix queued before this barrier."""
+        self._schedule_persist_barrier_locked().result()
+
+    def _schedule_persist_barrier_locked(self) -> Future[None]:
+        """Queue one exact FIFO durability barrier while state mutation is excluded."""
         barrier: Future[None] = Future()
         with self._state.persist_lock:
             self._state.pending_persists.append(_PersistRequest(records=(), completion=barrier))
             self._ensure_persist_drain_locked()
-        barrier.result()
+        return barrier
 
     def _schedule_persist_locked(
         self,
