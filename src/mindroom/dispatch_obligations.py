@@ -23,7 +23,6 @@ from mindroom.matrix.media import MATRIX_MEDIA_EVENT_TYPES, MatrixMediaEvent, pa
 
 logger = get_logger(__name__)
 
-_DATABASE_NAME = "dispatch_obligations.sqlite3"
 _SCHEMA_VERSION = 2
 _PENDING_STATE = "pending"
 _RETRY_INITIAL_DELAY_SECONDS = 1.0
@@ -70,6 +69,11 @@ class _DispatchCallbackResult(StrEnum):
 
 class _DispatchObligationCorruptionError(RuntimeError):
     """A pending row cannot be recovered without inventing source input."""
+
+
+def _database_name(principal_id: str, entity_name: str) -> str:
+    identity_digest = hashlib.sha256(f"{principal_id}\0{entity_name}".encode()).hexdigest()
+    return f"dispatch_obligations-{identity_digest}.sqlite3"
 
 
 @dataclass(frozen=True, slots=True)
@@ -125,7 +129,10 @@ class DispatchObligationStore:
             msg = "Dispatch obligation store requires an exact principal and entity"
             raise ValueError(msg)
         self.tracking_path = Path(self.tracking_path)
-        self._database_path = self.tracking_path / _DATABASE_NAME
+        self._database_path = self.tracking_path / _database_name(
+            self.principal_id,
+            self.entity_name,
+        )
         self._lock = threading.Lock()
         with self._lock, self._connect() as connection:
             self._initialize_schema(connection)
@@ -321,7 +328,7 @@ class DispatchObligationStore:
         self._validate_bound_key(key)
         with self._lock, self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
-            cursor = connection.execute(
+            connection.execute(
                 """
                 UPDATE dispatch_obligations
                 SET room_id = '',
@@ -344,26 +351,6 @@ class DispatchObligationStore:
                     _PENDING_STATE,
                 ),
             )
-            if cursor.rowcount == 0:
-                existing = connection.execute(
-                    """
-                    SELECT state
-                    FROM dispatch_obligations
-                    WHERE principal_id = ?
-                      AND entity_name = ?
-                      AND source_event_id = ?
-                      AND callback_kind = ?
-                    """,
-                    (
-                        key.principal_id,
-                        key.entity_name,
-                        key.source_event_id,
-                        key.callback_kind.value,
-                    ),
-                ).fetchone()
-                if existing is None:
-                    msg = f"Unknown dispatch obligation {key.source_event_id!r}"
-                    raise KeyError(msg)
 
     def discard_pending(self, key: _DispatchObligationKey) -> None:
         """Remove successful work whose source has no permanent Matrix event ID."""
@@ -585,14 +572,6 @@ async def _run_owned_store_operation(
         if worker_error is not None:
             raise cancellation from worker_error
         raise
-
-
-async def _run_store_settlement(
-    operation: Callable[..., None],
-    *args: object,
-) -> None:
-    """Finish one owned store settlement before propagating cancellation."""
-    await _run_owned_store_operation(operation, *args)
 
 
 def _invite_source_event_id(room_id: str, event_source_json: str) -> str:
@@ -882,6 +861,20 @@ class DispatchObligationRunner:
             self._schedule_retry(obligation.key)
             raise
 
+    async def dispatch_background(
+        self,
+        room: nio.MatrixRoom,
+        event: _DispatchEvent,
+        callback_kind: DispatchCallbackKind,
+        *,
+        owner: object,
+    ) -> None:
+        """Persist exact work before scheduling its fallible callback."""
+        obligation = await self.persist(room, event, callback_kind)
+        if obligation is None:
+            return
+        await self.task_wrapper(callback_kind, owner=owner)(room, event)
+
     async def persist(
         self,
         room: nio.MatrixRoom,
@@ -900,11 +893,7 @@ class DispatchObligationRunner:
                 persisted_obligation = await asyncio.to_thread(self.store.pending_for, obligation.key)
             else:
                 persisted_obligation = obligation
-        except asyncio.CancelledError:
-            if self.on_persist_failure is not None:
-                self.on_persist_failure()
-            raise
-        except Exception:
+        except (asyncio.CancelledError, Exception):
             if self.on_persist_failure is not None:
                 self.on_persist_failure()
             raise
@@ -1080,7 +1069,7 @@ class DispatchObligationRunner:
             return False
         if not await asyncio.to_thread(self.turn_is_terminal, obligation.source_event_id):
             return False
-        await _run_store_settlement(
+        await _run_owned_store_operation(
             self.store.settle_from_turn_store,
             obligation.source_event_id,
             obligation.callback_kind,
@@ -1100,14 +1089,14 @@ class DispatchObligationRunner:
         if await self._settle_from_turn_store_if_owned(obligation):
             return
         if obligation.callback_kind is DispatchCallbackKind.INVITE:
-            await _run_store_settlement(self.store.discard_pending, obligation.key)
+            await _run_owned_store_operation(self.store.discard_pending, obligation.key)
             return
         outcome = (
             _DispatchTerminalOutcome.SUCCEEDED
             if result is _DispatchCallbackResult.SUCCEEDED
             else _DispatchTerminalOutcome.INTENTIONALLY_IGNORED
         )
-        await _run_store_settlement(self.store.settle, obligation.key, outcome)
+        await _run_owned_store_operation(self.store.settle, obligation.key, outcome)
 
     async def _claim(self, key: _DispatchObligationKey) -> bool:
         async with self._active_lock:

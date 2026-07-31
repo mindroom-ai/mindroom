@@ -105,11 +105,6 @@ def _save_room_member_joins(path: Path, seen: dict[str, set[str]]) -> None:
         temp_path.unlink(missing_ok=True)
 
 
-def _mark_room_member_join_seen(storage_root: Path, *, room_id: str, user_id: str) -> None:
-    """Record one room/user pair or raise when its durable write fails."""
-    _mark_room_member_joins_seen(storage_root, ((room_id, user_id),))
-
-
 def _mark_room_member_joins_seen(
     storage_root: Path,
     room_user_ids: Iterable[tuple[str, str]],
@@ -212,11 +207,7 @@ def record_room_member_join_seen(
     join: RoomMemberJoin,
 ) -> None:
     """Record one room/user join after its hook emission completes."""
-    _mark_room_member_join_seen(
-        storage_root,
-        room_id=join.room_id,
-        user_id=join.user_id,
-    )
+    _mark_room_member_joins_seen(storage_root, ((join.room_id, join.user_id),))
 
 
 def room_member_events_from_sync_state(

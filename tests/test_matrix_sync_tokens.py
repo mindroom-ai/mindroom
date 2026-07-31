@@ -338,6 +338,29 @@ async def test_orchestrated_router_start_defers_turn_recovery_to_coordinator(tmp
 
 
 @pytest.mark.asyncio
+async def test_orchestrated_agent_start_defers_turn_recovery_until_first_sync(
+    tmp_path: Path,
+) -> None:
+    """A regular agent must not replay turns against pre-sync room state."""
+    bot = _agent_bot(tmp_path)
+    bot.orchestrator = MagicMock()
+    client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
+    recover_pending = AsyncMock()
+    bot._dispatch_obligation_runner.recover_pending = recover_pending
+
+    with (
+        patch.object(bot, "ensure_user_account", AsyncMock()),
+        patch("mindroom.bot.login_agent_user", AsyncMock(return_value=client)),
+        patch.object(bot, "_set_avatar_if_available", AsyncMock()),
+        patch.object(bot, "_set_presence_with_model_info", AsyncMock()),
+        patch("mindroom.bot.interactive.init_persistence"),
+    ):
+        await bot.start()
+
+    recover_pending.assert_awaited_once_with(turn_backed=False)
+
+
+@pytest.mark.asyncio
 async def test_orchestrated_team_start_gates_turn_recovery_on_responder_fleet(
     tmp_path: Path,
 ) -> None:
@@ -1424,8 +1447,11 @@ async def test_callback_failure_preserves_saved_checkpoint_immediately(tmp_path:
 
 
 @pytest.mark.asyncio
-async def test_invite_failure_rewinds_classic_cursor_before_response_certification(tmp_path: Path) -> None:
-    """An invite failure must leave exact durable work before replaying the sync."""
+async def test_durably_accepted_invite_failure_does_not_rewind_classic_cursor(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Accepted invite work must retry independently of raw sync continuity."""
     bot = _agent_bot(tmp_path)
     bot.client = make_matrix_client_mock(user_id=bot.matrix_id.full_id)
     bot.client.next_batch = "s_after_invite"
@@ -1442,11 +1468,13 @@ async def test_invite_failure_rewinds_classic_cursor_before_response_certificati
         },
     )
     assert isinstance(event, nio.InviteEvent)
+    schedule_retry = MagicMock()
+    monkeypatch.setattr(bot._dispatch_obligation_runner, "_schedule_retry", schedule_retry)
 
-    with pytest.raises(RuntimeError, match="join failed"):
-        await bot._on_invite_before_sync_certification(room, event)
+    await bot._on_invite_before_sync_certification(room, event)
+    assert await wait_for_background_tasks(timeout=1, owner=bot._runtime_view)
 
-    assert bot.client.next_batch == "s_before_invite"
+    assert bot.client.next_batch == "s_after_invite"
     pending = bot._dispatch_obligation_store.pending()
     assert len(pending) == 1
     assert pending[0].room_id == room.room_id
@@ -1454,6 +1482,7 @@ async def test_invite_failure_rewinds_classic_cursor_before_response_certificati
         **event.source,
         "content": event.content,
     }
+    schedule_retry.assert_called_once_with(pending[0].key)
 
     recovered_invite = AsyncMock()
     bot._room_lifecycle.on_invite = recovered_invite
@@ -1789,7 +1818,7 @@ async def test_dispatch_obligation_waits_for_terminal_turn_durability(tmp_path: 
         event.event_id,
         DispatchCallbackKind.MESSAGE,
     )
-    with sqlite3.connect(tmp_path / "tracking" / "dispatch_obligations.sqlite3") as connection:
+    with sqlite3.connect(bot._dispatch_obligation_store._database_path) as connection:
         terminal_kinds = connection.execute(
             """
             SELECT callback_kind

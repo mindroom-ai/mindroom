@@ -388,8 +388,61 @@ async def test_terminal_invite_join_failure_does_not_abort_sync(
         nio.MatrixRoom("!forbidden:localhost", bot.agent_user.user_id),
         event,
     )
+    assert await wait_for_background_tasks(timeout=1, owner=bot._runtime_view)
 
     bot.client.join.assert_awaited_once_with("!forbidden:localhost")
+    assert bot._dispatch_obligation_store.pending() == ()
+
+
+@pytest.mark.asyncio
+async def test_invite_sync_callback_runs_durable_join_in_background(tmp_path: Path) -> None:
+    """Durable invite admission must not hold the sync loop across network work."""
+    config = bind_runtime_paths(
+        Config(router=RouterConfig(model="default", accept_invites=True)),
+        test_runtime_paths(tmp_path),
+    )
+    bot = AgentBot(
+        agent_user=_router_user(),
+        storage_path=tmp_path,
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+    )
+    install_runtime_cache_support(bot)
+    bot.client = make_matrix_client_mock(user_id=bot.matrix_id.full_id)
+    join_started = asyncio.Event()
+    release_join = asyncio.Event()
+
+    async def delayed_invite(_room: nio.MatrixRoom, _event: nio.InviteEvent) -> None:
+        join_started.set()
+        await release_join.wait()
+
+    bot._room_lifecycle.on_invite = delayed_invite
+    room = nio.MatrixRoom("!background-invite:localhost", bot.matrix_id.full_id)
+    event = nio.InviteEvent.parse_event(
+        {
+            "type": "m.room.member",
+            "sender": "@owner:localhost",
+            "state_key": bot.matrix_id.full_id,
+            "content": {"membership": "invite"},
+        },
+    )
+    assert isinstance(event, nio.InviteEvent)
+
+    callback_task = asyncio.create_task(
+        bot._on_invite_before_sync_certification(room, event),
+    )
+    try:
+        await asyncio.wait_for(join_started.wait(), timeout=1)
+        await asyncio.sleep(0)
+        assert callback_task.done()
+        pending = bot._dispatch_obligation_store.pending()
+        assert len(pending) == 1
+        assert pending[0].callback_kind is DispatchCallbackKind.INVITE
+    finally:
+        release_join.set()
+        await callback_task
+
+    assert await wait_for_background_tasks(timeout=1, owner=bot._runtime_view)
     assert bot._dispatch_obligation_store.pending() == ()
 
 
