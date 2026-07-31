@@ -241,9 +241,9 @@ async def _run_cleanup(
     assert joined_rooms == [ROOM_ID]
     with patch("mindroom.matrix.stale_stream_cleanup.time.time", return_value=now_ms / 1000):
         result = await cleanup_stale_streaming_room(
-            client,
+            StaleStreamCleanupActor(client, None),
+            owner_user_id=BOT_USER_ID,
             room_id=ROOM_ID,
-            actors={BOT_USER_ID: StaleStreamCleanupActor(client, None)},
             bot_user_ids={BOT_USER_ID} if bot_user_ids is None else bot_user_ids,
             config=config,
             runtime_paths=runtime_paths_for(config),
@@ -358,7 +358,6 @@ async def test_interrupted_target_freshness_classifies_effective_later_sender(
 @pytest.mark.parametrize(
     ("history_case", "expected"),
     [
-        ("missing", InterruptedTargetFreshness.RETRY),
         ("failed", InterruptedTargetFreshness.RETRY),
         ("incomplete", InterruptedTargetFreshness.RETRY),
         ("missing_target", InterruptedTargetFreshness.UNRECOVERABLE),
@@ -380,16 +379,16 @@ async def test_interrupted_target_freshness_classifies_unusable_history(
         owner_user_id=BOT_USER_ID,
         original_sender_id=USER_ID,
     )
-    conversation_cache = None if history_case == "missing" else AsyncMock()
-    if conversation_cache is not None and history_case == "failed":
+    conversation_cache = AsyncMock()
+    if history_case == "failed":
         conversation_cache.refresh_startup_thread_history_from_source.side_effect = RuntimeError("history failed")
-    elif conversation_cache is not None and history_case == "incomplete":
+    elif history_case == "incomplete":
         conversation_cache.refresh_startup_thread_history_from_source.return_value = thread_history_result(
             [_history_message("$target")],
             is_full_history=False,
             diagnostics={"thread_read_source": "homeserver"},
         )
-    elif conversation_cache is not None:
+    else:
         conversation_cache.refresh_startup_thread_history_from_source.return_value = _authoritative_history(
             _history_message("$other"),
         )
@@ -2237,15 +2236,11 @@ async def test_cleanup_preserves_sidecar_tool_trace_from_edit_chain(tmp_path: Pa
 
 
 @pytest.mark.asyncio
-async def test_shared_room_cleanup_routes_edits_through_each_message_owner(tmp_path: Path) -> None:
-    """A shared history scan must use each bot's own client for Matrix edits."""
+async def test_owner_room_cleanup_ignores_messages_from_other_bots(tmp_path: Path) -> None:
+    """One owner history scan must repair only that exact owner's messages."""
     config = _make_config(tmp_path)
     first_client = make_matrix_client_mock(user_id=BOT_USER_ID)
-    second_client = make_matrix_client_mock(user_id=OTHER_BOT_USER_ID)
-    actors = {
-        BOT_USER_ID: StaleStreamCleanupActor(first_client, MagicMock()),
-        OTHER_BOT_USER_ID: StaleStreamCleanupActor(second_client, MagicMock()),
-    }
+    actor = StaleStreamCleanupActor(first_client, MagicMock())
     scanned_state = stale_stream_cleanup_module._ScannedRoomMessageStates(
         message_states={
             "$first": stale_stream_cleanup_module._MessageState(
@@ -2282,18 +2277,19 @@ async def test_shared_room_cleanup_routes_edits_through_each_message_owner(tmp_p
         ) as cleanup_candidate,
     ):
         result = await cleanup_stale_streaming_room(
-            first_client,
+            actor,
+            owner_user_id=BOT_USER_ID,
             room_id=ROOM_ID,
-            actors=actors,
-            bot_user_ids=set(actors),
+            bot_user_ids={BOT_USER_ID, OTHER_BOT_USER_ID},
             config=config,
             runtime_paths=runtime_paths_for(config),
             startup_cutoff_ms=NOW_MS,
         )
 
-    assert result.cleaned_count == 2
+    assert result.cleaned_count == 1
     assert result.interrupted_threads == ()
-    assert [call.args[0] for call in cleanup_candidate.await_args_list] == [first_client, second_client]
+    cleanup_candidate.assert_awaited_once()
+    assert cleanup_candidate.await_args.args[0] is first_client
 
 
 @pytest.mark.asyncio
@@ -2340,9 +2336,9 @@ async def test_room_cleanup_continues_after_failed_edit_and_requests_retry(
         ),
     ):
         result = await cleanup_stale_streaming_room(
-            client,
+            actor,
+            owner_user_id=BOT_USER_ID,
             room_id=ROOM_ID,
-            actors={BOT_USER_ID: actor},
             bot_user_ids={BOT_USER_ID},
             config=config,
             runtime_paths=runtime_paths_for(config),
@@ -2350,8 +2346,7 @@ async def test_room_cleanup_continues_after_failed_edit_and_requests_retry(
         )
 
     assert result.cleaned_count == 1
-    assert result.room_retry_required is False
-    assert result.retry_bot_user_ids == frozenset({BOT_USER_ID})
+    assert result.retry_required is True
     assert edit_stale_message.await_count == 2
 
 
@@ -2416,9 +2411,9 @@ async def test_requester_resolution_exception_requests_retry_after_cleanup(tmp_p
         ),
     ):
         result = await cleanup_stale_streaming_room(
-            client,
+            StaleStreamCleanupActor(client, None),
+            owner_user_id=BOT_USER_ID,
             room_id=ROOM_ID,
-            actors={BOT_USER_ID: StaleStreamCleanupActor(client, None)},
             bot_user_ids={BOT_USER_ID},
             config=config,
             runtime_paths=runtime_paths_for(config),
@@ -2427,7 +2422,7 @@ async def test_requester_resolution_exception_requests_retry_after_cleanup(tmp_p
     assert result.cleaned_count == 1
     assert len(result.interrupted_threads) == 1
     assert result.interrupted_threads[0].original_sender_id is None
-    assert result.room_retry_required is True
+    assert result.retry_required is True
 
 
 @pytest.mark.parametrize(
@@ -2475,9 +2470,9 @@ async def test_requester_resolution_response_classifies_retry_after_cleanup(
         ),
     ):
         result = await cleanup_stale_streaming_room(
-            client,
+            StaleStreamCleanupActor(client, None),
+            owner_user_id=BOT_USER_ID,
             room_id=ROOM_ID,
-            actors={BOT_USER_ID: StaleStreamCleanupActor(client, None)},
             bot_user_ids={BOT_USER_ID},
             config=config,
             runtime_paths=runtime_paths_for(config),
@@ -2486,7 +2481,7 @@ async def test_requester_resolution_response_classifies_retry_after_cleanup(
     assert result.cleaned_count == 1
     assert len(result.interrupted_threads) == 1
     assert result.interrupted_threads[0].original_sender_id is None
-    assert result.room_retry_required is expected_retry
+    assert result.retry_required is expected_retry
 
 
 @pytest.mark.asyncio
@@ -2575,9 +2570,9 @@ async def test_room_messages_error_requests_typed_room_retry(tmp_path: Path) -> 
     )
 
     result = await cleanup_stale_streaming_room(
-        client,
+        StaleStreamCleanupActor(client, MagicMock()),
+        owner_user_id=BOT_USER_ID,
         room_id=ROOM_ID,
-        actors={BOT_USER_ID: StaleStreamCleanupActor(client, MagicMock())},
         bot_user_ids={BOT_USER_ID},
         config=config,
         runtime_paths=runtime_paths_for(config),
@@ -2586,4 +2581,4 @@ async def test_room_messages_error_requests_typed_room_retry(tmp_path: Path) -> 
 
     assert result.cleaned_count == 0
     assert result.interrupted_threads == ()
-    assert result.room_retry_required is True
+    assert result.retry_required is True

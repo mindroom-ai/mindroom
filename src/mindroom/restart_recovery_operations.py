@@ -42,7 +42,6 @@ _OWNER_MEMBERSHIP_REFRESH_BACKOFF_SECONDS = 2.0
 class RecoveryOwner:
     """One current bot generation available for restart recovery."""
 
-    entity_name: str
     user_id: str
     generation: object
     client: nio.AsyncClient
@@ -62,7 +61,6 @@ def build_restart_recovery_owners(
         if client is None or not user_id:
             continue
         owners[user_id] = RecoveryOwner(
-            entity_name=bot.agent_name,
             user_id=user_id,
             generation=bot,
             client=client,
@@ -306,14 +304,12 @@ async def _cleanup_joined_owners(
     for owner in joined_owners:
         try:
             cleanup_result: StaleStreamCleanupResult = await cleanup_stale_streaming_room(
-                owner.client,
+                StaleStreamCleanupActor(
+                    client=owner.client,
+                    conversation_cache=owner.conversation_cache,
+                ),
+                owner_user_id=owner.user_id,
                 room_id=request.room_id,
-                actors={
-                    owner.user_id: StaleStreamCleanupActor(
-                        client=owner.client,
-                        conversation_cache=owner.conversation_cache,
-                    ),
-                },
                 bot_user_ids=set(owner_user_ids),
                 config=config,
                 runtime_paths=runtime_paths,
@@ -331,8 +327,7 @@ async def _cleanup_joined_owners(
             continue
         cleaned_count += cleanup_result.cleaned_count
         interrupted_threads.extend(cleanup_result.interrupted_threads)
-        retry_cleanup_owner_user_ids.update(cleanup_result.retry_bot_user_ids)
-        if cleanup_result.room_retry_required:
+        if cleanup_result.retry_required:
             retry_cleanup_owner_user_ids.add(owner.user_id)
     return cleaned_count, tuple(interrupted_threads), retry_cleanup_owner_user_ids
 

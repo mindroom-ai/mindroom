@@ -88,7 +88,6 @@ def _config(tmp_path: Path) -> Config:
 
 def _owner(
     *,
-    entity_name: str = "code",
     user_id: str = "@code:example.org",
     generation: object | None = None,
     rooms: frozenset[str] = frozenset({"!code:example.org"}),
@@ -101,7 +100,6 @@ def _owner(
     client.store = None
     client.olm = None
     return RecoveryOwner(
-        entity_name=entity_name,
         user_id=user_id,
         generation=object() if generation is None else generation,
         client=client,
@@ -274,7 +272,6 @@ async def test_shared_room_scans_joined_owner_and_retries_only_missing_owner(
     room_id = "!code:example.org"
     owner = _owner(rooms=frozenset({room_id}))
     router = _owner(
-        entity_name=ROUTER_AGENT_NAME,
         user_id="@router:example.org",
         rooms=frozenset({room_id}),
     )
@@ -314,14 +311,14 @@ async def test_shared_room_scans_joined_owner_and_retries_only_missing_owner(
         unjoined_owner_user_ids=frozenset({router.user_id}),
     )
     cleanup_room.assert_awaited_once()
-    assert set(cleanup_room.await_args.kwargs["actors"]) == {owner.user_id}
+    assert cleanup_room.await_args.kwargs["owner_user_id"] == owner.user_id
 
 
 @pytest.mark.asyncio
 async def test_matrix_room_recovery_scans_only_exact_owner_messages(tmp_path: Path) -> None:
     """One semantic room job must edit only messages authored by its exact owner."""
     owner = _owner()
-    other_owner = _owner(entity_name="other", user_id="@other:example.org")
+    other_owner = _owner(user_id="@other:example.org")
     config = _config(tmp_path)
     interrupted = _target("$target", timestamp_ms=10)
     operations = build_matrix_restart_recovery_operations(test_runtime_paths(tmp_path))
@@ -355,11 +352,8 @@ async def test_matrix_room_recovery_scans_only_exact_owner_messages(tmp_path: Pa
 
     assert result == RoomRecoveryResult(interrupted_threads=(interrupted,))
     cleanup_room.assert_awaited_once()
-    assert cleanup_room.await_args.args == (owner.client,)
-    assert cleanup_room.await_args.kwargs["actors"] == {
-        owner.user_id: cleanup_room.await_args.kwargs["actors"][owner.user_id],
-    }
-    assert cleanup_room.await_args.kwargs["actors"][owner.user_id].client is owner.client
+    assert cleanup_room.await_args.args[0].client is owner.client
+    assert cleanup_room.await_args.kwargs["owner_user_id"] == owner.user_id
     assert cleanup_room.await_args.kwargs["bot_user_ids"] == {owner.user_id, other_owner.user_id}
 
 
@@ -369,7 +363,6 @@ async def test_shared_room_startup_scans_through_each_joined_owner(tmp_path: Pat
     room_id = "!code:example.org"
     owner = _owner(rooms=frozenset({room_id}))
     router = _owner(
-        entity_name=ROUTER_AGENT_NAME,
         user_id="@router:example.org",
         rooms=frozenset({room_id}),
     )
@@ -405,12 +398,11 @@ async def test_shared_room_startup_scans_through_each_joined_owner(tmp_path: Pat
             await coordinator.stop()
 
     assert cleanup_room.await_count == 2
-    assert {call.args[0] for call in cleanup_room.await_args_list} == {
+    assert {call.args[0].client for call in cleanup_room.await_args_list} == {
         owner.client,
         router.client,
     }
-    assert {next(iter(call.kwargs["actors"])) for call in cleanup_room.await_args_list} == set(owners)
-    assert all(len(call.kwargs["actors"]) == 1 for call in cleanup_room.await_args_list)
+    assert {call.kwargs["owner_user_id"] for call in cleanup_room.await_args_list} == set(owners)
 
 
 @pytest.mark.asyncio
@@ -419,7 +411,6 @@ async def test_shared_room_merges_targets_visible_to_different_owners(tmp_path: 
     room_id = "!code:example.org"
     owner = _owner(rooms=frozenset({room_id}))
     router = _owner(
-        entity_name=ROUTER_AGENT_NAME,
         user_id="@router:example.org",
         rooms=frozenset({room_id}),
     )
@@ -433,10 +424,10 @@ async def test_shared_room_merges_targets_visible_to_different_owners(tmp_path: 
     operations = build_matrix_restart_recovery_operations(test_runtime_paths(tmp_path))
 
     async def cleanup(
-        scan_client: nio.AsyncClient,
+        actor: stale_stream_cleanup_module.StaleStreamCleanupActor,
         **_kwargs: object,
     ) -> stale_stream_cleanup_module.StaleStreamCleanupResult:
-        target = owner_target if scan_client is owner.client else router_target
+        target = owner_target if actor.client is owner.client else router_target
         return stale_stream_cleanup_module.StaleStreamCleanupResult(
             cleaned_count=1,
             interrupted_threads=(target,),
@@ -471,7 +462,6 @@ async def test_shared_room_scans_ready_owner_and_retries_only_unready_owner(
     room_id = "!code:example.org"
     owner = _owner(rooms=frozenset({room_id}))
     router = _owner(
-        entity_name=ROUTER_AGENT_NAME,
         user_id="@router:example.org",
         rooms=frozenset({room_id}),
         ready=False,
@@ -527,7 +517,7 @@ async def test_matrix_room_recovery_propagates_cleanup_retry_requirement(
     cleanup_result = stale_stream_cleanup_module.StaleStreamCleanupResult(
         cleaned_count=1,
         interrupted_threads=(interrupted,),
-        room_retry_required=True,
+        retry_required=True,
     )
 
     with (
@@ -559,27 +549,24 @@ async def test_matrix_room_recovery_retries_only_failed_cleanup_owner(
 ) -> None:
     """One owner's failed edit must not retain a healthy co-resident owner."""
     healthy_owner = _owner(
-        entity_name="healthy",
         user_id="@healthy:example.org",
     )
     failed_owner = _owner(
-        entity_name="failed",
         user_id="@failed:example.org",
     )
     interrupted = _target(
         "$healthy-target",
         timestamp_ms=10,
-        agent_name=healthy_owner.entity_name,
+        agent_name="healthy",
         owner_user_id=healthy_owner.user_id,
     )
     operations = build_matrix_restart_recovery_operations(test_runtime_paths(tmp_path))
 
     async def cleanup(
-        _scan_client: nio.AsyncClient,
-        **kwargs: object,
+        actor: stale_stream_cleanup_module.StaleStreamCleanupActor,
+        **_kwargs: object,
     ) -> stale_stream_cleanup_module.StaleStreamCleanupResult:
-        actors = cast("dict[str, object]", kwargs["actors"])
-        if healthy_owner.user_id in actors:
+        if actor.client is healthy_owner.client:
             return stale_stream_cleanup_module.StaleStreamCleanupResult(
                 cleaned_count=1,
                 interrupted_threads=(interrupted,),
@@ -587,7 +574,7 @@ async def test_matrix_room_recovery_retries_only_failed_cleanup_owner(
         return stale_stream_cleanup_module.StaleStreamCleanupResult(
             cleaned_count=0,
             interrupted_threads=(),
-            retry_bot_user_ids=frozenset({failed_owner.user_id}),
+            retry_required=True,
         )
 
     with (
@@ -631,26 +618,24 @@ async def test_matrix_room_cleanup_exception_retries_only_failed_owner(
 ) -> None:
     """One owner's cleanup exception must not skip a healthy later owner."""
     failed_owner = _owner(
-        entity_name="failed",
         user_id="@a-failed:example.org",
     )
     healthy_owner = _owner(
-        entity_name="healthy",
         user_id="@z-healthy:example.org",
     )
     healthy_target = _target(
         "$healthy-target",
         timestamp_ms=10,
-        agent_name=healthy_owner.entity_name,
+        agent_name="healthy",
         owner_user_id=healthy_owner.user_id,
     )
     operations = build_matrix_restart_recovery_operations(test_runtime_paths(tmp_path))
 
     async def cleanup(
-        scan_client: nio.AsyncClient,
+        actor: stale_stream_cleanup_module.StaleStreamCleanupActor,
         **_kwargs: object,
     ) -> stale_stream_cleanup_module.StaleStreamCleanupResult:
-        if scan_client is failed_owner.client:
+        if actor.client is failed_owner.client:
             msg = "failed owner history unavailable"
             raise RuntimeError(msg)
         return stale_stream_cleanup_module.StaleStreamCleanupResult(
@@ -1542,7 +1527,6 @@ async def test_scan_and_freshness_share_eight_matrix_read_slots(
     room_ids = frozenset(f"!room-{index}:example.org" for index in range(10))
     owner = _owner(rooms=room_ids)
     router = _owner(
-        entity_name=ROUTER_AGENT_NAME,
         user_id="@router:example.org",
         rooms=frozenset(),
     )
@@ -1640,7 +1624,6 @@ async def test_blocked_deliveries_do_not_consume_room_scan_capacity(tmp_path: Pa
     room_ids = frozenset(f"!room-{index}:example.org" for index in range(9))
     owner = _owner(rooms=room_ids)
     router = _owner(
-        entity_name=ROUTER_AGENT_NAME,
         user_id="@router:example.org",
         rooms=frozenset(),
     )
@@ -1704,7 +1687,6 @@ async def test_pause_drains_only_one_admitted_delivery_and_restores_waiters(
     room_ids = frozenset(f"!room-{index}:example.org" for index in range(3))
     owner = _owner(rooms=room_ids)
     router = _owner(
-        entity_name=ROUTER_AGENT_NAME,
         user_id="@router:example.org",
         rooms=frozenset(),
     )
@@ -2382,7 +2364,6 @@ async def test_requester_retry_does_not_fence_same_target_after_resolution(
     """An indeterminate requester must remain unsettled until its retry resolves."""
     owner = _owner()
     router = _owner(
-        entity_name=ROUTER_AGENT_NAME,
         user_id="@router:example.org",
         rooms=frozenset(),
     )
@@ -2636,7 +2617,6 @@ async def test_target_freshness_and_delivery_failures_retry_autonomously(tmp_pat
     """Final target reads and sends must retry without another readiness event."""
     owner = _owner()
     router = _owner(
-        entity_name=ROUTER_AGENT_NAME,
         user_id="@router:example.org",
         rooms=frozenset(),
     )
@@ -2744,7 +2724,6 @@ async def test_permanent_target_freshness_retry_stops_with_terminal_warning(
     """A permanently unreadable target must not poll for the process lifetime."""
     owner = _owner()
     router = _owner(
-        entity_name=ROUTER_AGENT_NAME,
         user_id="@router:example.org",
         rooms=frozenset(),
     )
@@ -2858,7 +2837,6 @@ async def test_terminal_delivery_freshness_settles_without_retry(tmp_path: Path)
     """Post-pacing terminal freshness must settle instead of becoming send failure."""
     owner = _owner()
     router = _owner(
-        entity_name=ROUTER_AGENT_NAME,
         user_id="@router:example.org",
         rooms=frozenset(),
     )
@@ -3001,7 +2979,6 @@ async def test_room_lease_snapshots_current_owners_once(tmp_path: Path) -> None:
     """One room lease must not rebuild durable owner scope per target."""
     owner = _owner()
     router = _owner(
-        entity_name=ROUTER_AGENT_NAME,
         user_id="@router:example.org",
         rooms=frozenset(),
     )
@@ -3074,7 +3051,6 @@ async def test_cancelled_pause_drains_successful_delivery_and_settles_target(  #
     """An ambiguous cancellation must not resend a delivery that eventually succeeds."""
     owner = _owner()
     router = _owner(
-        entity_name=ROUTER_AGENT_NAME,
         user_id="@router:example.org",
         rooms=frozenset(),
     )
@@ -3157,7 +3133,6 @@ async def test_pause_drains_current_delivery_without_starting_later_target(
     """Pause must settle the current delivery and retain every later target."""
     owner = _owner()
     router = _owner(
-        entity_name=ROUTER_AGENT_NAME,
         user_id="@router:example.org",
         rooms=frozenset(),
     )
@@ -3221,7 +3196,6 @@ async def test_pause_during_later_freshness_settles_prior_delivery_and_retains_t
     """Cancellation outside delivery must preserve partial attempt progress."""
     owner = _owner()
     router = _owner(
-        entity_name=ROUTER_AGENT_NAME,
         user_id="@router:example.org",
         rooms=frozenset(),
     )
@@ -3303,7 +3277,6 @@ async def test_cancelled_pause_drains_failed_delivery_and_restores_target(
     """A drained delivery failure must retry the exact target after resume."""
     owner = _owner()
     router = _owner(
-        entity_name=ROUTER_AGENT_NAME,
         user_id="@router:example.org",
         rooms=frozenset(),
     )
@@ -3896,7 +3869,6 @@ async def test_generation_change_discards_stale_room_result(tmp_path: Path) -> N
         return True
 
     router = _owner(
-        entity_name=ROUTER_AGENT_NAME,
         user_id="@router:example.org",
         rooms=frozenset(),
     )
@@ -3931,7 +3903,6 @@ async def test_generation_change_allows_new_interruption_in_same_thread(
     old_owner = _owner(generation=old_generation, rooms=frozenset({room_id}))
     new_owner = _owner(generation=new_generation, rooms=frozenset({room_id}))
     router = _owner(
-        entity_name=ROUTER_AGENT_NAME,
         user_id="@router:example.org",
         rooms=frozenset(),
     )
@@ -4000,7 +3971,6 @@ async def test_target_watermark_prevents_older_resurrection(tmp_path: Path) -> N
     """Rescanning an older target after the newest succeeds must not resume it."""
     owner = _owner()
     router = _owner(
-        entity_name=ROUTER_AGENT_NAME,
         user_id="@router:example.org",
         rooms=frozenset(),
     )
@@ -4061,7 +4031,6 @@ async def test_newer_same_room_scan_does_not_send_second_resume_while_old_target
     """One owner-room recovery lease must not deliver two target versions for one thread."""
     owner = _owner()
     router = _owner(
-        entity_name=ROUTER_AGENT_NAME,
         user_id="@router:example.org",
         rooms=frozenset(),
     )
@@ -4276,9 +4245,8 @@ async def test_unready_coowner_does_not_preserve_ready_owner_matrix_budget(
     tmp_path: Path,
 ) -> None:
     """One unready owner must not stop another owner from exhausting retries."""
-    ready = _owner(entity_name="code", user_id="@code:example.org")
+    ready = _owner(user_id="@code:example.org")
     waiting = _owner(
-        entity_name="other",
         user_id="@other:example.org",
         ready=False,
     )
@@ -4334,8 +4302,8 @@ async def test_ready_owners_share_one_room_scan_and_settle_independently(
     tmp_path: Path,
 ) -> None:
     """Same-request owners share discovery but retain exact delivery ownership."""
-    code = _owner(entity_name="code", user_id="@code:example.org")
-    other = _owner(entity_name="other", user_id="@other:example.org")
+    code = _owner(user_id="@code:example.org")
+    other = _owner(user_id="@other:example.org")
     owners = {code.user_id: code, other.user_id: other}
     scan_count = 0
     delivered: list[tuple[str, str]] = []
@@ -4410,28 +4378,28 @@ async def test_target_exception_retries_only_failed_target_and_continues_shared_
     tmp_path: Path,
 ) -> None:
     """One target exception must not skip later targets or a healthy co-owner."""
-    failed_owner = _owner(entity_name="failed", user_id="@a-failed:example.org")
-    healthy_owner = _owner(entity_name="healthy", user_id="@z-healthy:example.org")
+    failed_owner = _owner(user_id="@a-failed:example.org")
+    healthy_owner = _owner(user_id="@z-healthy:example.org")
     owners = {failed_owner.user_id: failed_owner, healthy_owner.user_id: healthy_owner}
     failed_target = _target(
         "$failed-target",
         timestamp_ms=10,
         thread_id="$a-failed-thread",
-        agent_name=failed_owner.entity_name,
+        agent_name="failed",
         owner_user_id=failed_owner.user_id,
     )
     later_target = _target(
         "$later-target",
         timestamp_ms=20,
         thread_id="$b-later-thread",
-        agent_name=failed_owner.entity_name,
+        agent_name="failed",
         owner_user_id=failed_owner.user_id,
     )
     healthy_target = _target(
         "$healthy-target",
         timestamp_ms=30,
         thread_id="$healthy-thread",
-        agent_name=healthy_owner.entity_name,
+        agent_name="healthy",
         owner_user_id=healthy_owner.user_id,
     )
     delivered: list[str] = []
@@ -4654,8 +4622,8 @@ async def test_pause_does_not_start_next_owner_delivery_in_shared_lease(
     tmp_path: Path,
 ) -> None:
     """Pause drains one admitted owner send without starting a co-owner send."""
-    code = _owner(entity_name="code", user_id="@code:example.org")
-    other = _owner(entity_name="other", user_id="@other:example.org")
+    code = _owner(user_id="@code:example.org")
+    other = _owner(user_id="@other:example.org")
     owners = {code.user_id: code, other.user_id: other}
     delivery_started = asyncio.Event()
     release_delivery = asyncio.Event()

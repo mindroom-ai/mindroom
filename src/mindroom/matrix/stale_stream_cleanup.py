@@ -108,12 +108,11 @@ class StaleStreamCleanupActor:
 
 @dataclass(frozen=True)
 class StaleStreamCleanupResult:
-    """Outcome from one shared room cleanup."""
+    """Outcome from one exact owner's room cleanup."""
 
     cleaned_count: int
     interrupted_threads: tuple[InterruptedThread, ...]
-    room_retry_required: bool = False
-    retry_bot_user_ids: frozenset[str] = frozenset()
+    retry_required: bool = False
 
 
 @dataclass(frozen=True)
@@ -219,12 +218,9 @@ async def interrupted_target_freshness(
     *,
     config: Config,
     runtime_paths: RuntimePaths,
-    conversation_cache: ConversationCacheProtocol | None,
+    conversation_cache: ConversationCacheProtocol,
 ) -> InterruptedTargetFreshness:
     """Classify one interrupted target from authoritative owner history."""
-    if conversation_cache is None or interrupted_thread.thread_id is None:
-        return InterruptedTargetFreshness.RETRY
-
     try:
         history = await conversation_cache.refresh_startup_thread_history_from_source(
             interrupted_thread.room_id,
@@ -316,19 +312,17 @@ def _later_thread_activity_is_internal(
 
 
 async def cleanup_stale_streaming_room(
-    scan_client: nio.AsyncClient,
+    actor: StaleStreamCleanupActor,
     *,
+    owner_user_id: str,
     room_id: str,
-    actors: dict[str, StaleStreamCleanupActor],
     bot_user_ids: set[str],
     config: Config,
     runtime_paths: RuntimePaths,
     startup_cutoff_ms: int | None = None,
     terminal_interrupted_only: bool = False,
 ) -> StaleStreamCleanupResult:
-    """Scan one room once and let each bot account repair its own messages."""
-    if not actors:
-        return StaleStreamCleanupResult(cleaned_count=0, interrupted_threads=())
+    """Scan and repair one exact owner's messages visible to that owner."""
     current_time_ms = int(time.time() * 1000)
     scan_policy = _cleanup_scan_policy(
         config,
@@ -336,9 +330,9 @@ async def cleanup_stale_streaming_room(
         terminal_interrupted_only=terminal_interrupted_only,
     )
     scanned_state = await _scan_room_message_states(
-        scan_client,
+        actor.client,
         room_id=room_id,
-        cleanup_bot_user_ids=set(actors),
+        cleanup_bot_user_ids={owner_user_id},
         bot_user_ids=bot_user_ids,
         config=config,
         runtime_paths=runtime_paths,
@@ -350,12 +344,12 @@ async def cleanup_stale_streaming_room(
         return StaleStreamCleanupResult(
             cleaned_count=0,
             interrupted_threads=(),
-            room_retry_required=scanned_state.retry_required,
+            retry_required=scanned_state.retry_required,
         )
 
     cleaned_count = 0
-    retry_bot_user_ids: set[str] = set()
-    prior_edit_succeeded_by_bot: set[str] = set()
+    retry_required = scanned_state.retry_required
+    prior_edit_succeeded = False
     interrupted_threads: list[InterruptedThread] = []
     candidate_items = sorted(
         ((k, v) for k, v in message_states.items() if v.latest_body is not None),
@@ -364,13 +358,11 @@ async def cleanup_stale_streaming_room(
 
     for target_event_id, state in candidate_items:
         assert state.latest_body is not None  # guaranteed by filter above
-        bot_user_id = state.bot_user_id
-        actor = actors.get(bot_user_id) if bot_user_id is not None else None
-        if bot_user_id is None or actor is None:
+        if state.bot_user_id != owner_user_id:
             continue
         candidate_result = await _process_stale_room_candidate(
             actor,
-            bot_user_id=bot_user_id,
+            bot_user_id=owner_user_id,
             room_id=room_id,
             target_event_id=target_event_id,
             state=state,
@@ -380,21 +372,20 @@ async def cleanup_stale_streaming_room(
             runtime_paths=runtime_paths,
             current_time_ms=current_time_ms,
             scan_policy=scan_policy,
-            prior_edit_succeeded=bot_user_id in prior_edit_succeeded_by_bot,
+            prior_edit_succeeded=prior_edit_succeeded,
         )
         if candidate_result.edited:
             cleaned_count += 1
-            prior_edit_succeeded_by_bot.add(bot_user_id)
+            prior_edit_succeeded = True
         if candidate_result.interrupted_thread is not None:
             interrupted_threads.append(candidate_result.interrupted_thread)
         if candidate_result.retry_required:
-            retry_bot_user_ids.add(bot_user_id)
+            retry_required = True
 
     return StaleStreamCleanupResult(
         cleaned_count=cleaned_count,
         interrupted_threads=tuple(interrupted_threads),
-        room_retry_required=scanned_state.retry_required,
-        retry_bot_user_ids=frozenset(retry_bot_user_ids),
+        retry_required=retry_required,
     )
 
 
