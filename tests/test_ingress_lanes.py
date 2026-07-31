@@ -804,15 +804,17 @@ async def test_interactive_answer_during_active_turn_never_holds_sender_lane(tmp
     generated: list[str] = []
     ack_sent = asyncio.Event()
 
-    async def fake_generate_response_locked(_self: object, request: object, **_kwargs: object) -> None:
+    async def fake_generate_response_locked(_self: object, request: object, **_kwargs: object) -> str:
         # The real lifecycle acquired the response lock before invoking this
         # locked operation; only post-lock generation is faked here.
-        generated.append(request.response_envelope.source_event_id)
+        source_event_id = request.response_envelope.source_event_id
+        generated.append(source_event_id)
         if request.on_lifecycle_lock_acquired is not None:
             request.on_lifecycle_lock_acquired()
-        if request.response_envelope.source_event_id == "$a0":
+        if source_event_id == "$a0":
             first_locked.set()
             await release_first_response.wait()
+        return f"{source_event_id}-response"
 
     async def fake_prepare_dispatch(
         _room: object,
@@ -881,6 +883,7 @@ async def test_interactive_answer_during_active_turn_never_holds_sender_lane(tmp
                 await answer_task
         with interactive._thread_lock:
             interactive._remove_active_question_locked("$question")
+            interactive._claimed_question_ids.discard("$question")
 
 
 @pytest.mark.asyncio

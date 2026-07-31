@@ -1132,11 +1132,23 @@ async def test_terminal_turn_settlement_retries_autonomously(tmp_path: Path) -> 
         retry_initial_delay_seconds=0,
         retry_max_delay_seconds=0,
     )
-    settle = MagicMock(side_effect=[OSError("dispatch store unavailable"), None])
+    settled = threading.Event()
+    attempts = 0
+
+    def settle_pending(_source_event_ids: tuple[str, ...]) -> None:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            message = "dispatch store unavailable"
+            raise OSError(message)
+        settled.set()
+
+    settle = MagicMock(side_effect=settle_pending)
     runner.store.settle_pending_from_turn_store = settle
 
     runner.bind_event_loop()
     await asyncio.to_thread(runner.retry_turn_settlement, ("$message",))
+    assert await asyncio.wait_for(asyncio.to_thread(settled.wait), timeout=1)
     await wait_for_background_tasks(timeout=1, owner=owner)
 
     assert settle.call_count == 2
