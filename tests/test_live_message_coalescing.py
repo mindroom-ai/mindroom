@@ -3751,6 +3751,45 @@ async def test_timer_flush_logs_dispatch_failure_without_unhandled_task() -> Non
 
 
 @pytest.mark.asyncio
+async def test_dispatch_failure_handoff_runs_after_gate_releases_exact_sources() -> None:
+    """Failed deferred sources must reach durable retry ownership after gate cleanup."""
+    room = _make_room()
+    failure_handoffs: list[tuple[str, ...]] = []
+    source_owned_during_handoff: list[bool] = []
+    handoff_complete = asyncio.Event()
+
+    async def failing_dispatch_batch(_batch: object) -> None:
+        msg = "boom"
+        raise RuntimeError(msg)
+
+    def on_dispatch_failure(source_event_ids: tuple[str, ...]) -> None:
+        failure_handoffs.append(source_event_ids)
+        source_owned_during_handoff.extend(gate.has_pending_source_event(event_id) for event_id in source_event_ids)
+        handoff_complete.set()
+
+    gate = CoalescingGate(
+        dispatch_batch=failing_dispatch_batch,
+        debounce_seconds=lambda: 0.01,
+        is_shutting_down=lambda: False,
+        on_dispatch_failure=on_dispatch_failure,
+    )
+
+    await _admit_ready(
+        gate,
+        CoalescingKey("!room:localhost", None, "@user:localhost"),
+        PendingEvent(
+            event=_text_event(event_id="$m1", body="first"),
+            room=room,
+            source_kind="message",
+        ),
+    )
+    await asyncio.wait_for(handoff_complete.wait(), timeout=1)
+
+    assert failure_handoffs == [("$m1",)]
+    assert source_owned_during_handoff == [False]
+
+
+@pytest.mark.asyncio
 async def test_failed_drain_does_not_poison_future_ingress() -> None:
     """A failed drain should log, clean up, and allow later events to dispatch."""
     room = _make_room()

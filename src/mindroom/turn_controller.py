@@ -929,19 +929,7 @@ class TurnController:
             source_event_prompts=dict(handoff.source_event_prompts),
             source_event_metadata=dict(handoff.source_event_metadata) if len(handoff.source_event_ids) > 1 else None,
         )
-        try:
-            await self._dispatch_handoff(handoff, handled_turn=handled_turn)
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            # A failed command dispatch must not propagate into the Matrix sync
-            # callback or poison later ingress, matching gate-flush containment.
-            self.deps.logger.exception(
-                "command_control_input_dispatch_failed",
-                event_id=dispatch_event.event_id,
-                room_id=room.room_id,
-                thread_id=coalescing_thread_id,
-            )
+        await self._dispatch_handoff(handoff, handled_turn=handled_turn)
 
     async def _enqueue_for_dispatch(
         self,

@@ -128,7 +128,6 @@ def _runner(
     background_task_owner: object | None = None,
     retry_initial_delay_seconds: float = 1.0,
     retry_max_delay_seconds: float = 30.0,
-    retry_max_attempts: int = 5,
 ) -> DispatchObligationRunner:
     return DispatchObligationRunner(
         store=store,
@@ -138,7 +137,6 @@ def _runner(
         background_task_owner=background_task_owner,
         _retry_initial_delay_seconds=retry_initial_delay_seconds,
         _retry_max_delay_seconds=retry_max_delay_seconds,
-        _retry_max_attempts=retry_max_attempts,
     )
 
 
@@ -742,17 +740,19 @@ async def test_recovery_failure_retries_autonomously_without_blocking_later_work
 
 
 @pytest.mark.asyncio
-async def test_autonomous_retry_attempts_are_bounded_and_leave_work_pending(tmp_path: Path) -> None:
-    """Permanent failures must stop retrying in-process without discarding durable work."""
+async def test_autonomous_retry_continues_until_transient_failure_recovers(tmp_path: Path) -> None:
+    """Ordinary callback failures must stay retry-owned beyond the old attempt cap."""
     attempts = 0
     retry_owner = object()
+    recovered = asyncio.Event()
 
     async def callback(_room: nio.MatrixRoom, _event: nio.Event) -> DispatchCallbackResult:
         nonlocal attempts
         attempts += 1
-        if attempts <= 3:
-            message = "permanent worker failure"
+        if attempts <= 6:
+            message = "transient worker failure"
             raise RuntimeError(message)
+        recovered.set()
         return DispatchCallbackResult.SUCCEEDED
 
     store = _store(tmp_path)
@@ -762,25 +762,19 @@ async def test_autonomous_retry_attempts_are_bounded_and_leave_work_pending(tmp_
         background_task_owner=retry_owner,
         retry_initial_delay_seconds=0,
         retry_max_delay_seconds=0,
-        retry_max_attempts=2,
     )
 
-    with pytest.raises(RuntimeError, match="permanent worker failure"):
+    with pytest.raises(RuntimeError, match="transient worker failure"):
         await runner.dispatch(
             nio.MatrixRoom(_ROOM_ID, _PRINCIPAL_ID),
             _message_event("$bounded-retry"),
             DispatchCallbackKind.MESSAGE,
         )
+    await asyncio.wait_for(recovered.wait(), timeout=1)
     await wait_for_background_tasks(timeout=1, owner=retry_owner)
 
-    assert attempts == 3
-    assert store.has_pending("$bounded-retry", DispatchCallbackKind.MESSAGE)
-
-    runner._schedule_retry(_message_obligation("$bounded-retry").key)
-    await wait_for_background_tasks(timeout=1, owner=retry_owner)
-
-    assert attempts == 3
-    assert store.has_pending("$bounded-retry", DispatchCallbackKind.MESSAGE)
+    assert attempts == 7
+    assert not store.has_pending("$bounded-retry", DispatchCallbackKind.MESSAGE)
 
 
 @pytest.mark.asyncio

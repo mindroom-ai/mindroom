@@ -192,6 +192,7 @@ class CoalescingGate:
         room_scope_is_single_conversation: Callable[[str], bool] | None = None,
         dispatch_allowed_now: Callable[[CoalescingKey], bool] | None = None,
         timestamp_formatter: TimestampFormatter | None = None,
+        on_dispatch_failure: Callable[[tuple[str, ...]], None] | None = None,
     ) -> None:
         self._dispatch_batch = dispatch_batch
         self._debounce_seconds = debounce_seconds
@@ -200,6 +201,7 @@ class CoalescingGate:
         self._room_scope_is_single_conversation = room_scope_is_single_conversation
         self._dispatch_allowed_now = dispatch_allowed_now
         self._timestamp_formatter = timestamp_formatter
+        self._on_dispatch_failure = on_dispatch_failure
         self._gates: dict[CoalescingKey, _GateEntry] = {}
         self._lanes = IngressLanes(deliver=self._admit_from_lane)
         self._active_drain_context: _DrainContext | None = None
@@ -822,7 +824,7 @@ class CoalescingGate:
         key: CoalescingKey,
         gate: _GateEntry,
         segment_owner: ClaimedSegmentOwner,
-    ) -> None:
+    ) -> bool:
         try:
             await self._dispatch_events(key, gate, segment_owner.pending_events)
         except asyncio.CancelledError:
@@ -835,6 +837,9 @@ class CoalescingGate:
             if (drain_context := self._current_drain_context(gate)) is not None:
                 drain_context.result.dispatch_failure_count += 1
             self._log_dispatch_failure(key, gate, error)
+            return False
+        else:
+            return True
 
     async def _dispatch_claim(
         self,
@@ -845,9 +850,10 @@ class CoalescingGate:
         """Dispatch one claimed admission set with one cleanup owner."""
         pending_events = [admission.pending_event for admission in admissions]
         segment_owner: ClaimedSegmentOwner | None = None
+        dispatched = False
         try:
             segment_owner = ClaimedSegmentOwner(pending_events=pending_events)
-            await self._dispatch_claimed_events(key, gate, segment_owner)
+            dispatched = await self._dispatch_claimed_events(key, gate, segment_owner)
         except BaseException:
             if segment_owner is not None:
                 closed_before = segment_owner.metadata_closed
@@ -857,6 +863,8 @@ class CoalescingGate:
             raise
         finally:
             self._clear_claimed_admissions(gate, admissions)
+        if not dispatched and self._on_dispatch_failure is not None:
+            self._on_dispatch_failure(tuple(pending_event.event.event_id for pending_event in pending_events))
 
     async def _dispatch_front_barrier(
         self,
