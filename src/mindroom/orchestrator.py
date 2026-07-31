@@ -1890,7 +1890,12 @@ class _MultiAgentOrchestrator:
             shutdown_intent=ORDERLY_SHUTDOWN,
         )
         await self._startup_maintenance.cancel()
+        await self._todo_poke_runtime.stop()
+        await self._stop_memory_auto_flush_worker()
+        await self._knowledge_source_watcher.shutdown()
+        await self._knowledge_refresh_scheduler.shutdown()
         await self._cancel_bot_start_tasks()
+        await self._stop_mcp_manager()
 
         # Stop sync admission before draining already-admitted recovery.
         for entity_name in list(self._sync_tasks.keys()):
@@ -1899,11 +1904,6 @@ class _MultiAgentOrchestrator:
             bot.running = False
 
         await self._restart_recovery.stop()
-        await self._todo_poke_runtime.stop()
-        await self._stop_memory_auto_flush_worker()
-        await self._knowledge_source_watcher.shutdown()
-        await self._knowledge_refresh_scheduler.shutdown()
-        await self._stop_mcp_manager()
 
         stop_tasks = [bot.stop(shutdown_intent=ORDERLY_SHUTDOWN) for bot in self.agent_bots.values()]
         await asyncio.gather(*stop_tasks)

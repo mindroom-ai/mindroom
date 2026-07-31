@@ -175,7 +175,7 @@ def _operations(
             ),
         )
 
-    async def close() -> None:
+    async def drain_membership_snapshots() -> None:
         return None
 
     async def joined_rooms(owner: RecoveryOwner) -> list[str]:
@@ -212,7 +212,7 @@ def _operations(
         target_freshness=freshness or current,
         deliver_target=delivery_outcome,
         discard_owner=lambda _owner_user_id: None,
-        close=close,
+        drain_membership_snapshots=drain_membership_snapshots,
     )
 
 
@@ -1219,7 +1219,7 @@ async def test_cancelled_membership_waiter_preserves_shared_lookup(tmp_path: Pat
             assert await attempts[1] == RoomRecoveryResult()
         finally:
             release_lookup.set()
-            await operations.close()
+            await operations.drain_membership_snapshots()
             await asyncio.gather(*attempts, return_exceptions=True)
 
     assert get_rooms.await_count == 1
@@ -1285,7 +1285,7 @@ async def test_replacement_generation_drains_inflight_membership_lookup(tmp_path
             release_old_cleanup.set()
             old_attempt.cancel()
             replacement_attempt.cancel()
-            await operations.close()
+            await operations.drain_membership_snapshots()
             await asyncio.gather(old_attempt, replacement_attempt, return_exceptions=True)
 
 
@@ -1353,13 +1353,13 @@ async def test_discarded_owner_lookup_drains_before_replacement_lookup(tmp_path:
             release_old_cleanup.set()
             old_attempt.cancel()
             replacement_attempt.cancel()
-            await operations.close()
+            await operations.drain_membership_snapshots()
             await asyncio.gather(old_attempt, replacement_attempt, return_exceptions=True)
 
 
 @pytest.mark.asyncio
-async def test_close_drains_discarded_owner_membership_lookup(tmp_path: Path) -> None:
-    """Close must retain and drain an in-flight lookup removed by owner discard."""
+async def test_snapshot_drain_waits_for_discarded_owner_membership_lookup(tmp_path: Path) -> None:
+    """Snapshot drain must retain and wait for a lookup removed by owner discard."""
     owner = _owner()
     operations = build_matrix_restart_recovery_operations(test_runtime_paths(tmp_path))
     lookup_started = asyncio.Event()
@@ -1380,17 +1380,57 @@ async def test_close_drains_discarded_owner_membership_lookup(tmp_path: Path) ->
         await asyncio.wait_for(lookup_started.wait(), timeout=1.0)
         operations.discard_owner(owner.user_id)
         await asyncio.wait_for(lookup_cancelled.wait(), timeout=1.0)
-        close_task = asyncio.create_task(operations.close())
+        drain_task = asyncio.create_task(operations.drain_membership_snapshots())
         try:
             await asyncio.sleep(0)
-            assert close_task.done() is False
+            assert drain_task.done() is False
             release_cleanup.set()
-            await asyncio.wait_for(close_task, timeout=1.0)
+            await asyncio.wait_for(drain_task, timeout=1.0)
         finally:
             release_cleanup.set()
             recovery_task.cancel()
-            close_task.cancel()
-            await asyncio.gather(recovery_task, close_task, return_exceptions=True)
+            drain_task.cancel()
+            await asyncio.gather(recovery_task, drain_task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_pause_drains_shared_membership_lookup_before_return(tmp_path: Path) -> None:
+    """Config mutation must wait for old-client membership cleanup to finish."""
+    owner = _owner(rooms=frozenset())
+    operations = build_matrix_restart_recovery_operations(test_runtime_paths(tmp_path))
+    coordinator = RestartRecoveryCoordinator(
+        current_config=lambda: _config(tmp_path),
+        current_owners=lambda: {owner.user_id: owner},
+        operations=operations,
+    )
+    lookup_started = asyncio.Event()
+    lookup_cancelled = asyncio.Event()
+    release_cleanup = asyncio.Event()
+
+    async def joined_rooms(_client: nio.AsyncClient) -> list[str]:
+        lookup_started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            lookup_cancelled.set()
+            await release_cleanup.wait()
+            raise
+
+    with patch("mindroom.restart_recovery_operations.get_joined_rooms", new=joined_rooms):
+        coordinator.start(startup_cutoff_ms=123)
+        await asyncio.wait_for(lookup_started.wait(), timeout=1.0)
+        pause_task = asyncio.create_task(coordinator.pause())
+        try:
+            await asyncio.wait_for(lookup_cancelled.wait(), timeout=1.0)
+            await asyncio.sleep(0)
+            assert pause_task.done() is False
+            release_cleanup.set()
+            await asyncio.wait_for(pause_task, timeout=1.0)
+        finally:
+            release_cleanup.set()
+            pause_task.cancel()
+            await asyncio.gather(pause_task, return_exceptions=True)
+            await coordinator.stop()
 
 
 @pytest.mark.asyncio
@@ -1455,7 +1495,7 @@ async def test_missing_rooms_back_off_one_owner_membership_snapshot_refresh(
             )
             calls_after_refresh = get_rooms.await_count
     finally:
-        await operations.close()
+        await operations.drain_membership_snapshots()
 
     assert missing_results == [
         RoomRecoveryResult(unjoined_owner_user_ids=frozenset({owner.user_id})) for _request in requests
@@ -1704,7 +1744,7 @@ async def test_owner_ready_during_stop_does_not_restore_recovery_work(
     close_started = asyncio.Event()
     release_close = asyncio.Event()
 
-    async def close() -> None:
+    async def drain_membership_snapshots() -> None:
         close_started.set()
         await release_close.wait()
 
@@ -1718,7 +1758,7 @@ async def test_owner_ready_during_stop_does_not_restore_recovery_work(
             target_freshness=AsyncMock(return_value=InterruptedTargetFreshness.CURRENT),
             deliver_target=AsyncMock(return_value=RestartDeliveryOutcome.DELIVERED),
             discard_owner=lambda _owner_user_id: None,
-            close=close,
+            drain_membership_snapshots=drain_membership_snapshots,
         ),
     )
     coordinator.start(startup_cutoff_ms=123)
@@ -3138,7 +3178,7 @@ async def test_terminal_delivery_freshness_settles_without_retry(tmp_path: Path)
         delivery_attempts += 1
         return restart_recovery_operations_module.RestartDeliveryOutcome.TERMINAL
 
-    async def close() -> None:
+    async def drain_membership_snapshots() -> None:
         return None
 
     coordinator = RestartRecoveryCoordinator(
@@ -3151,7 +3191,7 @@ async def test_terminal_delivery_freshness_settles_without_retry(tmp_path: Path)
             target_freshness=freshness,
             deliver_target=terminal_delivery,
             discard_owner=lambda _owner_user_id: None,
-            close=close,
+            drain_membership_snapshots=drain_membership_snapshots,
         ),
         retry_delay=lambda _attempt: 0.0,
     )
@@ -4613,7 +4653,7 @@ async def test_ready_owners_share_one_room_scan_and_settle_independently(
         delivered.append((owner.user_id, target.target_event_id))
         return RestartDeliveryOutcome.DELIVERED
 
-    async def close() -> None:
+    async def drain_membership_snapshots() -> None:
         return None
 
     operations = RestartRecoveryOperations(
@@ -4623,7 +4663,7 @@ async def test_ready_owners_share_one_room_scan_and_settle_independently(
         target_freshness=AsyncMock(return_value=InterruptedTargetFreshness.CURRENT),
         deliver_target=deliver,
         discard_owner=lambda _owner_user_id: None,
-        close=close,
+        drain_membership_snapshots=drain_membership_snapshots,
     )
     coordinator = RestartRecoveryCoordinator(
         current_config=lambda: _config(tmp_path),
@@ -4695,7 +4735,7 @@ async def test_target_exception_retries_only_failed_target_and_continues_shared_
             raise RuntimeError(msg)
         return RestartDeliveryOutcome.DELIVERED
 
-    async def close() -> None:
+    async def drain_membership_snapshots() -> None:
         return None
 
     coordinator = RestartRecoveryCoordinator(
@@ -4708,7 +4748,7 @@ async def test_target_exception_retries_only_failed_target_and_continues_shared_
             target_freshness=AsyncMock(return_value=InterruptedTargetFreshness.CURRENT),
             deliver_target=deliver,
             discard_owner=lambda _owner_user_id: None,
-            close=close,
+            drain_membership_snapshots=drain_membership_snapshots,
         ),
         retry_delay=lambda _attempt: 10.0,
     )
@@ -4932,7 +4972,7 @@ async def test_pause_does_not_start_next_owner_delivery_in_shared_lease(
             other_delivered.set()
         return RestartDeliveryOutcome.DELIVERED
 
-    async def close() -> None:
+    async def drain_membership_snapshots() -> None:
         return None
 
     coordinator = RestartRecoveryCoordinator(
@@ -4945,7 +4985,7 @@ async def test_pause_does_not_start_next_owner_delivery_in_shared_lease(
             target_freshness=AsyncMock(return_value=InterruptedTargetFreshness.CURRENT),
             deliver_target=deliver,
             discard_owner=lambda _owner_user_id: None,
-            close=close,
+            drain_membership_snapshots=drain_membership_snapshots,
         ),
     )
     coordinator.start(startup_cutoff_ms=123)

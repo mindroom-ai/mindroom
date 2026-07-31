@@ -193,6 +193,7 @@ Owner-authored resume relays use the standard dispatch-context path and resolve 
 The response runner refreshes that history again after acquiring the lifecycle lock.
 Resume delivery runs outside the read budget with one admitted delivery under global pacing.
 Pause cancels delivery waiters before admission and drains the admitted send because Matrix may commit before task cancellation becomes observable.
+Pause also cancels and drains shared membership snapshots before configuration mutation can replace their Matrix clients.
 Each relay uses a deterministic Matrix transaction ID as a replay guard, while draining the exact result lets the current lease settle its owned lifecycle state.
 One monotonic watermark per exact owner generation, room, and thread fences superseded targets and closes a successfully resumed recovery lifecycle.
 Object identity prevents older leases from mutating replaced work, while generation-compatible settlements may advance watermarks across a concurrent readiness refresh.

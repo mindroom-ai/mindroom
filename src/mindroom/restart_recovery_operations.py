@@ -127,7 +127,7 @@ class RestartRecoveryOperations:
     target_freshness: _TargetFreshness
     deliver_target: _DeliverTarget
     discard_owner: Callable[[str], None]
-    close: Callable[[], Awaitable[None]]
+    drain_membership_snapshots: Callable[[], Awaitable[None]]
 
 
 @dataclass(frozen=True)
@@ -220,7 +220,7 @@ class _OwnerMembershipSnapshots:
             snapshot.task.cancel()
             snapshot.task.add_done_callback(lambda _: self._discard(owner_user_id, snapshot))
 
-    async def close(self) -> None:
+    async def drain(self) -> None:
         """Cancel and drain every retained membership snapshot."""
         tasks = tuple(snapshot.task for snapshot in self.snapshots.values())
         self.snapshots.clear()
@@ -486,5 +486,5 @@ def build_matrix_restart_recovery_operations(
         target_freshness=target_freshness,
         deliver_target=deliver_target,
         discard_owner=membership_snapshots.discard_owner,
-        close=membership_snapshots.close,
+        drain_membership_snapshots=membership_snapshots.drain,
     )

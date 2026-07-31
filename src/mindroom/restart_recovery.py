@@ -246,6 +246,7 @@ class RestartRecoveryCoordinator:
         if task is not None:
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
+        await self._operations.drain_membership_snapshots()
 
     def resume(self) -> None:
         """Resume retained work against current config and owner generations."""
@@ -277,7 +278,7 @@ class RestartRecoveryCoordinator:
         self._room_jobs.clear()
         self._target_watermarks.clear()
         self._completed_startup_scans.clear()
-        await self._operations.close()
+        await self._operations.drain_membership_snapshots()
 
     def _require_config(self) -> Config:
         config = self._current_config()
