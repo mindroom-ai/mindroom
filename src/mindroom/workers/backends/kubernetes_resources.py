@@ -45,6 +45,7 @@ from mindroom.runtime_env_policy import (
 )
 from mindroom.tool_system.worker_routing import (
     descriptive_worker_id_for_key,
+    normalize_worker_key_part,
     resolved_worker_key_scope,
     worker_key_agent_name,
 )
@@ -1474,13 +1475,6 @@ class KubernetesResourceManager:
                     "readOnly": True,
                 },
             )
-        mounts.extend(
-            self._knowledge_storage_mounts(
-                worker_key,
-                mounted_storage_root=Path(self.config.storage_mount_path),
-                existing_mount_paths=tuple(Path(cast("str", mount["mountPath"])) for mount in mounts),
-            ),
-        )
         if self.config.agent_vault is not None:
             mounts.append(
                 {
@@ -1497,6 +1491,13 @@ class KubernetesResourceManager:
                     "readOnly": True,
                 },
             )
+        mounts.extend(
+            self._knowledge_storage_mounts(
+                worker_key,
+                mounted_storage_root=Path(self.config.storage_mount_path),
+                existing_mounts=tuple(mounts),
+            ),
+        )
         validate_unique_worker_visible_paths(
             (str(mount["mountPath"]) for mount in mounts),
             worker_key=worker_key,
@@ -1662,7 +1663,7 @@ class KubernetesResourceManager:
         worker_key: str,
         *,
         mounted_storage_root: Path,
-        existing_mount_paths: tuple[Path, ...],
+        existing_mounts: tuple[dict[str, object], ...],
     ) -> list[dict[str, object]]:
         relative_paths = self._assigned_knowledge_storage_paths(worker_key)
         mount_paths = tuple(mounted_storage_root / relative_path for relative_path in relative_paths)
@@ -1674,14 +1675,30 @@ class KubernetesResourceManager:
                         f"{mount_path} and {other_path}"
                     )
                     raise WorkerBackendError(msg)
+        storage_mount_paths = tuple(
+            Path(cast("str", mount["mountPath"]))
+            for mount in existing_mounts
+            if mount["name"] == WORKER_STORAGE_VOLUME_NAME
+        )
+        other_mount_paths = tuple(
+            Path(cast("str", mount["mountPath"]))
+            for mount in existing_mounts
+            if mount["name"] != WORKER_STORAGE_VOLUME_NAME
+        )
         mounts: list[dict[str, object]] = []
         for relative_path, mount_path in zip(relative_paths, mount_paths, strict=True):
             if any(
+                mount_path.is_relative_to(other_path) or other_path.is_relative_to(mount_path)
+                for other_path in other_mount_paths
+            ):
+                msg = f"Kubernetes knowledge mount overlaps existing mountPath for worker key: {worker_key}"
+                raise WorkerBackendError(msg)
+            if any(
                 mount_path == existing_path or mount_path.is_relative_to(existing_path)
-                for existing_path in existing_mount_paths
+                for existing_path in storage_mount_paths
             ):
                 continue
-            if any(existing_path.is_relative_to(mount_path) for existing_path in existing_mount_paths):
+            if any(existing_path.is_relative_to(mount_path) for existing_path in storage_mount_paths):
                 msg = f"Kubernetes knowledge mount overlaps existing mountPath for worker key: {worker_key}"
                 raise WorkerBackendError(msg)
             mounts.append(
@@ -1710,14 +1727,15 @@ class KubernetesResourceManager:
                 if policy.effective_execution_scope == "user"
             )
         else:
-            agent_name = worker_key_agent_name(worker_key)
+            encoded_agent_name = worker_key_agent_name(worker_key)
             expected_scope = None if scope == "unscoped" else scope
-            policy = self.resolved_agent_policies.get(agent_name) if agent_name is not None else None
-            agent_names = (
-                (agent_name,)
-                if agent_name is not None and policy is not None and policy.effective_execution_scope == expected_scope
-                else ()
-            )
+            agent_names = tuple(
+                agent_name
+                for agent_name, policy in self.resolved_agent_policies.items()
+                if encoded_agent_name is not None
+                and policy.effective_execution_scope == expected_scope
+                and normalize_worker_key_part(agent_name) == encoded_agent_name
+            )[:1]
 
         base_ids: set[str] = set()
         for agent_name in agent_names:

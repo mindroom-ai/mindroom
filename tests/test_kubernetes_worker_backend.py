@@ -1776,6 +1776,44 @@ router:
     }
 
 
+def test_kubernetes_backend_matches_normalized_agent_name_for_knowledge_mount(tmp_path: Path) -> None:
+    """Knowledge selection should match the normalized agent name encoded in a worker key."""
+    storage_root = tmp_path / "storage"
+    knowledge_root = storage_root / "knowledge" / "shared-docs"
+    knowledge_root.mkdir(parents=True)
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        f"""
+agents:
+  My Agent:
+    display_name: Code
+    role: Code test
+    model: default
+    worker_scope: shared
+    knowledge_bases: [shared_docs]
+knowledge_bases:
+  shared_docs:
+    path: {knowledge_root}
+models:
+  default:
+    provider: openai
+    id: gpt-5.4
+router:
+  model: default
+""".lstrip(),
+        encoding="utf-8",
+    )
+    runtime_paths = resolve_primary_runtime_paths(config_path=config_path, storage_path=storage_root)
+    backend, apps_api, _core_api = _backend(runtime_paths=runtime_paths)
+    worker_key = "v1:tenant-123:shared:My_Agent"
+
+    backend.ensure_worker(WorkerSpec(worker_key), now=10.0)
+
+    deployment = apps_api.created_bodies[0]
+    volume_mounts = deployment["spec"]["template"]["spec"]["containers"][0]["volumeMounts"]
+    assert any(mount.get("subPath") == "knowledge/shared-docs" for mount in volume_mounts)
+
+
 def test_kubernetes_backend_does_not_duplicate_knowledge_already_visible_in_agent_root(tmp_path: Path) -> None:
     """Knowledge below an existing scoped mount should use that mount without a nested duplicate."""
     storage_root = tmp_path / "storage"
@@ -1888,6 +1926,86 @@ router:
 
     assert "/app/worker/knowledge/project" in str(exc_info.value)
     assert "/app/worker/knowledge/project/docs" in str(exc_info.value)
+    assert apps_api.created_bodies == []
+
+
+def test_kubernetes_backend_rejects_knowledge_mount_containing_agent_vault_mount(tmp_path: Path) -> None:
+    """Knowledge mounts must not contain fixed runner mounts added later in the plan."""
+    storage_root = tmp_path / "storage"
+    knowledge_root = storage_root / "etc"
+    knowledge_root.mkdir(parents=True)
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        f"""
+agents:
+  code:
+    display_name: Code
+    role: Code test
+    model: default
+    worker_scope: shared
+    knowledge_bases: [unsafe_docs]
+knowledge_bases:
+  unsafe_docs:
+    path: {knowledge_root}
+models:
+  default:
+    provider: openai
+    id: gpt-5.4
+router:
+  model: default
+""".lstrip(),
+        encoding="utf-8",
+    )
+    runtime_paths = resolve_primary_runtime_paths(config_path=config_path, storage_path=storage_root)
+    backend, apps_api, _core_api = _backend(
+        runtime_paths=runtime_paths,
+        storage_mount_path="/",
+        agent_vault=_test_agent_vault_config(worker_ca_configmap_name="agent-vault-ca"),
+    )
+
+    with pytest.raises(WorkerBackendError, match="knowledge mount overlaps existing mountPath"):
+        backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=10.0)
+
+    assert apps_api.created_bodies == []
+
+
+def test_kubernetes_backend_rejects_knowledge_mount_inside_agent_vault_mount(tmp_path: Path) -> None:
+    """Only same-PVC storage ancestors may suppress a redundant knowledge mount."""
+    storage_root = tmp_path / "storage"
+    knowledge_root = storage_root / "agent-vault" / "docs"
+    knowledge_root.mkdir(parents=True)
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        f"""
+agents:
+  code:
+    display_name: Code
+    role: Code test
+    model: default
+    worker_scope: shared
+    knowledge_bases: [unsafe_docs]
+knowledge_bases:
+  unsafe_docs:
+    path: {knowledge_root}
+models:
+  default:
+    provider: openai
+    id: gpt-5.4
+router:
+  model: default
+""".lstrip(),
+        encoding="utf-8",
+    )
+    runtime_paths = resolve_primary_runtime_paths(config_path=config_path, storage_path=storage_root)
+    backend, apps_api, _core_api = _backend(
+        runtime_paths=runtime_paths,
+        storage_mount_path="/",
+        agent_vault=_test_agent_vault_config(),
+    )
+
+    with pytest.raises(WorkerBackendError, match="knowledge mount overlaps existing mountPath"):
+        backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=10.0)
+
     assert apps_api.created_bodies == []
 
 
