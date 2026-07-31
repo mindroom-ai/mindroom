@@ -25,6 +25,7 @@ from mindroom.knowledge.utils import _KnowledgeResolution
 from mindroom.matrix.cache import ThreadHistoryResult
 from mindroom.matrix.cache.thread_history_result import thread_history_result
 from mindroom.matrix.client import PermanentMatrixStartupError
+from mindroom.matrix.client_room_admin import RoomJoinOutcome
 from mindroom.matrix.state import MatrixState
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.media_inputs import MediaInputs
@@ -462,7 +463,7 @@ class TestAgentBot(AgentBotTestBase):
         mock_event = MagicMock()
         mock_event.sender = "@user:localhost"
 
-        join_room = AsyncMock(return_value=True)
+        join_room = AsyncMock(return_value=RoomJoinOutcome.JOINED)
         with (
             patch("mindroom.bot_room_lifecycle.is_authorized_sender", return_value=True),
             patch("mindroom.bot_room_lifecycle.join_room", join_room),

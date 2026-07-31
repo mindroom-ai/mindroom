@@ -25,6 +25,7 @@ from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.constants import ROUTER_AGENT_NAME, STREAM_STATUS_KEY, STREAM_STATUS_PENDING
 from mindroom.file_watcher import _tree_snapshot
 from mindroom.hooks import EVENT_MESSAGE_RECEIVED, HookRegistry
+from mindroom.matrix.client_room_admin import RoomJoinOutcome
 from mindroom.matrix.state import MatrixState
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
@@ -2196,12 +2197,12 @@ async def test_agent_joins_new_rooms_on_config_reload(  # noqa: C901
     joined_rooms: dict[str, list[str]] = {}
     left_rooms: dict[str, list[str]] = {}
 
-    async def mock_join_room(client: AsyncMock, room_id: str) -> bool:
+    async def mock_join_room(client: AsyncMock, room_id: str) -> RoomJoinOutcome:
         user_id = client.user_id
         if user_id not in joined_rooms:
             joined_rooms[user_id] = []
         joined_rooms[user_id].append(room_id)
-        return True
+        return RoomJoinOutcome.JOINED
 
     async def mock_leave_room(client: AsyncMock, room_id: str) -> bool:
         user_id = client.user_id
@@ -2286,9 +2287,9 @@ async def test_router_updates_rooms_on_config_reload(
     joined_rooms: list[str] = []
     left_rooms: list[str] = []
 
-    async def mock_join_room(_client: AsyncMock, room_id: str) -> bool:
+    async def mock_join_room(_client: AsyncMock, room_id: str) -> RoomJoinOutcome:
         joined_rooms.append(room_id)
-        return True
+        return RoomJoinOutcome.JOINED
 
     async def mock_leave_room(_client: AsyncMock, room_id: str) -> bool:
         left_rooms.append(room_id)
@@ -2368,12 +2369,12 @@ async def test_new_agent_joins_rooms_on_config_reload(
     # Track room operations
     joined_rooms: dict[str, list[str]] = {}
 
-    async def mock_join_room(client: AsyncMock, room_id: str) -> bool:
+    async def mock_join_room(client: AsyncMock, room_id: str) -> RoomJoinOutcome:
         user_id = client.user_id
         if user_id not in joined_rooms:
             joined_rooms[user_id] = []
         joined_rooms[user_id].append(room_id)
-        return True
+        return RoomJoinOutcome.JOINED
 
     monkeypatch.setattr("mindroom.bot_room_lifecycle.join_room", mock_join_room)
 
@@ -2435,12 +2436,12 @@ async def test_team_room_changes_on_config_reload(
     joined_rooms: dict[str, list[str]] = {}
     left_rooms: dict[str, list[str]] = {}
 
-    async def mock_join_room(client: AsyncMock, room_id: str) -> bool:
+    async def mock_join_room(client: AsyncMock, room_id: str) -> RoomJoinOutcome:
         user_id = client.user_id
         if user_id not in joined_rooms:
             joined_rooms[user_id] = []
         joined_rooms[user_id].append(room_id)
-        return True
+        return RoomJoinOutcome.JOINED
 
     async def mock_leave_room(client: AsyncMock, room_id: str) -> bool:
         user_id = client.user_id
@@ -2649,9 +2650,9 @@ async def test_room_membership_state_after_config_update(  # noqa: C901, PLR0915
             if room_id in room_memberships and user_id in room_memberships[room_id]:
                 room_memberships[room_id].remove(user_id)
 
-    async def mock_join_room(client: AsyncMock, room_id: str) -> bool:
+    async def mock_join_room(client: AsyncMock, room_id: str) -> RoomJoinOutcome:
         update_room_membership(client.user_id, room_id, "join")
-        return True
+        return RoomJoinOutcome.JOINED
 
     async def mock_leave_room(client: AsyncMock, room_id: str) -> bool:
         update_room_membership(client.user_id, room_id, "leave")

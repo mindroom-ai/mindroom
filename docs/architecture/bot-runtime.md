@@ -60,6 +60,7 @@ Matrix callback
 ## Durable Dispatch Boundary
 
 `DispatchObligationStore` durably accepts each correctness-critical Matrix callback before background execution can fail or be cancelled.
+It stores pending replay payloads and permanent compact tombstones in `tracking/dispatch_obligations.sqlite3`.
 Its exact key combines the Matrix principal, entity, source event, and callback kind, while pending rows retain the original room and event source for replay.
 Settled rows become permanent exact-key tombstones and atomically scrub that replay payload, keeping terminal truth compact without allowing an old callback to reappear.
 Successful and intentionally ignored callbacks settle explicitly, while failures and cancellations remain pending for direct startup recovery.
