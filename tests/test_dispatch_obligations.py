@@ -55,6 +55,10 @@ def _store(
     )
 
 
+def _database_path(store: DispatchObligationStore) -> Path:
+    return store._database_path
+
+
 def _message_obligation(
     event_id: str,
     *,
@@ -156,10 +160,47 @@ def test_pending_row_survives_new_store_instance(tmp_path: Path) -> None:
     assert restarted.has_pending("$message", DispatchCallbackKind.MESSAGE)
 
 
+def test_entity_admission_store_is_not_blocked_by_another_entity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One entity's write transaction must not block another entity's admission."""
+    first = _store(tmp_path)
+    second_principal = "@other:example.org"
+    second_entity = "other"
+    second = _store(
+        tmp_path,
+        principal_id=second_principal,
+        entity_name=second_entity,
+    )
+    lock_connection = sqlite3.connect(_database_path(first), isolation_level=None)
+    lock_connection.execute("BEGIN IMMEDIATE")
+
+    def connect_without_waiting() -> sqlite3.Connection:
+        connection = sqlite3.connect(_database_path(second), timeout=0.01)
+        connection.row_factory = sqlite3.Row
+        return connection
+
+    monkeypatch.setattr(second, "_connect", connect_without_waiting)
+    try:
+        result = second.create_pending(
+            _message_obligation(
+                "$other-entity",
+                principal_id=second_principal,
+                entity_name=second_entity,
+            ),
+        )
+    finally:
+        lock_connection.rollback()
+        lock_connection.close()
+
+    assert result is _DispatchCreateResult.CREATED
+
+
 def test_pending_recovery_query_uses_pending_order_index(tmp_path: Path) -> None:
     """Permanent tombstones must not be scanned or sorted to recover pending work."""
-    _store(tmp_path)
-    database_path = tmp_path / "tracking" / "dispatch_obligations.sqlite3"
+    store = _store(tmp_path)
+    database_path = _database_path(store)
     with sqlite3.connect(database_path) as connection:
         plan = connection.execute(
             """
@@ -220,7 +261,7 @@ def test_terminal_settlement_compacts_payload_before_invalid_replay_check(tmp_pa
 
     store.settle(obligation.key, _DispatchTerminalOutcome.SUCCEEDED)
 
-    database_path = tmp_path / "tracking" / "dispatch_obligations.sqlite3"
+    database_path = _database_path(store)
     with sqlite3.connect(database_path) as connection:
         row = connection.execute(
             "SELECT room_id, event_source_json FROM dispatch_obligations WHERE source_event_id = ?",
@@ -243,7 +284,7 @@ def test_store_initialization_compacts_legacy_terminal_payloads(tmp_path: Path) 
     obligation = _message_obligation("$legacy-terminal")
     store.create_pending(obligation)
     store.settle(obligation.key, _DispatchTerminalOutcome.SUCCEEDED)
-    database_path = tmp_path / "tracking" / "dispatch_obligations.sqlite3"
+    database_path = _database_path(store)
     with sqlite3.connect(database_path) as connection:
         connection.execute(
             """
@@ -330,7 +371,7 @@ def test_turn_store_terminal_truth_creates_missing_compact_tombstone(tmp_path: P
         event_source={"event_id": "$turn-only", "not_json_safe": object()},
     )
     assert store.create_pending(invalid_replay) is _DispatchCreateResult.ALREADY_TERMINAL
-    database_path = tmp_path / "tracking" / "dispatch_obligations.sqlite3"
+    database_path = _database_path(store)
     with sqlite3.connect(database_path) as connection:
         row = connection.execute(
             "SELECT room_id, event_source_json, state FROM dispatch_obligations WHERE source_event_id = ?",
@@ -344,7 +385,7 @@ def test_terminal_tombstones_are_not_globally_pruned(tmp_path: Path) -> None:
     store = _store(tmp_path)
     trigger = _message_obligation("$trigger")
     store.create_pending(trigger)
-    database_path = tmp_path / "tracking" / "dispatch_obligations.sqlite3"
+    database_path = _database_path(store)
     with sqlite3.connect(database_path) as connection:
         connection.executemany(
             """
@@ -384,7 +425,7 @@ def test_malformed_persisted_source_is_not_invented_into_recovery(tmp_path: Path
     store = _store(tmp_path)
     obligation = _message_obligation("$broken")
     store.create_pending(obligation)
-    database_path = tmp_path / "tracking" / "dispatch_obligations.sqlite3"
+    database_path = _database_path(store)
     with sqlite3.connect(database_path) as connection:
         connection.execute(
             "UPDATE dispatch_obligations SET event_source_json = ? WHERE source_event_id = ?",

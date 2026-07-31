@@ -23,7 +23,6 @@ from mindroom.matrix.media import MATRIX_MEDIA_EVENT_TYPES, MatrixMediaEvent, pa
 
 logger = get_logger(__name__)
 
-_DATABASE_NAME = "dispatch_obligations.sqlite3"
 _SCHEMA_VERSION = 2
 _PENDING_STATE = "pending"
 _RETRY_INITIAL_DELAY_SECONDS = 1.0
@@ -70,6 +69,11 @@ class _DispatchCallbackResult(StrEnum):
 
 class _DispatchObligationCorruptionError(RuntimeError):
     """A pending row cannot be recovered without inventing source input."""
+
+
+def _database_name(principal_id: str, entity_name: str) -> str:
+    identity_digest = hashlib.sha256(f"{principal_id}\0{entity_name}".encode()).hexdigest()
+    return f"dispatch_obligations-{identity_digest}.sqlite3"
 
 
 @dataclass(frozen=True, slots=True)
@@ -125,7 +129,10 @@ class DispatchObligationStore:
             msg = "Dispatch obligation store requires an exact principal and entity"
             raise ValueError(msg)
         self.tracking_path = Path(self.tracking_path)
-        self._database_path = self.tracking_path / _DATABASE_NAME
+        self._database_path = self.tracking_path / _database_name(
+            self.principal_id,
+            self.entity_name,
+        )
         self._lock = threading.Lock()
         with self._lock, self._connect() as connection:
             self._initialize_schema(connection)
@@ -881,6 +888,20 @@ class DispatchObligationRunner:
         except Exception:
             self._schedule_retry(obligation.key)
             raise
+
+    async def dispatch_background(
+        self,
+        room: nio.MatrixRoom,
+        event: _DispatchEvent,
+        callback_kind: DispatchCallbackKind,
+        *,
+        owner: object,
+    ) -> None:
+        """Persist exact work before scheduling its fallible callback."""
+        obligation = await self.persist(room, event, callback_kind)
+        if obligation is None:
+            return
+        await self.task_wrapper(callback_kind, owner=owner)(room, event)
 
     async def persist(
         self,

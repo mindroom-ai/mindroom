@@ -1910,16 +1910,13 @@ class AgentBot:
         room: nio.MatrixRoom,
         event: nio.InviteEvent,
     ) -> None:
-        """Finish invite handling before the containing classic sync can certify."""
-        try:
-            await self._dispatch_obligation_runner.dispatch(
-                room,
-                event,
-                DispatchCallbackKind.INVITE,
-            )
-        except BaseException:
-            self._rewind_sync_after_pre_certification_failure()
-            raise
+        """Durably accept invite work before scheduling its network side effects."""
+        await self._dispatch_obligation_runner.dispatch_background(
+            room,
+            event,
+            DispatchCallbackKind.INVITE,
+            owner=self._runtime_view,
+        )
 
     def _settle_turn_dispatch_obligations(self, event_ids: tuple[str, ...]) -> None:
         """Replace pending turn-backed obligations with durable TurnStore truth."""
