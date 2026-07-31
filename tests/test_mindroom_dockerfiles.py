@@ -23,11 +23,6 @@ def _apt_install_packages(dockerfile_text: str) -> set[str]:
     return {package for package in match.group("packages").split() if not package.startswith("-") and package != "\\"}
 
 
-def _final_stage(dockerfile_text: str) -> str:
-    _, final_stage = dockerfile_text.split(" AS final", maxsplit=1)
-    return final_stage
-
-
 def _assert_command_starts_with_tini(template_text: str, command: str) -> None:
     escaped_command = re.escape(command)
     block_list_pattern = rf"command:\s*\n\s*-\s*tini\s*\n\s*-\s*--\s*\n\s*-\s*{escaped_command}(?=\s)"
@@ -52,7 +47,7 @@ def test_mindroom_runtime_images_run_under_tini() -> None:
     for dockerfile in _MINDROOM_DOCKERFILES:
         text = dockerfile.read_text(encoding="utf-8")
 
-        assert "tini" in _apt_install_packages(_final_stage(text))
+        assert "tini" in _apt_install_packages(text)
         assert 'ENTRYPOINT ["tini", "--"]' in text
         assert 'CMD ["/app/.venv/bin/mindroom", "run"]' in text
 
@@ -78,7 +73,7 @@ def test_mindroom_runtime_images_opt_into_dashboard_asset_build() -> None:
 def test_full_mindroom_runtime_image_bundles_browser_runtime_packages() -> None:
     """The full runtime image should support browser and media-capable worker tools."""
     text = (_REPO_ROOT / "local/instances/deploy/Dockerfile.mindroom").read_text(encoding="utf-8")
-    packages = _apt_install_packages(_final_stage(text))
+    packages = _apt_install_packages(text)
 
     assert {"chromium", "ffmpeg", "fonts-liberation", "nodejs"} <= packages
 
@@ -87,13 +82,12 @@ def test_mindroom_runtime_images_keep_git_ssh_support_when_disabling_recommends(
     """Git-over-SSH needs an explicit SSH client when apt recommendations are disabled."""
     for dockerfile in _MINDROOM_DOCKERFILES:
         text = dockerfile.read_text(encoding="utf-8")
-        final_stage = _final_stage(text)
-        install_args_match = re.search(r"apt-get install -y (?P<args>.*?)\\\s*&&", final_stage, re.DOTALL)
+        install_args_match = re.search(r"apt-get install -y (?P<args>.*?)\\\s*&&", text, re.DOTALL)
         assert install_args_match is not None
         install_args = install_args_match.group("args").split()
 
         if "--no-install-recommends" in install_args:
-            assert "openssh-client" in _apt_install_packages(final_stage)
+            assert "openssh-client" in _apt_install_packages(text)
 
 
 def test_kubernetes_command_overrides_run_under_tini() -> None:

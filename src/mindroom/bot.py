@@ -1309,7 +1309,11 @@ class AgentBot:
 
         if isinstance(_response, nio.SyncResponse):
             with track_matrix_sync_cache_write(self.agent_name):
-                await self._apply_own_room_membership_from_sync(_response)
+                try:
+                    await self._apply_own_room_membership_from_sync(_response)
+                except BaseException:
+                    self._handle_pre_certification_failure()
+                    raise
                 restored_token_first_sync_response = (
                     first_sync_response and self._sync_cache_trust.state is SyncTrustState.PENDING
                 )
