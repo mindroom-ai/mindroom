@@ -413,8 +413,8 @@ async def test_shared_room_scans_ready_owner_and_retries_only_unready_owner(
         RoomLease(
             request,
             (
-                RoomWork(request, owner.user_id, owner.generation),
-                RoomWork(request, router.user_id, router.generation),
+                RoomWork(request, owner.user_id, owner.generation, due_at=None),
+                RoomWork(request, router.user_id, router.generation, due_at=None),
             ),
         ),
     )
@@ -1487,7 +1487,7 @@ def test_due_owner_cohort_precedes_oldest_repeat_owner(tmp_path: Path) -> None:
     active_request = RoomRecoveryRequest("!active:example.org", 123, False)
     oldest_request = RoomRecoveryRequest("!oldest:example.org", 123, False)
     newer_request = RoomRecoveryRequest("!newer:example.org", 123, False)
-    active = RoomWork(active_request, busy_owner, None)
+    active = RoomWork(active_request, busy_owner, None, due_at=None)
     oldest = RoomWork(oldest_request, busy_owner, None, due_at=1.0)
     newer = RoomWork(newer_request, "@idle:example.org", None, due_at=2.0)
     coordinator._active_attempts[cast("asyncio.Task[object]", MagicMock())] = RoomLease(
@@ -2493,7 +2493,7 @@ async def test_room_lease_snapshots_current_owners_once(tmp_path: Path) -> None:
         await coordinator._process_room(
             RoomLease(
                 request,
-                (RoomWork(request, owner.user_id, owner.generation),),
+                (RoomWork(request, owner.user_id, owner.generation, due_at=None),),
             ),
         )
         await asyncio.wait_for(all_delivered.wait(), timeout=1.0)

@@ -2533,7 +2533,7 @@ async def test_requester_resolution_respects_max_depth(tmp_path: Path) -> None:
     assert client.room_get_event.await_count <= 13
 
 
-def test_bot_module_does_not_import_stale_stream_cleanup() -> None:
+def test_bot_module_does_not_own_restart_recovery() -> None:
     """bot.py must not own restart recovery (ISSUE-024b).
 
     Per-bot cleanup raced with orchestrator-level recovery:
@@ -2542,9 +2542,13 @@ def test_bot_module_does_not_import_stale_stream_cleanup() -> None:
     Only the orchestrator should start the shared recovery path.
     """
     bot_source = Path(importlib.import_module("mindroom.bot").__file__).read_text()
-    assert "recover_stale_streaming_messages" not in bot_source, (
-        "bot.py must not import or call recover_stale_streaming_messages; the orchestrator owns restart recovery"
+    recovery_symbols = (
+        "cleanup_stale_streaming_room",
+        "interrupted_target_freshness",
+        "build_auto_resume_content",
     )
+    for symbol in recovery_symbols:
+        assert symbol not in bot_source, f"bot.py must not import or call {symbol}; the orchestrator owns recovery"
 
 
 @pytest.mark.asyncio

@@ -42,11 +42,11 @@ class _OwnerRoomWork:
     request: RoomRecoveryRequest
     owner_user_id: str
     generation: object | None
+    due_at: float | None
     targets: tuple[InterruptedThread, ...] = ()
     matrix_attempt: int = 0
     readiness_probe: int = 0
     membership_probe: int = 0
-    due_at: float | None = 0.0
 
     @property
     def key(self) -> _JobKey:
@@ -100,13 +100,6 @@ class _OwnerAttemptResult:
     membership_unavailable: bool = False
     matrix_failed: bool = False
     cancelled: bool = False
-
-
-@dataclass(frozen=True)
-class _OwnerRoomDiscoveryResult:
-    """Authoritative joined-room scope for one exact owner generation."""
-
-    room_ids: frozenset[str] | None
 
 
 def _restart_recovery_retry_delay(attempt: int) -> float:
@@ -168,7 +161,7 @@ class RestartRecoveryCoordinator:
         self._completed_startup_scans: set[tuple[_RoomKey, str]] = set()
         self._active_attempts: dict[asyncio.Task[tuple[_OwnerAttemptResult, ...]], _RoomLease] = {}
         self._owner_room_discoveries: dict[
-            asyncio.Task[_OwnerRoomDiscoveryResult],
+            asyncio.Task[frozenset[str] | None],
             RecoveryOwner,
         ] = {}
         self._matrix_read_slots = asyncio.Semaphore(_MAX_CONCURRENT_MATRIX_READ_PHASES)
@@ -324,7 +317,7 @@ class RestartRecoveryCoordinator:
             terminal_interrupted_only=False,
         )
         key = request.key, owner_user_id
-        if (request.key, owner_user_id) in self._completed_startup_scans or key in self._room_jobs:
+        if key in self._completed_startup_scans or key in self._room_jobs:
             return
         self._enqueue_request(owner_user_id, request)
 
@@ -401,7 +394,8 @@ class RestartRecoveryCoordinator:
     async def _discover_owner_rooms(
         self,
         owner: RecoveryOwner,
-    ) -> _OwnerRoomDiscoveryResult:
+    ) -> frozenset[str] | None:
+        """Retry owner-scope enumeration before any discovered room jobs exist."""
         room_ids: list[str] | None = None
         for attempt in range(1, _MAX_OWNER_DISCOVERY_ATTEMPTS + 1):
             try:
@@ -417,12 +411,10 @@ class RestartRecoveryCoordinator:
                     exc_info=True,
                 )
             if room_ids is not None:
-                return _OwnerRoomDiscoveryResult(
-                    room_ids=frozenset(room_id for room_id in room_ids if room_id.startswith("!")),
-                )
+                return frozenset(room_id for room_id in room_ids if room_id.startswith("!"))
             if attempt < _MAX_OWNER_DISCOVERY_ATTEMPTS:
                 await asyncio.sleep(self._retry_delay(attempt))
-        return _OwnerRoomDiscoveryResult(room_ids=None)
+        return None
 
     def _settle_finished_owner_room_discoveries(self) -> None:
         finished = tuple((task, owner) for task, owner in self._owner_room_discoveries.items() if task.done())
@@ -432,19 +424,19 @@ class RestartRecoveryCoordinator:
         for task, owner in finished:
             self._owner_room_discoveries.pop(task)
             try:
-                result = task.result()
+                room_ids = task.result()
             except asyncio.CancelledError:
                 continue
             current_owner = current_owners.get(owner.user_id)
             if current_owner is None or current_owner.generation is not owner.generation:
                 continue
-            if result.room_ids is None:
+            if room_ids is None:
                 logger.warning(
                     "Restart recovery could not discover owner room scope",
                     owner_user_id=owner.user_id,
                 )
                 continue
-            for room_id in result.room_ids:
+            for room_id in room_ids:
                 self._enqueue_startup_room(owner.user_id, room_id)
 
     async def _drain_owner_room_discoveries(self) -> None:

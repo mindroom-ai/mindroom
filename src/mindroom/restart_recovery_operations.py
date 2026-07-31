@@ -307,9 +307,6 @@ def build_matrix_restart_recovery_operations(
     )
     next_delivery_at = 0.0
 
-    async def joined_rooms(owner: RecoveryOwner) -> list[str] | None:
-        return await membership_snapshots.joined_rooms(owner)
-
     async def recover_room(
         owners: tuple[RecoveryOwner, ...],
         request: RoomRecoveryRequest,
@@ -397,7 +394,7 @@ def build_matrix_restart_recovery_operations(
         return RestartDeliveryOutcome.DELIVERED
 
     return RestartRecoveryOperations(
-        joined_rooms=joined_rooms,
+        joined_rooms=membership_snapshots.joined_rooms,
         membership_refresh_delay_seconds=membership_refresh_delay_seconds,
         recover_room=recover_room,
         target_freshness=target_freshness,
