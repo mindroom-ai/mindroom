@@ -542,6 +542,9 @@ class AgentBot:
             source_admission=self._cold_history_fence.admit_source,
             on_source_rejected=self._handle_rejected_dispatch_source,
             background_task_owner=self._runtime_view,
+            room_lifecycle_admission_enabled=lambda: (
+                self.agent_name == ROUTER_AGENT_NAME and self._first_sync_done and self._room_member_join_hooks_armed
+            ),
         )
         self._post_response_effects_support = PostResponseEffectsSupport(
             runtime=self._runtime_view,
@@ -1326,29 +1329,8 @@ class AgentBot:
         client = self.client
         if client is None:
             return
-        client.add_event_admission_callback(
-            self._create_room_member_admission_callback(),
-            nio.RoomMemberEvent,
-        )
         client.add_event_callback(self._create_room_member_task_wrapper(), nio.RoomMemberEvent)
         self._room_member_callback_registered = True
-
-    def _create_room_member_admission_callback(
-        self,
-    ) -> Callable[[nio.MatrixRoom, nio.Event], Awaitable[None]]:
-        """Persist live join work only while delivery-time hooks are armed."""
-        durable_admission = self._dispatch_obligation_runner.admission_callback(
-            DispatchCallbackKind.ROOM_LIFECYCLE,
-        )
-
-        async def wrapper(room: nio.MatrixRoom, event: nio.Event) -> None:
-            if not isinstance(event, nio.RoomMemberEvent):
-                return
-            if not self._first_sync_done or not self._room_member_join_hooks_armed:
-                return
-            await durable_admission(room, event)
-
-        return wrapper
 
     def _create_room_member_task_wrapper(self) -> Callable[[nio.MatrixRoom, nio.Event], Awaitable[None]]:
         """Run live join work only after its matching admission succeeds."""
@@ -1759,10 +1741,6 @@ class AgentBot:
             # Keep durable tracking-state loading off the event loop at startup.
             await asyncio.to_thread(self._turn_store.warm)
             await asyncio.to_thread(interactive.init_persistence, self.runtime_paths.storage_root)
-            if self.orchestrator is not None:
-                await self._dispatch_obligation_runner.recover_pending(turn_backed=False)
-            else:
-                await self._dispatch_obligation_runner.recover_pending()
             client = self.client
             assert client is not None
 
@@ -1802,6 +1780,11 @@ class AgentBot:
             # Note: Room joining is deferred until after invitations are handled
             self.logger.info("agent_setup_complete", user_id=self.agent_user.user_id)
             await self._emit_agent_lifecycle_event(EVENT_AGENT_STARTED)
+            create_background_task(
+                self._dispatch_obligation_runner.recover_pending(turn_backed=False),
+                name=f"recover_non_turn_dispatch_obligations_{self.agent_name}",
+                owner=self._runtime_view,
+            )
         except Exception:
             client = self.client
             self.running = False

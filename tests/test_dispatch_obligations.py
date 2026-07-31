@@ -7,7 +7,7 @@ import sqlite3
 import threading
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any, cast
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import nio
 import pytest
@@ -24,13 +24,6 @@ from mindroom.dispatch_obligations import (
 from mindroom.dispatch_obligations import (
     _DispatchCallbackResult as DispatchCallbackResult,
 )
-from mindroom.dispatch_obligations import (
-    _DispatchObligationAdmissionCallback as DispatchObligationAdmissionCallback,
-)
-from mindroom.dispatch_obligations import (
-    _DispatchObligationTaskWrapper as DispatchObligationTaskWrapper,
-)
-from mindroom.matrix.media import MATRIX_MEDIA_EVENT_TYPES
 from mindroom.owned_blocking import run_owned_blocking_operation
 
 if TYPE_CHECKING:
@@ -135,6 +128,7 @@ def _runner(
     background_task_owner: object | None = None,
     retry_initial_delay_seconds: float = 1.0,
     retry_max_delay_seconds: float = 30.0,
+    retry_max_attempts: int = 5,
 ) -> DispatchObligationRunner:
     return DispatchObligationRunner(
         store=store,
@@ -144,6 +138,7 @@ def _runner(
         background_task_owner=background_task_owner,
         _retry_initial_delay_seconds=retry_initial_delay_seconds,
         _retry_max_delay_seconds=retry_max_delay_seconds,
+        _retry_max_attempts=retry_max_attempts,
     )
 
 
@@ -158,6 +153,20 @@ def test_pending_row_survives_new_store_instance(tmp_path: Path) -> None:
 
     assert restarted.pending() == (obligation,)
     assert restarted.has_pending("$message", DispatchCallbackKind.MESSAGE)
+
+
+def test_store_connections_close_and_configure_concurrent_writes(tmp_path: Path) -> None:
+    """Every short-lived connection must close after using explicit concurrency settings."""
+    store = _store(tmp_path)
+
+    with store._connection() as connection:
+        journal_mode = connection.execute("PRAGMA journal_mode").fetchone()[0]
+        busy_timeout = connection.execute("PRAGMA busy_timeout").fetchone()[0]
+
+    assert journal_mode == "wal"
+    assert busy_timeout == 5_000
+    with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+        connection.execute("SELECT 1")
 
 
 def test_entity_admission_store_is_not_blocked_by_another_entity(
@@ -269,45 +278,13 @@ def test_terminal_settlement_compacts_payload_before_invalid_replay_check(tmp_pa
         ).fetchone()
         schema_version = connection.execute("PRAGMA user_version").fetchone()[0]
     assert row == ("", "")
-    assert schema_version == 2
+    assert schema_version == 1
     invalid_replay = replace(
         obligation,
         room_id="!different:example.org",
         event_source={"event_id": obligation.source_event_id, "not_json_safe": object()},
     )
     assert store.create_pending(invalid_replay) is _DispatchCreateResult.ALREADY_TERMINAL
-
-
-def test_store_initialization_compacts_legacy_terminal_payloads(tmp_path: Path) -> None:
-    """Opening an existing store must scrub payload retained by older terminal rows."""
-    store = _store(tmp_path)
-    obligation = _message_obligation("$legacy-terminal")
-    store.create_pending(obligation)
-    store.settle(obligation.key, _DispatchTerminalOutcome.SUCCEEDED)
-    database_path = _database_path(store)
-    with sqlite3.connect(database_path) as connection:
-        connection.execute(
-            """
-            UPDATE dispatch_obligations
-            SET room_id = ?, event_source_json = ?
-            WHERE source_event_id = ?
-            """,
-            (
-                obligation.room_id,
-                '{"event_id":"$legacy-terminal","content":{"body":"legacy"}}',
-                obligation.source_event_id,
-            ),
-        )
-        connection.execute("PRAGMA user_version = 1")
-
-    _store(tmp_path)
-
-    with sqlite3.connect(database_path) as connection:
-        row = connection.execute(
-            "SELECT room_id, event_source_json FROM dispatch_obligations WHERE source_event_id = ?",
-            (obligation.source_event_id,),
-        ).fetchone()
-    assert row == ("", "")
 
 
 def test_existing_pending_payload_keeps_first_accepted_source(tmp_path: Path) -> None:
@@ -421,10 +398,12 @@ def test_terminal_tombstones_are_not_globally_pruned(tmp_path: Path) -> None:
 
 
 def test_malformed_persisted_source_is_not_invented_into_recovery(tmp_path: Path) -> None:
-    """Invalid durable JSON must abort recovery and remain repairable pending work."""
+    """Invalid durable JSON must be logged, retained, and isolated from valid work."""
     store = _store(tmp_path)
-    obligation = _message_obligation("$broken")
-    store.create_pending(obligation)
+    broken = _message_obligation("$broken")
+    valid = _message_obligation("$valid")
+    store.create_pending(broken)
+    store.create_pending(valid)
     database_path = _database_path(store)
     with sqlite3.connect(database_path) as connection:
         connection.execute(
@@ -433,9 +412,51 @@ def test_malformed_persisted_source_is_not_invented_into_recovery(tmp_path: Path
         )
 
     restarted = _store(tmp_path)
-    with pytest.raises(RuntimeError, match="corrupt dispatch obligation"):
-        restarted.pending()
+    with patch("mindroom.dispatch_obligations.logger") as logger:
+        assert restarted.pending() == (valid,)
+
+    logger.error.assert_called_once_with(
+        "dispatch_obligation_pending_row_corrupt",
+        source_event_id="$broken",
+        callback_kind=DispatchCallbackKind.MESSAGE.value,
+    )
     assert restarted.has_pending("$broken", DispatchCallbackKind.MESSAGE)
+
+
+@pytest.mark.asyncio
+async def test_recovery_isolates_unreplayable_matrix_source(tmp_path: Path) -> None:
+    """A parseable corrupt row must remain pending without blocking valid recovery."""
+    store = _store(tmp_path)
+    broken = _message_obligation("$broken-event")
+    valid = _message_obligation("$valid-event")
+    store.create_pending(broken)
+    store.create_pending(valid)
+    with sqlite3.connect(_database_path(store)) as connection:
+        connection.execute(
+            "UPDATE dispatch_obligations SET event_source_json = ? WHERE source_event_id = ?",
+            (
+                '{"content":{"body":"bad","msgtype":"m.text"},"event_id":"$different",'
+                '"origin_server_ts":1234,"sender":"@user:example.org","type":"m.room.message"}',
+                "$broken-event",
+            ),
+        )
+    recovered: list[str] = []
+
+    async def callback(_room: nio.MatrixRoom, event: nio.Event) -> DispatchCallbackResult:
+        recovered.append(event.event_id)
+        return DispatchCallbackResult.SUCCEEDED
+
+    with patch("mindroom.dispatch_obligations.logger") as logger:
+        await _runner(store, callback).recover_pending()
+
+    assert recovered == ["$valid-event"]
+    logger.error.assert_called_once_with(
+        "dispatch_obligation_recovery_corrupt",
+        source_event_id="$broken-event",
+        callback_kind=DispatchCallbackKind.MESSAGE.value,
+        room_id=_ROOM_ID,
+    )
+    assert store.has_pending("$broken-event", DispatchCallbackKind.MESSAGE)
 
 
 @pytest.mark.asyncio
@@ -718,6 +739,48 @@ async def test_recovery_failure_retries_autonomously_without_blocking_later_work
     assert not store.has_pending("$first", DispatchCallbackKind.MESSAGE)
     assert not store.has_pending("$second", DispatchCallbackKind.MESSAGE)
     assert not store.has_pending("$later", DispatchCallbackKind.MESSAGE)
+
+
+@pytest.mark.asyncio
+async def test_autonomous_retry_attempts_are_bounded_and_leave_work_pending(tmp_path: Path) -> None:
+    """Permanent failures must stop retrying in-process without discarding durable work."""
+    attempts = 0
+    retry_owner = object()
+
+    async def callback(_room: nio.MatrixRoom, _event: nio.Event) -> DispatchCallbackResult:
+        nonlocal attempts
+        attempts += 1
+        if attempts <= 3:
+            message = "permanent worker failure"
+            raise RuntimeError(message)
+        return DispatchCallbackResult.SUCCEEDED
+
+    store = _store(tmp_path)
+    runner = _runner(
+        store,
+        callback,
+        background_task_owner=retry_owner,
+        retry_initial_delay_seconds=0,
+        retry_max_delay_seconds=0,
+        retry_max_attempts=2,
+    )
+
+    with pytest.raises(RuntimeError, match="permanent worker failure"):
+        await runner.dispatch(
+            nio.MatrixRoom(_ROOM_ID, _PRINCIPAL_ID),
+            _message_event("$bounded-retry"),
+            DispatchCallbackKind.MESSAGE,
+        )
+    await wait_for_background_tasks(timeout=1, owner=retry_owner)
+
+    assert attempts == 3
+    assert store.has_pending("$bounded-retry", DispatchCallbackKind.MESSAGE)
+
+    runner._schedule_retry(_message_obligation("$bounded-retry").key)
+    await wait_for_background_tasks(timeout=1, owner=retry_owner)
+
+    assert attempts == 3
+    assert store.has_pending("$bounded-retry", DispatchCallbackKind.MESSAGE)
 
 
 @pytest.mark.asyncio
@@ -1054,41 +1117,31 @@ async def test_persist_failure_notifies_once_for_every_runner_entrypoint(
     assert failure_notifications == 1
 
 
-def test_correctness_callbacks_register_with_explicit_durable_kinds(tmp_path: Path) -> None:
-    """Every source-backed correctness callback must use the durable runner seam."""
+@pytest.mark.asyncio
+async def test_source_callbacks_register_one_real_nio_admission_owner(tmp_path: Path) -> None:
+    """MindRoom must compose every durable event kind behind nio's single owner."""
 
     async def callback(_room: nio.MatrixRoom, _event: nio.Event) -> DispatchCallbackResult:
         return DispatchCallbackResult.SUCCEEDED
 
     runner = _runner(_store(tmp_path), callback)
-    client = MagicMock()
+    client = nio.AsyncClient(
+        "https://example.org",
+        _PRINCIPAL_ID,
+        config=nio.AsyncClientConfig(backfill_limited_timelines=True),
+    )
 
-    runner.register_source_callbacks(client, owner=object())
+    try:
+        with patch.object(
+            client,
+            "add_event_admission_callback",
+            wraps=client.add_event_admission_callback,
+        ) as add_admission:
+            runner.register_source_callbacks(client, owner=object())
+    finally:
+        await client.close()
 
-    registrations = {
-        event_type: registered
-        for registered, event_type in (call.args for call in client.add_event_callback.call_args_list)
-    }
-    admissions = {
-        event_type: registered
-        for registered, event_type in (call.args for call in client.add_event_admission_callback.call_args_list)
-    }
-    expected_kinds = {
-        nio.RoomMessageText: DispatchCallbackKind.MESSAGE,
-        nio.ReactionEvent: DispatchCallbackKind.REACTION,
-        nio.RedactionEvent: DispatchCallbackKind.REDACTION,
-        nio.MegolmEvent: DispatchCallbackKind.DECRYPTION_FAILURE,
-        **dict.fromkeys(MATRIX_MEDIA_EVENT_TYPES, DispatchCallbackKind.MEDIA),
-    }
-    assert {*expected_kinds, nio.UnknownEvent} <= registrations.keys()
-    assert registrations.keys() == admissions.keys()
-    for event_type, callback_kind in expected_kinds.items():
-        registered = registrations[event_type]
-        admission = admissions[event_type]
-        assert isinstance(registered, DispatchObligationTaskWrapper)
-        assert isinstance(admission, DispatchObligationAdmissionCallback)
-        assert registered.callback_kind is callback_kind
-        assert admission.callback_kind is callback_kind
+    add_admission.assert_called_once()
 
 
 @pytest.mark.asyncio
@@ -1122,11 +1175,7 @@ async def test_only_tool_approval_unknown_event_reaches_durable_acceptance(
     client = MagicMock()
     owner = object()
     runner.register_source_callbacks(client, owner=owner)
-    admission = next(
-        callback
-        for callback, event_type in (call.args for call in client.add_event_admission_callback.call_args_list)
-        if event_type is nio.UnknownEvent
-    )
+    admission = client.add_event_admission_callback.call_args.args[0]
     registered = next(
         callback
         for callback, event_type in (call.args for call in client.add_event_callback.call_args_list)

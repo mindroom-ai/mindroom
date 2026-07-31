@@ -6,12 +6,11 @@ import json
 from dataclasses import dataclass
 from threading import Lock
 from typing import TYPE_CHECKING
-from uuid import uuid4
 from weakref import WeakValueDictionary
 
 import nio
 
-from mindroom.constants import safe_replace
+from mindroom.durable_write import write_json_file_durable
 from mindroom.entity_resolution import entity_identity_registry, mindroom_user_id
 from mindroom.logging_config import get_logger
 
@@ -88,21 +87,18 @@ def _load_room_member_joins(path: Path) -> dict[str, set[str]]:
 
 
 def _save_room_member_joins(path: Path, seen: dict[str, set[str]]) -> None:
-    """Persist seen room-member joins atomically."""
-    temp_path = path.with_name(f"{path.name}.{uuid4().hex}.tmp")
+    """Persist seen room-member joins through the shared durable writer."""
     payload = {room_id: sorted(user_ids) for room_id, user_ids in sorted(seen.items())}
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        temp_path.write_text(
-            f"{json.dumps(payload, ensure_ascii=True, indent=2)}\n",
-            encoding="utf-8",
+        write_json_file_durable(
+            path,
+            payload,
+            indent=2,
+            trailing_newline=True,
         )
-        safe_replace(temp_path, path)
     except OSError as exc:
         msg = f"Failed to persist completed room-member join tracking at {path}"
         raise RuntimeError(msg) from exc
-    finally:
-        temp_path.unlink(missing_ok=True)
 
 
 def _mark_room_member_joins_seen(

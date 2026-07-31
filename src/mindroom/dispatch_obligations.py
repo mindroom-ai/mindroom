@@ -8,7 +8,8 @@ import json
 import sqlite3
 import threading
 import time
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Iterator, Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
@@ -24,10 +25,12 @@ from mindroom.owned_blocking import run_owned_blocking_operation
 
 logger = get_logger(__name__)
 
-_SCHEMA_VERSION = 2
+_SCHEMA_VERSION = 1
 _PENDING_STATE = "pending"
+_SQLITE_BUSY_TIMEOUT_MILLISECONDS = 5_000
 _RETRY_INITIAL_DELAY_SECONDS = 1.0
 _RETRY_MAX_DELAY_SECONDS = 30.0
+_RETRY_MAX_ATTEMPTS = 5
 _TOOL_APPROVAL_RESPONSE_EVENT_TYPE = "io.mindroom.tool_approval_response"
 
 
@@ -121,19 +124,30 @@ class DispatchObligationStore:
             self.entity_name,
         )
         self._lock = threading.Lock()
-        with self._lock, self._connect() as connection:
+        with self._lock, self._connection() as connection:
+            connection.execute("PRAGMA journal_mode = WAL")
             self._initialize_schema(connection)
 
     def _connect(self) -> sqlite3.Connection:
         self.tracking_path.mkdir(parents=True, exist_ok=True)
         connection = sqlite3.connect(self._database_path)
         connection.row_factory = sqlite3.Row
+        connection.execute(f"PRAGMA busy_timeout = {_SQLITE_BUSY_TIMEOUT_MILLISECONDS}")
         return connection
+
+    @contextmanager
+    def _connection(self) -> Iterator[sqlite3.Connection]:
+        connection = self._connect()
+        try:
+            with connection:
+                yield connection
+        finally:
+            connection.close()
 
     @staticmethod
     def _initialize_schema(connection: sqlite3.Connection) -> None:
         current_version = connection.execute("PRAGMA user_version").fetchone()[0]
-        if current_version not in {0, 1, _SCHEMA_VERSION}:
+        if current_version not in {0, _SCHEMA_VERSION}:
             msg = f"Unsupported dispatch obligation schema version {current_version}"
             raise RuntimeError(msg)
         connection.execute(
@@ -170,15 +184,6 @@ class DispatchObligationStore:
             WHERE state = 'pending'
             """,
         )
-        if current_version == 1:
-            connection.execute(
-                """
-                UPDATE dispatch_obligations
-                SET room_id = '', event_source_json = ''
-                WHERE state != ?
-                """,
-                (_PENDING_STATE,),
-            )
         if current_version < _SCHEMA_VERSION:
             connection.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
 
@@ -246,7 +251,7 @@ class DispatchObligationStore:
             msg = "Dispatch obligation requires a source event"
             raise ValueError(msg)
         key = obligation.key
-        with self._lock, self._connect() as connection:
+        with self._lock, self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
             existing = self._stored_row(
                 connection.execute(
@@ -313,7 +318,7 @@ class DispatchObligationStore:
     ) -> None:
         """Durably settle one exact pending callback."""
         self._validate_bound_key(key)
-        with self._lock, self._connect() as connection:
+        with self._lock, self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
             connection.execute(
                 """
@@ -342,7 +347,7 @@ class DispatchObligationStore:
     def discard_pending(self, key: _DispatchObligationKey) -> None:
         """Remove successful work whose source has no permanent Matrix event ID."""
         self._validate_bound_key(key)
-        with self._lock, self._connect() as connection:
+        with self._lock, self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
             connection.execute(
                 """
@@ -375,7 +380,7 @@ class DispatchObligationStore:
             msg = "TurnStore dispatch settlement requires a source event"
             raise ValueError(msg)
         settled_at_ns = time.time_ns()
-        with self._lock, self._connect() as connection:
+        with self._lock, self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
             connection.execute(
                 """
@@ -420,7 +425,7 @@ class DispatchObligationStore:
             msg = "TurnStore dispatch settlement requires source events"
             raise ValueError(msg)
         settled_at_ns = time.time_ns()
-        with self._lock, self._connect() as connection:
+        with self._lock, self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
             connection.executemany(
                 """
@@ -451,8 +456,8 @@ class DispatchObligationStore:
             )
 
     def pending(self) -> tuple[_DispatchObligation, ...]:
-        """Return pending work oldest-first, failing on unrecoverable durable input."""
-        with self._lock, self._connect() as connection:
+        """Return valid pending work oldest-first while retaining corrupt rows."""
+        with self._lock, self._connection() as connection:
             rows = connection.execute(
                 """
                 SELECT source_event_id, callback_kind, room_id, event_source_json
@@ -464,12 +469,22 @@ class DispatchObligationStore:
                 """,
                 (self.principal_id, self.entity_name, _PENDING_STATE),
             ).fetchall()
-        return tuple(self._pending_obligation_from_row(row) for row in rows)
+        obligations: list[_DispatchObligation] = []
+        for row in rows:
+            try:
+                obligations.append(self._pending_obligation_from_row(row))
+            except _DispatchObligationCorruptionError:
+                logger.error(  # noqa: TRY400
+                    "dispatch_obligation_pending_row_corrupt",
+                    source_event_id=row["source_event_id"],
+                    callback_kind=row["callback_kind"],
+                )
+        return tuple(obligations)
 
     def pending_for(self, key: _DispatchObligationKey) -> _DispatchObligation | None:
         """Reload the first durable payload for one still-pending exact key."""
         self._validate_bound_key(key)
-        with self._lock, self._connect() as connection:
+        with self._lock, self._connection() as connection:
             row = connection.execute(
                 """
                 SELECT source_event_id, callback_kind, room_id, event_source_json
@@ -496,7 +511,7 @@ class DispatchObligationStore:
         callback_kind: DispatchCallbackKind,
     ) -> bool:
         """Return whether one exact callback remains pending for one source."""
-        with self._lock, self._connect() as connection:
+        with self._lock, self._connection() as connection:
             row = connection.execute(
                 """
                 SELECT 1
@@ -554,6 +569,7 @@ def _invite_source_event_id(room_id: str, event_source_json: str) -> str:
 def _dispatch_event_source(event: _DispatchEvent) -> dict[str, object]:
     source = dict(event.source)
     if isinstance(event, nio.InviteMemberEvent):
+        # nio pops content while parsing invites, so restore it for stable durable replay keys.
         source["content"] = dict(event.content)
     return source
 
@@ -596,7 +612,7 @@ def _parse_recovery_event(obligation: _DispatchObligation) -> _DispatchEvent:
         if obligation.callback_kind is DispatchCallbackKind.MEDIA
         else nio.Event.parse_event(dict(obligation.event_source))
     )
-    if event is None or isinstance(event, nio.BadEvent) or event.event_id != obligation.source_event_id:
+    if not isinstance(event, nio.Event) or event.event_id != obligation.source_event_id:
         msg = f"corrupt dispatch obligation event {obligation.source_event_id!r}/{obligation.callback_kind.value!r}"
         raise _DispatchObligationCorruptionError(msg)
     return event
@@ -725,11 +741,14 @@ class DispatchObligationRunner:
     source_admission: _SourceAdmission = _admit_all_sources
     on_source_rejected: _SourceRejectionCallback | None = None
     background_task_owner: object | None = None
+    room_lifecycle_admission_enabled: Callable[[], bool] = lambda: False
     _retry_initial_delay_seconds: float = field(default=_RETRY_INITIAL_DELAY_SECONDS, repr=False)
     _retry_max_delay_seconds: float = field(default=_RETRY_MAX_DELAY_SECONDS, repr=False)
+    _retry_max_attempts: int = field(default=_RETRY_MAX_ATTEMPTS, repr=False)
     _active: set[_DispatchObligationKey] = field(default_factory=set, init=False, repr=False)
     _active_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False, repr=False)
-    _retry_keys: dict[_DispatchObligationKey, None] = field(default_factory=dict, init=False, repr=False)
+    _retry_keys: dict[_DispatchObligationKey, int] = field(default_factory=dict, init=False, repr=False)
+    _retry_exhausted: set[_DispatchObligationKey] = field(default_factory=set, init=False, repr=False)
     _retry_task: asyncio.Task[None] | None = field(default=None, init=False, repr=False)
 
     @staticmethod
@@ -790,34 +809,50 @@ class DispatchObligationRunner:
             callback_kind: DispatchCallbackKind,
             event_type: type[nio.Event],
         ) -> None:
-            client.add_event_admission_callback(
-                self.admission_callback(callback_kind),
-                event_type,
-            )
             client.add_event_callback(
                 self.task_wrapper(callback_kind, owner=owner),
                 event_type,
             )
 
+        client.add_event_admission_callback(self._admit_source_event)
         register(DispatchCallbackKind.MESSAGE, nio.RoomMessageText)
         register(DispatchCallbackKind.REDACTION, nio.RedactionEvent)
         register(DispatchCallbackKind.REACTION, nio.ReactionEvent)
         for event_type in MATRIX_MEDIA_EVENT_TYPES:
             register(DispatchCallbackKind.MEDIA, event_type)
-        approval_admission = self.admission_callback(DispatchCallbackKind.APPROVAL)
         approval_callback = self.task_wrapper(DispatchCallbackKind.APPROVAL, owner=owner)
-
-        async def admit_approval(room: nio.MatrixRoom, event: nio.Event) -> None:
-            if _is_tool_approval_response(event):
-                await approval_admission(room, event)
 
         async def dispatch_approval(room: nio.MatrixRoom, event: nio.Event) -> None:
             if _is_tool_approval_response(event):
                 await approval_callback(room, event)
 
-        client.add_event_admission_callback(admit_approval, nio.UnknownEvent)
         client.add_event_callback(dispatch_approval, nio.UnknownEvent)
         register(DispatchCallbackKind.DECRYPTION_FAILURE, nio.MegolmEvent)
+
+    async def _admit_source_event(self, room: nio.MatrixRoom, event: nio.Event) -> None:
+        """Route every correctness-critical timeline event through one nio owner."""
+        callback_kind = self._admission_kind(event)
+        if callback_kind is not None:
+            await self.admission_callback(callback_kind)(room, event)
+
+    def _admission_kind(self, event: nio.Event) -> DispatchCallbackKind | None:
+        """Return the one durable callback kind owned by a timeline event."""
+        callback_kind = None
+        if isinstance(event, nio.RoomMessageText):
+            callback_kind = DispatchCallbackKind.MESSAGE
+        elif isinstance(event, MATRIX_MEDIA_EVENT_TYPES):
+            callback_kind = DispatchCallbackKind.MEDIA
+        elif isinstance(event, nio.RedactionEvent):
+            callback_kind = DispatchCallbackKind.REDACTION
+        elif isinstance(event, nio.ReactionEvent):
+            callback_kind = DispatchCallbackKind.REACTION
+        elif isinstance(event, nio.UnknownEvent) and _is_tool_approval_response(event):
+            callback_kind = DispatchCallbackKind.APPROVAL
+        elif isinstance(event, nio.MegolmEvent):
+            callback_kind = DispatchCallbackKind.DECRYPTION_FAILURE
+        elif isinstance(event, nio.RoomMemberEvent) and self.room_lifecycle_admission_enabled():
+            callback_kind = DispatchCallbackKind.ROOM_LIFECYCLE
+        return callback_kind
 
     async def dispatch(
         self,
@@ -962,7 +997,12 @@ class DispatchObligationRunner:
             except asyncio.CancelledError:
                 raise
             except _DispatchObligationCorruptionError:
-                raise
+                logger.error(  # noqa: TRY400
+                    "dispatch_obligation_recovery_corrupt",
+                    source_event_id=obligation.source_event_id,
+                    callback_kind=obligation.callback_kind.value,
+                    room_id=obligation.room_id,
+                )
             except Exception:
                 logger.exception(
                     "dispatch_obligation_recovery_failed",
@@ -976,7 +1016,9 @@ class DispatchObligationRunner:
 
     def _schedule_retry(self, key: _DispatchObligationKey) -> None:
         """Ensure one failed exact callback remains autonomously retry-owned."""
-        self._retry_keys.setdefault(key, None)
+        if key in self._retry_exhausted:
+            return
+        self._retry_keys.setdefault(key, 0)
         if self._retry_task is not None and not self._retry_task.done():
             return
         self._retry_task = create_background_task(
@@ -992,7 +1034,7 @@ class DispatchObligationRunner:
             while self._retry_keys:
                 await asyncio.sleep(retry_delay_seconds)
                 for key in tuple(self._retry_keys):
-                    self._retry_keys.pop(key, None)
+                    completed_attempts = self._retry_keys.pop(key)
                     try:
                         obligation = await asyncio.to_thread(self.store.pending_for, key)
                         if obligation is None:
@@ -1006,18 +1048,31 @@ class DispatchObligationRunner:
                     except asyncio.CancelledError:
                         raise
                     except _DispatchObligationCorruptionError:
+                        self._retry_exhausted.add(key)
                         logger.exception(
                             "dispatch_obligation_retry_corrupt",
                             source_event_id=key.source_event_id,
                             callback_kind=key.callback_kind.value,
                         )
                     except Exception:
-                        self._retry_keys.setdefault(key, None)
-                        logger.exception(
-                            "dispatch_obligation_retry_failed",
-                            source_event_id=key.source_event_id,
-                            callback_kind=key.callback_kind.value,
-                        )
+                        completed_attempts += 1
+                        if completed_attempts < self._retry_max_attempts:
+                            self._retry_keys.setdefault(key, completed_attempts)
+                            logger.exception(
+                                "dispatch_obligation_retry_failed",
+                                source_event_id=key.source_event_id,
+                                callback_kind=key.callback_kind.value,
+                                retry_attempt=completed_attempts,
+                                retry_max_attempts=self._retry_max_attempts,
+                            )
+                        else:
+                            self._retry_exhausted.add(key)
+                            logger.error(  # noqa: TRY400
+                                "dispatch_obligation_retry_exhausted",
+                                source_event_id=key.source_event_id,
+                                callback_kind=key.callback_kind.value,
+                                retry_attempts=completed_attempts,
+                            )
                 retry_delay_seconds = min(
                     retry_delay_seconds * 2,
                     self._retry_max_delay_seconds,
