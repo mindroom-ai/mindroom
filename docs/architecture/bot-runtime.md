@@ -155,31 +155,42 @@ Semantic memory backends such as Mem0 have a separate lifecycle and are not alte
 
 `RestartRecoveryCoordinator` is the single owner of startup cleanup, replacement-room handoffs, interrupted-target freshness checks, semantic retry state, and resume-delivery settlement.
 `InterruptedTurnRooms` records durable room handoff facts, but it does not schedule Matrix recovery or own retry timing.
+
+### Scope and scheduling
+
+Configured rooms and the local Matrix cache seed recovery work immediately.
+The coordinator also enumerates every owner's authoritative joined-room list, so Sliding Sync window limits cannot omit older direct-message, space, or configured rooms.
+Owner room discovery, uncached room scans, and initial target freshness checks share one semaphore with at most eight Matrix read phases.
+One unavailable owner cannot block discovery or recovery for joined peers.
 The coordinator merges exact owners into one work item for each room and recovery policy.
-The coordinator starts every due same-room-eligible lease, while distinct policies for the same room never run concurrently.
-One shared semaphore permits at most eight Matrix read phases across uncached room scans and initial target freshness checks.
-Resume delivery runs outside that read budget with one admitted delivery under global pacing, so a blocked delivery does not prevent a ninth lease from scanning when a read slot becomes available.
-Pause cancels delivery waiters before admission and drains the one admitted idempotent send.
-Due selection gives each due owner cohort a read-queue position before ordering repeated-owner work by oldest due time.
+Distinct policies for the same room never run concurrently.
+Due selection gives each due owner cohort a read-queue position before repeated-owner work is ordered by oldest due time.
+
+### Owner-room transitions
+
+| Event | Transition |
+| --- | --- |
+| Owner has not finished first sync | Back off through six readiness probes without consuming the Matrix failure budget, then park. |
+| Desired room is absent from authoritative membership | Refresh membership once after the shared membership delay, then park quietly. |
+| Room scan or target freshness has a transient Matrix failure | Retry until the sixth actual Matrix failure, then park and emit one terminal warning. |
+| Owner readiness or configuration resume arrives | Invalidate retained membership state, refresh authoritative room scope, and re-enroll parked work with fresh budgets. |
+| Owner is removed | Delete its jobs, target watermarks, discovery task, and membership snapshot. |
+
 Each lease performs one shared room scan, newest-target selection, freshness checks, and resume delivery before releasing its room.
-The exact interrupted owner sends its own explicitly mentioned trusted resume relay, so recovery works in joined agent-only rooms where the router is absent.
-Owner-authored resume relays use the standard dispatch-context path and hydrate thread history before the response lock instead of using the router-only deferred-hydration optimization.
-One monotonic watermark per exact owner generation, room, and thread fences superseded targets and closes a successfully resumed recovery lifecycle.
-Concurrent room leases share one joined-room snapshot for each exact owner generation.
-A dedicated Matrix operations collaborator explicitly owns membership snapshots, releases discarded owners, and cancels and drains every retained snapshot during shutdown.
-A missing desired room gets one short owner-level membership refresh, then parks only that owner's work without spending the Matrix failure budget or emitting a terminal warning.
-Later owner-readiness or configuration-resume signals re-enroll parked membership work.
-A shared scan includes every current joined-room ID from each owner, including direct-message and space rooms, while one unavailable owner cannot block its joined peers.
-Unresolved room aliases remain outside retry state until room setup resolves them, and later readiness notifications do not recreate a completed same-generation scan.
 Room history failures, transient requester-resolution failures, and failed cleanup edits return typed retry outcomes.
 Resolved partial targets may settle while targets without an authoritative requester remain retained for retry.
-Waiting for an owner generation to finish first sync backs off without consuming its Matrix failure budget.
-Recovery parks one owner-room job after six actual Matrix failures, reopens its startup-scan fence, retains replacement-room intent for later readiness, and emits one terminal warning with the affected room and targets.
-Owner removal deletes its exact jobs and watermarks, while object-identity and generation checks prevent older leases from mutating replaced or removed work.
-Generation-matching settlements may still advance monotonic watermarks when a readiness signal refreshes the retained job during an admitted delivery.
-Each resume relay uses a deterministic Matrix transaction ID derived from the exact owner and interrupted target, so only a retry of that same target reuses the transaction ID.
-The orchestrator pauses recovery before configuration mutation, and pause cancellation drains active attempt cleanup before any leased work is settled or restored.
-Resume keeps retained semantic work but resolves it only against current ready owner generations.
+Unresolved room aliases remain outside retry state until room setup resolves them.
+
+### Delivery and settlement
+
+The exact interrupted owner sends its own explicitly mentioned trusted resume relay, so recovery works in joined agent-only rooms where the router is absent.
+Owner-authored resume relays use the standard dispatch-context path and hydrate thread history before the response lock.
+Resume delivery runs outside the read budget with one admitted delivery under global pacing.
+Pause cancels delivery waiters before admission and drains the admitted send because Matrix may commit before task cancellation becomes observable.
+Each relay uses a deterministic Matrix transaction ID as a replay guard, while draining the exact result lets the current lease settle its durable lifecycle state.
+One monotonic watermark per exact owner generation, room, and thread fences superseded targets and closes a successfully resumed recovery lifecycle.
+Object identity prevents older leases from mutating replaced work, while generation-compatible settlements may advance watermarks across a concurrent readiness refresh.
+The orchestrator pauses recovery before configuration mutation and resolves retained work only against current ready owner generations after resume.
 
 ## Tool Dispatch Contracts
 

@@ -30,7 +30,9 @@ type _JobKey = tuple[_RoomKey, str]
 
 
 _MAX_CONCURRENT_MATRIX_READ_PHASES = 8
-_MAX_RESTART_RECOVERY_ATTEMPTS = 6
+_MAX_MATRIX_ATTEMPTS = 6
+_MAX_OWNER_DISCOVERY_ATTEMPTS = 6
+_MAX_READINESS_PROBES = 6
 
 
 @dataclass(frozen=True)
@@ -100,6 +102,13 @@ class _OwnerAttemptResult:
     cancelled: bool = False
 
 
+@dataclass(frozen=True)
+class _OwnerRoomDiscoveryResult:
+    """Authoritative joined-room scope for one exact owner generation."""
+
+    room_ids: frozenset[str] | None
+
+
 def _restart_recovery_retry_delay(attempt: int) -> float:
     """Return capped exponential delay for a one-based retry attempt."""
     return min(60.0, 2.0 ** max(1, attempt))
@@ -144,6 +153,10 @@ class RestartRecoveryCoordinator:
         self._target_watermarks: dict[_TargetKey, _TargetWatermark] = {}
         self._completed_startup_scans: set[tuple[_RoomKey, str]] = set()
         self._active_attempts: dict[asyncio.Task[tuple[_OwnerAttemptResult, ...]], _RoomLease] = {}
+        self._owner_room_discoveries: dict[
+            asyncio.Task[_OwnerRoomDiscoveryResult],
+            RecoveryOwner,
+        ] = {}
         self._matrix_read_slots = asyncio.Semaphore(_MAX_CONCURRENT_MATRIX_READ_PHASES)
         self._delivery_lock = asyncio.Lock()
         self._worker_task: asyncio.Task[None] | None = None
@@ -159,6 +172,7 @@ class RestartRecoveryCoordinator:
         self._paused = False
         for owner in self._current_owners().values():
             self._enqueue_desired_rooms(owner)
+            self._start_owner_room_discovery(owner)
         self._ensure_worker()
 
     def owner_ready(self, owner_user_id: str) -> None:
@@ -168,6 +182,8 @@ class RestartRecoveryCoordinator:
         self._settle_finished_attempts()
         owner = self._current_owners().get(owner_user_id)
         if owner is not None:
+            self._operations.discard_owner(owner_user_id)
+            self._cancel_owner_room_discoveries(owner_user_id)
             self._target_watermarks = {
                 key: watermark
                 for key, watermark in self._target_watermarks.items()
@@ -175,10 +191,14 @@ class RestartRecoveryCoordinator:
             }
             self._refresh_owner_jobs(owner, grant_fresh_budget=True)
             self._enqueue_desired_rooms(owner)
+            if not self._paused:
+                self._start_owner_room_discovery(owner)
         self._ensure_worker()
 
     def enqueue_replacement_rooms(self, owner_user_id: str, room_ids: set[str]) -> None:
         """Retain terminal interrupted-room handoffs across bot replacement."""
+        if self._stopped:
+            return
         if not self._require_config().defaults.auto_resume_after_restart:
             return
         for room_id in room_ids:
@@ -200,6 +220,7 @@ class RestartRecoveryCoordinator:
             key: watermark for key, watermark in self._target_watermarks.items() if key[0] != owner_user_id
         }
         self._completed_startup_scans = {key for key in self._completed_startup_scans if key[1] != owner_user_id}
+        self._cancel_owner_room_discoveries(owner_user_id)
         self._operations.discard_owner(owner_user_id)
         self._wake.set()
 
@@ -221,10 +242,14 @@ class RestartRecoveryCoordinator:
             self._room_jobs = {
                 key: work for key, work in self._room_jobs.items() if not work.request.terminal_interrupted_only
             }
+        owners = tuple(self._current_owners().values()) if self._startup_cutoff_ms is not None else ()
         if self._room_jobs:
-            for owner in self._current_owners().values():
+            for owner in owners:
                 self._refresh_owner_jobs(owner, grant_fresh_budget=True)
         self._paused = False
+        for owner in owners:
+            self._operations.discard_owner(owner.user_id)
+            self._start_owner_room_discovery(owner)
         self._ensure_worker()
 
     async def stop(self) -> None:
@@ -240,6 +265,7 @@ class RestartRecoveryCoordinator:
         self._room_jobs.clear()
         self._target_watermarks.clear()
         self._completed_startup_scans.clear()
+        await self._drain_owner_room_discoveries()
         await self._operations.close()
 
     def _require_config(self) -> Config:
@@ -273,15 +299,20 @@ class RestartRecoveryCoordinator:
         if self._startup_cutoff_ms is None:
             return
         for room_id in owner.desired_room_ids:
-            request = RoomRecoveryRequest(
-                room_id=room_id,
-                startup_cutoff_ms=self._startup_cutoff_ms,
-                terminal_interrupted_only=False,
-            )
-            key = request.key, owner.user_id
-            if (request.key, owner.user_id) in self._completed_startup_scans or key in self._room_jobs:
-                continue
-            self._enqueue_request(owner.user_id, request)
+            self._enqueue_startup_room(owner.user_id, room_id)
+
+    def _enqueue_startup_room(self, owner_user_id: str, room_id: str) -> None:
+        if self._startup_cutoff_ms is None:
+            return
+        request = RoomRecoveryRequest(
+            room_id=room_id,
+            startup_cutoff_ms=self._startup_cutoff_ms,
+            terminal_interrupted_only=False,
+        )
+        key = request.key, owner_user_id
+        if (request.key, owner_user_id) in self._completed_startup_scans or key in self._room_jobs:
+            return
+        self._enqueue_request(owner_user_id, request)
 
     def _enqueue_request(
         self,
@@ -331,11 +362,84 @@ class RestartRecoveryCoordinator:
     async def _run(self) -> None:
         try:
             while not self._paused and not self._stopped:
+                self._settle_finished_owner_room_discoveries()
                 self._settle_finished_attempts()
                 self._start_due_attempts()
                 await self._wait_for_progress(delay=self._next_start_delay())
         finally:
+            await self._drain_owner_room_discoveries()
             await self._drain_active_attempts()
+
+    def _start_owner_room_discovery(self, owner: RecoveryOwner) -> None:
+        self._cancel_owner_room_discoveries(owner.user_id)
+        task = asyncio.create_task(
+            self._discover_owner_rooms(owner),
+            name=f"restart_recovery_joined_rooms:{owner.user_id}",
+        )
+        self._owner_room_discoveries[task] = owner
+        task.add_done_callback(lambda _task: self._wake.set())
+
+    def _cancel_owner_room_discoveries(self, owner_user_id: str) -> None:
+        for task, owner in self._owner_room_discoveries.items():
+            if owner.user_id == owner_user_id and not task.done():
+                task.cancel()
+
+    async def _discover_owner_rooms(
+        self,
+        owner: RecoveryOwner,
+    ) -> _OwnerRoomDiscoveryResult:
+        room_ids: list[str] | None = None
+        for attempt in range(1, _MAX_OWNER_DISCOVERY_ATTEMPTS + 1):
+            try:
+                async with self._matrix_read_slots:
+                    room_ids = await self._operations.joined_rooms(owner)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.warning(
+                    "Failed to discover owner rooms during restart recovery",
+                    attempt=attempt,
+                    owner_user_id=owner.user_id,
+                    exc_info=True,
+                )
+            if room_ids is not None:
+                return _OwnerRoomDiscoveryResult(
+                    room_ids=frozenset(room_id for room_id in room_ids if room_id.startswith("!")),
+                )
+            if attempt < _MAX_OWNER_DISCOVERY_ATTEMPTS:
+                await asyncio.sleep(self._retry_delay(attempt))
+        return _OwnerRoomDiscoveryResult(room_ids=None)
+
+    def _settle_finished_owner_room_discoveries(self) -> None:
+        finished = tuple((task, owner) for task, owner in self._owner_room_discoveries.items() if task.done())
+        if not finished:
+            return
+        current_owners = self._current_owners()
+        for task, owner in finished:
+            self._owner_room_discoveries.pop(task)
+            try:
+                result = task.result()
+            except asyncio.CancelledError:
+                continue
+            current_owner = current_owners.get(owner.user_id)
+            if current_owner is None or current_owner.generation is not owner.generation:
+                continue
+            if result.room_ids is None:
+                logger.warning(
+                    "Restart recovery could not discover owner room scope",
+                    owner_user_id=owner.user_id,
+                )
+                continue
+            for room_id in result.room_ids:
+                self._enqueue_startup_room(owner.user_id, room_id)
+
+    async def _drain_owner_room_discoveries(self) -> None:
+        tasks = tuple(self._owner_room_discoveries)
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        self._owner_room_discoveries.clear()
 
     def _active_room_ids(self) -> set[str]:
         return {lease.room_id for lease in self._active_attempts.values()}
@@ -489,7 +593,7 @@ class RestartRecoveryCoordinator:
                 self._retry_matrix(work, work.targets)
 
     def _retry_readiness(self, work: _OwnerRoomWork) -> None:
-        if work.readiness_probe >= _MAX_RESTART_RECOVERY_ATTEMPTS:
+        if work.readiness_probe >= _MAX_READINESS_PROBES:
             due_at: float | None = None
             logger.warning(
                 "Restart recovery owner unavailable; parking retained owner work",
@@ -507,7 +611,7 @@ class RestartRecoveryCoordinator:
         """Refresh one missing membership once, then wait for owner readiness."""
         if work.membership_probe == 0:
             work = replace(work, membership_probe=1)
-            due_at = asyncio.get_running_loop().time() + self._retry_delay(1)
+            due_at = asyncio.get_running_loop().time() + self._operations.membership_refresh_delay_seconds
         else:
             due_at = None
         self._room_jobs[work.key] = replace(work, due_at=due_at)
@@ -518,8 +622,7 @@ class RestartRecoveryCoordinator:
         retry_targets: tuple[InterruptedThread, ...],
     ) -> None:
         attempt = work.matrix_attempt + 1
-        if attempt >= _MAX_RESTART_RECOVERY_ATTEMPTS:
-            self._completed_startup_scans.discard((work.request.key, work.owner_user_id))
+        if attempt >= _MAX_MATRIX_ATTEMPTS:
             self._room_jobs[work.key] = replace(
                 work,
                 targets=(),
@@ -557,6 +660,8 @@ class RestartRecoveryCoordinator:
             self._target_watermarks[key] = replace(current, closed=True)
 
     async def _drain_active_attempts(self) -> None:
+        # The lease drain must survive cancellation while an admitted delivery
+        # independently drains its already-started Matrix side effect.
         tasks = tuple(self._active_attempts)
         for task in tasks:
             task.cancel()
@@ -586,15 +691,7 @@ class RestartRecoveryCoordinator:
         recovered_by_owner: dict[str, list[InterruptedThread]] = {owner_user_id: [] for owner_user_id in ready}
         owners_by_entity = {owner.entity_name: owner for owner in ready.values()}
         for target in recovered.interrupted_threads:
-            owner = owners_by_entity.get(target.agent_name)
-            if owner is None:
-                logger.warning(
-                    "Restart target has no current owner; skipping",
-                    agent_name=target.agent_name,
-                    room_id=target.room_id,
-                    target_event_id=target.target_event_id,
-                )
-                continue
+            owner = owners_by_entity[target.agent_name]
             if target.original_sender_id is None and owner.user_id in recovered.retry_owner_user_ids:
                 continue
             recovered_by_owner[owner.user_id].append(target)
@@ -677,7 +774,7 @@ class RestartRecoveryCoordinator:
                 retry_targets.append(target)
             else:
                 settlements.append(attempt)
-            if (lease := asyncio.current_task()) is not None and lease.cancelling():
+            if (task := asyncio.current_task()) is not None and task.cancelling():
                 retry_targets.extend(eligible_targets[index + 1 :])
                 cancelled = True
                 break
@@ -740,6 +837,9 @@ class RestartRecoveryCoordinator:
     ) -> RestartDeliveryOutcome:
         """Drain one exact delivery through repeated coordinator cancellation."""
         async with self._delivery_lock:
+            # Matrix may commit before cancellation is observable.
+            # Drain the exact outcome so pause can settle its watermark; the
+            # deterministic transaction ID is a replay guard, not settlement.
             task = asyncio.create_task(
                 self._operations.deliver_target(owner, target, config),
                 name=f"restart_recovery_delivery:{target.target_event_id}",

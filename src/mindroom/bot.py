@@ -796,7 +796,7 @@ class AgentBot:
 
     @property
     def restart_recovery_room_ids(self) -> frozenset[str]:
-        """Return the in-memory room scope eligible for restart recovery."""
+        """Return in-memory room hints that seed restart recovery."""
         room_ids = set(self.rooms)
         client = self.client
         if client is not None:

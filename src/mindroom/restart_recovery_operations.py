@@ -109,6 +109,7 @@ type _RecoverRoom = Callable[
     [tuple[RecoveryOwner, ...], RoomRecoveryRequest, frozenset[str], Config],
     Awaitable[_RoomRecoveryResult],
 ]
+type _JoinedRooms = Callable[[RecoveryOwner], Awaitable[list[str] | None]]
 type _TargetFreshness = Callable[
     [RecoveryOwner, InterruptedThread, Config],
     Awaitable[InterruptedTargetFreshness],
@@ -123,6 +124,8 @@ type _DeliverTarget = Callable[
 class RestartRecoveryOperations:
     """External operations used by the coordinator."""
 
+    joined_rooms: _JoinedRooms
+    membership_refresh_delay_seconds: float
     recover_room: _RecoverRoom
     target_freshness: _TargetFreshness
     deliver_target: _DeliverTarget
@@ -143,6 +146,7 @@ class _OwnerMembershipSnapshot:
 class _OwnerMembershipSnapshots:
     """Share joined-room discovery across one exact owner generation."""
 
+    refresh_backoff_seconds: float
     snapshots: dict[str, _OwnerMembershipSnapshot] = field(default_factory=dict)
 
     async def joined_rooms(self, owner: RecoveryOwner) -> list[str] | None:
@@ -162,10 +166,13 @@ class _OwnerMembershipSnapshots:
             )
             self.snapshots[owner.user_id] = snapshot
         try:
-            return await snapshot.task
+            joined_room_ids = await snapshot.task
         except BaseException:
             self._discard(owner.user_id, snapshot)
             raise
+        if joined_room_ids is None:
+            self._discard(owner.user_id, snapshot)
+        return joined_room_ids
 
     def invalidate(self, owner: RecoveryOwner) -> None:
         """Delay one owner-level refresh after a desired room is absent."""
@@ -173,7 +180,7 @@ class _OwnerMembershipSnapshots:
         if snapshot is not None and snapshot.generation is owner.generation and snapshot.refresh_after is None:
             self.snapshots[owner.user_id] = replace(
                 snapshot,
-                refresh_after=(asyncio.get_running_loop().time() + _OWNER_MEMBERSHIP_REFRESH_BACKOFF_SECONDS),
+                refresh_after=(asyncio.get_running_loop().time() + self.refresh_backoff_seconds),
             )
 
     def discard_owner(self, owner_user_id: str) -> None:
@@ -289,10 +296,19 @@ async def _recover_room(
     )
 
 
-def build_matrix_restart_recovery_operations(runtime_paths: RuntimePaths) -> RestartRecoveryOperations:
+def build_matrix_restart_recovery_operations(
+    runtime_paths: RuntimePaths,
+    *,
+    membership_refresh_delay_seconds: float = _OWNER_MEMBERSHIP_REFRESH_BACKOFF_SECONDS,
+) -> RestartRecoveryOperations:
     """Build exact-owner Matrix operations for restart recovery."""
-    membership_snapshots = _OwnerMembershipSnapshots()
+    membership_snapshots = _OwnerMembershipSnapshots(
+        refresh_backoff_seconds=membership_refresh_delay_seconds,
+    )
     next_delivery_at = 0.0
+
+    async def joined_rooms(owner: RecoveryOwner) -> list[str] | None:
+        return await membership_snapshots.joined_rooms(owner)
 
     async def recover_room(
         owners: tuple[RecoveryOwner, ...],
@@ -381,6 +397,8 @@ def build_matrix_restart_recovery_operations(runtime_paths: RuntimePaths) -> Res
         return RestartDeliveryOutcome.DELIVERED
 
     return RestartRecoveryOperations(
+        joined_rooms=joined_rooms,
+        membership_refresh_delay_seconds=membership_refresh_delay_seconds,
         recover_room=recover_room,
         target_freshness=target_freshness,
         deliver_target=deliver_target,
