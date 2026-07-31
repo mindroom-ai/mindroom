@@ -383,18 +383,18 @@ def build_matrix_restart_recovery_operations(
         delay = next_delivery_at - asyncio.get_running_loop().time()
         if delay > 0:
             await asyncio.sleep(delay)
-            freshness = await target_freshness(owner, target, config)
-            if freshness is InterruptedTargetFreshness.RETRY:
-                return RestartDeliveryOutcome.RETRY
-            if freshness is not InterruptedTargetFreshness.CURRENT:
-                return RestartDeliveryOutcome.TERMINAL
+        if not await hydrate_joined_room_for_delivery(owner.client, target.room_id):
+            return RestartDeliveryOutcome.RETRY
+        freshness = await target_freshness(owner, target, config)
+        if freshness is InterruptedTargetFreshness.RETRY:
+            return RestartDeliveryOutcome.RETRY
+        if freshness is not InterruptedTargetFreshness.CURRENT:
+            return RestartDeliveryOutcome.TERMINAL
         content = build_auto_resume_content(
             target,
             config=config,
             intended_responder_user_id=owner.user_id,
         )
-        if not await hydrate_joined_room_for_delivery(owner.client, target.room_id):
-            return RestartDeliveryOutcome.RETRY
         transaction_id = str(
             uuid5(
                 NAMESPACE_URL,

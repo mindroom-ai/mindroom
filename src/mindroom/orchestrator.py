@@ -334,7 +334,8 @@ class _MultiAgentOrchestrator:
         try:
             await self._restart_recovery.pause()
         except asyncio.CancelledError:
-            self._restart_recovery.resume()
+            if self.running and self.config is not None:
+                self._restart_recovery.resume()
             raise
 
     async def _stop_memory_auto_flush_worker(self) -> None:

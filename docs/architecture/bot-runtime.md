@@ -160,7 +160,8 @@ Semantic memory backends such as Mem0 have a separate lifecycle and are not alte
 
 Configured rooms and the local Matrix cache seed recovery work immediately.
 The coordinator also enumerates every owner's authoritative joined-room list, so Sliding Sync window limits cannot omit older direct-message, space, or configured rooms.
-Owner room discovery, uncached room scans, and initial target freshness checks share one semaphore with at most eight Matrix read phases.
+Owner room discovery, room recovery scans, and initial target freshness checks share one semaphore with at most eight concurrent read-bearing operations.
+A room-recovery lease holds its slot across the complete scan and cleanup phase, including any required cache hydration and repair writes.
 One unavailable owner cannot block discovery or recovery for joined peers.
 The coordinator merges exact owners into one work item for each room and recovery policy.
 Distinct policies for the same room never run concurrently.
@@ -184,7 +185,8 @@ Unresolved room aliases remain outside retry state until room setup resolves the
 ### Delivery and settlement
 
 The exact interrupted owner sends its own explicitly mentioned trusted resume relay, so recovery works in joined agent-only rooms where the router is absent.
-Owner-authored resume relays use the standard dispatch-context path and hydrate thread history before the response lock.
+Owner-authored resume relays use the standard dispatch-context path and resolve thread history before the response lock.
+The response runner refreshes that history again after acquiring the lifecycle lock.
 Resume delivery runs outside the read budget with one admitted delivery under global pacing.
 Pause cancels delivery waiters before admission and drains the admitted send because Matrix may commit before task cancellation becomes observable.
 Each relay uses a deterministic Matrix transaction ID as a replay guard, while draining the exact result lets the current lease settle its durable lifecycle state.

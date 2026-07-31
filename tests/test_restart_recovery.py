@@ -17,6 +17,7 @@ from mindroom.bot import AgentBot
 from mindroom.config.main import Config
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.matrix import stale_stream_cleanup as stale_stream_cleanup_module
+from mindroom.matrix.client_delivery import hydrate_joined_room_for_delivery
 from mindroom.matrix.stale_stream_cleanup import (
     InterruptedTargetFreshness,
     InterruptedThread,
@@ -126,6 +127,7 @@ def _hide_encrypted_room(
     owner.client.joined_members = AsyncMock(
         return_value=(members if members is not None else nio.JoinedMembersResponse(members=[], room_id=room_id)),
     )
+    owner.client.should_query_keys = False
 
 
 def _target(
@@ -605,10 +607,16 @@ async def test_matrix_target_delivery_by_exact_owner_mentions_intended_responder
     target = _target("$target", timestamp_ms=10)
     operations = build_matrix_restart_recovery_operations(test_runtime_paths(tmp_path))
 
-    with patch(
-        "mindroom.restart_recovery_operations.send_message_result",
-        new=AsyncMock(side_effect=delivered_matrix_side_effect("$resume")),
-    ) as send_message:
+    with (
+        patch(
+            "mindroom.restart_recovery_operations.interrupted_target_freshness",
+            new=AsyncMock(return_value=InterruptedTargetFreshness.CURRENT),
+        ),
+        patch(
+            "mindroom.restart_recovery_operations.send_message_result",
+            new=AsyncMock(side_effect=delivered_matrix_side_effect("$resume")),
+        ) as send_message,
+    ):
         delivered = await operations.deliver_target(owner, target, _config(tmp_path))
 
     assert delivered is restart_recovery_operations_module.RestartDeliveryOutcome.DELIVERED
@@ -635,7 +643,11 @@ async def test_matrix_target_delivery_hydrates_hidden_encrypted_room(
     )
     operations = build_matrix_restart_recovery_operations(test_runtime_paths(tmp_path))
 
-    delivered = await operations.deliver_target(owner, target, _config(tmp_path))
+    with patch(
+        "mindroom.restart_recovery_operations.interrupted_target_freshness",
+        new=AsyncMock(return_value=InterruptedTargetFreshness.CURRENT),
+    ):
+        delivered = await operations.deliver_target(owner, target, _config(tmp_path))
 
     assert delivered is RestartDeliveryOutcome.DELIVERED
     assert owner.client.rooms[target.room_id].encrypted is True
@@ -675,6 +687,107 @@ async def test_matrix_target_delivery_rolls_back_incomplete_encrypted_room(
 
 
 @pytest.mark.asyncio
+async def test_cancelled_encrypted_room_hydration_rolls_back_owned_cache_entry() -> None:
+    """Cancellation must not leave a partially hydrated encrypted room sendable."""
+    owner = _owner()
+    room_id = "!hidden:example.org"
+    _hide_encrypted_room(owner, room_id)
+    hydration_started = asyncio.Event()
+
+    async def joined_members(_room_id: str) -> nio.JoinedMembersResponse:
+        hydration_started.set()
+        await asyncio.Event().wait()
+        return nio.JoinedMembersResponse(members=[], room_id=room_id)
+
+    owner.client.joined_members.side_effect = joined_members
+    hydration = asyncio.create_task(hydrate_joined_room_for_delivery(owner.client, room_id))
+    await asyncio.wait_for(hydration_started.wait(), timeout=1.0)
+
+    hydration.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await hydration
+
+    assert room_id not in owner.client.rooms
+    assert room_id not in owner.client.encrypted_rooms
+
+
+@pytest.mark.asyncio
+async def test_encrypted_room_hydration_queries_new_member_device_keys() -> None:
+    """Encrypted hydration must query newly tracked member devices before succeeding."""
+    owner = _owner()
+    room_id = "!hidden:example.org"
+    _hide_encrypted_room(owner, room_id)
+    owner.client.keys_query = AsyncMock(return_value=nio.KeysQueryResponse(device_keys={}, failures={}))
+
+    async def joined_members(_room_id: str) -> nio.JoinedMembersResponse:
+        owner.client.should_query_keys = True
+        return nio.JoinedMembersResponse(members=[], room_id=room_id)
+
+    owner.client.joined_members.side_effect = joined_members
+
+    hydrated = await hydrate_joined_room_for_delivery(owner.client, room_id)
+
+    assert hydrated is True
+    owner.client.keys_query.assert_awaited_once_with()
+
+
+@pytest.mark.asyncio
+async def test_encrypted_room_hydration_rolls_back_failed_device_key_query() -> None:
+    """A failed device-key query must not leave an encrypted room sendable."""
+    owner = _owner()
+    room_id = "!hidden:example.org"
+    _hide_encrypted_room(owner, room_id)
+    owner.client.keys_query = AsyncMock(return_value=nio.KeysQueryError("unavailable", "M_UNKNOWN"))
+
+    async def joined_members(_room_id: str) -> nio.JoinedMembersResponse:
+        owner.client.should_query_keys = True
+        return nio.JoinedMembersResponse(members=[], room_id=room_id)
+
+    owner.client.joined_members.side_effect = joined_members
+
+    hydrated = await hydrate_joined_room_for_delivery(owner.client, room_id)
+
+    assert hydrated is False
+    assert room_id not in owner.client.rooms
+    assert room_id not in owner.client.encrypted_rooms
+
+
+@pytest.mark.asyncio
+async def test_matrix_target_delivery_rechecks_freshness_after_hidden_room_hydration(
+    tmp_path: Path,
+) -> None:
+    """Human activity during hidden-room hydration must prevent a stale resume relay."""
+    owner = _owner()
+    target = _target("$target", timestamp_ms=10)
+    _hide_encrypted_room(owner, target.room_id)
+    owner.client.should_query_keys = False
+    operations = build_matrix_restart_recovery_operations(test_runtime_paths(tmp_path))
+
+    async def freshness_after_hydration(*_args: object, **_kwargs: object) -> InterruptedTargetFreshness:
+        owner.client.joined_members.assert_awaited_once_with(target.room_id)
+        assert owner.client.rooms[target.room_id].encrypted is True
+        return InterruptedTargetFreshness.NEWER_HUMAN
+
+    with (
+        patch(
+            "mindroom.restart_recovery_operations.interrupted_target_freshness",
+            new=AsyncMock(side_effect=freshness_after_hydration),
+        ) as freshness,
+        patch("mindroom.restart_recovery_operations.build_auto_resume_content") as build_content,
+        patch(
+            "mindroom.restart_recovery_operations.send_message_result",
+            new=AsyncMock(side_effect=delivered_matrix_side_effect("$resume")),
+        ) as send_message,
+    ):
+        outcome = await operations.deliver_target(owner, target, _config(tmp_path))
+
+    assert outcome is RestartDeliveryOutcome.TERMINAL
+    freshness.assert_awaited_once()
+    build_content.assert_not_called()
+    send_message.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_matrix_target_delivery_paces_owner_sends(tmp_path: Path) -> None:
     """Concurrent-room recovery must not burst visible relays through exact owners."""
     owner = _owner()
@@ -693,6 +806,7 @@ async def test_matrix_target_delivery_paces_owner_sends(tmp_path: Path) -> None:
             "mindroom.restart_recovery_operations.interrupted_target_freshness",
             new=AsyncMock(
                 side_effect=(
+                    stale_stream_cleanup_module.InterruptedTargetFreshness.CURRENT,
                     stale_stream_cleanup_module.InterruptedTargetFreshness.CURRENT,
                     stale_stream_cleanup_module.InterruptedTargetFreshness.NEWER_HUMAN,
                 ),
@@ -742,6 +856,10 @@ async def test_matrix_target_delivery_propagates_cache_notification_failure(
         patch(
             "mindroom.restart_recovery_operations.send_message_result",
             new=AsyncMock(side_effect=delivered_matrix_side_effect("$resume")),
+        ),
+        patch(
+            "mindroom.restart_recovery_operations.interrupted_target_freshness",
+            new=AsyncMock(return_value=InterruptedTargetFreshness.CURRENT),
         ),
         pytest.raises(RuntimeError, match="cache bug"),
     ):
@@ -3428,6 +3546,8 @@ async def test_pause_cancels_discovery_and_active_lease_together(
 async def test_orchestrator_cancelled_pause_resumes_coordinator(tmp_path: Path) -> None:
     """A cancelled reload must not leave retained recovery work permanently paused."""
     orchestrator = _MultiAgentOrchestrator(test_runtime_paths(tmp_path))
+    orchestrator.running = True
+    orchestrator.config = _config(tmp_path)
     orchestrator._restart_recovery.pause = AsyncMock(side_effect=asyncio.CancelledError)
     orchestrator._restart_recovery.resume = MagicMock()
 
@@ -3435,6 +3555,20 @@ async def test_orchestrator_cancelled_pause_resumes_coordinator(tmp_path: Path) 
         await orchestrator._pause_restart_recovery()
 
     orchestrator._restart_recovery.resume.assert_called_once_with()
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_cancelled_pause_does_not_resume_during_shutdown(tmp_path: Path) -> None:
+    """Shutdown cancellation must not restart recovery before its stop phase."""
+    orchestrator = _MultiAgentOrchestrator(test_runtime_paths(tmp_path))
+    orchestrator.config = _config(tmp_path)
+    orchestrator._restart_recovery.pause = AsyncMock(side_effect=asyncio.CancelledError)
+    orchestrator._restart_recovery.resume = MagicMock()
+
+    with pytest.raises(asyncio.CancelledError):
+        await orchestrator._pause_restart_recovery()
+
+    orchestrator._restart_recovery.resume.assert_not_called()
 
 
 @pytest.mark.asyncio

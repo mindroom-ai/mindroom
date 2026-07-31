@@ -225,16 +225,26 @@ async def hydrate_joined_room_for_delivery(
     if room is not inserted_room or not encrypted:
         return True
 
-    members = await client.joined_members(room_id)
-    if not isinstance(members, nio.JoinedMembersResponse):
-        if rooms.get(room_id) is inserted_room:
-            rooms.pop(room_id)
-        return False
+    hydrated = False
+    try:
+        members = await client.joined_members(room_id)
+        if not isinstance(members, nio.JoinedMembersResponse):
+            return False
 
-    client.encrypted_rooms.add(room_id)
-    if client.store is not None:
-        client.store.save_encrypted_rooms({room_id})
-    return True
+        if client.should_query_keys:
+            key_query = await client.keys_query()
+            if not isinstance(key_query, nio.KeysQueryResponse):
+                return False
+
+        client.encrypted_rooms.add(room_id)
+        if client.store is not None:
+            client.store.save_encrypted_rooms({room_id})
+        hydrated = True
+        return True
+    finally:
+        if not hydrated and rooms.get(room_id) is inserted_room:
+            rooms.pop(room_id)
+            client.encrypted_rooms.discard(room_id)
 
 
 def _cached_rooms(client: nio.AsyncClient) -> Mapping[str, nio.MatrixRoom]:
