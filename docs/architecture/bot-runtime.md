@@ -154,13 +154,15 @@ Semantic memory backends such as Mem0 have a separate lifecycle and are not alte
 ## Restart Recovery Lifecycle
 
 `RestartRecoveryCoordinator` is the single owner of startup cleanup, replacement-room handoffs, interrupted-target freshness checks, semantic retry state, and resume-delivery settlement.
-`InterruptedTurnRooms` records durable room handoff facts, but it does not schedule Matrix recovery or own retry timing.
+`InterruptedTurnRooms` records in-memory room handoff facts, but it does not schedule Matrix recovery or own retry timing.
+Process restart rediscovers those facts from Matrix history.
 
 ### Scope and scheduling
 
 Configured rooms and the local Matrix cache seed recovery work immediately.
 The coordinator also enumerates every owner's authoritative joined-room list, so Sliding Sync window limits cannot omit older direct-message, space, or configured rooms.
-Owner room discovery, room recovery scans, and initial target freshness checks share one semaphore with at most eight concurrent read-bearing operations.
+The coordinator admits at most eight concurrent read-bearing phases across owner room discovery, room-recovery leases, and initial target freshness checks.
+A room-recovery phase may issue owner-specific membership and hydration requests while holding one phase slot.
 A room-recovery lease holds its slot while it scans each ready owner's Matrix history view and completes any required cache hydration or repair writes.
 One unavailable owner cannot block discovery or recovery for joined peers.
 The coordinator merges exact owners into one work item for each room and recovery policy.

@@ -1892,11 +1892,11 @@ class _MultiAgentOrchestrator:
         await self._startup_maintenance.cancel()
         await self._cancel_bot_start_tasks()
 
-        # Fence new sync admission before draining already-admitted recovery.
-        for bot in self.agent_bots.values():
-            bot.running = False
+        # Stop sync admission before draining already-admitted recovery.
         for entity_name in list(self._sync_tasks.keys()):
             await cancel_sync_task(entity_name, self._sync_tasks)
+        for bot in self.agent_bots.values():
+            bot.running = False
 
         await self._restart_recovery.stop()
         await self._todo_poke_runtime.stop()

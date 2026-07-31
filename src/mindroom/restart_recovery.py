@@ -210,6 +210,8 @@ class RestartRecoveryCoordinator:
         """Retain terminal interrupted-room handoffs across bot replacement."""
         if self._stopped:
             return
+        owner = self._current_owners().get(owner_user_id)
+        generation = None if owner is None else owner.generation
         for room_id in room_ids:
             self._enqueue_request(
                 owner_user_id,
@@ -218,6 +220,7 @@ class RestartRecoveryCoordinator:
                     startup_cutoff_ms=None,
                     terminal_interrupted_only=True,
                 ),
+                generation=generation,
                 grant_fresh_budget=True,
             )
         self._ensure_worker()
@@ -306,9 +309,9 @@ class RestartRecoveryCoordinator:
         if self._startup_cutoff_ms is None:
             return
         for room_id in owner.desired_room_ids:
-            self._enqueue_startup_room(owner.user_id, room_id)
+            self._enqueue_startup_room(owner, room_id)
 
-    def _enqueue_startup_room(self, owner_user_id: str, room_id: str) -> None:
+    def _enqueue_startup_room(self, owner: RecoveryOwner, room_id: str) -> None:
         if self._startup_cutoff_ms is None:
             return
         request = RoomRecoveryRequest(
@@ -316,24 +319,27 @@ class RestartRecoveryCoordinator:
             startup_cutoff_ms=self._startup_cutoff_ms,
             terminal_interrupted_only=False,
         )
-        key = request.key, owner_user_id
+        key = request.key, owner.user_id
         if key in self._completed_startup_scans or key in self._room_jobs:
             return
-        self._enqueue_request(owner_user_id, request)
+        self._enqueue_request(
+            owner.user_id,
+            request,
+            generation=owner.generation,
+        )
 
     def _enqueue_request(
         self,
         owner_user_id: str,
         request: RoomRecoveryRequest,
         *,
+        generation: object | None,
         grant_fresh_budget: bool = False,
     ) -> None:
         if not request.room_id.startswith("!"):
             return
         key = request.key, owner_user_id
         existing = self._room_jobs.get(key)
-        owner = self._current_owners().get(owner_user_id)
-        generation = None if owner is None else owner.generation
         now = asyncio.get_running_loop().time()
         if existing is None:
             self._room_jobs[key] = _OwnerRoomWork(
@@ -436,7 +442,7 @@ class RestartRecoveryCoordinator:
                 )
                 continue
             for room_id in room_ids:
-                self._enqueue_startup_room(owner.user_id, room_id)
+                self._enqueue_startup_room(current_owner, room_id)
 
     async def _drain_inflight_work(self) -> None:
         """Cancel every admitted task before draining any one task."""

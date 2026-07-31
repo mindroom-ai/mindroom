@@ -779,6 +779,26 @@ async def test_matrix_target_delivery_hydrates_hidden_encrypted_room(
 
 
 @pytest.mark.asyncio
+async def test_plaintext_delivery_hydration_does_not_publish_empty_room() -> None:
+    """A plaintext send must use cache bypass instead of publishing incomplete membership."""
+    owner = _owner()
+    room_id = "!hidden-plaintext:example.org"
+    owner.client.rooms = {}
+    owner.client.room_get_state_event = AsyncMock(
+        return_value=nio.RoomGetStateEventError(
+            "No encryption state",
+            "M_NOT_FOUND",
+            room_id=room_id,
+        ),
+    )
+
+    hydrated = await hydrate_joined_room_for_delivery(owner.client, room_id)
+
+    assert hydrated is True
+    assert room_id not in owner.client.rooms
+
+
+@pytest.mark.asyncio
 async def test_matrix_target_delivery_does_not_publish_incomplete_encrypted_room(
     tmp_path: Path,
 ) -> None:
@@ -1024,10 +1044,10 @@ async def test_matrix_target_delivery_propagates_cache_notification_failure(
 
 
 @pytest.mark.asyncio
-async def test_matrix_target_delivery_reuses_stable_transaction_id_after_lost_response(
+async def test_matrix_target_delivery_reuses_transaction_id_after_timestamp_advances(
     tmp_path: Path,
 ) -> None:
-    """An accepted send with a lost response must retry with the same Matrix transaction ID."""
+    """Rediscovery after a lost response must reuse the same Matrix transaction ID."""
     owner = _owner()
     target = _target("$target", timestamp_ms=10)
     operations = build_matrix_restart_recovery_operations(test_runtime_paths(tmp_path))
@@ -1058,7 +1078,11 @@ async def test_matrix_target_delivery_reuses_stable_transaction_id_after_lost_re
         ),
     ):
         first = await operations.deliver_target(owner, target, _config(tmp_path))
-        second = await operations.deliver_target(owner, target, _config(tmp_path))
+        second = await operations.deliver_target(
+            owner,
+            dataclasses.replace(target, timestamp_ms=target.timestamp_ms + 1),
+            _config(tmp_path),
+        )
 
     assert first is RestartDeliveryOutcome.RETRY
     assert second is RestartDeliveryOutcome.DELIVERED
@@ -1144,6 +1168,125 @@ async def test_matrix_room_recovery_shares_membership_discovery_for_owner_genera
     assert replacement_result == RoomRecoveryResult()
     assert same_generation_calls == 1
     assert get_rooms.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_cancelled_membership_waiter_preserves_shared_lookup(tmp_path: Path) -> None:
+    """Cancelling one room lease must not cancel another lease's shared membership read."""
+    room_ids = frozenset({"!first:example.org", "!second:example.org"})
+    owner = _owner(rooms=room_ids)
+    operations = build_matrix_restart_recovery_operations(test_runtime_paths(tmp_path))
+    lookup_started = asyncio.Event()
+    release_lookup = asyncio.Event()
+
+    async def joined_rooms(_client: nio.AsyncClient) -> list[str]:
+        lookup_started.set()
+        await release_lookup.wait()
+        return list(room_ids)
+
+    cleanup_room = AsyncMock(
+        return_value=stale_stream_cleanup_module.StaleStreamCleanupResult(
+            cleaned_count=0,
+            interrupted_threads=(),
+        ),
+    )
+    with (
+        patch(
+            "mindroom.restart_recovery_operations.get_joined_rooms",
+            new=AsyncMock(side_effect=joined_rooms),
+        ) as get_rooms,
+        patch("mindroom.restart_recovery_operations.cleanup_stale_streaming_room", new=cleanup_room),
+    ):
+        attempts = [
+            asyncio.create_task(
+                operations.recover_room(
+                    (owner,),
+                    RoomRecoveryRequest(room_id, 123, False),
+                    frozenset({owner.user_id}),
+                    _config(tmp_path),
+                ),
+            )
+            for room_id in sorted(room_ids)
+        ]
+        await asyncio.wait_for(lookup_started.wait(), timeout=1.0)
+        await asyncio.sleep(0)
+        attempts[0].cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await attempts[0]
+        try:
+            assert attempts[1].done() is False
+            release_lookup.set()
+            assert await attempts[1] == RoomRecoveryResult()
+        finally:
+            release_lookup.set()
+            await operations.close()
+            await asyncio.gather(*attempts, return_exceptions=True)
+
+    assert get_rooms.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_replacement_generation_drains_inflight_membership_lookup(tmp_path: Path) -> None:
+    """Replacing an owner must cancel and drain its superseded membership task."""
+    room_id = "!code:example.org"
+    old_owner = _owner(generation=object(), rooms=frozenset({room_id}))
+    new_owner = _owner(generation=object(), rooms=frozenset({room_id}))
+    operations = build_matrix_restart_recovery_operations(test_runtime_paths(tmp_path))
+    old_lookup_started = asyncio.Event()
+    old_lookup_cancelled = asyncio.Event()
+    release_old_cleanup = asyncio.Event()
+
+    async def joined_rooms(client: nio.AsyncClient) -> list[str]:
+        if client is not old_owner.client:
+            return [room_id]
+        old_lookup_started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            old_lookup_cancelled.set()
+            await release_old_cleanup.wait()
+            raise
+
+    cleanup_room = AsyncMock(
+        return_value=stale_stream_cleanup_module.StaleStreamCleanupResult(
+            cleaned_count=0,
+            interrupted_threads=(),
+        ),
+    )
+    with (
+        patch("mindroom.restart_recovery_operations.get_joined_rooms", new=AsyncMock(side_effect=joined_rooms)),
+        patch("mindroom.restart_recovery_operations.cleanup_stale_streaming_room", new=cleanup_room),
+    ):
+        old_attempt = asyncio.create_task(
+            operations.recover_room(
+                (old_owner,),
+                RoomRecoveryRequest(room_id, 123, False),
+                frozenset({old_owner.user_id}),
+                _config(tmp_path),
+            ),
+        )
+        await asyncio.wait_for(old_lookup_started.wait(), timeout=1.0)
+        replacement_attempt = asyncio.create_task(
+            operations.recover_room(
+                (new_owner,),
+                RoomRecoveryRequest(room_id, 123, False),
+                frozenset({new_owner.user_id}),
+                _config(tmp_path),
+            ),
+        )
+        try:
+            await asyncio.wait_for(old_lookup_cancelled.wait(), timeout=1.0)
+            assert replacement_attempt.done() is False
+            release_old_cleanup.set()
+            assert await replacement_attempt == RoomRecoveryResult()
+            with pytest.raises(asyncio.CancelledError):
+                await old_attempt
+        finally:
+            release_old_cleanup.set()
+            old_attempt.cancel()
+            replacement_attempt.cancel()
+            await operations.close()
+            await asyncio.gather(old_attempt, replacement_attempt, return_exceptions=True)
 
 
 @pytest.mark.asyncio
@@ -1428,7 +1571,10 @@ async def test_stop_drains_historical_membership_snapshots(tmp_path: Path) -> No
         await asyncio.wait_for(lookup_started.wait(), timeout=1.0)
         try:
             await coordinator.stop()
-            await asyncio.sleep(0)
+            await asyncio.wait_for(
+                asyncio.gather(recovery_task, return_exceptions=True),
+                timeout=1.0,
+            )
             assert recovery_task.cancelled()
         finally:
             recovery_task.cancel()
@@ -1437,6 +1583,7 @@ async def test_stop_drains_historical_membership_snapshots(tmp_path: Path) -> No
     del recovery_task
     del owner
     del generation
+    await asyncio.sleep(0)
     gc.collect()
 
     assert generation_ref() is None
@@ -1520,10 +1667,29 @@ async def test_enqueue_replacement_rooms_is_inert_after_stop(tmp_path: Path) -> 
 
 
 @pytest.mark.asyncio
-async def test_scan_and_freshness_share_eight_matrix_read_slots(
+async def test_enqueue_replacement_rooms_snapshots_owner_generation_once(tmp_path: Path) -> None:
+    """One replacement batch must not rebuild every owner for each room."""
+    owner = _owner(rooms=frozenset())
+    owners = {owner.user_id: owner}
+    current_owners = MagicMock(return_value=owners)
+    coordinator = RestartRecoveryCoordinator(
+        current_config=lambda: _config(tmp_path),
+        current_owners=current_owners,
+        operations=_operations(recover_room=AsyncMock(return_value=RoomRecoveryResult())),
+    )
+    room_ids = {f"!replacement-{index}:example.org" for index in range(20)}
+
+    coordinator.enqueue_replacement_rooms(owner.user_id, room_ids)
+
+    assert current_owners.call_count == 1
+    assert {work.room_id for work in coordinator._room_jobs.values()} == room_ids
+
+
+@pytest.mark.asyncio
+async def test_scan_and_freshness_share_eight_matrix_read_phase_slots(
     tmp_path: Path,
 ) -> None:
-    """Room scans and freshness reads must share one eight-slot Matrix read budget."""
+    """Room scans and freshness reads must share one eight-slot phase budget."""
     room_ids = frozenset(f"!room-{index}:example.org" for index in range(10))
     owner = _owner(rooms=room_ids)
     router = _owner(

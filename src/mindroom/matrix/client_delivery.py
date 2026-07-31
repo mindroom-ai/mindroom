@@ -263,10 +263,6 @@ async def hydrate_joined_room_for_delivery(
         return False
 
     if not encrypted:
-        rooms.setdefault(
-            room_id,
-            nio.MatrixRoom(room_id=room_id, own_user_id=client.user_id or ""),
-        )
         return True
 
     return await _hydrate_encrypted_joined_room(client, room_id)

@@ -2422,7 +2422,7 @@ async def test_new_agent_not_started_twice(tmp_path: Path) -> None:
 
 @pytest.mark.asyncio
 async def test_orchestrator_stop_cancels_all_tasks(tmp_path: Path) -> None:
-    """Test that stop() cancels all sync tasks."""
+    """Process shutdown must stop sync admission before one orderly bot drain."""
     shutdown_order: list[str] = []
 
     async def track_catalog_drain(*_args: object, **_kwargs: object) -> None:
@@ -2441,6 +2441,7 @@ async def test_orchestrator_stop_cancels_all_tasks(tmp_path: Path) -> None:
         cancelled = []
 
         async def track_cancel(name: str, tasks: dict) -> None:
+            assert all(bot.running for bot in orchestrator.agent_bots.values())
             cancelled.append(name)
             tasks.pop(name, None)
 

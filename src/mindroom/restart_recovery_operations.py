@@ -139,6 +139,20 @@ class _OwnerMembershipSnapshot:
     refresh_after: float | None = None
 
 
+async def _cancel_and_drain_membership_task(task: asyncio.Task[list[str] | None]) -> None:
+    """Cancel one superseded lookup without abandoning its cleanup."""
+    if not task.done():
+        task.cancel()
+    drain = asyncio.gather(task, return_exceptions=True)
+    while not drain.done():
+        try:
+            await asyncio.shield(drain)
+        except asyncio.CancelledError:
+            continue
+    if (current := asyncio.current_task()) is not None and current.cancelling():
+        raise asyncio.CancelledError
+
+
 @dataclass
 class _OwnerMembershipSnapshots:
     """Share joined-room discovery across one exact owner generation."""
@@ -149,11 +163,13 @@ class _OwnerMembershipSnapshots:
     async def joined_rooms(self, owner: RecoveryOwner) -> list[str] | None:
         """Return one generation snapshot, creating it on first use."""
         snapshot = self.snapshots.get(owner.user_id)
+        superseded_task: asyncio.Task[list[str] | None] | None = None
         if (
             snapshot is None
             or snapshot.generation is not owner.generation
             or (snapshot.refresh_after is not None and snapshot.refresh_after <= asyncio.get_running_loop().time())
         ):
+            superseded_task = None if snapshot is None else snapshot.task
             snapshot = _OwnerMembershipSnapshot(
                 generation=owner.generation,
                 task=asyncio.create_task(
@@ -162,8 +178,14 @@ class _OwnerMembershipSnapshots:
                 ),
             )
             self.snapshots[owner.user_id] = snapshot
+        if superseded_task is not None:
+            await _cancel_and_drain_membership_task(superseded_task)
         try:
-            joined_room_ids = await snapshot.task
+            joined_room_ids = await asyncio.shield(snapshot.task)
+        except asyncio.CancelledError:
+            if snapshot.task.cancelled():
+                self._discard(owner.user_id, snapshot)
+            raise
         except BaseException:
             self._discard(owner.user_id, snapshot)
             raise
@@ -423,16 +445,8 @@ def build_matrix_restart_recovery_operations(
         transaction_id = str(
             uuid5(
                 NAMESPACE_URL,
-                "\x00".join(
-                    (
-                        "mindroom.restart_recovery.v1",
-                        owner.user_id,
-                        target.room_id,
-                        target.thread_id,
-                        target.target_event_id,
-                        str(target.timestamp_ms),
-                    ),
-                ),
+                f"mindroom.restart_recovery.v1\x00{owner.user_id}\x00{target.room_id}"
+                f"\x00{target.thread_id}\x00{target.target_event_id}",
             ),
         )
         try:
