@@ -56,6 +56,14 @@ class _OwnerRoomWork:
     def room_id(self) -> str:
         return self.request.room_id
 
+    @property
+    def scheduled_at(self) -> float:
+        """Return the due time after the work enters the eligible queue."""
+        if self.due_at is None:
+            msg = "Eligible restart recovery work must have a due time"
+            raise RuntimeError(msg)
+        return self.due_at
+
 
 @dataclass(frozen=True)
 class _RoomLease:
@@ -254,9 +262,8 @@ class RestartRecoveryCoordinator:
                 key: work for key, work in self._room_jobs.items() if not work.request.terminal_interrupted_only
             }
         owners = tuple(self._current_owners().values()) if self._startup_cutoff_ms is not None else ()
-        if self._room_jobs:
-            for owner in owners:
-                self._refresh_owner_jobs(owner, grant_fresh_budget=True)
+        for owner in owners:
+            self._refresh_owner_jobs(owner, grant_fresh_budget=True)
         self._paused = False
         for owner in owners:
             self._operations.discard_owner(owner.user_id)
@@ -458,45 +465,49 @@ class RestartRecoveryCoordinator:
             work for work in self._room_jobs.values() if work.room_id not in active_room_ids and work.due_at is not None
         ]
 
-    def _next_due_work(self, now: float) -> _OwnerRoomWork | None:
-        eligible = [work for work in self._eligible_work() if work.due_at is not None and work.due_at <= now]
-        if not eligible:
-            return None
-        active_owners = set().union(
-            *(lease.all_owner_user_ids for lease in self._active_attempts.values()),
-        )
-        return min(
-            eligible,
+    def _due_room_leases(self, now: float) -> tuple[_RoomLease, ...]:
+        """Group all due jobs in one pass while preserving owner fairness."""
+        due_work = sorted(
+            (work for work in self._eligible_work() if work.scheduled_at <= now),
             key=lambda work: (
-                work.owner_user_id in active_owners,
-                work.due_at or 0.0,
+                work.scheduled_at,
                 work.room_id,
                 work.request.startup_cutoff_ms or -1,
                 work.request.terminal_interrupted_only,
                 work.owner_user_id,
             ),
         )
+        jobs_by_request: dict[_RoomKey, list[_OwnerRoomWork]] = {}
+        for work in due_work:
+            jobs_by_request.setdefault(work.request.key, []).append(work)
+
+        active_room_ids = self._active_room_ids()
+        active_owner_user_ids = set().union(
+            *(lease.all_owner_user_ids for lease in self._active_attempts.values()),
+        )
+        leases: list[_RoomLease] = []
+
+        def append_lease(work: _OwnerRoomWork) -> None:
+            jobs = tuple(sorted(jobs_by_request[work.request.key], key=lambda job: job.owner_user_id))
+            lease = _RoomLease(work.request, jobs)
+            leases.append(lease)
+            active_room_ids.add(work.room_id)
+            active_owner_user_ids.update(lease.all_owner_user_ids)
+
+        for work in due_work:
+            if work.room_id not in active_room_ids and work.owner_user_id not in active_owner_user_ids:
+                append_lease(work)
+        for work in due_work:
+            if work.room_id not in active_room_ids:
+                append_lease(work)
+        return tuple(leases)
 
     def _start_due_attempts(self) -> None:
         now = asyncio.get_running_loop().time()
-        while True:
-            seed = self._next_due_work(now)
-            if seed is None:
-                return
-            jobs = tuple(
-                sorted(
-                    (
-                        work
-                        for work in self._room_jobs.values()
-                        if work.request == seed.request and work.due_at is not None and work.due_at <= now
-                    ),
-                    key=lambda work: work.owner_user_id,
-                ),
-            )
-            lease = _RoomLease(seed.request, jobs)
+        for lease in self._due_room_leases(now):
             task = asyncio.create_task(
                 self._process_room(lease),
-                name=f"restart_recovery_room:{seed.request.key}",
+                name=f"restart_recovery_room:{lease.request.key}",
             )
             self._active_attempts[task] = lease
 
@@ -504,7 +515,7 @@ class RestartRecoveryCoordinator:
         eligible = self._eligible_work()
         if not eligible:
             return None
-        due_at = min(work.due_at for work in eligible if work.due_at is not None)
+        due_at = min(work.scheduled_at for work in eligible)
         return max(0.0, due_at - asyncio.get_running_loop().time())
 
     async def _wait_for_progress(self, *, delay: float | None) -> None:
@@ -544,7 +555,12 @@ class RestartRecoveryCoordinator:
             self._restore_cancelled(lease)
             return
         except Exception:
-            logger.warning("Restart recovery attempt failed", exc_info=True)
+            logger.warning(
+                "Restart recovery attempt failed",
+                room_id=lease.room_id,
+                owner_user_ids=sorted(lease.all_owner_user_ids),
+                exc_info=True,
+            )
             self._restore_failed_lease(lease)
             return
         for outcome in result:

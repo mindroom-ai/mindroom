@@ -55,7 +55,7 @@ from tests.conftest import (
 from tests.identity_helpers import agent_matrix_user
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
+    from collections.abc import Awaitable, Callable, ValuesView
     from pathlib import Path
 
     from mindroom.matrix.conversation_cache import ConversationCacheProtocol
@@ -1832,14 +1832,52 @@ def test_due_owner_cohort_precedes_oldest_repeat_owner(tmp_path: Path) -> None:
     )
     coordinator._room_jobs = {oldest.key: oldest, newer.key: newer}
 
-    assert coordinator._next_due_work(3.0) is newer
+    assert coordinator._due_room_leases(3.0)[0].request is newer_request
 
     coordinator._active_attempts[cast("asyncio.Task[object]", MagicMock())] = RoomLease(
         newer_request,
         (newer,),
     )
 
-    assert coordinator._next_due_work(3.0) is oldest
+    assert coordinator._due_room_leases(3.0)[0].request is oldest_request
+
+
+@pytest.mark.asyncio
+async def test_startup_scheduling_groups_due_jobs_in_one_values_pass(tmp_path: Path) -> None:
+    """Large startup scope must not rescan every retained job per room lease."""
+
+    class CountingRoomJobs(dict[tuple[tuple[str, int | None, bool], str], RoomWork]):
+        values_calls = 0
+
+        def values(self) -> ValuesView[RoomWork]:  # ty: ignore[invalid-method-override] - test counter wraps dict
+            self.values_calls += 1
+            return super().values()
+
+    coordinator = RestartRecoveryCoordinator(
+        current_config=lambda: _config(tmp_path),
+        current_owners=dict,
+        operations=_operations(recover_room=AsyncMock(return_value=RoomRecoveryResult())),
+    )
+    jobs = CountingRoomJobs()
+    for room_index in range(50):
+        request = RoomRecoveryRequest(f"!room-{room_index}:example.org", 123, False)
+        for owner_index in range(4):
+            work = RoomWork(
+                request,
+                f"@owner-{owner_index}:example.org",
+                None,
+                due_at=0.0,
+            )
+            jobs[work.key] = work
+    coordinator._room_jobs = jobs
+
+    with patch.object(coordinator, "_process_room", new=AsyncMock(return_value=())):
+        coordinator._start_due_attempts()
+        tasks = tuple(coordinator._active_attempts)
+        await asyncio.gather(*tasks)
+
+    assert len(tasks) == 50
+    assert jobs.values_calls <= 2
 
 
 @pytest.mark.asyncio
@@ -3371,8 +3409,10 @@ def test_restart_recovery_room_hints_include_current_joined_rooms() -> None:
         "!root-space:example.org": MagicMock(),
     }
     bot._room_lifecycle = MagicMock()
-    bot._room_lifecycle.should_persist_invited_rooms.return_value = True
-    bot._room_lifecycle.invited_rooms = {"!invited:example.org"}
+    bot._room_lifecycle.desired_room_ids = frozenset(
+        {"!configured:example.org", "!invited:example.org"},
+    )
+    bot._room_lifecycle.should_persist_invited_rooms.side_effect = AssertionError("duplicate policy")
 
     room_ids = AgentBot.restart_recovery_room_ids.fget(bot)
 
@@ -3383,6 +3423,32 @@ def test_restart_recovery_room_hints_include_current_joined_rooms() -> None:
             "!root-space:example.org",
             "!invited:example.org",
         },
+    )
+
+
+@pytest.mark.asyncio
+async def test_failed_lease_log_includes_room_and_owner_context(tmp_path: Path) -> None:
+    """Unexpected lease failures must identify the affected room and owners."""
+    coordinator = RestartRecoveryCoordinator(
+        current_config=lambda: _config(tmp_path),
+        current_owners=dict,
+        operations=_operations(recover_room=AsyncMock(return_value=RoomRecoveryResult())),
+    )
+    request = RoomRecoveryRequest("!failed:example.org", 123, False)
+    work = RoomWork(request, "@code:example.org", None, due_at=0.0)
+    lease = RoomLease(request, (work,))
+    task = MagicMock(spec=asyncio.Task)
+    task.result.side_effect = RuntimeError("boom")
+    coordinator._room_jobs = {work.key: work}
+
+    with patch("mindroom.restart_recovery.logger.warning") as warning:
+        coordinator._settle_attempt(lease, cast("asyncio.Task[object]", task))
+
+    warning.assert_called_once_with(
+        "Restart recovery attempt failed",
+        room_id=request.room_id,
+        owner_user_ids=[work.owner_user_id],
+        exc_info=True,
     )
 
 
