@@ -16,6 +16,7 @@ from mindroom.bot import TeamBot
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import RouterConfig
+from mindroom.matrix.client_room_admin import RoomJoinOutcome
 from mindroom.matrix.users import AgentMatrixUser
 from tests.conftest import (
     TEST_PASSWORD,
@@ -87,9 +88,9 @@ class TestTeamRoomMembership:
         # Track which rooms were joined
         joined_rooms = []
 
-        async def mock_join_room(_client: object, room_id: str) -> bool:
+        async def mock_join_room(_client: object, room_id: str) -> RoomJoinOutcome:
             joined_rooms.append(room_id)
-            return True
+            return RoomJoinOutcome.JOINED
 
         monkeypatch.setattr("mindroom.bot_room_lifecycle.join_room", mock_join_room)
 
@@ -209,7 +210,7 @@ class TestTeamRoomMembership:
         install_runtime_cache_support(bot)
         bot.client = AsyncMock()
 
-        join_room = AsyncMock(return_value=True)
+        join_room = AsyncMock(return_value=RoomJoinOutcome.JOINED)
         monkeypatch.setattr("mindroom.bot_room_lifecycle.is_authorized_sender", lambda *_args, **_kwargs: True)
         monkeypatch.setattr("mindroom.bot_room_lifecycle.join_room", join_room)
 

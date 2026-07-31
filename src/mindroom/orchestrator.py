@@ -246,6 +246,9 @@ class _MultiAgentOrchestrator:
     _mcp_manager: MCPServerManager | None = field(default=None, init=False)
     _config_update_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False)
     _dispatch_recovery_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False)
+    _dispatch_recovery_task_owner: object = field(default_factory=object, init=False, repr=False)
+    _dispatch_recovery_task: asyncio.Task[None] | None = field(default=None, init=False, repr=False)
+    _dispatch_recovery_requested: bool = field(default=False, init=False, repr=False)
     _response_admission_gate: ResponseAdmissionGate = field(default_factory=ResponseAdmissionGate, init=False)
     _mcp_catalog_change_task_owner: object = field(default_factory=object, init=False, repr=False)
     _pending_replacement_recovery_room_ids: dict[str, set[str]] = field(default_factory=dict, init=False)
@@ -555,6 +558,29 @@ class _MultiAgentOrchestrator:
                 ):
                     continue
                 await bot.recover_pending_turn_dispatch_obligations()
+
+    def _schedule_ready_turn_dispatch_recovery(self) -> None:
+        """Coalesce bot-ready signals into one orchestrator-owned recovery task."""
+        self._dispatch_recovery_requested = True
+        task = self._dispatch_recovery_task
+        if task is not None and not task.done():
+            return
+        self._dispatch_recovery_task = create_background_task(
+            self._run_scheduled_turn_dispatch_recovery(),
+            name="recover_ready_turn_dispatch_obligations",
+            owner=self._dispatch_recovery_task_owner,
+        )
+
+    async def _run_scheduled_turn_dispatch_recovery(self) -> None:
+        """Drain readiness signals without blocking a Matrix sync callback."""
+        current_task = asyncio.current_task()
+        try:
+            while self._dispatch_recovery_requested:
+                self._dispatch_recovery_requested = False
+                await self._recover_ready_turn_dispatch_obligations()
+        finally:
+            if self._dispatch_recovery_task is current_task:
+                self._dispatch_recovery_task = None
 
     async def _try_start_bot_once(self, entity_name: str, bot: AgentBot | TeamBot) -> bool | None:
         """Run one bot start attempt and classify the result."""
@@ -1197,7 +1223,7 @@ class _MultiAgentOrchestrator:
     async def handle_bot_ready(self, bot: AgentBot | TeamBot) -> None:
         """Handle bot-ready notifications through the public runtime protocol."""
         await self._approval_transport.handle_bot_ready(bot)
-        await self._recover_ready_turn_dispatch_obligations()
+        self._schedule_ready_turn_dispatch_recovery()
 
     async def _start_runtime(self) -> None:
         """Run the startup sequence before handing off to the sync loops."""
@@ -1891,6 +1917,11 @@ class _MultiAgentOrchestrator:
         await self.config_reload.cancel()
         owner = self._mcp_catalog_change_task_owner
         await wait_for_background_tasks(5.0, owner=owner, shutdown_intent=ORDERLY_SHUTDOWN)
+        await wait_for_background_tasks(
+            5.0,
+            owner=self._dispatch_recovery_task_owner,
+            shutdown_intent=ORDERLY_SHUTDOWN,
+        )
         await self._startup_maintenance.cancel()
         await self._todo_poke_runtime.stop()
         await self._stop_memory_auto_flush_worker()

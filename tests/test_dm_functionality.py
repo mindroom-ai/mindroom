@@ -12,6 +12,7 @@ from mindroom.bot import AgentBot
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.matrix.cache.thread_history_result import thread_history_result
+from mindroom.matrix.client_room_admin import RoomJoinOutcome
 from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.users import AgentMatrixUser
@@ -291,7 +292,10 @@ class TestDMIntegration:
         # Mock join_room to return success
         with (
             patch("mindroom.bot_room_lifecycle.is_authorized_sender", return_value=True),
-            patch("mindroom.bot_room_lifecycle.join_room", return_value=True) as mock_join,
+            patch(
+                "mindroom.bot_room_lifecycle.join_room",
+                return_value=RoomJoinOutcome.JOINED,
+            ) as mock_join,
         ):
             room = MagicMock()
             room.room_id = "!dm:localhost"

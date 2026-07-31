@@ -22,6 +22,7 @@ from mindroom.approval_manager import (
     initialize_approval_store,
 )
 from mindroom.authorization import is_authorized_sender as is_authorized_sender_for_test
+from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.bot import AgentBot
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
@@ -2166,6 +2167,10 @@ class TestMultiAgentOrchestrator:
         responder_bot.first_sync_complete = True
         with patch.object(orchestrator._approval_transport, "handle_bot_ready", new=AsyncMock()):
             await orchestrator.handle_bot_ready(responder_bot)
+        assert await wait_for_background_tasks(
+            timeout=1,
+            owner=orchestrator._dispatch_recovery_task_owner,
+        )
 
         router_bot.recover_pending_turn_dispatch_obligations.assert_awaited_once_with()
 
@@ -2209,6 +2214,46 @@ class TestMultiAgentOrchestrator:
         await orchestrator._recover_ready_turn_dispatch_obligations()
 
         router_bot.recover_pending_turn_dispatch_obligations.assert_awaited_once_with()
+
+    @pytest.mark.asyncio
+    async def test_bot_ready_schedules_blocked_turn_recovery_without_blocking_sync(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Ready callbacks must not await full recovered turns on the sync task."""
+        config = _runtime_bound_config(Config(), tmp_path)
+        orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths_for(config))
+        orchestrator.config = config
+        recovery_started = asyncio.Event()
+        release_recovery = asyncio.Event()
+
+        async def recover_turns() -> None:
+            recovery_started.set()
+            await release_recovery.wait()
+
+        router_bot = MagicMock()
+        router_bot.running = True
+        router_bot.first_sync_complete = True
+        router_bot.recover_pending_turn_dispatch_obligations = AsyncMock(side_effect=recover_turns)
+        orchestrator.agent_bots = {ROUTER_AGENT_NAME: router_bot}
+
+        with patch.object(orchestrator._approval_transport, "handle_bot_ready", new=AsyncMock()):
+            ready_task = asyncio.create_task(orchestrator.handle_bot_ready(router_bot))
+            try:
+                await recovery_started.wait()
+                assert ready_task.done()
+                recovery_task = orchestrator._dispatch_recovery_task
+                assert recovery_task is not None
+                assert not recovery_task.done()
+            finally:
+                release_recovery.set()
+                await ready_task
+
+        assert await wait_for_background_tasks(
+            timeout=1,
+            owner=orchestrator._dispatch_recovery_task_owner,
+        )
+        assert recovery_task.done()
 
     @pytest.mark.asyncio
     async def test_full_startup_does_not_recover_team_before_member_first_sync(
@@ -2340,6 +2385,10 @@ class TestMultiAgentOrchestrator:
         member_bot.first_sync_complete = True
         with patch.object(orchestrator._approval_transport, "handle_bot_ready", new=AsyncMock()):
             await orchestrator.handle_bot_ready(member_bot)
+        assert await wait_for_background_tasks(
+            timeout=1,
+            owner=orchestrator._dispatch_recovery_task_owner,
+        )
 
         team_bot.recover_pending_turn_dispatch_obligations.assert_awaited_once_with()
 

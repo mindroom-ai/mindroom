@@ -12,6 +12,7 @@ from mindroom.bot import TeamBot, create_bot_for_entity
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.constants import ROUTER_AGENT_NAME
+from mindroom.matrix.client_room_admin import RoomJoinOutcome
 from mindroom.matrix.state import MatrixState
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.orchestrator import _MultiAgentOrchestrator
@@ -199,9 +200,9 @@ async def test_router_joins_rooms_on_start(
     # Track which rooms were joined
     joined_rooms: list[str] = []
 
-    async def mock_join_room(_client: AsyncMock, room_id: str) -> bool:
+    async def mock_join_room(_client: AsyncMock, room_id: str) -> RoomJoinOutcome:
         joined_rooms.append(room_id)
-        return True
+        return RoomJoinOutcome.JOINED
 
     monkeypatch.setattr("mindroom.bot_room_lifecycle.join_room", mock_join_room)
 
