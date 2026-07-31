@@ -1304,11 +1304,32 @@ class AgentBot:
         client = self.client
         if client is None:
             return
+        client.add_event_admission_callback(
+            self._create_room_member_admission_callback(),
+            nio.RoomMemberEvent,
+        )
         client.add_event_callback(self._create_room_member_task_wrapper(), nio.RoomMemberEvent)
         self._room_member_callback_registered = True
 
+    def _create_room_member_admission_callback(
+        self,
+    ) -> Callable[[nio.MatrixRoom, nio.Event], Awaitable[None]]:
+        """Persist live join work only while delivery-time hooks are armed."""
+        durable_admission = self._dispatch_obligation_runner.admission_callback(
+            DispatchCallbackKind.ROOM_LIFECYCLE,
+        )
+
+        async def wrapper(room: nio.MatrixRoom, event: nio.Event) -> None:
+            if not isinstance(event, nio.RoomMemberEvent):
+                return
+            if not self._first_sync_done or not self._room_member_join_hooks_armed:
+                return
+            await durable_admission(room, event)
+
+        return wrapper
+
     def _create_room_member_task_wrapper(self) -> Callable[[nio.MatrixRoom, nio.Event], Awaitable[None]]:
-        """Return a background callback that preserves delivery-time hook arming."""
+        """Run live join work only after its matching admission succeeds."""
         durable_callback = self._dispatch_obligation_runner.task_wrapper(
             DispatchCallbackKind.ROOM_LIFECYCLE,
             owner=self._runtime_view,
@@ -1316,9 +1337,6 @@ class AgentBot:
 
         async def wrapper(room: nio.MatrixRoom, event: nio.Event) -> None:
             if not isinstance(event, nio.RoomMemberEvent):
-                return
-            hooks_armed_at_delivery = self._first_sync_done and self._room_member_join_hooks_armed
-            if not hooks_armed_at_delivery and not self._cold_history_fence.is_cold:
                 return
             await durable_callback(room, event)
 

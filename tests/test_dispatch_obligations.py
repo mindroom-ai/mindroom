@@ -26,6 +26,9 @@ from mindroom.dispatch_obligations import (
     _DispatchCallbackResult as DispatchCallbackResult,
 )
 from mindroom.dispatch_obligations import (
+    _DispatchObligationAdmissionCallback as DispatchObligationAdmissionCallback,
+)
+from mindroom.dispatch_obligations import (
     _DispatchObligationTaskWrapper as DispatchObligationTaskWrapper,
 )
 from mindroom.matrix.media import MATRIX_MEDIA_EVENT_TYPES
@@ -860,8 +863,11 @@ async def test_bound_message_callback_defers_for_persisted_turn_store_record() -
 
 
 @pytest.mark.asyncio
-async def test_task_wrapper_persists_before_background_execution(tmp_path: Path) -> None:
-    """Returning to nio must require durable acceptance before background execution."""
+async def test_admission_persists_once_before_event_callback_execution(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Admission must persist once; the later event callback may only execute it."""
     entered = asyncio.Event()
     release = asyncio.Event()
     owner = object()
@@ -873,15 +879,22 @@ async def test_task_wrapper_persists_before_background_execution(tmp_path: Path)
 
     store = _store(tmp_path)
     runner = _runner(store, callback)
+    create_pending = MagicMock(wraps=store.create_pending)
+    monkeypatch.setattr(store, "create_pending", create_pending)
+    admission = runner.admission_callback(DispatchCallbackKind.MESSAGE)
     wrapper = runner.task_wrapper(DispatchCallbackKind.MESSAGE, owner=owner)
     event = _message_event("$durable")
+    room = nio.MatrixRoom(_ROOM_ID, _PRINCIPAL_ID)
 
-    await wrapper(nio.MatrixRoom(_ROOM_ID, _PRINCIPAL_ID), event)
+    await admission(room, event)
 
     assert store.has_pending("$durable", DispatchCallbackKind.MESSAGE)
+    assert not entered.is_set()
+    await wrapper(room, event)
     await entered.wait()
     release.set()
     await wait_for_background_tasks(timeout=1.0, owner=owner)
+    create_pending.assert_called_once()
     assert not store.has_pending("$durable", DispatchCallbackKind.MESSAGE)
 
 
@@ -908,10 +921,10 @@ async def test_task_wrapper_failure_retries_autonomously(tmp_path: Path) -> None
         retry_max_delay_seconds=0,
     )
 
-    await runner.task_wrapper(DispatchCallbackKind.MESSAGE, owner=owner)(
-        nio.MatrixRoom(_ROOM_ID, _PRINCIPAL_ID),
-        _message_event("$task-retry"),
-    )
+    room = nio.MatrixRoom(_ROOM_ID, _PRINCIPAL_ID)
+    event = _message_event("$task-retry")
+    await runner.admission_callback(DispatchCallbackKind.MESSAGE)(room, event)
+    await runner.task_wrapper(DispatchCallbackKind.MESSAGE, owner=owner)(room, event)
     await wait_for_background_tasks(timeout=1, owner=owner)
 
     assert attempts == 2
@@ -954,7 +967,7 @@ async def test_direct_dispatch_failure_retries_autonomously(tmp_path: Path) -> N
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("entrypoint", ["direct", "task-wrapper"])
+@pytest.mark.parametrize("entrypoint", ["direct", "admission"])
 async def test_persist_failure_notifies_once_for_every_runner_entrypoint(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -990,12 +1003,12 @@ async def test_persist_failure_notifies_once_for_every_runner_entrypoint(
     if entrypoint == "direct":
         persist = runner.dispatch(room, event, DispatchCallbackKind.MESSAGE)
     else:
-        persist = runner.task_wrapper(DispatchCallbackKind.MESSAGE, owner=object())(room, event)
+        persist = runner.admission_callback(DispatchCallbackKind.MESSAGE)(room, event)
     expected_error = OSError if entrypoint == "direct" else nio.CallbackNotAcceptedError
     with pytest.raises(expected_error, match="dispatch database unavailable") as exc_info:
         await persist
 
-    if entrypoint == "task-wrapper":
+    if entrypoint == "admission":
         assert isinstance(exc_info.value.__cause__, OSError)
     assert failure_notifications == 1
 
@@ -1007,13 +1020,17 @@ def test_correctness_callbacks_register_with_explicit_durable_kinds(tmp_path: Pa
         return DispatchCallbackResult.SUCCEEDED
 
     runner = _runner(_store(tmp_path), callback)
-    client = MagicMock(spec=nio.AsyncClient)
+    client = MagicMock()
 
     runner.register_source_callbacks(client, owner=object())
 
     registrations = {
         event_type: registered
         for registered, event_type in (call.args for call in client.add_event_callback.call_args_list)
+    }
+    admissions = {
+        event_type: registered
+        for registered, event_type in (call.args for call in client.add_event_admission_callback.call_args_list)
     }
     expected_kinds = {
         nio.RoomMessageText: DispatchCallbackKind.MESSAGE,
@@ -1023,10 +1040,14 @@ def test_correctness_callbacks_register_with_explicit_durable_kinds(tmp_path: Pa
         **dict.fromkeys(MATRIX_MEDIA_EVENT_TYPES, DispatchCallbackKind.MEDIA),
     }
     assert {*expected_kinds, nio.UnknownEvent} <= registrations.keys()
+    assert registrations.keys() == admissions.keys()
     for event_type, callback_kind in expected_kinds.items():
         registered = registrations[event_type]
+        admission = admissions[event_type]
         assert isinstance(registered, DispatchObligationTaskWrapper)
+        assert isinstance(admission, DispatchObligationAdmissionCallback)
         assert registered.callback_kind is callback_kind
+        assert admission.callback_kind is callback_kind
 
 
 @pytest.mark.asyncio
@@ -1057,19 +1078,24 @@ async def test_only_tool_approval_unknown_event_reaches_durable_acceptance(
         room_for_id=lambda room_id: nio.MatrixRoom(room_id, _PRINCIPAL_ID),
         turn_is_terminal=lambda _event_id: False,
     )
-    client = MagicMock(spec=nio.AsyncClient)
+    client = MagicMock()
     owner = object()
     runner.register_source_callbacks(client, owner=owner)
+    admission = next(
+        callback
+        for callback, event_type in (call.args for call in client.add_event_admission_callback.call_args_list)
+        if event_type is nio.UnknownEvent
+    )
     registered = next(
         callback
         for callback, event_type in (call.args for call in client.add_event_callback.call_args_list)
         if event_type is nio.UnknownEvent
     )
 
-    await registered(
-        nio.MatrixRoom(_ROOM_ID, _PRINCIPAL_ID),
-        _unknown_event("$unknown", event_type),
-    )
+    room = nio.MatrixRoom(_ROOM_ID, _PRINCIPAL_ID)
+    event = _unknown_event("$unknown", event_type)
+    await admission(room, event)
+    await registered(room, event)
     await wait_for_background_tasks(timeout=1.0, owner=owner)
 
     assert attempts == expected_attempts

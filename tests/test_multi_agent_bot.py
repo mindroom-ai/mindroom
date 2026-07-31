@@ -180,6 +180,7 @@ class TestAgentBot(AgentBotTestBase):
         mock_client = AsyncMock()
         # add_event_callback is a sync method, not async
         mock_client.add_event_callback = MagicMock()
+        mock_client.add_event_admission_callback = MagicMock()
         mock_client.add_response_callback = MagicMock()
         mock_login.return_value = mock_client
 
@@ -202,6 +203,7 @@ class TestAgentBot(AgentBotTestBase):
         assert (
             mock_client.add_event_callback.call_count == 15
         )  # invite, message, redaction, reaction, audio, image/file/video, unknown-event, megolm callbacks
+        assert mock_client.add_event_admission_callback.call_count == 13
         registered_event_types = [call.args[1] for call in mock_client.add_event_callback.call_args_list]
         assert nio.MegolmEvent in registered_event_types  # undecryptable events must not vanish silently
         invite_callback = next(
@@ -275,6 +277,7 @@ class TestAgentBot(AgentBotTestBase):
         mock_client = AsyncMock()
         mock_client.user_id = actual_user_id
         mock_client.add_event_callback = MagicMock()
+        mock_client.add_event_admission_callback = MagicMock()
         mock_client.add_response_callback = MagicMock()
         mock_ensure_user.return_value = None
 
@@ -306,6 +309,7 @@ class TestAgentBot(AgentBotTestBase):
         assert bot._turn_controller.deps.matrix_id.full_id == actual_user_id
         mock_init_persistence.assert_called_once_with(runtime_paths_for(config).storage_root)
         assert mock_client.add_event_callback.call_count == 15
+        assert mock_client.add_event_admission_callback.call_count == 13
 
     @pytest.mark.asyncio
     @patch("mindroom.constants.runtime_matrix_homeserver", new=lambda *_args, **_kwargs: "http://localhost:8008")
@@ -385,6 +389,7 @@ class TestAgentBot(AgentBotTestBase):
         call_order: list[str] = []
         mock_client = AsyncMock()
         mock_client.add_event_callback = MagicMock()
+        mock_client.add_event_admission_callback = MagicMock()
         mock_client.add_response_callback = MagicMock()
 
         async def _sync_forever(*_args: object, **_kwargs: object) -> None:

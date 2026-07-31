@@ -157,6 +157,8 @@ def test_router_registers_room_member_callback_after_initial_sync(tmp_path: Path
     bot._register_room_member_callback_after_initial_sync()
     bot._register_room_member_callback_after_initial_sync()
 
+    bot.client.add_event_admission_callback.assert_called_once()
+    assert bot.client.add_event_admission_callback.call_args.args[1] is nio.RoomMemberEvent
     bot.client.add_event_callback.assert_called_once()
     assert bot.client.add_event_callback.call_args.args[1] is nio.RoomMemberEvent
 
@@ -168,6 +170,7 @@ def test_non_router_does_not_register_room_member_callback(tmp_path: Path) -> No
 
     bot._register_room_member_callback_after_initial_sync()
 
+    bot.client.add_event_admission_callback.assert_not_called()
     bot.client.add_event_callback.assert_not_called()
 
 
@@ -832,6 +835,7 @@ async def test_registered_room_member_callback_uses_delivery_time_arming_state(
     bot.client.next_batch = "s_rejected"
     bot.hook_registry = HookRegistry.from_plugins([_plugin("onboarding", [joined])])
     bot._register_room_member_callback_after_initial_sync()
+    room_member_admission = bot.client.add_event_admission_callback.call_args.args[0]
     room_member_callback = bot.client.add_event_callback.call_args.args[0]
     monkeypatch.setattr(
         bot._conversation_cache,
@@ -842,13 +846,17 @@ async def test_registered_room_member_callback_uses_delivery_time_arming_state(
     sync_error.status_code = "M_UNKNOWN_POS"
 
     await bot._on_sync_error(sync_error)
-    await room_member_callback(room, _room_member_event(event_id="$timeline-snapshot"))
+    timeline_event = _room_member_event(event_id="$timeline-snapshot")
+    await room_member_admission(room, timeline_event)
+    await room_member_callback(room, timeline_event)
     await bot._on_sync_response(_sync_response_with_state(room.room_id, []))
     await wait_for_background_tasks(timeout=1.0, owner=bot._runtime_view)
 
     assert seen == []
 
-    await room_member_callback(room, _room_member_event(event_id="$live", user_id="@bob:localhost"))
+    live_event = _room_member_event(event_id="$live", user_id="@bob:localhost")
+    await room_member_admission(room, live_event)
+    await room_member_callback(room, live_event)
     await wait_for_background_tasks(timeout=1.0, owner=bot._runtime_view)
 
     assert seen == ["$live"]
