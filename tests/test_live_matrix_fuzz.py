@@ -61,13 +61,19 @@ class _StaticObservationClient:
         await asyncio.sleep(0.001)
 
 
-def _restart_response(event_id: str, sender: str, source: str) -> dict[str, Any]:
+def _restart_response(
+    event_id: str,
+    sender: str,
+    source: str,
+    *,
+    body: str = "LIVE-FUZZ runtime-generation=replacement END call=1",
+) -> dict[str, Any]:
     return {
         "event_id": event_id,
         "sender": sender,
         "type": "m.room.message",
         "content": {
-            "body": "END call=1",
+            "body": body,
             "m.relates_to": {
                 "rel_type": "m.thread",
                 "event_id": source,
@@ -185,6 +191,18 @@ def test_restart_regression_scenario_is_allowed_and_json_replayable() -> None:
     assert LiveFuzzScenario.from_json(scenario.to_json()) == scenario
 
 
+def test_restart_regression_scenario_rejects_declared_batches_ignored_by_fixed_runner() -> None:
+    """The fixed restart profile must reject operations its runner would ignore."""
+    scenario = LiveFuzzScenario(
+        thread_count=1,
+        batches=((LiveOperation(0, LiveOperationKind.RESTART_MINDROOM, 0, None),),),
+        profile="restart-regression",
+    )
+
+    with pytest.raises(ValueError, match="fixed empty trace"):
+        scenario.validate()
+
+
 def test_restart_regression_evaluator_accepts_pass_and_rejects_bad_directions() -> None:
     """The profile's pure oracle must accept clean evidence and reject old output and prompt overlap."""
     passing = RestartRegressionObservation(
@@ -195,6 +213,7 @@ def test_restart_regression_evaluator_accepts_pass_and_rejects_bad_directions() 
         fresh_agent_output_count=1,
         fresh_router_output_count=0,
         fresh_callback_observed=True,
+        replacement_generation_response_observed=True,
         fresh_prompt_observed=True,
         historical_in_fresh_prompt=False,
         response_callbacks_quiescent=True,
@@ -210,6 +229,7 @@ def test_restart_regression_evaluator_accepts_pass_and_rejects_bad_directions() 
             fresh_agent_output_count=0,
             fresh_router_output_count=1,
             fresh_callback_observed=False,
+            replacement_generation_response_observed=False,
             historical_in_fresh_prompt=True,
             response_callbacks_quiescent=False,
         ),
@@ -220,6 +240,7 @@ def test_restart_regression_evaluator_accepts_pass_and_rejects_bad_directions() 
     assert any("invariant=fresh_agent_response_exactly_once" in failure for failure in failures)
     assert any("invariant=fresh_router_response_suppressed" in failure for failure in failures)
     assert any("invariant=fresh_callback_observed" in failure for failure in failures)
+    assert any("invariant=replacement_generation_response_observed" in failure for failure in failures)
     assert any("invariant=historical_events_absent_from_fresh_prompt" in failure for failure in failures)
     assert any("invariant=response_callbacks_quiescent" in failure for failure in failures)
 
@@ -259,6 +280,48 @@ async def test_restart_regression_does_not_send_fresh_event_before_replacement_b
             await runner._run_restart_regression()
 
         assert dormant.sent_txn_ids == ["restart-old-text", "restart-old-media"]
+    finally:
+        stack.close()
+
+
+@pytest.mark.asyncio
+async def test_restart_regression_boundary_requires_old_runtime_shutdown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Replacement setup is insufficient until both old bot generations report shutdown."""
+    stack = ManagedTuwunelStack()
+    observed_markers: list[tuple[str, ...]] = []
+    try:
+        stack.agent_id, stack.router_id = "@agent:example", "@router:example"
+        monkeypatch.setattr(stack, "add_restart_room", lambda _room_id: None)
+
+        def miss_every_boundary(markers: tuple[str, ...], *_args: object, **_kwargs: object) -> bool:
+            observed_markers.append(markers)
+            return False
+
+        monkeypatch.setattr(stack, "wait_for_log_count", miss_every_boundary)
+        dormant = _RecordingDormantClient()
+        runner = LiveFuzzRunner(
+            stack,
+            (cast("LiveMatrixClient", dormant),),
+            restart_regression_scenario(),
+            reply_timeout=0,
+            settle_seconds=0,
+        )
+
+        with pytest.raises(AssertionError, match="replacement_setup_boundary_reached"):
+            await runner._run_restart_regression()
+
+        assert (
+            "matrix_agent_response_runtime_shutdown",
+            "agent=general",
+            "restart_reason_category=config_reload",
+        ) in observed_markers
+        assert (
+            "matrix_agent_response_runtime_shutdown",
+            "agent=router",
+            "restart_reason_category=config_reload",
+        ) in observed_markers
     finally:
         stack.close()
 
@@ -407,7 +470,10 @@ def test_restart_config_update_atomically_replaces_file(monkeypatch: pytest.Monk
     """The live watcher must never observe a truncated replacement config."""
     stack = ManagedTuwunelStack()
     try:
-        stack.config_path.write_text("agents:\n  general:\n    rooms: [lobby]\n", encoding="utf-8")
+        stack.config_path.write_text(
+            "models:\n  default:\n    id: mindroom-live-fuzz\nagents:\n  general:\n    rooms: [lobby]\n",
+            encoding="utf-8",
+        )
         replacements: list[tuple[Path, Path]] = []
         replace_path = Path.replace
 
@@ -421,6 +487,7 @@ def test_restart_config_update_atomically_replaces_file(monkeypatch: pytest.Monk
 
         assert replacements == [(stack.config_path.with_suffix(".yaml.tmp"), stack.config_path)]
         assert "!restart:example" in stack.config_path.read_text(encoding="utf-8")
+        assert "mindroom-live-fuzz-replacement" in stack.config_path.read_text(encoding="utf-8")
     finally:
         stack.close()
 
@@ -663,6 +730,57 @@ async def test_restart_observation_rejects_router_only_fresh_response(
 
 
 @pytest.mark.asyncio
+async def test_restart_observation_rejects_old_runtime_generation_response(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A leaked old bot response must not satisfy replacement-runtime acceptance."""
+    stack = ManagedTuwunelStack()
+    stop_calls: list[float] = []
+    try:
+        stack.agent_id, stack.router_id = "@agent:example", "@router:example"
+        stack.log_path.write_text(
+            "matrix_event_callback_started !restart:example $fresh\nPreparing agent and prompt $fresh\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(stack, "cached_restart_event_pair_count", lambda _room_id, _event_ids: 4)
+
+        def record_stop(*, timeout: float) -> bool:
+            stop_calls.append(timeout)
+            return True
+
+        monkeypatch.setattr(stack, "stop_mindroom_for_observation", record_stop)
+        dormant = _StaticObservationClient(
+            (
+                _restart_response(
+                    "$old-runtime-response",
+                    stack.agent_id,
+                    "$fresh",
+                    body="LIVE-FUZZ runtime-generation=original END call=1",
+                ),
+            ),
+        )
+        runner = LiveFuzzRunner(
+            stack,
+            (cast("LiveMatrixClient", dormant),),
+            restart_regression_scenario(),
+            reply_timeout=0.05,
+            settle_seconds=0,
+        )
+
+        observation = await runner._wait_for_restart_observation(
+            cast("LiveMatrixClient", dormant),
+            historical_event_ids=("$old-text", "$old-media"),
+            fresh_event_id="$fresh",
+            replacement_boundary_reached=True,
+        )
+
+        assert stop_calls == []
+        assert not observation.response_callbacks_quiescent
+    finally:
+        stack.close()
+
+
+@pytest.mark.asyncio
 async def test_restart_response_index_honors_sender_override() -> None:
     """Agent and router observations must use their explicitly selected sender."""
     stack = ManagedTuwunelStack()
@@ -738,7 +856,7 @@ async def test_restart_observation_rejects_historical_output_arriving_during_cal
             "sender": sender,
             "type": "m.room.message",
             "content": {
-                "body": "END call=1",
+                "body": "LIVE-FUZZ runtime-generation=replacement END call=1",
                 "m.relates_to": {
                     "rel_type": "m.thread",
                     "event_id": source,

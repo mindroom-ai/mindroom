@@ -48,7 +48,11 @@ if TYPE_CHECKING:
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 INSTANCE_REGISTRY = PROJECT_ROOT / "local" / "instances" / "deploy" / "instances.json"
 MODEL_ID = "mindroom-live-fuzz"
+RESTART_MODEL_ID = "mindroom-live-fuzz-replacement"
+ORIGINAL_RUNTIME_GENERATION_MARKER = "runtime-generation=original"
+REPLACEMENT_RUNTIME_GENERATION_MARKER = "runtime-generation=replacement"
 AGENT_NAME = "general"
+ROUTER_NAME = "router"
 ROOM_KEY = "lobby"
 RESTART_SEED = 20_260_729
 RESTART_SHUTDOWN_FAILURE_MARKERS = (
@@ -116,6 +120,7 @@ class RestartRegressionObservation:
     fresh_agent_output_count: int
     fresh_router_output_count: int
     fresh_callback_observed: bool
+    replacement_generation_response_observed: bool
     fresh_prompt_observed: bool
     historical_in_fresh_prompt: bool
     response_callbacks_quiescent: bool
@@ -130,6 +135,7 @@ class _RestartEvidence:
     fresh_agent_output_count: int
     fresh_router_output_count: int
     fresh_callback_observed: bool
+    replacement_generation_response_observed: bool
     cached_event_pair_count: int
     fresh_prompt_observed: bool
     historical_in_fresh_prompt: bool
@@ -206,6 +212,14 @@ def evaluate_restart_regression(observation: RestartRegressionObservation) -> tu
         (
             "fresh_callback_observed",
             observation.fresh_callback_observed,
+            True,
+            "fresh_user",
+            "replacement_startup",
+            4,
+        ),
+        (
+            "replacement_generation_response_observed",
+            observation.replacement_generation_response_observed,
             True,
             "fresh_user",
             "replacement_startup",
@@ -332,9 +346,8 @@ class LiveFuzzScenario:
         if self.thread_count < 1:
             msg = "live Matrix fuzz trace must contain at least one thread"
             raise ValueError(msg)
-        if self.profile not in {"fuzz", "restart-regression", "saturation"}:
-            msg = f"unsupported live Matrix fuzz profile {self.profile!r}"
-            raise ValueError(msg)
+        if _validate_live_scenario_profile(self):
+            return
         known_events = {f"root:{thread}" for thread in range(self.thread_count)}
         known_responses = {f"response:root:{thread}" for thread in range(self.thread_count)}
         message_events = set(known_events)
@@ -386,6 +399,19 @@ class LiveFuzzScenario:
             known_events.update(new_events)
             known_responses.update(new_responses)
             message_events.update(new_messages)
+
+
+def _validate_live_scenario_profile(scenario: LiveFuzzScenario) -> bool:
+    """Validate profile-specific shape and report whether the trace is fixed."""
+    if scenario.profile not in {"fuzz", "restart-regression", "saturation"}:
+        msg = f"unsupported live Matrix fuzz profile {scenario.profile!r}"
+        raise ValueError(msg)
+    if scenario.profile != "restart-regression":
+        return False
+    if scenario.thread_count != 1 or scenario.batches:
+        msg = "restart-regression profile requires its fixed empty trace"
+        raise ValueError(msg)
+    return True
 
 
 def restart_regression_scenario() -> LiveFuzzScenario:
@@ -656,7 +682,14 @@ class _ModelHandler(BaseHTTPRequestHandler):
             self._send_json(
                 {
                     "object": "list",
-                    "data": [{"id": MODEL_ID, "object": "model", "owned_by": "mindroom-fuzz"}],
+                    "data": [
+                        {"id": MODEL_ID, "object": "model", "owned_by": "mindroom-fuzz"},
+                        {
+                            "id": RESTART_MODEL_ID,
+                            "object": "model",
+                            "owned_by": "mindroom-fuzz",
+                        },
+                    ],
                 },
             )
             return
@@ -669,7 +702,12 @@ class _ModelHandler(BaseHTTPRequestHandler):
         content_length = int(self.headers.get("Content-Length", "0"))
         payload = json.loads(self.rfile.read(content_length))
         call_id = next(self.call_ids)
-        content = self._response_text(call_id)
+        generation_marker = (
+            REPLACEMENT_RUNTIME_GENERATION_MARKER
+            if payload.get("model") == RESTART_MODEL_ID
+            else ORIGINAL_RUNTIME_GENERATION_MARKER
+        )
+        content = self._response_text(call_id, generation_marker)
         if payload.get("stream") is True:
             self._send_stream(call_id, content)
             return
@@ -691,9 +729,9 @@ class _ModelHandler(BaseHTTPRequestHandler):
         )
 
     @classmethod
-    def _response_text(cls, call_id: int) -> str:
+    def _response_text(cls, call_id: int, generation_marker: str) -> str:
         segments = " ".join(f"segment-{index:03d}" for index in range(cls.stream_segments))
-        return f"LIVE-FUZZ call={call_id} {segments} END call={call_id}"
+        return f"LIVE-FUZZ call={call_id} {generation_marker} {segments} END call={call_id}"
 
     def _send_stream(self, call_id: int, content: str) -> None:
         self.send_response(HTTPStatus.OK)
@@ -899,6 +937,7 @@ class ManagedTuwunelStack:
         """Trigger a real entity replacement that adds one dormant room."""
         config = yaml.safe_load(self.config_path.read_text(encoding="utf-8"))
         config["agents"][AGENT_NAME]["rooms"].append(room_id)
+        config["models"]["default"]["id"] = RESTART_MODEL_ID
         staged_path = self.config_path.with_suffix(".yaml.tmp")
         staged_path.write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
         staged_path.replace(self.config_path)
@@ -1413,6 +1452,16 @@ class LiveFuzzRunner:
             },
         )
         lifecycle_markers = (
+            (
+                "matrix_agent_response_runtime_shutdown",
+                f"agent={AGENT_NAME}",
+                "restart_reason_category=config_reload",
+            ),
+            (
+                "matrix_agent_response_runtime_shutdown",
+                f"agent={ROUTER_NAME}",
+                "restart_reason_category=config_reload",
+            ),
             ("agent_setup_complete", self.stack.agent_id),
             ("agent_setup_complete", self.stack.router_id),
             ("configuration_update_complete",),
@@ -1509,14 +1558,12 @@ class LiveFuzzRunner:
         )
         fresh_agent_response_ids = agent.get(fresh_event_id, set())
         fresh_router_response_ids = router.get(fresh_event_id, set())
+        fresh_response_body = self._latest_event_body(
+            events,
+            next(iter(fresh_agent_response_ids), ""),
+        )
         fresh_response_complete = (
-            len(fresh_agent_response_ids) == 1
-            and not fresh_router_response_ids
-            and "END call="
-            in self._latest_event_body(
-                events,
-                next(iter(fresh_agent_response_ids), ""),
-            )
+            len(fresh_agent_response_ids) == 1 and not fresh_router_response_ids and "END call=" in fresh_response_body
         )
         return _RestartEvidence(
             historical_output_counts=(historical_output_counts[0], historical_output_counts[1]),
@@ -1529,6 +1576,7 @@ class LiveFuzzRunner:
                 fresh_event_id,
             )
             > 0,
+            replacement_generation_response_observed=(REPLACEMENT_RUNTIME_GENERATION_MARKER in fresh_response_body),
             cached_event_pair_count=cached_event_pair_count,
             fresh_prompt_observed=fresh_prompt_observed,
             historical_in_fresh_prompt=historical_in_fresh_prompt,
@@ -1551,6 +1599,7 @@ class LiveFuzzRunner:
             fresh_agent_output_count=0,
             fresh_router_output_count=0,
             fresh_callback_observed=False,
+            replacement_generation_response_observed=False,
             cached_event_pair_count=0,
             fresh_prompt_observed=False,
             historical_in_fresh_prompt=False,
@@ -1572,6 +1621,7 @@ class LiveFuzzRunner:
                 and evidence.fresh_agent_output_count == 1
                 and evidence.fresh_router_output_count == 0
                 and evidence.fresh_callback_observed
+                and evidence.replacement_generation_response_observed
                 and evidence.fresh_prompt_observed
                 and evidence.fresh_response_complete
             )
@@ -1607,6 +1657,7 @@ class LiveFuzzRunner:
             fresh_agent_output_count=evidence.fresh_agent_output_count,
             fresh_router_output_count=evidence.fresh_router_output_count,
             fresh_callback_observed=evidence.fresh_callback_observed,
+            replacement_generation_response_observed=evidence.replacement_generation_response_observed,
             fresh_prompt_observed=evidence.fresh_prompt_observed,
             historical_in_fresh_prompt=evidence.historical_in_fresh_prompt,
             response_callbacks_quiescent=response_callbacks_quiescent,

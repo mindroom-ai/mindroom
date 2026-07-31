@@ -59,6 +59,7 @@ The saturation profile uses a 180-second per-reply deadline because its slow 12-
 The `restart-regression` profile is a manual opt-in oracle for the agent and router replacement caused by a real `config.yaml` hot reload.
 It creates a dormant public room, writes explicitly agent-mentioned historical text and media there, then adds that room to the managed agent configuration.
 The run sends the fresh request only after both replacement principals complete setup, the configuration update completes, and both principals durably cache both historical events.
+It also requires config-reload shutdown evidence for both old bot generations and changes the deterministic model ID during reload so only the replacement generation can emit the accepted response marker.
 It then uses the runtime's orderly callback and response drain as a quiescence boundary before the final Matrix audit.
 The run passes only after both principals cache both historical events, neither exact historical event starts a callback, and the exact fresh event starts a callback.
 The agent-mentioned fresh request must produce exactly one agent response and no router response, no historical event may reach the fresh prompt or produce output, and checkpoint-discard plus incomplete-drain markers must remain absent before and after the bounded quiescence drain.
