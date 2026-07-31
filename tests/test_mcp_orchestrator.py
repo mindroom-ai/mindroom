@@ -19,7 +19,7 @@ from mindroom.mcp.manager import MCPServerManager
 from mindroom.orchestration.config_updates import ConfigUpdatePlan, build_config_update_plan
 from mindroom.orchestration.runtime import EntityStartResults
 from mindroom.orchestrator import _MultiAgentOrchestrator
-from tests.identity_helpers import persist_entity_accounts
+from tests.identity_helpers import agent_matrix_user, persist_entity_accounts
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -679,16 +679,16 @@ async def test_mcp_catalog_replacement_recovers_interrupted_rooms(tmp_path: Path
     orchestrator.running = True
     old_code_bot = MagicMock(spec=AgentBot)
     old_code_bot.pending_sync_restart_retry_room_ids = frozenset()
-    old_code_bot.agent_user = MagicMock(user_id="@code:example.org")
+    old_code_bot.agent_user = agent_matrix_user("code")
     old_team_bot = MagicMock(spec=AgentBot)
     old_team_bot.running = False
     old_team_bot.pending_sync_restart_retry_room_ids = frozenset()
-    old_team_bot.agent_user = MagicMock(user_id="@dev_team:example.org")
+    old_team_bot.agent_user = agent_matrix_user("dev_team")
     new_code_bot = MagicMock(spec=AgentBot)
     new_code_bot.agent_name = "code"
     new_code_bot.running = True
     new_code_bot.client = MagicMock()
-    new_code_bot.agent_user = MagicMock(user_id="@code:example.org")
+    new_code_bot.agent_user = agent_matrix_user("code")
     router_bot = MagicMock(spec=AgentBot)
     router_bot.running = True
     router_bot.client = MagicMock()
@@ -733,7 +733,7 @@ async def test_router_restart_unbinds_external_trigger_runtime_before_stop_and_s
     orchestrator.config = config
     router_bot = MagicMock(spec=AgentBot)
     router_bot.running = False
-    router_bot.agent_user = MagicMock(user_id="@router:example.org")
+    router_bot.agent_user = agent_matrix_user("router")
     router_bot.pending_sync_restart_retry_room_ids = frozenset()
     orchestrator.agent_bots = {ROUTER_AGENT_NAME: router_bot}
     order: list[str] = []
@@ -809,7 +809,7 @@ async def test_external_trigger_target_restart_unbinds_runtime_before_stop(tmp_p
         ROUTER_AGENT_NAME: router_bot,
         "code": code_bot,
     }
-    orchestrator.agent_bots["code"].agent_user = MagicMock(user_id="@code:example.org")
+    orchestrator.agent_bots["code"].agent_user = agent_matrix_user("code")
     orchestrator.agent_bots["code"].pending_sync_restart_retry_room_ids = frozenset()
     order: list[str] = []
     external_trigger_runtime_bound = True
@@ -869,12 +869,12 @@ async def test_entity_replacement_recovers_rooms_after_old_bot_is_removed(
     orchestrator.config = config
     old_bot = MagicMock(spec=AgentBot)
     old_bot.pending_sync_restart_retry_room_ids = frozenset()
-    old_bot.agent_user = MagicMock(user_id="@code:example.org")
+    old_bot.agent_user = agent_matrix_user("code")
     new_bot = MagicMock(spec=AgentBot)
     new_bot.agent_name = "code"
     new_bot.running = True
     new_bot.client = MagicMock()
-    new_bot.agent_user = MagicMock(user_id="@code:example.org")
+    new_bot.agent_user = agent_matrix_user("code")
     router_bot = MagicMock(spec=AgentBot)
     router_bot.running = True
     router_bot.client = MagicMock()
@@ -941,7 +941,7 @@ async def test_removed_entity_discards_prepop_recovery_owner(
     orchestrator.config = config
     old_bot = MagicMock(spec=AgentBot)
     old_bot.pending_sync_restart_retry_room_ids = frozenset()
-    old_bot.agent_user = MagicMock(user_id="@code:example.org")
+    old_bot.agent_user = agent_matrix_user("code")
     orchestrator.agent_bots = {"code": old_bot}
     plan = ConfigUpdatePlan(
         new_config=Config.validate_with_runtime({}, _runtime_paths(tmp_path)),
@@ -988,12 +988,12 @@ async def test_mcp_prestop_captures_rooms_before_old_bot_is_removed(tmp_path: Pa
     orchestrator.config = current_config
     old_bot = MagicMock(spec=AgentBot)
     old_bot.pending_sync_restart_retry_room_ids = frozenset()
-    old_bot.agent_user = MagicMock(user_id="@code:example.org")
+    old_bot.agent_user = agent_matrix_user("code")
     new_bot = MagicMock(spec=AgentBot)
     new_bot.agent_name = "code"
     new_bot.running = True
     new_bot.client = MagicMock()
-    new_bot.agent_user = MagicMock(user_id="@code:example.org")
+    new_bot.agent_user = agent_matrix_user("code")
     router_bot = MagicMock(spec=AgentBot)
     router_bot.running = True
     router_bot.client = MagicMock()
@@ -1080,7 +1080,7 @@ async def test_mcp_prestop_discards_removed_prepop_recovery_owner(
     orchestrator.config = current_config
     old_bot = MagicMock(spec=AgentBot)
     old_bot.pending_sync_restart_retry_room_ids = frozenset()
-    old_bot.agent_user = MagicMock(user_id="@code:example.org")
+    old_bot.agent_user = agent_matrix_user("code")
     orchestrator.agent_bots = {"code": old_bot}
 
     async def stop_removed_bot(
@@ -1129,7 +1129,7 @@ async def test_apply_config_update_plan_unbinds_runtime_before_restarted_entity_
         ROUTER_AGENT_NAME: router_bot,
         "code": code_bot,
     }
-    orchestrator.agent_bots["code"].agent_user = MagicMock(user_id="@code:example.org")
+    orchestrator.agent_bots["code"].agent_user = agent_matrix_user("code")
     orchestrator.agent_bots["code"].pending_sync_restart_retry_room_ids = frozenset()
     plan = ConfigUpdatePlan(
         new_config=new_config,
@@ -1226,7 +1226,7 @@ async def test_apply_config_update_plan_rebinds_trigger_runtime_after_support_se
         ROUTER_AGENT_NAME: router_bot,
         "code": code_bot,
     }
-    orchestrator.agent_bots["code"].agent_user = MagicMock(user_id="@code:example.org")
+    orchestrator.agent_bots["code"].agent_user = agent_matrix_user("code")
     orchestrator.agent_bots["code"].pending_sync_restart_retry_room_ids = frozenset()
     plan = ConfigUpdatePlan(
         new_config=new_config,
@@ -1297,7 +1297,7 @@ async def test_router_removal_unbinds_external_trigger_runtime_before_cleanup(tm
         order.append("cleanup")
 
     router_bot = MagicMock(spec=AgentBot)
-    router_bot.agent_user = MagicMock(user_id="@router:example.org")
+    router_bot.agent_user = agent_matrix_user("router")
     router_bot.cleanup = AsyncMock(side_effect=cleanup)
     orchestrator.agent_bots = {ROUTER_AGENT_NAME: router_bot}
 
@@ -1387,7 +1387,7 @@ async def test_update_config_stops_mcp_entities_before_syncing_manager(tmp_path:
         ROUTER_AGENT_NAME: MagicMock(spec=AgentBot),
         "code": MagicMock(spec=AgentBot),
     }
-    orchestrator.agent_bots["code"].agent_user = MagicMock(user_id="@code:example.org")
+    orchestrator.agent_bots["code"].agent_user = agent_matrix_user("code")
     orchestrator.agent_bots["code"].pending_sync_restart_retry_room_ids = frozenset()
     updated_config = Config.validate_with_runtime(
         {

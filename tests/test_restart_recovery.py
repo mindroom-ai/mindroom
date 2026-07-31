@@ -50,6 +50,7 @@ from tests.conftest import (
     delivered_matrix_side_effect,
     test_runtime_paths,
 )
+from tests.identity_helpers import agent_matrix_user
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -2963,7 +2964,7 @@ def test_orchestrator_recovery_owner_uses_live_room_scope_without_disk_read(
     client = MagicMock(spec=nio.AsyncClient)
     bot = MagicMock(spec=AgentBot)
     bot.agent_name = "code"
-    bot.agent_user = MagicMock(user_id="@code:example.org")
+    bot.agent_user = agent_matrix_user("code")
     bot.client = client
     bot.rooms = ["!configured:example.org"]
     bot.running = True
