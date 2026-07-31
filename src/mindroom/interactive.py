@@ -115,6 +115,7 @@ class InteractiveSelection:
     selected_label: str
     selected_value: str
     thread_id: str | None
+    claimed_question: _InteractiveQuestion | None = field(default=None, compare=False, repr=False)
 
 
 # Track active interactive questions by event_id
@@ -126,6 +127,7 @@ _persistence_lock_file: Path | None = None
 _thread_lock = threading.RLock()
 _dirty_question_ids: set[str] = set()
 _deleted_question_ids: set[str] = set()
+_claimed_question_ids: set[str] = set()
 
 # Constants
 # Match interactive code blocks
@@ -232,7 +234,9 @@ def _write_active_questions_atomically_locked(questions: dict[str, _InteractiveQ
 def _replace_active_questions_locked(questions: dict[str, _InteractiveQuestion]) -> None:
     """Replace in-memory state after a successful load or save."""
     global _active_questions
-    _active_questions = questions
+    _active_questions = {
+        event_id: question for event_id, question in questions.items() if event_id not in _claimed_question_ids
+    }
     _dirty_question_ids.clear()
     _deleted_question_ids.clear()
 
@@ -240,7 +244,9 @@ def _replace_active_questions_locked(questions: dict[str, _InteractiveQuestion])
 def _set_active_questions_locked(questions: dict[str, _InteractiveQuestion]) -> None:
     """Replace the in-memory snapshot without clearing pending local changes."""
     global _active_questions
-    _active_questions = questions
+    _active_questions = {
+        event_id: question for event_id, question in questions.items() if event_id not in _claimed_question_ids
+    }
 
 
 def _store_active_question_locked(event_id: str, question: _InteractiveQuestion) -> None:
@@ -258,6 +264,47 @@ def _remove_active_question_locked(event_id: str) -> bool:
     _dirty_question_ids.discard(event_id)
     _deleted_question_ids.add(event_id)
     return True
+
+
+def _copy_question(question: _InteractiveQuestion) -> _InteractiveQuestion:
+    """Return an isolated snapshot suitable for restoring one failed claim."""
+    return _InteractiveQuestion(
+        room_id=question.room_id,
+        thread_id=question.thread_id,
+        options=dict(question.options),
+        creator_agent=question.creator_agent,
+        question_text=question.question_text,
+        option_labels=dict(question.option_labels),
+        created_at=question.created_at,
+    )
+
+
+def commit_selection(selection: InteractiveSelection) -> None:
+    """Durably consume a question after its selected turn reaches terminal truth."""
+    if selection.claimed_question is None:
+        return
+    with _thread_lock:
+        if _persistence_file is not None and _persistence_lock_file is not None:
+            _persistence_file.parent.mkdir(parents=True, exist_ok=True)
+            with advisory_file_lock(_persistence_lock_file):
+                persisted_questions = _load_persisted_questions()
+                persisted_questions.pop(selection.question_event_id, None)
+                _write_active_questions_atomically_locked(persisted_questions)
+        _claimed_question_ids.discard(selection.question_event_id)
+        _dirty_question_ids.discard(selection.question_event_id)
+        _deleted_question_ids.discard(selection.question_event_id)
+
+
+def restore_selection(selection: InteractiveSelection) -> None:
+    """Restore an in-process question claim after retryable selection failure."""
+    question = selection.claimed_question
+    if question is None:
+        return
+    with _thread_lock:
+        _claimed_question_ids.discard(selection.question_event_id)
+        if selection.question_event_id in _active_questions:
+            return
+        _store_active_question_locked(selection.question_event_id, _copy_question(question))
 
 
 def _apply_local_changes_locked(
@@ -501,9 +548,11 @@ async def handle_reaction(
                 value=selected_value,
             )
 
-        # The emoji reaction itself is the user's response, so just consume the question.
-        if _remove_active_question_locked(event.reacts_to):
-            _save_active_questions_locked()
+        # Remove in-memory to exclude concurrent selections, but defer the durable
+        # deletion until the selected turn reaches terminal truth.
+        claimed_question = _copy_question(question)
+        del _active_questions[event.reacts_to]
+        _claimed_question_ids.add(event.reacts_to)
 
         return InteractiveSelection(
             question_event_id=event.reacts_to,
@@ -512,6 +561,7 @@ async def handle_reaction(
             selected_label=selected_label,
             selected_value=selected_value,
             thread_id=question.thread_id,
+            claimed_question=claimed_question,
         )
 
 
@@ -584,8 +634,9 @@ def _handle_text_response_locked(
                 text=message_text,
                 value=selected_value,
             )
-        if _remove_active_question_locked(question_event_id):
-            _save_active_questions_locked()
+        claimed_question = _copy_question(question)
+        del _active_questions[question_event_id]
+        _claimed_question_ids.add(question_event_id)
         return InteractiveSelection(
             question_event_id=question_event_id,
             question_text=question.question_text,
@@ -593,6 +644,7 @@ def _handle_text_response_locked(
             selected_label=selected_label,
             selected_value=selected_value,
             thread_id=question.thread_id,
+            claimed_question=claimed_question,
         )
     return None
 
@@ -865,5 +917,6 @@ def _cleanup() -> None:
         _active_questions.clear()
         _dirty_question_ids.clear()
         _deleted_question_ids.clear()
+        _claimed_question_ids.clear()
         _persistence_file = None
         _persistence_lock_file = None

@@ -13,7 +13,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
-from typing import TypeVar
+from typing import TypeVar, cast
 
 import nio
 from typing_extensions import TypeIs
@@ -30,6 +30,7 @@ _SQLITE_BUSY_TIMEOUT_MILLISECONDS = 5_000
 _RETRY_INITIAL_DELAY_SECONDS = 1.0
 _RETRY_MAX_DELAY_SECONDS = 30.0
 _TOOL_APPROVAL_RESPONSE_EVENT_TYPE = "io.mindroom.tool_approval_response"
+_RECOVERY_SECURITY_METADATA_KEY = "io.mindroom.dispatch_recovery_security"
 _StoreResult = TypeVar("_StoreResult")
 
 
@@ -584,6 +585,7 @@ async def _run_owned_store_operation(
             except Exception as exc:
                 worker_error = exc
         if worker_error is not None:
+            # Cancellation remains primary, while the drained durable-write failure stays inspectable as its cause.
             raise cancellation from worker_error
         raise
 
@@ -595,10 +597,50 @@ def _invite_source_event_id(room_id: str, event_source_json: str) -> str:
 
 def _dispatch_event_source(event: _DispatchEvent) -> dict[str, object]:
     source = dict(event.source)
+    source.pop(_RECOVERY_SECURITY_METADATA_KEY, None)
+    if isinstance(event, nio.Event) and event.decrypted:
+        source[_RECOVERY_SECURITY_METADATA_KEY] = {
+            "decrypted": True,
+            "verified": event.verified,
+            "sender_key": event.sender_key,
+            "session_id": event.session_id,
+        }
     if isinstance(event, nio.InviteMemberEvent):
         # nio pops content while parsing invites, so restore it for stable durable replay keys.
         source["content"] = dict(event.content)
     return source
+
+
+def _apply_recovery_security_metadata(
+    event: nio.Event,
+    metadata: object,
+    *,
+    room_id: str,
+    source_event_id: str,
+) -> None:
+    """Restore nio facts attached after a decrypted payload was parsed."""
+    if metadata is None:
+        return
+    if not isinstance(metadata, dict):
+        msg = f"corrupt dispatch obligation event {source_event_id!r}/security metadata"
+        raise _DispatchObligationCorruptionError(msg)
+    metadata_dict = cast("dict[str, object]", metadata)
+    verified = metadata_dict.get("verified")
+    sender_key = metadata_dict.get("sender_key")
+    session_id = metadata_dict.get("session_id")
+    if (
+        metadata_dict.get("decrypted") is not True
+        or not isinstance(verified, bool)
+        or (sender_key is not None and not isinstance(sender_key, str))
+        or (session_id is not None and not isinstance(session_id, str))
+    ):
+        msg = f"corrupt dispatch obligation event {source_event_id!r}/security metadata"
+        raise _DispatchObligationCorruptionError(msg)
+    event.decrypted = True
+    event.verified = verified
+    event.sender_key = sender_key
+    event.session_id = session_id
+    vars(event)["room_id"] = room_id
 
 
 def _dispatch_source_event_id(
@@ -634,14 +676,22 @@ def _parse_recovery_event(obligation: _DispatchObligation) -> _DispatchEvent:
             msg = f"corrupt dispatch obligation event {obligation.source_event_id!r}/'invite'"
             raise _DispatchObligationCorruptionError(msg)
         return event
+    event_source = dict(obligation.event_source)
+    security_metadata = event_source.pop(_RECOVERY_SECURITY_METADATA_KEY, None)
     event = (
-        parse_matrix_media_event_source(obligation.event_source)
+        parse_matrix_media_event_source(event_source)
         if obligation.callback_kind is DispatchCallbackKind.MEDIA
-        else nio.Event.parse_event(dict(obligation.event_source))
+        else nio.Event.parse_event(event_source)
     )
     if not isinstance(event, nio.Event) or event.event_id != obligation.source_event_id:
         msg = f"corrupt dispatch obligation event {obligation.source_event_id!r}/{obligation.callback_kind.value!r}"
         raise _DispatchObligationCorruptionError(msg)
+    _apply_recovery_security_metadata(
+        event,
+        security_metadata,
+        room_id=obligation.room_id,
+        source_event_id=obligation.source_event_id,
+    )
     return event
 
 
@@ -774,6 +824,9 @@ class DispatchObligationRunner:
     _retry_keys: dict[_DispatchObligationKey, int] = field(default_factory=dict, init=False, repr=False)
     _retry_corrupt: set[_DispatchObligationKey] = field(default_factory=set, init=False, repr=False)
     _retry_task: asyncio.Task[None] | None = field(default=None, init=False, repr=False)
+    _event_loop: asyncio.AbstractEventLoop | None = field(default=None, init=False, repr=False)
+    _turn_settlement_retry_ids: set[str] = field(default_factory=set, init=False, repr=False)
+    _turn_settlement_retry_task: asyncio.Task[None] | None = field(default=None, init=False, repr=False)
 
     @staticmethod
     def callbacks_for(
@@ -816,21 +869,86 @@ class DispatchObligationRunner:
             owner=owner,
         )
 
-    def retry_pending_turn_sources(
+    def retry_pending_turn_source(
         self,
-        source_event_ids: tuple[str, ...],
+        source_event_id: str,
+        callback_kind: DispatchCallbackKind,
     ) -> None:
-        """Return deferred turn sources to exact stored callback retry ownership."""
-        for source_event_id in source_event_ids:
-            for callback_kind in _TURN_BACKED_KINDS:
-                self._schedule_retry(
-                    _DispatchObligationKey(
-                        principal_id=self.store.principal_id,
-                        entity_name=self.store.entity_name,
-                        source_event_id=source_event_id,
-                        callback_kind=callback_kind,
-                    ),
+        """Return one deferred turn source to its exact stored callback owner."""
+        if callback_kind not in _TURN_BACKED_KINDS:
+            msg = "Deferred turn retry requires a message or media callback kind"
+            raise ValueError(msg)
+        self._schedule_retry(
+            _DispatchObligationKey(
+                principal_id=self.store.principal_id,
+                entity_name=self.store.entity_name,
+                source_event_id=source_event_id,
+                callback_kind=callback_kind,
+            ),
+        )
+
+    def bind_event_loop(self) -> None:
+        """Bind the active runtime loop for callbacks arriving from persistence workers."""
+        self._event_loop = asyncio.get_running_loop()
+
+    def retry_turn_settlement(self, source_event_ids: tuple[str, ...]) -> None:
+        """Retry failed TurnStore compaction on the active runtime loop."""
+        try:
+            running_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            running_loop = None
+        if running_loop is None:
+            event_loop = self._event_loop
+            if event_loop is None or event_loop.is_closed():
+                logger.error(
+                    "turn_dispatch_obligation_retry_loop_unavailable",
+                    source_event_ids=source_event_ids,
                 )
+                return
+            event_loop.call_soon_threadsafe(self._enqueue_turn_settlement_retry, source_event_ids)
+            return
+        self._event_loop = running_loop
+        self._enqueue_turn_settlement_retry(source_event_ids)
+
+    def _enqueue_turn_settlement_retry(self, source_event_ids: tuple[str, ...]) -> None:
+        """Add exact terminal sources to the loop-owned settlement retry set."""
+        self._turn_settlement_retry_ids.update(source_event_ids)
+        retry_task = self._turn_settlement_retry_task
+        if retry_task is not None and not retry_task.done():
+            return
+        self._turn_settlement_retry_task = create_background_task(
+            self._retry_failed_turn_settlements(),
+            name=f"retry_turn_dispatch_settlement_{self.store.entity_name}",
+            owner=self.background_task_owner,
+        )
+
+    async def _retry_failed_turn_settlements(self) -> None:
+        """Retry terminal TurnStore compaction with capped backoff until it lands."""
+        retry_delay_seconds = self._retry_initial_delay_seconds
+        try:
+            while self._turn_settlement_retry_ids:
+                await asyncio.sleep(retry_delay_seconds)
+                source_event_ids = tuple(self._turn_settlement_retry_ids)
+                try:
+                    await _run_owned_store_operation(
+                        self.store.settle_pending_from_turn_store,
+                        source_event_ids,
+                    )
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    logger.exception(
+                        "turn_dispatch_obligation_settlement_retry_failed",
+                        source_event_ids=source_event_ids,
+                    )
+                else:
+                    self._turn_settlement_retry_ids.difference_update(source_event_ids)
+                retry_delay_seconds = min(
+                    retry_delay_seconds * 2,
+                    self._retry_max_delay_seconds,
+                )
+        finally:
+            self._turn_settlement_retry_task = None
 
     def admission_callback(
         self,
@@ -931,6 +1049,7 @@ class DispatchObligationRunner:
         callback_kind: DispatchCallbackKind,
     ) -> _DispatchObligation | None:
         """Persist exact work before its background task may be created."""
+        self._event_loop = asyncio.get_running_loop()
         try:
             obligation = self._obligation_for_event(room, event, callback_kind)
             if await self._settle_from_turn_store_if_owned(obligation):
@@ -975,6 +1094,15 @@ class DispatchObligationRunner:
             event_source=event_source,
         )
 
+    def source_event_id_for(
+        self,
+        room: nio.MatrixRoom,
+        event: _DispatchEvent,
+        callback_kind: DispatchCallbackKind,
+    ) -> str:
+        """Return the exact durable source identity for logging one callback."""
+        return self._obligation_for_event(room, event, callback_kind).source_event_id
+
     async def run_admitted(
         self,
         room: nio.MatrixRoom,
@@ -1009,6 +1137,7 @@ class DispatchObligationRunner:
 
     async def recover_pending(self, *, turn_backed: bool | None = None) -> None:
         """Retry every valid pending callback without waiting for another sync response."""
+        self._event_loop = asyncio.get_running_loop()
         failed_keys: list[_DispatchObligationKey] = []
         for obligation in await asyncio.to_thread(self.store.pending):
             if turn_backed is not None and (obligation.callback_kind in _TURN_BACKED_KINDS) != turn_backed:
@@ -1216,12 +1345,11 @@ class _DispatchObligationTaskWrapper:
         except asyncio.CancelledError:
             return
         except Exception:
-            obligation = self.runner._obligation_for_event(room, event, self.callback_kind)
             logger.exception(
                 "dispatch_obligation_callback_failed",
-                source_event_id=obligation.source_event_id,
-                callback_kind=obligation.callback_kind.value,
-                room_id=obligation.room_id,
+                source_event_id=self.runner.source_event_id_for(room, event, self.callback_kind),
+                callback_kind=self.callback_kind.value,
+                room_id=room.room_id,
             )
 
 

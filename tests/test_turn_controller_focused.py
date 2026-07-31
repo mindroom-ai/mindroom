@@ -1914,12 +1914,13 @@ async def test_interactive_selection_without_response_stays_retryable(config: Co
         thread_id="$thread-root:localhost",
     )
 
-    await harness.controller.handle_interactive_selection(
-        room,
-        selection=selection,
-        user_id=_SENDER,
-        source_event_id="$selection:localhost",
-    )
+    with pytest.raises(RuntimeError, match="no durable terminal outcome"):
+        await harness.controller.handle_interactive_selection(
+            room,
+            selection=selection,
+            user_id=_SENDER,
+            source_event_id="$selection:localhost",
+        )
 
     assert len(harness.runner.requests) == 1
     assert harness.turn_store.is_handled(selection.question_event_id) is False

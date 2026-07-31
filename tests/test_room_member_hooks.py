@@ -207,7 +207,7 @@ async def test_router_emits_room_member_joined_once_per_room_user(tmp_path: Path
 def test_room_member_marker_returns_normally_or_raises_without_boolean_status(tmp_path: Path) -> None:
     """A duplicate marker is successful idempotence, not a false write result."""
     bot = _router_bot(tmp_path)
-    join = room_member_joins.room_member_join_from_event(
+    join = room_member_joins._room_member_join_from_event(
         _room(),
         _room_member_event(),
         config=bot.config,
@@ -215,11 +215,11 @@ def test_room_member_marker_returns_normally_or_raises_without_boolean_status(tm
     )
     assert join is not None
 
-    first_result = room_member_joins.record_room_member_join_seen(
+    first_result = room_member_joins._record_room_member_join_seen(
         bot.runtime_paths.storage_root,
         join,
     )
-    duplicate_result = room_member_joins.record_room_member_join_seen(
+    duplicate_result = room_member_joins._record_room_member_join_seen(
         bot.runtime_paths.storage_root,
         join,
     )
@@ -234,7 +234,7 @@ def test_room_member_marker_fsyncs_payload_and_directory(
 ) -> None:
     """A completed hook marker must survive the same crash as its certified checkpoint."""
     bot = _router_bot(tmp_path)
-    join = room_member_joins.room_member_join_from_event(
+    join = room_member_joins._room_member_join_from_event(
         _room(),
         _room_member_event(),
         config=bot.config,
@@ -248,7 +248,7 @@ def test_room_member_marker_fsyncs_payload_and_directory(
 
     monkeypatch.setattr("mindroom.durable_write.os.fsync", track_fsync)
 
-    room_member_joins.record_room_member_join_seen(
+    room_member_joins._record_room_member_join_seen(
         bot.runtime_paths.storage_root,
         join,
     )
@@ -536,12 +536,12 @@ async def test_sync_state_baseline_markers_batch_one_worker_write(
 
     assert len(save_threads) == 1
     assert save_threads[0] != event_loop_thread
-    assert room_member_joins.room_member_join_is_seen(
+    assert room_member_joins._room_member_join_is_seen(
         bot.runtime_paths.storage_root,
         room_id=room.room_id,
         user_id="@alice:localhost",
     )
-    assert room_member_joins.room_member_join_is_seen(
+    assert room_member_joins._room_member_join_is_seen(
         bot.runtime_paths.storage_root,
         room_id=room.room_id,
         user_id="@bob:localhost",
@@ -571,7 +571,7 @@ async def test_sync_state_marker_update_waits_for_live_marker_lock(tmp_path: Pat
         bot._room_member_join_lock.release()
         await marker_task
 
-    assert room_member_joins.room_member_join_is_seen(
+    assert room_member_joins._room_member_join_is_seen(
         bot.runtime_paths.storage_root,
         room_id=room.room_id,
         user_id="@alice:localhost",
@@ -836,7 +836,12 @@ async def test_unknown_pos_resync_does_not_emit_room_member_joined_snapshot(
     sync_error.status_code = "M_UNKNOWN_POS"
 
     await bot._on_sync_error(sync_error)
-    await bot._on_room_member(room, _room_member_event(event_id="$timeline-snapshot"))
+    assert (
+        bot._dispatch_obligation_runner._admission_kind(
+            _room_member_event(event_id="$timeline-snapshot"),
+        )
+        is None
+    )
     await bot._on_sync_response(
         _sync_response_with_state(
             room.room_id,
@@ -930,7 +935,12 @@ async def test_uncertain_first_sync_reset_does_not_emit_room_member_joined_snaps
     await bot._on_sync_response(_sync_response_with_state(room.room_id, []))
     assert bot.client.next_batch is None
 
-    await bot._on_room_member(room, _room_member_event(event_id="$timeline-snapshot"))
+    assert (
+        bot._dispatch_obligation_runner._admission_kind(
+            _room_member_event(event_id="$timeline-snapshot"),
+        )
+        is None
+    )
     await bot._on_sync_response(
         _sync_response_with_state(
             room.room_id,
@@ -1035,22 +1045,12 @@ async def test_room_member_joined_deduplicates_concurrent_same_user_marking(
     assert seen == ["$join1"]
 
 
-@pytest.mark.asyncio
-async def test_room_member_joined_ignores_initial_sync_history(tmp_path: Path) -> None:
-    """Initial sync history should not be treated as live onboarding input."""
-    seen: list[str] = []
-
-    @hook(EVENT_ROOM_MEMBER_JOINED)
-    async def joined(ctx: RoomMemberJoinedContext) -> None:
-        seen.append(ctx.user_id)
-
+def test_room_member_join_admission_ignores_initial_sync_history(tmp_path: Path) -> None:
+    """Initial sync history must not enter the delayed live-callback boundary."""
     bot = _router_bot(tmp_path)
     bot._first_sync_done = False
-    bot.hook_registry = HookRegistry.from_plugins([_plugin("onboarding", [joined])])
 
-    await bot._on_room_member(_room(), _room_member_event())
-
-    assert seen == []
+    assert bot._dispatch_obligation_runner._admission_kind(_room_member_event()) is None
 
 
 @pytest.mark.asyncio

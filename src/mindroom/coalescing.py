@@ -192,7 +192,7 @@ class CoalescingGate:
         room_scope_is_single_conversation: Callable[[str], bool] | None = None,
         dispatch_allowed_now: Callable[[CoalescingKey], bool] | None = None,
         timestamp_formatter: TimestampFormatter | None = None,
-        on_dispatch_failure: Callable[[tuple[str, ...]], None] | None = None,
+        on_dispatch_failure: Callable[[tuple[PendingEvent, ...]], None] | None = None,
     ) -> None:
         self._dispatch_batch = dispatch_batch
         self._debounce_seconds = debounce_seconds
@@ -864,7 +864,7 @@ class CoalescingGate:
         finally:
             self._clear_claimed_admissions(gate, admissions)
         if not dispatched and self._on_dispatch_failure is not None:
-            self._on_dispatch_failure(tuple(pending_event.event.event_id for pending_event in pending_events))
+            self._on_dispatch_failure(tuple(pending_events))
 
     async def _dispatch_front_barrier(
         self,

@@ -809,6 +809,42 @@ async def test_encrypted_media_recovery_uses_media_source_parser(tmp_path: Path)
 
 
 @pytest.mark.asyncio
+async def test_decrypted_message_recovery_preserves_nio_security_metadata(tmp_path: Path) -> None:
+    """Restart replay must retain nio's authenticated decrypted-event facts."""
+    received: list[tuple[bool, bool, str | None, str | None, str | None]] = []
+
+    async def callback(_room: nio.MatrixRoom, event: nio.Event) -> DispatchCallbackResult:
+        received.append(
+            (
+                event.decrypted,
+                event.verified,
+                event.sender_key,
+                event.session_id,
+                cast("str | None", vars(event).get("room_id")),
+            ),
+        )
+        return DispatchCallbackResult.SUCCEEDED
+
+    event = _message_event("$decrypted-message")
+    event.decrypted = True
+    event.verified = True
+    event.sender_key = "curve25519:sender"
+    event.session_id = "megolm-session"
+    event.room_id = _ROOM_ID
+    store = _store(tmp_path)
+    first_runner = _runner(store, callback)
+    await first_runner.persist(
+        nio.MatrixRoom(_ROOM_ID, _PRINCIPAL_ID),
+        event,
+        DispatchCallbackKind.MESSAGE,
+    )
+
+    await _runner(_store(tmp_path), callback).recover_pending()
+
+    assert received == [(True, True, "curve25519:sender", "megolm-session", _ROOM_ID)]
+
+
+@pytest.mark.asyncio
 async def test_concurrent_duplicate_dispatch_runs_callback_once(tmp_path: Path) -> None:
     """Live and recovery delivery of one exact key must not execute concurrently."""
     entered = asyncio.Event()
@@ -1062,6 +1098,49 @@ async def test_direct_dispatch_failure_retries_autonomously(tmp_path: Path) -> N
 
     assert attempts == 2
     assert not store.has_pending("$direct-retry", DispatchCallbackKind.MESSAGE)
+
+
+def test_deferred_turn_retry_schedules_only_the_exact_callback_kind(tmp_path: Path) -> None:
+    """A failed gate handoff must not fabricate a second callback identity."""
+
+    async def callback(_room: nio.MatrixRoom, _event: nio.Event) -> DispatchCallbackResult:
+        return DispatchCallbackResult.SUCCEEDED
+
+    runner = _runner(_store(tmp_path), callback)
+    runner._schedule_retry = MagicMock()
+
+    runner.retry_pending_turn_source("$media", DispatchCallbackKind.MEDIA)
+
+    runner._schedule_retry.assert_called_once()
+    key = runner._schedule_retry.call_args.args[0]
+    assert key.source_event_id == "$media"
+    assert key.callback_kind is DispatchCallbackKind.MEDIA
+
+
+@pytest.mark.asyncio
+async def test_terminal_turn_settlement_retries_autonomously(tmp_path: Path) -> None:
+    """A failed terminal compaction must retry without restart or a fabricated callback key."""
+
+    async def callback(_room: nio.MatrixRoom, _event: nio.Event) -> DispatchCallbackResult:
+        return DispatchCallbackResult.SUCCEEDED
+
+    owner = object()
+    runner = _runner(
+        _store(tmp_path),
+        callback,
+        background_task_owner=owner,
+        retry_initial_delay_seconds=0,
+        retry_max_delay_seconds=0,
+    )
+    settle = MagicMock(side_effect=[OSError("dispatch store unavailable"), None])
+    runner.store.settle_pending_from_turn_store = settle
+
+    runner.bind_event_loop()
+    await asyncio.to_thread(runner.retry_turn_settlement, ("$message",))
+    await wait_for_background_tasks(timeout=1, owner=owner)
+
+    assert settle.call_count == 2
+    settle.assert_called_with(("$message",))
 
 
 @pytest.mark.asyncio

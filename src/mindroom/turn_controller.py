@@ -816,12 +816,17 @@ class TurnController:
                 # response may wait behind this conversation's active turn; the
                 # sender's lane slot must settle now, not at response completion.
                 await reservation_owner.release()
-                await self.handle_interactive_selection(
-                    room,
-                    selection=selection,
-                    user_id=envelope.requester_id,
-                    source_event_id=prepared_event.event_id,
-                )
+                try:
+                    await self.handle_interactive_selection(
+                        room,
+                        selection=selection,
+                        user_id=envelope.requester_id,
+                        source_event_id=prepared_event.event_id,
+                    )
+                    interactive.commit_selection(selection)
+                except BaseException:
+                    interactive.restore_selection(selection)
+                    raise
                 return _IngressAdmissionOutcome.CONSUMED
         if self.deps.ingress.command_control_input(prepared_event, source_kind=envelope.source_kind) is not None:
             if (turn_claim := reservation_owner.pending_turn_claim) is not None:
@@ -1298,6 +1303,11 @@ class TurnController:
         source_event_id: str,
     ) -> None:
         """Execute one validated interactive selection through the normal response path."""
+        if await self._interactive_selection_is_durably_terminal(
+            selection.question_event_id,
+            source_event_id,
+        ):
+            return
         thread_history = (
             await self.deps.resolver.fetch_thread_history(
                 room.room_id,
@@ -1331,7 +1341,14 @@ class TurnController:
             self.deps.turn_store.record_pending_turn,
             selection_handled_turn,
         )
-        if pending_turn is None or pending_turn.completed or pending_turn.redacted_source_event_ids:
+        if pending_turn is None:
+            msg = f"Interactive selection {source_event_id} has no durable terminal outcome"
+            raise RuntimeError(msg)
+        if pending_turn.completed or pending_turn.redacted_source_event_ids:
+            await self._require_durable_interactive_selection(
+                selection.question_event_id,
+                source_event_id,
+            )
             return
         selection_handled_turn = pending_turn
         ack_event_id = await self.deps.delivery_gateway.send_text(
@@ -1347,7 +1364,8 @@ class TurnController:
                 "Failed to send acknowledgment for interactive selection",
                 source_event_id=selection.question_event_id,
             )
-            return
+            msg = f"Interactive selection {source_event_id} has no durable terminal outcome"
+            raise RuntimeError(msg)
         # The selection is a synthetic turn with no Matrix message of its own, so
         # the attachment context that ingress normally resolves per message must
         # be rebuilt here from the conversation that asked the question.
@@ -1372,7 +1390,10 @@ class TurnController:
                 self._mark_source_events_responded(
                     replace(selection_handled_turn, response_event_id=response_event_id),
                 )
-            return
+                await self._require_durable_interactive_selection(selection.question_event_id, source_event_id)
+                return
+            msg = f"Interactive selection {source_event_id} has no durable terminal outcome"
+            raise RuntimeError(msg) from error
         selection_attachment_ids = tuple(selection_payload.attachment_ids or ())
         selection_matrix_run_metadata = self.deps.turn_store.build_run_metadata(selection_handled_turn)
         registry = entity_identity_registry(self.deps.runtime.config, self.deps.runtime_paths)
@@ -1422,6 +1443,41 @@ class TurnController:
             self._mark_source_events_responded(
                 replace(selection_handled_turn, response_event_id=response_event_id),
             )
+            await self._require_durable_interactive_selection(selection.question_event_id, source_event_id)
+            return
+        if await self._interactive_selection_is_durably_terminal(
+            selection.question_event_id,
+            source_event_id,
+        ):
+            return
+        msg = f"Interactive selection {source_event_id} has no durable terminal outcome"
+        raise RuntimeError(msg)
+
+    async def _interactive_selection_is_durably_terminal(
+        self,
+        question_event_id: str,
+        source_event_id: str,
+    ) -> bool:
+        """Return whether the question or exact selection source is durably terminal."""
+        return any(
+            await asyncio.gather(
+                *(
+                    asyncio.to_thread(self.deps.turn_store.is_durably_handled, event_id)
+                    for event_id in {question_event_id, source_event_id}
+                ),
+            ),
+        )
+
+    async def _require_durable_interactive_selection(
+        self,
+        question_event_id: str,
+        source_event_id: str,
+    ) -> None:
+        """Fail retryably until one selected question reaches durable terminal truth."""
+        if await self._interactive_selection_is_durably_terminal(question_event_id, source_event_id):
+            return
+        msg = f"Interactive selection {source_event_id} has no durable terminal outcome"
+        raise RuntimeError(msg)
 
     def _router_handoff_extra_content(
         self,

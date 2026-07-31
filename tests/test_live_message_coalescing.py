@@ -3754,7 +3754,7 @@ async def test_timer_flush_logs_dispatch_failure_without_unhandled_task() -> Non
 async def test_dispatch_failure_handoff_runs_after_gate_releases_exact_sources() -> None:
     """Failed deferred sources must reach durable retry ownership after gate cleanup."""
     room = _make_room()
-    failure_handoffs: list[tuple[str, ...]] = []
+    failure_handoffs: list[tuple[PendingEvent, ...]] = []
     source_owned_during_handoff: list[bool] = []
     handoff_complete = asyncio.Event()
 
@@ -3762,9 +3762,11 @@ async def test_dispatch_failure_handoff_runs_after_gate_releases_exact_sources()
         msg = "boom"
         raise RuntimeError(msg)
 
-    def on_dispatch_failure(source_event_ids: tuple[str, ...]) -> None:
-        failure_handoffs.append(source_event_ids)
-        source_owned_during_handoff.extend(gate.has_pending_source_event(event_id) for event_id in source_event_ids)
+    def on_dispatch_failure(pending_events: tuple[PendingEvent, ...]) -> None:
+        failure_handoffs.append(pending_events)
+        source_owned_during_handoff.extend(
+            gate.has_pending_source_event(pending_event.event.event_id) for pending_event in pending_events
+        )
         handoff_complete.set()
 
     gate = CoalescingGate(
@@ -3785,7 +3787,7 @@ async def test_dispatch_failure_handoff_runs_after_gate_releases_exact_sources()
     )
     await asyncio.wait_for(handoff_complete.wait(), timeout=1)
 
-    assert failure_handoffs == [("$m1",)]
+    assert [[pending.event.event_id for pending in handoff] for handoff in failure_handoffs] == [["$m1"]]
     assert source_owned_during_handoff == [False]
 
 

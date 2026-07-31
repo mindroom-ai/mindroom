@@ -612,7 +612,15 @@ class TestCommandHandling:
         generate_response = AsyncMock()
         _sync_turn_policy_runtime(bot)
         install_generate_response_mock(bot, generate_response)
-        bot._conversation_resolver.extract_dispatch_context = AsyncMock()
+        bot._conversation_resolver.extract_dispatch_context = AsyncMock(
+            return_value=dispatch_context_result(
+                _message_context(
+                    am_i_mentioned=False,
+                    is_thread=False,
+                    thread_id=None,
+                ),
+            ),
+        )
 
         # Create a room and event
         room = nio.MatrixRoom(room_id="!test:server", own_user_id=bot.client.user_id)

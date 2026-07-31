@@ -332,3 +332,33 @@ async def test_failed_cold_start_cleanup_disables_principal_view(tmp_path: Path)
 
     cache.disable.assert_called_once_with("untrusted_principal_cache_cleanup_failed")
     assert trust.state is SyncTrustState.COLD
+
+
+def test_retry_token_prefers_current_certified_checkpoint(tmp_path: Path) -> None:
+    """An in-memory certified checkpoint is the first replay choice."""
+    trust, _cache, _runtime = _trust(tmp_path)
+    trust.checkpoint = SyncCheckpoint("s_current")
+    save_sync_token(tmp_path, "code", "s_saved", cache_generation=_GENERATION)
+
+    assert trust.retry_token() == "s_current"
+
+
+@pytest.mark.parametrize(
+    ("cache_generation", "saved_generation", "expected"),
+    [
+        (_GENERATION, _GENERATION, "s_saved"),
+        ("replacement-generation", _GENERATION, None),
+        (None, _GENERATION, None),
+    ],
+)
+def test_saved_retry_token_requires_current_generation(
+    tmp_path: Path,
+    cache_generation: str | None,
+    saved_generation: str,
+    expected: str | None,
+) -> None:
+    """A durable retry token is usable only with its original generation."""
+    trust, _cache, _runtime = _trust(tmp_path, cache_generation=cache_generation)
+    save_sync_token(tmp_path, "code", "s_saved", cache_generation=saved_generation)
+
+    assert trust.retry_token() == expected
