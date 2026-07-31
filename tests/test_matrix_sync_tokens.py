@@ -143,6 +143,55 @@ def _text_event(event_id: str, body: str, origin_server_ts: int) -> nio.RoomMess
     )
 
 
+def _timeline_response(
+    transport: str,
+    room_id: str,
+    event: nio.Event,
+) -> nio.SyncResponse | nio.SlidingSyncResponse:
+    if transport == "classic":
+        response = nio.SyncResponse.from_dict(
+            {
+                "next_batch": "s_after_failure",
+                "device_one_time_keys_count": {},
+                "device_lists": {"changed": [], "left": []},
+                "rooms": {
+                    "invite": {},
+                    "leave": {},
+                    "join": {
+                        room_id: {
+                            "timeline": {
+                                "events": [event.source],
+                                "limited": False,
+                                "prev_batch": "p0",
+                            },
+                            "state": {"events": []},
+                            "ephemeral": {"events": []},
+                            "account_data": {"events": []},
+                        },
+                    },
+                },
+                "to_device": {"events": []},
+                "presence": {"events": []},
+                "account_data": {"events": []},
+            },
+        )
+        assert isinstance(response, nio.SyncResponse)
+        return response
+    response = nio.SlidingSyncResponse.from_dict(
+        {
+            "pos": "s_after_failure",
+            "rooms": {
+                room_id: {
+                    "membership": "join",
+                    "timeline": [event.source],
+                },
+            },
+        },
+    )
+    assert isinstance(response, nio.SlidingSyncResponse)
+    return response
+
+
 def _room_member_event(event_id: str = "$member-join") -> nio.RoomMemberEvent:
     event = nio.RoomMemberEvent.from_dict(
         {
@@ -1436,16 +1485,13 @@ async def test_dispatch_persistence_failure_keeps_pre_recovery_checkpoint(
         raise OSError(message)
 
     monkeypatch.setattr(bot._dispatch_obligation_store, "create_pending", fail_persist)
-    wrapper = bot._dispatch_obligation_runner.task_wrapper(
-        DispatchCallbackKind.MESSAGE,
-        owner=bot._runtime_view,
-    )
+    admission = bot._dispatch_obligation_runner.admission_callback(DispatchCallbackKind.MESSAGE)
 
     with pytest.raises(
         nio.CallbackNotAcceptedError,
         match="dispatch database unavailable",
     ) as exc_info:
-        await wrapper(
+        await admission(
             nio.MatrixRoom("!room:localhost", bot.matrix_id.full_id),
             _text_event("$unpersisted", "hello", 1),
         )
@@ -1475,47 +1521,7 @@ async def test_nio_replays_event_rejected_before_durable_dispatch_acceptance(
     bot.client = client
     room_id = "!room:localhost"
     event = _text_event(f"$lost-{transport}", "hello", 1)
-    if transport == "classic":
-        response = nio.SyncResponse.from_dict(
-            {
-                "next_batch": "s_after_failure",
-                "device_one_time_keys_count": {},
-                "device_lists": {"changed": [], "left": []},
-                "rooms": {
-                    "invite": {},
-                    "leave": {},
-                    "join": {
-                        room_id: {
-                            "timeline": {
-                                "events": [event.source],
-                                "limited": False,
-                                "prev_batch": "p0",
-                            },
-                            "state": {"events": []},
-                            "ephemeral": {"events": []},
-                            "account_data": {"events": []},
-                        },
-                    },
-                },
-                "to_device": {"events": []},
-                "presence": {"events": []},
-                "account_data": {"events": []},
-            },
-        )
-        assert isinstance(response, nio.SyncResponse)
-    else:
-        response = nio.SlidingSyncResponse.from_dict(
-            {
-                "pos": "s_after_failure",
-                "rooms": {
-                    room_id: {
-                        "membership": "join",
-                        "timeline": [event.source],
-                    },
-                },
-            },
-        )
-        assert isinstance(response, nio.SlidingSyncResponse)
+    response = _timeline_response(transport, room_id, event)
 
     create_attempts = 0
     create_pending = bot._dispatch_obligation_store.create_pending
@@ -1531,6 +1537,10 @@ async def test_nio_replays_event_rejected_before_durable_dispatch_acceptance(
 
     monkeypatch.setattr(bot._dispatch_obligation_store, "create_pending", fail_first_create)
     monkeypatch.setattr(bot._dispatch_obligation_runner, "run_persisted", AsyncMock())
+    client.add_event_admission_callback(
+        bot._dispatch_obligation_runner.admission_callback(DispatchCallbackKind.MESSAGE),
+        nio.RoomMessageText,
+    )
     client.add_event_callback(
         bot._dispatch_obligation_runner.task_wrapper(
             DispatchCallbackKind.MESSAGE,
@@ -1561,6 +1571,74 @@ async def test_nio_replays_event_rejected_before_durable_dispatch_acceptance(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("transport", ["classic", "sliding"])
+async def test_nio_accepts_late_non_acceptance_without_live_replay(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    transport: str,
+) -> None:
+    """The rejection signal is too late once ordinary event fanout begins."""
+    bot = _agent_bot(tmp_path)
+    client = nio.AsyncClient(
+        "https://example.org",
+        bot.matrix_id.full_id,
+        config=nio.AsyncClientConfig(
+            encryption_enabled=False,
+            backfill_limited_timelines=True,
+        ),
+    )
+    bot.client = client
+    room_id = "!room:localhost"
+    event = _text_event(f"$late-{transport}", "hello", 1)
+    response = _timeline_response(transport, room_id, event)
+    callback_attempts = 0
+
+    async def reject_too_late(
+        _room: nio.MatrixRoom,
+        _event: nio.Event,
+    ) -> object:
+        nonlocal callback_attempts
+        callback_attempts += 1
+        message = "ordinary callback rejection"
+        raise nio.CallbackNotAcceptedError(message)
+
+    callbacks = cast("dict[DispatchCallbackKind, Any]", bot._dispatch_obligation_runner.callbacks)
+    callbacks[DispatchCallbackKind.MESSAGE] = reject_too_late
+    schedule_retry = MagicMock()
+    monkeypatch.setattr(bot._dispatch_obligation_runner, "_schedule_retry", schedule_retry)
+    client.add_event_admission_callback(
+        bot._dispatch_obligation_runner.admission_callback(DispatchCallbackKind.MESSAGE),
+        nio.RoomMessageText,
+    )
+
+    async def run_admitted(
+        room: nio.MatrixRoom,
+        callback_event: nio.Event,
+    ) -> None:
+        await bot._dispatch_obligation_runner.run_admitted(
+            room,
+            callback_event,
+            DispatchCallbackKind.MESSAGE,
+        )
+
+    client.add_event_callback(run_admitted, nio.RoomMessageText)
+
+    with pytest.raises(
+        nio.CallbackNotAcceptedError,
+        match="ordinary callback rejection",
+    ):
+        await client.receive_response(response)
+    await client.receive_response(response)
+
+    assert callback_attempts == 1
+    assert bot._dispatch_obligation_store.has_pending(
+        event.event_id,
+        DispatchCallbackKind.MESSAGE,
+    )
+    schedule_retry.assert_called_once()
+
+
+@pytest.mark.asyncio
 async def test_swallowed_dispatch_persistence_failure_cannot_certify_response(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1586,15 +1664,12 @@ async def test_swallowed_dispatch_persistence_failure_cannot_certify_response(
         raise OSError(message)
 
     monkeypatch.setattr(bot._dispatch_obligation_store, "create_pending", fail_persist)
-    wrapper = bot._dispatch_obligation_runner.task_wrapper(
-        DispatchCallbackKind.MESSAGE,
-        owner=bot._runtime_view,
-    )
+    admission = bot._dispatch_obligation_runner.admission_callback(DispatchCallbackKind.MESSAGE)
     with pytest.raises(
         nio.CallbackNotAcceptedError,
         match="dispatch database unavailable",
     ) as exc_info:
-        await wrapper(
+        await admission(
             nio.MatrixRoom("!room:localhost", bot.matrix_id.full_id),
             _text_event("$unpersisted-response", "hello", 1),
         )
@@ -1638,13 +1713,10 @@ async def test_dispatch_creation_drains_repeated_cancellation_before_rewind(
     monkeypatch.setattr(bot._dispatch_obligation_store, "create_pending", blocking_create)
     run_persisted = AsyncMock()
     monkeypatch.setattr(bot._dispatch_obligation_runner, "run_persisted", run_persisted)
-    wrapper = bot._dispatch_obligation_runner.task_wrapper(
-        DispatchCallbackKind.MESSAGE,
-        owner=bot._runtime_view,
-    )
+    admission = bot._dispatch_obligation_runner.admission_callback(DispatchCallbackKind.MESSAGE)
     event = _text_event("$cancelled-create", "hello", 1)
     task = asyncio.create_task(
-        wrapper(nio.MatrixRoom("!room:localhost", bot.matrix_id.full_id), event),
+        admission(nio.MatrixRoom("!room:localhost", bot.matrix_id.full_id), event),
     )
 
     assert await asyncio.to_thread(create_started.wait, 2)

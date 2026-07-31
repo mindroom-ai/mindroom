@@ -813,41 +813,58 @@ class DispatchObligationRunner:
         *,
         owner: object,
     ) -> _DispatchObligationTaskWrapper:
-        """Return one callback that durably accepts work before task creation."""
+        """Return an ordinary callback that executes already-admitted work."""
         return _DispatchObligationTaskWrapper(
             runner=self,
             callback_kind=callback_kind,
             owner=owner,
         )
 
+    def admission_callback(
+        self,
+        callback_kind: DispatchCallbackKind,
+    ) -> _DispatchObligationAdmissionCallback:
+        """Return a pre-fanout callback that only persists exact work."""
+        return _DispatchObligationAdmissionCallback(
+            runner=self,
+            callback_kind=callback_kind,
+        )
+
     def register_source_callbacks(self, client: nio.AsyncClient, *, owner: object) -> None:
         """Register every source-backed correctness callback except delayed room lifecycle."""
-        client.add_event_callback(
-            self.task_wrapper(DispatchCallbackKind.MESSAGE, owner=owner),
-            nio.RoomMessageText,
-        )
-        client.add_event_callback(
-            self.task_wrapper(DispatchCallbackKind.REDACTION, owner=owner),
-            nio.RedactionEvent,
-        )
-        client.add_event_callback(
-            self.task_wrapper(DispatchCallbackKind.REACTION, owner=owner),
-            nio.ReactionEvent,
-        )
-        media_callback = self.task_wrapper(DispatchCallbackKind.MEDIA, owner=owner)
+
+        def register(
+            callback_kind: DispatchCallbackKind,
+            event_type: type[nio.Event],
+        ) -> None:
+            client.add_event_admission_callback(
+                self.admission_callback(callback_kind),
+                event_type,
+            )
+            client.add_event_callback(
+                self.task_wrapper(callback_kind, owner=owner),
+                event_type,
+            )
+
+        register(DispatchCallbackKind.MESSAGE, nio.RoomMessageText)
+        register(DispatchCallbackKind.REDACTION, nio.RedactionEvent)
+        register(DispatchCallbackKind.REACTION, nio.ReactionEvent)
         for event_type in MATRIX_MEDIA_EVENT_TYPES:
-            client.add_event_callback(media_callback, event_type)
+            register(DispatchCallbackKind.MEDIA, event_type)
+        approval_admission = self.admission_callback(DispatchCallbackKind.APPROVAL)
         approval_callback = self.task_wrapper(DispatchCallbackKind.APPROVAL, owner=owner)
+
+        async def admit_approval(room: nio.MatrixRoom, event: nio.Event) -> None:
+            if _is_tool_approval_response(event):
+                await approval_admission(room, event)
 
         async def dispatch_approval(room: nio.MatrixRoom, event: nio.Event) -> None:
             if _is_tool_approval_response(event):
                 await approval_callback(room, event)
 
+        client.add_event_admission_callback(admit_approval, nio.UnknownEvent)
         client.add_event_callback(dispatch_approval, nio.UnknownEvent)
-        client.add_event_callback(
-            self.task_wrapper(DispatchCallbackKind.DECRYPTION_FAILURE, owner=owner),
-            nio.MegolmEvent,
-        )
+        register(DispatchCallbackKind.DECRYPTION_FAILURE, nio.MegolmEvent)
 
     async def dispatch(
         self,
@@ -873,27 +890,7 @@ class DispatchObligationRunner:
     ) -> _DispatchObligation | None:
         """Persist exact work before its background task may be created."""
         try:
-            event_source = _dispatch_event_source(event)
-            event_source_json = json.dumps(
-                event_source,
-                ensure_ascii=True,
-                separators=(",", ":"),
-                sort_keys=True,
-            )
-            source_event_id = _dispatch_source_event_id(
-                room.room_id,
-                event,
-                callback_kind,
-                event_source_json,
-            )
-            obligation = _DispatchObligation(
-                principal_id=self.store.principal_id,
-                entity_name=self.store.entity_name,
-                source_event_id=source_event_id,
-                callback_kind=callback_kind,
-                room_id=room.room_id,
-                event_source=event_source,
-            )
+            obligation = self._obligation_for_event(room, event, callback_kind)
             if await self._settle_from_turn_store_if_owned(obligation):
                 return None
             create_result = await _run_owned_store_operation(self.store.create_pending, obligation)
@@ -912,6 +909,52 @@ class DispatchObligationRunner:
                 self.on_persist_failure()
             raise
         return persisted_obligation
+
+    def _obligation_for_event(
+        self,
+        room: nio.MatrixRoom,
+        event: _DispatchEvent,
+        callback_kind: DispatchCallbackKind,
+    ) -> _DispatchObligation:
+        event_source = _dispatch_event_source(event)
+        event_source_json = json.dumps(
+            event_source,
+            ensure_ascii=True,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        return _DispatchObligation(
+            principal_id=self.store.principal_id,
+            entity_name=self.store.entity_name,
+            source_event_id=_dispatch_source_event_id(
+                room.room_id,
+                event,
+                callback_kind,
+                event_source_json,
+            ),
+            callback_kind=callback_kind,
+            room_id=room.room_id,
+            event_source=event_source,
+        )
+
+    async def run_admitted(
+        self,
+        room: nio.MatrixRoom,
+        event: _DispatchEvent,
+        callback_kind: DispatchCallbackKind,
+    ) -> None:
+        """Execute one exact obligation previously accepted by nio admission."""
+        key = self._obligation_for_event(room, event, callback_kind).key
+        try:
+            obligation = await asyncio.to_thread(self.store.pending_for, key)
+            if obligation is None:
+                return
+            await self.run_persisted(obligation, room=room, event=event)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            self._schedule_retry(key)
+            raise
 
     async def run_persisted(
         self,
@@ -1079,45 +1122,57 @@ class DispatchObligationRunner:
 
 
 @dataclass(frozen=True, slots=True)
+class _DispatchObligationAdmissionCallback:
+    """Persist one exact callback during nio pre-fanout admission."""
+
+    runner: DispatchObligationRunner
+    callback_kind: DispatchCallbackKind
+
+    async def __call__(self, room: nio.MatrixRoom, event: _DispatchEvent) -> None:
+        """Reject only storage failures that occur before any callback side effect."""
+        try:
+            await self.runner.persist(room, event, self.callback_kind)
+        except (OSError, sqlite3.Error) as error:
+            raise nio.CallbackNotAcceptedError(str(error)) from error
+
+
+@dataclass(frozen=True, slots=True)
 class _DispatchObligationTaskWrapper:
-    """Durably accept one nio callback before scheduling background execution."""
+    """Schedule execution only after nio admits every matching callback."""
 
     runner: DispatchObligationRunner
     callback_kind: DispatchCallbackKind
     owner: object
 
     async def __call__(self, room: nio.MatrixRoom, event: _DispatchEvent) -> None:
-        """Persist one callback obligation before scheduling its execution."""
-        try:
-            obligation = await self.runner.persist(room, event, self.callback_kind)
-        except (OSError, sqlite3.Error) as error:
-            raise nio.CallbackNotAcceptedError(str(error)) from error
-        if obligation is None:
-            return
+        """Schedule already-persisted work without repeating durable admission."""
         create_background_task(
-            self._run(obligation, room=room, event=event),
+            self._run(room=room, event=event),
             owner=self.owner,
         )
 
     async def _run(
         self,
-        obligation: _DispatchObligation,
         *,
         room: nio.MatrixRoom,
         event: _DispatchEvent,
     ) -> None:
         try:
-            await self.runner.run_persisted(obligation, room=room, event=event)
+            await self.runner.run_admitted(
+                room,
+                event,
+                self.callback_kind,
+            )
         except asyncio.CancelledError:
             return
         except Exception:
+            obligation = self.runner._obligation_for_event(room, event, self.callback_kind)
             logger.exception(
                 "dispatch_obligation_callback_failed",
                 source_event_id=obligation.source_event_id,
                 callback_kind=obligation.callback_kind.value,
                 room_id=obligation.room_id,
             )
-            self.runner._schedule_retry(obligation.key)
 
 
 def _is_tool_approval_response(event: nio.Event) -> TypeIs[nio.UnknownEvent]:
