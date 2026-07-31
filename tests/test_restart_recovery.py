@@ -3886,10 +3886,10 @@ async def test_unavailable_owner_uses_bounded_readiness_probes_then_parks(
 
 
 @pytest.mark.asyncio
-async def test_disabled_auto_resume_ignores_replacement_room_enqueue(
+async def test_disabled_auto_resume_discards_paused_replacement_room_on_resume(
     tmp_path: Path,
 ) -> None:
-    """Disabled replacement recovery must not scan terminal interrupted rooms."""
+    """Resume must discard a retained handoff when the published policy stays disabled."""
     owner = _owner(rooms=frozenset())
     owners = {owner.user_id: owner}
     config = _config(tmp_path)
@@ -3901,7 +3901,9 @@ async def test_disabled_auto_resume_ignores_replacement_room_enqueue(
         operations=_operations(recover_room=recover_room),
     )
     coordinator.start(startup_cutoff_ms=123)
+    await coordinator.pause()
     coordinator.enqueue_replacement_rooms(owner.user_id, {"!code:example.org"})
+    coordinator.resume()
     try:
         await asyncio.sleep(0)
         await asyncio.sleep(0)
@@ -3909,6 +3911,36 @@ async def test_disabled_auto_resume_ignores_replacement_room_enqueue(
         await coordinator.stop()
 
     recover_room.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_disabled_to_enabled_resume_retains_paused_replacement_room(
+    tmp_path: Path,
+) -> None:
+    """A paused handoff must survive until resume reads the newly published policy."""
+    owner = _owner(rooms=frozenset())
+    owners = {owner.user_id: owner}
+    config = _config(tmp_path)
+    config.defaults.auto_resume_after_restart = False
+    recover_room = AsyncMock(return_value=RoomRecoveryResult())
+    coordinator = RestartRecoveryCoordinator(
+        current_config=lambda: config,
+        current_owners=lambda: owners,
+        operations=_operations(recover_room=recover_room),
+    )
+    coordinator.start(startup_cutoff_ms=123)
+    await coordinator.pause()
+    coordinator.enqueue_replacement_rooms(owner.user_id, {"!interrupted:example.org"})
+    config.defaults.auto_resume_after_restart = True
+    coordinator.resume()
+    try:
+        await _wait_until(lambda: recover_room.await_count == 1)
+    finally:
+        await coordinator.stop()
+
+    request = recover_room.await_args.args[1]
+    assert request.room_id == "!interrupted:example.org"
+    assert request.terminal_interrupted_only is True
 
 
 @pytest.mark.asyncio

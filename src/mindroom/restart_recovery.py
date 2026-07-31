@@ -206,8 +206,6 @@ class RestartRecoveryCoordinator:
         """Retain terminal interrupted-room handoffs across bot replacement."""
         if self._stopped:
             return
-        if not self._require_config().defaults.auto_resume_after_restart:
-            return
         for room_id in room_ids:
             self._enqueue_request(
                 owner_user_id,
