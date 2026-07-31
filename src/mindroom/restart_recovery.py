@@ -337,11 +337,11 @@ class RestartRecoveryCoordinator:
         active_owners = set().union(
             *(work.all_owner_user_ids for work in self._active_attempts.values()),
         )
-        fair = [work for work in eligible if work.all_owner_user_ids.isdisjoint(active_owners)]
         return min(
-            fair or eligible,
+            eligible,
             key=lambda work: (
                 work.due_at,
+                not work.all_owner_user_ids.isdisjoint(active_owners),
                 work.room_id,
                 work.startup_cutoff_ms or -1,
                 work.terminal_interrupted_only,

@@ -285,12 +285,12 @@ async def _recover_room(
         startup_cutoff_ms=request.startup_cutoff_ms,
         terminal_interrupted_only=request.terminal_interrupted_only,
     )
-    if cleanup_result.retry_required:
-        return _RoomRecoveryResult(
-            retry_owner_user_ids=frozenset(owner.user_id for owner in joined_owners),
-        )
+    retry_cleanup_owner_user_ids = set(cleanup_result.retry_bot_user_ids)
+    if cleanup_result.room_retry_required:
+        retry_cleanup_owner_user_ids.update(owner.user_id for owner in joined_owners)
     return _RoomRecoveryResult(
         interrupted_threads=cleanup_result.interrupted_threads,
+        retry_owner_user_ids=frozenset(retry_cleanup_owner_user_ids),
     )
 
 

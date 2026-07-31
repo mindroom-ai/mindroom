@@ -18,11 +18,12 @@ from mindroom.matrix import stale_stream_cleanup as stale_stream_cleanup_module
 from mindroom.matrix.invited_rooms_store import invited_rooms_path, save_invited_rooms
 from mindroom.matrix.stale_stream_cleanup import InterruptedThread
 from mindroom.orchestrator import _MultiAgentOrchestrator
-from mindroom.restart_recovery import (
-    RestartRecoveryCoordinator,
-)
+from mindroom.restart_recovery import RestartRecoveryCoordinator
 from mindroom.restart_recovery import (
     _restart_recovery_retry_delay as restart_recovery_retry_delay,
+)
+from mindroom.restart_recovery import (
+    _RoomWork as RoomWork,
 )
 from mindroom.restart_recovery import (
     _TargetSettlement as TargetSettlement,
@@ -102,13 +103,14 @@ def _target(
     timestamp_ms: int,
     room_id: str = "!code:example.org",
     thread_id: str = "$thread",
+    agent_name: str = "code",
 ) -> InterruptedThread:
     return InterruptedThread(
         room_id=room_id,
         thread_id=thread_id,
         target_event_id=target_event_id,
         partial_text="Partial",
-        agent_name="code",
+        agent_name=agent_name,
         original_sender_id="@alice:example.org",
         timestamp_ms=timestamp_ms,
     )
@@ -414,7 +416,7 @@ async def test_shared_room_waits_for_all_owners_then_scans_once(tmp_path: Path) 
 async def test_matrix_room_recovery_propagates_cleanup_retry_requirement(
     tmp_path: Path,
 ) -> None:
-    """Any failed room edit must keep the semantic room job retryable."""
+    """A room-wide retry must retain already-recovered targets."""
     owner = _owner()
     config = _config(tmp_path)
     interrupted = _target("$target", timestamp_ms=10)
@@ -427,7 +429,7 @@ async def test_matrix_room_recovery_propagates_cleanup_retry_requirement(
     cleanup_result = stale_stream_cleanup_module._StaleStreamCleanupResult(
         cleaned_count=1,
         interrupted_threads=(interrupted,),
-        retry_required=True,
+        room_retry_required=True,
     )
 
     with (
@@ -448,8 +450,61 @@ async def test_matrix_room_recovery_propagates_cleanup_retry_requirement(
         )
 
     assert result == RoomRecoveryResult(
-        interrupted_threads=(),
+        interrupted_threads=(interrupted,),
         retry_owner_user_ids=frozenset({owner.user_id}),
+    )
+
+
+@pytest.mark.asyncio
+async def test_matrix_room_recovery_retries_only_failed_cleanup_owner(
+    tmp_path: Path,
+) -> None:
+    """One owner's failed edit must not retain a healthy co-resident owner."""
+    healthy_owner = _owner(
+        entity_name="healthy",
+        user_id="@healthy:example.org",
+    )
+    failed_owner = _owner(
+        entity_name="failed",
+        user_id="@failed:example.org",
+    )
+    interrupted = _target(
+        "$healthy-target",
+        timestamp_ms=10,
+        agent_name=healthy_owner.entity_name,
+    )
+    operations = build_matrix_restart_recovery_operations(test_runtime_paths(tmp_path))
+
+    with (
+        patch(
+            "mindroom.restart_recovery_operations.get_joined_rooms",
+            new=AsyncMock(return_value=["!code:example.org"]),
+        ),
+        patch(
+            "mindroom.restart_recovery_operations.cleanup_stale_streaming_room",
+            new=AsyncMock(
+                return_value=stale_stream_cleanup_module._StaleStreamCleanupResult(
+                    cleaned_count=1,
+                    interrupted_threads=(interrupted,),
+                    retry_bot_user_ids=frozenset({failed_owner.user_id}),
+                ),
+            ),
+        ),
+    ):
+        result = await operations.recover_room(
+            (healthy_owner, failed_owner),
+            RoomRecoveryRequest(
+                room_id="!code:example.org",
+                startup_cutoff_ms=123,
+                terminal_interrupted_only=False,
+            ),
+            frozenset({healthy_owner.user_id, failed_owner.user_id}),
+            _config(tmp_path),
+        )
+
+    assert result == RoomRecoveryResult(
+        interrupted_threads=(interrupted,),
+        retry_owner_user_ids=frozenset({failed_owner.user_id}),
     )
 
 
@@ -956,6 +1011,49 @@ async def test_future_fair_owner_retry_does_not_hide_due_active_owner_work(
     finally:
         release_blocked.set()
         await coordinator.stop()
+
+
+def test_oldest_due_room_wins_before_owner_diversity(tmp_path: Path) -> None:
+    """Continuous disjoint arrivals must not starve older overlapping work."""
+
+    async def recover_room(
+        _owner: RecoveryOwner,
+        _request: RoomRecoveryRequest,
+        _owner_user_ids: frozenset[str],
+        _config: Config,
+    ) -> RoomRecoveryResult:
+        return RoomRecoveryResult()
+
+    coordinator = RestartRecoveryCoordinator(
+        current_config=lambda: _config(tmp_path),
+        current_owners=dict,
+        operations=_operations(recover_room=recover_room),
+    )
+    busy_owner = "@busy:example.org"
+    active = RoomWork(
+        room_id="!active:example.org",
+        startup_cutoff_ms=123,
+        terminal_interrupted_only=False,
+        owner_user_ids=frozenset({busy_owner}),
+    )
+    oldest = RoomWork(
+        room_id="!oldest:example.org",
+        startup_cutoff_ms=123,
+        terminal_interrupted_only=False,
+        owner_user_ids=frozenset({busy_owner}),
+        due_at=1.0,
+    )
+    newer = RoomWork(
+        room_id="!newer:example.org",
+        startup_cutoff_ms=123,
+        terminal_interrupted_only=False,
+        owner_user_ids=frozenset({"@idle:example.org"}),
+        due_at=2.0,
+    )
+    coordinator._active_attempts[cast("asyncio.Task[object]", MagicMock())] = active
+    coordinator._room_jobs = {oldest.key: oldest, newer.key: newer}
+
+    assert coordinator._next_due_work(3.0) is oldest
 
 
 @pytest.mark.asyncio

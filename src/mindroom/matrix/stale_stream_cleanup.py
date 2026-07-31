@@ -112,11 +112,12 @@ class StaleStreamCleanupActor:
 
 @dataclass(frozen=True)
 class _StaleStreamCleanupResult:
-    """Outcome from one exact-owner room cleanup."""
+    """Outcome from one shared room cleanup."""
 
     cleaned_count: int
     interrupted_threads: tuple[InterruptedThread, ...]
-    retry_required: bool = False
+    room_retry_required: bool = False
+    retry_bot_user_ids: frozenset[str] = frozenset()
 
 
 @dataclass(frozen=True)
@@ -353,11 +354,11 @@ async def cleanup_stale_streaming_room(
         return _StaleStreamCleanupResult(
             cleaned_count=0,
             interrupted_threads=(),
-            retry_required=scanned_state.retry_required,
+            room_retry_required=scanned_state.retry_required,
         )
 
     cleaned_count = 0
-    retry_required = scanned_state.retry_required
+    retry_bot_user_ids: set[str] = set()
     prior_edit_succeeded_by_bot: set[str] = set()
     interrupted_threads: list[InterruptedThread] = []
     candidate_items = sorted(
@@ -390,12 +391,14 @@ async def cleanup_stale_streaming_room(
             prior_edit_succeeded_by_bot.add(bot_user_id)
         if candidate_result.interrupted_thread is not None:
             interrupted_threads.append(candidate_result.interrupted_thread)
-        retry_required = retry_required or candidate_result.retry_required
+        if candidate_result.retry_required:
+            retry_bot_user_ids.add(bot_user_id)
 
     return _StaleStreamCleanupResult(
         cleaned_count=cleaned_count,
         interrupted_threads=tuple(interrupted_threads),
-        retry_required=retry_required,
+        room_retry_required=scanned_state.retry_required,
+        retry_bot_user_ids=frozenset(retry_bot_user_ids),
     )
 
 

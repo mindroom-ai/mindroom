@@ -2298,7 +2298,8 @@ async def test_room_cleanup_continues_after_failed_edit_and_requests_retry(
         )
 
     assert result.cleaned_count == 1
-    assert result.retry_required is True
+    assert result.room_retry_required is False
+    assert result.retry_bot_user_ids == frozenset({BOT_USER_ID})
     assert edit_stale_message.await_count == 2
 
 
@@ -2374,7 +2375,7 @@ async def test_requester_resolution_exception_requests_retry_after_cleanup(tmp_p
     assert result.cleaned_count == 1
     assert len(result.interrupted_threads) == 1
     assert result.interrupted_threads[0].original_sender_id is None
-    assert result.retry_required is True
+    assert result.room_retry_required is True
 
 
 @pytest.mark.parametrize(
@@ -2433,7 +2434,7 @@ async def test_requester_resolution_response_classifies_retry_after_cleanup(
     assert result.cleaned_count == 1
     assert len(result.interrupted_threads) == 1
     assert result.interrupted_threads[0].original_sender_id is None
-    assert result.retry_required is expected_retry
+    assert result.room_retry_required is expected_retry
 
 
 @pytest.mark.asyncio
@@ -2529,4 +2530,4 @@ async def test_room_messages_error_requests_typed_room_retry(tmp_path: Path) -> 
 
     assert result.cleaned_count == 0
     assert result.interrupted_threads == ()
-    assert result.retry_required is True
+    assert result.room_retry_required is True
