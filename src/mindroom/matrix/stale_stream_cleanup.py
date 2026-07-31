@@ -138,6 +138,7 @@ class _MessageState:
     """Latest visible state for one original Matrix message."""
 
     latest_body: str | None = None
+    original_timestamp: int = 0
     latest_timestamp: int = 0
     latest_event_id: str = ""
     latest_content: dict[str, Any] | None = None
@@ -577,7 +578,7 @@ async def _cleanup_one_stale_message(
             agent_name=agent_name,
             owner_user_id=owner_user_id,
             original_sender_id=state.requester_user_id,
-            timestamp_ms=state.latest_timestamp,
+            timestamp_ms=state.original_timestamp,
         )
     await _redact_stop_reactions(
         client,
@@ -815,6 +816,7 @@ def _merge_resolved_message_state(
     normalized_latest_content = {key: value for key, value in message.content.items() if isinstance(key, str)}
     state = message_states.setdefault(target_event_id, _MessageState())
     state.latest_body = message.body
+    state.original_timestamp = message.timestamp
     # The last time this message changed, not when it was created. ``timestamp`` deliberately
     # stays the original event's so an edit cannot reorder a thread, which means it is the
     # wrong clock for "is this stream still active": a placeholder posted eight hours ago and
@@ -1572,7 +1574,7 @@ def _interrupted_thread_from_terminal_state(
         agent_name=agent_name,
         owner_user_id=owner_user_id,
         original_sender_id=state.requester_user_id,
-        timestamp_ms=state.latest_timestamp,
+        timestamp_ms=state.original_timestamp,
     )
 
 

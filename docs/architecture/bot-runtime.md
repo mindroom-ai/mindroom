@@ -164,6 +164,7 @@ The coordinator also enumerates every owner's authoritative joined-room list, so
 The coordinator admits at most eight concurrent read-bearing phases across owner room discovery, room-recovery leases, and initial target freshness checks.
 A room-recovery phase may issue owner-specific membership and hydration requests while holding one phase slot.
 A room-recovery lease holds its slot while it scans each ready owner's Matrix history view and completes any required cache hydration or repair writes.
+Encrypted hidden-room hydration publishes a member-only `MatrixRoom` into nio's shared cache before delivery, while plaintext hidden rooms stay uncached so normal sync remains their sole cache owner.
 One unavailable owner cannot block discovery or recovery for joined peers.
 The coordinator merges exact owners into one work item for each room and recovery policy.
 Distinct policies for the same room never run concurrently.
@@ -176,12 +177,13 @@ Due selection gives each due owner cohort a read-queue position before repeated-
 | Owner has not finished first sync | Back off through six readiness probes without consuming the Matrix failure budget, then park. |
 | Desired room is absent from authoritative membership | Refresh membership once after the shared membership delay, then park quietly. |
 | Room scan or target freshness has a transient Matrix failure | Retry until the sixth actual Matrix failure, then park and emit one terminal warning. |
+| Authoritative owner-room discovery fails six times | Park discovery and emit one terminal warning until owner readiness or configuration resume restarts it. |
 | Owner readiness or configuration resume arrives | Invalidate retained membership state, refresh authoritative room scope, and re-enroll parked work with fresh budgets. |
 | Owner is removed | Delete its jobs, target watermarks, discovery task, and membership snapshot. |
 
 Each lease merges the outcomes from every ready owner's Matrix history view before newest-target selection, freshness checks, and resume delivery.
 Room history failures, transient requester-resolution failures, and failed cleanup edits return typed retry outcomes.
-Resolved partial targets may settle while targets without an authoritative requester remain retained for retry.
+Targets whose requester lookup failed transiently remain retained, while definitive requester absence emits an operator warning and settles without a relay.
 Unresolved room aliases remain outside retry state until room setup resolves them.
 
 ### Delivery and settlement

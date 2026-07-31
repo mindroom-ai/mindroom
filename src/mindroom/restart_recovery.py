@@ -194,7 +194,6 @@ class RestartRecoveryCoordinator:
         owner = self._current_owners().get(owner_user_id)
         if owner is not None:
             self._operations.discard_owner(owner_user_id)
-            self._cancel_owner_room_discoveries(owner_user_id)
             self._target_watermarks = {
                 key: watermark
                 for key, watermark in self._target_watermarks.items()
@@ -204,6 +203,8 @@ class RestartRecoveryCoordinator:
             self._enqueue_desired_rooms(owner)
             if not self._paused:
                 self._start_owner_room_discovery(owner)
+            else:
+                self._cancel_owner_room_discoveries(owner_user_id)
         self._ensure_worker()
 
     def enqueue_replacement_rooms(self, owner_user_id: str, room_ids: set[str]) -> None:
@@ -812,7 +813,7 @@ class RestartRecoveryCoordinator:
         targets: tuple[InterruptedThread, ...],
     ) -> tuple[InterruptedThread, ...]:
         eligible: list[InterruptedThread] = []
-        for target in _newest_targets(targets):
+        for target in targets:
             watermark = self._target_watermarks.get((owner.user_id, target.room_id, target.thread_id))
             if (
                 watermark is None

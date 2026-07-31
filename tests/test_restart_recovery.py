@@ -1290,6 +1290,110 @@ async def test_replacement_generation_drains_inflight_membership_lookup(tmp_path
 
 
 @pytest.mark.asyncio
+async def test_discarded_owner_lookup_drains_before_replacement_lookup(tmp_path: Path) -> None:
+    """Discarding an owner must not overlap its lookup with a replacement generation."""
+    room_id = "!code:example.org"
+    old_owner = _owner(generation=object(), rooms=frozenset({room_id}))
+    new_owner = _owner(generation=object(), rooms=frozenset({room_id}))
+    operations = build_matrix_restart_recovery_operations(test_runtime_paths(tmp_path))
+    old_lookup_started = asyncio.Event()
+    old_lookup_cancelled = asyncio.Event()
+    release_old_cleanup = asyncio.Event()
+    new_lookup_started = asyncio.Event()
+
+    async def joined_rooms(client: nio.AsyncClient) -> list[str]:
+        if client is not old_owner.client:
+            new_lookup_started.set()
+            return [room_id]
+        old_lookup_started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            old_lookup_cancelled.set()
+            await release_old_cleanup.wait()
+            raise
+
+    cleanup_room = AsyncMock(
+        return_value=stale_stream_cleanup_module.StaleStreamCleanupResult(
+            cleaned_count=0,
+            interrupted_threads=(),
+        ),
+    )
+    with (
+        patch("mindroom.restart_recovery_operations.get_joined_rooms", new=AsyncMock(side_effect=joined_rooms)),
+        patch("mindroom.restart_recovery_operations.cleanup_stale_streaming_room", new=cleanup_room),
+    ):
+        old_attempt = asyncio.create_task(
+            operations.recover_room(
+                (old_owner,),
+                RoomRecoveryRequest(room_id, 123, False),
+                frozenset({old_owner.user_id}),
+                _config(tmp_path),
+            ),
+        )
+        await asyncio.wait_for(old_lookup_started.wait(), timeout=1.0)
+        operations.discard_owner(old_owner.user_id)
+        replacement_attempt = asyncio.create_task(
+            operations.recover_room(
+                (new_owner,),
+                RoomRecoveryRequest(room_id, 123, False),
+                frozenset({new_owner.user_id}),
+                _config(tmp_path),
+            ),
+        )
+        try:
+            await asyncio.wait_for(old_lookup_cancelled.wait(), timeout=1.0)
+            with pytest.raises(TimeoutError):
+                await asyncio.wait_for(new_lookup_started.wait(), timeout=0.05)
+            release_old_cleanup.set()
+            assert await replacement_attempt == RoomRecoveryResult()
+            with pytest.raises(asyncio.CancelledError):
+                await old_attempt
+        finally:
+            release_old_cleanup.set()
+            old_attempt.cancel()
+            replacement_attempt.cancel()
+            await operations.close()
+            await asyncio.gather(old_attempt, replacement_attempt, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_close_drains_discarded_owner_membership_lookup(tmp_path: Path) -> None:
+    """Close must retain and drain an in-flight lookup removed by owner discard."""
+    owner = _owner()
+    operations = build_matrix_restart_recovery_operations(test_runtime_paths(tmp_path))
+    lookup_started = asyncio.Event()
+    lookup_cancelled = asyncio.Event()
+    release_cleanup = asyncio.Event()
+
+    async def joined_rooms(_client: nio.AsyncClient) -> list[str]:
+        lookup_started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            lookup_cancelled.set()
+            await release_cleanup.wait()
+            raise
+
+    with patch("mindroom.restart_recovery_operations.get_joined_rooms", new=joined_rooms):
+        recovery_task = asyncio.create_task(operations.joined_rooms(owner))
+        await asyncio.wait_for(lookup_started.wait(), timeout=1.0)
+        operations.discard_owner(owner.user_id)
+        await asyncio.wait_for(lookup_cancelled.wait(), timeout=1.0)
+        close_task = asyncio.create_task(operations.close())
+        try:
+            await asyncio.sleep(0)
+            assert close_task.done() is False
+            release_cleanup.set()
+            await asyncio.wait_for(close_task, timeout=1.0)
+        finally:
+            release_cleanup.set()
+            recovery_task.cancel()
+            close_task.cancel()
+            await asyncio.gather(recovery_task, close_task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
 async def test_missing_rooms_back_off_one_owner_membership_snapshot_refresh(
     tmp_path: Path,
 ) -> None:

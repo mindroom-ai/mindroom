@@ -586,6 +586,64 @@ async def test_recent_edit_keeps_old_stream_within_cleanup_window(tmp_path: Path
 
 
 @pytest.mark.asyncio
+async def test_cleanup_orders_interrupted_targets_by_original_event_not_later_edit(tmp_path: Path) -> None:
+    """A later edit must not make an older response outrank a newer response in one thread."""
+    config = _make_config(tmp_path)
+    client = AsyncMock(spec=nio.AsyncClient)
+    root_timestamp = NOW_MS - (STALE_AGE_MS + 40_000)
+    older_timestamp = NOW_MS - (STALE_AGE_MS + 30_000)
+    newer_timestamp = NOW_MS - (STALE_AGE_MS + 20_000)
+    later_edit_timestamp = NOW_MS - STALE_AGE_MS
+    client.room_messages.return_value = _room_messages_response(
+        _make_message_event(
+            event_id="$thread-root",
+            body="Question",
+            sender=USER_ID,
+            timestamp_ms=root_timestamp,
+        ),
+        _make_message_event(
+            event_id="$older-response",
+            body="Older partial",
+            timestamp_ms=older_timestamp,
+            relates_to=_thread_reply_relation("$thread-root", "$thread-root"),
+            extra_content={STREAM_STATUS_KEY: "streaming"},
+        ),
+        _make_message_event(
+            event_id="$newer-response",
+            body="Newer partial",
+            timestamp_ms=newer_timestamp,
+            relates_to=_thread_reply_relation("$thread-root", "$thread-root"),
+            extra_content={STREAM_STATUS_KEY: "streaming"},
+        ),
+        _make_message_event(
+            event_id="$older-late-edit",
+            body="* Older partial updated",
+            timestamp_ms=later_edit_timestamp,
+            relates_to={"rel_type": "m.replace", "event_id": "$older-response"},
+            new_content={
+                "body": "Older partial updated",
+                "msgtype": "m.text",
+                STREAM_STATUS_KEY: "streaming",
+            },
+        ),
+    )
+    client.room_get_event_relations = MagicMock(return_value=_aiter())
+
+    with patch(
+        "mindroom.matrix.stale_stream_cleanup.edit_message_result",
+        new=AsyncMock(side_effect=delivered_matrix_side_effect("$cleanup-edit")),
+    ):
+        cleaned, interrupted = await _run_cleanup(client, config, joined_rooms=[ROOM_ID])
+
+    assert cleaned == 2
+    timestamps_by_target = {target.target_event_id: target.timestamp_ms for target in interrupted}
+    assert timestamps_by_target == {
+        "$older-response": older_timestamp,
+        "$newer-response": newer_timestamp,
+    }
+
+
+@pytest.mark.asyncio
 async def test_cleanup_skips_completed_stream_status_even_with_trailing_marker(tmp_path: Path) -> None:
     """Cleanup must trust persisted stream status over a stale visible marker."""
     config = _make_config(tmp_path)

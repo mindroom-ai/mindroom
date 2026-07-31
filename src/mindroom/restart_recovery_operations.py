@@ -134,16 +134,19 @@ class RestartRecoveryOperations:
 class _OwnerMembershipSnapshot:
     """One joined-room lookup bound to its retained owner generation."""
 
-    generation: object
+    generation: object | None
     task: asyncio.Task[list[str] | None]
     refresh_after: float | None = None
 
 
-async def _cancel_and_drain_membership_task(task: asyncio.Task[list[str] | None]) -> None:
-    """Cancel one superseded lookup without abandoning its cleanup."""
-    if not task.done():
-        task.cancel()
-    drain = asyncio.gather(task, return_exceptions=True)
+async def _cancel_and_drain_membership_tasks(tasks: tuple[asyncio.Task[list[str] | None], ...]) -> None:
+    """Cancel superseded lookups without abandoning their cleanup."""
+    for task in tasks:
+        if not task.done() and task.cancelling() == 0:
+            task.cancel()
+    if not tasks:
+        return
+    drain = asyncio.gather(*tasks, return_exceptions=True)
     while not drain.done():
         try:
             await asyncio.shield(drain)
@@ -151,6 +154,15 @@ async def _cancel_and_drain_membership_task(task: asyncio.Task[list[str] | None]
             continue
     if (current := asyncio.current_task()) is not None and current.cancelling():
         raise asyncio.CancelledError
+
+
+async def _joined_rooms_after_superseded_tasks(
+    client: nio.AsyncClient,
+    superseded_tasks: tuple[asyncio.Task[list[str] | None], ...],
+) -> list[str] | None:
+    """Start one lookup only after every superseded lookup has drained."""
+    await _cancel_and_drain_membership_tasks(superseded_tasks)
+    return await get_joined_rooms(client)
 
 
 @dataclass
@@ -163,23 +175,20 @@ class _OwnerMembershipSnapshots:
     async def joined_rooms(self, owner: RecoveryOwner) -> list[str] | None:
         """Return one generation snapshot, creating it on first use."""
         snapshot = self.snapshots.get(owner.user_id)
-        superseded_task: asyncio.Task[list[str] | None] | None = None
         if (
             snapshot is None
             or snapshot.generation is not owner.generation
             or (snapshot.refresh_after is not None and snapshot.refresh_after <= asyncio.get_running_loop().time())
         ):
-            superseded_task = None if snapshot is None else snapshot.task
+            superseded_tasks = () if snapshot is None else (snapshot.task,)
             snapshot = _OwnerMembershipSnapshot(
                 generation=owner.generation,
                 task=asyncio.create_task(
-                    get_joined_rooms(owner.client),
+                    _joined_rooms_after_superseded_tasks(owner.client, superseded_tasks),
                     name=f"restart_recovery_membership:{owner.user_id}",
                 ),
             )
             self.snapshots[owner.user_id] = snapshot
-        if superseded_task is not None:
-            await _cancel_and_drain_membership_task(superseded_task)
         try:
             joined_room_ids = await asyncio.shield(snapshot.task)
         except asyncio.CancelledError:
@@ -206,20 +215,16 @@ class _OwnerMembershipSnapshots:
         """Release one removed owner's retained generation snapshot."""
         snapshot = self.snapshots.pop(owner_user_id, None)
         if snapshot is not None and not snapshot.task.done():
+            snapshot = replace(snapshot, generation=None, refresh_after=None)
+            self.snapshots[owner_user_id] = snapshot
             snapshot.task.cancel()
+            snapshot.task.add_done_callback(lambda _: self._discard(owner_user_id, snapshot))
 
     async def close(self) -> None:
         """Cancel and drain every retained membership snapshot."""
-        snapshots = tuple(self.snapshots.values())
+        tasks = tuple(snapshot.task for snapshot in self.snapshots.values())
         self.snapshots.clear()
-        for snapshot in snapshots:
-            if not snapshot.task.done():
-                snapshot.task.cancel()
-        if snapshots:
-            await asyncio.gather(
-                *(snapshot.task for snapshot in snapshots),
-                return_exceptions=True,
-            )
+        await _cancel_and_drain_membership_tasks(tasks)
 
     def _discard(
         self,
