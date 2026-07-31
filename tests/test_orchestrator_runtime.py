@@ -2170,6 +2170,47 @@ class TestMultiAgentOrchestrator:
         router_bot.recover_pending_turn_dispatch_obligations.assert_awaited_once_with()
 
     @pytest.mark.asyncio
+    async def test_router_turn_recovery_ignores_unavailable_unrelated_agent(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """A failed unrelated responder must not park durable router work forever."""
+        config = _runtime_bound_config(
+            Config(
+                agents={
+                    "healthy": AgentConfig(display_name="Healthy", role="Available responder"),
+                    "failed": AgentConfig(display_name="Failed", role="Unavailable responder"),
+                },
+            ),
+            tmp_path,
+        )
+        orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths_for(config))
+        orchestrator.config = config
+
+        router_bot = MagicMock()
+        router_bot.running = True
+        router_bot.first_sync_complete = True
+        router_bot.recover_pending_turn_dispatch_obligations = AsyncMock()
+
+        healthy_bot = MagicMock()
+        healthy_bot.running = True
+        healthy_bot.first_sync_complete = True
+
+        failed_bot = MagicMock()
+        failed_bot.running = False
+        failed_bot.first_sync_complete = False
+
+        orchestrator.agent_bots = {
+            ROUTER_AGENT_NAME: router_bot,
+            "healthy": healthy_bot,
+            "failed": failed_bot,
+        }
+
+        await orchestrator._recover_ready_turn_dispatch_obligations()
+
+        router_bot.recover_pending_turn_dispatch_obligations.assert_awaited_once_with()
+
+    @pytest.mark.asyncio
     async def test_full_startup_does_not_recover_team_before_member_first_sync(
         self,
         tmp_path: Path,
