@@ -1196,6 +1196,31 @@ async def test_sync_response_side_effect_failure_preserves_raw_cache_checkpoint(
 
 
 @pytest.mark.asyncio
+async def test_membership_cancellation_rewinds_uncertified_classic_cursor(tmp_path: Path) -> None:
+    """Cancellation before membership effects finish must replay the uncertified response."""
+    bot = _agent_bot(tmp_path)
+    bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
+    bot.client.next_batch = "s_after_membership"
+    bot._first_sync_done = True
+    bot._sync_cache_trust.state = SyncTrustState.CERTIFIED
+    bot._sync_cache_trust.checkpoint = SyncCheckpoint("s_before_membership")
+    response = MagicMock(spec=nio.SyncResponse)
+    response.next_batch = "s_after_membership"
+    response.rooms = MagicMock(join={})
+    bot._apply_own_room_membership_from_sync = AsyncMock(  # type: ignore[method-assign]
+        side_effect=asyncio.CancelledError("watchdog restart"),
+    )
+
+    with (
+        patch("mindroom.bot.mark_matrix_sync_success", return_value=datetime.now(UTC)),
+        pytest.raises(asyncio.CancelledError, match="watchdog restart"),
+    ):
+        await bot._on_sync_response(response)
+
+    assert bot.client.next_batch == "s_before_membership"
+
+
+@pytest.mark.asyncio
 async def test_prepare_for_sync_shutdown_flushes_latest_sync_token(tmp_path: Path) -> None:
     """Shutdown should flush the latest cache-certified sync token to disk."""
     bot = _agent_bot(tmp_path)
