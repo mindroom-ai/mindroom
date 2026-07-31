@@ -13,6 +13,7 @@ from mindroom.dispatch_obligations import (
     DispatchCallbackKind,
     DispatchObligationRunner,
     DispatchObligationStore,
+    DispatchSourceAdmission,
     _DispatchCallbackResult,
 )
 
@@ -64,15 +65,21 @@ def _runner(
         Awaitable[_DispatchCallbackResult],
     ],
 ) -> DispatchObligationRunner:
+    async def source_admission(
+        _room_id: str,
+        event_id: str,
+        callback_kind: DispatchCallbackKind,
+    ) -> DispatchSourceAdmission:
+        if await fence.admit(event_id, callback_kind):
+            return DispatchSourceAdmission.ACCEPTED
+        return DispatchSourceAdmission.COLD_HISTORY_FENCED
+
     return DispatchObligationRunner(
         store=store,
         callbacks={DispatchCallbackKind.MESSAGE: callback},
         room_for_id=lambda room_id: nio.MatrixRoom(room_id, "@code:example.org"),
         turn_is_terminal=lambda _event_id: False,
-        source_admission=lambda _room_id, event_id, callback_kind: fence.admit(
-            event_id,
-            callback_kind,
-        ),
+        source_admission=source_admission,
     )
 
 

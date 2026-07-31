@@ -85,7 +85,9 @@ Each agent bot runs its own sync loop with a 30-second long-polling timeout.
 The default `matrix_sync.mode: classic` streams events through classic `/v3/sync` and backfills limited-timeline gaps from `/messages`.
 Set `matrix_sync.mode: sliding` to opt into MSC4186 Simplified Sliding Sync on homeservers that advertise `org.matrix.simplified_msc3575`.
 `matrix_sync.sliding_timeline_limit` (default 100) bounds the per-room timeline window of each sliding request.
-Sliding positions are connection-scoped, so a restarted backend replays at most that window per room and older undelivered events are not recovered.
+Sliding positions are connection-scoped, so every restarted backend begins with callback admission cold.
+`mindroom-nio` backfills limited-timeline gaps before publishing the response recovery outcome, and ordinary callbacks open only when `unrecovered_room_ids` is empty.
+Classic Sync uses the same recovery outcome independently of event-cache checkpoint persistence.
 Changing `matrix_sync` restarts running entities on config hot reload.
 Sync loops are wrapped with `sync_forever_with_restart()` for automatic restart on connection failures.
 
@@ -215,8 +217,9 @@ Enabling encryption on a Matrix room is irreversible; MindRoom never disables it
 When an agent receives an event it cannot decrypt from an authorized sender, it logs a `matrix_event_decryption_failed` warning, sends a best-effort room-key request once per session (delivered to the bot account's own devices, so recovery normally needs the sender to post a new message), and posts one notice per (room, session) so the user knows to resend.
 All bots share a disk-backed notice ledger, so the first bot that fails on a session posts the only notice and multi-agent rooms never storm.
 After a live room join, decryption-failure callbacks for that exact unfinished join stay fenced across restarts until a trusted sync response confirms joined membership.
-The room fence runs before durable dispatch persistence, so pre-join failures cannot claim the notice ledger while ordinary message callbacks continue normally.
-During a start without sync continuity, the cold-history fence rejects ordinary callbacks before durable dispatch persistence and admits only exact previously pending obligations until the server establishes a trusted continuation.
+The room fence runs before durable dispatch persistence, but fenced failures still log diagnostics, update E2EE statistics, and request missing keys without claiming the visible-notice ledger.
+During a start without sync continuity, the cold-history fence rejects ordinary callbacks before durable dispatch persistence and admits only exact previously pending obligations until mindroom-nio reports a continuation with no unrecovered room gaps.
+Each rejected callback emits concise `matrix_dispatch_source_fenced` telemetry with its room, event, callback kind, and fence reason.
 Neither fence compares federated event timestamps with the local wall clock.
 Decryption-failure counters are exposed on `/api/health` under `e2ee`.
 

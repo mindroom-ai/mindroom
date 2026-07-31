@@ -67,6 +67,9 @@ Successful and intentionally ignored callbacks settle explicitly, while failures
 Recovery parses and invokes pending work without depending on a later Classic Sync token or Sliding Sync position.
 Message and media obligations remain pending when coalescing or a pending `TurnStore` record defers them, then yield only to durably persisted terminal turn truth.
 Raw sync-cache continuity remains owned separately by `SyncCacheTrust`, so a durable pending dispatch obligation is sufficient to preserve a certified checkpoint.
+`ColdHistoryFence` follows mindroom-nio's exact `unrecovered_room_ids` transport outcome instead of cache-certification success.
+Classic tokenless pre-certification rewinds rearm the fence, while checkpoint-apply failures preserve clean live transport continuity and leave restart behavior cold when no checkpoint reached disk.
+Continuity reads and writes run off the event loop, and retry decisions use the checkpoint already loaded or applied by `SyncCacheTrust`.
 Classic Sync response-owned lifecycle hooks and their durable de-duplication markers complete before `SyncCacheTrust` certifies the response checkpoint.
 Invite and response-owned lifecycle paths use the same runner directly because they are outside nio timeline fanout.
 The matching ordinary nio event callbacks only load and execute already-persisted work after every admission callback succeeds, and may then continue in the background.

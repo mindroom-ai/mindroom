@@ -152,8 +152,9 @@ async def handle_decrypt_failure(
     *,
     agent_name: str,
     runtime_paths: RuntimePaths,
+    suppress_notice: bool = False,
 ) -> None:
-    """Log one undecryptable Megolm event, request its key, and notify the room once."""
+    """Log one undecryptable event, request its key, and optionally notify."""
     session_id = event.session_id
     assert session_id is not None  # schema-required for parsed MegolmEvents
     already_requested = session_id in client.outgoing_key_requests
@@ -184,6 +185,9 @@ async def handle_decrypt_failure(
                 room_id=room.room_id,
                 session_id=session_id,
             )
+
+    if suppress_notice:
+        return
 
     # The check and the record run with no await between them, so concurrent
     # callbacks from other bots in this process cannot claim the same session:

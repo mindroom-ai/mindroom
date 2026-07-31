@@ -81,9 +81,7 @@ class BotRoomLifecycle:
         self._welcome_locks: dict[str, asyncio.Lock] = {}
         self._handled_invite_room_ids: set[str] = set()
         self._welcomed_room_ids: set[str] = set()
-        self._decrypt_notice_fenced_room_ids = set(
-            self.deps.continuity_store.load().pending_join_decrypt_fences,
-        )
+        self._decrypt_notice_fenced_room_ids: set[str] = set()
 
     def _lock_for_room(self, locks: dict[str, asyncio.Lock], room_id: str) -> asyncio.Lock:
         lock = locks.get(room_id)
@@ -131,9 +129,12 @@ class BotRoomLifecycle:
         """Return whether pre-join decrypt failures in this room stay silent."""
         return room_id in self._decrypt_notice_fenced_room_ids
 
-    def observe_trusted_sync_rooms(self, room_ids: Iterable[str]) -> None:
+    async def observe_trusted_sync_rooms(self, room_ids: Iterable[str]) -> None:
         """Clear join fences for rooms included in one trusted sync response."""
-        record = self.deps.continuity_store.update_join_fences(remove=room_ids)
+        record = await asyncio.to_thread(
+            self.deps.continuity_store.update_join_fences,
+            remove=tuple(room_ids),
+        )
         self.apply_continuity_record(record)
 
     def apply_continuity_record(self, record: SyncContinuityRecord) -> None:
@@ -142,13 +143,17 @@ class BotRoomLifecycle:
 
     async def restore_pending_join_decrypt_fences(self) -> None:
         """Validate durable unfinished-join fences before sync can start."""
+        self.apply_continuity_record(await asyncio.to_thread(self.deps.continuity_store.load))
         if not self._decrypt_notice_fenced_room_ids:
             return
         joined_rooms = await get_joined_rooms(self._client())
         if joined_rooms is None:
             msg = "Could not verify pending join decrypt fences because joined rooms are unavailable"
             raise RuntimeError(msg)
-        record = self.deps.continuity_store.update_join_fences(retain=joined_rooms)
+        record = await asyncio.to_thread(
+            self.deps.continuity_store.update_join_fences,
+            retain=joined_rooms,
+        )
         self.apply_continuity_record(record)
 
     async def _join_room_with_decrypt_notice_fence(
@@ -157,10 +162,20 @@ class BotRoomLifecycle:
         room_id: str,
     ) -> RoomJoinOutcome:
         """Fence decrypt callbacks before a live join can race its first sync."""
-        self.apply_continuity_record(self.deps.continuity_store.update_join_fences(add=(room_id,)))
+        self.apply_continuity_record(
+            await asyncio.to_thread(
+                self.deps.continuity_store.update_join_fences,
+                add=(room_id,),
+            ),
+        )
         join_outcome = await join_room(client, room_id)
         if join_outcome is RoomJoinOutcome.TERMINAL_FAILURE:
-            self.apply_continuity_record(self.deps.continuity_store.update_join_fences(remove=(room_id,)))
+            self.apply_continuity_record(
+                await asyncio.to_thread(
+                    self.deps.continuity_store.update_join_fences,
+                    remove=(room_id,),
+                ),
+            )
         return join_outcome
 
     async def _on_configured_room_joined(self, room_id: str) -> None:

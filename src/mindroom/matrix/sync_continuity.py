@@ -30,7 +30,7 @@ class SyncContinuityStore:
     """Own serialized fresh-read updates to one agent's continuity record."""
 
     def __init__(self, storage_path: Path, agent_name: str) -> None:
-        self._path = storage_path / "sync_tokens" / f"{agent_name}.token"
+        self._path = storage_path / "sync_continuity" / f"{agent_name}.json"
         self._lock_path = self._path.with_suffix(f"{self._path.suffix}.lock")
 
     def load(self) -> SyncContinuityRecord:

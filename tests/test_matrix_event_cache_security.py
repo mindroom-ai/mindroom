@@ -968,11 +968,11 @@ async def test_failed_startup_cleanup_disables_only_the_affected_principal(
 
 
 @pytest.mark.asyncio
-async def test_obsolete_sync_schema_fails_startup_closed(
+async def test_obsolete_sync_schema_at_legacy_path_starts_cold(
     event_cache_factory: Callable[[], ConversationEventCache],
     tmp_path: Path,
 ) -> None:
-    """An old checkpoint schema cannot silently become a continuity-less cold start."""
+    """An old checkpoint schema cannot collide with unified continuity state."""
     root = _shared_cache(event_cache_factory)
     await root.initialize()
     cache = root.for_principal("@alice:localhost")
@@ -989,8 +989,7 @@ async def test_obsolete_sync_schema_fails_startup_closed(
         logger=MagicMock(),
     )
     try:
-        with pytest.raises(RuntimeError, match="continuity"):
-            await trust.prepare_startup()
+        assert await trust.prepare_startup() is None
         assert continuity_path.exists()
     finally:
         await root.close()

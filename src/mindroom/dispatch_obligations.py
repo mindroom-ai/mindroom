@@ -45,6 +45,14 @@ class DispatchCallbackKind(StrEnum):
     DECRYPTION_FAILURE = "decryption_failure"
 
 
+class DispatchSourceAdmission(StrEnum):
+    """Typed outcome for one source event at the replay fence."""
+
+    ACCEPTED = "accepted"
+    COLD_HISTORY_FENCED = "cold_history_fenced"
+    DECRYPT_NOTICE_FENCED = "decrypt_notice_fenced"
+
+
 class _DispatchTerminalOutcome(StrEnum):
     """Explicit terminal outcomes for one exact callback obligation."""
 
@@ -555,7 +563,11 @@ _InviteCallback = Callable[[nio.MatrixRoom, nio.InviteEvent], Awaitable[None]]
 _RoomLifecycleCallback = Callable[[nio.MatrixRoom, nio.RoomMemberEvent], Awaitable[None]]
 _RedactionCallback = Callable[[nio.MatrixRoom, nio.RedactionEvent], Awaitable[None]]
 _DecryptionFailureCallback = Callable[[nio.MatrixRoom, nio.MegolmEvent], Awaitable[None]]
-_SourceAdmission = Callable[[str, str, DispatchCallbackKind], Awaitable[bool]]
+_SourceAdmission = Callable[[str, str, DispatchCallbackKind], Awaitable[DispatchSourceAdmission]]
+_SourceRejectionCallback = Callable[
+    [nio.MatrixRoom, _DispatchEvent, DispatchCallbackKind, DispatchSourceAdmission],
+    Awaitable[None],
+]
 
 _TURN_BACKED_KINDS = frozenset({DispatchCallbackKind.MESSAGE, DispatchCallbackKind.MEDIA})
 
@@ -564,8 +576,8 @@ async def _admit_all_sources(
     _room_id: str,
     _source_event_id: str,
     _callback_kind: DispatchCallbackKind,
-) -> bool:
-    return True
+) -> DispatchSourceAdmission:
+    return DispatchSourceAdmission.ACCEPTED
 
 
 async def _run_owned_store_operation(
@@ -781,6 +793,7 @@ class DispatchObligationRunner:
     turn_is_terminal: Callable[[str], bool]
     on_persist_failure: Callable[[], None] | None = None
     source_admission: _SourceAdmission = _admit_all_sources
+    on_source_rejected: _SourceRejectionCallback | None = None
     background_task_owner: object | None = None
     _retry_initial_delay_seconds: float = field(default=_RETRY_INITIAL_DELAY_SECONDS, repr=False)
     _retry_max_delay_seconds: float = field(default=_RETRY_MAX_DELAY_SECONDS, repr=False)
@@ -901,11 +914,19 @@ class DispatchObligationRunner:
         """Persist exact work before its background task may be created."""
         try:
             obligation = self._obligation_for_event(room, event, callback_kind)
-            if not await self.source_admission(
+            admission = await self.source_admission(
                 room.room_id,
                 obligation.source_event_id,
                 callback_kind,
-            ):
+            )
+            if admission is not DispatchSourceAdmission.ACCEPTED:
+                if self.on_source_rejected is not None:
+                    await self.on_source_rejected(
+                        room,
+                        event,
+                        callback_kind,
+                        admission,
+                    )
                 return None
             if await self._settle_from_turn_store_if_owned(obligation):
                 return None

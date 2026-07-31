@@ -172,7 +172,6 @@ def test_concurrent_stores_serialize_fresh_read_updates_without_resurrection(
 @pytest.mark.parametrize(
     "payload",
     [
-        '{"version":"mindroom-sync-token-v2","token":"s_old","cache_generation":"old"}',
         '{"version":"mindroom-sync-continuity-v1","checkpoint":"bad","pending_join_decrypt_fences":[]}',
         "not json",
     ],
@@ -182,9 +181,21 @@ def test_obsolete_or_corrupt_continuity_record_fails_closed(
     payload: str,
 ) -> None:
     """Unknown continuity cannot silently become a warm or unfenced restart."""
-    path = tmp_path / "sync_tokens" / "code.token"
+    path = tmp_path / "sync_continuity" / "code.json"
     path.parent.mkdir(parents=True)
     path.write_text(payload, encoding="utf-8")
 
     with pytest.raises(RuntimeError, match="continuity"):
         SyncContinuityStore(tmp_path, "code").load()
+
+
+def test_legacy_token_path_is_ignored_without_compatibility_parsing(tmp_path: Path) -> None:
+    """Old token formats cannot collide with the unified continuity record."""
+    path = tmp_path / "sync_tokens" / "code.token"
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        '{"version":"mindroom-sync-token-v2","token":"s_old","cache_generation":"old"}',
+        encoding="utf-8",
+    )
+
+    assert SyncContinuityStore(tmp_path, "code").load() == SyncContinuityRecord()

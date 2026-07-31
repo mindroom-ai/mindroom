@@ -662,6 +662,7 @@ async def test_bot_ready_hook_can_send_messages(tmp_path: Path) -> None:
     """Hooks on bot:ready should be able to send messages through the bound sender."""
     bot = _agent_bot(tmp_path, agent_name="router")
     bot.client = AsyncMock()
+    bot.client.add_event_admission_callback = MagicMock()
     bot.client.add_event_callback = MagicMock()
     orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
     orchestrator.agent_bots = {"router": bot}

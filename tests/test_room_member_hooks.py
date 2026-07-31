@@ -94,6 +94,7 @@ def _sync_response_with_state(
     response = MagicMock()
     response.__class__ = nio.SyncResponse
     response.next_batch = "s_next"
+    response.unrecovered_room_ids = frozenset()
     response.rooms = SimpleNamespace(
         invite={},
         join={
