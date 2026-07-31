@@ -1614,9 +1614,7 @@ class AgentBot:
             # Keep durable tracking-state loading off the event loop at startup.
             await asyncio.to_thread(self._turn_store.warm)
             await asyncio.to_thread(interactive.init_persistence, self.runtime_paths.storage_root)
-            if self.orchestrator is not None and (
-                self.agent_name == ROUTER_AGENT_NAME or self.agent_name in self.config.teams
-            ):
+            if self.orchestrator is not None:
                 await self._dispatch_obligation_runner.recover_pending(turn_backed=False)
             else:
                 await self._dispatch_obligation_runner.recover_pending()

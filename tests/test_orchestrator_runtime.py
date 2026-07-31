@@ -2175,6 +2175,40 @@ class TestMultiAgentOrchestrator:
         router_bot.recover_pending_turn_dispatch_obligations.assert_awaited_once_with()
 
     @pytest.mark.asyncio
+    async def test_regular_agent_turn_recovery_waits_for_own_first_sync(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """A regular agent must recover turns only after its room state is current."""
+        config = _runtime_bound_config(
+            Config(
+                agents={
+                    "general": AgentConfig(
+                        display_name="General",
+                        role="General assistant",
+                    ),
+                },
+            ),
+            tmp_path,
+        )
+        orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths_for(config))
+        orchestrator.config = config
+
+        bot = MagicMock()
+        bot.running = True
+        bot.first_sync_complete = False
+        bot.recover_pending_turn_dispatch_obligations = AsyncMock()
+        orchestrator.agent_bots = {"general": bot}
+
+        await orchestrator._recover_ready_turn_dispatch_obligations()
+        bot.recover_pending_turn_dispatch_obligations.assert_not_awaited()
+
+        bot.first_sync_complete = True
+        await orchestrator._recover_ready_turn_dispatch_obligations()
+
+        bot.recover_pending_turn_dispatch_obligations.assert_awaited_once_with()
+
+    @pytest.mark.asyncio
     async def test_router_turn_recovery_ignores_unavailable_unrelated_agent(
         self,
         tmp_path: Path,
@@ -2200,6 +2234,7 @@ class TestMultiAgentOrchestrator:
         healthy_bot = MagicMock()
         healthy_bot.running = True
         healthy_bot.first_sync_complete = True
+        healthy_bot.recover_pending_turn_dispatch_obligations = AsyncMock()
 
         failed_bot = MagicMock()
         failed_bot.running = False
@@ -2214,6 +2249,7 @@ class TestMultiAgentOrchestrator:
         await orchestrator._recover_ready_turn_dispatch_obligations()
 
         router_bot.recover_pending_turn_dispatch_obligations.assert_awaited_once_with()
+        healthy_bot.recover_pending_turn_dispatch_obligations.assert_awaited_once_with()
 
     @pytest.mark.asyncio
     async def test_bot_ready_schedules_blocked_turn_recovery_without_blocking_sync(
@@ -2297,6 +2333,7 @@ class TestMultiAgentOrchestrator:
         member_bot.agent_name = "general"
         member_bot.running = False
         member_bot.first_sync_complete = False
+        member_bot.recover_pending_turn_dispatch_obligations = AsyncMock()
 
         async def start_member() -> bool:
             member_starting.set()
@@ -2359,6 +2396,7 @@ class TestMultiAgentOrchestrator:
         member_bot.agent_name = "general"
         member_bot.running = False
         member_bot.first_sync_complete = False
+        member_bot.recover_pending_turn_dispatch_obligations = AsyncMock()
 
         async def start_member() -> bool:
             member_bot.running = True
@@ -2391,6 +2429,7 @@ class TestMultiAgentOrchestrator:
         )
 
         team_bot.recover_pending_turn_dispatch_obligations.assert_awaited_once_with()
+        member_bot.recover_pending_turn_dispatch_obligations.assert_awaited_once_with()
 
     @pytest.mark.asyncio
     async def test_orchestrator_start_skips_retry_for_permanent_failures(self, tmp_path: Path) -> None:

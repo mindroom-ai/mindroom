@@ -324,6 +324,29 @@ async def test_orchestrated_router_start_defers_turn_recovery_to_coordinator(tmp
 
 
 @pytest.mark.asyncio
+async def test_orchestrated_agent_start_defers_turn_recovery_until_first_sync(
+    tmp_path: Path,
+) -> None:
+    """A regular agent must not replay turns against pre-sync room state."""
+    bot = _agent_bot(tmp_path)
+    bot.orchestrator = MagicMock()
+    client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
+    recover_pending = AsyncMock()
+    bot._dispatch_obligation_runner.recover_pending = recover_pending
+
+    with (
+        patch.object(bot, "ensure_user_account", AsyncMock()),
+        patch("mindroom.bot.login_agent_user", AsyncMock(return_value=client)),
+        patch.object(bot, "_set_avatar_if_available", AsyncMock()),
+        patch.object(bot, "_set_presence_with_model_info", AsyncMock()),
+        patch("mindroom.bot.interactive.init_persistence"),
+    ):
+        await bot.start()
+
+    recover_pending.assert_awaited_once_with(turn_backed=False)
+
+
+@pytest.mark.asyncio
 async def test_orchestrated_team_start_gates_turn_recovery_on_responder_fleet(
     tmp_path: Path,
 ) -> None:
