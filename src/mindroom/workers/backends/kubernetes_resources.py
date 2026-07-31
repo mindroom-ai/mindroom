@@ -1666,15 +1666,6 @@ class KubernetesResourceManager:
         existing_mounts: tuple[dict[str, object], ...],
     ) -> list[dict[str, object]]:
         relative_paths = self._assigned_knowledge_storage_paths(worker_key)
-        mount_paths = tuple(mounted_storage_root / relative_path for relative_path in relative_paths)
-        for index, mount_path in enumerate(mount_paths):
-            for other_path in mount_paths[index + 1 :]:
-                if mount_path.is_relative_to(other_path) or other_path.is_relative_to(mount_path):
-                    msg = (
-                        f"Kubernetes knowledge mount paths overlap for worker key {worker_key}: "
-                        f"{mount_path} and {other_path}"
-                    )
-                    raise WorkerBackendError(msg)
         storage_mount_paths = tuple(
             Path(cast("str", mount["mountPath"]))
             for mount in existing_mounts
@@ -1685,22 +1676,52 @@ class KubernetesResourceManager:
             for mount in existing_mounts
             if mount["name"] != WORKER_STORAGE_VOLUME_NAME
         )
-        mounts: list[dict[str, object]] = []
-        for relative_path, mount_path in zip(relative_paths, mount_paths, strict=True):
-            if any(
-                mount_path.is_relative_to(other_path) or other_path.is_relative_to(mount_path)
-                for other_path in other_mount_paths
-            ):
-                msg = f"Kubernetes knowledge mount overlaps existing mountPath for worker key: {worker_key}"
+        candidates: list[tuple[Path, Path]] = []
+        for relative_path in relative_paths:
+            mount_path = mounted_storage_root / relative_path
+            overlapping_other_path = next(
+                (
+                    other_path
+                    for other_path in other_mount_paths
+                    if mount_path.is_relative_to(other_path) or other_path.is_relative_to(mount_path)
+                ),
+                None,
+            )
+            if overlapping_other_path is not None:
+                msg = (
+                    f"Kubernetes knowledge mount overlaps existing mountPath for worker key {worker_key}: "
+                    f"{mount_path} and {overlapping_other_path}"
+                )
                 raise WorkerBackendError(msg)
             if any(
                 mount_path == existing_path or mount_path.is_relative_to(existing_path)
                 for existing_path in storage_mount_paths
             ):
                 continue
-            if any(existing_path.is_relative_to(mount_path) for existing_path in storage_mount_paths):
-                msg = f"Kubernetes knowledge mount overlaps existing mountPath for worker key: {worker_key}"
+            contained_storage_path = next(
+                (existing_path for existing_path in storage_mount_paths if existing_path.is_relative_to(mount_path)),
+                None,
+            )
+            if contained_storage_path is not None:
+                msg = (
+                    f"Kubernetes knowledge mount overlaps existing mountPath for worker key {worker_key}: "
+                    f"{mount_path} and {contained_storage_path}"
+                )
                 raise WorkerBackendError(msg)
+            candidates.append((relative_path, mount_path))
+
+        candidate_mount_paths = tuple(mount_path for _relative_path, mount_path in candidates)
+        for index, mount_path in enumerate(candidate_mount_paths):
+            for other_path in candidate_mount_paths[index + 1 :]:
+                if mount_path.is_relative_to(other_path) or other_path.is_relative_to(mount_path):
+                    msg = (
+                        f"Kubernetes knowledge mount paths overlap for worker key {worker_key}: "
+                        f"{mount_path} and {other_path}"
+                    )
+                    raise WorkerBackendError(msg)
+
+        mounts: list[dict[str, object]] = []
+        for relative_path, mount_path in candidates:
             mounts.append(
                 {
                     "name": WORKER_STORAGE_VOLUME_NAME,

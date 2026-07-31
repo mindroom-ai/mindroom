@@ -1828,10 +1828,12 @@ agents:
     role: Code test
     model: default
     worker_scope: shared
-    knowledge_bases: [workspace_docs]
+    knowledge_bases: [workspace_docs, workspace_docs_child]
 knowledge_bases:
   workspace_docs:
     path: {knowledge_root}
+  workspace_docs_child:
+    path: {knowledge_root / "docs"}
 models:
   default:
     provider: openai
@@ -1851,6 +1853,7 @@ router:
     mount_paths = [mount["mountPath"] for mount in volume_mounts]
     assert "/app/worker/agents/code" in mount_paths
     assert "/app/worker/agents/code/workspace/knowledge" not in mount_paths
+    assert "/app/worker/agents/code/workspace/knowledge/docs" not in mount_paths
 
 
 def test_kubernetes_backend_rejects_knowledge_mount_containing_scoped_storage(tmp_path: Path) -> None:
