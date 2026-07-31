@@ -43,6 +43,7 @@ class _OwnerRoomWork:
     targets: tuple[InterruptedThread, ...] = ()
     matrix_attempt: int = 0
     readiness_probe: int = 0
+    membership_probe: int = 0
     due_at: float | None = 0.0
 
     @property
@@ -83,7 +84,6 @@ class _TargetWatermark:
 class _TargetSettlement:
     target: InterruptedThread
     closed: bool
-    owner_user_id: str
 
 
 @dataclass(frozen=True)
@@ -95,15 +95,9 @@ class _OwnerAttemptResult:
     retry_targets: tuple[InterruptedThread, ...] = ()
     settlements: tuple[_TargetSettlement, ...] = ()
     readiness_unavailable: bool = False
+    membership_unavailable: bool = False
     matrix_failed: bool = False
     cancelled: bool = False
-
-
-@dataclass(frozen=True)
-class _RoomAttemptResult:
-    """Independent owner outcomes from one shared room scan."""
-
-    outcomes: tuple[_OwnerAttemptResult, ...]
 
 
 def _restart_recovery_retry_delay(attempt: int) -> float:
@@ -149,7 +143,7 @@ class RestartRecoveryCoordinator:
         self._room_jobs: dict[_JobKey, _OwnerRoomWork] = {}
         self._target_watermarks: dict[_TargetKey, _TargetWatermark] = {}
         self._completed_startup_scans: set[tuple[_RoomKey, str]] = set()
-        self._active_attempts: dict[asyncio.Task[_RoomAttemptResult], _RoomLease] = {}
+        self._active_attempts: dict[asyncio.Task[tuple[_OwnerAttemptResult, ...]], _RoomLease] = {}
         self._matrix_read_slots = asyncio.Semaphore(_MAX_CONCURRENT_MATRIX_READ_PHASES)
         self._delivery_lock = asyncio.Lock()
         self._worker_task: asyncio.Task[None] | None = None
@@ -169,6 +163,8 @@ class RestartRecoveryCoordinator:
 
     def owner_ready(self, owner_user_id: str) -> None:
         """Refresh one owner and grant retained work a fresh bounded budget."""
+        if self._stopped:
+            return
         self._settle_finished_attempts()
         owner = self._current_owners().get(owner_user_id)
         if owner is not None:
@@ -183,8 +179,7 @@ class RestartRecoveryCoordinator:
 
     def enqueue_replacement_rooms(self, owner_user_id: str, room_ids: set[str]) -> None:
         """Retain terminal interrupted-room handoffs across bot replacement."""
-        config = self._current_config()
-        if config is not None and not config.defaults.auto_resume_after_restart:
+        if not self._require_config().defaults.auto_resume_after_restart:
             return
         for room_id in room_ids:
             self._enqueue_request(
@@ -222,8 +217,7 @@ class RestartRecoveryCoordinator:
         """Resume retained work against current config and owner generations."""
         if self._stopped:
             return
-        config = self._current_config()
-        if config is not None and not config.defaults.auto_resume_after_restart:
+        if not self._require_config().defaults.auto_resume_after_restart:
             self._room_jobs = {
                 key: work for key, work in self._room_jobs.items() if not work.request.terminal_interrupted_only
             }
@@ -248,6 +242,11 @@ class RestartRecoveryCoordinator:
         self._completed_startup_scans.clear()
         await self._operations.close()
 
+    def _require_config(self) -> Config:
+        config = self._current_config()
+        assert config is not None
+        return config
+
     def _refresh_owner_jobs(
         self,
         owner: RecoveryOwner,
@@ -265,6 +264,7 @@ class RestartRecoveryCoordinator:
                     generation=owner.generation,
                     matrix_attempt=0,
                     readiness_probe=0,
+                    membership_probe=0,
                     due_at=now,
                 )
         self._wake.set()
@@ -310,6 +310,7 @@ class RestartRecoveryCoordinator:
                 generation=generation,
                 matrix_attempt=0,
                 readiness_probe=0,
+                membership_probe=0,
                 due_at=now,
             )
         self._wake.set()
@@ -423,7 +424,7 @@ class RestartRecoveryCoordinator:
     def _settle_attempt(
         self,
         lease: _RoomLease,
-        task: asyncio.Task[_RoomAttemptResult],
+        task: asyncio.Task[tuple[_OwnerAttemptResult, ...]],
     ) -> None:
         try:
             result = task.result()
@@ -434,17 +435,18 @@ class RestartRecoveryCoordinator:
             logger.warning("Restart recovery attempt failed", exc_info=True)
             self._restore_failed_lease(lease)
             return
-        for outcome in result.outcomes:
+        for outcome in result:
             self._settle_owner_outcome(outcome)
 
     def _settle_owner_outcome(self, outcome: _OwnerAttemptResult) -> None:
         work = outcome.work
-        if self._room_jobs.get(work.key) is not work:
-            return
+        current_work = self._room_jobs.get(work.key)
         owner = outcome.owner
-        if owner is not None:
+        if current_work is not None and owner is not None and current_work.generation is owner.generation:
             for settlement in outcome.settlements:
                 self._advance_watermark(owner, settlement)
+        if current_work is not work:
+            return
         if outcome.cancelled:
             self._room_jobs[work.key] = replace(
                 work,
@@ -454,6 +456,9 @@ class RestartRecoveryCoordinator:
             return
         if outcome.readiness_unavailable:
             self._retry_readiness(work)
+            return
+        if outcome.membership_unavailable:
+            self._retry_membership(work)
             return
         if outcome.matrix_failed:
             self._retry_matrix(work, outcome.retry_targets)
@@ -498,6 +503,15 @@ class RestartRecoveryCoordinator:
             work = replace(work, readiness_probe=probe)
         self._room_jobs[work.key] = replace(work, due_at=due_at)
 
+    def _retry_membership(self, work: _OwnerRoomWork) -> None:
+        """Refresh one missing membership once, then wait for owner readiness."""
+        if work.membership_probe == 0:
+            work = replace(work, membership_probe=1)
+            due_at = asyncio.get_running_loop().time() + self._retry_delay(1)
+        else:
+            due_at = None
+        self._room_jobs[work.key] = replace(work, due_at=due_at)
+
     def _retry_matrix(
         self,
         work: _OwnerRoomWork,
@@ -511,6 +525,7 @@ class RestartRecoveryCoordinator:
                 targets=(),
                 matrix_attempt=attempt,
                 readiness_probe=0,
+                membership_probe=0,
                 due_at=None,
             )
             logger.warning(
@@ -526,6 +541,7 @@ class RestartRecoveryCoordinator:
             targets=_newest_targets(retry_targets),
             matrix_attempt=attempt,
             readiness_probe=0,
+            membership_probe=0,
             due_at=asyncio.get_running_loop().time() + self._retry_delay(attempt),
         )
 
@@ -553,32 +569,12 @@ class RestartRecoveryCoordinator:
                     continue
         self._settle_finished_attempts()
 
-    async def _process_room(self, lease: _RoomLease) -> _RoomAttemptResult:
-        config = self._current_config()
+    async def _process_room(self, lease: _RoomLease) -> tuple[_OwnerAttemptResult, ...]:
+        config = self._require_config()
         owners = dict(self._current_owners())
-        if (
-            config is not None
-            and lease.request.terminal_interrupted_only
-            and not config.defaults.auto_resume_after_restart
-        ):
-            return _RoomAttemptResult(
-                tuple(_OwnerAttemptResult(work=work, owner=owners.get(work.owner_user_id)) for work in lease.jobs),
-            )
-        if config is None:
-            return _RoomAttemptResult(
-                tuple(
-                    _OwnerAttemptResult(
-                        work=work,
-                        owner=None,
-                        retry_targets=work.targets,
-                        readiness_unavailable=True,
-                    )
-                    for work in lease.jobs
-                ),
-            )
         ready, outcomes = self._partition_ready_jobs(lease, owners)
         if not ready:
-            return _RoomAttemptResult(tuple(outcomes.values()))
+            return tuple(outcomes.values())
 
         async with self._matrix_read_slots:
             recovered = await self._operations.recover_room(
@@ -618,6 +614,14 @@ class RestartRecoveryCoordinator:
                     cancelled=True,
                 )
                 continue
+            if owner.user_id in recovered.unjoined_owner_user_ids:
+                outcomes[work.owner_user_id] = _OwnerAttemptResult(
+                    work=work,
+                    owner=owner,
+                    retry_targets=targets,
+                    membership_unavailable=True,
+                )
+                continue
             outcome = await self._process_owner_targets(
                 work,
                 owner,
@@ -626,9 +630,7 @@ class RestartRecoveryCoordinator:
                 scan_failed=owner.user_id in recovered.retry_owner_user_ids,
             )
             outcomes[work.owner_user_id] = outcome
-        return _RoomAttemptResult(
-            tuple(outcomes[job.owner_user_id] for job in lease.jobs),
-        )
+        return tuple(outcomes[job.owner_user_id] for job in lease.jobs)
 
     @staticmethod
     def _partition_ready_jobs(
@@ -712,7 +714,7 @@ class RestartRecoveryCoordinator:
         config: Config,
     ) -> _TargetSettlement | None:
         if target.original_sender_id is None or not config.defaults.auto_resume_after_restart:
-            return _TargetSettlement(target, closed=False, owner_user_id=owner.user_id)
+            return _TargetSettlement(target, closed=False)
         async with self._matrix_read_slots:
             freshness = await self._operations.target_freshness(owner, target, config)
         if freshness is InterruptedTargetFreshness.RETRY:
@@ -721,14 +723,13 @@ class RestartRecoveryCoordinator:
             InterruptedTargetFreshness.NEWER_HUMAN,
             InterruptedTargetFreshness.UNRECOVERABLE,
         }:
-            return _TargetSettlement(target, closed=False, owner_user_id=owner.user_id)
+            return _TargetSettlement(target, closed=False)
         delivery = await self._deliver_target(owner, target, config)
         if delivery is RestartDeliveryOutcome.RETRY:
             return None
         return _TargetSettlement(
             target,
             closed=delivery is RestartDeliveryOutcome.DELIVERED,
-            owner_user_id=owner.user_id,
         )
 
     async def _deliver_target(

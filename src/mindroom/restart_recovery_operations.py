@@ -94,6 +94,7 @@ class _RoomRecoveryResult:
 
     interrupted_threads: tuple[InterruptedThread, ...] = ()
     retry_owner_user_ids: frozenset[str] = frozenset()
+    unjoined_owner_user_ids: frozenset[str] = frozenset()
 
 
 class RestartDeliveryOutcome(Enum):
@@ -219,6 +220,7 @@ async def _recover_room(
     )
     joined_owners: list[RecoveryOwner] = []
     retry_owner_user_ids: set[str] = set()
+    unjoined_owner_user_ids: set[str] = set()
     for owner, joined_room_ids in zip(owners, membership_results):
         if isinstance(joined_room_ids, asyncio.CancelledError):
             raise joined_room_ids
@@ -234,15 +236,19 @@ async def _recover_room(
             )
             retry_owner_user_ids.add(owner.user_id)
             continue
-        if joined_room_ids is None or request.room_id not in joined_room_ids:
-            membership_snapshots.invalidate(owner)
+        if joined_room_ids is None:
             retry_owner_user_ids.add(owner.user_id)
+            continue
+        if request.room_id not in joined_room_ids:
+            membership_snapshots.invalidate(owner)
+            unjoined_owner_user_ids.add(owner.user_id)
             continue
         joined_owners.append(owner)
 
     if not joined_owners:
         return _RoomRecoveryResult(
             retry_owner_user_ids=frozenset(retry_owner_user_ids),
+            unjoined_owner_user_ids=frozenset(unjoined_owner_user_ids),
         )
 
     scan_owner = next(
@@ -279,6 +285,7 @@ async def _recover_room(
     return _RoomRecoveryResult(
         interrupted_threads=cleanup_result.interrupted_threads,
         retry_owner_user_ids=frozenset(retry_cleanup_owner_user_ids),
+        unjoined_owner_user_ids=frozenset(unjoined_owner_user_ids),
     )
 
 

@@ -141,6 +141,9 @@ def _operations(
             retry_owner_user_ids=frozenset(
                 owner_user_id for result in results for owner_user_id in result.retry_owner_user_ids
             ),
+            unjoined_owner_user_ids=frozenset(
+                owner_user_id for result in results for owner_user_id in result.unjoined_owner_user_ids
+            ),
         )
 
     async def close() -> None:
@@ -196,8 +199,8 @@ def test_restart_recovery_retry_delay_caps(attempt: int, expected_seconds: float
 
 
 @pytest.mark.asyncio
-async def test_matrix_room_recovery_retries_until_exact_owner_is_joined(tmp_path: Path) -> None:
-    """A desired room hidden from the owner client must stay in the room ledger."""
+async def test_matrix_room_recovery_defers_until_exact_owner_is_joined(tmp_path: Path) -> None:
+    """A desired room hidden from the owner client must wait for membership."""
     owner = _owner()
     config = _config(tmp_path)
     operations = build_matrix_restart_recovery_operations(test_runtime_paths(tmp_path))
@@ -222,7 +225,7 @@ async def test_matrix_room_recovery_retries_until_exact_owner_is_joined(tmp_path
         )
 
     assert result == RoomRecoveryResult(
-        retry_owner_user_ids=frozenset({owner.user_id}),
+        unjoined_owner_user_ids=frozenset({owner.user_id}),
     )
     cleanup_room.assert_not_awaited()
 
@@ -272,7 +275,7 @@ async def test_shared_room_scans_joined_owner_and_retries_only_missing_owner(
         )
 
     assert result == RoomRecoveryResult(
-        retry_owner_user_ids=frozenset({router.user_id}),
+        unjoined_owner_user_ids=frozenset({router.user_id}),
     )
     cleanup_room.assert_awaited_once()
     assert set(cleanup_room.await_args.kwargs["actors"]) == {owner.user_id}
@@ -411,7 +414,7 @@ async def test_shared_room_scans_ready_owner_and_retries_only_unready_owner(
     )
 
     assert scanned_owner_user_ids == [owner.user_id]
-    assert {outcome.work.owner_user_id for outcome in result.outcomes if outcome.readiness_unavailable} == {
+    assert {outcome.work.owner_user_id for outcome in result if outcome.readiness_unavailable} == {
         router.user_id,
     }
 
@@ -466,7 +469,7 @@ async def test_unmapped_target_does_not_poison_other_room_recovery(
             ),
         )
 
-    assert [settlement.target for settlement in result.outcomes[0].settlements] == [valid]
+    assert [settlement.target for settlement in result[0].settlements] == [valid]
     warning.assert_called_once_with(
         "Restart target has no current owner; skipping",
         agent_name=unmapped.agent_name,
@@ -868,7 +871,7 @@ async def test_missing_rooms_back_off_one_owner_membership_snapshot_refresh(
         await operations.close()
 
     assert missing_results == [
-        RoomRecoveryResult(retry_owner_user_ids=frozenset({owner.user_id})) for _request in requests
+        RoomRecoveryResult(unjoined_owner_user_ids=frozenset({owner.user_id})) for _request in requests
     ]
     assert calls_before_refresh == 1
     assert refreshed_result == RoomRecoveryResult()
@@ -1040,6 +1043,52 @@ async def test_stop_drains_historical_membership_snapshots(tmp_path: Path) -> No
     gc.collect()
 
     assert generation_ref() is None
+
+
+@pytest.mark.asyncio
+async def test_owner_ready_during_stop_does_not_restore_recovery_work(
+    tmp_path: Path,
+) -> None:
+    """A late sync-readiness callback must be inert after shutdown begins."""
+    owner = _owner(rooms=frozenset())
+    owners = {owner.user_id: owner}
+    current_owners = MagicMock(side_effect=lambda: owners)
+    close_started = asyncio.Event()
+    release_close = asyncio.Event()
+
+    async def close() -> None:
+        close_started.set()
+        await release_close.wait()
+
+    coordinator = RestartRecoveryCoordinator(
+        current_config=lambda: _config(tmp_path),
+        current_owners=current_owners,
+        operations=RestartRecoveryOperations(
+            recover_room=AsyncMock(return_value=RoomRecoveryResult()),
+            target_freshness=AsyncMock(return_value=InterruptedTargetFreshness.CURRENT),
+            deliver_target=AsyncMock(return_value=RestartDeliveryOutcome.DELIVERED),
+            discard_owner=lambda _owner_user_id: None,
+            close=close,
+        ),
+    )
+    coordinator.start(startup_cutoff_ms=123)
+    owners[owner.user_id] = _owner(
+        generation=owner.generation,
+        rooms=frozenset({"!code:example.org"}),
+    )
+
+    stop_task = asyncio.create_task(coordinator.stop())
+    await asyncio.wait_for(close_started.wait(), timeout=1.0)
+    owner_snapshots_before_callback = current_owners.call_count
+    try:
+        coordinator.owner_ready(owner.user_id)
+        restored_work = bool(coordinator._room_jobs)
+    finally:
+        release_close.set()
+        await asyncio.wait_for(stop_task, timeout=1.0)
+
+    assert current_owners.call_count == owner_snapshots_before_callback
+    assert not restored_work
 
 
 @pytest.mark.asyncio
@@ -1505,6 +1554,74 @@ async def test_permanent_room_retry_stops_with_terminal_warning(tmp_path: Path) 
 
 
 @pytest.mark.asyncio
+async def test_unjoined_desired_room_refreshes_once_then_parks_without_warning(
+    tmp_path: Path,
+) -> None:
+    """A missing membership must not spend the Matrix retry budget."""
+    owner = _owner()
+    owners = {owner.user_id: owner}
+    joined = False
+
+    async def joined_rooms(_client: nio.AsyncClient) -> list[str]:
+        return ["!code:example.org"] if joined else []
+
+    cleanup_room = AsyncMock(
+        return_value=stale_stream_cleanup_module.StaleStreamCleanupResult(
+            cleaned_count=0,
+            interrupted_threads=(),
+        ),
+    )
+    operations = build_matrix_restart_recovery_operations(test_runtime_paths(tmp_path))
+    coordinator = RestartRecoveryCoordinator(
+        current_config=lambda: _config(tmp_path),
+        current_owners=lambda: owners,
+        operations=operations,
+        retry_delay=lambda _attempt: 0.0,
+    )
+
+    with (
+        patch(
+            "mindroom.restart_recovery_operations._OWNER_MEMBERSHIP_REFRESH_BACKOFF_SECONDS",
+            0.0,
+        ),
+        patch(
+            "mindroom.restart_recovery_operations.get_joined_rooms",
+            new=AsyncMock(side_effect=joined_rooms),
+        ) as get_rooms,
+        patch(
+            "mindroom.restart_recovery_operations.cleanup_stale_streaming_room",
+            new=cleanup_room,
+        ),
+        patch("mindroom.restart_recovery.logger.warning") as warning,
+    ):
+        coordinator.start(startup_cutoff_ms=123)
+        await _wait_until(
+            lambda: (
+                bool(coordinator._room_jobs)
+                and not coordinator._active_attempts
+                and next(iter(coordinator._room_jobs.values())).due_at is None
+            ),
+        )
+        missing_membership_scans = get_rooms.await_count
+        parked = next(iter(coordinator._room_jobs.values()))
+
+        joined = True
+        coordinator.owner_ready(owner.user_id)
+        try:
+            await _wait_until(
+                lambda: not coordinator._room_jobs and not coordinator._active_attempts,
+            )
+        finally:
+            await coordinator.stop()
+
+    assert missing_membership_scans == 2
+    assert parked.matrix_attempt == 0
+    assert get_rooms.await_count == 3
+    warning.assert_not_called()
+    cleanup_room.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_owner_ready_restarts_a_finished_recovery_worker(tmp_path: Path) -> None:
     """A readiness signal must re-arm recovery after its worker exits."""
     owner = _owner(rooms=frozenset())
@@ -1536,6 +1653,61 @@ async def test_owner_ready_restarts_a_finished_recovery_worker(tmp_path: Path) -
         assert not replacement_worker.done()
     finally:
         await coordinator.stop()
+
+
+@pytest.mark.asyncio
+async def test_owner_ready_during_delivery_preserves_closed_watermark(
+    tmp_path: Path,
+) -> None:
+    """A readiness refresh must not discard an admitted delivery settlement."""
+    owner = _owner()
+    owners = {owner.user_id: owner}
+    target = _target("$target", timestamp_ms=10)
+    delivery_started = asyncio.Event()
+    release_delivery = asyncio.Event()
+    delivered: list[str] = []
+
+    async def recover_room(
+        _owner: RecoveryOwner,
+        _request: RoomRecoveryRequest,
+        _owner_user_ids: frozenset[str],
+        _config: Config,
+    ) -> RoomRecoveryResult:
+        return RoomRecoveryResult(interrupted_threads=(target,))
+
+    async def deliver(
+        _owner: RecoveryOwner,
+        delivered_target: InterruptedThread,
+        _config: Config,
+    ) -> bool:
+        delivered.append(delivered_target.target_event_id)
+        if len(delivered) == 1:
+            delivery_started.set()
+            await release_delivery.wait()
+        return True
+
+    coordinator = RestartRecoveryCoordinator(
+        current_config=lambda: _config(tmp_path),
+        current_owners=lambda: owners,
+        operations=_operations(recover_room=recover_room, deliver=deliver),
+    )
+    coordinator.start(startup_cutoff_ms=123)
+    await asyncio.wait_for(delivery_started.wait(), timeout=1.0)
+    coordinator.owner_ready(owner.user_id)
+    release_delivery.set()
+    try:
+        await _wait_until(
+            lambda: not coordinator._room_jobs and not coordinator._active_attempts,
+        )
+        watermarks = dict(coordinator._target_watermarks)
+    finally:
+        release_delivery.set()
+        await coordinator.stop()
+
+    assert delivered == [target.target_event_id]
+    watermark = watermarks[(owner.user_id, target.room_id, target.thread_id)]
+    assert watermark.generation is owner.generation
+    assert watermark.closed
 
 
 @pytest.mark.asyncio
@@ -3129,7 +3301,6 @@ async def test_discard_owner_clears_target_watermarks(tmp_path: Path) -> None:
         TargetSettlement(
             target=target,
             closed=False,
-            owner_user_id=owner.user_id,
         ),
     )
     coordinator.discard_owner(owner.user_id)

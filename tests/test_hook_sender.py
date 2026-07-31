@@ -52,6 +52,7 @@ from mindroom.hooks.sender import HookMessageSender as SenderAlias
 from mindroom.hooks.sender import send_and_track_message
 from mindroom.inbound_turn_normalizer import DispatchPayload
 from mindroom.logging_config import get_logger
+from mindroom.matrix import stale_stream_cleanup
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.orchestrator import _MultiAgentOrchestrator
@@ -825,19 +826,27 @@ async def test_extract_trusted_router_context_does_not_invent_thread_for_room_le
 
 @pytest.mark.asyncio
 async def test_prepare_dispatch_keeps_standard_context_for_non_router_internal_relays(tmp_path: Path) -> None:
-    """Non-router internal relays should keep using the standard dispatch context path."""
+    """Owner-authored resume relays must use the standard dispatch context path."""
     bot = _agent_bot(tmp_path)
     room = nio.MatrixRoom(room_id="!room:localhost", own_user_id="@mindroom_code:localhost")
+    content = stale_stream_cleanup.build_auto_resume_content(
+        stale_stream_cleanup.InterruptedThread(
+            room_id=room.room_id,
+            thread_id="$thread-root",
+            target_event_id="$target",
+            partial_text="partial",
+            agent_name=bot.agent_name,
+            original_sender_id="@user:localhost",
+        ),
+        config=bot.config,
+        intended_responder_user_id=bot.matrix_id.full_id,
+    )
     event = nio.RoomMessageText.from_dict(
         {
             "event_id": "$agent-relay",
             "sender": "@mindroom_code:localhost",
             "origin_server_ts": 1234567890,
-            "content": {
-                "msgtype": "m.text",
-                "body": "@mindroom_code:localhost internal follow-up",
-                ORIGINAL_SENDER_KEY: "@user:localhost",
-            },
+            "content": content,
         },
     )
     standard_context = _dispatch_context(bot)
