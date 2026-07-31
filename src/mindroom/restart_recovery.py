@@ -3,17 +3,16 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING
 
-from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.logging_config import get_logger
+from mindroom.matrix.stale_stream_cleanup import InterruptedTargetFreshness
 from mindroom.orchestration.runtime import create_logged_task
 from mindroom.restart_recovery_operations import (
     RecoveryOwner,
     RestartDeliveryOutcome,
     RestartRecoveryOperations,
-    RestartTargetFreshness,
     RoomRecoveryRequest,
     RoomRecoveryResult,
 )
@@ -31,7 +30,6 @@ type _RoomKey = tuple[str, int | None, bool]
 
 
 _MAX_CONCURRENT_MATRIX_READ_PHASES = 8
-_MAX_CONCURRENT_DELIVERY_ADMISSIONS = 1
 _MAX_RESTART_RECOVERY_ATTEMPTS = 6
 
 
@@ -98,6 +96,8 @@ class _RoomAttemptResult:
     retry_owner_user_ids: frozenset[str]
     retry_targets: tuple[_OwnedTarget, ...]
     settlements: tuple[_TargetSettlement, ...]
+    collaborator_unavailable: bool = False
+    owner_discard_epochs: Mapping[str, int] = field(default_factory=dict)
 
 
 def _restart_recovery_retry_delay(attempt: int) -> float:
@@ -162,10 +162,12 @@ class RestartRecoveryCoordinator:
         self._room_jobs: dict[_RoomKey, _RoomWork] = {}
         self._target_watermarks: dict[_TargetKey, _TargetWatermark] = {}
         self._completed_startup_scans: set[tuple[_RoomKey, str]] = set()
+        self._replacement_room_intents: set[tuple[str, str]] = set()
+        self._owner_discard_epochs: dict[str, int] = {}
         self._ready_generations: dict[str, object] = {}
         self._active_attempts: dict[asyncio.Task[_RoomAttemptResult], _RoomWork] = {}
         self._matrix_read_slots = asyncio.Semaphore(_MAX_CONCURRENT_MATRIX_READ_PHASES)
-        self._delivery_slots = asyncio.Semaphore(_MAX_CONCURRENT_DELIVERY_ADMISSIONS)
+        self._delivery_lock = asyncio.Lock()
         self._worker_task: asyncio.Task[None] | None = None
         self._wake = asyncio.Event()
         self._startup_cutoff_ms: int | None = None
@@ -196,6 +198,7 @@ class RestartRecoveryCoordinator:
                 if key[0] != owner_user_id or watermark.generation is owner.generation
             }
             self._enqueue_desired_rooms(owner)
+            self._enqueue_replacement_intents(owner_user_id)
         due_at = asyncio.get_running_loop().time()
         self._room_jobs = {
             key: replace(work, due_at=due_at) if owner_user_id in work.all_owner_user_ids else work
@@ -206,6 +209,7 @@ class RestartRecoveryCoordinator:
     def enqueue_replacement_rooms(self, owner_user_id: str, room_ids: set[str]) -> None:
         """Retain terminal interrupted-room handoffs across bot replacement."""
         for room_id in room_ids:
+            self._replacement_room_intents.add((owner_user_id, room_id))
             self._enqueue_request(
                 owner_user_id,
                 RoomRecoveryRequest(
@@ -218,6 +222,7 @@ class RestartRecoveryCoordinator:
 
     def discard_owner(self, owner_user_id: str) -> None:
         """Discard one removed owner's work, watermark, and membership snapshot."""
+        self._owner_discard_epochs[owner_user_id] = self._owner_discard_epochs.get(owner_user_id, 0) + 1
         retained_jobs: dict[_RoomKey, _RoomWork] = {}
         for key, work in self._room_jobs.items():
             retained = replace(
@@ -232,6 +237,9 @@ class RestartRecoveryCoordinator:
             key: watermark for key, watermark in self._target_watermarks.items() if key[0] != owner_user_id
         }
         self._completed_startup_scans = {key for key in self._completed_startup_scans if key[1] != owner_user_id}
+        self._replacement_room_intents = {
+            intent for intent in self._replacement_room_intents if intent[0] != owner_user_id
+        }
         self._ready_generations.pop(owner_user_id, None)
         self._operations.discard_owner(owner_user_id)
 
@@ -265,6 +273,8 @@ class RestartRecoveryCoordinator:
         self._room_jobs.clear()
         self._target_watermarks.clear()
         self._completed_startup_scans.clear()
+        self._replacement_room_intents.clear()
+        self._owner_discard_epochs.clear()
         self._ready_generations.clear()
         await self._operations.close()
 
@@ -288,6 +298,23 @@ class RestartRecoveryCoordinator:
             ):
                 continue
             self._enqueue_request(owner.user_id, request)
+
+    def _enqueue_replacement_intents(self, owner_user_id: str) -> None:
+        for intent_owner_user_id, room_id in self._replacement_room_intents:
+            if intent_owner_user_id != owner_user_id:
+                continue
+            request = RoomRecoveryRequest(
+                room_id=room_id,
+                startup_cutoff_ms=None,
+                terminal_interrupted_only=True,
+            )
+            key = (
+                request.room_id,
+                request.startup_cutoff_ms,
+                request.terminal_interrupted_only,
+            )
+            if not self._owner_has_pending_work(key, owner_user_id):
+                self._enqueue_request(owner_user_id, request)
 
     def _owner_has_pending_work(
         self,
@@ -422,22 +449,37 @@ class RestartRecoveryCoordinator:
             logger.warning("Restart recovery attempt failed", exc_info=True)
             self._restore(work, cancelled=self._paused or self._stopped)
             return
+
+        def owner_is_current(owner_user_id: str) -> bool:
+            return result.owner_discard_epochs.get(owner_user_id, 0) == self._owner_discard_epochs.get(owner_user_id, 0)
+
         for settlement in result.settlements:
             owner = result.owners.get(settlement.owner_user_id)
-            if owner is not None:
+            if owner is not None and owner_is_current(settlement.owner_user_id):
                 self._advance_watermark(owner, settlement)
         completed_owner_user_ids = work.owner_user_ids - result.retry_owner_user_ids
         if not work.terminal_interrupted_only:
             self._completed_startup_scans.update(
                 (work.key, owner_user_id)
                 for owner_user_id in completed_owner_user_ids
-                if owner_user_id in result.owners
+                if owner_user_id in result.owners and owner_is_current(owner_user_id)
             )
         remaining = replace(
             work,
-            owner_user_ids=result.retry_owner_user_ids,
-            targets=result.retry_targets,
+            owner_user_ids=frozenset(
+                owner_user_id for owner_user_id in result.retry_owner_user_ids if owner_is_current(owner_user_id)
+            ),
+            targets=tuple(target for target in result.retry_targets if owner_is_current(target.owner_user_id)),
         )
+        if work.terminal_interrupted_only:
+            completed_replacement_owner_user_ids = {
+                owner_user_id
+                for owner_user_id in work.all_owner_user_ids - remaining.all_owner_user_ids
+                if owner_is_current(owner_user_id)
+            }
+            self._replacement_room_intents.difference_update(
+                (owner_user_id, work.room_id) for owner_user_id in completed_replacement_owner_user_ids
+            )
         if remaining.owner_user_ids or remaining.targets:
             became_ready = any(
                 (owner := result.owners.get(owner_user_id)) is not None
@@ -448,6 +490,7 @@ class RestartRecoveryCoordinator:
             self._restore(
                 remaining,
                 cancelled=self._paused or self._stopped or became_ready,
+                attempt_failed=not result.collaborator_unavailable,
             )
 
     def _advance_watermark(self, owner: RecoveryOwner, settlement: _TargetSettlement) -> None:
@@ -477,8 +520,18 @@ class RestartRecoveryCoordinator:
     async def _process_room(self, work: _RoomWork) -> _RoomAttemptResult:
         config = self._current_config()
         owners = dict(self._current_owners())
+        owner_discard_epochs = {
+            owner_user_id: self._owner_discard_epochs.get(owner_user_id, 0) for owner_user_id in work.all_owner_user_ids
+        }
         if config is None:
-            return _RoomAttemptResult(owners, work.owner_user_ids, work.targets, ())
+            return _RoomAttemptResult(
+                owners,
+                work.owner_user_ids,
+                work.targets,
+                (),
+                collaborator_unavailable=True,
+                owner_discard_epochs=owner_discard_epochs,
+            )
 
         unavailable_owner_user_ids = {
             owner_user_id
@@ -505,18 +558,19 @@ class RestartRecoveryCoordinator:
 
         retry_targets: list[_OwnedTarget] = []
         settlements: list[_TargetSettlement] = []
+        collaborator_unavailable = bool(unavailable_owner_user_ids)
         eligible_targets = self._eligible_targets(owners, tuple(targets))
         for index, owned_target in enumerate(eligible_targets):
             owner = owners.get(owned_target.owner_user_id)
             if owner is None or not owner.first_sync_complete:
                 retry_targets.append(owned_target)
+                collaborator_unavailable = True
                 continue
             try:
                 attempt = await self._process_target(
                     owner,
                     owned_target.target,
                     config,
-                    owners,
                 )
             except asyncio.CancelledError:
                 retry_targets.extend(eligible_targets[index:])
@@ -533,6 +587,8 @@ class RestartRecoveryCoordinator:
             frozenset(retry_owner_user_ids),
             tuple(retry_targets),
             tuple(settlements),
+            collaborator_unavailable,
+            owner_discard_epochs,
         )
 
     async def _recover_scan(
@@ -593,30 +649,19 @@ class RestartRecoveryCoordinator:
         owner: RecoveryOwner,
         target: InterruptedThread,
         config: Config,
-        owners: Mapping[str, RecoveryOwner],
     ) -> _TargetSettlement | None:
         if target.original_sender_id is None or not config.defaults.auto_resume_after_restart:
             return _TargetSettlement(target, closed=False, owner_user_id=owner.user_id)
         async with self._matrix_read_slots:
             freshness = await self._operations.target_freshness(owner, target, config)
-        if freshness is RestartTargetFreshness.RETRY:
+        if freshness is InterruptedTargetFreshness.RETRY:
             return None
         if freshness in {
-            RestartTargetFreshness.NEWER_HUMAN,
-            RestartTargetFreshness.UNRECOVERABLE,
+            InterruptedTargetFreshness.NEWER_HUMAN,
+            InterruptedTargetFreshness.UNRECOVERABLE,
         }:
             return _TargetSettlement(target, closed=False, owner_user_id=owner.user_id)
-        router = next(
-            (
-                candidate
-                for candidate in owners.values()
-                if candidate.entity_name == ROUTER_AGENT_NAME and candidate.first_sync_complete
-            ),
-            None,
-        )
-        if router is None:
-            return None
-        delivery = await self._deliver_target(router, owner, target, config)
+        delivery = await self._deliver_target(owner, owner, target, config)
         if delivery is RestartDeliveryOutcome.RETRY:
             return None
         return _TargetSettlement(
@@ -627,15 +672,15 @@ class RestartRecoveryCoordinator:
 
     async def _deliver_target(
         self,
-        router: RecoveryOwner,
+        sender: RecoveryOwner,
         owner: RecoveryOwner,
         target: InterruptedThread,
         config: Config,
     ) -> RestartDeliveryOutcome:
         """Drain one exact delivery through repeated coordinator cancellation."""
-        async with self._delivery_slots:
+        async with self._delivery_lock:
             task = asyncio.create_task(
-                self._operations.deliver_target(router, owner, target, config),
+                self._operations.deliver_target(sender, owner, target, config),
                 name=f"restart_recovery_delivery:{target.target_event_id}",
             )
             try:
@@ -648,12 +693,21 @@ class RestartRecoveryCoordinator:
                         continue
                 return task.result()
 
-    def _restore(self, work: _RoomWork, *, cancelled: bool) -> None:
+    def _restore(
+        self,
+        work: _RoomWork,
+        *,
+        cancelled: bool,
+        attempt_failed: bool = True,
+    ) -> None:
         if self._stopped:
             return
         if not cancelled:
-            attempt = work.attempt + 1
-            if attempt >= _MAX_RESTART_RECOVERY_ATTEMPTS:
+            attempt = work.attempt + int(attempt_failed)
+            if attempt_failed and attempt >= _MAX_RESTART_RECOVERY_ATTEMPTS:
+                self._completed_startup_scans.difference_update(
+                    (work.key, owner_user_id) for owner_user_id in work.all_owner_user_ids
+                )
                 logger.warning(
                     "Restart recovery exhausted retries; dropping retained work",
                     attempt=attempt,
@@ -665,6 +719,6 @@ class RestartRecoveryCoordinator:
             work = replace(
                 work,
                 attempt=attempt,
-                due_at=asyncio.get_running_loop().time() + self._retry_delay(attempt),
+                due_at=(asyncio.get_running_loop().time() + self._retry_delay(max(1, attempt))),
             )
         self._queue(work)

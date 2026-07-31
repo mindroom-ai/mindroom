@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Awaitable, Callable, Coroutine
 from dataclasses import dataclass, field, replace
 from enum import Enum, auto
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING, Any
 from uuid import NAMESPACE_URL, uuid5
 
 from mindroom.constants import ROUTER_AGENT_NAME
@@ -22,7 +23,7 @@ from mindroom.matrix.stale_stream_cleanup import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Mapping
+    from collections.abc import Mapping
 
     import nio
 
@@ -90,15 +91,6 @@ class RoomRecoveryResult:
     retry_owner_user_ids: frozenset[str] = frozenset()
 
 
-class RestartTargetFreshness(Enum):
-    """Authoritative freshness state for one interrupted target."""
-
-    CURRENT = auto()
-    NEWER_HUMAN = auto()
-    UNRECOVERABLE = auto()
-    RETRY = auto()
-
-
 class RestartDeliveryOutcome(Enum):
     """Settlement state from one admitted resume delivery."""
 
@@ -107,39 +99,18 @@ class RestartDeliveryOutcome(Enum):
     RETRY = auto()
 
 
-class _RecoverRoom(Protocol):
-    async def __call__(
-        self,
-        owners: tuple[RecoveryOwner, ...],
-        request: RoomRecoveryRequest,
-        owner_user_ids: frozenset[str],
-        config: Config,
-    ) -> RoomRecoveryResult:
-        """Recover one scan scope through its exact current owners."""
-        ...
-
-
-class _TargetFreshness(Protocol):
-    async def __call__(
-        self,
-        owner: RecoveryOwner,
-        target: InterruptedThread,
-        config: Config,
-    ) -> RestartTargetFreshness:
-        """Classify one target through its exact current owner."""
-        ...
-
-
-class _DeliverTarget(Protocol):
-    async def __call__(
-        self,
-        router: RecoveryOwner,
-        owner: RecoveryOwner,
-        target: InterruptedThread,
-        config: Config,
-    ) -> RestartDeliveryOutcome:
-        """Deliver one target through the current router."""
-        ...
+type _RecoverRoom = Callable[
+    [tuple[RecoveryOwner, ...], RoomRecoveryRequest, frozenset[str], Config],
+    Awaitable[RoomRecoveryResult],
+]
+type _TargetFreshness = Callable[
+    [RecoveryOwner, InterruptedThread, Config],
+    Awaitable[InterruptedTargetFreshness],
+]
+type _DeliverTarget = Callable[
+    [RecoveryOwner, RecoveryOwner, InterruptedThread, Config],
+    Coroutine[Any, Any, RestartDeliveryOutcome],
+]
 
 
 @dataclass(frozen=True)
@@ -309,7 +280,6 @@ async def _recover_room(
 def build_matrix_restart_recovery_operations(runtime_paths: RuntimePaths) -> RestartRecoveryOperations:
     """Build exact-owner Matrix operations for restart recovery."""
     membership_snapshots = _OwnerMembershipSnapshots()
-    delivery_lock = asyncio.Lock()
     next_delivery_at = 0.0
 
     async def recover_room(
@@ -331,68 +301,61 @@ def build_matrix_restart_recovery_operations(runtime_paths: RuntimePaths) -> Res
         owner: RecoveryOwner,
         target: InterruptedThread,
         config: Config,
-    ) -> RestartTargetFreshness:
-        freshness = await interrupted_target_freshness(
+    ) -> InterruptedTargetFreshness:
+        return await interrupted_target_freshness(
             target,
             config=config,
             runtime_paths=runtime_paths,
             conversation_cache=owner.conversation_cache,
         )
-        return {
-            InterruptedTargetFreshness.CURRENT: RestartTargetFreshness.CURRENT,
-            InterruptedTargetFreshness.NEWER_HUMAN: RestartTargetFreshness.NEWER_HUMAN,
-            InterruptedTargetFreshness.UNRECOVERABLE: RestartTargetFreshness.UNRECOVERABLE,
-            InterruptedTargetFreshness.RETRY: RestartTargetFreshness.RETRY,
-        }[freshness]
 
     async def deliver_target(
-        router: RecoveryOwner,
+        sender: RecoveryOwner,
         owner: RecoveryOwner,
         target: InterruptedThread,
         config: Config,
     ) -> RestartDeliveryOutcome:
         nonlocal next_delivery_at
-        async with delivery_lock:
-            delay = next_delivery_at - asyncio.get_running_loop().time()
-            if delay > 0:
-                await asyncio.sleep(delay)
-                freshness = await target_freshness(owner, target, config)
-                if freshness is RestartTargetFreshness.RETRY:
-                    return RestartDeliveryOutcome.RETRY
-                if freshness is not RestartTargetFreshness.CURRENT:
-                    return RestartDeliveryOutcome.TERMINAL
-            content = build_auto_resume_content(
-                target,
-                config=config,
-                mention_user_id=(None if router.user_id == owner.user_id else owner.user_id),
-            )
-            transaction_id = str(
-                uuid5(
-                    NAMESPACE_URL,
-                    "\x00".join(
-                        (
-                            "mindroom.restart_recovery.v1",
-                            owner.user_id,
-                            target.room_id,
-                            target.thread_id or "",
-                            target.target_event_id,
-                            str(target.timestamp_ms),
-                        ),
+        delay = next_delivery_at - asyncio.get_running_loop().time()
+        if delay > 0:
+            await asyncio.sleep(delay)
+            freshness = await target_freshness(owner, target, config)
+            if freshness is InterruptedTargetFreshness.RETRY:
+                return RestartDeliveryOutcome.RETRY
+            if freshness is not InterruptedTargetFreshness.CURRENT:
+                return RestartDeliveryOutcome.TERMINAL
+        content = build_auto_resume_content(
+            target,
+            config=config,
+            mention_user_id=(None if sender.user_id == owner.user_id else owner.user_id),
+        )
+        transaction_id = str(
+            uuid5(
+                NAMESPACE_URL,
+                "\x00".join(
+                    (
+                        "mindroom.restart_recovery.v1",
+                        owner.user_id,
+                        target.room_id,
+                        target.thread_id or "",
+                        target.target_event_id,
+                        str(target.timestamp_ms),
                     ),
                 ),
+            ),
+        )
+        try:
+            delivered = await send_message_result(
+                sender.client,
+                target.room_id,
+                content,
+                transaction_id=transaction_id,
             )
-            try:
-                delivered = await send_message_result(
-                    router.client,
-                    target.room_id,
-                    content,
-                    transaction_id=transaction_id,
-                )
-            finally:
-                next_delivery_at = asyncio.get_running_loop().time() + _AUTO_RESUME_DELIVERY_INTERVAL_SECONDS
+        finally:
+            next_delivery_at = asyncio.get_running_loop().time() + _AUTO_RESUME_DELIVERY_INTERVAL_SECONDS
         if delivered is None:
             return RestartDeliveryOutcome.RETRY
-        router.conversation_cache.notify_outbound_message(
+        sender.conversation_cache.notify_outbound_message(
             target.room_id,
             delivered.event_id,
             delivered.content_sent,

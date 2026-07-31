@@ -1760,6 +1760,45 @@ async def test_cleanup_skips_restart_interrupted_thread_after_auto_resume_was_qu
 
 
 @pytest.mark.asyncio
+async def test_prior_auto_resume_relay_does_not_suppress_sibling_target(
+    tmp_path: Path,
+) -> None:
+    """A relay for one target must not suppress another interruption in the thread."""
+    config = _make_config(tmp_path)
+    client = _make_client()
+    client.rooms = _joined_room_cache()
+    restart_body = build_restart_interrupted_body("Partial answer")
+    client.room_messages.return_value = _room_messages_response(
+        _make_message_event(
+            event_id="$thread-root",
+            body="Question",
+            sender=USER_ID,
+            timestamp_ms=NOW_MS - (STALE_AGE_MS + 20_000),
+        ),
+        _make_message_event(
+            event_id="$message",
+            body=restart_body,
+            timestamp_ms=NOW_MS - (STALE_AGE_MS + 5_000),
+            relates_to=_thread_reply_relation("$thread-root", "$thread-root"),
+            extra_content={STREAM_STATUS_KEY: "error"},
+        ),
+        _make_message_event(
+            event_id="$sibling-resume",
+            body=f"@Test Agent {AUTO_RESUME_MESSAGE}",
+            sender=entity_ids(config, runtime_paths_for(config))[ROUTER_AGENT_NAME].full_id,
+            timestamp_ms=NOW_MS - STALE_AGE_MS,
+            relates_to=_thread_reply_relation("$thread-root", "$sibling-target"),
+        ),
+    )
+    client.room_get_event_relations = MagicMock(return_value=_aiter())
+
+    cleaned, interrupted = await _run_cleanup(client, config, joined_rooms=[ROOM_ID])
+
+    assert cleaned == 0
+    assert [target.target_event_id for target in interrupted] == ["$message"]
+
+
+@pytest.mark.asyncio
 async def test_cleanup_uses_canonical_stream_body_instead_of_transient_warmup_suffix(tmp_path: Path) -> None:
     """Restart cleanup should resume from canonical stream text, not the transient worker warmup suffix."""
     config = _make_config(tmp_path)

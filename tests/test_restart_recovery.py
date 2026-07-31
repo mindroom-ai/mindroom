@@ -16,7 +16,10 @@ from mindroom.bot import AgentBot
 from mindroom.config.main import Config
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.matrix import stale_stream_cleanup as stale_stream_cleanup_module
-from mindroom.matrix.stale_stream_cleanup import InterruptedThread
+from mindroom.matrix.stale_stream_cleanup import (
+    InterruptedTargetFreshness,
+    InterruptedThread,
+)
 from mindroom.orchestrator import _MultiAgentOrchestrator
 from mindroom.restart_recovery import RestartRecoveryCoordinator
 from mindroom.restart_recovery import (
@@ -35,7 +38,6 @@ from mindroom.restart_recovery_operations import (
     RecoveryOwner,
     RestartDeliveryOutcome,
     RestartRecoveryOperations,
-    RestartTargetFreshness,
     RoomRecoveryRequest,
     RoomRecoveryResult,
     build_matrix_restart_recovery_operations,
@@ -58,7 +60,7 @@ if TYPE_CHECKING:
     ]
     type _TargetFreshness = Callable[
         [RecoveryOwner, InterruptedThread, Config],
-        Awaitable[RestartTargetFreshness],
+        Awaitable[InterruptedTargetFreshness],
     ]
     type _DeliverTarget = Callable[
         [RecoveryOwner, RecoveryOwner, InterruptedThread, Config],
@@ -146,8 +148,8 @@ def _operations(
         _owner: RecoveryOwner,
         _target: InterruptedThread,
         _config: Config,
-    ) -> RestartTargetFreshness:
-        return RestartTargetFreshness.CURRENT
+    ) -> InterruptedTargetFreshness:
+        return InterruptedTargetFreshness.CURRENT
 
     async def delivered(
         _router: RecoveryOwner,
@@ -1141,9 +1143,9 @@ async def test_scan_and_freshness_share_eight_matrix_read_slots(
         _owner: RecoveryOwner,
         target: InterruptedThread,
         _config: Config,
-    ) -> RestartTargetFreshness:
+    ) -> InterruptedTargetFreshness:
         await matrix_read_phase("freshness", target.room_id)
-        return RestartTargetFreshness.CURRENT
+        return InterruptedTargetFreshness.CURRENT
 
     async def deliver(
         _router: RecoveryOwner,
@@ -1634,10 +1636,60 @@ async def test_ready_owner_immediately_retries_startup_and_replacement_room_inte
     coordinator.owner_ready(owner.user_id)
     try:
         await asyncio.wait_for(all_processed.wait(), timeout=0.5)
+        await _wait_until(
+            lambda: not coordinator._room_jobs and not coordinator._active_attempts,
+        )
+        coordinator.owner_ready(owner.user_id)
+        await asyncio.sleep(0)
     finally:
         await coordinator.stop()
 
     assert set(processed_requests) == {startup_request, replacement_request}
+    assert processed_requests.count(replacement_request) == 1
+
+
+@pytest.mark.asyncio
+async def test_owner_ready_reenrolls_dropped_replacement_room_intent(tmp_path: Path) -> None:
+    """A capped replacement scan must remain enrollable on later readiness."""
+    owner = _owner(rooms=frozenset())
+    owners = {owner.user_id: owner}
+    attempts = 0
+    sixth_attempt = asyncio.Event()
+    reenrolled = asyncio.Event()
+
+    async def recover_room(
+        _owner: RecoveryOwner,
+        request: RoomRecoveryRequest,
+        _owner_user_ids: frozenset[str],
+        _config: Config,
+    ) -> RoomRecoveryResult:
+        nonlocal attempts
+        assert request.terminal_interrupted_only
+        attempts += 1
+        if attempts == 6:
+            sixth_attempt.set()
+        if attempts == 7:
+            reenrolled.set()
+        return RoomRecoveryResult(retry_owner_user_ids=frozenset({owner.user_id}))
+
+    coordinator = RestartRecoveryCoordinator(
+        current_config=lambda: _config(tmp_path),
+        current_owners=lambda: owners,
+        operations=_operations(recover_room=recover_room),
+        retry_delay=lambda _attempt: 0.0,
+    )
+    coordinator.start(startup_cutoff_ms=123)
+    coordinator.enqueue_replacement_rooms(owner.user_id, {"!code:example.org"})
+    await asyncio.wait_for(sixth_attempt.wait(), timeout=1.0)
+    await _wait_until(lambda: not coordinator._room_jobs and not coordinator._active_attempts)
+
+    coordinator.owner_ready(owner.user_id)
+    try:
+        await asyncio.wait_for(reenrolled.wait(), timeout=1.0)
+    finally:
+        await coordinator.stop()
+
+    assert attempts == 7
 
 
 @pytest.mark.asyncio
@@ -1673,6 +1725,7 @@ async def test_early_owner_refresh_backs_off_until_first_sync_then_progresses(
             retry_owner_user_ids=frozenset({owner.user_id}),
             retry_targets=(),
             settlements=(),
+            collaborator_unavailable=True,
         )
 
     attempt = asyncio.create_task(unavailable_result())
@@ -1682,7 +1735,7 @@ async def test_early_owner_refresh_backs_off_until_first_sync_then_progresses(
 
     retained = next(iter(coordinator._room_jobs.values()))
     assert retry_attempts == [1]
-    assert retained.attempt == 1
+    assert retained.attempt == 0
     assert retained.due_at > asyncio.get_running_loop().time()
     assert owner.user_id not in coordinator._ready_generations
 
@@ -1695,6 +1748,54 @@ async def test_early_owner_refresh_backs_off_until_first_sync_then_progresses(
 
     assert not result.retry_owner_user_ids
     recover_room.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_owner_readiness_wait_preserves_matrix_retry_budget(tmp_path: Path) -> None:
+    """Waiting for first sync must not consume attempts needed by later Matrix retries."""
+    generation = object()
+    owner = _owner(generation=generation, ready=False)
+    owners = {owner.user_id: owner}
+    readiness_waited = asyncio.Event()
+    recovered = asyncio.Event()
+    scan_attempts = 0
+
+    def retry_delay(_attempt: int) -> float:
+        if not owners[owner.user_id].first_sync_complete:
+            readiness_waited.set()
+            return 60.0
+        return 0.0
+
+    async def recover_room(
+        _owner: RecoveryOwner,
+        _request: RoomRecoveryRequest,
+        _owner_user_ids: frozenset[str],
+        _config: Config,
+    ) -> RoomRecoveryResult:
+        nonlocal scan_attempts
+        scan_attempts += 1
+        if scan_attempts < 6:
+            return RoomRecoveryResult(retry_owner_user_ids=frozenset({owner.user_id}))
+        recovered.set()
+        return RoomRecoveryResult()
+
+    coordinator = RestartRecoveryCoordinator(
+        current_config=lambda: _config(tmp_path),
+        current_owners=lambda: owners,
+        operations=_operations(recover_room=recover_room),
+        retry_delay=retry_delay,
+    )
+    coordinator.start(startup_cutoff_ms=123)
+    await asyncio.wait_for(readiness_waited.wait(), timeout=1.0)
+
+    owners[owner.user_id] = _owner(generation=generation, ready=True)
+    coordinator.owner_ready(owner.user_id)
+    try:
+        await asyncio.wait_for(recovered.wait(), timeout=1.0)
+    finally:
+        await coordinator.stop()
+
+    assert scan_attempts == 6
 
 
 @pytest.mark.asyncio
@@ -1944,12 +2045,12 @@ async def test_target_freshness_and_delivery_failures_retry_autonomously(tmp_pat
         _owner: RecoveryOwner,
         _target: InterruptedThread,
         _config: Config,
-    ) -> RestartTargetFreshness:
+    ) -> InterruptedTargetFreshness:
         nonlocal freshness_attempts
         freshness_attempts += 1
         if freshness_attempts == 1:
-            return RestartTargetFreshness.RETRY
-        return RestartTargetFreshness.CURRENT
+            return InterruptedTargetFreshness.RETRY
+        return InterruptedTargetFreshness.CURRENT
 
     async def deliver(
         _router: RecoveryOwner,
@@ -1985,6 +2086,46 @@ async def test_target_freshness_and_delivery_failures_retry_autonomously(tmp_pat
 
 
 @pytest.mark.asyncio
+async def test_agent_only_room_delivers_resume_through_exact_owner(tmp_path: Path) -> None:
+    """An interrupted owner must deliver its own relay when no router transport exists."""
+    owner = _owner()
+    owners = {owner.user_id: owner}
+    target = _target("$target", timestamp_ms=10)
+    delivery_senders: list[str] = []
+
+    async def recover_room(
+        _owner: RecoveryOwner,
+        _request: RoomRecoveryRequest,
+        _owner_user_ids: frozenset[str],
+        _config: Config,
+    ) -> RoomRecoveryResult:
+        return RoomRecoveryResult(interrupted_threads=(target,))
+
+    async def deliver(
+        sender: RecoveryOwner,
+        _owner: RecoveryOwner,
+        _target: InterruptedThread,
+        _config: Config,
+    ) -> bool:
+        delivery_senders.append(sender.user_id)
+        return True
+
+    coordinator = RestartRecoveryCoordinator(
+        current_config=lambda: _config(tmp_path),
+        current_owners=lambda: owners,
+        operations=_operations(recover_room=recover_room, deliver=deliver),
+        retry_delay=lambda _attempt: 0.0,
+    )
+    coordinator.start(startup_cutoff_ms=123)
+    try:
+        await _wait_until(lambda: not coordinator._room_jobs and not coordinator._active_attempts)
+    finally:
+        await coordinator.stop()
+
+    assert delivery_senders == [owner.user_id]
+
+
+@pytest.mark.asyncio
 async def test_permanent_target_freshness_retry_stops_with_terminal_warning(
     tmp_path: Path,
 ) -> None:
@@ -2012,12 +2153,12 @@ async def test_permanent_target_freshness_retry_stops_with_terminal_warning(
         _owner: RecoveryOwner,
         _target: InterruptedThread,
         _config: Config,
-    ) -> RestartTargetFreshness:
+    ) -> InterruptedTargetFreshness:
         nonlocal freshness_attempts
         freshness_attempts += 1
         if freshness_attempts == 6:
             sixth_attempt.set()
-        return RestartTargetFreshness.RETRY
+        return InterruptedTargetFreshness.RETRY
 
     coordinator = RestartRecoveryCoordinator(
         current_config=lambda: _config(tmp_path),
@@ -2041,6 +2182,59 @@ async def test_permanent_target_freshness_retry_stops_with_terminal_warning(
         room_id=target.room_id,
         target_event_ids=[target.target_event_id],
     )
+
+
+@pytest.mark.asyncio
+async def test_dropped_target_retry_allows_later_startup_rediscovery(tmp_path: Path) -> None:
+    """Dropping a target retry must reopen its completed startup scan fence."""
+    owner = _owner()
+    owners = {owner.user_id: owner}
+    target = _target("$target", timestamp_ms=10)
+    scan_attempts = 0
+    freshness_attempts = 0
+    retry_dropped = asyncio.Event()
+    target_rediscovered = asyncio.Event()
+
+    async def recover_room(
+        _owner: RecoveryOwner,
+        _request: RoomRecoveryRequest,
+        _owner_user_ids: frozenset[str],
+        _config: Config,
+    ) -> RoomRecoveryResult:
+        nonlocal scan_attempts
+        scan_attempts += 1
+        if scan_attempts == 2:
+            target_rediscovered.set()
+        return RoomRecoveryResult(interrupted_threads=(target,))
+
+    async def freshness(
+        _owner: RecoveryOwner,
+        _target: InterruptedThread,
+        _config: Config,
+    ) -> InterruptedTargetFreshness:
+        nonlocal freshness_attempts
+        freshness_attempts += 1
+        if freshness_attempts == 6:
+            retry_dropped.set()
+        return InterruptedTargetFreshness.RETRY
+
+    coordinator = RestartRecoveryCoordinator(
+        current_config=lambda: _config(tmp_path),
+        current_owners=lambda: owners,
+        operations=_operations(recover_room=recover_room, freshness=freshness),
+        retry_delay=lambda _attempt: 0.0,
+    )
+    coordinator.start(startup_cutoff_ms=123)
+    await asyncio.wait_for(retry_dropped.wait(), timeout=1.0)
+    await _wait_until(lambda: not coordinator._room_jobs and not coordinator._active_attempts)
+
+    coordinator.owner_ready(owner.user_id)
+    try:
+        await asyncio.wait_for(target_rediscovered.wait(), timeout=1.0)
+    finally:
+        await coordinator.stop()
+
+    assert scan_attempts == 2
 
 
 @pytest.mark.asyncio
@@ -2068,8 +2262,8 @@ async def test_terminal_delivery_freshness_settles_without_retry(tmp_path: Path)
         _owner: RecoveryOwner,
         _target: InterruptedThread,
         _config: Config,
-    ) -> RestartTargetFreshness:
-        return RestartTargetFreshness.CURRENT
+    ) -> InterruptedTargetFreshness:
+        return InterruptedTargetFreshness.CURRENT
 
     async def terminal_delivery(
         _router: RecoveryOwner,
@@ -2351,14 +2545,14 @@ async def test_pause_during_later_freshness_settles_prior_delivery_and_retains_t
         _owner: RecoveryOwner,
         target: InterruptedThread,
         _config: Config,
-    ) -> RestartTargetFreshness:
+    ) -> InterruptedTargetFreshness:
         nonlocal second_freshness_attempts
         if target is second:
             second_freshness_attempts += 1
             if second_freshness_attempts == 1:
                 second_freshness_started.set()
                 await asyncio.Event().wait()
-        return RestartTargetFreshness.CURRENT
+        return InterruptedTargetFreshness.CURRENT
 
     async def deliver(
         _router: RecoveryOwner,
@@ -2503,11 +2697,11 @@ async def test_unrecoverable_target_is_settled_without_future_retry(tmp_path: Pa
         _owner: RecoveryOwner,
         _target: InterruptedThread,
         _config: Config,
-    ) -> RestartTargetFreshness:
+    ) -> InterruptedTargetFreshness:
         nonlocal freshness_attempts
         freshness_attempts += 1
         freshness_checked.set()
-        return RestartTargetFreshness.UNRECOVERABLE
+        return InterruptedTargetFreshness.UNRECOVERABLE
 
     async def deliver(
         _router: RecoveryOwner,
@@ -3026,3 +3220,120 @@ async def test_discard_owner_clears_target_watermarks(tmp_path: Path) -> None:
     coordinator.discard_owner(owner.user_id)
 
     assert key not in coordinator._target_watermarks
+
+
+@pytest.mark.asyncio
+async def test_discard_owner_fences_inflight_startup_scan_settlement(tmp_path: Path) -> None:
+    """A discarded generation must not restore a completed-scan fence after removal."""
+    room_id = "!code:example.org"
+    old_generation = object()
+    new_generation = object()
+    old_owner = _owner(
+        generation=old_generation,
+        rooms=frozenset({room_id}),
+    )
+    new_owner = _owner(
+        generation=new_generation,
+        rooms=frozenset({room_id}),
+    )
+    owners = {old_owner.user_id: old_owner}
+    old_scan_started = asyncio.Event()
+    release_old_scan = asyncio.Event()
+    new_scan_started = asyncio.Event()
+
+    async def recover_room(
+        owner: RecoveryOwner,
+        _request: RoomRecoveryRequest,
+        _owner_user_ids: frozenset[str],
+        _config: Config,
+    ) -> RoomRecoveryResult:
+        if owner.generation is old_generation:
+            old_scan_started.set()
+            await release_old_scan.wait()
+        else:
+            new_scan_started.set()
+        return RoomRecoveryResult()
+
+    coordinator = RestartRecoveryCoordinator(
+        current_config=lambda: _config(tmp_path),
+        current_owners=lambda: owners,
+        operations=_operations(recover_room=recover_room),
+    )
+    coordinator.start(startup_cutoff_ms=123)
+    await asyncio.wait_for(old_scan_started.wait(), timeout=1.0)
+
+    owners.clear()
+    coordinator.discard_owner(old_owner.user_id)
+    release_old_scan.set()
+    await _wait_until(lambda: not coordinator._room_jobs and not coordinator._active_attempts)
+
+    owners[new_owner.user_id] = new_owner
+    coordinator.owner_ready(new_owner.user_id)
+    try:
+        await asyncio.wait_for(new_scan_started.wait(), timeout=1.0)
+    finally:
+        await coordinator.stop()
+
+
+@pytest.mark.asyncio
+async def test_discard_owner_fences_inflight_replacement_intent_settlement(
+    tmp_path: Path,
+) -> None:
+    """A stale generation must not erase a replacement intent enrolled after removal."""
+    room_id = "!code:example.org"
+    old_generation = object()
+    new_generation = object()
+    old_owner = _owner(generation=old_generation, rooms=frozenset())
+    new_owner = _owner(generation=new_generation, rooms=frozenset())
+    owners = {old_owner.user_id: old_owner}
+    old_scan_started = asyncio.Event()
+    release_old_scan = asyncio.Event()
+    sixth_new_scan = asyncio.Event()
+    reenrolled_scan = asyncio.Event()
+    new_scan_attempts = 0
+
+    async def recover_room(
+        owner: RecoveryOwner,
+        request: RoomRecoveryRequest,
+        _owner_user_ids: frozenset[str],
+        _config: Config,
+    ) -> RoomRecoveryResult:
+        nonlocal new_scan_attempts
+        assert request.terminal_interrupted_only
+        if owner.generation is old_generation:
+            old_scan_started.set()
+            await release_old_scan.wait()
+            return RoomRecoveryResult()
+        new_scan_attempts += 1
+        if new_scan_attempts == 6:
+            sixth_new_scan.set()
+        if new_scan_attempts == 7:
+            reenrolled_scan.set()
+        return RoomRecoveryResult(retry_owner_user_ids=frozenset({owner.user_id}))
+
+    coordinator = RestartRecoveryCoordinator(
+        current_config=lambda: _config(tmp_path),
+        current_owners=lambda: owners,
+        operations=_operations(recover_room=recover_room),
+        retry_delay=lambda _attempt: 0.0,
+    )
+    coordinator.start(startup_cutoff_ms=123)
+    coordinator.enqueue_replacement_rooms(old_owner.user_id, {room_id})
+    await asyncio.wait_for(old_scan_started.wait(), timeout=1.0)
+
+    owners.clear()
+    coordinator.discard_owner(old_owner.user_id)
+    owners[new_owner.user_id] = new_owner
+    coordinator.enqueue_replacement_rooms(new_owner.user_id, {room_id})
+    release_old_scan.set()
+    await asyncio.wait_for(sixth_new_scan.wait(), timeout=1.0)
+    await _wait_until(lambda: not coordinator._room_jobs and not coordinator._active_attempts)
+
+    coordinator.owner_ready(new_owner.user_id)
+    try:
+        await asyncio.wait_for(reenrolled_scan.wait(), timeout=1.0)
+    finally:
+        release_old_scan.set()
+        await coordinator.stop()
+
+    assert new_scan_attempts == 7
