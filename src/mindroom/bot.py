@@ -432,6 +432,7 @@ class AgentBot:
                 timezone=self.config.timezone,
             ),
             on_dispatch_failure=self._retry_failed_coalesced_dispatch,
+            on_undelivered_source=self._retry_pending_dispatch_source,
         )
         self._hook_context_support = HookContextSupport(
             runtime=self._runtime_view,
@@ -1899,10 +1900,14 @@ class AgentBot:
     def _retry_failed_coalesced_dispatch(self, pending_events: tuple[PendingEvent, ...]) -> None:
         """Return failed gate sources to their exact durable callback owner."""
         for pending_event in pending_events:
-            self._dispatch_obligation_runner.retry_pending_turn_source(
-                pending_event.event.event_id,
-                callback_kind_for_source_kind(pending_event.source_kind),
-            )
+            self._retry_pending_dispatch_source(pending_event.event.event_id, pending_event.source_kind)
+
+    def _retry_pending_dispatch_source(self, source_event_id: str, source_kind: str) -> None:
+        """Return one undelivered source to its exact durable callback owner."""
+        self._dispatch_obligation_runner.retry_pending_turn_source(
+            source_event_id,
+            callback_kind_for_source_kind(source_kind),
+        )
 
     def _log_matrix_event_callback_started(
         self,

@@ -1044,6 +1044,9 @@ class TestCommandHandling:
 
             # Verify the agent didn't try to process the error message
             generate_response.assert_not_called()
+            terminal_turn = bot._turn_store.record_turn.call_args.args[0]
+            assert event.event_id in terminal_turn.source_event_ids
+            assert terminal_turn.completed is True
             # Check log calls - should be caught by the general agent message check
             debug_calls = [call[0][0] for call in bot.logger.debug.call_args_list]
             assert "ignore_unmentioned_agent_event" in debug_calls

@@ -193,6 +193,7 @@ class CoalescingGate:
         dispatch_allowed_now: Callable[[CoalescingKey], bool] | None = None,
         timestamp_formatter: TimestampFormatter | None = None,
         on_dispatch_failure: Callable[[tuple[PendingEvent, ...]], None] | None = None,
+        on_undelivered_source: Callable[[str, str], None] | None = None,
     ) -> None:
         self._dispatch_batch = dispatch_batch
         self._debounce_seconds = debounce_seconds
@@ -202,8 +203,12 @@ class CoalescingGate:
         self._dispatch_allowed_now = dispatch_allowed_now
         self._timestamp_formatter = timestamp_formatter
         self._on_dispatch_failure = on_dispatch_failure
+        self._on_undelivered_source = on_undelivered_source
         self._gates: dict[CoalescingKey, _GateEntry] = {}
-        self._lanes = IngressLanes(deliver=self._admit_from_lane)
+        self._lanes = IngressLanes(
+            deliver=self._admit_from_lane,
+            on_undelivered_source=self._handle_undelivered_lane_source,
+        )
         self._active_drain_context: _DrainContext | None = None
 
     @property
@@ -265,6 +270,13 @@ class CoalescingGate:
     def release_lane_slot(self, slot: LaneSlot) -> None:
         """Release one lane slot that will not be admitted."""
         self._lanes.release(slot)
+
+    def _handle_undelivered_lane_source(self, source_event_id: str, source_kind: str) -> None:
+        """Return a source that left its lane without another live gate owner."""
+        if self.has_pending_source_event(source_event_id):
+            return
+        if self._on_undelivered_source is not None:
+            self._on_undelivered_source(source_event_id, source_kind)
 
     def _conversation_is_busy(self, key: CoalescingKey) -> bool:
         return self._dispatch_allowed_now is not None and not self._dispatch_allowed_now(key)

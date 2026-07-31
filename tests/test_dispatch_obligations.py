@@ -29,7 +29,7 @@ from mindroom.dispatch_obligations import (
 from mindroom.dispatch_source import IMAGE_SOURCE_KIND, MEDIA_SOURCE_KIND, VOICE_SOURCE_KIND
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
+    from collections.abc import Awaitable, Callable, Coroutine
     from pathlib import Path
 
 _PRINCIPAL_ID = "@code:example.org"
@@ -540,6 +540,43 @@ async def test_cancelled_store_operation_preserves_cancellation_when_worker_fail
     assert task.cancelled()
     assert isinstance(exc_info.value.__cause__, RuntimeError)
     assert str(exc_info.value.__cause__) == "store write failed"
+
+
+@pytest.mark.asyncio
+async def test_cancelled_store_operation_preserves_caller_cancellation_when_worker_task_is_cancelled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A cancelled worker wrapper must stay the cause of the caller's cancellation."""
+    worker_started = threading.Event()
+    release_worker = threading.Event()
+    original_create_task = asyncio.create_task
+    worker_tasks: list[asyncio.Task[None]] = []
+
+    def capture_worker_task(coro: Coroutine[object, object, None]) -> asyncio.Task[None]:
+        task = original_create_task(coro)
+        worker_tasks.append(task)
+        return task
+
+    def blocking_store_operation() -> None:
+        worker_started.set()
+        assert release_worker.wait(timeout=5)
+
+    monkeypatch.setattr("mindroom.dispatch_obligations.asyncio.create_task", capture_worker_task)
+    caller_task = original_create_task(_run_owned_store_operation(blocking_store_operation))
+    assert await asyncio.to_thread(worker_started.wait, 5)
+
+    caller_task.cancel("caller cancelled")
+    await asyncio.sleep(0)
+    assert len(worker_tasks) == 1
+    worker_tasks[0].cancel("worker cancelled")
+    release_worker.set()
+
+    with pytest.raises(asyncio.CancelledError) as exc_info:
+        await caller_task
+
+    assert exc_info.value.args == ("caller cancelled",)
+    assert isinstance(exc_info.value.__cause__, asyncio.CancelledError)
+    assert exc_info.value.__cause__.args == ("worker cancelled",)
 
 
 @pytest.mark.asyncio

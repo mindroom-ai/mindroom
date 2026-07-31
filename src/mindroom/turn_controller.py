@@ -1171,6 +1171,7 @@ class TurnController:
                 event_label=event_label,
                 user_id=requester_user_id,
             )
+            self._mark_source_events_responded(handled_turn)
             return None
 
         replay_guard = (
@@ -1271,7 +1272,7 @@ class TurnController:
         command: Command,
         *,
         target: MessageTarget,
-    ) -> None:
+    ) -> bool:
         """Execute one command only on the bot that owns its response."""
         if not agent_owns_command(
             command,
@@ -1280,7 +1281,7 @@ class TurnController:
             room=room,
             requester_user_id=requester_user_id,
         ):
-            return
+            return False
         await self._execute_command(
             room=room,
             event=event,
@@ -1288,6 +1289,7 @@ class TurnController:
             command=command,
             target=target,
         )
+        return True
 
     async def handle_interactive_selection(
         self,
@@ -1305,10 +1307,10 @@ class TurnController:
                 user_id=user_id,
                 source_event_id=source_event_id,
             )
+            interactive.commit_selection(selection)
         except BaseException:
             interactive.restore_selection(selection)
             raise
-        interactive.commit_selection(selection)
 
     async def _execute_interactive_selection(
         self,
@@ -1562,6 +1564,7 @@ class TurnController:
                 "No responders to route to in this room for sender",
                 sender=permission_sender_id,
             )
+            self._mark_source_events_responded(handled_turn or TurnRecord.create([event.event_id]))
             return
 
         with bound_log_context(room_id=room.room_id, thread_id=thread_id):
@@ -1678,6 +1681,13 @@ class TurnController:
                 self._mark_source_events_responded(replace(tracked_handled_turn, response_event_id=event_id))
             else:
                 self.deps.logger.error("Failed to route to entity", entity=suggested_entity)
+                self._raise_router_relay_delivery_failure(suggested_entity)
+
+    @staticmethod
+    def _raise_router_relay_delivery_failure(suggested_entity: str | None) -> None:
+        """Raise the retryable signal for a router relay without a Matrix event."""
+        msg = f"Failed to route to entity {suggested_entity!r}"
+        raise RuntimeError(msg)
 
     def _router_handled_turn_outcome(
         self,

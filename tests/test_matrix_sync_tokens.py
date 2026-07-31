@@ -2020,6 +2020,69 @@ def test_failed_coalesced_dispatch_retries_exact_source_kind(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "failure_mode",
+    ["readiness_exception", "readiness_self_cancel", "readiness_none", "lane_delivery_failure"],
+)
+async def test_lane_terminal_drop_returns_deferred_source_to_retry_owner(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure_mode: str,
+) -> None:
+    """A lane that loses deferred work must return its exact source to durable retry."""
+    bot = _agent_bot(tmp_path)
+    room = nio.MatrixRoom("!room:localhost", bot.agent_user.user_id)
+    event = _text_event("$lane-retry", "retry me", 1_000)
+    runner = bot._dispatch_obligation_runner
+    runner._retry_initial_delay_seconds = 60
+    runner._retry_max_delay_seconds = 60
+    await runner.persist(room, event, DispatchCallbackKind.MESSAGE)
+
+    async def resolve_readiness() -> ReadyPendingEvent | None:
+        if failure_mode == "readiness_exception":
+            msg = "readiness failed"
+            raise RuntimeError(msg)
+        if failure_mode == "readiness_self_cancel":
+            current_task = asyncio.current_task()
+            assert current_task is not None
+            current_task.cancel()
+            await asyncio.sleep(0)
+        if failure_mode == "readiness_none":
+            return None
+        return ReadyPendingEvent(
+            pending_event=PendingEvent(event=event, room=room, source_kind="message"),
+        )
+
+    if failure_mode == "lane_delivery_failure":
+        monkeypatch.setattr(
+            bot._coalescing_gate,
+            "admit",
+            AsyncMock(side_effect=RuntimeError("lane delivery failed")),
+        )
+
+    slot = bot._coalescing_gate.enter_lane(room_id=room.room_id, sender_id=event.sender)
+    bot._coalescing_gate.submit_lane_slot(
+        slot,
+        key=CoalescingKey(room.room_id, None, event.sender),
+        source_event_id=event.event_id,
+        source_kind="message",
+        ready_task=asyncio.create_task(resolve_readiness()),
+    )
+    await asyncio.wait_for(slot.settled.wait(), timeout=1)
+
+    assert runner.store.has_pending(event.event_id, DispatchCallbackKind.MESSAGE)
+    assert not bot._coalescing_gate.has_pending_source_event(event.event_id)
+    assert len(runner._retry_keys) == 1
+    retry_key = next(iter(runner._retry_keys))
+    assert retry_key.source_event_id == event.event_id
+    assert retry_key.callback_kind is DispatchCallbackKind.MESSAGE
+    assert runner._retry_task is not None
+
+    runner._retry_task.cancel()
+    await asyncio.gather(runner._retry_task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
 async def test_receive_time_gate_shutdown_drains_unresolved_admission() -> None:
     """Sync shutdown should wait for an admitted prompt to become ready and dispatch it."""
     room = MagicMock(spec=nio.MatrixRoom)

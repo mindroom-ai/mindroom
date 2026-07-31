@@ -581,7 +581,7 @@ async def _run_owned_store_operation(
     try:
         return await asyncio.shield(worker_task)
     except asyncio.CancelledError as cancellation:
-        worker_error: Exception | None = None
+        worker_error: BaseException | None = None
         while not worker_task.done():
             try:
                 await asyncio.shield(worker_task)
@@ -593,6 +593,8 @@ async def _run_owned_store_operation(
         if worker_error is None:
             try:
                 worker_task.result()
+            except asyncio.CancelledError as exc:
+                worker_error = exc
             except Exception as exc:
                 worker_error = exc
         if worker_error is not None:

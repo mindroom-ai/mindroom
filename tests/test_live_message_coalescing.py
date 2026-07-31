@@ -46,6 +46,7 @@ from mindroom.dispatch_handoff import (
     _build_batch_dispatch_event,
     build_dispatch_handoff,
 )
+from mindroom.dispatch_obligations import DispatchCallbackKind
 from mindroom.dispatch_replay_guard import has_newer_unresponded_in_thread
 from mindroom.dispatch_source import (
     ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
@@ -468,6 +469,63 @@ def _set_context_histories(dispatch: PreparedDispatch, history: Sequence[Resolve
     """Keep replay-snapshot and planning history aligned for tests that need both."""
     dispatch.context.thread_history = list(history)
     dispatch.context.replay_guard_history = list(history)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("terminal_path", ["policy_ignore", "deep_synthetic", "non_owner_command"])
+async def test_post_gate_terminal_drop_settles_real_deferred_dispatch_obligation(
+    tmp_path: Path,
+    terminal_path: str,
+) -> None:
+    """Every successful post-gate drop must provide terminal truth to durable dispatch."""
+    bot = _make_bot(tmp_path, debounce_ms=0)
+    room = _make_room()
+    event = _text_event(
+        event_id=f"$terminal-{terminal_path}",
+        body="!help" if terminal_path == "non_owner_command" else "ignore me",
+    )
+    dispatch = _prepared_dispatch(event_id=event.event_id, body=event.body)
+    runner = bot._dispatch_obligation_runner
+    runner._retry_initial_delay_seconds = 0.001
+    runner._retry_max_delay_seconds = 0.001
+    await runner.persist(room, event, DispatchCallbackKind.MESSAGE)
+
+    plan_turn = AsyncMock(return_value=_DispatchPlan(kind="ignore"))
+    with (
+        patch.object(
+            bot._turn_controller,
+            "_prepare_dispatch",
+            new=AsyncMock(return_value=prepared_dispatch_result(dispatch)),
+        ),
+        patch.object(
+            bot._turn_controller,
+            "_should_skip_deep_synthetic_full_dispatch",
+            return_value=terminal_path == "deep_synthetic",
+        ),
+        patch.object(
+            bot._turn_policy,
+            "plan_turn",
+            new=plan_turn,
+        ),
+    ):
+        await _enqueue_for_dispatch(
+            bot,
+            event,
+            room,
+            source_kind="message",
+            requester_user_id=event.sender,
+        )
+        await bot._coalescing_gate.drain_all()
+
+    if terminal_path == "policy_ignore":
+        plan_turn.assert_awaited_once()
+    else:
+        plan_turn.assert_not_awaited()
+    assert bot._turn_store.is_durably_handled(event.event_id)
+    await _wait_for(
+        lambda: not runner.store.has_pending(event.event_id, DispatchCallbackKind.MESSAGE),
+        deadline_seconds=1,
+    )
 
 
 @pytest.mark.asyncio
@@ -4381,8 +4439,8 @@ async def test_backlog_replay_respects_coalesced_source_ownership(
         )
     else:
         bot.event_cache.get_recent_room_events.assert_not_awaited()
-    assert bot._turn_store.is_handled("$alice") is superseded
-    assert bot._turn_store.is_handled("$bob") is superseded
+    assert bot._turn_store.is_handled("$alice")
+    assert bot._turn_store.is_handled("$bob")
 
 
 @pytest.mark.asyncio
@@ -4455,8 +4513,8 @@ async def test_backlog_replay_fails_closed_when_physical_source_collides_with_al
         )
 
     plan_turn.assert_awaited_once()
-    assert not bot._turn_store.is_handled(relay_event_id)
-    assert not bot._turn_store.is_handled(human_event_id)
+    assert bot._turn_store.is_handled(relay_event_id)
+    assert bot._turn_store.is_handled(human_event_id)
 
 
 @pytest.mark.asyncio
@@ -4526,7 +4584,7 @@ async def test_backlog_replay_fails_closed_after_legacy_coalesced_projection(tmp
         )
 
     plan_turn.assert_awaited_once()
-    assert not bot._turn_store.is_handled(retained_event_id)
+    assert bot._turn_store.is_handled(retained_event_id)
 
 
 @pytest.mark.asyncio
@@ -4652,7 +4710,7 @@ async def test_backlog_replay_degraded_thread_history_ignores_equal_timestamp_ca
         since_ts_ms=1000,
     )
     action_mock.assert_awaited_once()
-    assert not bot._turn_store.is_handled("$m1")
+    assert bot._turn_store.is_handled("$m1")
 
 
 @pytest.mark.asyncio
@@ -4899,7 +4957,7 @@ async def test_backlog_replay_degraded_thread_history_ignores_visible_router_voi
         since_ts_ms=1000,
     )
     action_mock.assert_awaited_once()
-    assert not bot._turn_store.is_handled("$voice")
+    assert bot._turn_store.is_handled("$voice")
 
 
 @pytest.mark.asyncio
@@ -5090,7 +5148,7 @@ async def test_backlog_replay_degraded_thread_history_ignores_edit_events(tmp_pa
 
     history_guard.assert_not_called()
     action_mock.assert_awaited_once()
-    assert not bot._turn_store.is_handled("$m1")
+    assert bot._turn_store.is_handled("$m1")
 
 
 @pytest.mark.asyncio
@@ -5144,7 +5202,7 @@ async def test_backlog_replay_degraded_thread_history_fails_open_without_positiv
         since_ts_ms=1000,
     )
     action_mock.assert_awaited_once()
-    assert not bot._turn_store.is_handled("$m1")
+    assert bot._turn_store.is_handled("$m1")
     assert any(
         log.get("event") == "Thread replay guard degraded; proceeding without negative newer-message proof"
         for log in captured_logs
@@ -5200,7 +5258,7 @@ async def test_media_dispatch_uses_replay_snapshot_instead_of_mutated_planning_h
     newer_mock.assert_called_once()
     assert list(newer_mock.call_args.args[2]) == []
     action_mock.assert_awaited_once()
-    assert not bot._turn_store.is_handled("$img1")
+    assert bot._turn_store.is_handled("$img1")
 
 
 @pytest.mark.asyncio

@@ -74,8 +74,10 @@ class IngressLanes:
         self,
         *,
         deliver: Callable[[LaneSlot, LaneDelivery, ReadyPendingEvent], Awaitable[None]],
+        on_undelivered_source: Callable[[str, str], None] | None = None,
     ) -> None:
         self._deliver = deliver
+        self._on_undelivered_source = on_undelivered_source
         self._lanes: dict[_LaneKey, deque[LaneSlot]] = {}
         self._workers: dict[_LaneKey, asyncio.Task[None]] = {}
 
@@ -245,14 +247,18 @@ class IngressLanes:
             # loaded wait: a head slot that never settles poisons its sender's
             # lane and hangs unbounded drains.
             completed = False
+            undelivered: LaneDelivery | None = None
             try:
                 await slot.loaded.wait()
                 if not slot.released:
-                    await self._deliver_slot(slot)
+                    delivered = await self._deliver_slot(slot)
+                    if not delivered:
+                        undelivered = slot.delivery
                 completed = True
             except asyncio.CancelledError:
                 raise
             except Exception:
+                undelivered = slot.delivery
                 logger.exception(
                     "ingress_lane_slot_failed",
                     room_id=slot.room_id,
@@ -264,11 +270,26 @@ class IngressLanes:
                 if lane and lane[0] is slot:
                     lane.popleft()
                 slot.settled.set()
+            if undelivered is not None:
+                self._notify_undelivered_source(undelivered)
 
-    async def _deliver_slot(self, slot: LaneSlot) -> None:
+    def _notify_undelivered_source(self, delivery: LaneDelivery) -> None:
+        callback = self._on_undelivered_source
+        if callback is None or delivery.source_event_id is None:
+            return
+        try:
+            callback(delivery.source_event_id, delivery.source_kind)
+        except Exception:
+            logger.exception(
+                "ingress_lane_undelivered_source_notification_failed",
+                source_event_id=delivery.source_event_id,
+                room_id=delivery.key.room_id,
+            )
+
+    async def _deliver_slot(self, slot: LaneSlot) -> bool:
         delivery = slot.delivery
         if delivery is None:
-            return
+            return True
         ready = delivery.ready_result
         if ready is None:
             assert delivery.ready_task is not None
@@ -288,7 +309,7 @@ class IngressLanes:
                         sender_id=slot.sender_id,
                         age_ms=elapsed_ms_since(delivery.received_at, clock=time.time),
                     )
-                    return
+                    return False
                 raise
             except Exception as error:
                 logger.exception(
@@ -300,18 +321,19 @@ class IngressLanes:
                     exception_type=error.__class__.__name__,
                     error_message=str(error),
                 )
-                return
-        # Only after the exception split: a None result is a normalization skip
-        # (for example voice STT producing nothing), settled without delivery.
+                return False
+        # Only after the exception split: a None result did not enter the gate,
+        # so the durable owner must decide whether to retry its exact source.
         if ready is None:
-            return
+            return False
         if slot.released:
             # A bounded drain abandoned this slot while its readiness resolved;
             # the drain already counted it dropped and closed its metadata, so
             # delivering now would dispatch work the drain reported as dropped.
             close_ready_task_result_metadata(ready)
-            return
+            return True
         ready.pending_event.enqueue_time = delivery.received_at
+        delivered = True
         try:
             await self._deliver(slot, delivery, ready)
         except Exception:
@@ -322,6 +344,8 @@ class IngressLanes:
                 room_id=slot.room_id,
                 sender_id=slot.sender_id,
             )
+            delivered = False
+        return delivered
 
 
 def _close_late_ready_task_result(task: asyncio.Task[ReadyPendingEvent | None]) -> None:
