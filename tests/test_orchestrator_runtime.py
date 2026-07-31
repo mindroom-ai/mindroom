@@ -2155,6 +2155,7 @@ class TestMultiAgentOrchestrator:
         responder_bot.agent_name = "general"
         responder_bot.running = True
         responder_bot.first_sync_complete = False
+        responder_bot.recover_pending_turn_dispatch_obligations = AsyncMock()
 
         orchestrator.agent_bots = {
             ROUTER_AGENT_NAME: router_bot,
@@ -2173,6 +2174,7 @@ class TestMultiAgentOrchestrator:
         )
 
         assert router_bot.recover_pending_turn_dispatch_obligations.await_count == 2
+        responder_bot.recover_pending_turn_dispatch_obligations.assert_awaited_once_with()
 
     @pytest.mark.asyncio
     async def test_regular_agent_turn_recovery_waits_for_own_first_sync(
