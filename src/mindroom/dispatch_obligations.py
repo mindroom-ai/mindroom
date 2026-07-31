@@ -859,7 +859,11 @@ class DispatchObligationRunner:
         obligation = await self.persist(room, event, callback_kind)
         if obligation is None:
             return
-        await self.run_persisted(obligation, room=room, event=event)
+        try:
+            await self.run_persisted(obligation, room=room, event=event)
+        except Exception:
+            self._schedule_retry(obligation.key)
+            raise
 
     async def persist(
         self,
@@ -1084,7 +1088,10 @@ class _DispatchObligationTaskWrapper:
 
     async def __call__(self, room: nio.MatrixRoom, event: _DispatchEvent) -> None:
         """Persist one callback obligation before scheduling its execution."""
-        obligation = await self.runner.persist(room, event, self.callback_kind)
+        try:
+            obligation = await self.runner.persist(room, event, self.callback_kind)
+        except (OSError, sqlite3.Error) as error:
+            raise nio.CallbackNotAcceptedError(str(error)) from error
         if obligation is None:
             return
         create_background_task(
