@@ -44,7 +44,7 @@ dependencies = [
   "mem0ai>=0.1.115",
   # Arbitrary Olm to-device encryption uses the fork's tested internal API; update only with its round-trip tests.
   # Temporary exact development pin; replace it with the released NIO 0.32 artifact before merge or release.
-  "mindroom-nio[e2e] @ git+https://github.com/mindroom-ai/mindroom-nio.git@f4b365de0237df791f7115ed3145cfc8eddf38a3",
+  "mindroom-nio[e2e] @ git+https://github.com/mindroom-ai/mindroom-nio.git@f00a69581fd9173c2f6b78000b9e2e8310b076af",
   "openai",
   "packaging>=24",
   "pydantic>=2",

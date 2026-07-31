@@ -2044,6 +2044,15 @@ async def test_shutdown_recovery_warning_logs_exact_drain_predicates(
     assert warnings[0]["responses_drained"] is responses_drained
     assert warnings[0]["response_recovery_complete"] is response_recovery_complete
     assert not {"body", "content", "formatted_body", "message_content"} & warnings[0].keys()
+    response_warnings = [entry for entry in logs if entry["event"] == "matrix_agent_response_drain_incomplete"]
+    if responses_drained:
+        assert response_warnings == []
+    else:
+        assert len(response_warnings) == 1
+        assert response_warnings[0]["active_response_count"] == 0
+        assert response_warnings[0]["pending_response_count"] == 0
+        assert response_warnings[0]["response_recovery_complete"] is response_recovery_complete
+        assert response_warnings[0]["restart_reason_category"] == "agent_shutdown"
 
 
 @pytest.mark.asyncio
