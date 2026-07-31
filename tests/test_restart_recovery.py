@@ -124,6 +124,21 @@ def _hide_encrypted_room(
             room_id=room_id,
         ),
     )
+    owner.client.room_get_state = AsyncMock(
+        return_value=nio.RoomGetStateResponse(
+            events=[
+                {
+                    "content": {"algorithm": "m.megolm.v1.aes-sha2"},
+                    "event_id": "$encryption",
+                    "origin_server_ts": 1,
+                    "sender": owner.user_id,
+                    "state_key": "",
+                    "type": "m.room.encryption",
+                },
+            ],
+            room_id=room_id,
+        ),
+    )
     owner.client.joined_members = AsyncMock(
         return_value=(members if members is not None else nio.JoinedMembersResponse(members=[], room_id=room_id)),
     )
@@ -826,6 +841,27 @@ async def test_matrix_target_delivery_does_not_publish_incomplete_encrypted_room
 
 
 @pytest.mark.asyncio
+async def test_encrypted_room_hydration_does_not_publish_after_failed_state_query() -> None:
+    """Failed full-state hydration must not leave a partial shared cache entry."""
+    owner = _owner()
+    room_id = "!hidden:example.org"
+    _hide_encrypted_room(owner, room_id)
+    owner.client.room_get_state = AsyncMock(
+        return_value=nio.RoomGetStateError(
+            "unavailable",
+            "M_UNKNOWN",
+            room_id=room_id,
+        ),
+    )
+
+    hydrated = await hydrate_joined_room_for_delivery(owner.client, room_id)
+
+    assert hydrated is False
+    assert room_id not in owner.client.rooms
+    assert room_id not in owner.client.encrypted_rooms
+
+
+@pytest.mark.asyncio
 async def test_cancelled_encrypted_room_hydration_stops_before_cache_publication() -> None:
     """Cancellation before hydration completes must not publish a room."""
     owner = _owner()
@@ -905,6 +941,86 @@ async def test_encrypted_room_hydration_queries_new_member_device_keys() -> None
 
 
 @pytest.mark.asyncio
+async def test_encrypted_room_hydration_publishes_complete_room_state() -> None:
+    """A hidden encrypted room must not become a permanently partial cache entry."""
+    owner = _owner()
+    room_id = "!hidden:example.org"
+    invited_user_id = "@invited:example.org"
+    _hide_encrypted_room(owner, room_id)
+    owner.client.room_get_state = AsyncMock(
+        return_value=nio.RoomGetStateResponse(
+            events=[
+                {
+                    "content": {"algorithm": "m.megolm.v1.aes-sha2"},
+                    "event_id": "$encryption",
+                    "origin_server_ts": 1,
+                    "sender": owner.user_id,
+                    "state_key": "",
+                    "type": "m.room.encryption",
+                },
+                {
+                    "content": {"name": "Recovery Room"},
+                    "event_id": "$name",
+                    "origin_server_ts": 2,
+                    "sender": owner.user_id,
+                    "state_key": "",
+                    "type": "m.room.name",
+                },
+                {
+                    "content": {"displayname": "Invited", "membership": "invite"},
+                    "event_id": "$invite",
+                    "origin_server_ts": 3,
+                    "sender": owner.user_id,
+                    "state_key": invited_user_id,
+                    "type": "m.room.member",
+                },
+                {
+                    "content": {"users": {owner.user_id: 100}},
+                    "event_id": "$power-levels",
+                    "origin_server_ts": 4,
+                    "sender": owner.user_id,
+                    "state_key": "",
+                    "type": "m.room.power_levels",
+                },
+            ],
+            room_id=room_id,
+        ),
+    )
+
+    hydrated = await hydrate_joined_room_for_delivery(owner.client, room_id)
+
+    assert hydrated is True
+    room = owner.client.rooms[room_id]
+    assert room.encrypted is True
+    assert room.name == "Recovery Room"
+    assert invited_user_id in room.invited_users
+    assert room.power_levels.users[owner.user_id] == 100
+    assert room.members_synced is True
+
+
+@pytest.mark.asyncio
+async def test_encrypted_room_hydration_does_not_mutate_unencrypted_sync_room() -> None:
+    """A concurrent sync room must become authoritative before encrypted delivery."""
+    owner = _owner()
+    room_id = "!hidden:example.org"
+    _hide_encrypted_room(owner, room_id)
+    sync_room = nio.MatrixRoom(room_id=room_id, own_user_id=owner.user_id)
+
+    async def joined_members(_room_id: str) -> nio.JoinedMembersResponse:
+        owner.client.rooms[room_id] = sync_room
+        return nio.JoinedMembersResponse(members=[], room_id=room_id)
+
+    owner.client.joined_members.side_effect = joined_members
+
+    hydrated = await hydrate_joined_room_for_delivery(owner.client, room_id)
+
+    assert hydrated is False
+    assert owner.client.rooms[room_id] is sync_room
+    assert sync_room.encrypted is False
+    assert room_id not in owner.client.encrypted_rooms
+
+
+@pytest.mark.asyncio
 async def test_encrypted_room_hydration_does_not_publish_after_failed_device_key_query() -> None:
     """A failed device-key query must not publish an encrypted room."""
     owner = _owner()
@@ -923,6 +1039,43 @@ async def test_encrypted_room_hydration_does_not_publish_after_failed_device_key
     assert hydrated is False
     assert room_id not in owner.client.rooms
     assert room_id not in owner.client.encrypted_rooms
+
+
+@pytest.mark.asyncio
+async def test_encrypted_delivery_retries_when_member_device_keys_remain_pending(tmp_path: Path) -> None:
+    """A partial device-key response must not publish or send through an incomplete room."""
+    owner = _owner()
+    target = _target("$target", timestamp_ms=10)
+    remote_member_id = "@human:remote.example.org"
+    _hide_encrypted_room(
+        owner,
+        target.room_id,
+        members=nio.JoinedMembersResponse(
+            members=[nio.RoomMember(remote_member_id, "Human", None)],
+            room_id=target.room_id,
+        ),
+    )
+    owner.client.olm = MagicMock()
+    owner.client.should_query_keys = True
+    owner.client.users_for_key_query = {remote_member_id}
+    owner.client.keys_query = AsyncMock(
+        return_value=nio.KeysQueryResponse(
+            device_keys={},
+            failures={"remote.example.org": {"errcode": "M_UNAVAILABLE"}},
+        ),
+    )
+    owner.client.room_send = AsyncMock(
+        return_value=nio.RoomSendResponse(event_id="$resume", room_id=target.room_id),
+    )
+    operations = build_matrix_restart_recovery_operations(test_runtime_paths(tmp_path))
+
+    delivered = await operations.deliver_target(owner, target, _config(tmp_path))
+
+    assert delivered is RestartDeliveryOutcome.RETRY
+    assert remote_member_id in owner.client.users_for_key_query
+    assert target.room_id not in owner.client.rooms
+    assert target.room_id not in owner.client.encrypted_rooms
+    owner.client.room_send.assert_not_awaited()
 
 
 @pytest.mark.asyncio

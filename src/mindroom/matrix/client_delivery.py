@@ -201,23 +201,45 @@ async def _remote_room_encrypted(client: nio.AsyncClient, room_id: str) -> bool 
     return None
 
 
-def _room_from_joined_members(
+def _room_from_remote_state(
     client: nio.AsyncClient,
     room_id: str,
     members: nio.JoinedMembersResponse,
+    state: nio.RoomGetStateResponse,
 ) -> nio.MatrixRoom:
-    """Return a sync-owned room or one unpublished hydrated candidate."""
-    room = client.rooms.get(room_id)
-    if room is not None:
-        room.encrypted = True
-        return room
-
+    """Return one unpublished room candidate hydrated from authoritative state."""
     room = nio.MatrixRoom(room_id=room_id, own_user_id=client.user_id or "")
-    room.encrypted = True
+    for event_source in state.events:
+        event = nio.Event.parse_event(event_source)
+        if isinstance(event, nio.RoomMemberEvent):
+            room.handle_membership(event)
+        else:
+            room.handle_event(event)
     for member in members.members:
         room.add_member(member.user_id, member.display_name, member.avatar_url)
+    room.encrypted = True
     room.members_synced = True
     return room
+
+
+async def _encrypted_room_for_hydration(
+    client: nio.AsyncClient,
+    room_id: str,
+    members: nio.JoinedMembersResponse,
+) -> nio.MatrixRoom | None:
+    """Return a complete candidate or an authoritative encrypted sync room."""
+    room = client.rooms.get(room_id)
+    if room is not None:
+        return room if room.encrypted else None
+
+    state = await client.room_get_state(room_id)
+    if not isinstance(state, nio.RoomGetStateResponse):
+        return None
+    candidate = _room_from_remote_state(client, room_id, members, state)
+    room = client.rooms.get(room_id)
+    if room is None:
+        return candidate
+    return room if room.encrypted else None
 
 
 async def _hydrate_encrypted_joined_room(
@@ -229,12 +251,23 @@ async def _hydrate_encrypted_joined_room(
     if not isinstance(members, nio.JoinedMembersResponse):
         return False
 
-    room = _room_from_joined_members(client, room_id, members)
+    room = await _encrypted_room_for_hydration(client, room_id, members)
+    if room is None:
+        return False
     if client.olm is not None:
         client.olm.update_tracked_users(room)
     if client.should_query_keys:
         key_query = await client.keys_query()
         if not isinstance(key_query, nio.KeysQueryResponse):
+            return False
+        pending_room_members = set(room.users).intersection(client.users_for_key_query)
+        if pending_room_members:
+            logger.error(
+                "matrix_encrypted_room_device_keys_incomplete",
+                room_id=room_id,
+                pending_member_count=len(pending_room_members),
+                failed_server_count=len(key_query.failures),
+            )
             return False
 
     if client.store is not None:
