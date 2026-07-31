@@ -66,7 +66,6 @@ from tests.sync_continuity_helpers import clear_sync_token, load_sync_checkpoint
 if TYPE_CHECKING:
     from collections.abc import Iterable
     from pathlib import Path
-    from typing import Literal
 
     from mindroom.coalescing import LaneSlot, _GateEntry
     from mindroom.final_delivery import FinalDeliveryOutcome
@@ -155,83 +154,6 @@ async def _admit_and_dispatch_decrypt(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("mode", "saved_token", "expected_cold"),
-    [
-        ("classic", None, True),
-        ("classic", "s_restored", False),
-        ("sliding", None, True),
-        ("sliding", "s_classic_only", True),
-    ],
-)
-async def test_sync_transport_startup_sets_cold_history_admission(
-    tmp_path: Path,
-    mode: Literal["classic", "sliding"],
-    saved_token: str | None,
-    expected_cold: bool,
-) -> None:
-    """Classic since is reusable while a restarted Sliding connection has no pos."""
-    bot = _agent_bot(tmp_path)
-    bot.config.matrix_sync = MatrixSyncConfig(mode=mode)
-    bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
-    if saved_token is not None:
-        save_sync_token(
-            tmp_path,
-            bot.agent_name,
-            saved_token,
-            cache_generation=_CACHE_GENERATION,
-        )
-
-    await bot._prepare_matrix_sync_continuity()
-
-    assert bot._cold_history_fence.is_cold is expected_cold
-
-
-@pytest.mark.asyncio
-async def test_classic_response_continuation_opens_fence_and_unknown_pos_rearms(
-    tmp_path: Path,
-) -> None:
-    """Classic next_batch opens admission and M_UNKNOWN_POS closes it."""
-    bot = _agent_bot(tmp_path)
-    bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
-    await bot._prepare_matrix_sync_continuity()
-    bot._first_sync_done = True
-    response = MagicMock(spec=nio.SyncResponse)
-    response.next_batch = "s_after_cold"
-    response.rooms = MagicMock(join={}, leave={})
-    response.unrecovered_room_ids = frozenset()
-
-    await bot._on_sync_response(response)
-
-    assert not bot._cold_history_fence.is_cold
-    sync_error = MagicMock(spec=nio.SyncError)
-    sync_error.status_code = "M_UNKNOWN_POS"
-
-    await bot._on_sync_error(sync_error)
-
-    assert bot._cold_history_fence.is_cold
-
-
-@pytest.mark.asyncio
-async def test_classic_response_without_continuation_keeps_fence_cold(
-    tmp_path: Path,
-) -> None:
-    """Classic response without next_batch cannot establish continuity."""
-    bot = _agent_bot(tmp_path)
-    bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
-    await bot._prepare_matrix_sync_continuity()
-    bot._first_sync_done = True
-    response = MagicMock(spec=nio.SyncResponse)
-    response.next_batch = None
-    response.rooms = MagicMock(join={}, leave={})
-    response.unrecovered_room_ids = frozenset()
-
-    await bot._on_sync_response(response)
-
-    assert bot._cold_history_fence.is_cold
-
-
-@pytest.mark.asyncio
 async def test_warm_join_decrypt_notice_waits_for_trusted_sync_containing_room(
     tmp_path: Path,
 ) -> None:
@@ -241,7 +163,6 @@ async def test_warm_join_decrypt_notice_waits_for_trusted_sync_containing_room(
     bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
     bot.client.outgoing_key_requests = {}
     bot._first_sync_done = True
-    bot._cold_history_fence.observe_continuation("s_warm")
     room = nio.MatrixRoom(room_id, bot.agent_user.user_id)
 
     def megolm_event(event_id: str) -> nio.MegolmEvent:
@@ -426,43 +347,6 @@ async def test_join_fence_restore_keeps_durable_fences_when_inventory_unavailabl
 
 
 @pytest.mark.asyncio
-async def test_sliding_response_pos_opens_fence_and_missing_or_unknown_pos_rearms(
-    tmp_path: Path,
-) -> None:
-    """Sliding opens only after nio reports no remaining recovery gaps."""
-    bot = _agent_bot(tmp_path)
-    bot.config.matrix_sync = MatrixSyncConfig(mode="sliding")
-    bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
-    await bot._prepare_matrix_sync_continuity()
-    bot._first_sync_done = True
-
-    await bot._on_sync_response(
-        nio.SlidingSyncResponse(
-            "pos_with_gap",
-            unrecovered_room_ids=frozenset({"!gap:localhost"}),
-        ),
-    )
-
-    assert bot._cold_history_fence.is_cold
-
-    await bot._on_sync_response(nio.SlidingSyncResponse("pos_after_recovery"))
-
-    assert not bot._cold_history_fence.is_cold
-
-    await bot._on_sync_response(nio.SlidingSyncResponse(""))
-
-    assert bot._cold_history_fence.is_cold
-
-    await bot._on_sync_response(nio.SlidingSyncResponse("pos_after_missing"))
-
-    await bot._on_sync_error(
-        nio.SlidingSyncError("connection expired", "M_UNKNOWN_POS"),
-    )
-
-    assert bot._cold_history_fence.is_cold
-
-
-@pytest.mark.asyncio
 async def test_sliding_response_skips_continuity_write_without_join_fences(
     tmp_path: Path,
 ) -> None:
@@ -471,7 +355,6 @@ async def test_sliding_response_skips_continuity_write_without_join_fences(
     bot.config.matrix_sync = MatrixSyncConfig(mode="sliding")
     bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
     bot._first_sync_done = True
-    bot._cold_history_fence.observe_continuation("pos_before")
     response = nio.SlidingSyncResponse(
         "pos_after",
         rooms={"!room:localhost": nio.SlidingSyncRoom(membership="join")},
@@ -493,7 +376,7 @@ async def test_sliding_response_skips_continuity_write_without_join_fences(
 
 
 @pytest.mark.asyncio
-async def test_classic_unrecovered_gap_keeps_fence_cold_and_rejects_checkpoint(
+async def test_classic_unrecovered_gap_rejects_checkpoint(
     tmp_path: Path,
 ) -> None:
     """Classic next_batch cannot certify while nio reports an open recovery gap."""
@@ -512,22 +395,20 @@ async def test_classic_unrecovered_gap_keeps_fence_cold_and_rejects_checkpoint(
     ):
         await bot._on_sync_response(response)
 
-    assert bot._cold_history_fence.is_cold
     assert load_sync_checkpoint(tmp_path, bot.agent_name) is None
     assert bot.client.next_batch is None
 
 
 @pytest.mark.asyncio
-async def test_classic_token_reset_rearms_open_cold_history_fence(
+async def test_classic_incomplete_cache_rejects_checkpoint(
     tmp_path: Path,
 ) -> None:
-    """A since-less replay cannot admit history through a previously opened fence."""
+    """An incomplete cache write cannot advance the Classic checkpoint."""
     bot = _agent_bot(tmp_path)
     bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
     bot.client.next_batch = "s_after_gap"
     bot._first_sync_done = True
     bot._sync_cache_trust.state = SyncTrustState.CERTIFIED
-    bot._cold_history_fence.observe_continuation("s_before_gap")
     response = MagicMock(spec=nio.SyncResponse)
     response.next_batch = "s_after_gap"
     response.unrecovered_room_ids = frozenset()
@@ -546,18 +427,13 @@ async def test_classic_token_reset_rearms_open_cold_history_fence(
         await bot._on_sync_response(response)
 
     assert bot.client.next_batch is None
-    assert bot._cold_history_fence.is_cold
-    assert not await bot._cold_history_fence.admit(
-        "$historical",
-        DispatchCallbackKind.MESSAGE,
-    )
 
 
 @pytest.mark.asyncio
-async def test_tokenless_pre_certification_failure_rearms_cold_fence(
+async def test_tokenless_pre_certification_failure_rewinds_cursor(
     tmp_path: Path,
 ) -> None:
-    """Failed first response must not leave ordinary history admission warm."""
+    """Failed first response must rewind its uncertified cursor."""
     bot = _agent_bot(tmp_path)
     bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
     bot.client.next_batch = "s_failed"
@@ -583,7 +459,6 @@ async def test_tokenless_pre_certification_failure_rearms_cold_fence(
         await bot._on_sync_response(response)
 
     assert bot.client.next_batch is None
-    assert bot._cold_history_fence.is_cold
 
 
 @pytest.mark.asyncio
@@ -597,7 +472,11 @@ async def test_cold_history_drop_emits_operator_telemetry(tmp_path: Path) -> Non
     )
 
     with capture_logs() as logs:
-        await admission(room, event)
+        await admission(
+            room,
+            event,
+            nio.TimelineEventProvenance.HISTORY,
+        )
 
     assert not bot._dispatch_obligation_store.has_pending(
         event.event_id,
@@ -608,29 +487,6 @@ async def test_cold_history_drop_emits_operator_telemetry(tmp_path: Path) -> Non
         and entry["reason"] == DispatchSourceAdmission.COLD_HISTORY_FENCED
         and entry["source_event_id"] == event.event_id
         for entry in logs
-    )
-
-
-@pytest.mark.asyncio
-async def test_sliding_transport_restart_rearms_cold_history_fence(
-    tmp_path: Path,
-) -> None:
-    """Each fresh Sliding transport starts without a connection position."""
-    bot = _agent_bot(tmp_path)
-    bot.config.matrix_sync = MatrixSyncConfig(mode="sliding")
-    bot._cold_history_fence.observe_continuation("pos_from_previous_loop")
-    assert not bot._cold_history_fence.is_cold
-
-    bot.mark_sync_loop_started()
-
-    assert bot._cold_history_fence.is_cold
-    assert (
-        await bot._cold_history_fence.admit_source(
-            "!room:localhost",
-            "$initial-history",
-            DispatchCallbackKind.MESSAGE,
-        )
-        is DispatchSourceAdmission.COLD_HISTORY_FENCED
     )
 
 
@@ -672,10 +528,10 @@ async def test_sliding_trusted_sync_clears_joined_room_decrypt_notice_fence(
 
 
 @pytest.mark.asyncio
-async def test_sliding_fence_settlement_restart_is_globally_cold(
+async def test_sliding_join_fence_settlement_survives_restart(
     tmp_path: Path,
 ) -> None:
-    """Sliding may preserve Classic checkpoint state only because restart has no trusted pos."""
+    """Sliding join settlement preserves the unrelated Classic checkpoint."""
     room_id = "!room:localhost"
     store = SyncContinuityStore(tmp_path, "code")
     store.replace_checkpoint(SyncCheckpoint("s_classic", cache_generation=_CACHE_GENERATION))
@@ -703,7 +559,6 @@ async def test_sliding_fence_settlement_restart_is_globally_cold(
 
     await restarted._prepare_matrix_sync_continuity()
 
-    assert restarted._cold_history_fence.is_cold
     assert not restarted._room_lifecycle.decrypt_notice_is_fenced(room_id)
 
 
@@ -1697,7 +1552,7 @@ async def test_bot_start_purges_untrusted_cache_without_checkpoint_when_generati
 
 
 @pytest.mark.asyncio
-async def test_legacy_v2_sync_token_path_starts_cold_without_parsing(tmp_path: Path) -> None:
+async def test_legacy_v2_sync_token_path_is_not_parsed(tmp_path: Path) -> None:
     """Legacy token files are outside the unified continuity namespace."""
     token_path = _legacy_token_path(tmp_path)
     token_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1721,7 +1576,6 @@ async def test_legacy_v2_sync_token_path_starts_cold_without_parsing(tmp_path: P
 
     assert client.next_batch is None
     assert token_path.exists()
-    assert bot._cold_history_fence.is_cold
 
 
 @pytest.mark.asyncio
@@ -2178,7 +2032,6 @@ async def test_durably_accepted_invite_failure_does_not_rewind_classic_cursor(
     bot.client.next_batch = "s_after_invite"
     bot._sync_cache_trust.state = SyncTrustState.CERTIFIED
     bot._sync_cache_trust.checkpoint = SyncCheckpoint("s_before_invite")
-    bot._cold_history_fence.observe_continuation("s_before_invite")
     bot._room_lifecycle.on_invite = AsyncMock(side_effect=RuntimeError("join failed"))
     room = nio.MatrixRoom("!invited:localhost", bot.matrix_id.full_id)
     event = nio.InviteEvent.parse_event(
@@ -2228,7 +2081,6 @@ async def test_dispatch_persistence_failure_rewinds_classic_cursor(
     bot.client.next_batch = "s_after_failure"
     bot._sync_cache_trust.state = SyncTrustState.CERTIFIED
     bot._sync_cache_trust.checkpoint = SyncCheckpoint("s_before_failure")
-    bot._cold_history_fence.observe_continuation("s_before_failure")
 
     def fail_persist(*_args: object, **_kwargs: object) -> None:
         message = "dispatch database unavailable"
@@ -2251,15 +2103,14 @@ async def test_dispatch_persistence_failure_rewinds_classic_cursor(
 
 
 @pytest.mark.asyncio
-async def test_tokenless_dispatch_persistence_failure_rearms_cold_fence(
+async def test_tokenless_dispatch_persistence_failure_rewinds_cursor(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A live fence cannot stay open when rejected work has no replay cursor."""
+    """Rejected work without a replay cursor rewinds to tokenless sync."""
     bot = _agent_bot(tmp_path)
     bot.client = make_matrix_client_mock(user_id=bot.matrix_id.full_id)
     bot.client.next_batch = "s_unpersisted"
-    bot._cold_history_fence.observe_continuation("s_live")
 
     def fail_persist(*_args: object, **_kwargs: object) -> None:
         message = "dispatch database unavailable"
@@ -2277,7 +2128,6 @@ async def test_tokenless_dispatch_persistence_failure_rearms_cold_fence(
         )
 
     assert bot.client.next_batch is None
-    assert bot._cold_history_fence.is_cold
 
 
 @pytest.mark.asyncio
@@ -2299,8 +2149,8 @@ async def test_nio_replays_event_rejected_before_durable_dispatch_acceptance(
         ),
     )
     bot.client = client
-    bot._cold_history_fence.observe_continuation("s_before_failure")
     if transport == "classic":
+        client.next_batch = "s_before_failure"
         bot._sync_cache_trust.state = SyncTrustState.CERTIFIED
         bot._sync_cache_trust.checkpoint = SyncCheckpoint("s_before_failure")
     room_id = "!room:localhost"
@@ -2372,7 +2222,8 @@ async def test_nio_accepts_late_non_acceptance_without_live_replay(
         ),
     )
     bot.client = client
-    bot._cold_history_fence.observe_continuation("s_before_late_rejection")
+    if transport == "classic":
+        client.next_batch = "s_before_late_rejection"
     room_id = "!room:localhost"
     event = _text_event(f"$late-{transport}", "hello", 1)
     response = _timeline_response(transport, room_id, event)
@@ -2435,7 +2286,6 @@ async def test_swallowed_dispatch_persistence_failure_cannot_certify_response(
     bot._first_sync_done = True
     bot._sync_cache_trust.state = SyncTrustState.CERTIFIED
     bot._sync_cache_trust.checkpoint = SyncCheckpoint("s_before_failure")
-    bot._cold_history_fence.observe_continuation("s_before_failure")
     room_id = "!room:localhost"
     bot._room_lifecycle.apply_continuity_record(bot._sync_continuity_store.update_join_fences(add=(room_id,)))
     cache_generation = bot.event_cache.cache_generation
@@ -2527,7 +2377,6 @@ async def test_continuity_write_failure_preserves_prior_pair_and_runtime_trust(
     assert bot._sync_cache_trust.state is SyncTrustState.CERTIFIED
     assert bot._sync_cache_trust.checkpoint == SyncCheckpoint("s_before_failure")
     assert bot.client.next_batch == "s_after_failure"
-    assert not bot._cold_history_fence.is_cold
     assert bot._sync_continuity_store.load() == SyncContinuityRecord(
         revision=2,
         checkpoint=old_checkpoint,
@@ -2625,7 +2474,6 @@ async def test_dispatch_creation_drains_repeated_cancellation_before_rewind(
     bot.client.next_batch = "s_after_cancel"
     bot._sync_cache_trust.state = SyncTrustState.CERTIFIED
     bot._sync_cache_trust.checkpoint = SyncCheckpoint("s_before_cancel")
-    bot._cold_history_fence.observe_continuation("s_before_cancel")
     create_started = threading.Event()
     release_create = threading.Event()
     original_create = bot._dispatch_obligation_store.create_pending
@@ -2667,7 +2515,6 @@ async def test_dispatch_obligation_waits_for_terminal_turn_durability(tmp_path: 
     bot = _agent_bot(tmp_path)
     room = nio.MatrixRoom("!room:localhost", bot.matrix_id.full_id)
     event = _text_event("$write-behind", "hello", 1)
-    bot._cold_history_fence.observe_continuation("s_live")
     obligation = await bot._dispatch_obligation_runner.persist(
         room,
         event,

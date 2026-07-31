@@ -1498,7 +1498,6 @@ def _sliding_response_bot(tmp_path: Path) -> AgentBot:
     bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
     bot._first_sync_done = True
     bot._room_member_join_hooks_armed = True
-    bot._cold_history_fence.observe_continuation("pos_before")
     return bot
 
 
@@ -1652,7 +1651,6 @@ async def test_sliding_sync_error_skips_classic_token_rejection(
 
     assert bot._sync_continuity_store.load().checkpoint is not None
     assert bot._room_member_join_hooks_armed is True
-    assert bot._cold_history_fence.is_cold
     assert not any(entry["log_level"] == "warning" for entry in logs)
 
 

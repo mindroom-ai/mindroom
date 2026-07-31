@@ -1,4 +1,4 @@
-"""Matrix-continuity admission for cold callback windows."""
+"""Per-event Matrix provenance admission for timeline callbacks."""
 
 from __future__ import annotations
 
@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 import nio
 import pytest
 
+from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.cold_history_fence import ColdHistoryFence
 from mindroom.dispatch_obligations import (
     DispatchCallbackKind,
@@ -57,6 +58,40 @@ def _message(event_id: str) -> nio.RoomMessageText:
     return event
 
 
+def _sync_response(
+    next_batch: str,
+    event: nio.RoomMessageText,
+) -> nio.SyncResponse:
+    response = nio.SyncResponse.from_dict(
+        {
+            "next_batch": next_batch,
+            "device_one_time_keys_count": {},
+            "device_lists": {"changed": [], "left": []},
+            "rooms": {
+                "invite": {},
+                "leave": {},
+                "join": {
+                    "!room:example.org": {
+                        "timeline": {
+                            "events": [event.source],
+                            "limited": False,
+                            "prev_batch": "p0",
+                        },
+                        "state": {"events": []},
+                        "ephemeral": {"events": []},
+                        "account_data": {"events": []},
+                    },
+                },
+            },
+            "to_device": {"events": []},
+            "presence": {"events": []},
+            "account_data": {"events": []},
+        },
+    )
+    assert isinstance(response, nio.SyncResponse)
+    return response
+
+
 def _runner(
     store: DispatchObligationStore,
     fence: ColdHistoryFence,
@@ -71,42 +106,79 @@ def _runner(
         room_for_id=lambda room_id: nio.MatrixRoom(room_id, "@code:example.org"),
         turn_is_terminal=lambda _event_id: False,
         source_admission=fence.admit_source,
+        observe_event_provenance=fence.observe_event_provenance,
     )
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("continuation", [None, "", " \t"])
-async def test_missing_startup_continuation_suppresses_arbitrary_callbacks(
-    continuation: str | None,
+async def test_history_requires_one_exact_pending_obligation() -> None:
+    """Historical delivery may retry only its exact durable callback."""
+    obligations = _PendingObligations.with_keys(
+        {("$pending", DispatchCallbackKind.REACTION)},
+    )
+    fence = ColdHistoryFence(obligations)
+
+    assert (
+        await fence.admit_source(
+            "!room:example.org",
+            "$pending",
+            DispatchCallbackKind.REACTION,
+            nio.TimelineEventProvenance.HISTORY,
+        )
+        is DispatchSourceAdmission.ACCEPTED
+    )
+    assert (
+        await fence.admit_source(
+            "!room:example.org",
+            "$pending",
+            DispatchCallbackKind.MESSAGE,
+            nio.TimelineEventProvenance.HISTORY,
+        )
+        is DispatchSourceAdmission.COLD_HISTORY_FENCED
+    )
+    assert (
+        await fence.admit_source(
+            "!room:example.org",
+            "$other",
+            DispatchCallbackKind.REACTION,
+            nio.TimelineEventProvenance.HISTORY,
+        )
+        is DispatchSourceAdmission.COLD_HISTORY_FENCED
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "provenance",
+    [nio.TimelineEventProvenance.LIVE, None],
+)
+async def test_live_and_direct_dispatch_do_not_read_pending_state(
+    provenance: nio.TimelineEventProvenance | None,
 ) -> None:
-    """Tokenless startup must fail closed for arbitrary callback work."""
+    """Live nio delivery and explicit non-nio dispatch are current work."""
     obligations = _PendingObligations()
     fence = ColdHistoryFence(obligations)
 
-    fence.observe_continuation(continuation)
-
-    assert not await fence.admit("$history", DispatchCallbackKind.MESSAGE)
-    assert fence.is_cold
-    assert obligations.reads == [("$history", DispatchCallbackKind.MESSAGE)]
-
-
-@pytest.mark.asyncio
-async def test_cold_window_admits_only_exact_pending_event_and_kind() -> None:
-    """A pending event cannot license another event or callback kind."""
-    obligations = _PendingObligations.with_keys(
-        {("$obligated", DispatchCallbackKind.REACTION)},
+    admission = await fence.admit_source(
+        "!room:example.org",
+        "$current",
+        DispatchCallbackKind.MESSAGE,
+        provenance,
     )
-    fence = ColdHistoryFence(obligations)
-    fence.observe_continuation(None)
 
-    assert await fence.admit("$obligated", DispatchCallbackKind.REACTION)
-    assert not await fence.admit("$obligated", DispatchCallbackKind.MESSAGE)
-    assert not await fence.admit("$other", DispatchCallbackKind.REACTION)
+    assert admission is DispatchSourceAdmission.ACCEPTED
+    assert obligations.reads == []
 
 
 @pytest.mark.asyncio
-async def test_source_admission_owns_invite_and_decrypt_fence_policy() -> None:
-    """Current invites bypass history while pending joins suppress decrypt notices."""
+@pytest.mark.parametrize(
+    "provenance",
+    [nio.TimelineEventProvenance.LIVE, nio.TimelineEventProvenance.HISTORY],
+)
+async def test_invite_and_decrypt_fences_override_timeline_provenance(
+    provenance: nio.TimelineEventProvenance,
+) -> None:
+    """Invites stay current while pending joins keep decrypt notices fenced."""
     obligations = _PendingObligations()
     fence = ColdHistoryFence(
         obligations,
@@ -117,11 +189,13 @@ async def test_source_admission_owns_invite_and_decrypt_fence_policy() -> None:
         "!invited:localhost",
         "$invite",
         DispatchCallbackKind.INVITE,
+        provenance,
     )
     decrypt = await fence.admit_source(
         "!joining:localhost",
         "$encrypted",
         DispatchCallbackKind.DECRYPTION_FAILURE,
+        provenance,
     )
 
     assert invite is DispatchSourceAdmission.ACCEPTED
@@ -129,173 +203,30 @@ async def test_source_admission_owns_invite_and_decrypt_fence_policy() -> None:
     assert obligations.reads == []
 
 
-def test_incomplete_transport_recovery_rearms_fence() -> None:
-    """Unrecovered rooms keep arbitrary callbacks fenced despite a continuation."""
+def test_best_effort_admission_requires_matching_live_event_provenance() -> None:
+    """One live event cannot license unrelated best-effort callback work."""
     fence = ColdHistoryFence(_PendingObligations())
-    fence.observe_continuation("s_before_gap")
 
-    complete = fence.observe_recovery(
-        continuation="s_after_gap",
-        unrecovered_room_ids=frozenset({"!room:localhost"}),
-    )
+    fence.observe_event_provenance("$live", nio.TimelineEventProvenance.LIVE)
+    assert fence.event_is_live("$live")
+    assert not fence.event_is_live("$other")
 
-    assert not complete
-    assert fence.is_cold
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("continuation", ["s_after_cold", "pos_after_cold"])
-async def test_matrix_continuation_opens_ordinary_dispatch(continuation: str) -> None:
-    """A Matrix-issued continuation opens ordinary callback dispatch."""
-    obligations = _PendingObligations()
-    fence = ColdHistoryFence(obligations)
-    fence.observe_continuation(None)
-
-    fence.observe_continuation(continuation)
-
-    assert await fence.admit("$ordinary", DispatchCallbackKind.MESSAGE)
-    assert not fence.is_cold
-    assert obligations.reads == []
+    fence.observe_event_provenance("$history", nio.TimelineEventProvenance.HISTORY)
+    assert not fence.event_is_live("$history")
+    assert not fence.event_is_live("$live")
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("continuation", [None, "", " "])
-async def test_missing_response_continuation_keeps_fence_cold(
-    continuation: str | None,
-) -> None:
-    """An unusable response continuation cannot open a cold fence."""
-    fence = ColdHistoryFence(_PendingObligations())
-    fence.observe_continuation(None)
-
-    fence.observe_continuation(continuation)
-
-    assert not await fence.admit("$ordinary", DispatchCallbackKind.MESSAGE)
-    assert fence.is_cold
-
-
-@pytest.mark.asyncio
-async def test_missing_response_continuation_rearms_open_fence() -> None:
-    """Losing the response continuation must rearm exact-only admission."""
-    fence = ColdHistoryFence(_PendingObligations())
-    fence.observe_continuation("s_before_missing")
-
-    fence.observe_continuation(None)
-
-    assert not await fence.admit("$ordinary", DispatchCallbackKind.MESSAGE)
-    assert fence.is_cold
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("continuation", ["s_before_reset", "pos_before_reset"])
-async def test_continuity_reset_rearms_exact_obligation_admission(
-    continuation: str,
-) -> None:
-    """Continuity rejection closes ordinary work while preserving exact retries."""
-    obligations = _PendingObligations.with_keys(
-        {("$retry", DispatchCallbackKind.REDACTION)},
-    )
-    fence = ColdHistoryFence(obligations)
-    fence.observe_continuation(continuation)
-    assert await fence.admit("$ordinary", DispatchCallbackKind.REDACTION)
-
-    fence.reset()
-
-    assert not await fence.admit("$ordinary", DispatchCallbackKind.REDACTION)
-    assert await fence.admit("$retry", DispatchCallbackKind.REDACTION)
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("callback_kind", list(DispatchCallbackKind))
-async def test_each_callback_family_uses_exact_pending_admission(
-    callback_kind: DispatchCallbackKind,
-) -> None:
-    """Every correctness callback kind follows the same exact-key rule."""
-    obligations = _PendingObligations.with_keys({("$exact", callback_kind)})
-    fence = ColdHistoryFence(obligations)
-    fence.observe_continuation(None)
-
-    assert not await fence.admit("$absent", callback_kind)
-    assert await fence.admit("$exact", callback_kind)
-
-
-@pytest.mark.asyncio
-async def test_runner_checks_cold_admission_before_creating_current_obligation(
+async def test_history_cannot_create_the_obligation_that_admits_itself(
     tmp_path: Path,
 ) -> None:
-    """Cold replay cannot create the obligation that would admit itself."""
+    """Nio admission checks history before creating current durable work."""
     store = DispatchObligationStore(
         tracking_path=tmp_path,
         principal_id="@code:example.org",
         entity_name="code",
     )
     fence = ColdHistoryFence(store)
-    fence.observe_continuation(None)
-    attempts = 0
-
-    async def callback(
-        _room: nio.MatrixRoom,
-        _event: nio.Event,
-    ) -> _DispatchCallbackResult:
-        nonlocal attempts
-        attempts += 1
-        return _DispatchCallbackResult.SUCCEEDED
-
-    runner = _runner(store, fence, callback)
-
-    await runner.dispatch(
-        nio.MatrixRoom("!room:example.org", "@code:example.org"),
-        _message("$history"),
-        DispatchCallbackKind.MESSAGE,
-    )
-
-    assert attempts == 0
-    assert not store.has_pending("$history", DispatchCallbackKind.MESSAGE)
-
-
-@pytest.mark.asyncio
-async def test_runner_preserves_current_event_after_server_continuation(
-    tmp_path: Path,
-) -> None:
-    """A live event after Matrix establishes continuity still dispatches."""
-    store = DispatchObligationStore(
-        tracking_path=tmp_path,
-        principal_id="@code:example.org",
-        entity_name="code",
-    )
-    fence = ColdHistoryFence(store)
-    fence.observe_continuation(None)
-    fence.observe_continuation("s_live")
-    seen: list[str] = []
-
-    async def callback(
-        _room: nio.MatrixRoom,
-        event: nio.Event,
-    ) -> _DispatchCallbackResult:
-        seen.append(event.event_id)
-        return _DispatchCallbackResult.SUCCEEDED
-
-    await _runner(store, fence, callback).dispatch(
-        nio.MatrixRoom("!room:example.org", "@code:example.org"),
-        _message("$live"),
-        DispatchCallbackKind.MESSAGE,
-    )
-
-    assert seen == ["$live"]
-    assert not store.has_pending("$live", DispatchCallbackKind.MESSAGE)
-
-
-@pytest.mark.asyncio
-async def test_runner_admits_exact_pending_obligation_after_reset(
-    tmp_path: Path,
-) -> None:
-    """An exact pending callback remains runnable after continuity resets."""
-    store = DispatchObligationStore(
-        tracking_path=tmp_path,
-        principal_id="@code:example.org",
-        entity_name="code",
-    )
-    fence = ColdHistoryFence(store)
-    fence.observe_continuation("s_warm")
     attempts = 0
 
     async def callback(
@@ -308,33 +239,104 @@ async def test_runner_admits_exact_pending_obligation_after_reset(
 
     runner = _runner(store, fence, callback)
     room = nio.MatrixRoom("!room:example.org", "@code:example.org")
-    event = _message("$retry")
-    obligation = await runner.persist(
+    event = _message("$history")
+
+    await runner.admission_callback(DispatchCallbackKind.MESSAGE)(
         room,
         event,
-        DispatchCallbackKind.MESSAGE,
+        nio.TimelineEventProvenance.HISTORY,
     )
-    assert obligation is not None
-    fence.reset()
 
-    await runner.dispatch(room, event, DispatchCallbackKind.MESSAGE)
-
-    assert attempts == 1
-    assert not store.has_pending("$retry", DispatchCallbackKind.MESSAGE)
+    assert attempts == 0
+    assert not store.has_pending("$history", DispatchCallbackKind.MESSAGE)
 
 
 @pytest.mark.asyncio
-async def test_direct_recovery_bypasses_cold_source_admission(
+async def test_live_admission_persists_before_callback_fanout(
     tmp_path: Path,
 ) -> None:
-    """Direct restart recovery must not depend on a new Matrix continuation."""
+    """Live nio admission durably owns work before ordinary callbacks run."""
     store = DispatchObligationStore(
         tracking_path=tmp_path,
         principal_id="@code:example.org",
         entity_name="code",
     )
-    warm_fence = ColdHistoryFence(store)
-    warm_fence.observe_continuation("s_warm")
+    fence = ColdHistoryFence(store)
+
+    async def callback(
+        _room: nio.MatrixRoom,
+        _event: nio.Event,
+    ) -> _DispatchCallbackResult:
+        return _DispatchCallbackResult.SUCCEEDED
+
+    runner = _runner(store, fence, callback)
+    room = nio.MatrixRoom("!room:example.org", "@code:example.org")
+    event = _message("$live")
+
+    await runner.admission_callback(DispatchCallbackKind.MESSAGE)(
+        room,
+        event,
+        nio.TimelineEventProvenance.LIVE,
+    )
+
+    assert store.has_pending("$live", DispatchCallbackKind.MESSAGE)
+
+
+@pytest.mark.asyncio
+async def test_real_nio_initial_history_is_fenced_and_continuation_is_live(
+    tmp_path: Path,
+) -> None:
+    """The public nio contract drives the aggregate admission owner end to end."""
+    store = DispatchObligationStore(
+        tracking_path=tmp_path,
+        principal_id="@code:example.org",
+        entity_name="code",
+    )
+    fence = ColdHistoryFence(store)
+    seen: list[str] = []
+
+    async def callback(
+        _room: nio.MatrixRoom,
+        event: nio.Event,
+    ) -> _DispatchCallbackResult:
+        seen.append(event.event_id)
+        return _DispatchCallbackResult.SUCCEEDED
+
+    runner = _runner(store, fence, callback)
+    client = nio.AsyncClient(
+        "https://example.org",
+        "@code:example.org",
+        config=nio.AsyncClientConfig(
+            encryption_enabled=False,
+            backfill_limited_timelines=True,
+        ),
+    )
+    owner = object()
+    runner.register_source_callbacks(client, owner=owner)
+
+    try:
+        await client.receive_response(_sync_response("s1", _message("$history")))
+        await client.receive_response(_sync_response("s2", _message("$live")))
+        await wait_for_background_tasks(timeout=1, owner=owner)
+    finally:
+        await client.close()
+
+    assert seen == ["$live"]
+    assert not store.has_pending("$history", DispatchCallbackKind.MESSAGE)
+    assert not store.has_pending("$live", DispatchCallbackKind.MESSAGE)
+
+
+@pytest.mark.asyncio
+async def test_direct_recovery_bypasses_timeline_provenance(
+    tmp_path: Path,
+) -> None:
+    """Restart recovery replays durable work without a new nio delivery."""
+    store = DispatchObligationStore(
+        tracking_path=tmp_path,
+        principal_id="@code:example.org",
+        entity_name="code",
+    )
+    fence = ColdHistoryFence(store)
 
     async def failing_callback(
         _room: nio.MatrixRoom,
@@ -346,15 +348,13 @@ async def test_direct_recovery_bypasses_cold_source_admission(
     room = nio.MatrixRoom("!room:example.org", "@code:example.org")
     event = _message("$failed")
     with pytest.raises(RuntimeError, match="callback failed"):
-        await _runner(store, warm_fence, failing_callback).dispatch(
+        await _runner(store, fence, failing_callback).dispatch(
             room,
             event,
             DispatchCallbackKind.MESSAGE,
         )
     assert store.has_pending("$failed", DispatchCallbackKind.MESSAGE)
 
-    cold_fence = ColdHistoryFence(store)
-    cold_fence.observe_continuation(None)
     recovered: list[str] = []
 
     async def succeeding_callback(
@@ -364,7 +364,7 @@ async def test_direct_recovery_bypasses_cold_source_admission(
         recovered.append(recovered_event.event_id)
         return _DispatchCallbackResult.SUCCEEDED
 
-    await _runner(store, cold_fence, succeeding_callback).recover_pending()
+    await _runner(store, fence, succeeding_callback).recover_pending()
 
     assert recovered == ["$failed"]
     assert not store.has_pending("$failed", DispatchCallbackKind.MESSAGE)

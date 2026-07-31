@@ -1,13 +1,15 @@
-"""Fence Matrix callbacks until the server establishes sync continuity."""
+"""Fence historical Matrix callbacks using nio's per-event provenance."""
 
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
+from contextvars import ContextVar
+from dataclasses import dataclass, field
 from typing import Protocol
 
+import nio
+
 from mindroom.dispatch_admission import DispatchCallbackKind, DispatchSourceAdmission
-from mindroom.matrix.sync_token_values import normalize_sync_token
 
 
 class _PendingDispatchObligations(Protocol):
@@ -34,52 +36,35 @@ def _decrypt_not_fenced(_room_id: str) -> bool:
     return False
 
 
+def _event_provenance_context() -> ContextVar[tuple[str, nio.TimelineEventProvenance] | None]:
+    return ContextVar("mindroom_timeline_event_provenance", default=None)
+
+
 @dataclass(slots=True)
 class ColdHistoryFence:
-    """Admit only exact durable retries during a continuity-less sync window."""
+    """Admit live events and exact durable retries of historical events."""
 
     obligations: _PendingDispatchObligations
     decrypt_notice_is_fenced: _DecryptNoticeFence = _decrypt_not_fenced
-    _has_trusted_continuation: bool = False
+    _event_provenance: ContextVar[tuple[str, nio.TimelineEventProvenance] | None] = field(
+        default_factory=_event_provenance_context,
+        init=False,
+        repr=False,
+    )
 
-    @property
-    def is_cold(self) -> bool:
-        """Return whether arbitrary Matrix callbacks remain fenced."""
-        return not self._has_trusted_continuation
-
-    def observe_continuation(self, continuation: object) -> None:
-        """Set admission from one transport-compatible continuation."""
-        self._has_trusted_continuation = normalize_sync_token(continuation) is not None
-
-    def observe_recovery(
-        self,
-        *,
-        continuation: object,
-        unrecovered_room_ids: frozenset[str],
-    ) -> bool:
-        """Apply one transport recovery outcome and report whether it completed."""
-        if unrecovered_room_ids:
-            self.reset()
-            return False
-        self.observe_continuation(continuation)
-        return True
-
-    def reset(self) -> None:
-        """Rearm exact-only admission after transport continuity is rejected."""
-        self._has_trusted_continuation = False
-
-    async def admit(
+    def observe_event_provenance(
         self,
         source_event_id: str,
-        callback_kind: DispatchCallbackKind,
-    ) -> bool:
-        """Return whether one source callback may enter durable dispatch."""
-        if self._has_trusted_continuation:
-            return True
-        return await asyncio.to_thread(
-            self.obligations.has_pending,
+        provenance: nio.TimelineEventProvenance,
+    ) -> None:
+        """Expose one nio delivery's provenance to later callback fanout."""
+        self._event_provenance.set((source_event_id, provenance))
+
+    def event_is_live(self, source_event_id: str) -> bool:
+        """Return whether the current nio fanout belongs to this live event."""
+        return self._event_provenance.get() == (
             source_event_id,
-            callback_kind,
+            nio.TimelineEventProvenance.LIVE,
         )
 
     async def admit_source(
@@ -87,12 +72,19 @@ class ColdHistoryFence:
         room_id: str,
         source_event_id: str,
         callback_kind: DispatchCallbackKind,
+        provenance: nio.TimelineEventProvenance | None = None,
     ) -> DispatchSourceAdmission:
-        """Apply invite, decrypt-notice, and cold-history admission policy."""
+        """Apply invite, decrypt-notice, and event-provenance policy."""
         if callback_kind is DispatchCallbackKind.INVITE:
             return DispatchSourceAdmission.ACCEPTED
         if callback_kind is DispatchCallbackKind.DECRYPTION_FAILURE and self.decrypt_notice_is_fenced(room_id):
             return DispatchSourceAdmission.DECRYPT_NOTICE_FENCED
-        if await self.admit(source_event_id, callback_kind):
+        if provenance is not nio.TimelineEventProvenance.HISTORY:
+            return DispatchSourceAdmission.ACCEPTED
+        if await asyncio.to_thread(
+            self.obligations.has_pending,
+            source_event_id,
+            callback_kind,
+        ):
             return DispatchSourceAdmission.ACCEPTED
         return DispatchSourceAdmission.COLD_HISTORY_FENCED

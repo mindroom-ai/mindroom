@@ -272,15 +272,30 @@ async def test_call_manager_room_callbacks_reject_cold_history(tmp_path: Path) -
 
     membership_callback = client.add_event_callback.call_args_list[0].args[0]
     call_callback = client.add_event_callback.call_args_list[1].args[0]
+    bot._cold_history_fence.observe_event_provenance(
+        membership_event.event_id,
+        nio.TimelineEventProvenance.HISTORY,
+    )
     await membership_callback(room, membership_event)
+    bot._cold_history_fence.observe_event_provenance(
+        call_event.event_id,
+        nio.TimelineEventProvenance.HISTORY,
+    )
     await call_callback(room, call_event)
     await wait_for_background_tasks(timeout=1.0, owner=bot._runtime_view)
 
     call_manager.on_room_membership_event.assert_not_awaited()
     call_manager.on_room_event.assert_not_awaited()
 
-    bot._cold_history_fence.observe_continuation("s_warm")
+    bot._cold_history_fence.observe_event_provenance(
+        membership_event.event_id,
+        nio.TimelineEventProvenance.LIVE,
+    )
     await membership_callback(room, membership_event)
+    bot._cold_history_fence.observe_event_provenance(
+        call_event.event_id,
+        nio.TimelineEventProvenance.LIVE,
+    )
     await call_callback(room, call_event)
     await wait_for_background_tasks(timeout=1.0, owner=bot._runtime_view)
 
@@ -312,8 +327,15 @@ async def test_call_manager_room_callbacks_capture_cold_admission_at_delivery(tm
         bot._register_call_manager_callbacks(client)
 
     membership_callback = client.add_event_callback.call_args_list[0].args[0]
+    bot._cold_history_fence.observe_event_provenance(
+        membership_event.event_id,
+        nio.TimelineEventProvenance.HISTORY,
+    )
     await membership_callback(room, membership_event)
-    bot._cold_history_fence.observe_continuation("s_warm")
+    bot._cold_history_fence.observe_event_provenance(
+        membership_event.event_id,
+        nio.TimelineEventProvenance.LIVE,
+    )
     await wait_for_background_tasks(timeout=1.0, owner=bot._runtime_view)
 
     call_manager.on_room_membership_event.assert_not_awaited()
@@ -353,6 +375,10 @@ async def test_pending_room_lifecycle_does_not_admit_call_manager_mutation(tmp_p
         bot._register_call_manager_callbacks(client)
 
     membership_callback = client.add_event_callback.call_args_list[0].args[0]
+    bot._cold_history_fence.observe_event_provenance(
+        membership_event.event_id,
+        nio.TimelineEventProvenance.HISTORY,
+    )
     await membership_callback(room, membership_event)
     await wait_for_background_tasks(timeout=1.0, owner=bot._runtime_view)
 

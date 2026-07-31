@@ -419,7 +419,6 @@ async def test_terminal_invite_join_failure_does_not_abort_sync(
     bot.client = AsyncMock()
     bot.client.rooms = {}
     bot.client.join = AsyncMock(return_value=nio.JoinError("forbidden", "M_FORBIDDEN"))
-    bot._cold_history_fence.observe_continuation("s_before_invite")
     monkeypatch.setattr("mindroom.bot_room_lifecycle.is_authorized_sender", lambda *_args, **_kwargs: True)
     event = nio.InviteEvent.parse_event(
         {
@@ -443,11 +442,11 @@ async def test_terminal_invite_join_failure_does_not_abort_sync(
 
 
 @pytest.mark.asyncio
-async def test_tokenless_initial_sync_invite_bypasses_cold_history_fence(
+async def test_initial_sync_invite_is_current_membership_work(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """An invite is current membership work even when startup has no continuation."""
+    """An invite is current membership work during initial sync."""
     config = bind_runtime_paths(
         Config(router=RouterConfig(model="default", accept_invites=True)),
         test_runtime_paths(tmp_path),
@@ -461,7 +460,6 @@ async def test_tokenless_initial_sync_invite_bypasses_cold_history_fence(
     install_runtime_cache_support(bot)
     bot.client = AsyncMock()
     bot.client.rooms = {}
-    bot._cold_history_fence.observe_continuation(None)
     join_room = AsyncMock(return_value=RoomJoinOutcome.JOINED)
     welcome_message = AsyncMock()
     monkeypatch.setattr("mindroom.bot_room_lifecycle.is_authorized_sender", lambda *_args, **_kwargs: True)
@@ -484,7 +482,6 @@ async def test_tokenless_initial_sync_invite_bypasses_cold_history_fence(
     join_room.assert_awaited_once_with(bot.client, room.room_id)
     welcome_message.assert_awaited_once_with(room.room_id, event.sender)
     assert bot._room_lifecycle.invited_rooms == {room.room_id}
-    assert bot._cold_history_fence.is_cold
     assert bot._dispatch_obligation_store.pending() == ()
 
 
@@ -873,7 +870,6 @@ async def test_pending_invite_retries_failed_welcome_autonomously(
         runtime_paths=runtime_paths_for(config),
     )
     install_runtime_cache_support(bot)
-    bot._cold_history_fence.observe_continuation("s_before_invite")
     bot.client = AsyncMock()
     bot.client.rooms = {}
     bot.client.room_messages = AsyncMock(

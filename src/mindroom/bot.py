@@ -185,7 +185,7 @@ def _create_best_effort_task_wrapper(
     callback: Callable[..., Awaitable[None]],
     *,
     owner: BotRuntimeState | None = None,
-    admit: Callable[[], bool] | None = None,
+    admit: Callable[..., bool] | None = None,
 ) -> Callable[..., Awaitable[None]]:
     """Run one explicitly best-effort callback as a background task.
 
@@ -195,7 +195,7 @@ def _create_best_effort_task_wrapper(
     """
 
     async def wrapper(*args: object, **kwargs: object) -> None:
-        if admit is not None and not admit():
+        if admit is not None and not admit(*args, **kwargs):
             return
 
         # Create the task but don't await it - let it run in background
@@ -540,6 +540,7 @@ class AgentBot:
             turn_is_terminal=self._turn_store.is_durably_handled,
             on_persist_failure=self._record_dispatch_persist_failure,
             source_admission=self._cold_history_fence.admit_source,
+            observe_event_provenance=self._cold_history_fence.observe_event_provenance,
             on_source_rejected=self._handle_rejected_dispatch_source,
             background_task_owner=self._runtime_view,
             room_lifecycle_admission_enabled=lambda: (
@@ -1119,8 +1120,6 @@ class AgentBot:
         self._sync_shutting_down = False
         self._response_runner.resume_pending_admissions()
         self._calls_reconcile_pending = self._call_manager is not None
-        if self.config.matrix_sync.mode == "sliding":
-            self._cold_history_fence.reset()
         mark_matrix_sync_loop_started(self.agent_name)
 
     def reset_watchdog_clock(self) -> None:
@@ -1133,8 +1132,6 @@ class AgentBot:
         assert client is not None
         sync_token = await self._sync_cache_trust.prepare_startup()
         cast("Any", client).next_batch = sync_token
-        trusted_continuation = sync_token if self.config.matrix_sync.mode == "classic" else None
-        self._cold_history_fence.observe_continuation(trusted_continuation)
 
     async def _certify_sync_response(
         self,
@@ -1193,7 +1190,6 @@ class AgentBot:
             return
         if self.client is not None:
             cast("Any", self.client).next_batch = None
-        self._cold_history_fence.reset()
 
     def _rewind_sync_after_pre_certification_failure(self) -> None:
         """Replay a classic sync that failed before its position was certified."""
@@ -1202,8 +1198,6 @@ class AgentBot:
             return
         retry_token = self._sync_cache_trust.retry_token()
         cast("Any", client).next_batch = retry_token
-        if retry_token is None:
-            self._cold_history_fence.reset()
         self.logger.warning(
             "pre_certification_sync_side_effect_failed_replaying_sync",
             has_retry_token=retry_token is not None,
@@ -1215,8 +1209,6 @@ class AgentBot:
         retry_token = self._sync_cache_trust.retry_token()
         if client is not None and cast("Any", client).next_batch != retry_token:
             self._rewind_sync_after_pre_certification_failure()
-        elif retry_token is None:
-            self._cold_history_fence.reset()
 
     async def _handle_rejected_dispatch_source(
         self,
@@ -1244,15 +1236,11 @@ class AgentBot:
     def _apply_transport_recovery_outcome(
         self,
         *,
-        continuation: object,
         unrecovered_room_ids: frozenset[str],
         transport: str,
     ) -> None:
         """Expose incomplete transport recovery through operator telemetry."""
-        if self._cold_history_fence.observe_recovery(
-            continuation=continuation,
-            unrecovered_room_ids=unrecovered_room_ids,
-        ):
+        if not unrecovered_room_ids:
             return
         self.logger.warning(
             "matrix_sync_recovery_incomplete",
@@ -1413,7 +1401,6 @@ class AgentBot:
     ) -> tuple[_RoomMemberJoinSyncHookPlan, bool]:
         """Apply one Classic response through transport and cache owners."""
         self._apply_transport_recovery_outcome(
-            continuation=response.next_batch,
             unrecovered_room_ids=response.unrecovered_room_ids,
             transport="classic",
         )
@@ -1480,11 +1467,10 @@ class AgentBot:
         with track_matrix_sync_cache_write(self.agent_name):
             await self._apply_own_room_membership_from_sliding_sync(response)
         self._apply_transport_recovery_outcome(
-            continuation=response.pos,
             unrecovered_room_ids=response.unrecovered_room_ids,
             transport="sliding",
         )
-        if not self._cold_history_fence.is_cold and self._room_lifecycle.has_pending_join_decrypt_fences:
+        if response.pos and not response.unrecovered_room_ids and self._room_lifecycle.has_pending_join_decrypt_fences:
             await self._room_lifecycle.observe_trusted_sync_rooms(
                 room_id for room_id, room in response.rooms.items() if room.membership == "join"
             )
@@ -1538,8 +1524,6 @@ class AgentBot:
             # nio restarts expired sliding connections (M_UNKNOWN_POS)
             # transparently, and sliding errors say nothing about the classic
             # sync checkpoint, so classic token rejection must not run here.
-            if _response.status_code == "M_UNKNOWN_POS":
-                self._cold_history_fence.reset()
             self._warn_if_sliding_sync_never_succeeded(_response)
             return
         if _response.status_code == "M_UNKNOWN_POS":
@@ -1637,9 +1621,9 @@ class AgentBot:
             AuthenticatedToDeviceEvent,
         )
 
-    def _admit_live_call_event(self) -> bool:
-        """Admit call-runtime room state only when continuity exists at delivery."""
-        return not self._cold_history_fence.is_cold
+    def _admit_live_call_event(self, _room: nio.MatrixRoom, event: nio.Event) -> bool:
+        """Admit call-runtime room state only for this live nio delivery."""
+        return self._cold_history_fence.event_is_live(event.event_id)
 
     async def _apply_own_room_membership_from_sync(self, response: nio.SyncResponse) -> None:
         """Apply this bot's authoritative joined/left room sections before other sync work."""

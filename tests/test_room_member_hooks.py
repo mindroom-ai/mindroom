@@ -125,7 +125,6 @@ def _router_bot(
     bot.client.homeserver = "http://localhost:8008"
     bot._first_sync_done = True
     bot._room_member_join_hooks_armed = True
-    bot._cold_history_fence.observe_continuation("s_warm")
     return bot
 
 
@@ -883,7 +882,11 @@ async def test_registered_room_member_callback_uses_delivery_time_arming_state(
 
     await bot._on_sync_error(sync_error)
     timeline_event = _room_member_event(event_id="$timeline-snapshot")
-    await room_member_admission(room, timeline_event)
+    await room_member_admission(
+        room,
+        timeline_event,
+        nio.TimelineEventProvenance.HISTORY,
+    )
     await room_member_callback(room, timeline_event)
     await bot._on_sync_response(_sync_response_with_state(room.room_id, []))
     await wait_for_background_tasks(timeout=1.0, owner=bot._runtime_view)
@@ -891,7 +894,11 @@ async def test_registered_room_member_callback_uses_delivery_time_arming_state(
     assert seen == []
 
     live_event = _room_member_event(event_id="$live", user_id="@bob:localhost")
-    await room_member_admission(room, live_event)
+    await room_member_admission(
+        room,
+        live_event,
+        nio.TimelineEventProvenance.LIVE,
+    )
     await room_member_callback(room, live_event)
     await wait_for_background_tasks(timeout=1.0, owner=bot._runtime_view)
 
@@ -899,10 +906,10 @@ async def test_registered_room_member_callback_uses_delivery_time_arming_state(
 
 
 @pytest.mark.asyncio
-async def test_reset_member_callback_admits_exact_pending_lifecycle_obligation(
+async def test_member_callback_runs_exact_pending_lifecycle_obligation(
     tmp_path: Path,
 ) -> None:
-    """A cold member snapshot may retry only its exact durable lifecycle work."""
+    """A member callback may retry its exact durable lifecycle work."""
     seen: list[str] = []
 
     @hook(EVENT_ROOM_MEMBER_JOINED)
@@ -918,17 +925,13 @@ async def test_reset_member_callback_admits_exact_pending_lifecycle_obligation(
     bot._register_room_member_callback_after_initial_sync()
     room_member_callback = bot.client.add_event_callback.call_args.args[0]
     event = _room_member_event(event_id="$pending-member")
-    bot._cold_history_fence.observe_continuation("s_warm")
     obligation = await bot._dispatch_obligation_runner.persist(
         room,
         event,
         DispatchCallbackKind.ROOM_LIFECYCLE,
     )
     assert obligation is not None
-    sync_error = MagicMock(spec=nio.SyncError)
-    sync_error.status_code = "M_UNKNOWN_POS"
 
-    await bot._on_sync_error(sync_error)
     await room_member_callback(room, event)
     await wait_for_background_tasks(timeout=1.0, owner=bot._runtime_view)
 

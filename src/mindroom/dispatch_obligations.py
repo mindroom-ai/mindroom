@@ -544,7 +544,19 @@ _InviteCallback = Callable[[nio.MatrixRoom, nio.InviteEvent], Awaitable[None]]
 _RoomLifecycleCallback = Callable[[nio.MatrixRoom, nio.RoomMemberEvent], Awaitable[None]]
 _RedactionCallback = Callable[[nio.MatrixRoom, nio.RedactionEvent], Awaitable[None]]
 _DecryptionFailureCallback = Callable[[nio.MatrixRoom, nio.MegolmEvent], Awaitable[None]]
-_SourceAdmission = Callable[[str, str, DispatchCallbackKind], Awaitable[DispatchSourceAdmission]]
+_SourceAdmission = Callable[
+    [
+        str,
+        str,
+        DispatchCallbackKind,
+        nio.TimelineEventProvenance | None,
+    ],
+    Awaitable[DispatchSourceAdmission],
+]
+_EventProvenanceObserver = Callable[
+    [str, nio.TimelineEventProvenance],
+    None,
+]
 _SourceRejectionCallback = Callable[
     [nio.MatrixRoom, _DispatchEvent, DispatchCallbackKind, DispatchSourceAdmission],
     Awaitable[None],
@@ -557,8 +569,16 @@ async def _admit_all_sources(
     _room_id: str,
     _source_event_id: str,
     _callback_kind: DispatchCallbackKind,
+    _provenance: nio.TimelineEventProvenance | None,
 ) -> DispatchSourceAdmission:
     return DispatchSourceAdmission.ACCEPTED
+
+
+def _ignore_event_provenance(
+    _source_event_id: str,
+    _provenance: nio.TimelineEventProvenance,
+) -> None:
+    pass
 
 
 def _invite_source_event_id(room_id: str, event_source_json: str) -> str:
@@ -739,6 +759,7 @@ class DispatchObligationRunner:
     turn_is_terminal: Callable[[str], bool]
     on_persist_failure: Callable[[], None] | None = None
     source_admission: _SourceAdmission = _admit_all_sources
+    observe_event_provenance: _EventProvenanceObserver = _ignore_event_provenance
     on_source_rejected: _SourceRejectionCallback | None = None
     background_task_owner: object | None = None
     room_lifecycle_admission_enabled: Callable[[], bool] = lambda: False
@@ -829,11 +850,21 @@ class DispatchObligationRunner:
         client.add_event_callback(dispatch_approval, nio.UnknownEvent)
         register(DispatchCallbackKind.DECRYPTION_FAILURE, nio.MegolmEvent)
 
-    async def _admit_source_event(self, room: nio.MatrixRoom, event: nio.Event) -> None:
+    async def _admit_source_event(
+        self,
+        room: nio.MatrixRoom,
+        event: nio.Event,
+        provenance: nio.TimelineEventProvenance,
+    ) -> None:
         """Route every correctness-critical timeline event through one nio owner."""
+        self.observe_event_provenance(event.event_id, provenance)
         callback_kind = self._admission_kind(event)
         if callback_kind is not None:
-            await self.admission_callback(callback_kind)(room, event)
+            await self.admission_callback(callback_kind)(
+                room,
+                event,
+                provenance,
+            )
 
     def _admission_kind(self, event: nio.Event) -> DispatchCallbackKind | None:
         """Return the one durable callback kind owned by a timeline event."""
@@ -889,6 +920,7 @@ class DispatchObligationRunner:
         room: nio.MatrixRoom,
         event: _DispatchEvent,
         callback_kind: DispatchCallbackKind,
+        provenance: nio.TimelineEventProvenance | None = None,
     ) -> _DispatchObligation | None:
         """Persist exact work before its background task may be created."""
         try:
@@ -897,6 +929,7 @@ class DispatchObligationRunner:
                 room.room_id,
                 obligation.source_event_id,
                 callback_kind,
+                provenance,
             )
             if admission is not DispatchSourceAdmission.ACCEPTED:
                 if self.on_source_rejected is not None:
@@ -1160,10 +1193,20 @@ class _DispatchObligationAdmissionCallback:
     runner: DispatchObligationRunner
     callback_kind: DispatchCallbackKind
 
-    async def __call__(self, room: nio.MatrixRoom, event: _DispatchEvent) -> None:
+    async def __call__(
+        self,
+        room: nio.MatrixRoom,
+        event: _DispatchEvent,
+        provenance: nio.TimelineEventProvenance | None = None,
+    ) -> None:
         """Reject only storage failures that occur before any callback side effect."""
         try:
-            await self.runner.persist(room, event, self.callback_kind)
+            await self.runner.persist(
+                room,
+                event,
+                self.callback_kind,
+                provenance,
+            )
         except (OSError, sqlite3.Error) as error:
             raise nio.CallbackNotAcceptedError(str(error)) from error
 

@@ -75,9 +75,9 @@ To repair corruption, stop MindRoom, back up the affected database, and restore 
 Deleting an unrecoverable pending row is a last resort that accepts losing that callback unless Matrix redelivers it.
 Message and media obligations remain pending when coalescing or a pending `TurnStore` record defers them, then yield only to durably persisted terminal turn truth.
 Raw sync-cache continuity remains owned separately by `SyncCacheTrust`, so a durable pending dispatch obligation is sufficient to preserve a certified checkpoint.
-`ColdHistoryFence` currently follows mindroom-nio's response-scoped `unrecovered_room_ids` transport outcome instead of cache-certification success.
-The pinned response contract publishes that outcome after event admission, so typed per-event continuity provenance from mindroom-nio remains required before cold-history rejection can also guarantee no live-event loss.
-Every Classic cursor reset rearms the cold-history fence, while checkpoint-save failures preserve clean live transport continuity and leave restart behavior cold when no checkpoint reached disk.
+The pinned mindroom-nio contract supplies durable `LIVE` or `HISTORY` provenance with every timeline-event admission.
+`ColdHistoryFence` admits live events immediately and admits historical events only when the exact event and callback kind are already durably pending.
+The same event-scoped provenance gates auxiliary room callbacks, so one live event cannot license unrelated historical call-state mutations.
 Checkpoint mutations serialize their epoch check, durable transform, and runtime publication, while continuity revisions prevent older completed tasks from overwriting newer join-fence state.
 Malformed or future continuity records are durably repaired to an empty cold record before startup room lifecycle restoration.
 Continuity reads and writes run off the event loop, and retry decisions use the checkpoint already loaded or applied by `SyncCacheTrust`.

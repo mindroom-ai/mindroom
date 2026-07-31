@@ -1159,6 +1159,7 @@ async def test_only_tool_approval_unknown_event_reaches_durable_acceptance(
 ) -> None:
     """Only the exact custom approval event type may reach the durable callback."""
     attempts = 0
+    observed_provenance: list[tuple[str, nio.TimelineEventProvenance]] = []
 
     async def callback(_room: nio.MatrixRoom, _event: nio.Event) -> DispatchCallbackResult:
         nonlocal attempts
@@ -1171,6 +1172,9 @@ async def test_only_tool_approval_unknown_event_reaches_durable_acceptance(
         callbacks={DispatchCallbackKind.APPROVAL: callback},
         room_for_id=lambda room_id: nio.MatrixRoom(room_id, _PRINCIPAL_ID),
         turn_is_terminal=lambda _event_id: False,
+        observe_event_provenance=lambda event_id, provenance: observed_provenance.append(
+            (event_id, provenance),
+        ),
     )
     client = MagicMock()
     owner = object()
@@ -1184,9 +1188,12 @@ async def test_only_tool_approval_unknown_event_reaches_durable_acceptance(
 
     room = nio.MatrixRoom(_ROOM_ID, _PRINCIPAL_ID)
     event = _unknown_event("$unknown", event_type)
-    await admission(room, event)
+    await admission(room, event, nio.TimelineEventProvenance.LIVE)
     await registered(room, event)
     await wait_for_background_tasks(timeout=1.0, owner=owner)
 
     assert attempts == expected_attempts
+    assert observed_provenance == [
+        ("$unknown", nio.TimelineEventProvenance.LIVE),
+    ]
     assert not store.has_pending("$unknown", DispatchCallbackKind.APPROVAL)
