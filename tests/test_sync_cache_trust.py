@@ -135,25 +135,12 @@ async def test_invalid_continuity_record_is_repaired_and_starts_cold(
     assert await trust.prepare_startup() is None
 
     assert trust.state is SyncTrustState.COLD
-    assert trust.continuity_store.load() == SyncContinuityRecord()
+    assert trust.continuity_store.load() == SyncContinuityRecord(revision=1)
     cache.purge_principal.assert_awaited_once()
     invalid_log = next(
         call for call in trust.logger.warning.call_args_list if call.args == ("matrix_sync_continuity_invalid",)
     )
     assert "Invalid Matrix sync continuity record" in invalid_log.kwargs["error"]
-
-
-@pytest.mark.asyncio
-async def test_save_binds_checkpoint_to_current_cache_generation(tmp_path: Path) -> None:
-    """Saved checkpoints include the generation that received the sync delta."""
-    trust, _cache, _runtime = _trust(tmp_path)
-
-    await trust.save(SyncCheckpoint("s_new"))
-
-    assert load_sync_checkpoint(tmp_path, "code") == SyncCheckpoint(
-        token="s_new",  # noqa: S106
-        cache_generation=_GENERATION,
-    )
 
 
 @pytest.mark.asyncio
@@ -227,13 +214,36 @@ def test_acknowledged_dispatch_failure_does_not_reject_later_certification(
     assert not trust.consume_dispatch_persist_failure()
 
 
+def test_transport_recovery_gaps_make_cache_result_uncertified(
+    tmp_path: Path,
+) -> None:
+    """Sync trust must own how unrecovered transport rooms reject certification."""
+    trust, _cache, _runtime = _trust(tmp_path)
+
+    result = trust.include_unrecovered_rooms(
+        SyncCacheWriteResult(
+            complete=True,
+            limited_room_ids=("!cache:localhost",),
+        ),
+        {"!transport:localhost", "!cache:localhost"},
+    )
+
+    assert result.complete is False
+    assert result.limited_room_ids == (
+        "!cache:localhost",
+        "!transport:localhost",
+    )
+
+
 @pytest.mark.asyncio
 async def test_cache_scope_invalidation_rejects_stale_certification_plan(tmp_path: Path) -> None:
     """A plan made before cache cleanup cannot restore or persist sync continuity."""
     trust, _cache, _runtime = _trust(tmp_path)
     trust.state = SyncTrustState.CERTIFIED
     trust.checkpoint = SyncCheckpoint("s_before_cleanup")
-    await trust.save(trust.checkpoint)
+    trust.continuity_store.replace_checkpoint(
+        SyncCheckpoint("s_before_cleanup", cache_generation=_GENERATION),
+    )
     cache_result = SyncCacheWriteResult(complete=True)
     decision = trust.plan_response(
         next_batch="s_stale_after_cleanup",
@@ -254,11 +264,124 @@ async def test_cache_scope_invalidation_rejects_stale_certification_plan(tmp_pat
 
 
 @pytest.mark.asyncio
+async def test_cache_scope_invalidation_serializes_after_inflight_certification(
+    tmp_path: Path,
+) -> None:
+    """Invalidation must clear a certification that already entered its durable write."""
+    trust, _cache, _runtime = _trust(tmp_path)
+    cache_result = SyncCacheWriteResult(complete=True)
+    decision = trust.plan_response(
+        next_batch="s_stale",
+        cache_result=cache_result,
+        first_sync=False,
+    )
+    write_started = threading.Event()
+    release_write = threading.Event()
+    accept_classic_response = trust.continuity_store.accept_classic_response
+
+    def blocking_accept(
+        checkpoint: SyncCheckpoint,
+        *,
+        joined_room_ids: object,
+    ) -> SyncContinuityRecord:
+        write_started.set()
+        assert release_write.wait(timeout=2)
+        return accept_classic_response(
+            checkpoint,
+            joined_room_ids=joined_room_ids,  # type: ignore[arg-type]
+        )
+
+    with patch.object(
+        trust.continuity_store,
+        "accept_classic_response",
+        side_effect=blocking_accept,
+    ):
+        apply_task = asyncio.create_task(
+            trust.apply_response(decision, cache_result=cache_result),
+        )
+        assert await asyncio.to_thread(write_started.wait, 2)
+        invalidate_task = asyncio.create_task(trust.invalidate_for_cache_scope_cleanup())
+        await asyncio.sleep(0.05)
+        invalidation_finished_before_write = invalidate_task.done()
+        release_write.set()
+        await asyncio.gather(apply_task, invalidate_task)
+
+    assert not invalidation_finished_before_write
+    assert trust.state is SyncTrustState.UNCERTAIN
+    assert trust.checkpoint is None
+    assert trust.retry_token() is None
+    assert load_sync_checkpoint(tmp_path, "code") is None
+
+
+@pytest.mark.asyncio
+async def test_cache_scope_invalidation_serializes_after_inflight_shutdown_persist(
+    tmp_path: Path,
+) -> None:
+    """Invalidation must clear a shutdown persist that already entered its durable write."""
+    trust, _cache, _runtime = _trust(tmp_path)
+    trust.state = SyncTrustState.CERTIFIED
+    trust.checkpoint = SyncCheckpoint("s_old")
+    trust.continuity_store.replace_checkpoint(
+        SyncCheckpoint("s_old", cache_generation=_GENERATION),
+    )
+    write_started = threading.Event()
+    release_write = threading.Event()
+    replace_checkpoint = trust.continuity_store.replace_checkpoint
+
+    def blocking_replace(checkpoint: SyncCheckpoint) -> SyncContinuityRecord:
+        write_started.set()
+        assert release_write.wait(timeout=2)
+        return replace_checkpoint(checkpoint)
+
+    with patch.object(
+        trust.continuity_store,
+        "replace_checkpoint",
+        side_effect=blocking_replace,
+    ):
+        persist_task = asyncio.create_task(trust.persist_current())
+        assert await asyncio.to_thread(write_started.wait, 2)
+        invalidate_task = asyncio.create_task(trust.invalidate_for_cache_scope_cleanup())
+        await asyncio.sleep(0.05)
+        invalidation_finished_before_write = invalidate_task.done()
+        release_write.set()
+        await asyncio.gather(persist_task, invalidate_task)
+
+    assert not invalidation_finished_before_write
+    assert trust.state is SyncTrustState.UNCERTAIN
+    assert trust.checkpoint is None
+    assert trust.retry_token() is None
+    assert load_sync_checkpoint(tmp_path, "code") is None
+
+
+@pytest.mark.asyncio
+async def test_shutdown_persist_without_cache_generation_clears_saved_checkpoint(
+    tmp_path: Path,
+) -> None:
+    """Disabled cache generation must leave restart cold without masking shutdown."""
+    trust, _cache, runtime = _trust(tmp_path)
+    trust.state = SyncTrustState.CERTIFIED
+    trust.checkpoint = SyncCheckpoint("s_runtime")
+    trust.continuity_store.replace_checkpoint(
+        SyncCheckpoint("s_saved", cache_generation=_GENERATION),
+    )
+    runtime.event_cache.cache_generation = None
+
+    await trust.persist_current()
+
+    assert load_sync_checkpoint(tmp_path, "code") is None
+    trust.logger.warning.assert_any_call(
+        "matrix_sync_checkpoint_skipped_without_cache_generation",
+    )
+
+
+@pytest.mark.asyncio
 async def test_positioned_limited_response_resets_sync_continuity(tmp_path: Path) -> None:
     """A limited response after a position must force one since-less replay."""
     trust, _cache, _runtime = _trust(tmp_path)
     trust.state = SyncTrustState.CERTIFIED
-    await trust.save(SyncCheckpoint("s_before_gap"))
+    trust.continuity_store.replace_checkpoint(
+        SyncCheckpoint("s_before_gap", cache_generation=_GENERATION),
+    )
 
     decision = await trust.certify_response(
         next_batch="s_partial",
@@ -284,7 +407,9 @@ async def test_cancelled_durable_clear_cannot_resurrect_runtime_checkpoint(
     trust, _cache, _runtime = _trust(tmp_path)
     trust.state = SyncTrustState.CERTIFIED
     trust.checkpoint = SyncCheckpoint("s_old")
-    await trust.save(trust.checkpoint)
+    trust.continuity_store.replace_checkpoint(
+        SyncCheckpoint("s_old", cache_generation=_GENERATION),
+    )
     clear_started = threading.Event()
     release_clear = threading.Event()
     clear_checkpoint = trust.continuity_store.clear_checkpoint
@@ -324,6 +449,59 @@ async def test_cancelled_durable_clear_cannot_resurrect_runtime_checkpoint(
     assert trust.checkpoint is None
     assert trust.retry_token() is None
     assert load_sync_checkpoint(tmp_path, "code") is None
+
+
+@pytest.mark.asyncio
+async def test_cancelled_certification_publishes_committed_checkpoint_before_escape(
+    tmp_path: Path,
+) -> None:
+    """Cancellation must not split committed durability from runtime publication."""
+    trust, _cache, _runtime = _trust(tmp_path)
+    cache_result = SyncCacheWriteResult(complete=True)
+    decision = trust.plan_response(
+        next_batch="s_committed",
+        cache_result=cache_result,
+        first_sync=False,
+    )
+    write_started = threading.Event()
+    release_write = threading.Event()
+    accept_classic_response = trust.continuity_store.accept_classic_response
+
+    def blocking_accept(
+        checkpoint: SyncCheckpoint,
+        *,
+        joined_room_ids: object,
+    ) -> SyncContinuityRecord:
+        write_started.set()
+        assert release_write.wait(timeout=2)
+        return accept_classic_response(
+            checkpoint,
+            joined_room_ids=joined_room_ids,  # type: ignore[arg-type]
+        )
+
+    with patch.object(
+        trust.continuity_store,
+        "accept_classic_response",
+        side_effect=blocking_accept,
+    ):
+        apply_task = asyncio.create_task(
+            trust.apply_response(decision, cache_result=cache_result),
+        )
+        assert await asyncio.to_thread(write_started.wait, 2)
+        apply_task.cancel()
+        await asyncio.sleep(0)
+        apply_task.cancel()
+        release_write.set()
+
+        with pytest.raises(asyncio.CancelledError):
+            await apply_task
+
+    assert trust.state is SyncTrustState.CERTIFIED
+    assert trust.checkpoint == SyncCheckpoint("s_committed")
+    assert load_sync_checkpoint(tmp_path, "code") == SyncCheckpoint(
+        "s_committed",
+        cache_generation=_GENERATION,
+    )
 
 
 @pytest.mark.asyncio

@@ -37,6 +37,7 @@ def test_classic_acceptance_atomically_advances_checkpoint_and_clears_join_fence
     )
 
     expected = SyncContinuityRecord(
+        revision=3,
         checkpoint=_checkpoint("s_after"),
         pending_join_decrypt_fences=frozenset({"!pending:localhost"}),
     )
@@ -122,6 +123,7 @@ def test_crash_after_atomic_replace_restores_new_checkpoint_without_fence(
         )
 
     assert SyncContinuityStore(tmp_path, "code").load() == SyncContinuityRecord(
+        revision=3,
         checkpoint=_checkpoint("s_after"),
     )
 
@@ -164,9 +166,26 @@ def test_concurrent_stores_serialize_fresh_read_updates_without_resurrection(
         fence_future.result(timeout=2)
 
     assert SyncContinuityStore(tmp_path, "code").load() == SyncContinuityRecord(
+        revision=3,
         checkpoint=_checkpoint("s_after"),
         pending_join_decrypt_fences=frozenset({"!pending:localhost"}),
     )
+
+
+def test_each_changed_record_gets_monotonic_revision_under_store_lock(
+    tmp_path: Path,
+) -> None:
+    """Durable update order must remain visible to out-of-order runtime publishers."""
+    store = SyncContinuityStore(tmp_path, "code")
+
+    first = store.replace_checkpoint(_checkpoint("s_first"))
+    no_op = store.replace_checkpoint(_checkpoint("s_first"))
+    second = store.update_join_fences(add={"!pending:localhost"})
+
+    assert first.revision == 1
+    assert no_op.revision == 1
+    assert second.revision == 2
+    assert store.load().revision == 2
 
 
 @pytest.mark.parametrize(
@@ -198,8 +217,8 @@ def test_checkpoint_clear_repairs_invalid_continuity_record(tmp_path: Path) -> N
 
     record = store.clear_checkpoint()
 
-    assert record == SyncContinuityRecord()
-    assert store.load() == SyncContinuityRecord()
+    assert record == SyncContinuityRecord(revision=1)
+    assert store.load() == SyncContinuityRecord(revision=1)
 
 
 def test_legacy_token_path_is_ignored_without_compatibility_parsing(tmp_path: Path) -> None:

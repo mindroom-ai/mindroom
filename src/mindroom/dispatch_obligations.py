@@ -17,7 +17,7 @@ import nio
 from typing_extensions import TypeIs
 
 from mindroom.background_tasks import create_background_task
-from mindroom.dispatch_admission import DispatchSourceAdmission
+from mindroom.dispatch_admission import DispatchCallbackKind, DispatchSourceAdmission
 from mindroom.logging_config import get_logger
 from mindroom.matrix.media import MATRIX_MEDIA_EVENT_TYPES, MatrixMediaEvent, parse_matrix_media_event_source
 from mindroom.owned_blocking import run_owned_blocking_operation
@@ -29,19 +29,6 @@ _PENDING_STATE = "pending"
 _RETRY_INITIAL_DELAY_SECONDS = 1.0
 _RETRY_MAX_DELAY_SECONDS = 30.0
 _TOOL_APPROVAL_RESPONSE_EVENT_TYPE = "io.mindroom.tool_approval_response"
-
-
-class DispatchCallbackKind(StrEnum):
-    """Exact correctness-critical callback purposes."""
-
-    MESSAGE = "message"
-    MEDIA = "media"
-    REACTION = "reaction"
-    APPROVAL = "approval"
-    INVITE = "invite"
-    ROOM_LIFECYCLE = "room_lifecycle"
-    REDACTION = "redaction"
-    DECRYPTION_FAILURE = "decryption_failure"
 
 
 class _DispatchTerminalOutcome(StrEnum):

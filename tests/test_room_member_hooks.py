@@ -123,7 +123,7 @@ def _router_bot(
     bot.client.homeserver = "http://localhost:8008"
     bot._first_sync_done = True
     bot._room_member_join_hooks_armed = True
-    bot._cold_history_fence.start(trusted_continuation="s_warm")
+    bot._cold_history_fence.observe_continuation("s_warm")
     return bot
 
 
@@ -883,7 +883,7 @@ async def test_reset_member_callback_admits_exact_pending_lifecycle_obligation(
     bot._register_room_member_callback_after_initial_sync()
     room_member_callback = bot.client.add_event_callback.call_args.args[0]
     event = _room_member_event(event_id="$pending-member")
-    bot._cold_history_fence.start(trusted_continuation="s_warm")
+    bot._cold_history_fence.observe_continuation("s_warm")
     obligation = await bot._dispatch_obligation_runner.persist(
         room,
         event,

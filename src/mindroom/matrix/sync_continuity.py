@@ -15,13 +15,14 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Iterable
     from pathlib import Path
 
-_RECORD_VERSION = "mindroom-sync-continuity-v1"
+_RECORD_VERSION = "mindroom-sync-continuity-v2"
 
 
 @dataclass(frozen=True)
 class SyncContinuityRecord:
     """One crash-atomic Matrix checkpoint and join-fence snapshot."""
 
+    revision: int = 0
     checkpoint: SyncCheckpoint | None = None
     pending_join_decrypt_fences: frozenset[str] = frozenset()
 
@@ -38,9 +39,9 @@ class SyncContinuityStore:
         with advisory_file_lock(self._lock_path, exclusive=False):
             return self._load_locked()
 
-    def replace_checkpoint(self, checkpoint: SyncCheckpoint | None) -> SyncContinuityRecord:
+    def replace_checkpoint(self, checkpoint: SyncCheckpoint) -> SyncContinuityRecord:
         """Replace only the checkpoint from fresh durable state."""
-        normalized = _normalize_checkpoint(checkpoint) if checkpoint is not None else None
+        normalized = _normalize_checkpoint(checkpoint)
         return self._update(lambda current: replace(current, checkpoint=normalized))
 
     def clear_checkpoint(self) -> SyncContinuityRecord:
@@ -81,6 +82,7 @@ class SyncContinuityStore:
         joined = frozenset(_normalize_room_id(room_id) for room_id in joined_room_ids)
         return self._update(
             lambda current: SyncContinuityRecord(
+                revision=current.revision,
                 checkpoint=normalized_checkpoint,
                 pending_join_decrypt_fences=current.pending_join_decrypt_fences - joined,
             ),
@@ -102,9 +104,10 @@ class SyncContinuityStore:
                     raise
                 current = SyncContinuityRecord()
                 invalid_record = True
-            updated = transform(current)
-            if updated == current and not invalid_record:
+            transformed = replace(transform(current), revision=current.revision)
+            if transformed == current and not invalid_record:
                 return current
+            updated = replace(transformed, revision=current.revision + 1)
             write_json_file_durable(
                 self._path,
                 _record_payload(updated),
@@ -129,6 +132,10 @@ class SyncContinuityStore:
         if not isinstance(payload, dict) or payload.get("version") != _RECORD_VERSION:
             raise _format_error(self._path, "unsupported version")
 
+        revision = payload.get("revision")
+        if isinstance(revision, bool) or not isinstance(revision, int) or revision < 0:
+            raise _format_error(self._path, "invalid revision")
+
         raw_checkpoint = payload.get("checkpoint")
         if raw_checkpoint is None:
             checkpoint = None
@@ -146,10 +153,17 @@ class SyncContinuityStore:
             not isinstance(raw_fences, list)
             or any(not isinstance(room_id, str) or not room_id for room_id in raw_fences)
             or len(set(cast("list[str]", raw_fences))) != len(raw_fences)
-            or set(payload) != {"checkpoint", "pending_join_decrypt_fences", "version"}
+            or set(payload)
+            != {
+                "checkpoint",
+                "pending_join_decrypt_fences",
+                "revision",
+                "version",
+            }
         ):
             raise _format_error(self._path, "invalid join fences")
         return SyncContinuityRecord(
+            revision=revision,
             checkpoint=checkpoint,
             pending_join_decrypt_fences=frozenset(cast("list[str]", raw_fences)),
         )
@@ -168,6 +182,7 @@ def _record_payload(record: SyncContinuityRecord) -> dict[str, object]:
     return {
         "checkpoint": checkpoint_payload,
         "pending_join_decrypt_fences": sorted(record.pending_join_decrypt_fences),
+        "revision": record.revision,
         "version": _RECORD_VERSION,
     }
 

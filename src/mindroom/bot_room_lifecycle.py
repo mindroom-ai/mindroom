@@ -82,6 +82,7 @@ class BotRoomLifecycle:
         self._handled_invite_room_ids: set[str] = set()
         self._welcomed_room_ids: set[str] = set()
         self._decrypt_notice_fenced_room_ids: set[str] = set()
+        self._applied_continuity_revision = -1
 
     def _lock_for_room(self, locks: dict[str, asyncio.Lock], room_id: str) -> asyncio.Lock:
         lock = locks.get(room_id)
@@ -129,6 +130,11 @@ class BotRoomLifecycle:
         """Return whether pre-join decrypt failures in this room stay silent."""
         return room_id in self._decrypt_notice_fenced_room_ids
 
+    @property
+    def has_pending_join_decrypt_fences(self) -> bool:
+        """Return whether any durable join fence needs sync settlement."""
+        return bool(self._decrypt_notice_fenced_room_ids)
+
     async def observe_trusted_sync_rooms(self, room_ids: Iterable[str]) -> None:
         """Clear join fences for rooms included in one trusted sync response."""
         record = await asyncio.to_thread(
@@ -139,6 +145,9 @@ class BotRoomLifecycle:
 
     def apply_continuity_record(self, record: SyncContinuityRecord) -> None:
         """Expose join fences from one already-persisted continuity update."""
+        if record.revision <= self._applied_continuity_revision:
+            return
+        self._applied_continuity_revision = record.revision
         self._decrypt_notice_fenced_room_ids = set(record.pending_join_decrypt_fences)
 
     async def restore_pending_join_decrypt_fences(self) -> None:
@@ -148,8 +157,11 @@ class BotRoomLifecycle:
             return
         joined_rooms = await get_joined_rooms(self._client())
         if joined_rooms is None:
-            msg = "Could not verify pending join decrypt fences because joined rooms are unavailable"
-            raise RuntimeError(msg)
+            self._logger().warning(
+                "matrix_join_fence_restore_joined_rooms_unavailable",
+                pending_join_decrypt_fence_count=len(self._decrypt_notice_fenced_room_ids),
+            )
+            return
         record = await asyncio.to_thread(
             self.deps.continuity_store.update_join_fences,
             retain=joined_rooms,

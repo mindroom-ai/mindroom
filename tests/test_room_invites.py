@@ -419,7 +419,7 @@ async def test_terminal_invite_join_failure_does_not_abort_sync(
     bot.client = AsyncMock()
     bot.client.rooms = {}
     bot.client.join = AsyncMock(return_value=nio.JoinError("forbidden", "M_FORBIDDEN"))
-    bot._cold_history_fence.start(trusted_continuation="s_before_invite")
+    bot._cold_history_fence.observe_continuation("s_before_invite")
     monkeypatch.setattr("mindroom.bot_room_lifecycle.is_authorized_sender", lambda *_args, **_kwargs: True)
     event = nio.InviteEvent.parse_event(
         {
@@ -461,7 +461,7 @@ async def test_tokenless_initial_sync_invite_bypasses_cold_history_fence(
     install_runtime_cache_support(bot)
     bot.client = AsyncMock()
     bot.client.rooms = {}
-    bot._cold_history_fence.start(trusted_continuation=None)
+    bot._cold_history_fence.observe_continuation(None)
     join_room = AsyncMock(return_value=RoomJoinOutcome.JOINED)
     welcome_message = AsyncMock()
     monkeypatch.setattr("mindroom.bot_room_lifecycle.is_authorized_sender", lambda *_args, **_kwargs: True)
@@ -873,7 +873,7 @@ async def test_pending_invite_retries_failed_welcome_autonomously(
         runtime_paths=runtime_paths_for(config),
     )
     install_runtime_cache_support(bot)
-    bot._cold_history_fence.start(trusted_continuation="s_before_invite")
+    bot._cold_history_fence.observe_continuation("s_before_invite")
     bot.client = AsyncMock()
     bot.client.rooms = {}
     bot.client.room_messages = AsyncMock(

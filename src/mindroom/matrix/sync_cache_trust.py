@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, field, replace
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, TypeVar
 
 from mindroom.matrix.sync_certification import (
     SyncCacheWriteResult,
@@ -17,12 +18,15 @@ from mindroom.matrix.sync_certification import (
 from mindroom.owned_blocking import run_owned_blocking_operation
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable
+    from collections.abc import Callable, Coroutine, Iterable
+    from typing import Any
 
     import structlog
 
     from mindroom.bot_runtime_view import BotRuntimeView
     from mindroom.matrix.sync_continuity import SyncContinuityRecord, SyncContinuityStore
+
+_MutationResult = TypeVar("_MutationResult")
 
 
 @dataclass
@@ -37,6 +41,7 @@ class SyncCacheTrust:
     _awaiting_initial_window: bool = field(default=False, init=False, repr=False)
     _cache_scope_epoch: int = field(default=0, init=False, repr=False)
     _saved_checkpoint: SyncCheckpoint | None = field(default=None, init=False, repr=False)
+    _mutation_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False, repr=False)
     _dispatch_persist_failure_epoch: int = field(default=0, init=False, repr=False)
     _observed_dispatch_persist_failure_epoch: int = field(default=0, init=False, repr=False)
 
@@ -85,21 +90,36 @@ class SyncCacheTrust:
         self.logger.info("matrix_sync_token_restored", certified=True)
         return checkpoint
 
-    async def save(self, checkpoint: SyncCheckpoint) -> SyncContinuityRecord:
-        """Persist one checkpoint against the current durable cache generation."""
+    async def _persist_checkpoint_locked(
+        self,
+        checkpoint: SyncCheckpoint,
+        *,
+        joined_room_ids: Iterable[str] | None = None,
+    ) -> SyncContinuityRecord | None:
+        """Persist one checkpoint while the mutation lock owns publication order."""
         cache_generation = self.runtime.event_cache.cache_generation
         if cache_generation is None:
-            msg = "Cannot persist Matrix sync continuity without a cache generation"
-            raise RuntimeError(msg)
-        record = await run_owned_blocking_operation(
-            self.continuity_store.replace_checkpoint,
-            SyncCheckpoint(token=checkpoint.token, cache_generation=cache_generation),
+            return None
+        durable_checkpoint = SyncCheckpoint(
+            token=checkpoint.token,
+            cache_generation=cache_generation,
         )
+        if joined_room_ids is None:
+            record = await run_owned_blocking_operation(
+                self.continuity_store.replace_checkpoint,
+                durable_checkpoint,
+            )
+        else:
+            record = await run_owned_blocking_operation(
+                self.continuity_store.accept_classic_response,
+                durable_checkpoint,
+                joined_room_ids=joined_room_ids,
+            )
         self._saved_checkpoint = record.checkpoint
         return record
 
-    async def _clear_saved(self) -> bool:
-        """Clear the durable checkpoint, returning whether invalidation succeeded."""
+    async def _clear_saved_locked(self) -> bool:
+        """Clear durable checkpoint while the mutation lock owns publication order."""
         self._saved_checkpoint = None
         try:
             await run_owned_blocking_operation(self.continuity_store.clear_checkpoint)
@@ -110,14 +130,19 @@ class SyncCacheTrust:
 
     async def invalidate_for_cache_scope_cleanup(self) -> bool:
         """Invalidate continuity before principal- or room-owned rows are removed."""
-        self._cache_scope_epoch += 1
-        self.state = SyncTrustState.UNCERTAIN
-        self.checkpoint = None
-        if await self._clear_saved():
-            return True
-        self.runtime.event_cache.disable("sync_checkpoint_clear_failed")
-        self.logger.warning("matrix_cache_scope_cleanup_checkpoint_clear_failed")
-        return False
+
+        async def invalidate() -> bool:
+            async with self._mutation_lock:
+                self._cache_scope_epoch += 1
+                self.state = SyncTrustState.UNCERTAIN
+                self.checkpoint = None
+                if await self._clear_saved_locked():
+                    return True
+                self.runtime.event_cache.disable("sync_checkpoint_clear_failed")
+                self.logger.warning("matrix_cache_scope_cleanup_checkpoint_clear_failed")
+                return False
+
+        return await self._run_serialized_mutation(invalidate)
 
     def record_dispatch_persist_failure(self) -> None:
         """Latch one source callback rejected before durable ownership."""
@@ -138,6 +163,23 @@ class SyncCacheTrust:
     def acknowledge_dispatch_persist_failures(self) -> None:
         """Settle source failures irrelevant to non-checkpointed transports."""
         self._observed_dispatch_persist_failure_epoch = self._dispatch_persist_failure_epoch
+
+    @staticmethod
+    def include_unrecovered_rooms(
+        cache_result: SyncCacheWriteResult,
+        unrecovered_room_ids: Iterable[str],
+    ) -> SyncCacheWriteResult:
+        """Reject certification for rooms whose transport recovery remains open."""
+        unrecovered = frozenset(unrecovered_room_ids)
+        if not unrecovered:
+            return cache_result
+        return replace(
+            cache_result,
+            complete=False,
+            limited_room_ids=tuple(
+                sorted(set(cache_result.limited_room_ids) | unrecovered),
+            ),
+        )
 
     async def certify_response(
         self,
@@ -182,56 +224,61 @@ class SyncCacheTrust:
         joined_room_ids: Iterable[str] = (),
     ) -> tuple[SyncCertificationDecision, SyncContinuityRecord | None]:
         """Apply a planned response after its prerequisite durable work completes."""
-        if decision.cache_scope_epoch != self._cache_scope_epoch:
-            decision = SyncCertificationDecision(
-                state=SyncTrustState.UNCERTAIN,
-                clear_saved_token=True,
-                reset_client_token=True,
-                reason="cache_scope_invalidated",
-                cache_scope_epoch=self._cache_scope_epoch,
-            )
-        record = await self._apply_decision(
-            decision,
-            cache_result=cache_result,
-            joined_room_ids=joined_room_ids,
-        )
-        # Re-arm from applied trust so a replaced stale-scope decision cannot
-        # license another since-less replay.
-        if decision.reset_client_token:
-            self._awaiting_initial_window = True
-        elif self.state is SyncTrustState.CERTIFIED:
-            self._awaiting_initial_window = False
-        return decision, record
+
+        async def apply() -> tuple[SyncCertificationDecision, SyncContinuityRecord | None]:
+            nonlocal decision
+            async with self._mutation_lock:
+                if decision.cache_scope_epoch != self._cache_scope_epoch:
+                    decision = SyncCertificationDecision(
+                        state=SyncTrustState.UNCERTAIN,
+                        clear_saved_token=True,
+                        reset_client_token=True,
+                        reason="cache_scope_invalidated",
+                        cache_scope_epoch=self._cache_scope_epoch,
+                    )
+                record = await self._apply_decision_locked(
+                    decision,
+                    cache_result=cache_result,
+                    joined_room_ids=joined_room_ids,
+                )
+                # Re-arm from applied trust so a replaced stale-scope decision cannot
+                # license another since-less replay.
+                if decision.reset_client_token:
+                    self._awaiting_initial_window = True
+                elif self.state is SyncTrustState.CERTIFIED:
+                    self._awaiting_initial_window = False
+                return decision, record
+
+        return await self._run_serialized_mutation(apply)
 
     async def reject_unknown_pos(self) -> SyncCertificationDecision:
         """Invalidate a checkpoint rejected by the homeserver."""
-        decision = handle_unknown_pos()
-        await self._apply_decision(decision)
-        self._awaiting_initial_window = True
-        return decision
 
-    async def _apply_decision(
+        async def reject() -> SyncCertificationDecision:
+            async with self._mutation_lock:
+                decision = handle_unknown_pos()
+                await self._apply_decision_locked(decision)
+                self._awaiting_initial_window = True
+                return decision
+
+        return await self._run_serialized_mutation(reject)
+
+    async def _apply_decision_locked(
         self,
         decision: SyncCertificationDecision,
         *,
         cache_result: SyncCacheWriteResult | None = None,
         joined_room_ids: Iterable[str] = (),
     ) -> SyncContinuityRecord | None:
-        """Apply one certifier decision to trust state and durable storage."""
+        """Apply one certifier decision while mutation order is serialized."""
         if decision.checkpoint_to_save is not None:
-            cache_generation = self.runtime.event_cache.cache_generation
-            if cache_generation is None:
-                msg = "Cannot certify Matrix sync continuity without a cache generation"
-                raise RuntimeError(msg)
-            record = await run_owned_blocking_operation(
-                self.continuity_store.accept_classic_response,
-                SyncCheckpoint(
-                    token=decision.checkpoint_to_save.token,
-                    cache_generation=cache_generation,
-                ),
+            record = await self._persist_checkpoint_locked(
+                decision.checkpoint_to_save,
                 joined_room_ids=joined_room_ids,
             )
-            self._saved_checkpoint = record.checkpoint
+            if record is None:
+                msg = "Cannot certify Matrix sync continuity without a cache generation"
+                raise RuntimeError(msg)
         elif decision.clear_saved_token:
             # Fail runtime closed before awaiting the durable fresh-read transform.
             # Cancellation may propagate only after that worker commits, so no
@@ -241,9 +288,7 @@ class SyncCacheTrust:
             self._saved_checkpoint = None
             if decision.reset_client_token:
                 self._awaiting_initial_window = True
-            record = await run_owned_blocking_operation(
-                self.continuity_store.clear_checkpoint,
-            )
+            record = await run_owned_blocking_operation(self.continuity_store.clear_checkpoint)
         else:
             record = None
         self.state = decision.state
@@ -255,9 +300,47 @@ class SyncCacheTrust:
 
     async def persist_current(self) -> None:
         """Persist the current certified checkpoint."""
-        assert self.state is SyncTrustState.CERTIFIED
-        assert self.checkpoint is not None
-        await self.save(self.checkpoint)
+
+        async def persist() -> None:
+            async with self._mutation_lock:
+                if self.state is not SyncTrustState.CERTIFIED or self.checkpoint is None:
+                    return
+                record = await self._persist_checkpoint_locked(self.checkpoint)
+                if record is not None:
+                    return
+                self.state = SyncTrustState.UNCERTAIN
+                self.checkpoint = None
+                self.logger.warning("matrix_sync_checkpoint_skipped_without_cache_generation")
+                await self._clear_saved_locked()
+
+        await self._run_serialized_mutation(persist)
+
+    async def _run_serialized_mutation(
+        self,
+        mutation: Callable[[], Coroutine[Any, Any, _MutationResult]],
+    ) -> _MutationResult:
+        """Finish one accepted mutation before caller cancellation escapes."""
+        mutation_task = asyncio.create_task(mutation())
+        try:
+            return await asyncio.shield(mutation_task)
+        except asyncio.CancelledError as cancellation:
+            mutation_error: Exception | None = None
+            while not mutation_task.done():
+                try:
+                    await asyncio.shield(mutation_task)
+                except asyncio.CancelledError:
+                    continue
+                except Exception as exc:
+                    mutation_error = exc
+                    break
+            if mutation_error is None:
+                try:
+                    mutation_task.result()
+                except Exception as exc:
+                    mutation_error = exc
+            if mutation_error is not None:
+                raise cancellation from mutation_error
+            raise
 
     def retry_token(self) -> str | None:
         """Return the generation-safe checkpoint for work rejected before durability."""

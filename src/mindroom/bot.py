@@ -94,11 +94,10 @@ from .delivery_gateway import (
     ResponseHookService,
     SendTextRequest,
 )
+from .dispatch_admission import DispatchCallbackKind, DispatchSourceAdmission
 from .dispatch_obligations import (
-    DispatchCallbackKind,
     DispatchObligationRunner,
     DispatchObligationStore,
-    DispatchSourceAdmission,
 )
 from .edit_regenerator import EditRegenerator, EditRegeneratorDeps
 from .entity_rooms import get_rooms_for_entity
@@ -186,7 +185,7 @@ def _create_best_effort_task_wrapper(
     callback: Callable[..., Awaitable[None]],
     *,
     owner: BotRuntimeState | None = None,
-    admit: Callable[..., bool] | None = None,
+    admit: Callable[[], bool] | None = None,
 ) -> Callable[..., Awaitable[None]]:
     """Run one explicitly best-effort callback as a background task.
 
@@ -196,7 +195,7 @@ def _create_best_effort_task_wrapper(
     """
 
     async def wrapper(*args: object, **kwargs: object) -> None:
-        if admit is not None and not admit(*args, **kwargs):
+        if admit is not None and not admit():
             return
 
         # Create the task but don't await it - let it run in background
@@ -540,7 +539,7 @@ class AgentBot:
             room_for_id=self._room_for_dispatch_obligation,
             turn_is_terminal=self._turn_store.is_durably_handled,
             on_persist_failure=self._record_dispatch_persist_failure,
-            source_admission=self._admit_dispatch_source,
+            source_admission=self._cold_history_fence.admit_source,
             on_source_rejected=self._handle_rejected_dispatch_source,
             background_task_owner=self._runtime_view,
         )
@@ -1132,7 +1131,7 @@ class AgentBot:
         sync_token = await self._sync_cache_trust.prepare_startup()
         cast("Any", client).next_batch = sync_token
         trusted_continuation = sync_token if self.config.matrix_sync.mode == "classic" else None
-        self._cold_history_fence.start(trusted_continuation=trusted_continuation)
+        self._cold_history_fence.observe_continuation(trusted_continuation)
 
     async def _certify_sync_response(
         self,
@@ -1216,19 +1215,6 @@ class AgentBot:
         elif retry_token is None:
             self._cold_history_fence.reset()
 
-    async def _admit_dispatch_source(
-        self,
-        room_id: str,
-        source_event_id: str,
-        callback_kind: DispatchCallbackKind,
-    ) -> DispatchSourceAdmission:
-        """Delegate source admission with current room decrypt-fence state."""
-        return await self._cold_history_fence.admit_source(
-            room_id,
-            source_event_id,
-            callback_kind,
-        )
-
     async def _handle_rejected_dispatch_source(
         self,
         room: nio.MatrixRoom,
@@ -1290,7 +1276,7 @@ class AgentBot:
             return
         self._ensure_pre_certification_rewind()
 
-    def _handle_certification_apply_failure(self, error: BaseException) -> None:
+    def _handle_certification_apply_failure(self, error: Exception) -> None:
         """Report checkpoint-apply failure without undoing transport continuity."""
         self.logger.warning(
             "matrix_sync_certification_apply_failed",
@@ -1464,14 +1450,10 @@ class AgentBot:
                     first_sync=first_sync_response,
                 )
                 raise
-            if response.unrecovered_room_ids:
-                cache_result = replace(
-                    cache_result,
-                    complete=False,
-                    limited_room_ids=tuple(
-                        sorted(set(cache_result.limited_room_ids) | response.unrecovered_room_ids),
-                    ),
-                )
+            cache_result = self._sync_cache_trust.include_unrecovered_rooms(
+                cache_result,
+                response.unrecovered_room_ids,
+            )
             decision = self._plan_sync_response(
                 next_batch=response.next_batch,
                 cache_result=cache_result,
@@ -1502,7 +1484,9 @@ class AgentBot:
                     room_member_join_hook_plan=room_member_join_hook_plan,
                     response=response,
                 )
-            except BaseException as error:
+            except asyncio.CancelledError:
+                raise
+            except Exception as error:
                 self._handle_certification_apply_failure(error)
                 raise
         self._mark_sync_progress()
@@ -1518,7 +1502,7 @@ class AgentBot:
             unrecovered_room_ids=response.unrecovered_room_ids,
             transport="sliding",
         )
-        if not self._cold_history_fence.is_cold:
+        if not self._cold_history_fence.is_cold and self._room_lifecycle.has_pending_join_decrypt_fences:
             await self._room_lifecycle.observe_trusted_sync_rooms(
                 room_id for room_id, room in response.rooms.items() if room.membership == "join"
             )
@@ -1671,7 +1655,7 @@ class AgentBot:
             AuthenticatedToDeviceEvent,
         )
 
-    def _admit_live_call_event(self, _room: nio.MatrixRoom, _event: nio.Event) -> bool:
+    def _admit_live_call_event(self) -> bool:
         """Admit call-runtime room state only when continuity exists at delivery."""
         return not self._cold_history_fence.is_cold
 

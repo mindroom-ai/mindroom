@@ -4,13 +4,10 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Protocol
+from typing import Protocol
 
-from mindroom.dispatch_admission import DispatchSourceAdmission
+from mindroom.dispatch_admission import DispatchCallbackKind, DispatchSourceAdmission
 from mindroom.matrix.sync_token_values import normalize_sync_token
-
-if TYPE_CHECKING:
-    from mindroom.dispatch_obligations import DispatchCallbackKind
 
 
 class _PendingDispatchObligations(Protocol):
@@ -50,12 +47,8 @@ class ColdHistoryFence:
         """Return whether arbitrary Matrix callbacks remain fenced."""
         return not self._has_trusted_continuation
 
-    def start(self, *, trusted_continuation: object) -> None:
-        """Set startup admission from a transport-compatible continuation."""
-        self._has_trusted_continuation = normalize_sync_token(trusted_continuation) is not None
-
     def observe_continuation(self, continuation: object) -> None:
-        """Set ordinary admission from the continuation in one Matrix response."""
+        """Set admission from one transport-compatible continuation."""
         self._has_trusted_continuation = normalize_sync_token(continuation) is not None
 
     def observe_recovery(
@@ -96,9 +89,9 @@ class ColdHistoryFence:
         callback_kind: DispatchCallbackKind,
     ) -> DispatchSourceAdmission:
         """Apply invite, decrypt-notice, and cold-history admission policy."""
-        if callback_kind.value == "invite":
+        if callback_kind is DispatchCallbackKind.INVITE:
             return DispatchSourceAdmission.ACCEPTED
-        if callback_kind.value == "decryption_failure" and self.decrypt_notice_is_fenced(room_id):
+        if callback_kind is DispatchCallbackKind.DECRYPTION_FAILURE and self.decrypt_notice_is_fenced(room_id):
             return DispatchSourceAdmission.DECRYPT_NOTICE_FENCED
         if await self.admit(source_event_id, callback_kind):
             return DispatchSourceAdmission.ACCEPTED

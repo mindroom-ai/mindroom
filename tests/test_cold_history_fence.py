@@ -65,21 +65,12 @@ def _runner(
         Awaitable[_DispatchCallbackResult],
     ],
 ) -> DispatchObligationRunner:
-    async def source_admission(
-        _room_id: str,
-        event_id: str,
-        callback_kind: DispatchCallbackKind,
-    ) -> DispatchSourceAdmission:
-        if await fence.admit(event_id, callback_kind):
-            return DispatchSourceAdmission.ACCEPTED
-        return DispatchSourceAdmission.COLD_HISTORY_FENCED
-
     return DispatchObligationRunner(
         store=store,
         callbacks={DispatchCallbackKind.MESSAGE: callback},
         room_for_id=lambda room_id: nio.MatrixRoom(room_id, "@code:example.org"),
         turn_is_terminal=lambda _event_id: False,
-        source_admission=source_admission,
+        source_admission=fence.admit_source,
     )
 
 
@@ -92,7 +83,7 @@ async def test_missing_startup_continuation_suppresses_arbitrary_callbacks(
     obligations = _PendingObligations()
     fence = ColdHistoryFence(obligations)
 
-    fence.start(trusted_continuation=continuation)
+    fence.observe_continuation(continuation)
 
     assert not await fence.admit("$history", DispatchCallbackKind.MESSAGE)
     assert fence.is_cold
@@ -106,7 +97,7 @@ async def test_cold_window_admits_only_exact_pending_event_and_kind() -> None:
         {("$obligated", DispatchCallbackKind.REACTION)},
     )
     fence = ColdHistoryFence(obligations)
-    fence.start(trusted_continuation=None)
+    fence.observe_continuation(None)
 
     assert await fence.admit("$obligated", DispatchCallbackKind.REACTION)
     assert not await fence.admit("$obligated", DispatchCallbackKind.MESSAGE)
@@ -141,7 +132,7 @@ async def test_source_admission_owns_invite_and_decrypt_fence_policy() -> None:
 def test_incomplete_transport_recovery_rearms_fence() -> None:
     """Unrecovered rooms keep arbitrary callbacks fenced despite a continuation."""
     fence = ColdHistoryFence(_PendingObligations())
-    fence.start(trusted_continuation="s_before_gap")
+    fence.observe_continuation("s_before_gap")
 
     complete = fence.observe_recovery(
         continuation="s_after_gap",
@@ -158,7 +149,7 @@ async def test_matrix_continuation_opens_ordinary_dispatch(continuation: str) ->
     """A Matrix-issued continuation opens ordinary callback dispatch."""
     obligations = _PendingObligations()
     fence = ColdHistoryFence(obligations)
-    fence.start(trusted_continuation=None)
+    fence.observe_continuation(None)
 
     fence.observe_continuation(continuation)
 
@@ -174,7 +165,7 @@ async def test_missing_response_continuation_keeps_fence_cold(
 ) -> None:
     """An unusable response continuation cannot open a cold fence."""
     fence = ColdHistoryFence(_PendingObligations())
-    fence.start(trusted_continuation=None)
+    fence.observe_continuation(None)
 
     fence.observe_continuation(continuation)
 
@@ -186,7 +177,7 @@ async def test_missing_response_continuation_keeps_fence_cold(
 async def test_missing_response_continuation_rearms_open_fence() -> None:
     """Losing the response continuation must rearm exact-only admission."""
     fence = ColdHistoryFence(_PendingObligations())
-    fence.start(trusted_continuation="s_before_missing")
+    fence.observe_continuation("s_before_missing")
 
     fence.observe_continuation(None)
 
@@ -204,33 +195,13 @@ async def test_continuity_reset_rearms_exact_obligation_admission(
         {("$retry", DispatchCallbackKind.REDACTION)},
     )
     fence = ColdHistoryFence(obligations)
-    fence.start(trusted_continuation=continuation)
+    fence.observe_continuation(continuation)
     assert await fence.admit("$ordinary", DispatchCallbackKind.REDACTION)
 
     fence.reset()
 
     assert not await fence.admit("$ordinary", DispatchCallbackKind.REDACTION)
     assert await fence.admit("$retry", DispatchCallbackKind.REDACTION)
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("obligated", [False, True])
-async def test_opposite_origin_timestamp_skew_cannot_change_admission(
-    obligated: bool,
-) -> None:
-    """Federated event clocks must not influence callback admission."""
-    kind = DispatchCallbackKind.MESSAGE
-    pending = {("$same-event", kind)} if obligated else set()
-    fence = ColdHistoryFence(_PendingObligations.with_keys(pending))
-    fence.start(trusted_continuation=None)
-    sources = (
-        {"event_id": "$same-event", "origin_server_ts": 0},
-        {"event_id": "$same-event", "origin_server_ts": 9_000_000_000_000},
-    )
-
-    decisions = [await fence.admit(str(source["event_id"]), kind) for source in sources]
-
-    assert decisions == [obligated, obligated]
 
 
 @pytest.mark.asyncio
@@ -241,35 +212,10 @@ async def test_each_callback_family_uses_exact_pending_admission(
     """Every correctness callback kind follows the same exact-key rule."""
     obligations = _PendingObligations.with_keys({("$exact", callback_kind)})
     fence = ColdHistoryFence(obligations)
-    fence.start(trusted_continuation=None)
+    fence.observe_continuation(None)
 
     assert not await fence.admit("$absent", callback_kind)
     assert await fence.admit("$exact", callback_kind)
-
-
-@pytest.mark.asyncio
-async def test_edit_uses_message_obligation_without_timestamp_admission() -> None:
-    """Matrix edits use exact MESSAGE obligations without a clock boundary."""
-    obligations = _PendingObligations.with_keys(
-        {("$edit", DispatchCallbackKind.MESSAGE)},
-    )
-    fence = ColdHistoryFence(obligations)
-    fence.start(trusted_continuation=None)
-    edit_source = {
-        "event_id": "$edit",
-        "origin_server_ts": 0,
-        "content": {
-            "m.relates_to": {
-                "rel_type": "m.replace",
-                "event_id": "$original",
-            },
-        },
-    }
-
-    assert await fence.admit(
-        str(edit_source["event_id"]),
-        DispatchCallbackKind.MESSAGE,
-    )
 
 
 @pytest.mark.asyncio
@@ -283,7 +229,7 @@ async def test_runner_checks_cold_admission_before_creating_current_obligation(
         entity_name="code",
     )
     fence = ColdHistoryFence(store)
-    fence.start(trusted_continuation=None)
+    fence.observe_continuation(None)
     attempts = 0
 
     async def callback(
@@ -317,7 +263,7 @@ async def test_runner_preserves_current_event_after_server_continuation(
         entity_name="code",
     )
     fence = ColdHistoryFence(store)
-    fence.start(trusted_continuation=None)
+    fence.observe_continuation(None)
     fence.observe_continuation("s_live")
     seen: list[str] = []
 
@@ -349,7 +295,7 @@ async def test_runner_admits_exact_pending_obligation_after_reset(
         entity_name="code",
     )
     fence = ColdHistoryFence(store)
-    fence.start(trusted_continuation="s_warm")
+    fence.observe_continuation("s_warm")
     attempts = 0
 
     async def callback(
@@ -388,7 +334,7 @@ async def test_direct_recovery_bypasses_cold_source_admission(
         entity_name="code",
     )
     warm_fence = ColdHistoryFence(store)
-    warm_fence.start(trusted_continuation="s_warm")
+    warm_fence.observe_continuation("s_warm")
 
     async def failing_callback(
         _room: nio.MatrixRoom,
@@ -408,7 +354,7 @@ async def test_direct_recovery_bypasses_cold_source_admission(
     assert store.has_pending("$failed", DispatchCallbackKind.MESSAGE)
 
     cold_fence = ColdHistoryFence(store)
-    cold_fence.start(trusted_continuation=None)
+    cold_fence.observe_continuation(None)
     recovered: list[str] = []
 
     async def succeeding_callback(

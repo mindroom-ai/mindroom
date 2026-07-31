@@ -26,7 +26,7 @@ def save_sync_token(
 
 def clear_sync_token(storage_path: Path, agent_name: str) -> None:
     """Clear one checkpoint through the production continuity owner."""
-    SyncContinuityStore(storage_path, agent_name).replace_checkpoint(None)
+    SyncContinuityStore(storage_path, agent_name).clear_checkpoint()
 
 
 def load_sync_checkpoint(storage_path: Path, agent_name: str) -> SyncCheckpoint | None:

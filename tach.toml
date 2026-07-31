@@ -102,6 +102,7 @@ visibility = ["mindroom.bot"]
 path = "mindroom.dispatch_admission"
 depends_on = []
 visibility = [
+    "mindroom.bot",
     "mindroom.cold_history_fence",
     "mindroom.dispatch_obligations",
 ]
@@ -2797,6 +2798,7 @@ depends_on = [
     "mindroom.conversation_state_writer",
     "mindroom.delivery_gateway",
     "mindroom.desktop.pairing_receiver",
+    "mindroom.dispatch_admission",
     "mindroom.dispatch_obligations",
     "mindroom.edit_regenerator",
     "mindroom.entity_resolution",
