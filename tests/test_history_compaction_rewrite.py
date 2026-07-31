@@ -1321,6 +1321,38 @@ def test_private_strip_stale_anthropic_replay_fields_preserves_tool_chain_after_
     assert final_assistant.redacted_reasoning_content == "more redacted"
 
 
+@pytest.mark.parametrize("marker", [True, "persisted"], ids=["live", "persisted"])
+def test_private_strip_stale_anthropic_replay_fields_ignores_queued_notice(marker: bool | str) -> None:
+    interrupted_assistant = Message(
+        role="assistant",
+        content="tool call",
+        provider_data={"signature": "sig-tool"},
+        reasoning_content="thinking",
+        redacted_reasoning_content="redacted",
+        tool_calls=[
+            {"id": "call-1", "type": "function", "function": {"name": "tool", "arguments": "{}"}},
+        ],
+    )
+    messages = [
+        Message(role="user", content="question"),
+        interrupted_assistant,
+        Message(role="tool", content="tool result", tool_call_id="call-1"),
+        Message(
+            role="user",
+            content="A queued-message notice was delivered.",
+            provider_data={
+                "mindroom_queued_message_notice": marker,
+                "mindroom_queued_message_notice_response_turn_id": "response-1",
+            },
+        ),
+    ]
+
+    assert _strip_stale_anthropic_replay_fields(messages) == 0
+    assert interrupted_assistant.provider_data == {"signature": "sig-tool"}
+    assert interrupted_assistant.reasoning_content == "thinking"
+    assert interrupted_assistant.redacted_reasoning_content == "redacted"
+
+
 def test_private_strip_stale_anthropic_replay_fields_ignores_reasoning_without_signature() -> None:
     assistant = Message(
         role="assistant",

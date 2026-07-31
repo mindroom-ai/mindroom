@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, TypeVar, cast
 from agno.db.base import SessionType
 
 from mindroom.agent_storage import get_agent_session, get_team_session
-from mindroom.ai_runtime import queued_message_signal_context
+from mindroom.ai_runtime import finalize_queued_notice_response_turn_async, queued_message_signal_context
 from mindroom.hooks import EVENT_SESSION_STARTED, SessionHookContext, emit
 from mindroom.post_response_effects import apply_post_response_effects
 from mindroom.tool_system.runtime_context import resolve_tool_runtime_hook_bindings
@@ -288,8 +288,11 @@ class ResponseLifecycleCoordinator:
                     notice=notice,
                     queued_signal=queued_signal,
                 )
-                with queued_message_signal_context(queued_signal):
-                    return await locked_operation(target)
+                with queued_message_signal_context(queued_signal) as notice_context:
+                    try:
+                        return await locked_operation(target)
+                    finally:
+                        await finalize_queued_notice_response_turn_async(notice_context)
             finally:
                 if lock_acquired:
                     lifecycle_lock.release()

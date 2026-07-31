@@ -12,11 +12,10 @@ from zoneinfo import ZoneInfo
 from mindroom.constants import resolve_config_relative_path
 from mindroom.embedding_errors import classified_embedder_error
 from mindroom.logging_config import get_logger
+from mindroom.memory_scope_ids import agent_name_from_scope_user_id, agent_scope_user_id
 from mindroom.timing import timed
 
 from ._policy import (
-    agent_name_from_scope_user_id,
-    agent_scope_user_id,
     allowed_scope_storage_paths,
     build_team_user_id,
     effective_storage_paths_for_context,
@@ -36,6 +35,7 @@ from ._shared import (
     FILE_MEMORY_ENTRYPOINT,
     FILE_MEMORY_PATH_ID_PATTERN,
     FileMemoryResolution,
+    MemoryEntrypointContext,
     MemoryNotFoundError,
     MemoryResult,
     MemorySearchOutcome,
@@ -572,16 +572,22 @@ def _load_scope_entrypoint_context(
     scope_user_id: str,
     resolution: FileMemoryResolution,
     config: Config,
-) -> str:
-    """Load the scoped `MEMORY.md` entrypoint text."""
+) -> MemoryEntrypointContext:
+    """Load the scoped `MEMORY.md` entrypoint text and what the cap withheld."""
     entrypoint_path = _scope_entrypoint_path(_scope_dir(scope_user_id, resolution, config, create=False))
     if not entrypoint_path.exists():
-        return ""
+        return MemoryEntrypointContext()
     max_lines = config.memory.file.max_entrypoint_lines
     lines = entrypoint_path.read_text(encoding="utf-8").splitlines()
-    if max_lines < len(lines):
+    total_lines = len(lines)
+    if max_lines < total_lines:
         lines = lines[:max_lines]
-    return "\n".join(lines).strip()
+    return MemoryEntrypointContext(
+        text="\n".join(lines).strip(),
+        source_path=entrypoint_path,
+        included_lines=len(lines),
+        total_lines=total_lines,
+    )
 
 
 def _find_file_replica_memory_ids(
@@ -1189,8 +1195,8 @@ class FileMemoryBackend:
         config: Config,
         *,
         execution_identity: ToolExecutionIdentity | None = None,
-    ) -> str:
-        """Load the stable scoped `MEMORY.md` entrypoint text for one agent."""
+    ) -> MemoryEntrypointContext:
+        """Load the stable scoped `MEMORY.md` entrypoint context for one agent."""
         resolution = resolve_file_memory_resolution(
             storage_path,
             config,

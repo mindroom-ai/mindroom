@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from mindroom.memory_scope_ids import agent_name_from_scope_user_id, agent_scope_user_id
 from mindroom.runtime_resolution import resolve_agent_runtime
 
 from ._shared import FileMemoryResolution
@@ -88,18 +89,6 @@ def _effective_storage_path_for_agent(
 def build_team_user_id(agent_names: list[str]) -> str:
     """Create a stable team scope user ID from a set of agent names."""
     return f"team_{'+'.join(sorted(agent_names))}"
-
-
-def agent_scope_user_id(agent_name: str) -> str:
-    """Return the scoped memory user ID for one agent."""
-    return f"agent_{agent_name}"
-
-
-def agent_name_from_scope_user_id(scope_user_id: str) -> str | None:
-    """Extract the agent name from an agent scope user ID."""
-    if scope_user_id.startswith("agent_"):
-        return scope_user_id[len("agent_") :]
-    return None
 
 
 def get_team_ids_for_agent(agent_name: str, config: Config) -> list[str]:

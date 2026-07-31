@@ -209,6 +209,19 @@ class CoalescingGate:
         """Return the per-(room, sender) ingress lanes feeding this gate."""
         return self._lanes
 
+    def has_pending_source_event(self, source_event_id: str) -> bool:
+        """Return whether a lane or coalescing gate still owns one exact source."""
+        if any(
+            slot.delivery is not None and slot.delivery.source_event_id == source_event_id
+            for slot in self._lanes.unsettled_slots()
+        ):
+            return True
+        return any(
+            queued.source_event_id == source_event_id
+            for gate in self._gates.values()
+            for queued in (*gate.claimed_admissions, *gate.queue)
+        )
+
     def enter_lane(
         self,
         *,

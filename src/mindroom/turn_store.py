@@ -20,7 +20,7 @@ from mindroom.history.storage import invalidate_compacted_replay, read_scope_see
 from mindroom.session_ids import create_session_id
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Callable, Mapping
 
     import nio
 
@@ -51,6 +51,7 @@ class TurnStoreDeps:
     state_writer: ConversationStateWriter
     resolver: ConversationResolver
     tool_runtime: ToolRuntimeSupport
+    on_terminal_turn_persisted: Callable[[tuple[str, ...]], None] | None = None
 
 
 @dataclass(frozen=True)
@@ -129,11 +130,21 @@ class TurnStore:
                 timestamp=0.0,
             )
 
-        self._ledger.update_handled_turn(turn_record.indexed_event_ids, terminal_record)
+        self._ledger.update_handled_turn(
+            turn_record.indexed_event_ids,
+            terminal_record,
+            on_persisted=(
+                self._notify_terminal_turn_persisted if self.deps.on_terminal_turn_persisted is not None else None
+            ),
+        )
 
     def is_handled(self, event_id: str) -> bool:
         """Return whether one source event already has a terminal outcome."""
         return self._ledger.has_responded(event_id)
+
+    def is_durably_handled(self, event_id: str) -> bool:
+        """Return terminal truth only after its handled-turn ledger write completes."""
+        return self._ledger.has_durably_responded(event_id)
 
     def visible_echo_for_source(self, source_event_id: str) -> str | None:
         """Return the tracked visible echo for one source event."""
@@ -247,6 +258,11 @@ class TurnStore:
             merge_pending,
             wait_for_persist=True,
         )
+
+    def _notify_terminal_turn_persisted(self, turn_record: TurnRecord) -> None:
+        callback = self.deps.on_terminal_turn_persisted
+        if callback is not None:
+            callback(turn_record.indexed_event_ids)
 
     def try_claim_turn(self, turn_record: TurnRecord) -> bool:
         """Claim exclusive physical sources while aliases remain advisory."""
@@ -800,7 +816,11 @@ def _reconcile_ledger_and_recovery(
         completed=recovery_record.completed,
         source_event_prompts=source_event_prompts,
         source_event_revisions=source_event_revisions,
-        source_event_metadata=recovery_record.source_event_metadata or ledger_record.source_event_metadata,
+        source_event_metadata=(
+            recovery_record.source_event_metadata
+            if recovery_record.source_event_metadata is not None
+            else ledger_record.source_event_metadata
+        ),
         response_owner=recovery_record.response_owner or ledger_record.response_owner,
         requester_id=recovery_record.requester_id or ledger_record.requester_id,
         correlation_id=recovery_record.correlation_id or ledger_record.correlation_id,

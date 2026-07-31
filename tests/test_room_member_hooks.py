@@ -16,10 +16,12 @@ from mindroom.bot import AgentBot
 from mindroom.config.main import Config
 from mindroom.config.plugin import PluginEntryConfig
 from mindroom.constants import ROUTER_AGENT_NAME
+from mindroom.dispatch_obligations import DispatchCallbackKind
 from mindroom.entity_resolution import mindroom_user_id
 from mindroom.hooks import EVENT_ROOM_MEMBER_JOINED, HookRegistry, RoomMemberJoinedContext, hook
 from mindroom.matrix import room_member_joins
-from mindroom.matrix.sync_certification import SyncCacheWriteResult, SyncTrustState
+from mindroom.matrix.sync_certification import SyncCacheWriteResult, SyncCheckpoint, SyncTrustState
+from mindroom.matrix.sync_tokens import load_sync_checkpoint
 from mindroom.matrix.users import AgentMatrixUser
 from tests.conftest import TEST_PASSWORD, bind_runtime_paths, install_runtime_cache_support, test_runtime_paths
 from tests.identity_helpers import persist_entity_accounts
@@ -120,6 +122,7 @@ def _router_bot(
     bot.client.homeserver = "http://localhost:8008"
     bot._first_sync_done = True
     bot._room_member_join_hooks_armed = True
+    bot._cold_history_fence.start(trusted_continuation="s_warm")
     return bot
 
 
@@ -198,6 +201,60 @@ async def test_router_emits_room_member_joined_once_per_room_user(tmp_path: Path
     assert context.matrix_admin is not None
 
 
+def test_room_member_marker_returns_normally_or_raises_without_boolean_status(tmp_path: Path) -> None:
+    """A duplicate marker is successful idempotence, not a false write result."""
+    bot = _router_bot(tmp_path)
+    join = room_member_joins.room_member_join_from_event(
+        _room(),
+        _room_member_event(),
+        config=bot.config,
+        runtime_paths=bot.runtime_paths,
+    )
+    assert join is not None
+
+    first_result = room_member_joins.record_room_member_join_seen(
+        bot.runtime_paths.storage_root,
+        join,
+    )
+    duplicate_result = room_member_joins.record_room_member_join_seen(
+        bot.runtime_paths.storage_root,
+        join,
+    )
+
+    assert first_result is None
+    assert duplicate_result is None
+
+
+@pytest.mark.asyncio
+async def test_cancelled_room_member_hook_does_not_suppress_durable_retry(tmp_path: Path) -> None:
+    """The room/user de-dup marker must follow completed hook emission."""
+    attempts = 0
+    entered = asyncio.Event()
+    blocker = asyncio.Event()
+
+    @hook(EVENT_ROOM_MEMBER_JOINED)
+    async def joined(_ctx: RoomMemberJoinedContext) -> None:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            entered.set()
+            await blocker.wait()
+
+    bot = _router_bot(tmp_path)
+    bot.hook_registry = HookRegistry.from_plugins([_plugin("onboarding", [joined])])
+    room = _room()
+    event = _room_member_event(event_id="$retry")
+
+    first = asyncio.create_task(bot._on_room_member(room, event))
+    await entered.wait()
+    first.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await first
+    await bot._on_room_member(room, event)
+
+    assert attempts == 2
+
+
 @pytest.mark.asyncio
 async def test_room_member_joined_supports_router_agent_scope(tmp_path: Path) -> None:
     """room:member_joined hooks should support router agent scoping."""
@@ -259,6 +316,264 @@ async def test_router_emits_room_member_joined_from_sync_state_after_initial_syn
     await bot._on_sync_response(_sync_response_with_state(room.room_id, [_room_member_event(event_id="$state-join")]))
 
     assert seen == ["$state-join"]
+
+
+@pytest.mark.asyncio
+async def test_cancelled_sync_state_member_hook_is_directly_recoverable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Classic sync callback cancellation must leave transport-neutral exact work."""
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    attempts = 0
+
+    @hook(EVENT_ROOM_MEMBER_JOINED)
+    async def joined(_ctx: RoomMemberJoinedContext) -> None:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            entered.set()
+            await release.wait()
+
+    bot = _router_bot(tmp_path)
+    room = _room()
+    bot.client.rooms = {room.room_id: room}
+    bot.hook_registry = HookRegistry.from_plugins([_plugin("onboarding", [joined])])
+    monkeypatch.setattr(
+        bot._conversation_cache,
+        "cache_sync_timeline_for_certification",
+        AsyncMock(return_value=SyncCacheWriteResult(complete=True)),
+    )
+    sync_task = asyncio.create_task(
+        bot._on_sync_response(
+            _sync_response_with_state(room.room_id, [_room_member_event(event_id="$state-retry")]),
+        ),
+    )
+    await entered.wait()
+
+    sync_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await sync_task
+    assert bot._dispatch_obligation_store.has_pending(
+        "$state-retry",
+        DispatchCallbackKind.ROOM_LIFECYCLE,
+    )
+    assert load_sync_checkpoint(tmp_path, bot.agent_name) is None
+
+    await bot._dispatch_obligation_runner.recover_pending()
+
+    assert attempts == 2
+    assert not bot._dispatch_obligation_store.has_pending(
+        "$state-retry",
+        DispatchCallbackKind.ROOM_LIFECYCLE,
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("retry_token", [None, "s_before_marker_failure"])
+async def test_sync_state_marker_failure_blocks_checkpoint_certification(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    retry_token: str | None,
+) -> None:
+    """A baseline marker must reach disk before its source sync position can advance."""
+
+    @hook(EVENT_ROOM_MEMBER_JOINED)
+    async def joined(_ctx: RoomMemberJoinedContext) -> None:
+        pass
+
+    bot = _router_bot(tmp_path)
+    room = _room()
+    bot.client.rooms = {room.room_id: room}
+    bot.client.next_batch = "s_after_marker_failure"
+    if retry_token is not None:
+        bot._sync_cache_trust.state = SyncTrustState.CERTIFIED
+        bot._sync_cache_trust.checkpoint = SyncCheckpoint(retry_token)
+    bot.hook_registry = HookRegistry.from_plugins([_plugin("onboarding", [joined])])
+    monkeypatch.setattr(
+        bot._conversation_cache,
+        "cache_sync_timeline_for_certification",
+        AsyncMock(return_value=SyncCacheWriteResult(complete=True)),
+    )
+
+    def failing_replace(source: Path, target: Path) -> None:
+        del source, target
+        message = "marker unavailable"
+        raise OSError(message)
+
+    monkeypatch.setattr(room_member_joins, "safe_replace", failing_replace)
+
+    with pytest.raises(RuntimeError, match="room-member join tracking"):
+        await bot._on_sync_response(
+            _sync_response_with_state(
+                room.room_id,
+                [_room_member_event(event_id="$snapshot", prev_membership=None)],
+            ),
+        )
+
+    assert load_sync_checkpoint(tmp_path, bot.agent_name) is None
+    assert bot.client.next_batch == retry_token
+
+
+@pytest.mark.asyncio
+async def test_sync_room_lifecycle_persist_failure_rewinds_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Direct lifecycle acceptance failure must invoke the shared rewind exactly once."""
+
+    @hook(EVENT_ROOM_MEMBER_JOINED)
+    async def joined(_ctx: RoomMemberJoinedContext) -> None:
+        pass
+
+    bot = _router_bot(tmp_path)
+    room = _room()
+    bot.client.rooms = {room.room_id: room}
+    bot.client.next_batch = "s_after_failure"
+    bot._sync_cache_trust.state = SyncTrustState.CERTIFIED
+    bot._sync_cache_trust.checkpoint = SyncCheckpoint("s_before_failure")
+    bot.hook_registry = HookRegistry.from_plugins([_plugin("onboarding", [joined])])
+    monkeypatch.setattr(
+        bot._conversation_cache,
+        "cache_sync_timeline_for_certification",
+        AsyncMock(return_value=SyncCacheWriteResult(complete=True)),
+    )
+
+    def fail_create(_obligation: object) -> object:
+        message = "dispatch database unavailable"
+        raise OSError(message)
+
+    persist_failure = MagicMock(wraps=bot._rewind_sync_after_pre_certification_failure)
+    bot._dispatch_obligation_runner.on_persist_failure = persist_failure
+    monkeypatch.setattr(bot._dispatch_obligation_store, "create_pending", fail_create)
+
+    with pytest.raises(OSError, match="dispatch database unavailable"):
+        await bot._on_sync_response(
+            _sync_response_with_state(
+                room.room_id,
+                [_room_member_event(event_id="$lifecycle-persist-failure")],
+            ),
+        )
+
+    persist_failure.assert_called_once_with()
+    assert bot.client.next_batch == "s_before_failure"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("record_only", [False, True])
+async def test_sync_state_baseline_markers_batch_one_worker_write(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    record_only: bool,
+) -> None:
+    """Full-state baseline recording must write once without blocking the event loop."""
+
+    @hook(EVENT_ROOM_MEMBER_JOINED)
+    async def joined(_ctx: RoomMemberJoinedContext) -> None:
+        pass
+
+    bot = _router_bot(tmp_path)
+    room = _room()
+    bot.client.rooms = {room.room_id: room}
+    bot.hook_registry = HookRegistry.from_plugins([_plugin("onboarding", [joined])])
+    event_loop_thread = threading.get_ident()
+    save_threads: list[int] = []
+    original_save = room_member_joins._save_room_member_joins
+
+    def tracked_save(path: Path, seen: dict[str, set[str]]) -> None:
+        save_threads.append(threading.get_ident())
+        original_save(path, seen)
+
+    monkeypatch.setattr(room_member_joins, "_save_room_member_joins", tracked_save)
+    events = [
+        _room_member_event(event_id="$alice", user_id="@alice:localhost", prev_membership=None),
+        _room_member_event(event_id="$bob", user_id="@bob:localhost", prev_membership=None),
+    ]
+
+    await bot._emit_room_member_joined_sync_state_hooks(
+        _sync_response_with_state(room.room_id, events),
+        record_only=record_only,
+    )
+
+    assert len(save_threads) == 1
+    assert save_threads[0] != event_loop_thread
+    assert room_member_joins.room_member_join_is_seen(
+        bot.runtime_paths.storage_root,
+        room_id=room.room_id,
+        user_id="@alice:localhost",
+    )
+    assert room_member_joins.room_member_join_is_seen(
+        bot.runtime_paths.storage_root,
+        room_id=room.room_id,
+        user_id="@bob:localhost",
+    )
+
+
+@pytest.mark.asyncio
+async def test_sync_state_marker_update_waits_for_live_marker_lock(tmp_path: Path) -> None:
+    """Sync baseline and live completion markers must serialize through one bot lock."""
+    bot = _router_bot(tmp_path)
+    room = _room()
+    bot.client.rooms = {room.room_id: room}
+    await bot._room_member_join_lock.acquire()
+    marker_task = asyncio.create_task(
+        bot._emit_room_member_joined_sync_state_hooks(
+            _sync_response_with_state(
+                room.room_id,
+                [_room_member_event(event_id="$baseline", prev_membership=None)],
+            ),
+            record_only=True,
+        ),
+    )
+    try:
+        await asyncio.sleep(0.05)
+        assert not marker_task.done()
+    finally:
+        bot._room_member_join_lock.release()
+        await marker_task
+
+    assert room_member_joins.room_member_join_is_seen(
+        bot.runtime_paths.storage_root,
+        room_id=room.room_id,
+        user_id="@alice:localhost",
+    )
+
+
+@pytest.mark.asyncio
+async def test_sync_state_lifecycle_dispatch_does_not_hold_marker_lock(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Lifecycle callback owns live de-dup, so sync orchestration cannot lock around dispatch."""
+    bot = _router_bot(tmp_path)
+    room = _room()
+    bot.client.rooms = {room.room_id: room}
+    dispatched: list[str] = []
+
+    @hook(EVENT_ROOM_MEMBER_JOINED)
+    async def joined(_ctx: RoomMemberJoinedContext) -> None:
+        pass
+
+    bot.hook_registry = HookRegistry.from_plugins([_plugin("onboarding", [joined])])
+
+    async def dispatch(
+        _room: nio.MatrixRoom,
+        event: nio.Event,
+        callback_kind: DispatchCallbackKind,
+    ) -> None:
+        assert not bot._room_member_join_lock.locked()
+        assert callback_kind is DispatchCallbackKind.ROOM_LIFECYCLE
+        dispatched.append(event.event_id)
+
+    monkeypatch.setattr(bot._dispatch_obligation_runner, "dispatch", dispatch)
+
+    await bot._emit_room_member_joined_sync_state_hooks(
+        _sync_response_with_state(room.room_id, [_room_member_event(event_id="$dispatch")]),
+    )
+
+    assert dispatched == ["$dispatch"]
 
 
 @pytest.mark.asyncio
@@ -540,6 +855,47 @@ async def test_registered_room_member_callback_uses_delivery_time_arming_state(
 
 
 @pytest.mark.asyncio
+async def test_reset_member_callback_admits_exact_pending_lifecycle_obligation(
+    tmp_path: Path,
+) -> None:
+    """A cold member snapshot may retry only its exact durable lifecycle work."""
+    seen: list[str] = []
+
+    @hook(EVENT_ROOM_MEMBER_JOINED)
+    async def joined(ctx: RoomMemberJoinedContext) -> None:
+        seen.append(ctx.event_id)
+
+    bot = _router_bot(tmp_path)
+    room = _room()
+    bot.client.rooms = {room.room_id: room}
+    bot.hook_registry = HookRegistry.from_plugins([_plugin("onboarding", [joined])])
+    bot._first_sync_done = True
+    bot._room_member_join_hooks_armed = True
+    bot._register_room_member_callback_after_initial_sync()
+    room_member_callback = bot.client.add_event_callback.call_args.args[0]
+    event = _room_member_event(event_id="$pending-member")
+    bot._cold_history_fence.start(trusted_continuation="s_warm")
+    obligation = await bot._dispatch_obligation_runner.persist(
+        room,
+        event,
+        DispatchCallbackKind.ROOM_LIFECYCLE,
+    )
+    assert obligation is not None
+    sync_error = MagicMock(spec=nio.SyncError)
+    sync_error.status_code = "M_UNKNOWN_POS"
+
+    await bot._on_sync_error(sync_error)
+    await room_member_callback(room, event)
+    await wait_for_background_tasks(timeout=1.0, owner=bot._runtime_view)
+
+    assert seen == ["$pending-member"]
+    assert not bot._dispatch_obligation_store.has_pending(
+        "$pending-member",
+        DispatchCallbackKind.ROOM_LIFECYCLE,
+    )
+
+
+@pytest.mark.asyncio
 async def test_uncertain_first_sync_reset_does_not_emit_room_member_joined_snapshot(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -588,12 +944,20 @@ async def test_uncertain_first_sync_reset_does_not_emit_room_member_joined_snaps
     assert seen == ["$live"]
 
 
-def test_room_member_joined_ignores_join_when_tracking_save_fails(
+@pytest.mark.asyncio
+async def test_room_member_joined_save_failure_remains_retryable(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A join should not emit when durable de-duplication cannot be written."""
+    """Failed terminal tracking must surface so the durable obligation stays pending."""
+    seen: list[str] = []
+
+    @hook(EVENT_ROOM_MEMBER_JOINED)
+    async def joined(ctx: RoomMemberJoinedContext) -> None:
+        seen.append(ctx.event_id)
+
     bot = _router_bot(tmp_path)
+    bot.hook_registry = HookRegistry.from_plugins([_plugin("onboarding", [joined])])
     room = _room()
 
     def failing_replace(source: Path, target: Path) -> None:
@@ -602,15 +966,11 @@ def test_room_member_joined_ignores_join_when_tracking_save_fails(
 
     monkeypatch.setattr(room_member_joins, "safe_replace", failing_replace)
 
-    join = room_member_joins.room_member_join_from_event(
-        room,
-        _room_member_event(event_id="$join"),
-        config=bot.config,
-        runtime_paths=bot.runtime_paths,
-        storage_root=bot.runtime_paths.storage_root,
-    )
+    with pytest.raises(RuntimeError, match="Failed to persist completed room-member join") as exc_info:
+        await bot._on_room_member(room, _room_member_event(event_id="$join"))
 
-    assert join is None
+    assert isinstance(exc_info.value.__cause__, OSError)
+    assert seen == ["$join"]
     assert not (bot.runtime_paths.storage_root / "tracking" / "room_member_joins.json").exists()
 
 
@@ -619,48 +979,41 @@ async def test_room_member_joined_deduplicates_concurrent_same_user_marking(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Concurrent duplicate joins should still produce one hook payload."""
+    """Concurrent duplicate joins should still emit one hook payload."""
+    seen: list[str] = []
+
+    @hook(EVENT_ROOM_MEMBER_JOINED)
+    async def joined(ctx: RoomMemberJoinedContext) -> None:
+        seen.append(ctx.event_id)
+
     bot = _router_bot(tmp_path)
+    bot.hook_registry = HookRegistry.from_plugins([_plugin("onboarding", [joined])])
     room = _room()
     save_started = threading.Event()
     release_save = threading.Event()
     original_save = room_member_joins._save_room_member_joins
 
-    def delayed_save(path: Path, seen: dict[str, set[str]]) -> bool:
+    def delayed_save(path: Path, seen: dict[str, set[str]]) -> None:
         save_started.set()
         assert release_save.wait(timeout=2.0)
-        return original_save(path, seen)
+        original_save(path, seen)
 
     monkeypatch.setattr(room_member_joins, "_save_room_member_joins", delayed_save)
 
-    first_task: asyncio.Task[room_member_joins.RoomMemberJoin | None] | None = None
-    second_task: asyncio.Task[room_member_joins.RoomMemberJoin | None] | None = None
+    first_task: asyncio.Task[None] | None = None
+    second_task: asyncio.Task[None] | None = None
     try:
         first_task = asyncio.create_task(
-            asyncio.to_thread(
-                room_member_joins.room_member_join_from_event,
-                room,
-                _room_member_event(event_id="$join1"),
-                config=bot.config,
-                runtime_paths=bot.runtime_paths,
-                storage_root=bot.runtime_paths.storage_root,
-            ),
+            bot._on_room_member(room, _room_member_event(event_id="$join1")),
         )
         assert await asyncio.to_thread(save_started.wait, 2.0)
         second_task = asyncio.create_task(
-            asyncio.to_thread(
-                room_member_joins.room_member_join_from_event,
-                room,
-                _room_member_event(event_id="$join2"),
-                config=bot.config,
-                runtime_paths=bot.runtime_paths,
-                storage_root=bot.runtime_paths.storage_root,
-            ),
+            bot._on_room_member(room, _room_member_event(event_id="$join2")),
         )
         await asyncio.sleep(0.05)
         release_save.set()
 
-        results = await asyncio.gather(first_task, second_task)
+        await asyncio.gather(first_task, second_task)
     finally:
         release_save.set()
         pending = [task for task in (first_task, second_task) if task is not None and not task.done()]
@@ -672,9 +1025,7 @@ async def test_room_member_joined_deduplicates_concurrent_same_user_marking(
         if pending:
             await asyncio.gather(*pending, return_exceptions=True)
 
-    joins = [result for result in results if result is not None]
-    assert len(joins) == 1
-    assert joins[0].event_id == "$join1"
+    assert seen == ["$join1"]
 
 
 @pytest.mark.asyncio

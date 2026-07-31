@@ -14,6 +14,7 @@ from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from threading import Event, get_ident
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, cast
 from unittest.mock import MagicMock
 
@@ -42,6 +43,7 @@ from mindroom.config.knowledge import KnowledgeBaseConfig, KnowledgeGitConfig
 from mindroom.config.main import Config
 from mindroom.credentials import get_runtime_shared_credentials_manager
 from mindroom.credentials_sync import get_embedder_api_key
+from mindroom.file_memory_knowledge import resolve_file_memory_knowledge
 from mindroom.knowledge import KnowledgeRefreshScheduler, resolve_agent_knowledge_access
 from mindroom.knowledge.availability import KnowledgeAvailability
 from mindroom.knowledge.candidate_checkpoint import load_candidate_checkpoint
@@ -74,7 +76,9 @@ from mindroom.knowledge.registry import (
 )
 from mindroom.knowledge.utils import KnowledgeAvailabilityDetail
 from mindroom.knowledge.watch import KnowledgeSourceWatcher
-from mindroom.tool_system.worker_routing import ToolExecutionIdentity
+from mindroom.memory_scope_ids import agent_scope_user_id
+from mindroom.runtime_resolution import resolve_agent_runtime
+from mindroom.tool_system.worker_routing import ToolExecutionIdentity, agent_workspace_root_path
 from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
 from tests.knowledge_test_support import (
     _Client,
@@ -219,6 +223,224 @@ def _identity(requester_id: str, *, agent_name: str = "helper") -> ToolExecution
         thread_id=None,
         resolved_thread_id=None,
         session_id="session",
+    )
+
+
+def _file_memory_config(tmp_path: Path, *agent_names: str) -> Config:
+    runtime_paths = test_runtime_paths(tmp_path)
+    return bind_runtime_paths(
+        Config(
+            agents={name: AgentConfig(display_name=name.title()) for name in agent_names},
+            models={},
+            memory={"backend": "file", "search": {"mode": "semantic"}},
+        ),
+        runtime_paths,
+    )
+
+
+def _scheduled_file_memory_overlay(
+    agent_name: str,
+    config: Config,
+    runtime_paths: RuntimePaths,
+) -> tuple[str, Config]:
+    scheduler = MagicMock()
+    scheduler.is_refreshing.return_value = False
+
+    resolution = resolve_agent_knowledge_access(
+        agent_name,
+        config,
+        runtime_paths,
+        refresh_scheduler=scheduler,
+    )
+
+    assert resolution.knowledge is None
+    scheduler.schedule_refresh.assert_called_once()
+    call = scheduler.schedule_refresh.call_args
+    assert call is not None
+    base_id = call.args[0]
+    effective_config = call.kwargs["config"]
+    assert isinstance(base_id, str)
+    assert isinstance(effective_config, Config)
+    return base_id, effective_config
+
+
+@pytest.mark.asyncio
+async def test_file_memory_overlay_query_returns_memory_markdown_hit(tmp_path: Path) -> None:
+    """A published file-memory overlay should be queryable through agent knowledge."""
+    config = _file_memory_config(tmp_path, "helper")
+    runtime_paths = runtime_paths_for(config)
+    root = agent_workspace_root_path(runtime_paths.storage_root, "helper")
+    memory_file = root / "memory" / "notes.md"
+    memory_file.parent.mkdir(parents=True)
+    query_marker = "issue256-query-marker"
+    memory_file.write_text(f"{query_marker}\n", encoding="utf-8")
+
+    base_id, effective_config = _scheduled_file_memory_overlay("helper", config, runtime_paths)
+    await refresh_knowledge_binding(base_id, config=effective_config, runtime_paths=runtime_paths)
+
+    knowledge = resolve_agent_knowledge_access("helper", config, runtime_paths).knowledge
+    assert knowledge is not None
+    documents = knowledge.search(query_marker, max_results=5)
+
+    assert any(query_marker in document.content for document in documents)
+    assert any(document.meta_data.get("source_path") == "memory/notes.md" for document in documents)
+
+
+@pytest.mark.asyncio
+async def test_cold_file_memory_overlay_waits_for_managed_content_before_publish(tmp_path: Path) -> None:
+    """A cold runtime memory base must remain initializing until its corpus exists."""
+    config = _file_memory_config(tmp_path, "helper")
+    runtime_paths = runtime_paths_for(config)
+    root = agent_workspace_root_path(runtime_paths.storage_root, "helper")
+    resolution = resolve_file_memory_knowledge(
+        scope_user_id=agent_scope_user_id("helper"),
+        root=root,
+        config=config,
+        search_config=config.resolve_entity("helper").memory_search,
+    )
+
+    empty_result = await refresh_knowledge_binding(
+        resolution.base_id,
+        config=resolution.config,
+        runtime_paths=runtime_paths,
+    )
+    cold_lookup = get_published_index(
+        resolution.base_id,
+        config=resolution.config,
+        runtime_paths=runtime_paths,
+    )
+
+    assert empty_result.index_published is False
+    assert empty_result.availability is KnowledgeAvailability.INITIALIZING
+    assert cold_lookup.index is None
+
+    memory_file = root / "memory" / "notes.md"
+    memory_file.parent.mkdir(parents=True)
+    memory_file.write_text("published-after-content-exists\n", encoding="utf-8")
+    populated_result = await refresh_knowledge_binding(
+        resolution.base_id,
+        config=resolution.config,
+        runtime_paths=runtime_paths,
+    )
+    populated_lookup = get_published_index(
+        resolution.base_id,
+        config=resolution.config,
+        runtime_paths=runtime_paths,
+    )
+
+    assert populated_result.index_published is True
+    assert populated_result.availability is KnowledgeAvailability.READY
+    assert populated_lookup.index is not None
+    assert [
+        document.content.strip() for document in populated_lookup.index.knowledge.search("published", max_results=5)
+    ] == ["published-after-content-exists"]
+
+
+@pytest.mark.asyncio
+async def test_file_memory_knowledge_is_cross_agent_isolated(tmp_path: Path) -> None:
+    """Distinct agent workspaces must never expose each other's file-memory index."""
+    config = _file_memory_config(tmp_path, "alpha", "beta")
+    runtime_paths = runtime_paths_for(config)
+    alpha_runtime = resolve_agent_runtime("alpha", config, runtime_paths, execution_identity=None)
+    beta_runtime = resolve_agent_runtime("beta", config, runtime_paths, execution_identity=None)
+    assert alpha_runtime.file_memory_root is not None
+    assert beta_runtime.file_memory_root is not None
+    assert alpha_runtime.file_memory_root != beta_runtime.file_memory_root
+    assert not alpha_runtime.file_memory_root.is_symlink()
+    assert not beta_runtime.file_memory_root.is_symlink()
+    alpha_marker = "issue256-alpha-only-marker"
+    beta_marker = "issue256-beta-only-marker"
+    alpha_file = alpha_runtime.file_memory_root / "memory" / "notes.md"
+    beta_file = beta_runtime.file_memory_root / "memory" / "notes.md"
+    alpha_file.parent.mkdir(parents=True)
+    beta_file.parent.mkdir(parents=True)
+    alpha_file.write_text(f"{alpha_marker}\n", encoding="utf-8")
+    beta_file.write_text(f"{beta_marker}\n", encoding="utf-8")
+
+    alpha_base_id, alpha_config = _scheduled_file_memory_overlay("alpha", config, runtime_paths)
+    beta_base_id, beta_config = _scheduled_file_memory_overlay("beta", config, runtime_paths)
+    assert alpha_base_id != beta_base_id
+    assert alpha_config.knowledge_bases[alpha_base_id].path != beta_config.knowledge_bases[beta_base_id].path
+    await refresh_knowledge_binding(alpha_base_id, config=alpha_config, runtime_paths=runtime_paths)
+    await refresh_knowledge_binding(beta_base_id, config=beta_config, runtime_paths=runtime_paths)
+
+    alpha_knowledge = resolve_agent_knowledge_access("alpha", config, runtime_paths).knowledge
+    beta_knowledge = resolve_agent_knowledge_access("beta", config, runtime_paths).knowledge
+    assert alpha_knowledge is not None
+    assert beta_knowledge is not None
+    alpha_own = alpha_knowledge.search(alpha_marker, max_results=5)
+    beta_own = beta_knowledge.search(beta_marker, max_results=5)
+    alpha_cross = alpha_knowledge.search(beta_marker, max_results=5)
+    beta_cross = beta_knowledge.search(alpha_marker, max_results=5)
+
+    assert any(alpha_marker in document.content for document in alpha_own)
+    assert any(beta_marker in document.content for document in beta_own)
+    assert all(beta_marker not in document.content for document in alpha_cross)
+    assert all(alpha_marker not in document.content for document in beta_cross)
+
+
+@pytest.mark.parametrize(
+    ("authored_source_count", "expected_result_count", "memory_source_expected"),
+    [
+        pytest.param(10, 11, True, id="all-sources-fit"),
+        pytest.param(25, 20, False, id="source-count-is-capped"),
+    ],
+)
+def test_default_merged_search_budget_is_bounded_while_representing_sources_that_fit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    authored_source_count: int,
+    expected_result_count: int,
+    memory_source_expected: bool,
+) -> None:
+    """Merged defaults represent every source only until the bounded result budget is full."""
+    authored_base_ids = [f"source_{index}" for index in range(authored_source_count)]
+    config = _file_memory_config(tmp_path, "helper")
+    config.agents["helper"].knowledge_bases = authored_base_ids
+    config.knowledge_bases.update(
+        {
+            base_id: KnowledgeBaseConfig(path=str(tmp_path / base_id), description=f"Source {base_id}")
+            for base_id in authored_base_ids
+        },
+    )
+    runtime_paths = runtime_paths_for(config)
+
+    def _published_index(base_id: str, **_kwargs: object) -> object:
+        vector_db = _VectorDb(collection=f"collection_{base_id}")
+        vector_db.create()
+        _VectorDb.collections[vector_db.collection_name] = [
+            {
+                "content": f"result from {base_id}",
+                "metadata": {"source_path": f"{base_id}.md"},
+            },
+        ]
+        knowledge = SimpleNamespace(
+            vector_db=vector_db,
+            name=None,
+            description=None,
+            max_results=10,
+        )
+        return SimpleNamespace(
+            key=SimpleNamespace(base_id=base_id),
+            index=SimpleNamespace(
+                knowledge=knowledge,
+                state=SimpleNamespace(last_refresh_at=None, last_published_at=None),
+            ),
+            availability=KnowledgeAvailability.READY,
+            state=None,
+            schedule_refresh_on_access=False,
+        )
+
+    monkeypatch.setattr(knowledge_utils, "get_published_index", _published_index)
+
+    knowledge = resolve_agent_knowledge_access("helper", config, runtime_paths).knowledge
+    assert knowledge is not None
+    documents = knowledge.search("anything")
+
+    assert len(documents) == expected_result_count
+    assert (
+        any(document.content.startswith("result from file_memory_agent_helper_") for document in documents)
+        is memory_source_expected
     )
 
 
@@ -5981,6 +6203,97 @@ async def test_refresh_status_is_visible_across_scheduler_instances(
         release.set()
         await matrix_scheduler.shutdown()
         await api_scheduler.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_refresh_scheduler_claim_is_exclusive_across_instances(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two schedulers must not launch duplicate refreshes for one physical binding."""
+    docs_path = tmp_path / "docs"
+    config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
+    runtime_paths = runtime_paths_for(config)
+    matrix_scheduler = KnowledgeRefreshScheduler()
+    api_scheduler = KnowledgeRefreshScheduler()
+    started = asyncio.Event()
+    release = asyncio.Event()
+    calls = 0
+
+    async def _blocked_refresh(_base_id: str, **_kwargs: object) -> object:
+        nonlocal calls
+        calls += 1
+        started.set()
+        await release.wait()
+        return object()
+
+    monkeypatch.setattr(
+        "mindroom.knowledge.refresh_scheduler.refresh_knowledge_binding_in_subprocess",
+        _blocked_refresh,
+    )
+
+    matrix_scheduler.schedule_refresh("docs", config=config, runtime_paths=runtime_paths)
+    api_scheduler.schedule_refresh("docs", config=config, runtime_paths=runtime_paths)
+    await asyncio.wait_for(started.wait(), timeout=1)
+    await asyncio.sleep(0)
+
+    try:
+        assert calls == 1
+        assert len(matrix_scheduler._tasks) + len(api_scheduler._tasks) == 1
+        assert matrix_scheduler._pending == {}
+        assert api_scheduler._pending == {}
+        assert matrix_scheduler._claim_retry_handles == {}
+        assert api_scheduler._claim_retry_handles == {}
+    finally:
+        release.set()
+        await matrix_scheduler.shutdown()
+        await api_scheduler.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_refresh_scheduler_retries_request_after_direct_refresh_owner_finishes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A request rejected by a direct refresh claim must run after that owner finishes."""
+    docs_path = tmp_path / "docs"
+    config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
+    runtime_paths = runtime_paths_for(config)
+    scheduler = KnowledgeRefreshScheduler()
+    refresh_target = knowledge_registry.resolve_refresh_target(
+        "docs",
+        config=config,
+        runtime_paths=runtime_paths,
+    )
+    started = asyncio.Event()
+    calls = 0
+
+    async def _record_refresh(_base_id: str, **_kwargs: object) -> object:
+        nonlocal calls
+        calls += 1
+        started.set()
+        return object()
+
+    monkeypatch.setattr(
+        "mindroom.knowledge.refresh_scheduler.refresh_knowledge_binding_in_subprocess",
+        _record_refresh,
+    )
+
+    knowledge_refresh_locks.mark_refresh_active(refresh_target)
+    direct_claim_active = True
+    scheduler.schedule_refresh("docs", config=config, runtime_paths=runtime_paths)
+
+    try:
+        await asyncio.sleep(0)
+        assert calls == 0
+        knowledge_refresh_locks.mark_refresh_inactive(refresh_target)
+        direct_claim_active = False
+        await asyncio.wait_for(started.wait(), timeout=1)
+        assert calls == 1
+    finally:
+        if direct_claim_active:
+            knowledge_refresh_locks.mark_refresh_inactive(refresh_target)
+        await scheduler.shutdown()
 
 
 @pytest.mark.asyncio

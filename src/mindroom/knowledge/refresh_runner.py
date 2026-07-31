@@ -407,6 +407,20 @@ async def _refresh_knowledge_binding_locked(
             storage_path=binding.storage_root,
             knowledge_path=binding.knowledge_path,
         )
+        if await _should_defer_cold_empty_publication(manager, key):
+            await asyncio.to_thread(
+                mark_published_index_stale,
+                key,
+                reason="source_empty",
+                refresh_job="idle",
+            )
+            return KnowledgeRefreshResult(
+                key=key,
+                indexed_count=0,
+                index_published=False,
+                availability=KnowledgeAvailability.INITIALIZING,
+                last_error=None,
+            )
         unchanged_result = await _maybe_publish_unchanged_index(
             manager,
             key,
@@ -439,6 +453,20 @@ async def _refresh_knowledge_binding_locked(
         config=config,
         runtime_paths=runtime_paths,
     )
+
+
+async def _should_defer_cold_empty_publication(
+    manager: KnowledgeManager,
+    key: PublishedIndexKey,
+) -> bool:
+    """Return whether a content-gated cold index has no corpus to publish yet."""
+    if not manager.config.get_knowledge_base_config(manager.base_id).require_content_before_publish:
+        return False
+    files = await asyncio.to_thread(manager.list_files)
+    if files:
+        return False
+    state = await asyncio.to_thread(load_published_index_state, published_index_metadata_path(key))
+    return state is None or state.status != "complete" or not state.indexed_count
 
 
 async def _publish_file_mode_source_metadata(

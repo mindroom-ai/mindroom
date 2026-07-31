@@ -68,6 +68,7 @@ MindRoom's architecture consists of several key components working together.
 | `coalescing.py` | Live message coalescing gate (text dispatches immediately; media waits for attachments and a trailing caption) |
 | `text_ingress_dispatch.py` | Text ingress dispatch path used by TurnController |
 | `turn_policy.py` | Pure turn policy: decide ignore, route, or respond for inbound turns |
+| `dispatch_obligations.py` | Durable exact Matrix callback acceptance, settlement, and startup recovery |
 | `turn_store.py` | Unified durable turn access (wraps the handled-turn ledger) |
 | `handled_turns.py` | Disk-backed handled-turn ledger preventing duplicate responses |
 | `response_runner.py` | Response lifecycle execution (locking, streaming vs non-streaming, cancellation, detached inbox responses, shutdown drains) |
@@ -81,6 +82,8 @@ MindRoom's architecture consists of several key components working together.
 | `streaming.py` | Streaming state machine: placeholder, progressive edits, tool traces, cancellation |
 | `media_inputs.py` | Shared media-input container passed across bot, teams, and AI layers |
 | `media_fallback.py` | Retries model requests without inline media when models reject media inputs |
+| `file_memory_knowledge.py` | Shared resolution for agent file-memory semantic knowledge overlays |
+| `memory_scope_ids.py` | Cycle-free canonical agent memory scope identifiers |
 | `avatar_generation.py` | Generates and manages avatar assets for agents, rooms, and spaces |
 | `topic_generator.py` | AI-generated room topics |
 | `background_tasks.py` | Non-blocking async task management with GC protection |

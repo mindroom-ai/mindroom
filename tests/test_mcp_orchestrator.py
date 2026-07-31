@@ -680,6 +680,7 @@ async def test_mcp_catalog_replacement_recovers_interrupted_rooms(tmp_path: Path
     old_code_bot = MagicMock(spec=AgentBot)
     old_code_bot.pending_sync_restart_retry_room_ids = frozenset()
     old_team_bot = MagicMock(spec=AgentBot)
+    old_team_bot.running = False
     old_team_bot.pending_sync_restart_retry_room_ids = frozenset()
     new_code_bot = MagicMock(spec=AgentBot)
     new_code_bot.agent_name = "code"
@@ -689,6 +690,7 @@ async def test_mcp_catalog_replacement_recovers_interrupted_rooms(tmp_path: Path
     router_bot = MagicMock(spec=AgentBot)
     router_bot.running = True
     router_bot.client = MagicMock()
+    router_bot.recover_pending_turn_dispatch_obligations = AsyncMock()
     orchestrator._external_trigger_runtime.api_enabled = False
     orchestrator.agent_bots = {
         ROUTER_AGENT_NAME: router_bot,
@@ -723,7 +725,9 @@ async def test_router_restart_unbinds_external_trigger_runtime_before_stop_and_s
     orchestrator = _MultiAgentOrchestrator(runtime_paths=_runtime_paths(tmp_path))
     config = _config(tmp_path)
     orchestrator.config = config
-    orchestrator.agent_bots = {ROUTER_AGENT_NAME: MagicMock(spec=AgentBot)}
+    router_bot = MagicMock(spec=AgentBot)
+    router_bot.running = False
+    orchestrator.agent_bots = {ROUTER_AGENT_NAME: router_bot}
     order: list[str] = []
     external_trigger_runtime_bound = True
 
@@ -786,9 +790,16 @@ async def test_external_trigger_target_restart_unbinds_runtime_before_stop(tmp_p
     orchestrator = _MultiAgentOrchestrator(runtime_paths=_runtime_paths(tmp_path))
     config = _config_with_code_agent(tmp_path)
     orchestrator.config = config
+    router_bot = MagicMock(spec=AgentBot)
+    router_bot.running = True
+    router_bot.first_sync_complete = True
+    router_bot.recover_pending_turn_dispatch_obligations = AsyncMock()
+    code_bot = MagicMock(spec=AgentBot)
+    code_bot.running = False
+    code_bot.first_sync_complete = False
     orchestrator.agent_bots = {
-        ROUTER_AGENT_NAME: MagicMock(spec=AgentBot),
-        "code": MagicMock(spec=AgentBot),
+        ROUTER_AGENT_NAME: router_bot,
+        "code": code_bot,
     }
     order: list[str] = []
     external_trigger_runtime_bound = True
@@ -816,7 +827,8 @@ async def test_external_trigger_target_restart_unbinds_runtime_before_stop(tmp_p
 
     async def fake_create_and_start_entities(*_args: object, **_kwargs: object) -> EntityStartResults:
         order.append("create")
-        return EntityStartResults(started_bots=[orchestrator.agent_bots["code"]])
+        code_bot.running = True
+        return EntityStartResults(started_bots=[code_bot])
 
     with (
         patch.object(orchestrator._external_trigger_runtime, "unbind", side_effect=unbind_external_trigger_runtime),
@@ -1123,9 +1135,16 @@ async def test_apply_config_update_plan_unbinds_runtime_before_restarted_entity_
     current_config = _config_with_code_agent(tmp_path)
     new_config = _config_with_code_agent(tmp_path, role="Write better code")
     orchestrator.config = current_config
+    router_bot = MagicMock(spec=AgentBot)
+    router_bot.running = True
+    router_bot.first_sync_complete = True
+    router_bot.recover_pending_turn_dispatch_obligations = AsyncMock()
+    code_bot = MagicMock(spec=AgentBot)
+    code_bot.running = False
+    code_bot.first_sync_complete = False
     orchestrator.agent_bots = {
-        ROUTER_AGENT_NAME: MagicMock(spec=AgentBot),
-        "code": MagicMock(spec=AgentBot),
+        ROUTER_AGENT_NAME: router_bot,
+        "code": code_bot,
     }
     plan = ConfigUpdatePlan(
         new_config=new_config,
@@ -1211,9 +1230,16 @@ async def test_apply_config_update_plan_rebinds_trigger_runtime_after_support_se
     current_config = _config_with_code_agent(tmp_path)
     new_config = _config_with_code_agent(tmp_path, role="Write better code")
     orchestrator.config = current_config
+    router_bot = MagicMock(spec=AgentBot)
+    router_bot.running = True
+    router_bot.first_sync_complete = True
+    router_bot.recover_pending_turn_dispatch_obligations = AsyncMock()
+    code_bot = MagicMock(spec=AgentBot)
+    code_bot.running = False
+    code_bot.first_sync_complete = False
     orchestrator.agent_bots = {
-        ROUTER_AGENT_NAME: MagicMock(spec=AgentBot),
-        "code": MagicMock(spec=AgentBot),
+        ROUTER_AGENT_NAME: router_bot,
+        "code": code_bot,
     }
     plan = ConfigUpdatePlan(
         new_config=new_config,

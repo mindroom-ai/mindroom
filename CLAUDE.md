@@ -62,6 +62,7 @@ Gemini API docs call `gemini-3.1-flash-image` Nano Banana 2, while Vertex AI doc
 ```text
 Matrix sync callback
   -> bot.py (AgentBot/TeamBot runtime shell)
+  -> dispatch_obligations.py                                (durable exact callback acceptance and restart recovery)
   -> turn_controller.py (owns one turn: precheck -> normalize -> resolve -> coalesce -> decide -> execute -> record)
        -> ingress_validation.py                                  (trust, dedup, echo drop; commands exit before batching)
        -> inbound_turn_normalizer.py + conversation_resolver.py  (canonical turn input, conversation identity)
@@ -95,6 +96,7 @@ Matrix sync callback
 | `text_ingress_dispatch.py` | Text ingress dispatch path used by TurnController |
 | `turn_policy.py` | Pure turn policy: decide ignore, route, or respond for inbound turns |
 | `dispatch_replay_guard.py` | Replay-guard checks for dispatch sequencing |
+| `dispatch_obligations.py` | Durable exact Matrix callback acceptance, settlement, and startup recovery |
 | `turn_store.py` | Unified durable turn access (wraps the handled-turn ledger) |
 | `handled_turns.py` | Disk-backed handled-turn ledger preventing duplicate responses |
 | `redacted_turn_cleanup.py` | Source-redaction tombstoning and serialized persisted replay cleanup |
@@ -117,6 +119,8 @@ Matrix sync callback
 | `teams.py` | Multi-agent collaboration (coordinate vs collaborate modes) |
 | `agent_policy.py` | Canonical execution-policy derivation from authored agent config |
 | `memory/` | Mem0 memory: agent and team-scoped |
+| `file_memory_knowledge.py` | Shared resolution for agent file-memory semantic knowledge overlays |
+| `memory_scope_ids.py` | Cycle-free canonical agent memory scope identifiers |
 | `knowledge/` | Knowledge base / RAG file indexing with watcher |
 | `knowledge/file_listing.py` | Which files belong to a knowledge base: include patterns, traversal, symlink-safe inclusion rules |
 | `knowledge/collections.py` | Chroma collection lifecycle for one knowledge base: naming, opening, probing, deleting, reclaiming |

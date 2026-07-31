@@ -3,17 +3,18 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+import json
+from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING, Protocol, cast
 
 import nio
 
 from mindroom.authorization import is_authorized_sender
 from mindroom.commands.handler import generate_welcome_message_for_room
 from mindroom.constants import ROUTER_AGENT_NAME
+from mindroom.durable_write import write_json_file_durable
 from mindroom.matrix.client_room_admin import get_joined_rooms, join_room
-from mindroom.matrix.decrypt_failure import raise_notice_floor
 from mindroom.matrix.invited_rooms_store import (
     invited_rooms_path,
     load_invited_rooms,
@@ -80,6 +81,7 @@ class BotRoomLifecycle:
         self._welcome_locks: dict[str, asyncio.Lock] = {}
         self._handled_invite_room_ids: set[str] = set()
         self._welcomed_room_ids: set[str] = set()
+        self._decrypt_notice_fenced_room_ids = self._load_decrypt_notice_fences()
 
     def _lock_for_room(self, locks: dict[str, asyncio.Lock], room_id: str) -> asyncio.Lock:
         lock = locks.get(room_id)
@@ -123,6 +125,34 @@ class BotRoomLifecycle:
         """Return whether this entity persists invited room IDs across restarts."""
         return should_persist_invited_rooms(self._config(), self.deps.agent_name)
 
+    def decrypt_notice_is_fenced(self, room_id: str) -> bool:
+        """Return whether pre-join decrypt failures in this room stay silent."""
+        return room_id in self._decrypt_notice_fenced_room_ids
+
+    def observe_trusted_sync_rooms(self, room_ids: Iterable[str]) -> None:
+        """Clear join fences for rooms included in one trusted sync response."""
+        remaining_room_ids = self._decrypt_notice_fenced_room_ids.difference(room_ids)
+        self._replace_decrypt_notice_fences(remaining_room_ids)
+
+    async def restore_pending_join_decrypt_fences(self) -> None:
+        """Validate durable unfinished-join fences before sync can start."""
+        if not self._decrypt_notice_fenced_room_ids:
+            return
+        joined_rooms = await get_joined_rooms(self._client())
+        if joined_rooms is None:
+            msg = "Could not verify pending join decrypt fences because joined rooms are unavailable"
+            raise RuntimeError(msg)
+        pending_joined_room_ids = self._decrypt_notice_fenced_room_ids.intersection(joined_rooms)
+        self._replace_decrypt_notice_fences(pending_joined_room_ids)
+
+    async def _join_room_with_decrypt_notice_fence(self, client: nio.AsyncClient, room_id: str) -> bool:
+        """Fence decrypt callbacks before a live join can race its first sync."""
+        self._replace_decrypt_notice_fences(self._decrypt_notice_fenced_room_ids | {room_id})
+        joined = await join_room(client, room_id)
+        if not joined:
+            self._replace_decrypt_notice_fences(self._decrypt_notice_fenced_room_ids - {room_id})
+        return joined
+
     async def _on_configured_room_joined(self, room_id: str) -> None:
         """Apply common join state before configured-room setup."""
         await self.deps.on_room_joined(room_id)
@@ -131,6 +161,37 @@ class BotRoomLifecycle:
     def invited_rooms_file_path(self) -> Path:
         """Return the durable path for invited room IDs for this entity."""
         return invited_rooms_path(self.deps.runtime_paths.storage_root, self.deps.agent_name)
+
+    def _decrypt_notice_fences_file_path(self) -> Path:
+        """Return the durable unfinished-join fence path for this entity."""
+        return self.invited_rooms_file_path().with_name("pending_join_decrypt_fences.json")
+
+    def _load_decrypt_notice_fences(self) -> set[str]:
+        """Load exact room joins that still await trusted sync membership."""
+        path = self._decrypt_notice_fences_file_path()
+        if not path.exists():
+            return set()
+        try:
+            room_ids = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError, UnicodeDecodeError) as exc:
+            msg = f"Failed to load pending join decrypt fences from {path}"
+            raise RuntimeError(msg) from exc
+        if not isinstance(room_ids, list) or any(not isinstance(room_id, str) for room_id in room_ids):
+            msg = f"Invalid pending join decrypt fences at {path}"
+            raise RuntimeError(msg)
+        return set(cast("list[str]", room_ids))
+
+    def _replace_decrypt_notice_fences(self, room_ids: set[str]) -> None:
+        """Durably replace exact unfinished joins before exposing new state."""
+        if room_ids == self._decrypt_notice_fenced_room_ids:
+            return
+        write_json_file_durable(
+            self._decrypt_notice_fences_file_path(),
+            sorted(room_ids),
+            indent=2,
+            trailing_newline=True,
+        )
+        self._decrypt_notice_fenced_room_ids = room_ids
 
     def load_invited_rooms(self) -> set[str]:
         """Load invited rooms persisted for one eligible entity."""
@@ -145,7 +206,7 @@ class BotRoomLifecycle:
             return
         self._update_invited_room(room_id, remember=False)
 
-    def _update_invited_room(self, room_id: str, *, remember: bool) -> None:
+    def _update_invited_room(self, room_id: str, *, remember: bool) -> bool:
         """Merge one update with durable and in-memory state before saving."""
         room_ids = load_invited_rooms(self.invited_rooms_file_path()) | self.invited_rooms
         if remember:
@@ -155,15 +216,26 @@ class BotRoomLifecycle:
             self._pending_forgotten_invited_rooms.add(room_id)
         room_ids.difference_update(self._pending_forgotten_invited_rooms)
 
-        if save_invited_rooms(self.invited_rooms_file_path(), room_ids):
+        saved = save_invited_rooms(self.invited_rooms_file_path(), room_ids)
+        if saved:
             self._pending_forgotten_invited_rooms.clear()
         self.invited_rooms = room_ids
+        return saved
+
+    def _remember_invited_room(self, room_id: str) -> None:
+        """Persist one accepted invite or fail so its durable intent can retry."""
+        if self.should_persist_invited_rooms() and not self._update_invited_room(room_id, remember=True):
+            msg = f"Failed to persist invited room {room_id}"
+            raise OSError(msg)
 
     async def join_configured_rooms(self) -> None:
         """Join all rooms this bot should preserve across restarts."""
         client = self._client()
         joined_rooms = await get_joined_rooms(client)
-        current_rooms = set(joined_rooms or [])
+        if joined_rooms is None:
+            msg = "Could not reconcile configured rooms because joined rooms are unavailable"
+            raise RuntimeError(msg)
+        current_rooms = set(joined_rooms)
         desired_rooms = set(self.deps.get_configured_rooms())
         if self.should_persist_invited_rooms():
             desired_rooms.update(self.invited_rooms)
@@ -174,13 +246,9 @@ class BotRoomLifecycle:
                 await self._on_configured_room_joined(room_id)
                 continue
 
-            if await join_room(client, room_id):
+            if await self._join_room_with_decrypt_notice_fence(client, room_id):
                 current_rooms.add(room_id)
                 self._logger().info("Joined room", room_id=room_id)
-                if client.user_id:
-                    # Pre-join encrypted history can never decrypt on this device;
-                    # don't post decrypt-failure notices for it.
-                    raise_notice_floor(client.user_id, room_id)
                 await self._on_configured_room_joined(room_id)
             else:
                 self._logger().warning("Failed to join room", room_id=room_id)
@@ -292,23 +360,21 @@ class BotRoomLifecycle:
         async with self._lock_for_room(self._invite_join_locks, room.room_id):
             if room.room_id in self._handled_invite_room_ids or self._client_has_joined_room(room.room_id):
                 self._logger().debug("Invite already handled", room_id=room.room_id, sender=event.sender)
+                await self.deps.on_room_joined(room.room_id)
+                self._remember_invited_room(room.room_id)
                 if self.deps.agent_name == ROUTER_AGENT_NAME:
                     await self.send_welcome_message_if_empty(room.room_id, event.sender)
                 return
 
             self._logger().info("Received invite", room_id=room.room_id, sender=event.sender)
-            if not await join_room(client, room.room_id):
+            if not await self._join_room_with_decrypt_notice_fence(client, room.room_id):
                 self._logger().error("Failed to join room", room_id=room.room_id)
-                return
+                msg = f"Failed to join invited room {room.room_id}"
+                raise RuntimeError(msg)
 
-            self._handled_invite_room_ids.add(room.room_id)
             self._logger().info("Joined room", room_id=room.room_id)
             await self.deps.on_room_joined(room.room_id)
-            if client.user_id:
-                # Pre-join encrypted history can never decrypt on this device;
-                # don't post decrypt-failure notices for it.
-                raise_notice_floor(client.user_id, room.room_id)
-            if self.should_persist_invited_rooms():
-                self._update_invited_room(room.room_id, remember=True)
+            self._remember_invited_room(room.room_id)
+            self._handled_invite_room_ids.add(room.room_id)
             if self.deps.agent_name == ROUTER_AGENT_NAME:
                 await self.send_welcome_message_if_empty(room.room_id, event.sender)

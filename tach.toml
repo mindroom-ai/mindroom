@@ -88,6 +88,20 @@ path = "mindroom.dynamic_workflows"
 depends_on = ["mindroom.durable_write"]
 
 [[modules]]
+path = "mindroom.dispatch_obligations"
+depends_on = [
+    "mindroom.background_tasks",
+    "mindroom.logging_config",
+    "mindroom.matrix.media",
+]
+visibility = ["mindroom.bot"]
+
+[[modules]]
+path = "mindroom.cold_history_fence"
+depends_on = ["mindroom.matrix.sync_token_values"]
+visibility = ["mindroom.bot"]
+
+[[modules]]
 path = "mindroom.report_publishing"
 depends_on = ["mindroom.durable_write"]
 
@@ -170,6 +184,18 @@ visibility = ["mindroom.response_turn"]
 path = "mindroom.dynamic_tool_continuation"
 depends_on = []
 visibility = ["mindroom.response_turn"]
+
+[[modules]]
+path = "mindroom.file_memory_knowledge"
+depends_on = [
+    "mindroom.config.knowledge",
+    "mindroom.memory_scope_ids",
+    "mindroom.runtime_resolution",
+]
+visibility = [
+    "mindroom.knowledge.utils",
+    "mindroom.memory._semantic_file_search",
+]
 
 [[modules]]
 path = "mindroom.agents"
@@ -271,6 +297,7 @@ visibility = [
 [[modules]]
 path = "mindroom.ai_runtime"
 depends_on = [
+    "mindroom.history_run_visibility",
     "mindroom.logging_config",
     "mindroom.media_fallback",
     "mindroom.media_inputs",
@@ -285,6 +312,16 @@ visibility = [
     "mindroom.teams",
     "mindroom.thread_summary",
     "mindroom.topic_generator",
+]
+
+[[modules]]
+path = "mindroom.history_run_visibility"
+depends_on = []
+visibility = [
+    "mindroom.ai_runtime",
+    "mindroom.history.compaction",
+    "mindroom.history.storage",
+    "mindroom.sync_restart_retry",
 ]
 
 [[modules]]
@@ -839,7 +876,6 @@ depends_on = [
     "mindroom.commands.handler",
     "mindroom.constants",
     "mindroom.matrix.client_room_admin",
-    "mindroom.matrix.decrypt_failure",
     "mindroom.matrix.rooms",
     "mindroom.matrix.state",
     "mindroom.runtime_protocols",
@@ -892,6 +928,7 @@ depends_on = [
     "mindroom.constants",
     "mindroom.custom_tools.attachment_helpers",
     "mindroom.custom_tools.attachments",
+    "mindroom.entity_resolution",
     "mindroom.interactive",
     "mindroom.logging_config",
     "mindroom.matrix.client_delivery",
@@ -1018,6 +1055,7 @@ path = "mindroom.history.compaction"
 depends_on = [
     "mindroom.claude_prompt_cache",
     "mindroom.constants",
+    "mindroom.history_run_visibility",
     "mindroom.history.storage",
     "mindroom.history.summary_call",
     "mindroom.history.types",
@@ -1059,6 +1097,7 @@ depends_on = [
 path = "mindroom.history.storage"
 depends_on = [
     "mindroom.constants",
+    "mindroom.history_run_visibility",
     "mindroom.history.types",
     "mindroom.metadata_merge",
 ]
@@ -1531,9 +1570,20 @@ visibility = [
 ]
 
 [[modules]]
+path = "mindroom.memory_scope_ids"
+depends_on = []
+visibility = [
+    "mindroom.file_memory_knowledge",
+    "mindroom.memory._file_backend",
+    "mindroom.memory._mem0_backend",
+    "mindroom.memory._policy",
+]
+
+[[modules]]
 path = "mindroom.memory._policy"
 depends_on = [
     "mindroom.memory._shared",
+    "mindroom.memory_scope_ids",
     "mindroom.runtime_resolution",
 ]
 visibility = [
@@ -1571,6 +1621,7 @@ depends_on = [
     "mindroom.memory._file_backend",
     "mindroom.memory._prompting",
     "mindroom.memory._shared",
+    "mindroom.prompt_templates",
     "mindroom.timing",
 ]
 visibility = ["mindroom.memory", "mindroom.memory.auto_flush"]
@@ -1610,6 +1661,7 @@ depends_on = [
     "mindroom.memory._policy",
     "mindroom.memory._shared",
     "mindroom.memory._semantic_file_search",
+    "mindroom.memory_scope_ids",
     "mindroom.timing",
 ]
 visibility = ["mindroom.memory._backend", "mindroom.memory.functions"]
@@ -1618,6 +1670,7 @@ visibility = ["mindroom.memory._backend", "mindroom.memory.functions"]
 path = "mindroom.memory._semantic_file_search"
 depends_on = [
     "mindroom.embedding_errors",
+    "mindroom.file_memory_knowledge",
     "mindroom.knowledge",
     "mindroom.logging_config",
     "mindroom.memory._shared",
@@ -1634,6 +1687,7 @@ depends_on = [
     "mindroom.memory._policy",
     "mindroom.memory._prompting",
     "mindroom.memory._shared",
+    "mindroom.memory_scope_ids",
     "mindroom.timing",
 ]
 visibility = ["mindroom.memory._backend"]
@@ -1650,6 +1704,7 @@ visibility = [
     "mindroom.agents",
     "mindroom.config.main",
     "mindroom.memory._prompting",
+    "mindroom.memory.functions",
 ]
 
 [[modules]]
@@ -1994,6 +2049,7 @@ visibility = ["mindroom.matrix.sync_cache_trust"]
 path = "mindroom.matrix.sync_token_values"
 depends_on = []
 visibility = [
+    "mindroom.cold_history_fence",
     "mindroom.matrix.sync_certification",
     "mindroom.matrix.sync_tokens",
 ]
@@ -2058,7 +2114,7 @@ path = "mindroom.sync_restart_retry"
 depends_on = [
     "mindroom.response_admission",
     "mindroom.constants",
-    "mindroom.history.storage",
+    "mindroom.history_run_visibility",
     "mindroom.history.types",
     "mindroom.logging_config",
 ]
@@ -2142,7 +2198,6 @@ depends_on = [
 visibility = [
     "mindroom.api.main",
     "mindroom.bot",
-    "mindroom.bot_room_lifecycle",
     "mindroom.commands.encryption_commands",
 ]
 
@@ -2706,12 +2761,14 @@ depends_on = [
     "mindroom.approval_inbound",
     "mindroom.bot_room_lifecycle",
     "mindroom.bot_runtime_view",
+    "mindroom.cold_history_fence",
     "mindroom.commands.config_confirmation",
     "mindroom.constants",
     "mindroom.conversation_resolver",
     "mindroom.conversation_state_writer",
     "mindroom.delivery_gateway",
     "mindroom.desktop.pairing_receiver",
+    "mindroom.dispatch_obligations",
     "mindroom.edit_regenerator",
     "mindroom.entity_resolution",
     "mindroom.hooks",
@@ -3641,6 +3698,7 @@ visibility = ["mindroom.knowledge.utils"]
 path = "mindroom.knowledge.utils"
 depends_on = [
     "mindroom.embedding_errors",
+    "mindroom.file_memory_knowledge",
     "mindroom.knowledge.availability",
     "mindroom.knowledge.refresh_policy",
     "mindroom.knowledge.registry",
@@ -3760,7 +3818,6 @@ expose = [
     "resolve_agent_execution",
     "resolve_agent_runtime",
     "resolve_knowledge_binding",
-    "resolve_knowledge_owner_bindings",
 ]
 from = ["mindroom.runtime_resolution"]
 

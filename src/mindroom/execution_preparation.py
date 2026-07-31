@@ -254,16 +254,21 @@ def _context_message_from_visible_message(
     # them to the model it can continue the pattern as plain text with no trace.
     body = _context_body_from_visible_message(message, response_sender_id=response_sender_id) if body is None else body
     annotation = format_attachment_annotation(list(attachment_records))
-    if annotation:
-        body = f"{body}\n{annotation}" if body else annotation
     if (
         response_sender_id is not None
         and message.sender == response_sender_id
         and not _is_relayed_user_message(message)
     ):
+        if message.content.get("msgtype") == "m.audio":
+            body = f"[audio message: {body}]"
+        if annotation:
+            body = f"{body}\n{annotation}" if body else annotation
         # Provider APIs reject media on assistant turns, so agent-sent
-        # attachments surface through the annotation text only.
-        return Message(role="assistant", content=body)
+        # attachments surface through text annotations only. The leading
+        # separator prevents same-role provider merges from gluing messages.
+        return Message(role="assistant", content=f"\n\n{body}")
+    if annotation:
+        body = f"{body}\n{annotation}" if body else annotation
     event_id = message.event_id or None
     speaker_label = _message_speaker_label(message)
     if not speaker_label:
@@ -1053,7 +1058,7 @@ def _scrub_bound_team_scope_context(
     team: Team,
     entity_name: str | None,
 ) -> None:
-    """Strip stale queued-message notices before preparing a bound team run."""
+    """Recover prior queued-message notices before preparing a bound team run."""
     ai_runtime.scrub_queued_notice_session_context(
         scope_context=scope_context,
         entity_name=entity_name or str(team.name or "Team"),

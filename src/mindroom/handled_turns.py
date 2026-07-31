@@ -79,9 +79,16 @@ class SourceEventMetadata:
 SourceEventRevision = tuple[int, str]
 
 
-def _prompt_source_event_id(source_event_metadata: Mapping[str, SourceEventMetadata] | None, event_id: str) -> str:
+def _prompt_source_event_id(
+    source_event_ids: tuple[str, ...],
+    source_event_metadata: Mapping[str, SourceEventMetadata] | None,
+    event_id: str,
+) -> str:
     """Return the physical prompt owner for a source or discovery alias."""
-    for source_id, metadata in (source_event_metadata or {}).items():
+    if event_id in source_event_ids:
+        return event_id
+    metadata_by_source = source_event_metadata or {}
+    for source_id, metadata in metadata_by_source.items():
         if metadata.discovery_event_id == event_id:
             return source_id
     return event_id
@@ -148,7 +155,8 @@ class TurnRecord:
             source_event_ids,
             self.source_event_prompts,
             excluded_event_ids={
-                _prompt_source_event_id(source_event_metadata, event_id) for event_id in redacted_source_event_ids
+                _prompt_source_event_id(source_event_ids, source_event_metadata, event_id)
+                for event_id in redacted_source_event_ids
             },
         )
         source_event_revisions = _immutable_source_event_revisions(
@@ -251,7 +259,19 @@ class TurnRecord:
 
     def prompt_source_event_id(self, event_id: str) -> str:
         """Return the physical prompt owner for a source or discovery alias."""
-        return _prompt_source_event_id(self.source_event_metadata, event_id)
+        return _prompt_source_event_id(self.source_event_ids, self.source_event_metadata, event_id)
+
+    def requester_id_for_source(self, event_id: str) -> str | None:
+        """Return the exact requester for one source, or None when the record cannot prove one.
+
+        A single-source turn is one requester by construction, so it falls back to the turn-level
+        requester. A coalesced turn needs per-source metadata: records persisted before that field
+        existed, and maps normalization pruned an entry from, cannot attribute their sources.
+        """
+        if self.source_event_metadata is None:
+            return self.requester_id if not self.is_coalesced else None
+        metadata = self.source_event_metadata.get(self.prompt_source_event_id(event_id))
+        return metadata.sender if metadata is not None else None
 
     @property
     def replay_source_event_ids(self) -> tuple[str, ...]:
@@ -561,6 +581,7 @@ class HandledTurnLedger:
         update: Callable[[Mapping[str, TurnRecord]], TurnRecord],
         *,
         wait_for_persist: bool = False,
+        on_persisted: Callable[[TurnRecord], None] | None = None,
     ) -> TurnRecord | None:
         """Atomically update one record, optionally waiting for its exact persist."""
         normalized_lookup_event_ids = _normalize_source_event_ids(lookup_event_ids)
@@ -586,7 +607,10 @@ class HandledTurnLedger:
                 return None
             for event_id in persisted_record.indexed_event_ids:
                 self._responses[event_id] = persisted_record
-            persist_future = self._schedule_persist_locked(persisted_record)
+            persist_future = self._schedule_persist_locked(
+                persisted_record,
+                on_persisted=on_persisted,
+            )
         if wait_for_persist:
             persist_future.result()
         logger.debug("handled_turn_recorded", indexed_event_count=len(persisted_record.indexed_event_ids))
@@ -596,10 +620,22 @@ class HandledTurnLedger:
         """Return whether the source event has a terminal recorded outcome."""
         with self._state.lock:
             self._ensure_loaded_locked()
-            record = self._responses.get(event_id)
-            if record is None:
+            return self._has_responded_locked(event_id)
+
+    def has_durably_responded(self, event_id: str) -> bool:
+        """Return terminal truth only after all preceding ledger writes reach disk."""
+        with self._state.lock:
+            self._ensure_loaded_locked()
+            if not self._has_responded_locked(event_id):
                 return False
-            return record.completed or event_id in record.redacted_source_event_ids
+            self._wait_for_pending_persists_locked()
+            return self._has_responded_locked(event_id)
+
+    def _has_responded_locked(self, event_id: str) -> bool:
+        record = self._responses.get(event_id)
+        if record is None:
+            return False
+        return record.completed or event_id in record.redacted_source_event_ids
 
     def get_visible_echo_event_id(self, source_event_id: str) -> str | None:
         """Return the tracked visible echo event ID for one source event."""
@@ -659,9 +695,24 @@ class HandledTurnLedger:
             self._ensure_persist_drain_locked()
         barrier.result()
 
-    def _schedule_persist_locked(self, turn_record: TurnRecord) -> Future[None]:
+    def _schedule_persist_locked(
+        self,
+        turn_record: TurnRecord,
+        *,
+        on_persisted: Callable[[TurnRecord], None] | None = None,
+    ) -> Future[None]:
         """Queue one write-behind disk merge for records already applied to memory."""
         completion: Future[None] = Future()
+        if on_persisted is not None:
+
+            def notify_after_persist(done: Future[None]) -> None:
+                try:
+                    done.result()
+                except Exception:
+                    return
+                on_persisted(turn_record)
+
+            completion.add_done_callback(notify_after_persist)
         with self._state.persist_lock:
             self._state.pending_persists.append(
                 _PersistRequest(records=(turn_record,), completion=completion),
@@ -947,6 +998,14 @@ def _project_redaction_alias(
         turn_record,
         source_event_ids=retained_source_event_ids,
         anchor_event_id=anchor_event_id,
+        source_event_metadata=(
+            {}
+            if turn_record.is_coalesced and turn_record.source_event_metadata is None
+            else turn_record.source_event_metadata
+        ),
+        # Turn-level requester context remains required for owed redaction cleanup; an explicit
+        # empty source map keeps per-source replay ownership fail-closed after projection.
+        requester_id=turn_record.requester_id,
     )
 
 
@@ -1049,7 +1108,7 @@ def _immutable_source_event_metadata(
     excluded_event_ids: set[str],
 ) -> Mapping[str, SourceEventMetadata] | None:
     """Normalize and freeze source metadata belonging to the canonical identity."""
-    if not source_event_metadata:
+    if source_event_metadata is None:
         return None
     metadata: dict[str, SourceEventMetadata] = {}
     for event_id in source_event_ids:
@@ -1063,7 +1122,7 @@ def _immutable_source_event_metadata(
         )
         if normalized is not None:
             metadata[event_id] = normalized
-    return MappingProxyType(metadata) if metadata else None
+    return MappingProxyType(metadata)
 
 
 def _responses_file_path(base_path: Path, agent_name: str) -> Path:

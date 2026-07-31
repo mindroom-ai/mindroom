@@ -2127,9 +2127,13 @@ def test_docker_projected_context_files_load_in_worker_runtime(tmp_path: Path) -
     )
 
     assert len(loaded) == 1
-    assert loaded[0].kind == "personality"
-    assert loaded[0].title == "00-context.md"
     assert loaded[0].body == "# Context"
+    # The title is the worker-visible path, so the rendered prompt names a file
+    # the worker runtime can actually open.
+    title_path = Path(loaded[0].title)
+    assert title_path.is_absolute()
+    assert title_path.name == "00-context.md"
+    assert title_path.read_text(encoding="utf-8").strip() == "# Context"
 
 
 @pytest.mark.parametrize("worker_scope", ["shared", "unscoped"])

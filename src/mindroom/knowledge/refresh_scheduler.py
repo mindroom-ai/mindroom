@@ -18,9 +18,9 @@ from mindroom.embedder_health import (
 )
 from mindroom.embedding_errors import extract_classified_embedder_detail
 from mindroom.knowledge.refresh_locks import (
+    claim_scheduled_refresh,
     is_refresh_active,
-    mark_refresh_active,
-    mark_refresh_inactive,
+    mark_scheduled_refresh_inactive,
 )
 from mindroom.knowledge.refresh_runner import (
     refresh_knowledge_binding,
@@ -45,6 +45,7 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 _DEFAULT_MAX_CONCURRENT_REFRESHES = 1
 _MAX_CONCURRENT_REFRESHES_ENV = "MINDROOM_KNOWLEDGE_REFRESH_CONCURRENCY"
+_REFRESH_CLAIM_RETRY_SECONDS = 0.1
 
 
 def _default_max_concurrent_refreshes() -> int:
@@ -78,6 +79,7 @@ class KnowledgeRefreshScheduler:
     max_concurrent_refreshes: int = field(default_factory=_default_max_concurrent_refreshes)
     _tasks: dict[KnowledgeRefreshTarget, asyncio.Task[None]] = field(default_factory=dict, init=False)
     _pending: dict[KnowledgeRefreshTarget, _ScheduledRefresh] = field(default_factory=dict, init=False)
+    _claim_retry_handles: dict[KnowledgeRefreshTarget, asyncio.TimerHandle] = field(default_factory=dict, init=False)
     _shutting_down: bool = field(default=False, init=False)
     _refresh_slots: asyncio.Semaphore | None = field(default=None, init=False)
 
@@ -151,6 +153,10 @@ class KnowledgeRefreshScheduler:
         tasks = list(self._tasks.values())
         self._tasks.clear()
         self._pending.clear()
+        retry_handles = list(self._claim_retry_handles.values())
+        self._claim_retry_handles.clear()
+        for handle in retry_handles:
+            handle.cancel()
         for task in tasks:
             task.cancel()
         for task in tasks:
@@ -196,14 +202,50 @@ class KnowledgeRefreshScheduler:
         loop = _running_loop_for_schedule(key.base_id)
         if loop is None:
             return
-        mark_refresh_active(key)
+        claim_result = claim_scheduled_refresh(key)
+        if claim_result == "scheduled_refresh_active":
+            logger.debug("Skipping duplicate knowledge refresh owned by another scheduler", base_id=key.base_id)
+            return
+        if claim_result == "direct_refresh_active":
+            logger.debug("Deferring knowledge refresh owned by a direct caller", base_id=key.base_id)
+            self._pending[key] = request
+            self._schedule_claim_retry(key, loop)
+            return
+        self._pending.pop(key, None)
+        retry_handle = self._claim_retry_handles.pop(key, None)
+        if retry_handle is not None:
+            retry_handle.cancel()
         task = loop.create_task(self._run_refresh(key, request), name=f"knowledge_refresh:{key.base_id}")
         self._tasks[key] = task
 
         task.add_done_callback(lambda completed, *, scheduled_key=key: self._handle_done(scheduled_key, completed))
 
+    def _schedule_claim_retry(
+        self,
+        key: KnowledgeRefreshTarget,
+        loop: asyncio.AbstractEventLoop,
+    ) -> None:
+        if key in self._claim_retry_handles:
+            return
+        self._claim_retry_handles[key] = loop.call_later(
+            _REFRESH_CLAIM_RETRY_SECONDS,
+            self._retry_pending_claim,
+            key,
+        )
+
+    def _retry_pending_claim(self, key: KnowledgeRefreshTarget) -> None:
+        self._claim_retry_handles.pop(key, None)
+        if self._shutting_down:
+            self._pending.pop(key, None)
+            return
+        if key in self._tasks:
+            return
+        request = self._pending.pop(key, None)
+        if request is not None:
+            self._start_task(key, request)
+
     def _handle_done(self, key: KnowledgeRefreshTarget, task: asyncio.Task[None]) -> None:
-        mark_refresh_inactive(key)
+        mark_scheduled_refresh_inactive(key)
         if self._tasks.get(key) is task:
             self._tasks.pop(key, None)
         cancelled = False

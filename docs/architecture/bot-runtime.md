@@ -57,6 +57,18 @@ Matrix callback
 `TurnStore` owns durable turn truth.
 `DeliveryGateway` owns Matrix transport only.
 
+## Durable Dispatch Boundary
+
+`DispatchObligationStore` durably accepts each correctness-critical Matrix callback before background execution can fail or be cancelled.
+Its exact key combines the Matrix principal, entity, source event, and callback kind, while pending rows retain the original room and event source for replay.
+Settled rows become permanent exact-key tombstones and atomically scrub that replay payload, keeping terminal truth compact without allowing an old callback to reappear.
+Successful and intentionally ignored callbacks settle explicitly, while failures and cancellations remain pending for direct startup recovery.
+Recovery parses and invokes pending work without depending on a later Classic Sync token or Sliding Sync position.
+Message and media obligations remain pending when coalescing or a pending `TurnStore` record defers them, then yield only to durably persisted terminal turn truth.
+Raw sync-cache continuity remains owned separately by `SyncCacheTrust`, so a durable pending dispatch obligation is sufficient to preserve a certified checkpoint.
+Classic Sync response-owned lifecycle hooks and their durable de-duplication markers complete before `SyncCacheTrust` certifies the response checkpoint.
+Separately registered nio event callbacks may continue in the background after their exact dispatch obligation is durable.
+
 ## Completed Simplifications
 
 `TurnController` is now the only normal-turn owner.

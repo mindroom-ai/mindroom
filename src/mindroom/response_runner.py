@@ -513,11 +513,6 @@ class ResponseRunner:
         return task
 
     @property
-    def pending_inbox_response_count(self) -> int:
-        """Return an event-loop-local snapshot of runner-owned unsettled responses."""
-        return sum(not task.done() for task in self._inbox_response_tasks)
-
-    @property
     def incomplete_inbox_responses_recoverable(self) -> bool:
         """Return whether every timed-out response has finished cleanup with recovery proof."""
         return self._incomplete_inbox_responses_recoverable
