@@ -19,6 +19,7 @@ import nio
 from typing_extensions import TypeIs
 
 from mindroom.background_tasks import create_background_task
+from mindroom.dispatch_recovery_context import turn_dispatch_recovery_scope
 from mindroom.dispatch_source import IMAGE_SOURCE_KIND, MEDIA_SOURCE_KIND, VOICE_SOURCE_KIND
 from mindroom.logging_config import get_logger
 from mindroom.matrix.media import MATRIX_MEDIA_EVENT_TYPES, MatrixMediaEvent, parse_matrix_media_event_source
@@ -1160,11 +1161,15 @@ class DispatchObligationRunner:
                 continue
             try:
                 event = _parse_recovery_event(obligation)
-                await self._run_obligation(
-                    obligation,
-                    room=self.room_for_id(obligation.room_id),
-                    event=event,
-                )
+                room = self.room_for_id(obligation.room_id)
+                with turn_dispatch_recovery_scope(
+                    active=obligation.callback_kind in _TURN_BACKED_KINDS,
+                ):
+                    await self._run_obligation(
+                        obligation,
+                        room=room,
+                        event=event,
+                    )
             except asyncio.CancelledError:
                 raise
             except _DispatchObligationCorruptionError:

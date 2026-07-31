@@ -2126,11 +2126,11 @@ class TestMultiAgentOrchestrator:
         router_bot.recover_pending_turn_dispatch_obligations.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_router_turn_recovery_waits_for_responder_first_sync(
+    async def test_router_turn_recovery_delegates_unready_responder_filtering(
         self,
         tmp_path: Path,
     ) -> None:
-        """Running generations must finish first sync before router replay can route to them."""
+        """Router replay must filter unready dependencies per durable obligation."""
         config = _runtime_bound_config(
             Config(
                 agents={
@@ -2162,7 +2162,7 @@ class TestMultiAgentOrchestrator:
         }
 
         await orchestrator._recover_ready_turn_dispatch_obligations()
-        router_bot.recover_pending_turn_dispatch_obligations.assert_not_awaited()
+        router_bot.recover_pending_turn_dispatch_obligations.assert_awaited_once_with()
 
         responder_bot.first_sync_complete = True
         with patch.object(orchestrator._approval_transport, "handle_bot_ready", new=AsyncMock()):
@@ -2172,7 +2172,7 @@ class TestMultiAgentOrchestrator:
             owner=orchestrator._dispatch_recovery_task_owner,
         )
 
-        router_bot.recover_pending_turn_dispatch_obligations.assert_awaited_once_with()
+        assert router_bot.recover_pending_turn_dispatch_obligations.await_count == 2
 
     @pytest.mark.asyncio
     async def test_regular_agent_turn_recovery_waits_for_own_first_sync(
@@ -2209,11 +2209,11 @@ class TestMultiAgentOrchestrator:
         bot.recover_pending_turn_dispatch_obligations.assert_awaited_once_with()
 
     @pytest.mark.asyncio
-    async def test_router_turn_recovery_ignores_unavailable_unrelated_agent(
+    async def test_router_turn_recovery_ignores_running_unready_unrelated_agent(
         self,
         tmp_path: Path,
     ) -> None:
-        """A failed unrelated responder must not park durable router work forever."""
+        """A running stuck responder must not park unrelated durable router work."""
         config = _runtime_bound_config(
             Config(
                 agents={
@@ -2236,20 +2236,22 @@ class TestMultiAgentOrchestrator:
         healthy_bot.first_sync_complete = True
         healthy_bot.recover_pending_turn_dispatch_obligations = AsyncMock()
 
-        failed_bot = MagicMock()
-        failed_bot.running = False
-        failed_bot.first_sync_complete = False
+        stuck_bot = MagicMock()
+        stuck_bot.running = True
+        stuck_bot.first_sync_complete = False
+        stuck_bot.recover_pending_turn_dispatch_obligations = AsyncMock()
 
         orchestrator.agent_bots = {
             ROUTER_AGENT_NAME: router_bot,
             "healthy": healthy_bot,
-            "failed": failed_bot,
+            "failed": stuck_bot,
         }
 
         await orchestrator._recover_ready_turn_dispatch_obligations()
 
         router_bot.recover_pending_turn_dispatch_obligations.assert_awaited_once_with()
         healthy_bot.recover_pending_turn_dispatch_obligations.assert_awaited_once_with()
+        stuck_bot.recover_pending_turn_dispatch_obligations.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_bot_ready_schedules_blocked_turn_recovery_without_blocking_sync(

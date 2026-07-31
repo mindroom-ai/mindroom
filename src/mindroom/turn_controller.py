@@ -49,6 +49,7 @@ from mindroom.dispatch_handoff import (
     build_dispatch_handoff,
     payload_metadata_from_source,
 )
+from mindroom.dispatch_recovery_context import turn_dispatch_recovery_active
 from mindroom.dispatch_replay_guard import has_newer_unresponded_cached_thread_event, has_newer_unresponded_in_thread
 from mindroom.dispatch_source import (
     IMAGE_SOURCE_KIND,
@@ -162,6 +163,54 @@ def _gate_router_target_readiness(
     return (suggested_entity if first_sync_complete is True else None, first_sync_complete is False)
 
 
+@dataclass(frozen=True)
+class _RouterTargetResolution:
+    """One router target after its runtime readiness check."""
+
+    selected_entity: str | None
+    suggested_entity: str | None
+    response_text: str
+
+
+def _resolve_router_target(
+    orchestrator: OrchestratorRuntime | None,
+    suggested_entity: str | None,
+    scheduled_prompt: str | None,
+) -> _RouterTargetResolution | None:
+    """Resolve one target or retain recovered work until its runtime is ready."""
+    selected_entity = suggested_entity
+    suggested_entity, target_starting = _gate_router_target_readiness(
+        orchestrator,
+        suggested_entity,
+    )
+    if target_starting and turn_dispatch_recovery_active():
+        return None
+    if target_starting:
+        response_text = _ROUTER_TARGET_STARTING_TEXT
+    elif suggested_entity is None:
+        response_text = _ROUTER_TARGET_UNAVAILABLE_TEXT
+    else:
+        response_text = (
+            f"@{suggested_entity} {scheduled_prompt}"
+            if scheduled_prompt is not None
+            else f"@{suggested_entity} could you help with this?"
+        )
+    return _RouterTargetResolution(
+        selected_entity=selected_entity,
+        suggested_entity=suggested_entity,
+        response_text=response_text,
+    )
+
+
+@dataclass(frozen=True)
+class _RouterRelayDelivery:
+    """One final router relay delivery decision."""
+
+    event_id: str | None
+    suggested_entity: str | None
+    deferred_for_recovery: bool = False
+
+
 async def _send_router_relay_after_readiness_recheck(
     *,
     orchestrator: OrchestratorRuntime | None,
@@ -169,13 +218,25 @@ async def _send_router_relay_after_readiness_recheck(
     selected_entity: str | None,
     suggested_entity: str | None,
     delivery_request: SendTextRequest,
-) -> tuple[str | None, str | None]:
+) -> _RouterRelayDelivery:
     """Recheck one sampled target immediately before sending its relay."""
     if selected_entity is None or orchestrator is None:
-        return await delivery_gateway.send_text(delivery_request), suggested_entity
+        return _RouterRelayDelivery(
+            event_id=await delivery_gateway.send_text(delivery_request),
+            suggested_entity=suggested_entity,
+        )
     final_readiness = orchestrator.entity_first_sync_complete(selected_entity)
     if final_readiness is True:
-        return await delivery_gateway.send_text(delivery_request), suggested_entity
+        return _RouterRelayDelivery(
+            event_id=await delivery_gateway.send_text(delivery_request),
+            suggested_entity=suggested_entity,
+        )
+    if final_readiness is False and turn_dispatch_recovery_active():
+        return _RouterRelayDelivery(
+            event_id=None,
+            suggested_entity=suggested_entity,
+            deferred_for_recovery=True,
+        )
     fallback_extra_content = dict(delivery_request.extra_content or {})
     fallback_extra_content.pop(ORIGINAL_SENDER_KEY, None)
     fallback_extra_content.pop(SOURCE_KIND_KEY, None)
@@ -184,7 +245,10 @@ async def _send_router_relay_after_readiness_recheck(
         response_text=_ROUTER_TARGET_STARTING_TEXT if final_readiness is False else _ROUTER_TARGET_UNAVAILABLE_TEXT,
         extra_content=fallback_extra_content or None,
     )
-    return await delivery_gateway.send_text(fallback_request), None
+    return _RouterRelayDelivery(
+        event_id=await delivery_gateway.send_text(fallback_request),
+        suggested_entity=None,
+    )
 
 
 def _room_level_context_event(event: TextDispatchEvent) -> TextDispatchEvent:
@@ -1590,24 +1654,21 @@ class TurnController:
                     thread_history,
                 )
 
-        selected_entity = suggested_entity
-        suggested_entity, target_starting = _gate_router_target_readiness(
+        target_resolution = _resolve_router_target(
             self.deps.runtime.orchestrator,
             suggested_entity,
+            scheduled_prompt,
         )
-
-        if target_starting:
-            response_text = _ROUTER_TARGET_STARTING_TEXT
-        elif not suggested_entity:
-            response_text = _ROUTER_TARGET_UNAVAILABLE_TEXT
+        if target_resolution is None:
+            return
+        selected_entity, suggested_entity, response_text = (
+            target_resolution.selected_entity,
+            target_resolution.suggested_entity,
+            target_resolution.response_text,
+        )
+        if suggested_entity is None and response_text == _ROUTER_TARGET_UNAVAILABLE_TEXT:
             with bound_log_context(room_id=room.room_id, thread_id=thread_id):
                 self.deps.logger.warning("Router failed to determine entity")
-        else:
-            response_text = (
-                f"@{suggested_entity} {scheduled_prompt}"
-                if scheduled_prompt is not None
-                else f"@{suggested_entity} could you help with this?"
-            )
 
         target_thread_mode = (
             self.deps.runtime.config.get_entity_thread_mode(
@@ -1664,13 +1725,17 @@ class TurnController:
             response_text=response_text,
             extra_content=routed_extra_content or None,
         )
-        event_id, suggested_entity = await _send_router_relay_after_readiness_recheck(
+        relay_delivery = await _send_router_relay_after_readiness_recheck(
             orchestrator=self.deps.runtime.orchestrator,
             delivery_gateway=self.deps.delivery_gateway,
             selected_entity=selected_entity,
             suggested_entity=suggested_entity,
             delivery_request=delivery_request,
         )
+        if relay_delivery.deferred_for_recovery:
+            return
+        event_id = relay_delivery.event_id
+        suggested_entity = relay_delivery.suggested_entity
         tracked_handled_turn = handled_turn or TurnRecord.create([event.event_id])
         tracked_handled_turn = replace(
             tracked_handled_turn,

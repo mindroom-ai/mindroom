@@ -59,13 +59,14 @@ def _message_obligation(
     *,
     principal_id: str = _PRINCIPAL_ID,
     entity_name: str = _ENTITY_NAME,
+    room_id: str = _ROOM_ID,
 ) -> _DispatchObligation:
     return _DispatchObligation(
         principal_id=principal_id,
         entity_name=entity_name,
         source_event_id=event_id,
         callback_kind=DispatchCallbackKind.MESSAGE,
-        room_id=_ROOM_ID,
+        room_id=room_id,
         event_source={
             "type": "m.room.message",
             "event_id": event_id,
@@ -1079,6 +1080,33 @@ async def test_deferred_message_remains_pending_until_turn_store_is_terminal(tmp
     await runner.recover_pending()
 
     assert not _store(tmp_path).has_pending("$deferred", DispatchCallbackKind.MESSAGE)
+
+
+@pytest.mark.asyncio
+async def test_recovery_readiness_retains_only_blocked_obligations(tmp_path: Path) -> None:
+    """A blocked runtime dependency must not park unrelated durable callbacks."""
+    ready_room_id = "!ready:example.org"
+    blocked_room_id = "!blocked:example.org"
+    store = _store(tmp_path)
+    ready = _message_obligation("$ready", room_id=ready_room_id)
+    blocked = _message_obligation("$blocked", room_id=blocked_room_id)
+    store.create_pending(ready)
+    store.create_pending(blocked)
+    recovered: list[str] = []
+
+    async def callback(_room: nio.MatrixRoom, event: nio.Event) -> DispatchCallbackResult:
+        if event.event_id == "$blocked":
+            return DispatchCallbackResult.DEFERRED
+        recovered.append(event.event_id)
+        return DispatchCallbackResult.SUCCEEDED
+
+    runner = _runner(store, callback)
+    await runner.recover_pending(turn_backed=True)
+
+    assert recovered == ["$ready"]
+    assert not store.has_pending("$ready", DispatchCallbackKind.MESSAGE)
+    assert store.has_pending("$blocked", DispatchCallbackKind.MESSAGE)
+    assert not runner._retry_keys
 
 
 @pytest.mark.asyncio
