@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass, fields, replace
+from dataclasses import dataclass, fields
 from typing import TYPE_CHECKING, cast, get_type_hints
 
 import nio
@@ -45,11 +45,13 @@ def _trust(tmp_path: Path, *, state: SyncTrustState) -> SyncCacheTrust:
     )
 
 
-def _base_sync_response(
+def _sync_response(
     *,
     limited_room_ids: tuple[str, ...],
-    next_batch: str = "s_after",
+    recovered_room_ids: frozenset[str],
+    unrecovered_room_ids: frozenset[str],
 ) -> nio.SyncResponse:
+    """Build a real response carrying authoritative recovery outcomes."""
     joined_rooms = {
         room_id: nio.RoomInfo(
             timeline=nio.Timeline(events=[], limited=True, prev_batch=f"p_{index}"),
@@ -60,30 +62,12 @@ def _base_sync_response(
         for index, room_id in enumerate(limited_room_ids)
     }
     return nio.SyncResponse(
-        next_batch=next_batch,
+        next_batch="s_after",
         rooms=nio.Rooms(invite={}, join=joined_rooms, leave={}),
         device_key_count=nio.DeviceOneTimeKeyCount(curve25519=0, signed_curve25519=0),
         device_list=nio.DeviceList(changed=[], left=[]),
         to_device_events=[],
         presence_events=[],
-    )
-
-
-def _sync_response(
-    *,
-    limited_room_ids: tuple[str, ...],
-    recovered_room_ids: frozenset[str],
-    unrecovered_room_ids: frozenset[str],
-) -> nio.SyncResponse:
-    """Build a real response and fail first on the unreleased upstream contract."""
-    response_fields = {item.name for item in fields(nio.SyncResponse)}
-    expected_fields = {"recovered_room_ids", "unrecovered_room_ids"}
-    assert expected_fields <= response_fields, (
-        "mindroom-nio must release typed recovered_room_ids and "
-        "unrecovered_room_ids on SyncResponse before MindRoom consumes them"
-    )
-    return replace(
-        _base_sync_response(limited_room_ids=limited_room_ids),
         recovered_room_ids=recovered_room_ids,
         unrecovered_room_ids=unrecovered_room_ids,
     )

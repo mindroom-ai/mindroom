@@ -74,12 +74,12 @@ class SyncCacheWriteResult:
 
     @property
     def has_recovery_obligation(self) -> bool:
-        """Return whether nio left a limited room unclassified or unrecovered."""
+        """Return whether nio reports unresolved recovery or misses a current limited-room classification."""
         return bool(self.unclassified_limited_room_ids or self.unrecovered_room_ids)
 
     @property
     def certified(self) -> bool:
-        """Return whether this result proves the sync delta reached durable cache."""
+        """Return whether local cache work completed without errors or recovery obligations."""
         return self.complete and not self.errors and not self.has_recovery_obligation
 
 

@@ -216,7 +216,7 @@ def _sync_response(
     """Return one typed successful sync response with no recovery obligations."""
     response = MagicMock(spec=nio.SyncResponse)
     response.next_batch = next_batch
-    response.rooms = MagicMock(join=joined_rooms or {})
+    response.rooms = MagicMock(join=joined_rooms or {}, leave={})
     response.recovered_room_ids = frozenset()
     response.unrecovered_room_ids = frozenset()
     return cast("nio.SyncResponse", response)
@@ -754,15 +754,11 @@ async def test_postgres_outage_clears_unverifiable_checkpoint_and_recovers_cold(
     unavailable_bot.event_cache = unavailable_root.for_principal(principal_id)
     unavailable_client = make_matrix_client_mock(user_id=principal_id)
     unavailable_client.next_batch = None
-    empty_response = MagicMock(spec=nio.SyncResponse)
-    empty_response.next_batch = "s_empty_during_outage"
-    empty_response.rooms = MagicMock(join={}, leave={})
+    empty_response = _sync_response("s_empty_during_outage")
     message_event = nio.RoomMessageText.from_dict(event)
-    event_response = MagicMock(spec=nio.SyncResponse)
-    event_response.next_batch = "s_event_during_outage"
-    event_response.rooms = MagicMock(
-        join={room_id: MagicMock(timeline=MagicMock(events=[message_event], limited=False))},
-        leave={},
+    event_response = _sync_response(
+        "s_event_during_outage",
+        joined_rooms={room_id: MagicMock(timeline=MagicMock(events=[message_event], limited=False))},
     )
     try:
         with (
@@ -1162,8 +1158,8 @@ async def test_recovered_sync_response_certifies_after_nio_callback_success(tmp_
 
 
 @pytest.mark.asyncio
-async def test_cancelled_limited_cache_write_rewinds_established_cursor(tmp_path: Path) -> None:
-    """Cancellation must discard the active cursor before a later response can certify it."""
+async def test_cancelled_cache_write_rewinds_established_cursor(tmp_path: Path) -> None:
+    """Any cancelled cache write must discard the active cursor before later certification."""
     bot = _agent_bot(tmp_path)
     bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
     bot.client.next_batch = "s_after"
@@ -1176,10 +1172,7 @@ async def test_cancelled_limited_cache_write_rewinds_established_cursor(tmp_path
         "s_before",
         cache_generation=_CACHE_GENERATION,
     )
-    response = _sync_response(
-        "s_after",
-        joined_rooms={"!room:localhost": MagicMock(timeline=MagicMock(events=[], limited=True))},
-    )
+    response = _sync_response("s_after")
 
     with (
         patch.object(
@@ -1709,9 +1702,7 @@ async def test_swallowed_dispatch_persistence_failure_cannot_certify_response(
     assert isinstance(exc_info.value.__cause__, OSError)
     assert bot.client.next_batch == "s_before_failure"
 
-    response = MagicMock(spec=nio.SyncResponse)
-    response.next_batch = "s_after_failure"
-    response.rooms = MagicMock(join={})
+    response = _sync_response("s_after_failure")
     with patch("mindroom.bot.mark_matrix_sync_success", return_value=datetime.now(UTC)):
         await bot._on_sync_response(response)
 

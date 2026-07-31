@@ -157,6 +157,8 @@ class SyncCacheTrust:
             cache_result=cache_result,
             first_sync=first_sync,
         )
+        # Rewind an established cursor after any uncertified result so a later
+        # response cannot certify past an unrepaired local cache hole.
         if not cache_result.certified and not self._awaiting_initial_window:
             decision = replace(decision, reset_client_token=True)
         return replace(decision, cache_scope_epoch=self._cache_scope_epoch)
