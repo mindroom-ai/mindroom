@@ -68,7 +68,11 @@ Each entity database therefore grows by one compact row per exact callback over 
 Operators can inspect growth by running `SELECT state, COUNT(*) FROM dispatch_obligations GROUP BY state;` against each dispatch-obligation database.
 Terminal rows must not be deleted unless duplicate callback execution after future Matrix redelivery is acceptable.
 Successful and intentionally ignored callbacks settle explicitly, while failures and cancellations remain pending for direct startup recovery.
+Callback failures receive at most five autonomous retries per process, and exhausted work stays pending for a later restart or operator investigation.
 Recovery parses and invokes pending work without depending on a later Classic Sync token or Sliding Sync position.
+Recovery logs and skips a corrupt pending row so other valid rows can continue, while retaining the corrupt row for repair.
+To repair corruption, stop MindRoom, back up the affected database, and restore a known-good copy before restarting.
+Deleting an unrecoverable pending row is a last resort that accepts losing that callback unless Matrix redelivers it.
 Message and media obligations remain pending when coalescing or a pending `TurnStore` record defers them, then yield only to durably persisted terminal turn truth.
 Raw sync-cache continuity remains owned separately by `SyncCacheTrust`, so a durable pending dispatch obligation is sufficient to preserve a certified checkpoint.
 Classic Sync response-owned lifecycle hooks and their durable de-duplication markers complete before `SyncCacheTrust` certifies the response checkpoint.

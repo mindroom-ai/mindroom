@@ -319,8 +319,44 @@ async def test_orchestrated_router_start_defers_turn_recovery_to_coordinator(tmp
         patch("mindroom.bot.interactive.init_persistence"),
     ):
         await bot.start()
+        await wait_for_background_tasks(timeout=1, owner=bot._runtime_view)
 
     recover_pending.assert_awaited_once_with(turn_backed=False)
+
+
+@pytest.mark.asyncio
+async def test_start_runs_pending_invite_recovery_after_callbacks_and_running(
+    tmp_path: Path,
+) -> None:
+    """A blocked invite retry must not block bot or fleet startup."""
+    bot = _agent_bot(tmp_path)
+    bot.orchestrator = MagicMock()
+    client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
+    recovery_started = asyncio.Event()
+    release_recovery = asyncio.Event()
+
+    async def recover_pending(*, turn_backed: bool | None = None) -> None:
+        assert turn_backed is False
+        recovery_started.set()
+        await release_recovery.wait()
+
+    bot._dispatch_obligation_runner.recover_pending = recover_pending
+
+    with (
+        patch.object(bot, "ensure_user_account", AsyncMock()),
+        patch("mindroom.bot.login_agent_user", AsyncMock(return_value=client)),
+        patch.object(bot, "_set_avatar_if_available", AsyncMock()),
+        patch.object(bot, "_set_presence_with_model_info", AsyncMock()),
+        patch("mindroom.bot.interactive.init_persistence"),
+    ):
+        start_task = asyncio.create_task(bot.start())
+        try:
+            await asyncio.wait_for(recovery_started.wait(), timeout=1)
+            assert bot.running
+            assert client.add_response_callback.call_count == 2
+        finally:
+            release_recovery.set()
+            await start_task
 
 
 @pytest.mark.asyncio
@@ -342,6 +378,7 @@ async def test_orchestrated_agent_start_defers_turn_recovery_until_first_sync(
         patch("mindroom.bot.interactive.init_persistence"),
     ):
         await bot.start()
+        await wait_for_background_tasks(timeout=1, owner=bot._runtime_view)
 
     recover_pending.assert_awaited_once_with(turn_backed=False)
 
@@ -374,6 +411,7 @@ async def test_orchestrated_team_start_gates_turn_recovery_on_responder_fleet(
         patch("mindroom.bot.interactive.init_persistence"),
     ):
         await bot.start()
+        await wait_for_background_tasks(timeout=1, owner=bot._runtime_view)
 
     recover_pending.assert_awaited_once_with(turn_backed=False)
 
@@ -1117,7 +1155,7 @@ def test_cache_scope_cleanup_between_plan_and_apply_forces_tokenless_recovery(tm
     bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
     bot.client.next_batch = "s_stale_after_cleanup"
     cache_result = SyncCacheWriteResult(complete=True)
-    decision = bot._plan_sync_response(
+    decision = bot._sync_cache_trust.plan_response(
         next_batch="s_stale_after_cleanup",
         cache_result=cache_result,
         first_sync=False,

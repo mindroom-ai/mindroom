@@ -17628,11 +17628,15 @@ MindRoom stores data in the `mindroom_data` directory:
 - `chroma/` - ChromaDB vector store for agent/team memories
 - `knowledge_db/` - Knowledge base vector stores
 - `culture/` - Shared culture state
-- `tracking/` - Response tracking to avoid duplicates
+- `tracking/` - Durable response, callback-obligation, and lifecycle-hook state used to prevent duplicate work across restarts
 - `credentials/` - Synchronized secrets from `.env`
 - `logs/` - Application logs
 - `matrix_state.yaml` - Matrix connection state
 - `encryption_keys/` - Matrix E2EE keys (if enabled)
+
+Keep `tracking/` on persistent storage and include it in backups.
+Dispatch-obligation databases retain one compact terminal row per exact callback and have no automatic retention window because deleting rows weakens replay deduplication.
+Size and monitor the volume for lifetime callback growth, and use the inspection and corruption-remediation guidance in [Bot Runtime Architecture](https://docs.mindroom.chat/architecture/bot-runtime/#durable-dispatch-boundary).
 
 ## Sandbox Proxy Isolation
 
