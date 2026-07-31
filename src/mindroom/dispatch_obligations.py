@@ -1199,7 +1199,7 @@ class _DispatchObligationAdmissionCallback:
         event: _DispatchEvent,
         provenance: nio.TimelineEventProvenance | None = None,
     ) -> None:
-        """Reject only storage failures that occur before any callback side effect."""
+        """Translate every non-cancellation persistence failure into nio rejection."""
         try:
             await self.runner.persist(
                 room,
@@ -1207,7 +1207,9 @@ class _DispatchObligationAdmissionCallback:
                 self.callback_kind,
                 provenance,
             )
-        except (OSError, sqlite3.Error) as error:
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
             raise nio.CallbackNotAcceptedError(str(error)) from error
 
 
