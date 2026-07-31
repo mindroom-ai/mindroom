@@ -92,6 +92,7 @@ class SyncContinuityStore:
             write_json_file_durable(
                 self._path,
                 _record_payload(updated),
+                strict_atomic_replace=True,
                 sort_keys=True,
                 trailing_newline=True,
             )

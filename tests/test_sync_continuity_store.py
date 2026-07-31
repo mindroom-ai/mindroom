@@ -68,6 +68,31 @@ def test_crash_before_atomic_replace_preserves_old_checkpoint_and_fence(
     assert SyncContinuityStore(tmp_path, "code").load() == before
 
 
+def test_rename_failure_never_falls_back_to_a_tearing_copy(tmp_path: Path) -> None:
+    """A failed atomic rename must leave the complete old continuity record."""
+    store = SyncContinuityStore(tmp_path, "code")
+    store.replace_checkpoint(_checkpoint("s_before"))
+    store.update_join_fences(add={"!joined:localhost"})
+    before = store.load()
+
+    def tear_copy(_temporary_path: Path, target_path: Path) -> None:
+        target_path.write_text('{"version":', encoding="utf-8")
+        message = "copy crashed"
+        raise OSError(message)
+
+    with (
+        patch("mindroom.durable_write.os.replace", side_effect=OSError("rename unavailable")),
+        patch("mindroom.durable_write.safe_replace", side_effect=tear_copy),
+        pytest.raises(OSError, match=r"rename unavailable|copy crashed"),
+    ):
+        store.accept_classic_response(
+            _checkpoint("s_after"),
+            joined_room_ids={"!joined:localhost"},
+        )
+
+    assert SyncContinuityStore(tmp_path, "code").load() == before
+
+
 def test_crash_after_atomic_replace_restores_new_checkpoint_without_fence(
     tmp_path: Path,
 ) -> None:

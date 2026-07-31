@@ -1206,7 +1206,9 @@ class AgentBot:
         source_event_id: str,
         callback_kind: DispatchCallbackKind,
     ) -> bool:
-        """Apply decrypt-only room joins before global continuity admission."""
+        """Admit current invites, then apply history fences to replayable callbacks."""
+        if callback_kind is DispatchCallbackKind.INVITE:
+            return True
         decrypt_notice_fenced = (
             callback_kind is DispatchCallbackKind.DECRYPTION_FAILURE
             and self._room_lifecycle.decrypt_notice_is_fenced(room_id)

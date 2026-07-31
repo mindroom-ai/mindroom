@@ -22,12 +22,16 @@ def write_json_file_durable(
     payload: object,
     *,
     temp_dir: Path | None = None,
+    strict_atomic_replace: bool = False,
     indent: int | None = None,
     sort_keys: bool = False,
     trailing_newline: bool = False,
 ) -> None:
-    """Write JSON through fsynced temp file, bind-mount-safe replace, and directory fsync."""
+    """Write JSON through an fsynced temp file, durable replacement, and directory fsync."""
     directory = temp_dir or path.parent
+    if strict_atomic_replace and directory != path.parent:
+        msg = "Strict atomic replacement requires a temporary file beside its target"
+        raise ValueError(msg)
     path.parent.mkdir(parents=True, exist_ok=True)
     if directory != path.parent:
         directory.mkdir(parents=True, exist_ok=True)
@@ -47,7 +51,10 @@ def write_json_file_durable(
                 temp_file.write("\n")
             temp_file.flush()
             os.fsync(temp_file.fileno())
-        safe_replace(temp_path, path)
+        if strict_atomic_replace:
+            temp_path.replace(path)
+        else:
+            safe_replace(temp_path, path)
         _fsync_directory(path.parent)
     finally:
         if temp_path is not None and temp_path.exists():

@@ -440,6 +440,51 @@ async def test_terminal_invite_join_failure_does_not_abort_sync(
 
 
 @pytest.mark.asyncio
+async def test_tokenless_initial_sync_invite_bypasses_cold_history_fence(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """An invite is current membership work even when startup has no continuation."""
+    config = bind_runtime_paths(
+        Config(router=RouterConfig(model="default", accept_invites=True)),
+        test_runtime_paths(tmp_path),
+    )
+    bot = AgentBot(
+        agent_user=_router_user(),
+        storage_path=tmp_path,
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+    )
+    install_runtime_cache_support(bot)
+    bot.client = AsyncMock()
+    bot.client.rooms = {}
+    bot._cold_history_fence.start(trusted_continuation=None)
+    join_room = AsyncMock(return_value=RoomJoinOutcome.JOINED)
+    welcome_message = AsyncMock()
+    monkeypatch.setattr("mindroom.bot_room_lifecycle.is_authorized_sender", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr("mindroom.bot_room_lifecycle.join_room", join_room)
+    monkeypatch.setattr(bot._room_lifecycle, "send_welcome_message_if_empty", welcome_message)
+    event = nio.InviteEvent.parse_event(
+        {
+            "type": "m.room.member",
+            "sender": "@owner:localhost",
+            "state_key": bot.agent_user.user_id,
+            "content": {"membership": "invite"},
+        },
+    )
+    assert isinstance(event, nio.InviteMemberEvent)
+    room = nio.MatrixRoom("!invited:localhost", bot.agent_user.user_id)
+
+    await bot._on_invite_before_sync_certification(room, event)
+
+    join_room.assert_awaited_once_with(bot.client, room.room_id)
+    welcome_message.assert_awaited_once_with(room.room_id, event.sender)
+    assert bot._room_lifecycle.invited_rooms == {room.room_id}
+    assert bot._cold_history_fence.is_cold
+    assert bot._dispatch_obligation_store.pending() == ()
+
+
+@pytest.mark.asyncio
 async def test_invite_persistence_failure_propagates_to_sync_boundary(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
