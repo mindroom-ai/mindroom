@@ -28,6 +28,7 @@ from mindroom.delivery_gateway import FinalizeStreamedResponseRequest, ResponseI
 from mindroom.dispatch_handoff import PendingDispatchMetadata
 from mindroom.dispatch_obligations import (
     DispatchCallbackKind,
+    _DispatchCallbackResult,
     _DispatchObligationCorruptionError,
 )
 from mindroom.dispatch_source import VOICE_SOURCE_KIND
@@ -1985,6 +1986,44 @@ async def test_prepare_for_sync_shutdown_skips_precallback_uncertified_token(tmp
     await bot.prepare_for_sync_shutdown()
 
     assert _load_sync_token_value(tmp_path, bot.agent_name) == "s_before_precallback"
+
+
+@pytest.mark.asyncio
+async def test_failed_coalesced_dispatch_returns_exact_source_to_durable_retry(tmp_path: Path) -> None:
+    """Gate failure must retry its durable source without restart or another ready signal."""
+    bot = _agent_bot(tmp_path)
+    room = nio.MatrixRoom("!room:localhost", bot.agent_user.user_id)
+    event = _text_event("$deferred-retry", "retry me", 1_000)
+    retried = asyncio.Event()
+
+    async def recovered_callback(_room: nio.MatrixRoom, recovered_event: nio.Event) -> _DispatchCallbackResult:
+        assert recovered_event.event_id == event.event_id
+        retried.set()
+        return _DispatchCallbackResult.SUCCEEDED
+
+    async def failing_dispatch(_batch: CoalescedBatch) -> None:
+        msg = "coalesced dispatch failed"
+        raise RuntimeError(msg)
+
+    bot._dispatch_obligation_runner.callbacks = {DispatchCallbackKind.MESSAGE: recovered_callback}
+    bot._dispatch_obligation_runner.room_for_id = lambda _room_id: room
+    bot._dispatch_obligation_runner._retry_initial_delay_seconds = 0
+    bot._dispatch_obligation_runner._retry_max_delay_seconds = 0
+    bot._coalescing_gate._dispatch_batch = failing_dispatch
+    await bot._dispatch_obligation_runner.persist(room, event, DispatchCallbackKind.MESSAGE)
+
+    await bot._coalescing_gate.admit(
+        CoalescingKey(room.room_id, None, event.sender),
+        ready_result=ReadyPendingEvent(
+            pending_event=PendingEvent(event=event, room=room, source_kind="message"),
+        ),
+        source_event_id=event.event_id,
+        source_kind="message",
+    )
+    await asyncio.wait_for(retried.wait(), timeout=1)
+    await wait_for_background_tasks(timeout=1, owner=bot._runtime_view)
+
+    assert not bot._dispatch_obligation_store.has_pending(event.event_id, DispatchCallbackKind.MESSAGE)
 
 
 @pytest.mark.asyncio

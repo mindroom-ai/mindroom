@@ -29,7 +29,6 @@ _PENDING_STATE = "pending"
 _SQLITE_BUSY_TIMEOUT_MILLISECONDS = 5_000
 _RETRY_INITIAL_DELAY_SECONDS = 1.0
 _RETRY_MAX_DELAY_SECONDS = 30.0
-_RETRY_MAX_ATTEMPTS = 5
 _TOOL_APPROVAL_RESPONSE_EVENT_TYPE = "io.mindroom.tool_approval_response"
 _StoreResult = TypeVar("_StoreResult")
 
@@ -770,11 +769,10 @@ class DispatchObligationRunner:
     room_lifecycle_admission_enabled: Callable[[], bool] = lambda: False
     _retry_initial_delay_seconds: float = field(default=_RETRY_INITIAL_DELAY_SECONDS, repr=False)
     _retry_max_delay_seconds: float = field(default=_RETRY_MAX_DELAY_SECONDS, repr=False)
-    _retry_max_attempts: int = field(default=_RETRY_MAX_ATTEMPTS, repr=False)
     _active: set[_DispatchObligationKey] = field(default_factory=set, init=False, repr=False)
     _active_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False, repr=False)
     _retry_keys: dict[_DispatchObligationKey, int] = field(default_factory=dict, init=False, repr=False)
-    _retry_exhausted: set[_DispatchObligationKey] = field(default_factory=set, init=False, repr=False)
+    _retry_corrupt: set[_DispatchObligationKey] = field(default_factory=set, init=False, repr=False)
     _retry_task: asyncio.Task[None] | None = field(default=None, init=False, repr=False)
 
     @staticmethod
@@ -817,6 +815,22 @@ class DispatchObligationRunner:
             callback_kind=callback_kind,
             owner=owner,
         )
+
+    def retry_pending_turn_sources(
+        self,
+        source_event_ids: tuple[str, ...],
+    ) -> None:
+        """Return deferred turn sources to exact stored callback retry ownership."""
+        for source_event_id in source_event_ids:
+            for callback_kind in _TURN_BACKED_KINDS:
+                self._schedule_retry(
+                    _DispatchObligationKey(
+                        principal_id=self.store.principal_id,
+                        entity_name=self.store.entity_name,
+                        source_event_id=source_event_id,
+                        callback_kind=callback_kind,
+                    ),
+                )
 
     def admission_callback(
         self,
@@ -1028,7 +1042,7 @@ class DispatchObligationRunner:
 
     def _schedule_retry(self, key: _DispatchObligationKey) -> None:
         """Ensure one failed exact callback remains autonomously retry-owned."""
-        if key in self._retry_exhausted:
+        if key in self._retry_corrupt:
             return
         self._retry_keys.setdefault(key, 0)
         if self._retry_task is not None and not self._retry_task.done():
@@ -1060,7 +1074,7 @@ class DispatchObligationRunner:
                     except asyncio.CancelledError:
                         raise
                     except _DispatchObligationCorruptionError:
-                        self._retry_exhausted.add(key)
+                        self._retry_corrupt.add(key)
                         logger.exception(
                             "dispatch_obligation_retry_corrupt",
                             source_event_id=key.source_event_id,
@@ -1068,23 +1082,13 @@ class DispatchObligationRunner:
                         )
                     except Exception:
                         completed_attempts += 1
-                        if completed_attempts < self._retry_max_attempts:
-                            self._retry_keys.setdefault(key, completed_attempts)
-                            logger.exception(
-                                "dispatch_obligation_retry_failed",
-                                source_event_id=key.source_event_id,
-                                callback_kind=key.callback_kind.value,
-                                retry_attempt=completed_attempts,
-                                retry_max_attempts=self._retry_max_attempts,
-                            )
-                        else:
-                            self._retry_exhausted.add(key)
-                            logger.error(  # noqa: TRY400
-                                "dispatch_obligation_retry_exhausted",
-                                source_event_id=key.source_event_id,
-                                callback_kind=key.callback_kind.value,
-                                retry_attempts=completed_attempts,
-                            )
+                        self._retry_keys.setdefault(key, completed_attempts)
+                        logger.exception(
+                            "dispatch_obligation_retry_failed",
+                            source_event_id=key.source_event_id,
+                            callback_kind=key.callback_kind.value,
+                            retry_attempt=completed_attempts,
+                        )
                 retry_delay_seconds = min(
                     retry_delay_seconds * 2,
                     self._retry_max_delay_seconds,

@@ -19,7 +19,7 @@ import threading
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field, fields
 from typing import TYPE_CHECKING, Any, cast
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import nio
 import pytest
@@ -1513,6 +1513,25 @@ async def test_command_turn_records_terminal_outcome_through_turn_store(config: 
     record = harness.turn_store.get_turn_record(event.event_id)
     assert record is not None
     assert record.response_event_id == "$sent-1:localhost"
+
+
+@pytest.mark.asyncio
+async def test_command_dispatch_failure_propagates_without_recording_terminal_outcome(
+    config: Config,
+    tmp_path: Path,
+) -> None:
+    """A failed owner command must remain retryable at the durable callback boundary."""
+    harness = _build_harness(config, tmp_path, agent_name=ROUTER_AGENT_NAME)
+    room = _room_with_members(config, ROUTER_AGENT_NAME, "general", "research")
+    event = _text_event("!help", event_id="$failed-command:localhost")
+
+    with (
+        patch("mindroom.turn_controller.handle_command", side_effect=RuntimeError("command failed")),
+        pytest.raises(RuntimeError, match="command failed"),
+    ):
+        await harness.deliver(room, event)
+
+    assert harness.turn_store.get_turn_record(event.event_id) is None
 
 
 @pytest.mark.asyncio

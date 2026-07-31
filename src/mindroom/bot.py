@@ -432,6 +432,7 @@ class AgentBot:
                 timestamp_ms,
                 timezone=self.config.timezone,
             ),
+            on_dispatch_failure=self._retry_failed_coalesced_dispatch,
         )
         self._hook_context_support = HookContextSupport(
             runtime=self._runtime_view,
@@ -1917,6 +1918,10 @@ class AgentBot:
     async def _dispatch_coalesced_batch(self, batch: CoalescedBatch) -> None:
         """Delegate one flushed coalesced batch to the turn engine."""
         await self._turn_controller.handle_coalesced_batch(batch)
+
+    def _retry_failed_coalesced_dispatch(self, source_event_ids: tuple[str, ...]) -> None:
+        """Return failed gate sources to their exact durable callback owner."""
+        self._dispatch_obligation_runner.retry_pending_turn_sources(source_event_ids)
 
     def _log_matrix_event_callback_started(
         self,
