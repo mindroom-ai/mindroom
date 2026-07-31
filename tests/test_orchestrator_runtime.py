@@ -1143,8 +1143,10 @@ class TestMultiAgentOrchestrator:
 
         bot = AsyncMock()
         bot.agent_name = "general"
+        bot.agent_user.user_id = "@general:localhost"
         bot.rooms = []
         bot.ensure_rooms = AsyncMock()
+        orchestrator._restart_recovery.owner_ready = MagicMock()
 
         with (
             patch.object(orchestrator, "_ensure_rooms_exist", new=AsyncMock()),
@@ -1159,6 +1161,9 @@ class TestMultiAgentOrchestrator:
         assert bot.rooms == ["!room1:localhost"]
         mock_ensure_user_in_rooms.assert_not_awaited()
         assert bot.ensure_rooms.await_count == 2
+        orchestrator._restart_recovery.owner_ready.assert_called_once_with(
+            "@general:localhost",
+        )
 
     @pytest.mark.asyncio
     async def test_setup_rooms_and_memberships_retries_invites_after_router_joins(self, tmp_path: Path) -> None:

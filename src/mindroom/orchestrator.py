@@ -1676,6 +1676,11 @@ class _MultiAgentOrchestrator:
         if follow_up_bots:
             await asyncio.gather(*(bot.ensure_rooms() for bot in follow_up_bots))
 
+        for bot in bots:
+            owner_user_id = bot.agent_user.user_id
+            if owner_user_id:
+                self._restart_recovery.owner_ready(owner_user_id)
+
         logger.info("All agents have joined their configured rooms")
 
     async def _ensure_rooms_exist(self) -> dict[str, str]:

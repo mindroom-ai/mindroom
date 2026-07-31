@@ -8,6 +8,7 @@ from enum import Enum, auto
 from typing import TYPE_CHECKING, Protocol
 from uuid import NAMESPACE_URL, uuid5
 
+from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_delivery import send_message_result
 from mindroom.matrix.client_room_admin import get_joined_rooms
@@ -94,10 +95,11 @@ class RoomRecoveryRequest:
 
 @dataclass(frozen=True)
 class _RoomRecoveryResult:
-    """Result of one owner-room recovery attempt."""
+    """Result of one shared room recovery attempt."""
 
     interrupted_threads: tuple[InterruptedThread, ...] = ()
     retry: bool = False
+    retry_owner_user_ids: frozenset[str] = frozenset()
 
 
 class RestartTargetFreshness(Enum):
@@ -112,12 +114,12 @@ class RestartTargetFreshness(Enum):
 class _RecoverRoom(Protocol):
     async def __call__(
         self,
-        owner: RecoveryOwner,
+        owners: tuple[RecoveryOwner, ...],
         request: RoomRecoveryRequest,
         owner_user_ids: frozenset[str],
         config: Config,
     ) -> _RoomRecoveryResult:
-        """Recover one room through its exact current owner."""
+        """Recover one scan scope through its exact current owners."""
         ...
 
 
@@ -183,10 +185,7 @@ class _OwnerMembershipSnapshots:
             self.snapshots[owner.user_id] = snapshot
         try:
             return await snapshot.task
-        except asyncio.CancelledError:
-            self._discard(owner.user_id, snapshot)
-            raise
-        except Exception:
+        except BaseException:
             self._discard(owner.user_id, snapshot)
             raise
 
@@ -224,49 +223,95 @@ class _OwnerMembershipSnapshots:
             self.snapshots.pop(owner_user_id)
 
 
+async def _recover_room(
+    membership_snapshots: _OwnerMembershipSnapshots,
+    runtime_paths: RuntimePaths,
+    owners: tuple[RecoveryOwner, ...],
+    request: RoomRecoveryRequest,
+    owner_user_ids: frozenset[str],
+    config: Config,
+) -> _RoomRecoveryResult:
+    """Recover one room scan after every exact owner has joined."""
+    assert owners
+    membership_results = await asyncio.gather(
+        *(membership_snapshots.joined_rooms(owner) for owner in owners),
+        return_exceptions=True,
+    )
+    joined_owners: list[RecoveryOwner] = []
+    retry_owner_user_ids: set[str] = set()
+    for owner, joined_room_ids in zip(owners, membership_results):
+        if isinstance(joined_room_ids, asyncio.CancelledError):
+            raise joined_room_ids
+        if isinstance(joined_room_ids, BaseException):
+            logger.warning(
+                "Failed to list owner rooms during restart recovery",
+                owner_user_id=owner.user_id,
+                exc_info=(
+                    type(joined_room_ids),
+                    joined_room_ids,
+                    joined_room_ids.__traceback__,
+                ),
+            )
+            retry_owner_user_ids.add(owner.user_id)
+            continue
+        if joined_room_ids is None or request.room_id not in joined_room_ids:
+            membership_snapshots.invalidate(owner)
+            retry_owner_user_ids.add(owner.user_id)
+            continue
+        joined_owners.append(owner)
+
+    if retry_owner_user_ids:
+        return _RoomRecoveryResult(
+            retry_owner_user_ids=frozenset(owner.user_id for owner in owners),
+        )
+
+    scan_owner = next(
+        (owner for owner in joined_owners if owner.entity_name == ROUTER_AGENT_NAME),
+        min(joined_owners, key=lambda owner: owner.user_id),
+    )
+    cleanup_result = await cleanup_stale_streaming_room(
+        scan_owner.client,
+        room_id=request.room_id,
+        actors={
+            owner.user_id: StaleStreamCleanupActor(
+                client=owner.client,
+                conversation_cache=owner.conversation_cache,
+            )
+            for owner in joined_owners
+        },
+        bot_user_ids=set(owner_user_ids),
+        config=config,
+        runtime_paths=runtime_paths,
+        startup_cutoff_ms=request.startup_cutoff_ms,
+        terminal_interrupted_only=request.terminal_interrupted_only,
+    )
+    if cleanup_result.retry_required:
+        return _RoomRecoveryResult(
+            retry_owner_user_ids=frozenset(owner.user_id for owner in joined_owners),
+        )
+    return _RoomRecoveryResult(
+        interrupted_threads=cleanup_result.interrupted_threads,
+    )
+
+
 def build_matrix_restart_recovery_operations(runtime_paths: RuntimePaths) -> RestartRecoveryOperations:
     """Build exact-owner Matrix operations for restart recovery."""
     membership_snapshots = _OwnerMembershipSnapshots()
 
     async def recover_room(
-        owner: RecoveryOwner,
+        owners: tuple[RecoveryOwner, ...],
         request: RoomRecoveryRequest,
         owner_user_ids: frozenset[str],
         config: Config,
     ) -> _RoomRecoveryResult:
-        try:
-            joined_room_ids = await membership_snapshots.joined_rooms(owner)
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            logger.warning(
-                "Failed to list owner rooms during restart recovery",
-                owner_user_id=owner.user_id,
-                exc_info=True,
-            )
-            return _RoomRecoveryResult(retry=True)
-        if joined_room_ids is None or request.room_id not in joined_room_ids:
-            membership_snapshots.invalidate(owner)
-            return _RoomRecoveryResult(retry=True)
-
-        cleanup_result = await cleanup_stale_streaming_room(
-            owner.client,
-            room_id=request.room_id,
-            actors={
-                owner.user_id: StaleStreamCleanupActor(
-                    client=owner.client,
-                    conversation_cache=owner.conversation_cache,
-                ),
-            },
-            bot_user_ids=set(owner_user_ids),
-            config=config,
-            runtime_paths=runtime_paths,
-            startup_cutoff_ms=request.startup_cutoff_ms,
-            terminal_interrupted_only=request.terminal_interrupted_only,
+        return await _recover_room(
+            membership_snapshots,
+            runtime_paths,
+            owners,
+            request,
+            owner_user_ids,
+            config,
         )
-        if cleanup_result.retry_required:
-            return _RoomRecoveryResult(retry=True)
-        return _RoomRecoveryResult(interrupted_threads=cleanup_result.interrupted_threads)
 
     async def target_freshness(
         owner: RecoveryOwner,
