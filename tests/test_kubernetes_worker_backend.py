@@ -1883,9 +1883,11 @@ router:
     runtime_paths = resolve_primary_runtime_paths(config_path=config_path, storage_path=storage_root)
     backend, apps_api, _core_api = _backend(runtime_paths=runtime_paths)
 
-    with pytest.raises(WorkerBackendError, match="knowledge mount paths overlap"):
+    with pytest.raises(WorkerBackendError, match="knowledge mount paths overlap") as exc_info:
         backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=10.0)
 
+    assert "/app/worker/knowledge/project" in str(exc_info.value)
+    assert "/app/worker/knowledge/project/docs" in str(exc_info.value)
     assert apps_api.created_bodies == []
 
 

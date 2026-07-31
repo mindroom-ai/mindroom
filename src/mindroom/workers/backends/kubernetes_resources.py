@@ -1667,12 +1667,13 @@ class KubernetesResourceManager:
         relative_paths = self._assigned_knowledge_storage_paths(worker_key)
         mount_paths = tuple(mounted_storage_root / relative_path for relative_path in relative_paths)
         for index, mount_path in enumerate(mount_paths):
-            if any(
-                mount_path.is_relative_to(other_path) or other_path.is_relative_to(mount_path)
-                for other_path in mount_paths[index + 1 :]
-            ):
-                msg = f"Kubernetes knowledge mount paths overlap for worker key: {worker_key}"
-                raise WorkerBackendError(msg)
+            for other_path in mount_paths[index + 1 :]:
+                if mount_path.is_relative_to(other_path) or other_path.is_relative_to(mount_path):
+                    msg = (
+                        f"Kubernetes knowledge mount paths overlap for worker key {worker_key}: "
+                        f"{mount_path} and {other_path}"
+                    )
+                    raise WorkerBackendError(msg)
         mounts: list[dict[str, object]] = []
         for relative_path, mount_path in zip(relative_paths, mount_paths, strict=True):
             if any(
