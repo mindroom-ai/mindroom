@@ -304,21 +304,31 @@ async def _cleanup_joined_owners(
     interrupted_threads: list[InterruptedThread] = []
     retry_cleanup_owner_user_ids = set(retry_owner_user_ids)
     for owner in joined_owners:
-        cleanup_result: StaleStreamCleanupResult = await cleanup_stale_streaming_room(
-            owner.client,
-            room_id=request.room_id,
-            actors={
-                owner.user_id: StaleStreamCleanupActor(
-                    client=owner.client,
-                    conversation_cache=owner.conversation_cache,
-                ),
-            },
-            bot_user_ids=set(owner_user_ids),
-            config=config,
-            runtime_paths=runtime_paths,
-            startup_cutoff_ms=request.startup_cutoff_ms,
-            terminal_interrupted_only=request.terminal_interrupted_only,
-        )
+        try:
+            cleanup_result: StaleStreamCleanupResult = await cleanup_stale_streaming_room(
+                owner.client,
+                room_id=request.room_id,
+                actors={
+                    owner.user_id: StaleStreamCleanupActor(
+                        client=owner.client,
+                        conversation_cache=owner.conversation_cache,
+                    ),
+                },
+                bot_user_ids=set(owner_user_ids),
+                config=config,
+                runtime_paths=runtime_paths,
+                startup_cutoff_ms=request.startup_cutoff_ms,
+                terminal_interrupted_only=request.terminal_interrupted_only,
+            )
+        except Exception:
+            logger.warning(
+                "Failed to clean owner history during restart recovery",
+                owner_user_id=owner.user_id,
+                room_id=request.room_id,
+                exc_info=True,
+            )
+            retry_cleanup_owner_user_ids.add(owner.user_id)
+            continue
         cleaned_count += cleanup_result.cleaned_count
         interrupted_threads.extend(cleanup_result.interrupted_threads)
         retry_cleanup_owner_user_ids.update(cleanup_result.retry_bot_user_ids)
@@ -423,7 +433,7 @@ def build_matrix_restart_recovery_operations(
                         "mindroom.restart_recovery.v1",
                         owner.user_id,
                         target.room_id,
-                        target.thread_id or "",
+                        target.thread_id,
                         target.target_event_id,
                         str(target.timestamp_ms),
                     ),

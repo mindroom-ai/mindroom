@@ -205,19 +205,19 @@ def _room_from_joined_members(
     client: nio.AsyncClient,
     room_id: str,
     members: nio.JoinedMembersResponse,
-) -> tuple[nio.MatrixRoom, bool]:
+) -> nio.MatrixRoom:
     """Return a sync-owned room or one unpublished hydrated candidate."""
     room = client.rooms.get(room_id)
     if room is not None:
         room.encrypted = True
-        return room, False
+        return room
 
     room = nio.MatrixRoom(room_id=room_id, own_user_id=client.user_id or "")
     room.encrypted = True
     for member in members.members:
         room.add_member(member.user_id, member.display_name, member.avatar_url)
     room.members_synced = True
-    return room, True
+    return room
 
 
 async def _hydrate_encrypted_joined_room(
@@ -229,7 +229,7 @@ async def _hydrate_encrypted_joined_room(
     if not isinstance(members, nio.JoinedMembersResponse):
         return False
 
-    room, owns_room = _room_from_joined_members(client, room_id, members)
+    room = _room_from_joined_members(client, room_id, members)
     if client.olm is not None:
         client.olm.update_tracked_users(room)
     if client.should_query_keys:
@@ -237,15 +237,9 @@ async def _hydrate_encrypted_joined_room(
         if not isinstance(key_query, nio.KeysQueryResponse):
             return False
 
-    was_encrypted = room_id in client.encrypted_rooms
+    if client.store is not None:
+        client.store.save_encrypted_rooms({room_id})
     client.encrypted_rooms.add(room_id)
-    try:
-        if client.store is not None:
-            client.store.save_encrypted_rooms({room_id})
-    except BaseException:
-        if owns_room and not was_encrypted:
-            client.encrypted_rooms.discard(room_id)
-        raise
     client.rooms.setdefault(room_id, room)
     return True
 

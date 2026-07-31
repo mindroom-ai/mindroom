@@ -335,6 +335,7 @@ async def test_interrupted_target_freshness_classifies_effective_later_sender(
         "$target",
         "partial",
         "test_agent",
+        owner_user_id=BOT_USER_ID,
         original_sender_id=USER_ID,
     )
     conversation_cache = AsyncMock()
@@ -376,6 +377,7 @@ async def test_interrupted_target_freshness_classifies_unusable_history(
         "$target",
         "partial",
         "test_agent",
+        owner_user_id=BOT_USER_ID,
         original_sender_id=USER_ID,
     )
     conversation_cache = None if history_case == "missing" else AsyncMock()
@@ -412,6 +414,7 @@ async def test_interrupted_target_freshness_propagates_cancellation(tmp_path: Pa
         "$target",
         "partial",
         "test_agent",
+        owner_user_id=BOT_USER_ID,
         original_sender_id=USER_ID,
     )
     conversation_cache = AsyncMock()
@@ -768,6 +771,7 @@ async def test_cleanup_returns_interrupted_thread_per_cleaned_threaded_message(t
             target_event_id="$older",
             partial_text="First partial",
             agent_name="test_agent",
+            owner_user_id=BOT_USER_ID,
             original_sender_id=None,
         ),
         InterruptedThread(
@@ -776,6 +780,7 @@ async def test_cleanup_returns_interrupted_thread_per_cleaned_threaded_message(t
             target_event_id="$newer",
             partial_text="Second partial",
             agent_name="test_agent",
+            owner_user_id=BOT_USER_ID,
             original_sender_id=None,
         ),
     ]
@@ -942,6 +947,7 @@ async def test_cleanup_returns_thread_requester_for_auto_resume(tmp_path: Path) 
             target_event_id="$message",
             partial_text="Needs cleanup",
             agent_name="test_agent",
+            owner_user_id=BOT_USER_ID,
             original_sender_id=USER_ID,
         ),
     ]
@@ -998,6 +1004,7 @@ async def test_cleanup_uses_exact_replied_to_requester_not_latest_thread_speaker
             target_event_id="$original",
             partial_text="Needs cleanup",
             agent_name="test_agent",
+            owner_user_id=BOT_USER_ID,
             original_sender_id=USER_ID,
         ),
     ]
@@ -1048,6 +1055,7 @@ async def test_cleanup_uses_scanned_history_when_edited_bot_message_lacks_visibl
             target_event_id="$original",
             partial_text="Needs cleanup",
             agent_name="test_agent",
+            owner_user_id=BOT_USER_ID,
             original_sender_id=USER_ID,
         ),
     ]
@@ -1113,6 +1121,7 @@ async def test_cleanup_follows_agent_reply_chain_outside_scanned_history(tmp_pat
             target_event_id="$original",
             partial_text="Needs cleanup",
             agent_name="test_agent",
+            owner_user_id=BOT_USER_ID,
             original_sender_id=USER_ID,
         ),
     ]
@@ -1200,6 +1209,7 @@ async def test_cleanup_uses_visible_content_for_fetched_edit_events(tmp_path: Pa
             target_event_id="$original",
             partial_text="Needs cleanup",
             agent_name="test_agent",
+            owner_user_id=BOT_USER_ID,
             original_sender_id=USER_ID,
         ),
     ]
@@ -1281,6 +1291,7 @@ async def test_cleanup_fetches_exact_scanned_edit_ancestor_for_requester_resolut
             target_event_id="$original",
             partial_text="Needs cleanup",
             agent_name="test_agent",
+            owner_user_id=BOT_USER_ID,
             original_sender_id=USER_ID,
         ),
     ]
@@ -1446,6 +1457,7 @@ async def test_cleanup_returns_restart_marked_terminal_thread_for_auto_resume(tm
             target_event_id="$message",
             partial_text="Partial answer",
             agent_name="test_agent",
+            owner_user_id=BOT_USER_ID,
             original_sender_id=USER_ID,
         ),
     ]
@@ -1563,6 +1575,7 @@ async def test_cleanup_returns_old_terminal_interrupted_thread_for_auto_resume(t
             target_event_id="$old-interrupted",
             partial_text="Partial answer",
             agent_name="test_agent",
+            owner_user_id=BOT_USER_ID,
             original_sender_id=USER_ID,
             timestamp_ms=NOW_MS - OLD_STALE_AGE_MS,
         ),

@@ -89,10 +89,11 @@ class InterruptedThread:
     """One interrupted thread that can be resumed after restart."""
 
     room_id: str
-    thread_id: str | None
+    thread_id: str
     target_event_id: str
     partial_text: str
     agent_name: str
+    owner_user_id: str
     original_sender_id: str | None = None
     timestamp_ms: int = field(default=0, compare=False)
 
@@ -426,6 +427,7 @@ async def _process_stale_room_candidate(
     if _is_cleanup_candidate(state):
         return await _cleanup_candidate_message(
             actor.client,
+            owner_user_id=bot_user_id,
             room_id=room_id,
             target_event_id=target_event_id,
             state=state,
@@ -440,6 +442,7 @@ async def _process_stale_room_candidate(
         return _CandidateCleanupResult()
     return await _handle_interrupted_message(
         actor.client,
+        owner_user_id=bot_user_id,
         room_id=room_id,
         target_event_id=target_event_id,
         state=state,
@@ -457,6 +460,7 @@ async def _process_stale_room_candidate(
 async def _handle_interrupted_message(
     client: nio.AsyncClient,
     *,
+    owner_user_id: str,
     room_id: str,
     target_event_id: str,
     state: _MessageState,
@@ -473,6 +477,7 @@ async def _handle_interrupted_message(
     interrupted = None
     if can_auto_resume and target_event_id not in auto_resume_target_event_ids:
         interrupted = _interrupted_thread_from_terminal_state(
+            owner_user_id=owner_user_id,
             room_id=room_id,
             target_event_id=target_event_id,
             state=state,
@@ -546,6 +551,7 @@ async def _repair_restart_marked_message_metadata(
 async def _cleanup_one_stale_message(
     client: nio.AsyncClient,
     *,
+    owner_user_id: str,
     room_id: str,
     target_event_id: str,
     state: _MessageState,
@@ -578,6 +584,7 @@ async def _cleanup_one_stale_message(
             target_event_id=target_event_id,
             partial_text=_truncate_partial_text(clean_partial_reply_text(state.latest_body)),
             agent_name=agent_name,
+            owner_user_id=owner_user_id,
             original_sender_id=state.requester_user_id,
             timestamp_ms=state.latest_timestamp,
         )
@@ -594,6 +601,7 @@ async def _cleanup_one_stale_message(
 async def _cleanup_candidate_message(
     client: nio.AsyncClient,
     *,
+    owner_user_id: str,
     room_id: str,
     target_event_id: str,
     state: _MessageState,
@@ -610,6 +618,7 @@ async def _cleanup_candidate_message(
             await asyncio.sleep(_RATE_LIMIT_DELAY_SECONDS)
         edited, interrupted = await _cleanup_one_stale_message(
             client,
+            owner_user_id=owner_user_id,
             room_id=room_id,
             target_event_id=target_event_id,
             state=state,
@@ -1554,6 +1563,7 @@ def _has_resumable_interrupted_note(state: _MessageState) -> bool:
 
 def _interrupted_thread_from_terminal_state(
     *,
+    owner_user_id: str,
     room_id: str,
     target_event_id: str,
     state: _MessageState,
@@ -1569,6 +1579,7 @@ def _interrupted_thread_from_terminal_state(
         target_event_id=target_event_id,
         partial_text=_truncate_partial_text(clean_partial_reply_text(state.latest_body)),
         agent_name=agent_name,
+        owner_user_id=owner_user_id,
         original_sender_id=state.requester_user_id,
         timestamp_ms=state.latest_timestamp,
     )

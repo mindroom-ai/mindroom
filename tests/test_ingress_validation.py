@@ -67,6 +67,7 @@ def test_trusted_relay_resolves_requester_and_allows_self_authored_ingress(tmp_p
             target_event_id="$target",
             partial_text="partial",
             agent_name="test_agent",
+            owner_user_id=ids["test_agent"].full_id,
             original_sender_id=human_sender,
         ),
         config=config,

@@ -56,14 +56,6 @@ class _OwnerRoomWork:
     def room_id(self) -> str:
         return self.request.room_id
 
-    @property
-    def scheduled_at(self) -> float:
-        """Return the due time after the work enters the eligible queue."""
-        if self.due_at is None:
-            msg = "Eligible restart recovery work must have a due time"
-            raise RuntimeError(msg)
-        return self.due_at
-
 
 @dataclass(frozen=True)
 class _RoomLease:
@@ -142,15 +134,13 @@ def _target_version(target: InterruptedThread) -> tuple[int, str]:
 def _newest_targets(targets: tuple[InterruptedThread, ...]) -> tuple[InterruptedThread, ...]:
     newest: dict[str, InterruptedThread] = {}
     for target in targets:
-        if target.thread_id is None:
-            continue
         current = newest.get(target.thread_id)
         if current is None or _target_version(target) > _target_version(current):
             newest[target.thread_id] = target
     return tuple(
         sorted(
             newest.values(),
-            key=lambda target: (target.thread_id or "", _target_version(target)),
+            key=lambda target: (target.thread_id, _target_version(target)),
         ),
     )
 
@@ -459,24 +449,29 @@ class RestartRecoveryCoordinator:
     def _active_room_ids(self) -> set[str]:
         return {lease.room_id for lease in self._active_attempts.values()}
 
-    def _eligible_work(self) -> list[_OwnerRoomWork]:
+    def _eligible_work(self) -> list[tuple[float, _OwnerRoomWork]]:
         active_room_ids = self._active_room_ids()
         return [
-            work for work in self._room_jobs.values() if work.room_id not in active_room_ids and work.due_at is not None
+            (work.due_at, work)
+            for work in self._room_jobs.values()
+            if work.room_id not in active_room_ids and work.due_at is not None
         ]
 
     def _due_room_leases(self, now: float) -> tuple[_RoomLease, ...]:
         """Group all due jobs in one pass while preserving owner fairness."""
-        due_work = sorted(
-            (work for work in self._eligible_work() if work.scheduled_at <= now),
-            key=lambda work: (
-                work.scheduled_at,
-                work.room_id,
-                work.request.startup_cutoff_ms or -1,
-                work.request.terminal_interrupted_only,
-                work.owner_user_id,
-            ),
-        )
+        due_work = [
+            work
+            for _, work in sorted(
+                (item for item in self._eligible_work() if item[0] <= now),
+                key=lambda item: (
+                    item[0],
+                    item[1].room_id,
+                    item[1].request.startup_cutoff_ms or -1,
+                    item[1].request.terminal_interrupted_only,
+                    item[1].owner_user_id,
+                ),
+            )
+        ]
         jobs_by_request: dict[_RoomKey, list[_OwnerRoomWork]] = {}
         for work in due_work:
             jobs_by_request.setdefault(work.request.key, []).append(work)
@@ -515,7 +510,7 @@ class RestartRecoveryCoordinator:
         eligible = self._eligible_work()
         if not eligible:
             return None
-        due_at = min(work.scheduled_at for work in eligible)
+        due_at = min(due_at for due_at, _ in eligible)
         return max(0.0, due_at - asyncio.get_running_loop().time())
 
     async def _wait_for_progress(self, *, delay: float | None) -> None:
@@ -674,7 +669,6 @@ class RestartRecoveryCoordinator:
 
     def _advance_watermark(self, owner: RecoveryOwner, settlement: _TargetSettlement) -> None:
         target = settlement.target
-        assert target.thread_id is not None
         key = owner.user_id, target.room_id, target.thread_id
         version = _target_version(target)
         current = self._target_watermarks.get(key)
@@ -698,9 +692,8 @@ class RestartRecoveryCoordinator:
                 config,
             )
         recovered_by_owner: dict[str, list[InterruptedThread]] = {owner_user_id: [] for owner_user_id in ready}
-        owners_by_entity = {owner.entity_name: owner for owner in ready.values()}
         for target in recovered.interrupted_threads:
-            owner = owners_by_entity[target.agent_name]
+            owner = ready[target.owner_user_id]
             if target.original_sender_id is None and owner.user_id in recovered.retry_owner_user_ids:
                 continue
             recovered_by_owner[owner.user_id].append(target)
@@ -779,10 +772,21 @@ class RestartRecoveryCoordinator:
                 retry_targets.extend(eligible_targets[index:])
                 cancelled = True
                 break
-            if attempt is None:
+            except Exception:
+                logger.warning(
+                    "Restart recovery target failed",
+                    owner_user_id=owner.user_id,
+                    room_id=target.room_id,
+                    thread_id=target.thread_id,
+                    target_event_id=target.target_event_id,
+                    exc_info=True,
+                )
                 retry_targets.append(target)
             else:
-                settlements.append(attempt)
+                if attempt is None:
+                    retry_targets.append(target)
+                else:
+                    settlements.append(attempt)
             if (task := asyncio.current_task()) is not None and task.cancelling():
                 retry_targets.extend(eligible_targets[index + 1 :])
                 cancelled = True
@@ -803,7 +807,6 @@ class RestartRecoveryCoordinator:
     ) -> tuple[InterruptedThread, ...]:
         eligible: list[InterruptedThread] = []
         for target in _newest_targets(targets):
-            assert target.thread_id is not None
             watermark = self._target_watermarks.get((owner.user_id, target.room_id, target.thread_id))
             if (
                 watermark is None

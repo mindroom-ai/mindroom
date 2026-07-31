@@ -836,6 +836,7 @@ async def test_prepare_dispatch_keeps_standard_context_for_non_router_internal_r
             target_event_id="$target",
             partial_text="partial",
             agent_name=bot.agent_name,
+            owner_user_id=bot.matrix_id.full_id,
             original_sender_id="@user:localhost",
         ),
         config=bot.config,

@@ -139,6 +139,7 @@ def _target(
     room_id: str = "!code:example.org",
     thread_id: str = "$thread",
     agent_name: str = "code",
+    owner_user_id: str = "@code:example.org",
     original_sender_id: str | None = "@alice:example.org",
 ) -> InterruptedThread:
     return InterruptedThread(
@@ -147,6 +148,7 @@ def _target(
         target_event_id=target_event_id,
         partial_text="Partial",
         agent_name=agent_name,
+        owner_user_id=owner_user_id,
         original_sender_id=original_sender_id,
         timestamp_ms=timestamp_ms,
     )
@@ -422,7 +424,12 @@ async def test_shared_room_merges_targets_visible_to_different_owners(tmp_path: 
         rooms=frozenset({room_id}),
     )
     owner_target = _target("$owner-target", timestamp_ms=10)
-    router_target = _target("$router-target", timestamp_ms=20, agent_name=ROUTER_AGENT_NAME)
+    router_target = _target(
+        "$router-target",
+        timestamp_ms=20,
+        agent_name=ROUTER_AGENT_NAME,
+        owner_user_id=router.user_id,
+    )
     operations = build_matrix_restart_recovery_operations(test_runtime_paths(tmp_path))
 
     async def cleanup(
@@ -563,6 +570,7 @@ async def test_matrix_room_recovery_retries_only_failed_cleanup_owner(
         "$healthy-target",
         timestamp_ms=10,
         agent_name=healthy_owner.entity_name,
+        owner_user_id=healthy_owner.user_id,
     )
     operations = build_matrix_restart_recovery_operations(test_runtime_paths(tmp_path))
 
@@ -614,6 +622,70 @@ async def test_matrix_room_recovery_retries_only_failed_cleanup_owner(
         interrupted_count=1,
         retry_owner_count=1,
         room_id="!code:example.org",
+    )
+
+
+@pytest.mark.asyncio
+async def test_matrix_room_cleanup_exception_retries_only_failed_owner(
+    tmp_path: Path,
+) -> None:
+    """One owner's cleanup exception must not skip a healthy later owner."""
+    failed_owner = _owner(
+        entity_name="failed",
+        user_id="@a-failed:example.org",
+    )
+    healthy_owner = _owner(
+        entity_name="healthy",
+        user_id="@z-healthy:example.org",
+    )
+    healthy_target = _target(
+        "$healthy-target",
+        timestamp_ms=10,
+        agent_name=healthy_owner.entity_name,
+        owner_user_id=healthy_owner.user_id,
+    )
+    operations = build_matrix_restart_recovery_operations(test_runtime_paths(tmp_path))
+
+    async def cleanup(
+        scan_client: nio.AsyncClient,
+        **_kwargs: object,
+    ) -> stale_stream_cleanup_module.StaleStreamCleanupResult:
+        if scan_client is failed_owner.client:
+            msg = "failed owner history unavailable"
+            raise RuntimeError(msg)
+        return stale_stream_cleanup_module.StaleStreamCleanupResult(
+            cleaned_count=1,
+            interrupted_threads=(healthy_target,),
+        )
+
+    with (
+        patch(
+            "mindroom.restart_recovery_operations.get_joined_rooms",
+            new=AsyncMock(return_value=["!code:example.org"]),
+        ),
+        patch(
+            "mindroom.restart_recovery_operations.cleanup_stale_streaming_room",
+            new=AsyncMock(side_effect=cleanup),
+        ) as cleanup_room,
+        patch("mindroom.restart_recovery_operations.logger.warning") as warning,
+    ):
+        result = await operations.recover_room(
+            (failed_owner, healthy_owner),
+            RoomRecoveryRequest("!code:example.org", 123, False),
+            frozenset({failed_owner.user_id, healthy_owner.user_id}),
+            _config(tmp_path),
+        )
+
+    assert cleanup_room.await_count == 2
+    assert result == RoomRecoveryResult(
+        interrupted_threads=(healthy_target,),
+        retry_owner_user_ids=frozenset({failed_owner.user_id}),
+    )
+    warning.assert_called_once_with(
+        "Failed to clean owner history during restart recovery",
+        owner_user_id=failed_owner.user_id,
+        room_id="!code:example.org",
+        exc_info=True,
     )
 
 
@@ -722,7 +794,7 @@ async def test_matrix_target_delivery_hydrates_hidden_encrypted_room(
 
 
 @pytest.mark.asyncio
-async def test_matrix_target_delivery_rolls_back_incomplete_encrypted_room(
+async def test_matrix_target_delivery_does_not_publish_incomplete_encrypted_room(
     tmp_path: Path,
 ) -> None:
     """Failed member hydration must not leave a sendable-looking cache entry."""
@@ -749,8 +821,8 @@ async def test_matrix_target_delivery_rolls_back_incomplete_encrypted_room(
 
 
 @pytest.mark.asyncio
-async def test_cancelled_encrypted_room_hydration_rolls_back_owned_cache_entry() -> None:
-    """Cancellation must not leave a partially hydrated encrypted room sendable."""
+async def test_cancelled_encrypted_room_hydration_stops_before_cache_publication() -> None:
+    """Cancellation before hydration completes must not publish a room."""
     owner = _owner()
     room_id = "!hidden:example.org"
     _hide_encrypted_room(owner, room_id)
@@ -775,7 +847,7 @@ async def test_cancelled_encrypted_room_hydration_rolls_back_owned_cache_entry()
 
 @pytest.mark.asyncio
 async def test_cancelled_hydration_preserves_room_adopted_by_concurrent_sync() -> None:
-    """Rollback must not delete a room object that nio sync adopted and populated."""
+    """Cancellation before publication must preserve concurrent nio sync state."""
     owner = _owner()
     room_id = "!hidden:example.org"
     _hide_encrypted_room(owner, room_id)
@@ -828,8 +900,8 @@ async def test_encrypted_room_hydration_queries_new_member_device_keys() -> None
 
 
 @pytest.mark.asyncio
-async def test_encrypted_room_hydration_rolls_back_failed_device_key_query() -> None:
-    """A failed device-key query must not leave an encrypted room sendable."""
+async def test_encrypted_room_hydration_does_not_publish_after_failed_device_key_query() -> None:
+    """A failed device-key query must not publish an encrypted room."""
     owner = _owner()
     room_id = "!hidden:example.org"
     _hide_encrypted_room(owner, room_id)
@@ -4279,8 +4351,19 @@ async def test_ready_owners_share_one_room_scan_and_settle_independently(
         assert {owner.user_id for owner in scan_owners} == set(owners)
         return RoomRecoveryResult(
             interrupted_threads=(
-                _target("$code", timestamp_ms=10, agent_name="code"),
-                _target("$other", timestamp_ms=10, thread_id="$other", agent_name="other"),
+                _target(
+                    "$code",
+                    timestamp_ms=10,
+                    agent_name="stale-code-name",
+                    owner_user_id=code.user_id,
+                ),
+                _target(
+                    "$other",
+                    timestamp_ms=10,
+                    thread_id="$other",
+                    agent_name="other",
+                    owner_user_id=other.user_id,
+                ),
             ),
         )
 
@@ -4320,6 +4403,108 @@ async def test_ready_owners_share_one_room_scan_and_settle_independently(
         (code.user_id, "$code"),
         (other.user_id, "$other"),
     }
+
+
+@pytest.mark.asyncio
+async def test_target_exception_retries_only_failed_target_and_continues_shared_lease(
+    tmp_path: Path,
+) -> None:
+    """One target exception must not skip later targets or a healthy co-owner."""
+    failed_owner = _owner(entity_name="failed", user_id="@a-failed:example.org")
+    healthy_owner = _owner(entity_name="healthy", user_id="@z-healthy:example.org")
+    owners = {failed_owner.user_id: failed_owner, healthy_owner.user_id: healthy_owner}
+    failed_target = _target(
+        "$failed-target",
+        timestamp_ms=10,
+        thread_id="$a-failed-thread",
+        agent_name=failed_owner.entity_name,
+        owner_user_id=failed_owner.user_id,
+    )
+    later_target = _target(
+        "$later-target",
+        timestamp_ms=20,
+        thread_id="$b-later-thread",
+        agent_name=failed_owner.entity_name,
+        owner_user_id=failed_owner.user_id,
+    )
+    healthy_target = _target(
+        "$healthy-target",
+        timestamp_ms=30,
+        thread_id="$healthy-thread",
+        agent_name=healthy_owner.entity_name,
+        owner_user_id=healthy_owner.user_id,
+    )
+    delivered: list[str] = []
+
+    async def recover_batch(
+        _owners: tuple[RecoveryOwner, ...],
+        _request: RoomRecoveryRequest,
+        _owner_user_ids: frozenset[str],
+        _config: Config,
+    ) -> RoomRecoveryResult:
+        return RoomRecoveryResult(
+            interrupted_threads=(failed_target, later_target, healthy_target),
+        )
+
+    async def deliver(
+        _owner: RecoveryOwner,
+        target: InterruptedThread,
+        _config: Config,
+    ) -> RestartDeliveryOutcome:
+        delivered.append(target.target_event_id)
+        if target is failed_target:
+            msg = "target delivery failed"
+            raise RuntimeError(msg)
+        return RestartDeliveryOutcome.DELIVERED
+
+    async def close() -> None:
+        return None
+
+    coordinator = RestartRecoveryCoordinator(
+        current_config=lambda: _config(tmp_path),
+        current_owners=lambda: owners,
+        operations=RestartRecoveryOperations(
+            joined_rooms=AsyncMock(side_effect=lambda owner: list(owner.desired_room_ids)),
+            membership_refresh_delay_seconds=0.0,
+            recover_room=recover_batch,
+            target_freshness=AsyncMock(return_value=InterruptedTargetFreshness.CURRENT),
+            deliver_target=deliver,
+            discard_owner=lambda _owner_user_id: None,
+            close=close,
+        ),
+        retry_delay=lambda _attempt: 10.0,
+    )
+    request = RoomRecoveryRequest("!code:example.org", 123, False)
+    failed_work = RoomWork(request, failed_owner.user_id, failed_owner.generation, due_at=None)
+    healthy_work = RoomWork(request, healthy_owner.user_id, healthy_owner.generation, due_at=None)
+    coordinator._room_jobs = {
+        failed_work.key: failed_work,
+        healthy_work.key: healthy_work,
+    }
+
+    with patch("mindroom.restart_recovery.logger.warning") as warning:
+        outcomes = await coordinator._process_room(
+            RoomLease(request, (failed_work, healthy_work)),
+        )
+        for outcome in outcomes:
+            coordinator._settle_owner_outcome(outcome)
+
+    assert delivered == [
+        failed_target.target_event_id,
+        later_target.target_event_id,
+        healthy_target.target_event_id,
+    ]
+    assert coordinator._room_jobs[failed_work.key].targets == (failed_target,)
+    assert coordinator._room_jobs[failed_work.key].matrix_attempt == 1
+    assert healthy_work.key not in coordinator._room_jobs
+    warning.assert_called_once_with(
+        "Restart recovery target failed",
+        owner_user_id=failed_owner.user_id,
+        room_id=failed_target.room_id,
+        thread_id=failed_target.thread_id,
+        target_event_id=failed_target.target_event_id,
+        exc_info=True,
+    )
 
 
 @pytest.mark.asyncio
@@ -4485,8 +4670,14 @@ async def test_pause_does_not_start_next_owner_delivery_in_shared_lease(
     ) -> RoomRecoveryResult:
         return RoomRecoveryResult(
             interrupted_threads=(
-                _target("$code", timestamp_ms=10, agent_name="code"),
-                _target("$other", timestamp_ms=10, thread_id="$other", agent_name="other"),
+                _target("$code", timestamp_ms=10, agent_name="code", owner_user_id=code.user_id),
+                _target(
+                    "$other",
+                    timestamp_ms=10,
+                    thread_id="$other",
+                    agent_name="other",
+                    owner_user_id=other.user_id,
+                ),
             ),
         )
 
