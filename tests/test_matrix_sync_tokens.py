@@ -26,7 +26,10 @@ from mindroom.config.models import ModelConfig
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.delivery_gateway import FinalizeStreamedResponseRequest, ResponseIdentity
 from mindroom.dispatch_handoff import PendingDispatchMetadata
-from mindroom.dispatch_obligations import DispatchCallbackKind
+from mindroom.dispatch_obligations import (
+    DispatchCallbackKind,
+    _DispatchObligationCorruptionError,
+)
 from mindroom.dispatch_source import VOICE_SOURCE_KIND
 from mindroom.handled_turns import TurnRecord
 from mindroom.matrix.cache.event_cache import EventCacheBackendUnavailableError
@@ -1555,6 +1558,53 @@ async def test_nio_replays_event_rejected_before_durable_dispatch_acceptance(
     await wait_for_background_tasks(timeout=1, owner=bot._runtime_view)
 
     assert create_attempts == 2
+    assert bot._dispatch_obligation_store.has_pending(
+        event.event_id,
+        DispatchCallbackKind.MESSAGE,
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("transport", ["classic", "sliding"])
+async def test_nio_rejects_event_when_existing_dispatch_payload_is_corrupt(
+    tmp_path: Path,
+    transport: str,
+) -> None:
+    """Corrupt pending work must remain visible to nio as rejected admission."""
+    bot = _agent_bot(tmp_path)
+    client = nio.AsyncClient(
+        "https://example.org",
+        bot.matrix_id.full_id,
+        config=nio.AsyncClientConfig(
+            encryption_enabled=False,
+            backfill_limited_timelines=True,
+        ),
+    )
+    room_id = "!room:localhost"
+    room = nio.MatrixRoom(room_id, bot.matrix_id.full_id)
+    event = _text_event(f"$corrupt-{transport}", "hello", 1)
+    response = _timeline_response(transport, room_id, event)
+    await bot._dispatch_obligation_runner.persist(
+        room,
+        event,
+        DispatchCallbackKind.MESSAGE,
+    )
+    with sqlite3.connect(bot._dispatch_obligation_store._database_path) as connection:
+        connection.execute(
+            "UPDATE dispatch_obligations SET event_source_json = ? WHERE source_event_id = ?",
+            ("{", event.event_id),
+        )
+    client.add_event_admission_callback(
+        bot._dispatch_obligation_runner.admission_callback(DispatchCallbackKind.MESSAGE),
+        nio.RoomMessageText,
+    )
+
+    with pytest.raises(nio.CallbackNotAcceptedError) as exc_info:
+        await client.receive_response(response)
+
+    assert isinstance(exc_info.value.__cause__, _DispatchObligationCorruptionError)
+    recovery = cast("Any", client)._recovery
+    assert event.event_id not in recovery.completed.get(room_id, {})
     assert bot._dispatch_obligation_store.has_pending(
         event.event_id,
         DispatchCallbackKind.MESSAGE,
