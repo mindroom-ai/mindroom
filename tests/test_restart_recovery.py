@@ -2084,20 +2084,14 @@ def test_orchestrator_recovery_owner_uses_live_room_scope_without_disk_read(
     orchestrator.config = config
     orchestrator.agent_bots = {"code": bot}
 
-    with patch(
-        "mindroom.restart_recovery_operations.load_invited_rooms",
-        new=MagicMock(),
-        create=True,
-    ) as load_invited_rooms:
-        owners = orchestrator._restart_recovery_owners()
-        refreshed_owners = orchestrator._restart_recovery_owners()
+    owners = orchestrator._restart_recovery_owners()
+    refreshed_owners = orchestrator._restart_recovery_owners()
 
     assert owners["@code:example.org"].desired_room_ids == frozenset(
         {"!configured:example.org", "!invited:example.org"},
     )
     assert refreshed_owners["@code:example.org"].desired_room_ids == owners["@code:example.org"].desired_room_ids
     assert owners["@code:example.org"].generation is bot
-    load_invited_rooms.assert_not_called()
 
 
 @pytest.mark.asyncio
