@@ -68,6 +68,8 @@ class SyncCacheTrust:
     _awaiting_initial_window: bool = field(default=False, init=False, repr=False)
     _cache_scope_epoch: int = field(default=0, init=False, repr=False)
     _saved_checkpoint: SyncCheckpoint | None = field(default=None, init=False, repr=False)
+    _dispatch_persist_failure_epoch: int = field(default=0, init=False, repr=False)
+    _observed_dispatch_persist_failure_epoch: int = field(default=0, init=False, repr=False)
 
     async def prepare_startup(self) -> str | None:
         """Initialize cache trust, then restore a valid checkpoint or start cold."""
@@ -144,6 +146,26 @@ class SyncCacheTrust:
         self.runtime.event_cache.disable("sync_checkpoint_clear_failed")
         self.logger.warning("matrix_cache_scope_cleanup_checkpoint_clear_failed")
         return False
+
+    def record_dispatch_persist_failure(self) -> None:
+        """Latch one source callback rejected before durable ownership."""
+        self._dispatch_persist_failure_epoch += 1
+
+    def consume_dispatch_persist_failure(self) -> bool:
+        """Reject certification once for every newly observed failure epoch."""
+        failure_epoch = self._dispatch_persist_failure_epoch
+        if failure_epoch == self._observed_dispatch_persist_failure_epoch:
+            return False
+        self._observed_dispatch_persist_failure_epoch = failure_epoch
+        self.logger.warning(
+            "matrix_sync_certification_rejected_after_dispatch_persist_failure",
+            dispatch_persist_failure_epoch=failure_epoch,
+        )
+        return True
+
+    def acknowledge_dispatch_persist_failures(self) -> None:
+        """Settle source failures irrelevant to non-checkpointed transports."""
+        self._observed_dispatch_persist_failure_epoch = self._dispatch_persist_failure_epoch
 
     async def certify_response(
         self,

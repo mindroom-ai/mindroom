@@ -361,8 +361,6 @@ class AgentBot:
         self._last_sync_monotonic = None
         self._first_sync_done = False
         self._orchestrator_ready_handled = False
-        self._dispatch_persist_failure_epoch = 0
-        self._observed_dispatch_persist_failure_epoch = 0
         self._sync_shutting_down = False
         self._hook_registry_state = HookRegistryState(HookRegistry.empty())
         self._room_member_callback_registered = False
@@ -1285,26 +1283,20 @@ class AgentBot:
 
     def _record_dispatch_persist_failure(self) -> None:
         """Latch rejected source work until its containing response is rejected."""
-        self._dispatch_persist_failure_epoch += 1
+        self._sync_cache_trust.record_dispatch_persist_failure()
         if self.config.matrix_sync.mode == "classic":
             self._rewind_sync_after_pre_certification_failure()
 
-    def _consume_dispatch_persist_failure(self) -> bool:
-        """Return whether unseen source rejection blocks this response's checkpoint."""
-        failure_epoch = self._dispatch_persist_failure_epoch
-        if failure_epoch == self._observed_dispatch_persist_failure_epoch:
+    def _rewind_unseen_dispatch_persist_failure(self) -> bool:
+        """Rewind when trust reports an unseen durable-acceptance rejection."""
+        if not self._sync_cache_trust.consume_dispatch_persist_failure():
             return False
-        self._observed_dispatch_persist_failure_epoch = failure_epoch
         self._ensure_pre_certification_rewind()
-        self.logger.warning(
-            "matrix_sync_certification_rejected_after_dispatch_persist_failure",
-            dispatch_persist_failure_epoch=failure_epoch,
-        )
         return True
 
     def _handle_pre_certification_failure(self) -> None:
         """Rewind one failed response and consume any durable-acceptance rejection."""
-        if self._consume_dispatch_persist_failure():
+        if self._rewind_unseen_dispatch_persist_failure():
             return
         self._ensure_pre_certification_rewind()
 
@@ -1325,7 +1317,7 @@ class AgentBot:
         response: nio.SyncResponse,
     ) -> tuple[SyncCertificationDecision, _RoomMemberJoinSyncHookPlan, bool]:
         """Apply certification only when every source callback reached durable ownership."""
-        if self._consume_dispatch_persist_failure():
+        if self._rewind_unseen_dispatch_persist_failure():
             return decision, _RoomMemberJoinSyncHookPlan(arm_after_response=False), True
         applied = await self._apply_sync_response_decision(
             decision,
@@ -1530,7 +1522,7 @@ class AgentBot:
 
     async def _handle_sliding_sync_response(self, response: nio.SlidingSyncResponse) -> None:
         """Apply one Sliding response through membership and transport owners."""
-        self._observed_dispatch_persist_failure_epoch = self._dispatch_persist_failure_epoch
+        self._sync_cache_trust.acknowledge_dispatch_persist_failures()
         with track_matrix_sync_cache_write(self.agent_name):
             await self._apply_own_room_membership_from_sliding_sync(response)
         self._apply_transport_recovery_outcome(
@@ -1796,9 +1788,7 @@ class AgentBot:
             # Keep durable tracking-state loading off the event loop at startup.
             await asyncio.to_thread(self._turn_store.warm)
             await asyncio.to_thread(interactive.init_persistence, self.runtime_paths.storage_root)
-            if self.orchestrator is not None and (
-                self.agent_name == ROUTER_AGENT_NAME or self.agent_name in self.config.teams
-            ):
+            if self.orchestrator is not None:
                 await self._dispatch_obligation_runner.recover_pending(turn_backed=False)
             else:
                 await self._dispatch_obligation_runner.recover_pending()
@@ -2094,16 +2084,13 @@ class AgentBot:
         room: nio.MatrixRoom,
         event: nio.InviteEvent,
     ) -> None:
-        """Finish invite handling before the containing classic sync can certify."""
-        try:
-            await self._dispatch_obligation_runner.dispatch(
-                room,
-                event,
-                DispatchCallbackKind.INVITE,
-            )
-        except BaseException:
-            self._rewind_sync_after_pre_certification_failure()
-            raise
+        """Durably accept invite work before scheduling its network side effects."""
+        await self._dispatch_obligation_runner.dispatch_background(
+            room,
+            event,
+            DispatchCallbackKind.INVITE,
+            owner=self._runtime_view,
+        )
 
     def _settle_turn_dispatch_obligations(self, event_ids: tuple[str, ...]) -> None:
         """Replace pending turn-backed obligations with durable TurnStore truth."""

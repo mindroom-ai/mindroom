@@ -60,9 +60,13 @@ Matrix callback
 ## Durable Dispatch Boundary
 
 Nio pre-fanout admission callbacks persist each correctness-critical Matrix timeline callback before any ordinary event callback can run.
-It stores pending replay payloads and permanent compact tombstones in `tracking/dispatch_obligations.sqlite3`.
+Each exact Matrix principal and entity stores pending replay payloads and permanent compact tombstones in its own `tracking/dispatch_obligations-<identity-sha256>.sqlite3` file.
+This file boundary prevents one entity's admission write from waiting on another entity's SQLite write transaction.
 Its exact key combines the Matrix principal, entity, source event, and callback kind, while pending rows retain the original room and event source for replay.
 Settled rows become permanent exact-key tombstones and atomically scrub that replay payload, keeping terminal truth compact without allowing an old callback to reappear.
+Each entity database therefore grows by one compact row per exact callback over the lifetime of the instance.
+Operators can inspect growth by running `SELECT state, COUNT(*) FROM dispatch_obligations GROUP BY state;` against each dispatch-obligation database.
+Terminal rows must not be deleted unless duplicate callback execution after future Matrix redelivery is acceptable.
 Successful and intentionally ignored callbacks settle explicitly, while failures and cancellations remain pending for direct startup recovery.
 Recovery parses and invokes pending work without depending on a later Classic Sync token or Sliding Sync position.
 Message and media obligations remain pending when coalescing or a pending `TurnStore` record defers them, then yield only to durably persisted terminal turn truth.

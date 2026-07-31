@@ -540,7 +540,7 @@ class _MultiAgentOrchestrator:
             config = self.config
             if config is None:
                 return
-            for entity_name in [ROUTER_AGENT_NAME, *sorted(config.teams)]:
+            for entity_name in configured_entity_names(config):
                 bot = self.agent_bots.get(entity_name)
                 required_entities = (
                     # Router replay rechecks live responders, so unavailable bots cannot globally park unrelated work.
@@ -550,7 +550,11 @@ class _MultiAgentOrchestrator:
                         if (required_bot := self.agent_bots.get(required_entity)) is not None and required_bot.running
                     ]
                     if entity_name == ROUTER_AGENT_NAME
-                    else [entity_name, *config.teams[entity_name].agents]
+                    else (
+                        [entity_name, *config.teams[entity_name].agents]
+                        if entity_name in config.teams
+                        else [entity_name]
+                    )
                 )
                 if bot is None or any(
                     self.entity_first_sync_complete(required_entity) is not True

@@ -168,6 +168,23 @@ async def test_planned_response_does_not_advance_checkpoint_until_applied(tmp_pa
     assert trust.checkpoint == SyncCheckpoint("s_planned")
 
 
+def test_dispatch_persist_failure_is_consumed_once_per_epoch(tmp_path: Path) -> None:
+    """Each new admission failure rejects certification exactly once."""
+    trust, _cache, _runtime = _trust(tmp_path)
+
+    assert not trust.consume_dispatch_persist_failure()
+
+    trust.record_dispatch_persist_failure()
+    trust.record_dispatch_persist_failure()
+
+    assert trust.consume_dispatch_persist_failure()
+    assert not trust.consume_dispatch_persist_failure()
+
+    trust.record_dispatch_persist_failure()
+
+    assert trust.consume_dispatch_persist_failure()
+
+
 @pytest.mark.asyncio
 async def test_cache_scope_invalidation_rejects_stale_certification_plan(tmp_path: Path) -> None:
     """A plan made before cache cleanup cannot restore or persist sync continuity."""
