@@ -1104,6 +1104,9 @@ async def test_recovered_sync_response_certifies_after_nio_callback_success(tmp_
     bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
     room = nio.MatrixRoom("!room:localhost", bot.matrix_id.full_id)
     event = _text_event("$recovered-source", "hello", 1)
+    source_admission = bot._dispatch_obligation_runner.admission_callback(
+        DispatchCallbackKind.MESSAGE,
+    )
     source_callback = bot._dispatch_obligation_runner.task_wrapper(
         DispatchCallbackKind.MESSAGE,
         owner=bot._runtime_view,
@@ -1124,6 +1127,7 @@ async def test_recovered_sync_response_certifies_after_nio_callback_success(tmp_
             AsyncMock(return_value=cache_result),
         ),
     ):
+        await source_admission(room, event)
         await source_callback(room, event)
         assert bot._dispatch_obligation_store.has_pending(event.event_id, DispatchCallbackKind.MESSAGE)
         await bot._on_sync_response(response)
