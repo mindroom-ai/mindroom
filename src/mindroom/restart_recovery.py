@@ -807,15 +807,6 @@ class RestartRecoveryCoordinator:
     ) -> _TargetSettlement | None:
         if target.original_sender_id is None or not config.defaults.auto_resume_after_restart:
             return _TargetSettlement(target, closed=False)
-        async with self._matrix_read_slots:
-            freshness = await self._operations.target_freshness(owner, target, config)
-        if freshness is InterruptedTargetFreshness.RETRY:
-            return None
-        if freshness in {
-            InterruptedTargetFreshness.NEWER_HUMAN,
-            InterruptedTargetFreshness.UNRECOVERABLE,
-        }:
-            return _TargetSettlement(target, closed=False)
         delivery = await self._deliver_target(owner, target, config)
         if delivery is RestartDeliveryOutcome.RETRY:
             return None
@@ -832,6 +823,13 @@ class RestartRecoveryCoordinator:
     ) -> RestartDeliveryOutcome:
         """Drain one exact delivery through repeated coordinator cancellation."""
         async with self._delivery_lock:
+            async with self._matrix_read_slots:
+                freshness = await self._operations.target_freshness(owner, target, config)
+            if freshness is InterruptedTargetFreshness.RETRY:
+                return RestartDeliveryOutcome.RETRY
+            if freshness is not InterruptedTargetFreshness.CURRENT:
+                return RestartDeliveryOutcome.TERMINAL
+
             # Matrix may commit before cancellation is observable.
             # Drain the exact outcome so pause can settle its watermark; the
             # deterministic transaction ID is a replay guard, not settlement.

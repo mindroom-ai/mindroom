@@ -2433,6 +2433,86 @@ async def test_terminal_delivery_freshness_settles_without_retry(tmp_path: Path)
 
 
 @pytest.mark.asyncio
+async def test_queued_delivery_rechecks_freshness_after_delivery_lock(
+    tmp_path: Path,
+) -> None:
+    """A queued target must not send after human activity while waiting for delivery."""
+    owner = _owner()
+    first_target = _target("$first", timestamp_ms=10, thread_id="$first-thread")
+    queued_target = _target("$queued", timestamp_ms=20, thread_id="$queued-thread")
+    first_delivery_started = asyncio.Event()
+    release_first_delivery = asyncio.Event()
+    queued_processing_started = asyncio.Event()
+    freshness_checks: dict[str, int] = {}
+    delivered: list[str] = []
+    human_activity = False
+
+    async def recover_room(
+        _owner: RecoveryOwner,
+        _request: RoomRecoveryRequest,
+        _owner_user_ids: frozenset[str],
+        _config: Config,
+    ) -> RoomRecoveryResult:
+        return RoomRecoveryResult()
+
+    async def freshness(
+        _owner: RecoveryOwner,
+        target: InterruptedThread,
+        _config: Config,
+    ) -> InterruptedTargetFreshness:
+        attempt = freshness_checks.get(target.target_event_id, 0) + 1
+        freshness_checks[target.target_event_id] = attempt
+        if target is queued_target and human_activity:
+            return InterruptedTargetFreshness.NEWER_HUMAN
+        return InterruptedTargetFreshness.CURRENT
+
+    async def deliver(
+        _owner: RecoveryOwner,
+        target: InterruptedThread,
+        _config: Config,
+    ) -> bool:
+        delivered.append(target.target_event_id)
+        if target is first_target:
+            first_delivery_started.set()
+            await release_first_delivery.wait()
+        return True
+
+    coordinator = RestartRecoveryCoordinator(
+        current_config=lambda: _config(tmp_path),
+        current_owners=lambda: {owner.user_id: owner},
+        operations=_operations(
+            recover_room=recover_room,
+            freshness=freshness,
+            deliver=deliver,
+        ),
+        retry_delay=lambda _attempt: 0.0,
+    )
+    config = _config(tmp_path)
+    first_task = asyncio.create_task(coordinator._process_target(owner, first_target, config))
+    await asyncio.wait_for(first_delivery_started.wait(), timeout=1.0)
+
+    async def process_queued_target() -> TargetSettlement | None:
+        queued_processing_started.set()
+        return await coordinator._process_target(owner, queued_target, config)
+
+    queued_task = asyncio.create_task(process_queued_target())
+    await asyncio.wait_for(queued_processing_started.wait(), timeout=1.0)
+    await asyncio.sleep(0)
+    human_activity = True
+    release_first_delivery.set()
+
+    try:
+        first_settlement, queued_settlement = await asyncio.gather(first_task, queued_task)
+    finally:
+        await coordinator.stop()
+
+    assert first_settlement == TargetSettlement(first_target, closed=True)
+    assert queued_settlement == TargetSettlement(queued_target, closed=False)
+    assert freshness_checks[queued_target.target_event_id] == 1
+    assert delivered == [first_target.target_event_id]
+
+
+@pytest.mark.asyncio
 async def test_room_lease_snapshots_current_owners_once(tmp_path: Path) -> None:
     """One room lease must not rebuild durable owner scope per target."""
     owner = _owner()

@@ -2468,6 +2468,13 @@ async def test_orchestrator_stop_cancels_all_tasks(tmp_path: Path) -> None:
             "router": mock_bot2,
         }
 
+        async def track_recovery_stop() -> None:
+            shutdown_order.append("recovery_drain")
+            assert not orchestrator._sync_tasks
+            assert all(not bot.running for bot in orchestrator.agent_bots.values())
+
+        orchestrator._restart_recovery.stop = AsyncMock(side_effect=track_recovery_stop)
+
         async def track_mcp_stop() -> None:
             shutdown_order.append("mcp_teardown")
 
@@ -2498,6 +2505,7 @@ async def test_orchestrator_stop_cancels_all_tasks(tmp_path: Path) -> None:
             ],
         )
         assert mock_wait.await_count == 2
+        assert shutdown_order.index("recovery_drain") < shutdown_order.index("entity_teardown")
         assert shutdown_order.index("catalog_drain") < shutdown_order.index("mcp_teardown")
         assert shutdown_order.index("catalog_drain") < shutdown_order.index("entity_teardown")
 
