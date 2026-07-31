@@ -27,7 +27,7 @@ type _TargetKey = tuple[str, str, str]
 type _RoomKey = tuple[str, int | None, bool]
 
 
-_MAX_CONCURRENT_ROOMS = 8
+_MAX_CONCURRENT_ROOM_SCANS = 8
 
 
 @dataclass(frozen=True)
@@ -159,6 +159,7 @@ class RestartRecoveryCoordinator:
         self._completed_startup_scans: set[tuple[_RoomKey, str]] = set()
         self._ready_generations: dict[str, object] = {}
         self._active_attempts: dict[asyncio.Task[_RoomAttemptResult], _RoomWork] = {}
+        self._scan_slots = asyncio.Semaphore(_MAX_CONCURRENT_ROOM_SCANS)
         self._worker_task: asyncio.Task[None] | None = None
         self._wake = asyncio.Event()
         self._startup_cutoff_ms: int | None = None
@@ -352,7 +353,7 @@ class RestartRecoveryCoordinator:
 
     def _start_due_attempts(self) -> None:
         now = asyncio.get_running_loop().time()
-        while len(self._active_attempts) < _MAX_CONCURRENT_ROOMS:
+        while True:
             work = self._next_due_work(now)
             if work is None:
                 return
@@ -364,8 +365,6 @@ class RestartRecoveryCoordinator:
             self._active_attempts[task] = work
 
     def _next_start_delay(self) -> float | None:
-        if len(self._active_attempts) >= _MAX_CONCURRENT_ROOMS:
-            return None
         eligible = self._eligible_work()
         if not eligible:
             return None
@@ -475,25 +474,21 @@ class RestartRecoveryCoordinator:
             for owner_user_id in work.owner_user_ids
             if (owner := owners.get(owner_user_id)) is None or not owner.first_sync_complete
         }
-        if unavailable_owner_user_ids:
-            return _RoomAttemptResult(
-                owners,
-                work.owner_user_ids,
-                work.targets,
-                (),
-            )
-        retry_owner_user_ids: set[str] = set()
+        retry_owner_user_ids = set(unavailable_owner_user_ids)
         scan_owners = tuple(
-            owner for owner_user_id in sorted(work.owner_user_ids) if (owner := owners.get(owner_user_id)) is not None
+            owner
+            for owner_user_id in sorted(work.owner_user_ids - unavailable_owner_user_ids)
+            if (owner := owners.get(owner_user_id)) is not None
         )
         targets = list(work.targets)
         if scan_owners:
-            scan_retry_owner_user_ids, recovered_targets = await self._recover_scan(
-                scan_owners,
-                work,
-                owners,
-                config,
-            )
+            async with self._scan_slots:
+                scan_retry_owner_user_ids, recovered_targets = await self._recover_scan(
+                    scan_owners,
+                    work,
+                    owners,
+                    config,
+                )
             retry_owner_user_ids.update(scan_retry_owner_user_ids)
             targets.extend(recovered_targets)
 
@@ -502,7 +497,7 @@ class RestartRecoveryCoordinator:
         eligible_targets = self._eligible_targets(owners, tuple(targets))
         for index, owned_target in enumerate(eligible_targets):
             owner = owners.get(owned_target.owner_user_id)
-            if owner is None:
+            if owner is None or not owner.first_sync_complete:
                 retry_targets.append(owned_target)
                 continue
             try:

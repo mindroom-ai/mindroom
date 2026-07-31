@@ -1409,7 +1409,6 @@ depends_on = [
     "mindroom.matrix.client_session",
     "mindroom.matrix.rooms",
     "mindroom.matrix.state",
-    "mindroom.matrix.stale_stream_cleanup",
     "mindroom.matrix.thread_diagnostics",
     "mindroom.matrix.users",
     "mindroom.matrix_identifiers",
@@ -1485,7 +1484,6 @@ depends_on = [
     "mindroom.matrix.client_delivery",
     "mindroom.matrix.client_room_admin",
     "mindroom.matrix.conversation_cache",
-    "mindroom.matrix.invited_rooms_store",
     "mindroom.matrix.stale_stream_cleanup",
 ]
 visibility = [
