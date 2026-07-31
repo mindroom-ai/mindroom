@@ -34,6 +34,7 @@ class SyncCacheTrust:
     logger: structlog.stdlib.BoundLogger
     state: SyncTrustState = SyncTrustState.COLD
     checkpoint: SyncCheckpoint | None = None
+    _tokenless_baseline_pending: bool = field(default=False, init=False, repr=False)
     _cache_scope_epoch: int = field(default=0, init=False, repr=False)
     _dispatch_persist_failure_epoch: int = field(default=0, init=False, repr=False)
     _observed_dispatch_persist_failure_epoch: int = field(default=0, init=False, repr=False)
@@ -56,6 +57,7 @@ class SyncCacheTrust:
 
         self.state = SyncTrustState.PENDING if loaded is not None else SyncTrustState.COLD
         self.checkpoint = None
+        self._tokenless_baseline_pending = loaded is None
         return loaded.token if loaded is not None else None
 
     def _load_valid_checkpoint(self) -> SyncCheckpoint | None:
@@ -113,6 +115,8 @@ class SyncCacheTrust:
     def record_dispatch_persist_failure(self) -> None:
         """Latch one source callback rejected before durable ownership."""
         self._dispatch_persist_failure_epoch += 1
+        if self.checkpoint is None and self.state in {SyncTrustState.COLD, SyncTrustState.UNCERTAIN}:
+            self._tokenless_baseline_pending = True
 
     def consume_dispatch_persist_failure(self) -> bool:
         """Reject certification once for every newly observed failure epoch."""
@@ -155,9 +159,17 @@ class SyncCacheTrust:
             cache_result=cache_result,
             first_sync=first_sync,
         )
+        allow_tokenless_baseline = (
+            self._tokenless_baseline_pending
+            and decision.reason == "limited_sync_timeline"
+            and cache_result.complete
+            and not cache_result.errors
+            and not cache_result.unrecovered_room_ids
+        )
         # Rewind after any uncertified result so a later response cannot
-        # certify past an unrepaired local cache hole.
-        if not cache_result.certified:
+        # certify past an unrepaired local cache hole. One locally complete
+        # tokenless baseline may advance so nio can classify the positioned gap.
+        if not cache_result.certified and not allow_tokenless_baseline:
             decision = replace(decision, reset_client_token=True)
         return replace(decision, cache_scope_epoch=self._cache_scope_epoch)
 
@@ -177,12 +189,17 @@ class SyncCacheTrust:
                 cache_scope_epoch=self._cache_scope_epoch,
             )
         self._apply_decision(decision, cache_result=cache_result)
+        if decision.reset_client_token:
+            self._tokenless_baseline_pending = True
+        elif decision.reason == "limited_sync_timeline" or self.state is SyncTrustState.CERTIFIED:
+            self._tokenless_baseline_pending = False
         return decision
 
     def reject_unknown_pos(self) -> SyncCertificationDecision:
         """Invalidate a checkpoint rejected by the homeserver."""
         decision = handle_unknown_pos()
         self._apply_decision(decision)
+        self._tokenless_baseline_pending = True
         return decision
 
     def _apply_decision(
