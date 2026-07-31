@@ -43,7 +43,8 @@ dependencies = [
   "mdit-py-plugins>=0.5",
   "mem0ai>=0.1.115",
   # Arbitrary Olm to-device encryption uses the fork's tested internal API; update only with its round-trip tests.
-  "mindroom-nio[e2e]==0.32",
+  # Temporary exact development pin; replace it with the released NIO 0.32 artifact before merge or release.
+  "mindroom-nio[e2e] @ git+https://github.com/mindroom-ai/mindroom-nio.git@825c7e45dc6edb2c8b9a837d73c0763bb1ef1028",
   "openai",
   "packaging>=24",
   "pydantic>=2",
@@ -477,6 +478,8 @@ packages = [ "src/mindroom" ]
 [tool.hatch.build.targets.wheel.force-include]
 skills = "mindroom/_bundled_skills"
 [tool.hatch.build.targets.wheel.hooks.custom]
+[tool.hatch.metadata]
+allow-direct-references = true
 [tool.hatch.version]
 source = "vcs"
 [tool.hatch.version.raw-options]
@@ -495,8 +498,6 @@ override-dependencies = [
   "pillow>=10.2,<11; python_version < '3.14'",
   "pillow>=11,<12; python_version >= '3.14'",
 ]
-[tool.uv.sources]
-mindroom-nio = { git = "https://github.com/mindroom-ai/mindroom-nio", rev = "7c54a88c4a3db38612ac433ffef665287fdf4de1" }
 
 [tool.ruff]
 target-version = "py312"
