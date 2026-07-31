@@ -114,6 +114,22 @@ def test_uncertain_sync_fails_closed(cache_result: SyncCacheWriteResult, reason:
     assert decision.reason == reason
 
 
+def test_earlier_unrecovered_room_reports_incomplete_recovery() -> None:
+    """An earlier open recovery gap must not be diagnosed as a current limited timeline."""
+    decision = certify_sync_response(
+        SyncTrustState.CERTIFIED,
+        next_batch="s_next",
+        cache_result=SyncCacheWriteResult(
+            complete=True,
+            unrecovered_room_ids=frozenset({"!earlier:localhost"}),
+        ),
+        first_sync=False,
+    )
+
+    assert decision.state is SyncTrustState.UNCERTAIN
+    assert decision.reason == "sync_recovery_incomplete"
+
+
 def test_sync_cache_write_diagnostics_explains_uncertainty() -> None:
     """Sync-certification logs should expose the cache-write details behind uncertainty."""
     diagnostics = sync_cache_write_diagnostics(

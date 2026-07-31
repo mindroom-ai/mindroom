@@ -115,8 +115,10 @@ def _uncertain_reason(cache_result: SyncCacheWriteResult, *, next_batch: str | N
         return "missing_next_batch"
     if cache_result.errors:
         return "cache_write_failed"
-    if cache_result.has_recovery_obligation:
+    if cache_result.unclassified_limited_room_ids:
         return "limited_sync_timeline"
+    if cache_result.unrecovered_room_ids:
+        return "sync_recovery_incomplete"
     if not cache_result.complete:
         return "cache_write_incomplete"
     return None
