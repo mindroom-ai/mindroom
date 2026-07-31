@@ -3558,3 +3558,25 @@ async def test_pause_does_not_start_next_owner_delivery_in_shared_lease(
         await coordinator.stop()
 
     assert delivered == ["$code", "$other"]
+
+
+@pytest.mark.asyncio
+async def test_resume_without_retained_work_does_not_snapshot_owners(
+    tmp_path: Path,
+) -> None:
+    """A config resume with no recovery work must not materialize bot owners."""
+    current_owners = MagicMock(return_value={})
+
+    coordinator = RestartRecoveryCoordinator(
+        current_config=lambda: _config(tmp_path),
+        current_owners=current_owners,
+        operations=_operations(recover_room=AsyncMock()),
+    )
+    coordinator._stopped = False
+    coordinator.resume()
+    try:
+        await asyncio.sleep(0)
+    finally:
+        await coordinator.stop()
+
+    current_owners.assert_not_called()

@@ -227,9 +227,9 @@ class RestartRecoveryCoordinator:
             self._room_jobs = {
                 key: work for key, work in self._room_jobs.items() if not work.request.terminal_interrupted_only
             }
-        for owner in self._current_owners().values():
-            self._refresh_owner_jobs(owner, grant_fresh_budget=True)
-            self._enqueue_desired_rooms(owner)
+        if self._room_jobs:
+            for owner in self._current_owners().values():
+                self._refresh_owner_jobs(owner, grant_fresh_budget=True)
         self._paused = False
         self._ensure_worker()
 
