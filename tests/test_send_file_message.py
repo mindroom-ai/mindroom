@@ -1105,7 +1105,7 @@ class TestJoinRoom:
 
         joined = await join_room(client, "!room:localhost")
 
-        assert joined is True
+        assert joined
         client.join.assert_awaited_once_with("!room:localhost")
 
 

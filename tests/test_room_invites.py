@@ -348,6 +348,46 @@ async def test_invite_join_failure_propagates_to_sync_boundary(
 
 
 @pytest.mark.asyncio
+async def test_terminal_invite_join_failure_does_not_abort_sync(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A permanently unjoinable room must not wedge later sync callbacks."""
+    config = bind_runtime_paths(
+        Config(router=RouterConfig(model="default", accept_invites=True)),
+        test_runtime_paths(tmp_path),
+    )
+    bot = AgentBot(
+        agent_user=_router_user(),
+        storage_path=tmp_path,
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+    )
+    install_runtime_cache_support(bot)
+    bot.client = AsyncMock()
+    bot.client.rooms = {}
+    bot.client.join = AsyncMock(return_value=nio.JoinError("forbidden", "M_FORBIDDEN"))
+    monkeypatch.setattr("mindroom.bot_room_lifecycle.is_authorized_sender", lambda *_args, **_kwargs: True)
+    event = nio.InviteEvent.parse_event(
+        {
+            "type": "m.room.member",
+            "sender": "@owner:localhost",
+            "state_key": bot.agent_user.user_id,
+            "content": {"membership": "invite"},
+        },
+    )
+    assert isinstance(event, nio.InviteMemberEvent)
+
+    await bot._on_invite_before_sync_certification(
+        nio.MatrixRoom("!forbidden:localhost", bot.agent_user.user_id),
+        event,
+    )
+
+    bot.client.join.assert_awaited_once_with("!forbidden:localhost")
+    assert bot._dispatch_obligation_store.pending() == ()
+
+
+@pytest.mark.asyncio
 async def test_invite_persistence_failure_propagates_to_sync_boundary(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

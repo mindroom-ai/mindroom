@@ -12,7 +12,7 @@ import nio
 from mindroom.authorization import is_authorized_sender
 from mindroom.commands.handler import generate_welcome_message_for_room
 from mindroom.constants import ROUTER_AGENT_NAME
-from mindroom.matrix.client_room_admin import get_joined_rooms, join_room
+from mindroom.matrix.client_room_admin import RoomJoinOutcome, get_joined_rooms, join_room
 from mindroom.matrix.decrypt_failure import raise_notice_floor
 from mindroom.matrix.invited_rooms_store import (
     invited_rooms_path,
@@ -307,8 +307,11 @@ class BotRoomLifecycle:
                 return
 
             self._logger().info("Received invite", room_id=room.room_id, sender=event.sender)
-            if not await join_room(client, room.room_id):
+            join_outcome = await join_room(client, room.room_id)
+            if not join_outcome:
                 self._logger().error("Failed to join room", room_id=room.room_id)
+                if join_outcome is RoomJoinOutcome.TERMINAL_FAILURE:
+                    return
                 msg = f"Failed to join invited room {room.room_id}"
                 raise RuntimeError(msg)
 

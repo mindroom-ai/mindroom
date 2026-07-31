@@ -157,6 +157,58 @@ def test_has_responded_empty(temp_dir: Path) -> None:
     assert tracker.get_turn_record("event123") is None
 
 
+def test_durable_lookup_does_not_hold_state_lock_across_persist_barrier(temp_dir: Path) -> None:
+    """Disk durability waits must not block loop-side in-memory lookups."""
+    tracker = HandledTurnLedger("test_durable_lookup_lock", base_path=temp_dir)
+    tracker.warm()
+    real_persist = tracker._persist_records
+    persist_started = threading.Event()
+    release_persist = threading.Event()
+    durable_results: list[bool] = []
+    lookup_results: list[bool] = []
+    lookup_started = threading.Event()
+    lookup_done = threading.Event()
+
+    def persist_with_barrier(turn_records: tuple[TurnRecord, ...]) -> None:
+        persist_started.set()
+        assert release_persist.wait(timeout=5)
+        real_persist(turn_records)
+
+    def check_durable() -> None:
+        durable_results.append(tracker.has_durably_responded("$source"))
+
+    def check_in_memory() -> None:
+        lookup_started.set()
+        lookup_results.append(tracker.has_responded("$source"))
+        lookup_done.set()
+
+    with patch.object(tracker, "_persist_records", side_effect=persist_with_barrier):
+        tracker.record_handled_turn(TurnRecord.create(["$source"]))
+        assert persist_started.wait(timeout=5)
+        durable_thread = threading.Thread(target=check_durable)
+        durable_thread.start()
+        deadline = time.monotonic() + 5
+        while True:
+            with tracker._state.persist_lock:
+                barrier_queued = any(not request.records for request in tracker._state.pending_persists)
+            if barrier_queued:
+                break
+            assert time.monotonic() < deadline
+            time.sleep(0.001)
+
+        lookup_thread = threading.Thread(target=check_in_memory)
+        lookup_thread.start()
+        assert lookup_started.wait(timeout=5)
+        lookup_completed_before_disk = lookup_done.wait(timeout=1)
+        release_persist.set()
+        durable_thread.join(timeout=5)
+        lookup_thread.join(timeout=5)
+
+    assert lookup_completed_before_disk
+    assert durable_results == [True]
+    assert lookup_results == [True]
+
+
 def test_turn_record_normalizes_ids_and_prompt_map() -> None:
     """The handled-turn carrier should normalize IDs, prompts, and empty event IDs."""
     handled_turn = TurnRecord.create(

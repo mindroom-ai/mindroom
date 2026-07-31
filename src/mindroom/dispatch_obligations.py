@@ -26,6 +26,8 @@ logger = get_logger(__name__)
 _DATABASE_NAME = "dispatch_obligations.sqlite3"
 _SCHEMA_VERSION = 2
 _PENDING_STATE = "pending"
+_RETRY_INITIAL_DELAY_SECONDS = 1.0
+_RETRY_MAX_DELAY_SECONDS = 30.0
 _TOOL_APPROVAL_RESPONSE_EVENT_TYPE = "io.mindroom.tool_approval_response"
 _StoreResult = TypeVar("_StoreResult")
 
@@ -565,13 +567,23 @@ async def _run_owned_store_operation(
     worker_task = asyncio.create_task(asyncio.to_thread(operation, *args))
     try:
         return await asyncio.shield(worker_task)
-    except asyncio.CancelledError:
+    except asyncio.CancelledError as cancellation:
+        worker_error: Exception | None = None
         while not worker_task.done():
             try:
                 await asyncio.shield(worker_task)
             except asyncio.CancelledError:
                 continue
-        worker_task.result()
+            except Exception as exc:
+                worker_error = exc
+                break
+        if worker_error is None:
+            try:
+                worker_task.result()
+            except Exception as exc:
+                worker_error = exc
+        if worker_error is not None:
+            raise cancellation from worker_error
         raise
 
 
@@ -759,8 +771,13 @@ class DispatchObligationRunner:
     room_for_id: Callable[[str], nio.MatrixRoom]
     turn_is_terminal: Callable[[str], bool]
     on_persist_failure: Callable[[], None] | None = None
+    background_task_owner: object | None = None
+    _retry_initial_delay_seconds: float = field(default=_RETRY_INITIAL_DELAY_SECONDS, repr=False)
+    _retry_max_delay_seconds: float = field(default=_RETRY_MAX_DELAY_SECONDS, repr=False)
     _active: set[_DispatchObligationKey] = field(default_factory=set, init=False, repr=False)
     _active_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False, repr=False)
+    _retry_keys: dict[_DispatchObligationKey, None] = field(default_factory=dict, init=False, repr=False)
+    _retry_task: asyncio.Task[None] | None = field(default=None, init=False, repr=False)
 
     @staticmethod
     def callbacks_for(
@@ -907,6 +924,7 @@ class DispatchObligationRunner:
 
     async def recover_pending(self, *, turn_backed: bool | None = None) -> None:
         """Retry every valid pending callback without waiting for another sync response."""
+        failed_keys: list[_DispatchObligationKey] = []
         for obligation in await asyncio.to_thread(self.store.pending):
             if turn_backed is not None and (obligation.callback_kind in _TURN_BACKED_KINDS) != turn_backed:
                 continue
@@ -928,6 +946,60 @@ class DispatchObligationRunner:
                     callback_kind=obligation.callback_kind.value,
                     room_id=obligation.room_id,
                 )
+                failed_keys.append(obligation.key)
+        for key in failed_keys:
+            self._schedule_retry(key)
+
+    def _schedule_retry(self, key: _DispatchObligationKey) -> None:
+        """Ensure one failed exact callback remains autonomously retry-owned."""
+        self._retry_keys.setdefault(key, None)
+        if self._retry_task is not None and not self._retry_task.done():
+            return
+        self._retry_task = create_background_task(
+            self._retry_failed_obligations(),
+            name=f"retry_dispatch_obligations_{self.store.entity_name}",
+            owner=self.background_task_owner,
+        )
+
+    async def _retry_failed_obligations(self) -> None:
+        """Retry only callback failures, with one capped-backoff task per runner."""
+        retry_delay_seconds = self._retry_initial_delay_seconds
+        try:
+            while self._retry_keys:
+                await asyncio.sleep(retry_delay_seconds)
+                for key in tuple(self._retry_keys):
+                    self._retry_keys.pop(key, None)
+                    try:
+                        obligation = await asyncio.to_thread(self.store.pending_for, key)
+                        if obligation is None:
+                            continue
+                        event = _parse_recovery_event(obligation)
+                        await self._run_obligation(
+                            obligation,
+                            room=self.room_for_id(obligation.room_id),
+                            event=event,
+                        )
+                    except asyncio.CancelledError:
+                        raise
+                    except _DispatchObligationCorruptionError:
+                        logger.exception(
+                            "dispatch_obligation_retry_corrupt",
+                            source_event_id=key.source_event_id,
+                            callback_kind=key.callback_kind.value,
+                        )
+                    except Exception:
+                        self._retry_keys.setdefault(key, None)
+                        logger.exception(
+                            "dispatch_obligation_retry_failed",
+                            source_event_id=key.source_event_id,
+                            callback_kind=key.callback_kind.value,
+                        )
+                retry_delay_seconds = min(
+                    retry_delay_seconds * 2,
+                    self._retry_max_delay_seconds,
+                )
+        finally:
+            self._retry_task = None
 
     async def _run_obligation(
         self,
@@ -1038,6 +1110,7 @@ class _DispatchObligationTaskWrapper:
                 callback_kind=obligation.callback_kind.value,
                 room_id=obligation.room_id,
             )
+            self.runner._schedule_retry(obligation.key)
 
 
 def _is_tool_approval_response(event: nio.Event) -> TypeIs[nio.UnknownEvent]:
