@@ -59,7 +59,7 @@ Matrix callback
 
 ## Durable Dispatch Boundary
 
-`DispatchObligationStore` durably accepts each correctness-critical Matrix callback before background execution can fail or be cancelled.
+Nio pre-fanout admission callbacks persist each correctness-critical Matrix timeline callback before any ordinary event callback can run.
 It stores pending replay payloads and permanent compact tombstones in `tracking/dispatch_obligations.sqlite3`.
 Its exact key combines the Matrix principal, entity, source event, and callback kind, while pending rows retain the original room and event source for replay.
 Settled rows become permanent exact-key tombstones and atomically scrub that replay payload, keeping terminal truth compact without allowing an old callback to reappear.
@@ -68,7 +68,8 @@ Recovery parses and invokes pending work without depending on a later Classic Sy
 Message and media obligations remain pending when coalescing or a pending `TurnStore` record defers them, then yield only to durably persisted terminal turn truth.
 Raw sync-cache continuity remains owned separately by `SyncCacheTrust`, so a durable pending dispatch obligation is sufficient to preserve a certified checkpoint.
 Classic Sync response-owned lifecycle hooks and their durable de-duplication markers complete before `SyncCacheTrust` certifies the response checkpoint.
-Separately registered nio event callbacks may continue in the background after their exact dispatch obligation is durable.
+Invite and response-owned lifecycle paths use the same runner directly because they are outside nio timeline fanout.
+The matching ordinary nio event callbacks only load and execute already-persisted work after every admission callback succeeds, and may then continue in the background.
 
 ## Completed Simplifications
 
