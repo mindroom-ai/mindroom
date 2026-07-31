@@ -1474,6 +1474,13 @@ class KubernetesResourceManager:
                     "readOnly": True,
                 },
             )
+        mounts.extend(
+            self._knowledge_storage_mounts(
+                worker_key,
+                mounted_storage_root=Path(self.config.storage_mount_path),
+                existing_mount_paths=tuple(Path(cast("str", mount["mountPath"])) for mount in mounts),
+            ),
+        )
         if self.config.agent_vault is not None:
             mounts.append(
                 {
@@ -1490,6 +1497,11 @@ class KubernetesResourceManager:
                     "readOnly": True,
                 },
             )
+        validate_unique_worker_visible_paths(
+            (str(mount["mountPath"]) for mount in mounts),
+            worker_key=worker_key,
+            duplicate_label="Kubernetes mountPath",
+        )
         return mounts
 
     def _agent_vault_worker_ca_configmap_name(self) -> str | None:
@@ -1631,7 +1643,6 @@ class KubernetesResourceManager:
                 resolved_agent_policies=self.resolved_agent_policies,
             )
         ]
-        mounts.extend(self._knowledge_storage_mounts(worker_key, mounted_storage_root=mounted_storage_root))
         mounts.append(
             {
                 "name": WORKER_STORAGE_VOLUME_NAME,
@@ -1651,16 +1662,36 @@ class KubernetesResourceManager:
         worker_key: str,
         *,
         mounted_storage_root: Path,
+        existing_mount_paths: tuple[Path, ...],
     ) -> list[dict[str, object]]:
-        return [
-            {
-                "name": WORKER_STORAGE_VOLUME_NAME,
-                "mountPath": str(mounted_storage_root / relative_path),
-                "subPath": str(relative_path),
-                "readOnly": True,
-            }
-            for relative_path in self._assigned_knowledge_storage_paths(worker_key)
-        ]
+        relative_paths = self._assigned_knowledge_storage_paths(worker_key)
+        mount_paths = tuple(mounted_storage_root / relative_path for relative_path in relative_paths)
+        for index, mount_path in enumerate(mount_paths):
+            if any(
+                mount_path.is_relative_to(other_path) or other_path.is_relative_to(mount_path)
+                for other_path in mount_paths[index + 1 :]
+            ):
+                msg = f"Kubernetes knowledge mount paths overlap for worker key: {worker_key}"
+                raise WorkerBackendError(msg)
+        mounts: list[dict[str, object]] = []
+        for relative_path, mount_path in zip(relative_paths, mount_paths, strict=True):
+            if any(
+                mount_path == existing_path or mount_path.is_relative_to(existing_path)
+                for existing_path in existing_mount_paths
+            ):
+                continue
+            if any(existing_path.is_relative_to(mount_path) for existing_path in existing_mount_paths):
+                msg = f"Kubernetes knowledge mount overlaps existing mountPath for worker key: {worker_key}"
+                raise WorkerBackendError(msg)
+            mounts.append(
+                {
+                    "name": WORKER_STORAGE_VOLUME_NAME,
+                    "mountPath": str(mount_path),
+                    "subPath": str(relative_path),
+                    "readOnly": True,
+                },
+            )
+        return mounts
 
     def _assigned_knowledge_storage_paths(self, worker_key: str) -> tuple[Path, ...]:
         raw_agents = self.config_data.get("agents")
