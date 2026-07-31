@@ -792,10 +792,14 @@ async def test_external_trigger_target_restart_unbinds_runtime_before_stop(tmp_p
     orchestrator.config = config
     router_bot = MagicMock(spec=AgentBot)
     router_bot.running = True
+    router_bot.first_sync_complete = True
     router_bot.recover_pending_turn_dispatch_obligations = AsyncMock()
+    code_bot = MagicMock(spec=AgentBot)
+    code_bot.running = False
+    code_bot.first_sync_complete = False
     orchestrator.agent_bots = {
         ROUTER_AGENT_NAME: router_bot,
-        "code": MagicMock(spec=AgentBot),
+        "code": code_bot,
     }
     order: list[str] = []
     external_trigger_runtime_bound = True
@@ -823,7 +827,8 @@ async def test_external_trigger_target_restart_unbinds_runtime_before_stop(tmp_p
 
     async def fake_create_and_start_entities(*_args: object, **_kwargs: object) -> EntityStartResults:
         order.append("create")
-        return EntityStartResults(started_bots=[orchestrator.agent_bots["code"]])
+        code_bot.running = True
+        return EntityStartResults(started_bots=[code_bot])
 
     with (
         patch.object(orchestrator._external_trigger_runtime, "unbind", side_effect=unbind_external_trigger_runtime),
@@ -1132,10 +1137,14 @@ async def test_apply_config_update_plan_unbinds_runtime_before_restarted_entity_
     orchestrator.config = current_config
     router_bot = MagicMock(spec=AgentBot)
     router_bot.running = True
+    router_bot.first_sync_complete = True
     router_bot.recover_pending_turn_dispatch_obligations = AsyncMock()
+    code_bot = MagicMock(spec=AgentBot)
+    code_bot.running = False
+    code_bot.first_sync_complete = False
     orchestrator.agent_bots = {
         ROUTER_AGENT_NAME: router_bot,
-        "code": MagicMock(spec=AgentBot),
+        "code": code_bot,
     }
     plan = ConfigUpdatePlan(
         new_config=new_config,
@@ -1223,10 +1232,14 @@ async def test_apply_config_update_plan_rebinds_trigger_runtime_after_support_se
     orchestrator.config = current_config
     router_bot = MagicMock(spec=AgentBot)
     router_bot.running = True
+    router_bot.first_sync_complete = True
     router_bot.recover_pending_turn_dispatch_obligations = AsyncMock()
+    code_bot = MagicMock(spec=AgentBot)
+    code_bot.running = False
+    code_bot.first_sync_complete = False
     orchestrator.agent_bots = {
         ROUTER_AGENT_NAME: router_bot,
-        "code": MagicMock(spec=AgentBot),
+        "code": code_bot,
     }
     plan = ConfigUpdatePlan(
         new_config=new_config,
