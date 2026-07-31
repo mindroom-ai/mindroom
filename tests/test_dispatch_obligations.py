@@ -20,6 +20,7 @@ from mindroom.dispatch_obligations import (
     _DispatchCreateResult,
     _DispatchObligation,
     _DispatchTerminalOutcome,
+    _run_owned_store_operation,
 )
 from mindroom.dispatch_obligations import (
     _DispatchCallbackResult as DispatchCallbackResult,
@@ -124,12 +125,18 @@ def _runner(
     callback: Callable[[nio.MatrixRoom, nio.Event], Awaitable[DispatchCallbackResult]],
     *,
     turn_is_terminal: Callable[[str], bool] = lambda _event_id: False,
+    background_task_owner: object | None = None,
+    retry_initial_delay_seconds: float = 1.0,
+    retry_max_delay_seconds: float = 30.0,
 ) -> DispatchObligationRunner:
     return DispatchObligationRunner(
         store=store,
         callbacks={DispatchCallbackKind.MESSAGE: callback},
         room_for_id=lambda room_id: nio.MatrixRoom(room_id, "@code:example.org"),
         turn_is_terminal=turn_is_terminal,
+        background_task_owner=background_task_owner,
+        _retry_initial_delay_seconds=retry_initial_delay_seconds,
+        _retry_max_delay_seconds=retry_max_delay_seconds,
     )
 
 
@@ -416,6 +423,32 @@ async def test_cancellation_leaves_callback_obligation_pending(tmp_path: Path) -
 
 
 @pytest.mark.asyncio
+async def test_cancelled_store_operation_preserves_cancellation_when_worker_fails() -> None:
+    """A drained worker failure must not replace the caller's cancellation."""
+    worker_started = threading.Event()
+    release_worker = threading.Event()
+
+    def failing_store_operation() -> None:
+        worker_started.set()
+        assert release_worker.wait(timeout=5)
+        message = "store write failed"
+        raise RuntimeError(message)
+
+    task = asyncio.create_task(_run_owned_store_operation(failing_store_operation))
+    assert await asyncio.to_thread(worker_started.wait, 5)
+
+    task.cancel()
+    release_worker.set()
+
+    with pytest.raises(asyncio.CancelledError) as exc_info:
+        await task
+
+    assert task.cancelled()
+    assert isinstance(exc_info.value.__cause__, RuntimeError)
+    assert str(exc_info.value.__cause__) == "store write failed"
+
+
+@pytest.mark.asyncio
 async def test_callback_settlement_drains_repeated_cancellation_before_releasing_claim(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -601,6 +634,46 @@ async def test_failed_callback_retries_directly_without_later_sync_response(tmp_
 
     assert attempts == 2
     assert not _store(tmp_path).has_pending("$retry", DispatchCallbackKind.MESSAGE)
+
+
+@pytest.mark.asyncio
+async def test_recovery_failure_retries_autonomously_without_blocking_later_work(tmp_path: Path) -> None:
+    """One failed recovery row must retry without parking later durable work."""
+    attempts: list[str] = []
+    failed_attempts = {"$first", "$second"}
+    retries_finished = asyncio.Event()
+
+    async def callback(_room: nio.MatrixRoom, event: nio.Event) -> DispatchCallbackResult:
+        attempts.append(event.event_id)
+        if event.event_id in failed_attempts and attempts.count(event.event_id) == 1:
+            message = "transient worker failure"
+            raise RuntimeError(message)
+        if event.event_id == "$second":
+            retries_finished.set()
+        return DispatchCallbackResult.SUCCEEDED
+
+    store = _store(tmp_path)
+    store.create_pending(_message_obligation("$first"))
+    store.create_pending(_message_obligation("$second"))
+    store.create_pending(_message_obligation("$later"))
+    retry_owner = object()
+    runner = _runner(
+        store,
+        callback,
+        background_task_owner=retry_owner,
+        retry_initial_delay_seconds=0,
+        retry_max_delay_seconds=0,
+    )
+
+    await runner.recover_pending()
+
+    assert attempts == ["$first", "$second", "$later"]
+    await asyncio.wait_for(retries_finished.wait(), timeout=1)
+    await wait_for_background_tasks(timeout=1, owner=retry_owner)
+    assert attempts == ["$first", "$second", "$later", "$first", "$second"]
+    assert not store.has_pending("$first", DispatchCallbackKind.MESSAGE)
+    assert not store.has_pending("$second", DispatchCallbackKind.MESSAGE)
+    assert not store.has_pending("$later", DispatchCallbackKind.MESSAGE)
 
 
 @pytest.mark.asyncio
@@ -810,6 +883,39 @@ async def test_task_wrapper_persists_before_background_execution(tmp_path: Path)
     release.set()
     await wait_for_background_tasks(timeout=1.0, owner=owner)
     assert not store.has_pending("$durable", DispatchCallbackKind.MESSAGE)
+
+
+@pytest.mark.asyncio
+async def test_task_wrapper_failure_retries_autonomously(tmp_path: Path) -> None:
+    """A failed live callback task must retain autonomous retry ownership."""
+    attempts = 0
+    owner = object()
+
+    async def callback(_room: nio.MatrixRoom, _event: nio.Event) -> DispatchCallbackResult:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            message = "transient worker failure"
+            raise RuntimeError(message)
+        return DispatchCallbackResult.SUCCEEDED
+
+    store = _store(tmp_path)
+    runner = _runner(
+        store,
+        callback,
+        background_task_owner=owner,
+        retry_initial_delay_seconds=0,
+        retry_max_delay_seconds=0,
+    )
+
+    await runner.task_wrapper(DispatchCallbackKind.MESSAGE, owner=owner)(
+        nio.MatrixRoom(_ROOM_ID, _PRINCIPAL_ID),
+        _message_event("$task-retry"),
+    )
+    await wait_for_background_tasks(timeout=1, owner=owner)
+
+    assert attempts == 2
+    assert not store.has_pending("$task-retry", DispatchCallbackKind.MESSAGE)
 
 
 @pytest.mark.asyncio

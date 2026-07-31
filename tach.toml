@@ -4074,6 +4074,7 @@ exclusive = true
 
 [[interfaces]]
 expose = [
+    "RoomJoinOutcome",
     "add_room_to_space",
     "create_room",
     "create_space",
