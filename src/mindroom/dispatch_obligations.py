@@ -758,6 +758,8 @@ class _CallbackBindings:
     ) -> _DispatchCallbackResult:
         if not isinstance(event, MATRIX_MEDIA_EVENT_TYPES):
             return _DispatchCallbackResult.INTENTIONALLY_IGNORED
+        if self.source_is_deferred(event.event_id):
+            return _DispatchCallbackResult.DEFERRED
         await self.on_media(room, event)
         return self._turn_result(event.event_id)
 

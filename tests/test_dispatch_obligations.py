@@ -27,6 +27,7 @@ from mindroom.dispatch_obligations import (
     _DispatchCallbackResult as DispatchCallbackResult,
 )
 from mindroom.dispatch_source import IMAGE_SOURCE_KIND, MEDIA_SOURCE_KIND, VOICE_SOURCE_KIND
+from mindroom.matrix.media import MatrixMediaEvent, parse_matrix_media_event_source
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Coroutine
@@ -1134,6 +1135,50 @@ async def test_bound_message_callback_defers_for_persisted_turn_store_record() -
     event = _message_event("$bound")
 
     assert await callback(room, event) is DispatchCallbackResult.DEFERRED
+
+
+@pytest.mark.asyncio
+async def test_sequential_media_dispatch_does_not_reenter_deferred_source(tmp_path: Path) -> None:
+    """A lane-owned media source must enter downstream dispatch only once."""
+    deferred_sources: set[str] = set()
+    queued_media_events: list[MatrixMediaEvent] = []
+
+    async def noop(_room: nio.MatrixRoom, _event: nio.Event) -> None:
+        pass
+
+    async def on_media(_room: nio.MatrixRoom, event: MatrixMediaEvent) -> None:
+        queued_media_events.append(event)
+        deferred_sources.add(event.event_id)
+
+    callbacks = DispatchObligationRunner.callbacks_for(
+        on_message=cast("Any", noop),
+        on_media=on_media,
+        on_reaction=cast("Any", noop),
+        on_approval=cast("Any", noop),
+        on_invite=cast("Any", noop),
+        on_room_lifecycle=cast("Any", noop),
+        on_redaction=cast("Any", noop),
+        on_decryption_failure=cast("Any", noop),
+        turn_is_persisted=lambda _event_id: False,
+        source_is_deferred=deferred_sources.__contains__,
+    )
+    store = _store(tmp_path)
+    runner = DispatchObligationRunner(
+        store=store,
+        callbacks=callbacks,
+        room_for_id=lambda room_id: nio.MatrixRoom(room_id, _PRINCIPAL_ID),
+        turn_is_terminal=lambda _event_id: False,
+    )
+    event_id = "$deferred-media"
+    event = parse_matrix_media_event_source(_encrypted_image_source(event_id))
+    assert isinstance(event, nio.RoomEncryptedImage)
+    room = nio.MatrixRoom(_ROOM_ID, _PRINCIPAL_ID)
+
+    await runner.dispatch(room, event, DispatchCallbackKind.MEDIA)
+    await runner.dispatch(room, event, DispatchCallbackKind.MEDIA)
+
+    assert [queued.event_id for queued in queued_media_events] == [event_id]
+    assert store.has_pending(event_id, DispatchCallbackKind.MEDIA)
 
 
 @pytest.mark.asyncio
