@@ -1466,8 +1466,6 @@ depends_on = [
 [[modules]]
 path = "mindroom.restart_recovery"
 depends_on = [
-    "mindroom.config.main",
-    "mindroom.constants",
     "mindroom.logging_config",
     "mindroom.matrix.stale_stream_cleanup",
     "mindroom.orchestration.runtime",
@@ -1478,13 +1476,10 @@ visibility = ["mindroom.orchestrator"]
 [[modules]]
 path = "mindroom.restart_recovery_operations"
 depends_on = [
-    "mindroom.bot",
-    "mindroom.config.main",
     "mindroom.constants",
     "mindroom.logging_config",
     "mindroom.matrix.client_delivery",
     "mindroom.matrix.client_room_admin",
-    "mindroom.matrix.conversation_cache",
     "mindroom.matrix.stale_stream_cleanup",
 ]
 visibility = [
