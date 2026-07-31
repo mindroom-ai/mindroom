@@ -14,7 +14,7 @@ from mindroom.authorization import is_authorized_sender
 from mindroom.commands.handler import generate_welcome_message_for_room
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.durable_write import write_json_file_durable
-from mindroom.matrix.client_room_admin import get_joined_rooms, join_room
+from mindroom.matrix.client_room_admin import RoomJoinOutcome, get_joined_rooms, join_room
 from mindroom.matrix.invited_rooms_store import (
     invited_rooms_path,
     load_invited_rooms,
@@ -145,13 +145,17 @@ class BotRoomLifecycle:
         pending_joined_room_ids = self._decrypt_notice_fenced_room_ids.intersection(joined_rooms)
         self._replace_decrypt_notice_fences(pending_joined_room_ids)
 
-    async def _join_room_with_decrypt_notice_fence(self, client: nio.AsyncClient, room_id: str) -> bool:
+    async def _join_room_with_decrypt_notice_fence(
+        self,
+        client: nio.AsyncClient,
+        room_id: str,
+    ) -> RoomJoinOutcome:
         """Fence decrypt callbacks before a live join can race its first sync."""
         self._replace_decrypt_notice_fences(self._decrypt_notice_fenced_room_ids | {room_id})
-        joined = await join_room(client, room_id)
-        if not joined:
+        join_outcome = await join_room(client, room_id)
+        if join_outcome is RoomJoinOutcome.TERMINAL_FAILURE:
             self._replace_decrypt_notice_fences(self._decrypt_notice_fenced_room_ids - {room_id})
-        return joined
+        return join_outcome
 
     async def _on_configured_room_joined(self, room_id: str) -> None:
         """Apply common join state before configured-room setup."""
@@ -367,8 +371,11 @@ class BotRoomLifecycle:
                 return
 
             self._logger().info("Received invite", room_id=room.room_id, sender=event.sender)
-            if not await self._join_room_with_decrypt_notice_fence(client, room.room_id):
+            join_outcome = await self._join_room_with_decrypt_notice_fence(client, room.room_id)
+            if not join_outcome:
                 self._logger().error("Failed to join room", room_id=room.room_id)
+                if join_outcome is RoomJoinOutcome.TERMINAL_FAILURE:
+                    return
                 msg = f"Failed to join invited room {room.room_id}"
                 raise RuntimeError(msg)
 

@@ -536,6 +536,7 @@ class AgentBot:
             turn_is_terminal=self._turn_store.is_durably_handled,
             on_persist_failure=self._record_dispatch_persist_failure,
             source_admission=self._admit_dispatch_source,
+            background_task_owner=self._runtime_view,
         )
         self._post_response_effects_support = PostResponseEffectsSupport(
             runtime=self._runtime_view,
