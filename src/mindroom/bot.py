@@ -1900,7 +1900,10 @@ class AgentBot:
     def _retry_failed_coalesced_dispatch(self, pending_events: tuple[PendingEvent, ...]) -> None:
         """Return failed gate sources to their exact durable callback owner."""
         for pending_event in pending_events:
-            self._retry_pending_dispatch_source(pending_event.event.event_id, pending_event.source_kind)
+            self._retry_pending_dispatch_source(
+                pending_event.event.event_id,
+                pending_event.callback_source_kind or pending_event.source_kind,
+            )
 
     def _retry_pending_dispatch_source(self, source_event_id: str, source_kind: str) -> None:
         """Return one undelivered source to its exact durable callback owner."""

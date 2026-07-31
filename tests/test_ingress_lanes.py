@@ -18,6 +18,7 @@ from mindroom.constants import ORIGINAL_SENDER_KEY, SOURCE_KIND_KEY, VISIBLE_ROU
 from mindroom.dispatch_handoff import PendingDispatchMetadata, PreparedTextEvent
 from mindroom.dispatch_source import (
     ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
+    MEDIA_SOURCE_KIND,
     TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
     VOICE_SOURCE_KIND,
 )
@@ -85,6 +86,7 @@ def _gate(
     room_scope_is_single_conversation: bool | None = None,
     dispatch_allowed_now: Callable[[CoalescingKey], bool] | bool | None = None,
     wait_until_dispatch_allowed: Callable[[CoalescingKey], Awaitable[None]] | None = None,
+    on_undelivered_source: Callable[[str, str], None] | None = None,
 ) -> tuple[CoalescingGate, list[CoalescedBatch]]:
     batches: list[CoalescedBatch] = []
 
@@ -104,6 +106,7 @@ def _gate(
             None if room_scope_is_single_conversation is None else lambda _room_id: room_scope_is_single_conversation
         ),
         dispatch_allowed_now=dispatch_allowed_now,
+        on_undelivered_source=on_undelivered_source,
     )
     return gate, batches
 
@@ -499,6 +502,34 @@ async def test_failed_lane_readiness_does_not_block_later_same_sender_work() -> 
 
     await _wait_for(lambda: [batch.source_event_ids for batch in batches] == [["$text"]])
     await gate.drain_all()
+
+
+@pytest.mark.asyncio
+async def test_failed_lane_readiness_reports_original_callback_source_kind() -> None:
+    """Lane failure must return a transformed sidecar to its MEDIA callback owner."""
+    undelivered_sources: list[tuple[str, str]] = []
+    gate, _batches = _gate(
+        debounce_seconds=0.0,
+        on_undelivered_source=lambda event_id, source_kind: undelivered_sources.append((event_id, source_kind)),
+    )
+
+    async def failing_ready() -> ReadyPendingEvent:
+        msg = "sidecar hydration failed"
+        raise RuntimeError(msg)
+
+    slot = gate.enter_lane(room_id="!room:localhost", sender_id="@user:localhost")
+    gate.submit_lane_slot(
+        slot,
+        key=CoalescingKey("!room:localhost", "$thread", "@user:localhost"),
+        source_event_id="$sidecar",
+        source_kind="message",
+        callback_source_kind=MEDIA_SOURCE_KIND,
+        ready_task=asyncio.create_task(failing_ready()),
+    )
+
+    await _wait_for(lambda: slot.settled.is_set())
+
+    assert undelivered_sources == [("$sidecar", MEDIA_SOURCE_KIND)]
 
 
 @pytest.mark.asyncio

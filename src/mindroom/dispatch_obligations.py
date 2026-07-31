@@ -699,6 +699,8 @@ def _parse_recovery_event(obligation: _DispatchObligation) -> _DispatchEvent:
     if not isinstance(event, nio.Event) or event.event_id != obligation.source_event_id:
         msg = f"corrupt dispatch obligation event {obligation.source_event_id!r}/{obligation.callback_kind.value!r}"
         raise _DispatchObligationCorruptionError(msg)
+    if isinstance(event, nio.MegolmEvent):
+        event.room_id = obligation.room_id
     _apply_recovery_security_metadata(
         event,
         security_metadata,

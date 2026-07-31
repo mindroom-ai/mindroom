@@ -7,7 +7,7 @@ import sqlite3
 import threading
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any, cast
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
 import pytest
@@ -910,6 +910,50 @@ async def test_decrypted_message_recovery_preserves_nio_security_metadata(tmp_pa
     await _runner(_store(tmp_path), callback).recover_pending()
 
     assert received == [(True, True, "curve25519:sender", "megolm-session", _ROOM_ID)]
+
+
+@pytest.mark.asyncio
+async def test_megolm_recovery_restores_room_id_before_key_request(tmp_path: Path) -> None:
+    """Recovered undecryptable events need their durable room for key requests."""
+    event_id = "$undecryptable"
+    store = _store(tmp_path)
+    store.create_pending(
+        replace(
+            _message_obligation(event_id),
+            callback_kind=DispatchCallbackKind.DECRYPTION_FAILURE,
+            event_source={
+                "type": "m.room.encrypted",
+                "event_id": event_id,
+                "sender": "@user:example.org",
+                "origin_server_ts": 1_234,
+                "content": {
+                    "algorithm": "m.megolm.v1.aes-sha2",
+                    "ciphertext": "ciphertext",
+                    "device_id": "DEVICE",
+                    "sender_key": "curve25519:sender",
+                    "session_id": "megolm-session",
+                },
+            },
+        ),
+    )
+    request_room_key = AsyncMock()
+
+    async def callback(_room: nio.MatrixRoom, event: nio.Event) -> DispatchCallbackResult:
+        assert isinstance(event, nio.MegolmEvent)
+        await request_room_key(event)
+        return DispatchCallbackResult.SUCCEEDED
+
+    runner = DispatchObligationRunner(
+        store=store,
+        callbacks={DispatchCallbackKind.DECRYPTION_FAILURE: callback},
+        room_for_id=lambda room_id: nio.MatrixRoom(room_id, _PRINCIPAL_ID),
+        turn_is_terminal=lambda _event_id: False,
+    )
+
+    await runner.recover_pending()
+
+    recovered_event = request_room_key.await_args.args[0]
+    assert recovered_event.room_id == _ROOM_ID
 
 
 @pytest.mark.asyncio

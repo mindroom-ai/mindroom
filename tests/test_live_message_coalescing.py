@@ -7072,6 +7072,62 @@ async def test_sidecar_hydration_refreshes_prompt_and_mentions_before_dispatch(t
 
 
 @pytest.mark.asyncio
+async def test_sidecar_gate_failure_retries_original_media_callback(tmp_path: Path) -> None:
+    """A hydrated file sidecar must retain its exact MEDIA callback owner."""
+    bot = _make_bot(tmp_path, debounce_ms=0)
+    room = _make_room()
+    sidecar = _file_event(event_id="$sidecar-retry", body="preview.txt")
+    sidecar_content = sidecar.source["content"]
+    assert isinstance(sidecar_content, dict)
+    sidecar_content["io.mindroom.long_text"] = {
+        "version": 2,
+        "encoding": "matrix_event_content_json",
+        "original_event_size": 100_000,
+        "preview_size": len(sidecar.body),
+        "is_complete_content": True,
+    }
+    hydrated = PreparedTextEvent(
+        sender=sidecar.sender,
+        event_id=sidecar.event_id,
+        body="hydrated body",
+        source={"content": {"msgtype": "m.text", "body": "hydrated body"}},
+        server_timestamp=sidecar.server_timestamp,
+    )
+    retry_pending_source = MagicMock()
+
+    with (
+        patch.object(
+            bot._dispatch_obligation_runner,
+            "retry_pending_turn_source",
+            new=retry_pending_source,
+        ),
+        patch.object(
+            bot._inbound_turn_normalizer,
+            "prepare_file_sidecar_text_event",
+            new=AsyncMock(return_value=hydrated),
+        ),
+        patch("mindroom.turn_controller.interactive.handle_text_response", new=AsyncMock(return_value=None)),
+        patch.object(
+            bot._turn_controller,
+            "handle_coalesced_batch",
+            new=AsyncMock(side_effect=RuntimeError("dispatch failed")),
+        ),
+    ):
+        reservation_owner = bot._turn_controller._reserve_prompt_ingress_order(room, sidecar.sender)
+        outcome = await bot._turn_controller._dispatch_file_sidecar_text_preview(
+            room,
+            _PrecheckedEvent(event=sidecar, requester_user_id=sidecar.sender),
+            reservation_owner=reservation_owner,
+            coalescing_thread_id=None,
+        )
+        drain_result = await bot._coalescing_gate.drain_all()
+
+    assert outcome is _IngressAdmissionOutcome.ADMITTED
+    assert drain_result.dispatch_failure_count == 1
+    retry_pending_source.assert_called_once_with(sidecar.event_id, DispatchCallbackKind.MEDIA)
+
+
+@pytest.mark.asyncio
 async def test_router_early_skip_keeps_sidecar_preview_for_hydration(tmp_path: Path) -> None:
     """Router early skip should not drop sidecar previews before hydration can recover metadata."""
     bot = _make_bot(tmp_path, agent_name="router")

@@ -561,6 +561,7 @@ class TurnController:
         coalescing_thread_id: str | None,
         requester_user_id: str,
         reservation_owner: _PromptIngressReservationOwner,
+        callback_source_kind: str | None = None,
         trust_internal_payload_metadata: bool | None = None,
         queued_notice_reservation: QueuedHumanNoticeReservation | None = None,
     ) -> _IngressAdmissionOutcome:
@@ -581,6 +582,7 @@ class TurnController:
                 dispatch_event,
                 room,
                 source_kind=envelope.source_kind,
+                callback_source_kind=callback_source_kind,
                 dispatch_policy_source_kind=envelope.dispatch_policy_source_kind,
                 hook_source=envelope.hook_source,
                 message_received_depth=envelope.message_received_depth,
@@ -770,6 +772,7 @@ class TurnController:
         requester_user_id: str,
         reservation_owner: _PromptIngressReservationOwner,
         coalescing_thread_id: str | None,
+        callback_source_kind: str | None = None,
     ) -> _IngressAdmissionOutcome:
         """Run shared ingress dispatch for text events and sidecar text previews."""
         target = self.deps.resolver.build_message_target(
@@ -843,6 +846,7 @@ class TurnController:
             coalescing_thread_id=coalescing_thread_id,
             requester_user_id=requester_user_id,
             reservation_owner=reservation_owner,
+            callback_source_kind=callback_source_kind,
         )
 
     async def _handle_edit_event(
@@ -946,6 +950,7 @@ class TurnController:
         queued_notice_reservation: QueuedHumanNoticeReservation | None = None,
         queued_notice_target: MessageTarget | None = None,
         trust_internal_payload_metadata: bool | None = None,
+        callback_source_kind: str | None = None,
     ) -> _IngressAdmissionOutcome:
         """Route one inbound event through the live coalescing gate."""
         dispatch_timing = get_dispatch_pipeline_timing(event.source)
@@ -994,6 +999,7 @@ class TurnController:
             message_received_depth=message_received_depth,
             trust_internal_payload_metadata=resolved_trust_internal_payload_metadata,
             discovery_event_id=self.deps.ingress.router_relay_original_event_id(event),
+            callback_source_kind=callback_source_kind,
             dispatch_metadata=dispatch_metadata,
         )
         if turn_claim is not None:
@@ -1002,6 +1008,7 @@ class TurnController:
             resolved_key,
             source_event_id=event.event_id,
             source_kind=source_kind,
+            callback_source_kind=callback_source_kind,
             ready_result=ReadyPendingEvent(pending_event=pending_event),
         )
         emit_elapsed_timing(
@@ -2644,4 +2651,5 @@ class TurnController:
             requester_user_id=prechecked_event.requester_user_id,
             reservation_owner=reservation_owner,
             coalescing_thread_id=coalescing_thread_id,
+            callback_source_kind=MEDIA_SOURCE_KIND,
         )

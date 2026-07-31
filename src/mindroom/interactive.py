@@ -279,6 +279,16 @@ def _copy_question(question: _InteractiveQuestion) -> _InteractiveQuestion:
     )
 
 
+def _claim_question_locked(event_id: str, question: _InteractiveQuestion) -> _InteractiveQuestion:
+    """Hide one question only after any unsaved durable state is flushed."""
+    if event_id in _dirty_question_ids:
+        _persist_local_changes_locked(rebuild_on_read_error=False)
+    claimed_question = _copy_question(question)
+    del _active_questions[event_id]
+    _claimed_question_ids.add(event_id)
+    return claimed_question
+
+
 def commit_selection(selection: InteractiveSelection) -> None:
     """Durably consume a question after its selected turn reaches terminal truth."""
     if selection.claimed_question is None:
@@ -554,9 +564,7 @@ async def handle_reaction(
 
         # Remove in-memory to exclude concurrent selections, but defer the durable
         # deletion until the selected turn reaches terminal truth.
-        claimed_question = _copy_question(question)
-        del _active_questions[event.reacts_to]
-        _claimed_question_ids.add(event.reacts_to)
+        claimed_question = _claim_question_locked(event.reacts_to, question)
 
         return InteractiveSelection(
             question_event_id=event.reacts_to,
@@ -638,9 +646,7 @@ def _handle_text_response_locked(
                 text=message_text,
                 value=selected_value,
             )
-        claimed_question = _copy_question(question)
-        del _active_questions[question_event_id]
-        _claimed_question_ids.add(question_event_id)
+        claimed_question = _claim_question_locked(question_event_id, question)
         return InteractiveSelection(
             question_event_id=question_event_id,
             question_text=question.question_text,

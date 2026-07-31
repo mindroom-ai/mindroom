@@ -36,6 +36,7 @@ class LaneDelivery:
     ready_result: ReadyPendingEvent | None
     ready_task: asyncio.Task[ReadyPendingEvent | None] | None
     received_at: float
+    callback_source_kind: str | None = None
     busy_at_submit: bool = False
 
 
@@ -114,6 +115,7 @@ class IngressLanes:
         key: CoalescingKey,
         source_event_id: str | None,
         source_kind: str,
+        callback_source_kind: str | None = None,
         ready_result: ReadyPendingEvent | None = None,
         ready_task: asyncio.Task[ReadyPendingEvent | None] | None = None,
         received_at: float | None = None,
@@ -133,6 +135,7 @@ class IngressLanes:
             ready_result=ready_result,
             ready_task=ready_task,
             received_at=received_at if received_at is not None else time.time(),
+            callback_source_kind=callback_source_kind,
             busy_at_submit=busy_at_submit,
         )
         slot.loaded.set()
@@ -278,7 +281,7 @@ class IngressLanes:
         if callback is None or delivery.source_event_id is None:
             return
         try:
-            callback(delivery.source_event_id, delivery.source_kind)
+            callback(delivery.source_event_id, delivery.callback_source_kind or delivery.source_kind)
         except Exception:
             logger.exception(
                 "ingress_lane_undelivered_source_notification_failed",
