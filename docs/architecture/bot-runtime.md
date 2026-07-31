@@ -156,13 +156,16 @@ Semantic memory backends such as Mem0 have a separate lifecycle and are not alte
 `RestartRecoveryCoordinator` is the single owner of startup cleanup, replacement-room handoffs, interrupted-target freshness checks, semantic retry state, and resume-delivery settlement.
 `InterruptedTurnRooms` records durable room handoff facts, but it does not schedule Matrix recovery or own retry timing.
 The coordinator merges exact owners into one work item for each room and recovery policy.
-At most eight unrelated rooms have active leases, and distinct policies for the same room never scan concurrently.
-Lease selection ranks only due work and then prefers work whose owners do not already have an active lease.
-Each lease performs one shared room scan, newest-target selection, freshness checks, and resume delivery before releasing that room.
+The coordinator starts every due same-room-eligible lease, while distinct policies for the same room never run concurrently.
+One shared semaphore permits at most eight Matrix read phases across uncached room scans and authoritative target freshness checks.
+Resume delivery runs outside that read budget under global pacing, so a blocked delivery does not prevent a ninth lease from scanning when a read slot becomes available.
+Due selection gives each due owner cohort a read-queue position before ordering repeated-owner work by oldest due time.
+Each lease performs one shared room scan, newest-target selection, freshness checks, and resume delivery before releasing its room.
 One monotonic watermark per exact owner generation, room, and thread fences superseded targets and closes a successfully resumed recovery lifecycle.
 Concurrent room leases share one joined-room snapshot for each exact owner generation.
 A dedicated Matrix operations collaborator explicitly owns membership snapshots, releases discarded owners, and cancels and drains every retained snapshot during shutdown.
-A shared scan includes every currently joined owner, while a missing desired room invalidates and retries only that owner's snapshot so one unavailable owner cannot block its peers.
+A missing desired room starts one short owner-level membership refresh backoff, so same-cycle room retries reuse the negative snapshot while later retries can discover new joins.
+A shared scan includes every currently joined owner, while a missing desired room schedules a refresh and retries only that owner so one unavailable owner cannot block its peers.
 Unresolved room aliases remain outside retry state until room setup resolves them, and later readiness notifications do not recreate a completed same-generation scan.
 Room history failures, transient requester-resolution failures, and failed cleanup edits return typed retry outcomes, and interrupted targets publish only for owners whose scan state is authoritative.
 Each resume relay uses a deterministic Matrix transaction ID derived from the exact owner and interrupted target, so only a retry of that same target reuses the transaction ID.

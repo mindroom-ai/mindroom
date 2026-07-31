@@ -762,6 +762,79 @@ async def test_matrix_room_recovery_shares_membership_discovery_for_owner_genera
 
 
 @pytest.mark.asyncio
+async def test_missing_rooms_back_off_one_owner_membership_snapshot_refresh(
+    tmp_path: Path,
+) -> None:
+    """Absent desired rooms must share one read until the owner refresh delay expires."""
+    room_ids = frozenset(f"!missing-{index}:example.org" for index in range(5))
+    owner = _owner(rooms=room_ids)
+    config = _config(tmp_path)
+    operations = build_matrix_restart_recovery_operations(test_runtime_paths(tmp_path))
+    requests = [
+        RoomRecoveryRequest(
+            room_id=room_id,
+            startup_cutoff_ms=123,
+            terminal_interrupted_only=False,
+        )
+        for room_id in sorted(room_ids)
+    ]
+    membership_visible = False
+
+    async def joined_rooms(_client: nio.AsyncClient) -> list[str]:
+        return list(room_ids) if membership_visible else []
+
+    cleanup_room = AsyncMock(
+        return_value=stale_stream_cleanup_module._StaleStreamCleanupResult(
+            cleaned_count=0,
+            interrupted_threads=(),
+        ),
+    )
+    loop = asyncio.get_running_loop()
+    try:
+        with (
+            patch(
+                "mindroom.restart_recovery_operations.get_joined_rooms",
+                new=AsyncMock(side_effect=joined_rooms),
+            ) as get_rooms,
+            patch(
+                "mindroom.restart_recovery_operations.cleanup_stale_streaming_room",
+                new=cleanup_room,
+            ),
+            patch.object(loop, "time", return_value=100.0) as monotonic_time,
+        ):
+            missing_results = [
+                await operations.recover_room(
+                    (owner,),
+                    request,
+                    frozenset({owner.user_id}),
+                    config,
+                )
+                for request in requests
+            ]
+            calls_before_refresh = get_rooms.await_count
+
+            membership_visible = True
+            monotonic_time.return_value = 102.0
+            refreshed_result = await operations.recover_room(
+                (owner,),
+                requests[0],
+                frozenset({owner.user_id}),
+                config,
+            )
+            calls_after_refresh = get_rooms.await_count
+    finally:
+        await operations.close()
+
+    assert missing_results == [
+        RoomRecoveryResult(retry_owner_user_ids=frozenset({owner.user_id})) for _request in requests
+    ]
+    assert calls_before_refresh == 1
+    assert refreshed_result == RoomRecoveryResult()
+    assert calls_after_refresh == 2
+    cleanup_room.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_matrix_room_recovery_does_not_reuse_snapshot_after_generation_id_collision(
     tmp_path: Path,
 ) -> None:
@@ -928,55 +1001,104 @@ async def test_stop_drains_historical_membership_snapshots(tmp_path: Path) -> No
 
 
 @pytest.mark.asyncio
-async def test_eight_unrelated_rooms_run_concurrently_with_bounded_fanout(
+async def test_scan_and_freshness_share_eight_matrix_read_slots(
     tmp_path: Path,
 ) -> None:
-    """Recovery must retain the established eight-room startup concurrency."""
-    room_ids = frozenset(f"!room-{index}:example.org" for index in range(9))
+    """Room scans and freshness reads must share one eight-slot Matrix read budget."""
+    room_ids = frozenset(f"!room-{index}:example.org" for index in range(10))
     owner = _owner(rooms=room_ids)
-    owners = {owner.user_id: owner}
-    eight_started = asyncio.Event()
-    release_rooms = asyncio.Event()
-    all_finished = asyncio.Event()
-    finished = 0
-    active = 0
-    max_active = 0
+    router = _owner(
+        entity_name=ROUTER_AGENT_NAME,
+        user_id="@router:example.org",
+        rooms=frozenset(),
+    )
+    owners = {owner.user_id: owner, router.user_id: router}
+    phase_started: asyncio.Queue[tuple[str, str]] = asyncio.Queue()
+    release_reads: asyncio.Queue[None] = asyncio.Queue()
+    all_delivered = asyncio.Event()
+    active_reads = 0
+    max_active_reads = 0
+    delivered = 0
+
+    async def matrix_read_phase(kind: str, room_id: str) -> None:
+        nonlocal active_reads, max_active_reads
+        active_reads += 1
+        max_active_reads = max(max_active_reads, active_reads)
+        phase_started.put_nowait((kind, room_id))
+        try:
+            await release_reads.get()
+        finally:
+            active_reads -= 1
 
     async def recover_room(
         _owner: RecoveryOwner,
-        _request: RoomRecoveryRequest,
+        request: RoomRecoveryRequest,
         _owner_user_ids: frozenset[str],
         _config: Config,
     ) -> RoomRecoveryResult:
-        nonlocal active, finished, max_active
-        active += 1
-        max_active = max(max_active, active)
-        if active == 8:
-            eight_started.set()
-        try:
-            await release_rooms.wait()
-            return RoomRecoveryResult()
-        finally:
-            active -= 1
-            finished += 1
-            if finished == len(room_ids):
-                all_finished.set()
+        await matrix_read_phase("scan", request.room_id)
+        suffix = request.room_id.removeprefix("!").removesuffix(":example.org")
+        return RoomRecoveryResult(
+            interrupted_threads=(
+                _target(
+                    f"$target-{suffix}",
+                    timestamp_ms=10,
+                    room_id=request.room_id,
+                    thread_id=f"$thread-{suffix}",
+                ),
+            ),
+        )
+
+    async def freshness(
+        _owner: RecoveryOwner,
+        target: InterruptedThread,
+        _config: Config,
+    ) -> RestartTargetFreshness:
+        await matrix_read_phase("freshness", target.room_id)
+        return RestartTargetFreshness.CURRENT
+
+    async def deliver(
+        _router: RecoveryOwner,
+        _owner: RecoveryOwner,
+        _target: InterruptedThread,
+        _config: Config,
+    ) -> bool:
+        nonlocal delivered
+        delivered += 1
+        if delivered == len(room_ids):
+            all_delivered.set()
+        return True
 
     coordinator = RestartRecoveryCoordinator(
         current_config=lambda: _config(tmp_path),
         current_owners=lambda: owners,
-        operations=_operations(recover_room=recover_room),
+        operations=_operations(
+            recover_room=recover_room,
+            freshness=freshness,
+            deliver=deliver,
+        ),
     )
     coordinator.start(startup_cutoff_ms=123)
     try:
-        await asyncio.wait_for(eight_started.wait(), timeout=0.2)
-        release_rooms.set()
-        await asyncio.wait_for(all_finished.wait(), timeout=1.0)
+        first_phases = [await asyncio.wait_for(phase_started.get(), timeout=1.0) for _ in range(8)]
+        assert {kind for kind, _room_id in first_phases} == {"scan"}
+        assert active_reads == 8
+
+        release_reads.put_nowait(None)
+        await asyncio.wait_for(phase_started.get(), timeout=1.0)
+        await asyncio.sleep(0)
+
+        assert max_active_reads == 8
+
+        for _ in range(len(room_ids) * 2):
+            release_reads.put_nowait(None)
+        await asyncio.wait_for(all_delivered.wait(), timeout=1.0)
     finally:
-        release_rooms.set()
+        for _ in range(len(room_ids) * 2):
+            release_reads.put_nowait(None)
         await coordinator.stop()
 
-    assert max_active == 8
+    assert max_active_reads == 8
 
 
 @pytest.mark.asyncio
@@ -1043,13 +1165,14 @@ async def test_blocked_deliveries_do_not_consume_room_scan_capacity(tmp_path: Pa
 
 
 @pytest.mark.asyncio
-async def test_shared_owner_wait_does_not_fill_both_slots_ahead_of_another_owner(
+async def test_due_owner_cohort_gets_read_slot_before_repeat_owner_saturation(
     tmp_path: Path,
 ) -> None:
-    """One owner's blocked room work must leave a slot for another owner."""
+    """Eight earlier rooms from one owner must not fill every read slot."""
+    blocked_room_ids = frozenset(f"!blocked-{index}:example.org" for index in range(8))
     blocked_owner = _owner(
         user_id="@blocked:example.org",
-        rooms=frozenset({"!blocked-a:example.org", "!blocked-b:example.org"}),
+        rooms=blocked_room_ids,
     )
     healthy_owner = _owner(
         user_id="@healthy:example.org",
@@ -1081,7 +1204,7 @@ async def test_shared_owner_wait_does_not_fill_both_slots_ahead_of_another_owner
     )
     coordinator.start(startup_cutoff_ms=123)
     try:
-        await asyncio.wait_for(healthy_finished.wait(), timeout=0.2)
+        await asyncio.wait_for(healthy_finished.wait(), timeout=1.0)
     finally:
         release_blocked.set()
         await coordinator.stop()
@@ -1150,8 +1273,8 @@ async def test_future_fair_owner_retry_does_not_hide_due_active_owner_work(
         await coordinator.stop()
 
 
-def test_oldest_due_room_wins_before_owner_diversity(tmp_path: Path) -> None:
-    """Continuous disjoint arrivals must not starve older overlapping work."""
+def test_due_owner_cohort_precedes_oldest_repeat_owner(tmp_path: Path) -> None:
+    """Owner diversity gets one slot before age orders repeated-owner work."""
 
     async def recover_room(
         _owner: RecoveryOwner,
@@ -1189,6 +1312,10 @@ def test_oldest_due_room_wins_before_owner_diversity(tmp_path: Path) -> None:
     )
     coordinator._active_attempts[cast("asyncio.Task[object]", MagicMock())] = active
     coordinator._room_jobs = {oldest.key: oldest, newer.key: newer}
+
+    assert coordinator._next_due_work(3.0) is newer
+
+    coordinator._active_attempts[cast("asyncio.Task[object]", MagicMock())] = newer
 
     assert coordinator._next_due_work(3.0) is oldest
 

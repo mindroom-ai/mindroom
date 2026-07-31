@@ -27,7 +27,7 @@ type _TargetKey = tuple[str, str, str]
 type _RoomKey = tuple[str, int | None, bool]
 
 
-_MAX_CONCURRENT_ROOM_SCANS = 8
+_MAX_CONCURRENT_MATRIX_READ_PHASES = 8
 
 
 @dataclass(frozen=True)
@@ -140,7 +140,7 @@ def _merge_work(left: _RoomWork, right: _RoomWork) -> _RoomWork:
 
 
 class RestartRecoveryCoordinator:
-    """Own bounded room recovery leases and monotonic owner-target watermarks."""
+    """Own room recovery leases and monotonic owner-target watermarks."""
 
     def __init__(
         self,
@@ -159,7 +159,7 @@ class RestartRecoveryCoordinator:
         self._completed_startup_scans: set[tuple[_RoomKey, str]] = set()
         self._ready_generations: dict[str, object] = {}
         self._active_attempts: dict[asyncio.Task[_RoomAttemptResult], _RoomWork] = {}
-        self._scan_slots = asyncio.Semaphore(_MAX_CONCURRENT_ROOM_SCANS)
+        self._matrix_read_slots = asyncio.Semaphore(_MAX_CONCURRENT_MATRIX_READ_PHASES)
         self._worker_task: asyncio.Task[None] | None = None
         self._wake = asyncio.Event()
         self._startup_cutoff_ms: int | None = None
@@ -343,8 +343,8 @@ class RestartRecoveryCoordinator:
         return min(
             eligible,
             key=lambda work: (
-                work.due_at,
                 not work.all_owner_user_ids.isdisjoint(active_owners),
+                work.due_at,
                 work.room_id,
                 work.startup_cutoff_ms or -1,
                 work.terminal_interrupted_only,
@@ -482,7 +482,7 @@ class RestartRecoveryCoordinator:
         )
         targets = list(work.targets)
         if scan_owners:
-            async with self._scan_slots:
+            async with self._matrix_read_slots:
                 scan_retry_owner_user_ids, recovered_targets = await self._recover_scan(
                     scan_owners,
                     work,
@@ -581,7 +581,8 @@ class RestartRecoveryCoordinator:
     ) -> _TargetSettlement | None:
         if target.original_sender_id is None or not config.defaults.auto_resume_after_restart:
             return _TargetSettlement(target, closed=False, owner_user_id=owner.user_id)
-        freshness = await self._operations.target_freshness(owner, target, config)
+        async with self._matrix_read_slots:
+            freshness = await self._operations.target_freshness(owner, target, config)
         if freshness is RestartTargetFreshness.RETRY:
             return None
         if freshness in {

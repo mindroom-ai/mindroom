@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import Enum, auto
 from typing import TYPE_CHECKING, Protocol
 from uuid import NAMESPACE_URL, uuid5
@@ -34,6 +34,7 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 _AUTO_RESUME_DELIVERY_INTERVAL_SECONDS = 2.0
+_OWNER_MEMBERSHIP_REFRESH_BACKOFF_SECONDS = 2.0
 
 
 @dataclass(frozen=True)
@@ -149,6 +150,7 @@ class _OwnerMembershipSnapshot:
 
     generation: object
     task: asyncio.Task[list[str] | None]
+    refresh_after: float | None = None
 
 
 @dataclass
@@ -160,7 +162,11 @@ class _OwnerMembershipSnapshots:
     async def joined_rooms(self, owner: RecoveryOwner) -> list[str] | None:
         """Return one generation snapshot, creating it on first use."""
         snapshot = self.snapshots.get(owner.user_id)
-        if snapshot is None or snapshot.generation is not owner.generation:
+        if (
+            snapshot is None
+            or snapshot.generation is not owner.generation
+            or (snapshot.refresh_after is not None and snapshot.refresh_after <= asyncio.get_running_loop().time())
+        ):
             snapshot = _OwnerMembershipSnapshot(
                 generation=owner.generation,
                 task=asyncio.create_task(
@@ -176,10 +182,13 @@ class _OwnerMembershipSnapshots:
             raise
 
     def invalidate(self, owner: RecoveryOwner) -> None:
-        """Discard a snapshot that did not contain one desired room."""
+        """Delay one owner-level refresh after a desired room is absent."""
         snapshot = self.snapshots.get(owner.user_id)
-        if snapshot is not None and snapshot.generation is owner.generation:
-            self.snapshots.pop(owner.user_id)
+        if snapshot is not None and snapshot.generation is owner.generation and snapshot.refresh_after is None:
+            self.snapshots[owner.user_id] = replace(
+                snapshot,
+                refresh_after=(asyncio.get_running_loop().time() + _OWNER_MEMBERSHIP_REFRESH_BACKOFF_SECONDS),
+            )
 
     def discard_owner(self, owner_user_id: str) -> None:
         """Release one removed owner's retained generation snapshot."""
