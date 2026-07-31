@@ -219,6 +219,7 @@ def test_restart_regression_evaluator_accepts_pass_and_rejects_bad_directions() 
         cached_event_pair_count=4,
         fresh_agent_output_count=1,
         fresh_router_output_count=0,
+        fresh_response_complete=True,
         fresh_callback_count=2,
         recovered_generation_response_observed=True,
         fresh_obligation_recovered=True,
@@ -237,6 +238,7 @@ def test_restart_regression_evaluator_accepts_pass_and_rejects_bad_directions() 
             recovery_boundary_reached=False,
             fresh_agent_output_count=0,
             fresh_router_output_count=1,
+            fresh_response_complete=False,
             fresh_callback_count=1,
             recovered_generation_response_observed=False,
             fresh_obligation_recovered=False,
@@ -250,6 +252,7 @@ def test_restart_regression_evaluator_accepts_pass_and_rejects_bad_directions() 
     assert any("invariant=recovery_setup_boundary_reached" in failure for failure in failures)
     assert any("invariant=fresh_agent_response_exactly_once" in failure for failure in failures)
     assert any("invariant=fresh_router_response_suppressed" in failure for failure in failures)
+    assert any("invariant=fresh_response_complete" in failure for failure in failures)
     assert any("invariant=fresh_callback_replayed_after_restart" in failure for failure in failures)
     assert any("invariant=recovered_generation_response_observed" in failure for failure in failures)
     assert any("invariant=fresh_dispatch_obligation_recovered" in failure for failure in failures)
@@ -397,6 +400,7 @@ async def test_restart_regression_crosses_fresh_obligation_over_hard_restart(
                 cached_event_pair_count=4,
                 fresh_agent_output_count=1,
                 fresh_router_output_count=0,
+                fresh_response_complete=True,
                 fresh_callback_count=2,
                 recovered_generation_response_observed=True,
                 fresh_obligation_recovered=True,
@@ -987,6 +991,102 @@ async def test_restart_observation_rejects_old_runtime_generation_response(
 
         assert stop_calls == []
         assert not observation.response_callbacks_quiescent
+    finally:
+        stack.close()
+
+
+@pytest.mark.asyncio
+async def test_restart_observation_samples_real_evidence_when_deadline_already_expired(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A zero observation window must report durable state instead of fabricated zeros."""
+    stack = ManagedTuwunelStack()
+    try:
+        stack.agent_id, stack.router_id = "@agent:example", "@router:example"
+        stack.log_path.write_text(
+            "matrix_event_callback_started agent_name=general !restart:example $fresh\n"
+            "matrix_event_callback_started agent_name=general !restart:example $fresh\n"
+            "Preparing agent and prompt $fresh\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(stack, "cached_restart_event_pair_count", lambda _room_id, _event_ids: 4)
+        monkeypatch.setattr(stack, "restart_dispatch_obligation_state", lambda _event_id: "succeeded")
+        dormant = _StaticObservationClient(
+            (_restart_response("$agent-response", stack.agent_id, "$fresh"),),
+        )
+        runner = LiveFuzzRunner(
+            stack,
+            (cast("LiveMatrixClient", dormant),),
+            restart_regression_scenario(),
+            reply_timeout=0,
+            settle_seconds=0,
+        )
+
+        observation = await runner._wait_for_restart_observation(
+            cast("LiveMatrixClient", dormant),
+            historical_event_ids=("$old-text", "$old-media"),
+            fresh_event_id="$fresh",
+            replacement_boundary_reached=True,
+            recovery_boundary_reached=True,
+        )
+
+        assert observation.cached_event_pair_count == 4
+        assert observation.fresh_agent_output_count == 1
+        assert observation.fresh_response_complete
+        assert observation.fresh_callback_count == 2
+        assert observation.recovered_generation_response_observed
+        assert observation.fresh_obligation_recovered
+        assert observation.fresh_prompt_observed
+    finally:
+        stack.close()
+
+
+@pytest.mark.asyncio
+async def test_restart_observation_reports_incomplete_fresh_response(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A truncated recovered response must identify response completion as the failed invariant."""
+    stack = ManagedTuwunelStack()
+    try:
+        stack.agent_id, stack.router_id = "@agent:example", "@router:example"
+        stack.log_path.write_text(
+            "matrix_event_callback_started agent_name=general !restart:example $fresh\n"
+            "matrix_event_callback_started agent_name=general !restart:example $fresh\n"
+            "Preparing agent and prompt $fresh\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(stack, "cached_restart_event_pair_count", lambda _room_id, _event_ids: 4)
+        monkeypatch.setattr(stack, "restart_dispatch_obligation_state", lambda _event_id: "succeeded")
+        dormant = _StaticObservationClient(
+            (
+                _restart_response(
+                    "$agent-response",
+                    stack.agent_id,
+                    "$fresh",
+                    body="LIVE-FUZZ runtime-generation=recovered partial",
+                ),
+            ),
+        )
+        runner = LiveFuzzRunner(
+            stack,
+            (cast("LiveMatrixClient", dormant),),
+            restart_regression_scenario(),
+            reply_timeout=0.01,
+            settle_seconds=0,
+        )
+
+        observation = await runner._wait_for_restart_observation(
+            cast("LiveMatrixClient", dormant),
+            historical_event_ids=("$old-text", "$old-media"),
+            fresh_event_id="$fresh",
+            replacement_boundary_reached=True,
+            recovery_boundary_reached=True,
+        )
+
+        assert not observation.fresh_response_complete
+        assert any(
+            "invariant=fresh_response_complete" in failure for failure in evaluate_restart_regression(observation)
+        )
     finally:
         stack.close()
 

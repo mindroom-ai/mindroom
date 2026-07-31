@@ -114,6 +114,7 @@ class RestartRegressionObservation:
     cached_event_pair_count: int
     fresh_agent_output_count: int
     fresh_router_output_count: int
+    fresh_response_complete: bool
     fresh_callback_count: int
     recovered_generation_response_observed: bool
     fresh_obligation_recovered: bool
@@ -210,6 +211,14 @@ def evaluate_restart_regression(observation: RestartRegressionObservation) -> tu
             "fresh_router_response_suppressed",
             observation.fresh_router_output_count,
             0,
+            "fresh_user",
+            "recovery_startup",
+            4,
+        ),
+        (
+            "fresh_response_complete",
+            observation.fresh_response_complete,
+            True,
             "fresh_user",
             "recovery_startup",
             4,
@@ -1779,29 +1788,15 @@ class LiveFuzzRunner:
     ) -> RestartRegressionObservation:
         """Observe replacement output until the fresh response and callback stream settle."""
         deadline = time.monotonic() + self.reply_timeout
-        evidence = _RestartEvidence(
-            historical_output_counts=(0, 0),
-            historical_callback_counts=(0, 0),
-            fresh_agent_output_count=0,
-            fresh_router_output_count=0,
-            fresh_callback_count=0,
-            recovered_generation_response_observed=False,
-            fresh_obligation_recovered=False,
-            cached_event_pair_count=0,
-            fresh_prompt_observed=False,
-            historical_in_fresh_prompt=False,
-            fresh_response_complete=False,
+        evidence = self._collect_restart_evidence(
+            dormant,
+            historical_event_ids=historical_event_ids,
+            fresh_event_id=fresh_event_id,
         )
         response_callbacks_quiescent = False
-        positive_evidence_ready = False
-        while time.monotonic() < deadline:
-            await dormant.sync_incremental(timeout_ms=250, allow_limited=True)
-            evidence = self._collect_restart_evidence(
-                dormant,
-                historical_event_ids=historical_event_ids,
-                fresh_event_id=fresh_event_id,
-            )
-            positive_evidence_ready = (
+
+        def positive_evidence_ready() -> bool:
+            return (
                 replacement_boundary_reached
                 and recovery_boundary_reached
                 and evidence.cached_event_pair_count == 4
@@ -1814,10 +1809,16 @@ class LiveFuzzRunner:
                 and evidence.fresh_prompt_observed
                 and evidence.fresh_response_complete
             )
-            if positive_evidence_ready:
-                break
 
-        if positive_evidence_ready:
+        while not positive_evidence_ready() and time.monotonic() < deadline:
+            await dormant.sync_incremental(timeout_ms=250, allow_limited=True)
+            evidence = self._collect_restart_evidence(
+                dormant,
+                historical_event_ids=historical_event_ids,
+                fresh_event_id=fresh_event_id,
+            )
+
+        if positive_evidence_ready():
             shutdown_failure_count_before = self.stack.restart_shutdown_failure_count()
             stopped_gracefully = await asyncio.to_thread(
                 self.stack.stop_mindroom_for_observation,
@@ -1846,6 +1847,7 @@ class LiveFuzzRunner:
             cached_event_pair_count=evidence.cached_event_pair_count,
             fresh_agent_output_count=evidence.fresh_agent_output_count,
             fresh_router_output_count=evidence.fresh_router_output_count,
+            fresh_response_complete=evidence.fresh_response_complete,
             fresh_callback_count=evidence.fresh_callback_count,
             recovered_generation_response_observed=evidence.recovered_generation_response_observed,
             fresh_obligation_recovered=evidence.fresh_obligation_recovered,
