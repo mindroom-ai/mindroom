@@ -8,7 +8,7 @@ import sqlite3
 import threading
 import uuid
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import aiosqlite
@@ -1849,13 +1849,123 @@ async def test_dispatch_persistence_failure_rewinds_classic_cursor(
         owner=bot._runtime_view,
     )
 
-    with pytest.raises(OSError, match="dispatch database unavailable"):
+    with pytest.raises(
+        nio.CallbackNotAcceptedError,
+        match="dispatch database unavailable",
+    ) as exc_info:
         await wrapper(
             nio.MatrixRoom("!room:localhost", bot.matrix_id.full_id),
             _text_event("$unpersisted", "hello", 1),
         )
 
+    assert isinstance(exc_info.value.__cause__, OSError)
     assert bot.client.next_batch == "s_before_failure"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("transport", ["classic", "sliding"])
+async def test_nio_replays_event_rejected_before_durable_dispatch_acceptance(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    transport: str,
+) -> None:
+    """Nio must not deduplicate an event whose durable admission failed."""
+    bot = _agent_bot(tmp_path)
+    client = nio.AsyncClient(
+        "https://example.org",
+        bot.matrix_id.full_id,
+        config=nio.AsyncClientConfig(
+            encryption_enabled=False,
+            backfill_limited_timelines=True,
+        ),
+    )
+    bot.client = client
+    bot._cold_history_fence.start(trusted_continuation="s_before_failure")
+    room_id = "!room:localhost"
+    event = _text_event(f"$lost-{transport}", "hello", 1)
+    if transport == "classic":
+        response = nio.SyncResponse.from_dict(
+            {
+                "next_batch": "s_after_failure",
+                "device_one_time_keys_count": {},
+                "device_lists": {"changed": [], "left": []},
+                "rooms": {
+                    "invite": {},
+                    "leave": {},
+                    "join": {
+                        room_id: {
+                            "timeline": {
+                                "events": [event.source],
+                                "limited": False,
+                                "prev_batch": "p0",
+                            },
+                            "state": {"events": []},
+                            "ephemeral": {"events": []},
+                            "account_data": {"events": []},
+                        },
+                    },
+                },
+                "to_device": {"events": []},
+                "presence": {"events": []},
+                "account_data": {"events": []},
+            },
+        )
+        assert isinstance(response, nio.SyncResponse)
+    else:
+        response = nio.SlidingSyncResponse.from_dict(
+            {
+                "pos": "s_after_failure",
+                "rooms": {
+                    room_id: {
+                        "membership": "join",
+                        "timeline": [event.source],
+                    },
+                },
+            },
+        )
+        assert isinstance(response, nio.SlidingSyncResponse)
+
+    create_attempts = 0
+    create_pending = bot._dispatch_obligation_store.create_pending
+
+    def fail_first_create(obligation: object) -> object:
+        nonlocal create_attempts
+        create_attempts += 1
+        if create_attempts == 1:
+            message = "dispatch database unavailable"
+            error_type = OSError if transport == "classic" else sqlite3.OperationalError
+            raise error_type(message)
+        return create_pending(cast("Any", obligation))
+
+    monkeypatch.setattr(bot._dispatch_obligation_store, "create_pending", fail_first_create)
+    monkeypatch.setattr(bot._dispatch_obligation_runner, "run_persisted", AsyncMock())
+    client.add_event_callback(
+        bot._dispatch_obligation_runner.task_wrapper(
+            DispatchCallbackKind.MESSAGE,
+            owner=bot._runtime_view,
+        ),
+        nio.RoomMessageText,
+    )
+
+    with pytest.raises(
+        nio.CallbackNotAcceptedError,
+        match="dispatch database unavailable",
+    ) as exc_info:
+        await client.receive_response(response)
+
+    expected_cause = OSError if transport == "classic" else sqlite3.OperationalError
+    assert isinstance(exc_info.value.__cause__, expected_cause)
+    recovery = cast("Any", client)._recovery
+    assert event.event_id not in recovery.completed.get(room_id, {})
+
+    await client.receive_response(response)
+    await wait_for_background_tasks(timeout=1, owner=bot._runtime_view)
+
+    assert create_attempts == 2
+    assert bot._dispatch_obligation_store.has_pending(
+        event.event_id,
+        DispatchCallbackKind.MESSAGE,
+    )
 
 
 @pytest.mark.asyncio
@@ -1891,11 +2001,15 @@ async def test_swallowed_dispatch_persistence_failure_cannot_certify_response(
         DispatchCallbackKind.MESSAGE,
         owner=bot._runtime_view,
     )
-    with pytest.raises(OSError, match="dispatch database unavailable"):
+    with pytest.raises(
+        nio.CallbackNotAcceptedError,
+        match="dispatch database unavailable",
+    ) as exc_info:
         await wrapper(
             nio.MatrixRoom("!room:localhost", bot.matrix_id.full_id),
             _text_event("$unpersisted-response", "hello", 1),
         )
+    assert isinstance(exc_info.value.__cause__, OSError)
     assert bot.client.next_batch == "s_before_failure"
 
     response = MagicMock(spec=nio.SyncResponse)

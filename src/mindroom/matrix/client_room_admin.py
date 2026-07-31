@@ -53,10 +53,6 @@ class RoomJoinOutcome(StrEnum):
     RETRYABLE_FAILURE = "retryable_failure"
     TERMINAL_FAILURE = "terminal_failure"
 
-    def __bool__(self) -> bool:
-        """Preserve boolean join checks for callers that do not classify errors."""
-        return self is RoomJoinOutcome.JOINED
-
 
 async def invite_to_room(
     client: nio.AsyncClient,

@@ -207,6 +207,15 @@ class BotRoomLifecycle:
             msg = f"Failed to persist invited room {room_id}"
             raise OSError(msg)
 
+    async def _send_invite_welcome(self, room_id: str, sender: str) -> None:
+        """Finish router welcome delivery or leave the invite retryable."""
+        if self.deps.agent_name != ROUTER_AGENT_NAME:
+            return
+        if await self.send_welcome_message_if_empty(room_id, sender):
+            return
+        msg = f"Failed to complete welcome message for {room_id}"
+        raise RuntimeError(msg)
+
     async def join_configured_rooms(self) -> None:
         """Join all rooms this bot should preserve across restarts."""
         client = self._client()
@@ -225,7 +234,7 @@ class BotRoomLifecycle:
                 await self._on_configured_room_joined(room_id)
                 continue
 
-            if await self._join_room_with_decrypt_notice_fence(client, room_id):
+            if await self._join_room_with_decrypt_notice_fence(client, room_id) is RoomJoinOutcome.JOINED:
                 current_rooms.add(room_id)
                 self._logger().info("Joined room", room_id=room_id)
                 await self._on_configured_room_joined(room_id)
@@ -259,12 +268,16 @@ class BotRoomLifecycle:
 
         return list(current_rooms - configured_rooms)
 
-    async def send_welcome_message_if_empty(self, room_id: str, visible_to_sender_id: str | None = None) -> None:
+    async def send_welcome_message_if_empty(
+        self,
+        room_id: str,
+        visible_to_sender_id: str | None = None,
+    ) -> bool:
         """Send the router welcome message only when the room has no other history."""
         async with self._lock_for_room(self._welcome_locks, room_id):
             if room_id in self._welcomed_room_ids:
                 self._logger().debug("Welcome message already handled", room_id=room_id)
-                return
+                return True
 
             client = self._client()
             response = await client.room_messages(
@@ -274,7 +287,7 @@ class BotRoomLifecycle:
             )
             if not isinstance(response, nio.RoomMessagesResponse):
                 self._logger().error("Failed to check room messages", room_id=room_id, error=str(response))
-                return
+                return False
 
             if not response.chunk:
                 self._logger().info("Room is empty, sending welcome message", room_id=room_id)
@@ -298,13 +311,13 @@ class BotRoomLifecycle:
                 )
                 if event_id is None:
                     self._logger().warning("Welcome message delivery failed", room_id=room_id)
-                    return
+                    return False
                 self._welcomed_room_ids.add(room_id)
                 self._logger().info("Welcome message sent", room_id=room_id)
-                return
+                return True
 
             if len(response.chunk) != 1:
-                return
+                return True
 
             message = response.chunk[0]
             if (
@@ -314,7 +327,7 @@ class BotRoomLifecycle:
             ):
                 self._welcomed_room_ids.add(room_id)
                 self._logger().debug("Welcome message already sent", room_id=room_id)
-            return
+            return True
 
     async def on_invite(self, room: nio.MatrixRoom, event: nio.InviteEvent) -> None:
         """Handle one inbound invite using the configured room membership policy."""
@@ -341,13 +354,12 @@ class BotRoomLifecycle:
                 self._logger().debug("Invite already handled", room_id=room.room_id, sender=event.sender)
                 await self.deps.on_room_joined(room.room_id)
                 self._remember_invited_room(room.room_id)
-                if self.deps.agent_name == ROUTER_AGENT_NAME:
-                    await self.send_welcome_message_if_empty(room.room_id, event.sender)
+                await self._send_invite_welcome(room.room_id, event.sender)
                 return
 
             self._logger().info("Received invite", room_id=room.room_id, sender=event.sender)
             join_outcome = await self._join_room_with_decrypt_notice_fence(client, room.room_id)
-            if not join_outcome:
+            if join_outcome is not RoomJoinOutcome.JOINED:
                 self._logger().error("Failed to join room", room_id=room.room_id)
                 if join_outcome is RoomJoinOutcome.TERMINAL_FAILURE:
                     return
@@ -358,5 +370,4 @@ class BotRoomLifecycle:
             await self.deps.on_room_joined(room.room_id)
             self._remember_invited_room(room.room_id)
             self._handled_invite_room_ids.add(room.room_id)
-            if self.deps.agent_name == ROUTER_AGENT_NAME:
-                await self.send_welcome_message_if_empty(room.room_id, event.sender)
+            await self._send_invite_welcome(room.room_id, event.sender)

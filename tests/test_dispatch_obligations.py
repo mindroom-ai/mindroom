@@ -919,6 +919,41 @@ async def test_task_wrapper_failure_retries_autonomously(tmp_path: Path) -> None
 
 
 @pytest.mark.asyncio
+async def test_direct_dispatch_failure_retries_autonomously(tmp_path: Path) -> None:
+    """A failed direct callback must retain same-runtime retry ownership."""
+    attempts = 0
+    owner = object()
+
+    async def callback(_room: nio.MatrixRoom, _event: nio.Event) -> DispatchCallbackResult:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            message = "transient worker failure"
+            raise RuntimeError(message)
+        return DispatchCallbackResult.SUCCEEDED
+
+    store = _store(tmp_path)
+    runner = _runner(
+        store,
+        callback,
+        background_task_owner=owner,
+        retry_initial_delay_seconds=0,
+        retry_max_delay_seconds=0,
+    )
+
+    with pytest.raises(RuntimeError, match="transient worker failure"):
+        await runner.dispatch(
+            nio.MatrixRoom(_ROOM_ID, _PRINCIPAL_ID),
+            _message_event("$direct-retry"),
+            DispatchCallbackKind.MESSAGE,
+        )
+    await wait_for_background_tasks(timeout=1, owner=owner)
+
+    assert attempts == 2
+    assert not store.has_pending("$direct-retry", DispatchCallbackKind.MESSAGE)
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("entrypoint", ["direct", "task-wrapper"])
 async def test_persist_failure_notifies_once_for_every_runner_entrypoint(
     tmp_path: Path,
@@ -956,9 +991,12 @@ async def test_persist_failure_notifies_once_for_every_runner_entrypoint(
         persist = runner.dispatch(room, event, DispatchCallbackKind.MESSAGE)
     else:
         persist = runner.task_wrapper(DispatchCallbackKind.MESSAGE, owner=object())(room, event)
-    with pytest.raises(OSError, match="dispatch database unavailable"):
+    expected_error = OSError if entrypoint == "direct" else nio.CallbackNotAcceptedError
+    with pytest.raises(expected_error, match="dispatch database unavailable") as exc_info:
         await persist
 
+    if entrypoint == "task-wrapper":
+        assert isinstance(exc_info.value.__cause__, OSError)
     assert failure_notifications == 1
 
 
