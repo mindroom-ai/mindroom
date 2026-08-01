@@ -1615,6 +1615,10 @@ class TurnController:
                 target=response_target,
                 error=error,
                 existing_event_id=ack_event_id,
+                on_visible_response=lambda event_id: self._record_pending_visible_response(
+                    selection_handled_turn,
+                    event_id,
+                ),
             )
             if response_event_id is not None:
                 self._mark_source_events_responded(
@@ -1945,6 +1949,7 @@ class TurnController:
         target: MessageTarget,
         error: Exception,
         existing_event_id: str | None = None,
+        on_visible_response: Callable[[str], Awaitable[None]] | None = None,
     ) -> str | None:
         """Convert dispatch setup failures into a visible terminal message."""
         error_text = get_user_friendly_error_message(error, self.deps.agent_name)
@@ -1960,13 +1965,16 @@ class TurnController:
             )
             if edited:
                 return existing_event_id
-        return await self.deps.delivery_gateway.send_text(
+        response_event_id = await self.deps.delivery_gateway.send_text(
             SendTextRequest(
                 target=target,
                 response_text=error_text,
                 extra_content=terminal_extra_content,
             ),
         )
+        if response_event_id is not None and on_visible_response is not None:
+            await on_visible_response(response_event_id)
+        return response_event_id
 
     def _build_response_settlement_callbacks(
         self,
@@ -2177,6 +2185,7 @@ class TurnController:
                     target=dispatch.target,
                     error=failure,
                     existing_event_id=error.placeholder_event_id,
+                    on_visible_response=record_visible_response,
                 )
                 if response_event_id is not None:
                     self._mark_source_events_responded(replace(handled_turn, response_event_id=response_event_id))

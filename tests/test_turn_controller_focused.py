@@ -2642,8 +2642,62 @@ async def test_interactive_selection_attachment_setup_failure_finalizes_ack(
         fallback_request = harness.gateway.sent[1]
         assert fallback_request.response_text == edit_request.new_text
         assert fallback_request.extra_content == edit_request.extra_content
+    handled_turn = harness.turn_store.get_turn_record(selection.question_event_id)
+    assert handled_turn is not None
+    assert handled_turn.response_event_id == ("$sent-1:localhost" if edit_succeeds else "$sent-2:localhost")
     assert harness.turn_store.is_handled(selection.question_event_id) is True
     assert harness.turn_store.is_handled("$selection:localhost") is True
+
+
+@pytest.mark.asyncio
+async def test_interactive_selection_failure_persists_fallback_before_terminal_record(
+    config: Config,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A crash after fallback delivery must leave its exact event ID recoverable."""
+    harness = _build_harness(config, tmp_path)
+    harness.gateway.edit_succeeds = False
+
+    async def fail_attachment_resolution(
+        _normalizer: InboundTurnNormalizer,
+        _request: object,
+    ) -> object:
+        msg = "attachment lookup failed"
+        raise RuntimeError(msg)
+
+    def crash_before_terminal_record(_handled_turn: TurnRecord) -> None:
+        msg = "simulated crash"
+        raise RuntimeError(msg)
+
+    monkeypatch.setattr(
+        InboundTurnNormalizer,
+        "build_dispatch_payload_with_attachments",
+        fail_attachment_resolution,
+    )
+    monkeypatch.setattr(harness.controller, "_mark_source_events_responded", crash_before_terminal_record)
+    room = nio.MatrixRoom(_ROOM_ID, _entity_user_id(config, "general"))
+    selection = interactive.InteractiveSelection(
+        question_event_id="$question:localhost",
+        question_text="Process the attached report?",
+        selection_key="1",
+        selected_label="Yes",
+        selected_value="Yes",
+        thread_id="$thread-root:localhost",
+    )
+
+    with pytest.raises(RuntimeError, match="simulated crash"):
+        await harness.controller.handle_interactive_selection(
+            room,
+            selection=selection,
+            user_id=_SENDER,
+            source_event_id="$selection:localhost",
+        )
+
+    pending_turn = harness.turn_store.get_turn_record(selection.question_event_id)
+    assert pending_turn is not None
+    assert pending_turn.completed is False
+    assert pending_turn.response_event_id == "$sent-2:localhost"
 
 
 @pytest.mark.asyncio
