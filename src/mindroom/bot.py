@@ -642,7 +642,20 @@ class AgentBot:
                 settle_ignored_dispatch_sources=(
                     self._dispatch_obligation_runner.settle_intentionally_ignored_turn_sources
                 ),
+                retry_dispatch_sources=self._dispatch_obligation_runner.retry_pending_turn_sources,
+                recover_config_confirmation_setup=self._recover_config_confirmation_setup,
             ),
+        )
+
+    async def _recover_config_confirmation_setup(self, room_id: str, preview_event_id: str) -> bool:
+        """Recover Matrix-backed config setup without coupling turn control to commands."""
+        if self.client is None:
+            msg = "Matrix client is not ready for config confirmation recovery"
+            raise RuntimeError(msg)
+        return await config_confirmation.recover_confirmation_setup(
+            self.client,
+            room_id,
+            preview_event_id,
         )
 
     async def _wait_until_coalesced_dispatch_allowed(self, key: CoalescingKey) -> None:

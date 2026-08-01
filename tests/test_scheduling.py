@@ -1383,6 +1383,25 @@ async def test_cancel_scheduled_task_returns_error_when_state_write_fails() -> N
 
 
 @pytest.mark.asyncio
+async def test_cancel_scheduled_task_keeps_transient_state_read_retryable() -> None:
+    """A transient Matrix read failure must not become a terminal not-found result."""
+    client = AsyncMock()
+    client.room_get_state_event.return_value = nio.RoomGetStateEventError(
+        message="rate limited",
+        status_code="M_LIMIT_EXCEEDED",
+    )
+
+    with pytest.raises(RuntimeError, match="Failed to get scheduled task"):
+        await cancel_scheduled_task(
+            client=client,
+            room_id="!test:server",
+            task_id="taskcancel",
+        )
+
+    client.room_put_state.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_cancel_all_scheduled_tasks() -> None:
     """Test cancel_all_scheduled_tasks functionality."""
     # Create mock client

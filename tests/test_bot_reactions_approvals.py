@@ -188,6 +188,7 @@ class TestAgentBot(AgentBotTestBase):
         tmp_path: Path,
     ) -> None:
         """A failed selection handoff must leave its question answerable on exact retry."""
+        interactive._cleanup()
         config = self._config_for_storage(tmp_path)
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
@@ -214,10 +215,7 @@ class TestAgentBot(AgentBotTestBase):
 
             assert "$question" in interactive._active_questions
         finally:
-            interactive._active_questions.clear()
-            interactive._dirty_question_ids.clear()
-            interactive._deleted_question_ids.clear()
-            interactive._claimed_question_ids.clear()
+            interactive._cleanup()
 
     @pytest.mark.asyncio
     async def test_interactive_reaction_selection_reserves_prompt_order(

@@ -29,7 +29,7 @@ from mindroom.attachments import register_local_attachment
 from mindroom.bot_runtime_view import BotRuntimeState
 from mindroom.coalescing import CoalescingGate, IngressAdmissionClosedError
 from mindroom.coalescing_batch import CoalescedBatch, CoalescingKey, PendingEvent, build_coalesced_batch
-from mindroom.commands.parsing import command_parser
+from mindroom.commands.parsing import CommandType, command_parser
 from mindroom.config.agent import AgentConfig
 from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.main import Config
@@ -116,6 +116,7 @@ class _RecordingResponseRunner:
     team_requests: list[ResponseRequest] = field(default_factory=list)
     inbox_tasks: list[asyncio.Task[None]] = field(default_factory=list)
     recovery_proof_checks: list[Callable[[], bool]] = field(default_factory=list)
+    failure_callbacks: list[Callable[[], None] | None] = field(default_factory=list)
 
     def active_thread_ids_for_room(self, room_id: str) -> frozenset[str | None]:  # noqa: ARG002
         return frozenset()
@@ -138,8 +139,10 @@ class _RecordingResponseRunner:
         *,
         name: str,
         recovery_proof_ready: Callable[[], bool],
+        on_failure: Callable[[], None] | None = None,
     ) -> asyncio.Task[None]:
         self.recovery_proof_checks.append(recovery_proof_ready)
+        self.failure_callbacks.append(on_failure)
         task = asyncio.get_running_loop().create_task(response, name=name)
         self.inbox_tasks.append(task)
         return task
@@ -271,6 +274,7 @@ class _Harness:
     gate_batches: list[CoalescedBatch]
     conversation_cache: AsyncMock
     ignored_dispatch_sources: list[tuple[str, ...]]
+    retried_dispatch_sources: list[tuple[str, ...]]
 
     async def deliver(self, room: nio.MatrixRoom, event: nio.RoomMessageText) -> None:
         """Run one inbound text turn end-to-end, settling runner-owned responses.
@@ -383,6 +387,7 @@ def _build_harness(
     controller_ref: list[TurnController] = []
     gate_batches: list[CoalescedBatch] = []
     ignored_dispatch_sources: list[tuple[str, ...]] = []
+    retried_dispatch_sources: list[tuple[str, ...]] = []
 
     async def _dispatch_batch(batch: CoalescedBatch) -> None:
         gate_batches.append(batch)
@@ -390,6 +395,12 @@ def _build_harness(
 
     async def _settle_ignored_dispatch_sources(source_event_ids: tuple[str, ...]) -> None:
         ignored_dispatch_sources.append(source_event_ids)
+
+    def _retry_dispatch_sources(source_event_ids: tuple[str, ...]) -> None:
+        retried_dispatch_sources.append(source_event_ids)
+
+    async def _recover_config_confirmation_setup(_room_id: str, _preview_event_id: str) -> bool:
+        return False
 
     gate = CoalescingGate(
         dispatch_batch=_dispatch_batch,
@@ -436,6 +447,8 @@ def _build_harness(
                 ),
             ),
             settle_ignored_dispatch_sources=_settle_ignored_dispatch_sources,
+            retry_dispatch_sources=_retry_dispatch_sources,
+            recover_config_confirmation_setup=_recover_config_confirmation_setup,
         ),
     )
     controller_ref.append(controller)
@@ -450,6 +463,7 @@ def _build_harness(
         gate_batches=gate_batches,
         conversation_cache=conversation_cache,
         ignored_dispatch_sources=ignored_dispatch_sources,
+        retried_dispatch_sources=retried_dispatch_sources,
     )
 
 
@@ -618,6 +632,22 @@ async def test_replayed_turn_is_rejected_before_policy_and_compacted(config: Con
     assert harness.gateway.sent == []
     assert harness.turn_store.is_handled(event.event_id) is False
     assert harness.ignored_dispatch_sources == [(event.event_id,)]
+
+
+@pytest.mark.asyncio
+async def test_detached_response_failure_callback_owns_exact_source_retry(config: Config, tmp_path: Path) -> None:
+    """The detached response owner must hand its exact sources back to durable retry."""
+    harness = _build_harness(config, tmp_path)
+    room = _room_with_members(config, "general")
+    event = _text_event("please answer", thread_id=_THREAD_ROOT)
+
+    await harness.deliver(room, event)
+
+    assert len(harness.runner.failure_callbacks) == 1
+    on_failure = harness.runner.failure_callbacks[0]
+    assert on_failure is not None
+    on_failure()
+    assert harness.retried_dispatch_sources == [(event.event_id,)]
 
 
 @pytest.mark.asyncio
@@ -2059,6 +2089,37 @@ async def test_command_replay_adopts_durable_response(config: Config, tmp_path: 
 
 
 @pytest.mark.asyncio
+async def test_config_command_replay_recovers_confirmation_before_terminal_settlement(
+    config: Config,
+    tmp_path: Path,
+) -> None:
+    """A visible config preview is terminal only after its confirmation state is recovered."""
+    harness = _build_harness(config, tmp_path, agent_name=ROUTER_AGENT_NAME)
+    recoveries: list[tuple[str, str]] = []
+
+    async def recover_setup(room_id: str, preview_event_id: str) -> bool:
+        recoveries.append((room_id, preview_event_id))
+        return True
+
+    harness.controller.deps = replace(
+        harness.controller.deps,
+        recover_config_confirmation_setup=recover_setup,
+    )
+    command_turn = TurnRecord.create(["$config-command"])
+
+    recovered = await harness.controller._recover_visible_command_response(
+        room_id=_ROOM_ID,
+        command_type=CommandType.CONFIG,
+        command_turn=command_turn,
+        response_event_id="$preview",
+    )
+
+    assert recovered is True
+    assert recoveries == [(_ROOM_ID, "$preview")]
+    assert harness.turn_store.is_handled("$config-command")
+
+
+@pytest.mark.asyncio
 async def test_command_replay_does_not_repeat_mutation_after_visible_response(config: Config, tmp_path: Path) -> None:
     """A recovered command response must settle without rerunning its handler."""
     harness = _build_harness(config, tmp_path, agent_name=ROUTER_AGENT_NAME)
@@ -2127,6 +2188,70 @@ async def test_command_send_failure_keeps_turn_pending(config: Config, tmp_path:
     record = harness.turn_store.get_turn_record(event.event_id)
     assert record is not None
     assert record.completed is False
+    assert record.command_result_text is None
+
+
+@pytest.mark.asyncio
+async def test_mutating_command_retries_checkpointed_result_without_reapplying(config: Config, tmp_path: Path) -> None:
+    """A failed response send must replay the exact result, not repeat its mutation."""
+    harness = _build_harness(config, tmp_path, agent_name=ROUTER_AGENT_NAME)
+    room = _room_with_members(config, ROUTER_AGENT_NAME, "general")
+    event = _text_event("!model default", event_id="$model-send-failure:localhost")
+    command = command_parser.parse(event.body)
+    assert command is not None
+    target = harness.controller.deps.resolver.build_message_target(
+        room_id=room.room_id,
+        thread_id=None,
+        reply_to_event_id=event.event_id,
+        event_source=event.source,
+    )
+
+    async def fail_send(_request: SendTextRequest) -> None:
+        return None
+
+    with patch("mindroom.commands.handler.handle_model_command", return_value="✅ Model changed") as mutate:
+        with (
+            patch.object(harness.gateway, "send_text", new=fail_send),
+            pytest.raises(RuntimeError, match="did not return a Matrix event ID"),
+        ):
+            await harness.controller._execute_command(room, event, _SENDER, command, target=target)
+
+        pending_turn = harness.turn_store.get_turn_record(event.event_id)
+        assert pending_turn is not None
+        assert pending_turn.command_effect_started
+        assert pending_turn.command_result_text == "✅ Model changed"
+
+        await harness.controller._execute_command(room, event, _SENDER, command, target=target)
+
+    mutate.assert_called_once()
+    assert harness.gateway.sent[0].response_text == "✅ Model changed"
+    assert harness.turn_store.is_handled(event.event_id)
+
+
+@pytest.mark.asyncio
+async def test_mutating_command_with_ambiguous_effect_reports_uncertainty(config: Config, tmp_path: Path) -> None:
+    """A crash after mutation began must not silently rerun the command."""
+    harness = _build_harness(config, tmp_path, agent_name=ROUTER_AGENT_NAME)
+    room = _room_with_members(config, ROUTER_AGENT_NAME, "general")
+    event = _text_event("!model default", event_id="$model-ambiguous:localhost")
+    command = command_parser.parse(event.body)
+    assert command is not None
+    target = harness.controller.deps.resolver.build_message_target(
+        room_id=room.room_id,
+        thread_id=None,
+        reply_to_event_id=event.event_id,
+        event_source=event.source,
+    )
+    harness.turn_store.record_pending_turn(
+        TurnRecord.create([event.event_id], command_effect_started=True),
+    )
+
+    with patch("mindroom.commands.handler.handle_model_command") as mutate:
+        await harness.controller._execute_command(room, event, _SENDER, command, target=target)
+
+    mutate.assert_not_called()
+    assert "outcome is uncertain" in harness.gateway.sent[0].response_text
+    assert harness.turn_store.is_handled(event.event_id)
 
 
 @pytest.mark.asyncio

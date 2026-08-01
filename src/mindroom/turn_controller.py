@@ -19,7 +19,12 @@ from mindroom.coalescing_batch import (
     build_coalesced_batch,
 )
 from mindroom.coalescing_cleanup import close_pending_event_metadata_once
-from mindroom.commands.handler import CommandHandlerContext, agent_owns_command, handle_command
+from mindroom.commands.handler import (
+    COMMAND_TYPES_WITH_SIDE_EFFECTS,
+    CommandHandlerContext,
+    agent_owns_command,
+    handle_command,
+)
 from mindroom.commands.parsing import CommandType, command_parser
 from mindroom.constants import (
     ATTACHMENT_IDS_KEY,
@@ -132,6 +137,7 @@ if TYPE_CHECKING:
     from mindroom.commands.parsing import Command
     from mindroom.conversation_resolver import ConversationResolver
     from mindroom.delivery_gateway import DeliveryGateway
+    from mindroom.hooks import HookMatrixAdmin
     from mindroom.ingress_validation import IngressValidator
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.matrix.conversation_cache import MatrixConversationCache
@@ -144,6 +150,11 @@ if TYPE_CHECKING:
     from mindroom.tool_system.runtime_context import ToolRuntimeSupport
     from mindroom.turn_store import TurnStore
     from mindroom.visible_voice_echo import VisibleVoiceEchoLifecycle
+
+_UNCERTAIN_COMMAND_RESULT = (
+    "⚠️ This command was interrupted after its side effect began, so its outcome is uncertain. "
+    "Inspect the current state before retrying it."
+)
 
 
 _QUEUED_NOTICE_METADATA_KIND = "queued_notice_reservation"
@@ -448,6 +459,8 @@ class TurnControllerDeps:
     interrupted_turn_rooms: InterruptedTurnRooms
     visible_voice_echo: VisibleVoiceEchoLifecycle
     settle_ignored_dispatch_sources: Callable[[tuple[str, ...]], Awaitable[None]]
+    retry_dispatch_sources: Callable[[tuple[str, ...]], None]
+    recover_config_confirmation_setup: Callable[[str, str], Awaitable[bool]]
 
 
 @dataclass
@@ -1440,11 +1453,22 @@ class TurnController:
         )
         if command_turn is None:
             return
-        if recovered_response_event_id is not None and command.type is not CommandType.CONFIG:
-            self._mark_source_events_responded(
-                replace(command_turn, response_event_id=recovered_response_event_id),
-            )
+        if await self._recover_visible_command_response(
+            room_id=room.room_id,
+            command_type=command.type,
+            command_turn=command_turn,
+            response_event_id=recovered_response_event_id,
+        ):
             return
+        command_turn = await self._resume_or_start_command_execution(
+            command_turn,
+            command_type=command.type,
+            target=target,
+            recovered_response_event_id=recovered_response_event_id,
+        )
+        if command_turn is None:
+            return
+        active_command_turn = command_turn
 
         async def send_response(
             response_text: str,
@@ -1457,24 +1481,23 @@ class TurnController:
                 SendTextRequest(target=target, response_text=response_text, skip_mentions=skip_mentions),
             )
             if response_event_id is not None:
-                await self._record_pending_visible_response(command_turn, response_event_id)
+                await self._record_pending_visible_response(active_command_turn, response_event_id)
             return response_event_id
+
+        async def record_command_result(response_text: str) -> None:
+            """Checkpoint the exact command result before visible delivery."""
+            nonlocal active_command_turn
+            active_command_turn = await self._persist_command_turn_checkpoint(
+                active_command_turn,
+                command_result_text=response_text,
+            )
 
         def record_command_turn(outcome: TurnRecord) -> None:
             self._mark_source_events_responded(
-                replace(command_turn, response_event_id=outcome.response_event_id),
+                replace(active_command_turn, response_event_id=outcome.response_event_id),
             )
 
         orchestrator = self.deps.runtime.orchestrator
-        matrix_admin = None
-        if orchestrator is not None:
-            matrix_admin = orchestrator.hook_matrix_admin()
-        elif self.deps.agent_name == ROUTER_AGENT_NAME:
-            matrix_admin = build_hook_matrix_admin(
-                self._client(),
-                self.deps.runtime_paths,
-                config=self.deps.runtime.config,
-            )
         reload_plugins = (
             (lambda: orchestrator.reload_plugins_now(source="command")) if orchestrator is not None else None
         )
@@ -1486,9 +1509,10 @@ class TurnController:
             logger=self.deps.logger,
             conversation_cache=self.deps.resolver.deps.conversation_cache,
             event_cache=self.deps.runtime.event_cache,
-            matrix_admin=matrix_admin,
+            matrix_admin=self._command_matrix_admin(),
             stable_target=target,
             record_handled_turn=record_command_turn,
+            record_command_result=record_command_result,
             send_response=send_response,
             reload_plugins=reload_plugins,
             responder_candidates_for_room=self._responder_candidates_for_room,
@@ -1500,6 +1524,119 @@ class TurnController:
             command=command,
             requester_user_id=requester_user_id,
         )
+
+    def _command_matrix_admin(self) -> HookMatrixAdmin | None:
+        """Resolve the privileged Matrix writer available to command handlers."""
+        orchestrator = self.deps.runtime.orchestrator
+        if orchestrator is not None:
+            return orchestrator.hook_matrix_admin()
+        if self.deps.agent_name != ROUTER_AGENT_NAME:
+            return None
+        return build_hook_matrix_admin(
+            self._client(),
+            self.deps.runtime_paths,
+            config=self.deps.runtime.config,
+        )
+
+    async def _recover_visible_command_response(
+        self,
+        *,
+        room_id: str,
+        command_type: CommandType,
+        command_turn: TurnRecord,
+        response_event_id: str | None,
+    ) -> bool:
+        """Adopt one visible command response after restoring required config setup."""
+        if response_event_id is None:
+            return False
+        if command_type is CommandType.CONFIG and not await self.deps.recover_config_confirmation_setup(
+            room_id,
+            response_event_id,
+        ):
+            return False
+        self._mark_source_events_responded(
+            replace(command_turn, response_event_id=response_event_id),
+        )
+        return True
+
+    async def _persist_command_turn_checkpoint(
+        self,
+        command_turn: TurnRecord,
+        *,
+        command_effect_started: bool | None = None,
+        command_result_text: str | None = None,
+    ) -> TurnRecord:
+        """Persist one command journal transition and return its merged authority."""
+        persisted_turn = await asyncio.to_thread(
+            self.deps.turn_store.record_pending_turn,
+            replace(
+                command_turn,
+                command_effect_started=(
+                    command_turn.command_effect_started if command_effect_started is None else command_effect_started
+                ),
+                command_result_text=command_result_text,
+            ),
+        )
+        if persisted_turn is None or persisted_turn.completed:
+            msg = "Failed to persist pending command checkpoint"
+            raise RuntimeError(msg)
+        return persisted_turn
+
+    async def _deliver_checkpointed_command_result(
+        self,
+        command_turn: TurnRecord,
+        *,
+        target: MessageTarget,
+        response_text: str,
+        recovered_response_event_id: str | None,
+    ) -> None:
+        """Deliver one durable command result and terminalize its source turn."""
+        response_event_id = recovered_response_event_id
+        if response_event_id is None:
+            response_event_id = await self.deps.delivery_gateway.send_text(
+                SendTextRequest(target=target, response_text=response_text, skip_mentions=True),
+            )
+            if response_event_id is not None:
+                await self._record_pending_visible_response(command_turn, response_event_id)
+        self._mark_source_events_responded(
+            replace(command_turn, response_event_id=response_event_id),
+        )
+
+    async def _resume_or_start_command_execution(
+        self,
+        command_turn: TurnRecord,
+        *,
+        command_type: CommandType,
+        target: MessageTarget,
+        recovered_response_event_id: str | None,
+    ) -> TurnRecord | None:
+        """Resume a durable result or conservatively begin one mutating command."""
+        if command_turn.command_result_text is not None:
+            await self._deliver_checkpointed_command_result(
+                command_turn,
+                target=target,
+                response_text=command_turn.command_result_text,
+                recovered_response_event_id=recovered_response_event_id,
+            )
+            return None
+        if command_turn.command_effect_started:
+            command_turn = await self._persist_command_turn_checkpoint(
+                command_turn,
+                command_result_text=_UNCERTAIN_COMMAND_RESULT,
+            )
+            await self._deliver_checkpointed_command_result(
+                command_turn,
+                target=target,
+                response_text=_UNCERTAIN_COMMAND_RESULT,
+                recovered_response_event_id=recovered_response_event_id,
+            )
+            return None
+        if command_type in COMMAND_TYPES_WITH_SIDE_EFFECTS:
+            return await self._persist_command_turn_checkpoint(
+                command_turn,
+                command_effect_started=True,
+            )
+        return command_turn
 
     async def _execute_command_if_owned(
         self,

@@ -1020,6 +1020,12 @@ class DispatchObligationRunner:
             ),
         )
 
+    def retry_pending_turn_sources(self, source_event_ids: tuple[str, ...]) -> None:
+        """Return turn sources of either ingress kind to their stored callback owners."""
+        for source_event_id in source_event_ids:
+            for callback_kind in _TURN_BACKED_KINDS:
+                self.retry_pending_turn_source(source_event_id, callback_kind)
+
     async def settle_intentionally_ignored_turn_source(
         self,
         source_event_id: str,

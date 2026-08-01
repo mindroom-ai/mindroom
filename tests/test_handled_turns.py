@@ -486,6 +486,26 @@ def test_turn_record_cannot_mutate_after_ledger_publication() -> None:
         record.response_event_id = "$replacement"  # type: ignore[misc]
 
 
+def test_command_execution_checkpoint_persists_across_restart(temp_dir: Path) -> None:
+    """Command effect and result evidence must survive process replacement."""
+    tracker = HandledTurnLedger("test_command_checkpoint", base_path=temp_dir)
+    tracker.record_handled_turn(
+        TurnRecord.create(
+            ["$command"],
+            completed=False,
+            command_effect_started=True,
+            command_result_text="✅ Applied once",
+        ),
+    )
+
+    recovered = _reload_ledger("test_command_checkpoint", temp_dir).get_turn_record("$command")
+
+    assert recovered is not None
+    assert recovered.completed is False
+    assert recovered.command_effect_started
+    assert recovered.command_result_text == "✅ Applied once"
+
+
 def test_source_event_revisions_persist_across_restart_and_run_recovery(temp_dir: Path) -> None:
     """Per-source edit order should survive both durable turn projections."""
     revisions = {

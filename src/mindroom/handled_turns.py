@@ -116,6 +116,8 @@ class TurnRecord:
     response_owner: str | None = None
     requester_id: str | None = None
     correlation_id: str | None = None
+    command_effect_started: bool = False
+    command_result_text: str | None = None
     history_scope: HistoryScope | None = None
     conversation_target: MessageTarget | None = None
     timestamp: float = 0.0
@@ -195,6 +197,13 @@ class TurnRecord:
         object.__setattr__(self, "response_owner", _normalize_string(self.response_owner))
         object.__setattr__(self, "requester_id", _normalize_string(self.requester_id))
         object.__setattr__(self, "correlation_id", _normalize_string(self.correlation_id))
+        command_result_text = _normalize_string(self.command_result_text)
+        object.__setattr__(
+            self,
+            "command_effect_started",
+            self.command_effect_started is True or command_result_text is not None,
+        )
+        object.__setattr__(self, "command_result_text", command_result_text)
         object.__setattr__(self, "history_scope", history_scope)
         object.__setattr__(self, "conversation_target", conversation_target)
         object.__setattr__(self, "timestamp", normalized_timestamp)
@@ -219,6 +228,8 @@ class TurnRecord:
         response_owner: str | None = None,
         requester_id: str | None = None,
         correlation_id: str | None = None,
+        command_effect_started: bool = False,
+        command_result_text: str | None = None,
         history_scope: HistoryScope | None = None,
         conversation_target: MessageTarget | None = None,
         timestamp: float = 0.0,
@@ -244,6 +255,8 @@ class TurnRecord:
             response_owner=response_owner,
             requester_id=requester_id,
             correlation_id=correlation_id,
+            command_effect_started=command_effect_started,
+            command_result_text=command_result_text,
             history_scope=history_scope,
             conversation_target=conversation_target,
             timestamp=timestamp,
@@ -291,7 +304,7 @@ class TurnRecordCodec:
         return _TURN_RECORD_SCHEMA_VERSION
 
     @staticmethod
-    def to_ledger_record(record: TurnRecord) -> dict[str, object]:  # noqa: C901
+    def to_ledger_record(record: TurnRecord) -> dict[str, object]:  # noqa: C901, PLR0912
         """Serialize one exact record for the versioned handled-turn ledger."""
         payload: dict[str, object] = {
             "anchor_event_id": record.anchor_event_id,
@@ -328,6 +341,10 @@ class TurnRecordCodec:
             payload["requester_id"] = record.requester_id
         if record.correlation_id is not None:
             payload["correlation_id"] = record.correlation_id
+        if record.command_effect_started:
+            payload["command_effect_started"] = True
+        if record.command_result_text is not None:
+            payload["command_result_text"] = record.command_result_text
         if record.history_scope is not None:
             payload["history_scope"] = record.history_scope.to_metadata()
         if record.conversation_target is not None:
@@ -385,6 +402,8 @@ class TurnRecordCodec:
             response_owner=_normalize_string(record.get("response_owner")),
             requester_id=_normalize_string(record.get("requester_id")),
             correlation_id=_normalize_string(record.get("correlation_id")),
+            command_effect_started=record.get("command_effect_started") is True,
+            command_result_text=_normalize_string(record.get("command_result_text")),
             history_scope=HistoryScope.from_metadata(record.get("history_scope")),
             conversation_target=MessageTarget.from_metadata(record.get("conversation_target")),
             timestamp=float(timestamp),
@@ -1089,6 +1108,8 @@ def _merge_same_identity_records(candidate: TurnRecord, existing: TurnRecord) ->
             if newer.visible_echo_is_fallback is not None
             else older.visible_echo_is_fallback
         ),
+        command_effect_started=newer.command_effect_started or older.command_effect_started,
+        command_result_text=newer.command_result_text or older.command_result_text,
     )
 
 

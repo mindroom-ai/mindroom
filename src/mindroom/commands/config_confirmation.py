@@ -41,10 +41,13 @@ class _PendingConfigChange:
     created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
     decision_event_id: str | None = None
     decision_key: str | None = None
+    decision_execution_started: bool = False
     decision_response_text: str | None = None
 
     def is_expired(self) -> bool:
         """Check if this pending change has expired."""
+        if self.decision_event_id is not None:
+            return False
         age = datetime.now(UTC) - self.created_at
         return age.total_seconds() > _MAX_PENDING_AGE_HOURS * 3600
 
@@ -60,6 +63,7 @@ class _PendingConfigChange:
             "created_at": self.created_at.isoformat(),
             "decision_event_id": self.decision_event_id,
             "decision_key": self.decision_key,
+            "decision_execution_started": self.decision_execution_started,
             "decision_response_text": self.decision_response_text,
         }
 
@@ -79,6 +83,7 @@ class _PendingConfigChange:
             created_at=created_at,
             decision_event_id=data.get("decision_event_id"),
             decision_key=data.get("decision_key"),
+            decision_execution_started=data.get("decision_execution_started") is True,
             decision_response_text=data.get("decision_response_text"),
         )
 
@@ -86,45 +91,6 @@ class _PendingConfigChange:
 # Track pending configuration changes by event_id
 _pending_changes: dict[str, _PendingConfigChange] = {}
 _pending_change_locks: dict[str, asyncio.Lock] = {}
-
-
-def register_pending_change(
-    event_id: str,
-    room_id: str,
-    thread_id: str | None,
-    config_path: str,
-    old_value: Any,  # noqa: ANN401
-    new_value: Any,  # noqa: ANN401
-    requester: str,
-) -> _PendingConfigChange:
-    """Register a pending configuration change for confirmation.
-
-    Args:
-        event_id: The event ID of the confirmation message
-        room_id: The room ID
-        thread_id: Thread ID if in a thread
-        config_path: The configuration path being changed
-        old_value: The current value
-        new_value: The proposed new value
-        requester: User ID who requested the change
-
-    """
-    pending_change = _PendingConfigChange(
-        room_id=room_id,
-        thread_id=thread_id,
-        config_path=config_path,
-        old_value=old_value,
-        new_value=new_value,
-        requester=requester,
-    )
-    _pending_changes[event_id] = pending_change
-    logger.info(
-        "Registered pending config change",
-        event_id=event_id,
-        path=config_path,
-        requester=requester,
-    )
-    return pending_change
 
 
 def _get_pending_change(event_id: str) -> _PendingConfigChange | None:
@@ -153,7 +119,7 @@ def _remove_pending_change(event_id: str) -> _PendingConfigChange | None:
     return _pending_changes.pop(event_id, None)
 
 
-async def store_pending_change_in_matrix(
+async def _store_pending_change_in_matrix(
     client: nio.AsyncClient,
     event_id: str,
     pending_change: _PendingConfigChange,
@@ -344,7 +310,7 @@ def _cleanup() -> None:
     _pending_change_locks.clear()
 
 
-async def add_confirmation_reactions(
+async def _add_confirmation_reactions(
     client: nio.AsyncClient,
     room_id: str,
     event_id: str,
@@ -371,9 +337,97 @@ async def add_confirmation_reactions(
             tx_id=transaction_id,
             ignore_unverified_devices=True,
         )
+        if isinstance(response, nio.RoomSendError) and response.status_code == "M_DUPLICATE_ANNOTATION":
+            continue
         if not isinstance(response, nio.RoomSendResponse):
             msg = f"Failed to add {reaction_name} config confirmation reaction: {response}"
             raise RuntimeError(msg)  # noqa: TRY004
+
+
+async def _confirmation_response_ids(
+    client: nio.AsyncClient,
+    room_id: str,
+    preview_event_id: str,
+    *,
+    decision_event_id: str | None = None,
+) -> tuple[str, ...]:
+    """Return config-decision responses visibly owned by one preview."""
+    if client.user_id is None:
+        msg = "Config confirmation recovery requires a Matrix user ID"
+        raise RuntimeError(msg)
+    response_ids = await find_response_event_ids_via_room_messages(
+        client,
+        room_id,
+        response_sender=client.user_id,
+        source_event_ids=(preview_event_id,),
+        response_source_filter=lambda source: (
+            isinstance(content := source.get("content"), dict)
+            and isinstance(reaction_id := content.get(CONFIG_CONFIRMATION_REACTION_KEY), str)
+            and bool(reaction_id)
+            and (decision_event_id is None or reaction_id == decision_event_id)
+        ),
+    )
+    if len(response_ids) > 1:
+        msg = "Config confirmation recovery found multiple visible responses"
+        raise RuntimeError(msg)
+    return tuple(response_ids)
+
+
+async def recover_confirmation_setup(
+    client: nio.AsyncClient,
+    room_id: str,
+    preview_event_id: str,
+) -> bool:
+    """Recover a preview whose pending state or completed decision already exists."""
+    lock = _pending_change_locks.setdefault(preview_event_id, asyncio.Lock())
+    async with lock:
+        pending_change = await _resolve_pending_change(client, room_id, preview_event_id)
+        if pending_change is not None:
+            if pending_change.decision_event_id is None:
+                await _add_confirmation_reactions(client, room_id, preview_event_id)
+            return True
+        return bool(await _confirmation_response_ids(client, room_id, preview_event_id))
+
+
+async def ensure_pending_change(
+    client: nio.AsyncClient,
+    *,
+    event_id: str,
+    room_id: str,
+    thread_id: str | None,
+    config_path: str,
+    old_value: Any,  # noqa: ANN401
+    new_value: Any,  # noqa: ANN401
+    requester: str,
+) -> None:
+    """Persist one preview exactly once before exposing its reaction buttons."""
+    lock = _pending_change_locks.setdefault(event_id, asyncio.Lock())
+    async with lock:
+        pending_change = await _resolve_pending_change(client, room_id, event_id)
+        if pending_change is not None:
+            if pending_change.decision_event_id is None:
+                await _add_confirmation_reactions(client, room_id, event_id)
+            return
+        if await _confirmation_response_ids(client, room_id, event_id):
+            return
+
+        pending_change = _PendingConfigChange(
+            room_id=room_id,
+            thread_id=thread_id,
+            config_path=config_path,
+            old_value=old_value,
+            new_value=new_value,
+            requester=requester,
+        )
+        await _store_pending_change_in_matrix(client, event_id, pending_change)
+        _pending_changes[event_id] = pending_change
+        await _add_confirmation_reactions(client, room_id, event_id)
+        logger.info(
+            "Registered pending config change",
+            event_id=event_id,
+            path=config_path,
+            requester=requester,
+        )
 
 
 async def _ensure_decision_checkpoint(
@@ -413,28 +467,47 @@ async def _ensure_decision_checkpoint(
         decision_key=event.key,
         decision_response_text=response_text,
     )
-    await store_pending_change_in_matrix(bot.client, event.reacts_to, checkpoint)
+    await _store_pending_change_in_matrix(bot.client, event.reacts_to, checkpoint)
     _pending_changes[event.reacts_to] = checkpoint
     return checkpoint
 
 
 async def _response_for_checkpointed_decision(
     bot: AgentBot,
+    preview_event_id: str,
     pending_change: _PendingConfigChange,
-) -> str:
-    """Return the response for one frozen decision, applying an idempotent config set."""
+) -> tuple[_PendingConfigChange, str]:
+    """Checkpoint one decision result without repeating an ambiguous config write."""
     if pending_change.decision_response_text is not None:
-        return pending_change.decision_response_text
+        return pending_change, pending_change.decision_response_text
     if pending_change.decision_key != "✅":
         msg = "Config confirmation decision checkpoint is incomplete"
         raise RuntimeError(msg)
+    assert bot.client is not None
+    if pending_change.decision_execution_started:
+        response_text = (
+            "⚠️ The configuration change was interrupted after application began, so its outcome is uncertain. "
+            "Inspect the current configuration before making another change."
+        )
+        checkpoint = replace(pending_change, decision_response_text=response_text)
+        await _store_pending_change_in_matrix(bot.client, preview_event_id, checkpoint)
+        _pending_changes[preview_event_id] = checkpoint
+        return checkpoint, response_text
+
+    started_checkpoint = replace(pending_change, decision_execution_started=True)
+    await _store_pending_change_in_matrix(bot.client, preview_event_id, started_checkpoint)
+    _pending_changes[preview_event_id] = started_checkpoint
     from mindroom.commands.config_commands import apply_config_change  # noqa: PLC0415
 
-    return await apply_config_change(
+    response_text = await apply_config_change(
         pending_change.config_path,
         pending_change.new_value,
         runtime_paths=bot.runtime_paths,
     )
+    completed_checkpoint = replace(started_checkpoint, decision_response_text=response_text)
+    await _store_pending_change_in_matrix(bot.client, preview_event_id, completed_checkpoint)
+    _pending_changes[preview_event_id] = completed_checkpoint
+    return completed_checkpoint, response_text
 
 
 async def _confirmation_response_is_visible(
@@ -445,20 +518,14 @@ async def _confirmation_response_is_visible(
     """Return whether this exact decision already owns a visible response."""
     assert bot.client is not None
     assert bot.client.user_id is not None
-    response_ids = await find_response_event_ids_via_room_messages(
-        bot.client,
-        room_id,
-        response_sender=bot.client.user_id,
-        source_event_ids=(event.reacts_to,),
-        response_source_filter=lambda source: (
-            isinstance(content := source.get("content"), dict)
-            and content.get(CONFIG_CONFIRMATION_REACTION_KEY) == event.event_id
+    return bool(
+        await _confirmation_response_ids(
+            bot.client,
+            room_id,
+            event.reacts_to,
+            decision_event_id=event.event_id,
         ),
     )
-    if len(response_ids) > 1:
-        msg = "Config confirmation recovery found multiple visible responses"
-        raise RuntimeError(msg)
-    return bool(response_ids)
 
 
 async def resume_committed_confirmation(
@@ -500,7 +567,11 @@ async def handle_confirmation_reaction(
         pending_change = await _ensure_decision_checkpoint(bot, event, pending_change)
         if pending_change is None:
             return
-        response_text = await _response_for_checkpointed_decision(bot, pending_change)
+        pending_change, response_text = await _response_for_checkpointed_decision(
+            bot,
+            preview_event_id,
+            pending_change,
+        )
 
         target = bot._conversation_resolver.build_message_target(
             room_id=room.room_id,

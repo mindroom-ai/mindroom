@@ -1666,11 +1666,17 @@ async def cancel_scheduled_task(
         state_key=task_id,
     )
 
-    if not isinstance(response, nio.RoomGetStateEventResponse):
+    if isinstance(response, nio.RoomGetStateEventError) and response.status_code == "M_NOT_FOUND":
         return f"❌ Task `{task_id}` not found."
+    if not isinstance(response, nio.RoomGetStateEventResponse):
+        msg = f"Failed to get scheduled task {task_id!r} from room {room_id!r}: {response}"
+        raise RuntimeError(msg)  # noqa: TRY004
+    if not isinstance(response.content, dict):
+        msg = f"Scheduled task {task_id!r} in room {room_id!r} has invalid state content"
+        raise TypeError(msg)
 
     # Update to cancelled
-    existing_content = response.content if isinstance(response.content, dict) else None
+    existing_content = response.content
     try:
         await _put_scheduled_task_state_content(
             client=client,

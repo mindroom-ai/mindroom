@@ -485,6 +485,14 @@ class _PreparedResponseRuntime:
     tool_dispatch: ToolDispatchContext
 
 
+@dataclass(frozen=True)
+class _InboxResponseOwnership:
+    """Recovery callbacks retained with one detached inbox response."""
+
+    recovery_proof_ready: Callable[[], bool]
+    on_failure: Callable[[], None] | None
+
+
 @dataclass
 class ResponseRunner:
     """Run one response lifecycle while keeping bot seams patchable."""
@@ -497,7 +505,7 @@ class ResponseRunner:
         default_factory=ResponseLifecycleCoordinator,
         init=False,
     )
-    _inbox_response_tasks: dict[asyncio.Task[None], Callable[[], bool]] = field(default_factory=dict, init=False)
+    _inbox_response_tasks: dict[asyncio.Task[None], _InboxResponseOwnership] = field(default_factory=dict, init=False)
     _incomplete_inbox_responses_recoverable: bool = field(default=True, init=False)
     _admission_shutdown_requested: asyncio.Event = field(default_factory=asyncio.Event, init=False, repr=False)
 
@@ -507,10 +515,14 @@ class ResponseRunner:
         *,
         name: str,
         recovery_proof_ready: Callable[[], bool],
+        on_failure: Callable[[], None] | None = None,
     ) -> asyncio.Task[None]:
         """Own one detached inbox response until it completes or a drain settles it."""
         task = asyncio.create_task(response, name=name)
-        self._inbox_response_tasks[task] = recovery_proof_ready
+        self._inbox_response_tasks[task] = _InboxResponseOwnership(
+            recovery_proof_ready=recovery_proof_ready,
+            on_failure=on_failure,
+        )
         task.add_done_callback(self._finish_inbox_response_task)
         return task
 
@@ -525,7 +537,7 @@ class ResponseRunner:
         return self._incomplete_inbox_responses_recoverable
 
     def _finish_inbox_response_task(self, task: asyncio.Task[None]) -> None:
-        self._inbox_response_tasks.pop(task, None)
+        ownership = self._inbox_response_tasks.pop(task, None)
         if task.cancelled():
             return
         error = task.exception()
@@ -534,6 +546,8 @@ class ResponseRunner:
             # refusal into sync-checkpoint failure accounting.
             return
         if error is not None:
+            if ownership is not None and ownership.on_failure is not None:
+                ownership.on_failure()
             self.deps.logger.error(
                 "inbox_response_task_failed",
                 task_name=task.get_name(),
@@ -555,7 +569,7 @@ class ResponseRunner:
         """
         tasks = [task for task in self._inbox_response_tasks if not task.done()]
         # Done callbacks pop tasks, so snapshot proofs before an await can run them.
-        recovery_checks = {task: self._inbox_response_tasks[task] for task in tasks}
+        recovery_checks = {task: self._inbox_response_tasks[task].recovery_proof_ready for task in tasks}
         if not tasks:
             return True
         if cancel_after_seconds is None:

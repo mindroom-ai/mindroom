@@ -170,6 +170,29 @@ async def test_repeated_inbox_drains_keep_failed_recovery_proof_fail_closed() ->
     assert runner.incomplete_inbox_responses_recoverable is False
 
 
+@pytest.mark.asyncio
+async def test_failed_detached_inbox_response_returns_sources_to_retry_owner() -> None:
+    """A post-handoff failure must trigger autonomous dispatch retry immediately."""
+    runner = ResponseRunner(deps=MagicMock())
+    on_failure = MagicMock()
+
+    async def fail_after_handoff() -> None:
+        msg = "delivery failed"
+        raise RuntimeError(msg)
+
+    response_task = runner.track_inbox_response(
+        fail_after_handoff(),
+        name="test_failed_detached_inbox_response",
+        recovery_proof_ready=lambda: False,
+        on_failure=on_failure,
+    )
+
+    await asyncio.gather(response_task, return_exceptions=True)
+    await asyncio.sleep(0)
+
+    on_failure.assert_called_once_with()
+
+
 class RecordingStopManager(StopManager):
     """Real StopManager whose deferred clear is made immediate and observable."""
 
