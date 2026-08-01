@@ -32,9 +32,9 @@ async def test_mcp_fake_stdio_server_end_to_end(tmp_path: Path) -> None:
     server_script.write_text(
         textwrap.dedent(
             """
-            from mcp.server.fastmcp import FastMCP
+            from mcp.server import MCPServer
 
-            server = FastMCP("Fake MCP")
+            server = MCPServer("Fake MCP")
 
             @server.tool()
             def echo(text: str) -> str:

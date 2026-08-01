@@ -7,7 +7,6 @@ import base64
 import json
 import shutil
 from dataclasses import dataclass
-from datetime import timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol
 from uuid import uuid4
@@ -267,7 +266,7 @@ class PlaywrightMCPBrowserProvider:
                 ClientSession(
                     read_stream,
                     write_stream,
-                    read_timeout_seconds=timedelta(seconds=self._call_timeout_seconds),
+                    read_timeout_seconds=self._call_timeout_seconds,
                 ) as session,
             ):
                 await session.initialize()
@@ -282,7 +281,7 @@ class PlaywrightMCPBrowserProvider:
                         result = await session.call_tool(
                             active.tool_name,
                             active.arguments,
-                            read_timeout_seconds=timedelta(seconds=self._call_timeout_seconds),
+                            read_timeout_seconds=self._call_timeout_seconds,
                         )
                         if not active.future.done():
                             active.future.set_result(result)
@@ -578,13 +577,13 @@ def _provider_result(action: str, result: CallToolResult, *, max_chars: int) -> 
 
 def _result_text(result: CallToolResult) -> str:
     text_parts = [block.text for block in result.content if isinstance(block, TextContent)]
-    if result.structuredContent is not None:
-        text_parts.append(json.dumps(result.structuredContent, sort_keys=True, ensure_ascii=False))
+    if result.structured_content is not None:
+        text_parts.append(json.dumps(result.structured_content, sort_keys=True, ensure_ascii=False))
     return "\n\n".join(part for part in text_parts if part).strip()
 
 
 def _raise_result_error(action: str, result: CallToolResult) -> None:
-    if result.isError:
+    if result.is_error:
         text = _truncate_result_text(_result_text(result), max_chars=_MAX_RESULT_CHARS)
         raise PlaywrightBrowserError(text or f"Playwright MCP action {action} failed.")
 
@@ -595,7 +594,7 @@ def _browser_image(block: ImageContent) -> BrowserImage:
     except ValueError as exc:
         msg = "Playwright MCP returned invalid base64 image data."
         raise PlaywrightBrowserError(msg) from exc
-    return _validated_browser_image(content, block.mimeType)
+    return _validated_browser_image(content, block.mime_type)
 
 
 def _browser_image_file(path: Path, mime_type: str) -> BrowserImage:

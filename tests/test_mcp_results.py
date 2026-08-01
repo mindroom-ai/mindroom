@@ -29,13 +29,13 @@ def test_tool_result_from_call_result_converts_text_images_and_resources() -> No
         CallToolResult(
             content=[
                 TextContent(type="text", text="hello"),
-                ImageContent(type="image", data=base64.b64encode(image_bytes).decode("utf-8"), mimeType="image/png"),
+                ImageContent(type="image", data=base64.b64encode(image_bytes).decode("utf-8"), mime_type="image/png"),
                 EmbeddedResource(
                     type="resource",
                     resource=TextResourceContents(
                         uri="file:///tmp/demo.txt",
                         text="embedded text",
-                        mimeType="text/plain",
+                        mime_type="text/plain",
                     ),
                 ),
                 ResourceLink(
@@ -46,7 +46,7 @@ def test_tool_result_from_call_result_converts_text_images_and_resources() -> No
                     description="linked resource",
                 ),
             ],
-            structuredContent={"ok": True},
+            structured_content={"ok": True},
         ),
     )
     assert isinstance(result, ToolResult)
@@ -65,8 +65,8 @@ def test_tool_result_from_call_result_raises_on_error() -> None:
             "demo",
             CallToolResult(
                 content=[TextContent(type="text", text="tool exploded")],
-                isError=True,
-                structuredContent={"code": "boom"},
+                is_error=True,
+                structured_content={"code": "boom"},
             ),
         )
 
@@ -82,7 +82,7 @@ def test_tool_result_from_call_result_summarizes_binary_embedded_resources() -> 
                     resource=BlobResourceContents(
                         uri="file:///tmp/demo.bin",
                         blob=base64.b64encode(b"abc").decode("utf-8"),
-                        mimeType="application/octet-stream",
+                        mime_type="application/octet-stream",
                     ),
                 ),
             ],
@@ -101,7 +101,7 @@ def test_tool_result_from_call_result_converts_audio_blocks() -> None:
                 AudioContent(
                     type="audio",
                     data=base64.b64encode(audio_bytes).decode("utf-8"),
-                    mimeType="audio/ogg",
+                    mime_type="audio/ogg",
                 ),
             ],
         ),
@@ -120,8 +120,8 @@ def test_tool_result_from_call_result_keeps_invalid_base64_media_as_utf8_bytes()
         "demo",
         CallToolResult(
             content=[
-                ImageContent(type="image", data=image_data, mimeType="image/png"),
-                AudioContent(type="audio", data=audio_data, mimeType="audio/wav"),
+                ImageContent(type="image", data=image_data, mime_type="image/png"),
+                AudioContent(type="audio", data=audio_data, mime_type="audio/wav"),
             ],
         ),
     )

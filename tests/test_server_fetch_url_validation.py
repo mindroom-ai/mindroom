@@ -8,6 +8,7 @@ from typing import get_type_hints
 import httpx
 import pytest
 
+from mindroom.server_fetch_httpx2 import ServerFetchHTTPX2AsyncTransport
 from mindroom.server_fetch_url import (
     ServerFetchAsyncHTTPTransport,
     ServerFetchHTTPTransport,
@@ -22,7 +23,10 @@ def _addrinfo(ip_address: str) -> list[tuple[int, int, int, str, tuple[str, int]
     return [(family, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", (ip_address, 443))]
 
 
-@pytest.mark.parametrize("transport_cls", [ServerFetchHTTPTransport, ServerFetchAsyncHTTPTransport])
+@pytest.mark.parametrize(
+    "transport_cls",
+    [ServerFetchHTTPTransport, ServerFetchAsyncHTTPTransport, ServerFetchHTTPX2AsyncTransport],
+)
 def test_server_fetch_transport_type_hints_resolve_at_runtime(transport_cls: type[object]) -> None:
     """Transport constructor annotations should support runtime type inspection."""
     hints = get_type_hints(transport_cls.__init__)

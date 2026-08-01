@@ -6,31 +6,26 @@ import asyncio
 import re
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Any, cast
 
-import httpx
-from anyio.streams.memory import MemoryObjectReceiveStream, MemoryObjectSendStream
 from mcp.client.sse import sse_client
 from mcp.client.stdio import StdioServerParameters, get_default_environment, stdio_client
-from mcp.client.streamable_http import streamablehttp_client
-from mcp.shared.message import SessionMessage
+from mcp.client.streamable_http import streamable_http_client
 
-from mindroom.server_fetch_url import ServerFetchAsyncHTTPTransport, validate_server_fetch_url
+from mindroom.server_fetch_url import validate_server_fetch_url
 
 _ENV_REFERENCE_PATTERN = re.compile(r"\$\{([^}]+)\}")
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable, Mapping
     from contextlib import AbstractAsyncContextManager
-    from typing import Any
+
+    import httpx2
 
     from mindroom.constants import RuntimePaths
     from mindroom.mcp.config import MCPServerConfig, MCPTransport
 
-_TransportStreams = tuple[
-    MemoryObjectReceiveStream[SessionMessage | Exception],
-    MemoryObjectSendStream[SessionMessage],
-]
+_TransportStreams = tuple[Any, Any]
 
 if TYPE_CHECKING:
     _RemoteTransportClient = Callable[..., AbstractAsyncContextManager[tuple[Any, ...]]]
@@ -63,14 +58,20 @@ def _interpolate_mcp_headers(values: Mapping[str, str], runtime_paths: RuntimePa
 
 def _server_fetch_mcp_http_client(
     headers: dict[str, str] | None = None,
-    timeout: httpx.Timeout | None = None,
-    auth: httpx.Auth | None = None,
+    timeout: httpx2.Timeout | None = None,
+    auth: httpx2.Auth | None = None,
     **_ignored: object,
-) -> httpx.AsyncClient:
-    """Create an MCP HTTP client that validates requests, redirects, and dialed addresses."""
+) -> httpx2.AsyncClient:
+    """Create an MCP 2 HTTP client that validates requests, redirects, and dialed addresses."""
+    import httpx2  # noqa: PLC0415 - Keep HTTPX2 out of slim tool-registry imports.
+
+    from mindroom.server_fetch_httpx2 import (  # noqa: PLC0415 - MCP 2 HTTP transport is optional at import time.
+        ServerFetchHTTPX2AsyncTransport,
+    )
+
     kwargs: dict[str, Any] = {
         "follow_redirects": True,
-        "transport": ServerFetchAsyncHTTPTransport(),
+        "transport": ServerFetchHTTPX2AsyncTransport(),
     }
     if timeout is not None:
         kwargs["timeout"] = timeout
@@ -78,7 +79,7 @@ def _server_fetch_mcp_http_client(
         kwargs["headers"] = headers
     if auth is not None:
         kwargs["auth"] = auth
-    return httpx.AsyncClient(**kwargs)
+    return httpx2.AsyncClient(**kwargs)
 
 
 def _build_stdio_server_parameters(
@@ -139,6 +140,34 @@ async def _open_remote_transport(
         yield cast("_TransportStreams", streams[:2])
 
 
+@asynccontextmanager
+async def _open_streamable_http(
+    server_config: MCPServerConfig,
+    runtime_paths: RuntimePaths,
+    *,
+    extra_headers: Mapping[str, str] | None = None,
+) -> AsyncIterator[_TransportStreams]:
+    import httpx2  # noqa: PLC0415 - Keep HTTPX2 out of slim tool-registry imports.
+
+    if server_config.url is None:
+        msg = "streamable-http MCP servers require url"
+        raise ValueError(msg)
+    url = await asyncio.to_thread(validate_server_fetch_url, server_config.url)
+    headers = {
+        **_interpolate_mcp_headers(server_config.headers, runtime_paths),
+        **(dict(extra_headers) if extra_headers is not None else {}),
+    }
+    http_client = _server_fetch_mcp_http_client(
+        headers=headers,
+        timeout=httpx2.Timeout(server_config.startup_timeout_seconds, read=server_config.call_timeout_seconds),
+    )
+    async with (
+        http_client,
+        streamable_http_client(url, http_client=http_client) as streams,
+    ):
+        yield cast("_TransportStreams", streams)
+
+
 def build_transport_handle(
     server_id: str,
     server_config: MCPServerConfig,
@@ -163,11 +192,9 @@ def build_transport_handle(
     if server_config.transport == "streamable-http":
         return _MCPTransportHandle(
             transport="streamable-http",
-            opener=lambda: _open_remote_transport(
+            opener=lambda: _open_streamable_http(
                 server_config,
                 runtime_paths,
-                transport="streamable-http",
-                client=streamablehttp_client,
                 extra_headers=extra_headers,
             ),
         )

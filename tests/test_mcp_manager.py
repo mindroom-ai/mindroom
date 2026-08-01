@@ -39,7 +39,6 @@ from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_w
 from tests.identity_helpers import persist_entity_accounts
 
 if TYPE_CHECKING:
-    from datetime import timedelta
     from pathlib import Path
 
     from mindroom.constants import RuntimePaths
@@ -99,7 +98,7 @@ class _FakeClientSession:
         _read_stream: object,
         _write_stream: object,
         *,
-        read_timeout_seconds: timedelta | None = None,
+        read_timeout_seconds: float | None = None,
         message_handler: _MessageHandler | None = None,
         **_: object,
     ) -> None:
@@ -128,14 +127,19 @@ class _FakeClientSession:
         if _FakeClientSession.initialize_delay_seconds > 0:
             await asyncio.sleep(_FakeClientSession.initialize_delay_seconds)
         return mcp_types.InitializeResult(
-            protocolVersion="2025-03-26",
+            protocol_version="2025-03-26",
             capabilities=mcp_types.ServerCapabilities(),
-            serverInfo=Implementation(name="demo", version="1.0"),
+            server_info=Implementation(name="demo", version="1.0"),
             instructions="demo server",
         )
 
-    async def list_tools(self, cursor: str | None = None) -> ListToolsResult:
+    async def list_tools(
+        self,
+        *,
+        params: mcp_types.PaginatedRequestParams | None = None,
+    ) -> ListToolsResult:
         """Return the planned tool list, including paginated responses when configured."""
+        cursor = params.cursor if params is not None else None
         _FakeClientSession.listed_cursors.append(cursor)
         if _FakeClientSession.list_tools_delay_seconds > 0:
             await asyncio.sleep(_FakeClientSession.list_tools_delay_seconds)
@@ -148,7 +152,7 @@ class _FakeClientSession:
         self,
         _name: str,
         arguments: dict[str, object] | None = None,
-        read_timeout_seconds: timedelta | None = None,
+        read_timeout_seconds: float | None = None,
         progress_callback: object | None = None,
     ) -> CallToolResult:
         """Pop and return the next planned tool result."""
@@ -211,7 +215,7 @@ def _runtime_paths(tmp_path: Path) -> RuntimePaths:
 
 
 def _tool(name: str) -> Tool:
-    return Tool(name=name, description=f"{name} tool", inputSchema={"type": "object", "properties": {}})
+    return Tool(name=name, description=f"{name} tool", input_schema={"type": "object", "properties": {}})
 
 
 @asynccontextmanager
@@ -1394,7 +1398,7 @@ async def test_mcp_manager_does_not_retry_explicit_tool_errors(
     _FakeClientSession.planned_tool_results = [
         CallToolResult(
             content=[mcp_types.TextContent(type="text", text="tool exploded")],
-            isError=True,
+            is_error=True,
         ),
     ]
     manager = MCPServerManager(_runtime_paths(tmp_path))
@@ -1513,7 +1517,7 @@ async def test_mcp_manager_paginates_catalog_discovery(
     """Follow MCP pagination cursors until the full tool catalog is collected."""
     _patch_manager(monkeypatch)
     _FakeClientSession.planned_tool_pages = [
-        ListToolsResult(tools=[_tool("echo")], nextCursor="page-2"),
+        ListToolsResult(tools=[_tool("echo")], next_cursor="page-2"),
         ListToolsResult(tools=[_tool("ping")]),
     ]
     manager = MCPServerManager(_runtime_paths(tmp_path))
@@ -1578,11 +1582,7 @@ async def test_mcp_manager_refresh_waits_for_in_flight_calls(
 
     message_handler = initial_session.message_handler
     assert message_handler is not None
-    await message_handler(
-        mcp_types.ServerNotification(
-            ToolListChangedNotification(method="notifications/tools/list_changed"),
-        ),
-    )
+    await message_handler(ToolListChangedNotification(method="notifications/tools/list_changed"))
     refresh_task = manager._states["demo"].refresh_task
     assert refresh_task is not None
     await asyncio.sleep(0)
@@ -1620,11 +1620,7 @@ async def test_mcp_manager_handles_tools_list_changed_notifications(
     monkeypatch.setattr(manager, "_refresh_server_catalog", fake_refresh)
     message_handler = _FakeClientSession.sessions[0].message_handler
     assert message_handler is not None
-    await message_handler(
-        mcp_types.ServerNotification(
-            ToolListChangedNotification(method="notifications/tools/list_changed"),
-        ),
-    )
+    await message_handler(ToolListChangedNotification(method="notifications/tools/list_changed"))
     refresh_task = manager._states["demo"].refresh_task
     assert refresh_task is not None
     await refresh_task
@@ -1670,20 +1666,12 @@ async def test_mcp_manager_reschedules_refresh_when_catalog_goes_stale_mid_refre
     message_handler = _FakeClientSession.sessions[0].message_handler
     assert message_handler is not None
 
-    await message_handler(
-        mcp_types.ServerNotification(
-            ToolListChangedNotification(method="notifications/tools/list_changed"),
-        ),
-    )
+    await message_handler(ToolListChangedNotification(method="notifications/tools/list_changed"))
     first_refresh_task = manager._states["demo"].refresh_task
     assert first_refresh_task is not None
     await refresh_started.wait()
 
-    await message_handler(
-        mcp_types.ServerNotification(
-            ToolListChangedNotification(method="notifications/tools/list_changed"),
-        ),
-    )
+    await message_handler(ToolListChangedNotification(method="notifications/tools/list_changed"))
 
     allow_first_refresh_to_finish.set()
     await asyncio.wait_for(second_refresh_started.wait(), timeout=1)

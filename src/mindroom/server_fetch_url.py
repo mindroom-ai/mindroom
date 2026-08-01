@@ -250,6 +250,15 @@ def validate_server_fetch_url(url: str, *, allow_private_networks: bool = False)
     )
 
 
+def validate_server_fetch_request_url(url: str, *, allow_private_networks: bool = False) -> str:
+    """Validate a request URL without performing the transport's pinned DNS lookup."""
+    return _validate_server_fetch_url(
+        url,
+        allow_private_networks=allow_private_networks,
+        resolve_hostnames=False,
+    )
+
+
 def validate_server_fetch_redirect_url(
     current_url: str,
     location: str | None,
@@ -262,7 +271,7 @@ def validate_server_fetch_redirect_url(
     return validate_server_fetch_url(urljoin(current_url, location), allow_private_networks=allow_private_networks)
 
 
-def _validated_connect_addresses(
+def resolve_server_fetch_connect_addresses(
     host: str,
     *,
     port: int,
@@ -294,7 +303,11 @@ class _ServerFetchSyncNetworkBackend(httpcore.NetworkBackend):
         socket_options: Iterable[SOCKET_OPTION] | None = None,
     ) -> httpcore.NetworkStream:
         return _connect_validated_sync(
-            _validated_connect_addresses(host, port=port, allow_private_networks=self._allow_private_networks),
+            resolve_server_fetch_connect_addresses(
+                host,
+                port=port,
+                allow_private_networks=self._allow_private_networks,
+            ),
             lambda address: self._backend.connect_tcp(
                 address.compressed,
                 port,
@@ -332,7 +345,11 @@ class _ServerFetchAsyncNetworkBackend(httpcore.AsyncNetworkBackend):
         socket_options: Iterable[SOCKET_OPTION] | None = None,
     ) -> httpcore.AsyncNetworkStream:
         return await _connect_validated_async(
-            _validated_connect_addresses(host, port=port, allow_private_networks=self._allow_private_networks),
+            resolve_server_fetch_connect_addresses(
+                host,
+                port=port,
+                allow_private_networks=self._allow_private_networks,
+            ),
             lambda address: self._backend.connect_tcp(
                 address.compressed,
                 port,
@@ -418,11 +435,7 @@ class ServerFetchHTTPTransport(httpx.HTTPTransport):
 
     def handle_request(self, request: httpx.Request) -> httpx.Response:
         """Validate each request before HTTPX sends it."""
-        _validate_server_fetch_url(
-            str(request.url),
-            allow_private_networks=self._allow_private_networks,
-            resolve_hostnames=False,
-        )
+        validate_server_fetch_request_url(str(request.url), allow_private_networks=self._allow_private_networks)
         return super().handle_request(request)
 
     def close(self) -> None:
@@ -464,11 +477,7 @@ class ServerFetchAsyncHTTPTransport(httpx.AsyncHTTPTransport):
 
     async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
         """Validate each async request before HTTPX sends it."""
-        _validate_server_fetch_url(
-            str(request.url),
-            allow_private_networks=self._allow_private_networks,
-            resolve_hostnames=False,
-        )
+        validate_server_fetch_request_url(str(request.url), allow_private_networks=self._allow_private_networks)
         return await super().handle_async_request(request)
 
     async def aclose(self) -> None:

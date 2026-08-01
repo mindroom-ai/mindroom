@@ -6,6 +6,7 @@ import threading
 from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING, cast
 
+import httpx2
 import pytest
 
 import mindroom.mcp.transports as transport_module
@@ -136,25 +137,39 @@ async def test_open_sse_interpolates_headers_and_passes_timeouts(
 
 
 @pytest.mark.asyncio
-async def test_open_streamable_http_interpolates_headers_passes_timeouts_and_drops_session_getter(
+async def test_open_streamable_http_builds_guarded_mcp2_client(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Open streamable HTTP transports while dropping the session id getter."""
+    """Open MCP 2 streamable HTTP with guarded headers and timeouts."""
     runtime_paths = _runtime_paths(tmp_path)
     read_stream = object()
     write_stream = object()
     captured: dict[str, object] = {}
 
+    class _FakeHTTPClient:
+        async def __aenter__(self) -> _FakeHTTPClient:
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+    http_client = _FakeHTTPClient()
+
+    def fake_http_client_factory(**kwargs: object) -> _FakeHTTPClient:
+        captured["client_kwargs"] = kwargs
+        return http_client
+
     @asynccontextmanager
-    async def fake_streamablehttp_client(
+    async def fake_streamable_http_client(
         url: str,
         **kwargs: object,
-    ) -> AsyncIterator[tuple[object, object, object]]:
+    ) -> AsyncIterator[tuple[object, object]]:
         captured.update(url=url, **kwargs)
-        yield read_stream, write_stream, lambda: "session-id"
+        yield read_stream, write_stream
 
-    monkeypatch.setattr(transport_module, "streamablehttp_client", fake_streamablehttp_client)
+    monkeypatch.setattr(transport_module, "_server_fetch_mcp_http_client", fake_http_client_factory)
+    monkeypatch.setattr(transport_module, "streamable_http_client", fake_streamable_http_client)
     server_config = MCPServerConfig(
         transport="streamable-http",
         url="https://mcp.example/mcp",
@@ -168,14 +183,14 @@ async def test_open_streamable_http_interpolates_headers_passes_timeouts_and_dro
     async with handle.opener() as streams:
         assert streams == (read_stream, write_stream)
 
-    httpx_client_factory = captured.pop("httpx_client_factory")
-    assert httpx_client_factory is _server_fetch_mcp_http_client
-    assert captured == {
-        "url": "https://mcp.example/mcp",
-        "headers": {"X-Token": "secret-token"},
-        "timeout": 3.5,
-        "sse_read_timeout": 4.5,
-    }
+    assert captured.pop("http_client") is http_client
+    client_kwargs = cast("dict[str, object]", captured.pop("client_kwargs"))
+    assert client_kwargs["headers"] == {"X-Token": "secret-token"}
+    timeout = client_kwargs["timeout"]
+    assert isinstance(timeout, httpx2.Timeout)
+    assert timeout.connect == 3.5
+    assert timeout.read == 4.5
+    assert captured == {"url": "https://mcp.example/mcp"}
 
 
 @pytest.mark.asyncio
@@ -278,16 +293,16 @@ async def test_open_streamable_http_rejects_metadata_transport_url(
     runtime_paths = _runtime_paths(tmp_path)
 
     @asynccontextmanager
-    async def fake_streamablehttp_client(
+    async def fake_streamable_http_client(
         url: str,
         **kwargs: object,
-    ) -> AsyncIterator[tuple[object, object, object]]:
+    ) -> AsyncIterator[tuple[object, object]]:
         del url, kwargs
         msg = "unsafe MCP URL should be rejected before the streamable HTTP client opens"
         raise AssertionError(msg)
-        yield object(), object(), lambda: "session-id"
+        yield object(), object()
 
-    monkeypatch.setattr(transport_module, "streamablehttp_client", fake_streamablehttp_client)
+    monkeypatch.setattr(transport_module, "streamable_http_client", fake_streamable_http_client)
     server_config = MCPServerConfig(
         transport="streamable-http",
         url="http://169.254.169.254/latest/meta-data/",
