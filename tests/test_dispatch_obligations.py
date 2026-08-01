@@ -234,6 +234,54 @@ def test_v1_store_migrates_pending_rows_without_inventing_a_consumer(tmp_path: P
     assert migrated.pending() == (replace(obligation, requires_pending_check=True),)
 
 
+def test_v1_store_recovers_migration_interrupted_after_column_add(tmp_path: Path) -> None:
+    """A physical schema change without its version bump must remain restartable."""
+    store = _store(tmp_path)
+    obligation = _message_obligation("$interrupted-v1-migration")
+    store.create_pending(obligation)
+    database_path = _database_path(store)
+    with sqlite3.connect(database_path) as connection:
+        connection.execute("PRAGMA user_version = 1")
+
+    migrated = _store(tmp_path)
+
+    with sqlite3.connect(database_path) as connection:
+        columns = {row[1] for row in connection.execute("PRAGMA table_info(dispatch_obligations)")}
+        schema_version = connection.execute("PRAGMA user_version").fetchone()[0]
+    assert "semantic_consumer" in columns
+    assert schema_version == 2
+    assert migrated.pending() == (replace(obligation, requires_pending_check=True),)
+
+
+def test_schema_change_rolls_back_when_migration_does_not_finish(tmp_path: Path) -> None:
+    """The physical schema and version marker must commit as one migration."""
+    store = _store(tmp_path)
+    obligation = _message_obligation("$rolled-back-v1-migration")
+    store.create_pending(obligation)
+    database_path = _database_path(store)
+    with sqlite3.connect(database_path) as connection:
+        connection.execute("PRAGMA user_version = 1")
+        connection.execute("ALTER TABLE dispatch_obligations DROP COLUMN semantic_consumer")
+
+    def interrupt_after_schema_change(connection: sqlite3.Connection) -> None:
+        connection.execute("ALTER TABLE dispatch_obligations ADD COLUMN semantic_consumer TEXT")
+        message = "simulated migration interruption"
+        raise RuntimeError(message)
+
+    with (
+        patch.object(DispatchObligationStore, "_initialize_schema", side_effect=interrupt_after_schema_change),
+        pytest.raises(RuntimeError, match="simulated migration interruption"),
+    ):
+        _store(tmp_path)
+
+    with sqlite3.connect(database_path) as connection:
+        columns = {row[1] for row in connection.execute("PRAGMA table_info(dispatch_obligations)")}
+        schema_version = connection.execute("PRAGMA user_version").fetchone()[0]
+    assert "semantic_consumer" not in columns
+    assert schema_version == 1
+    assert _store(tmp_path).pending() == (replace(obligation, requires_pending_check=True),)
+
+
 @pytest.mark.asyncio
 async def test_aged_interrupted_command_journal_survives_pending_obligation_recovery(tmp_path: Path) -> None:
     """Pending callback recovery must keep the command checkpoint it depends on."""

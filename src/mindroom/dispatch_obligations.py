@@ -193,6 +193,7 @@ class DispatchObligationStore:
         self._lock = threading.Lock()
         with self._lock, self._connection() as connection:
             connection.execute("PRAGMA journal_mode = WAL")
+            connection.execute("BEGIN IMMEDIATE")
             self._initialize_schema(connection)
 
     def _connect(self) -> sqlite3.Connection:
@@ -240,7 +241,8 @@ class DispatchObligationStore:
             )
             """,
         )
-        if current_version == 1:
+        columns = {row["name"] for row in connection.execute("PRAGMA table_info(dispatch_obligations)")}
+        if "semantic_consumer" not in columns:
             connection.execute("ALTER TABLE dispatch_obligations ADD COLUMN semantic_consumer TEXT")
         connection.execute(
             """
