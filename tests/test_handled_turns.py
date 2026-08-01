@@ -1228,6 +1228,29 @@ def test_cleanup_by_age_retains_pending_redaction_intent(temp_dir: Path) -> None
     assert tracker.get_turn_record("$ordinary") is None
 
 
+def test_cleanup_by_age_retains_incomplete_turn(temp_dir: Path) -> None:
+    """Age cleanup must not discard a turn whose durable work is unfinished."""
+    tracker = HandledTurnLedger("test_incomplete_age_cleanup", base_path=temp_dir)
+    old_timestamp = time.time() - (40 * 24 * 60 * 60)
+    tracker.record_handled_turn(
+        TurnRecord.create(
+            ["$incomplete"],
+            completed=False,
+            command_execution_started=True,
+            timestamp=old_timestamp,
+        ),
+    )
+    tracker.record_handled_turn(TurnRecord.create(["$terminal"], timestamp=old_timestamp))
+    tracker.flush()
+
+    tracker._cleanup_old_events(max_events=100, max_age_days=30)
+
+    incomplete = tracker.get_turn_record("$incomplete")
+    assert incomplete is not None
+    assert incomplete.command_execution_started
+    assert tracker.get_turn_record("$terminal") is None
+
+
 def test_cleanup_by_count_retains_pending_redaction_intent(temp_dir: Path) -> None:
     """Count retention may exceed its limit rather than lose owed cleanup work."""
     tracker = HandledTurnLedger("test_pending_count_cleanup", base_path=temp_dir)
@@ -1246,6 +1269,28 @@ def test_cleanup_by_count_retains_pending_redaction_intent(temp_dir: Path) -> No
 
     assert tracker.get_turn_record("$pending") is not None
     assert tracker.pending_redaction_cleanup_event_ids() == ("$pending",)
+    assert tracker.get_turn_record("$newest") is not None
+
+
+def test_cleanup_by_count_retains_incomplete_turn(temp_dir: Path) -> None:
+    """Count cleanup may exceed its limit rather than discard unfinished work."""
+    tracker = HandledTurnLedger("test_incomplete_count_cleanup", base_path=temp_dir)
+    tracker.record_handled_turn(
+        TurnRecord.create(
+            ["$incomplete"],
+            completed=False,
+            command_execution_started=True,
+            timestamp=time.time() - 2,
+        ),
+    )
+    tracker.record_handled_turn(TurnRecord.create(["$newest"], timestamp=time.time()))
+    tracker.flush()
+
+    tracker._cleanup_old_events(max_events=1, max_age_days=30)
+
+    incomplete = tracker.get_turn_record("$incomplete")
+    assert incomplete is not None
+    assert incomplete.command_execution_started
     assert tracker.get_turn_record("$newest") is not None
 
 

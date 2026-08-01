@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import sqlite3
 import threading
+import time
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -30,6 +31,7 @@ from mindroom.dispatch_obligations import (
 )
 from mindroom.dispatch_recovery_context import turn_dispatch_recovery_active
 from mindroom.dispatch_source import IMAGE_SOURCE_KIND, MEDIA_SOURCE_KIND, VOICE_SOURCE_KIND
+from mindroom.handled_turns import HandledTurnLedger, TurnRecord
 from mindroom.matrix.media import MatrixMediaEvent, parse_matrix_media_event_source
 
 if TYPE_CHECKING:
@@ -187,6 +189,40 @@ def test_pending_row_survives_new_store_instance(tmp_path: Path) -> None:
 
     assert restarted.pending() == (obligation,)
     assert restarted.has_pending("$message", DispatchCallbackKind.MESSAGE)
+
+
+@pytest.mark.asyncio
+async def test_aged_interrupted_command_journal_survives_pending_obligation_recovery(tmp_path: Path) -> None:
+    """Pending callback recovery must keep the command checkpoint it depends on."""
+    event_id = "$interrupted-command"
+    ledger = HandledTurnLedger(_ENTITY_NAME, base_path=tmp_path / "tracking")
+    ledger.record_handled_turn(
+        TurnRecord.create(
+            [event_id],
+            completed=False,
+            command_execution_started=True,
+            timestamp=time.time() - (40 * 24 * 60 * 60),
+        ),
+    )
+    ledger.flush()
+    store = _store(tmp_path)
+    store.create_pending(_message_obligation(event_id))
+
+    restarted_ledger = HandledTurnLedger(_ENTITY_NAME, base_path=tmp_path / "tracking")
+    restarted_ledger.warm()
+    recovered_records: list[TurnRecord | None] = []
+
+    async def callback(_room: nio.MatrixRoom, event: nio.Event) -> DispatchCallbackResult:
+        recovered_records.append(restarted_ledger.get_turn_record(event.event_id))
+        return DispatchCallbackResult.DEFERRED
+
+    await _runner(store, callback, turn_is_terminal=restarted_ledger.has_responded).recover_pending(turn_backed=True)
+
+    assert len(recovered_records) == 1
+    recovered_record = recovered_records[0]
+    assert recovered_record is not None
+    assert recovered_record.command_execution_started
+    assert store.has_pending(event_id, DispatchCallbackKind.MESSAGE)
 
 
 def test_store_connections_close_and_configure_concurrent_writes(tmp_path: Path) -> None:

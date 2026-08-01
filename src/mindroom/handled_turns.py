@@ -1223,6 +1223,11 @@ class _ResponseGroup:
     records: dict[str, TurnRecord]
 
 
+def _response_group_requires_retention(group: _ResponseGroup) -> bool:
+    """Return whether one group still owns unfinished durable work."""
+    return any(not record.completed or record.pending_redaction_cleanup_event_ids for record in group.records.values())
+
+
 def _cleaned_responses(
     responses: dict[str, TurnRecord],
     *,
@@ -1235,19 +1240,14 @@ def _cleaned_responses(
     fresh_groups = [
         group
         for group in _response_groups(responses)
-        if any(record.pending_redaction_cleanup_event_ids for record in group.records.values())
-        or current_time - group.timestamp < max_age_seconds
+        if _response_group_requires_retention(group) or current_time - group.timestamp < max_age_seconds
     ]
     if len(fresh_groups) > max_events:
-        pending_groups = [
-            group
-            for group in fresh_groups
-            if any(record.pending_redaction_cleanup_event_ids for record in group.records.values())
-        ]
-        pending_group_ids = {id(group) for group in pending_groups}
-        ordinary_groups = [group for group in fresh_groups if id(group) not in pending_group_ids]
+        retained_groups = [group for group in fresh_groups if _response_group_requires_retention(group)]
+        retained_group_ids = {id(group) for group in retained_groups}
+        ordinary_groups = [group for group in fresh_groups if id(group) not in retained_group_ids]
         kept_ordinary_groups = ordinary_groups[-max_events:] if max_events else []
-        fresh_groups = sorted((*pending_groups, *kept_ordinary_groups), key=lambda group: group.timestamp)
+        fresh_groups = sorted((*retained_groups, *kept_ordinary_groups), key=lambda group: group.timestamp)
     cleaned_responses: dict[str, TurnRecord] = {}
     for group in fresh_groups:
         cleaned_responses.update(group.records)
