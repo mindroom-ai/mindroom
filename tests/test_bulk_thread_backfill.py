@@ -32,6 +32,7 @@ def _message_event(
     timestamp: int,
     thread_root_id: str | None = None,
     reply_to_event_id: str | None = None,
+    is_falling_back: bool = False,
     sender: str = "@alice:localhost",
 ) -> nio.RoomMessageText:
     content: dict[str, object] = {"body": body, "msgtype": "m.text"}
@@ -41,6 +42,8 @@ def _message_event(
         relation = content.setdefault("m.relates_to", {})
         assert isinstance(relation, dict)
         relation["m.in_reply_to"] = {"event_id": reply_to_event_id}
+        if is_falling_back:
+            relation["is_falling_back"] = True
     return nio.RoomMessageText.from_dict(
         {
             "event_id": event_id,
@@ -185,6 +188,39 @@ async def test_response_recovery_scan_finds_opaque_encrypted_reply() -> None:
     )
 
     assert response_event_ids == frozenset({response_event_id})
+
+
+@pytest.mark.asyncio
+async def test_response_recovery_scan_ignores_thread_fallback_relation() -> None:
+    """A thread continuation is not the bot response merely because fallback targets the source."""
+    source_event_id = "$source:localhost"
+    client = AsyncMock()
+    client.room_messages = AsyncMock(
+        return_value=_messages_response(
+            [
+                _message_event(
+                    "$scheduled:localhost",
+                    "scheduled continuation",
+                    timestamp=2000,
+                    thread_root_id="$thread:localhost",
+                    reply_to_event_id=source_event_id,
+                    is_falling_back=True,
+                    sender="@bot:localhost",
+                ),
+                _message_event(source_event_id, "question", timestamp=1000),
+            ],
+            end=None,
+        ),
+    )
+
+    response_event_ids = await find_response_event_ids_via_room_messages(
+        client,
+        _ROOM_ID,
+        response_sender="@bot:localhost",
+        source_event_ids=(source_event_id,),
+    )
+
+    assert response_event_ids == frozenset()
 
 
 @pytest.mark.asyncio

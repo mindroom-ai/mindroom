@@ -1372,6 +1372,7 @@ async def find_response_event_ids_via_room_messages(
             if (
                 event_source.get("sender") == response_sender
                 and not event_info.is_edit
+                and not event_info.is_thread_fallback
                 and event_info.reply_to_event_id in sources
             ):
                 response_event_ids.add(event.event_id)

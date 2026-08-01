@@ -29,11 +29,12 @@ from mindroom.attachments import register_local_attachment
 from mindroom.bot_runtime_view import BotRuntimeState
 from mindroom.coalescing import CoalescingGate, IngressAdmissionClosedError
 from mindroom.coalescing_batch import CoalescedBatch, CoalescingKey, PendingEvent, build_coalesced_batch
+from mindroom.commands.parsing import command_parser
 from mindroom.config.agent import AgentConfig
 from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.main import Config
 from mindroom.constants import ROUTER_AGENT_NAME
-from mindroom.conversation_resolver import ConversationResolver, ConversationResolverDeps
+from mindroom.conversation_resolver import ConversationResolver, ConversationResolverDeps, MessageContext
 from mindroom.conversation_state_writer import ConversationStateWriter, ConversationStateWriterDeps
 from mindroom.dispatch_callback_outcome import TurnDispatchOutcome
 from mindroom.dispatch_obligations import DispatchCallbackKind, DispatchObligationRunner, DispatchObligationStore
@@ -55,6 +56,7 @@ from mindroom.inbound_turn_normalizer import (
 from mindroom.ingress_validation import IngressValidator, IngressValidatorDeps
 from mindroom.logging_config import get_logger
 from mindroom.matrix.cache.thread_history_result import thread_history_result
+from mindroom.message_target import MessageTarget
 from mindroom.response_admission import ResponseAdmissionRefusedError
 from mindroom.response_payload_preparation import DispatchPayloadInputs, ResponsePayloadPreparation
 from mindroom.response_runner import ResponseRequest
@@ -62,7 +64,7 @@ from mindroom.sync_restart_retry import InterruptedTurnRooms
 from mindroom.tool_system.runtime_context import ToolRuntimeSupport
 from mindroom.turn_controller import TurnController, TurnControllerDeps
 from mindroom.turn_origin import TurnIntent
-from mindroom.turn_policy import IngressHookRunner, ResponseAction, TurnPolicy, TurnPolicyDeps
+from mindroom.turn_policy import IngressHookRunner, PreparedDispatch, ResponseAction, TurnPolicy, TurnPolicyDeps
 from mindroom.turn_store import TurnStore, TurnStoreDeps
 from mindroom.visible_voice_echo import VisibleVoiceEchoDeps, VisibleVoiceEchoLifecycle
 from tests.conftest import (
@@ -84,7 +86,6 @@ if TYPE_CHECKING:
     from mindroom.hooks import MessageEnvelope
     from mindroom.matrix.cache import ThreadHistoryResult
     from mindroom.matrix.event_info import EventInfo
-    from mindroom.message_target import MessageTarget
     from mindroom.response_lifecycle import QueuedHumanNoticeReservation
     from mindroom.response_runner import ResponseRunner
     from mindroom.turn_policy import _ResponderAvailability as ResponderAvailability
@@ -155,6 +156,8 @@ class _RecordingResponseRunner:
         if request.on_lifecycle_lock_acquired is not None:
             request.on_lifecycle_lock_acquired()
         if request.prepare_source_turn is not None and request.prepare_source_turn():
+            if request.on_source_turn_suppressed is not None:
+                await request.on_source_turn_suppressed()
             return None
         if self.visible_response_event_id is not None and request.on_visible_response is not None:
             await request.on_visible_response(self.visible_response_event_id)
@@ -180,6 +183,8 @@ class _RecordingResponseRunner:
         if request.on_lifecycle_lock_acquired is not None:
             request.on_lifecycle_lock_acquired()
         if request.prepare_source_turn is not None and request.prepare_source_turn():
+            if request.on_source_turn_suppressed is not None:
+                await request.on_source_turn_suppressed()
             return None
         if self.visible_response_event_id is not None and request.on_visible_response is not None:
             await request.on_visible_response(self.visible_response_event_id)
@@ -694,6 +699,30 @@ async def test_incomplete_response_intent_reconciles_matrix_without_recovery_sco
 
 
 @pytest.mark.asyncio
+async def test_recovery_lookup_excludes_visible_voice_echo(config: Config, tmp_path: Path) -> None:
+    """Router recovery must distinguish its relay from an earlier visible voice echo."""
+    harness = _build_harness(config, tmp_path, agent_name=ROUTER_AGENT_NAME)
+    pending_turn = TurnRecord.create(
+        [_EVENT_ID],
+        response_event_id="$voice-echo:localhost",
+        completed=False,
+    )
+    harness.turn_store.record_pending_turn(pending_turn)
+
+    with patch(
+        "mindroom.turn_controller.find_response_event_ids_via_room_messages",
+        return_value=frozenset({"$voice-echo:localhost", "$relay:localhost"}),
+    ):
+        recovered = await harness.controller._recovered_response_event_id(
+            pending_turn,
+            room_id=_ROOM_ID,
+            excluded_event_ids=("$voice-echo:localhost",),
+        )
+
+    assert recovered == "$relay:localhost"
+
+
+@pytest.mark.asyncio
 async def test_visible_response_identity_is_durable_before_generation_finishes(
     config: Config,
     tmp_path: Path,
@@ -727,6 +756,88 @@ async def test_response_intent_is_durable_before_any_matrix_response(config: Con
     assert record is not None
     assert record.response_event_id is None
     assert record.completed is False
+
+
+@pytest.mark.asyncio
+async def test_redacted_pending_turn_settles_deferred_source_before_response(
+    config: Config,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A redaction racing the pending-intent write must terminally settle its callback owner."""
+    harness = _build_harness(config, tmp_path)
+    room = _room_with_members(config, "general")
+    event = _text_event("redact before response")
+    real_record_pending = harness.turn_store.record_pending_turn
+
+    def record_then_redact(turn_record: TurnRecord) -> TurnRecord | None:
+        pending_turn = real_record_pending(turn_record)
+        assert pending_turn is not None
+        return harness.turn_store.mark_source_redacted(event.event_id)
+
+    monkeypatch.setattr(harness.turn_store, "record_pending_turn", record_then_redact)
+
+    await harness.deliver(room, event)
+
+    assert harness.runner.requests == []
+    assert harness.ignored_dispatch_sources == [(event.event_id,)]
+
+
+@pytest.mark.asyncio
+async def test_locked_coalesced_redaction_settles_every_suppressed_source(
+    config: Config,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The locked redaction check must release every physical source in a suppressed batch."""
+    harness = _build_harness(config, tmp_path)
+    room = _room_with_members(config, "general", ROUTER_AGENT_NAME)
+    mention = _entity_user_id(config, "general")
+    relay_event_ids = ("$relay-one:localhost", "$relay-two:localhost")
+    relay_events = [
+        _router_relay_event(
+            config,
+            event_id=event_id,
+            original_event_id=human_event_id,
+            body=f"{mention} {body}",
+            origin_server_ts=timestamp,
+        )
+        for event_id, human_event_id, body, timestamp in (
+            (relay_event_ids[0], "$human-one:localhost", "first", 1_000_000),
+            (relay_event_ids[1], "$human-two:localhost", "second", 1_000_001),
+        )
+    ]
+    batch = build_coalesced_batch(
+        CoalescingKey(_ROOM_ID, _THREAD_ROOT, _SENDER),
+        [
+            PendingEvent(
+                event=event,
+                room=room,
+                source_kind=TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
+                requester_user_id=_SENDER,
+                trust_internal_payload_metadata=True,
+                discovery_event_id=human_event_id,
+            )
+            for event, human_event_id in zip(
+                relay_events,
+                ("$human-one:localhost", "$human-two:localhost"),
+                strict=True,
+            )
+        ],
+    )
+    real_generate_response = harness.runner.generate_response
+
+    async def redact_before_locked_check(request: ResponseRequest) -> str | None:
+        harness.turn_store.mark_source_redacted(relay_event_ids[0])
+        return await real_generate_response(request)
+
+    monkeypatch.setattr(harness.runner, "generate_response", redact_before_locked_check)
+
+    await harness.controller.handle_coalesced_batch(batch)
+    await harness.runner.settle_inbox_responses()
+
+    assert len(harness.runner.requests) == 1
+    assert harness.ignored_dispatch_sources == [relay_event_ids]
 
 
 @pytest.mark.asyncio
@@ -1868,11 +1979,166 @@ async def test_command_turn_records_terminal_outcome_through_turn_store(config: 
 
 
 @pytest.mark.asyncio
+async def test_command_replay_adopts_durable_response(config: Config, tmp_path: Path) -> None:
+    """A command replay must reuse the response persisted before terminal settlement."""
+    harness = _build_harness(config, tmp_path, agent_name=ROUTER_AGENT_NAME)
+    room = _room_with_members(config, ROUTER_AGENT_NAME, "general", "research")
+    event = _text_event("!help", event_id="$command-replay:localhost")
+    command = command_parser.parse(event.body)
+    assert command is not None
+    target = harness.controller.deps.resolver.build_message_target(
+        room_id=room.room_id,
+        thread_id=None,
+        reply_to_event_id=event.event_id,
+        event_source=event.source,
+    )
+    handled_turn = TurnRecord.create([event.event_id])
+
+    with patch.object(harness.controller, "_mark_source_events_responded"):
+        await harness.controller._execute_command(
+            room,
+            event,
+            _SENDER,
+            command,
+            target=target,
+            handled_turn=handled_turn,
+        )
+
+    pending_turn = harness.turn_store.get_turn_record(event.event_id)
+    assert pending_turn is not None
+    assert pending_turn.completed is False
+    assert pending_turn.response_event_id == "$sent-1:localhost"
+
+    await harness.controller._execute_command(
+        room,
+        event,
+        _SENDER,
+        command,
+        target=target,
+        handled_turn=handled_turn,
+    )
+
+    assert len(harness.gateway.sent) == 1
+    record = harness.turn_store.get_turn_record(event.event_id)
+    assert record is not None
+    assert record.completed is True
+    assert record.response_event_id == "$sent-1:localhost"
+
+
+@pytest.mark.asyncio
+async def test_rejection_replay_adopts_durable_response(config: Config, tmp_path: Path) -> None:
+    """A rejected-turn replay must not send a second visible rejection."""
+    harness = _build_harness(config, tmp_path)
+    room = _room_with_members(config, "general")
+    event = _text_event("unsupported request", event_id="$reject-replay:localhost")
+    target = MessageTarget.resolve(room.room_id, None, event.event_id)
+    envelope = harness.controller.deps.resolver.build_ingress_envelope(
+        event=event,
+        requester_user_id=_SENDER,
+        target=target,
+    )
+    dispatch = PreparedDispatch(
+        requester_user_id=_SENDER,
+        context=MessageContext(
+            am_i_mentioned=True,
+            is_thread=False,
+            thread_id=None,
+            thread_history=(),
+            mentioned_agents=[],
+            has_non_agent_mentions=False,
+        ),
+        target=target,
+        correlation_id=event.event_id,
+        envelope=envelope,
+    )
+    action = ResponseAction(kind="reject", rejection_message="Unsupported request")
+    handled_turn = harness.turn_store.attach_response_context(
+        TurnRecord.create([event.event_id], completed=False),
+        history_scope=None,
+        conversation_target=target,
+    )
+    pending_turn = harness.turn_store.record_pending_turn(handled_turn)
+    assert pending_turn is not None
+
+    with patch.object(harness.controller, "_mark_source_events_responded"):
+        await harness.controller._execute_response_action(
+            room,
+            event,
+            dispatch,
+            action,
+            DispatchPayloadInputs((), (), ()),
+            processing_log="rejecting",
+            dispatch_started_at=0.0,
+            handled_turn=pending_turn,
+        )
+
+    pending_turn = harness.turn_store.get_turn_record(event.event_id)
+    assert pending_turn is not None
+    assert pending_turn.completed is False
+    assert pending_turn.response_event_id == "$sent-1:localhost"
+
+    await harness.controller._execute_response_action(
+        room,
+        event,
+        dispatch,
+        action,
+        DispatchPayloadInputs((), (), ()),
+        processing_log="rejecting",
+        dispatch_started_at=0.0,
+        handled_turn=pending_turn,
+        reconcile_visible_response=True,
+    )
+
+    assert len(harness.gateway.sent) == 1
+    record = harness.turn_store.get_turn_record(event.event_id)
+    assert record is not None
+    assert record.completed is True
+    assert record.response_event_id == "$sent-1:localhost"
+
+
+@pytest.mark.asyncio
+async def test_router_relay_replay_adopts_durable_response(config: Config, tmp_path: Path) -> None:
+    """A router replay must reuse the relay persisted before terminal settlement."""
+    harness = _build_harness(config, tmp_path, agent_name=ROUTER_AGENT_NAME)
+    room = _room_with_members(config, ROUTER_AGENT_NAME, "general")
+    event = _text_event("route this", event_id="$router-replay:localhost")
+    handled_turn = TurnRecord.create([event.event_id], completed=False)
+
+    with patch.object(harness.controller, "_mark_source_events_responded"):
+        await harness.controller._execute_router_relay(
+            room,
+            event,
+            (),
+            requester_user_id=_SENDER,
+            handled_turn=handled_turn,
+        )
+
+    pending_turn = harness.turn_store.get_turn_record(event.event_id)
+    assert pending_turn is not None
+    assert pending_turn.completed is False
+    assert pending_turn.response_event_id == "$sent-1:localhost"
+
+    await harness.controller._execute_router_relay(
+        room,
+        event,
+        (),
+        requester_user_id=_SENDER,
+        handled_turn=handled_turn,
+    )
+
+    assert len(harness.gateway.sent) == 1
+    record = harness.turn_store.get_turn_record(event.event_id)
+    assert record is not None
+    assert record.completed is True
+    assert record.response_event_id == "$sent-1:localhost"
+
+
+@pytest.mark.asyncio
 async def test_command_dispatch_failure_propagates_without_recording_terminal_outcome(
     config: Config,
     tmp_path: Path,
 ) -> None:
-    """A failed owner command must remain retryable at the durable callback boundary."""
+    """A failed owner command must retain only retryable pending intent."""
     harness = _build_harness(config, tmp_path, agent_name=ROUTER_AGENT_NAME)
     room = _room_with_members(config, ROUTER_AGENT_NAME, "general", "research")
     event = _text_event("!help", event_id="$failed-command:localhost")
@@ -1883,7 +2149,10 @@ async def test_command_dispatch_failure_propagates_without_recording_terminal_ou
     ):
         await harness.deliver(room, event)
 
-    assert harness.turn_store.get_turn_record(event.event_id) is None
+    record = harness.turn_store.get_turn_record(event.event_id)
+    assert record is not None
+    assert record.completed is False
+    assert record.response_event_id is None
 
 
 @pytest.mark.asyncio
@@ -1982,7 +2251,7 @@ async def test_interactive_selection_acks_generates_and_records_once(config: Con
     ack_request = harness.gateway.sent[0]
     assert ack_request.response_text.startswith("You selected: 1 Option 1")
     assert ack_request.target.resolved_thread_id == selection.thread_id
-    assert ack_request.target.reply_to_event_id is None
+    assert ack_request.target.reply_to_event_id == selection.question_event_id
 
     assert len(harness.runner.requests) == 1
     request = harness.runner.requests[0]
@@ -1998,6 +2267,49 @@ async def test_interactive_selection_acks_generates_and_records_once(config: Con
 
     assert harness.turn_store.is_handled(selection.question_event_id) is True
     assert harness.turn_store.is_handled("$selection:localhost") is True
+
+
+@pytest.mark.asyncio
+async def test_interactive_selection_replay_adopts_durable_ack(config: Config, tmp_path: Path) -> None:
+    """A retry after visible delivery must reuse the first acknowledgment instead of sending again."""
+    harness = _build_harness(config, tmp_path)
+    harness.runner.response_event_id = None
+    room = nio.MatrixRoom(_ROOM_ID, _entity_user_id(config, "general"))
+    selection = interactive.InteractiveSelection(
+        question_event_id="$question:localhost",
+        question_text="Which option should I use?",
+        selection_key="1",
+        selected_label="Option 1",
+        selected_value="Option 1",
+        thread_id="$thread-root:localhost",
+    )
+    selection_event_id = "$selection:localhost"
+
+    with pytest.raises(RuntimeError, match="no durable terminal outcome"):
+        await harness.controller.handle_interactive_selection(
+            room,
+            selection=selection,
+            user_id=_SENDER,
+            source_event_id=selection_event_id,
+        )
+
+    pending_turn = harness.turn_store.get_turn_record(selection.question_event_id)
+    assert pending_turn is not None
+    assert pending_turn.completed is False
+    assert pending_turn.response_event_id == "$sent-1:localhost"
+
+    harness.runner.response_event_id = "$sent-1:localhost"
+    await harness.controller.handle_interactive_selection(
+        room,
+        selection=selection,
+        user_id=_SENDER,
+        source_event_id=selection_event_id,
+    )
+
+    assert len(harness.gateway.sent) == 1
+    assert len(harness.runner.requests) == 2
+    assert harness.runner.requests[1].existing_event_id == "$sent-1:localhost"
+    assert harness.turn_store.is_handled(selection.question_event_id) is True
 
 
 @pytest.mark.asyncio
@@ -2157,14 +2469,14 @@ async def test_interactive_selection_replacement_refusal_uses_checkpoint_replay(
             source_event_id=selection_event_id,
         )
 
-    # Only the pre-existing acknowledgement was sent. Refusal performs no
+    # Only the durably tracked acknowledgement was sent. Refusal performs no
     # untimed Matrix settlement inside replacement shutdown.
     assert len(harness.gateway.sent) == 1
     assert harness.gateway.edited == []
 
     record = harness.turn_store.get_turn_record(selection_event_id)
     assert record is not None
-    assert record.response_event_id is None
+    assert record.response_event_id == "$sent-1:localhost"
     assert record.completed is False
 
 
@@ -2209,7 +2521,7 @@ async def test_interactive_selection_redacted_after_ack_is_suppressed_under_lock
     assert record is not None
     assert record.redacted_source_event_ids == (selection_event_id,)
     assert record.pending_redaction_cleanup_event_ids == ()
-    assert record.response_event_id is None
+    assert record.response_event_id == "$ack:localhost"
     assert harness.turn_store.is_handled(selection_event_id) is True
     assert harness.turn_store.is_handled(selection.question_event_id) is False
 

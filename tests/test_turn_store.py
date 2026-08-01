@@ -162,6 +162,34 @@ def test_only_terminal_turn_notifies_exact_indexed_event_ids(tmp_path: Path) -> 
     assert notifications == [("$source", "$alias")]
 
 
+def test_pending_delivery_intent_does_not_require_model_history_scope(tmp_path: Path) -> None:
+    """Response ownership and target distinguish delivery intent from a raw visible echo."""
+    store = _store(tmp_path)
+    source_event_ids = ("$source",)
+    visible_echo = TurnRecord.create(
+        source_event_ids,
+        response_event_id="$echo",
+        completed=False,
+    )
+    store.record_pending_turn(visible_echo)
+    assert store.has_pending_response_intent(source_event_ids) is False
+
+    target = MessageTarget.resolve("!room:example.org", None, "$source")
+    delivery_intent = store.attach_response_context(
+        visible_echo,
+        history_scope=None,
+        conversation_target=target,
+    )
+    store.record_pending_turn(delivery_intent)
+
+    assert store.has_pending_response_intent(source_event_ids) is True
+    record = store.get_turn_record("$source")
+    assert record is not None
+    assert record.response_owner == "agent"
+    assert record.conversation_target == target
+    assert record.history_scope is None
+
+
 def test_terminal_turn_notifies_only_after_durable_write(tmp_path: Path) -> None:
     """Dispatch truth must remain until its replacing TurnStore write reaches disk."""
     notified = threading.Event()

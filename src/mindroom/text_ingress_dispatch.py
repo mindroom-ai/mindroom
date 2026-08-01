@@ -321,6 +321,7 @@ async def _blocked_before_plan(
             requester_user_id=requester_user_id,
             command=prepared.command,
             target=prepared.dispatch.target,
+            handled_turn=prepared.handled_turn,
         )
         if not command_owned:
             await controller._settle_source_events_ignored(prepared.handled_turn)
@@ -445,7 +446,10 @@ async def _apply_turn_plan(
         controller.deps.turn_store.record_pending_turn,
         handled_turn,
     )
-    if pending_turn is None or pending_turn.completed or pending_turn.redacted_source_event_ids:
+    if pending_turn is None or pending_turn.completed:
+        return
+    if pending_turn.redacted_source_event_ids:
+        await controller._settle_source_events_ignored(pending_turn)
         return
     handled_turn = pending_turn
 

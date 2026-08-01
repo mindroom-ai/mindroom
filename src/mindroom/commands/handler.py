@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol
 
@@ -46,6 +47,11 @@ if TYPE_CHECKING:
     from mindroom.tool_system.plugins import PluginReloadResult
 
 logger = get_logger(__name__)
+
+
+def _scheduled_task_id_for_command(source_event_id: str) -> str:
+    """Return the stable task key owned by one schedule command event."""
+    return hashlib.sha256(source_event_id.encode()).hexdigest()[:8]
 
 
 def _scheduling_runtime(context: CommandHandlerContext, room: nio.MatrixRoom) -> SchedulingRuntime:
@@ -336,6 +342,7 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
             scheduled_by=requester_user_id,
             full_text=full_text,
             mentioned_agents=mentioned_agents,
+            task_id=_scheduled_task_id_for_command(event.event_id),
         )
 
     elif command.type == CommandType.LIST_SCHEDULES:
@@ -407,7 +414,6 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
                 )
 
                 if response_event_id:
-                    context.record_handled_turn(handled_turn)
                     # Register the pending change
                     config_confirmation.register_pending_change(
                         event_id=response_event_id,
@@ -437,8 +443,7 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
                         response_event_id,
                     )
 
-                if response_event_id is None:
-                    context.record_handled_turn(handled_turn)
+                context.record_handled_turn(handled_turn)
                 return  # Exit early since we've handled the response
 
     elif command.type == CommandType.MODEL:

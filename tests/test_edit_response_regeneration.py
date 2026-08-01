@@ -3999,7 +3999,7 @@ async def test_on_reaction_leaves_question_retryable_when_ack_response_is_suppre
             await bot._on_reaction(room, reaction_event)
 
         assert bot._turn_store.is_handled("$question:example.com") is False
-        assert _response_event_id(bot, "$question:example.com") is None
+        assert _response_event_id(bot, "$question:example.com") == "$ack_event:example.com"
         request = mock_generate_response.await_args.args[0]
         assert request.existing_event_id == "$ack_event:example.com"
         assert request.existing_event_is_placeholder is True

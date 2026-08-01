@@ -334,7 +334,7 @@ async def test_handle_interactive_selection_threaded_streaming_keeps_reply_targe
     bot._delivery_gateway.send_text.assert_awaited_once()
     ack_request = bot._delivery_gateway.send_text.await_args.args[0]
     assert ack_request.target.resolved_thread_id == selection.thread_id
-    assert ack_request.target.reply_to_event_id is None
+    assert ack_request.target.reply_to_event_id == selection.question_event_id
     generate_response_mock.assert_awaited_once()
     assert captured_envelope is not None
     assert captured_envelope.source_event_id == "$selection:localhost"

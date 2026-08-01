@@ -330,6 +330,7 @@ class ResponseRequest:
     current_prompt_is_structured: bool = False
     on_lifecycle_lock_acquired: Callable[[], None] | None = None
     prepare_source_turn: Callable[[], bool] | None = None
+    on_source_turn_suppressed: Callable[[], Awaitable[None]] | None = None
     pipeline_timing: DispatchPipelineTiming | None = None
     queued_notice_reservation: QueuedHumanNoticeReservation | None = None
     on_interrupted_response_recoverable: Callable[[], None] | None = None
@@ -1240,6 +1241,8 @@ class ResponseRunner:
                         ),
                     ),
                 )
+            if request.on_source_turn_suppressed is not None:
+                await request.on_source_turn_suppressed()
             return None
         placeholder_event_id = None
         if (

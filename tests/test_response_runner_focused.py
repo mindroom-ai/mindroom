@@ -342,6 +342,7 @@ async def test_begin_locked_turn_suppresses_source_redacted_before_response_regi
     )
     response_thread_id = threading.get_ident()
     preparation_thread_ids: list[int] = []
+    on_source_turn_suppressed = AsyncMock()
 
     def prepare_source_turn() -> bool:
         preparation_thread_ids.append(threading.get_ident())
@@ -354,6 +355,7 @@ async def test_begin_locked_turn_suppresses_source_redacted_before_response_regi
         response_envelope=envelope,
         payload_preparation=_preparation(target, envelope),
         prepare_source_turn=prepare_source_turn,
+        on_source_turn_suppressed=on_source_turn_suppressed,
     )
 
     prepared_request = await runner._begin_locked_turn(
@@ -372,6 +374,7 @@ async def test_begin_locked_turn_suppresses_source_redacted_before_response_regi
     assert preparation_thread_ids[0] != response_thread_id
     delivery_gateway.send_text.assert_not_awaited()
     request_preparer.prepare.assert_not_awaited()
+    on_source_turn_suppressed.assert_awaited_once_with()
 
 
 @pytest.mark.asyncio
@@ -436,6 +439,7 @@ async def test_begin_locked_turn_settles_external_placeholder_when_source_is_red
             delivery_gateway=delivery_gateway,
         ),
     )
+    on_source_turn_suppressed = AsyncMock()
     request = ResponseRequest(
         thread_history=[],
         prompt="REDACTED_SECRET",
@@ -444,6 +448,7 @@ async def test_begin_locked_turn_settles_external_placeholder_when_source_is_red
         existing_event_id="$ack",
         existing_event_is_placeholder=True,
         prepare_source_turn=lambda: True,
+        on_source_turn_suppressed=on_source_turn_suppressed,
     )
 
     prepared_request = await runner._begin_locked_turn(
@@ -461,6 +466,7 @@ async def test_begin_locked_turn_settles_external_placeholder_when_source_is_red
     cancellation_request = delivery_gateway.deliver_cancelled_visible_note.await_args.args[0]
     assert cancellation_request.event_id == "$ack"
     assert cancellation_request.existing_event_is_placeholder is True
+    on_source_turn_suppressed.assert_awaited_once_with()
 
 
 @pytest.mark.asyncio

@@ -720,8 +720,8 @@ async def test_handle_command_config_set_confirmation_records_preview_event_id(t
 
 
 @pytest.mark.asyncio
-async def test_handle_command_config_set_records_preview_before_post_send_failure(tmp_path: Path) -> None:
-    """Preview sends should still be recorded if later confirmation setup fails."""
+async def test_handle_command_config_set_stays_retryable_after_post_send_failure(tmp_path: Path) -> None:
+    """Confirmation setup failures should leave the command retryable."""
     context = CommandHandlerContext(
         client=AsyncMock(),
         config=SimpleNamespace(
@@ -784,12 +784,7 @@ async def test_handle_command_config_set_records_preview_before_post_send_failur
             requester_user_id="@alice:example.org",
         )
 
-    context.record_handled_turn.assert_called_once_with(
-        TurnRecord.create(
-            ["$event"],
-            response_event_id="$preview",
-        ),
-    )
+    context.record_handled_turn.assert_not_called()
 
 
 @pytest.mark.asyncio

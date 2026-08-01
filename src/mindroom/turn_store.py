@@ -215,7 +215,7 @@ class TurnStore:
         return any(
             (record := self.get_turn_record(source_event_id)) is not None
             and not record.completed
-            and record.history_scope is not None
+            and record.response_owner is not None
             and record.conversation_target is not None
             for source_event_id in source_event_ids
         )

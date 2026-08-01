@@ -122,7 +122,7 @@ from mindroom.turn_policy import IngressHookRunner, PreparedDispatch, ResponseAc
 from mindroom.visible_voice_echo import VisibleVoiceEchoRequest
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Sequence
+    from collections.abc import Awaitable, Callable, Collection, Sequence
 
     import nio
     import structlog
@@ -501,6 +501,7 @@ class TurnController:
         handled_turn: TurnRecord,
         *,
         room_id: str,
+        excluded_event_ids: Collection[str] = (),
     ) -> str | None:
         """Return the durable visible response owned by a replayed turn."""
         incomplete_records = tuple(
@@ -511,6 +512,7 @@ class TurnController:
         response_event_ids = {
             record.response_event_id for record in incomplete_records if record.response_event_id is not None
         }
+        response_event_ids.difference_update(excluded_event_ids)
         if len(response_event_ids) > 1:
             msg = "Recovered coalesced turn has conflicting visible response event IDs"
             raise RuntimeError(msg)
@@ -525,6 +527,7 @@ class TurnController:
                 source_event_ids=handled_turn.source_event_ids,
             ),
         )
+        response_event_ids.difference_update(excluded_event_ids)
         self.deps.logger.info(
             "dispatch_recovery_response_lookup",
             room_id=room_id,
@@ -539,6 +542,54 @@ class TurnController:
     async def _settle_source_events_ignored(self, handled_turn: TurnRecord) -> None:
         """Compact exact callback obligations without growing the handled-turn ledger."""
         await self.deps.settle_ignored_dispatch_sources(handled_turn.source_event_ids)
+
+    async def _record_pending_visible_response(self, handled_turn: TurnRecord, response_event_id: str) -> None:
+        """Durably bind one visible response to its incomplete turn before generation."""
+        await asyncio.to_thread(
+            self.deps.turn_store.record_pending_turn,
+            replace(handled_turn, response_event_id=response_event_id, completed=False),
+        )
+
+    async def _prepare_visible_delivery_turn(
+        self,
+        handled_turn: TurnRecord,
+        *,
+        requester_id: str,
+        correlation_id: str,
+        target: MessageTarget,
+        excluded_event_ids: Collection[str] = (),
+    ) -> tuple[TurnRecord | None, str | None]:
+        """Persist one non-model delivery intent and recover any visible event."""
+        reconcile_visible_response = self.deps.turn_store.has_pending_response_intent(
+            handled_turn.source_event_ids,
+        )
+        tracked_turn = self.deps.turn_store.attach_response_context(
+            replace(
+                handled_turn,
+                requester_id=requester_id,
+                correlation_id=correlation_id,
+            ),
+            history_scope=None,
+            conversation_target=target,
+        )
+        pending_turn = await asyncio.to_thread(self.deps.turn_store.record_pending_turn, tracked_turn)
+        if pending_turn is None or pending_turn.completed:
+            return None, None
+        if pending_turn.redacted_source_event_ids:
+            await self._settle_source_events_ignored(pending_turn)
+            return None, None
+        recovered_response_event_id = (
+            await self._recovered_response_event_id(
+                pending_turn,
+                room_id=target.room_id,
+                excluded_event_ids=excluded_event_ids,
+            )
+            if reconcile_visible_response
+            else None
+        )
+        if recovered_response_event_id is not None:
+            await self._record_pending_visible_response(pending_turn, recovered_response_event_id)
+        return pending_turn, recovered_response_event_id
 
     def _has_newer_unresponded_in_thread(
         self,
@@ -1003,15 +1054,28 @@ class TurnController:
                 reply_to_event_id=event.event_id,
                 event_source=event.source,
             )
-            await self.deps.delivery_gateway.send_text(
-                SendTextRequest(
-                    target=target,
-                    response_text=(
-                        "I could not run that command yet: the conversation it targets "
-                        "is still being resolved. Please resend it in a moment."
-                    ),
-                ),
+            pending_turn, response_event_id = await self._prepare_visible_delivery_turn(
+                TurnRecord.create([event.event_id]),
+                requester_id=event.sender,
+                correlation_id=event.event_id,
+                target=target,
             )
+            if pending_turn is None:
+                return True
+            if response_event_id is None:
+                response_event_id = await self.deps.delivery_gateway.send_text(
+                    SendTextRequest(
+                        target=target,
+                        response_text=(
+                            "I could not run that command yet: the conversation it targets "
+                            "is still being resolved. Please resend it in a moment."
+                        ),
+                    ),
+                )
+            if response_event_id is not None:
+                await self._record_pending_visible_response(pending_turn, response_event_id)
+            self._mark_source_events_responded(replace(pending_turn, response_event_id=response_event_id))
+            return True
         self._mark_source_events_responded(TurnRecord.create([event.event_id]))
         return True
 
@@ -1329,23 +1393,38 @@ class TurnController:
         command: Command,
         *,
         target: MessageTarget,
+        handled_turn: TurnRecord | None = None,
     ) -> None:
         """Run one explicit command executor path from the turn controller."""
         event = await self.deps.normalizer.resolve_text_event(
             TextNormalizationRequest(event=event),
         )
+        command_turn, recovered_response_event_id = await self._prepare_visible_delivery_turn(
+            handled_turn or TurnRecord.create([event.event_id]),
+            requester_id=requester_user_id,
+            correlation_id=event.event_id,
+            target=target,
+        )
+        if command_turn is None:
+            return
 
         async def send_response(
             response_text: str,
             *,
             skip_mentions: bool = False,
         ) -> str | None:
-            return await self.deps.delivery_gateway.send_text(
-                SendTextRequest(
-                    target=target,
-                    response_text=response_text,
-                    skip_mentions=skip_mentions,
-                ),
+            if recovered_response_event_id is not None:
+                return recovered_response_event_id
+            response_event_id = await self.deps.delivery_gateway.send_text(
+                SendTextRequest(target=target, response_text=response_text, skip_mentions=skip_mentions),
+            )
+            if response_event_id is not None:
+                await self._record_pending_visible_response(command_turn, response_event_id)
+            return response_event_id
+
+        def record_command_turn(outcome: TurnRecord) -> None:
+            self._mark_source_events_responded(
+                replace(command_turn, response_event_id=outcome.response_event_id),
             )
 
         orchestrator = self.deps.runtime.orchestrator
@@ -1371,7 +1450,7 @@ class TurnController:
             event_cache=self.deps.runtime.event_cache,
             matrix_admin=matrix_admin,
             stable_target=target,
-            record_handled_turn=self.deps.turn_store.record_turn,
+            record_handled_turn=record_command_turn,
             send_response=send_response,
             reload_plugins=reload_plugins,
             responder_candidates_for_room=self._responder_candidates_for_room,
@@ -1392,6 +1471,7 @@ class TurnController:
         command: Command,
         *,
         target: MessageTarget,
+        handled_turn: TurnRecord,
     ) -> bool:
         """Execute one command only on the bot that owns its response."""
         if not agent_owns_command(
@@ -1408,6 +1488,7 @@ class TurnController:
             requester_user_id=requester_user_id,
             command=command,
             target=target,
+            handled_turn=handled_turn,
         )
         return True
 
@@ -1446,6 +1527,9 @@ class TurnController:
             source_event_id,
         ):
             return
+        reconcile_visible_response = self.deps.turn_store.has_pending_response_intent(
+            (selection.question_event_id,),
+        )
         thread_history = (
             await self.deps.resolver.fetch_thread_history(
                 room.room_id,
@@ -1454,11 +1538,6 @@ class TurnController:
             )
             if selection.thread_id
             else []
-        )
-        ack_target = self.deps.resolver.build_message_target(
-            room_id=room.room_id,
-            thread_id=selection.thread_id,
-            reply_to_event_id=None if selection.thread_id else selection.question_event_id,
         )
         response_target = self.deps.resolver.build_message_target(
             room_id=room.room_id,
@@ -1492,20 +1571,31 @@ class TurnController:
             )
             return
         selection_handled_turn = pending_turn
-        ack_event_id = await self.deps.delivery_gateway.send_text(
-            SendTextRequest(
-                target=ack_target,
-                response_text=(
-                    f"You selected: {selection.selection_key} {selection.selected_value}\n\nProcessing your response..."
-                ),
-            ),
+        ack_event_id = (
+            await self._recovered_response_event_id(
+                selection_handled_turn,
+                room_id=room.room_id,
+            )
+            if reconcile_visible_response
+            else None
         )
+        if ack_event_id is None:
+            ack_event_id = await self.deps.delivery_gateway.send_text(
+                SendTextRequest(
+                    target=response_target,
+                    response_text=(
+                        f"You selected: {selection.selection_key} {selection.selected_value}\n\nProcessing your response..."
+                    ),
+                ),
+            )
         if not ack_event_id:
             self.deps.logger.error(
                 "Failed to send acknowledgment for interactive selection",
                 source_event_id=selection.question_event_id,
             )
             raise self._interactive_selection_retry_error(source_event_id)
+        await self._record_pending_visible_response(selection_handled_turn, ack_event_id)
+        selection_handled_turn = replace(selection_handled_turn, response_event_id=ack_event_id)
         # The selection is a synthetic turn with no Matrix message of its own, so
         # the attachment context that ingress normally resolves per message must
         # be rebuilt here from the conversation that asked the question.
@@ -1522,7 +1612,7 @@ class TurnController:
             )
         except Exception as error:
             response_event_id = await self._finalize_dispatch_failure(
-                target=ack_target,
+                target=response_target,
                 error=error,
                 existing_event_id=ack_event_id,
             )
@@ -1660,6 +1750,44 @@ class TurnController:
                 routed_extra_content[PER_FIRE_THREAD_ROOT_EVENT_ID_KEY] = thread_event_id
         return routed_extra_content
 
+    async def _router_handoff_with_attachments(
+        self,
+        *,
+        room_id: str,
+        thread_id: str | None,
+        event: DispatchEvent,
+        media_events: Sequence[MediaDispatchEvent],
+        extra_content: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Register routed media and return handoff metadata with attachment IDs."""
+        routed_media_events = list(media_events)
+        if not routed_media_events and is_matrix_media_dispatch_event(event):
+            routed_media_events.append(event)
+        if not routed_media_events:
+            return extra_content
+        routed_attachment_ids = merge_attachment_ids(
+            parse_attachment_ids_from_event_source({"content": extra_content}),
+            [
+                attachment_id
+                for attachment_id in await asyncio.gather(
+                    *(
+                        self.deps.normalizer.register_routed_attachment(
+                            room_id=room_id,
+                            thread_id=thread_id,
+                            event=media_event,
+                        )
+                        for media_event in routed_media_events
+                    ),
+                )
+                if attachment_id is not None
+            ],
+        )
+        if routed_attachment_ids:
+            extra_content[ATTACHMENT_IDS_KEY] = routed_attachment_ids
+        else:
+            extra_content.pop(ATTACHMENT_IDS_KEY, None)
+        return extra_content
+
     async def _execute_router_relay(
         self,
         room: nio.MatrixRoom,
@@ -1745,37 +1873,37 @@ class TurnController:
             requester_user_id=requester_user_id,
             thread_event_id=thread_event_id,
         )
-        routed_media_events = list(media_events or [])
-        if not routed_media_events and is_matrix_media_dispatch_event(event):
-            routed_media_events.append(event)
-        if routed_media_events:
-            routed_attachment_ids = merge_attachment_ids(
-                parse_attachment_ids_from_event_source({"content": routed_extra_content}),
-                [
-                    attachment_id
-                    for attachment_id in await asyncio.gather(
-                        *(
-                            self.deps.normalizer.register_routed_attachment(
-                                room_id=room.room_id,
-                                thread_id=thread_event_id,
-                                event=media_event,
-                            )
-                            for media_event in routed_media_events
-                        ),
-                    )
-                    if attachment_id is not None
-                ],
-            )
-            if routed_attachment_ids:
-                routed_extra_content[ATTACHMENT_IDS_KEY] = routed_attachment_ids
-            else:
-                routed_extra_content.pop(ATTACHMENT_IDS_KEY, None)
+        routed_extra_content = await self._router_handoff_with_attachments(
+            room_id=room.room_id,
+            thread_id=thread_event_id,
+            event=event,
+            media_events=media_events or (),
+            extra_content=routed_extra_content,
+        )
 
         delivery_request = SendTextRequest(
             target=resolved_target,
             response_text=response_text,
             extra_content=routed_extra_content or None,
         )
+        source_turn = handled_turn or TurnRecord.create([event.event_id])
+        visible_echo_event_id = self.deps.turn_store.finalized_visible_echo_for_sources(
+            source_turn.source_event_ids,
+        )
+        tracked_handled_turn, recovered_response_event_id = await self._prepare_visible_delivery_turn(
+            source_turn,
+            requester_id=requester_user_id,
+            correlation_id=event.event_id,
+            target=resolved_target,
+            excluded_event_ids=(visible_echo_event_id,) if visible_echo_event_id is not None else (),
+        )
+        if tracked_handled_turn is None:
+            return
+        if recovered_response_event_id is not None:
+            self._mark_source_events_responded(
+                replace(tracked_handled_turn, response_event_id=recovered_response_event_id),
+            )
+            return
         relay_delivery = await _send_router_relay_after_readiness_recheck(
             orchestrator=self.deps.runtime.orchestrator,
             delivery_gateway=self.deps.delivery_gateway,
@@ -1787,20 +1915,10 @@ class TurnController:
             return
         event_id = relay_delivery.event_id
         suggested_entity = relay_delivery.suggested_entity
-        tracked_handled_turn = handled_turn or TurnRecord.create([event.event_id])
-        tracked_handled_turn = replace(
-            tracked_handled_turn,
-            requester_id=requester_user_id,
-            correlation_id=event.event_id,
-        )
-        tracked_handled_turn = self.deps.turn_store.attach_response_context(
-            tracked_handled_turn,
-            history_scope=None,
-            conversation_target=resolved_target,
-        )
         with bound_log_context(**resolved_target.log_context):
             if event_id:
                 self.deps.logger.info("Routed to entity", suggested_entity=suggested_entity)
+                await self._record_pending_visible_response(tracked_handled_turn, event_id)
                 self._mark_source_events_responded(replace(tracked_handled_turn, response_event_id=event_id))
             else:
                 self.deps.logger.error("Failed to route to entity", entity=suggested_entity)
@@ -1903,12 +2021,23 @@ class TurnController:
         ):
             if action.kind == "reject":
                 assert action.rejection_message is not None
-                response_event_id = await self.deps.delivery_gateway.send_text(
-                    SendTextRequest(
-                        target=dispatch.target,
-                        response_text=action.rejection_message,
-                    ),
+                response_event_id = (
+                    await self._recovered_response_event_id(
+                        handled_turn,
+                        room_id=dispatch.target.room_id,
+                    )
+                    if reconcile_visible_response
+                    else None
                 )
+                if response_event_id is None:
+                    response_event_id = await self.deps.delivery_gateway.send_text(
+                        SendTextRequest(
+                            target=dispatch.target,
+                            response_text=action.rejection_message,
+                        ),
+                    )
+                if response_event_id is not None:
+                    await self._record_pending_visible_response(handled_turn, response_event_id)
                 self._mark_source_events_responded(replace(handled_turn, response_event_id=response_event_id))
                 if dispatch_timing is not None and response_event_id is not None:
                     dispatch_timing.mark_first_visible_reply("final", substantive=True)
@@ -1974,12 +2103,10 @@ class TurnController:
             )
 
             async def record_visible_response(response_event_id: str) -> None:
-                pending_turn = replace(
-                    handled_turn,
-                    response_event_id=response_event_id,
-                    completed=False,
-                )
-                await asyncio.to_thread(self.deps.turn_store.record_pending_turn, pending_turn)
+                await self._record_pending_visible_response(handled_turn, response_event_id)
+
+            async def settle_redacted_sources() -> None:
+                await self._settle_source_events_ignored(handled_turn)
 
             try:
                 if action.kind == "team":
@@ -2007,6 +2134,7 @@ class TurnController:
                                 target=dispatch.target,
                                 source_event_ids=handled_turn.indexed_event_ids,
                             ),
+                            on_source_turn_suppressed=settle_redacted_sources,
                             on_interrupted_response_recoverable=record_interrupted_turn,
                             on_deferred_outcome_handled=record_deferred_outcome,
                             on_visible_response=record_visible_response,
@@ -2037,6 +2165,7 @@ class TurnController:
                                 target=dispatch.target,
                                 source_event_ids=handled_turn.indexed_event_ids,
                             ),
+                            on_source_turn_suppressed=settle_redacted_sources,
                             on_interrupted_response_recoverable=record_interrupted_turn,
                             on_deferred_outcome_handled=record_deferred_outcome,
                             on_visible_response=record_visible_response,

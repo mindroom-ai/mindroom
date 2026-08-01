@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import tempfile
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -222,6 +223,7 @@ class TestBotScheduleCommands:
             assert call_kwargs["scheduled_by"] == "@user:server"
             assert call_kwargs["full_text"] == "in 5 minutes Check deployment"
             assert call_kwargs["mentioned_agents"] == []
+            assert call_kwargs["task_id"] == hashlib.sha256(event.event_id.encode()).hexdigest()[:8]
 
             # Verify response was sent
             send_response_mock.assert_called_once()
