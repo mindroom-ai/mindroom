@@ -31,8 +31,8 @@ def _summarize_embedded_resource(block: EmbeddedResource) -> str:
         preview = resource.text[:500]
         return f"Embedded resource {resource.uri}: {preview}"
     if isinstance(resource, BlobResourceContents):
-        return f"Embedded resource {resource.uri} ({resource.mime_type or 'unknown mime'}, binary blob)"
-    return f"Embedded resource {resource.uri} ({resource.mime_type or 'unknown mime'})"
+        return f"Embedded resource {resource.uri} ({resource.mimeType or 'unknown mime'}, binary blob)"
+    return f"Embedded resource {resource.uri} ({resource.mimeType or 'unknown mime'})"
 
 
 def _summarize_resource_link(block: ResourceLink) -> str:
@@ -41,15 +41,15 @@ def _summarize_resource_link(block: ResourceLink) -> str:
         details.append(f"title={block.title}")
     if block.description:
         details.append(f"description={block.description}")
-    if block.mime_type:
-        details.append(f"mime={block.mime_type}")
+    if block.mimeType:
+        details.append(f"mime={block.mimeType}")
     return " | ".join(details)
 
 
 def _compact_structured_content(result: CallToolResult) -> str | None:
-    if result.structured_content is None:
+    if result.structuredContent is None:
         return None
-    return json.dumps(result.structured_content, sort_keys=True, ensure_ascii=True)
+    return json.dumps(result.structuredContent, sort_keys=True, ensure_ascii=True)
 
 
 def _text_lines_from_blocks(content_blocks: Iterable[object]) -> list[str]:
@@ -76,7 +76,7 @@ def _image_artifacts_from_blocks(content_blocks: Iterable[object]) -> list[Image
     for block in content_blocks:
         if not isinstance(block, ImageContent):
             continue
-        images.append(Image(content=_mcp_block_data_as_bytes(block.data), mime_type=block.mime_type))
+        images.append(Image(content=_mcp_block_data_as_bytes(block.data), mime_type=block.mimeType))
     return images
 
 
@@ -85,13 +85,13 @@ def _audio_artifacts_from_blocks(content_blocks: Iterable[object]) -> list[Audio
     for block in content_blocks:
         if not isinstance(block, AudioContent):
             continue
-        audios.append(Audio(content=_mcp_block_data_as_bytes(block.data), mime_type=block.mime_type))
+        audios.append(Audio(content=_mcp_block_data_as_bytes(block.data), mime_type=block.mimeType))
     return audios
 
 
 def _raise_for_mcp_call_error(server_id: str, result: CallToolResult) -> None:
     """Raise a structured tool error when the server reports failure."""
-    if not result.is_error:
+    if not result.isError:
         return
     lines = _text_lines_from_blocks(result.content)
     structured = _compact_structured_content(result)

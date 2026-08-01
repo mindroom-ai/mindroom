@@ -7,6 +7,7 @@ import hashlib
 import json
 from contextlib import AsyncExitStack
 from dataclasses import dataclass
+from datetime import timedelta
 from typing import TYPE_CHECKING, cast
 
 import mcp.types as mcp_types
@@ -504,7 +505,7 @@ class MCPServerManager:
             result = await session.call_tool(
                 remote_tool_name,
                 arguments=arguments,
-                read_timeout_seconds=timeout_seconds,
+                read_timeout_seconds=timedelta(seconds=timeout_seconds),
             )
         except Exception as exc:
             raise self._wrap_runtime_exception(state.server_id, exc) from exc
@@ -585,7 +586,7 @@ class MCPServerManager:
                     ClientSession(
                         read_stream,
                         write_stream,
-                        read_timeout_seconds=state.config.call_timeout_seconds,
+                        read_timeout_seconds=timedelta(seconds=state.config.call_timeout_seconds),
                         message_handler=self._build_message_handler(state),
                     ),
                 )
@@ -651,10 +652,9 @@ class MCPServerManager:
         discovered_tools: list[mcp_types.Tool] = []
         cursor: str | None = None
         while True:
-            params = mcp_types.PaginatedRequestParams(cursor=cursor) if cursor is not None else None
-            result = await session.list_tools(params=params)
+            result = await session.list_tools(cursor=cursor)
             discovered_tools.extend(result.tools)
-            cursor = result.next_cursor
+            cursor = result.nextCursor
             if cursor is None:
                 break
 
@@ -684,8 +684,8 @@ class MCPServerManager:
                     remote_name=tool.name,
                     function_name=function_name,
                     description=tool.description,
-                    input_schema=tool.input_schema,
-                    output_schema=tool.output_schema,
+                    input_schema=tool.inputSchema,
+                    output_schema=tool.outputSchema,
                     title=(tool.annotations.title if tool.annotations is not None else tool.title),
                 ),
             )
@@ -719,7 +719,9 @@ class MCPServerManager:
                     error=str(message),
                 )
                 return
-            if not isinstance(message, mcp_types.ToolListChangedNotification):
+            if not isinstance(message, mcp_types.ServerNotification):
+                return
+            if not isinstance(message.root, mcp_types.ToolListChangedNotification):
                 return
             state.stale = True
             if state.config.auth is None:

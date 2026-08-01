@@ -11011,9 +11011,9 @@ This is the smallest useful local example.
 Save it as `echo_mcp_server.py`:
 
 ```python
-from mcp.server import MCPServer
+from mcp.server.fastmcp import FastMCP
 
-server = MCPServer("Echo Server")
+server = FastMCP("Echo Server")
 
 
 @server.tool()
@@ -11050,9 +11050,8 @@ Use whatever Python interpreter has the `mcp` package installed.
 Inside this repository, `./.venv/bin/python` is usually the right choice.
 
 The same server can also be run over HTTP transports.
-If you change the script to `server.run(transport="sse")`, the default MCPServer endpoint is `/sse`.
-If you change it to `server.run(transport="streamable-http")`, the default MCPServer endpoint is `/mcp`.
-MCP 2 retains SSE for legacy clients, but new HTTP integrations should use Streamable HTTP.
+If you change the script to `server.run(transport="sse")`, the default FastMCP endpoint is `/sse`.
+If you change it to `server.run(transport="streamable-http")`, the default FastMCP endpoint is `/mcp`.
 
 ## Example: Chrome DevTools MCP
 

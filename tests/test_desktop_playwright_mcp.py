@@ -41,7 +41,7 @@ class _FailingStdioContext:
 
 
 def _text_result(text: str = "ok", *, error: bool = False) -> CallToolResult:
-    return CallToolResult(content=[TextContent(type="text", text=text)], is_error=error)
+    return CallToolResult(content=[TextContent(type="text", text=text)], isError=error)
 
 
 def test_browser_action_policy_keeps_observation_available_without_control() -> None:
@@ -148,9 +148,9 @@ def test_provider_result_preserves_model_text_and_image() -> None:
     result = CallToolResult(
         content=[
             TextContent(type="text", text="Page snapshot"),
-            ImageContent(type="image", data=base64.b64encode(image_bytes).decode(), mime_type="image/png"),
+            ImageContent(type="image", data=base64.b64encode(image_bytes).decode(), mimeType="image/png"),
         ],
-        is_error=False,
+        isError=False,
     )
 
     provider_result = _provider_result("screenshot", result, max_chars=100)
