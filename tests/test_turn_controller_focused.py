@@ -35,6 +35,7 @@ from mindroom.config.main import Config
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.conversation_resolver import ConversationResolver, ConversationResolverDeps
 from mindroom.conversation_state_writer import ConversationStateWriter, ConversationStateWriterDeps
+from mindroom.dispatch_callback_outcome import TurnDispatchOutcome
 from mindroom.dispatch_obligations import DispatchCallbackKind, DispatchObligationRunner, DispatchObligationStore
 from mindroom.dispatch_source import (
     EXTERNAL_TRIGGER_SOURCE_KIND,
@@ -759,6 +760,104 @@ async def test_completed_router_alias_rejects_later_physical_relay(config: Confi
 
     assert harness.runner.requests == []
     assert harness.turn_store.get_turn_record("$relay-duplicate:localhost") is None
+
+
+@pytest.mark.asyncio
+async def test_duplicate_router_relay_claim_settles_without_restart(config: Config, tmp_path: Path) -> None:
+    """A relay blocked by the same human alias must not remain deferred without an owner."""
+    harness = _build_harness(config, tmp_path)
+    room = _room_with_members(config, "general", ROUTER_AGENT_NAME)
+    original_event_id = "$human-duplicate:localhost"
+    mention = _entity_user_id(config, "general")
+    first = _router_relay_event(
+        config,
+        event_id="$relay-one:localhost",
+        original_event_id=original_event_id,
+        body=f"{mention} first",
+        origin_server_ts=1_000_000,
+    )
+    second = _router_relay_event(
+        config,
+        event_id="$relay-two:localhost",
+        original_event_id=original_event_id,
+        body=f"{mention} duplicate",
+        origin_server_ts=1_000_001,
+    )
+    obligation_runner, obligation_store = _obligation_runner(
+        harness,
+        tracking_path=tmp_path / "dispatch-tracking",
+        principal_id=_entity_user_id(config, "general"),
+        entity_name="general",
+        room=room,
+    )
+    harness.turn_store.deps = replace(
+        harness.turn_store.deps,
+        on_terminal_turn_persisted=obligation_runner.retry_turn_settlement,
+    )
+    normalization_started = asyncio.Event()
+    release_normalization = asyncio.Event()
+    resolve_text_event = harness.controller.deps.normalizer.resolve_text_event
+
+    async def resolve_with_barrier(
+        _normalizer: InboundTurnNormalizer,
+        request: TextNormalizationRequest,
+    ) -> PreparedTextEvent:
+        if request.event.event_id == first.event_id:
+            normalization_started.set()
+            await release_normalization.wait()
+        return await resolve_text_event(request)
+
+    with patch.object(InboundTurnNormalizer, "resolve_text_event", new=resolve_with_barrier):
+        first_dispatch = asyncio.create_task(
+            obligation_runner.dispatch(room, first, DispatchCallbackKind.MESSAGE),
+        )
+        await normalization_started.wait()
+        second_dispatch = asyncio.create_task(
+            obligation_runner.dispatch(room, second, DispatchCallbackKind.MESSAGE),
+        )
+        await asyncio.sleep(0)
+        assert not second_dispatch.done()
+        release_normalization.set()
+        await asyncio.gather(first_dispatch, second_dispatch)
+
+    await harness.gate.drain_all()
+    await harness.runner.settle_inbox_responses()
+    if obligation_runner._turn_settlement_retry_task is not None:
+        await obligation_runner._turn_settlement_retry_task
+
+    assert not obligation_store.has_pending(first.event_id, DispatchCallbackKind.MESSAGE)
+    assert not obligation_store.has_pending(second.event_id, DispatchCallbackKind.MESSAGE)
+
+
+@pytest.mark.asyncio
+async def test_router_alias_claim_loser_reclaims_after_failed_owner(config: Config, tmp_path: Path) -> None:
+    """A relay retries ingress when the competing alias owner exits without terminal truth."""
+    harness = _build_harness(config, tmp_path)
+    room = _room_with_members(config, "general", ROUTER_AGENT_NAME)
+    original_event_id = "$human-retry:localhost"
+    active_claim = TurnRecord.create(
+        ["$failed-relay:localhost"],
+        discovery_event_ids=[original_event_id],
+        completed=False,
+    )
+    event = _router_relay_event(
+        config,
+        event_id="$retry-relay:localhost",
+        original_event_id=original_event_id,
+        body=f"{_entity_user_id(config, 'general')} retry",
+        origin_server_ts=1_000_000,
+    )
+    assert harness.turn_store.try_claim_turn(active_claim)
+
+    dispatch = asyncio.create_task(harness.controller.handle_text_event(room, event))
+    await asyncio.sleep(0)
+    assert not dispatch.done()
+    harness.turn_store.release_pending_turn_claim(active_claim)
+
+    assert await dispatch is TurnDispatchOutcome.DEFERRED
+    await harness.gate.drain_all()
+    await harness.runner.settle_inbox_responses()
+    assert len(harness.runner.requests) == 1
 
 
 @pytest.mark.asyncio
