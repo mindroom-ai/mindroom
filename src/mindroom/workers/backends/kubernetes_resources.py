@@ -611,6 +611,87 @@ def _resolved_agent_policies_for_runtime_paths(
     return resolved_agent_policies_from_config_data(loaded_config_data)
 
 
+@dataclass(frozen=True, slots=True)
+class _KnowledgeStorageMountPlan:
+    relative_path: Path
+    mount_path: Path
+
+
+def _first_overlapping_path(path: Path, candidates: tuple[Path, ...]) -> Path | None:
+    return next(
+        (candidate for candidate in candidates if path.is_relative_to(candidate) or candidate.is_relative_to(path)),
+        None,
+    )
+
+
+def _plan_knowledge_storage_mounts(
+    relative_paths: tuple[Path, ...],
+    *,
+    mounted_storage_root: Path,
+    existing_mounts: tuple[dict[str, object], ...],
+    worker_key: str,
+) -> tuple[_KnowledgeStorageMountPlan, ...]:
+    storage_mount_paths = tuple(
+        Path(cast("str", mount["mountPath"]))
+        for mount in existing_mounts
+        if mount["name"] == WORKER_STORAGE_VOLUME_NAME
+    )
+    other_mount_paths = tuple(
+        Path(cast("str", mount["mountPath"]))
+        for mount in existing_mounts
+        if mount["name"] != WORKER_STORAGE_VOLUME_NAME
+    )
+    plans: list[_KnowledgeStorageMountPlan] = []
+    for relative_path in relative_paths:
+        mount_path = mounted_storage_root / relative_path
+        if collision := _first_overlapping_path(mount_path, other_mount_paths):
+            msg = (
+                f"Kubernetes knowledge mount overlaps existing mountPath for worker key {worker_key}: "
+                f"{mount_path} and {collision}"
+            )
+            raise WorkerBackendError(msg)
+        if any(mount_path.is_relative_to(existing_path) for existing_path in storage_mount_paths):
+            continue
+        if collision := _first_overlapping_path(mount_path, storage_mount_paths):
+            msg = (
+                f"Kubernetes knowledge mount overlaps existing mountPath for worker key {worker_key}: "
+                f"{mount_path} and {collision}"
+            )
+            raise WorkerBackendError(msg)
+        if collision := _first_overlapping_path(
+            mount_path,
+            tuple(plan.mount_path for plan in plans),
+        ):
+            msg = f"Kubernetes knowledge mount paths overlap for worker key {worker_key}: {mount_path} and {collision}"
+            raise WorkerBackendError(msg)
+        plans.append(_KnowledgeStorageMountPlan(relative_path=relative_path, mount_path=mount_path))
+    return tuple(plans)
+
+
+def _agent_names_addressed_by_worker_key(
+    worker_key: str,
+    resolved_agent_policies: Mapping[str, ResolvedAgentPolicy],
+) -> tuple[str, ...]:
+    scope = resolved_worker_key_scope(worker_key)
+    if scope == "user":
+        return tuple(
+            agent_name
+            for agent_name, policy in resolved_agent_policies.items()
+            if policy.effective_execution_scope == "user"
+        )
+
+    encoded_agent_name = worker_key_agent_name(worker_key)
+    if encoded_agent_name is None:
+        return ()
+    expected_scope = None if scope == "unscoped" else scope
+    return tuple(
+        agent_name
+        for agent_name, policy in resolved_agent_policies.items()
+        if policy.effective_execution_scope == expected_scope
+        and normalize_worker_key_part(agent_name) == encoded_agent_name
+    )[:1]
+
+
 class KubernetesResourceManager:
     """Own Kubernetes API access, manifest construction, and cached cluster metadata."""
 
@@ -1665,72 +1746,21 @@ class KubernetesResourceManager:
         mounted_storage_root: Path,
         existing_mounts: tuple[dict[str, object], ...],
     ) -> list[dict[str, object]]:
-        relative_paths = self._assigned_knowledge_storage_paths(worker_key)
-        storage_mount_paths = tuple(
-            Path(cast("str", mount["mountPath"]))
-            for mount in existing_mounts
-            if mount["name"] == WORKER_STORAGE_VOLUME_NAME
+        plans = _plan_knowledge_storage_mounts(
+            self._assigned_knowledge_storage_paths(worker_key),
+            mounted_storage_root=mounted_storage_root,
+            existing_mounts=existing_mounts,
+            worker_key=worker_key,
         )
-        other_mount_paths = tuple(
-            Path(cast("str", mount["mountPath"]))
-            for mount in existing_mounts
-            if mount["name"] != WORKER_STORAGE_VOLUME_NAME
-        )
-        candidates: list[tuple[Path, Path]] = []
-        for relative_path in relative_paths:
-            mount_path = mounted_storage_root / relative_path
-            overlapping_other_path = next(
-                (
-                    other_path
-                    for other_path in other_mount_paths
-                    if mount_path.is_relative_to(other_path) or other_path.is_relative_to(mount_path)
-                ),
-                None,
-            )
-            if overlapping_other_path is not None:
-                msg = (
-                    f"Kubernetes knowledge mount overlaps existing mountPath for worker key {worker_key}: "
-                    f"{mount_path} and {overlapping_other_path}"
-                )
-                raise WorkerBackendError(msg)
-            if any(
-                mount_path == existing_path or mount_path.is_relative_to(existing_path)
-                for existing_path in storage_mount_paths
-            ):
-                continue
-            contained_storage_path = next(
-                (existing_path for existing_path in storage_mount_paths if existing_path.is_relative_to(mount_path)),
-                None,
-            )
-            if contained_storage_path is not None:
-                msg = (
-                    f"Kubernetes knowledge mount overlaps existing mountPath for worker key {worker_key}: "
-                    f"{mount_path} and {contained_storage_path}"
-                )
-                raise WorkerBackendError(msg)
-            candidates.append((relative_path, mount_path))
-
-        candidate_mount_paths = tuple(mount_path for _relative_path, mount_path in candidates)
-        for index, mount_path in enumerate(candidate_mount_paths):
-            for other_path in candidate_mount_paths[index + 1 :]:
-                if mount_path.is_relative_to(other_path) or other_path.is_relative_to(mount_path):
-                    msg = (
-                        f"Kubernetes knowledge mount paths overlap for worker key {worker_key}: "
-                        f"{mount_path} and {other_path}"
-                    )
-                    raise WorkerBackendError(msg)
-
-        mounts: list[dict[str, object]] = []
-        for relative_path, mount_path in candidates:
-            mounts.append(
-                {
-                    "name": WORKER_STORAGE_VOLUME_NAME,
-                    "mountPath": str(mount_path),
-                    "subPath": str(relative_path),
-                    "readOnly": True,
-                },
-            )
-        return mounts
+        return [
+            {
+                "name": WORKER_STORAGE_VOLUME_NAME,
+                "mountPath": str(plan.mount_path),
+                "subPath": str(plan.relative_path),
+                "readOnly": True,
+            }
+            for plan in plans
+        ]
 
     def _assigned_knowledge_storage_paths(self, worker_key: str) -> tuple[Path, ...]:
         raw_agents = self.config_data.get("agents")
@@ -1740,26 +1770,8 @@ class KubernetesResourceManager:
         agent_configs = cast("Mapping[str, object]", raw_agents)
         knowledge_base_configs = cast("Mapping[str, object]", raw_knowledge_bases)
 
-        scope = resolved_worker_key_scope(worker_key)
-        if scope == "user":
-            agent_names = tuple(
-                agent_name
-                for agent_name, policy in self.resolved_agent_policies.items()
-                if policy.effective_execution_scope == "user"
-            )
-        else:
-            encoded_agent_name = worker_key_agent_name(worker_key)
-            expected_scope = None if scope == "unscoped" else scope
-            agent_names = tuple(
-                agent_name
-                for agent_name, policy in self.resolved_agent_policies.items()
-                if encoded_agent_name is not None
-                and policy.effective_execution_scope == expected_scope
-                and normalize_worker_key_part(agent_name) == encoded_agent_name
-            )[:1]
-
         base_ids: set[str] = set()
-        for agent_name in agent_names:
+        for agent_name in _agent_names_addressed_by_worker_key(worker_key, self.resolved_agent_policies):
             raw_agent = agent_configs.get(agent_name)
             if not isinstance(raw_agent, Mapping):
                 continue

@@ -1752,7 +1752,7 @@ knowledge_bases:
 models:
   default:
     provider: openai
-    id: gpt-5.4
+    id: gpt-5.6
 router:
   model: default
 """.lstrip(),
@@ -1797,7 +1797,7 @@ knowledge_bases:
 models:
   default:
     provider: openai
-    id: gpt-5.4
+    id: gpt-5.6
 router:
   model: default
 """.lstrip(),
@@ -1837,7 +1837,7 @@ knowledge_bases:
 models:
   default:
     provider: openai
-    id: gpt-5.4
+    id: gpt-5.6
 router:
   model: default
 """.lstrip(),
@@ -1876,7 +1876,7 @@ knowledge_bases:
 models:
   default:
     provider: openai
-    id: gpt-5.4
+    id: gpt-5.6
 router:
   model: default
 """.lstrip(),
@@ -1915,7 +1915,7 @@ knowledge_bases:
 models:
   default:
     provider: openai
-    id: gpt-5.4
+    id: gpt-5.6
 router:
   model: default
 """.lstrip(),
@@ -1953,7 +1953,7 @@ knowledge_bases:
 models:
   default:
     provider: openai
-    id: gpt-5.4
+    id: gpt-5.6
 router:
   model: default
 """.lstrip(),
@@ -1993,7 +1993,7 @@ knowledge_bases:
 models:
   default:
     provider: openai
-    id: gpt-5.4
+    id: gpt-5.6
 router:
   model: default
 """.lstrip(),
@@ -2037,7 +2037,7 @@ knowledge_bases:
 models:
   default:
     provider: openai
-    id: gpt-5.4
+    id: gpt-5.6
 router:
   model: default
 """.lstrip(),
@@ -2077,7 +2077,7 @@ knowledge_bases:
 models:
   default:
     provider: openai
-    id: gpt-5.4
+    id: gpt-5.6
 router:
   model: default
 """.lstrip(),
@@ -2132,7 +2132,7 @@ knowledge_bases:
 models:
   default:
     provider: openai
-    id: gpt-5.4
+    id: gpt-5.6
 router:
   model: default
 """.lstrip(),
@@ -2173,7 +2173,7 @@ knowledge_bases:
 models:
   default:
     provider: openai
-    id: gpt-5.4
+    id: gpt-5.6
 router:
   model: default
 """.lstrip(),
@@ -2199,7 +2199,7 @@ knowledge_bases:
 models:
   default:
     provider: openai
-    id: gpt-5.4
+    id: gpt-5.6
 router:
   model: default
 """.lstrip(),
