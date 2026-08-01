@@ -76,6 +76,7 @@ from mindroom.inbound_turn_normalizer import (
 from mindroom.logging_config import bound_log_context
 from mindroom.matrix.cache import ThreadHistoryResult
 from mindroom.matrix.cache.thread_reads import ThreadReadMode
+from mindroom.matrix.client_thread_history import find_response_event_ids_via_room_messages
 from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.media import (
     AudioMessageEvent,
@@ -494,6 +495,46 @@ class TurnController:
     def _mark_source_events_responded(self, handled_turn: TurnRecord) -> None:
         """Mark one or more source events as handled by the same terminal outcome."""
         self.deps.turn_store.record_turn(handled_turn)
+
+    async def _recovered_response_event_id(
+        self,
+        handled_turn: TurnRecord,
+        *,
+        room_id: str,
+    ) -> str | None:
+        """Return the durable visible response owned by a replayed turn."""
+        incomplete_records = tuple(
+            record
+            for source_event_id in handled_turn.source_event_ids
+            if (record := self.deps.turn_store.get_turn_record(source_event_id)) is not None and not record.completed
+        )
+        response_event_ids = {
+            record.response_event_id for record in incomplete_records if record.response_event_id is not None
+        }
+        if len(response_event_ids) > 1:
+            msg = "Recovered coalesced turn has conflicting visible response event IDs"
+            raise RuntimeError(msg)
+        if response_event_ids:
+            return next(iter(response_event_ids))
+
+        response_event_ids = set(
+            await find_response_event_ids_via_room_messages(
+                self._client(),
+                room_id,
+                response_sender=self.deps.matrix_id.full_id,
+                source_event_ids=handled_turn.source_event_ids,
+            ),
+        )
+        self.deps.logger.info(
+            "dispatch_recovery_response_lookup",
+            room_id=room_id,
+            source_event_ids=handled_turn.source_event_ids,
+            response_event_ids=sorted(response_event_ids),
+        )
+        if len(response_event_ids) > 1:
+            msg = "Recovered turn has multiple visible Matrix responses"
+            raise RuntimeError(msg)
+        return next(iter(response_event_ids), None)
 
     async def _settle_source_events_ignored(self, handled_turn: TurnRecord) -> None:
         """Compact exact callback obligations without growing the handled-turn ledger."""
@@ -1840,6 +1881,7 @@ class TurnController:
         matrix_run_metadata: dict[str, Any] | None = None,
         queued_notice_reservation: QueuedHumanNoticeReservation | None = None,
         on_lifecycle_lock_acquired: Callable[[], None] | None = None,
+        reconcile_visible_response: bool = False,
     ) -> None:
         """Execute one final response path for a prepared dispatch action."""
         if room.room_id != dispatch.target.room_id:
@@ -1922,6 +1964,23 @@ class TurnController:
                 source_event_id=event.event_id,
                 handled_turn=handled_turn,
             )
+            recovered_response_event_id = (
+                await self._recovered_response_event_id(
+                    handled_turn,
+                    room_id=dispatch.target.room_id,
+                )
+                if reconcile_visible_response
+                else None
+            )
+
+            async def record_visible_response(response_event_id: str) -> None:
+                pending_turn = replace(
+                    handled_turn,
+                    response_event_id=response_event_id,
+                    completed=False,
+                )
+                await asyncio.to_thread(self.deps.turn_store.record_pending_turn, pending_turn)
+
             try:
                 if action.kind == "team":
                     assert action.form_team is not None
@@ -1931,6 +1990,8 @@ class TurnController:
                             thread_history=dispatch.context.thread_history,
                             prompt=event.body,
                             user_id=dispatch.requester_user_id,
+                            existing_event_id=recovered_response_event_id,
+                            existing_event_is_placeholder=recovered_response_event_id is not None,
                             response_envelope=dispatch.envelope,
                             correlation_id=dispatch.correlation_id,
                             matrix_run_metadata=matrix_run_metadata,
@@ -1948,6 +2009,7 @@ class TurnController:
                             ),
                             on_interrupted_response_recoverable=record_interrupted_turn,
                             on_deferred_outcome_handled=record_deferred_outcome,
+                            on_visible_response=record_visible_response,
                         ),
                         team_agents=action.form_team.eligible_members,
                         team_mode=team_mode.value,
@@ -1958,6 +2020,8 @@ class TurnController:
                             thread_history=dispatch.context.thread_history,
                             prompt=event.body,
                             user_id=dispatch.requester_user_id,
+                            existing_event_id=recovered_response_event_id,
+                            existing_event_is_placeholder=recovered_response_event_id is not None,
                             response_envelope=dispatch.envelope,
                             correlation_id=dispatch.correlation_id,
                             matrix_run_metadata=matrix_run_metadata,
@@ -1975,6 +2039,7 @@ class TurnController:
                             ),
                             on_interrupted_response_recoverable=record_interrupted_turn,
                             on_deferred_outcome_handled=record_deferred_outcome,
+                            on_visible_response=record_visible_response,
                         ),
                     )
             except PostLockRequestPreparationError as error:

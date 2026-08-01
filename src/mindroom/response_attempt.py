@@ -14,7 +14,7 @@ from mindroom.matrix.presence import is_user_online
 from mindroom.orchestration.runtime import cancel_failure_reason, classify_cancel_source, log_cancelled_response
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Coroutine
+    from collections.abc import Awaitable, Callable, Coroutine
 
     import nio
     import structlog
@@ -56,6 +56,7 @@ class ResponseAttemptRequest:
     run_id: str | None = None
     pipeline_timing: DispatchPipelineTiming | None = None
     on_cancelled: Callable[[str], None] | None = None
+    on_visible_response: Callable[[str], Awaitable[None]] | None = None
 
 
 @dataclass(frozen=True)
@@ -75,6 +76,8 @@ class ResponseAttemptRunner:
         if message_id is not None and request.pipeline_timing is not None:
             request.pipeline_timing.mark("placeholder_sent")
             request.pipeline_timing.mark_first_visible_reply("placeholder")
+        if message_id is not None and request.on_visible_response is not None:
+            await request.on_visible_response(message_id)
         return message_id
 
     async def _should_show_stop_button(self, request: ResponseAttemptRequest, message_id: str) -> bool:

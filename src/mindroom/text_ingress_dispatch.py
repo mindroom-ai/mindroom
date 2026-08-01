@@ -425,6 +425,9 @@ async def _apply_turn_plan(
         return
 
     assert plan.response_action is not None
+    reconcile_visible_response = controller.deps.turn_store.has_pending_response_intent(
+        prepared.handled_turn.source_event_ids,
+    )
     response_history_scope = (
         controller.deps.turn_store.response_history_scope(
             plan.response_action,
@@ -477,6 +480,7 @@ async def _apply_turn_plan(
                 matrix_run_metadata=controller.deps.turn_store.build_run_metadata(handled_turn),
                 queued_notice_reservation=queued_notice_reservation,
                 on_lifecycle_lock_acquired=response_started.set,
+                reconcile_visible_response=reconcile_visible_response,
             ),
         ),
         name=f"inbox_response:{prepared.event.event_id}",

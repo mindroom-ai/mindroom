@@ -37,6 +37,7 @@ from mindroom.conversation_resolver import ConversationResolver, ConversationRes
 from mindroom.conversation_state_writer import ConversationStateWriter, ConversationStateWriterDeps
 from mindroom.dispatch_callback_outcome import TurnDispatchOutcome
 from mindroom.dispatch_obligations import DispatchCallbackKind, DispatchObligationRunner, DispatchObligationStore
+from mindroom.dispatch_recovery_context import turn_dispatch_recovery_scope
 from mindroom.dispatch_source import (
     EXTERNAL_TRIGGER_SOURCE_KIND,
     SCHEDULED_SOURCE_KIND,
@@ -61,7 +62,7 @@ from mindroom.sync_restart_retry import InterruptedTurnRooms
 from mindroom.tool_system.runtime_context import ToolRuntimeSupport
 from mindroom.turn_controller import TurnController, TurnControllerDeps
 from mindroom.turn_origin import TurnIntent
-from mindroom.turn_policy import IngressHookRunner, TurnPolicy, TurnPolicyDeps
+from mindroom.turn_policy import IngressHookRunner, ResponseAction, TurnPolicy, TurnPolicyDeps
 from mindroom.turn_store import TurnStore, TurnStoreDeps
 from mindroom.visible_voice_echo import VisibleVoiceEchoDeps, VisibleVoiceEchoLifecycle
 from tests.conftest import (
@@ -86,7 +87,6 @@ if TYPE_CHECKING:
     from mindroom.message_target import MessageTarget
     from mindroom.response_lifecycle import QueuedHumanNoticeReservation
     from mindroom.response_runner import ResponseRunner
-    from mindroom.turn_policy import ResponseAction
     from mindroom.turn_policy import _ResponderAvailability as ResponderAvailability
 
 _ROOM_ID = "!focused:localhost"
@@ -108,6 +108,7 @@ class _RecordingResponseRunner:
     """
 
     response_event_id: str | None = "$response:localhost"
+    visible_response_event_id: str | None = None
     pre_lock_error: Exception | None = None
     deferred_sync_restart_error: asyncio.CancelledError | None = None
     requests: list[ResponseRequest] = field(default_factory=list)
@@ -155,6 +156,8 @@ class _RecordingResponseRunner:
             request.on_lifecycle_lock_acquired()
         if request.prepare_source_turn is not None and request.prepare_source_turn():
             return None
+        if self.visible_response_event_id is not None and request.on_visible_response is not None:
+            await request.on_visible_response(self.visible_response_event_id)
         if self.deferred_sync_restart_error is not None:
             assert self.response_event_id is not None
             assert request.on_interrupted_response_recoverable is not None
@@ -178,6 +181,8 @@ class _RecordingResponseRunner:
             request.on_lifecycle_lock_acquired()
         if request.prepare_source_turn is not None and request.prepare_source_turn():
             return None
+        if self.visible_response_event_id is not None and request.on_visible_response is not None:
+            await request.on_visible_response(self.visible_response_event_id)
         return self.response_event_id
 
 
@@ -608,6 +613,120 @@ async def test_replayed_turn_is_rejected_before_policy_and_compacted(config: Con
     assert harness.gateway.sent == []
     assert harness.turn_store.is_handled(event.event_id) is False
     assert harness.ignored_dispatch_sources == [(event.event_id,)]
+
+
+@pytest.mark.asyncio
+async def test_recovered_turn_adopts_its_existing_visible_response(config: Config, tmp_path: Path) -> None:
+    """Hard-crash replay must edit the original response instead of sending another one."""
+    response_event_id = "$thinking:localhost"
+    harness = _build_harness(config, tmp_path)
+    room = _room_with_members(config, "general")
+    event = _text_event("please recover", thread_id=_THREAD_ROOT)
+    target = harness.controller.deps.resolver.build_message_target(
+        room_id=_ROOM_ID,
+        thread_id=_THREAD_ROOT,
+        reply_to_event_id=event.event_id,
+        event_source=event.source,
+    )
+    pending_turn = harness.turn_store.attach_response_context(
+        TurnRecord.create(
+            [event.event_id],
+            response_event_id=response_event_id,
+            completed=False,
+        ),
+        history_scope=harness.turn_store.response_history_scope(
+            ResponseAction(kind="individual"),
+            requester_user_id=_SENDER,
+        ),
+        conversation_target=target,
+    )
+    harness.turn_store.record_pending_turn(pending_turn)
+
+    with turn_dispatch_recovery_scope(active=True):
+        await harness.deliver(room, event)
+
+    assert len(harness.runner.requests) == 1
+    assert harness.runner.requests[0].existing_event_id == response_event_id
+    assert harness.runner.requests[0].existing_event_is_placeholder is True
+
+
+@pytest.mark.asyncio
+async def test_incomplete_response_intent_reconciles_matrix_without_recovery_scope(
+    config: Config,
+    tmp_path: Path,
+) -> None:
+    """A pending intent reconciles Matrix even when ordinary sync wins the restart race."""
+    response_event_id = "$thinking:localhost"
+    harness = _build_harness(config, tmp_path)
+    room = _room_with_members(config, "general")
+    event = _text_event("please recover", thread_id=_THREAD_ROOT)
+    target = harness.controller.deps.resolver.build_message_target(
+        room_id=_ROOM_ID,
+        thread_id=_THREAD_ROOT,
+        reply_to_event_id=event.event_id,
+        event_source=event.source,
+    )
+    pending_turn = harness.turn_store.attach_response_context(
+        TurnRecord.create([event.event_id], completed=False),
+        history_scope=harness.turn_store.response_history_scope(
+            ResponseAction(kind="individual"),
+            requester_user_id=_SENDER,
+        ),
+        conversation_target=target,
+    )
+    harness.turn_store.record_pending_turn(pending_turn)
+
+    with patch(
+        "mindroom.turn_controller.find_response_event_ids_via_room_messages",
+        return_value=frozenset({response_event_id}),
+    ) as find_response_event_ids:
+        await harness.deliver(room, event)
+
+    assert len(harness.runner.requests) == 1
+    assert harness.runner.requests[0].existing_event_id == response_event_id
+    assert harness.runner.requests[0].existing_event_is_placeholder is True
+    find_response_event_ids.assert_awaited_once_with(
+        harness.controller._client(),
+        _ROOM_ID,
+        response_sender=_entity_user_id(config, "general"),
+        source_event_ids=(_EVENT_ID,),
+    )
+
+
+@pytest.mark.asyncio
+async def test_visible_response_identity_is_durable_before_generation_finishes(
+    config: Config,
+    tmp_path: Path,
+) -> None:
+    """The pending ledger must own the placeholder before a hard crash can lose it."""
+    harness = _build_harness(config, tmp_path)
+    harness.runner.visible_response_event_id = "$thinking:localhost"
+    harness.runner.response_event_id = None
+    room = _room_with_members(config, "general")
+    event = _text_event("please persist the visible response")
+
+    await harness.deliver(room, event)
+
+    record = harness.turn_store.get_turn_record(event.event_id)
+    assert record is not None
+    assert record.response_event_id == "$thinking:localhost"
+    assert record.completed is False
+
+
+@pytest.mark.asyncio
+async def test_response_intent_is_durable_before_any_matrix_response(config: Config, tmp_path: Path) -> None:
+    """A restart can recognize incomplete work even if the first visible send wins the crash race."""
+    harness = _build_harness(config, tmp_path)
+    harness.runner.response_event_id = None
+    room = _room_with_members(config, "general")
+    event = _text_event("please persist response intent")
+
+    await harness.deliver(room, event)
+
+    record = harness.turn_store.get_turn_record(event.event_id)
+    assert record is not None
+    assert record.response_event_id is None
+    assert record.completed is False
 
 
 @pytest.mark.asyncio

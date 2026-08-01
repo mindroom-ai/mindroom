@@ -210,6 +210,16 @@ class TurnStore:
         """Return the ledger-backed canonical record for one source event."""
         return self._ledger.get_turn_record(source_event_id)
 
+    def has_pending_response_intent(self, source_event_ids: tuple[str, ...]) -> bool:
+        """Return whether these sources already own an incomplete response attempt."""
+        return any(
+            (record := self.get_turn_record(source_event_id)) is not None
+            and not record.completed
+            and record.history_scope is not None
+            and record.conversation_target is not None
+            for source_event_id in source_event_ids
+        )
+
     def record_pending_turn(self, turn_record: TurnRecord) -> TurnRecord | None:
         """Persist exact response context before generation reaches session storage."""
         if not turn_record.source_event_ids:

@@ -335,6 +335,7 @@ class ResponseRequest:
     on_interrupted_response_recoverable: Callable[[], None] | None = None
     sync_restart_retry_source_event_id: str | None = None
     on_deferred_outcome_handled: Callable[[str], None] | None = None
+    on_visible_response: Callable[[str], Awaitable[None]] | None = None
 
     @property
     def room_id(self) -> str:
@@ -1464,6 +1465,7 @@ class ResponseRunner:
                 run_id=run_id,
                 pipeline_timing=request.pipeline_timing,
                 on_cancelled=progress.note_task_cancelled,
+                on_visible_response=request.on_visible_response,
             )
             if progress.tracked_event_id is None:
                 progress.track_event(run_message_id)
@@ -2209,6 +2211,7 @@ class ResponseRunner:
         run_id: str | None = None,
         pipeline_timing: DispatchPipelineTiming | None = None,
         on_cancelled: Callable[[str], None] | None = None,
+        on_visible_response: Callable[[str], Awaitable[None]] | None = None,
     ) -> _MatrixEventId | None:
         """Run one response-generation attempt with cancellation support."""
         return await ResponseAttemptRunner(
@@ -2232,6 +2235,7 @@ class ResponseRunner:
                 run_id=run_id,
                 pipeline_timing=pipeline_timing,
                 on_cancelled=on_cancelled,
+                on_visible_response=on_visible_response,
             ),
         )
 

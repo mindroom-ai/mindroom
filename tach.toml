@@ -2496,6 +2496,7 @@ visibility = [
     "mindroom.matrix.conversation_cache",
     "mindroom.matrix.thread_room_scan",
     "mindroom.thread_export.execution",
+    "mindroom.turn_controller",
 ]
 
 [[modules]]
@@ -3452,6 +3453,7 @@ depends_on = [
     "mindroom.inbound_turn_normalizer",
     "mindroom.matrix.cache",
     "mindroom.matrix.cache.thread_reads",
+    "mindroom.matrix.client_thread_history",
     "mindroom.matrix.event_info",
     "mindroom.matrix.message_content",
     "mindroom.matrix.rooms",
@@ -4171,6 +4173,7 @@ expose = [
     "fetch_dispatch_thread_history",
     "fetch_dispatch_thread_snapshot",
     "fetch_thread_history",
+    "find_response_event_ids_via_room_messages",
     "get_room_threads_page",
     "log_thread_history_refresh",
     "refresh_thread_history_from_source",
