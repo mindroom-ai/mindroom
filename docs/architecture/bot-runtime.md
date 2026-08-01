@@ -73,7 +73,7 @@ Successful and intentionally ignored callbacks settle explicitly, while failures
 Callback failures remain autonomously retry-owned with capped exponential backoff until they settle or deterministic corruption parks them for operator repair.
 Visible response paths persist `TurnStore` truth, while pure policy ignores, unmentioned managed senders, blocked deep synthetic relays, and commands owned by another entity compact their exact dispatch-obligation tombstones directly.
 This keeps ignored high-volume traffic out of the handled-turn JSON ledger without weakening exact callback de-duplication.
-An in-memory claim loser remains deferred only to the competing owner, which must either persist terminal truth or return the exact source to durable retry.
+An in-memory claim loser waits for the competing owner, then yields to durable terminal truth or retries ingress when that owner exits without a terminal outcome.
 Ingress-lane readiness and delivery failures return the exact source to the existing durable retry owner after the lane releases it.
 A successful empty readiness result explicitly settles the exact source as intentionally ignored instead of repeating download or transcription work forever.
 Router delivery failure raises back into that same retry path instead of completing without terminal truth.
