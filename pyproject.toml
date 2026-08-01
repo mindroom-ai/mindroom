@@ -578,6 +578,7 @@ addopts = """
     -p no:tach
     -q
     -n auto
+    --dist worksteal
     --asyncio-mode=strict
     --timeout 60
     --durations 20
