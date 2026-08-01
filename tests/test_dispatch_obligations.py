@@ -29,7 +29,7 @@ from mindroom.dispatch_obligations import (
 from mindroom.dispatch_obligations import (
     _DispatchCallbackResult as DispatchCallbackResult,
 )
-from mindroom.dispatch_recovery_context import dispatch_recovery_active, turn_dispatch_recovery_active
+from mindroom.dispatch_recovery_context import turn_dispatch_recovery_active
 from mindroom.dispatch_source import IMAGE_SOURCE_KIND, MEDIA_SOURCE_KIND, VOICE_SOURCE_KIND
 from mindroom.handled_turns import HandledTurnLedger, TurnRecord, _reset_handled_turn_ledger_runtime
 from mindroom.matrix.media import MatrixMediaEvent, parse_matrix_media_event_source
@@ -410,7 +410,7 @@ def test_terminal_settlement_compacts_payload_before_invalid_replay_check(tmp_pa
         ).fetchone()
         schema_version = connection.execute("PRAGMA user_version").fetchone()[0]
     assert row == ("", "")
-    assert schema_version == 1
+    assert schema_version == 2
     invalid_replay = replace(
         obligation,
         room_id="!different:example.org",
@@ -1538,12 +1538,12 @@ async def test_turn_callback_retry_preserves_recovery_deferral(tmp_path: Path) -
 
 
 @pytest.mark.asyncio
-async def test_reaction_recovery_has_callback_but_not_turn_recovery_context(tmp_path: Path) -> None:
-    """Reaction replay must expose transport recovery without impersonating a turn replay."""
-    observed_context: list[tuple[bool, bool]] = []
+async def test_reaction_recovery_does_not_impersonate_turn_recovery(tmp_path: Path) -> None:
+    """A recovered reaction callback must not acquire turn-recovery semantics."""
+    observed_context: list[bool] = []
 
     async def callback(_room: nio.MatrixRoom, _event: nio.Event) -> DispatchCallbackResult:
-        observed_context.append((dispatch_recovery_active(), turn_dispatch_recovery_active()))
+        observed_context.append(turn_dispatch_recovery_active())
         return DispatchCallbackResult.SUCCEEDED
 
     store = _store(tmp_path)
@@ -1557,17 +1557,17 @@ async def test_reaction_recovery_has_callback_but_not_turn_recovery_context(tmp_
 
     await runner.recover_pending(turn_backed=False)
 
-    assert observed_context == [(True, False)]
+    assert observed_context == [False]
     assert not store.has_pending("$reaction-recovery", DispatchCallbackKind.REACTION)
 
 
 @pytest.mark.asyncio
 async def test_repeated_pending_admission_has_recovery_context(tmp_path: Path) -> None:
     """A live duplicate of persisted work must use the same semantics as startup replay."""
-    observed_context: list[tuple[bool, bool]] = []
+    observed_context: list[bool] = []
 
     async def callback(_room: nio.MatrixRoom, _event: nio.Event) -> DispatchCallbackResult:
-        observed_context.append((dispatch_recovery_active(), turn_dispatch_recovery_active()))
+        observed_context.append(turn_dispatch_recovery_active())
         return DispatchCallbackResult.SUCCEEDED
 
     store = _store(tmp_path)
@@ -1585,7 +1585,7 @@ async def test_repeated_pending_admission_has_recovery_context(tmp_path: Path) -
         DispatchCallbackKind.REACTION,
     )
 
-    assert observed_context == [(True, False)]
+    assert observed_context == [False]
     assert not store.has_pending("$repeated-reaction", DispatchCallbackKind.REACTION)
 
 
