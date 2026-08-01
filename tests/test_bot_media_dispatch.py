@@ -24,6 +24,7 @@ from mindroom.dispatch_handoff import PreparedTextEvent
 from mindroom.dispatch_source import (
     VOICE_SOURCE_KIND,
 )
+from mindroom.handled_turns import TurnRecord
 from mindroom.history.types import HistoryScope
 from mindroom.hooks import (
     EnrichmentItem,
@@ -74,6 +75,17 @@ if TYPE_CHECKING:
 def mock_agent_user() -> AgentMatrixUser:
     """Mock agent user for testing."""
     return make_mock_agent_user()
+
+
+def _assert_ready_voice_claim_handoff(ready_event: ReadyPendingEvent | None) -> None:
+    """Assert a ready voice task transfers its source claim to the gate."""
+    _assert_ready_voice_text_fallback(ready_event)
+    assert ready_event is not None
+    claim_metadata = next(
+        item for item in ready_event.pending_event.dispatch_metadata if item.kind == "pending_turn_claim"
+    )
+    assert claim_metadata.payload == TurnRecord.create(["$voice_event"], completed=False)
+    claim_metadata.close()
 
 
 class TestAgentBot(AgentBotTestBase):
@@ -297,7 +309,7 @@ class TestAgentBot(AgentBotTestBase):
         admitted_slot = mock_submit.call_args.args[0]
         bot._coalescing_gate.release_lane_slot(admitted_slot)
         await asyncio.wait_for(admitted_slot.settled.wait(), timeout=1.0)
-        _assert_ready_voice_text_fallback(ready_event)
+        _assert_ready_voice_claim_handoff(ready_event)
         assert call_order == ["reserve", "append", "coalescing_thread", "admit", "normalize"]
         bot._conversation_cache.append_live_event.assert_awaited_once()
         bot._conversation_resolver.coalescing_thread_id.assert_awaited_once_with(
@@ -305,6 +317,40 @@ class TestAgentBot(AgentBotTestBase):
             event,
         )
         bot._turn_controller._dispatch_special_media_as_text.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_media_ingress_claims_source_before_async_thread_resolution(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """A media replay cannot repeat thread resolution while the first delivery owns the turn."""
+        config = self._config_for_storage(tmp_path)
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        room = SimpleNamespace(room_id="!test:localhost")
+        event = _room_image_event(sender="@user:localhost", event_id="$image_event", body="photo.jpg")
+        resolution_started = asyncio.Event()
+
+        async def block_thread_resolution(*_args: object, **_kwargs: object) -> None:
+            resolution_started.set()
+            await asyncio.Event().wait()
+
+        bot._turn_controller._precheck_dispatch_event = MagicMock(
+            return_value=SimpleNamespace(event=event, requester_user_id="@user:localhost"),
+        )
+        bot._conversation_resolver.coalescing_thread_id = AsyncMock(side_effect=block_thread_resolution)
+        first = asyncio.create_task(bot._turn_controller._handle_media_message_inner(room, event))
+
+        await resolution_started.wait()
+        competing_claim = TurnRecord.create([event.event_id], completed=False)
+        assert bot._turn_store.try_claim_turn(competing_claim) is False
+
+        first.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await first
+
+        assert bot._turn_store.try_claim_turn(competing_claim) is True
+        bot._turn_store.release_pending_turn_claim(competing_claim)
 
     @pytest.mark.asyncio
     async def test_audio_dispatch_releases_receive_order_when_target_resolution_is_cancelled(
