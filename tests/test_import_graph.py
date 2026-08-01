@@ -35,12 +35,16 @@ _PROVIDER_SDK_ROOTS = (
     "openai",
 )
 _HEAVY_OPTIONAL_RUNTIME_ROOTS = (
+    # Provider-specific clients and authentication.
     *_PROVIDER_SDK_ROOTS,
     "agno.models.vertexai.claude",
+    "google.auth",
+    "google.oauth2",
+    # Storage engines.
     "agno.vectordb.chroma",
     "chromadb",
-    "google.auth",
     "mem0",
+    # ML and data stacks.
     "numpy",
     "pandas",
     "scipy",
