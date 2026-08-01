@@ -21,7 +21,7 @@ from typing_extensions import TypeIs
 
 from mindroom.background_tasks import create_background_task
 from mindroom.dispatch_callback_outcome import TurnDispatchOutcome
-from mindroom.dispatch_recovery_context import turn_dispatch_recovery_scope
+from mindroom.dispatch_recovery_context import dispatch_recovery_scope
 from mindroom.dispatch_source import IMAGE_SOURCE_KIND, MEDIA_SOURCE_KIND, VOICE_SOURCE_KIND
 from mindroom.logging_config import get_logger
 from mindroom.matrix.media import MATRIX_MEDIA_EVENT_TYPES, MatrixMediaEvent, parse_matrix_media_event_source
@@ -1344,6 +1344,10 @@ class DispatchObligationRunner:
         if room.room_id != obligation.room_id or _dispatch_event_source(event) != obligation.event_source:
             room = self.room_for_id(obligation.room_id)
             event = _parse_recovery_event(obligation)
+        if obligation.requires_pending_check:
+            with dispatch_recovery_scope(turn_backed=obligation.callback_kind in _TURN_BACKED_KINDS):
+                await self._run_obligation(obligation, room=room, event=event)
+            return
         await self._run_obligation(obligation, room=room, event=event)
 
     async def recover_pending(self, *, turn_backed: bool | None = None) -> None:
@@ -1356,9 +1360,7 @@ class DispatchObligationRunner:
             try:
                 event = _parse_recovery_event(obligation)
                 room = self.room_for_id(obligation.room_id)
-                with turn_dispatch_recovery_scope(
-                    active=obligation.callback_kind in _TURN_BACKED_KINDS,
-                ):
+                with dispatch_recovery_scope(turn_backed=obligation.callback_kind in _TURN_BACKED_KINDS):
                     await self._run_obligation(
                         obligation,
                         room=room,
@@ -1420,9 +1422,7 @@ class DispatchObligationRunner:
                         if obligation is None:
                             continue
                         event = _parse_recovery_event(obligation)
-                        with turn_dispatch_recovery_scope(
-                            active=obligation.callback_kind in _TURN_BACKED_KINDS,
-                        ):
+                        with dispatch_recovery_scope(turn_backed=obligation.callback_kind in _TURN_BACKED_KINDS):
                             claimed = await self._run_obligation(
                                 obligation,
                                 room=self.room_for_id(obligation.room_id),

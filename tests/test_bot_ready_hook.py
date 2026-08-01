@@ -194,6 +194,33 @@ async def test_turn_recovery_cleans_ledger_after_reading_unsettled_sources(tmp_p
 
 
 @pytest.mark.asyncio
+async def test_turn_recovery_does_not_fail_when_post_recovery_cleanup_fails(tmp_path: Path) -> None:
+    """Ledger pruning is maintenance and must not invalidate completed recovery."""
+    bot = _agent_bot(tmp_path)
+    bot._dispatch_obligation_runner.recover_pending = AsyncMock()
+    bot._dispatch_obligation_runner.unsettled_source_event_ids = MagicMock(return_value=frozenset())
+    bot._turn_store.cleanup = MagicMock(side_effect=OSError("disk unavailable"))
+
+    await bot.recover_pending_turn_dispatch_obligations()
+
+    bot._dispatch_obligation_runner.recover_pending.assert_awaited_once_with(turn_backed=True)
+    bot._turn_store.cleanup.assert_called_once_with(unsettled_source_event_ids=frozenset())
+
+
+@pytest.mark.asyncio
+async def test_non_turn_recovery_retries_store_enumeration_failure(tmp_path: Path) -> None:
+    """A transient discovery failure must not strand accepted non-turn callbacks."""
+    bot = _agent_bot(tmp_path)
+    bot._dispatch_obligation_runner.recover_pending = AsyncMock(side_effect=[OSError("disk unavailable"), None])
+
+    with patch("mindroom.bot.wait_exponential", return_value=lambda _retry_state: 0):
+        await bot._recover_non_turn_dispatch_obligations()
+
+    assert bot._dispatch_obligation_runner.recover_pending.await_count == 2
+    bot._dispatch_obligation_runner.recover_pending.assert_awaited_with(turn_backed=False)
+
+
+@pytest.mark.asyncio
 async def test_bot_ready_fires_on_first_sync_response(tmp_path: Path) -> None:
     """bot:ready should fire when the first sync response is received."""
     bot = _agent_bot(tmp_path)

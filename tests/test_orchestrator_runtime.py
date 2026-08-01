@@ -41,6 +41,8 @@ from mindroom.matrix.users import INTERNAL_USER_ACCOUNT_KEY, AgentMatrixUser
 from mindroom.orchestration.config_updates import ConfigUpdatePlan
 from mindroom.orchestration.plugin_watch import _collect_plugin_root_changes
 from mindroom.orchestration.runtime import (
+    STARTUP_RETRY_INITIAL_DELAY_SECONDS,
+    STARTUP_RETRY_MAX_DELAY_SECONDS,
     _matrix_homeserver_startup_timeout_seconds_from_env,
     run_with_retry,
     wait_for_matrix_homeserver,
@@ -2175,6 +2177,48 @@ class TestMultiAgentOrchestrator:
 
         assert router_bot.recover_pending_turn_dispatch_obligations.await_count == 2
         responder_bot.recover_pending_turn_dispatch_obligations.assert_awaited_once_with()
+
+    @pytest.mark.asyncio
+    async def test_scheduled_turn_recovery_isolates_and_retries_one_bot_failure(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """One transient store failure must not strand this or any later ready bot."""
+        config = _runtime_bound_config(
+            Config(agents={"general": AgentConfig(display_name="General", role="General assistant")}),
+            tmp_path,
+        )
+        orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths_for(config))
+        orchestrator.config = config
+
+        router_bot = MagicMock()
+        router_bot.running = True
+        router_bot.first_sync_complete = True
+        router_bot.recover_pending_turn_dispatch_obligations = AsyncMock(
+            side_effect=[OSError("store unavailable"), None],
+        )
+        responder_bot = MagicMock()
+        responder_bot.running = True
+        responder_bot.first_sync_complete = True
+        responder_bot.recover_pending_turn_dispatch_obligations = AsyncMock()
+        orchestrator.agent_bots = {ROUTER_AGENT_NAME: router_bot, "general": responder_bot}
+
+        with patch("mindroom.orchestration.runtime.retry_delay_seconds", return_value=0) as retry_delay:
+            orchestrator._schedule_ready_turn_dispatch_recovery()
+            assert await wait_for_background_tasks(
+                timeout=1,
+                owner=orchestrator._dispatch_recovery_task_owner,
+            )
+
+        assert router_bot.recover_pending_turn_dispatch_obligations.await_count == 2
+        assert responder_bot.recover_pending_turn_dispatch_obligations.await_count == 2
+        retry_delay.assert_called_once_with(
+            1,
+            initial_delay_seconds=STARTUP_RETRY_INITIAL_DELAY_SECONDS,
+            max_delay_seconds=STARTUP_RETRY_MAX_DELAY_SECONDS,
+        )
+        assert not orchestrator._dispatch_recovery_requested
+        assert orchestrator._dispatch_recovery_task is None
 
     @pytest.mark.asyncio
     async def test_regular_agent_turn_recovery_waits_for_own_first_sync(

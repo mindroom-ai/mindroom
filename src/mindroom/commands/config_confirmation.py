@@ -373,6 +373,22 @@ async def _confirmation_response_ids(
     return tuple(response_ids)
 
 
+async def has_visible_confirmation_response(
+    client: nio.AsyncClient,
+    room_id: str,
+    event: nio.ReactionEvent,
+) -> bool:
+    """Return whether durable Matrix output proves this decision was consumed."""
+    return bool(
+        await _confirmation_response_ids(
+            client,
+            room_id,
+            event.reacts_to,
+            decision_event_id=event.event_id,
+        ),
+    )
+
+
 async def recover_confirmation_setup(
     client: nio.AsyncClient,
     room_id: str,
@@ -510,24 +526,6 @@ async def _response_for_checkpointed_decision(
     return completed_checkpoint, response_text
 
 
-async def _confirmation_response_is_visible(
-    bot: AgentBot,
-    room_id: str,
-    event: nio.ReactionEvent,
-) -> bool:
-    """Return whether this exact decision already owns a visible response."""
-    assert bot.client is not None
-    assert bot.client.user_id is not None
-    return bool(
-        await _confirmation_response_ids(
-            bot.client,
-            room_id,
-            event.reacts_to,
-            decision_event_id=event.event_id,
-        ),
-    )
-
-
 async def resume_committed_confirmation(
     bot: AgentBot,
     room: nio.MatrixRoom,
@@ -559,7 +557,7 @@ async def handle_confirmation_reaction(
         if pending_change.decision_event_id is not None and pending_change.decision_event_id != event.event_id:
             return
 
-        if await _confirmation_response_is_visible(bot, room.room_id, event):
+        if await has_visible_confirmation_response(bot.client, room.room_id, event):
             await _remove_pending_change_from_matrix(bot.client, pending_change.room_id, preview_event_id)
             _remove_pending_change(preview_event_id)
             return

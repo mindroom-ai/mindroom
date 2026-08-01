@@ -29,7 +29,7 @@ from mindroom.dispatch_obligations import (
 from mindroom.dispatch_obligations import (
     _DispatchCallbackResult as DispatchCallbackResult,
 )
-from mindroom.dispatch_recovery_context import turn_dispatch_recovery_active
+from mindroom.dispatch_recovery_context import dispatch_recovery_active, turn_dispatch_recovery_active
 from mindroom.dispatch_source import IMAGE_SOURCE_KIND, MEDIA_SOURCE_KIND, VOICE_SOURCE_KIND
 from mindroom.handled_turns import HandledTurnLedger, TurnRecord, _reset_handled_turn_ledger_runtime
 from mindroom.matrix.media import MatrixMediaEvent, parse_matrix_media_event_source
@@ -86,6 +86,33 @@ def _message_obligation(
 def _message_event(event_id: str) -> nio.RoomMessageText:
     event = nio.Event.parse_event(_message_obligation(event_id).event_source)
     assert isinstance(event, nio.RoomMessageText)
+    return event
+
+
+def _reaction_obligation(event_id: str) -> _DispatchObligation:
+    """Build one replayable reaction obligation."""
+    return replace(
+        _message_obligation(event_id),
+        callback_kind=DispatchCallbackKind.REACTION,
+        event_source={
+            "type": "m.reaction",
+            "event_id": event_id,
+            "sender": "@user:example.org",
+            "origin_server_ts": 1_234,
+            "content": {
+                "m.relates_to": {
+                    "rel_type": "m.annotation",
+                    "event_id": "$target",
+                    "key": "✅",
+                },
+            },
+        },
+    )
+
+
+def _reaction_event(event_id: str) -> nio.ReactionEvent:
+    event = nio.Event.parse_event(_reaction_obligation(event_id).event_source)
+    assert isinstance(event, nio.ReactionEvent)
     return event
 
 
@@ -1508,6 +1535,58 @@ async def test_turn_callback_retry_preserves_recovery_deferral(tmp_path: Path) -
 
     assert attempts == 2
     assert store.has_pending("$recovery-scope", DispatchCallbackKind.MESSAGE)
+
+
+@pytest.mark.asyncio
+async def test_reaction_recovery_has_callback_but_not_turn_recovery_context(tmp_path: Path) -> None:
+    """Reaction replay must expose transport recovery without impersonating a turn replay."""
+    observed_context: list[tuple[bool, bool]] = []
+
+    async def callback(_room: nio.MatrixRoom, _event: nio.Event) -> DispatchCallbackResult:
+        observed_context.append((dispatch_recovery_active(), turn_dispatch_recovery_active()))
+        return DispatchCallbackResult.SUCCEEDED
+
+    store = _store(tmp_path)
+    store.create_pending(_reaction_obligation("$reaction-recovery"))
+    runner = DispatchObligationRunner(
+        store=store,
+        callbacks={DispatchCallbackKind.REACTION: callback},
+        room_for_id=lambda room_id: nio.MatrixRoom(room_id, _PRINCIPAL_ID),
+        turn_is_terminal=lambda _event_id: False,
+    )
+
+    await runner.recover_pending(turn_backed=False)
+
+    assert observed_context == [(True, False)]
+    assert not store.has_pending("$reaction-recovery", DispatchCallbackKind.REACTION)
+
+
+@pytest.mark.asyncio
+async def test_repeated_pending_admission_has_recovery_context(tmp_path: Path) -> None:
+    """A live duplicate of persisted work must use the same semantics as startup replay."""
+    observed_context: list[tuple[bool, bool]] = []
+
+    async def callback(_room: nio.MatrixRoom, _event: nio.Event) -> DispatchCallbackResult:
+        observed_context.append((dispatch_recovery_active(), turn_dispatch_recovery_active()))
+        return DispatchCallbackResult.SUCCEEDED
+
+    store = _store(tmp_path)
+    store.create_pending(_reaction_obligation("$repeated-reaction"))
+    runner = DispatchObligationRunner(
+        store=store,
+        callbacks={DispatchCallbackKind.REACTION: callback},
+        room_for_id=lambda room_id: nio.MatrixRoom(room_id, _PRINCIPAL_ID),
+        turn_is_terminal=lambda _event_id: False,
+    )
+
+    await runner.dispatch(
+        nio.MatrixRoom(_ROOM_ID, _PRINCIPAL_ID),
+        _reaction_event("$repeated-reaction"),
+        DispatchCallbackKind.REACTION,
+    )
+
+    assert observed_context == [(True, False)]
+    assert not store.has_pending("$repeated-reaction", DispatchCallbackKind.REACTION)
 
 
 def test_deferred_turn_retry_schedules_only_the_exact_callback_kind(tmp_path: Path) -> None:

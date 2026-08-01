@@ -540,6 +540,7 @@ class _MultiAgentOrchestrator:
             config = self.config
             if config is None:
                 return
+            first_error: Exception | None = None
             for entity_name in configured_entity_names(config):
                 bot = self.agent_bots.get(entity_name)
                 required_entities = (
@@ -556,7 +557,18 @@ class _MultiAgentOrchestrator:
                     for required_entity in required_entities
                 ):
                     continue
-                await bot.recover_pending_turn_dispatch_obligations()
+                try:
+                    await bot.recover_pending_turn_dispatch_obligations()
+                except asyncio.CancelledError:
+                    raise
+                except Exception as error:
+                    first_error = first_error or error
+                    logger.exception(
+                        "turn_dispatch_recovery_failed",
+                        agent_name=entity_name,
+                    )
+            if first_error is not None:
+                raise first_error
 
     def _schedule_ready_turn_dispatch_recovery(self) -> None:
         """Coalesce bot-ready signals into one orchestrator-owned recovery task."""
@@ -576,7 +588,11 @@ class _MultiAgentOrchestrator:
         try:
             while self._dispatch_recovery_requested:
                 self._dispatch_recovery_requested = False
-                await self._recover_ready_turn_dispatch_obligations()
+                await run_with_retry(
+                    "Recovering ready turn dispatch obligations",
+                    self._recover_ready_turn_dispatch_obligations,
+                    update_runtime_state=False,
+                )
         finally:
             if self._dispatch_recovery_task is current_task:
                 self._dispatch_recovery_task = None

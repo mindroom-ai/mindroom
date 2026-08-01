@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import suppress
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
@@ -19,6 +20,8 @@ from mindroom.approval_manager import (
     initialize_approval_store,
 )
 from mindroom.bot import AgentBot
+from mindroom.constants import ROUTER_AGENT_NAME
+from mindroom.dispatch_recovery_context import dispatch_recovery_scope
 from mindroom.hooks import (
     EVENT_REACTION_RECEIVED,
     HookRegistry,
@@ -180,6 +183,88 @@ class TestAgentBot(AgentBotTestBase):
             await bot._on_reaction(room, event)
 
         assert seen == []
+
+    @pytest.mark.asyncio
+    async def test_recovered_interactive_reaction_keeps_its_durable_consumer(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """A terminal selection alias must not replay through generic reaction hooks."""
+        seen: list[str] = []
+
+        @hook(EVENT_REACTION_RECEIVED)
+        async def record_reaction(ctx: ReactionReceivedContext) -> None:
+            seen.append(ctx.event_id)
+
+        config = self._config_for_storage(tmp_path)
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot.client = MagicMock()
+        bot.hook_registry = HookRegistry.from_plugins([_hook_plugin("hooked", [record_reaction])])
+        bot._turn_store.is_durably_handled = MagicMock(return_value=True)
+        room = MagicMock(room_id="!test:localhost")
+        event = self._make_handler_event("reaction", sender="@user:localhost", event_id="$reaction")
+        event.key = "✅"
+
+        with (
+            patch(
+                "mindroom.bot.config_confirmation.resolve_reaction_pending_change",
+                new=AsyncMock(return_value=None),
+            ),
+            patch(
+                "mindroom.reaction_recovery.config_confirmation.has_visible_confirmation_response",
+                new=AsyncMock(),
+            ) as visible_confirmation,
+            dispatch_recovery_scope(),
+        ):
+            await bot._on_reaction(room, event)
+
+        assert seen == []
+        visible_confirmation.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_recovered_config_reaction_keeps_its_visible_consumer(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """A visible config receipt must not replay through generic reaction hooks."""
+        seen: list[str] = []
+
+        @hook(EVENT_REACTION_RECEIVED)
+        async def record_reaction(ctx: ReactionReceivedContext) -> None:
+            seen.append(ctx.event_id)
+
+        config = self._config_for_storage(tmp_path)
+        router_user = replace(
+            mock_agent_user,
+            agent_name=ROUTER_AGENT_NAME,
+            user_id="@mindroom_router:localhost",
+            display_name="RouterAgent",
+        )
+        bot = AgentBot(router_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot.client = MagicMock()
+        bot.hook_registry = HookRegistry.from_plugins([_hook_plugin("hooked", [record_reaction])])
+        bot._turn_store.is_durably_handled = MagicMock(return_value=False)
+        room = MagicMock(room_id="!test:localhost")
+        event = self._make_handler_event("reaction", sender="@user:localhost", event_id="$reaction")
+        event.key = "✅"
+
+        with (
+            patch(
+                "mindroom.bot.config_confirmation.resolve_reaction_pending_change",
+                new=AsyncMock(return_value=None),
+            ),
+            patch(
+                "mindroom.reaction_recovery.config_confirmation.has_visible_confirmation_response",
+                new=AsyncMock(return_value=True),
+            ) as visible_confirmation,
+            dispatch_recovery_scope(),
+        ):
+            await bot._on_reaction(room, event)
+
+        assert seen == []
+        visible_confirmation.assert_awaited_once_with(bot.client, room.room_id, event)
 
     @pytest.mark.asyncio
     async def test_interactive_reaction_failure_restores_question_for_durable_retry(

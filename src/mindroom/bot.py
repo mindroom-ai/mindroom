@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
 from dataclasses import dataclass, replace
 from functools import cached_property
@@ -10,7 +11,7 @@ from typing import TYPE_CHECKING, Any, cast
 from uuid import uuid4
 
 import nio
-from tenacity import retry, retry_if_not_exception_type, stop_after_attempt, wait_exponential
+from tenacity import before_sleep_log, retry, retry_if_not_exception_type, stop_after_attempt, wait_exponential
 
 from mindroom.approval_inbound import (
     handle_tool_approval_action,
@@ -117,6 +118,7 @@ from .matrix.room_member_joins import (
 )
 from .matrix.to_device import AuthenticatedToDeviceEvent
 from .media_inputs import MediaInputs
+from .reaction_recovery import recovered_reaction_was_consumed
 from .redacted_turn_cleanup import RedactedTurnCleanup, RedactedTurnCleanupDeps
 from .response_payload_preparation import ResponsePayloadPreparer
 from .response_runner import ResponseRequest, ResponseRunner, ResponseRunnerDeps, prepare_memory_and_model_context
@@ -1624,7 +1626,7 @@ class AgentBot:
             self.logger.info("agent_setup_complete", user_id=self.agent_user.user_id)
             await self._emit_agent_lifecycle_event(EVENT_AGENT_STARTED)
             create_background_task(
-                self._dispatch_obligation_runner.recover_pending(turn_backed=False),
+                self._recover_non_turn_dispatch_obligations(),
                 name=f"recover_non_turn_dispatch_obligations_{self.agent_name}",
                 owner=self._runtime_view,
             )
@@ -1639,16 +1641,33 @@ class AgentBot:
                     self.logger.warning("Failed to close Matrix client after startup failure", exc_info=True)
             raise
 
+    async def _recover_non_turn_dispatch_obligations(self) -> None:
+        """Retry non-turn callback discovery until the durable store is readable."""
+
+        @retry(
+            wait=wait_exponential(multiplier=1, min=1, max=30),
+            retry=retry_if_not_exception_type(asyncio.CancelledError),
+            before_sleep=before_sleep_log(self.logger, logging.WARNING),
+            reraise=True,
+        )
+        async def recover() -> None:
+            await self._dispatch_obligation_runner.recover_pending(turn_backed=False)
+
+        await recover()
+
     async def recover_pending_turn_dispatch_obligations(self) -> None:
         """Release fleet-dependent turn replay after the responder startup pass."""
         await self._dispatch_obligation_runner.recover_pending(turn_backed=True)
-        unsettled_source_event_ids = await asyncio.to_thread(
-            self._dispatch_obligation_runner.unsettled_source_event_ids,
-        )
-        await asyncio.to_thread(
-            self._turn_store.cleanup,
-            unsettled_source_event_ids=unsettled_source_event_ids,
-        )
+        try:
+            unsettled_source_event_ids = await asyncio.to_thread(
+                self._dispatch_obligation_runner.unsettled_source_event_ids,
+            )
+            await asyncio.to_thread(
+                self._turn_store.cleanup,
+                unsettled_source_event_ids=unsettled_source_event_ids,
+            )
+        except Exception:
+            self.logger.exception("post_recovery_turn_ledger_cleanup_failed")
 
     async def try_start(self) -> bool:
         """Try to start the agent bot with smart retry logic.
@@ -2148,6 +2167,14 @@ class AgentBot:
             event,
             enabled=self.agent_name == ROUTER_AGENT_NAME,
         )
+        if pending_change is None and await recovered_reaction_was_consumed(
+            entity_name=self.agent_name,
+            is_durably_handled=self._turn_store.is_durably_handled,
+            client=self.client,
+            room_id=room.room_id,
+            event=event,
+        ):
+            return
         if pending_change is not None and await config_confirmation.resume_committed_confirmation(
             self,
             room,
