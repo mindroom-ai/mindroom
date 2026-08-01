@@ -802,6 +802,19 @@ async def test_handle_live_approval_id_response_resolves_same_room_waiter(tmp_pa
     )
     pending = await _wait_for_pending(store, sender=sender, room_id="!room-a:localhost")
 
+    assert await store.can_handle_action(
+        room_id="!room-a:localhost",
+        sender_id="@user:localhost",
+        card_event_id=None,
+        approval_id=pending.approval_id,
+    )
+    assert not await store.can_handle_action(
+        room_id="!room-b:localhost",
+        sender_id="@user:localhost",
+        card_event_id=None,
+        approval_id=pending.approval_id,
+    )
+
     result = await store.handle_live_approval_id_response(
         room_id="!room-a:localhost",
         sender_id="@user:localhost",

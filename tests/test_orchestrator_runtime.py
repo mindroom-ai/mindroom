@@ -2480,6 +2480,48 @@ class TestMultiAgentOrchestrator:
         member_bot.recover_pending_turn_dispatch_obligations.assert_awaited_once_with()
 
     @pytest.mark.asyncio
+    async def test_background_bot_start_does_not_wait_for_dispatch_recovery(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Dispatch maintenance must not leave a successfully started bot unsynced."""
+        config = _runtime_bound_config(
+            Config(agents={"general": AgentConfig(display_name="General", role="General assistant")}),
+            tmp_path,
+        )
+        orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths_for(config))
+        orchestrator.config = config
+        bot = MagicMock()
+        bot.running = True
+        bot.try_start = AsyncMock(return_value=True)
+        bot.recover_pending_turn_dispatch_obligations = AsyncMock(side_effect=OSError("store unavailable"))
+        orchestrator.agent_bots = {"general": bot}
+        order: list[str] = []
+
+        with (
+            patch.object(orchestrator, "_entities_blocked_by_failed_mcp_servers", return_value=set()),
+            patch.object(orchestrator, "_bind_started_runtime_support_services"),
+            patch.object(orchestrator, "_resolve_bot_room_aliases"),
+            patch.object(
+                orchestrator,
+                "_schedule_ready_turn_dispatch_recovery",
+                side_effect=lambda: order.append("recovery_scheduled"),
+            ),
+            patch.object(
+                orchestrator,
+                "_start_sync_task",
+                side_effect=lambda *_args: order.append("sync_started"),
+            ),
+            patch.object(orchestrator, "_setup_rooms_and_memberships", new=AsyncMock()),
+            patch.object(orchestrator, "_recover_pending_replacement_rooms", new=AsyncMock()),
+            patch.object(orchestrator._external_trigger_runtime, "bind_if_ready"),
+        ):
+            await orchestrator._run_bot_start_retry("general")
+
+        assert order == ["recovery_scheduled", "sync_started"]
+        bot.recover_pending_turn_dispatch_obligations.assert_not_awaited()
+
+    @pytest.mark.asyncio
     async def test_orchestrator_start_skips_retry_for_permanent_failures(self, tmp_path: Path) -> None:
         """Permanent startup failures should leave bots disabled without retry loops."""
         orchestrator = _MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path))

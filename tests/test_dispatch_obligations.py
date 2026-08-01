@@ -6,6 +6,7 @@ import asyncio
 import sqlite3
 import threading
 import time
+from contextlib import suppress
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -19,6 +20,7 @@ from mindroom.dispatch_obligations import (
     DispatchCallbackKind,
     DispatchObligationRunner,
     DispatchObligationStore,
+    DispatchSemanticConsumer,
     _DispatchCreateResult,
     _DispatchObligation,
     _DispatchTerminalOutcome,
@@ -29,7 +31,7 @@ from mindroom.dispatch_obligations import (
 from mindroom.dispatch_obligations import (
     _DispatchCallbackResult as DispatchCallbackResult,
 )
-from mindroom.dispatch_recovery_context import dispatch_recovery_active, turn_dispatch_recovery_active
+from mindroom.dispatch_recovery_context import turn_dispatch_recovery_active
 from mindroom.dispatch_source import IMAGE_SOURCE_KIND, MEDIA_SOURCE_KIND, VOICE_SOURCE_KIND
 from mindroom.handled_turns import HandledTurnLedger, TurnRecord, _reset_handled_turn_ledger_runtime
 from mindroom.matrix.media import MatrixMediaEvent, parse_matrix_media_event_source
@@ -108,12 +110,6 @@ def _reaction_obligation(event_id: str) -> _DispatchObligation:
             },
         },
     )
-
-
-def _reaction_event(event_id: str) -> nio.ReactionEvent:
-    event = nio.Event.parse_event(_reaction_obligation(event_id).event_source)
-    assert isinstance(event, nio.ReactionEvent)
-    return event
 
 
 def test_store_database_name_identifies_entity_and_principal(tmp_path: Path) -> None:
@@ -216,6 +212,26 @@ def test_pending_row_survives_new_store_instance(tmp_path: Path) -> None:
 
     assert restarted.pending() == (obligation,)
     assert restarted.has_pending("$message", DispatchCallbackKind.MESSAGE)
+
+
+def test_v1_store_migrates_pending_rows_without_inventing_a_consumer(tmp_path: Path) -> None:
+    """Schema migration must keep accepted work unclassified until its callback routes it."""
+    store = _store(tmp_path)
+    obligation = _message_obligation("$v1-pending")
+    store.create_pending(obligation)
+    database_path = _database_path(store)
+    with sqlite3.connect(database_path) as connection:
+        connection.execute("PRAGMA user_version = 1")
+        connection.execute("ALTER TABLE dispatch_obligations DROP COLUMN semantic_consumer")
+
+    migrated = _store(tmp_path)
+
+    with sqlite3.connect(database_path) as connection:
+        columns = {row[1] for row in connection.execute("PRAGMA table_info(dispatch_obligations)")}
+        schema_version = connection.execute("PRAGMA user_version").fetchone()[0]
+    assert "semantic_consumer" in columns
+    assert schema_version == 2
+    assert migrated.pending() == (replace(obligation, requires_pending_check=True),)
 
 
 @pytest.mark.asyncio
@@ -405,18 +421,50 @@ def test_terminal_settlement_compacts_payload_before_invalid_replay_check(tmp_pa
     database_path = _database_path(store)
     with sqlite3.connect(database_path) as connection:
         row = connection.execute(
-            "SELECT room_id, event_source_json FROM dispatch_obligations WHERE source_event_id = ?",
+            "SELECT room_id, event_source_json, semantic_consumer FROM dispatch_obligations WHERE source_event_id = ?",
             (obligation.source_event_id,),
         ).fetchone()
         schema_version = connection.execute("PRAGMA user_version").fetchone()[0]
-    assert row == ("", "")
-    assert schema_version == 1
+    assert row == ("", "", None)
+    assert schema_version == 2
     invalid_replay = replace(
         obligation,
         room_id="!different:example.org",
         event_source={"event_id": obligation.source_event_id, "not_json_safe": object()},
     )
     assert store.create_pending(invalid_replay) is _DispatchCreateResult.ALREADY_TERMINAL
+
+
+def test_semantic_consumer_claim_is_durable_and_single_owner(tmp_path: Path) -> None:
+    """One accepted callback may choose exactly one application consumer."""
+    store = _store(tmp_path)
+    obligation = _message_obligation("$consumer")
+    store.create_pending(obligation)
+
+    assert (
+        store.claim_semantic_consumer(obligation.key, DispatchSemanticConsumer.APPROVAL_REPLY)
+        is DispatchSemanticConsumer.APPROVAL_REPLY
+    )
+    assert (
+        store.claim_semantic_consumer(obligation.key, DispatchSemanticConsumer.APPROVAL_REPLY)
+        is DispatchSemanticConsumer.APPROVAL_REPLY
+    )
+    with pytest.raises(ValueError, match="cannot consume"):
+        store.claim_semantic_consumer(obligation.key, DispatchSemanticConsumer.STOP_REACTION)
+    reaction = _reaction_obligation("$reaction-consumer")
+    store.create_pending(reaction)
+    assert (
+        store.claim_semantic_consumer(reaction.key, DispatchSemanticConsumer.STOP_REACTION)
+        is DispatchSemanticConsumer.STOP_REACTION
+    )
+    assert (
+        store.claim_semantic_consumer(reaction.key, DispatchSemanticConsumer.REACTION_HOOKS)
+        is DispatchSemanticConsumer.STOP_REACTION
+    )
+    assert _store(tmp_path).pending() == (
+        replace(obligation, semantic_consumer=DispatchSemanticConsumer.APPROVAL_REPLY, requires_pending_check=True),
+        replace(reaction, semantic_consumer=DispatchSemanticConsumer.STOP_REACTION, requires_pending_check=True),
+    )
 
 
 def test_existing_pending_payload_keeps_first_accepted_source(tmp_path: Path) -> None:
@@ -947,6 +995,91 @@ async def test_autonomous_retry_continues_until_transient_failure_recovers(tmp_p
 
     assert attempts == 7
     assert not store.has_pending("$bounded-retry", DispatchCallbackKind.MESSAGE)
+
+
+@pytest.mark.asyncio
+async def test_retry_worker_survives_transient_pending_discovery_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed liveness read must leave the exact retry owned by the same worker."""
+    store = _store(tmp_path)
+    obligation = _message_obligation("$retry-read")
+    store.create_pending(obligation)
+    owner = object()
+    callback = AsyncMock(return_value=DispatchCallbackResult.SUCCEEDED)
+    runner = _runner(
+        store,
+        callback,
+        background_task_owner=owner,
+        retry_initial_delay_seconds=0,
+        retry_max_delay_seconds=0,
+    )
+    real_has_pending = store.has_pending
+    reads = 0
+
+    def flaky_has_pending(source_event_id: str, callback_kind: DispatchCallbackKind) -> bool:
+        nonlocal reads
+        reads += 1
+        if reads == 1:
+            message = "transient sqlite read failure"
+            raise OSError(message)
+        return real_has_pending(source_event_id, callback_kind)
+
+    monkeypatch.setattr(store, "has_pending", flaky_has_pending)
+
+    runner._schedule_retry(obligation.key)
+    await wait_for_background_tasks(timeout=1, owner=owner)
+
+    assert reads >= 2
+    callback.assert_awaited_once()
+    assert not real_has_pending(obligation.source_event_id, obligation.callback_kind)
+
+
+@pytest.mark.asyncio
+async def test_replay_observes_consumer_claimed_before_interrupted_side_effect(tmp_path: Path) -> None:
+    """A crash after a side effect must not let replay rediscover another consumer."""
+    store = _store(tmp_path)
+    obligation = _message_obligation("$claimed-before-crash")
+    store.create_pending(obligation)
+    first_runner: DispatchObligationRunner
+
+    async def interrupted_callback(
+        _room: nio.MatrixRoom,
+        _event: nio.Event,
+    ) -> DispatchCallbackResult:
+        await first_runner.claim_semantic_consumer(DispatchSemanticConsumer.APPROVAL_REPLY)
+        message = "crash after approval side effect"
+        raise RuntimeError(message)
+
+    first_runner = _runner(
+        store,
+        interrupted_callback,
+        retry_initial_delay_seconds=3_600,
+        retry_max_delay_seconds=3_600,
+    )
+    await first_runner.recover_pending()
+    retry_task = first_runner._retry_task
+    assert retry_task is not None
+    retry_task.cancel()
+    with suppress(asyncio.CancelledError):
+        await retry_task
+
+    replayed_consumers: list[DispatchSemanticConsumer | None] = []
+    restarted_store = _store(tmp_path)
+    restarted_runner: DispatchObligationRunner
+
+    async def replay_callback(_room: nio.MatrixRoom, _event: nio.Event) -> DispatchCallbackResult:
+        replayed_consumers.append(restarted_runner.semantic_consumer())
+        with pytest.raises(ValueError, match="cannot consume"):
+            await restarted_runner.claim_semantic_consumer(DispatchSemanticConsumer.REACTION_HOOKS)
+        return DispatchCallbackResult.SUCCEEDED
+
+    restarted_runner = _runner(restarted_store, replay_callback)
+    await restarted_runner.recover_pending()
+
+    assert replayed_consumers == [DispatchSemanticConsumer.APPROVAL_REPLY]
+    assert not restarted_store.has_pending(obligation.source_event_id, obligation.callback_kind)
 
 
 @pytest.mark.asyncio
@@ -1538,55 +1671,26 @@ async def test_turn_callback_retry_preserves_recovery_deferral(tmp_path: Path) -
 
 
 @pytest.mark.asyncio
-async def test_reaction_recovery_has_callback_but_not_turn_recovery_context(tmp_path: Path) -> None:
-    """Reaction replay must expose transport recovery without impersonating a turn replay."""
-    observed_context: list[tuple[bool, bool]] = []
+async def test_repeated_pending_turn_admission_has_recovery_context(tmp_path: Path) -> None:
+    """A live duplicate of persisted turn work must use startup-replay semantics."""
+    observed_context: list[bool] = []
 
     async def callback(_room: nio.MatrixRoom, _event: nio.Event) -> DispatchCallbackResult:
-        observed_context.append((dispatch_recovery_active(), turn_dispatch_recovery_active()))
+        observed_context.append(turn_dispatch_recovery_active())
         return DispatchCallbackResult.SUCCEEDED
 
     store = _store(tmp_path)
-    store.create_pending(_reaction_obligation("$reaction-recovery"))
-    runner = DispatchObligationRunner(
-        store=store,
-        callbacks={DispatchCallbackKind.REACTION: callback},
-        room_for_id=lambda room_id: nio.MatrixRoom(room_id, _PRINCIPAL_ID),
-        turn_is_terminal=lambda _event_id: False,
-    )
-
-    await runner.recover_pending(turn_backed=False)
-
-    assert observed_context == [(True, False)]
-    assert not store.has_pending("$reaction-recovery", DispatchCallbackKind.REACTION)
-
-
-@pytest.mark.asyncio
-async def test_repeated_pending_admission_has_recovery_context(tmp_path: Path) -> None:
-    """A live duplicate of persisted work must use the same semantics as startup replay."""
-    observed_context: list[tuple[bool, bool]] = []
-
-    async def callback(_room: nio.MatrixRoom, _event: nio.Event) -> DispatchCallbackResult:
-        observed_context.append((dispatch_recovery_active(), turn_dispatch_recovery_active()))
-        return DispatchCallbackResult.SUCCEEDED
-
-    store = _store(tmp_path)
-    store.create_pending(_reaction_obligation("$repeated-reaction"))
-    runner = DispatchObligationRunner(
-        store=store,
-        callbacks={DispatchCallbackKind.REACTION: callback},
-        room_for_id=lambda room_id: nio.MatrixRoom(room_id, _PRINCIPAL_ID),
-        turn_is_terminal=lambda _event_id: False,
-    )
+    store.create_pending(_message_obligation("$repeated-message"))
+    runner = _runner(store, callback)
 
     await runner.dispatch(
         nio.MatrixRoom(_ROOM_ID, _PRINCIPAL_ID),
-        _reaction_event("$repeated-reaction"),
-        DispatchCallbackKind.REACTION,
+        _message_event("$repeated-message"),
+        DispatchCallbackKind.MESSAGE,
     )
 
-    assert observed_context == [(True, False)]
-    assert not store.has_pending("$repeated-reaction", DispatchCallbackKind.REACTION)
+    assert observed_context == [True]
+    assert not store.has_pending("$repeated-message", DispatchCallbackKind.MESSAGE)
 
 
 def test_deferred_turn_retry_schedules_only_the_exact_callback_kind(tmp_path: Path) -> None:
