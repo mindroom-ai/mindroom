@@ -105,7 +105,7 @@ It no longer sends messages, runs AI, or writes persistence state.
 Command handling now records terminal outcomes through `TurnStore` as well.
 Potentially mutating chat commands use an at-most-once execution-attempt journal: `TurnStore` records that execution is about to begin before the handler runs, then records the exact result before visible delivery.
 Recovery re-delivers a recorded result, while an interrupted execution attempt without a result is not rerun and instead produces an explicit uncertain-outcome response that requires the requester to inspect state before retrying.
-Incomplete turn groups bypass ordinary age and count cleanup until terminal settlement so their response intents and execution journals cannot expire while a dispatch obligation still owns recovery.
+Startup loads turn truth without pruning, recovers turn-backed dispatch obligations, then applies age and count cleanup while retaining pending redaction work, replayable incomplete turns, and every group referenced by a raw unsettled callback row.
 `!config set` uses a separate Matrix-backed `preview -> decision -> execution -> result` journal because its mutation begins only after the requester reacts to the preview.
 
 `TurnRecord` is the single immutable schema for turn identity, outcome, and regeneration facts.

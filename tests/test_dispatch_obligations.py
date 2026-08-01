@@ -31,7 +31,7 @@ from mindroom.dispatch_obligations import (
 )
 from mindroom.dispatch_recovery_context import turn_dispatch_recovery_active
 from mindroom.dispatch_source import IMAGE_SOURCE_KIND, MEDIA_SOURCE_KIND, VOICE_SOURCE_KIND
-from mindroom.handled_turns import HandledTurnLedger, TurnRecord
+from mindroom.handled_turns import HandledTurnLedger, TurnRecord, _reset_handled_turn_ledger_runtime
 from mindroom.matrix.media import MatrixMediaEvent, parse_matrix_media_event_source
 
 if TYPE_CHECKING:
@@ -223,6 +223,41 @@ async def test_aged_interrupted_command_journal_survives_pending_obligation_reco
     assert recovered_record is not None
     assert recovered_record.command_execution_started
     assert store.has_pending(event_id, DispatchCallbackKind.MESSAGE)
+
+
+@pytest.mark.asyncio
+async def test_startup_recovers_aged_completed_turn_before_cleanup(tmp_path: Path) -> None:
+    """Cleanup must not erase terminal truth before it settles the other durable store."""
+    event_id = "$completed-command"
+    tracking_path = tmp_path / "tracking"
+    ledger = HandledTurnLedger(_ENTITY_NAME, base_path=tracking_path)
+    ledger.record_handled_turn(
+        TurnRecord.create(
+            [event_id],
+            response_event_id="$response",
+            timestamp=time.time() - (40 * 24 * 60 * 60),
+        ),
+    )
+    ledger.flush()
+    store = _store(tmp_path)
+    obligation = _message_obligation(event_id)
+    store.create_pending(obligation)
+    store.mark_callback_deferred(obligation.key)
+    _reset_handled_turn_ledger_runtime()
+
+    restarted_ledger = HandledTurnLedger(_ENTITY_NAME, base_path=tracking_path)
+    restarted_ledger.load()
+    callback = AsyncMock(return_value=DispatchCallbackResult.DEFERRED)
+    runner = _runner(store, callback, turn_is_terminal=restarted_ledger.has_durably_responded)
+
+    await runner.recover_pending(turn_backed=True)
+    unsettled_source_event_ids = runner.unsettled_source_event_ids()
+    restarted_ledger.cleanup(unsettled_source_event_ids=unsettled_source_event_ids)
+
+    callback.assert_not_awaited()
+    assert not store.has_pending(event_id, DispatchCallbackKind.MESSAGE)
+    assert event_id not in unsettled_source_event_ids
+    assert restarted_ledger.get_turn_record(event_id) is None
 
 
 def test_store_connections_close_and_configure_concurrent_writes(tmp_path: Path) -> None:
@@ -491,6 +526,7 @@ def test_malformed_persisted_source_is_not_invented_into_recovery(tmp_path: Path
         callback_kind=DispatchCallbackKind.MESSAGE.value,
     )
     assert restarted.has_pending("$broken", DispatchCallbackKind.MESSAGE)
+    assert restarted.unsettled_source_event_ids() == frozenset({"$broken", "$valid"})
 
 
 @pytest.mark.asyncio

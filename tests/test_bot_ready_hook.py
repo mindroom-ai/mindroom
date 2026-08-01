@@ -171,6 +171,29 @@ def _plugin(name: str, callbacks: list[object]) -> object:
 
 
 @pytest.mark.asyncio
+async def test_turn_recovery_cleans_ledger_after_reading_unsettled_sources(tmp_path: Path) -> None:
+    """Startup cleanup must run after recovery and preserve every raw unsettled source."""
+    bot = _agent_bot(tmp_path)
+    call_order: list[str] = []
+    unsettled_source_event_ids = frozenset({"$pending"})
+    bot._dispatch_obligation_runner.recover_pending = AsyncMock(
+        side_effect=lambda **_kwargs: call_order.append("recover"),
+    )
+    bot._dispatch_obligation_runner.unsettled_source_event_ids = MagicMock(
+        side_effect=lambda: (call_order.append("unsettled"), unsettled_source_event_ids)[1],
+    )
+    bot._turn_store.cleanup = MagicMock(side_effect=lambda **_kwargs: call_order.append("cleanup"))
+
+    await bot.recover_pending_turn_dispatch_obligations()
+
+    assert call_order == ["recover", "unsettled", "cleanup"]
+    bot._dispatch_obligation_runner.recover_pending.assert_awaited_once_with(turn_backed=True)
+    bot._turn_store.cleanup.assert_called_once_with(
+        unsettled_source_event_ids=unsettled_source_event_ids,
+    )
+
+
+@pytest.mark.asyncio
 async def test_bot_ready_fires_on_first_sync_response(tmp_path: Path) -> None:
     """bot:ready should fire when the first sync response is received."""
     bot = _agent_bot(tmp_path)

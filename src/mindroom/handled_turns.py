@@ -29,7 +29,7 @@ from mindroom.message_target import MessageTarget
 from mindroom.timestamp_formatting import normalize_timestamp_ms
 
 if typing.TYPE_CHECKING:
-    from collections.abc import Callable, Sequence
+    from collections.abc import Callable, Collection, Sequence
     from pathlib import Path
 
 logger = get_logger(__name__)
@@ -595,6 +595,16 @@ class HandledTurnLedger:
         """Load and compact the persisted ledger; call from a worker thread, not the event loop."""
         self._cleanup_old_events()
 
+    def load(self) -> None:
+        """Load persisted truth without pruning records needed by later recovery."""
+        with self._state.lock:
+            self._wait_for_pending_persists_locked()
+            self._ensure_loaded_locked()
+
+    def cleanup(self, *, unsettled_source_event_ids: Collection[str] = ()) -> None:
+        """Compact terminal history while retaining truth still owned by dispatch."""
+        self._cleanup_old_events(unsettled_source_event_ids=unsettled_source_event_ids)
+
     def flush(self) -> None:
         """Block until every scheduled persist completes, propagating write failures."""
         with self._state.lock:
@@ -909,7 +919,13 @@ class HandledTurnLedger:
         }
         write_json_file_durable(self._responses_file, payload, temp_dir=self.base_path, indent=2)
 
-    def _cleanup_old_events(self, max_events: int = 10000, max_age_days: int = 30) -> None:
+    def _cleanup_old_events(
+        self,
+        max_events: int = 10000,
+        max_age_days: int = 30,
+        *,
+        unsettled_source_event_ids: Collection[str] = (),
+    ) -> None:
         """Drop stale persisted records by age and count, then reload shared memory."""
         with self._state.lock:
             self._wait_for_pending_persists_locked()
@@ -919,6 +935,7 @@ class HandledTurnLedger:
                     self._read_responses_file_locked(),
                     max_events=max_events,
                     max_age_days=max_age_days,
+                    unsettled_source_event_ids=unsettled_source_event_ids,
                 )
                 self._write_responses_file_locked(self._responses)
             self._state.loaded = True
@@ -1223,9 +1240,16 @@ class _ResponseGroup:
     records: dict[str, TurnRecord]
 
 
-def _response_group_requires_retention(group: _ResponseGroup) -> bool:
+def _response_group_requires_retention(
+    group: _ResponseGroup,
+    unsettled_source_event_ids: frozenset[str],
+) -> bool:
     """Return whether one group still owns unfinished durable work."""
-    return any(not record.completed or record.pending_redaction_cleanup_event_ids for record in group.records.values())
+    return (
+        not unsettled_source_event_ids.isdisjoint(group.records)
+        or any(record.pending_redaction_cleanup_event_ids for record in group.records.values())
+        or any(not record.completed and record.replay_source_event_ids for record in group.records.values())
+    )
 
 
 def _cleaned_responses(
@@ -1233,17 +1257,22 @@ def _cleaned_responses(
     *,
     max_events: int,
     max_age_days: int,
+    unsettled_source_event_ids: Collection[str] = (),
 ) -> dict[str, TurnRecord]:
     """Remove stale turn groups while keeping coalesced groups intact."""
     current_time = time.time()
     max_age_seconds = max_age_days * 24 * 60 * 60
+    retained_source_event_ids = frozenset(unsettled_source_event_ids)
     fresh_groups = [
         group
         for group in _response_groups(responses)
-        if _response_group_requires_retention(group) or current_time - group.timestamp < max_age_seconds
+        if _response_group_requires_retention(group, retained_source_event_ids)
+        or current_time - group.timestamp < max_age_seconds
     ]
     if len(fresh_groups) > max_events:
-        retained_groups = [group for group in fresh_groups if _response_group_requires_retention(group)]
+        retained_groups = [
+            group for group in fresh_groups if _response_group_requires_retention(group, retained_source_event_ids)
+        ]
         retained_group_ids = {id(group) for group in retained_groups}
         ordinary_groups = [group for group in fresh_groups if id(group) not in retained_group_ids]
         kept_ordinary_groups = ordinary_groups[-max_events:] if max_events else []

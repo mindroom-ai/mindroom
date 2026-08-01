@@ -618,6 +618,26 @@ class DispatchObligationStore:
                 )
         return tuple(obligations)
 
+    def unsettled_source_event_ids(self) -> frozenset[str]:
+        """Return raw source IDs whose callbacks are not terminal."""
+        with self._lock, self._connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT DISTINCT source_event_id
+                FROM dispatch_obligations
+                WHERE principal_id = ?
+                  AND entity_name = ?
+                  AND state IN (?, ?)
+                """,
+                (
+                    self.principal_id,
+                    self.entity_name,
+                    _PENDING_STATE,
+                    _DEFERRED_STATE,
+                ),
+            ).fetchall()
+        return frozenset(row["source_event_id"] for row in rows)
+
     def pending_for(self, key: _DispatchObligationKey) -> _DispatchObligation | None:
         """Reload the first durable payload for one still-pending exact key."""
         self._validate_bound_key(key)
@@ -1025,6 +1045,10 @@ class DispatchObligationRunner:
         for source_event_id in source_event_ids:
             for callback_kind in _TURN_BACKED_KINDS:
                 self.retry_pending_turn_source(source_event_id, callback_kind)
+
+    def unsettled_source_event_ids(self) -> frozenset[str]:
+        """Return raw source IDs that post-recovery turn cleanup must retain."""
+        return self.store.unsettled_source_event_ids()
 
     async def settle_intentionally_ignored_turn_source(
         self,

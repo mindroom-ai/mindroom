@@ -1642,6 +1642,13 @@ class AgentBot:
     async def recover_pending_turn_dispatch_obligations(self) -> None:
         """Release fleet-dependent turn replay after the responder startup pass."""
         await self._dispatch_obligation_runner.recover_pending(turn_backed=True)
+        unsettled_source_event_ids = await asyncio.to_thread(
+            self._dispatch_obligation_runner.unsettled_source_event_ids,
+        )
+        await asyncio.to_thread(
+            self._turn_store.cleanup,
+            unsettled_source_event_ids=unsettled_source_event_ids,
+        )
 
     async def try_start(self) -> bool:
         """Try to start the agent bot with smart retry logic.

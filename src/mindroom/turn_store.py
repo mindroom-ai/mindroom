@@ -20,7 +20,7 @@ from mindroom.history.storage import invalidate_compacted_replay, read_scope_see
 from mindroom.session_ids import create_session_id
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping
+    from collections.abc import Callable, Collection, Mapping
 
     import nio
 
@@ -88,8 +88,12 @@ class TurnStore:
         )
 
     def warm(self) -> None:
-        """Load the ledger before asynchronous startup recovery begins."""
-        self._ledger.warm()
+        """Load the ledger without pruning truth needed by startup recovery."""
+        self._ledger.load()
+
+    def cleanup(self, *, unsettled_source_event_ids: Collection[str] = ()) -> None:
+        """Compact terminal history after startup recovery identifies live sources."""
+        self._ledger.cleanup(unsettled_source_event_ids=unsettled_source_event_ids)
 
     def record_turn(self, turn_record: TurnRecord) -> None:
         """Persist one terminal turn, preserving any previously recorded optional facts."""

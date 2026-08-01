@@ -1251,6 +1251,45 @@ def test_cleanup_by_age_retains_incomplete_turn(temp_dir: Path) -> None:
     assert tracker.get_turn_record("$terminal") is None
 
 
+def test_cleanup_by_age_retains_terminal_turn_for_unsettled_source(temp_dir: Path) -> None:
+    """Cross-store cleanup must retain old terminal truth while dispatch still owns it."""
+    tracker = HandledTurnLedger("test_unsettled_age_cleanup", base_path=temp_dir)
+    tracker.record_handled_turn(
+        TurnRecord.create(
+            ["$terminal"],
+            response_event_id="$response",
+            timestamp=time.time() - (40 * 24 * 60 * 60),
+        ),
+    )
+    tracker.flush()
+
+    tracker.cleanup(unsettled_source_event_ids={"$terminal"})
+
+    assert tracker.get_turn_record("$terminal") is not None
+
+    tracker.cleanup()
+
+    assert tracker.get_turn_record("$terminal") is None
+
+
+def test_cleanup_by_age_removes_terminal_redaction_only_turn(temp_dir: Path) -> None:
+    """A fully redacted turn without cleanup or dispatch work must not live forever."""
+    tracker = HandledTurnLedger("test_redacted_age_cleanup", base_path=temp_dir)
+    tracker.record_handled_turn(
+        TurnRecord.create(
+            ["$redacted"],
+            redacted_source_event_ids=["$redacted"],
+            completed=False,
+            timestamp=time.time() - (40 * 24 * 60 * 60),
+        ),
+    )
+    tracker.flush()
+
+    tracker.cleanup()
+
+    assert tracker.get_turn_record("$redacted") is None
+
+
 def test_cleanup_by_count_retains_pending_redaction_intent(temp_dir: Path) -> None:
     """Count retention may exceed its limit rather than lose owed cleanup work."""
     tracker = HandledTurnLedger("test_pending_count_cleanup", base_path=temp_dir)
