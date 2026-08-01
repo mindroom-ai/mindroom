@@ -15,6 +15,7 @@ from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.entity_resolution import mindroom_user_id
 from mindroom.matrix import client as matrix_client
 from mindroom.matrix import rooms as matrix_rooms
+from mindroom.matrix.client_room_admin import RoomJoinOutcome
 from mindroom.matrix.state import MatrixState
 from mindroom.matrix_identifiers import managed_room_key_from_alias_localpart, managed_space_alias_localpart
 from mindroom.orchestrator import _MultiAgentOrchestrator
@@ -118,7 +119,7 @@ async def test_ensure_user_in_rooms_uses_managed_login_boundary(
         updated_state.save(runtime_paths=login_runtime_paths)
         return client
 
-    join_room = AsyncMock(return_value=True)
+    join_room = AsyncMock(return_value=RoomJoinOutcome.JOINED)
     monkeypatch.setattr(matrix_rooms, "login_agent_user", _login_user)
     monkeypatch.setattr(matrix_rooms, "join_room", join_room)
 
@@ -455,7 +456,10 @@ async def test_ensure_root_space_resolves_existing_alias_without_recreating(tmp_
         patch("mindroom.matrix.rooms.MatrixState.load", return_value=state),
         patch.object(MatrixState, "save", autospec=True) as mock_save,
         patch("mindroom.matrix.rooms.get_joined_rooms", new=AsyncMock(return_value=[])),
-        patch("mindroom.matrix.rooms.join_room", new=AsyncMock(return_value=True)) as mock_join,
+        patch(
+            "mindroom.matrix.rooms.join_room",
+            new=AsyncMock(return_value=RoomJoinOutcome.JOINED),
+        ) as mock_join,
         patch("mindroom.matrix.rooms.create_space", new=AsyncMock()) as mock_create,
         patch("mindroom.matrix.rooms.ensure_room_name", new=AsyncMock(return_value=True)) as mock_name,
         patch("mindroom.matrix.rooms.ensure_room_admin_power_levels", new=AsyncMock(return_value=True)) as mock_admins,
@@ -510,7 +514,10 @@ async def test_ensure_root_space_skips_existing_alias_when_router_cannot_join(tm
         patch("mindroom.matrix.rooms.MatrixState.load", return_value=state),
         patch.object(MatrixState, "save", autospec=True) as mock_save,
         patch("mindroom.matrix.rooms.get_joined_rooms", new=AsyncMock(return_value=[])),
-        patch("mindroom.matrix.rooms.join_room", new=AsyncMock(return_value=False)) as mock_join,
+        patch(
+            "mindroom.matrix.rooms.join_room",
+            new=AsyncMock(return_value=RoomJoinOutcome.RETRYABLE_FAILURE),
+        ) as mock_join,
         patch("mindroom.matrix.rooms.create_space", new=AsyncMock()) as mock_create,
         patch("mindroom.matrix.rooms.ensure_room_name", new=AsyncMock(return_value=True)) as mock_name,
         patch("mindroom.matrix.rooms.add_room_to_space", new=AsyncMock(return_value=True)) as mock_add,
@@ -798,7 +805,9 @@ async def test_update_config_matrix_space_change_reconciles_without_room_members
     router_bot = MagicMock()
     router_bot.config = initial_config
     router_bot.enable_streaming = True
+    router_bot.running = True
     router_bot._set_presence_with_model_info = AsyncMock()
+    router_bot.recover_pending_turn_dispatch_obligations = AsyncMock()
     orchestrator.agent_bots[ROUTER_AGENT_NAME] = router_bot
 
     with (

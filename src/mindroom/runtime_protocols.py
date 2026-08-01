@@ -32,7 +32,7 @@ class SupportsRunningState(Protocol):
     running: bool
 
 
-class OrchestratorRuntime(Protocol):
+class OrchestratorRuntime(SupportsRunningState, Protocol):
     """Narrow orchestrator surface used by extracted runtime collaborators."""
 
     @property

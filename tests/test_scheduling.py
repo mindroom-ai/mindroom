@@ -34,6 +34,7 @@ from mindroom.scheduling import (
     drain_deferred_overdue_tasks,
     edit_scheduled_task,
     get_pending_schedule_thread_ids_for_room,
+    get_scheduled_task,
     get_scheduled_tasks_for_room,
     list_scheduled_tasks,
     restore_scheduled_tasks,
@@ -1382,6 +1383,25 @@ async def test_cancel_scheduled_task_returns_error_when_state_write_fails() -> N
 
 
 @pytest.mark.asyncio
+async def test_cancel_scheduled_task_keeps_transient_state_read_retryable() -> None:
+    """A transient Matrix read failure must not become a terminal not-found result."""
+    client = AsyncMock()
+    client.room_get_state_event.return_value = nio.RoomGetStateEventError(
+        message="rate limited",
+        status_code="M_LIMIT_EXCEEDED",
+    )
+
+    with pytest.raises(RuntimeError, match="Failed to get scheduled task"):
+        await cancel_scheduled_task(
+            client=client,
+            room_id="!test:server",
+            task_id="taskcancel",
+        )
+
+    client.room_put_state.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_cancel_all_scheduled_tasks() -> None:
     """Test cancel_all_scheduled_tasks functionality."""
     # Create mock client
@@ -1653,6 +1673,19 @@ async def test_get_pending_schedule_thread_ids_raises_on_room_state_error() -> N
 
     with pytest.raises(RuntimeError, match="Failed to get scheduled task state"):
         await get_pending_schedule_thread_ids_for_room(client, "!test:server")
+
+
+@pytest.mark.asyncio
+async def test_get_scheduled_task_raises_on_transient_matrix_error() -> None:
+    """A transient checkpoint read failure must not look like an absent task."""
+    client = AsyncMock()
+    client.room_get_state_event.return_value = nio.RoomGetStateEventError.from_dict(
+        {"errcode": "M_LIMIT_EXCEEDED", "error": "Slow down"},
+        "!test:server",
+    )
+
+    with pytest.raises(RuntimeError, match="Failed to get scheduled task"):
+        await get_scheduled_task(client, "!test:server", "task123")
 
 
 @pytest.mark.asyncio

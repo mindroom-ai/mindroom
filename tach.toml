@@ -88,6 +88,25 @@ path = "mindroom.dynamic_workflows"
 depends_on = ["mindroom.durable_write"]
 
 [[modules]]
+path = "mindroom.dispatch_callback_outcome"
+depends_on = []
+visibility = [
+    "mindroom.bot",
+    "mindroom.dispatch_obligations",
+    "mindroom.turn_controller",
+]
+
+[[modules]]
+path = "mindroom.dispatch_obligations"
+depends_on = [
+    "mindroom.background_tasks",
+    "mindroom.dispatch_callback_outcome",
+    "mindroom.logging_config",
+    "mindroom.matrix.media",
+]
+visibility = ["mindroom.bot"]
+
+[[modules]]
 path = "mindroom.report_publishing"
 depends_on = ["mindroom.durable_write"]
 
@@ -2469,6 +2488,7 @@ depends_on = [
     "mindroom.matrix.visible_body",
 ]
 visibility = [
+    "mindroom.commands.config_confirmation",
     "mindroom.custom_tools.matrix_conversation_operations",
     "mindroom.custom_tools.matrix_room",
     "mindroom.custom_tools.thread_tags",
@@ -2477,6 +2497,8 @@ visibility = [
     "mindroom.matrix.conversation_cache",
     "mindroom.matrix.thread_room_scan",
     "mindroom.thread_export.execution",
+    "mindroom.turn_controller",
+    "mindroom.visible_voice_echo",
 ]
 
 [[modules]]
@@ -2754,6 +2776,8 @@ depends_on = [
     "mindroom.conversation_state_writer",
     "mindroom.delivery_gateway",
     "mindroom.desktop.pairing_receiver",
+    "mindroom.dispatch_callback_outcome",
+    "mindroom.dispatch_obligations",
     "mindroom.edit_regenerator",
     "mindroom.entity_resolution",
     "mindroom.hooks",
@@ -2790,6 +2814,7 @@ depends_on = [
     "mindroom.turn_controller",
     "mindroom.turn_policy",
     "mindroom.turn_store",
+    "mindroom.visible_voice_echo",
 ]
 
 [[modules]]
@@ -3019,8 +3044,10 @@ visibility = [
 path = "mindroom.commands.config_confirmation"
 depends_on = [
     "mindroom.commands.config_commands",
+    "mindroom.constants",
     "mindroom.delivery_gateway",
     "mindroom.logging_config",
+    "mindroom.matrix.client_thread_history",
 ]
 
 [[modules]]
@@ -3415,6 +3442,24 @@ depends_on = [
 visibility = ["mindroom.turn_controller"]
 
 [[modules]]
+path = "mindroom.visible_voice_echo"
+depends_on = [
+    "mindroom.authorization",
+    "mindroom.background_tasks",
+    "mindroom.constants",
+    "mindroom.delivery_gateway",
+    "mindroom.dispatch_handoff",
+    "mindroom.dispatch_recovery_context",
+    "mindroom.dispatch_source",
+    "mindroom.matrix.client_thread_history",
+    "mindroom.turn_origin",
+]
+visibility = [
+    "mindroom.bot",
+    "mindroom.turn_controller",
+]
+
+[[modules]]
 path = "mindroom.turn_controller"
 depends_on = [
     "mindroom.response_admission",
@@ -3422,6 +3467,7 @@ depends_on = [
     "mindroom.commands.parsing",
     "mindroom.constants",
     "mindroom.delivery_gateway",
+    "mindroom.dispatch_callback_outcome",
     "mindroom.dispatch_replay_guard",
     "mindroom.dispatch_source",
     "mindroom.dispatch_thread_context",
@@ -3430,6 +3476,7 @@ depends_on = [
     "mindroom.inbound_turn_normalizer",
     "mindroom.matrix.cache",
     "mindroom.matrix.cache.thread_reads",
+    "mindroom.matrix.client_thread_history",
     "mindroom.matrix.event_info",
     "mindroom.matrix.message_content",
     "mindroom.matrix.rooms",
@@ -3445,6 +3492,7 @@ depends_on = [
     "mindroom.timestamp_formatting",
     "mindroom.turn_store",
     "mindroom.turn_policy",
+    "mindroom.visible_voice_echo",
 ]
 
 [[modules]]
@@ -4059,6 +4107,7 @@ exclusive = true
 
 [[interfaces]]
 expose = [
+    "RoomJoinOutcome",
     "add_room_to_space",
     "create_room",
     "create_space",
@@ -4148,6 +4197,7 @@ expose = [
     "fetch_dispatch_thread_history",
     "fetch_dispatch_thread_snapshot",
     "fetch_thread_history",
+    "find_response_event_ids_via_room_messages",
     "get_room_threads_page",
     "log_thread_history_refresh",
     "refresh_thread_history_from_source",
@@ -4568,6 +4618,7 @@ expose = [
     "ToolApprovalScriptError",
     "ToolApprovalTransportError",
     "ToolCallWorkflowOrigin",
+    "can_handle_matrix_approval_action",
     "evaluate_tool_approval",
     "expire_orphaned_approval_cards_on_startup",
     "handle_matrix_approval_action",

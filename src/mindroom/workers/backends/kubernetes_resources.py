@@ -27,8 +27,11 @@ from pathlib import Path, PurePosixPath
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Protocol, cast
 
+import yaml
+
 from mindroom import constants
-from mindroom.constants import RuntimePaths, resolve_config_relative_path
+from mindroom.config.yaml_includes import load_yaml_config_source
+from mindroom.constants import RuntimePaths
 from mindroom.runtime_env_policy import (
     CREDENTIALS_ENCRYPTION_KEY_ENV,
     KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY,
@@ -40,12 +43,7 @@ from mindroom.runtime_env_policy import (
     credentials_encryption_key_value,
     worker_extra_env,
 )
-from mindroom.tool_system.worker_routing import (
-    descriptive_worker_id_for_key,
-    normalize_worker_key_part,
-    resolved_worker_key_scope,
-    worker_key_agent_name,
-)
+from mindroom.tool_system.worker_routing import descriptive_worker_id_for_key
 from mindroom.workers.backend import WorkerBackendError
 from mindroom.workers.backends._dedicated_worker_common import (
     plan_scoped_visible_state_roots,
@@ -584,85 +582,17 @@ def _deployment_snapshot(payload: object) -> KubernetesDeployment:
     )
 
 
-@dataclass(frozen=True, slots=True)
-class _KnowledgeStorageMountPlan:
-    relative_path: Path
-    mount_path: Path
-
-
-def _first_overlapping_path(path: Path, candidates: tuple[Path, ...]) -> Path | None:
-    return next(
-        (candidate for candidate in candidates if path.is_relative_to(candidate) or candidate.is_relative_to(path)),
-        None,
-    )
-
-
-def _plan_knowledge_storage_mounts(
-    relative_paths: tuple[Path, ...],
-    *,
-    mounted_storage_root: Path,
-    existing_mounts: tuple[dict[str, object], ...],
-    worker_key: str,
-) -> tuple[_KnowledgeStorageMountPlan, ...]:
-    storage_mount_paths = tuple(
-        Path(cast("str", mount["mountPath"]))
-        for mount in existing_mounts
-        if mount["name"] == WORKER_STORAGE_VOLUME_NAME
-    )
-    other_mount_paths = tuple(
-        Path(cast("str", mount["mountPath"]))
-        for mount in existing_mounts
-        if mount["name"] != WORKER_STORAGE_VOLUME_NAME
-    )
-    plans: list[_KnowledgeStorageMountPlan] = []
-    for relative_path in relative_paths:
-        mount_path = mounted_storage_root / relative_path
-        if collision := _first_overlapping_path(mount_path, other_mount_paths):
-            msg = (
-                f"Kubernetes knowledge mount overlaps existing mountPath for worker key {worker_key}: "
-                f"{mount_path} and {collision}"
-            )
-            raise WorkerBackendError(msg)
-        if any(mount_path.is_relative_to(existing_path) for existing_path in storage_mount_paths):
-            continue
-        if collision := _first_overlapping_path(mount_path, storage_mount_paths):
-            msg = (
-                f"Kubernetes knowledge mount overlaps existing mountPath for worker key {worker_key}: "
-                f"{mount_path} and {collision}"
-            )
-            raise WorkerBackendError(msg)
-        if collision := _first_overlapping_path(
-            mount_path,
-            tuple(plan.mount_path for plan in plans),
-        ):
-            msg = f"Kubernetes knowledge mount paths overlap for worker key {worker_key}: {mount_path} and {collision}"
-            raise WorkerBackendError(msg)
-        plans.append(_KnowledgeStorageMountPlan(relative_path=relative_path, mount_path=mount_path))
-    return tuple(plans)
-
-
-def _agent_names_addressed_by_worker_key(
-    worker_key: str,
-    resolved_agent_policies: Mapping[str, ResolvedAgentPolicy],
-) -> tuple[str, ...]:
-    scope = resolved_worker_key_scope(worker_key)
-    if scope == "user":
-        return tuple(
-            agent_name
-            for agent_name, policy in resolved_agent_policies.items()
-            if policy.effective_execution_scope == "user"
-        )
-
-    encoded_agent_name = worker_key_agent_name(worker_key)
-    if encoded_agent_name is None:
-        return ()
-    expected_scope = None if scope == "unscoped" else scope
-    return tuple(
-        agent_name
-        for agent_name, policy in resolved_agent_policies.items()
-        if policy.effective_execution_scope == expected_scope
-        and normalize_worker_key_part(agent_name) == encoded_agent_name
-    )[:1]
+def _resolved_agent_policies_for_runtime_paths(runtime_paths: RuntimePaths) -> dict[str, ResolvedAgentPolicy]:
+    try:
+        config_data, _source_files = load_yaml_config_source(runtime_paths.config_path)
+    except OSError:
+        return {}
+    except (yaml.YAMLError, UnicodeError) as exc:
+        msg = f"Failed to parse Kubernetes worker config for scoped storage planning: {exc}"
+        raise WorkerBackendError(msg) from exc
+    if not isinstance(config_data, dict):
+        return {}
+    return resolved_agent_policies_from_config_data(cast("dict[str, object]", config_data))
 
 
 class KubernetesResourceManager:
@@ -676,7 +606,6 @@ class KubernetesResourceManager:
         auth_token: str | None,
         storage_root: Path,
         tool_validation_snapshot: dict[str, dict[str, object]],
-        config_snapshot: dict[str, object],
         worker_grantable_credentials: frozenset[str],
     ) -> None:
         """Initialize one resource manager for a concrete backend configuration."""
@@ -686,8 +615,7 @@ class KubernetesResourceManager:
         self.storage_root = storage_root.expanduser().resolve()
         self.tool_validation_snapshot = tool_validation_snapshot
         self.worker_grantable_credentials = worker_grantable_credentials
-        self.config_snapshot = config_snapshot
-        self.resolved_agent_policies = resolved_agent_policies_from_config_data(config_snapshot)
+        self.resolved_agent_policies = _resolved_agent_policies_for_runtime_paths(runtime_paths)
         self.apps_api: _AppsApiProtocol | None = None
         self.core_api: _CoreApiProtocol | None = None
         self.api_exception_cls: type[_ApiStatusError] | None = None
@@ -1543,18 +1471,6 @@ class KubernetesResourceManager:
                     "readOnly": True,
                 },
             )
-        mounts.extend(
-            self._knowledge_storage_mounts(
-                worker_key,
-                mounted_storage_root=Path(self.config.storage_mount_path),
-                existing_mounts=tuple(mounts),
-            ),
-        )
-        validate_unique_worker_visible_paths(
-            (str(mount["mountPath"]) for mount in mounts),
-            worker_key=worker_key,
-            duplicate_label="Kubernetes mountPath",
-        )
         return mounts
 
     def _agent_vault_worker_ca_configmap_name(self) -> str | None:
@@ -1709,60 +1625,3 @@ class KubernetesResourceManager:
             duplicate_label="Kubernetes mountPath",
         )
         return mounts
-
-    def _knowledge_storage_mounts(
-        self,
-        worker_key: str,
-        *,
-        mounted_storage_root: Path,
-        existing_mounts: tuple[dict[str, object], ...],
-    ) -> list[dict[str, object]]:
-        plans = _plan_knowledge_storage_mounts(
-            self._assigned_knowledge_storage_paths(worker_key),
-            mounted_storage_root=mounted_storage_root,
-            existing_mounts=existing_mounts,
-            worker_key=worker_key,
-        )
-        return [
-            {
-                "name": WORKER_STORAGE_VOLUME_NAME,
-                "mountPath": str(plan.mount_path),
-                "subPath": str(plan.relative_path),
-                "readOnly": True,
-            }
-            for plan in plans
-        ]
-
-    def _assigned_knowledge_storage_paths(self, worker_key: str) -> tuple[Path, ...]:
-        raw_agents = self.config_snapshot.get("agents")
-        raw_knowledge_bases = self.config_snapshot.get("knowledge_bases")
-        if not isinstance(raw_agents, Mapping) or not isinstance(raw_knowledge_bases, Mapping):
-            return ()
-        agent_configs = cast("Mapping[str, object]", raw_agents)
-        knowledge_base_configs = cast("Mapping[str, object]", raw_knowledge_bases)
-
-        base_ids: set[str] = set()
-        for agent_name in _agent_names_addressed_by_worker_key(worker_key, self.resolved_agent_policies):
-            raw_agent = agent_configs.get(agent_name)
-            if not isinstance(raw_agent, Mapping):
-                continue
-            raw_base_ids = cast("Mapping[str, object]", raw_agent).get("knowledge_bases")
-            if isinstance(raw_base_ids, list):
-                base_ids.update(base_id for base_id in raw_base_ids if isinstance(base_id, str))
-
-        relative_paths: set[Path] = set()
-        for base_id in base_ids:
-            raw_base = knowledge_base_configs.get(base_id)
-            if not isinstance(raw_base, Mapping):
-                continue
-            raw_path = cast("Mapping[str, object]", raw_base).get("path")
-            if not isinstance(raw_path, str):
-                continue
-            source_path = resolve_config_relative_path(raw_path, self.runtime_paths)
-            try:
-                relative_paths.add(source_path.relative_to(self.storage_root))
-            except ValueError:
-                continue
-        ordered_paths = list(relative_paths)
-        ordered_paths.sort(key=lambda path: path.as_posix())
-        return tuple(ordered_paths)

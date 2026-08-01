@@ -679,10 +679,7 @@ async def test_stop_emoji_from_agent_falls_through(tmp_path: Path) -> None:
         },
     )
 
-    with (
-        patch("mindroom.bot.interactive.handle_reaction") as mock_handle_reaction,
-        patch("mindroom.bot.config_confirmation.get_pending_change", return_value=None),
-    ):
+    with patch("mindroom.bot.interactive.handle_reaction") as mock_handle_reaction:
         mock_handle_reaction.return_value = None  # No interactive result
 
         # Track a message as being generated

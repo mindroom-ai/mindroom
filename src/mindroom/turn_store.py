@@ -20,7 +20,7 @@ from mindroom.history.storage import invalidate_compacted_replay, read_scope_see
 from mindroom.session_ids import create_session_id
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Callable, Collection, Mapping
 
     import nio
 
@@ -51,6 +51,7 @@ class TurnStoreDeps:
     state_writer: ConversationStateWriter
     resolver: ConversationResolver
     tool_runtime: ToolRuntimeSupport
+    on_terminal_turn_persisted: Callable[[tuple[str, ...]], None] | None = None
 
 
 @dataclass(frozen=True)
@@ -87,8 +88,12 @@ class TurnStore:
         )
 
     def warm(self) -> None:
-        """Load the ledger before asynchronous startup recovery begins."""
-        self._ledger.warm()
+        """Load the ledger without pruning truth needed by startup recovery."""
+        self._ledger.load()
+
+    def cleanup(self, *, unsettled_source_event_ids: Collection[str] = ()) -> None:
+        """Compact terminal history after startup recovery identifies live sources."""
+        self._ledger.cleanup(unsettled_source_event_ids=unsettled_source_event_ids)
 
     def record_turn(self, turn_record: TurnRecord) -> None:
         """Persist one terminal turn, preserving any previously recorded optional facts."""
@@ -129,11 +134,19 @@ class TurnStore:
                 timestamp=0.0,
             )
 
-        self._ledger.update_handled_turn(turn_record.indexed_event_ids, terminal_record)
+        self._ledger.update_handled_turn(
+            turn_record.indexed_event_ids,
+            terminal_record,
+            on_persisted=self._notify_terminal_turn_persisted,
+        )
 
     def is_handled(self, event_id: str) -> bool:
         """Return whether one source event already has a terminal outcome."""
         return self._ledger.has_responded(event_id)
+
+    def is_durably_handled(self, event_id: str) -> bool:
+        """Return terminal truth only after its handled-turn ledger write completes."""
+        return self._ledger.has_durably_responded(event_id)
 
     def visible_echo_for_source(self, source_event_id: str) -> str | None:
         """Return the tracked visible echo for one source event."""
@@ -201,6 +214,16 @@ class TurnStore:
         """Return the ledger-backed canonical record for one source event."""
         return self._ledger.get_turn_record(source_event_id)
 
+    def has_pending_response_intent(self, source_event_ids: tuple[str, ...]) -> bool:
+        """Return whether these sources already own an incomplete response attempt."""
+        return any(
+            (record := self.get_turn_record(source_event_id)) is not None
+            and not record.completed
+            and record.response_owner is not None
+            and record.conversation_target is not None
+            for source_event_id in source_event_ids
+        )
+
     def record_pending_turn(self, turn_record: TurnRecord) -> TurnRecord | None:
         """Persist exact response context before generation reaches session storage."""
         if not turn_record.source_event_ids:
@@ -247,6 +270,11 @@ class TurnStore:
             merge_pending,
             wait_for_persist=True,
         )
+
+    def _notify_terminal_turn_persisted(self, turn_record: TurnRecord) -> None:
+        callback = self.deps.on_terminal_turn_persisted
+        if callback is not None:
+            callback(turn_record.indexed_event_ids)
 
     def try_claim_turn(self, turn_record: TurnRecord) -> bool:
         """Claim exclusive physical sources while aliases remain advisory."""
@@ -760,6 +788,8 @@ def _backfill_missing_turn_facts(authority: TurnRecord, recovery: TurnRecord) ->
         response_owner=authority.response_owner or recovery.response_owner,
         requester_id=authority.requester_id or recovery.requester_id,
         correlation_id=authority.correlation_id or recovery.correlation_id,
+        command_execution_started=authority.command_execution_started or recovery.command_execution_started,
+        command_result_text=authority.command_result_text or recovery.command_result_text,
         history_scope=authority.history_scope or recovery.history_scope,
         conversation_target=authority.conversation_target or recovery.conversation_target,
     )

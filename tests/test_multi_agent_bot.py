@@ -25,6 +25,7 @@ from mindroom.knowledge.utils import _KnowledgeResolution
 from mindroom.matrix.cache import ThreadHistoryResult
 from mindroom.matrix.cache.thread_history_result import thread_history_result
 from mindroom.matrix.client import PermanentMatrixStartupError
+from mindroom.matrix.client_room_admin import RoomJoinOutcome
 from mindroom.matrix.state import MatrixState
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.media_inputs import MediaInputs
@@ -179,6 +180,7 @@ class TestAgentBot(AgentBotTestBase):
         mock_client = AsyncMock()
         # add_event_callback is a sync method, not async
         mock_client.add_event_callback = MagicMock()
+        mock_client.add_event_admission_callback = MagicMock()
         mock_client.add_response_callback = MagicMock()
         mock_login.return_value = mock_client
 
@@ -201,8 +203,13 @@ class TestAgentBot(AgentBotTestBase):
         assert (
             mock_client.add_event_callback.call_count == 15
         )  # invite, message, redaction, reaction, audio, image/file/video, unknown-event, megolm callbacks
+        mock_client.add_event_admission_callback.assert_called_once()
         registered_event_types = [call.args[1] for call in mock_client.add_event_callback.call_args_list]
         assert nio.MegolmEvent in registered_event_types  # undecryptable events must not vanish silently
+        invite_callback = next(
+            call.args[0] for call in mock_client.add_event_callback.call_args_list if call.args[1] is nio.InviteEvent
+        )
+        assert invite_callback == bot._on_invite_before_sync_certification
 
     @pytest.mark.asyncio
     @patch("mindroom.config.main.load_config")
@@ -270,6 +277,7 @@ class TestAgentBot(AgentBotTestBase):
         mock_client = AsyncMock()
         mock_client.user_id = actual_user_id
         mock_client.add_event_callback = MagicMock()
+        mock_client.add_event_admission_callback = MagicMock()
         mock_client.add_response_callback = MagicMock()
         mock_ensure_user.return_value = None
 
@@ -301,6 +309,7 @@ class TestAgentBot(AgentBotTestBase):
         assert bot._turn_controller.deps.matrix_id.full_id == actual_user_id
         mock_init_persistence.assert_called_once_with(runtime_paths_for(config).storage_root)
         assert mock_client.add_event_callback.call_count == 15
+        mock_client.add_event_admission_callback.assert_called_once()
 
     @pytest.mark.asyncio
     @patch("mindroom.constants.runtime_matrix_homeserver", new=lambda *_args, **_kwargs: "http://localhost:8008")
@@ -380,6 +389,7 @@ class TestAgentBot(AgentBotTestBase):
         call_order: list[str] = []
         mock_client = AsyncMock()
         mock_client.add_event_callback = MagicMock()
+        mock_client.add_event_admission_callback = MagicMock()
         mock_client.add_response_callback = MagicMock()
 
         async def _sync_forever(*_args: object, **_kwargs: object) -> None:
@@ -458,7 +468,7 @@ class TestAgentBot(AgentBotTestBase):
         mock_event = MagicMock()
         mock_event.sender = "@user:localhost"
 
-        join_room = AsyncMock(return_value=True)
+        join_room = AsyncMock(return_value=RoomJoinOutcome.JOINED)
         with (
             patch("mindroom.bot_room_lifecycle.is_authorized_sender", return_value=True),
             patch("mindroom.bot_room_lifecycle.join_room", join_room),

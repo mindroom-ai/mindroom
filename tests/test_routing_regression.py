@@ -25,6 +25,7 @@ from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.constants import ORIGINAL_SENDER_KEY, SOURCE_KIND_KEY
 from mindroom.conversation_resolver import MessageContext
+from mindroom.dispatch_obligations import DispatchCallbackKind
 from mindroom.dispatch_source import TRUSTED_INTERNAL_RELAY_SOURCE_KIND
 from mindroom.hooks import MessageEnvelope
 from mindroom.knowledge.utils import _KnowledgeResolution
@@ -196,9 +197,56 @@ def _router_readiness_runtime(
     return router_bot, target_bot, orchestrator, room
 
 
+def _selective_router_recovery_runtime(
+    tmp_path: Path,
+) -> tuple[AgentBot, AgentBot, AgentBot, nio.MatrixRoom]:
+    """Return router recovery state with one ready and one unready room candidate."""
+    room_id = "!selective-router-recovery:localhost"
+    config = _runtime_bound_config(
+        Config(
+            agents={
+                "healthy": AgentConfig(display_name="Healthy", rooms=[room_id]),
+                "stuck": AgentConfig(display_name="Stuck", rooms=[room_id]),
+            },
+            authorization={"default_room_access": True},
+        ),
+        tmp_path,
+    )
+    runtime_paths = runtime_paths_for(config)
+    ids = entity_ids(config, runtime_paths)
+
+    def make_bot(entity_name: str) -> AgentBot:
+        user = AgentMatrixUser(entity_name, ids[entity_name].full_id, entity_name.title(), TEST_PASSWORD)
+        return setup_test_bot(user, tmp_path, room_id, config=config)
+
+    router_bot = make_bot("router")
+    healthy_bot = make_bot("healthy")
+    stuck_bot = make_bot("stuck")
+    orchestrator = _MultiAgentOrchestrator(runtime_paths)
+    orchestrator.config = config
+    orchestrator.agent_bots = {
+        "router": router_bot,
+        "healthy": healthy_bot,
+        "stuck": stuck_bot,
+    }
+    router_bot.orchestrator = orchestrator
+    router_bot.running = healthy_bot.running = stuck_bot.running = True
+    router_bot._first_sync_done = healthy_bot._first_sync_done = True
+    stuck_bot._first_sync_done = False
+    room = nio.MatrixRoom(room_id, ids["router"].full_id)
+    room.users = {
+        ids["healthy"].full_id: MagicMock(),
+        ids["stuck"].full_id: MagicMock(),
+        "@user:localhost": MagicMock(),
+    }
+    router_bot.client.rooms[room_id] = room
+    return router_bot, healthy_bot, stuck_bot, room
+
+
 def _router_readiness_event(event_id: str) -> nio.RoomMessageText:
     return nio.RoomMessageText.from_dict(
         {
+            "type": "m.room.message",
             "event_id": event_id,
             "sender": "@user:localhost",
             "origin_server_ts": 1_000,
@@ -419,6 +467,79 @@ class TestRoutingRegression:
     """Regression tests for routing behavior."""
 
     @pytest.mark.asyncio
+    @patch("mindroom.turn_controller.suggest_responder_for_message", new_callable=AsyncMock)
+    async def test_router_turn_recovery_defers_only_selected_unready_candidate(
+        self,
+        mock_suggest_responder: AsyncMock,
+        tmp_path: Path,
+    ) -> None:
+        """Recover ready selections while retaining only an exact unready target."""
+        router_bot, _healthy_bot, stuck_bot, room = _selective_router_recovery_runtime(tmp_path)
+        room_id = room.room_id
+        event = _router_readiness_event("$selective-recovery")
+        router_bot.client.room_send.return_value = nio.RoomSendResponse.from_dict(
+            {"event_id": "$router-response"},
+            room_id=room_id,
+        )
+        mock_suggest_responder.return_value = "healthy"
+        await router_bot._dispatch_obligation_runner.persist(
+            room,
+            event,
+            DispatchCallbackKind.MESSAGE,
+        )
+
+        await router_bot.recover_pending_turn_dispatch_obligations()
+        await drain_coalescing(router_bot)
+        assert await wait_for_background_tasks(timeout=1, owner=router_bot._runtime_view)
+        await router_bot.recover_pending_turn_dispatch_obligations()
+
+        mock_suggest_responder.assert_awaited_once()
+        content = router_bot.client.room_send.await_args.kwargs["content"]
+        assert content["body"] == "@mindroom_healthy:localhost could you help with this?"
+        assert not router_bot._dispatch_obligation_store.has_pending(
+            event.event_id,
+            DispatchCallbackKind.MESSAGE,
+        )
+
+        blocked_event = _router_readiness_event("$blocked-recovery")
+        mock_suggest_responder.reset_mock(return_value=True)
+        mock_suggest_responder.return_value = "stuck"
+        router_bot.client.room_send.reset_mock()
+        await router_bot._dispatch_obligation_runner.persist(
+            room,
+            blocked_event,
+            DispatchCallbackKind.MESSAGE,
+        )
+
+        await router_bot.recover_pending_turn_dispatch_obligations()
+        await drain_coalescing(router_bot)
+
+        mock_suggest_responder.assert_awaited_once()
+        router_bot.client.room_send.assert_not_awaited()
+        assert router_bot._dispatch_obligation_store.has_pending(
+            blocked_event.event_id,
+            DispatchCallbackKind.MESSAGE,
+        )
+        assert not router_bot._dispatch_obligation_runner._retry_keys
+
+        stuck_bot._first_sync_done = True
+        router_bot.client.room_send.return_value = nio.RoomSendResponse.from_dict(
+            {"event_id": "$stuck-router-response"},
+            room_id=room_id,
+        )
+        await router_bot.recover_pending_turn_dispatch_obligations()
+        await drain_coalescing(router_bot)
+        assert await wait_for_background_tasks(timeout=1, owner=router_bot._runtime_view)
+        await router_bot.recover_pending_turn_dispatch_obligations()
+
+        content = router_bot.client.room_send.await_args.kwargs["content"]
+        assert content["body"] == "@mindroom_stuck:localhost could you help with this?"
+        assert not router_bot._dispatch_obligation_store.has_pending(
+            blocked_event.event_id,
+            DispatchCallbackKind.MESSAGE,
+        )
+
+    @pytest.mark.asyncio
     async def test_router_relay_waits_for_target_first_sync(self, tmp_path: Path) -> None:
         """An unavailable target gets a visible status, then one relay after readiness."""
         router_bot, target_bot, _, room = _router_readiness_runtime(tmp_path)
@@ -503,11 +624,10 @@ class TestRoutingRegression:
             ),
         )
         await coalescing_gate.drain_all()
-        assert router_bot._runtime_view.callback_failure_count == 1
         router_bot._sync_cache_trust.state = SyncTrustState.CERTIFIED
         router_bot._sync_cache_trust.checkpoint = SyncCheckpoint("s_before_router_shutdown")
         await router_bot.prepare_for_sync_shutdown()
-        assert router_bot._sync_cache_trust.checkpoint is None
+        assert router_bot._sync_cache_trust.checkpoint == SyncCheckpoint("s_before_router_shutdown")
 
     @pytest.mark.asyncio
     async def test_mcp_catalog_restart_waits_for_admitted_router_relay_delivery(

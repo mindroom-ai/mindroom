@@ -68,6 +68,7 @@ MindRoom's architecture consists of several key components working together.
 | `coalescing.py` | Live message coalescing gate (text dispatches immediately; media waits for attachments and a trailing caption) |
 | `text_ingress_dispatch.py` | Text ingress dispatch path used by TurnController |
 | `turn_policy.py` | Pure turn policy: decide ignore, route, or respond for inbound turns |
+| `dispatch_obligations.py` | Durable exact Matrix callback acceptance, settlement, and startup recovery |
 | `turn_store.py` | Unified durable turn access (wraps the handled-turn ledger) |
 | `handled_turns.py` | Disk-backed handled-turn ledger preventing duplicate responses |
 | `response_runner.py` | Response lifecycle execution (locking, streaming vs non-streaming, cancellation, detached inbox responses, shutdown drains) |

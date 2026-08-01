@@ -334,7 +334,7 @@ async def test_handle_interactive_selection_threaded_streaming_keeps_reply_targe
     bot._delivery_gateway.send_text.assert_awaited_once()
     ack_request = bot._delivery_gateway.send_text.await_args.args[0]
     assert ack_request.target.resolved_thread_id == selection.thread_id
-    assert ack_request.target.reply_to_event_id is None
+    assert ack_request.target.reply_to_event_id == selection.question_event_id
     generate_response_mock.assert_awaited_once()
     assert captured_envelope is not None
     assert captured_envelope.source_event_id == "$selection:localhost"
@@ -410,12 +410,13 @@ async def test_handle_interactive_selection_does_not_mark_handled_when_runner_re
     generate_response_mock = AsyncMock(return_value=None)
     install_generate_response_mock(bot, generate_response_mock)
 
-    await bot._turn_controller.handle_interactive_selection(
-        room,
-        selection=selection,
-        user_id="@user:localhost",
-        source_event_id="$selection:localhost",
-    )
+    with pytest.raises(RuntimeError, match="no durable terminal outcome"):
+        await bot._turn_controller.handle_interactive_selection(
+            room,
+            selection=selection,
+            user_id="@user:localhost",
+            source_event_id="$selection:localhost",
+        )
 
     generate_response_mock.assert_awaited_once()
     bot._turn_controller.deps.turn_store.record_turn.assert_not_called()

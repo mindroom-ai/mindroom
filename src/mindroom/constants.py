@@ -20,6 +20,7 @@ from mindroom import runtime_env_policy
 # Agent names
 ROUTER_AGENT_NAME = "router"
 VISIBLE_ROUTER_VOICE_ECHO_KEY = "com.mindroom.visible_router_voice_echo"
+CONFIG_CONFIRMATION_REACTION_KEY = "com.mindroom.config_confirmation_reaction"
 DEFAULT_MINDROOM_URL = "http://127.0.0.1:8765"
 DEFAULT_COMPACTION_TIMEOUT_SECONDS = 600.0
 DEFAULT_TOOL_OUTPUT_AUTO_SAVE_THRESHOLD_BYTES = 50 * 1024

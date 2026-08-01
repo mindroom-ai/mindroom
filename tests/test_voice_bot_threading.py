@@ -51,6 +51,7 @@ from tests.conftest import (
 )
 
 if TYPE_CHECKING:
+    from mindroom.dispatch_callback_outcome import TurnDispatchOutcome
     from mindroom.handled_turns import TurnRecord
 
 
@@ -579,7 +580,7 @@ async def test_voice_message_signals_active_turn_before_stt(mock_home_bot: Agent
 
     turn_active = True
     queued_signal.begin_response_turn()
-    task: asyncio.Task[None] | None = None
+    task: asyncio.Task[TurnDispatchOutcome] | None = None
     try:
         with (
             patch.object(
@@ -890,7 +891,7 @@ async def test_room_mode_voice_notice_survives_until_queued_dispatch_owns_it(
 
     turn_active = True
     queued_signal.begin_response_turn()
-    task: asyncio.Task[None] | None = None
+    task: asyncio.Task[TurnDispatchOutcome] | None = None
     try:
         with (
             patch.object(
@@ -980,8 +981,8 @@ async def test_voice_and_text_followups_during_streaming_coalesce_in_receive_ord
             streaming_started.set()
             await release_streaming.wait()
 
-    first_task: asyncio.Task[None] | None = None
-    second_task: asyncio.Task[None] | None = None
+    first_task: asyncio.Task[TurnDispatchOutcome] | None = None
+    second_task: asyncio.Task[TurnDispatchOutcome] | None = None
     try:
         with (
             patch.object(
@@ -1086,7 +1087,7 @@ async def test_voice_first_text_second_uses_receive_order_when_stt_finishes_late
     ) -> None:
         dispatches.append((_handled_source_event_ids(handled_turn), dispatched_event.body))
 
-    voice_task: asyncio.Task[None] | None = None
+    voice_task: asyncio.Task[TurnDispatchOutcome] | None = None
     try:
         with (
             patch.object(
@@ -1176,7 +1177,7 @@ async def test_voice_first_text_second_waits_for_slow_thread_resolution(
     ) -> None:
         dispatches.append((_handled_source_event_ids(handled_turn), dispatched_event.body))
 
-    voice_task: asyncio.Task[None] | None = None
+    voice_task: asyncio.Task[TurnDispatchOutcome] | None = None
     try:
         with (
             patch.object(
@@ -1280,7 +1281,7 @@ async def test_root_voice_and_root_text_share_room_scope_while_stt_pending(
     ) -> None:
         dispatches.append((_handled_source_event_ids(handled_turn), dispatched_event.body))
 
-    voice_task: asyncio.Task[None] | None = None
+    voice_task: asyncio.Task[TurnDispatchOutcome] | None = None
     try:
         with (
             patch.object(
@@ -1366,7 +1367,7 @@ async def test_room_mode_voice_burst_dispatches_as_one_turn(mock_home_bot: Agent
     ) -> None:
         dispatches.append(_handled_source_event_ids(handled_turn))
 
-    voice_tasks: list[asyncio.Task[None]] = []
+    voice_tasks: list[asyncio.Task[TurnDispatchOutcome]] = []
     try:
         with (
             patch.object(
@@ -1400,7 +1401,7 @@ async def test_room_mode_voice_burst_dispatches_as_one_turn(mock_home_bot: Agent
 
 @pytest.mark.asyncio
 async def test_trusted_router_visible_voice_echo_is_display_only(mock_home_bot: AgentBot) -> None:
-    """Trusted router voice echoes should be marked handled and skipped by target agents."""
+    """Trusted router voice echoes should be skipped without growing target turn ledgers."""
     bot = mock_home_bot
     room = _threaded_room()
     echo_event = _threaded_prepared_text_event(
@@ -1436,7 +1437,7 @@ async def test_trusted_router_visible_voice_echo_is_display_only(mock_home_bot: 
         await drain_coalescing(bot)
 
     mock_dispatch.assert_not_awaited()
-    assert bot._turn_store.is_handled("$echo")
+    assert not bot._turn_store.is_handled("$echo")
 
 
 @pytest.mark.asyncio

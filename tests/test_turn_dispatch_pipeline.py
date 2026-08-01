@@ -346,7 +346,10 @@ class TestAgentBot(AgentBotTestBase):
         )
         bot.client = AsyncMock(spec=nio.AsyncClient)
 
-        with patch("mindroom.delivery_gateway.send_message_result", new=AsyncMock(return_value=None)):
+        with (
+            patch("mindroom.delivery_gateway.send_message_result", new=AsyncMock(return_value=None)),
+            pytest.raises(RuntimeError, match="requires a visible Matrix response event ID"),
+        ):
             await bot._turn_controller._execute_response_action(
                 room,
                 event,
@@ -358,9 +361,7 @@ class TestAgentBot(AgentBotTestBase):
                 handled_turn=TurnRecord.create([event.event_id]),
             )
 
-        tracker.record_handled_turn.assert_called_once_with(
-            TurnRecord.create([event.event_id]),
-        )
+        tracker.record_handled_turn.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_extract_dispatch_context_uses_bounded_full_thread_history(
@@ -2419,6 +2420,36 @@ class TestAgentBot(AgentBotTestBase):
         )
 
     @pytest.mark.asyncio
+    async def test_finalize_dispatch_failure_records_fallback_before_return(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """A replacement error must be durable before dispatch finalization resumes."""
+        config = self._config_for_storage(tmp_path)
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        _wrap_extracted_collaborators(bot)
+        bot.client = AsyncMock()
+        bot.logger = MagicMock()
+        bot._delivery_gateway.edit_text = AsyncMock(return_value=False)
+        bot._delivery_gateway.send_text = AsyncMock(return_value="$fallback-error")
+        _replace_turn_policy_deps(bot, delivery_gateway=bot._delivery_gateway)
+        persisted_event_ids: list[str] = []
+
+        async def record_visible_response(event_id: str) -> None:
+            persisted_event_ids.append(event_id)
+
+        resolution = await bot._turn_controller._finalize_dispatch_failure(
+            target=MessageTarget.resolve("!test:localhost", "$thread_root", "$event"),
+            error=RuntimeError("boom"),
+            existing_event_id="$placeholder",
+            on_visible_response=record_visible_response,
+        )
+
+        assert persisted_event_ids == ["$fallback-error"]
+        assert resolution == "$fallback-error"
+
+    @pytest.mark.asyncio
     async def test_finalize_dispatch_failure_uses_system_response_kind_for_team_bot(
         self,
         tmp_path: Path,
@@ -2603,6 +2634,7 @@ class TestAgentBot(AgentBotTestBase):
                     return_value=None,
                 ),
             ),
+            pytest.raises(RuntimeError, match="requires a visible Matrix response event ID"),
         ):
             await bot._turn_controller._execute_response_action(
                 room,

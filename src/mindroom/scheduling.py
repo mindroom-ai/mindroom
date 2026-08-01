@@ -629,11 +629,19 @@ async def get_scheduled_task(
         event_type=_SCHEDULED_TASK_EVENT_TYPE,
         state_key=task_id,
     )
+    if isinstance(response, nio.RoomGetStateEventError) and response.status_code == "M_NOT_FOUND":
+        return None
     if not isinstance(response, nio.RoomGetStateEventResponse):
-        return None
+        msg = f"Failed to get scheduled task {task_id!r} from room {room_id!r}: {response}"
+        raise RuntimeError(msg)  # noqa: TRY004
     if not isinstance(response.content, dict):
-        return None
-    return _parse_scheduled_task_record(room_id, task_id, response.content)
+        msg = f"Scheduled task {task_id!r} in room {room_id!r} has invalid state content"
+        raise TypeError(msg)
+    task = _parse_scheduled_task_record(room_id, task_id, response.content)
+    if task is None:
+        msg = f"Scheduled task {task_id!r} in room {room_id!r} has invalid state"
+        raise RuntimeError(msg)
+    return task
 
 
 async def _get_pending_task_record(
@@ -718,22 +726,23 @@ async def _persist_scheduled_task_state(
     matrix_admin: HookMatrixAdmin | None = None,
 ) -> None:
     """Persist scheduled task state to Matrix."""
+    content = {
+        "task_id": task_id,
+        "workflow": workflow.model_dump_json(),
+        "cron_description": (
+            workflow.cron_schedule.to_natural_language()
+            if workflow.schedule_type == "cron" and workflow.cron_schedule is not None
+            else None
+        ),
+        "status": status,
+        "created_at": _serialize_scheduled_task_created_at(created_at),
+        "updated_at": datetime.now(UTC).isoformat(),
+    }
     await _put_scheduled_task_state_content(
         client=client,
         room_id=room_id,
         task_id=task_id,
-        content={
-            "task_id": task_id,
-            "workflow": workflow.model_dump_json(),
-            "cron_description": (
-                workflow.cron_schedule.to_natural_language()
-                if workflow.schedule_type == "cron" and workflow.cron_schedule is not None
-                else None
-            ),
-            "status": status,
-            "created_at": _serialize_scheduled_task_created_at(created_at),
-            "updated_at": datetime.now(UTC).isoformat(),
-        },
+        content=content,
         matrix_admin=matrix_admin,
     )
 
@@ -1252,6 +1261,33 @@ def _history_limit_display(history_limit: int) -> str:
     return f"last {history_limit} message{'s' if history_limit != 1 else ''}"
 
 
+def _scheduled_task_response_text(
+    workflow: ScheduledWorkflow,
+    *,
+    task_id: str,
+    new_thread: bool,
+    config: Config,
+) -> str:
+    """Render the stable response persisted with one command-owned mutation."""
+    if workflow.schedule_type == "once" and workflow.execute_at:
+        response_text = f"✅ Scheduled for {_format_scheduled_time(workflow.execute_at, config.timezone)}\n"
+    elif workflow.cron_schedule:
+        natural_desc = workflow.cron_schedule.to_natural_language()
+        cron_str = workflow.cron_schedule.to_cron_string()
+        response_text = f"✅ Scheduled recurring task: **{natural_desc}**\n"
+        response_text += f"   _(Cron: `{cron_str}`)_\n"
+    else:
+        response_text = "✅ Task scheduled\n"
+
+    response_text += f"\n**Task:** {workflow.description}\n"
+    response_text += f"**Will post:** {workflow.message}\n"
+    if workflow.history_limit is not None:
+        response_text += f"**History:** {_history_limit_display(workflow.history_limit)}\n"
+    delivery = "New thread per fire" if new_thread else "Current room/thread scope"
+    response_text += f"**Delivery:** {delivery}\n"
+    return response_text + f"\n**Task ID:** `{task_id}`"
+
+
 async def schedule_task(  # noqa: C901, PLR0912, PLR0915
     runtime: SchedulingRuntime,
     room_id: str,
@@ -1382,6 +1418,12 @@ async def schedule_task(  # noqa: C901, PLR0912, PLR0915
 
     # Create task ID for new tasks (or reuse existing ID when editing)
     task_id = task_id or (existing_task.task_id if existing_task else str(uuid.uuid4())[:8])
+    response_text = _scheduled_task_response_text(
+        workflow_result,
+        task_id=task_id,
+        new_thread=new_thread,
+        config=config,
+    )
 
     logger.info(
         "Storing workflow task in Matrix state",
@@ -1418,29 +1460,7 @@ async def schedule_task(  # noqa: C901, PLR0912, PLR0915
     except ValueError as e:
         return (None, f"❌ Failed to schedule: {e!s}")
 
-    # Build success message
-    if workflow_result.schedule_type == "once" and workflow_result.execute_at:
-        # Format time with timezone and relative delta
-        formatted_time = _format_scheduled_time(workflow_result.execute_at, config.timezone)
-        success_msg = f"✅ Scheduled for {formatted_time}\n"
-    elif workflow_result.cron_schedule:
-        # Show both natural language and cron syntax
-        natural_desc = workflow_result.cron_schedule.to_natural_language()
-        cron_str = workflow_result.cron_schedule.to_cron_string()
-        success_msg = f"✅ Scheduled recurring task: **{natural_desc}**\n"
-        success_msg += f"   _(Cron: `{cron_str}`)_\n"
-    else:
-        success_msg = "✅ Task scheduled\n"
-
-    success_msg += f"\n**Task:** {workflow_result.description}\n"
-    success_msg += f"**Will post:** {workflow_result.message}\n"
-    if workflow_result.history_limit is not None:
-        success_msg += f"**History:** {_history_limit_display(workflow_result.history_limit)}\n"
-    delivery = "New thread per fire" if new_thread else "Current room/thread scope"
-    success_msg += f"**Delivery:** {delivery}\n"
-    success_msg += f"\n**Task ID:** `{task_id}`"
-
-    return (task_id, success_msg)
+    return (task_id, response_text)
 
 
 async def edit_scheduled_task(
@@ -1577,11 +1597,17 @@ async def cancel_scheduled_task(
         state_key=task_id,
     )
 
-    if not isinstance(response, nio.RoomGetStateEventResponse):
+    if isinstance(response, nio.RoomGetStateEventError) and response.status_code == "M_NOT_FOUND":
         return f"❌ Task `{task_id}` not found."
+    if not isinstance(response, nio.RoomGetStateEventResponse):
+        msg = f"Failed to get scheduled task {task_id!r} from room {room_id!r}: {response}"
+        raise RuntimeError(msg)  # noqa: TRY004
+    if not isinstance(response.content, dict):
+        msg = f"Scheduled task {task_id!r} in room {room_id!r} has invalid state content"
+        raise TypeError(msg)
 
     # Update to cancelled
-    existing_content = response.content if isinstance(response.content, dict) else None
+    existing_content = response.content
     try:
         await _put_scheduled_task_state_content(
             client=client,
@@ -1628,7 +1654,10 @@ async def cancel_all_scheduled_tasks(
                         client=client,
                         room_id=room_id,
                         task_id=task_id,
-                        content=_cancelled_task_content(task_id, existing_content),
+                        content=_cancelled_task_content(
+                            task_id,
+                            existing_content,
+                        ),
                         matrix_admin=matrix_admin,
                     )
                     _cancel_running_task(task_id)
@@ -1637,7 +1666,6 @@ async def cancel_all_scheduled_tasks(
                 except Exception:
                     logger.exception("scheduled_task_cancel_failed", task_id=task_id)
                     failed_count += 1
-
     if cancelled_count == 0:
         if failed_count > 0:
             return f"❌ Failed to cancel {failed_count} scheduled task(s)"

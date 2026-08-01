@@ -95,6 +95,14 @@ When complete, write a summary to .claude/REPORT.md including:
 
 ## Checking spawned agent results
 
+### Claude Code context compaction
+
+Claude Code automatically compacts its context when needed.
+Treat a high or full context meter as informational, not as a blocker.
+Never rush, interrupt, clear, or restart a Claude agent merely because its context meter is near 100%.
+Keep polling normally and let compaction finish.
+Intervene only on concrete evidence of a stuck command or lost progress, not on context-window usage alone.
+
 After spawning, you can check progress:
 
 ```bash

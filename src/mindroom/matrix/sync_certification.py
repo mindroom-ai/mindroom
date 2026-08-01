@@ -52,6 +52,7 @@ class SyncCertificationDecision:
     clear_saved_token: bool = False
     reset_client_token: bool = False
     reason: str | None = None
+    cache_scope_epoch: int | None = None
 
 
 def _uncertain_decision(

@@ -5,14 +5,16 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, cast
+from unittest.mock import AsyncMock, patch
 
 import nio
 import pytest
 
 from mindroom.bot_runtime_view import BotRuntimeState
 from mindroom.config.main import Config
-from mindroom.constants import ROUTER_AGENT_NAME
+from mindroom.constants import ROUTER_AGENT_NAME, VISIBLE_ROUTER_VOICE_ECHO_KEY
 from mindroom.dispatch_handoff import PreparedTextEvent
+from mindroom.dispatch_recovery_context import turn_dispatch_recovery_scope
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.logging_config import get_logger
 from mindroom.message_target import MessageTarget
@@ -214,6 +216,38 @@ async def test_responder_waits_for_claimed_echo_publication(tmp_path: Path) -> N
     harness.gateway.release_send.set()
     await finish
     assert await asyncio.wait_for(responder_wait, timeout=1) is True
+
+
+@pytest.mark.asyncio
+async def test_recovery_adopts_untracked_marked_echo_before_sending(tmp_path: Path) -> None:
+    """A hard crash after Matrix delivery must not create a second visible router echo."""
+    harness = _echo_harness(tmp_path, voice_enabled=True)
+    source_event_id = "$voice-recovery"
+    client = AsyncMock(spec=nio.AsyncClient)
+    client.user_id = cast("_RouterIngress", harness.router.deps.ingress).router_user_id
+    cast("BotRuntimeState", harness.router.deps.runtime).client = client
+
+    with (
+        turn_dispatch_recovery_scope(active=True),
+        patch(
+            "mindroom.visible_voice_echo.find_response_event_ids_via_room_messages",
+            new_callable=AsyncMock,
+            return_value=frozenset({"$orphaned-echo"}),
+        ) as find_echo,
+        patch.object(harness.gateway, "send_text", new_callable=AsyncMock) as send_text,
+        patch.object(harness.gateway, "edit_text", new_callable=AsyncMock, return_value=True) as edit_text,
+    ):
+        handle = harness.router.start(_request(source_event_id))
+        assert handle is not None
+        await harness.router.finish(handle, _normalized_event(source_event_id))
+
+    send_text.assert_not_awaited()
+    edit_text.assert_awaited_once()
+    assert edit_text.await_args.args[0].event_id == "$orphaned-echo"
+    assert harness.router.deps.turn_store.visible_echo_for_source(source_event_id) == "$orphaned-echo"
+    response_filter = find_echo.await_args.kwargs["response_source_filter"]
+    assert response_filter({"content": {VISIBLE_ROUTER_VOICE_ECHO_KEY: True}})
+    assert not response_filter({"content": {}})
 
 
 @pytest.mark.asyncio

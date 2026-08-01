@@ -27,6 +27,7 @@ from mindroom.history.types import HistoryScope
 from mindroom.message_target import MessageTarget
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from concurrent.futures import Future
     from pathlib import Path
 
@@ -154,6 +155,58 @@ def test_has_responded_empty(temp_dir: Path) -> None:
 
     assert not tracker.has_responded("event123")
     assert tracker.get_turn_record("event123") is None
+
+
+def test_durable_lookup_does_not_hold_state_lock_across_persist_barrier(temp_dir: Path) -> None:
+    """Disk durability waits must not block loop-side in-memory lookups."""
+    tracker = HandledTurnLedger("test_durable_lookup_lock", base_path=temp_dir)
+    tracker.warm()
+    real_persist = tracker._persist_records
+    persist_started = threading.Event()
+    release_persist = threading.Event()
+    durable_results: list[bool] = []
+    lookup_results: list[bool] = []
+    lookup_started = threading.Event()
+    lookup_done = threading.Event()
+
+    def persist_with_barrier(turn_records: tuple[TurnRecord, ...]) -> None:
+        persist_started.set()
+        assert release_persist.wait(timeout=5)
+        real_persist(turn_records)
+
+    def check_durable() -> None:
+        durable_results.append(tracker.has_durably_responded("$source"))
+
+    def check_in_memory() -> None:
+        lookup_started.set()
+        lookup_results.append(tracker.has_responded("$source"))
+        lookup_done.set()
+
+    with patch.object(tracker, "_persist_records", side_effect=persist_with_barrier):
+        tracker.record_handled_turn(TurnRecord.create(["$source"]))
+        assert persist_started.wait(timeout=5)
+        durable_thread = threading.Thread(target=check_durable)
+        durable_thread.start()
+        deadline = time.monotonic() + 5
+        while True:
+            with tracker._state.persist_lock:
+                barrier_queued = any(not request.records for request in tracker._state.pending_persists)
+            if barrier_queued:
+                break
+            assert time.monotonic() < deadline
+            time.sleep(0.001)
+
+        lookup_thread = threading.Thread(target=check_in_memory)
+        lookup_thread.start()
+        assert lookup_started.wait(timeout=5)
+        lookup_completed_before_disk = lookup_done.wait(timeout=1)
+        release_persist.set()
+        durable_thread.join(timeout=5)
+        lookup_thread.join(timeout=5)
+
+    assert lookup_completed_before_disk
+    assert durable_results == [True]
+    assert lookup_results == [True]
 
 
 def test_turn_record_normalizes_ids_and_prompt_map() -> None:
@@ -433,6 +486,26 @@ def test_turn_record_cannot_mutate_after_ledger_publication() -> None:
         record.response_event_id = "$replacement"  # type: ignore[misc]
 
 
+def test_command_execution_checkpoint_persists_across_restart(temp_dir: Path) -> None:
+    """Command effect and result evidence must survive process replacement."""
+    tracker = HandledTurnLedger("test_command_checkpoint", base_path=temp_dir)
+    tracker.record_handled_turn(
+        TurnRecord.create(
+            ["$command"],
+            completed=False,
+            command_execution_started=True,
+            command_result_text="✅ Applied once",
+        ),
+    )
+
+    recovered = _reload_ledger("test_command_checkpoint", temp_dir).get_turn_record("$command")
+
+    assert recovered is not None
+    assert recovered.completed is False
+    assert recovered.command_execution_started
+    assert recovered.command_result_text == "✅ Applied once"
+
+
 def test_source_event_revisions_persist_across_restart_and_run_recovery(temp_dir: Path) -> None:
     """Per-source edit order should survive both durable turn projections."""
     revisions = {
@@ -647,6 +720,36 @@ def test_exact_persist_waiter_does_not_wait_for_later_batches(temp_dir: Path) ->
     assert not first_thread.is_alive()
 
 
+def test_on_persisted_runs_on_worker_when_write_finishes_before_schedule_returns(
+    temp_dir: Path,
+) -> None:
+    """A fast persist must never notify inline on the ledger caller thread."""
+    tracker = HandledTurnLedger("test_persist_notification_thread", base_path=temp_dir)
+    tracker.warm()
+    caller_thread_id = threading.get_ident()
+    notification_thread_ids: list[int] = []
+    real_schedule = tracker._schedule_persist_locked
+
+    def schedule_after_completion(
+        turn_record: TurnRecord,
+        *,
+        on_persisted: Callable[[TurnRecord], None] | None = None,
+    ) -> Future[None]:
+        completion = real_schedule(turn_record, on_persisted=on_persisted)
+        completion.result(timeout=5)
+        return completion
+
+    with patch.object(tracker, "_schedule_persist_locked", side_effect=schedule_after_completion):
+        tracker.update_handled_turn(
+            ("$fast",),
+            lambda _existing: TurnRecord.create(["$fast"], completed=False),
+            on_persisted=lambda _record: notification_thread_ids.append(threading.get_ident()),
+        )
+
+    assert len(notification_thread_ids) == 1
+    assert notification_thread_ids[0] != caller_thread_id
+
+
 def test_transient_persist_failure_waiter_resolves_after_retry(temp_dir: Path) -> None:
     """A waiter must remain blocked until its successful retry persists."""
     tracker = HandledTurnLedger("test_transient_persist_waiter", base_path=temp_dir)
@@ -691,12 +794,13 @@ def test_transient_persist_failure_waiter_resolves_after_retry(temp_dir: Path) -
     assert "$retry" in _read_persisted_records(tracker)
 
 
-def test_failed_batch_retries_without_new_record_and_remains_flush_visible(temp_dir: Path) -> None:
-    """A failed batch should retry once and remain pending for a later flush."""
+def test_failed_batch_retries_autonomously_and_notifies_after_persist(temp_dir: Path) -> None:
+    """A terminal write must remain retry-owned without later ledger traffic."""
     tracker = HandledTurnLedger("test_persist_retry", base_path=temp_dir)
     tracker.warm()
     real_persist = tracker._persist_records
     second_failure = threading.Event()
+    persisted = threading.Event()
     attempts = 0
 
     def fail_twice_then_persist(turn_records: tuple[TurnRecord, ...]) -> None:
@@ -710,9 +814,13 @@ def test_failed_batch_retries_without_new_record_and_remains_flush_visible(temp_
         real_persist(turn_records)
 
     with patch.object(tracker, "_persist_records", side_effect=fail_twice_then_persist):
-        tracker.record_handled_turn(TurnRecord.create(["$retry"], completed=False))
+        tracker.update_handled_turn(
+            ("$retry",),
+            lambda _existing: TurnRecord.create(["$retry"], completed=True),
+            on_persisted=lambda _record: persisted.set(),
+        )
         assert second_failure.wait(timeout=5)
-        tracker.flush()
+        assert persisted.wait(timeout=1)
 
     assert attempts == 3
     assert "$retry" in _read_persisted_records(tracker)
@@ -749,8 +857,12 @@ def test_second_persist_failure_does_not_fail_waiter_queued_during_retry(temp_di
             raise OSError(second_failure)
         real_persist(turn_records)
 
-    def schedule_and_signal(turn_record: TurnRecord) -> Future[None]:
-        completion = real_schedule(turn_record)
+    def schedule_and_signal(
+        turn_record: TurnRecord,
+        *,
+        on_persisted: Callable[[TurnRecord], None] | None = None,
+    ) -> Future[None]:
+        completion = real_schedule(turn_record, on_persisted=on_persisted)
         if "$later" in turn_record.indexed_event_ids:
             later_scheduled.set()
         return completion
@@ -1116,6 +1228,68 @@ def test_cleanup_by_age_retains_pending_redaction_intent(temp_dir: Path) -> None
     assert tracker.get_turn_record("$ordinary") is None
 
 
+def test_cleanup_by_age_retains_incomplete_turn(temp_dir: Path) -> None:
+    """Age cleanup must not discard a turn whose durable work is unfinished."""
+    tracker = HandledTurnLedger("test_incomplete_age_cleanup", base_path=temp_dir)
+    old_timestamp = time.time() - (40 * 24 * 60 * 60)
+    tracker.record_handled_turn(
+        TurnRecord.create(
+            ["$incomplete"],
+            completed=False,
+            command_execution_started=True,
+            timestamp=old_timestamp,
+        ),
+    )
+    tracker.record_handled_turn(TurnRecord.create(["$terminal"], timestamp=old_timestamp))
+    tracker.flush()
+
+    tracker._cleanup_old_events(max_events=100, max_age_days=30)
+
+    incomplete = tracker.get_turn_record("$incomplete")
+    assert incomplete is not None
+    assert incomplete.command_execution_started
+    assert tracker.get_turn_record("$terminal") is None
+
+
+def test_cleanup_by_age_retains_terminal_turn_for_unsettled_source(temp_dir: Path) -> None:
+    """Cross-store cleanup must retain old terminal truth while dispatch still owns it."""
+    tracker = HandledTurnLedger("test_unsettled_age_cleanup", base_path=temp_dir)
+    tracker.record_handled_turn(
+        TurnRecord.create(
+            ["$terminal"],
+            response_event_id="$response",
+            timestamp=time.time() - (40 * 24 * 60 * 60),
+        ),
+    )
+    tracker.flush()
+
+    tracker.cleanup(unsettled_source_event_ids={"$terminal"})
+
+    assert tracker.get_turn_record("$terminal") is not None
+
+    tracker.cleanup()
+
+    assert tracker.get_turn_record("$terminal") is None
+
+
+def test_cleanup_by_age_removes_terminal_redaction_only_turn(temp_dir: Path) -> None:
+    """A fully redacted turn without cleanup or dispatch work must not live forever."""
+    tracker = HandledTurnLedger("test_redacted_age_cleanup", base_path=temp_dir)
+    tracker.record_handled_turn(
+        TurnRecord.create(
+            ["$redacted"],
+            redacted_source_event_ids=["$redacted"],
+            completed=False,
+            timestamp=time.time() - (40 * 24 * 60 * 60),
+        ),
+    )
+    tracker.flush()
+
+    tracker.cleanup()
+
+    assert tracker.get_turn_record("$redacted") is None
+
+
 def test_cleanup_by_count_retains_pending_redaction_intent(temp_dir: Path) -> None:
     """Count retention may exceed its limit rather than lose owed cleanup work."""
     tracker = HandledTurnLedger("test_pending_count_cleanup", base_path=temp_dir)
@@ -1134,6 +1308,28 @@ def test_cleanup_by_count_retains_pending_redaction_intent(temp_dir: Path) -> No
 
     assert tracker.get_turn_record("$pending") is not None
     assert tracker.pending_redaction_cleanup_event_ids() == ("$pending",)
+    assert tracker.get_turn_record("$newest") is not None
+
+
+def test_cleanup_by_count_retains_incomplete_turn(temp_dir: Path) -> None:
+    """Count cleanup may exceed its limit rather than discard unfinished work."""
+    tracker = HandledTurnLedger("test_incomplete_count_cleanup", base_path=temp_dir)
+    tracker.record_handled_turn(
+        TurnRecord.create(
+            ["$incomplete"],
+            completed=False,
+            command_execution_started=True,
+            timestamp=time.time() - 2,
+        ),
+    )
+    tracker.record_handled_turn(TurnRecord.create(["$newest"], timestamp=time.time()))
+    tracker.flush()
+
+    tracker._cleanup_old_events(max_events=1, max_age_days=30)
+
+    incomplete = tracker.get_turn_record("$incomplete")
+    assert incomplete is not None
+    assert incomplete.command_execution_started
     assert tracker.get_turn_record("$newest") is not None
 
 

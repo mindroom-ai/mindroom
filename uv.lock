@@ -4515,7 +4515,7 @@ requires-dist = [
     { name = "mdit-py-plugins", specifier = ">=0.5" },
     { name = "mem0ai", specifier = ">=0.1.115" },
     { name = "mem0ai", marker = "extra == 'mem0'", specifier = ">=0.1.115" },
-    { name = "mindroom-nio", extras = ["e2e"], specifier = "==0.31" },
+    { name = "mindroom-nio", extras = ["e2e"], specifier = "==0.33.0" },
     { name = "moviepy", marker = "extra == 'moviepy-video-tools'" },
     { name = "neo4j", marker = "extra == 'neo4j'" },
     { name = "newspaper4k", marker = "extra == 'newspaper'" },
@@ -4625,7 +4625,7 @@ dev = [
 
 [[package]]
 name = "mindroom-nio"
-version = "0.31.0"
+version = "0.33.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "aiofiles" },
@@ -4637,9 +4637,9 @@ dependencies = [
     { name = "pycryptodome" },
     { name = "unpaddedbase64" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/f0/88/ff684847de83744240387dd2fa345feabc103cbde140c81ef770b6040fd7/mindroom_nio-0.31.0.tar.gz", hash = "sha256:972f43a6e3b6390ba7123f250162898ad8c35f525efb970e5f1d10c6bc18095c", size = 185977, upload-time = "2026-07-25T18:38:23.624Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/9f/36/90c59e8db1ec3bff7da979687f62bd985f1ec8c7870d27424e1004bac441/mindroom_nio-0.33.0.tar.gz", hash = "sha256:f3abb390d47f5ea81ae7d90eef45c6e639d889f3ad9f60a77213e1344ed89f90", size = 201528, upload-time = "2026-07-31T15:51:37.414Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/83/66/c62a1cb25f217f118e67f5437420bdd3005964a21e3a5182b5ee4d51943f/mindroom_nio-0.31.0-py3-none-any.whl", hash = "sha256:9f7a160db13dc4f90f37e0c0cf88d3c008ac47ac2e61b88672e1cf7130fed939", size = 214365, upload-time = "2026-07-25T18:38:22.069Z" },
+    { url = "https://files.pythonhosted.org/packages/fa/95/e33eecec18c04983567ef253227d341e8e2566d9cfafabd0fbddc379f81f/mindroom_nio-0.33.0-py3-none-any.whl", hash = "sha256:36bd49c98f358fcbbc75af74e00cf98d7b91d634225482119f8c579a6df4b355", size = 230642, upload-time = "2026-07-31T15:51:36.095Z" },
 ]
 
 [package.optional-dependencies]

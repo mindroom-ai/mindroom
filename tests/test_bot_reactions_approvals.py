@@ -134,7 +134,7 @@ class TestAgentBot(AgentBotTestBase):
             },
         }
 
-        with patch("mindroom.bot.interactive.handle_reaction", new=AsyncMock(return_value=False)):
+        with patch("mindroom.bot.interactive.handle_reaction", new=AsyncMock(return_value=None)):
             await bot._on_reaction(room, event)
 
         assert seen == [("👍", "$question", "$thread-root")]
@@ -180,6 +180,42 @@ class TestAgentBot(AgentBotTestBase):
             await bot._on_reaction(room, event)
 
         assert seen == []
+
+    @pytest.mark.asyncio
+    async def test_interactive_reaction_failure_restores_question_for_durable_retry(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """A failed selection handoff must leave its question answerable on exact retry."""
+        interactive._cleanup()
+        config = self._config_for_storage(tmp_path)
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
+        room = MagicMock()
+        room.room_id = "!test:localhost"
+        event = self._make_handler_event("reaction", sender="@user:localhost", event_id="$reaction")
+        interactive._active_questions["$question"] = interactive._InteractiveQuestion(
+            room_id=room.room_id,
+            thread_id=None,
+            options={"👍": "approve"},
+            creator_agent=bot.agent_name,
+        )
+
+        try:
+            with (
+                patch.object(
+                    bot._turn_controller,
+                    "_execute_interactive_selection",
+                    new=AsyncMock(side_effect=OSError("pending write failed")),
+                ),
+                pytest.raises(OSError, match="pending write failed"),
+            ):
+                await bot._on_reaction(room, event)
+
+            assert "$question" in interactive._active_questions
+        finally:
+            interactive._cleanup()
 
     @pytest.mark.asyncio
     async def test_interactive_reaction_selection_reserves_prompt_order(
@@ -406,10 +442,15 @@ class TestAgentBot(AgentBotTestBase):
                 "content": {"approval_id": "approval-1", "status": "approved"},
             },
         )
-        with patch(
-            "mindroom.approval_inbound.handle_matrix_approval_action",
-            new=AsyncMock(return_value=ApprovalActionResult(consumed=True, resolved=True, card_event_id="$approval")),
-        ) as handle_matrix_approval_action:
+        with (
+            patch("mindroom.approval_inbound.can_handle_matrix_approval_action", new=AsyncMock(return_value=True)),
+            patch(
+                "mindroom.approval_inbound.handle_matrix_approval_action",
+                new=AsyncMock(
+                    return_value=ApprovalActionResult(consumed=True, resolved=True, card_event_id="$approval"),
+                ),
+            ) as handle_matrix_approval_action,
+        ):
             await bot._on_unknown_event(room, event)
 
         handle_matrix_approval_action.assert_awaited_once_with(
@@ -894,10 +935,13 @@ class TestAgentBot(AgentBotTestBase):
         event.sender = "@user:localhost"
         event.event_id = "$reaction"
         event.source = {"content": {}}
-        with patch(
-            "mindroom.approval_inbound.handle_matrix_approval_action",
-            new=AsyncMock(return_value=ApprovalActionResult(consumed=True, resolved=True)),
-        ) as handle_matrix_approval_action:
+        with (
+            patch("mindroom.approval_inbound.can_handle_matrix_approval_action", new=AsyncMock(return_value=True)),
+            patch(
+                "mindroom.approval_inbound.handle_matrix_approval_action",
+                new=AsyncMock(return_value=ApprovalActionResult(consumed=True, resolved=True)),
+            ) as handle_matrix_approval_action,
+        ):
             await bot._on_reaction(room, event)
 
         handle_matrix_approval_action.assert_awaited_once_with(
@@ -965,7 +1009,7 @@ class TestAgentBot(AgentBotTestBase):
             },
         }
 
-        with patch("mindroom.bot.interactive.handle_reaction", new=AsyncMock(return_value=False)):
+        with patch("mindroom.bot.interactive.handle_reaction", new=AsyncMock(return_value=None)):
             await bot._on_reaction(room, event)
 
         assert seen == [("$plain-reply", "$thread-root")]
@@ -996,7 +1040,7 @@ class TestAgentBot(AgentBotTestBase):
         event = self._make_handler_event("reaction", sender="@user:localhost", event_id="$reaction")
         event.reacts_to = "$plain-reply"
 
-        with patch("mindroom.bot.interactive.handle_reaction", new=AsyncMock(return_value=False)):
+        with patch("mindroom.bot.interactive.handle_reaction", new=AsyncMock(return_value=None)):
             await bot._on_reaction(room, event)
 
         bot._conversation_resolver.resolve_related_event_thread_id_dispatch_snapshot_best_effort.assert_awaited_once_with(
@@ -1092,7 +1136,7 @@ class TestAgentBot(AgentBotTestBase):
             },
         }
 
-        with patch("mindroom.bot.interactive.handle_reaction", new=AsyncMock(return_value=False)):
+        with patch("mindroom.bot.interactive.handle_reaction", new=AsyncMock(return_value=None)):
             await bot._on_reaction(room, event)
 
         assert seen == [("$plain-reply-2", "$thread-root")]

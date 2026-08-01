@@ -12,7 +12,12 @@ from unittest.mock import AsyncMock, Mock
 import nio
 import pytest
 
-from mindroom.constants import STREAM_STATUS_KEY, RuntimePaths
+from mindroom.constants import (
+    CONFIG_CONFIRMATION_REACTION_KEY,
+    STREAM_STATUS_KEY,
+    VISIBLE_ROUTER_VOICE_ECHO_KEY,
+    RuntimePaths,
+)
 from mindroom.matrix import client_session
 from mindroom.matrix.client_session import (
     PermanentMatrixStartupError,
@@ -23,8 +28,8 @@ from mindroom.matrix.client_session import (
 )
 
 
-def test_encryption_exposes_only_mindroom_stream_status(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Encrypted stream events expose status but no private message fields."""
+def test_encryption_exposes_only_mindroom_recovery_markers(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Encrypted events expose recovery markers but no private message fields."""
     relation = {"event_id": "$original:example.org", "rel_type": "m.replace"}
 
     def fake_encrypt(
@@ -50,6 +55,8 @@ def test_encryption_exposes_only_mindroom_stream_status(monkeypatch: pytest.Monk
             "m.mentions": {"user_ids": ["@private:example.org"]},
             "msgtype": "m.notice",
             STREAM_STATUS_KEY: "streaming",
+            VISIBLE_ROUTER_VOICE_ECHO_KEY: True,
+            CONFIG_CONFIRMATION_REACTION_KEY: "$reaction",
         },
     )
 
@@ -59,6 +66,8 @@ def test_encryption_exposes_only_mindroom_stream_status(monkeypatch: pytest.Monk
         "ciphertext": "encrypted payload",
         "m.relates_to": relation,
         STREAM_STATUS_KEY: "streaming",
+        VISIBLE_ROUTER_VOICE_ECHO_KEY: True,
+        CONFIG_CONFIRMATION_REACTION_KEY: "$reaction",
     }
 
 

@@ -15,16 +15,19 @@ from mindroom.cancellation import SYNC_RESTART_CANCEL_MSG
 from mindroom.coalescing import CoalescingGate, IngressAdmissionClosedError, ReadyPendingEvent
 from mindroom.coalescing_batch import CoalescingKey, PendingEvent
 from mindroom.constants import ORIGINAL_SENDER_KEY, SOURCE_KIND_KEY, VISIBLE_ROUTER_VOICE_ECHO_KEY
+from mindroom.dispatch_callback_outcome import TurnDispatchOutcome
 from mindroom.dispatch_handoff import PendingDispatchMetadata, PreparedTextEvent
+from mindroom.dispatch_obligations import DispatchCallbackKind, DispatchObligationRunner
 from mindroom.dispatch_source import (
     ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
+    MEDIA_SOURCE_KIND,
     TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
     VOICE_SOURCE_KIND,
 )
 from mindroom.matrix.thread_membership import ThreadMembershipLookupError
 from mindroom.message_target import MessageTarget
 from mindroom.runtime_shutdown import SYNC_RESTART_SHUTDOWN
-from tests.conftest import prepared_dispatch_result, unwrap_extracted_collaborator
+from tests.conftest import prepared_dispatch_result, replace_turn_controller_deps, unwrap_extracted_collaborator
 from tests.test_live_message_coalescing import (
     _enqueue_for_dispatch,
     _image_event,
@@ -85,6 +88,8 @@ def _gate(
     room_scope_is_single_conversation: bool | None = None,
     dispatch_allowed_now: Callable[[CoalescingKey], bool] | bool | None = None,
     wait_until_dispatch_allowed: Callable[[CoalescingKey], Awaitable[None]] | None = None,
+    on_undelivered_source: Callable[[str, str], None] | None = None,
+    on_intentionally_ignored_source: Callable[[str, str], Awaitable[None]] | None = None,
 ) -> tuple[CoalescingGate, list[CoalescedBatch]]:
     batches: list[CoalescedBatch] = []
 
@@ -104,6 +109,8 @@ def _gate(
             None if room_scope_is_single_conversation is None else lambda _room_id: room_scope_is_single_conversation
         ),
         dispatch_allowed_now=dispatch_allowed_now,
+        on_undelivered_source=on_undelivered_source,
+        on_intentionally_ignored_source=on_intentionally_ignored_source,
     )
     return gate, batches
 
@@ -425,9 +432,11 @@ async def test_router_command_targeting_unresolved_conversation_fails_visibly(tm
 
 
 @pytest.mark.asyncio
-async def test_non_router_agent_marks_unresolvable_command_handled_without_notice(tmp_path: Path) -> None:
-    """Non-router agents drop unresolvable commands quietly but never guess a target."""
+async def test_non_router_agent_settles_unresolvable_command_without_notice(tmp_path: Path) -> None:
+    """Non-router agents explicitly ignore unresolvable commands without growing the turn ledger."""
     bot = _make_bot(tmp_path)
+    settle_ignored = AsyncMock()
+    replace_turn_controller_deps(bot, settle_ignored_dispatch_sources=settle_ignored)
     room = _make_room()
     command_event = _text_event(event_id="$cmd", body="!help", server_timestamp=1000, thread_id="$pending_root")
     send_text_mock = AsyncMock(return_value="$notice")
@@ -445,7 +454,8 @@ async def test_non_router_agent_marks_unresolvable_command_handled_without_notic
 
     send_text_mock.assert_not_awaited()
     dispatch_mock.assert_not_awaited()
-    assert bot._turn_store.is_handled("$cmd")
+    settle_ignored.assert_awaited_once_with(("$cmd",))
+    assert not bot._turn_store.is_handled("$cmd")
 
 
 @pytest.mark.asyncio
@@ -499,6 +509,123 @@ async def test_failed_lane_readiness_does_not_block_later_same_sender_work() -> 
 
     await _wait_for(lambda: [batch.source_event_ids for batch in batches] == [["$text"]])
     await gate.drain_all()
+
+
+@pytest.mark.asyncio
+async def test_failed_lane_readiness_reports_original_callback_source_kind() -> None:
+    """Lane failure must return a transformed sidecar to its MEDIA callback owner."""
+    undelivered_sources: list[tuple[str, str]] = []
+    gate, _batches = _gate(
+        debounce_seconds=0.0,
+        on_undelivered_source=lambda event_id, source_kind: undelivered_sources.append((event_id, source_kind)),
+    )
+
+    async def failing_ready() -> ReadyPendingEvent:
+        msg = "sidecar hydration failed"
+        raise RuntimeError(msg)
+
+    slot = gate.enter_lane(room_id="!room:localhost", sender_id="@user:localhost")
+    gate.submit_lane_slot(
+        slot,
+        key=CoalescingKey("!room:localhost", "$thread", "@user:localhost"),
+        source_event_id="$sidecar",
+        source_kind="message",
+        callback_source_kind=MEDIA_SOURCE_KIND,
+        ready_task=asyncio.create_task(failing_ready()),
+    )
+
+    await _wait_for(lambda: slot.settled.is_set())
+
+    assert undelivered_sources == [("$sidecar", MEDIA_SOURCE_KIND)]
+
+
+@pytest.mark.asyncio
+async def test_ignored_source_remains_owned_during_durable_settlement() -> None:
+    """Redelivery must defer while an ignored media source writes its terminal tombstone."""
+    settlement_started = asyncio.Event()
+    release_settlement = asyncio.Event()
+
+    async def settle_source(_event_id: str, _source_kind: str) -> None:
+        settlement_started.set()
+        await release_settlement.wait()
+
+    gate, _batches = _gate(
+        debounce_seconds=0.0,
+        on_intentionally_ignored_source=settle_source,
+    )
+
+    async def ignored_ready() -> None:
+        return None
+
+    source_event_id = "$ignored-media"
+    slot = gate.enter_lane(room_id="!room:localhost", sender_id="@user:localhost")
+    gate.submit_lane_slot(
+        slot,
+        key=CoalescingKey("!room:localhost", "$thread", "@user:localhost"),
+        source_event_id=source_event_id,
+        source_kind=MEDIA_SOURCE_KIND,
+        ready_task=asyncio.create_task(ignored_ready()),
+    )
+    await settlement_started.wait()
+
+    on_media = AsyncMock(return_value=TurnDispatchOutcome.DEFERRED)
+
+    async def noop(_room: nio.MatrixRoom, _event: nio.Event) -> None:
+        pass
+
+    callbacks = DispatchObligationRunner.callbacks_for(
+        on_message=cast("Callable", noop),
+        on_media=on_media,
+        on_reaction=cast("Callable", noop),
+        on_approval=cast("Callable", noop),
+        on_invite=cast("Callable", noop),
+        on_room_lifecycle=cast("Callable", noop),
+        on_redaction=cast("Callable", noop),
+        on_decryption_failure=cast("Callable", noop),
+        source_has_live_owner=gate.has_pending_source_event,
+    )
+    outcome = await callbacks[DispatchCallbackKind.MEDIA](
+        _room(),
+        _image_event(event_id=source_event_id),
+    )
+
+    assert outcome.value == "deferred"
+    on_media.assert_not_awaited()
+
+    release_settlement.set()
+    await slot.settled.wait()
+    assert not gate.has_pending_source_event(source_event_id)
+
+
+@pytest.mark.asyncio
+async def test_failed_ignored_source_settlement_returns_source_to_retry_owner() -> None:
+    """A failed terminal write must not suppress its own durable retry handoff."""
+    undelivered_sources: list[tuple[str, str]] = []
+
+    async def fail_settlement(_event_id: str, _source_kind: str) -> None:
+        msg = "tracking store unavailable"
+        raise RuntimeError(msg)
+
+    gate, _batches = _gate(
+        debounce_seconds=0.0,
+        on_undelivered_source=lambda event_id, source_kind: undelivered_sources.append((event_id, source_kind)),
+        on_intentionally_ignored_source=fail_settlement,
+    )
+
+    async def ignored_ready() -> None:
+        return None
+
+    slot = gate.enter_lane(room_id="!room:localhost", sender_id="@user:localhost")
+    gate.submit_lane_slot(
+        slot,
+        key=CoalescingKey("!room:localhost", "$thread", "@user:localhost"),
+        source_event_id="$ignored-media",
+        source_kind=MEDIA_SOURCE_KIND,
+        ready_task=asyncio.create_task(ignored_ready()),
+    )
+
+    await slot.settled.wait()
+    assert undelivered_sources == [("$ignored-media", MEDIA_SOURCE_KIND)]
 
 
 @pytest.mark.asyncio
@@ -775,7 +902,7 @@ async def test_voice_echo_and_follow_up_slots_never_hold_another_conversation(tm
         await _wait_for(lambda: "$b1" in generated, deadline_seconds=1.0)
         assert not release_first_response.is_set()
         assert bot._coalescing_gate.lanes.all_settled()
-        assert bot._turn_store.is_handled("$e1")
+        assert not bot._turn_store.is_handled("$e1")
 
         release_first_response.set()
         await bot._coalescing_gate.drain_all()
@@ -804,15 +931,17 @@ async def test_interactive_answer_during_active_turn_never_holds_sender_lane(tmp
     generated: list[str] = []
     ack_sent = asyncio.Event()
 
-    async def fake_generate_response_locked(_self: object, request: object, **_kwargs: object) -> None:
+    async def fake_generate_response_locked(_self: object, request: object, **_kwargs: object) -> str:
         # The real lifecycle acquired the response lock before invoking this
         # locked operation; only post-lock generation is faked here.
-        generated.append(request.response_envelope.source_event_id)
+        source_event_id = request.response_envelope.source_event_id
+        generated.append(source_event_id)
         if request.on_lifecycle_lock_acquired is not None:
             request.on_lifecycle_lock_acquired()
-        if request.response_envelope.source_event_id == "$a0":
+        if source_event_id == "$a0":
             first_locked.set()
             await release_first_response.wait()
+        return f"{source_event_id}-response"
 
     async def fake_prepare_dispatch(
         _room: object,
@@ -881,6 +1010,7 @@ async def test_interactive_answer_during_active_turn_never_holds_sender_lane(tmp
                 await answer_task
         with interactive._thread_lock:
             interactive._remove_active_question_locked("$question")
+            interactive._claimed_question_ids.discard("$question")
 
 
 @pytest.mark.asyncio

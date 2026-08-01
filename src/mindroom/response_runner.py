@@ -330,11 +330,13 @@ class ResponseRequest:
     current_prompt_is_structured: bool = False
     on_lifecycle_lock_acquired: Callable[[], None] | None = None
     prepare_source_turn: Callable[[], bool] | None = None
+    on_source_turn_suppressed: Callable[[], Awaitable[None]] | None = None
     pipeline_timing: DispatchPipelineTiming | None = None
     queued_notice_reservation: QueuedHumanNoticeReservation | None = None
     on_interrupted_response_recoverable: Callable[[], None] | None = None
     sync_restart_retry_source_event_id: str | None = None
     on_deferred_outcome_handled: Callable[[str], None] | None = None
+    on_visible_response: Callable[[str], Awaitable[None]] | None = None
 
     @property
     def room_id(self) -> str:
@@ -483,6 +485,14 @@ class _PreparedResponseRuntime:
     tool_dispatch: ToolDispatchContext
 
 
+@dataclass(frozen=True)
+class _InboxResponseOwnership:
+    """Recovery callbacks retained with one detached inbox response."""
+
+    recovery_proof_ready: Callable[[], bool]
+    on_failure: Callable[[], None] | None
+
+
 @dataclass
 class ResponseRunner:
     """Run one response lifecycle while keeping bot seams patchable."""
@@ -495,7 +505,7 @@ class ResponseRunner:
         default_factory=ResponseLifecycleCoordinator,
         init=False,
     )
-    _inbox_response_tasks: dict[asyncio.Task[None], Callable[[], bool]] = field(default_factory=dict, init=False)
+    _inbox_response_tasks: dict[asyncio.Task[None], _InboxResponseOwnership] = field(default_factory=dict, init=False)
     _incomplete_inbox_responses_recoverable: bool = field(default=True, init=False)
     _admission_shutdown_requested: asyncio.Event = field(default_factory=asyncio.Event, init=False, repr=False)
 
@@ -505,10 +515,14 @@ class ResponseRunner:
         *,
         name: str,
         recovery_proof_ready: Callable[[], bool],
+        on_failure: Callable[[], None] | None = None,
     ) -> asyncio.Task[None]:
         """Own one detached inbox response until it completes or a drain settles it."""
         task = asyncio.create_task(response, name=name)
-        self._inbox_response_tasks[task] = recovery_proof_ready
+        self._inbox_response_tasks[task] = _InboxResponseOwnership(
+            recovery_proof_ready=recovery_proof_ready,
+            on_failure=on_failure,
+        )
         task.add_done_callback(self._finish_inbox_response_task)
         return task
 
@@ -523,7 +537,7 @@ class ResponseRunner:
         return self._incomplete_inbox_responses_recoverable
 
     def _finish_inbox_response_task(self, task: asyncio.Task[None]) -> None:
-        self._inbox_response_tasks.pop(task, None)
+        ownership = self._inbox_response_tasks.pop(task, None)
         if task.cancelled():
             return
         error = task.exception()
@@ -532,6 +546,8 @@ class ResponseRunner:
             # refusal into sync-checkpoint failure accounting.
             return
         if error is not None:
+            if ownership is not None and ownership.on_failure is not None:
+                ownership.on_failure()
             self.deps.logger.error(
                 "inbox_response_task_failed",
                 task_name=task.get_name(),
@@ -553,7 +569,7 @@ class ResponseRunner:
         """
         tasks = [task for task in self._inbox_response_tasks if not task.done()]
         # Done callbacks pop tasks, so snapshot proofs before an await can run them.
-        recovery_checks = {task: self._inbox_response_tasks[task] for task in tasks}
+        recovery_checks = {task: self._inbox_response_tasks[task].recovery_proof_ready for task in tasks}
         if not tasks:
             return True
         if cancel_after_seconds is None:
@@ -1239,6 +1255,8 @@ class ResponseRunner:
                         ),
                     ),
                 )
+            if request.on_source_turn_suppressed is not None:
+                await request.on_source_turn_suppressed()
             return None
         placeholder_event_id = None
         if (
@@ -1268,6 +1286,8 @@ class ResponseRunner:
                 if request.pipeline_timing is not None:
                     request.pipeline_timing.mark("placeholder_sent")
                     request.pipeline_timing.mark_first_visible_reply("placeholder")
+                if request.on_visible_response is not None:
+                    await request.on_visible_response(placeholder_event_id)
         request = await self._prepare_request_after_lock(
             request,
             exclude_history_event_id=placeholder_event_id,
@@ -1464,6 +1484,7 @@ class ResponseRunner:
                 run_id=run_id,
                 pipeline_timing=request.pipeline_timing,
                 on_cancelled=progress.note_task_cancelled,
+                on_visible_response=request.on_visible_response,
             )
             if progress.tracked_event_id is None:
                 progress.track_event(run_message_id)
@@ -2209,6 +2230,7 @@ class ResponseRunner:
         run_id: str | None = None,
         pipeline_timing: DispatchPipelineTiming | None = None,
         on_cancelled: Callable[[str], None] | None = None,
+        on_visible_response: Callable[[str], Awaitable[None]] | None = None,
     ) -> _MatrixEventId | None:
         """Run one response-generation attempt with cancellation support."""
         return await ResponseAttemptRunner(
@@ -2232,6 +2254,7 @@ class ResponseRunner:
                 run_id=run_id,
                 pipeline_timing=pipeline_timing,
                 on_cancelled=on_cancelled,
+                on_visible_response=on_visible_response,
             ),
         )
 

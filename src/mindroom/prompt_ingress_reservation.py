@@ -42,6 +42,7 @@ class PromptIngressReservationOwner:
         *,
         source_event_id: str | None,
         source_kind: str,
+        callback_source_kind: str | None = None,
         ready_result: ReadyPendingEvent | None = None,
         ready_task: asyncio.Task[ReadyPendingEvent | None] | None = None,
     ) -> None:
@@ -57,6 +58,7 @@ class PromptIngressReservationOwner:
                 ready_task=ready_task,
                 source_event_id=source_event_id,
                 source_kind=source_kind,
+                callback_source_kind=callback_source_kind,
             )
             metadata_transferred = True
         except BaseException:

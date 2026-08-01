@@ -8,7 +8,7 @@ import time
 from contextlib import suppress
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import nio
 import pytest
@@ -2389,8 +2389,21 @@ async def test_orchestrator_stop_cancels_all_tasks(tmp_path: Path) -> None:
         # Verify bots were stopped with public shutdown metadata and no restart cancellation source.
         mock_bot1.stop.assert_awaited_once_with(shutdown_intent=ORDERLY_SHUTDOWN)
         mock_bot2.stop.assert_awaited_once_with(shutdown_intent=ORDERLY_SHUTDOWN)
-        owner = orchestrator._mcp_catalog_change_task_owner
-        mock_wait.assert_awaited_once_with(5.0, owner=owner, shutdown_intent=ORDERLY_SHUTDOWN)
+        mock_wait.assert_has_awaits(
+            [
+                call(
+                    5.0,
+                    owner=orchestrator._mcp_catalog_change_task_owner,
+                    shutdown_intent=ORDERLY_SHUTDOWN,
+                ),
+                call(
+                    5.0,
+                    owner=orchestrator._dispatch_recovery_task_owner,
+                    shutdown_intent=ORDERLY_SHUTDOWN,
+                ),
+            ],
+        )
+        assert mock_wait.await_count == 2
         assert shutdown_order.index("catalog_drain") < shutdown_order.index("mcp_teardown")
         assert shutdown_order.index("catalog_drain") < shutdown_order.index("entity_teardown")
 

@@ -170,6 +170,29 @@ async def test_repeated_inbox_drains_keep_failed_recovery_proof_fail_closed() ->
     assert runner.incomplete_inbox_responses_recoverable is False
 
 
+@pytest.mark.asyncio
+async def test_failed_detached_inbox_response_returns_sources_to_retry_owner() -> None:
+    """A post-handoff failure must trigger autonomous dispatch retry immediately."""
+    runner = ResponseRunner(deps=MagicMock())
+    on_failure = MagicMock()
+
+    async def fail_after_handoff() -> None:
+        msg = "delivery failed"
+        raise RuntimeError(msg)
+
+    response_task = runner.track_inbox_response(
+        fail_after_handoff(),
+        name="test_failed_detached_inbox_response",
+        recovery_proof_ready=lambda: False,
+        on_failure=on_failure,
+    )
+
+    await asyncio.gather(response_task, return_exceptions=True)
+    await asyncio.sleep(0)
+
+    on_failure.assert_called_once_with()
+
+
 class RecordingStopManager(StopManager):
     """Real StopManager whose deferred clear is made immediate and observable."""
 
@@ -342,6 +365,7 @@ async def test_begin_locked_turn_suppresses_source_redacted_before_response_regi
     )
     response_thread_id = threading.get_ident()
     preparation_thread_ids: list[int] = []
+    on_source_turn_suppressed = AsyncMock()
 
     def prepare_source_turn() -> bool:
         preparation_thread_ids.append(threading.get_ident())
@@ -354,6 +378,7 @@ async def test_begin_locked_turn_suppresses_source_redacted_before_response_regi
         response_envelope=envelope,
         payload_preparation=_preparation(target, envelope),
         prepare_source_turn=prepare_source_turn,
+        on_source_turn_suppressed=on_source_turn_suppressed,
     )
 
     prepared_request = await runner._begin_locked_turn(
@@ -372,6 +397,7 @@ async def test_begin_locked_turn_suppresses_source_redacted_before_response_regi
     assert preparation_thread_ids[0] != response_thread_id
     delivery_gateway.send_text.assert_not_awaited()
     request_preparer.prepare.assert_not_awaited()
+    on_source_turn_suppressed.assert_awaited_once_with()
 
 
 @pytest.mark.asyncio
@@ -436,6 +462,7 @@ async def test_begin_locked_turn_settles_external_placeholder_when_source_is_red
             delivery_gateway=delivery_gateway,
         ),
     )
+    on_source_turn_suppressed = AsyncMock()
     request = ResponseRequest(
         thread_history=[],
         prompt="REDACTED_SECRET",
@@ -444,6 +471,7 @@ async def test_begin_locked_turn_settles_external_placeholder_when_source_is_red
         existing_event_id="$ack",
         existing_event_is_placeholder=True,
         prepare_source_turn=lambda: True,
+        on_source_turn_suppressed=on_source_turn_suppressed,
     )
 
     prepared_request = await runner._begin_locked_turn(
@@ -461,6 +489,7 @@ async def test_begin_locked_turn_settles_external_placeholder_when_source_is_red
     cancellation_request = delivery_gateway.deliver_cancelled_visible_note.await_args.args[0]
     assert cancellation_request.event_id == "$ack"
     assert cancellation_request.existing_event_is_placeholder is True
+    on_source_turn_suppressed.assert_awaited_once_with()
 
 
 @pytest.mark.asyncio
@@ -488,6 +517,7 @@ async def test_begin_locked_turn_excludes_early_placeholder_from_refreshed_histo
     request_preparer.prepare = AsyncMock(side_effect=lambda request: replace(request, payload_preparation=None))
     delivery_gateway = MagicMock(spec=DeliveryGateway)
     delivery_gateway.send_text = AsyncMock(return_value="$placeholder")
+    on_visible_response = AsyncMock()
     runner = ResponseRunner(
         replace(
             unwrap_extracted_collaborator(bot._response_runner).deps,
@@ -502,6 +532,7 @@ async def test_begin_locked_turn_excludes_early_placeholder_from_refreshed_histo
         user_id="@user:localhost",
         response_envelope=envelope,
         payload_preparation=_preparation(target, envelope),
+        on_visible_response=on_visible_response,
     )
 
     prepared_request = await runner._begin_locked_turn(
@@ -522,6 +553,7 @@ async def test_begin_locked_turn_excludes_early_placeholder_from_refreshed_histo
     assert prepared_request.thread_history.diagnostics == {"cache_status": "fresh"}
     assert prepared_request.existing_event_id == "$placeholder"
     assert prepared_request.existing_event_is_placeholder is True
+    on_visible_response.assert_awaited_once_with("$placeholder")
 
 
 @pytest.mark.asyncio

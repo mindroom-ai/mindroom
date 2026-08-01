@@ -9,6 +9,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
 from pathlib import Path
 from types import SimpleNamespace
+from typing import TYPE_CHECKING
 from unittest.mock import ANY, MagicMock, patch
 
 import pytest
@@ -42,8 +43,15 @@ from mindroom.text_ingress_dispatch import _run_claimed_response
 from mindroom.turn_store import TurnStore, TurnStoreDeps
 from tests.conftest import TEST_PASSWORD, bind_runtime_paths, runtime_paths_for, test_runtime_paths
 
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
-def _store(tmp_path: Path) -> TurnStore:
+
+def _store(
+    tmp_path: Path,
+    *,
+    on_terminal_turn_persisted: Callable[[tuple[str, ...]], None] | None = None,
+) -> TurnStore:
     return TurnStore(
         TurnStoreDeps(
             agent_name="agent",
@@ -51,6 +59,7 @@ def _store(tmp_path: Path) -> TurnStore:
             state_writer=MagicMock(),
             resolver=MagicMock(),
             tool_runtime=MagicMock(),
+            on_terminal_turn_persisted=on_terminal_turn_persisted,
         ),
     )
 
@@ -132,6 +141,85 @@ def _prepare_redaction(
         target=target,
         source_event_ids=("$later",),
     )
+
+
+def test_only_terminal_turn_notifies_exact_indexed_event_ids(tmp_path: Path) -> None:
+    """Pending TurnStore state must not retire callback work that startup cannot resume."""
+    notifications: list[tuple[str, ...]] = []
+    store = _store(tmp_path, on_terminal_turn_persisted=notifications.append)
+    pending = TurnRecord.create(
+        ["$source"],
+        discovery_event_ids=["$alias"],
+        completed=False,
+    )
+
+    store.record_pending_turn(pending)
+    assert notifications == []
+
+    store.record_turn(pending)
+    store._ledger.flush()
+
+    assert notifications == [("$source", "$alias")]
+
+
+def test_pending_delivery_intent_does_not_require_model_history_scope(tmp_path: Path) -> None:
+    """Response ownership and target distinguish delivery intent from a raw visible echo."""
+    store = _store(tmp_path)
+    source_event_ids = ("$source",)
+    visible_echo = TurnRecord.create(
+        source_event_ids,
+        response_event_id="$echo",
+        completed=False,
+    )
+    store.record_pending_turn(visible_echo)
+    assert store.has_pending_response_intent(source_event_ids) is False
+
+    target = MessageTarget.resolve("!room:example.org", None, "$source")
+    delivery_intent = store.attach_response_context(
+        visible_echo,
+        history_scope=None,
+        conversation_target=target,
+    )
+    store.record_pending_turn(delivery_intent)
+
+    assert store.has_pending_response_intent(source_event_ids) is True
+    record = store.get_turn_record("$source")
+    assert record is not None
+    assert record.response_owner == "agent"
+    assert record.conversation_target == target
+    assert record.history_scope is None
+
+
+def test_terminal_turn_notifies_only_after_durable_write(tmp_path: Path) -> None:
+    """Dispatch truth must remain until its replacing TurnStore write reaches disk."""
+    notified = threading.Event()
+    persist_started = threading.Event()
+    release_persist = threading.Event()
+    store = _store(tmp_path, on_terminal_turn_persisted=lambda _event_ids: notified.set())
+    original_persist = store._ledger._persist_records
+
+    def blocking_persist(records: tuple[TurnRecord, ...]) -> None:
+        persist_started.set()
+        assert release_persist.wait(timeout=2)
+        original_persist(records)
+
+    with patch.object(store._ledger, "_persist_records", side_effect=blocking_persist):
+        record_thread = threading.Thread(
+            target=store.record_turn,
+            args=(TurnRecord.create(["$source"], response_event_id="$response"),),
+        )
+        record_thread.start()
+        try:
+            assert persist_started.wait(timeout=2)
+            assert not notified.wait(timeout=0.1)
+            record_thread.join(timeout=0.1)
+            assert not record_thread.is_alive()
+        finally:
+            release_persist.set()
+            record_thread.join(timeout=2)
+
+    assert not record_thread.is_alive()
+    assert notified.wait(timeout=2)
 
 
 def test_pending_turn_claim_allows_only_one_concurrent_owner(tmp_path: Path) -> None:
