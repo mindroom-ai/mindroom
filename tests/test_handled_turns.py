@@ -544,6 +544,7 @@ def test_user_stop_state_persists_across_restart(temp_dir: Path) -> None:
         TurnRecord.create(
             ["$source"],
             response_event_id="$response",
+            latest_edit_receipt_order=6,
             user_stop_receipt_order=7,
             user_stop_settled_receipt_order=7,
         ),
@@ -552,6 +553,7 @@ def test_user_stop_state_persists_across_restart(temp_dir: Path) -> None:
     recovered = _reload_ledger("test_user_stop_cutoff", temp_dir).get_turn_record("$source")
 
     assert recovered is not None
+    assert recovered.latest_edit_receipt_order == 6
     assert recovered.user_stop_receipt_order == 7
     assert recovered.user_stop_settled_receipt_order == 7
 

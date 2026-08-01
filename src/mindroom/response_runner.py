@@ -509,7 +509,7 @@ class ResponseRunner:
     _inbox_response_tasks: dict[asyncio.Task[None], _InboxResponseOwnership] = field(default_factory=dict, init=False)
     _incomplete_inbox_responses_recoverable: bool = field(default=True, init=False)
     _admission_shutdown_requested: asyncio.Event = field(default_factory=asyncio.Event, init=False, repr=False)
-    _user_stop_receipt_orders: dict[str, int] = field(default_factory=dict, init=False, repr=False)
+    _user_stop_receipt_orders: dict[str, set[int]] = field(default_factory=dict, init=False, repr=False)
 
     def track_inbox_response(
         self,
@@ -813,19 +813,20 @@ class ResponseRunner:
         message_id: str,
         target: MessageTarget,
         stop_receipt_order: int,
+        should_cancel: Callable[[], Awaitable[bool]],
         finalize: Callable[[], Awaitable[bool]],
     ) -> bool:
         """Cancel the live response, then durably finalize its turn under the same lock."""
         cancellation_requested = False
-        self._user_stop_receipt_orders[message_id] = max(
-            stop_receipt_order,
-            self._user_stop_receipt_orders.get(message_id, stop_receipt_order),
-        )
+        self._user_stop_receipt_orders.setdefault(message_id, set()).add(stop_receipt_order)
 
         async def cancel_live_response() -> None:
             nonlocal cancellation_requested
-            if not cancellation_requested:
-                cancellation_requested = await self.deps.stop_manager.handle_stop_reaction(message_id)
+            if cancellation_requested:
+                return
+            if not await should_cancel():
+                return
+            cancellation_requested = await self.deps.stop_manager.handle_stop_reaction(message_id)
 
         try:
             return await self._lifecycle_coordinator.run_locked_target_operation(
@@ -834,7 +835,10 @@ class ResponseRunner:
                 locked_operation=finalize,
             )
         finally:
-            if self._user_stop_receipt_orders.get(message_id) == stop_receipt_order:
+            receipt_orders = self._user_stop_receipt_orders.get(message_id)
+            if receipt_orders is not None:
+                receipt_orders.discard(stop_receipt_order)
+            if not receipt_orders:
                 self._user_stop_receipt_orders.pop(message_id, None)
 
     def reserve_waiting_human_message(
@@ -1259,9 +1263,10 @@ class ResponseRunner:
             return
         response_event_id = final_outcome.final_visible_event_id
         assert response_event_id is not None
-        stop_receipt_order = self._user_stop_receipt_orders.get(response_event_id)
-        if stop_receipt_order is None:
+        stop_receipt_orders = self._user_stop_receipt_orders.get(response_event_id)
+        if not stop_receipt_orders:
             return
+        stop_receipt_order = max(stop_receipt_orders)
         await _run_locked_source_preparation(
             lambda: on_user_stop_handled(response_event_id, stop_receipt_order),
         )

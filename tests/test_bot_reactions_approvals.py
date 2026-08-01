@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 from contextlib import suppress
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
@@ -41,6 +42,7 @@ from tests.bot_helpers import (
 from tests.conftest import (
     make_matrix_client_mock,
     runtime_paths_for,
+    unwrap_extracted_collaborator,
 )
 
 if TYPE_CHECKING:
@@ -1342,6 +1344,75 @@ class TestAgentBot(AgentBotTestBase):
         assert finalized_record is not None
         assert finalized_record.user_stop_settled_receipt_order == stop_receipt_order
         assert restarted._dispatch_obligation_store.pending() == ()
+
+    @pytest.mark.asyncio
+    async def test_older_stop_callback_preserves_later_edit_and_its_stop_button(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """A delayed older STOP cannot cancel or clean up a later edit's live controls."""
+        config = self._config_for_storage(tmp_path)
+        runtime_paths = runtime_paths_for(config)
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
+        bot.client = make_matrix_client_mock()
+        target = MessageTarget.resolve("!test:localhost", None, "$source")
+        bot._turn_store.record_pending_turn(
+            TurnRecord.create(
+                ["$source"],
+                response_event_id="$response",
+                completed=False,
+                response_owner=bot.agent_name,
+                requester_id="@user:localhost",
+                conversation_target=target,
+            ),
+        )
+        assert not bot._turn_store.prepare_edit_response_source(
+            target=target,
+            source_event_ids=("$source",),
+            response_event_id="$response",
+            edit_receipt_order=3,
+        )
+        bot._dispatch_obligation_runner.receipt_order = AsyncMock(return_value=2)
+        later_edit_task = asyncio.create_task(asyncio.Event().wait())
+        bot.stop_manager.set_current(
+            "$response",
+            target,
+            later_edit_task,
+            reaction_event_id="$later-edit-stop-button",
+        )
+        response_runner = unwrap_extracted_collaborator(bot._response_runner)
+        lifecycle_lock = response_runner._lifecycle_coordinator._response_lifecycle_lock(target)
+        await lifecycle_lock.acquire()
+        turn_store = unwrap_extracted_collaborator(bot._turn_store)
+        original_lookup = turn_store.turn_record_for_response_event_id
+        cancellation_check_started = threading.Event()
+        lookup_count = 0
+
+        def tracked_lookup(response_event_id: str) -> TurnRecord | None:
+            nonlocal lookup_count
+            lookup_count += 1
+            if lookup_count == 3:
+                cancellation_check_started.set()
+            return original_lookup(response_event_id)
+
+        room = nio.MatrixRoom("!test:localhost", bot.matrix_id.full_id)
+        event = _reaction_event("🛑", "$stale-stop-reaction")
+        with patch.object(turn_store, "turn_record_for_response_event_id", side_effect=tracked_lookup):
+            replay_task = asyncio.create_task(
+                bot._dispatch_obligation_runner.dispatch(room, event, DispatchCallbackKind.REACTION),
+            )
+            assert await asyncio.to_thread(cancellation_check_started.wait, 2)
+            assert later_edit_task.done() is False
+            lifecycle_lock.release()
+            await replay_task
+
+        tracked = bot.stop_manager.tracked_messages["$response"]
+        assert tracked.task is later_edit_task
+        assert tracked.reaction_event_id == "$later-edit-stop-button"
+        bot.client.room_redact.assert_not_awaited()
+        later_edit_task.cancel()
+        await asyncio.gather(later_edit_task, return_exceptions=True)
 
     @pytest.mark.asyncio
     async def test_interrupted_config_reaction_replays_only_its_durable_consumer(

@@ -79,21 +79,24 @@ async def _maybe_handle_stop_reaction(
             DispatchSemanticConsumer.STOP_REACTION,
         )
 
+    async def remove_current_stop_button() -> None:
+        assert bot.client is not None
+        await bot.stop_manager.remove_stop_button(
+            bot.client,
+            event.reacts_to,
+            notify_outbound_redaction=bot._conversation_cache.notify_outbound_redaction,
+        )
+
     stopped = await bot._turn_controller.finalize_user_stop(
         event.reacts_to,
         await bot._dispatch_obligation_runner.receipt_order(),
+        remove_current_stop_button,
     )
     if stopped:
         bot.logger.info(
             "Stop requested for message",
             message_id=event.reacts_to,
             requested_by=event.sender,
-        )
-        assert bot.client is not None
-        await bot.stop_manager.remove_stop_button(
-            bot.client,
-            event.reacts_to,
-            notify_outbound_redaction=bot._conversation_cache.notify_outbound_redaction,
         )
     return True
 

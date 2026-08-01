@@ -458,7 +458,9 @@ async def test_user_stop_cancels_live_response_before_terminalizing_under_its_lo
     bot.stop_manager.set_current("$response", target, response_task)
     finalize = AsyncMock(return_value=True)
 
-    stop_task = asyncio.create_task(runner.finalize_user_stop("$response", target, 7, finalize))
+    stop_task = asyncio.create_task(
+        runner.finalize_user_stop("$response", target, 7, AsyncMock(return_value=True), finalize),
+    )
     await asyncio.gather(response_task, return_exceptions=True)
 
     finalize.assert_not_awaited()
@@ -466,6 +468,35 @@ async def test_user_stop_cancels_live_response_before_terminalizing_under_its_lo
 
     assert await stop_task is True
     finalize.assert_awaited_once_with()
+
+
+@pytest.mark.asyncio
+async def test_settled_stop_retry_does_not_cancel_later_live_response(tmp_path: Path) -> None:
+    """A STOP superseded by a later edit must not cancel that edit while waiting."""
+    bot = _bot(tmp_path)
+    runner = unwrap_extracted_collaborator(bot._response_runner)
+    target = _target(thread_id="$thread", reply_to_event_id="$event")
+    lifecycle_lock = runner._lifecycle_coordinator._response_lifecycle_lock(target)
+    await lifecycle_lock.acquire()
+    response_task = asyncio.create_task(asyncio.Event().wait())
+    bot.stop_manager.set_current("$response", target, response_task)
+    should_cancel = AsyncMock(return_value=False)
+    finalize = AsyncMock(return_value=True)
+
+    stop_task = asyncio.create_task(
+        runner.finalize_user_stop("$response", target, 2, should_cancel, finalize),
+    )
+    await asyncio.sleep(0)
+
+    assert response_task.done() is False
+    lifecycle_lock.release()
+
+    assert await stop_task is True
+    should_cancel.assert_awaited()
+    finalize.assert_awaited_once_with()
+    assert response_task.done() is False
+    response_task.cancel()
+    await asyncio.gather(response_task, return_exceptions=True)
 
 
 @pytest.mark.asyncio
@@ -1820,7 +1851,7 @@ async def test_terminal_interruption_registers_recovery_unless_user_stopped(
     coordinator = unwrap_extracted_collaborator(bot._response_runner)
     recoveries: list[str] = []
     user_stops: list[tuple[str, int]] = []
-    coordinator._user_stop_receipt_orders["$response"] = 7
+    coordinator._user_stop_receipt_orders["$response"] = {7}
     request = replace(
         _plain_request(_target(thread_id="$thread")),
         on_interrupted_response_recoverable=lambda: recoveries.append("recovery"),

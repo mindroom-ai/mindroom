@@ -1690,10 +1690,76 @@ class TurnController:
             interactive.restore_selection(selection)
             raise
 
+    @staticmethod
+    def _user_stop_is_settled(turn_record: TurnRecord, stop_receipt_order: int) -> bool:
+        settled_order = turn_record.user_stop_settled_receipt_order
+        return settled_order is not None and settled_order >= stop_receipt_order
+
+    async def _record_user_stop(
+        self,
+        response_event_id: str,
+        stop_receipt_order: int,
+        *,
+        delivery_settled: bool = False,
+    ) -> TurnRecord:
+        stopped = await asyncio.to_thread(
+            self.deps.turn_store.record_user_stopped_response,
+            response_event_id,
+            stop_receipt_order,
+            delivery_settled=delivery_settled,
+        )
+        if (
+            stopped is None
+            or not stopped.completed
+            or stopped.user_stop_receipt_order is None
+            or stopped.user_stop_receipt_order < stop_receipt_order
+        ):
+            msg = f"User-stopped response {response_event_id!r} did not become durable"
+            raise RuntimeError(msg)
+        return stopped
+
+    async def _user_stop_should_cancel(self, response_event_id: str, stop_receipt_order: int) -> bool:
+        current = await asyncio.to_thread(
+            self.deps.turn_store.turn_record_for_response_event_id,
+            response_event_id,
+        )
+        return current is None or (
+            (current.latest_edit_receipt_order or 0) <= stop_receipt_order
+            and not self._user_stop_is_settled(current, stop_receipt_order)
+        )
+
+    async def _finalize_user_stop_under_lock(
+        self,
+        response_event_id: str,
+        stop_receipt_order: int,
+        target: MessageTarget,
+        on_current_stop_finalized: Callable[[], Awaitable[None]],
+    ) -> bool:
+        stopped = await self._record_user_stop(response_event_id, stop_receipt_order)
+        newer_edit_exists = (stopped.latest_edit_receipt_order or 0) > stop_receipt_order
+        if not self._user_stop_is_settled(stopped, stop_receipt_order):
+            if not newer_edit_exists and not await self.deps.delivery_gateway.finalize_user_stopped_response(
+                target,
+                response_event_id,
+            ):
+                msg = f"Failed to finalize user-stopped response {response_event_id!r}"
+                raise RuntimeError(msg)
+            stopped = await self._record_user_stop(
+                response_event_id,
+                stop_receipt_order,
+                delivery_settled=True,
+            )
+        if not self._user_stop_is_settled(stopped, stop_receipt_order):
+            return False
+        if not newer_edit_exists:
+            await on_current_stop_finalized()
+        return True
+
     async def finalize_user_stop(
         self,
         response_event_id: str,
         stop_receipt_order: int,
+        on_current_stop_finalized: Callable[[], Awaitable[None]],
     ) -> bool:
         """Make one user-stop intent terminal independently of runtime recovery order."""
         turn_record = self.deps.turn_store.turn_record_for_response_event_id(response_event_id)
@@ -1705,46 +1771,18 @@ class TurnController:
             msg = f"User-stopped response {response_event_id!r} has no durable conversation target"
             raise RuntimeError(msg)
 
-        async def finalize() -> bool:
-            stopped = await asyncio.to_thread(
-                self.deps.turn_store.record_user_stopped_response,
-                response_event_id,
-                stop_receipt_order,
-            )
-            if (
-                stopped is None
-                or not stopped.completed
-                or stopped.user_stop_receipt_order is None
-                or stopped.user_stop_receipt_order < stop_receipt_order
-            ):
-                return False
-            settled_receipt_order = stopped.user_stop_settled_receipt_order
-            if settled_receipt_order is None or settled_receipt_order < stop_receipt_order:
-                if not await self.deps.delivery_gateway.finalize_user_stopped_response(
-                    target,
-                    response_event_id,
-                ):
-                    msg = f"Failed to finalize user-stopped response {response_event_id!r}"
-                    raise RuntimeError(msg)
-                stopped = await asyncio.to_thread(
-                    self.deps.turn_store.record_user_stopped_response,
-                    response_event_id,
-                    stop_receipt_order,
-                    delivery_settled=True,
-                )
-                if (
-                    stopped is None
-                    or stopped.user_stop_settled_receipt_order is None
-                    or stopped.user_stop_settled_receipt_order < stop_receipt_order
-                ):
-                    return False
-            return True
-
+        await self._record_user_stop(response_event_id, stop_receipt_order)
         stopped = await self.deps.response_runner.finalize_user_stop(
             response_event_id,
             target,
             stop_receipt_order,
-            finalize,
+            lambda: self._user_stop_should_cancel(response_event_id, stop_receipt_order),
+            lambda: self._finalize_user_stop_under_lock(
+                response_event_id,
+                stop_receipt_order,
+                target,
+                on_current_stop_finalized,
+            ),
         )
         if not stopped:
             msg = f"User-stopped response {response_event_id!r} did not become durable"

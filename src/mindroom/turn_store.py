@@ -499,30 +499,29 @@ class TurnStore:
             return True
         if response_event_id is None:
             return False
-        turn_record = self.turn_record_for_response_event_id(response_event_id)
-        if turn_record is None:
-            return True
-        cutoff = turn_record.user_stop_receipt_order
-        if cutoff is not None and edit_receipt_order <= cutoff:
-            return True
-        settled_receipt_order = turn_record.user_stop_settled_receipt_order
-        if cutoff is not None and (settled_receipt_order is None or settled_receipt_order < cutoff):
-            return (
-                self._update_response_turn(
-                    response_event_id,
-                    lambda current: replace(
-                        current,
-                        user_stop_settled_receipt_order=max(
-                            current.user_stop_settled_receipt_order or 0,
-                            current.user_stop_receipt_order or 0,
-                        )
-                        or None,
-                        timestamp=0.0,
-                    ),
+
+        def prepared_record(current: TurnRecord) -> TurnRecord:
+            cutoff = current.user_stop_receipt_order
+            if cutoff is not None and edit_receipt_order <= cutoff:
+                return current
+            return replace(
+                current,
+                latest_edit_receipt_order=max(
+                    current.latest_edit_receipt_order or 0,
+                    edit_receipt_order,
+                ),
+                user_stop_settled_receipt_order=max(
+                    current.user_stop_settled_receipt_order or 0,
+                    cutoff or 0,
                 )
-                is None
+                or None,
+                timestamp=0.0,
             )
-        return False
+
+        prepared = self._update_response_turn(response_event_id, prepared_record)
+        return prepared is None or (
+            prepared.user_stop_receipt_order is not None and edit_receipt_order <= prepared.user_stop_receipt_order
+        )
 
     def response_history_scope(
         self,
@@ -926,6 +925,7 @@ def _backfill_missing_turn_facts(authority: TurnRecord, recovery: TurnRecord) ->
             else recovery.source_event_prompts
         ),
         source_event_revisions=authority.source_event_revisions or recovery.source_event_revisions,
+        latest_edit_receipt_order=_latest_edit_receipt_order(authority, recovery),
         user_stop_receipt_order=_latest_user_stop_receipt_order(authority, recovery),
         user_stop_settled_receipt_order=_latest_user_stop_settled_receipt_order(authority, recovery),
         source_event_metadata=(
@@ -978,6 +978,7 @@ def _reconcile_ledger_and_recovery(
         completed=recovery_record.completed,
         source_event_prompts=source_event_prompts,
         source_event_revisions=source_event_revisions,
+        latest_edit_receipt_order=_latest_edit_receipt_order(ledger_record, recovery_record),
         user_stop_receipt_order=_latest_user_stop_receipt_order(ledger_record, recovery_record),
         user_stop_settled_receipt_order=_latest_user_stop_settled_receipt_order(
             ledger_record,
@@ -1008,6 +1009,14 @@ def _latest_user_stop_receipt_order(*records: TurnRecord) -> int | None:
     """Return the latest durable STOP receipt order on these same-turn records."""
     return max(
         (record.user_stop_receipt_order for record in records if record.user_stop_receipt_order is not None),
+        default=None,
+    )
+
+
+def _latest_edit_receipt_order(*records: TurnRecord) -> int | None:
+    """Return the latest edit admitted for these same-turn records."""
+    return max(
+        (record.latest_edit_receipt_order for record in records if record.latest_edit_receipt_order is not None),
         default=None,
     )
 

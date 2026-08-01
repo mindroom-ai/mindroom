@@ -263,6 +263,7 @@ def test_locked_edit_preparation_uses_stop_order_and_settles_superseded_delivery
     )
     stopped = store.get_turn_record("$source")
     assert stopped is not None
+    assert stopped.latest_edit_receipt_order is None
     assert stopped.user_stop_settled_receipt_order is None
 
     assert not store.prepare_edit_response_source(
@@ -273,6 +274,7 @@ def test_locked_edit_preparation_uses_stop_order_and_settles_superseded_delivery
     )
     reopened = store.get_turn_record("$source")
     assert reopened is not None
+    assert reopened.latest_edit_receipt_order == 3
     assert reopened.user_stop_settled_receipt_order == 2
 
 
