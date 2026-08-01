@@ -292,6 +292,7 @@ class EditRegenerator:
             return None, None, applied
 
         driving_edit = max(active.values(), key=lambda edit: edit.revision)
+        active_receipt_order = max(edit.receipt_order for edit in active.values())
         retry_source_event_id = record.prompt_source_event_id(driving_edit.original_event_id) if retrying else None
         if record.is_coalesced:
             prompt_parts = [prompt_map.get(source_event_id) for source_event_id in record.replay_source_event_ids]
@@ -355,7 +356,7 @@ class EditRegenerator:
                         dict.fromkeys((*record.replay_source_event_ids, driving_edit.original_event_id)),
                     ),
                     response_event_id=record.response_event_id,
-                    edit_receipt_order=driving_edit.receipt_order,
+                    edit_receipt_order=active_receipt_order,
                 ),
                 on_interrupted_response_recoverable=record_interrupted_turn,
                 sync_restart_retry_source_event_id=retry_source_event_id,

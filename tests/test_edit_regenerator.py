@@ -478,6 +478,61 @@ async def test_concurrent_coalesced_sibling_edits_are_both_retained(tmp_path: Pa
 
 
 @pytest.mark.asyncio
+async def test_coalesced_sibling_edits_publish_the_latest_receipt_order(tmp_path: Path) -> None:
+    """STOP ordering follows included callback admission, not Matrix revision order."""
+    first_event_id = "$m1:example.org"
+    second_event_id = "$m2:example.org"
+    harness = _harness(
+        tmp_path,
+        turn_record=_turn_record(
+            source_event_ids=(first_event_id, second_event_id),
+            source_event_prompts={first_event_id: "first base", second_event_id: "second base"},
+            source_event_metadata=_source_metadata(first_event_id, second_event_id),
+        ),
+    )
+    wait_started = asyncio.Event()
+    release_wait = asyncio.Event()
+
+    async def wait_for_turn_settled(_source_event_ids: tuple[str, ...]) -> None:
+        wait_started.set()
+        await release_wait.wait()
+
+    harness.regenerator.deps.receipt_order.side_effect = [5, 4]
+    harness.turn_store.try_claim_turn.side_effect = [False, True, True]
+    harness.wait_for_turn_settled.side_effect = wait_for_turn_settled
+    first, first_info = _edit_event(
+        original_event_id=first_event_id,
+        new_body="first edited",
+        event_id="$edit-first:example.org",
+        server_timestamp=1_000_010,
+    )
+    second, second_info = _edit_event(
+        original_event_id=second_event_id,
+        new_body="second edited",
+        event_id="$edit-second:example.org",
+        server_timestamp=1_000_020,
+    )
+
+    first_task = asyncio.create_task(_handle_edit(harness, first, first_info))
+    await wait_started.wait()
+    second_task = asyncio.create_task(_handle_edit(harness, second, second_info))
+    await asyncio.sleep(0)
+    assert len(next(iter(harness.regenerator._mailboxes.values())).pending) == 2
+    release_wait.set()
+    await asyncio.gather(first_task, second_task)
+
+    request = harness.generate_response.await_args.args[0]
+    assert request.prepare_source_turn is not None
+    assert request.prepare_source_turn() is False
+    harness.turn_store.prepare_edit_response_source.assert_called_once_with(
+        target=MessageTarget.resolve(ROOM_ID, THREAD_ID, second_event_id),
+        source_event_ids=(first_event_id, second_event_id),
+        response_event_id=RESPONSE_EVENT_ID,
+        edit_receipt_order=5,
+    )
+
+
+@pytest.mark.asyncio
 async def test_suppressed_coalesced_edit_body_is_retained_for_later_sibling(tmp_path: Path) -> None:
     """Hook suppression skips its generation but not its durable body update."""
     first_event_id = "$m1:example.org"

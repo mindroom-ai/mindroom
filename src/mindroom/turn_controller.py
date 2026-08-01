@@ -1718,11 +1718,8 @@ class TurnController:
             raise RuntimeError(msg)
         return stopped
 
-    async def _user_stop_should_cancel(self, response_event_id: str, stop_receipt_order: int) -> bool:
-        current = await asyncio.to_thread(
-            self.deps.turn_store.turn_record_for_response_event_id,
-            response_event_id,
-        )
+    def _user_stop_should_cancel(self, response_event_id: str, stop_receipt_order: int) -> bool:
+        current = self.deps.turn_store.turn_record_for_response_event_id(response_event_id)
         return current is None or (
             (current.latest_edit_receipt_order or 0) <= stop_receipt_order
             and not self._user_stop_is_settled(current, stop_receipt_order)

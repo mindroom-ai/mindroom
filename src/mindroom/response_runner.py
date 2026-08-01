@@ -813,7 +813,7 @@ class ResponseRunner:
         message_id: str,
         target: MessageTarget,
         stop_receipt_order: int,
-        should_cancel: Callable[[], Awaitable[bool]],
+        should_cancel: Callable[[], bool],
         finalize: Callable[[], Awaitable[bool]],
     ) -> bool:
         """Cancel the live response, then durably finalize its turn under the same lock."""
@@ -824,9 +824,7 @@ class ResponseRunner:
             nonlocal cancellation_requested
             if cancellation_requested:
                 return
-            if not await should_cancel():
-                return
-            cancellation_requested = await self.deps.stop_manager.handle_stop_reaction(message_id)
+            cancellation_requested = self.deps.stop_manager.request_stop_if(message_id, should_cancel)
 
         try:
             return await self._lifecycle_coordinator.run_locked_target_operation(

@@ -294,7 +294,7 @@ async def test_stop_manager_force_cancels_task_when_run_never_becomes_cancellabl
     )
 
     with patch("mindroom.stop.acancel_run", new=AsyncMock(return_value=False)):
-        assert await stop_manager.handle_stop_reaction("$message:example.com") is True
+        assert stop_manager.request_stop_if("$message:example.com", lambda: True) is True
         await asyncio.wait_for(task_cancelled.wait(), timeout=0.2)
         await _drain_stop_cleanup(stop_manager)
 
@@ -382,7 +382,7 @@ async def test_stop_manager_force_cancels_task_when_graceful_cancel_errors() -> 
     )
 
     with patch("mindroom.stop.acancel_run", new=AsyncMock(side_effect=RuntimeError("redis down"))):
-        assert await stop_manager.handle_stop_reaction("$message:example.com") is True
+        assert stop_manager.request_stop_if("$message:example.com", lambda: True) is True
         await asyncio.wait_for(task_cancelled.wait(), timeout=0.2)
         await _drain_stop_cleanup(stop_manager)
 
@@ -411,7 +411,7 @@ async def test_stop_manager_logs_tracked_thread_context(
         target=target,
         task=task,
     )
-    assert await stop_manager.handle_stop_reaction("$message:example.org") is True
+    assert stop_manager.request_stop_if("$message:example.org", lambda: True) is True
 
     payloads = [json.loads(line) for line in capsys.readouterr().err.strip().splitlines()]
     tracking_payload = next(payload for payload in payloads if payload["event"] == "Tracking message generation")
@@ -457,7 +457,7 @@ async def test_stop_manager_immediately_cancels_task_even_when_acancel_run_succe
         return True
 
     with patch("mindroom.stop.acancel_run", new=graceful_cancel_run):
-        assert await stop_manager.handle_stop_reaction("$message:example.com") is True
+        assert stop_manager.request_stop_if("$message:example.com", lambda: True) is True
         await asyncio.wait_for(task_cancelled.wait(), timeout=0.1)
         await asyncio.wait_for(cleanup_requested.wait(), timeout=0.2)
         await _drain_stop_cleanup(stop_manager)
@@ -500,7 +500,7 @@ async def test_stop_manager_immediately_cancels_task_when_acancel_run_is_slow() 
     )
 
     with patch("mindroom.stop.acancel_run", new=hanging_cancel_run):
-        assert await stop_manager.handle_stop_reaction("$message:example.com") is True
+        assert stop_manager.request_stop_if("$message:example.com", lambda: True) is True
         await asyncio.wait_for(task_cancelled.wait(), timeout=0.1)
         await asyncio.wait_for(cancellation_manager_started.wait(), timeout=0.2)
         await _drain_stop_cleanup(stop_manager)
@@ -549,7 +549,7 @@ async def test_stop_manager_retries_until_run_becomes_cancellable() -> None:
     )
 
     with patch("mindroom.stop.acancel_run", new=fake_acancel_run):
-        assert await stop_manager.handle_stop_reaction("$message:example.com") is True
+        assert stop_manager.request_stop_if("$message:example.com", lambda: True) is True
         await asyncio.wait_for(hard_cancelled.wait(), timeout=0.1)
         await _drain_stop_cleanup(stop_manager)
 
@@ -599,7 +599,7 @@ async def test_stop_manager_reprobes_when_retry_updates_run_id() -> None:
     )
 
     with patch("mindroom.stop.acancel_run", new=fake_acancel_run):
-        assert await stop_manager.handle_stop_reaction("$message:example.com") is True
+        assert stop_manager.request_stop_if("$message:example.com", lambda: True) is True
         await asyncio.wait_for(hard_cancelled.wait(), timeout=0.1)
         await asyncio.wait_for(first_cancel_attempt.wait(), timeout=0.2)
         stop_manager.update_run_id("$message:example.com", "run-456")
@@ -634,7 +634,7 @@ async def test_stop_manager_cleanup_uses_captured_run_id_after_task_finishes() -
 
     cancel_run = AsyncMock(return_value=True)
     with patch("mindroom.stop.acancel_run", new=cancel_run):
-        assert await stop_manager.handle_stop_reaction("$message:example.com") is True
+        assert stop_manager.request_stop_if("$message:example.com", lambda: True) is True
         with pytest.raises(asyncio.CancelledError):
             await task
         await _drain_stop_cleanup(stop_manager)

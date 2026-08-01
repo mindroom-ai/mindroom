@@ -291,11 +291,14 @@ class StopManager:
         else:
             logger.debug("Message not tracked, skipping cleanup", message_id=message_id)
 
-    async def handle_stop_reaction(self, message_id: str) -> bool:
-        """Handle a stop reaction for a message.
+    def request_stop_if(self, message_id: str, should_stop: Callable[[], bool]) -> bool:
+        """Atomically validate current intent and request cancellation without yielding."""
+        if not should_stop():
+            return False
+        return self._request_stop(message_id)
 
-        Returns True if hard cancellation was initiated or is already in progress, False otherwise.
-        """
+    def _request_stop(self, message_id: str) -> bool:
+        """Request cancellation for the response currently tracked by this message."""
         tracked = self.tracked_messages.get(message_id)
         target_log = self._log_target(tracked.target) if tracked is not None else {}
         logger.info(

@@ -12,7 +12,7 @@ import asyncio
 import threading
 from dataclasses import replace
 from typing import TYPE_CHECKING
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 import pytest
 
@@ -459,7 +459,7 @@ async def test_user_stop_cancels_live_response_before_terminalizing_under_its_lo
     finalize = AsyncMock(return_value=True)
 
     stop_task = asyncio.create_task(
-        runner.finalize_user_stop("$response", target, 7, AsyncMock(return_value=True), finalize),
+        runner.finalize_user_stop("$response", target, 7, Mock(return_value=True), finalize),
     )
     await asyncio.gather(response_task, return_exceptions=True)
 
@@ -468,6 +468,41 @@ async def test_user_stop_cancels_live_response_before_terminalizing_under_its_lo
 
     assert await stop_task is True
     finalize.assert_awaited_once_with()
+
+
+@pytest.mark.asyncio
+async def test_user_stop_guard_and_cancellation_do_not_yield_between_each_other(tmp_path: Path) -> None:
+    """A later tracked edit cannot replace the guarded task before cancellation."""
+    bot = _bot(tmp_path)
+    runner = unwrap_extracted_collaborator(bot._response_runner)
+    target = _target(thread_id="$thread", reply_to_event_id="$event")
+    lifecycle_lock = runner._lifecycle_coordinator._response_lifecycle_lock(target)
+    await lifecycle_lock.acquire()
+    old_response_task = asyncio.create_task(asyncio.Event().wait())
+    later_edit_task = asyncio.create_task(asyncio.Event().wait())
+    bot.stop_manager.set_current("$response", target, old_response_task)
+
+    def should_cancel() -> bool:
+        asyncio.get_running_loop().call_soon(
+            bot.stop_manager.set_current,
+            "$response",
+            target,
+            later_edit_task,
+        )
+        return True
+
+    stop_task = asyncio.create_task(
+        runner.finalize_user_stop("$response", target, 2, should_cancel, AsyncMock(return_value=True)),
+    )
+    await asyncio.gather(old_response_task, return_exceptions=True)
+    await asyncio.sleep(0)
+
+    assert later_edit_task.done() is False
+    assert bot.stop_manager.tracked_messages["$response"].task is later_edit_task
+    lifecycle_lock.release()
+    assert await stop_task is True
+    later_edit_task.cancel()
+    await asyncio.gather(later_edit_task, return_exceptions=True)
 
 
 @pytest.mark.asyncio
@@ -480,7 +515,7 @@ async def test_settled_stop_retry_does_not_cancel_later_live_response(tmp_path: 
     await lifecycle_lock.acquire()
     response_task = asyncio.create_task(asyncio.Event().wait())
     bot.stop_manager.set_current("$response", target, response_task)
-    should_cancel = AsyncMock(return_value=False)
+    should_cancel = Mock(return_value=False)
     finalize = AsyncMock(return_value=True)
 
     stop_task = asyncio.create_task(
@@ -492,7 +527,7 @@ async def test_settled_stop_retry_does_not_cancel_later_live_response(tmp_path: 
     lifecycle_lock.release()
 
     assert await stop_task is True
-    should_cancel.assert_awaited()
+    should_cancel.assert_called()
     finalize.assert_awaited_once_with()
     assert response_task.done() is False
     response_task.cancel()
@@ -902,7 +937,7 @@ async def test_user_stop_mid_generation_cancels_task_and_clears_tracking(tmp_pat
     await asyncio.wait_for(started.wait(), timeout=2)
     tracked = stop_manager.tracked_messages["$placeholder"]
 
-    assert await stop_manager.handle_stop_reaction("$placeholder") is True
+    assert stop_manager.request_stop_if("$placeholder", lambda: True) is True
     # The attempt survives the cancellation and still reports its visible event id.
     assert await asyncio.wait_for(run_task, timeout=2) == "$placeholder"
 
