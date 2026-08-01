@@ -324,7 +324,7 @@ class DispatchObligationStore:
             requires_pending_check=True,
         )
 
-    def create_pending(self, obligation: _DispatchObligation) -> _DispatchCreateResult:
+    def _create_pending(self, obligation: _DispatchObligation) -> _DispatchCreateResult:
         """Durably create pending work before its callback can run."""
         self._validate_bound_key(obligation.key)
         if not obligation.source_event_id:
@@ -426,7 +426,7 @@ class DispatchObligationStore:
                 ),
             )
 
-    def discard_pending(self, key: _DispatchObligationKey) -> None:
+    def _discard_pending(self, key: _DispatchObligationKey) -> None:
         """Remove successful work whose source has no permanent Matrix event ID."""
         self._validate_bound_key(key)
         with self._lock, self._connection() as connection:
@@ -450,7 +450,7 @@ class DispatchObligationStore:
                 ),
             )
 
-    def mark_callback_pending(self, key: _DispatchObligationKey) -> bool:
+    def _mark_callback_pending(self, key: _DispatchObligationKey) -> bool:
         """Return deferred turn work to callback ownership before retrying it."""
         self._validate_bound_key(key)
         with self._lock, self._connection() as connection:
@@ -514,7 +514,7 @@ class DispatchObligationStore:
             raise RuntimeError(msg)
         return DispatchSemanticConsumer(row["semantic_consumer"])
 
-    def mark_callback_deferred(self, key: _DispatchObligationKey) -> None:
+    def _mark_callback_deferred(self, key: _DispatchObligationKey) -> None:
         """Record that the callback completed and downstream turn work owns the source."""
         self._validate_bound_key(key)
         with self._lock, self._connection() as connection:
@@ -539,7 +539,7 @@ class DispatchObligationStore:
                 ),
             )
 
-    def settle_from_turn_store(
+    def _settle_from_turn_store(
         self,
         source_event_id: str,
         callback_kind: DispatchCallbackKind,
@@ -590,7 +590,7 @@ class DispatchObligationStore:
                 ),
             )
 
-    def settle_pending_from_turn_store(self, source_event_ids: tuple[str, ...]) -> None:
+    def _settle_pending_from_turn_store(self, source_event_ids: tuple[str, ...]) -> None:
         """Compact only transient turn-backed rows after TurnStore becomes durable."""
         if not source_event_ids:
             return
@@ -715,7 +715,7 @@ class DispatchObligationStore:
             ).fetchall()
         return frozenset(row["source_event_id"] for row in rows)
 
-    def pending_for(self, key: _DispatchObligationKey) -> _DispatchObligation | None:
+    def _pending_for(self, key: _DispatchObligationKey) -> _DispatchObligation | None:
         """Reload the first durable payload for one still-pending exact key."""
         self._validate_bound_key(key)
         with self._lock, self._connection() as connection:
@@ -740,7 +740,7 @@ class DispatchObligationStore:
             ).fetchone()
         return None if row is None else self._pending_obligation_from_row(row)
 
-    def has_pending(
+    def _has_pending(
         self,
         source_event_id: str,
         callback_kind: DispatchCallbackKind,
@@ -1188,7 +1188,7 @@ class DispatchObligationRunner:
             running_loop = None
         if running_loop is None:
             try:
-                self.store.settle_pending_from_turn_store(source_event_ids)
+                self.store._settle_pending_from_turn_store(source_event_ids)
             except Exception:
                 logger.exception(
                     "turn_dispatch_obligation_initial_settlement_failed",
@@ -1228,7 +1228,7 @@ class DispatchObligationRunner:
                 source_event_ids = tuple(self._turn_settlement_retry_ids)
                 try:
                     await _run_owned_store_operation(
-                        self.store.settle_pending_from_turn_store,
+                        self.store._settle_pending_from_turn_store,
                         source_event_ids,
                     )
                 except asyncio.CancelledError:
@@ -1249,7 +1249,7 @@ class DispatchObligationRunner:
         finally:
             self._turn_settlement_retry_task = None
 
-    def admission_callback(
+    def _admission_callback(
         self,
         callback_kind: DispatchCallbackKind,
     ) -> _DispatchObligationAdmissionCallback:
@@ -1286,7 +1286,7 @@ class DispatchObligationRunner:
         """Route every correctness-critical timeline event through one nio owner."""
         callback_kind = self._admission_kind(event)
         if callback_kind is not None:
-            await self.admission_callback(callback_kind)(room, event)
+            await self._admission_callback(callback_kind)(room, event)
 
     def _admission_kind(self, event: nio.Event) -> DispatchCallbackKind | None:
         """Return the one durable callback kind owned by a timeline event."""
@@ -1308,7 +1308,7 @@ class DispatchObligationRunner:
         if obligation is None:
             return
         try:
-            await self.run_persisted(obligation, room=room, event=event)
+            await self._run_persisted(obligation, room=room, event=event)
         except Exception:
             self._schedule_retry(obligation.key)
             raise
@@ -1342,11 +1342,11 @@ class DispatchObligationRunner:
         self._event_loop = asyncio.get_running_loop()
         try:
             obligation = self._obligation_for_event(room, event, callback_kind)
-            create_result = await _run_owned_store_operation(self.store.create_pending, obligation)
+            create_result = await _run_owned_store_operation(self.store._create_pending, obligation)
             if create_result is _DispatchCreateResult.ALREADY_TERMINAL:
                 persisted_obligation = None
             elif create_result is _DispatchCreateResult.ALREADY_PENDING:
-                persisted_obligation = await asyncio.to_thread(self.store.pending_for, obligation.key)
+                persisted_obligation = await asyncio.to_thread(self.store._pending_for, obligation.key)
             else:
                 persisted_obligation = None if await self._settle_from_turn_store_if_owned(obligation) else obligation
         except (asyncio.CancelledError, Exception):
@@ -1382,7 +1382,7 @@ class DispatchObligationRunner:
             event_source=event_source,
         )
 
-    def source_event_id_for(
+    def _source_event_id_for(
         self,
         room: nio.MatrixRoom,
         event: _DispatchEvent,
@@ -1391,7 +1391,7 @@ class DispatchObligationRunner:
         """Return the exact durable source identity for logging one callback."""
         return self._obligation_for_event(room, event, callback_kind).source_event_id
 
-    async def run_admitted(
+    async def _run_admitted(
         self,
         room: nio.MatrixRoom,
         event: _DispatchEvent,
@@ -1400,10 +1400,10 @@ class DispatchObligationRunner:
         """Execute one exact obligation previously accepted by nio admission."""
         key = self._obligation_for_event(room, event, callback_kind).key
         try:
-            obligation = await asyncio.to_thread(self.store.pending_for, key)
+            obligation = await asyncio.to_thread(self.store._pending_for, key)
             if obligation is None:
                 return
-            await self.run_persisted(obligation, room=room, event=event)
+            await self._run_persisted(obligation, room=room, event=event)
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -1432,7 +1432,7 @@ class DispatchObligationRunner:
         event: _DispatchEvent,
     ) -> None:
         try:
-            await self.run_persisted(obligation, room=room, event=event)
+            await self._run_persisted(obligation, room=room, event=event)
         except asyncio.CancelledError:
             return
         except Exception:
@@ -1444,7 +1444,7 @@ class DispatchObligationRunner:
                 room_id=obligation.room_id,
             )
 
-    async def run_persisted(
+    async def _run_persisted(
         self,
         obligation: _DispatchObligation,
         *,
@@ -1515,7 +1515,7 @@ class DispatchObligationRunner:
         for key in tuple(self._retry_keys):
             try:
                 is_pending = await asyncio.to_thread(
-                    self.store.has_pending,
+                    self.store._has_pending,
                     key.source_event_id,
                     key.callback_kind,
                 )
@@ -1543,7 +1543,7 @@ class DispatchObligationRunner:
                 for key in tuple(self._retry_keys):
                     completed_attempts = self._retry_keys.pop(key)
                     try:
-                        obligation = await asyncio.to_thread(self.store.pending_for, key)
+                        obligation = await asyncio.to_thread(self.store._pending_for, key)
                         if obligation is None:
                             continue
                         event = _parse_recovery_event(obligation)
@@ -1592,7 +1592,7 @@ class DispatchObligationRunner:
             return False
         try:
             if obligation.requires_pending_check and not await asyncio.to_thread(
-                self.store.has_pending,
+                self.store._has_pending,
                 obligation.source_event_id,
                 obligation.callback_kind,
             ):
@@ -1601,7 +1601,7 @@ class DispatchObligationRunner:
                 if await self._settle_from_turn_store_if_owned(obligation):
                     return True
                 callback_reclaimed = await _run_owned_store_operation(
-                    self.store.mark_callback_pending,
+                    self.store._mark_callback_pending,
                     obligation.key,
                 )
                 if not callback_reclaimed:
@@ -1627,7 +1627,7 @@ class DispatchObligationRunner:
         if not await asyncio.to_thread(self.turn_is_terminal, obligation.source_event_id):
             return False
         await _run_owned_store_operation(
-            self.store.settle_from_turn_store,
+            self.store._settle_from_turn_store,
             obligation.source_event_id,
             obligation.callback_kind,
         )
@@ -1644,11 +1644,11 @@ class DispatchObligationRunner:
         if await self._settle_from_turn_store_if_owned(obligation):
             return
         if result is _DispatchCallbackResult.DEFERRED:
-            await _run_owned_store_operation(self.store.mark_callback_deferred, obligation.key)
+            await _run_owned_store_operation(self.store._mark_callback_deferred, obligation.key)
             await self._settle_from_turn_store_if_owned(obligation)
             return
         if obligation.callback_kind is DispatchCallbackKind.INVITE:
-            await _run_owned_store_operation(self.store.discard_pending, obligation.key)
+            await _run_owned_store_operation(self.store._discard_pending, obligation.key)
             return
         outcome = (
             _DispatchTerminalOutcome.SUCCEEDED
@@ -1721,7 +1721,7 @@ class _DispatchObligationTaskWrapper:
         event: _DispatchEvent,
     ) -> None:
         try:
-            await self.runner.run_admitted(
+            await self.runner._run_admitted(
                 room,
                 event,
                 self.callback_kind,
@@ -1731,7 +1731,7 @@ class _DispatchObligationTaskWrapper:
         except Exception:
             logger.exception(
                 "dispatch_obligation_callback_failed",
-                source_event_id=self.runner.source_event_id_for(room, event, self.callback_kind),
+                source_event_id=self.runner._source_event_id_for(room, event, self.callback_kind),
                 callback_kind=self.callback_kind.value,
                 room_id=room.room_id,
             )

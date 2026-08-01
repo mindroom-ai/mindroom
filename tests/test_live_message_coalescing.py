@@ -523,7 +523,7 @@ async def test_post_gate_terminal_drop_settles_real_deferred_dispatch_obligation
         plan_turn.assert_not_awaited()
     assert not bot._turn_store.is_durably_handled(event.event_id)
     await _wait_for(
-        lambda: not runner.store.has_pending(event.event_id, DispatchCallbackKind.MESSAGE),
+        lambda: not runner.store._has_pending(event.event_id, DispatchCallbackKind.MESSAGE),
         deadline_seconds=1,
     )
 

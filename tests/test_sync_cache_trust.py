@@ -123,7 +123,7 @@ def test_planned_response_does_not_advance_checkpoint_until_applied(tmp_path: Pa
     assert trust.checkpoint is None
     assert load_sync_checkpoint(tmp_path, "code") is None
 
-    trust.apply_response(decision, cache_result=SyncCacheWriteResult(complete=True))
+    trust._apply_response(decision, cache_result=SyncCacheWriteResult(complete=True))
 
     assert trust.state is SyncTrustState.CERTIFIED
     assert trust.checkpoint == SyncCheckpoint("s_planned")
@@ -133,17 +133,17 @@ def test_dispatch_persist_failure_is_consumed_once_per_epoch(tmp_path: Path) -> 
     """Each new admission failure rejects certification exactly once."""
     trust, _cache, _runtime = _trust(tmp_path)
 
-    assert not trust.consume_dispatch_persist_failure()
+    assert not trust._consume_dispatch_persist_failure()
 
     trust.record_dispatch_persist_failure()
     trust.record_dispatch_persist_failure()
 
-    assert trust.consume_dispatch_persist_failure()
-    assert not trust.consume_dispatch_persist_failure()
+    assert trust._consume_dispatch_persist_failure()
+    assert not trust._consume_dispatch_persist_failure()
 
     trust.record_dispatch_persist_failure()
 
-    assert trust.consume_dispatch_persist_failure()
+    assert trust._consume_dispatch_persist_failure()
 
 
 def test_dispatch_acceptance_policy_rejects_failed_response_then_applies_next(tmp_path: Path) -> None:
@@ -193,7 +193,7 @@ def test_cache_scope_invalidation_rejects_stale_certification_plan(tmp_path: Pat
     )
 
     assert trust.invalidate_for_cache_scope_cleanup()
-    applied = trust.apply_response(decision, cache_result=cache_result)
+    applied = trust._apply_response(decision, cache_result=cache_result)
 
     assert applied.state is SyncTrustState.UNCERTAIN
     assert applied.reset_client_token is True

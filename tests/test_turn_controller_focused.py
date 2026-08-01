@@ -1118,8 +1118,8 @@ async def test_duplicate_router_relay_claim_settles_without_restart(config: Conf
     if obligation_runner._turn_settlement_retry_task is not None:
         await obligation_runner._turn_settlement_retry_task
 
-    assert not obligation_store.has_pending(first.event_id, DispatchCallbackKind.MESSAGE)
-    assert not obligation_store.has_pending(second.event_id, DispatchCallbackKind.MESSAGE)
+    assert not obligation_store._has_pending(first.event_id, DispatchCallbackKind.MESSAGE)
+    assert not obligation_store._has_pending(second.event_id, DispatchCallbackKind.MESSAGE)
 
 
 @pytest.mark.asyncio
@@ -1206,10 +1206,10 @@ async def test_failed_gate_admission_releases_ingress_claim_once(
     assert obligation is not None
 
     with pytest.raises(IngressAdmissionClosedError):
-        await obligation_runner.run_persisted(obligation, room=room, event=event)
+        await obligation_runner._run_persisted(obligation, room=room, event=event)
 
     release_claim.assert_called_once()
-    assert obligation_store.has_pending(event.event_id, DispatchCallbackKind.MESSAGE)
+    assert obligation_store._has_pending(event.event_id, DispatchCallbackKind.MESSAGE)
     competing_claim = TurnRecord.create([event.event_id], completed=False)
     assert harness.turn_store.try_claim_turn(competing_claim) is True
     harness.turn_store.release_pending_turn_claim(competing_claim)
@@ -1241,9 +1241,9 @@ async def test_failed_media_admission_remains_a_pending_exact_callback(
     assert obligation is not None
 
     with pytest.raises(IngressAdmissionClosedError):
-        await obligation_runner.run_persisted(obligation, room=room, event=event)
+        await obligation_runner._run_persisted(obligation, room=room, event=event)
 
-    assert obligation_store.has_pending(event.event_id, DispatchCallbackKind.MEDIA)
+    assert obligation_store._has_pending(event.event_id, DispatchCallbackKind.MEDIA)
 
 
 @pytest.mark.asyncio
@@ -1271,7 +1271,7 @@ async def test_router_silent_ignore_compacts_exact_callback(config: Config, tmp_
     assert harness.policy.plan_turn_calls == 1
     assert harness.runner.requests == []
     assert harness.turn_store.get_turn_record(event.event_id) is None
-    assert not obligation_store.has_pending(event.event_id, DispatchCallbackKind.MESSAGE)
+    assert not obligation_store._has_pending(event.event_id, DispatchCallbackKind.MESSAGE)
 
 
 @pytest.mark.asyncio
