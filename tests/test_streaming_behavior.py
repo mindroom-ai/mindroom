@@ -2140,7 +2140,7 @@ class TestStreamingBehavior:
                 typing_indicator=noop_typing,
             ),
         ):
-            generation = await bot._response_runner.process_and_respond_streaming(
+            generation = await bot._response_runner._process_and_respond_streaming(
                 ResponseRequest(
                     thread_history=[],
                     prompt="Continue",
@@ -2315,7 +2315,7 @@ class TestStreamingBehavior:
                 typing_indicator=_noop_typing_indicator,
             ),
         ):
-            generation = await bot._response_runner.process_and_respond(
+            generation = await bot._response_runner._process_and_respond(
                 ResponseRequest(
                     thread_history=[],
                     prompt="Please check the docs",
@@ -4017,7 +4017,7 @@ class TestStreamingBehavior:
             ),
         )
         response_hooks = SimpleNamespace(
-            apply_before_response=AsyncMock(
+            _apply_before_response=AsyncMock(
                 return_value=SimpleNamespace(
                     response_text="chunk",
                     response_kind="ai",
@@ -4027,7 +4027,7 @@ class TestStreamingBehavior:
                     suppress=False,
                 ),
             ),
-            apply_final_response_transform=AsyncMock(
+            _apply_final_response_transform=AsyncMock(
                 return_value=SimpleNamespace(
                     response_text="updated text",
                     response_kind="ai",
@@ -4079,8 +4079,8 @@ class TestStreamingBehavior:
         assert outcome.final_visible_event_id == "$streaming"
         assert outcome.final_visible_body == "updated text"
         assert outcome.delivery_kind == "edited"
-        response_hooks.apply_before_response.assert_not_awaited()
-        response_hooks.apply_final_response_transform.assert_awaited_once()
+        response_hooks._apply_before_response.assert_not_awaited()
+        response_hooks._apply_final_response_transform.assert_awaited_once()
         gateway.edit_text.assert_awaited_once()
         edited_request = gateway.edit_text.await_args.args[0]
         assert edited_request.event_id == "$streaming"
@@ -4128,8 +4128,8 @@ class TestStreamingBehavior:
             ),
         )
         response_hooks = SimpleNamespace(
-            apply_before_response=AsyncMock(),
-            apply_final_response_transform=AsyncMock(
+            _apply_before_response=AsyncMock(),
+            _apply_final_response_transform=AsyncMock(
                 return_value=SimpleNamespace(
                     response_text="canonical final",
                     response_kind="ai",
@@ -4178,8 +4178,8 @@ class TestStreamingBehavior:
 
         assert outcome.final_visible_event_id == "$streaming"
         assert outcome.final_visible_body == "chunk"
-        response_hooks.apply_before_response.assert_not_awaited()
-        response_hooks.apply_final_response_transform.assert_awaited_once()
+        response_hooks._apply_before_response.assert_not_awaited()
+        response_hooks._apply_final_response_transform.assert_awaited_once()
         lifecycle = ResponseLifecycle(
             ResponseLifecycleDeps(
                 response_hooks=response_hooks,
@@ -4232,8 +4232,8 @@ class TestStreamingBehavior:
             extract_mapping=True,
         )
         response_hooks = SimpleNamespace(
-            apply_before_response=AsyncMock(),
-            apply_final_response_transform=AsyncMock(
+            _apply_before_response=AsyncMock(),
+            _apply_final_response_transform=AsyncMock(
                 return_value=SimpleNamespace(
                     response_text=raw_interactive,
                     response_kind="ai",
@@ -4287,7 +4287,7 @@ class TestStreamingBehavior:
         assert list(outcome.options_list or ()) == [
             {"emoji": "✅", "label": "Approve", "value": "approve"},
         ]
-        response_hooks.apply_final_response_transform.assert_awaited_once()
+        response_hooks._apply_final_response_transform.assert_awaited_once()
         response_hooks.emit_cancelled_response.assert_not_awaited()
 
     @pytest.mark.asyncio

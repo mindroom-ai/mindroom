@@ -74,7 +74,7 @@ class BotRoomLifecycle:
 
     def __init__(self, deps: BotRoomLifecycleDeps) -> None:
         self.deps = deps
-        self.invited_rooms = self.load_invited_rooms()
+        self.invited_rooms = self._load_invited_rooms()
         self._pending_forgotten_invited_rooms: set[str] = set()
         self._invite_join_locks: dict[str, asyncio.Lock] = {}
         self._welcome_locks: dict[str, asyncio.Lock] = {}
@@ -115,11 +115,11 @@ class BotRoomLifecycle:
                 return cached_room
         return nio.MatrixRoom(room_id=room_id, own_user_id=self.deps.agent_user.user_id)
 
-    def should_accept_invite(self) -> bool:
+    def _should_accept_invite(self) -> bool:
         """Return whether this entity should accept one inbound room invite."""
         return should_accept_invites(self._config(), self.deps.agent_name)
 
-    def should_persist_invited_rooms(self) -> bool:
+    def _should_persist_invited_rooms(self) -> bool:
         """Return whether this entity persists invited room IDs across restarts."""
         return should_persist_invited_rooms(self._config(), self.deps.agent_name)
 
@@ -128,19 +128,19 @@ class BotRoomLifecycle:
         await self.deps.on_room_joined(room_id)
         await self.deps.on_configured_room_joined(room_id)
 
-    def invited_rooms_file_path(self) -> Path:
+    def _invited_rooms_file_path(self) -> Path:
         """Return the durable path for invited room IDs for this entity."""
         return invited_rooms_path(self.deps.runtime_paths.storage_root, self.deps.agent_name)
 
-    def load_invited_rooms(self) -> set[str]:
+    def _load_invited_rooms(self) -> set[str]:
         """Load invited rooms persisted for one eligible entity."""
-        if not self.should_persist_invited_rooms():
+        if not self._should_persist_invited_rooms():
             return set()
-        return load_invited_rooms(self.invited_rooms_file_path())
+        return load_invited_rooms(self._invited_rooms_file_path())
 
     def forget_invited_room(self, room_id: str) -> None:
         """Stop preserving an ad-hoc room after this bot leaves it."""
-        if not self.should_persist_invited_rooms():
+        if not self._should_persist_invited_rooms():
             self.invited_rooms.discard(room_id)
         elif not self._update_invited_room(room_id, remember=False):
             msg = f"Failed to forget invited room {room_id}"
@@ -150,7 +150,7 @@ class BotRoomLifecycle:
 
     def _update_invited_room(self, room_id: str, *, remember: bool) -> bool:
         """Merge one update with durable and in-memory state before saving."""
-        room_ids = load_invited_rooms(self.invited_rooms_file_path()) | self.invited_rooms
+        room_ids = load_invited_rooms(self._invited_rooms_file_path()) | self.invited_rooms
         if remember:
             self._pending_forgotten_invited_rooms.discard(room_id)
             room_ids.add(room_id)
@@ -158,7 +158,7 @@ class BotRoomLifecycle:
             self._pending_forgotten_invited_rooms.add(room_id)
         room_ids.difference_update(self._pending_forgotten_invited_rooms)
 
-        saved = save_invited_rooms(self.invited_rooms_file_path(), room_ids)
+        saved = save_invited_rooms(self._invited_rooms_file_path(), room_ids)
         if saved:
             self._pending_forgotten_invited_rooms.clear()
         self.invited_rooms = room_ids
@@ -166,7 +166,7 @@ class BotRoomLifecycle:
 
     def _remember_invited_room(self, room_id: str) -> None:
         """Persist one accepted invite or fail so its durable intent can retry."""
-        if self.should_persist_invited_rooms() and not self._update_invited_room(room_id, remember=True):
+        if self._should_persist_invited_rooms() and not self._update_invited_room(room_id, remember=True):
             msg = f"Failed to persist invited room {room_id}"
             raise OSError(msg)
 
@@ -185,7 +185,7 @@ class BotRoomLifecycle:
         joined_rooms = await get_joined_rooms(client)
         current_rooms = set(joined_rooms or [])
         desired_rooms = set(self.deps.get_configured_rooms())
-        if self.should_persist_invited_rooms():
+        if self._should_persist_invited_rooms():
             desired_rooms.update(self.invited_rooms)
 
         for room_id in desired_rooms:
@@ -210,11 +210,11 @@ class BotRoomLifecycle:
         client = self._client()
         await leave_non_dm_rooms(
             client,
-            room_ids if room_ids is not None else await self.rooms_to_leave(),
+            room_ids if room_ids is not None else await self._rooms_to_leave(),
             on_room_left=self.deps.on_room_left,
         )
 
-    async def rooms_to_leave(self) -> list[str]:
+    async def _rooms_to_leave(self) -> list[str]:
         """Return joined rooms this bot should now leave before DM filtering."""
         client = self._client()
         joined_rooms = await get_joined_rooms(client)
@@ -223,7 +223,7 @@ class BotRoomLifecycle:
 
         current_rooms = set(joined_rooms)
         configured_rooms = set(self.deps.get_configured_rooms())
-        if self.should_persist_invited_rooms():
+        if self._should_persist_invited_rooms():
             configured_rooms.update(self.invited_rooms)
         if self.deps.agent_name == ROUTER_AGENT_NAME:
             root_space_id = matrix_state_for_runtime(self.deps.runtime_paths).space_room_id
@@ -296,7 +296,7 @@ class BotRoomLifecycle:
     async def on_invite(self, room: nio.MatrixRoom, event: nio.InviteEvent) -> None:
         """Handle one inbound invite using the configured room membership policy."""
         client = self._client()
-        if not self.should_accept_invite():
+        if not self._should_accept_invite():
             self._logger().info("Ignored invite", room_id=room.room_id, sender=event.sender)
             return
 

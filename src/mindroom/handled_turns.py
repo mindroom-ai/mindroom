@@ -56,7 +56,7 @@ class SourceEventMetadata:
         """Normalize the timestamp once for every physical representation."""
         object.__setattr__(self, "timestamp_ms", normalize_timestamp_ms(self.timestamp_ms))
 
-    def to_record(self) -> dict[str, object]:
+    def _to_record(self) -> dict[str, object]:
         """Return a JSON-safe representation for durable metadata."""
         record: dict[str, object] = {"sender": self.sender}
         if self.timestamp_ms is not None:
@@ -66,7 +66,7 @@ class SourceEventMetadata:
         return record
 
     @classmethod
-    def from_raw(cls, raw_metadata: object) -> SourceEventMetadata | None:
+    def _from_raw(cls, raw_metadata: object) -> SourceEventMetadata | None:
         """Build source metadata from a persisted JSON-like value."""
         if not isinstance(raw_metadata, Mapping):
             return None
@@ -309,7 +309,7 @@ class TurnRecordCodec:
         return _TURN_RECORD_SCHEMA_VERSION
 
     @staticmethod
-    def to_ledger_record(record: TurnRecord) -> dict[str, object]:  # noqa: C901, PLR0912
+    def _to_ledger_record(record: TurnRecord) -> dict[str, object]:  # noqa: C901, PLR0912
         """Serialize one exact record for the versioned handled-turn ledger."""
         payload: dict[str, object] = {
             "anchor_event_id": record.anchor_event_id,
@@ -340,7 +340,7 @@ class TurnRecordCodec:
             payload["user_stop_cutoff_revision"] = list(record.user_stop_cutoff_revision)
         if record.source_event_metadata is not None:
             payload["source_event_metadata"] = {
-                event_id: metadata.to_record() for event_id, metadata in record.source_event_metadata.items()
+                event_id: metadata._to_record() for event_id, metadata in record.source_event_metadata.items()
             }
         if record.response_owner is not None:
             payload["response_owner"] = record.response_owner
@@ -359,7 +359,7 @@ class TurnRecordCodec:
         return payload
 
     @staticmethod
-    def from_ledger_record(event_id: str, raw_record: object) -> TurnRecord | None:
+    def _from_ledger_record(event_id: str, raw_record: object) -> TurnRecord | None:
         """Parse one record from the current ledger schema without legacy migration."""
         if not isinstance(raw_record, Mapping):
             return None
@@ -445,7 +445,7 @@ class TurnRecordCodec:
             }
         if record.source_event_metadata is not None:
             metadata[constants.MATRIX_SOURCE_EVENT_METADATA_KEY] = {
-                event_id: source_metadata.to_record()
+                event_id: source_metadata._to_record()
                 for event_id, source_metadata in record.source_event_metadata.items()
             }
         if record.response_owner is not None:
@@ -938,7 +938,7 @@ class HandledTurnLedger:
         payload = {
             _LEDGER_SCHEMA_VERSION_KEY: TurnRecordCodec.schema_version(),
             _LEDGER_RECORDS_KEY: {
-                event_id: TurnRecordCodec.to_ledger_record(record) for event_id, record in responses.items()
+                event_id: TurnRecordCodec._to_ledger_record(record) for event_id, record in responses.items()
             },
         }
         write_json_file_durable(self._responses_file, payload, temp_dir=self.base_path, indent=2)
@@ -992,7 +992,7 @@ class HandledTurnLedger:
         records: dict[str, TurnRecord] = {}
         invalid_event_ids: list[str] = []
         for event_id, raw_record in raw_records.items():
-            record = TurnRecordCodec.from_ledger_record(event_id, raw_record) if isinstance(event_id, str) else None
+            record = TurnRecordCodec._from_ledger_record(event_id, raw_record) if isinstance(event_id, str) else None
             if record is None:
                 invalid_event_ids.append(event_id if isinstance(event_id, str) else repr(event_id))
                 continue
@@ -1264,7 +1264,7 @@ def _immutable_source_event_metadata(
         normalized = (
             raw_metadata
             if isinstance(raw_metadata, SourceEventMetadata)
-            else SourceEventMetadata.from_raw(raw_metadata)
+            else SourceEventMetadata._from_raw(raw_metadata)
         )
         if normalized is not None:
             metadata[event_id] = normalized

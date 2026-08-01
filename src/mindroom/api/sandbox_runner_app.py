@@ -5,6 +5,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
+from mindroom import __version__
 from mindroom.api.sandbox_runner import (
     app_runner_token,
     app_runtime_config,
@@ -14,6 +15,7 @@ from mindroom.api.sandbox_runner import (
     startup_runner_token_from_env,
 )
 from mindroom.api.sandbox_runner import router as sandbox_runner_router
+from mindroom.workers.compatibility import worker_health_payload
 
 
 @asynccontextmanager
@@ -40,6 +42,11 @@ app.include_router(sandbox_runner_router)
 
 
 @app.get("/healthz")
-async def healthz() -> dict[str, str]:
-    """Minimal readiness/liveness probe for dedicated worker pods."""
-    return {"status": "ok"}
+async def healthz() -> dict[str, str | int]:
+    """Return readiness plus the worker compatibility contract."""
+    payload = worker_health_payload(mindroom_version=__version__)
+    return {
+        "status": payload.status,
+        "mindroom_version": payload.mindroom_version,
+        "worker_protocol": payload.worker_protocol,
+    }

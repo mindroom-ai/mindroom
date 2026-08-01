@@ -1184,6 +1184,9 @@ def test_worker_cleanup_once_cleans_workers(monkeypatch: pytest.MonkeyPatch) -> 
         == 1
     )
     assert captured_kwargs["kubernetes_tool_validation_snapshot"] is not None
+    assert captured_kwargs["kubernetes_config_snapshot"] == (
+        main.serialized_kubernetes_worker_config_snapshot(runtime_config)
+    )
     assert captured_kwargs["worker_grantable_credentials"] == runtime_config.get_worker_grantable_credentials()
 
 
@@ -1263,6 +1266,7 @@ def test_list_workers_endpoint(test_client: TestClient, monkeypatch: pytest.Monk
     assert response.json()["workers"][0]["worker_key"] == "worker-key"
     assert response.json()["workers"][0]["backend_name"] == "kubernetes"
     assert captured_kwargs["kubernetes_tool_validation_snapshot"] is not None
+    assert captured_kwargs["kubernetes_config_snapshot"] is not None
     assert captured_kwargs["worker_grantable_credentials"] == constants.DEFAULT_WORKER_GRANTABLE_CREDENTIALS
 
 

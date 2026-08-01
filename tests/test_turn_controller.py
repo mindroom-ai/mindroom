@@ -175,11 +175,11 @@ async def test_owner_cancel_ready_task_closes_ready_result_returned_during_cance
     owner.ready_task = asyncio.create_task(ready())
     await asyncio.sleep(0)
 
-    await owner.cancel_ready_task()
+    await owner._cancel_ready_task()
 
     assert cancelled.is_set()
     assert close_count == 1
-    await owner.cancel_ready_task()
+    await owner._cancel_ready_task()
     assert close_count == 1
 
     await owner.release()

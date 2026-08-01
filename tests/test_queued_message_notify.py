@@ -762,7 +762,7 @@ async def test_post_response_effects_register_interactive_follow_up_for_preserve
         thread_id="$thread",
         reply_to_event_id="$event",
     )
-    interactive_metadata = InteractiveMetadata.from_parts(
+    interactive_metadata = InteractiveMetadata._from_parts(
         {"1": "yes"},
         ({"emoji": "1", "label": "Yes", "value": "yes"},),
     )
@@ -802,7 +802,7 @@ async def test_post_response_effects_skip_interactive_follow_up_for_preserved_st
         thread_id="$thread",
         reply_to_event_id="$event",
     )
-    interactive_metadata = InteractiveMetadata.from_parts(
+    interactive_metadata = InteractiveMetadata._from_parts(
         {"1": "yes"},
         ({"emoji": "1", "label": "Yes", "value": "yes"},),
     )
@@ -1029,7 +1029,7 @@ async def test_generate_response_sets_queued_signal_for_human_ingress(tmp_path: 
     try:
         with patch.object(
             ResponseRunner,
-            "generate_response_locked",
+            "_generate_response_locked",
             new=AsyncMock(return_value="$response"),
         ) as mock_locked:
             task = asyncio.create_task(
@@ -1092,7 +1092,7 @@ async def test_generate_response_skips_signal_for_non_human_prompt_ingress(
     try:
         with patch.object(
             ResponseRunner,
-            "generate_response_locked",
+            "_generate_response_locked",
             new=AsyncMock(return_value="$response"),
         ):
             task = asyncio.create_task(
@@ -1164,7 +1164,7 @@ async def test_generate_response_sets_queued_signal_for_trusted_router_relay(tmp
     try:
         with patch.object(
             ResponseRunner,
-            "generate_response_locked",
+            "_generate_response_locked",
             new=AsyncMock(return_value="$response"),
         ):
             task = asyncio.create_task(
@@ -1208,7 +1208,7 @@ async def test_generate_response_detects_active_turn_before_lock_is_held(tmp_pat
 
     with (
         patch.object(coordinator._lifecycle_coordinator, "_response_lifecycle_lock", return_value=lock),
-        patch.object(ResponseRunner, "generate_response_locked", new=fake_generate_response_locked),
+        patch.object(ResponseRunner, "_generate_response_locked", new=fake_generate_response_locked),
     ):
         first_task = asyncio.create_task(
             bot._response_runner.generate_response(
@@ -1262,7 +1262,7 @@ async def test_generate_response_waits_for_lock_before_starting_placeholder_life
         with (
             patch.object(
                 ResponseRunner,
-                "process_and_respond",
+                "_process_and_respond",
                 new=AsyncMock(
                     return_value=_ResponseGenerationOutcome(
                         delivery=FinalDeliveryOutcome(
@@ -1278,7 +1278,7 @@ async def test_generate_response_waits_for_lock_before_starting_placeholder_life
             ),
             patch.object(
                 ResponseRunner,
-                "run_cancellable_response",
+                "_run_cancellable_response",
                 new=AsyncMock(side_effect=fake_run_cancellable_response),
             ) as mock_run_cancellable_response,
             patch("mindroom.response_runner.should_use_streaming", new_callable=AsyncMock, return_value=False),
@@ -1424,12 +1424,12 @@ async def test_generate_response_uses_post_lock_reproof_target(tmp_path: Path) -
         patch.object(coordinator, "_build_lifecycle", MagicMock(return_value=_NoopResponseLifecycle())),
         patch.object(
             coordinator,
-            "run_cancellable_response",
+            "_run_cancellable_response",
             new=AsyncMock(side_effect=fake_run_cancellable_response),
         ),
         patch.object(
             coordinator,
-            "process_and_respond",
+            "_process_and_respond",
             new=AsyncMock(side_effect=fake_process_and_respond),
         ),
         patch("mindroom.response_runner.should_use_streaming", AsyncMock(return_value=False)),
@@ -1511,12 +1511,12 @@ async def test_generate_response_keeps_locked_target_when_payload_preparation_re
         ),
         patch.object(
             coordinator,
-            "run_cancellable_response",
+            "_run_cancellable_response",
             new=AsyncMock(side_effect=fake_run_cancellable_response),
         ),
         patch.object(
             coordinator,
-            "process_and_respond",
+            "_process_and_respond",
             new=AsyncMock(side_effect=fake_process_and_respond),
         ),
         patch("mindroom.response_runner.should_use_streaming", AsyncMock(return_value=False)),
@@ -1581,7 +1581,7 @@ async def test_generate_team_response_uses_post_lock_reproof_target(tmp_path: Pa
         patch.object(coordinator, "_build_lifecycle", MagicMock(return_value=lifecycle)),
         patch.object(
             coordinator,
-            "run_cancellable_response",
+            "_run_cancellable_response",
             new=AsyncMock(side_effect=fake_run_cancellable_response),
         ),
         patch("mindroom.delivery_gateway.DeliveryGateway.deliver_final", new=AsyncMock(side_effect=fake_deliver_final)),
@@ -1662,7 +1662,7 @@ async def test_generate_team_response_keeps_locked_target_when_payload_preparati
         ),
         patch.object(
             coordinator,
-            "run_cancellable_response",
+            "_run_cancellable_response",
             new=AsyncMock(side_effect=fake_run_cancellable_response),
         ),
         patch("mindroom.delivery_gateway.DeliveryGateway.deliver_final", new=AsyncMock(side_effect=fake_deliver_final)),
@@ -1739,7 +1739,7 @@ async def test_generate_team_response_helper_sets_queued_signal(tmp_path: Path) 
     try:
         with patch.object(
             ResponseRunner,
-            "generate_team_response_helper_locked",
+            "_generate_team_response_helper_locked",
             new=AsyncMock(return_value="$team-response"),
         ) as mock_locked:
             task = asyncio.create_task(
@@ -1789,7 +1789,7 @@ async def test_generate_response_without_reservation_does_not_drain_human_backlo
 
     await lifecycle_lock.acquire()
     try:
-        with patch.object(ResponseRunner, "generate_response_locked", new=fake_locked):
+        with patch.object(ResponseRunner, "_generate_response_locked", new=fake_locked):
             task_b = asyncio.create_task(
                 bot._response_runner.generate_response(
                     ResponseRequest(
@@ -1856,7 +1856,7 @@ async def test_generate_team_response_without_reservation_does_not_drain_human_b
 
     await lifecycle_lock.acquire()
     try:
-        with patch.object(ResponseRunner, "generate_team_response_helper_locked", new=fake_locked):
+        with patch.object(ResponseRunner, "_generate_team_response_helper_locked", new=fake_locked):
             task_b = asyncio.create_task(
                 bot._response_runner.generate_team_response_helper(
                     ResponseRequest(

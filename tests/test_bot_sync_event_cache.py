@@ -527,7 +527,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             self._sync_response({room_id: MagicMock(timeline=MagicMock(events=[message_event], limited=True))}),
         )
 
-        assert result.certified is False
+        assert result._certified is False
         assert result.limited_room_ids == (room_id,)
         assert result.errors == ()
         event_cache.mark_room_threads_gap.assert_awaited_once_with(
@@ -552,7 +552,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             self._sync_response({room_id: MagicMock(timeline=MagicMock(events=[], limited=True))}),
         )
 
-        assert result.certified is False
+        assert result._certified is False
         assert result.complete is False
         assert result.errors == (marker_error,)
         assert result.limited_room_ids == (room_id,)
@@ -608,7 +608,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             self._sync_response({room_id: MagicMock(timeline=MagicMock(events=[], limited=True))}),
         )
 
-        assert result.certified is False
+        assert result._certified is False
         assert result.complete is False
         assert result.runtime_available is False
         assert result.limited_room_ids == (room_id,)
@@ -667,7 +667,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         finally:
             await _close_bound_runtime_support(bot, support)
 
-        assert result.certified is False
+        assert result._certified is False
         assert result.limited_room_ids == (room_id,)
         assert result.errors == ()
         assert cached_event is not None

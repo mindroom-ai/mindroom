@@ -200,7 +200,7 @@ def _source_metadata(*source_event_ids: str) -> dict[str, SourceEventMetadata]:
 
 def _source_metadata_records(*source_event_ids: str) -> dict[str, dict[str, object]]:
     return {
-        source_event_id: metadata.to_record()
+        source_event_id: metadata._to_record()
         for source_event_id, metadata in _source_metadata(*source_event_ids).items()
     }
 
@@ -3212,7 +3212,7 @@ async def test_handle_message_edit_recovers_missing_ledger_row_from_persisted_ru
     with (
         patch.object(bot._conversation_state_writer, "create_storage", return_value=storage),
         patch(
-            "mindroom.response_runner.ResponseRunner.process_and_respond",
+            "mindroom.response_runner.ResponseRunner._process_and_respond",
             new=AsyncMock(side_effect=process_and_respond),
         ),
         patch("mindroom.response_runner.reprioritize_auto_flush_sessions"),
@@ -3693,7 +3693,7 @@ async def test_handle_message_edit_recovers_newer_run_response_event_id_after_re
     with (
         patch("mindroom.response_runner.should_use_streaming", new_callable=AsyncMock, return_value=False),
         patch(
-            "mindroom.response_runner.ResponseRunner.process_and_respond",
+            "mindroom.response_runner.ResponseRunner._process_and_respond",
             new=AsyncMock(side_effect=process_and_respond),
         ),
         patch("mindroom.response_runner.reprioritize_auto_flush_sessions"),

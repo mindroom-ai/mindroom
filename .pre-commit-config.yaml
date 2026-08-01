@@ -73,12 +73,12 @@ repos:
 
       - id: privata
         name: Enforce module privacy
-        entry: bash -c 'env -u VIRTUAL_ENV uv run privata .'
+        entry: bash -c 'env -u VIRTUAL_ENV uv run privata --methods .'
         language: system
         pass_filenames: false
 
   - repo: https://github.com/tox-dev/pyproject-fmt
-    rev: "v2.21.1"
+    rev: "v2.26.0"
     hooks:
       - id: pyproject-fmt
         args: ["--table-format", "long", "--no-generate-python-version-classifiers"]
@@ -94,7 +94,7 @@ repos:
         require_serial: true
 
   - repo: https://github.com/pre-commit/mirrors-eslint
-    rev: v10.2.1
+    rev: v10.8.0
     hooks:
       - id: eslint
         files: ^frontend/.*\.(js|jsx|ts|tsx)$
@@ -110,18 +110,19 @@ repos:
 
   - repo: local
     hooks:
-      - id: typescript-check
-        name: TypeScript type checking
-        entry: bash -c 'cd frontend && bun run type-check'
-        language: system
-        files: ^frontend/.*\.(ts|tsx)$
-        pass_filenames: false
-
+      # Each hook must bootstrap a fresh checkout without downloading Puppeteer's browser.
       - id: check-bun-lock
         name: Check bun.lock is up to date
-        entry: bash -c 'cd frontend && bun install --frozen-lockfile'
+        entry: bash -c 'cd frontend && PUPPETEER_SKIP_DOWNLOAD=true bun install --frozen-lockfile'
         language: system
-        files: ^frontend/package\.json$
+        files: ^frontend/(package\.json|bun\.lock)$
+        pass_filenames: false
+
+      - id: typescript-check
+        name: TypeScript type checking
+        entry: bash -c 'cd frontend && PUPPETEER_SKIP_DOWNLOAD=true bun install --frozen-lockfile && bun run type-check'
+        language: system
+        files: ^frontend/.*\.(ts|tsx)$
         pass_filenames: false
 
   - repo: https://github.com/pre-commit/pre-commit-hooks

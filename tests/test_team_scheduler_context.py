@@ -129,7 +129,7 @@ async def test_team_non_streaming_has_scheduler_context(tmp_path: Path) -> None:
     with (
         patch.object(
             ResponseRunner,
-            "run_cancellable_response",
+            "_run_cancellable_response",
             new=AsyncMock(side_effect=fake_run_cancellable_response),
         ),
         patch("mindroom.response_runner.typing_indicator", new=_noop_typing_indicator),
@@ -168,7 +168,7 @@ async def test_team_non_streaming_cancellation_edits_placeholder(tmp_path: Path)
     with (
         patch.object(
             ResponseRunner,
-            "run_cancellable_response",
+            "_run_cancellable_response",
             new=AsyncMock(side_effect=fake_run_cancellable_response),
         ),
         patch("mindroom.response_runner.typing_indicator", new=_noop_typing_indicator),
@@ -220,7 +220,7 @@ async def test_team_non_streaming_sync_restart_edits_placeholder_with_restart_no
     with (
         patch.object(
             ResponseRunner,
-            "run_cancellable_response",
+            "_run_cancellable_response",
             new=AsyncMock(side_effect=fake_run_cancellable_response),
         ),
         patch("mindroom.response_runner.typing_indicator", new=_noop_typing_indicator),
@@ -290,7 +290,7 @@ async def test_team_streaming_has_scheduler_context(tmp_path: Path) -> None:
     with (
         patch.object(
             ResponseRunner,
-            "run_cancellable_response",
+            "_run_cancellable_response",
             new=AsyncMock(side_effect=fake_run_cancellable_response),
         ),
         patch("mindroom.response_runner.typing_indicator", new=_noop_typing_indicator),
@@ -336,7 +336,7 @@ async def test_team_late_cancellation_during_post_effects_propagates(tmp_path: P
     with (
         patch.object(
             ResponseRunner,
-            "run_cancellable_response",
+            "_run_cancellable_response",
             new=AsyncMock(side_effect=fake_run_cancellable_response),
         ),
         patch("mindroom.response_runner.typing_indicator", new=_noop_typing_indicator),

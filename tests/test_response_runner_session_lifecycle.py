@@ -232,12 +232,12 @@ async def test_process_and_respond_propagates_before_response_cancellation_to_ru
             requester_id="@alice:localhost",
         )
         coordinator._persist_interrupted_recorder = MagicMock()
-        coordinator.deps.delivery_gateway.deps.response_hooks.apply_before_response = AsyncMock(
+        coordinator.deps.delivery_gateway.deps.response_hooks._apply_before_response = AsyncMock(
             side_effect=asyncio.CancelledError(USER_STOP_CANCEL_MSG),
         )
 
         with pytest.raises(asyncio.CancelledError, match=USER_STOP_CANCEL_MSG):
-            await coordinator.process_and_respond(
+            await coordinator._process_and_respond(
                 ResponseRequest(
                     thread_history=(),
                     prompt="Hello",
@@ -306,7 +306,7 @@ async def test_process_and_respond_streaming_preserves_user_stop_outcome(
         )
         coordinator.deps.delivery_gateway.deps.response_hooks.emit_cancelled_response.reset_mock()
 
-        response_event_id = await coordinator.generate_response_locked(
+        response_event_id = await coordinator._generate_response_locked(
             replace(
                 _response_request(
                     prompt="Hello",
@@ -421,10 +421,10 @@ async def test_process_and_respond_emits_session_started_after_first_persisted_t
             ),
         )
 
-        await coordinator.process_and_respond(
+        await coordinator._process_and_respond(
             _response_request(prompt="Hello", user_id="@alice:localhost", thread_id="$thread-root"),
         )
-        await coordinator.process_and_respond(
+        await coordinator._process_and_respond(
             _response_request(prompt="Hello again", user_id="@alice:localhost", thread_id="$thread-root"),
         )
 
@@ -501,7 +501,7 @@ async def test_process_and_respond_applies_session_started_agent_and_room_scopes
 
         mock_ai.side_effect = fake_ai_response
 
-        await coordinator.process_and_respond(
+        await coordinator._process_and_respond(
             _response_request(prompt="Hello", user_id="@alice:localhost", thread_id="$thread-root"),
         )
 
@@ -554,7 +554,7 @@ async def test_process_and_respond_does_not_emit_session_started_without_persist
 
         mock_ai.side_effect = fake_ai_response
 
-        await coordinator.process_and_respond(
+        await coordinator._process_and_respond(
             _response_request(prompt="Hello", user_id="@alice:localhost", thread_id="$thread-root"),
         )
 
@@ -678,7 +678,7 @@ async def test_session_started_hooks_continue_after_timeout(tmp_path: Path) -> N
 
         mock_ai.side_effect = fake_ai_response
 
-        await coordinator.process_and_respond(
+        await coordinator._process_and_respond(
             _response_request(prompt="Hello", user_id="@alice:localhost", thread_id="$thread-root"),
         )
 
@@ -750,7 +750,7 @@ async def test_session_started_hooks_continue_after_runtime_error(tmp_path: Path
 
         mock_ai.side_effect = fake_ai_response
 
-        await coordinator.process_and_respond(
+        await coordinator._process_and_respond(
             _response_request(prompt="Hello", user_id="@alice:localhost", thread_id="$thread-root"),
         )
 
@@ -832,7 +832,7 @@ async def test_process_and_respond_streaming_emits_session_started_after_persist
 
         mock_stream.side_effect = fake_stream_agent_response
 
-        generation = await coordinator.process_and_respond_streaming(
+        generation = await coordinator._process_and_respond_streaming(
             _response_request(prompt="Hello", user_id="@bob:localhost", thread_id="$thread-root"),
         )
 
@@ -893,7 +893,7 @@ async def test_process_and_respond_streaming_persists_interrupted_history_when_d
 
         mock_stream.side_effect = fake_stream_agent_response
 
-        generation = await coordinator.process_and_respond_streaming(
+        generation = await coordinator._process_and_respond_streaming(
             _response_request(prompt="Hello", user_id="@bob:localhost", thread_id="$thread-root"),
         )
 
@@ -960,7 +960,7 @@ async def test_process_and_respond_streaming_persists_interrupted_history_when_m
 
         coordinator.deps.delivery_gateway.deliver_stream.side_effect = consume_delivery
 
-        generation = await coordinator.process_and_respond_streaming(
+        generation = await coordinator._process_and_respond_streaming(
             _response_request(prompt="Hello", user_id="@bob:localhost", thread_id="$thread-root"),
             run_id="run-1",
         )
@@ -1052,7 +1052,7 @@ async def test_process_and_respond_streaming_delivery_failure_with_visible_tools
 
         mock_stream.side_effect = fake_stream_agent_response
 
-        generation = await coordinator.process_and_respond_streaming(
+        generation = await coordinator._process_and_respond_streaming(
             _response_request(prompt="Hello", user_id="@bob:localhost", thread_id="$thread-root"),
         )
 
@@ -1134,7 +1134,7 @@ async def test_process_and_respond_emits_session_started_after_persisted_cancell
 
         mock_ai.side_effect = fake_ai_response
 
-        generation = await coordinator.process_and_respond(
+        generation = await coordinator._process_and_respond(
             replace(
                 _response_request(prompt="Hello", user_id="@alice:localhost", thread_id="$thread-root"),
                 existing_event_id="$thinking",
@@ -1217,7 +1217,7 @@ async def test_process_and_respond_streaming_emits_session_started_after_persist
         mock_stream.side_effect = fake_stream_agent_response
 
         with pytest.raises(asyncio.CancelledError, match="cancel"):
-            await coordinator.process_and_respond_streaming(
+            await coordinator._process_and_respond_streaming(
                 replace(
                     _response_request(prompt="Hello", user_id="@bob:localhost", thread_id="$thread-root"),
                     existing_event_id="$thinking",
@@ -1254,7 +1254,7 @@ async def test_generate_response_locked_persists_minimal_interrupted_history_aft
     with (
         patch.object(
             ResponseRunner,
-            "run_cancellable_response",
+            "_run_cancellable_response",
             new=AsyncMock(side_effect=fake_run_cancellable_response),
         ),
         patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=False)),
@@ -1281,7 +1281,7 @@ async def test_generate_response_locked_persists_minimal_interrupted_history_aft
 
         mock_ai.side_effect = fake_ai_response
 
-        resolution = await coordinator.generate_response_locked(
+        resolution = await coordinator._generate_response_locked(
             _response_request(prompt="Hello", user_id="@alice:localhost", thread_id="$thread-root"),
             resolved_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
         )
@@ -1362,7 +1362,7 @@ async def test_private_agent_response_runner_builds_execution_identity_from_requ
             "build_execution_identity",
             side_effect=spy_build_execution_identity,
         ):
-            response_event_id = await coordinator.generate_response_locked(
+            response_event_id = await coordinator._generate_response_locked(
                 _response_request(prompt="Campground opened", user_id="@owner:localhost"),
                 resolved_target=target,
             )
@@ -1411,7 +1411,7 @@ async def test_generate_response_locked_hard_cancel_does_not_seed_seen_ids_with_
     with (
         patch.object(
             ResponseRunner,
-            "run_cancellable_response",
+            "_run_cancellable_response",
             new=AsyncMock(side_effect=fake_run_cancellable_response),
         ),
         patch.object(ResponseRunner, "_active_response_event_ids", return_value={"$other-response"}),
@@ -1439,7 +1439,7 @@ async def test_generate_response_locked_hard_cancel_does_not_seed_seen_ids_with_
 
         mock_ai.side_effect = fake_ai_response
 
-        resolution = await coordinator.generate_response_locked(
+        resolution = await coordinator._generate_response_locked(
             _response_request(prompt="Hello", user_id="@alice:localhost", thread_id="$thread-root"),
             resolved_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
         )
@@ -1478,7 +1478,7 @@ async def test_generate_response_locked_finalizes_cancelled_task_before_delivery
     with (
         patch.object(
             ResponseRunner,
-            "run_cancellable_response",
+            "_run_cancellable_response",
             new=AsyncMock(side_effect=fake_run_cancellable_response),
         ),
         patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=False)),
@@ -1494,7 +1494,7 @@ async def test_generate_response_locked_finalizes_cancelled_task_before_delivery
             message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
         )
 
-        resolution = await coordinator.generate_response_locked(
+        resolution = await coordinator._generate_response_locked(
             _response_request(prompt="Hello", user_id="@alice:localhost", thread_id="$thread-root"),
             resolved_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
         )
@@ -1534,7 +1534,7 @@ async def test_early_cancellation_redacts_thinking_placeholder(
     with (
         patch.object(
             ResponseRunner,
-            "run_cancellable_response",
+            "_run_cancellable_response",
             new=AsyncMock(side_effect=fake_run_cancellable_response),
         ),
         patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=False)),
@@ -1552,7 +1552,7 @@ async def test_early_cancellation_redacts_thinking_placeholder(
         redact_mock = AsyncMock(side_effect=redact_message_event)
         object.__setattr__(coordinator.deps.delivery_gateway.deps, "redact_message_event", redact_mock)
 
-        resolution = await coordinator.generate_response_locked(
+        resolution = await coordinator._generate_response_locked(
             _response_request(prompt="Hello", user_id="@alice:localhost", thread_id="$thread-root"),
             resolved_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
         )
@@ -1620,7 +1620,7 @@ async def test_generate_response_locked_returns_none_when_final_delivery_is_unha
             "generate_non_streaming_ai_response",
             new=AsyncMock(side_effect=fake_generate_non_streaming),
         ):
-            resolution = await coordinator.generate_response_locked(
+            resolution = await coordinator._generate_response_locked(
                 _response_request(prompt="Hello", user_id="@alice:localhost", thread_id="$thread-root"),
                 resolved_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
             )
@@ -1688,7 +1688,7 @@ async def test_generate_response_locked_unhandled_delivery_outcome_does_not_pers
             ),
         )
 
-        resolution = await coordinator.generate_response_locked(
+        resolution = await coordinator._generate_response_locked(
             _response_request(prompt="Hello", user_id="@alice:localhost", thread_id="$thread-root"),
             resolved_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
         )
@@ -1774,7 +1774,7 @@ async def test_generate_response_locked_preserves_visible_stream_when_finalize_r
             "generate_streaming_ai_response",
             new=AsyncMock(side_effect=fake_generate_streaming),
         ):
-            resolution = await coordinator.generate_response_locked(
+            resolution = await coordinator._generate_response_locked(
                 request,
                 resolved_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
             )
@@ -1862,7 +1862,7 @@ async def test_generate_response_locked_preserves_visible_stream_on_late_finaliz
             "generate_streaming_ai_response",
             new=AsyncMock(side_effect=fake_generate_streaming),
         ):
-            resolution = await coordinator.generate_response_locked(
+            resolution = await coordinator._generate_response_locked(
                 request,
                 resolved_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
             )
@@ -1903,7 +1903,7 @@ async def test_process_and_respond_uses_resolved_thread_id_for_ai_logging_contex
             base_request,
             response_envelope=replace(base_request.response_envelope, target=target),
         )
-        await coordinator.process_and_respond(request)
+        await coordinator._process_and_respond(request)
 
 
 @pytest.mark.asyncio
@@ -1940,7 +1940,7 @@ async def test_process_and_respond_streaming_uses_resolved_thread_id_for_ai_logg
             base_request,
             response_envelope=replace(base_request.response_envelope, target=target),
         )
-        await coordinator.process_and_respond_streaming(request)
+        await coordinator._process_and_respond_streaming(request)
 
 
 @pytest.mark.asyncio
@@ -1971,7 +1971,7 @@ async def test_process_and_respond_passes_current_and_model_prompt_to_ai(
 
         mock_ai.side_effect = fake_ai_response
 
-        await coordinator.process_and_respond(
+        await coordinator._process_and_respond(
             _response_request(
                 prompt="Hello",
                 model_prompt="Hello with context",
@@ -2010,7 +2010,7 @@ async def test_process_and_respond_streaming_passes_current_and_model_prompt_to_
 
         mock_stream.side_effect = fake_stream_agent_response
 
-        await coordinator.process_and_respond_streaming(
+        await coordinator._process_and_respond_streaming(
             _response_request(
                 prompt="Hello",
                 model_prompt="Hello with context",
@@ -2044,7 +2044,7 @@ async def test_generate_response_locked_sets_failure_reason_for_plain_streaming_
         )
         coordinator.generate_streaming_ai_response = AsyncMock(side_effect=RuntimeError("plain boom"))
 
-        resolution = await coordinator.generate_response_locked(
+        resolution = await coordinator._generate_response_locked(
             _response_request(prompt="Hello", user_id="@bob:localhost", thread_id="$thread-root"),
             resolved_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
         )

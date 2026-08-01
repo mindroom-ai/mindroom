@@ -1051,7 +1051,7 @@ class TestAgentBot(AgentBotTestBase):
             ),
             patch.object(
                 ResponseRunner,
-                "run_cancellable_response",
+                "_run_cancellable_response",
                 new=AsyncMock(side_effect=run_cancellable_response),
             ),
             patch.object(bot._conversation_cache, "get_thread_history", AsyncMock(return_value=history)),
@@ -1130,7 +1130,7 @@ class TestAgentBot(AgentBotTestBase):
         with (
             patch.object(
                 unwrap_extracted_collaborator(bot._response_runner),
-                "run_cancellable_response",
+                "_run_cancellable_response",
                 new=AsyncMock(side_effect=run_cancellable_response),
             ),
             patch.object(bot._conversation_cache, "get_thread_history", AsyncMock(return_value=history)),

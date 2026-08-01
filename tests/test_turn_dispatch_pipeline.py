@@ -627,7 +627,7 @@ class TestAgentBot(AgentBotTestBase):
             ) as mock_build_payload,
             patch.object(
                 ResponseRunner,
-                "process_and_respond",
+                "_process_and_respond",
                 new=AsyncMock(
                     return_value=_ResponseGenerationOutcome(
                         delivery=FinalDeliveryOutcome(
@@ -642,7 +642,7 @@ class TestAgentBot(AgentBotTestBase):
             ) as mock_process,
             patch.object(
                 ResponseRunner,
-                "run_cancellable_response",
+                "_run_cancellable_response",
                 new=AsyncMock(side_effect=run_cancellable_response),
             ),
             patch.object(ResponsePayloadPreparer, "_log_dispatch_latency"),
@@ -2882,7 +2882,7 @@ class TestAgentBot(AgentBotTestBase):
         gateway = replace_delivery_gateway_deps(
             bot,
             response_hooks=SimpleNamespace(
-                apply_before_response=AsyncMock(
+                _apply_before_response=AsyncMock(
                     return_value=SimpleNamespace(
                         response_text="ignored",
                         response_kind="ai",
@@ -2934,7 +2934,7 @@ class TestAgentBot(AgentBotTestBase):
         gateway = replace_delivery_gateway_deps(
             bot,
             response_hooks=SimpleNamespace(
-                apply_before_response=AsyncMock(
+                _apply_before_response=AsyncMock(
                     return_value=SimpleNamespace(
                         response_text="Updated answer",
                         response_kind="ai",
@@ -2986,7 +2986,7 @@ class TestAgentBot(AgentBotTestBase):
             bot,
             redact_message_event=AsyncMock(return_value=True),
             response_hooks=SimpleNamespace(
-                apply_before_response=AsyncMock(side_effect=RuntimeError("hook boom")),
+                _apply_before_response=AsyncMock(side_effect=RuntimeError("hook boom")),
                 emit_after_response=AsyncMock(),
                 emit_cancelled_response=AsyncMock(),
             ),
@@ -3031,7 +3031,7 @@ class TestAgentBot(AgentBotTestBase):
             bot,
             redact_message_event=AsyncMock(return_value=True),
             response_hooks=SimpleNamespace(
-                apply_before_response=AsyncMock(side_effect=asyncio.CancelledError("hook cancelled")),
+                _apply_before_response=AsyncMock(side_effect=asyncio.CancelledError("hook cancelled")),
                 emit_after_response=AsyncMock(),
                 emit_cancelled_response=AsyncMock(),
             ),

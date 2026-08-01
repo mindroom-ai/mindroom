@@ -675,7 +675,7 @@ def _outcome(
         suppressed=resolved_suppressed,
         tool_trace=tool_trace,
         extra_content=dict(extra_content or {}),
-        interactive_metadata=InteractiveMetadata.from_parts(option_map, options_list),
+        interactive_metadata=InteractiveMetadata._from_parts(option_map, options_list),
     )
 
 

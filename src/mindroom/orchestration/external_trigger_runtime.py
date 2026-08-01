@@ -40,7 +40,7 @@ class ExternalTriggerRuntimeCoordinator:
             return
 
         async def is_trigger_snapshot_ready(snapshot: TriggerDeliverySnapshot) -> bool:
-            return await self.is_ready(snapshot, bots)
+            return await self._is_ready(snapshot, bots)
 
         from mindroom.api import main as api_main  # noqa: PLC0415
 
@@ -69,7 +69,7 @@ class ExternalTriggerRuntimeCoordinator:
             return
         self.unbind()
 
-    async def is_ready(
+    async def _is_ready(
         self,
         snapshot: TriggerDeliverySnapshot,
         bots: Mapping[str, AgentBot | TeamBot],
