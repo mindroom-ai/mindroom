@@ -11,6 +11,7 @@ from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
+import httpx
 import pytest
 import yaml
 
@@ -36,6 +37,7 @@ from mindroom.workers.backends._dedicated_worker_common import build_dedicated_w
 from mindroom.workers.backends.docker import (
     DockerWorkerBackend,
     _load_docker_client_and_errors,
+    _worker_health_compatibility_error,
     ensure_docker_dependencies,
 )
 from mindroom.workers.backends.docker_config import (
@@ -50,6 +52,7 @@ from mindroom.workers.backends.docker_projection import (
     DockerProjectionManager,
 )
 from mindroom.workers.backends.local import local_worker_state_paths_for_root
+from mindroom.workers.compatibility import WORKER_PROTOCOL_VERSION
 from mindroom.workers.models import WorkerReadyProgress, WorkerSpec
 from mindroom.workers.runtime import primary_worker_backend_available, primary_worker_backend_name
 from mindroom.workspaces import resolve_agent_workspace_from_state_path
@@ -1959,6 +1962,74 @@ def test_docker_worker_ready_failure_surfaces_container_logs(
     assert "OPENAI_API_KEY=***redacted***" in message
     assert "... [truncated]" in message
     assert len(message) < 4300
+
+
+def test_docker_worker_health_accepts_matching_protocol() -> None:
+    """A worker using the host protocol should pass the compatibility handshake."""
+    response = httpx.Response(
+        200,
+        json={
+            "status": "ok",
+            "mindroom_version": "2026.8.1",
+            "worker_protocol": WORKER_PROTOCOL_VERSION,
+        },
+    )
+
+    assert _worker_health_compatibility_error(response, image="mindroom:2026.8.1") is None
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"status": "ok"},
+        {"status": "ok", "mindroom_version": "2026.7.1", "worker_protocol": 0},
+    ],
+)
+def test_docker_worker_health_rejects_incompatible_protocol(payload: dict[str, object]) -> None:
+    """Missing and stale worker protocols should fail with image guidance."""
+    response = httpx.Response(200, json=payload)
+
+    error = _worker_health_compatibility_error(response, image="mindroom:stale")
+
+    assert error is not None
+    assert "mindroom:stale" in error
+    assert f"expected worker protocol {WORKER_PROTOCOL_VERSION}" in error
+    assert "Use a worker image built for this MindRoom release" in error
+
+
+def test_docker_worker_readiness_rejects_incompatible_image(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A successful stale health endpoint must not make the worker ready."""
+    backend, _fake_client, _sync_calls = _backend(monkeypatch, tmp_path)
+    container = _FakeContainer(
+        name="mindroom-worker-stale",
+        image="mindroom:stale",
+        image_identity="sha256:stale",
+        host_port=44999,
+        environment={},
+        labels={},
+        user=None,
+    )
+
+    class _IncompatibleHealthClient:
+        def __init__(self, *, timeout: float) -> None:
+            assert timeout > 0
+
+        def __enter__(self) -> _IncompatibleHealthClient:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+        def get(self, _url: str) -> httpx.Response:
+            return httpx.Response(200, json={"status": "ok"})
+
+    monkeypatch.setattr("mindroom.workers.backends.docker.httpx.Client", _IncompatibleHealthClient)
+
+    with pytest.raises(WorkerBackendError, match="expected worker protocol"):
+        DockerWorkerBackend._wait_for_ready(backend, container)
 
 
 def test_docker_backend_cleanup_reaps_abandoned_failed_container(
