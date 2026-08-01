@@ -1716,7 +1716,7 @@ class TurnController:
                         self.deps.turn_store.is_durably_handled(event_id) for event_id in current.source_event_ids
                     ),
                 )
-            if not current.completed and not await self.deps.delivery_gateway.finalize_user_stopped_response(
+            if not await self.deps.delivery_gateway.finalize_user_stopped_response(
                 target,
                 response_event_id,
             ):

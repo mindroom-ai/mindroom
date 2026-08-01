@@ -1206,8 +1206,13 @@ class TestAgentBot(AgentBotTestBase):
         restarted = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
         restarted.client = make_matrix_client_mock()
         restarted._emit_reaction_received_hooks = AsyncMock()
-        await restarted._dispatch_obligation_runner.recover_pending(turn_backed=False)
+        with patch(
+            "mindroom.delivery_gateway.DeliveryGateway.finalize_user_stopped_response",
+            new=AsyncMock(return_value=True),
+        ) as finalize_stopped_response:
+            await restarted._dispatch_obligation_runner.recover_pending(turn_backed=False)
 
+        finalize_stopped_response.assert_awaited_once_with(target, "$response")
         stopped_record = restarted._turn_store.get_turn_record("$source")
         assert stopped_record is not None
         assert stopped_record.user_stop_cutoff_revision == (1, "$stop-reaction")
