@@ -612,7 +612,15 @@ class TestCommandHandling:
         generate_response = AsyncMock()
         _sync_turn_policy_runtime(bot)
         install_generate_response_mock(bot, generate_response)
-        bot._conversation_resolver.extract_dispatch_context = AsyncMock()
+        bot._conversation_resolver.extract_dispatch_context = AsyncMock(
+            return_value=dispatch_context_result(
+                _message_context(
+                    am_i_mentioned=False,
+                    is_thread=False,
+                    thread_id=None,
+                ),
+            ),
+        )
 
         # Create a room and event
         room = nio.MatrixRoom(room_id="!test:server", own_user_id=bot.client.user_id)
@@ -1036,6 +1044,9 @@ class TestCommandHandling:
 
             # Verify the agent didn't try to process the error message
             generate_response.assert_not_called()
+            terminal_turn = bot._turn_store.record_turn.call_args.args[0]
+            assert event.event_id in terminal_turn.source_event_ids
+            assert terminal_turn.completed is True
             # Check log calls - should be caught by the general agent message check
             debug_calls = [call[0][0] for call in bot.logger.debug.call_args_list]
             assert "ignore_unmentioned_agent_event" in debug_calls

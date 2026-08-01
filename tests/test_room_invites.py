@@ -372,7 +372,7 @@ async def test_terminal_invite_join_failure_does_not_abort_sync(
     install_runtime_cache_support(bot)
     bot.client = AsyncMock()
     bot.client.rooms = {}
-    bot.client.join = AsyncMock(return_value=nio.JoinError("forbidden", "M_FORBIDDEN"))
+    bot.client.join = AsyncMock(return_value=nio.JoinError("bad state", "M_BAD_STATE"))
     monkeypatch.setattr("mindroom.bot_room_lifecycle.is_authorized_sender", lambda *_args, **_kwargs: True)
     event = nio.InviteEvent.parse_event(
         {
@@ -385,12 +385,12 @@ async def test_terminal_invite_join_failure_does_not_abort_sync(
     assert isinstance(event, nio.InviteMemberEvent)
 
     await bot._on_invite_before_sync_certification(
-        nio.MatrixRoom("!forbidden:localhost", bot.agent_user.user_id),
+        nio.MatrixRoom("!invalid-state:localhost", bot.agent_user.user_id),
         event,
     )
     assert await wait_for_background_tasks(timeout=1, owner=bot._runtime_view)
 
-    bot.client.join.assert_awaited_once_with("!forbidden:localhost")
+    bot.client.join.assert_awaited_once_with("!invalid-state:localhost")
     assert bot._dispatch_obligation_store.pending() == ()
 
 

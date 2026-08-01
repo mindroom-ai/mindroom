@@ -315,18 +315,21 @@ async def _blocked_before_plan(
     requester_user_id: str,
 ) -> bool:
     if prepared.command is not None:
-        await controller._execute_command_if_owned(
+        command_owned = await controller._execute_command_if_owned(
             room=room,
             event=prepared.event,
             requester_user_id=requester_user_id,
             command=prepared.command,
             target=prepared.dispatch.target,
         )
+        if not command_owned:
+            controller._mark_source_events_responded(prepared.handled_turn)
         return True
     if controller._should_skip_deep_synthetic_full_dispatch(
         event_id=prepared.event.event_id,
         envelope=prepared.dispatch.envelope,
     ):
+        controller._mark_source_events_responded(prepared.handled_turn)
         return True
 
     may_be_superseded = (
@@ -412,6 +415,8 @@ async def _apply_turn_plan(
             router_outcome = controller._router_handled_turn_outcome(prepared.handled_turn)
             if router_outcome is not None:
                 controller._mark_source_events_responded(router_outcome)
+        else:
+            controller._mark_source_events_responded(prepared.handled_turn)
         return
     if plan.kind == "route":
         await _execute_route_plan(controller, room, prepared, plan, media_events=media_events)

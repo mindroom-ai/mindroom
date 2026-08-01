@@ -167,8 +167,8 @@ Use `message:final_response_transform` for one text-only best-effort replacement
 For `compaction:before` and `compaction:after`, `ctx.messages` contains raw `agno.models.message.Message` objects from the compacted session payload.
 MindRoom does not sanitize attachments, media, tool calls, tool args, provider metadata, citations, reasoning fields, metrics, references, or extra Pydantic fields before these hooks run.
 For `message:cancelled`, inspect `ctx.info.failure_reason` to distinguish explicit cancellation, interruption, suppression, and delivery failure recovery.
-`room:member_joined` is emitted once per room/user pair using MindRoom's durable tracking state under `mindroom_data/tracking/`.
-This makes it suitable for lobby-based onboarding hooks that should create or invite a private agent only once.
+`room:member_joined` uses at-least-once delivery because MindRoom records the durable room/user marker only after the hook completes.
+A process interruption or marker-write failure after a handler side effect can replay the same room/user pair, so handlers that create or invite resources must be idempotent.
 
 ### Default timeouts
 

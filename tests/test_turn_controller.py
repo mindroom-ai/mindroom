@@ -410,12 +410,13 @@ async def test_handle_interactive_selection_does_not_mark_handled_when_runner_re
     generate_response_mock = AsyncMock(return_value=None)
     install_generate_response_mock(bot, generate_response_mock)
 
-    await bot._turn_controller.handle_interactive_selection(
-        room,
-        selection=selection,
-        user_id="@user:localhost",
-        source_event_id="$selection:localhost",
-    )
+    with pytest.raises(RuntimeError, match="no durable terminal outcome"):
+        await bot._turn_controller.handle_interactive_selection(
+            room,
+            selection=selection,
+            user_id="@user:localhost",
+            source_event_id="$selection:localhost",
+        )
 
     generate_response_mock.assert_awaited_once()
     bot._turn_controller.deps.turn_store.record_turn.assert_not_called()

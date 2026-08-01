@@ -130,6 +130,21 @@ class SyncCacheTrust:
         )
         return True
 
+    def reject_response_before_certification(self) -> None:
+        """Consume any admission failure owned by an aborted sync response."""
+        self.consume_dispatch_persist_failure()
+
+    def apply_response_after_dispatch_acceptance(
+        self,
+        decision: SyncCertificationDecision,
+        *,
+        cache_result: SyncCacheWriteResult,
+    ) -> tuple[SyncCertificationDecision, bool]:
+        """Apply a plan only when its source callbacks all reached durable ownership."""
+        if self.consume_dispatch_persist_failure():
+            return decision, True
+        return self.apply_response(decision, cache_result=cache_result), False
+
     def certify_response(
         self,
         *,

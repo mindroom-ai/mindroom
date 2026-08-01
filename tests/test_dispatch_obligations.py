@@ -7,7 +7,7 @@ import sqlite3
 import threading
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any, cast
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
 import pytest
@@ -21,13 +21,17 @@ from mindroom.dispatch_obligations import (
     _DispatchObligation,
     _DispatchTerminalOutcome,
     _run_owned_store_operation,
+    callback_kind_for_source_kind,
 )
 from mindroom.dispatch_obligations import (
     _DispatchCallbackResult as DispatchCallbackResult,
 )
+from mindroom.dispatch_recovery_context import turn_dispatch_recovery_active
+from mindroom.dispatch_source import IMAGE_SOURCE_KIND, MEDIA_SOURCE_KIND, VOICE_SOURCE_KIND
+from mindroom.matrix.media import MatrixMediaEvent, parse_matrix_media_event_source
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
+    from collections.abc import Awaitable, Callable, Coroutine
     from pathlib import Path
 
 _PRINCIPAL_ID = "@code:example.org"
@@ -57,13 +61,14 @@ def _message_obligation(
     *,
     principal_id: str = _PRINCIPAL_ID,
     entity_name: str = _ENTITY_NAME,
+    room_id: str = _ROOM_ID,
 ) -> _DispatchObligation:
     return _DispatchObligation(
         principal_id=principal_id,
         entity_name=entity_name,
         source_event_id=event_id,
         callback_kind=DispatchCallbackKind.MESSAGE,
-        room_id=_ROOM_ID,
+        room_id=room_id,
         event_source={
             "type": "m.room.message",
             "event_id": event_id,
@@ -78,6 +83,35 @@ def _message_event(event_id: str) -> nio.RoomMessageText:
     event = nio.Event.parse_event(_message_obligation(event_id).event_source)
     assert isinstance(event, nio.RoomMessageText)
     return event
+
+
+def test_store_database_name_identifies_entity_and_principal(tmp_path: Path) -> None:
+    """Operators must be able to map one leaf database back to its entity."""
+    store = _store(tmp_path)
+
+    assert store._database_path.name.startswith("dispatch_obligations-code-")
+    assert store._database_path.name.endswith(".sqlite3")
+
+
+def test_store_operations_do_not_repeat_tracking_directory_creation(tmp_path: Path) -> None:
+    """Only store construction should create its tracking directory."""
+    store = _store(tmp_path)
+
+    with patch("pathlib.Path.mkdir") as mkdir:
+        store.pending()
+
+    mkdir.assert_not_called()
+
+
+@pytest.mark.parametrize("source_kind", [IMAGE_SOURCE_KIND, MEDIA_SOURCE_KIND, VOICE_SOURCE_KIND])
+def test_media_source_kinds_map_to_media_dispatch(source_kind: str) -> None:
+    """Coalescing retries must use the callback kind owned by dispatch obligations."""
+    assert callback_kind_for_source_kind(source_kind) is DispatchCallbackKind.MEDIA
+
+
+def test_text_source_kind_maps_to_message_dispatch() -> None:
+    """Ordinary text retries must return to the message callback owner."""
+    assert callback_kind_for_source_kind("message") is DispatchCallbackKind.MESSAGE
 
 
 def _unknown_event(event_id: str, event_type: str) -> nio.UnknownEvent:
@@ -512,6 +546,43 @@ async def test_cancelled_store_operation_preserves_cancellation_when_worker_fail
 
 
 @pytest.mark.asyncio
+async def test_cancelled_store_operation_preserves_caller_cancellation_when_worker_task_is_cancelled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A cancelled worker wrapper must stay the cause of the caller's cancellation."""
+    worker_started = threading.Event()
+    release_worker = threading.Event()
+    original_create_task = asyncio.create_task
+    worker_tasks: list[asyncio.Task[None]] = []
+
+    def capture_worker_task(coro: Coroutine[object, object, None]) -> asyncio.Task[None]:
+        task = original_create_task(coro)
+        worker_tasks.append(task)
+        return task
+
+    def blocking_store_operation() -> None:
+        worker_started.set()
+        assert release_worker.wait(timeout=5)
+
+    monkeypatch.setattr("mindroom.dispatch_obligations.asyncio.create_task", capture_worker_task)
+    caller_task = original_create_task(_run_owned_store_operation(blocking_store_operation))
+    assert await asyncio.to_thread(worker_started.wait, 5)
+
+    caller_task.cancel("caller cancelled")
+    await asyncio.sleep(0)
+    assert len(worker_tasks) == 1
+    worker_tasks[0].cancel("worker cancelled")
+    release_worker.set()
+
+    with pytest.raises(asyncio.CancelledError) as exc_info:
+        await caller_task
+
+    assert exc_info.value.args == ("caller cancelled",)
+    assert isinstance(exc_info.value.__cause__, asyncio.CancelledError)
+    assert exc_info.value.__cause__.args == ("worker cancelled",)
+
+
+@pytest.mark.asyncio
 async def test_callback_settlement_drains_repeated_cancellation_before_releasing_claim(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -809,6 +880,86 @@ async def test_encrypted_media_recovery_uses_media_source_parser(tmp_path: Path)
 
 
 @pytest.mark.asyncio
+async def test_decrypted_message_recovery_preserves_nio_security_metadata(tmp_path: Path) -> None:
+    """Restart replay must retain nio's authenticated decrypted-event facts."""
+    received: list[tuple[bool, bool, str | None, str | None, str | None]] = []
+
+    async def callback(_room: nio.MatrixRoom, event: nio.Event) -> DispatchCallbackResult:
+        received.append(
+            (
+                event.decrypted,
+                event.verified,
+                event.sender_key,
+                event.session_id,
+                cast("str | None", vars(event).get("room_id")),
+            ),
+        )
+        return DispatchCallbackResult.SUCCEEDED
+
+    event = _message_event("$decrypted-message")
+    event.decrypted = True
+    event.verified = True
+    event.sender_key = "curve25519:sender"
+    event.session_id = "megolm-session"
+    event.room_id = _ROOM_ID
+    store = _store(tmp_path)
+    first_runner = _runner(store, callback)
+    await first_runner.persist(
+        nio.MatrixRoom(_ROOM_ID, _PRINCIPAL_ID),
+        event,
+        DispatchCallbackKind.MESSAGE,
+    )
+
+    await _runner(_store(tmp_path), callback).recover_pending()
+
+    assert received == [(True, True, "curve25519:sender", "megolm-session", _ROOM_ID)]
+
+
+@pytest.mark.asyncio
+async def test_megolm_recovery_restores_room_id_before_key_request(tmp_path: Path) -> None:
+    """Recovered undecryptable events need their durable room for key requests."""
+    event_id = "$undecryptable"
+    store = _store(tmp_path)
+    store.create_pending(
+        replace(
+            _message_obligation(event_id),
+            callback_kind=DispatchCallbackKind.DECRYPTION_FAILURE,
+            event_source={
+                "type": "m.room.encrypted",
+                "event_id": event_id,
+                "sender": "@user:example.org",
+                "origin_server_ts": 1_234,
+                "content": {
+                    "algorithm": "m.megolm.v1.aes-sha2",
+                    "ciphertext": "ciphertext",
+                    "device_id": "DEVICE",
+                    "sender_key": "curve25519:sender",
+                    "session_id": "megolm-session",
+                },
+            },
+        ),
+    )
+    request_room_key = AsyncMock()
+
+    async def callback(_room: nio.MatrixRoom, event: nio.Event) -> DispatchCallbackResult:
+        assert isinstance(event, nio.MegolmEvent)
+        await request_room_key(event)
+        return DispatchCallbackResult.SUCCEEDED
+
+    runner = DispatchObligationRunner(
+        store=store,
+        callbacks={DispatchCallbackKind.DECRYPTION_FAILURE: callback},
+        room_for_id=lambda room_id: nio.MatrixRoom(room_id, _PRINCIPAL_ID),
+        turn_is_terminal=lambda _event_id: False,
+    )
+
+    await runner.recover_pending()
+
+    recovered_event = request_room_key.await_args.args[0]
+    assert recovered_event.room_id == _ROOM_ID
+
+
+@pytest.mark.asyncio
 async def test_concurrent_duplicate_dispatch_runs_callback_once(tmp_path: Path) -> None:
     """Live and recovery delivery of one exact key must not execute concurrently."""
     entered = asyncio.Event()
@@ -934,6 +1085,33 @@ async def test_deferred_message_remains_pending_until_turn_store_is_terminal(tmp
 
 
 @pytest.mark.asyncio
+async def test_recovery_readiness_retains_only_blocked_obligations(tmp_path: Path) -> None:
+    """A blocked runtime dependency must not park unrelated durable callbacks."""
+    ready_room_id = "!ready:example.org"
+    blocked_room_id = "!blocked:example.org"
+    store = _store(tmp_path)
+    ready = _message_obligation("$ready", room_id=ready_room_id)
+    blocked = _message_obligation("$blocked", room_id=blocked_room_id)
+    store.create_pending(ready)
+    store.create_pending(blocked)
+    recovered: list[str] = []
+
+    async def callback(_room: nio.MatrixRoom, event: nio.Event) -> DispatchCallbackResult:
+        if event.event_id == "$blocked":
+            return DispatchCallbackResult.DEFERRED
+        recovered.append(event.event_id)
+        return DispatchCallbackResult.SUCCEEDED
+
+    runner = _runner(store, callback)
+    await runner.recover_pending(turn_backed=True)
+
+    assert recovered == ["$ready"]
+    assert not store.has_pending("$ready", DispatchCallbackKind.MESSAGE)
+    assert store.has_pending("$blocked", DispatchCallbackKind.MESSAGE)
+    assert not runner._retry_keys
+
+
+@pytest.mark.asyncio
 async def test_bound_message_callback_defers_for_persisted_turn_store_record() -> None:
     """Typed callbacks defer persisted turn truth to the runner's durable settlement gate."""
     persisted = {"$bound"}
@@ -958,6 +1136,50 @@ async def test_bound_message_callback_defers_for_persisted_turn_store_record() -
     event = _message_event("$bound")
 
     assert await callback(room, event) is DispatchCallbackResult.DEFERRED
+
+
+@pytest.mark.asyncio
+async def test_sequential_media_dispatch_does_not_reenter_deferred_source(tmp_path: Path) -> None:
+    """A lane-owned media source must enter downstream dispatch only once."""
+    deferred_sources: set[str] = set()
+    queued_media_events: list[MatrixMediaEvent] = []
+
+    async def noop(_room: nio.MatrixRoom, _event: nio.Event) -> None:
+        pass
+
+    async def on_media(_room: nio.MatrixRoom, event: MatrixMediaEvent) -> None:
+        queued_media_events.append(event)
+        deferred_sources.add(event.event_id)
+
+    callbacks = DispatchObligationRunner.callbacks_for(
+        on_message=cast("Any", noop),
+        on_media=on_media,
+        on_reaction=cast("Any", noop),
+        on_approval=cast("Any", noop),
+        on_invite=cast("Any", noop),
+        on_room_lifecycle=cast("Any", noop),
+        on_redaction=cast("Any", noop),
+        on_decryption_failure=cast("Any", noop),
+        turn_is_persisted=lambda _event_id: False,
+        source_is_deferred=deferred_sources.__contains__,
+    )
+    store = _store(tmp_path)
+    runner = DispatchObligationRunner(
+        store=store,
+        callbacks=callbacks,
+        room_for_id=lambda room_id: nio.MatrixRoom(room_id, _PRINCIPAL_ID),
+        turn_is_terminal=lambda _event_id: False,
+    )
+    event_id = "$deferred-media"
+    event = parse_matrix_media_event_source(_encrypted_image_source(event_id))
+    assert isinstance(event, nio.RoomEncryptedImage)
+    room = nio.MatrixRoom(_ROOM_ID, _PRINCIPAL_ID)
+
+    await runner.dispatch(room, event, DispatchCallbackKind.MEDIA)
+    await runner.dispatch(room, event, DispatchCallbackKind.MEDIA)
+
+    assert [queued.event_id for queued in queued_media_events] == [event_id]
+    assert store.has_pending(event_id, DispatchCallbackKind.MEDIA)
 
 
 @pytest.mark.asyncio
@@ -1062,6 +1284,117 @@ async def test_direct_dispatch_failure_retries_autonomously(tmp_path: Path) -> N
 
     assert attempts == 2
     assert not store.has_pending("$direct-retry", DispatchCallbackKind.MESSAGE)
+
+
+@pytest.mark.asyncio
+async def test_turn_callback_retry_preserves_recovery_deferral(tmp_path: Path) -> None:
+    """A retried turn must not settle work that startup replay would defer."""
+    attempts = 0
+    owner = object()
+
+    async def callback(_room: nio.MatrixRoom, _event: nio.Event) -> DispatchCallbackResult:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            message = "transient worker failure"
+            raise RuntimeError(message)
+        return DispatchCallbackResult.DEFERRED if turn_dispatch_recovery_active() else DispatchCallbackResult.SUCCEEDED
+
+    store = _store(tmp_path)
+    runner = _runner(
+        store,
+        callback,
+        background_task_owner=owner,
+        retry_initial_delay_seconds=0,
+        retry_max_delay_seconds=0,
+    )
+
+    with pytest.raises(RuntimeError, match="transient worker failure"):
+        await runner.dispatch(
+            nio.MatrixRoom(_ROOM_ID, _PRINCIPAL_ID),
+            _message_event("$recovery-scope"),
+            DispatchCallbackKind.MESSAGE,
+        )
+    await wait_for_background_tasks(timeout=1, owner=owner)
+
+    assert attempts == 2
+    assert store.has_pending("$recovery-scope", DispatchCallbackKind.MESSAGE)
+
+
+def test_deferred_turn_retry_schedules_only_the_exact_callback_kind(tmp_path: Path) -> None:
+    """A failed gate handoff must not fabricate a second callback identity."""
+
+    async def callback(_room: nio.MatrixRoom, _event: nio.Event) -> DispatchCallbackResult:
+        return DispatchCallbackResult.SUCCEEDED
+
+    runner = _runner(_store(tmp_path), callback)
+    runner._schedule_retry = MagicMock()
+
+    runner.retry_pending_turn_source("$media", DispatchCallbackKind.MEDIA)
+
+    runner._schedule_retry.assert_called_once()
+    key = runner._schedule_retry.call_args.args[0]
+    assert key.source_event_id == "$media"
+    assert key.callback_kind is DispatchCallbackKind.MEDIA
+
+
+@pytest.mark.asyncio
+async def test_deferred_turn_retry_without_obligation_skips_backoff(tmp_path: Path) -> None:
+    """A stale retry request must not hold runtime shutdown through its backoff."""
+
+    async def callback(_room: nio.MatrixRoom, _event: nio.Event) -> DispatchCallbackResult:
+        return DispatchCallbackResult.SUCCEEDED
+
+    owner = object()
+    runner = _runner(
+        _store(tmp_path),
+        callback,
+        background_task_owner=owner,
+        retry_initial_delay_seconds=60,
+        retry_max_delay_seconds=60,
+    )
+
+    runner.retry_pending_turn_source("$missing", DispatchCallbackKind.MESSAGE)
+
+    assert await wait_for_background_tasks(timeout=1, owner=owner) is True
+
+
+@pytest.mark.asyncio
+async def test_terminal_turn_settlement_retries_autonomously(tmp_path: Path) -> None:
+    """A failed terminal compaction must retry without restart or a fabricated callback key."""
+
+    async def callback(_room: nio.MatrixRoom, _event: nio.Event) -> DispatchCallbackResult:
+        return DispatchCallbackResult.SUCCEEDED
+
+    owner = object()
+    runner = _runner(
+        _store(tmp_path),
+        callback,
+        background_task_owner=owner,
+        retry_initial_delay_seconds=0,
+        retry_max_delay_seconds=0,
+    )
+    settled = threading.Event()
+    attempts = 0
+
+    def settle_pending(_source_event_ids: tuple[str, ...]) -> None:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            message = "dispatch store unavailable"
+            raise OSError(message)
+        settled.set()
+
+    settle = MagicMock(side_effect=settle_pending)
+    runner.store.settle_pending_from_turn_store = settle
+
+    runner.bind_event_loop()
+    await asyncio.to_thread(runner.retry_turn_settlement, ("$message",))
+    assert await asyncio.wait_for(asyncio.to_thread(settled.wait), timeout=1)
+    await wait_for_background_tasks(timeout=1, owner=owner)
+
+    assert settle.call_count == 2
+    settle.assert_called_with(("$message",))
 
 
 @pytest.mark.asyncio

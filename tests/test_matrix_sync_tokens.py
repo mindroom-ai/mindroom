@@ -17,7 +17,7 @@ import pytest
 from structlog.testing import capture_logs
 
 from mindroom.background_tasks import wait_for_background_tasks
-from mindroom.bot import AgentBot, TeamBot, _create_best_effort_task_wrapper
+from mindroom.bot import AgentBot, TeamBot, _create_best_effort_task_wrapper, _RoomMemberJoinSyncHookPlan
 from mindroom.coalescing import CoalescingDrainResult, CoalescingGate, IngressAdmissionClosedError, ReadyPendingEvent
 from mindroom.coalescing_batch import CoalescedBatch, CoalescingKey, PendingEvent
 from mindroom.config.agent import AgentConfig
@@ -31,7 +31,7 @@ from mindroom.dispatch_obligations import (
     _DispatchCallbackResult,
     _DispatchObligationCorruptionError,
 )
-from mindroom.dispatch_source import VOICE_SOURCE_KIND
+from mindroom.dispatch_source import IMAGE_SOURCE_KIND, MEDIA_SOURCE_KIND, VOICE_SOURCE_KIND
 from mindroom.handled_turns import TurnRecord
 from mindroom.matrix.cache.event_cache import EventCacheBackendUnavailableError
 from mindroom.matrix.cache.postgres_event_cache import PostgresEventCache
@@ -100,6 +100,39 @@ def _agent_bot(tmp_path: Path, *, agent_name: str = "code") -> AgentBot:
     )
     install_runtime_cache_support(bot)
     return bot
+
+
+def test_dispatch_recovery_room_contract_prefers_cache_and_guarantees_room_id(tmp_path: Path) -> None:
+    """Recovery room state is best-effort, but its exact room ID is always available."""
+    bot = _agent_bot(tmp_path)
+    cached_room = nio.MatrixRoom("!cached:localhost", bot.agent_user.user_id)
+    bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
+    bot.client.rooms = {cached_room.room_id: cached_room}
+
+    assert bot._room_for_dispatch_obligation(cached_room.room_id) is cached_room
+    assert bot._room_for_dispatch_obligation("!missing:localhost").room_id == "!missing:localhost"
+
+
+def test_terminal_turn_settlement_hands_sqlite_work_to_event_loop_owner(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Handled-turn persistence callbacks must not run obligation SQLite inline."""
+    bot = _agent_bot(tmp_path)
+    retry_turn_settlement = MagicMock()
+    monkeypatch.setattr(
+        bot._dispatch_obligation_runner,
+        "retry_turn_settlement",
+        retry_turn_settlement,
+        raising=False,
+    )
+    settle_pending = MagicMock()
+    monkeypatch.setattr(bot._dispatch_obligation_store, "settle_pending_from_turn_store", settle_pending)
+
+    bot._settle_turn_dispatch_obligations(("$message",))
+
+    settle_pending.assert_not_called()
+    retry_turn_settlement.assert_called_once_with(("$message",))
 
 
 def _install_fast_response_drain(bot: AgentBot) -> None:
@@ -1292,7 +1325,11 @@ def test_cache_scope_cleanup_between_plan_and_apply_forces_tokenless_recovery(tm
     )
 
     assert bot._sync_cache_trust.invalidate_for_cache_scope_cleanup()
-    bot._apply_sync_response_decision(decision, cache_result=cache_result)
+    bot._apply_sync_response_after_dispatch_acceptance(
+        decision,
+        cache_result=cache_result,
+        room_member_join_hook_plan=_RoomMemberJoinSyncHookPlan(),
+    )
 
     assert bot.client.next_batch is None
     assert bot._sync_cache_trust.state is SyncTrustState.UNCERTAIN
@@ -2024,6 +2061,104 @@ async def test_failed_coalesced_dispatch_returns_exact_source_to_durable_retry(t
     await wait_for_background_tasks(timeout=1, owner=bot._runtime_view)
 
     assert not bot._dispatch_obligation_store.has_pending(event.event_id, DispatchCallbackKind.MESSAGE)
+
+
+@pytest.mark.parametrize(
+    ("source_kind", "callback_kind"),
+    [
+        ("message", DispatchCallbackKind.MESSAGE),
+        (IMAGE_SOURCE_KIND, DispatchCallbackKind.MEDIA),
+        (MEDIA_SOURCE_KIND, DispatchCallbackKind.MEDIA),
+        (VOICE_SOURCE_KIND, DispatchCallbackKind.MEDIA),
+    ],
+)
+def test_failed_coalesced_dispatch_retries_exact_source_kind(
+    tmp_path: Path,
+    source_kind: str,
+    callback_kind: DispatchCallbackKind,
+) -> None:
+    """Gate failure must return each source to its actual durable callback key."""
+    bot = _agent_bot(tmp_path)
+    event = _text_event("$retry-kind", "retry me", 1_000)
+    bot._dispatch_obligation_runner.retry_pending_turn_source = MagicMock()
+
+    bot._retry_failed_coalesced_dispatch(
+        (
+            PendingEvent(
+                event=event,
+                room=nio.MatrixRoom("!room:localhost", bot.agent_user.user_id),
+                source_kind=source_kind,
+            ),
+        ),
+    )
+
+    bot._dispatch_obligation_runner.retry_pending_turn_source.assert_called_once_with(
+        event.event_id,
+        callback_kind,
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "failure_mode",
+    ["readiness_exception", "readiness_self_cancel", "readiness_none", "lane_delivery_failure"],
+)
+async def test_lane_terminal_drop_returns_deferred_source_to_retry_owner(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure_mode: str,
+) -> None:
+    """A lane that loses deferred work must return its exact source to durable retry."""
+    bot = _agent_bot(tmp_path)
+    room = nio.MatrixRoom("!room:localhost", bot.agent_user.user_id)
+    event = _text_event("$lane-retry", "retry me", 1_000)
+    runner = bot._dispatch_obligation_runner
+    runner._retry_initial_delay_seconds = 60
+    runner._retry_max_delay_seconds = 60
+    await runner.persist(room, event, DispatchCallbackKind.MESSAGE)
+
+    async def resolve_readiness() -> ReadyPendingEvent | None:
+        if failure_mode == "readiness_exception":
+            msg = "readiness failed"
+            raise RuntimeError(msg)
+        if failure_mode == "readiness_self_cancel":
+            current_task = asyncio.current_task()
+            assert current_task is not None
+            current_task.cancel()
+            await asyncio.sleep(0)
+        if failure_mode == "readiness_none":
+            return None
+        return ReadyPendingEvent(
+            pending_event=PendingEvent(event=event, room=room, source_kind="message"),
+        )
+
+    if failure_mode == "lane_delivery_failure":
+        monkeypatch.setattr(
+            bot._coalescing_gate,
+            "admit",
+            AsyncMock(side_effect=RuntimeError("lane delivery failed")),
+        )
+
+    slot = bot._coalescing_gate.enter_lane(room_id=room.room_id, sender_id=event.sender)
+    bot._coalescing_gate.submit_lane_slot(
+        slot,
+        key=CoalescingKey(room.room_id, None, event.sender),
+        source_event_id=event.event_id,
+        source_kind="message",
+        ready_task=asyncio.create_task(resolve_readiness()),
+    )
+    await asyncio.wait_for(slot.settled.wait(), timeout=1)
+
+    assert runner.store.has_pending(event.event_id, DispatchCallbackKind.MESSAGE)
+    assert not bot._coalescing_gate.has_pending_source_event(event.event_id)
+    assert len(runner._retry_keys) == 1
+    retry_key = next(iter(runner._retry_keys))
+    assert retry_key.source_event_id == event.event_id
+    assert retry_key.callback_kind is DispatchCallbackKind.MESSAGE
+    assert runner._retry_task is not None
+
+    runner._retry_task.cancel()
+    await asyncio.gather(runner._retry_task, return_exceptions=True)
 
 
 @pytest.mark.asyncio
