@@ -1269,6 +1269,8 @@ class ResponseRunner:
                 if request.pipeline_timing is not None:
                     request.pipeline_timing.mark("placeholder_sent")
                     request.pipeline_timing.mark_first_visible_reply("placeholder")
+                if request.on_visible_response is not None:
+                    await request.on_visible_response(placeholder_event_id)
         request = await self._prepare_request_after_lock(
             request,
             exclude_history_event_id=placeholder_event_id,

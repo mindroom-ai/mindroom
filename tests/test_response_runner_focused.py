@@ -488,6 +488,7 @@ async def test_begin_locked_turn_excludes_early_placeholder_from_refreshed_histo
     request_preparer.prepare = AsyncMock(side_effect=lambda request: replace(request, payload_preparation=None))
     delivery_gateway = MagicMock(spec=DeliveryGateway)
     delivery_gateway.send_text = AsyncMock(return_value="$placeholder")
+    on_visible_response = AsyncMock()
     runner = ResponseRunner(
         replace(
             unwrap_extracted_collaborator(bot._response_runner).deps,
@@ -502,6 +503,7 @@ async def test_begin_locked_turn_excludes_early_placeholder_from_refreshed_histo
         user_id="@user:localhost",
         response_envelope=envelope,
         payload_preparation=_preparation(target, envelope),
+        on_visible_response=on_visible_response,
     )
 
     prepared_request = await runner._begin_locked_turn(
@@ -522,6 +524,7 @@ async def test_begin_locked_turn_excludes_early_placeholder_from_refreshed_histo
     assert prepared_request.thread_history.diagnostics == {"cache_status": "fresh"}
     assert prepared_request.existing_event_id == "$placeholder"
     assert prepared_request.existing_event_is_placeholder is True
+    on_visible_response.assert_awaited_once_with("$placeholder")
 
 
 @pytest.mark.asyncio
