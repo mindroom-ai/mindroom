@@ -34,6 +34,7 @@ from mindroom.matrix.health import (
     reset_matrix_sync_health,
     track_matrix_sync_cache_write,
 )
+from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.sync_loop import _sliding_sync_lists, _sliding_sync_room_subscriptions, sliding_own_membership_sets
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.orchestration import runtime as runtime_helpers
@@ -1838,6 +1839,7 @@ async def test_orchestrator_tracks_sync_tasks(tmp_path: Path) -> None:
         # Create mock bot
         mock_bot = AsyncMock()
         mock_bot.agent_name = "test_agent"
+        mock_bot.matrix_id = MatrixID.parse("@mindroom_test_agent:localhost")
         mock_bot.start = AsyncMock()
         mock_bot.rooms = []
         mock_create_bot.return_value = mock_bot
@@ -1905,11 +1907,13 @@ async def test_start_runtime_waits_for_shutdown_after_initial_sync_generation_ex
 
     router_bot = AsyncMock()
     router_bot.agent_name = "router"
+    router_bot.matrix_id = MatrixID.parse("@mindroom_router:localhost")
     router_bot.running = True
     router_bot.stop = AsyncMock()
 
     general_bot = AsyncMock()
     general_bot.agent_name = "general"
+    general_bot.matrix_id = MatrixID.parse("@mindroom_general:localhost")
     general_bot.running = True
     general_bot.stop = AsyncMock()
 
@@ -1969,11 +1973,13 @@ async def test_start_runtime_starts_sync_before_startup_maintenance_completes(tm
 
     router_bot = AsyncMock()
     router_bot.agent_name = "router"
+    router_bot.matrix_id = MatrixID.parse("@mindroom_router:localhost")
     router_bot.running = True
     router_bot.stop = AsyncMock()
 
     general_bot = AsyncMock()
     general_bot.agent_name = "general"
+    general_bot.matrix_id = MatrixID.parse("@mindroom_general:localhost")
     general_bot.running = True
     general_bot.stop = AsyncMock()
 
@@ -2263,7 +2269,10 @@ async def test_new_agent_not_started_twice(tmp_path: Path) -> None:
 
         mock_existing_bot = AsyncMock()
         mock_existing_bot.config = old_config
-        orchestrator.agent_bots = {"general": mock_existing_bot, "router": AsyncMock()}
+        mock_existing_bot.matrix_id = MatrixID.parse("@mindroom_general:localhost")
+        mock_router_bot = AsyncMock()
+        mock_router_bot.matrix_id = MatrixID.parse("@mindroom_router:localhost")
+        orchestrator.agent_bots = {"general": mock_existing_bot, "router": mock_router_bot}
 
         async def existing_sync_loop() -> None:
             await asyncio.sleep(60)
@@ -2298,8 +2307,14 @@ async def test_new_agent_not_started_twice(tmp_path: Path) -> None:
         # Mock bot creation — record every call
         created_bots: list[AsyncMock] = []
 
-        def make_bot(*args, **kwargs) -> AsyncMock:  # noqa: ANN002, ANN003, ARG001
+        def make_bot(
+            _entity_name: str,
+            agent_user: AgentMatrixUser,
+            *_args: object,
+            **_kwargs: object,
+        ) -> AsyncMock:
             bot = AsyncMock()
+            bot.matrix_id = agent_user.matrix_id
             bot.try_start = AsyncMock(return_value=True)
             bot.sync_forever = AsyncMock()
             created_bots.append(bot)
