@@ -277,7 +277,8 @@ function AppContent() {
 
   const getPlatformUrl = () => {
     const configured = (import.meta as any).env?.VITE_PLATFORM_URL as
-      string | undefined;
+      | string
+      | undefined;
     if (configured && configured.length > 0) return configured;
     if (typeof window !== "undefined") {
       const host = window.location.host;
