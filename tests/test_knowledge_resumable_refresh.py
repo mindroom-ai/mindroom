@@ -23,6 +23,7 @@ from typing import TYPE_CHECKING, Any, ClassVar, Protocol
 import pytest
 from agno.knowledge.document.base import Document
 from agno.knowledge.embedder.base import Embedder
+from agno.vectordb import chroma as agno_chroma
 from chromadb.errors import InternalError, NotFoundError
 from structlog.testing import capture_logs
 
@@ -421,8 +422,7 @@ def fake_vector_store(
     monkeypatch.setattr(knowledge_manager_module, "Knowledge", _FakeKnowledge)
     monkeypatch.setattr(knowledge_collections_module, "Knowledge", _FakeKnowledge)
     monkeypatch.setattr(knowledge_manager_module, "create_configured_embedder", lambda *_a, **_k: embedder)
-    monkeypatch.setattr("mindroom.knowledge.indexing_config.ChromaDb", _FakeVectorDb)
-    monkeypatch.setattr(knowledge_registry, "ChromaDb", _FakeVectorDb)
+    monkeypatch.setattr(agno_chroma, "ChromaDb", _FakeVectorDb)
     monkeypatch.setattr(knowledge_registry, "StrictSearchKnowledge", _FakeKnowledge)
     monkeypatch.setattr(knowledge_registry, "create_configured_embedder", lambda *_a, **_k: embedder)
 

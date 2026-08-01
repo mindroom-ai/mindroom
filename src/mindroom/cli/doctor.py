@@ -11,9 +11,6 @@ from urllib.parse import urlparse
 
 import httpx
 import typer
-from agno.models.vertexai.claude import Claude as VertexAIClaude
-from anthropic import APIStatusError
-from google.auth.exceptions import DefaultCredentialsError, RefreshError
 
 from mindroom import constants
 from mindroom.constants import RuntimePaths, env_key_for_provider, runtime_env_path
@@ -21,7 +18,6 @@ from mindroom.credentials_sync import sync_env_to_credentials
 from mindroom.embedder_health import probe_embedder, semantic_embedder_configured
 from mindroom.embedding_errors import EMBEDDER_UNREACHABLE_DETAIL
 from mindroom.embeddings import create_sentence_transformers_embedder
-from mindroom.google_adc import load_google_application_credentials
 from mindroom.matrix.health import (
     MSC4186_UNSTABLE_FEATURE,
     matrix_versions_url,
@@ -36,6 +32,9 @@ from .config import activate_cli_runtime, console, load_config_quiet
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+
+    from anthropic import APIStatusError
+    from google.auth.exceptions import DefaultCredentialsError, RefreshError
 
     from mindroom.config.models import ModelConfig
 
@@ -322,6 +321,9 @@ def _classify_vertexai_claude_error(
     | httpx.HTTPError,
 ) -> tuple[bool | None, str]:
     """Classify one Vertex AI Claude validation failure for doctor output."""
+    from anthropic import APIStatusError  # noqa: PLC0415
+    from google.auth.exceptions import DefaultCredentialsError, RefreshError  # noqa: PLC0415
+
     if isinstance(exc, APIStatusError):
         return False, _vertexai_claude_api_error_detail(exc)
     if isinstance(exc, DefaultCredentialsError):
@@ -374,6 +376,8 @@ def _validate_vertexai_claude_connection(
     client_params = dict(extra_kwargs.get("client_params") or {})
     google_application_credentials = runtime_env_path(runtime_paths, "GOOGLE_APPLICATION_CREDENTIALS")
     if "credentials" not in client_params and google_application_credentials is not None:
+        from mindroom.google_adc import load_google_application_credentials  # noqa: PLC0415
+
         try:
             client_params["credentials"] = load_google_application_credentials(str(google_application_credentials))
         except PermanentStartupError as exc:
@@ -384,6 +388,10 @@ def _validate_vertexai_claude_connection(
     extra_kwargs.setdefault("project_id", project_id)
     extra_kwargs.setdefault("region", region)
     extra_kwargs.setdefault("timeout", 10)
+
+    from agno.models.vertexai.claude import Claude as VertexAIClaude  # noqa: PLC0415
+    from anthropic import APIStatusError  # noqa: PLC0415
+    from google.auth.exceptions import DefaultCredentialsError, RefreshError  # noqa: PLC0415
 
     try:
         model = VertexAIClaude(id=model_config.id, **extra_kwargs)

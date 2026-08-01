@@ -22,10 +22,6 @@ from mindroom.knowledge.refresh_locks import (
     is_refresh_active,
     mark_scheduled_refresh_inactive,
 )
-from mindroom.knowledge.refresh_runner import (
-    refresh_knowledge_binding,
-    refresh_knowledge_binding_in_subprocess,
-)
 from mindroom.knowledge.registry import (
     KnowledgeRefreshTarget,
     load_published_index_state,
@@ -46,6 +42,48 @@ logger = get_logger(__name__)
 _DEFAULT_MAX_CONCURRENT_REFRESHES = 1
 _MAX_CONCURRENT_REFRESHES_ENV = "MINDROOM_KNOWLEDGE_REFRESH_CONCURRENCY"
 _REFRESH_CLAIM_RETRY_SECONDS = 0.1
+
+
+async def _refresh_knowledge_binding(
+    base_id: str,
+    *,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    execution_identity: ToolExecutionIdentity | None = None,
+    force_reindex: bool = False,
+) -> KnowledgeRefreshResult:
+    """Load the heavy in-process refresh path only for an explicit refresh."""
+    from mindroom.knowledge.refresh_runner import refresh_knowledge_binding as run_refresh  # noqa: PLC0415
+
+    return await run_refresh(
+        base_id,
+        config=config,
+        runtime_paths=runtime_paths,
+        execution_identity=execution_identity,
+        force_reindex=force_reindex,
+    )
+
+
+async def _refresh_knowledge_binding_in_subprocess(
+    base_id: str,
+    *,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    execution_identity: ToolExecutionIdentity | None = None,
+    force_reindex: bool = False,
+) -> None:
+    """Load subprocess refresh machinery only when scheduled work starts."""
+    from mindroom.knowledge.refresh_runner import (  # noqa: PLC0415
+        refresh_knowledge_binding_in_subprocess as run_refresh,
+    )
+
+    await run_refresh(
+        base_id,
+        config=config,
+        runtime_paths=runtime_paths,
+        execution_identity=execution_identity,
+        force_reindex=force_reindex,
+    )
 
 
 def _default_max_concurrent_refreshes() -> int:
@@ -139,7 +177,7 @@ class KnowledgeRefreshScheduler:
                 create=False,
             )
             self._pending.pop(key, None)
-        return await refresh_knowledge_binding(
+        return await _refresh_knowledge_binding(
             base_id,
             config=config,
             runtime_paths=runtime_paths,
@@ -265,7 +303,7 @@ class KnowledgeRefreshScheduler:
     async def _run_refresh(self, key: KnowledgeRefreshTarget, request: _ScheduledRefresh) -> None:
         async with self._refresh_semaphore():
             try:
-                await refresh_knowledge_binding_in_subprocess(
+                await _refresh_knowledge_binding_in_subprocess(
                     key.base_id,
                     config=request.config,
                     runtime_paths=request.runtime_paths,

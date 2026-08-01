@@ -225,6 +225,19 @@ def test_primary_runtime_does_not_import_provider_sdks() -> None:
     _assert_probe_clean("mindroom.orchestrator", _PROVIDER_SDK_ROOTS)
 
 
+def test_primary_runtime_defers_optional_storage_engines() -> None:
+    """MindRoom startup must defer storage engines until memory or knowledge uses them."""
+    _assert_probe_clean("mindroom.orchestrator", ("mem0", "chromadb", "agno.vectordb.chroma"))
+
+
+def test_doctor_import_does_not_import_optional_provider_sdks() -> None:
+    """Doctor must defer provider-specific diagnostics until that provider is configured."""
+    _assert_probe_clean(
+        "mindroom.cli.doctor",
+        (*_PROVIDER_SDK_ROOTS, "agno.models.vertexai.claude", "google.auth"),
+    )
+
+
 def test_openai_wire_models_import_only_the_openai_sdk() -> None:
     """Agno's azure package init pulls the anthropic SDK; only the azure branch should pay that."""
     non_openai_roots = tuple(root for root in _PROVIDER_SDK_ROOTS if root != "openai")
