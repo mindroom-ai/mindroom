@@ -544,6 +544,11 @@ per-file-ignores."src/mindroom/tools/*" = [
   "PLC0415", # `import` should be at the top-level of a file"
 ]
 
+[tool.vulture]
+paths = [ "src/mindroom", "vulture_whitelist.py" ]
+min_confidence = 60
+sort_by_size = true
+
 [tool.ty.environment]
 python-version = "3.13"
 [[tool.ty.overrides]]
@@ -596,8 +601,3 @@ exclude_lines = [
   "if TYPE_CHECKING",
   "if __name__ == .__main__.:",
 ]
-
-[tool.vulture]
-paths = [ "src/mindroom", "vulture_whitelist.py" ]
-min_confidence = 60
-sort_by_size = true

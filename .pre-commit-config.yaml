@@ -78,7 +78,7 @@ repos:
         pass_filenames: false
 
   - repo: https://github.com/tox-dev/pyproject-fmt
-    rev: "v2.21.1"
+    rev: "v2.26.0"
     hooks:
       - id: pyproject-fmt
         args: ["--table-format", "long", "--no-generate-python-version-classifiers"]
@@ -94,7 +94,7 @@ repos:
         require_serial: true
 
   - repo: https://github.com/pre-commit/mirrors-eslint
-    rev: v10.2.1
+    rev: v10.8.0
     hooks:
       - id: eslint
         files: ^frontend/.*\.(js|jsx|ts|tsx)$
