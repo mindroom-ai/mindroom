@@ -1983,6 +1983,8 @@ def test_docker_worker_health_accepts_matching_protocol() -> None:
     [
         {"status": "ok"},
         {"status": "ok", "mindroom_version": "2026.7.1", "worker_protocol": 0},
+        {"status": "ok", "mindroom_version": "2026.8.1", "worker_protocol": True},
+        {"status": "ok", "mindroom_version": "2026.8.1", "worker_protocol": 1.0},
     ],
 )
 def test_docker_worker_health_rejects_incompatible_protocol(payload: dict[str, object]) -> None:

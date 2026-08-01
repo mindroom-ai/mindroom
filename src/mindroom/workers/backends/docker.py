@@ -221,7 +221,11 @@ def _worker_health_compatibility_error(response: httpx.Response, *, image: str) 
         reported_protocol = payload.get("worker_protocol", "missing")
         reported_version = payload.get("mindroom_version", "unknown")
 
-    if reported_protocol == WORKER_PROTOCOL_VERSION:
+    if (
+        isinstance(reported_protocol, int)
+        and not isinstance(reported_protocol, bool)
+        and reported_protocol == WORKER_PROTOCOL_VERSION
+    ):
         return None
     return (
         f"Docker worker image '{image}' is incompatible with this MindRoom runtime: "
