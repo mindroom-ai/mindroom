@@ -38,6 +38,7 @@ MindRoom's architecture consists of several key components working together.
 - [Matrix Integration](https://docs.mindroom.chat/architecture/matrix/) - How MindRoom connects to Matrix
 - [Agent Orchestration](https://docs.mindroom.chat/architecture/orchestration/) - How agents are managed
 - [Bot Runtime](https://docs.mindroom.chat/architecture/bot-runtime/) - The inbound turn pipeline and its module boundaries
+- [Durable Terminal Delivery](https://docs.mindroom.chat/architecture/durable-terminal-delivery/) - How a committed final response survives transient Matrix failure
 
 ## Key Internal Modules
 
@@ -64,8 +65,8 @@ MindRoom's architecture consists of several key components working together.
 | `coalescing.py` | Live message coalescing gate (text dispatches immediately; media waits for attachments and a trailing caption) |
 | `text_ingress_dispatch.py` | Text ingress dispatch path used by TurnController |
 | `turn_policy.py` | Pure turn policy: decide ignore, route, or respond for inbound turns |
-| `turn_store.py` | Unified durable turn access (wraps the handled-turn ledger) |
-| `handled_turns.py` | Disk-backed handled-turn ledger preventing duplicate responses |
+| `turn_store.py` | Unified durable turn and terminal-checkpoint access (wraps the handled-turn ledger) |
+| `handled_turns.py` | Disk-backed handled-turn ledger preventing duplicate responses and storing canonical terminal checkpoints |
 | `response_runner.py` | Response lifecycle execution (locking, streaming vs non-streaming, cancellation, detached inbox responses, shutdown drains) |
 | `response_lifecycle.py` | Shared response lifecycle helpers and queued-notice state |
 | `execution_preparation.py` | Request-scoped execution preparation for prompts and persisted replay |
@@ -75,6 +76,7 @@ MindRoom's architecture consists of several key components working together.
 | `post_response_effects.py` | Shared post-response effects after Matrix delivery |
 | `routing.py` | Intelligent agent or team selection when no entity is mentioned |
 | `streaming.py` | Streaming state machine: placeholder, progressive edits, tool traces, cancellation |
+| `terminal_delivery.py` | Retry coordinator for exact terminal edits checkpointed on canonical TurnRecords |
 | `media_inputs.py` | Shared media-input container passed across bot, teams, and AI layers |
 | `media_fallback.py` | Retries model requests without inline media when models reject media inputs |
 | `file_memory_knowledge.py` | Shared resolution for agent file-memory semantic knowledge overlays |

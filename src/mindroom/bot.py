@@ -122,6 +122,7 @@ from .scheduling import (
 )
 from .startup_errors import PermanentStartupError
 from .sync_restart_retry import InterruptedTurnRooms
+from .terminal_delivery import TerminalDeliveryCoordinator, TerminalDeliveryCoordinatorDeps
 from .turn_controller import TurnController, TurnControllerDeps
 from .turn_policy import IngressHookRunner, TurnPolicy, TurnPolicyDeps
 from .turn_store import TurnStore, TurnStoreDeps
@@ -129,6 +130,7 @@ from .visible_voice_echo import VisibleVoiceEchoDeps, VisibleVoiceEchoLifecycle
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
+    from contextlib import AbstractAsyncContextManager
     from datetime import datetime
     from pathlib import Path
 
@@ -304,6 +306,7 @@ class AgentBot:
     _conversation_state_writer: ConversationStateWriter
     _conversation_cache: MatrixConversationCache
     _delivery_gateway: DeliveryGateway
+    _terminal_delivery_coordinator: TerminalDeliveryCoordinator
     _response_runner: ResponseRunner
     _redacted_turn_cleanup: RedactedTurnCleanup
     _turn_store: TurnStore
@@ -467,19 +470,6 @@ class AgentBot:
                 runtime_paths=self.runtime_paths,
             ),
         )
-        self._delivery_gateway = DeliveryGateway(
-            DeliveryGatewayDeps(
-                runtime=self._runtime_view,
-                runtime_paths=self.runtime_paths,
-                agent_name=self.agent_name,
-                logger=self.logger,
-                resolver=self._conversation_resolver,
-                redact_message_event=self._redact_message_event,
-                response_hooks=ResponseHookService(
-                    hook_context=self._hook_context_support,
-                ),
-            ),
-        )
         self._tool_runtime_support = ToolRuntimeSupport(
             runtime=self._runtime_view,
             logger=self.logger,
@@ -497,6 +487,31 @@ class AgentBot:
                 state_writer=self._conversation_state_writer,
                 resolver=self._conversation_resolver,
                 tool_runtime=self._tool_runtime_support,
+            ),
+        )
+        response_hooks = ResponseHookService(
+            hook_context=self._hook_context_support,
+        )
+        self._terminal_delivery_coordinator = TerminalDeliveryCoordinator(
+            TerminalDeliveryCoordinatorDeps(
+                runtime=self._runtime_view,
+                turn_store=self._turn_store,
+                conversation_cache=self._conversation_cache,
+                redact_message_event=self._redact_message_event,
+                is_ready=self._terminal_delivery_ready,
+                logger=self.logger,
+            ),
+        )
+        self._delivery_gateway = DeliveryGateway(
+            DeliveryGatewayDeps(
+                runtime=self._runtime_view,
+                runtime_paths=self.runtime_paths,
+                agent_name=self.agent_name,
+                logger=self.logger,
+                resolver=self._conversation_resolver,
+                redact_message_event=self._redact_message_event,
+                response_hooks=response_hooks,
+                terminal_delivery_coordinator=self._terminal_delivery_coordinator,
             ),
         )
         self._post_response_effects_support = PostResponseEffectsSupport(
@@ -572,6 +587,7 @@ class AgentBot:
             RedactedTurnCleanupDeps(
                 conversation_cache=self._conversation_cache,
                 turn_store=self._turn_store,
+                terminal_delivery_coordinator=self._terminal_delivery_coordinator,
             ),
         )
         self._visible_voice_echo = VisibleVoiceEchoLifecycle(
@@ -607,6 +623,19 @@ class AgentBot:
                 visible_voice_echo=self._visible_voice_echo,
             ),
         )
+
+    def _terminal_delivery_ready(self) -> bool:
+        """Return whether TurnRecord checkpoint retries may talk to Matrix."""
+        return (
+            self.running
+            and not self._sync_shutting_down
+            and self._first_sync_done
+            and self._runtime_view.client is not None
+        )
+
+    def terminal_delivery_cleanup_guard(self, target_event_id: str) -> AbstractAsyncContextManager[bool]:
+        """Serialize stale cleanup with terminal delivery for one visible event."""
+        return self._terminal_delivery_coordinator.stale_cleanup_guard(target_event_id)
 
     async def _wait_until_coalesced_dispatch_allowed(self, key: CoalescingKey) -> None:
         """Hold active follow-up dispatch until the response lock for its target is idle."""
@@ -1206,6 +1235,9 @@ class AgentBot:
         if first_sync_response or has_deferred_overdue_tasks():
             self._maybe_start_deferred_overdue_task_drain()
 
+        # Applied sync state may unblock a deferred TurnRecord checkpoint.
+        self._terminal_delivery_coordinator.wake(reason="sync_response_applied")
+
     async def _on_sync_response(self, _response: nio.SyncResponse | nio.SlidingSyncResponse) -> None:
         """Track successful sync responses for health checks and watchdogs."""
         first_sync_response = not self._first_sync_done
@@ -1458,7 +1490,7 @@ class AgentBot:
         if call_manager is not None:
             await call_manager.on_room_membership_event(room, event)
 
-    async def start(self) -> None:
+    async def start(self) -> None:  # noqa: PLR0915
         """Start the agent bot with user account setup (but don't join rooms yet)."""
         self._validate_runtime_support_injection_contract_for_startup()
         await self.ensure_user_account()
@@ -1478,6 +1510,10 @@ class AgentBot:
             await self._set_avatar_if_available()
             # Keep durable tracking-state loading off the event loop at startup.
             await asyncio.to_thread(self._turn_store.warm)
+            recovered = await self._terminal_delivery_coordinator.warm()
+            if recovered:
+                self.logger.warning("terminal_delivery_startup_recovery", recovered_count=recovered)
+            self._terminal_delivery_coordinator.start()
             await asyncio.to_thread(interactive.init_persistence, self.runtime_paths.storage_root)
             client = self.client
             assert client is not None
@@ -1558,6 +1594,7 @@ class AgentBot:
             client = self.client
             self.running = False
             self.client = None
+            await self._terminal_delivery_coordinator.stop()
             if client is not None:
                 try:
                     await client.close()
@@ -1738,6 +1775,7 @@ class AgentBot:
         checkpoint_decision_completed = False
         try:
             self._response_runner.refuse_pending_admissions()
+            await self._terminal_delivery_coordinator.stop()
             await self._cancel_startup_thread_prewarm()
             if self.agent_name == ROUTER_AGENT_NAME:
                 await self._cancel_deferred_overdue_task_drain()

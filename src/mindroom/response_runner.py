@@ -1941,6 +1941,7 @@ class ResponseRunner:
                                 streaming_cls=ReplacementStreamingResponse,
                                 pipeline_timing=request.pipeline_timing,
                                 visible_event_id_callback=_note_visible_response_event_id,
+                                identity=response_identity,
                             ),
                         )
                         event_id = transport_outcome.last_physical_stream_event_id
@@ -2458,6 +2459,7 @@ class ResponseRunner:
                         streaming_cls=StreamingResponse,
                         pipeline_timing=request.pipeline_timing,
                         visible_event_id_callback=note_visible_response_event_id,
+                        identity=self._response_identity(request, response_kind="ai"),
                     ),
                 )
                 if request.pipeline_timing is not None:

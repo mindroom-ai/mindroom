@@ -10,6 +10,7 @@ if TYPE_CHECKING:
     import nio
 
     from mindroom.matrix.conversation_cache import MatrixConversationCache
+    from mindroom.terminal_delivery import TerminalDeliveryCoordinator
     from mindroom.turn_store import TurnStore
 
 
@@ -19,6 +20,7 @@ class RedactedTurnCleanupDeps:
 
     conversation_cache: MatrixConversationCache
     turn_store: TurnStore
+    terminal_delivery_coordinator: TerminalDeliveryCoordinator | None = None
 
 
 @dataclass
@@ -29,5 +31,11 @@ class RedactedTurnCleanup:
 
     async def handle(self, room: nio.MatrixRoom, event: nio.RedactionEvent) -> None:
         """Persist the tombstone before applying the redaction to cached history."""
-        await asyncio.to_thread(self.deps.turn_store.mark_source_redacted, event.redacts)
+        if self.deps.terminal_delivery_coordinator is not None:
+            await self.deps.terminal_delivery_coordinator.redact(
+                room_id=room.room_id,
+                event_id=event.redacts,
+            )
+        else:
+            await asyncio.to_thread(self.deps.turn_store.mark_source_redacted, event.redacts)
         await self.deps.conversation_cache.apply_redaction(room.room_id, event)

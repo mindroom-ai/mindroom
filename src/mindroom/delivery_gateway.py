@@ -12,7 +12,7 @@ from nio.exceptions import SendRetryError
 
 from mindroom import constants, interactive
 from mindroom.constants import SKIP_MENTIONS_KEY
-from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
+from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome, TerminalStreamDelivery
 from mindroom.hooks import (
     EVENT_MESSAGE_AFTER_RESPONSE,
     EVENT_MESSAGE_BEFORE_RESPONSE,
@@ -31,7 +31,12 @@ from mindroom.hooks import (
     emit_final_response_transform,
     emit_transform,
 )
-from mindroom.matrix.client_delivery import edit_message_result, send_message_result
+from mindroom.matrix.client_delivery import (
+    build_edit_event_content,
+    edit_message_result,
+    prepare_message_content,
+    send_message_result,
+)
 from mindroom.matrix.mentions import format_message_with_mentions
 from mindroom.matrix.message_builder import build_message_content
 from mindroom.runtime_protocols import SupportsClientConfig  # noqa: TC001
@@ -44,6 +49,7 @@ from mindroom.streaming import (
     interactive_response_for_visible_body,
     send_streaming_response,
 )
+from mindroom.terminal_delivery import TerminalDeliveryCommit, TerminalDeliveryIntent
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable
@@ -62,6 +68,7 @@ if TYPE_CHECKING:
     from mindroom.hooks import MessageEnvelope
     from mindroom.message_target import MessageTarget
     from mindroom.streaming import StreamInputChunk
+    from mindroom.terminal_delivery import TerminalDeliveryCoordinator
     from mindroom.timing import DispatchPipelineTiming
     from mindroom.tool_system.events import ToolTraceEntry
 
@@ -301,6 +308,7 @@ class StreamingDeliveryRequest:
     pipeline_timing: DispatchPipelineTiming | None = None
     visible_event_id_callback: Callable[[str], None] | None = None
     preserve_existing_visible_on_empty_terminal: bool = False
+    identity: ResponseIdentity | None = None
 
 
 @dataclass(frozen=True)
@@ -314,6 +322,7 @@ class DeliveryGatewayDeps:
     redact_message_event: Callable[..., Awaitable[bool]]
     resolver: ConversationResolver
     response_hooks: ResponseHookService
+    terminal_delivery_coordinator: TerminalDeliveryCoordinator | None = None
 
 
 @dataclass(frozen=True)
@@ -343,6 +352,31 @@ class DeliveryGateway:
             msg = "Matrix client is not ready for response delivery"
             raise RuntimeError(msg)
         return client
+
+    async def _commit_terminal_edit(
+        self,
+        *,
+        identity: ResponseIdentity,
+        target: MessageTarget,
+        event_id: str,
+        wire_content: dict[str, Any],
+    ) -> TerminalDeliveryCommit:
+        """Commit one exact replacement payload before Matrix transport."""
+        coordinator = self.deps.terminal_delivery_coordinator
+        assert coordinator is not None
+        prepared_content = await prepare_message_content(
+            self._client(),
+            target.room_id,
+            wire_content,
+        )
+        return await coordinator.commit_and_attempt(
+            TerminalDeliveryIntent(
+                source_event_ids=(identity.response_envelope.source_event_id,),
+                target_event_id=event_id,
+                correlation_id=identity.correlation_id,
+                wire_content=prepared_content,
+            ),
+        )
 
     @staticmethod
     def _cancelled_error_failure_reason(error: asyncio.CancelledError) -> str:
@@ -706,6 +740,51 @@ class DeliveryGateway:
         display_text = interactive_response.formatted_text
 
         if request.existing_event_id is not None:
+            coordinator = self.deps.terminal_delivery_coordinator
+            source_event_ids = (request.identity.response_envelope.source_event_id,)
+            if (
+                request.existing_event_is_placeholder
+                and coordinator is not None
+                and await coordinator.can_checkpoint(source_event_ids)
+            ):
+                replacement_content = format_message_with_mentions(
+                    self.deps.runtime.config,
+                    self.deps.runtime_paths,
+                    display_text,
+                    tool_trace=draft.tool_trace,
+                    extra_content=draft.extra_content,
+                )
+                commit = await self._commit_terminal_edit(
+                    identity=request.identity,
+                    target=request.target,
+                    event_id=request.existing_event_id,
+                    wire_content=build_edit_event_content(
+                        event_id=request.existing_event_id,
+                        new_content=replacement_content,
+                        new_text=display_text,
+                    ),
+                )
+                if commit.status in {"delivered", "deferred"}:
+                    return FinalDeliveryOutcome(
+                        terminal_status="completed",
+                        event_id=request.existing_event_id,
+                        is_visible_response=True,
+                        final_visible_body=display_text,
+                        delivery_kind="edited",
+                        tool_trace=tuple(draft.tool_trace or ()),
+                        extra_content=draft.extra_content,
+                        interactive_metadata=interactive_response.interactive_metadata,
+                    )
+                return await self._finish_placeholder_delivery_failure(
+                    _PlaceholderFailureUpdateRequest(
+                        target=request.target,
+                        event_id=request.existing_event_id,
+                        identity=request.identity,
+                        failure_reason="terminal_checkpoint_rejected",
+                        tool_trace=draft.tool_trace,
+                        extra_content=draft.extra_content,
+                    ),
+                )
             edited = await self.edit_text(
                 EditTextRequest(
                     target=request.target,
@@ -994,6 +1073,75 @@ class DeliveryGateway:
             request.existing_event_id,
             caller_label="delivery_stream",
         )
+
+        terminal_edit_callback = None
+        identity = request.identity
+        coordinator = self.deps.terminal_delivery_coordinator
+        if (
+            coordinator is not None
+            and identity is not None
+            and (request.existing_event_id is None or request.adopt_existing_placeholder)
+            and await coordinator.can_checkpoint((identity.response_envelope.source_event_id,))
+        ):
+
+            async def terminal_edit_callback(
+                event_id: str,
+                wire_content: dict[str, Any],
+                rendered_body: str,
+                canonical_body: str,
+                tool_trace: list[ToolTraceEntry],
+                interactive_metadata: interactive.InteractiveMetadata | None,
+            ) -> TerminalStreamDelivery:
+                final_wire_content = wire_content
+                final_rendered_body = rendered_body
+                final_interactive_metadata = interactive_metadata
+                try:
+                    transform = await self.deps.response_hooks.apply_final_response_transform(
+                        identity=identity,
+                        response_text=canonical_body,
+                    )
+                except asyncio.CancelledError:
+                    self.deps.logger.warning(
+                        "Final streamed-response transform cancelled; preserving streamed success",
+                        correlation_id=identity.correlation_id,
+                    )
+                except Exception:
+                    self.deps.logger.exception(
+                        "Final streamed-response transform failed; preserving streamed success",
+                        correlation_id=identity.correlation_id,
+                    )
+                else:
+                    if transform.response_text != canonical_body and transform.response_text.strip():
+                        transformed = interactive.parse_and_format_interactive(
+                            transform.response_text,
+                            extract_mapping=True,
+                        )
+                        final_rendered_body = transformed.formatted_text
+                        final_interactive_metadata = transformed.interactive_metadata
+                        replacement_content = format_message_with_mentions(
+                            self.deps.runtime.config,
+                            self.deps.runtime_paths,
+                            final_rendered_body,
+                            tool_trace=tool_trace,
+                            extra_content=request.extra_content,
+                        )
+                        final_wire_content = build_edit_event_content(
+                            event_id=event_id,
+                            new_content=replacement_content,
+                            new_text=final_rendered_body,
+                        )
+                commit = await self._commit_terminal_edit(
+                    identity=identity,
+                    target=request.target,
+                    event_id=event_id,
+                    wire_content=final_wire_content,
+                )
+                return TerminalStreamDelivery(
+                    commit=commit,
+                    rendered_body=final_rendered_body,
+                    interactive_metadata=final_interactive_metadata,
+                )
+
         return await send_streaming_response(
             client,
             request.target,
@@ -1009,6 +1157,7 @@ class DeliveryGateway:
             tool_trace_collector=request.tool_trace_collector,
             pipeline_timing=request.pipeline_timing,
             visible_event_id_callback=request.visible_event_id_callback,
+            terminal_edit_callback=terminal_edit_callback,
             latest_thread_event_id=latest_thread_event_id,
             conversation_cache=self.deps.resolver.deps.conversation_cache,
             preserve_existing_visible_on_empty_terminal=(
@@ -1350,12 +1499,15 @@ class DeliveryGateway:
                         tool_trace=tuple(request.tool_trace or ()),
                         extra_content=request.extra_content,
                     )
-                final_transform_draft = await self.deps.response_hooks.apply_final_response_transform(
-                    identity=request.identity,
-                    response_text=final_body_candidate,
-                )
+                final_transform_draft = None
+                if not stream_outcome.terminal_transform_applied:
+                    final_transform_draft = await self.deps.response_hooks.apply_final_response_transform(
+                        identity=request.identity,
+                        response_text=final_body_candidate,
+                    )
                 if (
-                    final_transform_draft.response_text != final_body_candidate
+                    final_transform_draft is not None
+                    and final_transform_draft.response_text != final_body_candidate
                     and final_transform_draft.response_text.strip()
                 ):
                     try:

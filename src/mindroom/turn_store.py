@@ -15,7 +15,14 @@ from agno.run.team import TeamRunOutput
 
 from mindroom.agent_storage import get_agent_session, get_team_session
 from mindroom.agents import remove_run_by_event_id
-from mindroom.handled_turns import HandledTurnLedger, TurnRecord, TurnRecordCodec, merge_edit_facts, same_turn_identity
+from mindroom.handled_turns import (
+    HandledTurnLedger,
+    TerminalEditCheckpoint,
+    TurnRecord,
+    TurnRecordCodec,
+    merge_edit_facts,
+    same_turn_identity,
+)
 from mindroom.history.storage import invalidate_compacted_replay, read_scope_seen_event_ids
 from mindroom.session_ids import create_session_id
 
@@ -30,6 +37,10 @@ if TYPE_CHECKING:
     from mindroom.message_target import MessageTarget
     from mindroom.tool_system.runtime_context import ToolRuntimeSupport
     from mindroom.turn_policy import ResponseAction
+
+
+class _TerminalCheckpointConflictError(RuntimeError):
+    """Reject a checkpoint mutation without changing canonical turn state."""
 
 
 @dataclass(frozen=True)
@@ -89,6 +100,10 @@ class TurnStore:
     def warm(self) -> None:
         """Load the ledger before asynchronous startup recovery begins."""
         self._ledger.warm()
+
+    def flush(self) -> None:
+        """Wait until every handled-turn update queued so far is durable."""
+        self._ledger.flush()
 
     def record_turn(self, turn_record: TurnRecord) -> None:
         """Persist one terminal turn, preserving any previously recorded optional facts."""
@@ -201,6 +216,179 @@ class TurnStore:
         """Return the ledger-backed canonical record for one source event."""
         return self._ledger.get_turn_record(source_event_id)
 
+    def turn_for_event(self, event_id: str) -> TurnRecord | None:
+        """Resolve a canonical turn by source, alias, or visible response ID."""
+        return self._ledger.get_turn_record(event_id) or self._ledger.get_turn_record_for_response_event(event_id)
+
+    def commit_terminal_checkpoint(
+        self,
+        turn_record: TurnRecord,
+        *,
+        response_event_id: str,
+        checkpoint: TerminalEditCheckpoint,
+    ) -> TurnRecord | None:
+        """Make one exact terminal edit the durable canonical turn outcome."""
+        if not turn_record.source_event_ids or not response_event_id:
+            return None
+        target_record = self._ledger.get_turn_record(response_event_id)
+        target_owner = self._ledger.get_turn_record_for_response_event(response_event_id)
+        if (target_record is not None and response_event_id in target_record.redacted_source_event_ids) or (
+            target_owner is not None and not same_turn_identity(target_owner, turn_record)
+        ):
+            return None
+
+        def committed_record(existing_records: Mapping[str, TurnRecord]) -> TurnRecord:
+            authority = existing_records.get(turn_record.source_event_ids[0])
+            if (
+                authority is None
+                or any(existing_records.get(event_id) != authority for event_id in turn_record.indexed_event_ids)
+                or authority.indexed_event_ids != turn_record.indexed_event_ids
+                or not same_turn_identity(authority, turn_record)
+            ):
+                raise _TerminalCheckpointConflictError
+            existing_checkpoint = authority.terminal_edit_checkpoint
+            if existing_checkpoint is not None and existing_checkpoint.transaction_id == checkpoint.transaction_id:
+                return authority
+            if authority.completed or existing_checkpoint is not None:
+                raise _TerminalCheckpointConflictError
+            committed_checkpoint = replace(
+                checkpoint,
+                accepted_redacted_source_event_ids=authority.redacted_source_event_ids,
+            )
+            return replace(
+                authority,
+                completed=True,
+                response_event_id=response_event_id,
+                terminal_edit_checkpoint=committed_checkpoint,
+                timestamp=0.0,
+            )
+
+        try:
+            return self._ledger.update_handled_turn(
+                turn_record.indexed_event_ids,
+                committed_record,
+                wait_for_persist=True,
+            )
+        except _TerminalCheckpointConflictError:
+            return None
+
+    def terminal_checkpoint_records(self) -> tuple[TurnRecord, ...]:
+        """Return unique canonical turns still owning terminal checkpoint work."""
+        return self._ledger.terminal_checkpoint_records()
+
+    def terminal_checkpoint_for_sources(self, source_event_ids: tuple[str, ...]) -> TurnRecord | None:
+        """Return one checkpoint only when every candidate ID belongs to its owner."""
+        if not source_event_ids:
+            return None
+        owner = self._ledger.get_turn_record(source_event_ids[0])
+        if (
+            owner is None
+            or owner.terminal_edit_checkpoint is None
+            or any(self._ledger.get_turn_record(event_id) != owner for event_id in source_event_ids)
+            or not set(source_event_ids).issubset(owner.indexed_event_ids)
+        ):
+            return None
+        return owner
+
+    def clear_terminal_checkpoint(
+        self,
+        turn_record: TurnRecord,
+        *,
+        expected_transaction_id: str,
+    ) -> TurnRecord | None:
+        """Clear one matching checkpoint after Matrix accepts its edit."""
+
+        def cleared_record(existing_records: Mapping[str, TurnRecord]) -> TurnRecord:
+            authority = existing_records.get(turn_record.source_event_ids[0])
+            checkpoint = authority.terminal_edit_checkpoint if authority is not None else None
+            if (
+                authority is None
+                or not same_turn_identity(authority, turn_record)
+                or checkpoint is None
+                or checkpoint.transaction_id != expected_transaction_id
+            ):
+                raise _TerminalCheckpointConflictError
+            return replace(
+                authority,
+                terminal_edit_checkpoint=None,
+                timestamp=0.0,
+            )
+
+        try:
+            return self._ledger.update_handled_turn(
+                turn_record.indexed_event_ids,
+                cleared_record,
+                wait_for_persist=True,
+            )
+        except _TerminalCheckpointConflictError:
+            return None
+
+    def clear_redacted_terminal_checkpoint(
+        self,
+        turn_record: TurnRecord,
+        *,
+        expected_transaction_id: str,
+    ) -> TurnRecord | None:
+        """Clear checkpoint and target after source-redaction cleanup."""
+
+        def cleared_record(existing_records: Mapping[str, TurnRecord]) -> TurnRecord:
+            authority = existing_records.get(turn_record.source_event_ids[0])
+            checkpoint = authority.terminal_edit_checkpoint if authority is not None else None
+            if (
+                authority is None
+                or not same_turn_identity(authority, turn_record)
+                or checkpoint is None
+                or checkpoint.transaction_id != expected_transaction_id
+            ):
+                raise _TerminalCheckpointConflictError
+            return replace(
+                authority,
+                response_event_id=None,
+                terminal_edit_checkpoint=None,
+                timestamp=0.0,
+            )
+
+        try:
+            return self._ledger.update_handled_turn(
+                turn_record.indexed_event_ids,
+                cleared_record,
+                wait_for_persist=True,
+            )
+        except _TerminalCheckpointConflictError:
+            return None
+
+    def clear_redacted_response(
+        self,
+        turn_record: TurnRecord,
+        *,
+        expected_response_event_id: str,
+    ) -> TurnRecord | None:
+        """Forget one visible response after source-redaction cleanup."""
+
+        def cleared_record(existing_records: Mapping[str, TurnRecord]) -> TurnRecord:
+            authority = existing_records.get(turn_record.source_event_ids[0])
+            if (
+                authority is None
+                or not same_turn_identity(authority, turn_record)
+                or authority.response_event_id != expected_response_event_id
+            ):
+                raise _TerminalCheckpointConflictError
+            return replace(
+                authority,
+                response_event_id=None,
+                terminal_edit_checkpoint=None,
+                timestamp=0.0,
+            )
+
+        try:
+            return self._ledger.update_handled_turn(
+                turn_record.indexed_event_ids,
+                cleared_record,
+                wait_for_persist=True,
+            )
+        except _TerminalCheckpointConflictError:
+            return None
+
     def record_pending_turn(self, turn_record: TurnRecord) -> TurnRecord | None:
         """Persist exact response context before generation reaches session storage."""
         if not turn_record.source_event_ids:
@@ -288,6 +476,35 @@ class TurnStore:
         source_event_id: str,
     ) -> TurnRecord | None:
         """Durably tombstone one source event before later replay cleanup."""
+        response_owner = self._ledger.get_turn_record_for_response_event(source_event_id)
+        if response_owner is not None:
+            tombstone = self._ledger.update_handled_turn(
+                (source_event_id,),
+                lambda _existing_records: TurnRecord.create(
+                    [source_event_id],
+                    redacted_source_event_ids=[source_event_id],
+                    completed=False,
+                ),
+                wait_for_persist=True,
+            )
+
+            def cleared_owner(existing_records: Mapping[str, TurnRecord]) -> TurnRecord:
+                authority = existing_records.get(response_owner.source_event_ids[0])
+                if authority is None or authority.response_event_id != source_event_id:
+                    return authority or response_owner
+                return replace(
+                    authority,
+                    response_event_id=None,
+                    terminal_edit_checkpoint=None,
+                    timestamp=0.0,
+                )
+
+            self._ledger.update_handled_turn(
+                response_owner.indexed_event_ids,
+                cleared_owner,
+                wait_for_persist=True,
+            )
+            return tombstone
 
         def redacted_record(existing_records: Mapping[str, TurnRecord]) -> TurnRecord:
             existing_record = existing_records.get(source_event_id)
@@ -762,6 +979,7 @@ def _backfill_missing_turn_facts(authority: TurnRecord, recovery: TurnRecord) ->
         correlation_id=authority.correlation_id or recovery.correlation_id,
         history_scope=authority.history_scope or recovery.history_scope,
         conversation_target=authority.conversation_target or recovery.conversation_target,
+        terminal_edit_checkpoint=authority.terminal_edit_checkpoint or recovery.terminal_edit_checkpoint,
     )
 
 

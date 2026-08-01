@@ -24,9 +24,10 @@ from mindroom.delivery_gateway import (
     FinalDeliveryRequest,
     FinalizeStreamedResponseRequest,
     ResponseIdentity,
+    StreamingDeliveryRequest,
 )
 from mindroom.dispatch_source import MESSAGE_SOURCE_KIND
-from mindroom.final_delivery import StreamTransportOutcome
+from mindroom.final_delivery import StreamTransportOutcome, TerminalStreamDelivery
 from mindroom.hooks import MessageEnvelope
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client import DeliveredMatrixEvent
@@ -39,6 +40,7 @@ from mindroom.post_response_effects import (
 )
 from mindroom.response_lifecycle import ResponseLifecycle, ResponseLifecycleDeps
 from mindroom.streaming import StreamingResponse, send_streaming_response
+from mindroom.terminal_delivery import TerminalDeliveryCommit, TerminalDeliveryIntent
 from tests.conftest import (
     bind_runtime_paths,
     make_matrix_client_mock,
@@ -48,7 +50,7 @@ from tests.conftest import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
+    from collections.abc import AsyncIterator, Awaitable, Callable
     from pathlib import Path
 
 
@@ -197,6 +199,134 @@ async def test_completed_terminal_edit_opts_into_sync_recovery_retry(tmp_path: P
     assert outcome.failure_reason is None
     edit.assert_awaited_once()
     assert edit.call_args.kwargs["retry_sync_recovery"] is True
+
+
+@pytest.mark.asyncio
+async def test_completed_terminal_edit_uses_durable_callback_before_matrix(tmp_path: Path) -> None:
+    """A completed placeholder edit must enter durable transport instead of direct Matrix editing."""
+    streaming = _streaming_response(_config(tmp_path))
+    streaming.event_id = "$placeholder"
+    streaming.accumulated_text = "complete answer"
+    terminal_edit = AsyncMock(
+        return_value=SimpleNamespace(
+            commit=TerminalDeliveryCommit("deferred", "matrix_not_ready"),
+            rendered_body="complete answer",
+            interactive_metadata=None,
+        ),
+    )
+    streaming.terminal_edit_callback = terminal_edit
+
+    with patch("mindroom.streaming.edit_message_result", new=AsyncMock()) as direct_edit:
+        outcome = await streaming.finalize(_client())
+
+    terminal_edit.assert_awaited_once()
+    direct_edit.assert_not_awaited()
+    assert outcome.terminal_status == "completed"
+    assert outcome.failure_reason is None
+    assert outcome.rendered_body == "complete answer"
+
+
+@pytest.mark.asyncio
+async def test_delivery_gateway_checkpoints_placeholder_edit_before_matrix(tmp_path: Path) -> None:
+    """A non-streamed placeholder replacement uses the same durable edit boundary."""
+    gateway = _delivery_gateway(tmp_path)
+    coordinator = SimpleNamespace(
+        can_checkpoint=AsyncMock(return_value=True),
+        commit_and_attempt=AsyncMock(
+            return_value=TerminalDeliveryCommit("deferred", "matrix_not_ready"),
+        ),
+    )
+    gateway = DeliveryGateway(
+        replace(gateway.deps, terminal_delivery_coordinator=coordinator),
+    )
+    identity = ResponseIdentity("ai", _envelope(), "correlation")
+
+    with patch("mindroom.delivery_gateway.edit_message_result", new=AsyncMock()) as direct_edit:
+        outcome = await gateway.deliver_final(
+            FinalDeliveryRequest(
+                target=MessageTarget.resolve("!room:localhost", None, "$reply"),
+                existing_event_id="$placeholder",
+                existing_event_is_placeholder=True,
+                response_text="complete answer",
+                identity=identity,
+                tool_trace=None,
+                extra_content=None,
+            ),
+        )
+
+    direct_edit.assert_not_awaited()
+    intent = coordinator.commit_and_attempt.await_args.args[0]
+    assert isinstance(intent, TerminalDeliveryIntent)
+    assert intent.source_event_ids == ("$reply",)
+    assert intent.target_event_id == "$placeholder"
+    assert intent.correlation_id == "correlation"
+    assert intent.wire_content["m.relates_to"]["event_id"] == "$placeholder"
+    assert outcome.terminal_status == "completed"
+    assert outcome.final_visible_body == "final answer"
+
+
+@pytest.mark.asyncio
+async def test_delivery_gateway_freezes_stream_transform_in_durable_edit(tmp_path: Path) -> None:
+    """The durable stream payload includes the final hook transform exactly once."""
+    gateway = _delivery_gateway(tmp_path)
+    gateway.deps.response_hooks.apply_final_response_transform.return_value = SimpleNamespace(
+        response_text="transformed answer",
+    )
+    coordinator = SimpleNamespace(
+        can_checkpoint=AsyncMock(return_value=True),
+        commit_and_attempt=AsyncMock(
+            return_value=TerminalDeliveryCommit("deferred", "matrix_not_ready"),
+        ),
+    )
+    gateway = DeliveryGateway(
+        replace(gateway.deps, terminal_delivery_coordinator=coordinator),
+    )
+    identity = ResponseIdentity("ai", _envelope(), "correlation")
+
+    async def fake_stream(
+        *args: object,
+        terminal_edit_callback: Callable[..., Awaitable[TerminalStreamDelivery]] | None = None,
+        **kwargs: object,
+    ) -> StreamTransportOutcome:
+        del args, kwargs
+        assert terminal_edit_callback is not None
+        terminal = await terminal_edit_callback(
+            "$placeholder",
+            {
+                "body": "* raw answer",
+                "m.new_content": {"body": "raw answer", "msgtype": "m.text"},
+                "m.relates_to": {"rel_type": "m.replace", "event_id": "$placeholder"},
+            },
+            "raw answer",
+            "raw answer",
+            [],
+            None,
+        )
+        return StreamTransportOutcome(
+            last_physical_stream_event_id="$placeholder",
+            terminal_status="completed",
+            rendered_body=terminal.rendered_body,
+            visible_body_state="visible_body",
+            terminal_update_committed=True,
+            terminal_transform_applied=True,
+            interactive_metadata=terminal.interactive_metadata,
+        )
+
+    with patch("mindroom.delivery_gateway.send_streaming_response", new=fake_stream):
+        outcome = await gateway.deliver_stream(
+            StreamingDeliveryRequest(
+                target=MessageTarget.resolve("!room:localhost", None, "$reply"),
+                response_stream=_empty_stream(),
+                existing_event_id="$placeholder",
+                adopt_existing_placeholder=True,
+                identity=identity,
+            ),
+        )
+
+    intent = coordinator.commit_and_attempt.await_args.args[0]
+    assert isinstance(intent, TerminalDeliveryIntent)
+    assert intent.wire_content["m.new_content"]["body"] == "transformed answer"
+    assert outcome.terminal_transform_applied is True
 
 
 @pytest.mark.asyncio

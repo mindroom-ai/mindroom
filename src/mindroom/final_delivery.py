@@ -7,11 +7,21 @@ from typing import TYPE_CHECKING, Any, Literal
 
 if TYPE_CHECKING:
     from mindroom.interactive import InteractiveMetadata
+    from mindroom.terminal_delivery import TerminalDeliveryCommit
     from mindroom.tool_system.events import ToolTraceEntry
 
 _TerminalStatus = Literal["completed", "cancelled", "error"]
 VisibleBodyState = Literal["none", "placeholder_only", "visible_body"]
 _VisibleDeliveryKind = Literal["sent", "edited"]
+
+
+@dataclass(frozen=True)
+class TerminalStreamDelivery:
+    """Result of routing one completed stream edit through durable transport."""
+
+    commit: TerminalDeliveryCommit
+    rendered_body: str
+    interactive_metadata: InteractiveMetadata | None
 
 
 @dataclass(frozen=True)
@@ -21,6 +31,7 @@ class StreamTransportOutcome:  # noqa: D101
     rendered_body: str | None
     visible_body_state: VisibleBodyState
     terminal_update_committed: bool = False
+    terminal_transform_applied: bool = False
     canonical_final_body_candidate: str | None = None
     failure_reason: str | None = None
     interactive_metadata: InteractiveMetadata | None = None

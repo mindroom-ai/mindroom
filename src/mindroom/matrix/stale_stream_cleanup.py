@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -60,7 +61,8 @@ from mindroom.streaming import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Iterable, Sequence
+    from collections.abc import AsyncIterator, Callable, Iterable, Sequence
+    from contextlib import AbstractAsyncContextManager
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
@@ -90,6 +92,12 @@ _TERMINAL_STREAM_STATUSES = frozenset(
 )
 
 
+@asynccontextmanager
+async def _allow_stale_cleanup() -> AsyncIterator[bool]:
+    """Allow cleanup when no durable-delivery owner is attached."""
+    yield True
+
+
 @dataclass(frozen=True)
 class _InterruptedThread:
     """One interrupted thread that can be resumed after restart."""
@@ -109,6 +117,9 @@ class StaleStreamCleanupActor:
 
     client: nio.AsyncClient
     conversation_cache: ConversationCacheProtocol | None
+    terminal_delivery_cleanup_guard: Callable[[str], AbstractAsyncContextManager[bool]] = lambda _event_id: (
+        _allow_stale_cleanup()
+    )
 
 
 @dataclass(frozen=True)
@@ -572,14 +583,41 @@ async def _process_stale_room_candidate(
         scan_policy=scan_policy,
     ):
         return False, None
-    if scan_policy.terminal_interrupted_only and not _has_resumable_interrupted_note(state):
-        return False, None
-    if _is_cleanup_candidate(state):
-        return await _cleanup_candidate_message(
+    async with actor.terminal_delivery_cleanup_guard(target_event_id) as may_clean:
+        if not may_clean:
+            # A durable terminal delivery already owns this message. Writing an
+            # interruption note over it would clobber a committed final response and
+            # auto-resuming would duplicate a turn that has already been answered.
+            logger.info(
+                "Skipping stale stream cleanup for durably owned terminal delivery",
+                room_id=room_id,
+                event_id=target_event_id,
+            )
+            return False, None
+        if scan_policy.terminal_interrupted_only and not _has_resumable_interrupted_note(state):
+            return False, None
+        if _is_cleanup_candidate(state):
+            return await _cleanup_candidate_message(
+                actor.client,
+                room_id=room_id,
+                target_event_id=target_event_id,
+                state=state,
+                bot_user_ids=bot_user_ids,
+                config=config,
+                runtime_paths=runtime_paths,
+                conversation_cache=actor.conversation_cache,
+                agent_name=agent_name,
+                prior_edit_succeeded=prior_edit_succeeded,
+            )
+        if not (_has_restart_interrupted_note(state.latest_body) or _has_resumable_interrupted_note(state)):
+            return False, None
+        return await _handle_interrupted_message(
             actor.client,
             room_id=room_id,
             target_event_id=target_event_id,
             state=state,
+            auto_resume_target_event_ids=auto_resume_target_event_ids,
+            can_auto_resume=_has_resumable_interrupted_note(state),
             bot_user_ids=bot_user_ids,
             config=config,
             runtime_paths=runtime_paths,
@@ -587,22 +625,6 @@ async def _process_stale_room_candidate(
             agent_name=agent_name,
             prior_edit_succeeded=prior_edit_succeeded,
         )
-    if not (_has_restart_interrupted_note(state.latest_body) or _has_resumable_interrupted_note(state)):
-        return False, None
-    return await _handle_interrupted_message(
-        actor.client,
-        room_id=room_id,
-        target_event_id=target_event_id,
-        state=state,
-        auto_resume_target_event_ids=auto_resume_target_event_ids,
-        can_auto_resume=_has_resumable_interrupted_note(state),
-        bot_user_ids=bot_user_ids,
-        config=config,
-        runtime_paths=runtime_paths,
-        conversation_cache=actor.conversation_cache,
-        agent_name=agent_name,
-        prior_edit_succeeded=prior_edit_succeeded,
-    )
 
 
 async def _handle_interrupted_message(

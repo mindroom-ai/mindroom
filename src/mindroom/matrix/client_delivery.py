@@ -125,6 +125,7 @@ async def _send_prepared_room_message(
     cache_bypass: bool,
     operation: str,
     retry_sync_recovery: bool,
+    transaction_id: str | None = None,
 ) -> object | None:
     """Send one prepared Matrix room message and normalize local delivery exceptions."""
 
@@ -144,7 +145,7 @@ async def _send_prepared_room_message(
                 room_id,
                 message_type,
                 content_sent,
-                uuid4(),
+                transaction_id or uuid4(),
             )
             return await client._send(
                 nio.RoomSendResponse,
@@ -154,12 +155,16 @@ async def _send_prepared_room_message(
                 response_data=(room_id,),
             )
         # Bots have no interactive device-verification flow, so encrypted sends
-        # always deliver to unverified devices.
+        # always deliver to unverified devices. Only a caller that needs an
+        # idempotent repeat pins the transaction ID; ordinary sends keep nio's
+        # per-call identifier so retries of distinct sends stay distinct.
+        deterministic_transaction = {"tx_id": transaction_id} if transaction_id is not None else {}
         return await client.room_send(
             room_id=room_id,
             message_type=message_type,
             content=content_sent,
             ignore_unverified_devices=True,
+            **deterministic_transaction,
         )
 
     try:
@@ -240,6 +245,15 @@ def can_send_to_encrypted_room(client: nio.AsyncClient, room_id: str, *, operati
     return _can_send_to_encrypted_room(client, room_id, operation=operation)
 
 
+async def prepare_message_content(
+    client: nio.AsyncClient,
+    room_id: str,
+    content: dict[str, Any],
+) -> dict[str, Any]:
+    """Freeze one exact payload, including any large-message sidecar reference."""
+    return await prepare_large_message(client, room_id, content)
+
+
 async def send_message_result(
     client: nio.AsyncClient,
     room_id: str,
@@ -247,6 +261,8 @@ async def send_message_result(
     *,
     operation: str = "send_message",
     retry_sync_recovery: bool = False,
+    transaction_id: str | None = None,
+    content_is_prepared: bool = False,
 ) -> DeliveredMatrixEvent | None:
     """Send a message to a Matrix room and return the exact delivered payload."""
     if not _can_send_to_encrypted_room(client, room_id, operation=operation):
@@ -283,7 +299,7 @@ async def send_message_result(
         room_id=room_id,
         message_type=message_type,
     )
-    content_sent = await prepare_large_message(client, room_id, content)
+    content_sent = content if content_is_prepared else await prepare_message_content(client, room_id, content)
     emit_timing_event(
         "Matrix send timing",
         phase="prepare_finish",
@@ -305,6 +321,7 @@ async def send_message_result(
         cache_bypass=cache_bypass,
         operation=operation,
         retry_sync_recovery=retry_sync_recovery,
+        transaction_id=transaction_id,
     )
     if response is None:
         emit_timing_event(
@@ -704,6 +721,7 @@ __all__ = [
     "cached_room",
     "can_send_to_encrypted_room",
     "edit_message_result",
+    "prepare_message_content",
     "send_audio_message",
     "send_file_message",
     "send_message_result",

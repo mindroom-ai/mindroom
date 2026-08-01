@@ -160,6 +160,7 @@ Matrix sync callback
 | `shell_execution.py` | Shell command execution core: spawning, output buffering, background handle registry |
 | `shell_supervisor.py` | Worker-local shell supervisor process owning background shell handles across sandbox request subprocesses |
 | `streaming.py` | Streaming state machine: placeholder, progressive edits, tool traces, cancellation |
+| `terminal_delivery.py` | Sequential retry coordinator for final edits checkpointed on canonical turn records |
 | `prompts.py` | Built-in prompt defaults and prompt override registry |
 | `attachments.py` | Attachment persistence, registration, and context-scoped resolution |
 | `attachment_ids.py` | Leaf attachment-ID helpers kept free of matrix-client imports |

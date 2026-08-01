@@ -11,6 +11,7 @@ without blocking the event loop on filesystem I/O (issue #1260).
 from __future__ import annotations
 
 import json
+import math
 import threading
 import time
 import typing
@@ -79,6 +80,62 @@ class SourceEventMetadata:
 SourceEventRevision = tuple[int, str]
 
 
+@dataclass(frozen=True)
+class TerminalEditCheckpoint:
+    """Frozen terminal Matrix edit awaiting idempotent transport."""
+
+    transaction_id: str
+    wire_content: Mapping[str, object]
+    correlation_id: str
+    accepted_redacted_source_event_ids: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        """Freeze the exact JSON payload once."""
+        if not all(isinstance(value, str) and value for value in (self.transaction_id, self.correlation_id)):
+            message = "Terminal checkpoint identity strings must be non-empty"
+            raise ValueError(message)
+        if not isinstance(self.wire_content, Mapping):
+            message = "Terminal checkpoint wire content must be a mapping"
+            raise TypeError(message)
+        if not self.wire_content:
+            message = "Terminal checkpoint wire content must be non-empty"
+            raise ValueError(message)
+        object.__setattr__(self, "wire_content", _freeze_json_mapping(self.wire_content))
+        object.__setattr__(
+            self,
+            "accepted_redacted_source_event_ids",
+            _normalize_source_event_ids(self.accepted_redacted_source_event_ids),
+        )
+
+    def to_record(self) -> dict[str, object]:
+        """Return the JSON-safe checkpoint stored inside one TurnRecord."""
+        return {
+            "transaction_id": self.transaction_id,
+            "wire_content": _thaw_json_value(self.wire_content),
+            "correlation_id": self.correlation_id,
+            "accepted_redacted_source_event_ids": list(self.accepted_redacted_source_event_ids),
+        }
+
+    @classmethod
+    def from_raw(cls, raw_checkpoint: object) -> TerminalEditCheckpoint | None:
+        """Decode one complete transport checkpoint."""
+        if not isinstance(raw_checkpoint, Mapping):
+            return None
+        checkpoint = typing.cast("Mapping[str, Any]", raw_checkpoint)
+        try:
+            return cls(
+                transaction_id=checkpoint["transaction_id"],
+                wire_content=checkpoint["wire_content"],
+                correlation_id=checkpoint["correlation_id"],
+                accepted_redacted_source_event_ids=checkpoint.get(
+                    "accepted_redacted_source_event_ids",
+                    (),
+                ),
+            )
+        except (KeyError, TypeError, ValueError):
+            return None
+
+
 def _prompt_source_event_id(
     source_event_ids: tuple[str, ...],
     source_event_metadata: Mapping[str, SourceEventMetadata] | None,
@@ -116,6 +173,7 @@ class TurnRecord:
     correlation_id: str | None = None
     history_scope: HistoryScope | None = None
     conversation_target: MessageTarget | None = None
+    terminal_edit_checkpoint: TerminalEditCheckpoint | None = None
     timestamp: float = 0.0
 
     def __post_init__(self) -> None:
@@ -195,6 +253,13 @@ class TurnRecord:
         object.__setattr__(self, "correlation_id", _normalize_string(self.correlation_id))
         object.__setattr__(self, "history_scope", history_scope)
         object.__setattr__(self, "conversation_target", conversation_target)
+        object.__setattr__(
+            self,
+            "terminal_edit_checkpoint",
+            self.terminal_edit_checkpoint
+            if isinstance(self.terminal_edit_checkpoint, TerminalEditCheckpoint)
+            else None,
+        )
         object.__setattr__(self, "timestamp", normalized_timestamp)
 
     @classmethod
@@ -219,6 +284,7 @@ class TurnRecord:
         correlation_id: str | None = None,
         history_scope: HistoryScope | None = None,
         conversation_target: MessageTarget | None = None,
+        terminal_edit_checkpoint: TerminalEditCheckpoint | None = None,
         timestamp: float = 0.0,
     ) -> TurnRecord:
         """Create a record while accepting sequence and mapping inputs from runtime flows."""
@@ -244,6 +310,7 @@ class TurnRecord:
             correlation_id=correlation_id,
             history_scope=history_scope,
             conversation_target=conversation_target,
+            terminal_edit_checkpoint=terminal_edit_checkpoint,
             timestamp=timestamp,
         )
 
@@ -289,7 +356,7 @@ class TurnRecordCodec:
         return _TURN_RECORD_SCHEMA_VERSION
 
     @staticmethod
-    def to_ledger_record(record: TurnRecord) -> dict[str, object]:  # noqa: C901
+    def to_ledger_record(record: TurnRecord) -> dict[str, object]:  # noqa: C901, PLR0912
         """Serialize one exact record for the versioned handled-turn ledger."""
         payload: dict[str, object] = {
             "anchor_event_id": record.anchor_event_id,
@@ -330,6 +397,8 @@ class TurnRecordCodec:
             payload["history_scope"] = record.history_scope.to_metadata()
         if record.conversation_target is not None:
             payload["conversation_target"] = record.conversation_target.to_metadata()
+        if record.terminal_edit_checkpoint is not None:
+            payload["terminal_edit_checkpoint"] = record.terminal_edit_checkpoint.to_record()
         return payload
 
     @staticmethod
@@ -346,6 +415,12 @@ class TurnRecordCodec:
         completed = record.get("completed")
         timestamp = record.get("timestamp")
         response_event_id = record.get("response_event_id")
+        raw_terminal_edit_checkpoint = record.get("terminal_edit_checkpoint")
+        terminal_edit_checkpoint = (
+            TerminalEditCheckpoint.from_raw(raw_terminal_edit_checkpoint)
+            if raw_terminal_edit_checkpoint is not None
+            else None
+        )
         if (
             not isinstance(raw_source_event_ids, list)
             or not isinstance(raw_discovery_event_ids, list)
@@ -357,6 +432,7 @@ class TurnRecordCodec:
             or not isinstance(timestamp, int | float)
             or isinstance(timestamp, bool)
             or (response_event_id is not None and not isinstance(response_event_id, str))
+            or (raw_terminal_edit_checkpoint is not None and terminal_edit_checkpoint is None)
         ):
             return None
         source_event_ids = _normalize_source_event_ids(raw_source_event_ids)
@@ -385,6 +461,7 @@ class TurnRecordCodec:
             correlation_id=_normalize_string(record.get("correlation_id")),
             history_scope=HistoryScope.from_metadata(record.get("history_scope")),
             conversation_target=MessageTarget.from_metadata(record.get("conversation_target")),
+            terminal_edit_checkpoint=terminal_edit_checkpoint,
             timestamp=float(timestamp),
         )
         if event_id not in turn_record.indexed_event_ids:
@@ -662,6 +739,23 @@ class HandledTurnLedger:
                 unique_records[record.indexed_event_ids] = record
             return tuple(unique_records.values())
 
+    def terminal_checkpoint_records(self) -> tuple[TurnRecord, ...]:
+        """Return each canonical turn with outstanding terminal work once."""
+        with self._state.lock:
+            self._ensure_loaded_locked()
+            unique_records = {
+                record.indexed_event_ids: record
+                for record in self._responses.values()
+                if record.terminal_edit_checkpoint is not None
+            }
+            return tuple(unique_records.values())
+
+    def get_turn_record_for_response_event(self, response_event_id: str) -> TurnRecord | None:
+        """Return the unique canonical owner of one visible response event."""
+        with self._state.lock:
+            self._ensure_loaded_locked()
+            return self._turn_record_for_response_event_locked(response_event_id)
+
     def _ensure_loaded_locked(self) -> None:
         """Load persisted records into shared memory once while the state lock is held."""
         if self._state.loaded:
@@ -670,6 +764,19 @@ class HandledTurnLedger:
         with advisory_file_lock(self._responses_lock_file, exclusive=True):
             self._responses = self._read_responses_file_locked()
         self._state.loaded = True
+
+    def _turn_record_for_response_event_locked(self, response_event_id: str) -> TurnRecord | None:
+        matches = self._turn_records_for_response_event_locked(response_event_id)
+        return matches[0] if len(matches) == 1 else None
+
+    def _turn_records_for_response_event_locked(self, response_event_id: str) -> tuple[TurnRecord, ...]:
+        """Return every canonical record currently naming one visible response."""
+        matches = {
+            record.indexed_event_ids: record
+            for record in self._responses.values()
+            if record.response_event_id == response_event_id
+        }
+        return tuple(matches.values())
 
     def _wait_for_pending_persists_locked(self) -> None:
         """Wait for the exact FIFO prefix queued before this barrier."""
@@ -1005,6 +1112,37 @@ def _normalize_string(value: object) -> str | None:
     return value if isinstance(value, str) and value else None
 
 
+def _freeze_json_mapping(value: Mapping[str, object]) -> Mapping[str, object]:
+    """Recursively freeze one JSON-like mapping."""
+    if any(not isinstance(key, str) for key in value):
+        message = "Terminal checkpoint JSON object keys must be strings"
+        raise TypeError(message)
+    return MappingProxyType({key: _freeze_json_value(item) for key, item in value.items()})
+
+
+def _freeze_json_value(value: object) -> object:
+    """Recursively freeze mappings and arrays while retaining JSON scalars."""
+    if isinstance(value, Mapping):
+        return _freeze_json_mapping(typing.cast("Mapping[str, object]", value))
+    if isinstance(value, list | tuple):
+        return tuple(_freeze_json_value(item) for item in value)
+    if value is None or isinstance(value, str | bool | int):
+        return value
+    if isinstance(value, float) and math.isfinite(value):
+        return value
+    message = f"Terminal checkpoint contains non-JSON value: {type(value).__name__}"
+    raise TypeError(message)
+
+
+def _thaw_json_value(value: object) -> object:
+    """Return mutable JSON containers for persistence."""
+    if isinstance(value, Mapping):
+        return {key: _thaw_json_value(item) for key, item in value.items()}
+    if isinstance(value, tuple | list):
+        return [_thaw_json_value(item) for item in value]
+    return value
+
+
 def _bool_or_none(value: object) -> bool | None:
     """Return a strict boolean or None."""
     return value if isinstance(value, bool) else None
@@ -1123,6 +1261,7 @@ def _cleaned_responses(
         group
         for group in _response_groups(responses)
         if any(record.pending_redaction_cleanup_event_ids for record in group.records.values())
+        or any(record.terminal_edit_checkpoint is not None for record in group.records.values())
         or current_time - group.timestamp < max_age_seconds
     ]
     if len(fresh_groups) > max_events:
@@ -1130,6 +1269,7 @@ def _cleaned_responses(
             group
             for group in fresh_groups
             if any(record.pending_redaction_cleanup_event_ids for record in group.records.values())
+            or any(record.terminal_edit_checkpoint is not None for record in group.records.values())
         ]
         pending_group_ids = {id(group) for group in pending_groups}
         ordinary_groups = [group for group in fresh_groups if id(group) not in pending_group_ids]

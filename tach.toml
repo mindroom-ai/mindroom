@@ -976,6 +976,16 @@ depends_on = [
     "mindroom.matrix.client_delivery",
     "mindroom.runtime_protocols",
     "mindroom.streaming",
+    "mindroom.terminal_delivery",
+]
+
+[[modules]]
+path = "mindroom.terminal_delivery"
+depends_on = [
+    "mindroom.handled_turns",
+    "mindroom.matrix.client_delivery",
+    "mindroom.matrix.conversation_cache",
+    "mindroom.turn_store",
 ]
 
 [[modules]]
@@ -2145,6 +2155,7 @@ visibility = [
     "mindroom.matrix.stale_stream_cleanup",
     "mindroom.scheduling",
     "mindroom.streaming",
+    "mindroom.terminal_delivery",
     "mindroom.thread_summary",
 ]
 
@@ -2782,6 +2793,7 @@ depends_on = [
     "mindroom.scheduling",
     "mindroom.sync_restart_retry",
     "mindroom.teams",
+    "mindroom.terminal_delivery",
     "mindroom.timestamp_formatting",
     "mindroom.tool_approval",
     "mindroom.tool_system.dynamic_toolkits",
@@ -2794,7 +2806,10 @@ depends_on = [
 
 [[modules]]
 path = "mindroom.redacted_turn_cleanup"
-depends_on = []
+depends_on = [
+    "mindroom.terminal_delivery",
+    "mindroom.turn_store",
+]
 visibility = ["mindroom.bot"]
 
 [[modules]]
@@ -4107,6 +4122,7 @@ expose = [
     "can_send_to_encrypted_room",
     "cached_room",
     "edit_message_result",
+    "prepare_message_content",
     "send_audio_message",
     "send_file_message",
     "send_message_result",
