@@ -6,8 +6,11 @@ import os
 import shutil
 import subprocess
 from dataclasses import dataclass
+from importlib.metadata import version as distribution_version
 from pathlib import Path
 from typing import TYPE_CHECKING, NamedTuple
+
+from packaging.version import Version
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -69,9 +72,16 @@ class ServiceManager(NamedTuple):
     get_recent_logs: Callable[[int], list[str]]
 
 
-def build_service_command(uv_path: Path) -> list[str]:
-    """Build the command for running MindRoom through uv tool run."""
-    return [str(uv_path), "tool", "run", "--from", _PACKAGE_NAME, "mindroom", "run"]
+def build_service_command(uv_path: Path, *, package_version: str | None = None) -> list[str]:
+    """Build a service command pinned to the installing MindRoom version."""
+    installed_version = Version(package_version or distribution_version(_PACKAGE_NAME))
+    resolved_version = (
+        ".".join(str(component) for component in installed_version.release)
+        if installed_version.is_devrelease
+        else installed_version.public
+    )
+    requirement = f"{_PACKAGE_NAME}=={resolved_version}"
+    return [str(uv_path), "tool", "run", "--from", requirement, "mindroom", "run"]
 
 
 def find_uv(extra_paths: list[Path] | None = None) -> Path | None:

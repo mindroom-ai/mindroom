@@ -39,7 +39,7 @@ dependencies = [
   "jinja2>=3.1",
   "json5>=0.13",
   "markdown-it-py>=4",
-  "mcp[cli]>=1.12.4",
+  "mcp[cli]>=1.12.4,<2",
   "mdit-py-plugins>=0.5",
   "mem0ai>=0.1.115",
   # Arbitrary Olm to-device encryption uses the fork's tested internal API; update only with its round-trip tests.

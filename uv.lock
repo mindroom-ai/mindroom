@@ -4511,7 +4511,7 @@ requires-dist = [
     { name = "lxml-html-clean", marker = "extra == 'newspaper'" },
     { name = "markdown-it-py", specifier = ">=4" },
     { name = "matplotlib", marker = "extra == 'visualization'" },
-    { name = "mcp", extras = ["cli"], specifier = ">=1.12.4" },
+    { name = "mcp", extras = ["cli"], specifier = ">=1.12.4,<2" },
     { name = "mdit-py-plugins", specifier = ">=0.5" },
     { name = "mem0ai", specifier = ">=0.1.115" },
     { name = "mem0ai", marker = "extra == 'mem0'", specifier = ">=0.1.115" },
