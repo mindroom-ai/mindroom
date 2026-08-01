@@ -87,7 +87,7 @@ def _write_responses_file(
             conversation_target=MessageTarget.from_metadata(raw_record.get("conversation_target")),
             timestamp=float(raw_record.get("timestamp", 0.0)),
         )
-        serialized_records[event_id] = TurnRecordCodec.to_ledger_record(record)
+        serialized_records[event_id] = TurnRecordCodec._to_ledger_record(record)
     tracker._responses_file.write_text(
         json.dumps(
             {
@@ -969,9 +969,9 @@ def test_record_without_requester_or_correlation_loads_cleanly(temp_dir: Path) -
 
 def test_current_codec_rejects_incomplete_ledger_records() -> None:
     """Current-version ledger rows require the full canonical identity and outcome fields."""
-    assert TurnRecordCodec.from_ledger_record("$event", {}) is None
+    assert TurnRecordCodec._from_ledger_record("$event", {}) is None
     assert (
-        TurnRecordCodec.from_ledger_record(
+        TurnRecordCodec._from_ledger_record(
             "$event",
             {
                 "anchor_event_id": "$event",
@@ -1285,7 +1285,7 @@ def test_partial_invalid_coalesced_ledger_rehydrates_and_persists_valid_group(te
             {
                 "schema_version": TurnRecordCodec.schema_version(),
                 "records": {
-                    "$valid": TurnRecordCodec.to_ledger_record(valid_record),
+                    "$valid": TurnRecordCodec._to_ledger_record(valid_record),
                     "$invalid": [],
                 },
             },

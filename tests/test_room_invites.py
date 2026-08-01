@@ -1481,5 +1481,5 @@ def test_load_invited_rooms_returns_empty_set_for_invalid_utf8(tmp_path: Path) -
         runtime_paths=runtime_paths_for(config),
     )
 
-    assert bot._room_lifecycle.load_invited_rooms() == set()
+    assert bot._room_lifecycle._load_invited_rooms() == set()
     assert bot._room_lifecycle.invited_rooms == set()

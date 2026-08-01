@@ -1455,7 +1455,7 @@ class ResponseRunner:
         run_message_id: str | None = None
         deferred_error: BaseException | None = None
         try:
-            run_message_id = await self.run_cancellable_response(
+            run_message_id = await self._run_cancellable_response(
                 target=target,
                 response_function=response_function,
                 thinking_message=thinking_message,
@@ -1616,10 +1616,12 @@ class ResponseRunner:
         return await self._run_locked_response_lifecycle(
             request,
             response_kind="team",
-            locked_operation=lambda resolved_target, early_placeholder_state: self.generate_team_response_helper_locked(
-                team_request,
-                resolved_target=resolved_target,
-                early_placeholder_state=early_placeholder_state,
+            locked_operation=lambda resolved_target, early_placeholder_state: (
+                self._generate_team_response_helper_locked(
+                    team_request,
+                    resolved_target=resolved_target,
+                    early_placeholder_state=early_placeholder_state,
+                )
             ),
         )
 
@@ -1640,7 +1642,7 @@ class ResponseRunner:
             ),
         )
 
-    async def generate_team_response_helper_locked(  # noqa: C901, PLR0915
+    async def _generate_team_response_helper_locked(  # noqa: C901, PLR0915
         self,
         team_request: _TeamResponseRequest,
         *,
@@ -2198,7 +2200,7 @@ class ResponseRunner:
             streaming_delivery_error_handler=settle_team_streaming_delivery_error,
         )
 
-    async def run_cancellable_response(
+    async def _run_cancellable_response(
         self,
         *,
         target: MessageTarget,
@@ -2485,7 +2487,7 @@ class ResponseRunner:
             )
             raise
 
-    async def process_and_respond(  # noqa: C901
+    async def _process_and_respond(  # noqa: C901
         self,
         request: ResponseRequest,
         *,
@@ -2632,7 +2634,7 @@ class ResponseRunner:
             request.pipeline_timing.mark("response_complete")
         return build_outcome(delivery)
 
-    async def process_and_respond_streaming(  # noqa: C901, PLR0915
+    async def _process_and_respond_streaming(  # noqa: C901, PLR0915
         self,
         request: ResponseRequest,
         *,
@@ -2823,14 +2825,14 @@ class ResponseRunner:
         return await self._run_locked_response_lifecycle(
             request,
             response_kind="ai",
-            locked_operation=lambda resolved_target, early_placeholder_state: self.generate_response_locked(
+            locked_operation=lambda resolved_target, early_placeholder_state: self._generate_response_locked(
                 request,
                 resolved_target=resolved_target,
                 early_placeholder_state=early_placeholder_state,
             ),
         )
 
-    async def generate_response_locked(
+    async def _generate_response_locked(
         self,
         request: ResponseRequest,
         *,
@@ -2942,14 +2944,14 @@ class ResponseRunner:
             progress.track_event(message_id)
             delivery_request = self._request_for_delivery(normalized_request, message_id=message_id)
             if use_streaming:
-                generation = await self.process_and_respond_streaming(
+                generation = await self._process_and_respond_streaming(
                     delivery_request,
                     run_id=response_run_id,
                     on_delivery_started=progress.note_delivery_started,
                     attempt_run_id_collector=attempt_run_ids,
                 )
             else:
-                generation = await self.process_and_respond(
+                generation = await self._process_and_respond(
                     delivery_request,
                     run_id=response_run_id,
                     on_delivery_started=progress.note_delivery_started,

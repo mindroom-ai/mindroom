@@ -543,7 +543,7 @@ async def test_long_running_turn_never_delays_other_ingress_from_same_sender(tmp
         patch.object(bot._turn_policy, "plan_turn", new=AsyncMock(return_value=_respond_dispatch_plan())),
         patch.object(bot._turn_controller, "_has_newer_unresponded_in_thread", return_value=False),
         patch(
-            "mindroom.response_runner.ResponseRunner.generate_response_locked",
+            "mindroom.response_runner.ResponseRunner._generate_response_locked",
             new=fake_generate_response_locked,
         ),
     ):
@@ -759,7 +759,7 @@ async def test_voice_echo_and_follow_up_slots_never_hold_another_conversation(tm
             new=AsyncMock(side_effect=fake_prepare_voice_event),
         ),
         patch(
-            "mindroom.response_runner.ResponseRunner.generate_response_locked",
+            "mindroom.response_runner.ResponseRunner._generate_response_locked",
             new=fake_generate_response_locked,
         ),
     ):
@@ -853,7 +853,7 @@ async def test_interactive_answer_during_active_turn_never_holds_sender_lane(tmp
             patch.object(bot._delivery_gateway, "send_text", new=AsyncMock(side_effect=fake_send_text)),
             patch.object(bot._conversation_resolver, "fetch_thread_history", new=AsyncMock(return_value=[])),
             patch(
-                "mindroom.response_runner.ResponseRunner.generate_response_locked",
+                "mindroom.response_runner.ResponseRunner._generate_response_locked",
                 new=fake_generate_response_locked,
             ),
         ):
@@ -1051,7 +1051,7 @@ async def test_response_failure_drains_follow_up_queue(tmp_path: Path) -> None:
         patch.object(bot._turn_policy, "plan_turn", new=AsyncMock(return_value=_respond_dispatch_plan())),
         patch.object(bot._turn_controller, "_has_newer_unresponded_in_thread", return_value=False),
         patch(
-            "mindroom.response_runner.ResponseRunner.generate_response_locked",
+            "mindroom.response_runner.ResponseRunner._generate_response_locked",
             new=fake_generate_response_locked,
         ),
     ):

@@ -1066,7 +1066,7 @@ async def test_update_config_keeps_current_config_when_new_entity_account_prepar
         patch.object(orchestrator, "_prepare_entity_accounts", new=AsyncMock(side_effect=account_error)) as prepare,
         pytest.raises(PermanentStartupError, match="share a Matrix ID"),
     ):
-        await orchestrator.config_reload.update_config()
+        await orchestrator.config_reload._update_config()
 
     assert orchestrator.config is current_config
     prepare.assert_awaited_once_with(new_config, {"writer"})
@@ -1100,7 +1100,7 @@ async def test_update_config_keeps_current_config_when_restarted_entity_account_
         patch.object(orchestrator, "_prepare_entity_accounts", new=AsyncMock(side_effect=account_error)) as prepare,
         pytest.raises(PermanentStartupError, match="share a Matrix ID"),
     ):
-        await orchestrator.config_reload.update_config()
+        await orchestrator.config_reload._update_config()
 
     assert orchestrator.config is current_config
     prepare.assert_awaited_once_with(new_config, {"general"})
@@ -1172,7 +1172,7 @@ async def test_update_config_validates_internal_user_collision_before_publish(tm
         patch.object(orchestrator, "_prepare_entity_accounts", new=AsyncMock()) as prepare_entities,
         pytest.raises(PermanentStartupError, match="internal user Matrix ID"),
     ):
-        await orchestrator.config_reload.update_config()
+        await orchestrator.config_reload._update_config()
 
     assert orchestrator.config is current_config
     prepare_entities.assert_not_awaited()
@@ -1348,7 +1348,7 @@ async def test_update_config_cancels_tasks_for_removed_plugins(
         hooks_module._AUTO_POKE_TASK = task
 
         _write_plugin_removal_test_config(tmp_path, with_plugin=False)
-        updated = await orchestrator.config_reload.update_config()
+        updated = await orchestrator.config_reload._update_config()
         await asyncio.sleep(0)
 
         assert updated is True
@@ -1459,7 +1459,7 @@ async def test_update_config_serializes_live_plugin_reload_against_staged_plugin
             patch.object(orchestrator, "_sync_runtime_support_services", new=AsyncMock()),
             patch.object(orchestrator, "_emit_config_reloaded", new=AsyncMock()),
         ):
-            updated = await orchestrator.config_reload.update_config()
+            updated = await orchestrator.config_reload._update_config()
 
         assert updated is False
         assert reload_task is not None
@@ -1513,7 +1513,7 @@ async def test_config_update_serializes_manual_plugin_reload_and_mcp_catalog_cha
         patch.object(orchestrator.config_reload, "apply_update_plan", new=apply_update_plan),
         patch("mindroom.orchestrator.reload_plugins", return_value=reload_result) as reload_plugins_mock,
     ):
-        config_task = asyncio.create_task(orchestrator.config_reload.update_config())
+        config_task = asyncio.create_task(orchestrator.config_reload._update_config())
         await asyncio.wait_for(apply_started.wait(), timeout=1)
         plugin_task = asyncio.create_task(orchestrator.reload_plugins_now(source="test"))
         mcp_task = asyncio.create_task(orchestrator._handle_mcp_catalog_change("demo"))
@@ -1585,7 +1585,7 @@ async def test_queued_config_reload_waits_for_in_flight_response_without_event_i
         target: MessageTarget,
         _early_placeholder: object,
     ) -> str | None:
-        return await runner.run_cancellable_response(
+        return await runner._run_cancellable_response(
             target=target,
             response_function=response_function,
             thinking_message="Thinking...",
@@ -1596,7 +1596,7 @@ async def test_queued_config_reload_waits_for_in_flight_response_without_event_i
     orchestrator.agent_bots["agent1"] = bot
     # The orchestrator owns one shared gate that every managed bot admits through.
     bot.admission_gate = orchestrator.config_reload.response_admission_gate
-    orchestrator.config_reload.update_config = AsyncMock(return_value=True)
+    orchestrator.config_reload._update_config = AsyncMock(return_value=True)
 
     response_task = asyncio.create_task(
         runner._run_locked_response_lifecycle(
@@ -1616,13 +1616,13 @@ async def test_queued_config_reload_waits_for_in_flight_response_without_event_i
         assert task is not None
 
         await asyncio.sleep(0.05)
-        orchestrator.config_reload.update_config.assert_not_awaited()
+        orchestrator.config_reload._update_config.assert_not_awaited()
 
         release_response.set()
         await asyncio.wait_for(response_task, timeout=1)
         await asyncio.wait_for(task, timeout=1)
 
-        orchestrator.config_reload.update_config.assert_awaited_once()
+        orchestrator.config_reload._update_config.assert_awaited_once()
     finally:
         release_response.set()
         await asyncio.gather(response_task, return_exceptions=True)
@@ -2593,7 +2593,7 @@ async def test_orchestrator_handles_config_reload(  # noqa: PLR0915
         monkeypatch.setattr(bot, "sync_forever", AsyncMock(side_effect=asyncio.CancelledError()))
 
     # Update config
-    updated = await orchestrator.config_reload.update_config()
+    updated = await orchestrator.config_reload._update_config()
     assert updated  # Should return True since config changed
 
     # Verify updated state
@@ -2811,7 +2811,7 @@ async def test_in_flight_response_count_nonzero_during_send_response(
         target: MessageTarget,
         _early_placeholder: object,
     ) -> str | None:
-        return await runner.run_cancellable_response(
+        return await runner._run_cancellable_response(
             target=target,
             response_function=response_function,
             thinking_message="Thinking...",
@@ -3091,7 +3091,7 @@ async def test_run_cancellable_response_marks_thinking_placeholder_pending(
     async def response_function(message_id: str | None) -> None:
         assert message_id == "$thinking"
 
-    await bot._response_runner.run_cancellable_response(
+    await bot._response_runner._run_cancellable_response(
         target=MessageTarget.resolve("!room:localhost", None, "$reply"),
         response_function=response_function,
         thinking_message="Thinking...",
@@ -3118,18 +3118,18 @@ async def test_shutdown_during_active_drain_cancels_reload(
     orchestrator.agent_bots["agent1"] = mock_bot
     # An admitted response that never finishes, so the drain never goes idle.
     assert orchestrator.config_reload.response_admission_gate.admit()
-    orchestrator.config_reload.update_config = AsyncMock(return_value=True)
+    orchestrator.config_reload._update_config = AsyncMock(return_value=True)
     orchestrator.config_reload.request_reload()
     task = orchestrator.config_reload._reload_task
     assert task is not None
 
     # Let the drain loop start polling
     await asyncio.sleep(0.05)
-    orchestrator.config_reload.update_config.assert_not_awaited()
+    orchestrator.config_reload._update_config.assert_not_awaited()
 
     # Shutdown
     await orchestrator.stop()
 
     # The reload task should have been cancelled
     assert task.done()
-    orchestrator.config_reload.update_config.assert_not_awaited()
+    orchestrator.config_reload._update_config.assert_not_awaited()

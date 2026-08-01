@@ -60,7 +60,7 @@ class InteractiveMetadata:
     options_list: tuple[dict[str, str], ...]
 
     @classmethod
-    def from_parts(
+    def _from_parts(
         cls,
         option_map: dict[str, str] | None,
         options_list: Sequence[dict[str, str]] | None,
@@ -769,7 +769,7 @@ def parse_and_format_interactive(response_text: str, extract_mapping: bool = Fal
 
     return _InteractiveResponse(
         final_text,
-        InteractiveMetadata.from_parts(
+        InteractiveMetadata._from_parts(
             option_map,
             options if extract_mapping else None,
             question_text=question,

@@ -171,11 +171,11 @@ class TestAgentResponseLogic:
             ),
         )
 
-        responder_pool = policy.filter_materializable_responders(
+        responder_pool = policy._filter_materializable_responders(
             [team_id],
             _ResponderAvailability(materializable_agent_names={"alpha", "beta"}, live_entity_names=None),
         )
-        action = policy.team_response_action(
+        action = policy._team_response_action(
             TeamResolution(
                 intent=TeamIntent.EXPLICIT_MEMBERS,
                 requested_members=[team_id],
@@ -234,8 +234,8 @@ class TestAgentResponseLogic:
             reason="Team request includes unsupported members.",
         )
         responder_pool = [ids["private_worker"], ids["shared"]]
-        owner = policy.response_owner_for_team_resolution(team_resolution, responder_pool)
-        action = policy.team_response_action(team_resolution, responder_pool)
+        owner = policy._response_owner_for_team_resolution(team_resolution, responder_pool)
+        action = policy._team_response_action(team_resolution, responder_pool)
 
         assert owner == ids["shared"]
         assert action is not None
@@ -290,11 +290,11 @@ class TestAgentResponseLogic:
             outcome=TeamOutcome.TEAM,
             mode=TeamMode.COORDINATE,
         )
-        owner = policy.response_owner_for_team_resolution(
+        owner = policy._response_owner_for_team_resolution(
             team_resolution,
             responder_pool=[ids["private_one"], ids["ops"], ids["shared"]],
         )
-        action = policy.team_response_action(
+        action = policy._team_response_action(
             team_resolution,
             responder_pool=[ids["private_one"], ids["ops"], ids["shared"]],
         )
@@ -358,7 +358,7 @@ class TestAgentResponseLogic:
             "mindroom.turn_policy.responder_candidate_entities_for_room",
             new=AsyncMock(return_value=[candidate_ids["calculator"], candidate_ids["general"]]),
         ):
-            multiple_visible_action = await policy.resolve_response_action(
+            multiple_visible_action = await policy._resolve_response_action(
                 dispatch,
                 room,
                 False,
@@ -371,7 +371,7 @@ class TestAgentResponseLogic:
             "mindroom.turn_policy.responder_candidate_entities_for_room",
             new=AsyncMock(return_value=[candidate_ids["calculator"]]),
         ):
-            single_visible_action = await policy.resolve_response_action(
+            single_visible_action = await policy._resolve_response_action(
                 dispatch,
                 room,
                 False,
@@ -441,7 +441,7 @@ class TestAgentResponseLogic:
                 new=MagicMock(return_value=TeamResolution.none()),
             ),
         ):
-            action = await policy.resolve_response_action(
+            action = await policy._resolve_response_action(
                 dispatch,
                 room,
                 False,
@@ -518,7 +518,7 @@ class TestAgentResponseLogic:
             "mindroom.turn_policy.responder_candidate_entities_for_room",
             new=AsyncMock(return_value=[candidate_ids["calculator"], candidate_ids["general"]]),
         ):
-            action = await policy.resolve_response_action(
+            action = await policy._resolve_response_action(
                 dispatch,
                 room,
                 False,
@@ -602,7 +602,7 @@ class TestAgentResponseLogic:
                 new=MagicMock(return_value=TeamResolution.none()),
             ),
         ):
-            action = await policy.resolve_response_action(
+            action = await policy._resolve_response_action(
                 dispatch,
                 room,
                 False,

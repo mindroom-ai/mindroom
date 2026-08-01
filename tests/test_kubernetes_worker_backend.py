@@ -3859,7 +3859,7 @@ def test_kubernetes_backend_adds_agent_vault_mint_init_container(tmp_path: Path)
     assert {"agent-vault-token", "agent-vault-bootstrap", "agent-vault-ca"} <= volume_names
 
     # No bridge/NetworkPolicy resources exist in this model.
-    assert backend._resources.agent_vault_vault_name(worker_key) == expected_vault
+    assert backend._resources._agent_vault_vault_name(worker_key) == expected_vault
 
 
 def test_agent_vault_main_env_error_names_worker_key_when_vault_name_missing(tmp_path: Path) -> None:
@@ -3877,7 +3877,7 @@ def test_agent_vault_main_env_error_names_worker_key_when_vault_name_missing(tmp
     def _missing_vault_name(_self: object, requested_worker_key: str) -> None:
         assert requested_worker_key == worker_key
 
-    backend._resources.agent_vault_vault_name = MethodType(_missing_vault_name, backend._resources)
+    backend._resources._agent_vault_vault_name = MethodType(_missing_vault_name, backend._resources)
 
     with pytest.raises(WorkerBackendError) as exc_info:
         backend._resources._agent_vault_main_env(worker_key=worker_key)
@@ -3901,7 +3901,7 @@ def test_kubernetes_backend_omits_agent_vault_when_disabled(tmp_path: Path) -> N
     assert all(v["name"] != "agent-vault-token" for v in template_spec["volumes"])
     main_env = {e["name"] for e in template_spec["containers"][0]["env"]}
     assert "MINDROOM_WORKER_EGRESS_PROXY_URL" not in main_env
-    assert backend._resources.agent_vault_vault_name(_TEST_SCOPED_WORKER_KEY_A) is None
+    assert backend._resources._agent_vault_vault_name(_TEST_SCOPED_WORKER_KEY_A) is None
 
 
 def test_agent_vault_config_from_env_defaults_and_requirements() -> None:

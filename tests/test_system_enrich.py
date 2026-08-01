@@ -631,7 +631,7 @@ async def test_process_and_respond_threads_system_enrichment_items(tmp_path: Pat
             ai_response=AsyncMock(side_effect=fake_ai_response),
         ),
     ):
-        generation = await bot._response_runner.process_and_respond(
+        generation = await bot._response_runner._process_and_respond(
             ResponseRequest(
                 thread_history=[],
                 prompt="Please reply",
@@ -683,7 +683,7 @@ async def test_process_and_respond_streaming_threads_system_enrichment_items(tmp
             stream_agent_response=fake_stream_agent_response,
         ),
     ):
-        generation = await bot._response_runner.process_and_respond_streaming(
+        generation = await bot._response_runner._process_and_respond_streaming(
             ResponseRequest(
                 thread_history=[],
                 prompt="Please reply",

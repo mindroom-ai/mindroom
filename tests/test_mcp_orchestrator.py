@@ -274,11 +274,11 @@ async def test_external_trigger_readiness_is_per_trigger_room(tmp_path: Path) ->
         return ["!campground:example.org"]
 
     with patch("mindroom.orchestration.external_trigger_runtime.get_joined_rooms", side_effect=get_joined_room_ids):
-        assert await orchestrator._external_trigger_runtime.is_ready(
+        assert await orchestrator._external_trigger_runtime._is_ready(
             _trigger_snapshot(trigger_id="campground", room_id="!campground:example.org"),
             orchestrator.agent_bots,
         )
-        assert not await orchestrator._external_trigger_runtime.is_ready(
+        assert not await orchestrator._external_trigger_runtime._is_ready(
             _trigger_snapshot(trigger_id="campground_other", room_id="!other:example.org"),
             orchestrator.agent_bots,
         )
@@ -308,7 +308,7 @@ async def test_external_trigger_readiness_uses_matrix_joined_rooms(tmp_path: Pat
         }[client]
 
     with patch("mindroom.orchestration.external_trigger_runtime.get_joined_rooms", side_effect=get_joined_room_ids):
-        assert await orchestrator._external_trigger_runtime.is_ready(
+        assert await orchestrator._external_trigger_runtime._is_ready(
             _trigger_snapshot(),
             orchestrator.agent_bots,
         )
@@ -1411,6 +1411,6 @@ async def test_update_config_stops_mcp_entities_before_syncing_manager(tmp_path:
         patch.object(orchestrator, "_emit_config_reloaded", new=AsyncMock()),
         patch.object(orchestrator._external_trigger_runtime, "bind_if_ready"),
     ):
-        await orchestrator.config_reload.update_config()
+        await orchestrator.config_reload._update_config()
 
     assert call_order[:2] == ["stop", "sync"]

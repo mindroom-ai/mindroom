@@ -2518,7 +2518,7 @@ class TestMultiAgentOrchestrator:
             patch.object(orchestrator._external_trigger_runtime, "sync_api_config_snapshot", new=AsyncMock()),
             patch.object(orchestrator, "_sync_runtime_support_services", new=AsyncMock()) as mock_sync_runtime,
         ):
-            updated = await orchestrator.config_reload.update_config()
+            updated = await orchestrator.config_reload._update_config()
 
         assert updated is False
         mock_sync_runtime.assert_awaited_once_with(
@@ -2649,7 +2649,7 @@ class TestMultiAgentOrchestrator:
                 patch.object(orchestrator, "_emit_config_reloaded", new=AsyncMock()),
                 patch.object(orchestrator, "_sync_memory_auto_flush_worker", new=AsyncMock()),
             ):
-                updated = await orchestrator.config_reload.update_config()
+                updated = await orchestrator.config_reload._update_config()
 
             assert updated is True
             assert task.done() is False
@@ -2862,7 +2862,7 @@ class TestMultiAgentOrchestrator:
             patch.object(orchestrator._external_trigger_runtime, "sync_api_config_snapshot", new=AsyncMock()),
             patch.object(orchestrator, "_sync_runtime_support_services", new=AsyncMock()),
         ):
-            updated = await orchestrator.config_reload.update_config()
+            updated = await orchestrator.config_reload._update_config()
 
         assert updated is False
         mock_load_config.assert_called_once()
@@ -2910,7 +2910,7 @@ class TestMultiAgentOrchestrator:
             ),
             pytest.raises(RuntimeError, match="boom"),
         ):
-            await orchestrator.config_reload.update_config()
+            await orchestrator.config_reload._update_config()
 
         assert orchestrator.config is current_config
         assert orchestrator.hook_registry is old_hook_registry
@@ -2970,7 +2970,7 @@ class TestMultiAgentOrchestrator:
             patch("mindroom.orchestrator.clear_worker_validation_snapshot_cache") as mock_clear_snapshot_cache,
             pytest.raises(RuntimeError, match="broken plugin"),
         ):
-            await orchestrator.config_reload.update_config()
+            await orchestrator.config_reload._update_config()
 
         stop_entities_before_mcp_sync.assert_not_awaited()
         assert bot.running is True
@@ -3070,7 +3070,7 @@ class TestMultiAgentOrchestrator:
                 ),
                 pytest.raises(RuntimeError, match="stop failed"),
             ):
-                await orchestrator.config_reload.update_config()
+                await orchestrator.config_reload._update_config()
 
             assert orchestrator.config is current_config
             assert orchestrator.hook_registry is old_hook_registry
@@ -3152,7 +3152,7 @@ class TestMultiAgentOrchestrator:
                 patch.object(orchestrator, "_sync_runtime_support_services", new=AsyncMock()),
                 patch.object(orchestrator, "_emit_config_reloaded", new=AsyncMock()),
             ):
-                updated = await orchestrator.config_reload.update_config()
+                updated = await orchestrator.config_reload._update_config()
 
             assert updated is False
             loaded_hooks_module = plugin_module._MODULE_IMPORT_CACHE[hooks_path.resolve()].module
@@ -3222,7 +3222,7 @@ class TestMultiAgentOrchestrator:
             patch.object(orchestrator, "_sync_memory_auto_flush_worker", new=AsyncMock()),
         ):
             try:
-                updated = await orchestrator.config_reload.update_config()
+                updated = await orchestrator.config_reload._update_config()
                 assert updated is False
                 assert router_bot.event_cache.principal_id == "@mindroom_router:localhost"
                 assert general_bot.event_cache.principal_id == "@mindroom_general:localhost"
@@ -3293,7 +3293,7 @@ class TestMultiAgentOrchestrator:
             patch.object(orchestrator, "_sync_memory_auto_flush_worker", new=AsyncMock()),
         ):
             try:
-                updated = await orchestrator.config_reload.update_config()
+                updated = await orchestrator.config_reload._update_config()
                 assert updated is False
                 assert orchestrator._runtime_support.event_cache is old_cache
                 assert old_cache.db_path == old_config.cache.resolve_db_path(orchestrator.runtime_paths)
@@ -3400,7 +3400,7 @@ class TestMultiAgentOrchestrator:
             patch.object(orchestrator, "_ensure_room_invitations", new=AsyncMock()),
         ):
             try:
-                updated = await orchestrator.config_reload.update_config()
+                updated = await orchestrator.config_reload._update_config()
             finally:
                 await orchestrator._close_runtime_support_services()
 
@@ -3496,7 +3496,7 @@ class TestMultiAgentOrchestrator:
             patch.object(orchestrator, "_ensure_room_invitations", new=AsyncMock()),
         ):
             try:
-                updated = await orchestrator.config_reload.update_config()
+                updated = await orchestrator.config_reload._update_config()
             finally:
                 await orchestrator._close_runtime_support_services()
 

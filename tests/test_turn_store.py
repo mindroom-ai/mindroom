@@ -1256,9 +1256,9 @@ def test_turn_record_codecs_preserve_explicit_unknown_source_ownership() -> None
         requester_id="@stale:example.org",
     )
 
-    ledger_recovered = TurnRecordCodec.from_ledger_record(
+    ledger_recovered = TurnRecordCodec._from_ledger_record(
         event_id,
-        TurnRecordCodec.to_ledger_record(turn_record),
+        TurnRecordCodec._to_ledger_record(turn_record),
     )
     run_metadata = TurnRecordCodec.to_run_metadata(turn_record)
     run_metadata[constants.MATRIX_EVENT_ID_METADATA_KEY] = event_id
@@ -1554,7 +1554,7 @@ def test_routed_alias_redaction_marks_owning_relay_under_lock(tmp_path: Path) ->
 
     assert marked is not None
     assert marked.source_event_prompts == {"$anchor": "keep"}
-    assert store.any_source_redacted(("$relay",)) is True
+    assert store._any_source_redacted(("$relay",)) is True
 
 
 def test_same_second_delivered_run_repairs_fractional_ledger_timestamp(tmp_path: Path) -> None:

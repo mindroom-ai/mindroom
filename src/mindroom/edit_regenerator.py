@@ -80,7 +80,7 @@ class EditRegenerator:
             raise RuntimeError(msg)
         return client
 
-    async def edit_regeneration_context(
+    async def _edit_regeneration_context(
         self,
         context: MessageContext,
         room: nio.MatrixRoom,
@@ -153,7 +153,7 @@ class EditRegenerator:
             return
         if turn_record.requester_id_for_source(original_event_id) != requester_user_id:
             return
-        context = await self.edit_regeneration_context(
+        context = await self._edit_regeneration_context(
             context,
             room,
             conversation_target=turn_record.conversation_target,

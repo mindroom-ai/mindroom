@@ -513,7 +513,7 @@ router:
         tmp_path,
         config_text=config_text,
     )
-    projection = backend._projection_manager.projected_config(
+    projection = backend._projection_manager._projected_config(
         local_worker_state_paths_for_root(tmp_path / "workers" / "mapped-plugin"),
         materialize=True,
     )
@@ -545,7 +545,7 @@ def test_docker_worker_projection_resolves_config_includes(
         tmp_path,
         config_text=config_text,
     )
-    projection = backend._projection_manager.projected_config(
+    projection = backend._projection_manager._projected_config(
         local_worker_state_paths_for_root(tmp_path / "workers" / "split-config"),
         materialize=True,
     )
@@ -812,7 +812,7 @@ def test_docker_backend_from_runtime_reanchors_host_config_projection_and_runtim
         storage_path=tmp_path / "storage",
         runtime_paths=runtime_paths,
     )
-    projection = backend._projection_manager.projected_config(
+    projection = backend._projection_manager._projected_config(
         local_worker_state_paths_for_root(tmp_path / "workers" / "projection-test"),
         materialize=False,
     )
@@ -1114,7 +1114,7 @@ def _projection_signature_for_hash_seed(hash_seed: str, workspace_root: Path) ->
             runtime_paths=runtime_paths,
         )
         paths = local_worker_state_paths_for_root(tmp_path / "workers" / "worker-a")
-        projection = manager.projected_config(
+        projection = manager._projected_config(
             paths,
             worker_key="v1:default:shared:alpha",
             materialize=False,
@@ -2194,7 +2194,7 @@ def test_docker_projected_context_files_load_in_worker_runtime(tmp_path: Path) -
         runtime_paths=runtime_paths,
     )
     worker_paths = local_worker_state_paths_for_root(worker_root_path(tmp_path, _TEST_UNSCOPED_WORKER_KEY))
-    projection = manager.projected_config(worker_paths, worker_key=_TEST_UNSCOPED_WORKER_KEY, materialize=True)
+    projection = manager._projected_config(worker_paths, worker_key=_TEST_UNSCOPED_WORKER_KEY, materialize=True)
     projected_config = yaml.safe_load(projection.projected_yaml)
     projected_context_file = projected_config["agents"]["code"]["context_files"][0]
     worker_runtime = build_dedicated_worker_runtime_paths(
@@ -2293,7 +2293,7 @@ router:
     else:
         worker_key = resolve_unscoped_worker_key("My Agent")
 
-    projection = manager.projected_config(worker_paths, worker_key=worker_key, materialize=False)
+    projection = manager._projected_config(worker_paths, worker_key=worker_key, materialize=False)
     projected_config = yaml.safe_load(projection.projected_yaml)
 
     assert list(projected_config["agents"]) == ["My Agent"]
@@ -3418,14 +3418,14 @@ router:
         projected_configs_root=tmp_path / "projections",
         runtime_paths=runtime_paths,
     )
-    first_projection = first_manager.projected_config(paths, materialize=True)
+    first_projection = first_manager._projected_config(paths, materialize=True)
 
     renamed_manager = DockerProjectionManager(
         config=replace(base_config, config_path="/app/config-host/alt.yaml"),
         projected_configs_root=tmp_path / "projections",
         runtime_paths=runtime_paths,
     )
-    renamed_projection = renamed_manager.projected_config(paths, materialize=True)
+    renamed_projection = renamed_manager._projected_config(paths, materialize=True)
 
     assert renamed_projection.root != first_projection.root
     assert not first_projection.root.exists()
@@ -3479,13 +3479,13 @@ router:
         runtime_paths=runtime_paths,
     )
 
-    first_projection = manager.projected_config(paths, materialize=True)
+    first_projection = manager._projected_config(paths, materialize=True)
     first_projected_file = first_projection.root / ".mindroom-worker-assets" / "plugins" / "00-demo" / "helper.sh"
     assert first_projected_file.stat().st_mode & 0o777 == 0o644
 
     plugin_file.chmod(0o755)
 
-    second_projection = manager.projected_config(paths, materialize=True)
+    second_projection = manager._projected_config(paths, materialize=True)
     second_projected_file = second_projection.root / ".mindroom-worker-assets" / "plugins" / "00-demo" / "helper.sh"
 
     assert second_projection.root != first_projection.root
@@ -3538,13 +3538,13 @@ router:
         runtime_paths=runtime_paths,
     )
 
-    first_projection = manager.projected_config(paths, materialize=True)
+    first_projection = manager._projected_config(paths, materialize=True)
     first_projected_dir = first_projection.root / ".mindroom-worker-assets" / "plugins" / "00-demo"
     assert first_projected_dir.stat().st_mode & 0o777 == 0o755
 
     plugin_dir.chmod(0o700)
 
-    second_projection = manager.projected_config(paths, materialize=True)
+    second_projection = manager._projected_config(paths, materialize=True)
     second_projected_dir = second_projection.root / ".mindroom-worker-assets" / "plugins" / "00-demo"
 
     assert second_projection.root != first_projection.root

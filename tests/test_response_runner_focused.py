@@ -284,10 +284,10 @@ async def test_concurrent_requests_serialize_and_refresh_history_under_lock(tmp_
         ),
         patch.object(
             coordinator,
-            "run_cancellable_response",
+            "_run_cancellable_response",
             new=AsyncMock(side_effect=fake_run_cancellable_response),
         ),
-        patch.object(coordinator, "process_and_respond", new=AsyncMock(side_effect=fake_process_and_respond)),
+        patch.object(coordinator, "_process_and_respond", new=AsyncMock(side_effect=fake_process_and_respond)),
         patch_response_runner_module(
             should_use_streaming=AsyncMock(return_value=False),
             apply_post_response_effects=AsyncMock(),
@@ -846,7 +846,7 @@ async def test_non_streaming_response_delivers_through_deliver_final(tmp_path: P
             typing_indicator=_noop_typing,
         ),
     ):
-        generation = await coordinator.process_and_respond(_plain_request(_target()))
+        generation = await coordinator._process_and_respond(_plain_request(_target()))
 
     assert generation.delivery.event_id == "$response"
     deliver_final.assert_awaited_once()
@@ -878,7 +878,7 @@ async def test_non_streaming_invisible_delivery_does_not_mark_substantive_reply(
             typing_indicator=_noop_typing,
         ),
     ):
-        generation = await coordinator.process_and_respond(request)
+        generation = await coordinator._process_and_respond(request)
 
     assert generation.delivery is delivery
     assert timing.metadata["first_visible_kind"] == "placeholder"
@@ -913,7 +913,7 @@ async def test_non_streaming_failed_edit_preserving_old_body_does_not_mark_subst
             typing_indicator=_noop_typing,
         ),
     ):
-        generation = await coordinator.process_and_respond(request)
+        generation = await coordinator._process_and_respond(request)
 
     assert generation.delivery is delivery
     assert "first_substantive_reply" not in timing.marks
@@ -945,7 +945,7 @@ async def test_streaming_response_streams_then_finalizes_through_gateway(tmp_pat
             typing_indicator=_noop_typing,
         ),
     ):
-        generation = await coordinator.process_and_respond_streaming(_plain_request(_target()))
+        generation = await coordinator._process_and_respond_streaming(_plain_request(_target()))
 
     assert generation.delivery.event_id == "$stream"
     deliver_stream.assert_awaited_once()
@@ -987,7 +987,7 @@ async def test_streaming_placeholder_only_delivery_does_not_mark_substantive_rep
             typing_indicator=_noop_typing,
         ),
     ):
-        generation = await coordinator.process_and_respond_streaming(request)
+        generation = await coordinator._process_and_respond_streaming(request)
 
     assert generation.delivery is delivery
     assert timing.metadata["first_visible_kind"] == "placeholder"
@@ -1044,7 +1044,7 @@ async def test_streaming_midstream_failure_persists_partial_and_finalizes_error(
             _plain_request(_target()),
             model_prompt="hello\n\n<mindroom_message_context>persist me</mindroom_message_context>",
         )
-        generation = await coordinator.process_and_respond_streaming(request)
+        generation = await coordinator._process_and_respond_streaming(request)
 
     # The failure does not propagate: it is logged and becomes a finalized error outcome.
     assert generation.delivery is error_outcome
@@ -1120,7 +1120,7 @@ async def test_streaming_midstream_failure_persists_partial_off_event_loop(
             typing_indicator=_noop_typing,
         ),
     ):
-        await coordinator.process_and_respond_streaming(_plain_request(_target()))
+        await coordinator._process_and_respond_streaming(_plain_request(_target()))
 
 
 @pytest.mark.asyncio
@@ -1146,12 +1146,12 @@ async def test_agent_streaming_sync_restart_cancelled_outcome_registers_retry(tm
     with (
         patch.object(
             coordinator,
-            "run_cancellable_response",
+            "_run_cancellable_response",
             new=AsyncMock(side_effect=fake_run_cancellable_response),
         ),
         patch.object(
             coordinator,
-            "process_and_respond_streaming",
+            "_process_and_respond_streaming",
             new=AsyncMock(return_value=_ResponseGenerationOutcome(delivery=cancelled_outcome, run_succeeded=False)),
         ),
         patch_response_runner_module(
@@ -1416,7 +1416,7 @@ async def test_terminal_settlement_finalizes_and_runs_post_effects_once(
     with (
         patch.object(
             coordinator,
-            "run_cancellable_response",
+            "_run_cancellable_response",
             new=AsyncMock(side_effect=run_cancellable_response),
         ),
         patch.object(lifecycle, "finalize", new=finalize),
@@ -1474,7 +1474,7 @@ async def test_terminal_settlement_registers_retry_before_rethrowing_cancel(tmp_
     with (
         patch.object(
             coordinator,
-            "run_cancellable_response",
+            "_run_cancellable_response",
             new=AsyncMock(side_effect=asyncio.CancelledError("sync_restart")),
         ),
         patch.object(lifecycle, "finalize", new=finalize),
@@ -1530,7 +1530,7 @@ async def test_uncommitted_interruption_rethrows_cancel_without_marking_source_h
     with (
         patch.object(
             coordinator,
-            "run_cancellable_response",
+            "_run_cancellable_response",
             new=AsyncMock(side_effect=asyncio.CancelledError("sync_restart")),
         ),
         patch_response_runner_module(apply_post_response_effects=post_effects),
@@ -1580,7 +1580,7 @@ async def test_cancel_cleanup_error_does_not_mark_source_handled(tmp_path: Path)
     with (
         patch.object(
             coordinator,
-            "run_cancellable_response",
+            "_run_cancellable_response",
             new=AsyncMock(return_value="$placeholder"),
         ),
         patch_response_runner_module(apply_post_response_effects=AsyncMock()),
@@ -1659,7 +1659,7 @@ async def test_terminal_send_cancellation_preserves_source_replay(
     with (
         patch.object(
             coordinator,
-            "run_cancellable_response",
+            "_run_cancellable_response",
             new=AsyncMock(return_value="$response"),
         ),
         patch_response_runner_module(apply_post_response_effects=AsyncMock()),
@@ -1724,7 +1724,7 @@ async def test_unrecoverable_interruption_remains_unhandled_without_outer_cancel
     with (
         patch.object(
             coordinator,
-            "run_cancellable_response",
+            "_run_cancellable_response",
             new=AsyncMock(return_value="$response"),
         ),
         patch_response_runner_module(apply_post_response_effects=AsyncMock()),
@@ -1787,7 +1787,7 @@ async def test_terminal_interruption_registers_recovery_unless_user_stopped(
     with (
         patch.object(
             coordinator,
-            "run_cancellable_response",
+            "_run_cancellable_response",
             new=AsyncMock(return_value="$response"),
         ),
         patch_response_runner_module(apply_post_response_effects=AsyncMock()),
@@ -1849,7 +1849,7 @@ async def test_terminal_settlement_late_cancel_keeps_settled_outcome_canonical(
     with (
         patch.object(
             coordinator,
-            "run_cancellable_response",
+            "_run_cancellable_response",
             new=AsyncMock(side_effect=asyncio.CancelledError("sync_restart")),
         ),
         patch.object(lifecycle, "finalize", new=finalize),
@@ -1893,7 +1893,7 @@ async def test_terminal_settlement_rethrows_generation_error_after_post_effects(
     with (
         patch.object(
             coordinator,
-            "run_cancellable_response",
+            "_run_cancellable_response",
             new=AsyncMock(side_effect=RuntimeError("generation failed")),
         ),
         patch.object(lifecycle, "finalize", new=finalize),

@@ -1563,7 +1563,7 @@ async def test_active_follow_up_owner_includes_later_media_payload(tmp_path: Pat
             patch.object(bot._turn_controller, "_has_newer_unresponded_in_thread", return_value=False),
             patch.object(ResponsePayloadPreparer, "_log_dispatch_latency"),
             patch(
-                "mindroom.response_runner.ResponseRunner.generate_response_locked",
+                "mindroom.response_runner.ResponseRunner._generate_response_locked",
                 new=fake_generate_response_locked,
             ),
         ):

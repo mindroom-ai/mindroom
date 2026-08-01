@@ -133,7 +133,7 @@ class TestDynamicConfigUpdate:
                 mock_create_bot.return_value = new_bot_mock
 
                 # Call update_config
-                updated = await orchestrator.config_reload.update_config()
+                updated = await orchestrator.config_reload._update_config()
 
                 # Verify the update happened
                 assert updated is True
@@ -203,7 +203,7 @@ class TestDynamicConfigUpdate:
             patch.object(orchestrator, "_sync_runtime_support_services", new=AsyncMock()),
             patch.object(orchestrator, "_emit_config_reloaded", new=AsyncMock()),
         ):
-            updated = await orchestrator.config_reload.update_config()
+            updated = await orchestrator.config_reload._update_config()
 
         assert updated is True
         assert mock_restart.await_args.args[0].entities_to_restart == {"general", ROUTER_AGENT_NAME}
@@ -330,7 +330,7 @@ class TestDynamicConfigUpdate:
             patch("mindroom.orchestration.config_lifecycle.load_config", return_value=updated_config),
             patch("mindroom.orchestration.config_updates._identify_entities_to_restart", return_value=set()),
         ):
-            updated = await orchestrator.config_reload.update_config()
+            updated = await orchestrator.config_reload._update_config()
 
         # No entities restarted, but existing bots still receive new defaults.
         assert updated is False
@@ -388,7 +388,7 @@ class TestDynamicConfigUpdate:
             patch("mindroom.orchestration.config_lifecycle.load_config", return_value=updated_config),
             patch("mindroom.orchestration.config_updates._identify_entities_to_restart", return_value=set()),
         ):
-            updated = await orchestrator.config_reload.update_config()
+            updated = await orchestrator.config_reload._update_config()
 
         assert updated is False
         assert mock_bot.config == updated_config
@@ -445,7 +445,7 @@ class TestDynamicConfigUpdate:
             patch("mindroom.orchestration.config_updates._identify_entities_to_restart", return_value=set()),
             patch.object(orchestrator, "_setup_rooms_and_memberships", new=AsyncMock()) as mock_setup,
         ):
-            updated = await orchestrator.config_reload.update_config()
+            updated = await orchestrator.config_reload._update_config()
 
         assert updated is True
         assert general_bot.config == updated_config
@@ -496,7 +496,7 @@ class TestDynamicConfigUpdate:
             patch("mindroom.orchestration.config_updates._identify_entities_to_restart", return_value=set()),
             patch.object(orchestrator, "_setup_rooms_and_memberships", new=AsyncMock()) as mock_setup,
         ):
-            updated = await orchestrator.config_reload.update_config()
+            updated = await orchestrator.config_reload._update_config()
 
         assert updated is True
         assert general_bot.config == updated_config
@@ -549,7 +549,7 @@ class TestDynamicConfigUpdate:
             patch.object(orchestrator, "_ensure_user_account", new=AsyncMock()) as mock_ensure_user,
             patch.object(orchestrator, "_setup_rooms_and_memberships", new=AsyncMock()) as mock_setup,
         ):
-            updated = await orchestrator.config_reload.update_config()
+            updated = await orchestrator.config_reload._update_config()
 
         assert updated is True
         assert orchestrator.config == updated_config
@@ -607,7 +607,7 @@ class TestDynamicConfigUpdate:
             patch.object(orchestrator, "_setup_rooms_and_memberships", new=AsyncMock()) as mock_setup,
             pytest.raises(PermanentMatrixStartupError, match="cannot be changed"),
         ):
-            await orchestrator.config_reload.update_config()
+            await orchestrator.config_reload._update_config()
 
         assert orchestrator.config == initial_config
         assert mock_bot.config == initial_config

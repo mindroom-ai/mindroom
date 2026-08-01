@@ -535,7 +535,7 @@ class ResponseLifecycle:
                 response_event_id=response_event_id,
                 error=error,
             )
-        await self.apply_effects_safely(
+        await self._apply_effects_safely(
             final_delivery_outcome=final_delivery_outcome,
             post_response_outcome=lambda: build_post_response_outcome(final_delivery_outcome),
             post_response_deps=post_response_deps,
@@ -544,7 +544,7 @@ class ResponseLifecycle:
             self.pipeline_timing.emit_summary(self.deps.logger, outcome=_response_outcome_label(final_delivery_outcome))
         return final_delivery_outcome
 
-    async def apply_effects_safely(
+    async def _apply_effects_safely(
         self,
         *,
         final_delivery_outcome: FinalDeliveryOutcome,

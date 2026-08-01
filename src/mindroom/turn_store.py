@@ -311,7 +311,7 @@ class TurnStore:
             wait_for_persist=True,
         )
 
-    def any_source_redacted(self, source_event_ids: tuple[str, ...]) -> bool:
+    def _any_source_redacted(self, source_event_ids: tuple[str, ...]) -> bool:
         """Return whether durable state tombstones any source in one pending response."""
         return any(
             (record := self._ledger.get_turn_record(source_event_id)) is not None
@@ -348,7 +348,7 @@ class TurnStore:
                 redacted_event_id=redacted_event_id,
             )
             self._clear_pending_redaction_cleanup(redacted_event_id)
-        return self.any_source_redacted(source_event_ids)
+        return self._any_source_redacted(source_event_ids)
 
     def response_history_scope(
         self,

@@ -73,7 +73,7 @@ repos:
 
       - id: privata
         name: Enforce module privacy
-        entry: bash -c 'env -u VIRTUAL_ENV uv run privata .'
+        entry: bash -c 'env -u VIRTUAL_ENV uv run privata --methods .'
         language: system
         pass_filenames: false
 

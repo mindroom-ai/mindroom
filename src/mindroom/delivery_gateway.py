@@ -97,7 +97,7 @@ class ResponseHookService:
 
     hook_context: HookContextSupport
 
-    async def apply_before_response(  # noqa: D102
+    async def _apply_before_response(
         self,
         *,
         identity: ResponseIdentity,
@@ -120,7 +120,7 @@ class ResponseHookService:
         )
         return await emit_transform(self.hook_context.registry, EVENT_MESSAGE_BEFORE_RESPONSE, context)
 
-    async def apply_final_response_transform(  # noqa: D102
+    async def _apply_final_response_transform(
         self,
         *,
         identity: ResponseIdentity,
@@ -257,7 +257,7 @@ class MatrixCompactionLifecycle:
 
     async def start(self, event: CompactionLifecycleStart) -> str | None:
         """Send the initial visible lifecycle notice."""
-        return await self.delivery_gateway.send_compaction_lifecycle_start(
+        return await self.delivery_gateway._send_compaction_lifecycle_start(
             target=self.target,
             reply_to_event_id=self.reply_to_event_id,
             event=event,
@@ -265,21 +265,21 @@ class MatrixCompactionLifecycle:
 
     async def progress(self, event: CompactionLifecycleProgress) -> None:
         """Edit the lifecycle notice after persisted compaction progress."""
-        await self.delivery_gateway.edit_compaction_lifecycle_progress(
+        await self.delivery_gateway._edit_compaction_lifecycle_progress(
             target=self.target,
             event=event,
         )
 
     async def complete_success(self, outcome: CompactionOutcome) -> None:
         """Edit the lifecycle notice after successful compaction."""
-        await self.delivery_gateway.edit_compaction_lifecycle_success(
+        await self.delivery_gateway._edit_compaction_lifecycle_success(
             target=self.target,
             outcome=outcome,
         )
 
     async def complete_failure(self, event: CompactionLifecycleFailure) -> None:
         """Edit the lifecycle notice after failed compaction."""
-        await self.delivery_gateway.edit_compaction_lifecycle_failure(
+        await self.delivery_gateway._edit_compaction_lifecycle_failure(
             target=self.target,
             event=event,
         )
@@ -586,7 +586,7 @@ class DeliveryGateway:
     ) -> FinalDeliveryOutcome:
         """Apply before_response hooks and perform the final send or edit."""
         try:
-            draft = await self.deps.response_hooks.apply_before_response(
+            draft = await self.deps.response_hooks._apply_before_response(
                 identity=request.identity,
                 response_text=request.response_text,
                 tool_trace=request.tool_trace,
@@ -837,7 +837,7 @@ class DeliveryGateway:
             extra_content=extra_content,
         )
 
-    async def send_compaction_lifecycle_start(
+    async def _send_compaction_lifecycle_start(
         self,
         *,
         target: MessageTarget,
@@ -882,7 +882,7 @@ class DeliveryGateway:
         self.deps.logger.error("Failed to send compaction lifecycle notice", **target.log_context)
         return None
 
-    async def edit_compaction_lifecycle_progress(
+    async def _edit_compaction_lifecycle_progress(
         self,
         *,
         target: MessageTarget,
@@ -898,7 +898,7 @@ class DeliveryGateway:
             metadata=event.to_notice_metadata(),
         )
 
-    async def edit_compaction_lifecycle_success(
+    async def _edit_compaction_lifecycle_success(
         self,
         *,
         target: MessageTarget,
@@ -914,7 +914,7 @@ class DeliveryGateway:
             metadata=outcome.to_notice_metadata(),
         )
 
-    async def edit_compaction_lifecycle_failure(
+    async def _edit_compaction_lifecycle_failure(
         self,
         *,
         target: MessageTarget,
@@ -1350,7 +1350,7 @@ class DeliveryGateway:
                         tool_trace=tuple(request.tool_trace or ()),
                         extra_content=request.extra_content,
                     )
-                final_transform_draft = await self.deps.response_hooks.apply_final_response_transform(
+                final_transform_draft = await self.deps.response_hooks._apply_final_response_transform(
                     identity=request.identity,
                     response_text=final_body_candidate,
                 )

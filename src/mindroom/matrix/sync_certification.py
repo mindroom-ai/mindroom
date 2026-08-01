@@ -38,7 +38,7 @@ class SyncCacheWriteResult:
     runtime_diagnostics: dict[str, object] | None = None
 
     @property
-    def certified(self) -> bool:
+    def _certified(self) -> bool:
         """Return whether this result proves the sync delta reached durable cache."""
         return self.complete and not self.limited_room_ids and not self.errors
 
@@ -119,7 +119,7 @@ def sync_cache_write_diagnostics(cache_result: SyncCacheWriteResult) -> dict[str
     """Return structured log fields explaining one sync cache-write result."""
     diagnostics: dict[str, Any] = {
         "cache_write_complete": cache_result.complete,
-        "cache_write_certified": cache_result.certified,
+        "cache_write_certified": cache_result._certified,
         "cache_limited_room_count": len(cache_result.limited_room_ids),
         "cache_error_count": len(cache_result.errors),
     }

@@ -400,7 +400,7 @@ async def test_router_updates_rooms_on_config_change(monkeypatch: pytest.MonkeyP
             monkeypatch.setattr(bot, "sync_forever", mock_sync_forever)
 
         # Update config
-        updated = await orchestrator.config_reload.update_config()
+        updated = await orchestrator.config_reload._update_config()
         assert updated  # Should return True since router needs restart
 
         # Router should be recreated with new rooms

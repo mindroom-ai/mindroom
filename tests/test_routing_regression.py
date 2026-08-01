@@ -380,7 +380,7 @@ def test_team_request_responder_filtering_uses_actual_member_ids(tmp_path: Path)
         ),
     )
 
-    filtered = policy.filter_materializable_responders(
+    filtered = policy._filter_materializable_responders(
         [
             ids["worker"],
             ids["idle"],
@@ -1239,7 +1239,7 @@ class TestRoutingRegression:
                 return_value=AgentResponseDecision(True),
             ) as mock_decide_agent_response,
         ):
-            action = await alpha_bot._turn_policy.resolve_response_action(
+            action = await alpha_bot._turn_policy._resolve_response_action(
                 _policy_dispatch(
                     agent_name=alpha_bot.agent_name,
                     room_id=room.room_id,
@@ -1320,7 +1320,7 @@ class TestRoutingRegression:
             has_non_agent_mentions=False,
         )
 
-        action = await bot._turn_policy.resolve_response_action(
+        action = await bot._turn_policy._resolve_response_action(
             _policy_dispatch(
                 agent_name=bot.agent_name,
                 room_id=room.room_id,

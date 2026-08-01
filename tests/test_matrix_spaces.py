@@ -814,7 +814,7 @@ async def test_update_config_matrix_space_change_reconciles_without_room_members
         patch.object(orchestrator, "_sync_event_cache_service", new=AsyncMock()),
         patch.object(orchestrator, "_sync_runtime_support_services", new=AsyncMock()),
     ):
-        updated = await orchestrator.config_reload.update_config()
+        updated = await orchestrator.config_reload._update_config()
 
     assert updated is True
     assert general_bot.config == updated_config
