@@ -6,6 +6,9 @@ import hashlib
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, cast
 
+import yaml
+
+from mindroom.config.yaml_includes import load_yaml_config_source_with_digests, source_files_fingerprint
 from mindroom.constants import runtime_env_values
 from mindroom.runtime_env_policy import (
     CREDENTIALS_ENCRYPTION_KEY_ENV,
@@ -342,6 +345,12 @@ def kubernetes_backend_config_signature(
 ) -> tuple[str, ...]:
     """Return a cache signature for one concrete Kubernetes backend config."""
     config = KubernetesWorkerBackendConfig.from_runtime(runtime_paths)
+    try:
+        _, source_digests = load_yaml_config_source_with_digests(runtime_paths.config_path)
+    except (OSError, yaml.YAMLError, UnicodeError) as exc:
+        msg = f"Failed to read Kubernetes worker config file '{runtime_paths.config_path}': {exc}"
+        raise WorkerBackendError(msg) from exc
+    config_source_fingerprint = source_files_fingerprint(runtime_paths.config_path, source_digests)
     credentials_encryption_key = runtime_paths.env_value(CREDENTIALS_ENCRYPTION_KEY_ENV)
     credentials_encryption_key_marker = credentials_encryption_key_hash(credentials_encryption_key) or ""
     extra_env_json = stable_signature_json(config.extra_env)
@@ -384,6 +393,7 @@ def kubernetes_backend_config_signature(
         credentials_encryption_key_marker,
         auth_token or "",
         str(storage_root.expanduser().resolve()) if storage_root is not None else "",
+        config_source_fingerprint,
     )
 
 
