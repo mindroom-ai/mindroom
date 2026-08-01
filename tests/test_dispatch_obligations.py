@@ -148,6 +148,18 @@ def test_receipt_order_is_durable_across_callback_kinds_and_settlement(tmp_path:
     assert restarted._receipt_order(stop.key) == stop_order
 
 
+def test_only_invites_can_discard_receipt_order_rows(tmp_path: Path) -> None:
+    """Deleting ordered callbacks would allow SQLite to reuse their receipt order."""
+    store = _store(tmp_path)
+    message = _message_obligation("$message")
+    store._create_pending(message)
+
+    with pytest.raises(ValueError, match="Only successful invite obligations"):
+        store._discard_pending(message.key)
+
+    assert store._receipt_order(message.key) > 0
+
+
 @pytest.mark.parametrize("source_kind", [IMAGE_SOURCE_KIND, MEDIA_SOURCE_KIND, VOICE_SOURCE_KIND])
 def test_media_source_kinds_map_to_media_dispatch(source_kind: str) -> None:
     """Coalescing retries must use the callback kind owned by dispatch obligations."""

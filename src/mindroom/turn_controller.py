@@ -1718,8 +1718,8 @@ class TurnController:
             raise RuntimeError(msg)
         return stopped
 
-    def _user_stop_should_cancel(self, response_event_id: str, stop_receipt_order: int) -> bool:
-        current = self.deps.turn_store.turn_record_for_response_event_id(response_event_id)
+    def _user_stop_should_cancel(self, source_event_id: str, stop_receipt_order: int) -> bool:
+        current = self.deps.turn_store.get_turn_record(source_event_id)
         return current is None or (
             (current.latest_edit_receipt_order or 0) <= stop_receipt_order
             and not self._user_stop_is_settled(current, stop_receipt_order)
@@ -1767,13 +1767,14 @@ class TurnController:
         if target is None:
             msg = f"User-stopped response {response_event_id!r} has no durable conversation target"
             raise RuntimeError(msg)
+        source_event_id = turn_record.indexed_event_ids[0]
 
         await self._record_user_stop(response_event_id, stop_receipt_order)
         stopped = await self.deps.response_runner.finalize_user_stop(
             response_event_id,
             target,
             stop_receipt_order,
-            lambda: self._user_stop_should_cancel(response_event_id, stop_receipt_order),
+            lambda: self._user_stop_should_cancel(source_event_id, stop_receipt_order),
             lambda: self._finalize_user_stop_under_lock(
                 response_event_id,
                 stop_receipt_order,

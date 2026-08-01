@@ -97,12 +97,35 @@ visibility = [
 ]
 
 [[modules]]
+path = "mindroom.dispatch_recovery_context"
+depends_on = []
+visibility = [
+    "mindroom.dispatch_obligations",
+    "mindroom.turn_controller",
+    "mindroom.visible_voice_echo",
+]
+
+[[modules]]
 path = "mindroom.dispatch_obligations"
 depends_on = [
     "mindroom.background_tasks",
     "mindroom.dispatch_callback_outcome",
+    "mindroom.dispatch_recovery_context",
     "mindroom.logging_config",
     "mindroom.matrix.media",
+]
+visibility = [
+    "mindroom.bot",
+    "mindroom.reaction_dispatch",
+]
+
+[[modules]]
+path = "mindroom.reaction_dispatch"
+depends_on = [
+    "mindroom.commands.config_confirmation",
+    "mindroom.constants",
+    "mindroom.dispatch_obligations",
+    "mindroom.entity_resolution",
 ]
 visibility = ["mindroom.bot"]
 
@@ -2800,6 +2823,7 @@ depends_on = [
     "mindroom.matrix_rtc.call_manager",
     "mindroom.memory",
     "mindroom.post_response_effects",
+    "mindroom.reaction_dispatch",
     "mindroom.redacted_turn_cleanup",
     "mindroom.response_payload_preparation",
     "mindroom.response_runner",
@@ -3468,6 +3492,7 @@ depends_on = [
     "mindroom.constants",
     "mindroom.delivery_gateway",
     "mindroom.dispatch_callback_outcome",
+    "mindroom.dispatch_recovery_context",
     "mindroom.dispatch_replay_guard",
     "mindroom.dispatch_source",
     "mindroom.dispatch_thread_context",

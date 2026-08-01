@@ -429,6 +429,9 @@ class DispatchObligationStore:
     def _discard_pending(self, key: _DispatchObligationKey) -> None:
         """Remove successful work whose source has no permanent Matrix event ID."""
         self._validate_bound_key(key)
+        if key.callback_kind is not DispatchCallbackKind.INVITE:
+            msg = "Only successful invite obligations may be deleted"
+            raise ValueError(msg)
         with self._lock, self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
             connection.execute(
@@ -518,6 +521,8 @@ class DispatchObligationStore:
         """Return the stable SQLite admission order for one exact callback."""
         self._validate_bound_key(key)
         with self._lock, self._connection() as connection:
+            # SQLite may reuse a deleted maximum rowid, so MESSAGE and REACTION
+            # rows remain permanent and `_discard_pending` enforces INVITE-only deletion.
             row = connection.execute(
                 """
                 SELECT rowid

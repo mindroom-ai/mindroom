@@ -1081,6 +1081,7 @@ async def test_confirmation_reactions_serialize_one_decision(
     apply_change.assert_awaited_once()
     bot._delivery_gateway.send_text.assert_awaited_once()
     assert config_confirmation._get_pending_change(preview_event_id) is None
+    assert not config_confirmation._pending_change_locks
 
 
 @pytest.mark.asyncio
@@ -1202,6 +1203,7 @@ async def test_confirmation_send_failure_keeps_replay_state(
         requester="@admin:example.org",
     )
     monkeypatch.setattr(config_confirmation, "_pending_changes", {event_id: pending_change})
+    monkeypatch.setattr(config_confirmation, "_pending_change_locks", {})
     bot = SimpleNamespace(
         client=SimpleNamespace(user_id="@router:example.org"),
         config=SimpleNamespace(
@@ -1239,6 +1241,7 @@ async def test_confirmation_send_failure_keeps_replay_state(
     ):
         with pytest.raises(RuntimeError, match="Failed to send config confirmation response"):
             await handle_confirmation_reaction(bot, room, event)
+        assert not config_confirmation._pending_change_locks
 
         bot._delivery_gateway.send_text = AsyncMock(return_value="$response")
         await handle_confirmation_reaction(bot, room, event)
@@ -1246,6 +1249,7 @@ async def test_confirmation_send_failure_keeps_replay_state(
     apply_change.assert_awaited_once()
     remove_matrix.assert_awaited_once_with(bot.client, room_id, event_id)
     assert config_confirmation._get_pending_change(event_id) is None
+    assert not config_confirmation._pending_change_locks
 
 
 @pytest.mark.asyncio

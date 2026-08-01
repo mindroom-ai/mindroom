@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
@@ -17,6 +18,8 @@ from mindroom.matrix.client_thread_history import find_response_event_ids_via_ro
 from mindroom.matrix.message_builder import build_reaction_content
 
 if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
+
     from mindroom.bot import AgentBot
 
 logger = get_logger(__name__)
@@ -90,7 +93,34 @@ class _PendingConfigChange:
 
 # Track pending configuration changes by event_id
 _pending_changes: dict[str, _PendingConfigChange] = {}
-_pending_change_locks: dict[str, asyncio.Lock] = {}
+
+
+@dataclass
+class _PendingChangeLock:
+    """One borrowed per-preview serialization lock."""
+
+    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    borrowers: int = 0
+
+
+_pending_change_locks: dict[str, _PendingChangeLock] = {}
+
+
+@asynccontextmanager
+async def _pending_change_lock(event_id: str) -> AsyncIterator[None]:
+    """Serialize one preview while retaining locks only for active borrowers."""
+    entry = _pending_change_locks.get(event_id)
+    if entry is None:
+        entry = _PendingChangeLock()
+        _pending_change_locks[event_id] = entry
+    entry.borrowers += 1
+    try:
+        async with entry.lock:
+            yield
+    finally:
+        entry.borrowers -= 1
+        if entry.borrowers == 0 and _pending_change_locks.get(event_id) is entry:
+            _pending_change_locks.pop(event_id)
 
 
 def _get_pending_change(event_id: str) -> _PendingConfigChange | None:
@@ -395,8 +425,7 @@ async def recover_confirmation_setup(
     preview_event_id: str,
 ) -> bool:
     """Recover a preview whose pending state or completed decision already exists."""
-    lock = _pending_change_locks.setdefault(preview_event_id, asyncio.Lock())
-    async with lock:
+    async with _pending_change_lock(preview_event_id):
         pending_change = await _resolve_pending_change(client, room_id, preview_event_id)
         if pending_change is not None:
             if pending_change.decision_event_id is None:
@@ -417,8 +446,7 @@ async def ensure_pending_change(
     requester: str,
 ) -> None:
     """Persist one preview exactly once before exposing its reaction buttons."""
-    lock = _pending_change_locks.setdefault(event_id, asyncio.Lock())
-    async with lock:
+    async with _pending_change_lock(event_id):
         pending_change = await _resolve_pending_change(client, room_id, event_id)
         if pending_change is not None:
             if pending_change.decision_event_id is None:
@@ -549,8 +577,7 @@ async def handle_confirmation_reaction(
     assert bot.client is not None
     assert bot.client.user_id is not None
     preview_event_id = event.reacts_to
-    lock = _pending_change_locks.setdefault(preview_event_id, asyncio.Lock())
-    async with lock:
+    async with _pending_change_lock(preview_event_id):
         pending_change = await _resolve_pending_change(bot.client, room.room_id, preview_event_id)
         if pending_change is None:
             return

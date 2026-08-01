@@ -1385,20 +1385,16 @@ class TestAgentBot(AgentBotTestBase):
         lifecycle_lock = response_runner._lifecycle_coordinator._response_lifecycle_lock(target)
         await lifecycle_lock.acquire()
         turn_store = unwrap_extracted_collaborator(bot._turn_store)
-        original_lookup = turn_store.turn_record_for_response_event_id
+        original_lookup = turn_store.get_turn_record
         cancellation_check_started = threading.Event()
-        lookup_count = 0
 
-        def tracked_lookup(response_event_id: str) -> TurnRecord | None:
-            nonlocal lookup_count
-            lookup_count += 1
-            if lookup_count == 3:
-                cancellation_check_started.set()
-            return original_lookup(response_event_id)
+        def tracked_lookup(source_event_id: str) -> TurnRecord | None:
+            cancellation_check_started.set()
+            return original_lookup(source_event_id)
 
         room = nio.MatrixRoom("!test:localhost", bot.matrix_id.full_id)
         event = _reaction_event("🛑", "$stale-stop-reaction")
-        with patch.object(turn_store, "turn_record_for_response_event_id", side_effect=tracked_lookup):
+        with patch.object(turn_store, "get_turn_record", side_effect=tracked_lookup) as source_lookup:
             replay_task = asyncio.create_task(
                 bot._dispatch_obligation_runner.dispatch(room, event, DispatchCallbackKind.REACTION),
             )
@@ -1407,6 +1403,7 @@ class TestAgentBot(AgentBotTestBase):
             lifecycle_lock.release()
             await replay_task
 
+        source_lookup.assert_called_with("$source")
         tracked = bot.stop_manager.tracked_messages["$response"]
         assert tracked.task is later_edit_task
         assert tracked.reaction_event_id == "$later-edit-stop-button"
