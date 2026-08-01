@@ -162,6 +162,8 @@ def mock_agent_bot(send_response_mock: AsyncMock) -> AgentBot:
     )
     wrap_extracted_collaborators(bot)
     bot.client = AsyncMock()
+    bot.client.add_event_admission_callback = MagicMock()
+    bot.client.add_event_callback = MagicMock()
     bot.client.user_id = bot.agent_user.user_id
     install_runtime_cache_support(bot)
     sync_bot_runtime_state(bot)
@@ -490,6 +492,7 @@ class TestBotTaskRestoration:
                 patch("mindroom.bot.restore_scheduled_tasks", new_callable=AsyncMock) as mock_restore,
             ):
                 mock_client = AsyncMock()
+                mock_client.add_event_admission_callback = MagicMock()
                 mock_client.add_event_callback = MagicMock()
                 mock_client.add_response_callback = MagicMock()
                 mock_client.user_id = agent_user.user_id
@@ -543,6 +546,7 @@ class TestBotTaskRestoration:
                 patch("mindroom.bot.AgentBot._set_presence_with_model_info", new_callable=AsyncMock),
             ):
                 mock_client = AsyncMock()
+                mock_client.add_event_admission_callback = MagicMock()
                 mock_client.add_event_callback = MagicMock()
                 mock_client.add_response_callback = MagicMock()
                 mock_client.user_id = agent_user.user_id
@@ -583,7 +587,7 @@ class TestCommandHandling:
         )
 
     @pytest.mark.asyncio
-    async def test_non_router_agent_ignores_commands(self) -> None:
+    async def test_non_router_agent_ignores_commands(self, tmp_path: Path) -> None:
         """Test that non-router agents ignore command messages."""
         # Create a calculator agent (not router)
         agent_user = AgentMatrixUser(
@@ -596,14 +600,13 @@ class TestCommandHandling:
 
         config = _runtime_bound_config(Config(router=RouterConfig(model="default")))
 
-        with tempfile.TemporaryDirectory() as tmpdir:
-            bot = AgentBot(
-                agent_user=agent_user,
-                storage_path=Path(tmpdir),
-                config=config,
-                runtime_paths=runtime_paths_for(config),
-                rooms=["!test:server"],
-            )
+        bot = AgentBot(
+            agent_user=agent_user,
+            storage_path=tmp_path,
+            config=config,
+            runtime_paths=runtime_paths_for(config),
+            rooms=["!test:server"],
+        )
         wrap_extracted_collaborators(bot)
         bot.client = AsyncMock()
         bot.client.user_id = bot.agent_user.user_id
@@ -1044,9 +1047,7 @@ class TestCommandHandling:
 
             # Verify the agent didn't try to process the error message
             generate_response.assert_not_called()
-            terminal_turn = bot._turn_store.record_turn.call_args.args[0]
-            assert event.event_id in terminal_turn.source_event_ids
-            assert terminal_turn.completed is True
+            bot._turn_store.record_turn.assert_not_called()
             # Check log calls - should be caught by the general agent message check
             debug_calls = [call[0][0] for call in bot.logger.debug.call_args_list]
             assert "ignore_unmentioned_agent_event" in debug_calls

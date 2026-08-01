@@ -258,6 +258,7 @@ class _Harness:
     gate: CoalescingGate
     gate_batches: list[CoalescedBatch]
     conversation_cache: AsyncMock
+    ignored_dispatch_sources: list[tuple[str, ...]]
 
     async def deliver(self, room: nio.MatrixRoom, event: nio.RoomMessageText) -> None:
         """Run one inbound text turn end-to-end, settling runner-owned responses.
@@ -369,10 +370,14 @@ def _build_harness(
     interrupted_turn_rooms = InterruptedTurnRooms()
     controller_ref: list[TurnController] = []
     gate_batches: list[CoalescedBatch] = []
+    ignored_dispatch_sources: list[tuple[str, ...]] = []
 
     async def _dispatch_batch(batch: CoalescedBatch) -> None:
         gate_batches.append(batch)
         await controller_ref[0].handle_coalesced_batch(batch)
+
+    async def _settle_ignored_dispatch_sources(source_event_ids: tuple[str, ...]) -> None:
+        ignored_dispatch_sources.append(source_event_ids)
 
     gate = CoalescingGate(
         dispatch_batch=_dispatch_batch,
@@ -418,6 +423,7 @@ def _build_harness(
                     ingress=ingress_validator,
                 ),
             ),
+            settle_ignored_dispatch_sources=_settle_ignored_dispatch_sources,
         ),
     )
     controller_ref.append(controller)
@@ -431,6 +437,7 @@ def _build_harness(
         gate=gate,
         gate_batches=gate_batches,
         conversation_cache=conversation_cache,
+        ignored_dispatch_sources=ignored_dispatch_sources,
     )
 
 
@@ -515,11 +522,11 @@ def _router_relay_event(
 
 
 @pytest.mark.asyncio
-async def test_replayed_turn_is_rejected_before_policy_and_recorded(config: Config, tmp_path: Path) -> None:
+async def test_replayed_turn_is_rejected_before_policy_and_compacted(config: Config, tmp_path: Path) -> None:
     """A turn superseded by a newer unresponded requester message never reaches policy.
 
-    The dispatch replay guard must consume the turn (recording it as handled) without
-    evaluating the turn plan, invoking the response runner, or sending anything.
+    The dispatch replay guard must consume the exact callback obligation without
+    growing the handled-turn ledger, evaluating policy, or sending anything.
     """
     newer_history = thread_history_result(
         [
@@ -541,7 +548,8 @@ async def test_replayed_turn_is_rejected_before_policy_and_recorded(config: Conf
     assert harness.policy.plan_turn_calls == 0
     assert harness.runner.requests == []
     assert harness.gateway.sent == []
-    assert harness.turn_store.is_handled(event.event_id) is True
+    assert harness.turn_store.is_handled(event.event_id) is False
+    assert harness.ignored_dispatch_sources == [(event.event_id,)]
 
 
 @pytest.mark.asyncio
@@ -697,11 +705,11 @@ async def test_completed_router_alias_rejects_later_physical_relay(config: Confi
 
 
 @pytest.mark.asyncio
-async def test_router_relay_ignored_by_this_agent_records_terminal_alias(
+async def test_router_relay_ignored_by_this_agent_compacts_exact_callback(
     config: Config,
     tmp_path: Path,
 ) -> None:
-    """A relay routed elsewhere still records local terminal callback truth."""
+    """A relay routed elsewhere settles locally without indexing a fake response turn."""
     harness = _build_harness(config, tmp_path)
     room = _room_with_members(config, "general", "research", ROUTER_AGENT_NAME)
     relay = _router_relay_event(
@@ -715,10 +723,9 @@ async def test_router_relay_ignored_by_this_agent_records_terminal_alias(
     await harness.deliver(room, relay)
 
     assert harness.runner.requests == []
-    relay_record = harness.turn_store.get_turn_record("$relay-research:localhost")
-    assert relay_record is not None
-    assert relay_record.completed is True
-    assert harness.turn_store.get_turn_record("$human-research:localhost") == relay_record
+    assert harness.turn_store.get_turn_record("$relay-research:localhost") is None
+    assert harness.turn_store.get_turn_record("$human-research:localhost") is None
+    assert harness.ignored_dispatch_sources == [("$relay-research:localhost",)]
 
 
 @pytest.mark.asyncio
@@ -771,8 +778,8 @@ async def test_sender_outside_reply_allowlist_is_dropped_at_precheck(tmp_path: P
 
 
 @pytest.mark.asyncio
-async def test_policy_ignore_sends_nothing_and_records_terminal_turn(config: Config, tmp_path: Path) -> None:
-    """An ignore plan records local terminal truth without sending a response."""
+async def test_policy_ignore_sends_nothing_and_compacts_callback(config: Config, tmp_path: Path) -> None:
+    """An ignore plan compacts exact callback truth without growing the turn ledger."""
     harness = _build_harness(config, tmp_path)
     room = _room_with_members(config, "general", "research")
     event = _text_event("untagged message with multiple visible responders")
@@ -782,7 +789,8 @@ async def test_policy_ignore_sends_nothing_and_records_terminal_turn(config: Con
     assert harness.policy.plan_turn_calls == 1
     assert harness.runner.requests == []
     assert harness.gateway.sent == []
-    assert harness.turn_store.is_handled(event.event_id) is True
+    assert harness.turn_store.is_handled(event.event_id) is False
+    assert harness.ignored_dispatch_sources == [(event.event_id,)]
 
 
 @pytest.mark.asyncio
@@ -1546,9 +1554,9 @@ async def test_non_router_agent_consumes_command_without_responding(config: Conf
     assert harness.gateway.sent == []
     # Commands are control inputs: even a silently consumed one never enters the gate.
     assert harness.gate_batches == []
-    # Each entity records its own terminal callback truth even when only the
-    # router owns the visible command response.
-    assert harness.turn_store.is_handled(event.event_id) is True
+    # Exact callback truth stays compact when only the router owns the visible reply.
+    assert harness.turn_store.is_handled(event.event_id) is False
+    assert harness.ignored_dispatch_sources == [(event.event_id,)]
 
 
 @pytest.mark.asyncio

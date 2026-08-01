@@ -2029,7 +2029,7 @@ async def test_lane_terminal_drop_returns_deferred_source_to_retry_owner(
     monkeypatch: pytest.MonkeyPatch,
     failure_mode: str,
 ) -> None:
-    """A lane that loses deferred work must return its exact source to durable retry."""
+    """A lane must either retry failed readiness or settle a successful empty result."""
     bot = _agent_bot(tmp_path)
     room = nio.MatrixRoom("!room:localhost", bot.agent_user.user_id)
     event = _text_event("$lane-retry", "retry me", 1_000)
@@ -2069,6 +2069,13 @@ async def test_lane_terminal_drop_returns_deferred_source_to_retry_owner(
         ready_task=asyncio.create_task(resolve_readiness()),
     )
     await asyncio.wait_for(slot.settled.wait(), timeout=1)
+
+    if failure_mode == "readiness_none":
+        assert not runner.store.has_pending(event.event_id, DispatchCallbackKind.MESSAGE)
+        assert not bot._coalescing_gate.has_pending_source_event(event.event_id)
+        assert not runner._retry_keys
+        assert runner._retry_task is None
+        return
 
     assert runner.store.has_pending(event.event_id, DispatchCallbackKind.MESSAGE)
     assert not bot._coalescing_gate.has_pending_source_event(event.event_id)

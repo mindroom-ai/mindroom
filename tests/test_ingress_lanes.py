@@ -806,7 +806,7 @@ async def test_voice_echo_and_follow_up_slots_never_hold_another_conversation(tm
         await _wait_for(lambda: "$b1" in generated, deadline_seconds=1.0)
         assert not release_first_response.is_set()
         assert bot._coalescing_gate.lanes.all_settled()
-        assert bot._turn_store.is_handled("$e1")
+        assert not bot._turn_store.is_handled("$e1")
 
         release_first_response.set()
         await bot._coalescing_gate.drain_all()

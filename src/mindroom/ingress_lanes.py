@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import enum
 import time
 from collections import deque
 from dataclasses import dataclass, field
@@ -62,6 +63,14 @@ class _LaneAbandonOutcome:
     dropped_ready_count: int = 0
 
 
+class _LaneDeliveryOutcome(enum.Enum):
+    """Terminal ownership result for one resolved lane slot."""
+
+    DELIVERED = "delivered"
+    RETRY = "retry"
+    INTENTIONALLY_IGNORED = "intentionally_ignored"
+
+
 class IngressLanes:
     """Own receipt-order delivery of resolving ingress per (room, sender) lane.
 
@@ -76,11 +85,14 @@ class IngressLanes:
         *,
         deliver: Callable[[LaneSlot, LaneDelivery, ReadyPendingEvent], Awaitable[None]],
         on_undelivered_source: Callable[[str, str], None] | None = None,
+        on_intentionally_ignored_source: Callable[[str, str], Awaitable[None]] | None = None,
     ) -> None:
         self._deliver = deliver
         self._on_undelivered_source = on_undelivered_source
+        self._on_intentionally_ignored_source = on_intentionally_ignored_source
         self._lanes: dict[_LaneKey, deque[LaneSlot]] = {}
         self._workers: dict[_LaneKey, asyncio.Task[None]] = {}
+        self._settling_slots: dict[int, LaneSlot] = {}
 
     @staticmethod
     def closed_slot(*, room_id: str, sender_id: str, receipt_time: float | None = None) -> LaneSlot:
@@ -169,7 +181,16 @@ class IngressLanes:
 
     def unsettled_slots(self) -> list[LaneSlot]:
         """Return every slot that has not delivered or released yet."""
-        return [slot for lane in self._lanes.values() for slot in lane if not slot.settled.is_set()]
+        lane_slots = [slot for lane in self._lanes.values() for slot in lane if not slot.settled.is_set()]
+        return [*lane_slots, *self._settling_slots.values()]
+
+    def has_pending_source_event(self, source_event_id: str) -> bool:
+        """Return whether an active lane still owns one exact source before settlement."""
+        return any(
+            slot.delivery is not None and slot.delivery.source_event_id == source_event_id
+            for lane in self._lanes.values()
+            for slot in lane
+        )
 
     def all_settled(self) -> bool:
         """Return whether no lane holds undelivered ingress."""
@@ -251,12 +272,15 @@ class IngressLanes:
             # lane and hangs unbounded drains.
             completed = False
             undelivered: LaneDelivery | None = None
+            intentionally_ignored: LaneDelivery | None = None
             try:
                 await slot.loaded.wait()
                 if not slot.released:
-                    delivered = await self._deliver_slot(slot)
-                    if not delivered:
-                        undelivered = slot.delivery
+                    delivery_outcome = await self._deliver_slot(slot)
+                    undelivered, intentionally_ignored = self._completion_sources(
+                        delivery_outcome,
+                        slot.delivery,
+                    )
                 completed = True
             except asyncio.CancelledError:
                 raise
@@ -272,9 +296,42 @@ class IngressLanes:
                     slot.released = True
                 if lane and lane[0] is slot:
                     lane.popleft()
+                if intentionally_ignored is None:
+                    slot.settled.set()
+                else:
+                    self._settling_slots[id(slot)] = slot
+            await self._finish_delivery_notifications(
+                slot,
+                undelivered=undelivered,
+                intentionally_ignored=intentionally_ignored,
+            )
+
+    async def _finish_delivery_notifications(
+        self,
+        slot: LaneSlot,
+        *,
+        undelivered: LaneDelivery | None,
+        intentionally_ignored: LaneDelivery | None,
+    ) -> None:
+        if undelivered is not None:
+            self._notify_undelivered_source(undelivered)
+        if intentionally_ignored is not None:
+            try:
+                await self._notify_intentionally_ignored_source(intentionally_ignored)
+            finally:
+                self._settling_slots.pop(id(slot), None)
                 slot.settled.set()
-            if undelivered is not None:
-                self._notify_undelivered_source(undelivered)
+
+    @staticmethod
+    def _completion_sources(
+        outcome: _LaneDeliveryOutcome,
+        delivery: LaneDelivery | None,
+    ) -> tuple[LaneDelivery | None, LaneDelivery | None]:
+        if outcome is _LaneDeliveryOutcome.RETRY:
+            return delivery, None
+        if outcome is _LaneDeliveryOutcome.INTENTIONALLY_IGNORED:
+            return None, delivery
+        return None, None
 
     def _notify_undelivered_source(self, delivery: LaneDelivery) -> None:
         callback = self._on_undelivered_source
@@ -289,10 +346,26 @@ class IngressLanes:
                 room_id=delivery.key.room_id,
             )
 
-    async def _deliver_slot(self, slot: LaneSlot) -> bool:
+    async def _notify_intentionally_ignored_source(self, delivery: LaneDelivery) -> None:
+        callback = self._on_intentionally_ignored_source
+        if callback is None or delivery.source_event_id is None:
+            return
+        try:
+            await callback(
+                delivery.source_event_id,
+                delivery.callback_source_kind or delivery.source_kind,
+            )
+        except Exception:
+            logger.exception(
+                "ingress_lane_ignored_source_settlement_failed",
+                source_event_id=delivery.source_event_id,
+                room_id=delivery.key.room_id,
+            )
+            self._notify_undelivered_source(delivery)
+
+    async def _deliver_slot(self, slot: LaneSlot) -> _LaneDeliveryOutcome:
         delivery = slot.delivery
-        if delivery is None:
-            return True
+        assert delivery is not None
         ready = delivery.ready_result
         if ready is None:
             assert delivery.ready_task is not None
@@ -312,7 +385,7 @@ class IngressLanes:
                         sender_id=slot.sender_id,
                         age_ms=elapsed_ms_since(delivery.received_at, clock=time.time),
                     )
-                    return False
+                    return _LaneDeliveryOutcome.RETRY
                 raise
             except Exception as error:
                 logger.exception(
@@ -324,19 +397,18 @@ class IngressLanes:
                     exception_type=error.__class__.__name__,
                     error_message=str(error),
                 )
-                return False
-        # Only after the exception split: a None result did not enter the gate,
-        # so the durable owner must decide whether to retry its exact source.
+                return _LaneDeliveryOutcome.RETRY
+        # Only after the exception split: a successful None result intentionally
+        # consumed this source without entering the gate.
         if ready is None:
-            return False
+            return _LaneDeliveryOutcome.INTENTIONALLY_IGNORED
         if slot.released:
             # A bounded drain abandoned this slot while its readiness resolved;
             # the drain already counted it dropped and closed its metadata, so
             # delivering now would dispatch work the drain reported as dropped.
             close_ready_task_result_metadata(ready)
-            return True
+            return _LaneDeliveryOutcome.DELIVERED
         ready.pending_event.enqueue_time = delivery.received_at
-        delivered = True
         try:
             await self._deliver(slot, delivery, ready)
         except Exception:
@@ -347,8 +419,8 @@ class IngressLanes:
                 room_id=slot.room_id,
                 sender_id=slot.sender_id,
             )
-            delivered = False
-        return delivered
+            return _LaneDeliveryOutcome.RETRY
+        return _LaneDeliveryOutcome.DELIVERED
 
 
 def _close_late_ready_task_result(task: asyncio.Task[ReadyPendingEvent | None]) -> None:

@@ -120,7 +120,7 @@ from mindroom.turn_policy import IngressHookRunner, PreparedDispatch, ResponseAc
 from mindroom.visible_voice_echo import VisibleVoiceEchoRequest
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Sequence
+    from collections.abc import Awaitable, Callable, Sequence
 
     import nio
     import structlog
@@ -170,6 +170,7 @@ class _RouterTargetResolution:
     selected_entity: str | None
     suggested_entity: str | None
     response_text: str
+    target_unavailable: bool
 
 
 def _resolve_router_target(
@@ -199,6 +200,7 @@ def _resolve_router_target(
         selected_entity=selected_entity,
         suggested_entity=suggested_entity,
         response_text=response_text,
+        target_unavailable=not target_starting and suggested_entity is None,
     )
 
 
@@ -442,6 +444,7 @@ class TurnControllerDeps:
     ingress: IngressValidator
     interrupted_turn_rooms: InterruptedTurnRooms
     visible_voice_echo: VisibleVoiceEchoLifecycle
+    settle_ignored_dispatch_sources: Callable[[tuple[str, ...]], Awaitable[None]]
 
 
 @dataclass
@@ -490,6 +493,10 @@ class TurnController:
     def _mark_source_events_responded(self, handled_turn: TurnRecord) -> None:
         """Mark one or more source events as handled by the same terminal outcome."""
         self.deps.turn_store.record_turn(handled_turn)
+
+    async def _settle_source_events_ignored(self, handled_turn: TurnRecord) -> None:
+        """Compact exact callback obligations without growing the handled-turn ledger."""
+        await self.deps.settle_ignored_dispatch_sources(handled_turn.source_event_ids)
 
     def _has_newer_unresponded_in_thread(
         self,
@@ -852,7 +859,6 @@ class TurnController:
             self.deps.ingress.event_source_kind(prepared_event, content) if isinstance(content, dict) else None
         )
         if self.deps.ingress.is_display_only_router_voice_echo(prepared_event):
-            self._mark_source_events_responded(TurnRecord.create([prepared_event.event_id]))
             return _IngressAdmissionOutcome.CONSUMED
         trusted_user_relay = original_sender is not None and prepared_source_kind in {
             TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
@@ -1064,6 +1070,7 @@ class TurnController:
             trust_internal_payload_metadata=resolved_trust_internal_payload_metadata,
             discovery_event_id=self.deps.ingress.router_relay_original_event_id(event),
             callback_source_kind=callback_source_kind,
+            turn_dispatch_recovery=turn_dispatch_recovery_active(),
             dispatch_metadata=dispatch_metadata,
         )
         if turn_claim is not None:
@@ -1229,7 +1236,7 @@ class TurnController:
             suppressed=suppressed,
         )
         if suppressed:
-            self._mark_source_events_responded(handled_turn)
+            await self._settle_source_events_ignored(handled_turn)
             return None
 
         origin = envelope.origin
@@ -1242,7 +1249,7 @@ class TurnController:
                 event_label=event_label,
                 user_id=requester_user_id,
             )
-            self._mark_source_events_responded(handled_turn)
+            await self._settle_source_events_ignored(handled_turn)
             return None
 
         replay_guard = (
@@ -1635,7 +1642,9 @@ class TurnController:
                 "No responders to route to in this room for sender",
                 sender=permission_sender_id,
             )
-            self._mark_source_events_responded(handled_turn or TurnRecord.create([event.event_id]))
+            await self._settle_source_events_ignored(
+                handled_turn or TurnRecord.create([event.event_id]),
+            )
             return
 
         with bound_log_context(room_id=room.room_id, thread_id=thread_id):
@@ -1666,7 +1675,7 @@ class TurnController:
             target_resolution.suggested_entity,
             target_resolution.response_text,
         )
-        if suggested_entity is None and response_text == _ROUTER_TARGET_UNAVAILABLE_TEXT:
+        if target_resolution.target_unavailable:
             with bound_log_context(room_id=room.room_id, thread_id=thread_id):
                 self.deps.logger.warning("Router failed to determine entity")
 
@@ -1753,13 +1762,8 @@ class TurnController:
                 self._mark_source_events_responded(replace(tracked_handled_turn, response_event_id=event_id))
             else:
                 self.deps.logger.error("Failed to route to entity", entity=suggested_entity)
-                self._raise_router_relay_delivery_failure(suggested_entity)
-
-    @staticmethod
-    def _raise_router_relay_delivery_failure(suggested_entity: str | None) -> None:
-        """Raise the retryable signal for a router relay without a Matrix event."""
-        msg = f"Failed to route to entity {suggested_entity!r}"
-        raise RuntimeError(msg)
+                msg = f"Failed to route to entity {suggested_entity!r}"
+                raise RuntimeError(msg)
 
     def _router_handled_turn_outcome(
         self,
@@ -2269,9 +2273,6 @@ class TurnController:
                 event_id=prechecked_event.event.event_id,
                 sender=prechecked_event.event.sender,
             )
-            self._mark_source_events_responded(
-                TurnRecord.create([prechecked_event.event.event_id]),
-            )
             return
         reservation_owner = self._reserve_prompt_ingress_order(
             room,
@@ -2484,6 +2485,7 @@ class TurnController:
                     hook_source=envelope.hook_source,
                     message_received_depth=envelope.message_received_depth,
                     trust_internal_payload_metadata=True,
+                    turn_dispatch_recovery=turn_dispatch_recovery_active(),
                     dispatch_metadata=_queued_notice_dispatch_metadata(queued_notice_reservation, normalized_target),
                 ),
             )
@@ -2626,6 +2628,7 @@ class TurnController:
                     hook_source=hook_source,
                     message_received_depth=message_received_depth,
                     trust_internal_payload_metadata=True,
+                    turn_dispatch_recovery=turn_dispatch_recovery_active(),
                     dispatch_metadata=_queued_notice_dispatch_metadata(queued_notice_reservation, target),
                 ),
             ),

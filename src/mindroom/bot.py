@@ -433,6 +433,7 @@ class AgentBot:
             ),
             on_dispatch_failure=self._retry_failed_coalesced_dispatch,
             on_undelivered_source=self._retry_pending_dispatch_source,
+            on_intentionally_ignored_source=self._settle_ignored_dispatch_source,
         )
         self._hook_context_support = HookContextSupport(
             runtime=self._runtime_view,
@@ -638,6 +639,9 @@ class AgentBot:
                 ingress=self._ingress_validator,
                 interrupted_turn_rooms=self._interrupted_turn_rooms,
                 visible_voice_echo=self._visible_voice_echo,
+                settle_ignored_dispatch_sources=(
+                    self._dispatch_obligation_runner.settle_intentionally_ignored_turn_sources
+                ),
             ),
         )
 
@@ -1908,6 +1912,13 @@ class AgentBot:
     def _retry_pending_dispatch_source(self, source_event_id: str, source_kind: str) -> None:
         """Return one undelivered source to its exact durable callback owner."""
         self._dispatch_obligation_runner.retry_pending_turn_source(
+            source_event_id,
+            callback_kind_for_source_kind(source_kind),
+        )
+
+    async def _settle_ignored_dispatch_source(self, source_event_id: str, source_kind: str) -> None:
+        """Settle one asynchronously normalized source that produced no dispatch payload."""
+        await self._dispatch_obligation_runner.settle_intentionally_ignored_turn_source(
             source_event_id,
             callback_kind_for_source_kind(source_kind),
         )

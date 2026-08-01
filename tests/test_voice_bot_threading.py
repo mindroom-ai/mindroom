@@ -1400,7 +1400,7 @@ async def test_room_mode_voice_burst_dispatches_as_one_turn(mock_home_bot: Agent
 
 @pytest.mark.asyncio
 async def test_trusted_router_visible_voice_echo_is_display_only(mock_home_bot: AgentBot) -> None:
-    """Trusted router voice echoes should be marked handled and skipped by target agents."""
+    """Trusted router voice echoes should be skipped without growing target turn ledgers."""
     bot = mock_home_bot
     room = _threaded_room()
     echo_event = _threaded_prepared_text_event(
@@ -1436,7 +1436,7 @@ async def test_trusted_router_visible_voice_echo_is_display_only(mock_home_bot: 
         await drain_coalescing(bot)
 
     mock_dispatch.assert_not_awaited()
-    assert bot._turn_store.is_handled("$echo")
+    assert not bot._turn_store.is_handled("$echo")
 
 
 @pytest.mark.asyncio
