@@ -112,6 +112,7 @@ class TurnRecord:
     source_event_prompts: Mapping[str, str] | None = None
     source_event_revisions: Mapping[str, SourceEventRevision] | None = None
     suppressed_source_event_revisions: Mapping[str, SourceEventRevision] | None = None
+    user_stop_cutoff_revision: SourceEventRevision | None = None
     source_event_metadata: Mapping[str, SourceEventMetadata] | None = None
     response_owner: str | None = None
     requester_id: str | None = None
@@ -173,6 +174,7 @@ class TurnRecord:
             self.suppressed_source_event_revisions,
             excluded_event_ids=redacted_source_event_id_set,
         )
+        user_stop_cutoff_revision = _source_event_revision_or_none(self.user_stop_cutoff_revision)
         history_scope = self.history_scope if isinstance(self.history_scope, HistoryScope) else None
         conversation_target = self.conversation_target if isinstance(self.conversation_target, MessageTarget) else None
         object.__setattr__(self, "source_event_ids", source_event_ids)
@@ -193,6 +195,7 @@ class TurnRecord:
         object.__setattr__(self, "source_event_prompts", source_event_prompts)
         object.__setattr__(self, "source_event_revisions", source_event_revisions)
         object.__setattr__(self, "suppressed_source_event_revisions", suppressed_source_event_revisions)
+        object.__setattr__(self, "user_stop_cutoff_revision", user_stop_cutoff_revision)
         object.__setattr__(self, "source_event_metadata", source_event_metadata)
         object.__setattr__(self, "response_owner", _normalize_string(self.response_owner))
         object.__setattr__(self, "requester_id", _normalize_string(self.requester_id))
@@ -224,6 +227,7 @@ class TurnRecord:
         source_event_prompts: Mapping[str, str] | None = None,
         source_event_revisions: Mapping[str, object] | None = None,
         suppressed_source_event_revisions: Mapping[str, object] | None = None,
+        user_stop_cutoff_revision: SourceEventRevision | None = None,
         source_event_metadata: Mapping[str, object] | None = None,
         response_owner: str | None = None,
         requester_id: str | None = None,
@@ -251,6 +255,7 @@ class TurnRecord:
                 "Mapping[str, SourceEventRevision] | None",
                 suppressed_source_event_revisions,
             ),
+            user_stop_cutoff_revision=user_stop_cutoff_revision,
             source_event_metadata=typing.cast("Mapping[str, SourceEventMetadata] | None", source_event_metadata),
             response_owner=response_owner,
             requester_id=requester_id,
@@ -331,6 +336,8 @@ class TurnRecordCodec:
             payload["suppressed_source_event_revisions"] = {
                 event_id: list(revision) for event_id, revision in record.suppressed_source_event_revisions.items()
             }
+        if record.user_stop_cutoff_revision is not None:
+            payload["user_stop_cutoff_revision"] = list(record.user_stop_cutoff_revision)
         if record.source_event_metadata is not None:
             payload["source_event_metadata"] = {
                 event_id: metadata.to_record() for event_id, metadata in record.source_event_metadata.items()
@@ -397,6 +404,9 @@ class TurnRecordCodec:
             source_event_revisions=_mapping_or_none(record.get("source_event_revisions")),
             suppressed_source_event_revisions=_mapping_or_none(
                 record.get("suppressed_source_event_revisions"),
+            ),
+            user_stop_cutoff_revision=_source_event_revision_or_none(
+                record.get("user_stop_cutoff_revision"),
             ),
             source_event_metadata=_mapping_or_none(record.get("source_event_metadata")),
             response_owner=_normalize_string(record.get("response_owner")),
@@ -721,6 +731,20 @@ class HandledTurnLedger:
                     continue
                 unique_records[record.indexed_event_ids] = record
             return tuple(unique_records.values())
+
+    def turn_record_for_response_event_id(self, response_event_id: str) -> TurnRecord | None:
+        """Return the sole turn whose visible response has this Matrix event ID."""
+        with self._state.lock:
+            self._ensure_loaded_locked()
+            matches = {
+                record.indexed_event_ids: record
+                for record in self._responses.values()
+                if response_event_id in {record.response_event_id, record.visible_echo_event_id}
+            }
+        if len(matches) > 1:
+            msg = f"Multiple turns own visible response {response_event_id!r}"
+            raise RuntimeError(msg)
+        return next(iter(matches.values()), None)
 
     def _ensure_loaded_locked(self) -> None:
         """Load persisted records into shared memory once while the state lock is held."""
@@ -1127,6 +1151,10 @@ def _merge_same_identity_records(candidate: TurnRecord, existing: TurnRecord) ->
         ),
         command_execution_started=newer.command_execution_started or older.command_execution_started,
         command_result_text=newer.command_result_text or older.command_result_text,
+        user_stop_cutoff_revision=_latest_revision(
+            newer.user_stop_cutoff_revision,
+            older.user_stop_cutoff_revision,
+        ),
     )
 
 
@@ -1143,6 +1171,25 @@ def _bool_or_none(value: object) -> bool | None:
 def _mapping_or_none(value: object) -> Mapping[str, Any] | None:
     """Return a typed mapping for codec input."""
     return typing.cast("Mapping[str, Any]", value) if isinstance(value, Mapping) else None
+
+
+def _source_event_revision_or_none(value: object) -> SourceEventRevision | None:
+    """Return one valid canonical Matrix revision tuple."""
+    if (
+        isinstance(value, tuple | list)
+        and len(value) == 2
+        and isinstance(value[0], int)
+        and not isinstance(value[0], bool)
+        and isinstance(value[1], str)
+        and value[1]
+    ):
+        return (value[0], value[1])
+    return None
+
+
+def _latest_revision(*revisions: SourceEventRevision | None) -> SourceEventRevision | None:
+    """Return the latest present canonical Matrix revision."""
+    return max((revision for revision in revisions if revision is not None), default=None)
 
 
 def _immutable_prompt_map(

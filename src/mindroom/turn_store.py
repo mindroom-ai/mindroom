@@ -15,7 +15,14 @@ from agno.run.team import TeamRunOutput
 
 from mindroom.agent_storage import get_agent_session, get_team_session
 from mindroom.agents import remove_run_by_event_id
-from mindroom.handled_turns import HandledTurnLedger, TurnRecord, TurnRecordCodec, merge_edit_facts, same_turn_identity
+from mindroom.handled_turns import (
+    HandledTurnLedger,
+    SourceEventRevision,
+    TurnRecord,
+    TurnRecordCodec,
+    merge_edit_facts,
+    same_turn_identity,
+)
 from mindroom.history.storage import invalidate_compacted_replay, read_scope_seen_event_ids
 from mindroom.session_ids import create_session_id
 
@@ -97,6 +104,14 @@ class TurnStore:
 
     def record_turn(self, turn_record: TurnRecord) -> None:
         """Persist one terminal turn, preserving any previously recorded optional facts."""
+        self._record_terminal_turn(turn_record, wait_for_persist=False)
+
+    def record_turn_durably(self, turn_record: TurnRecord) -> None:
+        """Persist one terminal turn and wait until its exact ledger write lands."""
+        self._record_terminal_turn(turn_record, wait_for_persist=True)
+
+    def _record_terminal_turn(self, turn_record: TurnRecord, *, wait_for_persist: bool) -> None:
+        """Apply the canonical terminal merge with optional exact durability."""
         if not turn_record.source_event_ids:
             return
 
@@ -137,6 +152,7 @@ class TurnStore:
         self._ledger.update_handled_turn(
             turn_record.indexed_event_ids,
             terminal_record,
+            wait_for_persist=wait_for_persist,
             on_persisted=self._notify_terminal_turn_persisted,
         )
 
@@ -213,6 +229,54 @@ class TurnStore:
     def get_turn_record(self, source_event_id: str) -> TurnRecord | None:
         """Return the ledger-backed canonical record for one source event."""
         return self._ledger.get_turn_record(source_event_id)
+
+    def turn_record_for_response_event_id(self, response_event_id: str) -> TurnRecord | None:
+        """Return the durable turn that owns one visible response event."""
+        return self._ledger.turn_record_for_response_event_id(response_event_id)
+
+    def record_user_stopped_response(
+        self,
+        response_event_id: str,
+        stop_revision: SourceEventRevision,
+    ) -> TurnRecord | None:
+        """Durably terminate the incomplete turn that owns a user-stopped response."""
+        turn_record = self.turn_record_for_response_event_id(response_event_id)
+        if turn_record is None:
+            return turn_record
+        if (
+            turn_record.completed
+            and turn_record.user_stop_cutoff_revision is not None
+            and turn_record.user_stop_cutoff_revision >= stop_revision
+        ):
+            return turn_record
+
+        def stopped_record(existing_records: Mapping[str, TurnRecord]) -> TurnRecord:
+            matching_records = {
+                record.indexed_event_ids: record
+                for record in existing_records.values()
+                if response_event_id in {record.response_event_id, record.visible_echo_event_id}
+            }
+            if len(matching_records) != 1:
+                msg = f"User-stopped response {response_event_id!r} lost its sole turn owner"
+                raise RuntimeError(msg)
+            current = next(iter(matching_records.values()))
+            return replace(
+                current,
+                response_event_id=response_event_id,
+                completed=True,
+                user_stop_cutoff_revision=max(
+                    stop_revision,
+                    current.user_stop_cutoff_revision or stop_revision,
+                ),
+                timestamp=0.0,
+            )
+
+        return self._ledger.update_handled_turn(
+            turn_record.indexed_event_ids,
+            stopped_record,
+            wait_for_persist=True,
+            on_persisted=self._notify_terminal_turn_persisted,
+        )
 
     def has_pending_response_intent(self, source_event_ids: tuple[str, ...]) -> bool:
         """Return whether these sources already own an incomplete response attempt."""
@@ -377,6 +441,19 @@ class TurnStore:
             )
             self._clear_pending_redaction_cleanup(redacted_event_id)
         return self.any_source_redacted(source_event_ids)
+
+    def prepare_pending_response_source(
+        self,
+        *,
+        target: MessageTarget,
+        source_event_ids: tuple[str, ...],
+        terminal_source_event_ids: tuple[str, ...],
+    ) -> bool:
+        """Finish cleanup, then suppress a pending response whose source became terminal."""
+        return self.prepare_response_for_redactions(
+            target=target,
+            source_event_ids=source_event_ids,
+        ) or any(self.is_handled(source_event_id) for source_event_id in terminal_source_event_ids)
 
     def response_history_scope(
         self,
@@ -780,6 +857,7 @@ def _backfill_missing_turn_facts(authority: TurnRecord, recovery: TurnRecord) ->
             else recovery.source_event_prompts
         ),
         source_event_revisions=authority.source_event_revisions or recovery.source_event_revisions,
+        user_stop_cutoff_revision=_latest_user_stop_cutoff(authority, recovery),
         source_event_metadata=(
             authority.source_event_metadata
             if authority.source_event_metadata is not None
@@ -830,6 +908,7 @@ def _reconcile_ledger_and_recovery(
         completed=recovery_record.completed,
         source_event_prompts=source_event_prompts,
         source_event_revisions=source_event_revisions,
+        user_stop_cutoff_revision=_latest_user_stop_cutoff(ledger_record, recovery_record),
         source_event_metadata=(
             recovery_record.source_event_metadata
             if recovery_record.source_event_metadata is not None
@@ -848,4 +927,12 @@ def _reconcile_ledger_and_recovery(
         )
         if recovered_record != ledger_record
         else ledger_record
+    )
+
+
+def _latest_user_stop_cutoff(*records: TurnRecord) -> SourceEventRevision | None:
+    """Return the latest durable STOP cutoff present on these same-turn records."""
+    return max(
+        (record.user_stop_cutoff_revision for record in records if record.user_stop_cutoff_revision is not None),
+        default=None,
     )

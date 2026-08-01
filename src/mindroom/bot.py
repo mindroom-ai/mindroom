@@ -119,6 +119,7 @@ from .matrix.room_member_joins import (
 )
 from .matrix.to_device import AuthenticatedToDeviceEvent
 from .media_inputs import MediaInputs
+from .reaction_dispatch import dispatch_reaction
 from .redacted_turn_cleanup import RedactedTurnCleanup, RedactedTurnCleanupDeps
 from .response_payload_preparation import ResponsePayloadPreparer
 from .response_runner import ResponseRequest, ResponseRunner, ResponseRunnerDeps, prepare_memory_and_model_context
@@ -149,7 +150,6 @@ if TYPE_CHECKING:
     from mindroom.matrix.cache import AgentMessageSnapshot, ConversationEventCache, EventCacheWriteCoordinator
     from mindroom.matrix.identity import MatrixID
     from mindroom.matrix.media import MatrixMediaEvent
-    from mindroom.prompt_ingress_reservation import PromptIngressReservationOwner
     from mindroom.response_admission import ResponseAdmissionGate
     from mindroom.runtime_protocols import OrchestratorRuntime
     from mindroom.runtime_support import StartupThreadPrewarmRegistry
@@ -2039,7 +2039,13 @@ class AgentBot:
     async def _on_reaction(self, room: nio.MatrixRoom, event: nio.ReactionEvent) -> None:
         """Handle reaction events for interactive questions, stop functionality, and config confirmations."""
         async with self._conversation_resolver.turn_thread_cache_scope():
-            await self._handle_reaction_inner(room, event)
+            await dispatch_reaction(
+                self,
+                room,
+                event,
+                handle_approval_action=handle_tool_approval_action,
+                sender_is_authorized=is_authorized_sender,
+            )
 
     async def _on_room_member(
         self,
@@ -2162,233 +2168,6 @@ class AgentBot:
             approval_id=payload.approval_id,
             status=payload.status,
             reason=payload.reason,
-        )
-
-    async def _maybe_handle_approval_reaction(
-        self,
-        room: nio.MatrixRoom,
-        event: nio.ReactionEvent,
-        consumer: DispatchSemanticConsumer | None,
-    ) -> bool:
-        """Route a checkmark only to the approval consumer that claimed it."""
-        approval_claimed = consumer is DispatchSemanticConsumer.TOOL_APPROVAL_REACTION
-        if event.key != "✅" or (consumer is not None and not approval_claimed):
-            return False
-
-        async def claim_approval_reaction() -> None:
-            nonlocal approval_claimed
-            await self._dispatch_obligation_runner.claim_semantic_consumer(
-                DispatchSemanticConsumer.TOOL_APPROVAL_REACTION,
-            )
-            approval_claimed = True
-
-        approval_handled = await handle_tool_approval_action(
-            room=room,
-            sender_id=event.sender,
-            config=self.config,
-            runtime_paths=self.runtime_paths,
-            orchestrator=self.orchestrator,
-            logger=self.logger,
-            approval_event_id=event.reacts_to,
-            status="approved",
-            reason=None,
-            before_consume=None if approval_claimed else claim_approval_reaction,
-            authorization_prevalidated=approval_claimed,
-        )
-        return approval_claimed or approval_handled
-
-    async def _maybe_handle_stop_reaction(
-        self,
-        event: nio.ReactionEvent,
-        consumer: DispatchSemanticConsumer | None,
-    ) -> bool:
-        """Route a stop reaction only to the live run that claimed it."""
-        stop_claimed = consumer is DispatchSemanticConsumer.STOP_REACTION
-        if event.key != "🛑" or (consumer is not None and not stop_claimed):
-            return False
-        if not stop_claimed:
-            sender_agent_name = entity_identity_registry(
-                self.config,
-                self.runtime_paths,
-            ).current_entity_name_for_user_id(event.sender)
-            if sender_agent_name or not self.stop_manager.can_handle_stop_reaction(event.reacts_to):
-                return False
-            await self._dispatch_obligation_runner.claim_semantic_consumer(
-                DispatchSemanticConsumer.STOP_REACTION,
-            )
-
-        stopped = await self.stop_manager.handle_stop_reaction(event.reacts_to)
-        if stopped:
-            self.logger.info(
-                "Stop requested for message",
-                message_id=event.reacts_to,
-                requested_by=event.sender,
-            )
-            assert self.client is not None
-            await self.stop_manager.remove_stop_button(
-                self.client,
-                event.reacts_to,
-                notify_outbound_redaction=self._conversation_cache.notify_outbound_redaction,
-            )
-        return True
-
-    async def _maybe_handle_interactive_reaction(
-        self,
-        room: nio.MatrixRoom,
-        event: nio.ReactionEvent,
-        consumer: DispatchSemanticConsumer | None,
-        reservation_owner: PromptIngressReservationOwner,
-    ) -> bool:
-        """Route an interactive choice only to its claimed question."""
-        interactive_claimed = consumer is DispatchSemanticConsumer.INTERACTIVE_REACTION
-        if consumer is not None and not interactive_claimed:
-            return False
-        assert self.client is not None
-        selection = await interactive.handle_reaction(
-            self.client,
-            event,
-            self.agent_name,
-            self.config,
-            self.runtime_paths,
-        )
-        if selection is None:
-            return interactive_claimed
-        if not interactive_claimed:
-            try:
-                await self._dispatch_obligation_runner.claim_semantic_consumer(
-                    DispatchSemanticConsumer.INTERACTIVE_REACTION,
-                )
-            except BaseException:
-                interactive.restore_selection(selection)
-                raise
-
-        # The selection's response may wait behind this conversation's active
-        # turn, so release the sender's lane before response completion.
-        await reservation_owner.release()
-        await self._turn_controller.handle_interactive_selection(
-            room,
-            selection=selection,
-            user_id=event.sender,
-            source_event_id=event.event_id,
-        )
-        return True
-
-    async def _maybe_handle_nonconfig_reaction(
-        self,
-        room: nio.MatrixRoom,
-        event: nio.ReactionEvent,
-        consumer: DispatchSemanticConsumer | None,
-        reservation_owner: PromptIngressReservationOwner,
-    ) -> bool:
-        """Route one authorized reaction among the non-config consumers."""
-        if await self._maybe_handle_approval_reaction(room, event, consumer):
-            return True
-        if consumer is None and not self._turn_policy.can_reply_to_sender(event.sender):
-            self.logger.debug("Ignoring reaction due to reply permissions", sender=event.sender)
-            return True
-        if await self._maybe_handle_stop_reaction(event, consumer):
-            return True
-        return await self._maybe_handle_interactive_reaction(
-            room,
-            event,
-            consumer,
-            reservation_owner,
-        )
-
-    async def _handle_reaction_inner(
-        self,
-        room: nio.MatrixRoom,
-        event: nio.ReactionEvent,
-    ) -> None:
-        """Handle one reaction inside the per-turn thread-history cache scope."""
-        assert self.client is not None
-
-        semantic_consumer = self._dispatch_obligation_runner.semantic_consumer()
-        if semantic_consumer is DispatchSemanticConsumer.REACTION_HOOKS:
-            await self._emit_reaction_received_hooks(
-                room_id=room.room_id,
-                event=event,
-                correlation_id=event.event_id,
-            )
-            return
-        await self._route_reaction(room, event, semantic_consumer)
-
-    async def _route_reaction(
-        self,
-        room: nio.MatrixRoom,
-        event: nio.ReactionEvent,
-        semantic_consumer: DispatchSemanticConsumer | None,
-    ) -> None:
-        """Classify and execute one reaction that has no completed hook claim."""
-        assert self.client is not None
-
-        pending_change = (
-            await config_confirmation.resolve_reaction_pending_change(
-                self.client,
-                room.room_id,
-                event,
-                enabled=self.agent_name == ROUTER_AGENT_NAME,
-            )
-            if semantic_consumer in {None, DispatchSemanticConsumer.CONFIG_CONFIRMATION}
-            else None
-        )
-        if semantic_consumer is DispatchSemanticConsumer.CONFIG_CONFIRMATION and pending_change is None:
-            return
-        if pending_change is not None and pending_change.decision_event_id is not None:
-            if semantic_consumer is None:
-                await self._dispatch_obligation_runner.claim_semantic_consumer(
-                    DispatchSemanticConsumer.CONFIG_CONFIRMATION,
-                )
-            await config_confirmation.resume_committed_confirmation(self, room, event, pending_change)
-            return
-
-        if semantic_consumer is None and not is_authorized_sender(
-            event.sender,
-            self.config,
-            room.room_id,
-            self.runtime_paths,
-        ):
-            self.logger.debug("ignoring_reaction_from_unauthorized_sender", user_id=event.sender)
-            return
-
-        requester_user_id = self._ingress_validator.requester_user_id(
-            sender=event.sender,
-            source=event.source,
-        )
-        reservation_owner = self._turn_controller._reserve_prompt_ingress_order(
-            room,
-            requester_user_id,
-            receipt_time=time.monotonic(),
-        )
-        try:
-            if pending_change is not None:
-                if semantic_consumer is None and not self._turn_policy.can_reply_to_sender(event.sender):
-                    self.logger.debug("Ignoring reaction due to reply permissions", sender=event.sender)
-                    return
-                if semantic_consumer is None:
-                    await self._dispatch_obligation_runner.claim_semantic_consumer(
-                        DispatchSemanticConsumer.CONFIG_CONFIRMATION,
-                    )
-                await config_confirmation.handle_confirmation_reaction(self, room, event)
-                return
-
-            if await self._maybe_handle_nonconfig_reaction(
-                room,
-                event,
-                semantic_consumer,
-                reservation_owner,
-            ):
-                return
-        finally:
-            await reservation_owner.release()
-
-        await self._dispatch_obligation_runner.claim_semantic_consumer(
-            DispatchSemanticConsumer.REACTION_HOOKS,
-        )
-        await self._emit_reaction_received_hooks(
-            room_id=room.room_id,
-            event=event,
-            correlation_id=event.event_id,
         )
 
     async def _on_media_message(

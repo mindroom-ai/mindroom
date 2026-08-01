@@ -13,6 +13,7 @@ import pytest
 from mindroom.bot import AgentBot
 from mindroom.cancellation import USER_STOP_CANCEL_MSG
 from mindroom.config.main import Config
+from mindroom.handled_turns import TurnRecord
 from mindroom.logging_config import setup_logging
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
@@ -57,6 +58,21 @@ def _stop_test_agent_user(config: Config) -> AgentMatrixUser:
     )
 
 
+def _record_pending_response(bot: AgentBot, message_id: str, target: MessageTarget) -> None:
+    """Mirror the durable response intent that owns every real stop button."""
+    bot._turn_store.record_pending_turn(
+        TurnRecord.create(
+            [f"{message_id}-source"],
+            response_event_id=message_id,
+            completed=False,
+            response_owner=bot.agent_name,
+            requester_id="@user:example.com",
+            conversation_target=target,
+        ),
+    )
+    bot._delivery_gateway.finalize_user_stopped_response = AsyncMock(return_value=True)
+
+
 @pytest.mark.asyncio
 async def test_stop_emoji_only_stops_during_generation(tmp_path: Path) -> None:
     """Test that 🛑 reaction only acts as stop button during message generation."""
@@ -75,7 +91,6 @@ async def test_stop_emoji_only_stops_during_generation(tmp_path: Path) -> None:
     bot.client = AsyncMock(spec=nio.AsyncClient)
     bot.client.user_id = agent_user.user_id
     bot.logger = MagicMock()
-    bot.stop_manager = StopManager()
     send_response = AsyncMock(return_value="$stopping:example.com")
     install_send_response_mock(bot, send_response)
 
@@ -117,11 +132,13 @@ async def test_stop_emoji_only_stops_during_generation(tmp_path: Path) -> None:
         # Track a message as being generated
         task = MagicMock()  # Use MagicMock instead of AsyncMock for the task
         task.done = MagicMock(return_value=False)  # done() is a regular method, not async
+        target = MessageTarget.resolve("!test:example.com", None, "$message:example.com")
         bot.stop_manager.set_current(
             message_id="$message:example.com",
-            target=MessageTarget.resolve("!test:example.com", None, "$message:example.com"),
+            target=target,
             task=task,
         )
+        _record_pending_response(bot, "$message:example.com", target)
 
         # Process the same reaction again
         await bot._on_reaction(room, reaction_event)
@@ -151,7 +168,6 @@ async def test_stop_emoji_hard_cancels_and_schedules_agno_cleanup_when_run_id_pr
     bot.client = AsyncMock(spec=nio.AsyncClient)
     bot.client.user_id = agent_user.user_id
     bot.logger = MagicMock()
-    bot.stop_manager = StopManager()
     send_response = AsyncMock(return_value="$stopping:example.com")
     install_send_response_mock(bot, send_response)
 
@@ -175,12 +191,14 @@ async def test_stop_emoji_hard_cancels_and_schedules_agno_cleanup_when_run_id_pr
 
     task = MagicMock()
     task.done = MagicMock(return_value=False)
+    target = MessageTarget.resolve("!test:example.com", None, "$message:example.com")
     bot.stop_manager.set_current(
         message_id="$message:example.com",
-        target=MessageTarget.resolve("!test:example.com", None, "$message:example.com"),
+        target=target,
         task=task,
         run_id="run-123",
     )
+    _record_pending_response(bot, "$message:example.com", target)
 
     with patch.object(bot.stop_manager, "_schedule_graceful_run_cancel") as mock_schedule_cancel:
         await bot._on_reaction(room, reaction_event)
@@ -207,7 +225,6 @@ async def test_stop_emoji_threaded_target_sends_no_acknowledgement(tmp_path: Pat
     bot.client = AsyncMock(spec=nio.AsyncClient)
     bot.client.user_id = agent_user.user_id
     bot.logger = MagicMock()
-    bot.stop_manager = StopManager()
     send_response = AsyncMock(return_value="$stopping:example.com")
     install_send_response_mock(bot, send_response)
 
@@ -231,12 +248,14 @@ async def test_stop_emoji_threaded_target_sends_no_acknowledgement(tmp_path: Pat
 
     task = MagicMock()
     task.done = MagicMock(return_value=False)
+    target = MessageTarget.resolve("!test:example.com", "$thread:example.com", "$message:example.com")
     bot.stop_manager.set_current(
         message_id="$message:example.com",
-        target=MessageTarget.resolve("!test:example.com", "$thread:example.com", "$message:example.com"),
+        target=target,
         task=task,
         run_id="run-123",
     )
+    _record_pending_response(bot, "$message:example.com", target)
 
     with patch.object(bot.stop_manager, "_schedule_graceful_run_cancel") as mock_schedule_cancel:
         await bot._on_reaction(room, reaction_event)
@@ -657,7 +676,6 @@ async def test_stop_emoji_from_agent_falls_through(tmp_path: Path) -> None:
     bot.client = AsyncMock(spec=nio.AsyncClient)
     bot.client.user_id = agent_user.user_id
     bot.logger = MagicMock()
-    bot.stop_manager = StopManager()
 
     room = nio.MatrixRoom(room_id="!test:localhost", own_user_id=agent_user.user_id)
 
@@ -732,7 +750,6 @@ async def test_stop_reaction_blocked_by_reply_permissions(tmp_path: Path) -> Non
     bot.client = AsyncMock(spec=nio.AsyncClient)
     bot.client.user_id = agent_user.user_id
     bot.logger = MagicMock()
-    bot.stop_manager = StopManager()
 
     room = nio.MatrixRoom(room_id="!test:example.com", own_user_id=agent_user.user_id)
 

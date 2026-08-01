@@ -71,7 +71,7 @@ from mindroom.dispatch_source import (
 )
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.error_handling import get_user_friendly_error_message
-from mindroom.handled_turns import TurnRecord
+from mindroom.handled_turns import SourceEventRevision, TurnRecord
 from mindroom.hooks import MessageEnvelope, build_hook_matrix_admin, hook_ingress_policy
 from mindroom.inbound_turn_normalizer import (
     DispatchPayloadWithAttachmentsRequest,
@@ -1690,6 +1690,60 @@ class TurnController:
             interactive.restore_selection(selection)
             raise
 
+    async def finalize_user_stop(
+        self,
+        response_event_id: str,
+        stop_revision: SourceEventRevision,
+    ) -> bool:
+        """Make one user-stop intent terminal independently of runtime recovery order."""
+        turn_record = self.deps.turn_store.turn_record_for_response_event_id(response_event_id)
+        if turn_record is None:
+            msg = f"User-stopped response {response_event_id!r} has no durable turn owner"
+            raise RuntimeError(msg)
+        target = turn_record.conversation_target
+        if target is None:
+            msg = f"User-stopped response {response_event_id!r} has no durable conversation target"
+            raise RuntimeError(msg)
+
+        async def finalize() -> bool:
+            current = self.deps.turn_store.turn_record_for_response_event_id(response_event_id)
+            if current is None:
+                msg = f"User-stopped response {response_event_id!r} lost its durable turn owner"
+                raise RuntimeError(msg)
+            if current.user_stop_cutoff_revision is not None and current.user_stop_cutoff_revision >= stop_revision:
+                return await asyncio.to_thread(
+                    lambda: all(
+                        self.deps.turn_store.is_durably_handled(event_id) for event_id in current.source_event_ids
+                    ),
+                )
+            if not current.completed and not await self.deps.delivery_gateway.finalize_user_stopped_response(
+                target,
+                response_event_id,
+            ):
+                msg = f"Failed to finalize user-stopped response {response_event_id!r}"
+                raise RuntimeError(msg)
+            stopped = await asyncio.to_thread(
+                self.deps.turn_store.record_user_stopped_response,
+                response_event_id,
+                stop_revision,
+            )
+            return (
+                stopped is not None
+                and stopped.completed
+                and stopped.user_stop_cutoff_revision is not None
+                and stopped.user_stop_cutoff_revision >= stop_revision
+            )
+
+        stopped = await self.deps.response_runner.finalize_user_stop(
+            response_event_id,
+            target,
+            finalize,
+        )
+        if not stopped:
+            msg = f"User-stopped response {response_event_id!r} did not become durable"
+            raise RuntimeError(msg)
+        return True
+
     async def _execute_interactive_selection(
         self,
         room: nio.MatrixRoom,
@@ -1825,11 +1879,12 @@ class TurnController:
             ),
         )
 
-        record_interrupted_turn, record_deferred_outcome = self._build_response_settlement_callbacks(
+        record_interrupted_turn, record_deferred_outcome, record_user_stop = self._build_response_settlement_callbacks(
             room,
             source_event_id=source_event_id,
             handled_turn=selection_handled_turn,
         )
+
         response_event_id = await self.deps.response_runner.generate_response(
             ResponseRequest(
                 prompt=selection_payload.prompt,
@@ -1841,12 +1896,14 @@ class TurnController:
                 attachment_ids=selection_attachment_ids or None,
                 response_envelope=response_envelope,
                 matrix_run_metadata=selection_matrix_run_metadata,
-                prepare_source_turn=lambda: self.deps.turn_store.prepare_response_for_redactions(
+                prepare_source_turn=lambda: self.deps.turn_store.prepare_pending_response_source(
                     target=response_target,
                     source_event_ids=selection_handled_turn.indexed_event_ids,
+                    terminal_source_event_ids=selection_handled_turn.source_event_ids,
                 ),
                 on_interrupted_response_recoverable=record_interrupted_turn,
                 on_deferred_outcome_handled=record_deferred_outcome,
+                on_user_stop_handled=record_user_stop,
             ),
         )
         if response_event_id is not None:
@@ -2159,7 +2216,7 @@ class TurnController:
         *,
         source_event_id: str,
         handled_turn: TurnRecord,
-    ) -> tuple[Callable[[], None], Callable[[str], None]]:
+    ) -> tuple[Callable[[], None], Callable[[str], None], Callable[[str], None]]:
         """Build callbacks for interrupted-turn recording and deferred handled recording."""
 
         def record_interrupted_turn() -> None:
@@ -2168,7 +2225,12 @@ class TurnController:
         def record_deferred_outcome(response_event_id: str) -> None:
             self._mark_source_events_responded(replace(handled_turn, response_event_id=response_event_id))
 
-        return record_interrupted_turn, record_deferred_outcome
+        def record_user_stop(response_event_id: str) -> None:
+            self.deps.turn_store.record_turn_durably(
+                replace(handled_turn, response_event_id=response_event_id),
+            )
+
+        return record_interrupted_turn, record_deferred_outcome, record_user_stop
 
     async def _execute_response_action(  # noqa: C901, PLR0912, PLR0915
         self,
@@ -2273,11 +2335,14 @@ class TurnController:
                         self.deps.runtime_paths,
                     )
 
-            record_interrupted_turn, record_deferred_outcome = self._build_response_settlement_callbacks(
-                room,
-                source_event_id=event.event_id,
-                handled_turn=handled_turn,
+            record_interrupted_turn, record_deferred_outcome, record_user_stop = (
+                self._build_response_settlement_callbacks(
+                    room,
+                    source_event_id=event.event_id,
+                    handled_turn=handled_turn,
+                )
             )
+
             recovered_response_event_id = (
                 await self._recovered_response_event_id(
                     handled_turn,
@@ -2315,13 +2380,15 @@ class TurnController:
                             pipeline_timing=dispatch_timing,
                             queued_notice_reservation=queued_notice_reservation,
                             on_lifecycle_lock_acquired=on_lifecycle_lock_acquired,
-                            prepare_source_turn=lambda: self.deps.turn_store.prepare_response_for_redactions(
+                            prepare_source_turn=lambda: self.deps.turn_store.prepare_pending_response_source(
                                 target=dispatch.target,
                                 source_event_ids=handled_turn.indexed_event_ids,
+                                terminal_source_event_ids=handled_turn.source_event_ids,
                             ),
                             on_source_turn_suppressed=settle_redacted_sources,
                             on_interrupted_response_recoverable=record_interrupted_turn,
                             on_deferred_outcome_handled=record_deferred_outcome,
+                            on_user_stop_handled=record_user_stop,
                             on_visible_response=record_visible_response,
                         ),
                         team_agents=action.form_team.eligible_members,
@@ -2346,13 +2413,15 @@ class TurnController:
                             pipeline_timing=dispatch_timing,
                             queued_notice_reservation=queued_notice_reservation,
                             on_lifecycle_lock_acquired=on_lifecycle_lock_acquired,
-                            prepare_source_turn=lambda: self.deps.turn_store.prepare_response_for_redactions(
+                            prepare_source_turn=lambda: self.deps.turn_store.prepare_pending_response_source(
                                 target=dispatch.target,
                                 source_event_ids=handled_turn.indexed_event_ids,
+                                terminal_source_event_ids=handled_turn.source_event_ids,
                             ),
                             on_source_turn_suppressed=settle_redacted_sources,
                             on_interrupted_response_recoverable=record_interrupted_turn,
                             on_deferred_outcome_handled=record_deferred_outcome,
+                            on_user_stop_handled=record_user_stop,
                             on_visible_response=record_visible_response,
                         ),
                     )

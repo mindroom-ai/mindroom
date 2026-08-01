@@ -837,6 +837,18 @@ class DeliveryGateway:
             extra_content=extra_content,
         )
 
+    async def finalize_user_stopped_response(self, target: MessageTarget, event_id: str) -> bool:
+        """Edit a recovered in-flight response into its terminal user-stop state."""
+        cancelled_text, stream_status = build_cancelled_response_update("", cancel_source="user_stop")
+        return await self.edit_text(
+            EditTextRequest(
+                target=target,
+                event_id=event_id,
+                new_text=cancelled_text,
+                extra_content={constants.STREAM_STATUS_KEY: stream_status},
+            ),
+        )
+
     async def send_compaction_lifecycle_start(
         self,
         *,

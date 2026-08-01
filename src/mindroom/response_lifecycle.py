@@ -305,6 +305,33 @@ class ResponseLifecycleCoordinator:
             )
             queued_signal.finish_response_turn()
 
+    async def run_locked_target_operation(
+        self,
+        *,
+        target: MessageTarget,
+        while_waiting: Callable[[], Awaitable[None]],
+        locked_operation: Callable[[], Awaitable[_LockedResponseResult]],
+    ) -> _LockedResponseResult:
+        """Run a non-response operation under one target's response lock."""
+        lifecycle_lock = self._response_lifecycle_lock(target)
+        acquire_task = asyncio.create_task(lifecycle_lock.acquire())
+        lock_acquired = False
+        try:
+            while not acquire_task.done():
+                await while_waiting()
+                await asyncio.wait({acquire_task}, timeout=0.01)
+            await acquire_task
+            lock_acquired = True
+            return await locked_operation()
+        finally:
+            if not acquire_task.done():
+                acquire_task.cancel()
+                await asyncio.gather(acquire_task, return_exceptions=True)
+            elif not lock_acquired and not acquire_task.cancelled() and acquire_task.exception() is None:
+                lifecycle_lock.release()
+            if lock_acquired:
+                lifecycle_lock.release()
+
 
 @dataclass(frozen=True)
 class _SessionStartedWatch:

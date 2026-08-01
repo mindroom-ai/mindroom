@@ -162,6 +162,67 @@ def test_only_terminal_turn_notifies_exact_indexed_event_ids(tmp_path: Path) -> 
     assert notifications == [("$source", "$alias")]
 
 
+def test_user_stop_durably_terminates_the_turn_that_owns_the_response(tmp_path: Path) -> None:
+    """A user stop must become durable turn truth before dispatch settles it."""
+    notifications: list[tuple[str, ...]] = []
+    store = _store(tmp_path, on_terminal_turn_persisted=notifications.append)
+    target = MessageTarget.resolve("!room:example.org", None, "$source")
+    pending = TurnRecord.create(
+        ["$source"],
+        response_event_id="$reply",
+        completed=False,
+        response_owner="agent",
+        requester_id="@user:example.org",
+        conversation_target=target,
+    )
+    store.record_pending_turn(pending)
+
+    stop_revision = (2, "$stop")
+    stopped = store.record_user_stopped_response("$reply", stop_revision)
+
+    assert stopped is not None
+    assert stopped.completed is True
+    assert stopped.user_stop_cutoff_revision == stop_revision
+    assert store.is_durably_handled("$source") is True
+    assert notifications == [("$source",)]
+    assert store.record_user_stopped_response("$reply", stop_revision) == stopped
+    assert notifications == [("$source",)]
+
+
+def test_locked_pending_response_preparation_suppresses_a_concurrent_user_stop(tmp_path: Path) -> None:
+    """A response queued before STOP must recheck terminal truth after taking its lock."""
+    store = _store(tmp_path)
+    target = MessageTarget.resolve("!room:example.org", None, "$source")
+    pending = TurnRecord.create(
+        ["$source"],
+        response_event_id="$reply",
+        completed=False,
+        response_owner="agent",
+        requester_id="@user:example.org",
+        conversation_target=target,
+    )
+    store.record_pending_turn(pending)
+    assert (
+        store.prepare_pending_response_source(
+            target=target,
+            source_event_ids=("$source",),
+            terminal_source_event_ids=("$source",),
+        )
+        is False
+    )
+
+    store.record_user_stopped_response("$reply", (2, "$stop"))
+
+    assert (
+        store.prepare_pending_response_source(
+            target=target,
+            source_event_ids=("$source",),
+            terminal_source_event_ids=("$source",),
+        )
+        is True
+    )
+
+
 def test_pending_delivery_intent_does_not_require_model_history_scope(tmp_path: Path) -> None:
     """Response ownership and target distinguish delivery intent from a raw visible echo."""
     store = _store(tmp_path)

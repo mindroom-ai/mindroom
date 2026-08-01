@@ -537,6 +537,24 @@ def test_source_event_revisions_persist_across_restart_and_run_recovery(temp_dir
     assert recovered.requester_id == "@user:example.com"
 
 
+def test_user_stop_cutoff_revision_persists_across_restart(temp_dir: Path) -> None:
+    """A durable STOP cutoff must survive independently of recoverable run metadata."""
+    stop_revision = (1_000_030, "$stop")
+    tracker = HandledTurnLedger("test_user_stop_cutoff", base_path=temp_dir)
+    tracker.record_handled_turn(
+        TurnRecord.create(
+            ["$source"],
+            response_event_id="$response",
+            user_stop_cutoff_revision=stop_revision,
+        ),
+    )
+
+    recovered = _reload_ledger("test_user_stop_cutoff", temp_dir).get_turn_record("$source")
+
+    assert recovered is not None
+    assert recovered.user_stop_cutoff_revision == stop_revision
+
+
 def test_suppressed_source_event_revisions_persist_across_restart(temp_dir: Path) -> None:
     """Hook suppression must survive Matrix replay through the durable ledger."""
     suppressed_revisions = {"$source": (1_000_010, "$edit")}

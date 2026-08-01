@@ -22,12 +22,14 @@ from mindroom.approval_manager import (
 from mindroom.bot import AgentBot
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.dispatch_obligations import DispatchCallbackKind, DispatchSemanticConsumer
+from mindroom.handled_turns import TurnRecord
 from mindroom.hooks import (
     EVENT_REACTION_RECEIVED,
     HookRegistry,
     ReactionReceivedContext,
     hook,
 )
+from mindroom.message_target import MessageTarget
 from mindroom.tool_approval import ApprovalActionResult, MatrixApprovalAction, _shutdown_approval_store
 from tests.bot_helpers import (
     AgentBotTestBase,
@@ -1131,9 +1133,18 @@ class TestAgentBot(AgentBotTestBase):
         runtime_paths = runtime_paths_for(config)
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
         bot.client = make_matrix_client_mock()
-        bot.stop_manager.can_handle_stop_reaction = MagicMock(return_value=True)
+        target = MessageTarget.resolve("!test:localhost", None, "$source")
+        pending_turn = TurnRecord.create(
+            ["$source"],
+            response_event_id="$response",
+            completed=False,
+            response_owner=bot.agent_name,
+            requester_id="@user:localhost",
+            conversation_target=target,
+        )
+        bot._turn_store.record_pending_turn(pending_turn)
         failure = RuntimeError("crash after stop reaction side effect")
-        bot.stop_manager.handle_stop_reaction = AsyncMock(side_effect=failure)
+        bot._turn_controller.finalize_user_stop = AsyncMock(side_effect=failure)
         room = nio.MatrixRoom("!test:localhost", bot.matrix_id.full_id)
         event = _reaction_event("🛑", "$stop-reaction")
 
@@ -1144,13 +1155,215 @@ class TestAgentBot(AgentBotTestBase):
 
         restarted = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
         restarted.client = make_matrix_client_mock()
-        restarted.stop_manager.handle_stop_reaction = AsyncMock(return_value=False)
         restarted._emit_reaction_received_hooks = AsyncMock()
 
+        with patch(
+            "mindroom.delivery_gateway.DeliveryGateway.finalize_user_stopped_response",
+            new=AsyncMock(return_value=True),
+        ) as finalize_stopped_response:
+            await restarted._dispatch_obligation_runner.recover_pending(turn_backed=False)
+
+        finalize_stopped_response.assert_awaited_once_with(target, "$response")
+        restarted._emit_reaction_received_hooks.assert_not_awaited()
+        assert restarted._turn_store.is_durably_handled("$source") is True
+        stopped_record = restarted._turn_store.get_turn_record("$source")
+        assert stopped_record is not None
+        assert stopped_record.user_stop_cutoff_revision == (1, "$stop-reaction")
+        assert restarted._dispatch_obligation_store.pending() == ()
+
+    @pytest.mark.asyncio
+    async def test_interrupted_stop_claim_suppresses_preceding_edit_after_restart(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """A STOP claimed before cancellation must durably cover earlier edits."""
+        config = self._config_for_storage(tmp_path)
+        runtime_paths = runtime_paths_for(config)
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
+        bot.client = make_matrix_client_mock()
+        target = MessageTarget.resolve("!test:localhost", None, "$source")
+        bot._turn_store.record_turn(
+            TurnRecord.create(
+                ["$source"],
+                response_event_id="$response",
+                response_owner=bot.agent_name,
+                requester_id="@user:localhost",
+                conversation_target=target,
+            ),
+        )
+        bot.stop_manager.can_handle_stop_reaction = MagicMock(return_value=True)
+        bot._turn_controller.finalize_user_stop = AsyncMock(
+            side_effect=RuntimeError("crash after stop claim"),
+        )
+        room = nio.MatrixRoom("!test:localhost", bot.matrix_id.full_id)
+        event = _reaction_event("🛑", "$stop-reaction")
+
+        with pytest.raises(RuntimeError, match="crash after stop claim"):
+            await bot._dispatch_obligation_runner.dispatch(room, event, DispatchCallbackKind.REACTION)
+        await _cancel_dispatch_retry(bot)
+
+        restarted = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
+        restarted.client = make_matrix_client_mock()
+        restarted._emit_reaction_received_hooks = AsyncMock()
         await restarted._dispatch_obligation_runner.recover_pending(turn_backed=False)
 
-        restarted.stop_manager.handle_stop_reaction.assert_awaited_once_with("$response")
+        stopped_record = restarted._turn_store.get_turn_record("$source")
+        assert stopped_record is not None
+        assert stopped_record.user_stop_cutoff_revision == (1, "$stop-reaction")
         restarted._emit_reaction_received_hooks.assert_not_awaited()
+        assert restarted._dispatch_obligation_store.pending() == ()
+
+    @pytest.mark.asyncio
+    async def test_interrupted_config_reaction_replays_only_its_durable_consumer(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """A config reaction claimed before a crash must not reach another consumer."""
+        config = self._config_for_storage(tmp_path)
+        runtime_paths = runtime_paths_for(config)
+        router_user = replace(
+            mock_agent_user,
+            agent_name=ROUTER_AGENT_NAME,
+            user_id="@mindroom_router:localhost",
+            display_name="RouterAgent",
+        )
+        bot = AgentBot(router_user, tmp_path, config=config, runtime_paths=runtime_paths)
+        bot.client = make_matrix_client_mock()
+        room = nio.MatrixRoom("!test:localhost", bot.matrix_id.full_id)
+        event = _reaction_event("✅", "$config-reaction")
+        pending_change = MagicMock(decision_event_id="$decision")
+        failure = RuntimeError("crash after config reaction claim")
+
+        with (
+            patch(
+                "mindroom.bot.config_confirmation.resolve_reaction_pending_change",
+                new=AsyncMock(return_value=pending_change),
+            ),
+            patch(
+                "mindroom.bot.config_confirmation.resume_committed_confirmation",
+                new=AsyncMock(side_effect=failure),
+            ),
+            pytest.raises(RuntimeError, match="crash after config reaction claim"),
+        ):
+            await bot._dispatch_obligation_runner.dispatch(room, event, DispatchCallbackKind.REACTION)
+        await _cancel_dispatch_retry(bot)
+        assert (
+            bot._dispatch_obligation_store.pending()[0].semantic_consumer
+            is DispatchSemanticConsumer.CONFIG_CONFIRMATION
+        )
+
+        restarted = AgentBot(router_user, tmp_path, config=config, runtime_paths=runtime_paths)
+        restarted.client = make_matrix_client_mock()
+        restarted._emit_reaction_received_hooks = AsyncMock()
+        with patch(
+            "mindroom.bot.config_confirmation.resolve_reaction_pending_change",
+            new=AsyncMock(return_value=None),
+        ) as resolve_pending:
+            await restarted._dispatch_obligation_runner.recover_pending(turn_backed=False)
+
+        resolve_pending.assert_awaited_once()
+        restarted._emit_reaction_received_hooks.assert_not_awaited()
+        assert restarted._dispatch_obligation_store.pending() == ()
+
+    @pytest.mark.asyncio
+    async def test_interrupted_interactive_reaction_replays_only_its_durable_consumer(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """An interactive claim must survive a crash before turn handoff completes."""
+        config = self._config_for_storage(tmp_path)
+        runtime_paths = runtime_paths_for(config)
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
+        bot.client = make_matrix_client_mock()
+        room = nio.MatrixRoom("!test:localhost", bot.matrix_id.full_id)
+        event = _reaction_event("👍", "$interactive-reaction")
+        selection = interactive.InteractiveSelection(
+            question_event_id="$question",
+            question_text="Choose",
+            selection_key="👍",
+            selected_label="Chosen",
+            selected_value="chosen",
+            thread_id=None,
+        )
+        failure = RuntimeError("crash after interactive reaction claim")
+
+        with (
+            patch("mindroom.bot.interactive.handle_reaction", new=AsyncMock(return_value=selection)),
+            patch.object(
+                bot._turn_controller,
+                "handle_interactive_selection",
+                new=AsyncMock(side_effect=failure),
+            ),
+            pytest.raises(RuntimeError, match="crash after interactive reaction claim"),
+        ):
+            await bot._dispatch_obligation_runner.dispatch(room, event, DispatchCallbackKind.REACTION)
+        await _cancel_dispatch_retry(bot)
+        assert (
+            bot._dispatch_obligation_store.pending()[0].semantic_consumer
+            is DispatchSemanticConsumer.INTERACTIVE_REACTION
+        )
+
+        restarted = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
+        restarted.client = make_matrix_client_mock()
+        restarted._emit_reaction_received_hooks = AsyncMock()
+        with patch(
+            "mindroom.bot.interactive.handle_reaction",
+            new=AsyncMock(return_value=None),
+        ) as interactive_handler:
+            await restarted._dispatch_obligation_runner.recover_pending(turn_backed=False)
+
+        interactive_handler.assert_awaited_once()
+        restarted._emit_reaction_received_hooks.assert_not_awaited()
+        assert restarted._dispatch_obligation_store.pending() == ()
+
+    @pytest.mark.asyncio
+    async def test_interrupted_hook_reaction_replays_hooks_without_reentering_builtins(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """A claimed generic hook keeps at-least-once delivery without reclassification."""
+        config = self._config_for_storage(tmp_path)
+        runtime_paths = runtime_paths_for(config)
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
+        bot.client = make_matrix_client_mock()
+        room = nio.MatrixRoom("!test:localhost", bot.matrix_id.full_id)
+        event = _reaction_event("👍", "$hook-reaction")
+        emissions: list[str] = []
+
+        async def emit_then_crash(**_kwargs: object) -> None:
+            emissions.append(event.event_id)
+            message = "crash after reaction hook side effect"
+            raise RuntimeError(message)
+
+        bot._emit_reaction_received_hooks = emit_then_crash
+        with (
+            patch("mindroom.bot.interactive.handle_reaction", new=AsyncMock(return_value=None)),
+            pytest.raises(RuntimeError, match="crash after reaction hook side effect"),
+        ):
+            await bot._dispatch_obligation_runner.dispatch(room, event, DispatchCallbackKind.REACTION)
+        await _cancel_dispatch_retry(bot)
+        assert bot._dispatch_obligation_store.pending()[0].semantic_consumer is DispatchSemanticConsumer.REACTION_HOOKS
+
+        restarted = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
+        restarted.client = make_matrix_client_mock()
+
+        async def emit_replay(**_kwargs: object) -> None:
+            emissions.append(event.event_id)
+
+        restarted._emit_reaction_received_hooks = AsyncMock(side_effect=emit_replay)
+        with patch(
+            "mindroom.bot.interactive.handle_reaction",
+            new=AsyncMock(return_value=None),
+        ) as interactive_handler:
+            await restarted._dispatch_obligation_runner.recover_pending(turn_backed=False)
+
+        assert emissions == [event.event_id, event.event_id]
+        interactive_handler.assert_not_awaited()
+        restarted._emit_reaction_received_hooks.assert_awaited_once()
         assert restarted._dispatch_obligation_store.pending() == ()
 
     @pytest.mark.asyncio

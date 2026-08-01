@@ -336,6 +336,7 @@ class ResponseRequest:
     on_interrupted_response_recoverable: Callable[[], None] | None = None
     sync_restart_retry_source_event_id: str | None = None
     on_deferred_outcome_handled: Callable[[str], None] | None = None
+    on_user_stop_handled: Callable[[str], None] | None = None
     on_visible_response: Callable[[str], Awaitable[None]] | None = None
 
     @property
@@ -806,6 +807,26 @@ class ResponseRunner:
         """Wait until one canonical room/thread has no active response turn."""
         await self._lifecycle_coordinator.wait_for_thread_idle(room_id, thread_id)
 
+    async def finalize_user_stop(
+        self,
+        message_id: str,
+        target: MessageTarget,
+        finalize: Callable[[], Awaitable[bool]],
+    ) -> bool:
+        """Cancel the live response, then durably finalize its turn under the same lock."""
+        cancellation_requested = False
+
+        async def cancel_live_response() -> None:
+            nonlocal cancellation_requested
+            if not cancellation_requested:
+                cancellation_requested = await self.deps.stop_manager.handle_stop_reaction(message_id)
+
+        return await self._lifecycle_coordinator.run_locked_target_operation(
+            target=target,
+            while_waiting=cancel_live_response,
+            locked_operation=finalize,
+        )
+
     def reserve_waiting_human_message(
         self,
         *,
@@ -1214,6 +1235,24 @@ class ResponseRunner:
         request.on_interrupted_response_recoverable()
         return True
 
+    async def _record_user_stop_handled(
+        self,
+        request: ResponseRequest,
+        final_outcome: FinalDeliveryOutcome,
+        *,
+        cancel_source: str | None,
+        source_handled: bool,
+    ) -> None:
+        """Make explicit user-stop settlement durable before releasing the response lock."""
+        on_user_stop_handled = request.on_user_stop_handled
+        if not source_handled or cancel_source != "user_stop" or on_user_stop_handled is None:
+            return
+        response_event_id = final_outcome.final_visible_event_id
+        assert response_event_id is not None
+        await _run_locked_source_preparation(
+            lambda: on_user_stop_handled(response_event_id),
+        )
+
     async def _begin_locked_turn(
         self,
         request: ResponseRequest,
@@ -1239,7 +1278,7 @@ class ResponseRunner:
             request.prepare_source_turn,
         ):
             self.deps.logger.info(
-                "response_suppressed_for_redacted_source",
+                "response_suppressed_for_terminal_source",
                 source_event_id=request.response_envelope.source_event_id,
             )
             if request.existing_event_id is not None and request.existing_event_is_placeholder:
@@ -1554,6 +1593,12 @@ class ResponseRunner:
             or cancel_source is None
             or cancel_source == "user_stop"
             or interruption_recovery_registered
+        )
+        await self._record_user_stop_handled(
+            request,
+            final_outcome,
+            cancel_source=cancel_source,
+            source_handled=source_handled,
         )
         if deferred_error is not None:
             if source_handled and request.on_deferred_outcome_handled is not None:

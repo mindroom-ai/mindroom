@@ -447,6 +447,28 @@ async def test_begin_locked_turn_waits_for_cancelled_source_preparation(tmp_path
 
 
 @pytest.mark.asyncio
+async def test_user_stop_cancels_live_response_before_terminalizing_under_its_lock(tmp_path: Path) -> None:
+    """STOP must cancel the lock owner before it records the durable terminal turn."""
+    bot = _bot(tmp_path)
+    runner = unwrap_extracted_collaborator(bot._response_runner)
+    target = _target(thread_id="$thread", reply_to_event_id="$event")
+    lifecycle_lock = runner._lifecycle_coordinator._response_lifecycle_lock(target)
+    await lifecycle_lock.acquire()
+    response_task = asyncio.create_task(asyncio.Event().wait())
+    bot.stop_manager.set_current("$response", target, response_task)
+    finalize = AsyncMock(return_value=True)
+
+    stop_task = asyncio.create_task(runner.finalize_user_stop("$response", target, finalize))
+    await asyncio.gather(response_task, return_exceptions=True)
+
+    finalize.assert_not_awaited()
+    lifecycle_lock.release()
+
+    assert await stop_task is True
+    finalize.assert_awaited_once_with()
+
+
+@pytest.mark.asyncio
 async def test_begin_locked_turn_settles_external_placeholder_when_source_is_redacted(tmp_path: Path) -> None:
     """Suppression must not leave an interactive acknowledgement stuck on Processing."""
     bot = _bot(tmp_path)
@@ -1780,10 +1802,10 @@ async def test_unrecoverable_interruption_remains_unhandled_without_outer_cancel
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("failure_reason", "final_visible_body", "expected_recoveries"),
+    ("failure_reason", "final_visible_body", "expected_recoveries", "expected_user_stops"),
     [
-        ("interrupted", INTERRUPTED_RESPONSE_NOTE, ["recovery"]),
-        ("cancelled_by_user", "partial answer", []),
+        ("interrupted", INTERRUPTED_RESPONSE_NOTE, ["recovery"], []),
+        ("cancelled_by_user", "partial answer", [], ["$response"]),
     ],
 )
 async def test_terminal_interruption_registers_recovery_unless_user_stopped(
@@ -1791,14 +1813,17 @@ async def test_terminal_interruption_registers_recovery_unless_user_stopped(
     failure_reason: str,
     final_visible_body: str,
     expected_recoveries: list[str],
+    expected_user_stops: list[str],
 ) -> None:
     """A visible terminal interruption remains recoverable except after an explicit user stop."""
     bot = _bot(tmp_path)
     coordinator = unwrap_extracted_collaborator(bot._response_runner)
     recoveries: list[str] = []
+    user_stops: list[str] = []
     request = replace(
         _plain_request(_target(thread_id="$thread")),
         on_interrupted_response_recoverable=lambda: recoveries.append("recovery"),
+        on_user_stop_handled=user_stops.append,
     )
     progress = response_runner._DeliveryProgress()
     progress.settle(
@@ -1839,6 +1864,7 @@ async def test_terminal_interruption_registers_recovery_unless_user_stopped(
 
     assert result == "$response"
     assert recoveries == expected_recoveries
+    assert user_stops == expected_user_stops
 
 
 @pytest.mark.asyncio

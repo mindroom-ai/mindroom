@@ -58,6 +58,21 @@ class _Edit:
     suppressed: bool
 
 
+def _edit_remains_active(
+    record: TurnRecord,
+    edit: _Edit,
+    source_event_id: str,
+    suppressed_revisions: dict[str, SourceEventRevision],
+) -> bool:
+    """Update suppression state and reject revisions covered by a durable STOP."""
+    if edit.suppressed:
+        suppressed_revisions[source_event_id] = edit.revision
+        return False
+    suppressed_revisions.pop(source_event_id, None)
+    cutoff = record.user_stop_cutoff_revision
+    return cutoff is None or edit.revision > cutoff
+
+
 @dataclass
 class _Mailbox:
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
@@ -255,10 +270,7 @@ class EditRegenerator:
             revisions[source_event_id] = edit.revision
             applied[source_event_id] = edit.revision
             prompt_map[record.prompt_source_event_id(source_event_id)] = edit.body
-            if edit.suppressed:
-                suppressed_revisions[source_event_id] = edit.revision
-            else:
-                suppressed_revisions.pop(source_event_id, None)
+            if _edit_remains_active(record, edit, source_event_id, suppressed_revisions):
                 active[source_event_id] = edit
                 retrying &= edit.revision == committed
         if not active:
@@ -342,6 +354,11 @@ class EditRegenerator:
                 sync_restart_retry_source_event_id=retry_source_event_id,
                 on_deferred_outcome_handled=lambda response_event_id: (
                     self.deps.turn_store.record_turn(replace(record, response_event_id=response_event_id))
+                    if applied
+                    else None
+                ),
+                on_user_stop_handled=lambda response_event_id: (
+                    self.deps.turn_store.record_turn_durably(replace(record, response_event_id=response_event_id))
                     if applied
                     else None
                 ),
