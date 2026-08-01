@@ -81,7 +81,7 @@ async def _maybe_handle_stop_reaction(
 
     stopped = await bot._turn_controller.finalize_user_stop(
         event.reacts_to,
-        (event.server_timestamp, event.event_id),
+        await bot._dispatch_obligation_runner.receipt_order(),
     )
     if stopped:
         bot.logger.info(

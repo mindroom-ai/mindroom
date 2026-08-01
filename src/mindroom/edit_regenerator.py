@@ -10,6 +10,7 @@ from mindroom.coalescing_batch import coalesced_prompt, tagged_coalesced_prompt
 from mindroom.conversation_resolver import MessageContext
 from mindroom.dispatch_source import EDIT_SOURCE_KIND
 from mindroom.entity_resolution import entity_identity_registry
+from mindroom.handled_turns import with_user_stop
 from mindroom.hooks import hook_ingress_policy
 from mindroom.matrix.client_visible_messages import extract_visible_edit_body
 from mindroom.response_runner import ResponseRequest
@@ -44,6 +45,7 @@ class EditRegeneratorDeps:
     ingress_hook_runner: IngressHookRunner
     generate_response: Callable[[ResponseRequest], Awaitable[str | None]]
     wait_for_turn_settled: Callable[[tuple[str, ...]], Awaitable[None]]
+    receipt_order: Callable[[], Awaitable[int]]
     interrupted_turn_rooms: InterruptedTurnRooms
     timestamp_formatter: Callable[[float | None], str | None]
 
@@ -55,6 +57,7 @@ class _Edit:
     context: MessageContext
     envelope: MessageEnvelope
     revision: SourceEventRevision
+    receipt_order: int
     suppressed: bool
 
 
@@ -69,8 +72,8 @@ def _edit_remains_active(
         suppressed_revisions[source_event_id] = edit.revision
         return False
     suppressed_revisions.pop(source_event_id, None)
-    cutoff = record.user_stop_cutoff_revision
-    return cutoff is None or edit.revision > cutoff
+    cutoff = record.user_stop_receipt_order
+    return cutoff is None or edit.receipt_order > cutoff
 
 
 @dataclass
@@ -177,6 +180,7 @@ class EditRegenerator:
             return
         if original_event_id in turn_record.redacted_source_event_ids:
             return
+        receipt_order = await self.deps.receipt_order()
         revision = (event.server_timestamp, event.event_id)
         committed = (turn_record.source_event_revisions or {}).get(original_event_id)
         if committed is not None and revision < committed:
@@ -225,6 +229,7 @@ class EditRegenerator:
                 context=context,
                 envelope=envelope,
                 revision=revision,
+                receipt_order=receipt_order,
                 suppressed=suppressed,
             )
             async with mailbox.lock:
@@ -344,11 +349,13 @@ class EditRegenerator:
                     turn_record=record,
                     requester_user_id=requester_id,
                 ),
-                prepare_source_turn=lambda: self.deps.turn_store.prepare_response_for_redactions(
+                prepare_source_turn=lambda: self.deps.turn_store.prepare_edit_response_source(
                     target=target,
                     source_event_ids=tuple(
                         dict.fromkeys((*record.replay_source_event_ids, driving_edit.original_event_id)),
                     ),
+                    response_event_id=record.response_event_id,
+                    edit_receipt_order=driving_edit.receipt_order,
                 ),
                 on_interrupted_response_recoverable=record_interrupted_turn,
                 sync_restart_retry_source_event_id=retry_source_event_id,
@@ -357,8 +364,15 @@ class EditRegenerator:
                     if applied
                     else None
                 ),
-                on_user_stop_handled=lambda response_event_id: (
-                    self.deps.turn_store.record_turn_durably(replace(record, response_event_id=response_event_id))
+                on_user_stop_handled=lambda response_event_id, stop_receipt_order: (
+                    self.deps.turn_store.record_turn_durably(
+                        with_user_stop(
+                            record,
+                            response_event_id,
+                            stop_receipt_order,
+                            delivery_settled=True,
+                        ),
+                    )
                     if applied
                     else None
                 ),

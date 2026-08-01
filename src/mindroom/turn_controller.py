@@ -71,7 +71,7 @@ from mindroom.dispatch_source import (
 )
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.error_handling import get_user_friendly_error_message
-from mindroom.handled_turns import SourceEventRevision, TurnRecord
+from mindroom.handled_turns import TurnRecord, with_user_stop
 from mindroom.hooks import MessageEnvelope, build_hook_matrix_admin, hook_ingress_policy
 from mindroom.inbound_turn_normalizer import (
     DispatchPayloadWithAttachmentsRequest,
@@ -1693,7 +1693,7 @@ class TurnController:
     async def finalize_user_stop(
         self,
         response_event_id: str,
-        stop_revision: SourceEventRevision,
+        stop_receipt_order: int,
     ) -> bool:
         """Make one user-stop intent terminal independently of runtime recovery order."""
         turn_record = self.deps.turn_store.turn_record_for_response_event_id(response_event_id)
@@ -1706,37 +1706,44 @@ class TurnController:
             raise RuntimeError(msg)
 
         async def finalize() -> bool:
-            current = self.deps.turn_store.turn_record_for_response_event_id(response_event_id)
-            if current is None:
-                msg = f"User-stopped response {response_event_id!r} lost its durable turn owner"
-                raise RuntimeError(msg)
-            if current.user_stop_cutoff_revision is not None and current.user_stop_cutoff_revision >= stop_revision:
-                return await asyncio.to_thread(
-                    lambda: all(
-                        self.deps.turn_store.is_durably_handled(event_id) for event_id in current.source_event_ids
-                    ),
-                )
-            if not await self.deps.delivery_gateway.finalize_user_stopped_response(
-                target,
-                response_event_id,
-            ):
-                msg = f"Failed to finalize user-stopped response {response_event_id!r}"
-                raise RuntimeError(msg)
             stopped = await asyncio.to_thread(
                 self.deps.turn_store.record_user_stopped_response,
                 response_event_id,
-                stop_revision,
+                stop_receipt_order,
             )
-            return (
-                stopped is not None
-                and stopped.completed
-                and stopped.user_stop_cutoff_revision is not None
-                and stopped.user_stop_cutoff_revision >= stop_revision
-            )
+            if (
+                stopped is None
+                or not stopped.completed
+                or stopped.user_stop_receipt_order is None
+                or stopped.user_stop_receipt_order < stop_receipt_order
+            ):
+                return False
+            settled_receipt_order = stopped.user_stop_settled_receipt_order
+            if settled_receipt_order is None or settled_receipt_order < stop_receipt_order:
+                if not await self.deps.delivery_gateway.finalize_user_stopped_response(
+                    target,
+                    response_event_id,
+                ):
+                    msg = f"Failed to finalize user-stopped response {response_event_id!r}"
+                    raise RuntimeError(msg)
+                stopped = await asyncio.to_thread(
+                    self.deps.turn_store.record_user_stopped_response,
+                    response_event_id,
+                    stop_receipt_order,
+                    delivery_settled=True,
+                )
+                if (
+                    stopped is None
+                    or stopped.user_stop_settled_receipt_order is None
+                    or stopped.user_stop_settled_receipt_order < stop_receipt_order
+                ):
+                    return False
+            return True
 
         stopped = await self.deps.response_runner.finalize_user_stop(
             response_event_id,
             target,
+            stop_receipt_order,
             finalize,
         )
         if not stopped:
@@ -2216,7 +2223,7 @@ class TurnController:
         *,
         source_event_id: str,
         handled_turn: TurnRecord,
-    ) -> tuple[Callable[[], None], Callable[[str], None], Callable[[str], None]]:
+    ) -> tuple[Callable[[], None], Callable[[str], None], Callable[[str, int], None]]:
         """Build callbacks for interrupted-turn recording and deferred handled recording."""
 
         def record_interrupted_turn() -> None:
@@ -2225,9 +2232,14 @@ class TurnController:
         def record_deferred_outcome(response_event_id: str) -> None:
             self._mark_source_events_responded(replace(handled_turn, response_event_id=response_event_id))
 
-        def record_user_stop(response_event_id: str) -> None:
+        def record_user_stop(response_event_id: str, stop_receipt_order: int) -> None:
             self.deps.turn_store.record_turn_durably(
-                replace(handled_turn, response_event_id=response_event_id),
+                with_user_stop(
+                    handled_turn,
+                    response_event_id,
+                    stop_receipt_order,
+                    delivery_settled=True,
+                ),
             )
 
         return record_interrupted_turn, record_deferred_outcome, record_user_stop

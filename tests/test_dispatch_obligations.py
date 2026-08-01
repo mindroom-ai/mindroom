@@ -130,6 +130,24 @@ def test_store_operations_do_not_repeat_tracking_directory_creation(tmp_path: Pa
     mkdir.assert_not_called()
 
 
+def test_receipt_order_is_durable_across_callback_kinds_and_settlement(tmp_path: Path) -> None:
+    """STOP/edit ordering must use admission order, never opaque Matrix event IDs."""
+    store = _store(tmp_path)
+    edit = _message_obligation("$z-edit")
+    stop = _reaction_obligation("$a-stop")
+
+    store._create_pending(edit)
+    store._create_pending(stop)
+    edit_order = store._receipt_order(edit.key)
+    stop_order = store._receipt_order(stop.key)
+    store.settle(edit.key, _DispatchTerminalOutcome.SUCCEEDED)
+    restarted = _store(tmp_path)
+
+    assert edit_order < stop_order
+    assert restarted._receipt_order(edit.key) == edit_order
+    assert restarted._receipt_order(stop.key) == stop_order
+
+
 @pytest.mark.parametrize("source_kind", [IMAGE_SOURCE_KIND, MEDIA_SOURCE_KIND, VOICE_SOURCE_KIND])
 def test_media_source_kinds_map_to_media_dispatch(source_kind: str) -> None:
     """Coalescing retries must use the callback kind owned by dispatch obligations."""

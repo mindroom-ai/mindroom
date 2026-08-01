@@ -458,7 +458,7 @@ async def test_user_stop_cancels_live_response_before_terminalizing_under_its_lo
     bot.stop_manager.set_current("$response", target, response_task)
     finalize = AsyncMock(return_value=True)
 
-    stop_task = asyncio.create_task(runner.finalize_user_stop("$response", target, finalize))
+    stop_task = asyncio.create_task(runner.finalize_user_stop("$response", target, 7, finalize))
     await asyncio.gather(response_task, return_exceptions=True)
 
     finalize.assert_not_awaited()
@@ -1805,7 +1805,7 @@ async def test_unrecoverable_interruption_remains_unhandled_without_outer_cancel
     ("failure_reason", "final_visible_body", "expected_recoveries", "expected_user_stops"),
     [
         ("interrupted", INTERRUPTED_RESPONSE_NOTE, ["recovery"], []),
-        ("cancelled_by_user", "partial answer", [], ["$response"]),
+        ("cancelled_by_user", "partial answer", [], [("$response", 7)]),
     ],
 )
 async def test_terminal_interruption_registers_recovery_unless_user_stopped(
@@ -1813,17 +1813,18 @@ async def test_terminal_interruption_registers_recovery_unless_user_stopped(
     failure_reason: str,
     final_visible_body: str,
     expected_recoveries: list[str],
-    expected_user_stops: list[str],
+    expected_user_stops: list[tuple[str, int]],
 ) -> None:
     """A visible terminal interruption remains recoverable except after an explicit user stop."""
     bot = _bot(tmp_path)
     coordinator = unwrap_extracted_collaborator(bot._response_runner)
     recoveries: list[str] = []
-    user_stops: list[str] = []
+    user_stops: list[tuple[str, int]] = []
+    coordinator._user_stop_receipt_orders["$response"] = 7
     request = replace(
         _plain_request(_target(thread_id="$thread")),
         on_interrupted_response_recoverable=lambda: recoveries.append("recovery"),
-        on_user_stop_handled=user_stops.append,
+        on_user_stop_handled=lambda event_id, receipt_order: user_stops.append((event_id, receipt_order)),
     )
     progress = response_runner._DeliveryProgress()
     progress.settle(

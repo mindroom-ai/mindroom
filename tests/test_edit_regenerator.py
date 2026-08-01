@@ -157,7 +157,7 @@ def _edit_event(
     return event, EventInfo.from_event(source)
 
 
-def _harness(tmp_path: Path, *, turn_record: TurnRecord | None) -> _Harness:
+def _harness(tmp_path: Path, *, turn_record: TurnRecord | None, receipt_order: int = 1) -> _Harness:
     runtime_paths = resolve_runtime_paths(
         config_path=tmp_path / "config.yaml",
         storage_path=tmp_path,
@@ -191,7 +191,7 @@ def _harness(tmp_path: Path, *, turn_record: TurnRecord | None) -> _Harness:
     turn_store.record_turn.side_effect = record_turn
     turn_store.record_turn_durably.side_effect = record_turn
     turn_store.build_run_metadata.return_value = dict(RUN_METADATA)
-    turn_store.prepare_response_for_redactions.return_value = False
+    turn_store.prepare_edit_response_source.return_value = False
 
     ingress_hook_runner = MagicMock(spec=IngressHookRunner)
     ingress_hook_runner.emit_message_received_hooks.return_value = False
@@ -216,6 +216,7 @@ def _harness(tmp_path: Path, *, turn_record: TurnRecord | None) -> _Harness:
             ingress_hook_runner=ingress_hook_runner,
             generate_response=run_locked_response,
             wait_for_turn_settled=wait_for_turn_settled,
+            receipt_order=AsyncMock(return_value=receipt_order),
             interrupted_turn_rooms=interrupted_turn_rooms,
             timestamp_formatter=lambda timestamp_ms: format_timestamp_ms(timestamp_ms, timezone=config.timezone),
         ),
@@ -1048,9 +1049,11 @@ async def test_coalesced_sibling_edit_excludes_redacted_source_prompt(tmp_path: 
     assert "REDACTED_SECRET" not in request.prompt
     assert request.prepare_source_turn is not None
     assert request.prepare_source_turn() is False
-    harness.turn_store.prepare_response_for_redactions.assert_called_once_with(
+    harness.turn_store.prepare_edit_response_source.assert_called_once_with(
         target=record.conversation_target,
         source_event_ids=(second_event_id,),
+        response_event_id=record.response_event_id,
+        edit_receipt_order=1,
     )
     handled_turn = harness.turn_store.build_run_metadata.call_args.args[0]
     assert handled_turn.redacted_source_event_ids == (first_event_id,)
@@ -1070,7 +1073,7 @@ async def test_coalesced_edit_rechecks_every_snapshotted_source_under_lock(tmp_p
     harness = _harness(tmp_path, turn_record=record)
     redaction_checks = 0
 
-    def prepare_response_for_redactions(**_kwargs: object) -> bool:
+    def prepare_edit_response_source(**_kwargs: object) -> bool:
         nonlocal redaction_checks
         redaction_checks += 1
         if redaction_checks == 1:
@@ -1084,7 +1087,7 @@ async def test_coalesced_edit_rechecks_every_snapshotted_source_under_lock(tmp_p
         assert request.prepare_source_turn is not None
         return None if request.prepare_source_turn() else NEW_RESPONSE_EVENT_ID
 
-    harness.turn_store.prepare_response_for_redactions.side_effect = prepare_response_for_redactions
+    harness.turn_store.prepare_edit_response_source.side_effect = prepare_edit_response_source
     harness.generate_response.side_effect = generate
     event, event_info = _edit_event(original_event_id=second_event_id, new_body="edited second message")
 
@@ -1100,7 +1103,7 @@ async def test_coalesced_edit_rechecks_every_snapshotted_source_under_lock(tmp_p
             {second_event_id: "edited second message"},
         ),
     ]
-    assert harness.turn_store.prepare_response_for_redactions.call_count == 2
+    assert harness.turn_store.prepare_edit_response_source.call_count == 2
     assert harness.turn_store.record_turn.call_args.args[0].redacted_source_event_ids == (first_event_id,)
 
 
@@ -1128,7 +1131,7 @@ async def test_edit_request_rechecks_redaction_after_acquiring_response_lock(tmp
     """A redaction that wins the lifecycle lock race must suppress stale regeneration."""
     record = _turn_record()
     harness = _harness(tmp_path, turn_record=record)
-    harness.turn_store.prepare_response_for_redactions.return_value = True
+    harness.turn_store.prepare_edit_response_source.return_value = True
     event, event_info = _edit_event()
 
     await _handle_edit(harness, event, event_info)
@@ -1136,9 +1139,11 @@ async def test_edit_request_rechecks_redaction_after_acquiring_response_lock(tmp
     request = harness.generate_response.await_args.args[0]
     assert request.prepare_source_turn is not None
     assert request.prepare_source_turn() is True
-    harness.turn_store.prepare_response_for_redactions.assert_called_once_with(
+    harness.turn_store.prepare_edit_response_source.assert_called_once_with(
         target=record.conversation_target,
         source_event_ids=(ORIGINAL_EVENT_ID,),
+        response_event_id=record.response_event_id,
+        edit_receipt_order=1,
     )
 
 
@@ -1553,7 +1558,7 @@ async def test_user_stop_durably_commits_the_edit_revision_before_generation_ret
 
     async def stop(request: ResponseRequest) -> str:
         assert request.on_user_stop_handled is not None
-        request.on_user_stop_handled(NEW_RESPONSE_EVENT_ID)
+        request.on_user_stop_handled(NEW_RESPONSE_EVENT_ID, 2)
         return NEW_RESPONSE_EVENT_ID
 
     harness.generate_response.side_effect = stop
@@ -1567,6 +1572,8 @@ async def test_user_stop_durably_commits_the_edit_revision_before_generation_ret
     assert stopped_record.source_event_revisions == {
         ORIGINAL_EVENT_ID: (event.server_timestamp, event.event_id),
     }
+    assert stopped_record.user_stop_receipt_order == 2
+    assert stopped_record.user_stop_settled_receipt_order == 2
 
 
 @pytest.mark.asyncio
@@ -1574,13 +1581,14 @@ async def test_durable_user_stop_suppresses_preceding_edit_recovery(tmp_path: Pa
     """An edit accepted before STOP must not regenerate after the process restarts."""
     record = replace(
         _turn_record(),
-        user_stop_cutoff_revision=(1_000_020, "$stop:example.org"),
+        user_stop_receipt_order=2,
+        user_stop_settled_receipt_order=2,
     )
-    harness = _harness(tmp_path, turn_record=record)
+    harness = _harness(tmp_path, turn_record=record, receipt_order=1)
     event, event_info = _edit_event(
         new_body="edit before stop",
-        event_id="$edit-before-stop:example.org",
-        server_timestamp=1_000_010,
+        event_id="$z-edit-before-stop:example.org",
+        server_timestamp=1_000_020,
     )
 
     await _handle_edit(harness, event, event_info)
@@ -1590,6 +1598,7 @@ async def test_durable_user_stop_suppresses_preceding_edit_recovery(tmp_path: Pa
     assert recorded.source_event_revisions == {
         ORIGINAL_EVENT_ID: (event.server_timestamp, event.event_id),
     }
+    assert recorded.user_stop_settled_receipt_order == 2
 
 
 @pytest.mark.asyncio
@@ -1597,18 +1606,21 @@ async def test_edit_after_durable_user_stop_can_regenerate(tmp_path: Path) -> No
     """STOP is a cutoff, not a permanent ban on later user edits."""
     record = replace(
         _turn_record(),
-        user_stop_cutoff_revision=(1_000_020, "$stop:example.org"),
+        user_stop_receipt_order=2,
+        user_stop_settled_receipt_order=2,
     )
-    harness = _harness(tmp_path, turn_record=record)
+    harness = _harness(tmp_path, turn_record=record, receipt_order=3)
     event, event_info = _edit_event(
         new_body="edit after stop",
-        event_id="$edit-after-stop:example.org",
-        server_timestamp=1_000_030,
+        event_id="$a-edit-after-stop:example.org",
+        server_timestamp=1_000_020,
     )
 
     await _handle_edit(harness, event, event_info)
 
     harness.generate_response.assert_awaited_once()
+    recorded = harness.turn_store.record_turn.call_args.args[0]
+    assert recorded.user_stop_settled_receipt_order == 2
 
 
 @pytest.mark.asyncio

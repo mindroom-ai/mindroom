@@ -514,6 +514,31 @@ class DispatchObligationStore:
             raise RuntimeError(msg)
         return DispatchSemanticConsumer(row["semantic_consumer"])
 
+    def _receipt_order(self, key: _DispatchObligationKey) -> int:
+        """Return the stable SQLite admission order for one exact callback."""
+        self._validate_bound_key(key)
+        with self._lock, self._connection() as connection:
+            row = connection.execute(
+                """
+                SELECT rowid
+                FROM dispatch_obligations
+                WHERE principal_id = ?
+                  AND entity_name = ?
+                  AND source_event_id = ?
+                  AND callback_kind = ?
+                """,
+                (
+                    key.principal_id,
+                    key.entity_name,
+                    key.source_event_id,
+                    key.callback_kind.value,
+                ),
+            ).fetchone()
+        if row is None:
+            msg = "Running dispatch callback lost its durable receipt order"
+            raise RuntimeError(msg)
+        return int(row["rowid"])
+
     def _mark_callback_deferred(self, key: _DispatchObligationKey) -> None:
         """Record that the callback completed and downstream turn work owns the source."""
         self._validate_bound_key(key)
@@ -1134,6 +1159,14 @@ class DispatchObligationRunner:
             return None
         self.store._validate_bound_key(obligation.key)
         return obligation.semantic_consumer
+
+    async def receipt_order(self) -> int:
+        """Return the durable admission order of the running callback."""
+        obligation = _RUNNING_OBLIGATION.get()
+        if obligation is None:
+            msg = "Dispatch receipt order is only available inside a durable callback"
+            raise RuntimeError(msg)
+        return await asyncio.to_thread(self.store._receipt_order, obligation.key)
 
     async def claim_semantic_consumer(self, consumer: DispatchSemanticConsumer) -> None:
         """Freeze the running callback's application consumer before side effects."""

@@ -112,7 +112,8 @@ class TurnRecord:
     source_event_prompts: Mapping[str, str] | None = None
     source_event_revisions: Mapping[str, SourceEventRevision] | None = None
     suppressed_source_event_revisions: Mapping[str, SourceEventRevision] | None = None
-    user_stop_cutoff_revision: SourceEventRevision | None = None
+    user_stop_receipt_order: int | None = None
+    user_stop_settled_receipt_order: int | None = None
     source_event_metadata: Mapping[str, SourceEventMetadata] | None = None
     response_owner: str | None = None
     requester_id: str | None = None
@@ -174,7 +175,12 @@ class TurnRecord:
             self.suppressed_source_event_revisions,
             excluded_event_ids=redacted_source_event_id_set,
         )
-        user_stop_cutoff_revision = _source_event_revision_or_none(self.user_stop_cutoff_revision)
+        user_stop_receipt_order = _positive_int_or_none(self.user_stop_receipt_order)
+        user_stop_settled_receipt_order = _positive_int_or_none(self.user_stop_settled_receipt_order)
+        if user_stop_receipt_order is None or (
+            user_stop_settled_receipt_order is not None and user_stop_settled_receipt_order > user_stop_receipt_order
+        ):
+            user_stop_settled_receipt_order = None
         history_scope = self.history_scope if isinstance(self.history_scope, HistoryScope) else None
         conversation_target = self.conversation_target if isinstance(self.conversation_target, MessageTarget) else None
         object.__setattr__(self, "source_event_ids", source_event_ids)
@@ -195,7 +201,8 @@ class TurnRecord:
         object.__setattr__(self, "source_event_prompts", source_event_prompts)
         object.__setattr__(self, "source_event_revisions", source_event_revisions)
         object.__setattr__(self, "suppressed_source_event_revisions", suppressed_source_event_revisions)
-        object.__setattr__(self, "user_stop_cutoff_revision", user_stop_cutoff_revision)
+        object.__setattr__(self, "user_stop_receipt_order", user_stop_receipt_order)
+        object.__setattr__(self, "user_stop_settled_receipt_order", user_stop_settled_receipt_order)
         object.__setattr__(self, "source_event_metadata", source_event_metadata)
         object.__setattr__(self, "response_owner", _normalize_string(self.response_owner))
         object.__setattr__(self, "requester_id", _normalize_string(self.requester_id))
@@ -227,7 +234,8 @@ class TurnRecord:
         source_event_prompts: Mapping[str, str] | None = None,
         source_event_revisions: Mapping[str, object] | None = None,
         suppressed_source_event_revisions: Mapping[str, object] | None = None,
-        user_stop_cutoff_revision: SourceEventRevision | None = None,
+        user_stop_receipt_order: int | None = None,
+        user_stop_settled_receipt_order: int | None = None,
         source_event_metadata: Mapping[str, object] | None = None,
         response_owner: str | None = None,
         requester_id: str | None = None,
@@ -255,7 +263,8 @@ class TurnRecord:
                 "Mapping[str, SourceEventRevision] | None",
                 suppressed_source_event_revisions,
             ),
-            user_stop_cutoff_revision=user_stop_cutoff_revision,
+            user_stop_receipt_order=user_stop_receipt_order,
+            user_stop_settled_receipt_order=user_stop_settled_receipt_order,
             source_event_metadata=typing.cast("Mapping[str, SourceEventMetadata] | None", source_event_metadata),
             response_owner=response_owner,
             requester_id=requester_id,
@@ -300,6 +309,34 @@ class TurnRecord:
         return tuple(event_id for event_id in self.source_event_ids if event_id not in redacted_event_ids)
 
 
+def with_user_stop(
+    turn_record: TurnRecord,
+    response_event_id: str,
+    stop_receipt_order: int,
+    *,
+    delivery_settled: bool = False,
+) -> TurnRecord:
+    """Return the monotonic durable state for one admitted STOP callback."""
+    if isinstance(stop_receipt_order, bool) or stop_receipt_order <= 0:
+        msg = "User-stop receipt order must be positive"
+        raise ValueError(msg)
+    return replace(
+        turn_record,
+        response_event_id=response_event_id,
+        completed=True,
+        user_stop_receipt_order=max(
+            stop_receipt_order,
+            turn_record.user_stop_receipt_order or stop_receipt_order,
+        ),
+        user_stop_settled_receipt_order=max(
+            turn_record.user_stop_settled_receipt_order or 0,
+            stop_receipt_order if delivery_settled else 0,
+        )
+        or None,
+        timestamp=0.0,
+    )
+
+
 class TurnRecordCodec:
     """Encode the canonical record into its two intentional physical projections."""
 
@@ -336,8 +373,10 @@ class TurnRecordCodec:
             payload["suppressed_source_event_revisions"] = {
                 event_id: list(revision) for event_id, revision in record.suppressed_source_event_revisions.items()
             }
-        if record.user_stop_cutoff_revision is not None:
-            payload["user_stop_cutoff_revision"] = list(record.user_stop_cutoff_revision)
+        if record.user_stop_receipt_order is not None:
+            payload["user_stop_receipt_order"] = record.user_stop_receipt_order
+        if record.user_stop_settled_receipt_order is not None:
+            payload["user_stop_settled_receipt_order"] = record.user_stop_settled_receipt_order
         if record.source_event_metadata is not None:
             payload["source_event_metadata"] = {
                 event_id: metadata._to_record() for event_id, metadata in record.source_event_metadata.items()
@@ -405,8 +444,9 @@ class TurnRecordCodec:
             suppressed_source_event_revisions=_mapping_or_none(
                 record.get("suppressed_source_event_revisions"),
             ),
-            user_stop_cutoff_revision=_source_event_revision_or_none(
-                record.get("user_stop_cutoff_revision"),
+            user_stop_receipt_order=_positive_int_or_none(record.get("user_stop_receipt_order")),
+            user_stop_settled_receipt_order=_positive_int_or_none(
+                record.get("user_stop_settled_receipt_order"),
             ),
             source_event_metadata=_mapping_or_none(record.get("source_event_metadata")),
             response_owner=_normalize_string(record.get("response_owner")),
@@ -1151,10 +1191,16 @@ def _merge_same_identity_records(candidate: TurnRecord, existing: TurnRecord) ->
         ),
         command_execution_started=newer.command_execution_started or older.command_execution_started,
         command_result_text=newer.command_result_text or older.command_result_text,
-        user_stop_cutoff_revision=_latest_revision(
-            newer.user_stop_cutoff_revision,
-            older.user_stop_cutoff_revision,
-        ),
+        user_stop_receipt_order=max(
+            newer.user_stop_receipt_order or 0,
+            older.user_stop_receipt_order or 0,
+        )
+        or None,
+        user_stop_settled_receipt_order=max(
+            newer.user_stop_settled_receipt_order or 0,
+            older.user_stop_settled_receipt_order or 0,
+        )
+        or None,
     )
 
 
@@ -1168,28 +1214,14 @@ def _bool_or_none(value: object) -> bool | None:
     return value if isinstance(value, bool) else None
 
 
+def _positive_int_or_none(value: object) -> int | None:
+    """Return one positive non-boolean integer or None."""
+    return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else None
+
+
 def _mapping_or_none(value: object) -> Mapping[str, Any] | None:
     """Return a typed mapping for codec input."""
     return typing.cast("Mapping[str, Any]", value) if isinstance(value, Mapping) else None
-
-
-def _source_event_revision_or_none(value: object) -> SourceEventRevision | None:
-    """Return one valid canonical Matrix revision tuple."""
-    if (
-        isinstance(value, tuple | list)
-        and len(value) == 2
-        and isinstance(value[0], int)
-        and not isinstance(value[0], bool)
-        and isinstance(value[1], str)
-        and value[1]
-    ):
-        return (value[0], value[1])
-    return None
-
-
-def _latest_revision(*revisions: SourceEventRevision | None) -> SourceEventRevision | None:
-    """Return the latest present canonical Matrix revision."""
-    return max((revision for revision in revisions if revision is not None), default=None)
 
 
 def _immutable_prompt_map(

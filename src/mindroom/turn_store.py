@@ -17,11 +17,11 @@ from mindroom.agent_storage import get_agent_session, get_team_session
 from mindroom.agents import remove_run_by_event_id
 from mindroom.handled_turns import (
     HandledTurnLedger,
-    SourceEventRevision,
     TurnRecord,
     TurnRecordCodec,
     merge_edit_facts,
     same_turn_identity,
+    with_user_stop,
 )
 from mindroom.history.storage import invalidate_compacted_replay, read_scope_seen_event_ids
 from mindroom.session_ids import create_session_id
@@ -234,48 +234,76 @@ class TurnStore:
         """Return the durable turn that owns one visible response event."""
         return self._ledger.turn_record_for_response_event_id(response_event_id)
 
-    def record_user_stopped_response(
+    def _update_response_turn(
         self,
         response_event_id: str,
-        stop_revision: SourceEventRevision,
+        update: Callable[[TurnRecord], TurnRecord],
+        *,
+        notify_terminal: bool = False,
     ) -> TurnRecord | None:
-        """Durably terminate the incomplete turn that owns a user-stopped response."""
+        """Durably update the sole turn that owns one visible response."""
         turn_record = self.turn_record_for_response_event_id(response_event_id)
         if turn_record is None:
-            return turn_record
-        if (
-            turn_record.completed
-            and turn_record.user_stop_cutoff_revision is not None
-            and turn_record.user_stop_cutoff_revision >= stop_revision
-        ):
-            return turn_record
+            return None
 
-        def stopped_record(existing_records: Mapping[str, TurnRecord]) -> TurnRecord:
+        def updated_record(existing_records: Mapping[str, TurnRecord]) -> TurnRecord:
             matching_records = {
                 record.indexed_event_ids: record
                 for record in existing_records.values()
                 if response_event_id in {record.response_event_id, record.visible_echo_event_id}
             }
             if len(matching_records) != 1:
-                msg = f"User-stopped response {response_event_id!r} lost its sole turn owner"
+                msg = f"Response {response_event_id!r} lost its sole turn owner"
                 raise RuntimeError(msg)
-            current = next(iter(matching_records.values()))
-            return replace(
-                current,
-                response_event_id=response_event_id,
-                completed=True,
-                user_stop_cutoff_revision=max(
-                    stop_revision,
-                    current.user_stop_cutoff_revision or stop_revision,
-                ),
-                timestamp=0.0,
-            )
+            return update(next(iter(matching_records.values())))
 
         return self._ledger.update_handled_turn(
             turn_record.indexed_event_ids,
-            stopped_record,
+            updated_record,
             wait_for_persist=True,
-            on_persisted=self._notify_terminal_turn_persisted,
+            on_persisted=self._notify_terminal_turn_persisted if notify_terminal else None,
+        )
+
+    def record_user_stopped_response(
+        self,
+        response_event_id: str,
+        stop_receipt_order: int,
+        *,
+        delivery_settled: bool = False,
+    ) -> TurnRecord | None:
+        """Durably terminate the turn that owns a user-stopped response."""
+        if isinstance(stop_receipt_order, bool) or stop_receipt_order <= 0:
+            msg = "User-stop receipt order must be positive"
+            raise ValueError(msg)
+        turn_record = self.turn_record_for_response_event_id(response_event_id)
+        if turn_record is None:
+            return turn_record
+        if (
+            turn_record.completed
+            and turn_record.user_stop_receipt_order is not None
+            and turn_record.user_stop_receipt_order >= stop_receipt_order
+            and (
+                not delivery_settled
+                or (
+                    turn_record.user_stop_settled_receipt_order is not None
+                    and turn_record.user_stop_settled_receipt_order >= stop_receipt_order
+                )
+            )
+        ):
+            return turn_record
+
+        def stopped_record(current: TurnRecord) -> TurnRecord:
+            return with_user_stop(
+                current,
+                response_event_id,
+                stop_receipt_order,
+                delivery_settled=delivery_settled,
+            )
+
+        return self._update_response_turn(
+            response_event_id,
+            stopped_record,
+            notify_terminal=not turn_record.completed,
         )
 
     def has_pending_response_intent(self, source_event_ids: tuple[str, ...]) -> bool:
@@ -414,7 +442,7 @@ class TurnStore:
             for source_event_id in source_event_ids
         )
 
-    def prepare_response_for_redactions(
+    def _prepare_response_for_redactions(
         self,
         *,
         target: MessageTarget,
@@ -450,10 +478,51 @@ class TurnStore:
         terminal_source_event_ids: tuple[str, ...],
     ) -> bool:
         """Finish cleanup, then suppress a pending response whose source became terminal."""
-        return self.prepare_response_for_redactions(
+        return self._prepare_response_for_redactions(
             target=target,
             source_event_ids=source_event_ids,
         ) or any(self.is_handled(source_event_id) for source_event_id in terminal_source_event_ids)
+
+    def prepare_edit_response_source(
+        self,
+        *,
+        target: MessageTarget,
+        source_event_ids: tuple[str, ...],
+        response_event_id: str | None,
+        edit_receipt_order: int,
+    ) -> bool:
+        """Suppress pre-STOP edits or durably open later edits for visible delivery."""
+        if isinstance(edit_receipt_order, bool) or edit_receipt_order <= 0:
+            msg = "Edit receipt order must be positive"
+            raise ValueError(msg)
+        if self._prepare_response_for_redactions(target=target, source_event_ids=source_event_ids):
+            return True
+        if response_event_id is None:
+            return False
+        turn_record = self.turn_record_for_response_event_id(response_event_id)
+        if turn_record is None:
+            return True
+        cutoff = turn_record.user_stop_receipt_order
+        if cutoff is not None and edit_receipt_order <= cutoff:
+            return True
+        settled_receipt_order = turn_record.user_stop_settled_receipt_order
+        if cutoff is not None and (settled_receipt_order is None or settled_receipt_order < cutoff):
+            return (
+                self._update_response_turn(
+                    response_event_id,
+                    lambda current: replace(
+                        current,
+                        user_stop_settled_receipt_order=max(
+                            current.user_stop_settled_receipt_order or 0,
+                            current.user_stop_receipt_order or 0,
+                        )
+                        or None,
+                        timestamp=0.0,
+                    ),
+                )
+                is None
+            )
+        return False
 
     def response_history_scope(
         self,
@@ -857,7 +926,8 @@ def _backfill_missing_turn_facts(authority: TurnRecord, recovery: TurnRecord) ->
             else recovery.source_event_prompts
         ),
         source_event_revisions=authority.source_event_revisions or recovery.source_event_revisions,
-        user_stop_cutoff_revision=_latest_user_stop_cutoff(authority, recovery),
+        user_stop_receipt_order=_latest_user_stop_receipt_order(authority, recovery),
+        user_stop_settled_receipt_order=_latest_user_stop_settled_receipt_order(authority, recovery),
         source_event_metadata=(
             authority.source_event_metadata
             if authority.source_event_metadata is not None
@@ -908,7 +978,11 @@ def _reconcile_ledger_and_recovery(
         completed=recovery_record.completed,
         source_event_prompts=source_event_prompts,
         source_event_revisions=source_event_revisions,
-        user_stop_cutoff_revision=_latest_user_stop_cutoff(ledger_record, recovery_record),
+        user_stop_receipt_order=_latest_user_stop_receipt_order(ledger_record, recovery_record),
+        user_stop_settled_receipt_order=_latest_user_stop_settled_receipt_order(
+            ledger_record,
+            recovery_record,
+        ),
         source_event_metadata=(
             recovery_record.source_event_metadata
             if recovery_record.source_event_metadata is not None
@@ -930,9 +1004,21 @@ def _reconcile_ledger_and_recovery(
     )
 
 
-def _latest_user_stop_cutoff(*records: TurnRecord) -> SourceEventRevision | None:
-    """Return the latest durable STOP cutoff present on these same-turn records."""
+def _latest_user_stop_receipt_order(*records: TurnRecord) -> int | None:
+    """Return the latest durable STOP receipt order on these same-turn records."""
     return max(
-        (record.user_stop_cutoff_revision for record in records if record.user_stop_cutoff_revision is not None),
+        (record.user_stop_receipt_order for record in records if record.user_stop_receipt_order is not None),
+        default=None,
+    )
+
+
+def _latest_user_stop_settled_receipt_order(*records: TurnRecord) -> int | None:
+    """Return the latest STOP whose visible obligation is delivered or superseded."""
+    return max(
+        (
+            record.user_stop_settled_receipt_order
+            for record in records
+            if record.user_stop_settled_receipt_order is not None
+        ),
         default=None,
     )

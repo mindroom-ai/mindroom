@@ -1318,6 +1318,13 @@ def replace_edit_regenerator_deps(bot: RuntimeBot, **changes: object) -> EditReg
     if "logger" in rebuilt_changes:
         logger = rebuilt_changes.pop("logger")
         rebuilt_changes["get_logger"] = lambda logger=logger: logger
+    if "receipt_order" not in rebuilt_changes:
+        receipt_orders = count(1)
+
+        async def next_receipt_order() -> int:
+            return next(receipt_orders)
+
+        rebuilt_changes["receipt_order"] = next_receipt_order
     store_field_names = set(unwrap_extracted_collaborator(bot._turn_store).deps.__dataclass_fields__)
     store_changes = {name: value for name, value in changes.items() if name in store_field_names}
     if store_changes:
