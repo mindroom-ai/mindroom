@@ -27,7 +27,7 @@ from mindroom.dispatch_source import (
 from mindroom.matrix.thread_membership import ThreadMembershipLookupError
 from mindroom.message_target import MessageTarget
 from mindroom.runtime_shutdown import SYNC_RESTART_SHUTDOWN
-from tests.conftest import prepared_dispatch_result, unwrap_extracted_collaborator
+from tests.conftest import prepared_dispatch_result, replace_turn_controller_deps, unwrap_extracted_collaborator
 from tests.test_live_message_coalescing import (
     _enqueue_for_dispatch,
     _image_event,
@@ -432,9 +432,11 @@ async def test_router_command_targeting_unresolved_conversation_fails_visibly(tm
 
 
 @pytest.mark.asyncio
-async def test_non_router_agent_marks_unresolvable_command_handled_without_notice(tmp_path: Path) -> None:
-    """Non-router agents drop unresolvable commands quietly but never guess a target."""
+async def test_non_router_agent_settles_unresolvable_command_without_notice(tmp_path: Path) -> None:
+    """Non-router agents explicitly ignore unresolvable commands without growing the turn ledger."""
     bot = _make_bot(tmp_path)
+    settle_ignored = AsyncMock()
+    replace_turn_controller_deps(bot, settle_ignored_dispatch_sources=settle_ignored)
     room = _make_room()
     command_event = _text_event(event_id="$cmd", body="!help", server_timestamp=1000, thread_id="$pending_root")
     send_text_mock = AsyncMock(return_value="$notice")
@@ -452,7 +454,8 @@ async def test_non_router_agent_marks_unresolvable_command_handled_without_notic
 
     send_text_mock.assert_not_awaited()
     dispatch_mock.assert_not_awaited()
-    assert bot._turn_store.is_handled("$cmd")
+    settle_ignored.assert_awaited_once_with(("$cmd",))
+    assert not bot._turn_store.is_handled("$cmd")
 
 
 @pytest.mark.asyncio

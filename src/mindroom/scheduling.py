@@ -350,6 +350,8 @@ def _parse_scheduled_task_record(
 def _cancelled_task_content(
     task_id: str,
     existing_content: dict[str, object] | None,
+    *,
+    command_event_id: str | None = None,
 ) -> dict[str, object]:
     """Build cancelled task state while preserving existing metadata where possible."""
     cancelled_content: dict[str, object] = {"status": "cancelled", "task_id": task_id}
@@ -371,6 +373,10 @@ def _cancelled_task_content(
             value = existing_content.get(key)
             if isinstance(value, str):
                 cancelled_content[key] = value
+
+    if command_event_id is not None:
+        cancelled_content["last_command_event_id"] = command_event_id
+        cancelled_content.pop("last_command_response_text", None)
 
     cancelled_content["updated_at"] = datetime.now(UTC).isoformat()
     return cancelled_content
@@ -642,11 +648,19 @@ async def get_scheduled_task(
         event_type=_SCHEDULED_TASK_EVENT_TYPE,
         state_key=task_id,
     )
+    if isinstance(response, nio.RoomGetStateEventError) and response.status_code == "M_NOT_FOUND":
+        return None
     if not isinstance(response, nio.RoomGetStateEventResponse):
-        return None
+        msg = f"Failed to get scheduled task {task_id!r} from room {room_id!r}: {response}"
+        raise RuntimeError(msg)  # noqa: TRY004
     if not isinstance(response.content, dict):
-        return None
-    return _parse_scheduled_task_record(room_id, task_id, response.content)
+        msg = f"Scheduled task {task_id!r} in room {room_id!r} has invalid state content"
+        raise TypeError(msg)
+    task = _parse_scheduled_task_record(room_id, task_id, response.content)
+    if task is None:
+        msg = f"Scheduled task {task_id!r} in room {room_id!r} has invalid state"
+        raise RuntimeError(msg)
+    return task
 
 
 async def _get_pending_task_record(
@@ -1678,6 +1692,7 @@ async def cancel_all_scheduled_tasks(
     client: nio.AsyncClient,
     room_id: str,
     matrix_admin: HookMatrixAdmin | None = None,
+    command_event_id: str | None = None,
 ) -> str:
     """Cancel all scheduled tasks in a room."""
     # Get all scheduled tasks
@@ -1703,7 +1718,11 @@ async def cancel_all_scheduled_tasks(
                         client=client,
                         room_id=room_id,
                         task_id=task_id,
-                        content=_cancelled_task_content(task_id, existing_content),
+                        content=_cancelled_task_content(
+                            task_id,
+                            existing_content,
+                            command_event_id=command_event_id,
+                        ),
                         matrix_admin=matrix_admin,
                     )
                     _cancel_running_task(task_id)
@@ -1712,6 +1731,8 @@ async def cancel_all_scheduled_tasks(
                 except Exception:
                     logger.exception("scheduled_task_cancel_failed", task_id=task_id)
                     failed_count += 1
+            elif command_event_id is not None and content.get("last_command_event_id") == command_event_id:
+                cancelled_count += 1
 
     if cancelled_count == 0:
         if failed_count > 0:

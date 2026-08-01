@@ -4220,7 +4220,6 @@ async def test_on_reaction_respects_agent_reply_permissions(tmp_path: Path) -> N
 
     with (
         patch("mindroom.bot.is_authorized_sender", return_value=True),
-        patch("mindroom.bot.config_confirmation.get_pending_change", return_value=None),
         patch.object(bot._delivery_gateway, "send_text", new_callable=AsyncMock) as mock_send_text,
         patch.object(bot._response_runner, "generate_response", new_callable=AsyncMock) as mock_generate_response,
     ):
@@ -4318,6 +4317,79 @@ async def test_config_confirmation_blocked_by_reply_permissions(tmp_path: Path) 
 
     # Bob is disallowed for the router — the confirmation handler must not run.
     mock_confirm.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_committed_config_confirmation_resumes_before_changed_reply_permissions(tmp_path: Path) -> None:
+    """A frozen config decision must finish after that decision changes authorization."""
+    agent_user = AgentMatrixUser(
+        agent_name=ROUTER_AGENT_NAME,
+        user_id=f"@mindroom_{ROUTER_AGENT_NAME}:example.com",
+        display_name="Router",
+        password="test_password",  # noqa: S106
+    )
+    config = _bind_runtime_paths(
+        Config(
+            agents={"assistant": {"display_name": "Assistant", "rooms": ["!test:example.com"]}},
+            authorization={
+                "default_room_access": True,
+                "agent_reply_permissions": {ROUTER_AGENT_NAME: ["@alice:example.com"]},
+            },
+        ),
+        tmp_path,
+    )
+    bot = AgentBot(
+        agent_user=agent_user,
+        storage_path=tmp_path,
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+        rooms=["!test:example.com"],
+    )
+    bot.client = make_matrix_client_mock(user_id=f"@mindroom_{ROUTER_AGENT_NAME}:example.com")
+    replace_edit_regenerator_deps(bot)
+    bot.logger = MagicMock()
+    room = nio.MatrixRoom(
+        room_id="!test:example.com",
+        own_user_id=f"@mindroom_{ROUTER_AGENT_NAME}:example.com",
+    )
+    preview_event_id = "$config_msg:example.com"
+    reaction_event_id = "$reaction_bob:example.com"
+    config_confirmation._pending_changes[preview_event_id] = config_confirmation._PendingConfigChange(
+        requester="@bob:example.com",
+        room_id=room.room_id,
+        thread_id=None,
+        config_path="authorization.agent_reply_permissions.router",
+        old_value=["@bob:example.com"],
+        new_value=["@alice:example.com"],
+        decision_event_id=reaction_event_id,
+        decision_key="✅",
+    )
+    reaction_event = nio.ReactionEvent.from_dict(
+        {
+            "content": {
+                "m.relates_to": {
+                    "rel_type": "m.annotation",
+                    "event_id": preview_event_id,
+                    "key": "✅",
+                },
+            },
+            "event_id": reaction_event_id,
+            "sender": "@bob:example.com",
+            "origin_server_ts": 1000000,
+            "type": "m.reaction",
+            "room_id": room.room_id,
+        },
+    )
+
+    with patch(
+        "mindroom.bot.config_confirmation.resume_committed_confirmation",
+        new_callable=AsyncMock,
+        return_value=True,
+    ) as resume_confirmation:
+        await bot._on_reaction(room, reaction_event)
+
+    config_confirmation._pending_changes.clear()
+    resume_confirmation.assert_awaited_once()
 
 
 @pytest.mark.asyncio

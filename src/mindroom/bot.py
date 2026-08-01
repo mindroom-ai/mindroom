@@ -2114,9 +2114,27 @@ class AgentBot:
             reason=payload.reason,
         )
 
-    async def _handle_reaction_inner(self, room: nio.MatrixRoom, event: nio.ReactionEvent) -> None:
+    async def _handle_reaction_inner(  # noqa: PLR0911
+        self,
+        room: nio.MatrixRoom,
+        event: nio.ReactionEvent,
+    ) -> None:
         """Handle one reaction inside the per-turn thread-history cache scope."""
         assert self.client is not None
+
+        pending_change = await config_confirmation.resolve_reaction_pending_change(
+            self.client,
+            room.room_id,
+            event,
+            enabled=self.agent_name == ROUTER_AGENT_NAME,
+        )
+        if pending_change is not None and await config_confirmation.resume_committed_confirmation(
+            self,
+            room,
+            event,
+            pending_change,
+        ):
+            return
 
         if not is_authorized_sender(
             event.sender,
@@ -2172,15 +2190,8 @@ class AgentBot:
                     )
                     return
 
-            pending_change = None
-            if self.agent_name == ROUTER_AGENT_NAME and event.key in {"✅", "❌"}:
-                pending_change = await config_confirmation.resolve_pending_change(
-                    self.client,
-                    room.room_id,
-                    event.reacts_to,
-                )
             if pending_change is not None:
-                await config_confirmation.handle_confirmation_reaction(self, room, event, pending_change)
+                await config_confirmation.handle_confirmation_reaction(self, room, event)
                 return
 
             result = await interactive.handle_reaction(

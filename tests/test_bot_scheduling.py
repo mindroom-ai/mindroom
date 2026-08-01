@@ -139,7 +139,7 @@ async def _execute_command(
 @pytest.fixture
 def send_response_mock() -> AsyncMock:
     """Delivery seam mock installed on mock_agent_bot."""
-    return AsyncMock()
+    return AsyncMock(return_value="$command-response")
 
 
 @pytest.fixture
@@ -344,6 +344,7 @@ class TestBotScheduleCommands:
                 client=mock_agent_bot.client,
                 room_id="!test:server",
                 matrix_admin=None,
+                command_event_id=event.event_id,
             )
 
         send_response_mock.assert_called_once()

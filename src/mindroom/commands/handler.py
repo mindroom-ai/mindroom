@@ -201,9 +201,12 @@ async def generate_welcome_message_for_room(
     return _format_welcome_message(candidate_entities, config, runtime_paths)
 
 
-def _normalized_response_event_id(raw_response_event_id: str | None) -> str | None:
-    """Normalize Matrix send helpers that may return empty strings or None."""
-    return raw_response_event_id if isinstance(raw_response_event_id, str) and raw_response_event_id else None
+def _require_response_event_id(raw_response_event_id: str | None) -> str:
+    """Return one visible Matrix response ID or keep the command retryable."""
+    if isinstance(raw_response_event_id, str) and raw_response_event_id:
+        return raw_response_event_id
+    msg = "Command response delivery did not return a Matrix event ID"
+    raise RuntimeError(msg)
 
 
 def _format_plugin_reload_summary(result: PluginReloadResult) -> str:
@@ -363,6 +366,7 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
                 client=context.client,
                 room_id=room.room_id,
                 matrix_admin=context.matrix_admin,
+                command_event_id=event.event_id,
             )
         else:
             # Cancel specific task
@@ -409,41 +413,31 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
                     response_text,
                     skip_mentions=True,
                 )
-                response_event_id = _normalized_response_event_id(raw_response_event_id)
+                response_event_id = _require_response_event_id(raw_response_event_id)
                 handled_turn = TurnRecord.create(
                     [event.event_id],
                     response_event_id=response_event_id,
                 )
 
-                if response_event_id:
-                    # Register the pending change
-                    config_confirmation.register_pending_change(
-                        event_id=response_event_id,
-                        room_id=room.room_id,
-                        thread_id=effective_thread_id,
-                        config_path=change_info["config_path"],
-                        old_value=change_info["old_value"],
-                        new_value=change_info["new_value"],
-                        requester=resolved_requester_user_id,
-                    )
-
-                    # Get the pending change we just registered
-                    pending_change = config_confirmation.get_pending_change(response_event_id)
-
-                    # Store in Matrix state for persistence
-                    if pending_change:
-                        await config_confirmation.store_pending_change_in_matrix(
-                            context.client,
-                            response_event_id,
-                            pending_change,
-                        )
-
-                    # Add reaction buttons
-                    await config_confirmation.add_confirmation_reactions(
-                        context.client,
-                        room.room_id,
-                        response_event_id,
-                    )
+                pending_change = config_confirmation.register_pending_change(
+                    event_id=response_event_id,
+                    room_id=room.room_id,
+                    thread_id=effective_thread_id,
+                    config_path=change_info["config_path"],
+                    old_value=change_info["old_value"],
+                    new_value=change_info["new_value"],
+                    requester=resolved_requester_user_id,
+                )
+                await config_confirmation.store_pending_change_in_matrix(
+                    context.client,
+                    response_event_id,
+                    pending_change,
+                )
+                await config_confirmation.add_confirmation_reactions(
+                    context.client,
+                    room.room_id,
+                    response_event_id,
+                )
 
                 context.record_handled_turn(handled_turn)
                 return  # Exit early since we've handled the response
@@ -492,9 +486,10 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
             response_text,
             skip_mentions=True,
         )
+        response_event_id = _require_response_event_id(raw_response_event_id)
         context.record_handled_turn(
             TurnRecord.create(
                 [event.event_id],
-                response_event_id=_normalized_response_event_id(raw_response_event_id),
+                response_event_id=response_event_id,
             ),
         )

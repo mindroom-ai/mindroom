@@ -20,7 +20,7 @@ from mindroom.coalescing_batch import (
 )
 from mindroom.coalescing_cleanup import close_pending_event_metadata_once
 from mindroom.commands.handler import CommandHandlerContext, agent_owns_command, handle_command
-from mindroom.commands.parsing import command_parser
+from mindroom.commands.parsing import CommandType, command_parser
 from mindroom.constants import (
     ATTACHMENT_IDS_KEY,
     ORIGINAL_SENDER_KEY,
@@ -495,6 +495,9 @@ class TurnController:
 
     def _mark_source_events_responded(self, handled_turn: TurnRecord) -> None:
         """Mark one or more source events as handled by the same terminal outcome."""
+        if handled_turn.response_event_id is None:
+            msg = "A responded turn requires a visible Matrix response event ID"
+            raise RuntimeError(msg)
         self.deps.turn_store.record_turn(handled_turn)
 
     async def _recovered_response_event_id(
@@ -1106,7 +1109,7 @@ class TurnController:
                 await self._record_pending_visible_response(pending_turn, response_event_id)
             self._mark_source_events_responded(replace(pending_turn, response_event_id=response_event_id))
             return True
-        self._mark_source_events_responded(TurnRecord.create([event.event_id]))
+        await self._settle_source_events_ignored(TurnRecord.create([event.event_id]))
         return True
 
     async def _dispatch_command_control_input(
@@ -1436,6 +1439,11 @@ class TurnController:
             target=target,
         )
         if command_turn is None:
+            return
+        if recovered_response_event_id is not None and command.type is not CommandType.CONFIG:
+            self._mark_source_events_responded(
+                replace(command_turn, response_event_id=recovered_response_event_id),
+            )
             return
 
         async def send_response(
@@ -2217,8 +2225,7 @@ class TurnController:
                     existing_event_id=error.placeholder_event_id,
                     on_visible_response=record_visible_response,
                 )
-                if response_event_id is not None:
-                    self._mark_source_events_responded(replace(handled_turn, response_event_id=response_event_id))
+                self._mark_source_events_responded(replace(handled_turn, response_event_id=response_event_id))
                 return
             if response_event_id is not None:
                 self._mark_source_events_responded(replace(handled_turn, response_event_id=response_event_id))

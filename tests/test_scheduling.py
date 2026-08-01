@@ -34,6 +34,7 @@ from mindroom.scheduling import (
     drain_deferred_overdue_tasks,
     edit_scheduled_task,
     get_pending_schedule_thread_ids_for_room,
+    get_scheduled_task,
     get_scheduled_tasks_for_room,
     list_scheduled_tasks,
     restore_scheduled_tasks,
@@ -1656,6 +1657,19 @@ async def test_get_pending_schedule_thread_ids_raises_on_room_state_error() -> N
 
 
 @pytest.mark.asyncio
+async def test_get_scheduled_task_raises_on_transient_matrix_error() -> None:
+    """A transient checkpoint read failure must not look like an absent task."""
+    client = AsyncMock()
+    client.room_get_state_event.return_value = nio.RoomGetStateEventError.from_dict(
+        {"errcode": "M_LIMIT_EXCEEDED", "error": "Slow down"},
+        "!test:server",
+    )
+
+    with pytest.raises(RuntimeError, match="Failed to get scheduled task"):
+        await get_scheduled_task(client, "!test:server", "task123")
+
+
+@pytest.mark.asyncio
 async def test_schedule_command_replay_reuses_persisted_source_checkpoint() -> None:
     """A relative schedule must not be reparsed or moved when its command replays."""
     client = AsyncMock()
@@ -1759,6 +1773,72 @@ async def test_cancel_all_scheduled_tasks_no_tasks() -> None:
 
     # Verify room_put_state was never called
     client.room_put_state.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_cancel_all_replay_reuses_command_checkpoint() -> None:
+    """A crash after cancel-all mutation must replay the same visible result."""
+    client = AsyncMock()
+    workflow = ScheduledWorkflow(
+        schedule_type="once",
+        execute_at=datetime.now(UTC) + timedelta(minutes=5),
+        message="cancel me",
+        description="cancel me",
+        room_id="!test:server",
+    )
+    pending_content = {
+        "task_id": "task1",
+        "workflow": workflow.model_dump_json(),
+        "status": "pending",
+    }
+    client.room_get_state.return_value = nio.RoomGetStateResponse.from_dict(
+        [
+            {
+                "type": _SCHEDULED_TASK_EVENT_TYPE,
+                "state_key": "task1",
+                "content": pending_content,
+                "event_id": "$state1",
+                "sender": "@system:server",
+                "origin_server_ts": 1,
+            },
+        ],
+        room_id="!test:server",
+    )
+    client.room_put_state.return_value = nio.RoomPutStateResponse.from_dict(
+        {"event_id": "$cancelled"},
+        room_id="!test:server",
+    )
+
+    first_result = await cancel_all_scheduled_tasks(
+        client,
+        "!test:server",
+        command_event_id="$cancel-all-command",
+    )
+    cancelled_content = client.room_put_state.await_args.kwargs["content"]
+    client.room_get_state.return_value = nio.RoomGetStateResponse.from_dict(
+        [
+            {
+                "type": _SCHEDULED_TASK_EVENT_TYPE,
+                "state_key": "task1",
+                "content": cancelled_content,
+                "event_id": "$state2",
+                "sender": "@system:server",
+                "origin_server_ts": 2,
+            },
+        ],
+        room_id="!test:server",
+    )
+    client.room_put_state.reset_mock()
+
+    replay_result = await cancel_all_scheduled_tasks(
+        client,
+        "!test:server",
+        command_event_id="$cancel-all-command",
+    )
+
+    assert first_result == replay_result == "✅ Cancelled 1 scheduled task(s)"
+    assert cancelled_content["last_command_event_id"] == "$cancel-all-command"
+    client.room_put_state.assert_not_awaited()
 
 
 @pytest.mark.asyncio

@@ -346,7 +346,10 @@ class TestAgentBot(AgentBotTestBase):
         )
         bot.client = AsyncMock(spec=nio.AsyncClient)
 
-        with patch("mindroom.delivery_gateway.send_message_result", new=AsyncMock(return_value=None)):
+        with (
+            patch("mindroom.delivery_gateway.send_message_result", new=AsyncMock(return_value=None)),
+            pytest.raises(RuntimeError, match="requires a visible Matrix response event ID"),
+        ):
             await bot._turn_controller._execute_response_action(
                 room,
                 event,
@@ -358,9 +361,7 @@ class TestAgentBot(AgentBotTestBase):
                 handled_turn=TurnRecord.create([event.event_id]),
             )
 
-        tracker.record_handled_turn.assert_called_once_with(
-            TurnRecord.create([event.event_id]),
-        )
+        tracker.record_handled_turn.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_extract_dispatch_context_uses_bounded_full_thread_history(
@@ -2633,6 +2634,7 @@ class TestAgentBot(AgentBotTestBase):
                     return_value=None,
                 ),
             ),
+            pytest.raises(RuntimeError, match="requires a visible Matrix response event ID"),
         ):
             await bot._turn_controller._execute_response_action(
                 room,

@@ -2059,6 +2059,77 @@ async def test_command_replay_adopts_durable_response(config: Config, tmp_path: 
 
 
 @pytest.mark.asyncio
+async def test_command_replay_does_not_repeat_mutation_after_visible_response(config: Config, tmp_path: Path) -> None:
+    """A recovered command response must settle without rerunning its handler."""
+    harness = _build_harness(config, tmp_path, agent_name=ROUTER_AGENT_NAME)
+    room = _room_with_members(config, ROUTER_AGENT_NAME, "general")
+    event = _text_event("!model default", event_id="$model-command-replay:localhost")
+    command = command_parser.parse(event.body)
+    assert command is not None
+    target = harness.controller.deps.resolver.build_message_target(
+        room_id=room.room_id,
+        thread_id=None,
+        reply_to_event_id=event.event_id,
+        event_source=event.source,
+    )
+    handled_turn = TurnRecord.create([event.event_id])
+
+    with (
+        patch("mindroom.commands.handler.handle_model_command", return_value="✅ Model changed") as mutate,
+        patch.object(harness.controller, "_mark_source_events_responded"),
+    ):
+        await harness.controller._execute_command(
+            room,
+            event,
+            _SENDER,
+            command,
+            target=target,
+            handled_turn=handled_turn,
+        )
+
+    await harness.controller._execute_command(
+        room,
+        event,
+        _SENDER,
+        command,
+        target=target,
+        handled_turn=handled_turn,
+    )
+
+    mutate.assert_called_once()
+    assert len(harness.gateway.sent) == 1
+
+
+@pytest.mark.asyncio
+async def test_command_send_failure_keeps_turn_pending(config: Config, tmp_path: Path) -> None:
+    """A command with no visible Matrix event must remain retry-owned."""
+    harness = _build_harness(config, tmp_path, agent_name=ROUTER_AGENT_NAME)
+    room = _room_with_members(config, ROUTER_AGENT_NAME, "general")
+    event = _text_event("!help", event_id="$command-send-failure:localhost")
+    command = command_parser.parse(event.body)
+    assert command is not None
+    target = harness.controller.deps.resolver.build_message_target(
+        room_id=room.room_id,
+        thread_id=None,
+        reply_to_event_id=event.event_id,
+        event_source=event.source,
+    )
+
+    async def fail_send(_request: SendTextRequest) -> None:
+        return None
+
+    with (
+        patch.object(harness.gateway, "send_text", new=fail_send),
+        pytest.raises(RuntimeError, match="did not return a Matrix event ID"),
+    ):
+        await harness.controller._execute_command(room, event, _SENDER, command, target=target)
+
+    record = harness.turn_store.get_turn_record(event.event_id)
+    assert record is not None
+    assert record.completed is False
+
+
+@pytest.mark.asyncio
 async def test_rejection_replay_adopts_durable_response(config: Config, tmp_path: Path) -> None:
     """A rejected-turn replay must not send a second visible rejection."""
     harness = _build_harness(config, tmp_path)
