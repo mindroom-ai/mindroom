@@ -17,7 +17,7 @@ from __future__ import annotations
 import asyncio
 import threading
 from contextlib import asynccontextmanager
-from dataclasses import dataclass, field, fields
+from dataclasses import dataclass, field, fields, replace
 from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import MagicMock, patch
 
@@ -35,6 +35,7 @@ from mindroom.config.main import Config
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.conversation_resolver import ConversationResolver, ConversationResolverDeps
 from mindroom.conversation_state_writer import ConversationStateWriter, ConversationStateWriterDeps
+from mindroom.dispatch_obligations import DispatchCallbackKind, DispatchObligationRunner, DispatchObligationStore
 from mindroom.dispatch_source import (
     EXTERNAL_TRIGGER_SOURCE_KIND,
     SCHEDULED_SOURCE_KIND,
@@ -258,6 +259,7 @@ class _Harness:
     gate: CoalescingGate
     gate_batches: list[CoalescedBatch]
     conversation_cache: AsyncMock
+    ignored_dispatch_sources: list[tuple[str, ...]]
 
     async def deliver(self, room: nio.MatrixRoom, event: nio.RoomMessageText) -> None:
         """Run one inbound text turn end-to-end, settling runner-owned responses.
@@ -369,10 +371,14 @@ def _build_harness(
     interrupted_turn_rooms = InterruptedTurnRooms()
     controller_ref: list[TurnController] = []
     gate_batches: list[CoalescedBatch] = []
+    ignored_dispatch_sources: list[tuple[str, ...]] = []
 
     async def _dispatch_batch(batch: CoalescedBatch) -> None:
         gate_batches.append(batch)
         await controller_ref[0].handle_coalesced_batch(batch)
+
+    async def _settle_ignored_dispatch_sources(source_event_ids: tuple[str, ...]) -> None:
+        ignored_dispatch_sources.append(source_event_ids)
 
     gate = CoalescingGate(
         dispatch_batch=_dispatch_batch,
@@ -418,6 +424,7 @@ def _build_harness(
                     ingress=ingress_validator,
                 ),
             ),
+            settle_ignored_dispatch_sources=_settle_ignored_dispatch_sources,
         ),
     )
     controller_ref.append(controller)
@@ -431,6 +438,7 @@ def _build_harness(
         gate=gate,
         gate_batches=gate_batches,
         conversation_cache=conversation_cache,
+        ignored_dispatch_sources=ignored_dispatch_sources,
     )
 
 
@@ -483,6 +491,62 @@ def _text_event(
     )
 
 
+def _image_event(*, event_id: str) -> nio.RoomMessageImage:
+    return cast(
+        "nio.RoomMessageImage",
+        nio.RoomMessageImage.from_dict(
+            {
+                "content": {
+                    "body": "photo.jpg",
+                    "info": {"mimetype": "image/jpeg"},
+                    "msgtype": "m.image",
+                    "url": "mxc://localhost/photo",
+                },
+                "event_id": event_id,
+                "sender": _SENDER,
+                "origin_server_ts": 1_000_000,
+                "room_id": _ROOM_ID,
+                "type": "m.room.message",
+            },
+        ),
+    )
+
+
+def _obligation_runner(
+    harness: _Harness,
+    *,
+    tracking_path: Path,
+    principal_id: str,
+    entity_name: str,
+    room: nio.MatrixRoom,
+) -> tuple[DispatchObligationRunner, DispatchObligationStore]:
+    async def noop(_room: nio.MatrixRoom, _event: nio.Event) -> None:
+        pass
+
+    store = DispatchObligationStore(
+        tracking_path=tracking_path,
+        principal_id=principal_id,
+        entity_name=entity_name,
+    )
+    runner = DispatchObligationRunner(
+        store=store,
+        callbacks=DispatchObligationRunner.callbacks_for(
+            on_message=harness.controller.handle_text_event,
+            on_media=harness.controller.handle_media_event,
+            on_reaction=cast("Any", noop),
+            on_approval=cast("Any", noop),
+            on_invite=cast("Any", noop),
+            on_room_lifecycle=cast("Any", noop),
+            on_redaction=cast("Any", noop),
+            on_decryption_failure=cast("Any", noop),
+            source_has_live_owner=harness.gate.has_pending_source_event,
+        ),
+        room_for_id=lambda _room_id: room,
+        turn_is_terminal=harness.turn_store.is_durably_handled,
+    )
+    return runner, store
+
+
 def _router_relay_event(
     config: Config,
     *,
@@ -515,11 +579,11 @@ def _router_relay_event(
 
 
 @pytest.mark.asyncio
-async def test_replayed_turn_is_rejected_before_policy_and_recorded(config: Config, tmp_path: Path) -> None:
+async def test_replayed_turn_is_rejected_before_policy_and_compacted(config: Config, tmp_path: Path) -> None:
     """A turn superseded by a newer unresponded requester message never reaches policy.
 
-    The dispatch replay guard must consume the turn (recording it as handled) without
-    evaluating the turn plan, invoking the response runner, or sending anything.
+    The dispatch replay guard must consume the exact callback obligation without
+    growing the handled-turn ledger, evaluating policy, or sending anything.
     """
     newer_history = thread_history_result(
         [
@@ -541,7 +605,8 @@ async def test_replayed_turn_is_rejected_before_policy_and_recorded(config: Conf
     assert harness.policy.plan_turn_calls == 0
     assert harness.runner.requests == []
     assert harness.gateway.sent == []
-    assert harness.turn_store.is_handled(event.event_id) is True
+    assert harness.turn_store.is_handled(event.event_id) is False
+    assert harness.ignored_dispatch_sources == [(event.event_id,)]
 
 
 @pytest.mark.asyncio
@@ -697,11 +762,11 @@ async def test_completed_router_alias_rejects_later_physical_relay(config: Confi
 
 
 @pytest.mark.asyncio
-async def test_router_relay_ignored_by_this_agent_records_terminal_alias(
+async def test_router_relay_ignored_by_this_agent_compacts_exact_callback(
     config: Config,
     tmp_path: Path,
 ) -> None:
-    """A relay routed elsewhere still records local terminal callback truth."""
+    """A relay routed elsewhere settles locally without indexing a fake response turn."""
     harness = _build_harness(config, tmp_path)
     room = _room_with_members(config, "general", "research", ROUTER_AGENT_NAME)
     relay = _router_relay_event(
@@ -715,10 +780,9 @@ async def test_router_relay_ignored_by_this_agent_records_terminal_alias(
     await harness.deliver(room, relay)
 
     assert harness.runner.requests == []
-    relay_record = harness.turn_store.get_turn_record("$relay-research:localhost")
-    assert relay_record is not None
-    assert relay_record.completed is True
-    assert harness.turn_store.get_turn_record("$human-research:localhost") == relay_record
+    assert harness.turn_store.get_turn_record("$relay-research:localhost") is None
+    assert harness.turn_store.get_turn_record("$human-research:localhost") is None
+    assert harness.ignored_dispatch_sources == [("$relay-research:localhost",)]
 
 
 @pytest.mark.asyncio
@@ -739,12 +803,83 @@ async def test_failed_gate_admission_releases_ingress_claim_once(
         MagicMock(side_effect=IngressAdmissionClosedError),
     )
 
-    await harness.controller.handle_text_event(room, event)
+    obligation_runner, obligation_store = _obligation_runner(
+        harness,
+        tracking_path=tmp_path / "dispatch-tracking",
+        principal_id=_entity_user_id(config, "general"),
+        entity_name="general",
+        room=room,
+    )
+    obligation = await obligation_runner.persist(room, event, DispatchCallbackKind.MESSAGE)
+    assert obligation is not None
+
+    with pytest.raises(IngressAdmissionClosedError):
+        await obligation_runner.run_persisted(obligation, room=room, event=event)
 
     release_claim.assert_called_once()
+    assert obligation_store.has_pending(event.event_id, DispatchCallbackKind.MESSAGE)
     competing_claim = TurnRecord.create([event.event_id], completed=False)
     assert harness.turn_store.try_claim_turn(competing_claim) is True
     harness.turn_store.release_pending_turn_claim(competing_claim)
+
+
+@pytest.mark.asyncio
+async def test_failed_media_admission_remains_a_pending_exact_callback(
+    config: Config,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A closed media lane must raise through the durable boundary for recovery."""
+    harness = _build_harness(config, tmp_path)
+    room = _room_with_members(config, "general")
+    event = _image_event(event_id="$media-admission-closed:localhost")
+    monkeypatch.setattr(
+        harness.gate,
+        "submit_lane_slot",
+        MagicMock(side_effect=IngressAdmissionClosedError),
+    )
+    obligation_runner, obligation_store = _obligation_runner(
+        harness,
+        tracking_path=tmp_path / "dispatch-tracking",
+        principal_id=_entity_user_id(config, "general"),
+        entity_name="general",
+        room=room,
+    )
+    obligation = await obligation_runner.persist(room, event, DispatchCallbackKind.MEDIA)
+    assert obligation is not None
+
+    with pytest.raises(IngressAdmissionClosedError):
+        await obligation_runner.run_persisted(obligation, room=room, event=event)
+
+    assert obligation_store.has_pending(event.event_id, DispatchCallbackKind.MEDIA)
+
+
+@pytest.mark.asyncio
+async def test_router_silent_ignore_compacts_exact_callback(config: Config, tmp_path: Path) -> None:
+    """A router ignore without a visible voice echo explicitly settles its source."""
+    harness = _build_harness(config, tmp_path, agent_name=ROUTER_AGENT_NAME)
+    room = _room_with_members(config, ROUTER_AGENT_NAME, "general")
+    event = _text_event("hello there", event_id="$router-ignore:localhost")
+
+    obligation_runner, obligation_store = _obligation_runner(
+        harness,
+        tracking_path=tmp_path / "dispatch-tracking",
+        principal_id=_entity_user_id(config, ROUTER_AGENT_NAME),
+        entity_name=ROUTER_AGENT_NAME,
+        room=room,
+    )
+    harness.controller.deps = replace(
+        harness.controller.deps,
+        settle_ignored_dispatch_sources=obligation_runner.settle_intentionally_ignored_turn_sources,
+    )
+
+    await obligation_runner.dispatch(room, event, DispatchCallbackKind.MESSAGE)
+    await harness.gate.drain_all()
+
+    assert harness.policy.plan_turn_calls == 1
+    assert harness.runner.requests == []
+    assert harness.turn_store.get_turn_record(event.event_id) is None
+    assert not obligation_store.has_pending(event.event_id, DispatchCallbackKind.MESSAGE)
 
 
 @pytest.mark.asyncio
@@ -771,8 +906,8 @@ async def test_sender_outside_reply_allowlist_is_dropped_at_precheck(tmp_path: P
 
 
 @pytest.mark.asyncio
-async def test_policy_ignore_sends_nothing_and_records_terminal_turn(config: Config, tmp_path: Path) -> None:
-    """An ignore plan records local terminal truth without sending a response."""
+async def test_policy_ignore_sends_nothing_and_compacts_callback(config: Config, tmp_path: Path) -> None:
+    """An ignore plan compacts exact callback truth without growing the turn ledger."""
     harness = _build_harness(config, tmp_path)
     room = _room_with_members(config, "general", "research")
     event = _text_event("untagged message with multiple visible responders")
@@ -782,7 +917,8 @@ async def test_policy_ignore_sends_nothing_and_records_terminal_turn(config: Con
     assert harness.policy.plan_turn_calls == 1
     assert harness.runner.requests == []
     assert harness.gateway.sent == []
-    assert harness.turn_store.is_handled(event.event_id) is True
+    assert harness.turn_store.is_handled(event.event_id) is False
+    assert harness.ignored_dispatch_sources == [(event.event_id,)]
 
 
 @pytest.mark.asyncio
@@ -1546,9 +1682,9 @@ async def test_non_router_agent_consumes_command_without_responding(config: Conf
     assert harness.gateway.sent == []
     # Commands are control inputs: even a silently consumed one never enters the gate.
     assert harness.gate_batches == []
-    # Each entity records its own terminal callback truth even when only the
-    # router owns the visible command response.
-    assert harness.turn_store.is_handled(event.event_id) is True
+    # Exact callback truth stays compact when only the router owns the visible reply.
+    assert harness.turn_store.is_handled(event.event_id) is False
+    assert harness.ignored_dispatch_sources == [(event.event_id,)]
 
 
 @pytest.mark.asyncio

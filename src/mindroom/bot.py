@@ -92,6 +92,7 @@ from .delivery_gateway import (
     ResponseHookService,
     SendTextRequest,
 )
+from .dispatch_callback_outcome import TurnDispatchOutcome
 from .dispatch_obligations import (
     DispatchCallbackKind,
     DispatchObligationRunner,
@@ -433,6 +434,7 @@ class AgentBot:
             ),
             on_dispatch_failure=self._retry_failed_coalesced_dispatch,
             on_undelivered_source=self._retry_pending_dispatch_source,
+            on_intentionally_ignored_source=self._settle_ignored_dispatch_source,
         )
         self._hook_context_support = HookContextSupport(
             runtime=self._runtime_view,
@@ -521,8 +523,7 @@ class AgentBot:
                 on_room_lifecycle=self._on_room_member,
                 on_redaction=self._on_redaction,
                 on_decryption_failure=self._on_decryption_failure,
-                turn_is_persisted=lambda event_id: self._turn_store.get_turn_record(event_id) is not None,
-                source_is_deferred=self._coalescing_gate.has_pending_source_event,
+                source_has_live_owner=self._coalescing_gate.has_pending_source_event,
             ),
             room_for_id=self._room_for_dispatch_obligation,
             turn_is_terminal=self._turn_store.is_durably_handled,
@@ -638,6 +639,9 @@ class AgentBot:
                 ingress=self._ingress_validator,
                 interrupted_turn_rooms=self._interrupted_turn_rooms,
                 visible_voice_echo=self._visible_voice_echo,
+                settle_ignored_dispatch_sources=(
+                    self._dispatch_obligation_runner.settle_intentionally_ignored_turn_sources
+                ),
             ),
         )
 
@@ -1916,6 +1920,13 @@ class AgentBot:
             callback_kind_for_source_kind(source_kind),
         )
 
+    async def _settle_ignored_dispatch_source(self, source_event_id: str, source_kind: str) -> None:
+        """Settle one asynchronously normalized source that produced no dispatch payload."""
+        await self._dispatch_obligation_runner.settle_intentionally_ignored_turn_source(
+            source_event_id,
+            callback_kind_for_source_kind(source_kind),
+        )
+
     def _log_matrix_event_callback_started(
         self,
         room: nio.MatrixRoom,
@@ -1938,7 +1949,7 @@ class AgentBot:
             log_context["matrix_event_receive_lag_ms"] = round(receive_timestamp_ms - float(origin_server_ts), 1)
         self.logger.info("matrix_event_callback_started", **log_context)
 
-    async def _on_message(self, room: nio.MatrixRoom, event: nio.RoomMessageText) -> None:
+    async def _on_message(self, room: nio.MatrixRoom, event: nio.RoomMessageText) -> TurnDispatchOutcome:
         """Delegate one inbound text event to the turn engine."""
         receipt_time = time.monotonic()
         self._log_matrix_event_callback_started(room, event, callback_name="message")
@@ -1963,8 +1974,8 @@ class AgentBot:
                 orchestrator=self.orchestrator,
                 logger=self.logger,
             ):
-                return
-            await self._turn_controller.handle_text_event(
+                return TurnDispatchOutcome.INTENTIONALLY_IGNORED
+            return await self._turn_controller.handle_text_event(
                 room,
                 event,
                 receipt_time=receipt_time,
@@ -2202,11 +2213,11 @@ class AgentBot:
         self,
         room: nio.MatrixRoom,
         event: MatrixMediaEvent,
-    ) -> None:
+    ) -> TurnDispatchOutcome:
         """Delegate one inbound media event to the turn engine."""
         receipt_time = time.monotonic()
         self._log_matrix_event_callback_started(room, event, callback_name="media")
-        await self._turn_controller.handle_media_event(room, event, receipt_time=receipt_time)
+        return await self._turn_controller.handle_media_event(room, event, receipt_time=receipt_time)
 
     async def _run_regenerated_response(self, request: ResponseRequest) -> str | None:
         """Run one edit-regenerated turn through this bot's response path."""

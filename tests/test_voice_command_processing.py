@@ -775,9 +775,7 @@ async def test_router_ignores_audio_events_from_internal_agents(tmp_path) -> Non
     mock_voice.assert_not_called()
     mock_download_audio.assert_not_called()
     send_response.assert_not_called()
-    turn_store.record_turn.assert_called_once_with(
-        TurnRecord.create(["$agent_audio_event"]),
-    )
+    turn_store.record_turn.assert_not_called()
 
 
 @pytest.mark.asyncio

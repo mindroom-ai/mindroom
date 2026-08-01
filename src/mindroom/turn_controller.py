@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING, Any, Protocol, cast
 from mindroom import interactive
 from mindroom.attachment_ids import merge_attachment_ids
 from mindroom.attachments import parse_attachment_ids_from_event_source
-from mindroom.coalescing import CoalescingGate, IngressAdmissionClosedError, ReadyPendingEvent
+from mindroom.coalescing import CoalescingGate, ReadyPendingEvent
 from mindroom.coalescing_batch import (
     CoalescedBatch,
     CoalescingKey,
@@ -37,6 +37,7 @@ from mindroom.constants import (
     RuntimePaths,
 )
 from mindroom.delivery_gateway import EditTextRequest, SendTextRequest
+from mindroom.dispatch_callback_outcome import TurnDispatchOutcome
 from mindroom.dispatch_handoff import (
     DispatchEvent,
     DispatchHandoff,
@@ -120,7 +121,7 @@ from mindroom.turn_policy import IngressHookRunner, PreparedDispatch, ResponseAc
 from mindroom.visible_voice_echo import VisibleVoiceEchoRequest
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Sequence
+    from collections.abc import Awaitable, Callable, Sequence
 
     import nio
     import structlog
@@ -170,6 +171,7 @@ class _RouterTargetResolution:
     selected_entity: str | None
     suggested_entity: str | None
     response_text: str
+    target_unavailable: bool
 
 
 def _resolve_router_target(
@@ -199,6 +201,7 @@ def _resolve_router_target(
         selected_entity=selected_entity,
         suggested_entity=suggested_entity,
         response_text=response_text,
+        target_unavailable=not target_starting and suggested_entity is None,
     )
 
 
@@ -442,6 +445,7 @@ class TurnControllerDeps:
     ingress: IngressValidator
     interrupted_turn_rooms: InterruptedTurnRooms
     visible_voice_echo: VisibleVoiceEchoLifecycle
+    settle_ignored_dispatch_sources: Callable[[tuple[str, ...]], Awaitable[None]]
 
 
 @dataclass
@@ -490,6 +494,10 @@ class TurnController:
     def _mark_source_events_responded(self, handled_turn: TurnRecord) -> None:
         """Mark one or more source events as handled by the same terminal outcome."""
         self.deps.turn_store.record_turn(handled_turn)
+
+    async def _settle_source_events_ignored(self, handled_turn: TurnRecord) -> None:
+        """Compact exact callback obligations without growing the handled-turn ledger."""
+        await self.deps.settle_ignored_dispatch_sources(handled_turn.source_event_ids)
 
     def _has_newer_unresponded_in_thread(
         self,
@@ -852,7 +860,6 @@ class TurnController:
             self.deps.ingress.event_source_kind(prepared_event, content) if isinstance(content, dict) else None
         )
         if self.deps.ingress.is_display_only_router_voice_echo(prepared_event):
-            self._mark_source_events_responded(TurnRecord.create([prepared_event.event_id]))
             return _IngressAdmissionOutcome.CONSUMED
         trusted_user_relay = original_sender is not None and prepared_source_kind in {
             TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
@@ -1064,6 +1071,7 @@ class TurnController:
             trust_internal_payload_metadata=resolved_trust_internal_payload_metadata,
             discovery_event_id=self.deps.ingress.router_relay_original_event_id(event),
             callback_source_kind=callback_source_kind,
+            turn_dispatch_recovery=turn_dispatch_recovery_active(),
             dispatch_metadata=dispatch_metadata,
         )
         if turn_claim is not None:
@@ -1229,7 +1237,7 @@ class TurnController:
             suppressed=suppressed,
         )
         if suppressed:
-            self._mark_source_events_responded(handled_turn)
+            await self._settle_source_events_ignored(handled_turn)
             return None
 
         origin = envelope.origin
@@ -1242,7 +1250,7 @@ class TurnController:
                 event_label=event_label,
                 user_id=requester_user_id,
             )
-            self._mark_source_events_responded(handled_turn)
+            await self._settle_source_events_ignored(handled_turn)
             return None
 
         replay_guard = (
@@ -1635,7 +1643,9 @@ class TurnController:
                 "No responders to route to in this room for sender",
                 sender=permission_sender_id,
             )
-            self._mark_source_events_responded(handled_turn or TurnRecord.create([event.event_id]))
+            await self._settle_source_events_ignored(
+                handled_turn or TurnRecord.create([event.event_id]),
+            )
             return
 
         with bound_log_context(room_id=room.room_id, thread_id=thread_id):
@@ -1666,7 +1676,7 @@ class TurnController:
             target_resolution.suggested_entity,
             target_resolution.response_text,
         )
-        if suggested_entity is None and response_text == _ROUTER_TARGET_UNAVAILABLE_TEXT:
+        if target_resolution.target_unavailable:
             with bound_log_context(room_id=room.room_id, thread_id=thread_id):
                 self.deps.logger.warning("Router failed to determine entity")
 
@@ -1753,13 +1763,8 @@ class TurnController:
                 self._mark_source_events_responded(replace(tracked_handled_turn, response_event_id=event_id))
             else:
                 self.deps.logger.error("Failed to route to entity", entity=suggested_entity)
-                self._raise_router_relay_delivery_failure(suggested_entity)
-
-    @staticmethod
-    def _raise_router_relay_delivery_failure(suggested_entity: str | None) -> None:
-        """Raise the retryable signal for a router relay without a Matrix event."""
-        msg = f"Failed to route to entity {suggested_entity!r}"
-        raise RuntimeError(msg)
+                msg = f"Failed to route to entity {suggested_entity!r}"
+                raise RuntimeError(msg)
 
     def _router_handled_turn_outcome(
         self,
@@ -2063,10 +2068,10 @@ class TurnController:
         *,
         receipt_time: float | None = None,
         reservation_owner: _PromptIngressReservationOwner | None = None,
-    ) -> None:
+    ) -> TurnDispatchOutcome:
         """Handle one inbound text event."""
         async with self.deps.resolver.turn_thread_cache_scope():
-            await self._handle_message_inner(
+            return await self._handle_message_inner(
                 room,
                 event,
                 receipt_time=receipt_time,
@@ -2080,20 +2085,20 @@ class TurnController:
         *,
         receipt_time: float | None = None,
         reservation_owner: _PromptIngressReservationOwner | None = None,
-    ) -> None:
+    ) -> TurnDispatchOutcome:
         """Handle one text message inside the per-turn conversation lookup scope."""
         event_info = EventInfo.from_event(event.source)
         if not isinstance(event.body, str):
-            return
+            return TurnDispatchOutcome.INTENTIONALLY_IGNORED
         event_content = event.source.get("content") if isinstance(event.source, dict) else None
         if isinstance(event_content, dict) and event_content.get(STREAM_STATUS_KEY) in {
             STREAM_STATUS_PENDING,
             STREAM_STATUS_STREAMING,
         }:
-            return
+            return TurnDispatchOutcome.INTENTIONALLY_IGNORED
         prechecked_event = self._precheck_dispatch_event(room, event, is_edit=event_info.is_edit)
         if prechecked_event is None:
-            return
+            return TurnDispatchOutcome.INTENTIONALLY_IGNORED
 
         dispatch_timing = create_dispatch_pipeline_timing(
             event_id=event.event_id,
@@ -2111,25 +2116,24 @@ class TurnController:
             if event_info.is_edit:
                 await reservation_owner.release()
                 await self._handle_edit_event(room, prechecked_event, event_info, dispatch_timing)
-                return
+                return TurnDispatchOutcome.INTENTIONALLY_IGNORED
             routed_alias = self.deps.ingress.router_relay_original_event_id(event)
             claim_aliases = (routed_alias,) if routed_alias else ()
             turn_claim = TurnRecord.create([event.event_id], discovery_event_ids=claim_aliases, completed=False)
             if not self.deps.turn_store.try_claim_turn(turn_claim):
-                return
+                return TurnDispatchOutcome.DEFERRED
             reservation_owner.pending_turn_claim = turn_claim
-            await self._ingest_live_text_event(
+            outcome = await self._ingest_live_text_event(
                 room,
                 prechecked_event,
                 event_info=event_info,
                 dispatch_timing=dispatch_timing,
                 reservation_owner=reservation_owner,
             )
-        except IngressAdmissionClosedError:
-            self.deps.logger.debug(
-                "Text ingress admission closed",
-                event_id=prechecked_event.event.event_id,
-                room_id=room.room_id,
+            return (
+                TurnDispatchOutcome.DEFERRED
+                if outcome is _IngressAdmissionOutcome.ADMITTED
+                else TurnDispatchOutcome.INTENTIONALLY_IGNORED
             )
         finally:
             if reservation_owner.pending_turn_claim is not None and not reservation_owner.admitted:
@@ -2145,14 +2149,14 @@ class TurnController:
         event_info: EventInfo,
         dispatch_timing: DispatchPipelineTiming | None,
         reservation_owner: _PromptIngressReservationOwner,
-    ) -> None:
+    ) -> _IngressAdmissionOutcome:
         """Resolve, normalize, and admit one live (non-edit) text event."""
         event = prechecked_event.event
         try:
             ingress_thread_id = await self.deps.resolver.coalescing_thread_id(room, event)
         except ThreadMembershipLookupError:
             if await self._notify_command_target_not_ready(room, event):
-                return
+                return _IngressAdmissionOutcome.CONSUMED
             raise
         if await self._should_skip_router_before_shared_ingress_work(
             room,
@@ -2166,7 +2170,7 @@ class TurnController:
                 room_id=room.room_id,
                 thread_id=ingress_thread_id,
             )
-            return
+            return _IngressAdmissionOutcome.CONSUMED
 
         self.deps.logger.info(
             "Received message",
@@ -2185,7 +2189,7 @@ class TurnController:
             event,
             dispatch_timing=dispatch_timing,
         )
-        await self._dispatch_prepared_text_like_ingress(
+        return await self._dispatch_prepared_text_like_ingress(
             room=room,
             prepared_event=prepared_event,
             dispatch_event=event,
@@ -2238,10 +2242,10 @@ class TurnController:
         event: MatrixMediaEvent,
         *,
         receipt_time: float | None = None,
-    ) -> None:
+    ) -> TurnDispatchOutcome:
         """Handle one inbound media event."""
         async with self.deps.resolver.turn_thread_cache_scope():
-            await self._handle_media_message_inner(room, event, receipt_time=receipt_time)
+            return await self._handle_media_message_inner(room, event, receipt_time=receipt_time)
 
     async def _handle_media_message_inner(
         self,
@@ -2249,11 +2253,11 @@ class TurnController:
         event: MatrixMediaEvent,
         *,
         receipt_time: float | None = None,
-    ) -> None:
+    ) -> TurnDispatchOutcome:
         """Handle one media event inside the per-turn conversation lookup scope."""
         prechecked_event = self._precheck_dispatch_event(room, event)
         if prechecked_event is None:
-            return
+            return TurnDispatchOutcome.INTENTIONALLY_IGNORED
         dispatch_timing = create_dispatch_pipeline_timing(
             event_id=prechecked_event.event.event_id,
             room_id=room.room_id,
@@ -2269,10 +2273,7 @@ class TurnController:
                 event_id=prechecked_event.event.event_id,
                 sender=prechecked_event.event.sender,
             )
-            self._mark_source_events_responded(
-                TurnRecord.create([prechecked_event.event.event_id]),
-            )
-            return
+            return TurnDispatchOutcome.INTENTIONALLY_IGNORED
         reservation_owner = self._reserve_prompt_ingress_order(
             room,
             prechecked_event.requester_user_id,
@@ -2290,41 +2291,41 @@ class TurnController:
                     dispatch_timing=dispatch_timing,
                     reservation_owner=reservation_owner,
                 )
-                return
-            # Prime transitive ancestor lookups before writing advisory cache membership.
-            coalescing_thread_id = await self.deps.resolver.coalescing_thread_id(room, prechecked_event.event)
-            await self._append_live_event_with_timing(
-                room.room_id,
-                prechecked_event.event,
-                event_info=event_info,
-                dispatch_timing=dispatch_timing,
-            )
+                dispatch_outcome = TurnDispatchOutcome.DEFERRED
+            else:
+                # Prime transitive ancestor lookups before writing advisory cache membership.
+                coalescing_thread_id = await self.deps.resolver.coalescing_thread_id(room, prechecked_event.event)
+                await self._append_live_event_with_timing(
+                    room.room_id,
+                    prechecked_event.event,
+                    event_info=event_info,
+                    dispatch_timing=dispatch_timing,
+                )
 
-            outcome = await self._dispatch_special_media_as_text(
-                room,
-                prechecked_event,
-                reservation_owner=reservation_owner,
-                coalescing_thread_id=coalescing_thread_id,
-            )
-            if outcome is not _IngressAdmissionOutcome.IGNORED:
-                return
-            if not is_matrix_media_dispatch_event(prechecked_event.event):
-                return
-            await self._enqueue_media_for_dispatch(
-                room=room,
-                event=prechecked_event.event,
-                coalescing_thread_id=coalescing_thread_id,
-                requester_user_id=prechecked_event.requester_user_id,
-                reservation_owner=reservation_owner,
-            )
-        except IngressAdmissionClosedError:
-            self.deps.logger.debug(
-                "Media ingress admission closed",
-                event_id=prechecked_event.event.event_id,
-                room_id=room.room_id,
-            )
+                admission_outcome = await self._dispatch_special_media_as_text(
+                    room,
+                    prechecked_event,
+                    reservation_owner=reservation_owner,
+                    coalescing_thread_id=coalescing_thread_id,
+                )
+                if admission_outcome is _IngressAdmissionOutcome.ADMITTED:
+                    dispatch_outcome = TurnDispatchOutcome.DEFERRED
+                elif admission_outcome is _IngressAdmissionOutcome.CONSUMED or not is_matrix_media_dispatch_event(
+                    prechecked_event.event,
+                ):
+                    dispatch_outcome = TurnDispatchOutcome.INTENTIONALLY_IGNORED
+                else:
+                    await self._enqueue_media_for_dispatch(
+                        room=room,
+                        event=prechecked_event.event,
+                        coalescing_thread_id=coalescing_thread_id,
+                        requester_user_id=prechecked_event.requester_user_id,
+                        reservation_owner=reservation_owner,
+                    )
+                    dispatch_outcome = TurnDispatchOutcome.DEFERRED
         finally:
             await reservation_owner.release()
+        return dispatch_outcome
 
     async def _dispatch_special_media_as_text(
         self,
@@ -2484,6 +2485,7 @@ class TurnController:
                     hook_source=envelope.hook_source,
                     message_received_depth=envelope.message_received_depth,
                     trust_internal_payload_metadata=True,
+                    turn_dispatch_recovery=turn_dispatch_recovery_active(),
                     dispatch_metadata=_queued_notice_dispatch_metadata(queued_notice_reservation, normalized_target),
                 ),
             )
@@ -2626,6 +2628,7 @@ class TurnController:
                     hook_source=hook_source,
                     message_received_depth=message_received_depth,
                     trust_internal_payload_metadata=True,
+                    turn_dispatch_recovery=turn_dispatch_recovery_active(),
                     dispatch_metadata=_queued_notice_dispatch_metadata(queued_notice_reservation, target),
                 ),
             ),

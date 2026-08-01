@@ -10,15 +10,17 @@ import threading
 import time
 from collections.abc import Awaitable, Callable, Iterator, Mapping
 from contextlib import contextmanager
-from dataclasses import dataclass, field
+from contextvars import ContextVar
+from dataclasses import dataclass, field, replace
 from enum import StrEnum
 from pathlib import Path
-from typing import TypeVar, cast
+from typing import Protocol, TypeVar, cast
 
 import nio
 from typing_extensions import TypeIs
 
 from mindroom.background_tasks import create_background_task
+from mindroom.dispatch_callback_outcome import TurnDispatchOutcome
 from mindroom.dispatch_recovery_context import turn_dispatch_recovery_scope
 from mindroom.dispatch_source import IMAGE_SOURCE_KIND, MEDIA_SOURCE_KIND, VOICE_SOURCE_KIND
 from mindroom.logging_config import get_logger
@@ -28,6 +30,8 @@ logger = get_logger(__name__)
 
 _SCHEMA_VERSION = 1
 _PENDING_STATE = "pending"
+_DEFERRED_STATE = "deferred"
+_UNSETTLED_STATES = (_PENDING_STATE, _DEFERRED_STATE)
 _SQLITE_BUSY_TIMEOUT_MILLISECONDS = 5_000
 _RETRY_INITIAL_DELAY_SECONDS = 1.0
 _RETRY_MAX_DELAY_SECONDS = 30.0
@@ -111,6 +115,8 @@ class _DispatchObligation:
     callback_kind: DispatchCallbackKind
     room_id: str
     event_source: Mapping[str, object]
+    callback_completed: bool = False
+    requires_pending_check: bool = field(default=False, compare=False, repr=False)
 
     @property
     def key(self) -> _DispatchObligationKey:
@@ -123,11 +129,23 @@ class _DispatchObligation:
         )
 
 
+_ADMITTED_OBLIGATION: ContextVar[_DispatchObligation | None] = ContextVar(
+    "admitted_dispatch_obligation",
+    default=None,
+)
+
+
 @dataclass(frozen=True, slots=True)
 class _StoredRow:
     room_id: str
     event_source_json: str
     state: str
+
+
+class _RoomIdEvent(Protocol):
+    """Nio event carrying the room attached by its decryption pipeline."""
+
+    room_id: str
 
 
 @dataclass
@@ -185,7 +203,7 @@ class DispatchObligationStore:
                 room_id TEXT NOT NULL,
                 event_source_json TEXT NOT NULL,
                 state TEXT NOT NULL CHECK (
-                    state IN ('pending', 'succeeded', 'intentionally_ignored')
+                    state IN ('pending', 'deferred', 'succeeded', 'intentionally_ignored')
                 ),
                 created_at_ns INTEGER NOT NULL,
                 settled_at_ns INTEGER,
@@ -206,7 +224,7 @@ class DispatchObligationStore:
                 entity_name,
                 created_at_ns
             )
-            WHERE state = 'pending'
+            WHERE state IN ('pending', 'deferred')
             """,
         )
         if current_version < _SCHEMA_VERSION:
@@ -267,6 +285,8 @@ class DispatchObligationStore:
             callback_kind=callback_kind,
             room_id=row["room_id"],
             event_source=event_source,
+            callback_completed=row["state"] == _DEFERRED_STATE,
+            requires_pending_check=True,
         )
 
     def create_pending(self, obligation: _DispatchObligation) -> _DispatchCreateResult:
@@ -296,7 +316,7 @@ class DispatchObligationStore:
                     ),
                 ).fetchone(),
             )
-            if existing is not None and existing.state != _PENDING_STATE:
+            if existing is not None and existing.state not in _UNSETTLED_STATES:
                 return _DispatchCreateResult.ALREADY_TERMINAL
             if not obligation.room_id:
                 msg = "Dispatch obligation requires a room"
@@ -356,7 +376,7 @@ class DispatchObligationStore:
                   AND entity_name = ?
                   AND source_event_id = ?
                   AND callback_kind = ?
-                  AND state = ?
+                  AND state IN (?, ?)
                 """,
                 (
                     outcome.value,
@@ -366,6 +386,7 @@ class DispatchObligationStore:
                     key.source_event_id,
                     key.callback_kind.value,
                     _PENDING_STATE,
+                    _DEFERRED_STATE,
                 ),
             )
 
@@ -381,9 +402,61 @@ class DispatchObligationStore:
                   AND entity_name = ?
                   AND source_event_id = ?
                   AND callback_kind = ?
+                  AND state IN (?, ?)
+                """,
+                (
+                    key.principal_id,
+                    key.entity_name,
+                    key.source_event_id,
+                    key.callback_kind.value,
+                    _PENDING_STATE,
+                    _DEFERRED_STATE,
+                ),
+            )
+
+    def mark_callback_pending(self, key: _DispatchObligationKey) -> bool:
+        """Return deferred turn work to callback ownership before retrying it."""
+        self._validate_bound_key(key)
+        with self._lock, self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            cursor = connection.execute(
+                """
+                UPDATE dispatch_obligations
+                SET state = ?
+                WHERE principal_id = ?
+                  AND entity_name = ?
+                  AND source_event_id = ?
+                  AND callback_kind = ?
                   AND state = ?
                 """,
                 (
+                    _PENDING_STATE,
+                    key.principal_id,
+                    key.entity_name,
+                    key.source_event_id,
+                    key.callback_kind.value,
+                    _DEFERRED_STATE,
+                ),
+            )
+        return cursor.rowcount == 1
+
+    def mark_callback_deferred(self, key: _DispatchObligationKey) -> None:
+        """Record that the callback completed and downstream turn work owns the source."""
+        self._validate_bound_key(key)
+        with self._lock, self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            connection.execute(
+                """
+                UPDATE dispatch_obligations
+                SET state = ?
+                WHERE principal_id = ?
+                  AND entity_name = ?
+                  AND source_event_id = ?
+                  AND callback_kind = ?
+                  AND state = ?
+                """,
+                (
+                    _DEFERRED_STATE,
                     key.principal_id,
                     key.entity_name,
                     key.source_event_id,
@@ -474,7 +547,46 @@ class DispatchObligationStore:
                         source_event_id,
                         DispatchCallbackKind.MESSAGE.value,
                         DispatchCallbackKind.MEDIA.value,
+                        _DEFERRED_STATE,
+                    )
+                    for source_event_id in source_event_ids
+                ),
+            )
+
+    def settle_intentionally_ignored_turn_sources(self, source_event_ids: tuple[str, ...]) -> None:
+        """Compact deferred message or media callbacks intentionally ignored downstream."""
+        if not source_event_ids:
+            return
+        if any(not source_event_id for source_event_id in source_event_ids):
+            msg = "Ignored dispatch settlement requires source events"
+            raise ValueError(msg)
+        settled_at_ns = time.time_ns()
+        with self._lock, self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            connection.executemany(
+                """
+                UPDATE dispatch_obligations
+                SET room_id = '',
+                    event_source_json = '',
+                    state = ?,
+                    settled_at_ns = ?
+                WHERE principal_id = ?
+                  AND entity_name = ?
+                  AND source_event_id = ?
+                  AND callback_kind IN (?, ?)
+                  AND state IN (?, ?)
+                """,
+                (
+                    (
+                        _DispatchTerminalOutcome.INTENTIONALLY_IGNORED.value,
+                        settled_at_ns,
+                        self.principal_id,
+                        self.entity_name,
+                        source_event_id,
+                        DispatchCallbackKind.MESSAGE.value,
+                        DispatchCallbackKind.MEDIA.value,
                         _PENDING_STATE,
+                        _DEFERRED_STATE,
                     )
                     for source_event_id in source_event_ids
                 ),
@@ -485,14 +597,14 @@ class DispatchObligationStore:
         with self._lock, self._connection() as connection:
             rows = connection.execute(
                 """
-                SELECT source_event_id, callback_kind, room_id, event_source_json
+                SELECT source_event_id, callback_kind, room_id, event_source_json, state
                 FROM dispatch_obligations
                 WHERE principal_id = ?
                   AND entity_name = ?
-                  AND state = ?
+                  AND state IN ('pending', 'deferred')
                 ORDER BY created_at_ns, rowid
                 """,
-                (self.principal_id, self.entity_name, _PENDING_STATE),
+                (self.principal_id, self.entity_name),
             ).fetchall()
         obligations: list[_DispatchObligation] = []
         for row in rows:
@@ -512,13 +624,13 @@ class DispatchObligationStore:
         with self._lock, self._connection() as connection:
             row = connection.execute(
                 """
-                SELECT source_event_id, callback_kind, room_id, event_source_json
+                SELECT source_event_id, callback_kind, room_id, event_source_json, state
                 FROM dispatch_obligations
                 WHERE principal_id = ?
                   AND entity_name = ?
                   AND source_event_id = ?
                   AND callback_kind = ?
-                  AND state = ?
+                  AND state IN (?, ?)
                 """,
                 (
                     key.principal_id,
@@ -526,6 +638,7 @@ class DispatchObligationStore:
                     key.source_event_id,
                     key.callback_kind.value,
                     _PENDING_STATE,
+                    _DEFERRED_STATE,
                 ),
             ).fetchone()
         return None if row is None else self._pending_obligation_from_row(row)
@@ -544,7 +657,7 @@ class DispatchObligationStore:
                 WHERE principal_id = ?
                   AND entity_name = ?
                   AND source_event_id = ?
-                  AND state = ?
+                  AND state IN (?, ?)
                   AND callback_kind = ?
                 LIMIT 1
                 """,
@@ -553,6 +666,7 @@ class DispatchObligationStore:
                     self.entity_name,
                     source_event_id,
                     _PENDING_STATE,
+                    _DEFERRED_STATE,
                     callback_kind.value,
                 ),
             ).fetchone()
@@ -561,8 +675,8 @@ class DispatchObligationStore:
 
 _DispatchEvent = nio.Event | nio.InviteEvent
 _DispatchCallback = Callable[[nio.MatrixRoom, _DispatchEvent], Awaitable[_DispatchCallbackResult]]
-_MessageCallback = Callable[[nio.MatrixRoom, nio.RoomMessageText], Awaitable[None]]
-_MediaCallback = Callable[[nio.MatrixRoom, MatrixMediaEvent], Awaitable[None]]
+_MessageCallback = Callable[[nio.MatrixRoom, nio.RoomMessageText], Awaitable[TurnDispatchOutcome]]
+_MediaCallback = Callable[[nio.MatrixRoom, MatrixMediaEvent], Awaitable[TurnDispatchOutcome]]
 _ReactionCallback = Callable[[nio.MatrixRoom, nio.ReactionEvent], Awaitable[None]]
 _ApprovalCallback = Callable[[nio.MatrixRoom, nio.UnknownEvent], Awaitable[None]]
 _InviteCallback = Callable[[nio.MatrixRoom, nio.InviteEvent], Awaitable[None]]
@@ -654,7 +768,9 @@ def _apply_recovery_security_metadata(
     event.verified = verified
     event.sender_key = sender_key
     event.session_id = session_id
-    vars(event)["room_id"] = room_id
+    # Nio attaches this attribute to decrypted events even though its base Event
+    # annotation omits it; the protocol keeps that runtime contract explicit here.
+    cast(_RoomIdEvent, event).room_id = room_id  # noqa: TC006
 
 
 def _dispatch_source_event_id(
@@ -721,8 +837,7 @@ class _CallbackBindings:
     on_room_lifecycle: _RoomLifecycleCallback
     on_redaction: _RedactionCallback
     on_decryption_failure: _DecryptionFailureCallback
-    turn_is_persisted: Callable[[str], bool]
-    source_is_deferred: Callable[[str], bool]
+    source_has_live_owner: Callable[[str], bool]
 
     def as_mapping(self) -> Mapping[DispatchCallbackKind, _DispatchCallback]:
         return {
@@ -736,10 +851,14 @@ class _CallbackBindings:
             DispatchCallbackKind.DECRYPTION_FAILURE: self.dispatch_decryption_failure,
         }
 
-    def _turn_result(self, source_event_id: str) -> _DispatchCallbackResult:
-        if self.turn_is_persisted(source_event_id) or self.source_is_deferred(source_event_id):
+    @staticmethod
+    def _turn_result(outcome: TurnDispatchOutcome) -> _DispatchCallbackResult:
+        if outcome is TurnDispatchOutcome.DEFERRED:
             return _DispatchCallbackResult.DEFERRED
-        return _DispatchCallbackResult.INTENTIONALLY_IGNORED
+        if outcome is TurnDispatchOutcome.INTENTIONALLY_IGNORED:
+            return _DispatchCallbackResult.INTENTIONALLY_IGNORED
+        msg = f"Turn dispatch callback returned invalid outcome {outcome!r}"
+        raise TypeError(msg)
 
     async def dispatch_message(
         self,
@@ -748,8 +867,7 @@ class _CallbackBindings:
     ) -> _DispatchCallbackResult:
         if not isinstance(event, nio.RoomMessageText):
             return _DispatchCallbackResult.INTENTIONALLY_IGNORED
-        await self.on_message(room, event)
-        return self._turn_result(event.event_id)
+        return self._turn_result(await self.on_message(room, event))
 
     async def dispatch_media(
         self,
@@ -758,10 +876,9 @@ class _CallbackBindings:
     ) -> _DispatchCallbackResult:
         if not isinstance(event, MATRIX_MEDIA_EVENT_TYPES):
             return _DispatchCallbackResult.INTENTIONALLY_IGNORED
-        if self.source_is_deferred(event.event_id):
+        if self.source_has_live_owner(event.event_id):
             return _DispatchCallbackResult.DEFERRED
-        await self.on_media(room, event)
-        return self._turn_result(event.event_id)
+        return self._turn_result(await self.on_media(room, event))
 
     async def dispatch_reaction(
         self,
@@ -857,8 +974,7 @@ class DispatchObligationRunner:
         on_room_lifecycle: _RoomLifecycleCallback,
         on_redaction: _RedactionCallback,
         on_decryption_failure: _DecryptionFailureCallback,
-        turn_is_persisted: Callable[[str], bool],
-        source_is_deferred: Callable[[str], bool],
+        source_has_live_owner: Callable[[str], bool],
     ) -> Mapping[DispatchCallbackKind, _DispatchCallback]:
         """Bind typed Matrix callbacks to explicit durable outcomes."""
         return _CallbackBindings(
@@ -870,8 +986,7 @@ class DispatchObligationRunner:
             on_room_lifecycle=on_room_lifecycle,
             on_redaction=on_redaction,
             on_decryption_failure=on_decryption_failure,
-            turn_is_persisted=turn_is_persisted,
-            source_is_deferred=source_is_deferred,
+            source_has_live_owner=source_has_live_owner,
         ).as_mapping()
 
     def task_wrapper(
@@ -903,6 +1018,30 @@ class DispatchObligationRunner:
                 source_event_id=source_event_id,
                 callback_kind=callback_kind,
             ),
+        )
+
+    async def settle_intentionally_ignored_turn_source(
+        self,
+        source_event_id: str,
+        callback_kind: DispatchCallbackKind,
+    ) -> None:
+        """Settle one deferred turn source whose asynchronous normalization ignored it."""
+        if callback_kind not in _TURN_BACKED_KINDS:
+            msg = "Deferred turn settlement requires a message or media callback kind"
+            raise ValueError(msg)
+        await _run_owned_store_operation(
+            self.store.settle_intentionally_ignored_turn_sources,
+            (source_event_id,),
+        )
+
+    async def settle_intentionally_ignored_turn_sources(
+        self,
+        source_event_ids: tuple[str, ...],
+    ) -> None:
+        """Settle deferred turn sources that downstream dispatch intentionally ignored."""
+        await _run_owned_store_operation(
+            self.store.settle_intentionally_ignored_turn_sources,
+            source_event_ids,
         )
 
     def bind_event_loop(self) -> None:
@@ -981,30 +1120,26 @@ class DispatchObligationRunner:
 
     def register_source_callbacks(self, client: nio.AsyncClient, *, owner: object) -> None:
         """Register every source-backed correctness callback except delayed room lifecycle."""
-
-        def register(
-            callback_kind: DispatchCallbackKind,
-            event_type: type[nio.Event],
-        ) -> None:
-            client.add_event_callback(
-                self.task_wrapper(callback_kind, owner=owner),
-                event_type,
-            )
-
         client.add_event_admission_callback(self._admit_source_event)
-        register(DispatchCallbackKind.MESSAGE, nio.RoomMessageText)
-        register(DispatchCallbackKind.REDACTION, nio.RedactionEvent)
-        register(DispatchCallbackKind.REACTION, nio.ReactionEvent)
-        for event_type in MATRIX_MEDIA_EVENT_TYPES:
-            register(DispatchCallbackKind.MEDIA, event_type)
-        approval_callback = self.task_wrapper(DispatchCallbackKind.APPROVAL, owner=owner)
+        for policy in _SOURCE_CALLBACK_POLICIES:
+            callback = self.task_wrapper(policy.callback_kind, owner=owner)
+            if policy.predicate is None:
+                for event_type in policy.event_types:
+                    client.add_event_callback(callback, event_type)
+                continue
 
-        async def dispatch_approval(room: nio.MatrixRoom, event: nio.Event) -> None:
-            if _is_tool_approval_response(event):
-                await approval_callback(room, event)
+            async def dispatch_matching(
+                room: nio.MatrixRoom,
+                event: nio.Event,
+                *,
+                callback: _DispatchObligationTaskWrapper = callback,
+                policy: _SourceCallbackPolicy = policy,
+            ) -> None:
+                if policy.matches(event):
+                    await callback(room, event)
 
-        client.add_event_callback(dispatch_approval, nio.UnknownEvent)
-        register(DispatchCallbackKind.DECRYPTION_FAILURE, nio.MegolmEvent)
+            for event_type in policy.event_types:
+                client.add_event_callback(dispatch_matching, event_type)
 
     async def _admit_source_event(self, room: nio.MatrixRoom, event: nio.Event) -> None:
         """Route every correctness-critical timeline event through one nio owner."""
@@ -1014,22 +1149,12 @@ class DispatchObligationRunner:
 
     def _admission_kind(self, event: nio.Event) -> DispatchCallbackKind | None:
         """Return the one durable callback kind owned by a timeline event."""
-        callback_kind = None
-        if isinstance(event, nio.RoomMessageText):
-            callback_kind = DispatchCallbackKind.MESSAGE
-        elif isinstance(event, MATRIX_MEDIA_EVENT_TYPES):
-            callback_kind = DispatchCallbackKind.MEDIA
-        elif isinstance(event, nio.RedactionEvent):
-            callback_kind = DispatchCallbackKind.REDACTION
-        elif isinstance(event, nio.ReactionEvent):
-            callback_kind = DispatchCallbackKind.REACTION
-        elif isinstance(event, nio.UnknownEvent) and _is_tool_approval_response(event):
-            callback_kind = DispatchCallbackKind.APPROVAL
-        elif isinstance(event, nio.MegolmEvent):
-            callback_kind = DispatchCallbackKind.DECRYPTION_FAILURE
-        elif isinstance(event, nio.RoomMemberEvent) and self.room_lifecycle_admission_enabled():
-            callback_kind = DispatchCallbackKind.ROOM_LIFECYCLE
-        return callback_kind
+        for policy in _SOURCE_CALLBACK_POLICIES:
+            if policy.matches(event):
+                return policy.callback_kind
+        if isinstance(event, nio.RoomMemberEvent) and self.room_lifecycle_admission_enabled():
+            return DispatchCallbackKind.ROOM_LIFECYCLE
+        return None
 
     async def dispatch(
         self,
@@ -1059,7 +1184,12 @@ class DispatchObligationRunner:
         obligation = await self.persist(room, event, callback_kind)
         if obligation is None:
             return
-        await self.task_wrapper(callback_kind, owner=owner)(room, event)
+        self._schedule_background_obligation(
+            obligation,
+            room=room,
+            event=event,
+            owner=owner,
+        )
 
     async def persist(
         self,
@@ -1071,15 +1201,13 @@ class DispatchObligationRunner:
         self._event_loop = asyncio.get_running_loop()
         try:
             obligation = self._obligation_for_event(room, event, callback_kind)
-            if await self._settle_from_turn_store_if_owned(obligation):
-                return None
             create_result = await _run_owned_store_operation(self.store.create_pending, obligation)
             if create_result is _DispatchCreateResult.ALREADY_TERMINAL:
                 persisted_obligation = None
             elif create_result is _DispatchCreateResult.ALREADY_PENDING:
                 persisted_obligation = await asyncio.to_thread(self.store.pending_for, obligation.key)
             else:
-                persisted_obligation = obligation
+                persisted_obligation = None if await self._settle_from_turn_store_if_owned(obligation) else obligation
         except (asyncio.CancelledError, Exception):
             if self.on_persist_failure is not None:
                 self.on_persist_failure()
@@ -1140,6 +1268,40 @@ class DispatchObligationRunner:
         except Exception:
             self._schedule_retry(key)
             raise
+
+    def _schedule_background_obligation(
+        self,
+        obligation: _DispatchObligation,
+        *,
+        room: nio.MatrixRoom,
+        event: _DispatchEvent,
+        owner: object,
+    ) -> None:
+        """Schedule one exact accepted payload without reloading it from SQLite."""
+        create_background_task(
+            self._run_background_obligation(obligation, room=room, event=event),
+            owner=owner,
+        )
+
+    async def _run_background_obligation(
+        self,
+        obligation: _DispatchObligation,
+        *,
+        room: nio.MatrixRoom,
+        event: _DispatchEvent,
+    ) -> None:
+        try:
+            await self.run_persisted(obligation, room=room, event=event)
+        except asyncio.CancelledError:
+            return
+        except Exception:
+            self._schedule_retry(obligation.key)
+            logger.exception(
+                "dispatch_obligation_callback_failed",
+                source_event_id=obligation.source_event_id,
+                callback_kind=obligation.callback_kind.value,
+                room_id=obligation.room_id,
+            )
 
     async def run_persisted(
         self,
@@ -1271,14 +1433,22 @@ class DispatchObligationRunner:
         if not await self._claim(obligation.key):
             return
         try:
-            if not await asyncio.to_thread(
+            if obligation.requires_pending_check and not await asyncio.to_thread(
                 self.store.has_pending,
                 obligation.source_event_id,
                 obligation.callback_kind,
             ):
                 return
-            if await self._settle_from_turn_store_if_owned(obligation):
-                return
+            if obligation.callback_completed:
+                if await self._settle_from_turn_store_if_owned(obligation):
+                    return
+                callback_reclaimed = await _run_owned_store_operation(
+                    self.store.mark_callback_pending,
+                    obligation.key,
+                )
+                if not callback_reclaimed:
+                    return
+                obligation = replace(obligation, callback_completed=False, requires_pending_check=False)
             callback = self.callbacks.get(obligation.callback_kind)
             if callback is None:
                 msg = f"No callback registered for {obligation.callback_kind.value!r}"
@@ -1308,9 +1478,11 @@ class DispatchObligationRunner:
         if not isinstance(result, _DispatchCallbackResult):
             msg = f"Dispatch callback returned invalid result {result!r}"
             raise TypeError(msg)
-        if result is _DispatchCallbackResult.DEFERRED:
-            return
         if await self._settle_from_turn_store_if_owned(obligation):
+            return
+        if result is _DispatchCallbackResult.DEFERRED:
+            await _run_owned_store_operation(self.store.mark_callback_deferred, obligation.key)
+            await self._settle_from_turn_store_if_owned(obligation)
             return
         if obligation.callback_kind is DispatchCallbackKind.INVITE:
             await _run_owned_store_operation(self.store.discard_pending, obligation.key)
@@ -1343,12 +1515,14 @@ class _DispatchObligationAdmissionCallback:
 
     async def __call__(self, room: nio.MatrixRoom, event: _DispatchEvent) -> None:
         """Translate every non-cancellation persistence failure into nio rejection."""
+        _ADMITTED_OBLIGATION.set(None)
         try:
-            await self.runner.persist(room, event, self.callback_kind)
+            obligation = await self.runner.persist(room, event, self.callback_kind)
         except asyncio.CancelledError:
             raise
         except Exception as error:
             raise nio.CallbackNotAcceptedError(str(error)) from error
+        _ADMITTED_OBLIGATION.set(obligation)
 
 
 @dataclass(frozen=True, slots=True)
@@ -1361,6 +1535,17 @@ class _DispatchObligationTaskWrapper:
 
     async def __call__(self, room: nio.MatrixRoom, event: _DispatchEvent) -> None:
         """Schedule already-persisted work without repeating durable admission."""
+        key = self.runner._obligation_for_event(room, event, self.callback_kind).key
+        obligation = _ADMITTED_OBLIGATION.get()
+        _ADMITTED_OBLIGATION.set(None)
+        if obligation is not None and obligation.key == key:
+            self.runner._schedule_background_obligation(
+                obligation,
+                room=room,
+                event=event,
+                owner=self.owner,
+            )
+            return
         create_background_task(
             self._run(room=room, event=event),
             owner=self.owner,
@@ -1391,3 +1576,30 @@ class _DispatchObligationTaskWrapper:
 
 def _is_tool_approval_response(event: nio.Event) -> TypeIs[nio.UnknownEvent]:
     return isinstance(event, nio.UnknownEvent) and event.type == _TOOL_APPROVAL_RESPONSE_EVENT_TYPE
+
+
+@dataclass(frozen=True, slots=True)
+class _SourceCallbackPolicy:
+    """One shared timeline admission and callback-registration rule."""
+
+    callback_kind: DispatchCallbackKind
+    event_types: tuple[type[nio.Event], ...]
+    predicate: Callable[[nio.Event], bool] | None = None
+
+    def matches(self, event: nio.Event) -> bool:
+        """Return whether this policy owns one exact event."""
+        return isinstance(event, self.event_types) and (self.predicate is None or self.predicate(event))
+
+
+_SOURCE_CALLBACK_POLICIES = (
+    _SourceCallbackPolicy(DispatchCallbackKind.MESSAGE, (nio.RoomMessageText,)),
+    _SourceCallbackPolicy(DispatchCallbackKind.REDACTION, (nio.RedactionEvent,)),
+    _SourceCallbackPolicy(DispatchCallbackKind.REACTION, (nio.ReactionEvent,)),
+    _SourceCallbackPolicy(DispatchCallbackKind.MEDIA, MATRIX_MEDIA_EVENT_TYPES),
+    _SourceCallbackPolicy(
+        DispatchCallbackKind.APPROVAL,
+        (nio.UnknownEvent,),
+        _is_tool_approval_response,
+    ),
+    _SourceCallbackPolicy(DispatchCallbackKind.DECRYPTION_FAILURE, (nio.MegolmEvent,)),
+)

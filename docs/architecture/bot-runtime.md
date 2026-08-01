@@ -62,24 +62,28 @@ Matrix callback
 Nio pre-fanout admission callbacks persist each correctness-critical Matrix timeline callback before any ordinary event callback can run.
 Each exact Matrix principal and entity stores pending replay payloads and permanent compact tombstones in its own `tracking/dispatch_obligations-<entity>-<principal-sha256-prefix>.sqlite3` file.
 This file boundary prevents one entity's admission write from waiting on another entity's SQLite write transaction.
-Its exact key combines the Matrix principal, entity, source event, and callback kind, while pending rows retain the original room and event source for replay.
+Its exact key combines the Matrix principal, entity, source event, and callback kind, while unsettled rows retain the original room and event source for replay.
+Unsettled rows distinguish callbacks that still need execution from callbacks that completed and deferred their source to downstream turn work.
 Settled rows become permanent exact-key tombstones and atomically scrub that replay payload, keeping terminal truth compact without allowing an old callback to reappear.
-Each entity database therefore grows by one compact row per exact callback over the lifetime of the instance.
+Each entity database therefore grows by one compact row per settled callback except successful invites, whose synthetic obligations are deleted so later re-invites can run.
 Operators can inspect growth by running `SELECT state, COUNT(*) FROM dispatch_obligations GROUP BY state;` against each dispatch-obligation database.
 Terminal rows must not be deleted unless duplicate callback execution after future Matrix redelivery is acceptable.
 Classic Sync tokens are opaque and may be invalidated, forcing a no-`since` sync whose limited timeline backfill can redeliver an older event, so there is no checkpoint-relative pruning frontier that preserves exact de-duplication.
 Successful and intentionally ignored callbacks settle explicitly, while failures and cancellations remain pending for direct startup recovery.
 Callback failures remain autonomously retry-owned with capped exponential backoff until they settle or deterministic corruption parks them for operator repair.
-After gate admission, every successful terminal path persists `TurnStore` truth, including policy ignores, unmentioned managed senders, blocked deep synthetic relays, and commands owned by another entity.
+Visible response paths persist `TurnStore` truth, while pure policy ignores, unmentioned managed senders, blocked deep synthetic relays, and commands owned by another entity compact their exact dispatch-obligation tombstones directly.
+This keeps ignored high-volume traffic out of the handled-turn JSON ledger without weakening exact callback de-duplication.
 An in-memory claim loser remains deferred only to the competing owner, which must either persist terminal truth or return the exact source to durable retry.
-Ingress-lane readiness failures, empty normalization results, and delivery failures return the exact source to the existing durable retry owner after the lane releases it.
+Ingress-lane readiness and delivery failures return the exact source to the existing durable retry owner after the lane releases it.
+A successful empty readiness result explicitly settles the exact source as intentionally ignored instead of repeating download or transcription work forever.
 Router delivery failure raises back into that same retry path instead of completing without terminal truth.
 Recovery parses and invokes pending work without depending on a later Classic Sync token or Sliding Sync position.
 Recovery callbacks may rely on the room ID, while cached membership and state are best-effort because recovery does not wait for a new sync.
 Recovery logs and skips a corrupt pending row so other valid rows can continue, while retaining the corrupt row for repair.
 To repair corruption, stop MindRoom, back up the affected database, and restore a known-good copy before restarting.
 Deleting an unrecoverable pending row is a last resort that accepts losing that callback unless Matrix redelivers it.
-Message and media obligations remain pending only while the gate, a competing turn claim, retry, or a pending `TurnStore` response owns them, then yield only to durably persisted terminal turn truth.
+Message and media obligations remain unsettled only while their callback, gate, competing turn claim, retry, or a pending `TurnStore` response owns them, then yield only to an explicit compact outcome.
+Recovery intent travels with queued ingress so pre-existing lane and coalescing workers cannot turn a temporarily unavailable recovered router target into a terminal fallback response.
 The registered `DispatchObligationRunner` source callback durably accepts each relevant event before background execution.
 The pinned nio recovery contract publishes a recovered-room outcome only after every non-live callback succeeds, so `SyncCacheTrust` can certify a complete recovered response while unrecovered and unclassified limited rooms still fail closed.
 Raw sync-cache continuity remains owned separately by `SyncCacheTrust`, so a durable pending dispatch obligation is sufficient to preserve a certified checkpoint.
