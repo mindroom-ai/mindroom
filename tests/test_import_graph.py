@@ -88,7 +88,23 @@ _TOOLS_ROOTS = _REGISTRY_ROOTS | frozenset(
         "zipp",
     },
 )
+# Top-level CLI help only needs command metadata and presentation libraries.
+# Command implementations must defer networking, crypto, config validation,
+# and provider imports until the selected command runs.
+_CLI_ROOTS = frozenset(
+    {
+        "annotated_doc",
+        "attr",
+        "click",
+        "dotenv",
+        "pygments",
+        "rich",
+        "shellingham",
+        "typer",
+    },
+)
 _ALLOWED_THIRD_PARTY_ROOTS: dict[str, frozenset[str]] = {
+    "mindroom.cli.main": _CLI_ROOTS,
     "mindroom.config.main": _CONFIG_LAYER_ROOTS,
     "mindroom.model_loading": _CONFIG_LAYER_ROOTS | frozenset({"agno"}),
     "mindroom.tool_system.declarations": frozenset({"dotenv"}),
