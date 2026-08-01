@@ -18,6 +18,7 @@ from mindroom.constants import ORIGINAL_SENDER_KEY, SOURCE_KIND_KEY, VISIBLE_ROU
 from mindroom.dispatch_handoff import PendingDispatchMetadata, PreparedTextEvent
 from mindroom.dispatch_source import (
     ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
+    MEDIA_SOURCE_KIND,
     TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
     VOICE_SOURCE_KIND,
 )
@@ -85,6 +86,7 @@ def _gate(
     room_scope_is_single_conversation: bool | None = None,
     dispatch_allowed_now: Callable[[CoalescingKey], bool] | bool | None = None,
     wait_until_dispatch_allowed: Callable[[CoalescingKey], Awaitable[None]] | None = None,
+    on_undelivered_source: Callable[[str, str], None] | None = None,
 ) -> tuple[CoalescingGate, list[CoalescedBatch]]:
     batches: list[CoalescedBatch] = []
 
@@ -104,6 +106,7 @@ def _gate(
             None if room_scope_is_single_conversation is None else lambda _room_id: room_scope_is_single_conversation
         ),
         dispatch_allowed_now=dispatch_allowed_now,
+        on_undelivered_source=on_undelivered_source,
     )
     return gate, batches
 
@@ -502,6 +505,34 @@ async def test_failed_lane_readiness_does_not_block_later_same_sender_work() -> 
 
 
 @pytest.mark.asyncio
+async def test_failed_lane_readiness_reports_original_callback_source_kind() -> None:
+    """Lane failure must return a transformed sidecar to its MEDIA callback owner."""
+    undelivered_sources: list[tuple[str, str]] = []
+    gate, _batches = _gate(
+        debounce_seconds=0.0,
+        on_undelivered_source=lambda event_id, source_kind: undelivered_sources.append((event_id, source_kind)),
+    )
+
+    async def failing_ready() -> ReadyPendingEvent:
+        msg = "sidecar hydration failed"
+        raise RuntimeError(msg)
+
+    slot = gate.enter_lane(room_id="!room:localhost", sender_id="@user:localhost")
+    gate.submit_lane_slot(
+        slot,
+        key=CoalescingKey("!room:localhost", "$thread", "@user:localhost"),
+        source_event_id="$sidecar",
+        source_kind="message",
+        callback_source_kind=MEDIA_SOURCE_KIND,
+        ready_task=asyncio.create_task(failing_ready()),
+    )
+
+    await _wait_for(lambda: slot.settled.is_set())
+
+    assert undelivered_sources == [("$sidecar", MEDIA_SOURCE_KIND)]
+
+
+@pytest.mark.asyncio
 async def test_long_running_turn_never_delays_other_ingress_from_same_sender(tmp_path: Path) -> None:
     """A multi-minute in-flight turn delays neither a new top-level turn nor another thread."""
     bot = _make_bot(tmp_path, debounce_ms=0)
@@ -804,15 +835,17 @@ async def test_interactive_answer_during_active_turn_never_holds_sender_lane(tmp
     generated: list[str] = []
     ack_sent = asyncio.Event()
 
-    async def fake_generate_response_locked(_self: object, request: object, **_kwargs: object) -> None:
+    async def fake_generate_response_locked(_self: object, request: object, **_kwargs: object) -> str:
         # The real lifecycle acquired the response lock before invoking this
         # locked operation; only post-lock generation is faked here.
-        generated.append(request.response_envelope.source_event_id)
+        source_event_id = request.response_envelope.source_event_id
+        generated.append(source_event_id)
         if request.on_lifecycle_lock_acquired is not None:
             request.on_lifecycle_lock_acquired()
-        if request.response_envelope.source_event_id == "$a0":
+        if source_event_id == "$a0":
             first_locked.set()
             await release_first_response.wait()
+        return f"{source_event_id}-response"
 
     async def fake_prepare_dispatch(
         _room: object,
@@ -881,6 +914,7 @@ async def test_interactive_answer_during_active_turn_never_holds_sender_lane(tmp
                 await answer_task
         with interactive._thread_lock:
             interactive._remove_active_question_locked("$question")
+            interactive._claimed_question_ids.discard("$question")
 
 
 @pytest.mark.asyncio

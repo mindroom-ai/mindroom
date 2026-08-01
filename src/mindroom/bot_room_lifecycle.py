@@ -209,8 +209,11 @@ class BotRoomLifecycle:
         """Stop preserving an ad-hoc room after this bot leaves it."""
         if not self.should_persist_invited_rooms():
             self.invited_rooms.discard(room_id)
-            return
-        self._update_invited_room(room_id, remember=False)
+        elif not self._update_invited_room(room_id, remember=False):
+            msg = f"Failed to forget invited room {room_id}"
+            raise OSError(msg)
+        self._handled_invite_room_ids.discard(room_id)
+        self._welcomed_room_ids.discard(room_id)
 
     def _update_invited_room(self, room_id: str, *, remember: bool) -> bool:
         """Merge one update with durable and in-memory state before saving."""

@@ -774,12 +774,13 @@ def test_transient_persist_failure_waiter_resolves_after_retry(temp_dir: Path) -
     assert "$retry" in _read_persisted_records(tracker)
 
 
-def test_failed_batch_retries_without_new_record_and_remains_flush_visible(temp_dir: Path) -> None:
-    """A failed batch should retry once and remain pending for a later flush."""
+def test_failed_batch_retries_autonomously_and_notifies_after_persist(temp_dir: Path) -> None:
+    """A terminal write must remain retry-owned without later ledger traffic."""
     tracker = HandledTurnLedger("test_persist_retry", base_path=temp_dir)
     tracker.warm()
     real_persist = tracker._persist_records
     second_failure = threading.Event()
+    persisted = threading.Event()
     attempts = 0
 
     def fail_twice_then_persist(turn_records: tuple[TurnRecord, ...]) -> None:
@@ -793,9 +794,13 @@ def test_failed_batch_retries_without_new_record_and_remains_flush_visible(temp_
         real_persist(turn_records)
 
     with patch.object(tracker, "_persist_records", side_effect=fail_twice_then_persist):
-        tracker.record_handled_turn(TurnRecord.create(["$retry"], completed=False))
+        tracker.update_handled_turn(
+            ("$retry",),
+            lambda _existing: TurnRecord.create(["$retry"], completed=True),
+            on_persisted=lambda _record: persisted.set(),
+        )
         assert second_failure.wait(timeout=5)
-        tracker.flush()
+        assert persisted.wait(timeout=1)
 
     assert attempts == 3
     assert "$retry" in _read_persisted_records(tracker)

@@ -3995,7 +3995,8 @@ async def test_on_reaction_leaves_question_retryable_when_ack_response_is_suppre
         mock_generate_response.return_value = _delivery_resolution(None)
         mock_fetch_history.return_value = thread_history_result([], is_full_history=True)
 
-        await bot._on_reaction(room, reaction_event)
+        with pytest.raises(RuntimeError, match="no durable terminal outcome"):
+            await bot._on_reaction(room, reaction_event)
 
         assert bot._turn_store.is_handled("$question:example.com") is False
         assert _response_event_id(bot, "$question:example.com") is None

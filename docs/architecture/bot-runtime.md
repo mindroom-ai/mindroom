@@ -60,20 +60,26 @@ Matrix callback
 ## Durable Dispatch Boundary
 
 Nio pre-fanout admission callbacks persist each correctness-critical Matrix timeline callback before any ordinary event callback can run.
-Each exact Matrix principal and entity stores pending replay payloads and permanent compact tombstones in its own `tracking/dispatch_obligations-<identity-sha256>.sqlite3` file.
+Each exact Matrix principal and entity stores pending replay payloads and permanent compact tombstones in its own `tracking/dispatch_obligations-<entity>-<principal-sha256-prefix>.sqlite3` file.
 This file boundary prevents one entity's admission write from waiting on another entity's SQLite write transaction.
 Its exact key combines the Matrix principal, entity, source event, and callback kind, while pending rows retain the original room and event source for replay.
 Settled rows become permanent exact-key tombstones and atomically scrub that replay payload, keeping terminal truth compact without allowing an old callback to reappear.
 Each entity database therefore grows by one compact row per exact callback over the lifetime of the instance.
 Operators can inspect growth by running `SELECT state, COUNT(*) FROM dispatch_obligations GROUP BY state;` against each dispatch-obligation database.
 Terminal rows must not be deleted unless duplicate callback execution after future Matrix redelivery is acceptable.
+Classic Sync tokens are opaque and may be invalidated, forcing a no-`since` sync whose limited timeline backfill can redeliver an older event, so there is no checkpoint-relative pruning frontier that preserves exact de-duplication.
 Successful and intentionally ignored callbacks settle explicitly, while failures and cancellations remain pending for direct startup recovery.
-Callback failures receive at most five autonomous retries per process, and exhausted work stays pending for a later restart or operator investigation.
+Callback failures remain autonomously retry-owned with capped exponential backoff until they settle or deterministic corruption parks them for operator repair.
+After gate admission, every successful terminal path persists `TurnStore` truth, including policy ignores, unmentioned managed senders, blocked deep synthetic relays, and commands owned by another entity.
+An in-memory claim loser remains deferred only to the competing owner, which must either persist terminal truth or return the exact source to durable retry.
+Ingress-lane readiness failures, empty normalization results, and delivery failures return the exact source to the existing durable retry owner after the lane releases it.
+Router delivery failure raises back into that same retry path instead of completing without terminal truth.
 Recovery parses and invokes pending work without depending on a later Classic Sync token or Sliding Sync position.
+Recovery callbacks may rely on the room ID, while cached membership and state are best-effort because recovery does not wait for a new sync.
 Recovery logs and skips a corrupt pending row so other valid rows can continue, while retaining the corrupt row for repair.
 To repair corruption, stop MindRoom, back up the affected database, and restore a known-good copy before restarting.
 Deleting an unrecoverable pending row is a last resort that accepts losing that callback unless Matrix redelivers it.
-Message and media obligations remain pending when coalescing or a pending `TurnStore` record defers them, then yield only to durably persisted terminal turn truth.
+Message and media obligations remain pending only while the gate, a competing turn claim, retry, or a pending `TurnStore` response owns them, then yield only to durably persisted terminal turn truth.
 Raw sync-cache continuity remains owned separately by `SyncCacheTrust`, so a durable pending dispatch obligation is sufficient to preserve a certified checkpoint.
 The pinned mindroom-nio contract supplies durable `LIVE` or `HISTORY` provenance with every timeline-event admission.
 `ColdHistoryFence` admits live events immediately and admits historical events only when the exact event and callback kind are already durably pending.
@@ -82,9 +88,12 @@ Checkpoint mutations serialize their epoch check, durable transform, and runtime
 Malformed or future continuity records are durably repaired to an empty cold record before startup room lifecycle restoration.
 Continuity reads and writes run off the event loop, and retry decisions use the checkpoint already loaded or applied by `SyncCacheTrust`.
 Classic Sync response-owned lifecycle hooks and their durable de-duplication markers complete before `SyncCacheTrust` certifies the response checkpoint.
+Live `room-member-joined` hooks are at-least-once because hook emission happens before the durable seen marker, so a marker write failure replays the hook instead of losing it.
 Invite and response-owned lifecycle paths use the same runner directly because they are outside nio timeline fanout.
 Current invite callbacks bypass cold-history admission because they represent live membership work, while their callback runner still provides exact durable retry.
 The matching ordinary nio event callbacks only load and execute already-persisted work after every admission callback succeeds, and may then continue in the background.
+Auxiliary call-manager membership and unknown-event callbacks remain best-effort reconciliation wakeups because their standalone event payloads cannot replay the current room call state; the manager reconciles joined rooms after sync and retries transient state fetches directly.
+To-device call inputs and desktop pairing receivers also remain best-effort because they do not share a stable replayable timeline-event identity, so failures in these auxiliary paths are logged without dispatch-obligation ownership.
 
 ## Completed Simplifications
 

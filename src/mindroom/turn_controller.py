@@ -49,6 +49,7 @@ from mindroom.dispatch_handoff import (
     build_dispatch_handoff,
     payload_metadata_from_source,
 )
+from mindroom.dispatch_recovery_context import turn_dispatch_recovery_active
 from mindroom.dispatch_replay_guard import has_newer_unresponded_cached_thread_event, has_newer_unresponded_in_thread
 from mindroom.dispatch_source import (
     IMAGE_SOURCE_KIND,
@@ -162,6 +163,54 @@ def _gate_router_target_readiness(
     return (suggested_entity if first_sync_complete is True else None, first_sync_complete is False)
 
 
+@dataclass(frozen=True)
+class _RouterTargetResolution:
+    """One router target after its runtime readiness check."""
+
+    selected_entity: str | None
+    suggested_entity: str | None
+    response_text: str
+
+
+def _resolve_router_target(
+    orchestrator: OrchestratorRuntime | None,
+    suggested_entity: str | None,
+    scheduled_prompt: str | None,
+) -> _RouterTargetResolution | None:
+    """Resolve one target or retain recovered work until its runtime is ready."""
+    selected_entity = suggested_entity
+    suggested_entity, target_starting = _gate_router_target_readiness(
+        orchestrator,
+        suggested_entity,
+    )
+    if target_starting and turn_dispatch_recovery_active():
+        return None
+    if target_starting:
+        response_text = _ROUTER_TARGET_STARTING_TEXT
+    elif suggested_entity is None:
+        response_text = _ROUTER_TARGET_UNAVAILABLE_TEXT
+    else:
+        response_text = (
+            f"@{suggested_entity} {scheduled_prompt}"
+            if scheduled_prompt is not None
+            else f"@{suggested_entity} could you help with this?"
+        )
+    return _RouterTargetResolution(
+        selected_entity=selected_entity,
+        suggested_entity=suggested_entity,
+        response_text=response_text,
+    )
+
+
+@dataclass(frozen=True)
+class _RouterRelayDelivery:
+    """One final router relay delivery decision."""
+
+    event_id: str | None
+    suggested_entity: str | None
+    deferred_for_recovery: bool = False
+
+
 async def _send_router_relay_after_readiness_recheck(
     *,
     orchestrator: OrchestratorRuntime | None,
@@ -169,13 +218,25 @@ async def _send_router_relay_after_readiness_recheck(
     selected_entity: str | None,
     suggested_entity: str | None,
     delivery_request: SendTextRequest,
-) -> tuple[str | None, str | None]:
+) -> _RouterRelayDelivery:
     """Recheck one sampled target immediately before sending its relay."""
     if selected_entity is None or orchestrator is None:
-        return await delivery_gateway.send_text(delivery_request), suggested_entity
+        return _RouterRelayDelivery(
+            event_id=await delivery_gateway.send_text(delivery_request),
+            suggested_entity=suggested_entity,
+        )
     final_readiness = orchestrator.entity_first_sync_complete(selected_entity)
     if final_readiness is True:
-        return await delivery_gateway.send_text(delivery_request), suggested_entity
+        return _RouterRelayDelivery(
+            event_id=await delivery_gateway.send_text(delivery_request),
+            suggested_entity=suggested_entity,
+        )
+    if final_readiness is False and turn_dispatch_recovery_active():
+        return _RouterRelayDelivery(
+            event_id=None,
+            suggested_entity=suggested_entity,
+            deferred_for_recovery=True,
+        )
     fallback_extra_content = dict(delivery_request.extra_content or {})
     fallback_extra_content.pop(ORIGINAL_SENDER_KEY, None)
     fallback_extra_content.pop(SOURCE_KIND_KEY, None)
@@ -184,7 +245,10 @@ async def _send_router_relay_after_readiness_recheck(
         response_text=_ROUTER_TARGET_STARTING_TEXT if final_readiness is False else _ROUTER_TARGET_UNAVAILABLE_TEXT,
         extra_content=fallback_extra_content or None,
     )
-    return await delivery_gateway.send_text(fallback_request), None
+    return _RouterRelayDelivery(
+        event_id=await delivery_gateway.send_text(fallback_request),
+        suggested_entity=None,
+    )
 
 
 def _room_level_context_event(event: TextDispatchEvent) -> TextDispatchEvent:
@@ -561,6 +625,7 @@ class TurnController:
         coalescing_thread_id: str | None,
         requester_user_id: str,
         reservation_owner: _PromptIngressReservationOwner,
+        callback_source_kind: str | None = None,
         trust_internal_payload_metadata: bool | None = None,
         queued_notice_reservation: QueuedHumanNoticeReservation | None = None,
     ) -> _IngressAdmissionOutcome:
@@ -581,6 +646,7 @@ class TurnController:
                 dispatch_event,
                 room,
                 source_kind=envelope.source_kind,
+                callback_source_kind=callback_source_kind,
                 dispatch_policy_source_kind=envelope.dispatch_policy_source_kind,
                 hook_source=envelope.hook_source,
                 message_received_depth=envelope.message_received_depth,
@@ -770,6 +836,7 @@ class TurnController:
         requester_user_id: str,
         reservation_owner: _PromptIngressReservationOwner,
         coalescing_thread_id: str | None,
+        callback_source_kind: str | None = None,
     ) -> _IngressAdmissionOutcome:
         """Run shared ingress dispatch for text events and sidecar text previews."""
         target = self.deps.resolver.build_message_target(
@@ -843,6 +910,7 @@ class TurnController:
             coalescing_thread_id=coalescing_thread_id,
             requester_user_id=requester_user_id,
             reservation_owner=reservation_owner,
+            callback_source_kind=callback_source_kind,
         )
 
     async def _handle_edit_event(
@@ -929,19 +997,7 @@ class TurnController:
             source_event_prompts=dict(handoff.source_event_prompts),
             source_event_metadata=dict(handoff.source_event_metadata) if len(handoff.source_event_ids) > 1 else None,
         )
-        try:
-            await self._dispatch_handoff(handoff, handled_turn=handled_turn)
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            # A failed command dispatch must not propagate into the Matrix sync
-            # callback or poison later ingress, matching gate-flush containment.
-            self.deps.logger.exception(
-                "command_control_input_dispatch_failed",
-                event_id=dispatch_event.event_id,
-                room_id=room.room_id,
-                thread_id=coalescing_thread_id,
-            )
+        await self._dispatch_handoff(handoff, handled_turn=handled_turn)
 
     async def _enqueue_for_dispatch(
         self,
@@ -958,6 +1014,7 @@ class TurnController:
         queued_notice_reservation: QueuedHumanNoticeReservation | None = None,
         queued_notice_target: MessageTarget | None = None,
         trust_internal_payload_metadata: bool | None = None,
+        callback_source_kind: str | None = None,
     ) -> _IngressAdmissionOutcome:
         """Route one inbound event through the live coalescing gate."""
         dispatch_timing = get_dispatch_pipeline_timing(event.source)
@@ -1006,6 +1063,7 @@ class TurnController:
             message_received_depth=message_received_depth,
             trust_internal_payload_metadata=resolved_trust_internal_payload_metadata,
             discovery_event_id=self.deps.ingress.router_relay_original_event_id(event),
+            callback_source_kind=callback_source_kind,
             dispatch_metadata=dispatch_metadata,
         )
         if turn_claim is not None:
@@ -1014,6 +1072,7 @@ class TurnController:
             resolved_key,
             source_event_id=event.event_id,
             source_kind=source_kind,
+            callback_source_kind=callback_source_kind,
             ready_result=ReadyPendingEvent(pending_event=pending_event),
         )
         emit_elapsed_timing(
@@ -1183,6 +1242,7 @@ class TurnController:
                 event_label=event_label,
                 user_id=requester_user_id,
             )
+            self._mark_source_events_responded(handled_turn)
             return None
 
         replay_guard = (
@@ -1283,7 +1343,7 @@ class TurnController:
         command: Command,
         *,
         target: MessageTarget,
-    ) -> None:
+    ) -> bool:
         """Execute one command only on the bot that owns its response."""
         if not agent_owns_command(
             command,
@@ -1292,7 +1352,7 @@ class TurnController:
             room=room,
             requester_user_id=requester_user_id,
         ):
-            return
+            return False
         await self._execute_command(
             room=room,
             event=event,
@@ -1300,6 +1360,7 @@ class TurnController:
             command=command,
             target=target,
         )
+        return True
 
     async def handle_interactive_selection(
         self,
@@ -1309,7 +1370,33 @@ class TurnController:
         user_id: str,
         source_event_id: str,
     ) -> None:
-        """Execute one validated interactive selection through the normal response path."""
+        """Own claim settlement around one validated interactive selection."""
+        try:
+            await self._execute_interactive_selection(
+                room,
+                selection=selection,
+                user_id=user_id,
+                source_event_id=source_event_id,
+            )
+            interactive.commit_selection(selection)
+        except BaseException:
+            interactive.restore_selection(selection)
+            raise
+
+    async def _execute_interactive_selection(
+        self,
+        room: nio.MatrixRoom,
+        *,
+        selection: interactive.InteractiveSelection,
+        user_id: str,
+        source_event_id: str,
+    ) -> None:
+        """Execute one selection after its caller transfers claim ownership."""
+        if await self._interactive_selection_is_durably_terminal(
+            selection.question_event_id,
+            source_event_id,
+        ):
+            return
         thread_history = (
             await self.deps.resolver.fetch_thread_history(
                 room.room_id,
@@ -1343,7 +1430,17 @@ class TurnController:
             self.deps.turn_store.record_pending_turn,
             selection_handled_turn,
         )
-        if pending_turn is None or pending_turn.completed or pending_turn.redacted_source_event_ids:
+        if pending_turn is None:
+            await self._require_durable_interactive_selection(
+                selection.question_event_id,
+                source_event_id,
+            )
+            return
+        if pending_turn.completed or pending_turn.redacted_source_event_ids:
+            await self._require_durable_interactive_selection(
+                selection.question_event_id,
+                source_event_id,
+            )
             return
         selection_handled_turn = pending_turn
         ack_event_id = await self.deps.delivery_gateway.send_text(
@@ -1359,7 +1456,7 @@ class TurnController:
                 "Failed to send acknowledgment for interactive selection",
                 source_event_id=selection.question_event_id,
             )
-            return
+            raise self._interactive_selection_retry_error(source_event_id)
         # The selection is a synthetic turn with no Matrix message of its own, so
         # the attachment context that ingress normally resolves per message must
         # be rebuilt here from the conversation that asked the question.
@@ -1384,7 +1481,9 @@ class TurnController:
                 self._mark_source_events_responded(
                     replace(selection_handled_turn, response_event_id=response_event_id),
                 )
-            return
+                await self._require_durable_interactive_selection(selection.question_event_id, source_event_id)
+                return
+            raise self._interactive_selection_retry_error(source_event_id) from error
         selection_attachment_ids = tuple(selection_payload.attachment_ids or ())
         selection_matrix_run_metadata = self.deps.turn_store.build_run_metadata(selection_handled_turn)
         registry = entity_identity_registry(self.deps.runtime.config, self.deps.runtime_paths)
@@ -1434,6 +1533,42 @@ class TurnController:
             self._mark_source_events_responded(
                 replace(selection_handled_turn, response_event_id=response_event_id),
             )
+            await self._require_durable_interactive_selection(selection.question_event_id, source_event_id)
+            return
+        await self._require_durable_interactive_selection(
+            selection.question_event_id,
+            source_event_id,
+        )
+
+    async def _interactive_selection_is_durably_terminal(
+        self,
+        question_event_id: str,
+        source_event_id: str,
+    ) -> bool:
+        """Return whether the question or exact selection source is durably terminal."""
+        return any(
+            await asyncio.gather(
+                *(
+                    asyncio.to_thread(self.deps.turn_store.is_durably_handled, event_id)
+                    for event_id in {question_event_id, source_event_id}
+                ),
+            ),
+        )
+
+    async def _require_durable_interactive_selection(
+        self,
+        question_event_id: str,
+        source_event_id: str,
+    ) -> None:
+        """Fail retryably until one selected question reaches durable terminal truth."""
+        if await self._interactive_selection_is_durably_terminal(question_event_id, source_event_id):
+            return
+        raise self._interactive_selection_retry_error(source_event_id)
+
+    @staticmethod
+    def _interactive_selection_retry_error(source_event_id: str) -> RuntimeError:
+        """Return the shared retry signal for a selection without terminal truth."""
+        return RuntimeError(f"Interactive selection {source_event_id} has no durable terminal outcome")
 
     def _router_handoff_extra_content(
         self,
@@ -1500,6 +1635,7 @@ class TurnController:
                 "No responders to route to in this room for sender",
                 sender=permission_sender_id,
             )
+            self._mark_source_events_responded(handled_turn or TurnRecord.create([event.event_id]))
             return
 
         with bound_log_context(room_id=room.room_id, thread_id=thread_id):
@@ -1518,24 +1654,21 @@ class TurnController:
                     thread_history,
                 )
 
-        selected_entity = suggested_entity
-        suggested_entity, target_starting = _gate_router_target_readiness(
+        target_resolution = _resolve_router_target(
             self.deps.runtime.orchestrator,
             suggested_entity,
+            scheduled_prompt,
         )
-
-        if target_starting:
-            response_text = _ROUTER_TARGET_STARTING_TEXT
-        elif not suggested_entity:
-            response_text = _ROUTER_TARGET_UNAVAILABLE_TEXT
+        if target_resolution is None:
+            return
+        selected_entity, suggested_entity, response_text = (
+            target_resolution.selected_entity,
+            target_resolution.suggested_entity,
+            target_resolution.response_text,
+        )
+        if suggested_entity is None and response_text == _ROUTER_TARGET_UNAVAILABLE_TEXT:
             with bound_log_context(room_id=room.room_id, thread_id=thread_id):
                 self.deps.logger.warning("Router failed to determine entity")
-        else:
-            response_text = (
-                f"@{suggested_entity} {scheduled_prompt}"
-                if scheduled_prompt is not None
-                else f"@{suggested_entity} could you help with this?"
-            )
 
         target_thread_mode = (
             self.deps.runtime.config.get_entity_thread_mode(
@@ -1592,13 +1725,17 @@ class TurnController:
             response_text=response_text,
             extra_content=routed_extra_content or None,
         )
-        event_id, suggested_entity = await _send_router_relay_after_readiness_recheck(
+        relay_delivery = await _send_router_relay_after_readiness_recheck(
             orchestrator=self.deps.runtime.orchestrator,
             delivery_gateway=self.deps.delivery_gateway,
             selected_entity=selected_entity,
             suggested_entity=suggested_entity,
             delivery_request=delivery_request,
         )
+        if relay_delivery.deferred_for_recovery:
+            return
+        event_id = relay_delivery.event_id
+        suggested_entity = relay_delivery.suggested_entity
         tracked_handled_turn = handled_turn or TurnRecord.create([event.event_id])
         tracked_handled_turn = replace(
             tracked_handled_turn,
@@ -1616,6 +1753,13 @@ class TurnController:
                 self._mark_source_events_responded(replace(tracked_handled_turn, response_event_id=event_id))
             else:
                 self.deps.logger.error("Failed to route to entity", entity=suggested_entity)
+                self._raise_router_relay_delivery_failure(suggested_entity)
+
+    @staticmethod
+    def _raise_router_relay_delivery_failure(suggested_entity: str | None) -> None:
+        """Raise the retryable signal for a router relay without a Matrix event."""
+        msg = f"Failed to route to entity {suggested_entity!r}"
+        raise RuntimeError(msg)
 
     def _router_handled_turn_outcome(
         self,
@@ -2572,4 +2716,5 @@ class TurnController:
             requester_user_id=prechecked_event.requester_user_id,
             reservation_owner=reservation_owner,
             coalescing_thread_id=coalescing_thread_id,
+            callback_source_kind=MEDIA_SOURCE_KIND,
         )

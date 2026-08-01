@@ -46,6 +46,7 @@ from mindroom.dispatch_handoff import (
     _build_batch_dispatch_event,
     build_dispatch_handoff,
 )
+from mindroom.dispatch_obligations import DispatchCallbackKind
 from mindroom.dispatch_replay_guard import has_newer_unresponded_in_thread
 from mindroom.dispatch_source import (
     ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
@@ -468,6 +469,63 @@ def _set_context_histories(dispatch: PreparedDispatch, history: Sequence[Resolve
     """Keep replay-snapshot and planning history aligned for tests that need both."""
     dispatch.context.thread_history = list(history)
     dispatch.context.replay_guard_history = list(history)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("terminal_path", ["policy_ignore", "deep_synthetic", "non_owner_command"])
+async def test_post_gate_terminal_drop_settles_real_deferred_dispatch_obligation(
+    tmp_path: Path,
+    terminal_path: str,
+) -> None:
+    """Every successful post-gate drop must provide terminal truth to durable dispatch."""
+    bot = _make_bot(tmp_path, debounce_ms=0)
+    room = _make_room()
+    event = _text_event(
+        event_id=f"$terminal-{terminal_path}",
+        body="!help" if terminal_path == "non_owner_command" else "ignore me",
+    )
+    dispatch = _prepared_dispatch(event_id=event.event_id, body=event.body)
+    runner = bot._dispatch_obligation_runner
+    runner._retry_initial_delay_seconds = 0.001
+    runner._retry_max_delay_seconds = 0.001
+    await runner.persist(room, event, DispatchCallbackKind.MESSAGE)
+
+    plan_turn = AsyncMock(return_value=_DispatchPlan(kind="ignore"))
+    with (
+        patch.object(
+            bot._turn_controller,
+            "_prepare_dispatch",
+            new=AsyncMock(return_value=prepared_dispatch_result(dispatch)),
+        ),
+        patch.object(
+            bot._turn_controller,
+            "_should_skip_deep_synthetic_full_dispatch",
+            return_value=terminal_path == "deep_synthetic",
+        ),
+        patch.object(
+            bot._turn_policy,
+            "plan_turn",
+            new=plan_turn,
+        ),
+    ):
+        await _enqueue_for_dispatch(
+            bot,
+            event,
+            room,
+            source_kind="message",
+            requester_user_id=event.sender,
+        )
+        await bot._coalescing_gate.drain_all()
+
+    if terminal_path == "policy_ignore":
+        plan_turn.assert_awaited_once()
+    else:
+        plan_turn.assert_not_awaited()
+    assert bot._turn_store.is_durably_handled(event.event_id)
+    await _wait_for(
+        lambda: not runner.store.has_pending(event.event_id, DispatchCallbackKind.MESSAGE),
+        deadline_seconds=1,
+    )
 
 
 @pytest.mark.asyncio
@@ -3751,6 +3809,47 @@ async def test_timer_flush_logs_dispatch_failure_without_unhandled_task() -> Non
 
 
 @pytest.mark.asyncio
+async def test_dispatch_failure_handoff_runs_after_gate_releases_exact_sources() -> None:
+    """Failed deferred sources must reach durable retry ownership after gate cleanup."""
+    room = _make_room()
+    failure_handoffs: list[tuple[PendingEvent, ...]] = []
+    source_owned_during_handoff: list[bool] = []
+    handoff_complete = asyncio.Event()
+
+    async def failing_dispatch_batch(_batch: object) -> None:
+        msg = "boom"
+        raise RuntimeError(msg)
+
+    def on_dispatch_failure(pending_events: tuple[PendingEvent, ...]) -> None:
+        failure_handoffs.append(pending_events)
+        source_owned_during_handoff.extend(
+            gate.has_pending_source_event(pending_event.event.event_id) for pending_event in pending_events
+        )
+        handoff_complete.set()
+
+    gate = CoalescingGate(
+        dispatch_batch=failing_dispatch_batch,
+        debounce_seconds=lambda: 0.01,
+        is_shutting_down=lambda: False,
+        on_dispatch_failure=on_dispatch_failure,
+    )
+
+    await _admit_ready(
+        gate,
+        CoalescingKey("!room:localhost", None, "@user:localhost"),
+        PendingEvent(
+            event=_text_event(event_id="$m1", body="first"),
+            room=room,
+            source_kind="message",
+        ),
+    )
+    await asyncio.wait_for(handoff_complete.wait(), timeout=1)
+
+    assert [[pending.event.event_id for pending in handoff] for handoff in failure_handoffs] == [["$m1"]]
+    assert source_owned_during_handoff == [False]
+
+
+@pytest.mark.asyncio
 async def test_failed_drain_does_not_poison_future_ingress() -> None:
     """A failed drain should log, clean up, and allow later events to dispatch."""
     room = _make_room()
@@ -4340,8 +4439,8 @@ async def test_backlog_replay_respects_coalesced_source_ownership(
         )
     else:
         bot.event_cache.get_recent_room_events.assert_not_awaited()
-    assert bot._turn_store.is_handled("$alice") is superseded
-    assert bot._turn_store.is_handled("$bob") is superseded
+    assert bot._turn_store.is_handled("$alice")
+    assert bot._turn_store.is_handled("$bob")
 
 
 @pytest.mark.asyncio
@@ -4414,8 +4513,8 @@ async def test_backlog_replay_fails_closed_when_physical_source_collides_with_al
         )
 
     plan_turn.assert_awaited_once()
-    assert not bot._turn_store.is_handled(relay_event_id)
-    assert not bot._turn_store.is_handled(human_event_id)
+    assert bot._turn_store.is_handled(relay_event_id)
+    assert bot._turn_store.is_handled(human_event_id)
 
 
 @pytest.mark.asyncio
@@ -4485,7 +4584,7 @@ async def test_backlog_replay_fails_closed_after_legacy_coalesced_projection(tmp
         )
 
     plan_turn.assert_awaited_once()
-    assert not bot._turn_store.is_handled(retained_event_id)
+    assert bot._turn_store.is_handled(retained_event_id)
 
 
 @pytest.mark.asyncio
@@ -4611,7 +4710,7 @@ async def test_backlog_replay_degraded_thread_history_ignores_equal_timestamp_ca
         since_ts_ms=1000,
     )
     action_mock.assert_awaited_once()
-    assert not bot._turn_store.is_handled("$m1")
+    assert bot._turn_store.is_handled("$m1")
 
 
 @pytest.mark.asyncio
@@ -4858,7 +4957,7 @@ async def test_backlog_replay_degraded_thread_history_ignores_visible_router_voi
         since_ts_ms=1000,
     )
     action_mock.assert_awaited_once()
-    assert not bot._turn_store.is_handled("$voice")
+    assert bot._turn_store.is_handled("$voice")
 
 
 @pytest.mark.asyncio
@@ -5049,7 +5148,7 @@ async def test_backlog_replay_degraded_thread_history_ignores_edit_events(tmp_pa
 
     history_guard.assert_not_called()
     action_mock.assert_awaited_once()
-    assert not bot._turn_store.is_handled("$m1")
+    assert bot._turn_store.is_handled("$m1")
 
 
 @pytest.mark.asyncio
@@ -5103,7 +5202,7 @@ async def test_backlog_replay_degraded_thread_history_fails_open_without_positiv
         since_ts_ms=1000,
     )
     action_mock.assert_awaited_once()
-    assert not bot._turn_store.is_handled("$m1")
+    assert bot._turn_store.is_handled("$m1")
     assert any(
         log.get("event") == "Thread replay guard degraded; proceeding without negative newer-message proof"
         for log in captured_logs
@@ -5159,7 +5258,7 @@ async def test_media_dispatch_uses_replay_snapshot_instead_of_mutated_planning_h
     newer_mock.assert_called_once()
     assert list(newer_mock.call_args.args[2]) == []
     action_mock.assert_awaited_once()
-    assert not bot._turn_store.is_handled("$img1")
+    assert bot._turn_store.is_handled("$img1")
 
 
 @pytest.mark.asyncio
@@ -6970,6 +7069,62 @@ async def test_sidecar_hydration_refreshes_prompt_and_mentions_before_dispatch(t
 
     assert captured_envelopes[0].mentioned_agents == ("test_agent",)
     assert captured_handled_turns[0].source_event_prompts == {"$sidecar": "@test_agent hydrated body"}
+
+
+@pytest.mark.asyncio
+async def test_sidecar_gate_failure_retries_original_media_callback(tmp_path: Path) -> None:
+    """A hydrated file sidecar must retain its exact MEDIA callback owner."""
+    bot = _make_bot(tmp_path, debounce_ms=0)
+    room = _make_room()
+    sidecar = _file_event(event_id="$sidecar-retry", body="preview.txt")
+    sidecar_content = sidecar.source["content"]
+    assert isinstance(sidecar_content, dict)
+    sidecar_content["io.mindroom.long_text"] = {
+        "version": 2,
+        "encoding": "matrix_event_content_json",
+        "original_event_size": 100_000,
+        "preview_size": len(sidecar.body),
+        "is_complete_content": True,
+    }
+    hydrated = PreparedTextEvent(
+        sender=sidecar.sender,
+        event_id=sidecar.event_id,
+        body="hydrated body",
+        source={"content": {"msgtype": "m.text", "body": "hydrated body"}},
+        server_timestamp=sidecar.server_timestamp,
+    )
+    retry_pending_source = MagicMock()
+
+    with (
+        patch.object(
+            bot._dispatch_obligation_runner,
+            "retry_pending_turn_source",
+            new=retry_pending_source,
+        ),
+        patch.object(
+            bot._inbound_turn_normalizer,
+            "prepare_file_sidecar_text_event",
+            new=AsyncMock(return_value=hydrated),
+        ),
+        patch("mindroom.turn_controller.interactive.handle_text_response", new=AsyncMock(return_value=None)),
+        patch.object(
+            bot._turn_controller,
+            "handle_coalesced_batch",
+            new=AsyncMock(side_effect=RuntimeError("dispatch failed")),
+        ),
+    ):
+        reservation_owner = bot._turn_controller._reserve_prompt_ingress_order(room, sidecar.sender)
+        outcome = await bot._turn_controller._dispatch_file_sidecar_text_preview(
+            room,
+            _PrecheckedEvent(event=sidecar, requester_user_id=sidecar.sender),
+            reservation_owner=reservation_owner,
+            coalescing_thread_id=None,
+        )
+        drain_result = await bot._coalescing_gate.drain_all()
+
+    assert outcome is _IngressAdmissionOutcome.ADMITTED
+    assert drain_result.dispatch_failure_count == 1
+    retry_pending_source.assert_called_once_with(sidecar.event_id, DispatchCallbackKind.MEDIA)
 
 
 @pytest.mark.asyncio

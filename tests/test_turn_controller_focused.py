@@ -19,7 +19,7 @@ import threading
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field, fields
 from typing import TYPE_CHECKING, Any, cast
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import nio
 import pytest
@@ -697,11 +697,11 @@ async def test_completed_router_alias_rejects_later_physical_relay(config: Confi
 
 
 @pytest.mark.asyncio
-async def test_router_relay_ignored_by_this_agent_does_not_index_human_alias(
+async def test_router_relay_ignored_by_this_agent_records_terminal_alias(
     config: Config,
     tmp_path: Path,
 ) -> None:
-    """A relay routed to another agent must not create durable alias ownership."""
+    """A relay routed elsewhere still records local terminal callback truth."""
     harness = _build_harness(config, tmp_path)
     room = _room_with_members(config, "general", "research", ROUTER_AGENT_NAME)
     relay = _router_relay_event(
@@ -715,8 +715,10 @@ async def test_router_relay_ignored_by_this_agent_does_not_index_human_alias(
     await harness.deliver(room, relay)
 
     assert harness.runner.requests == []
-    assert harness.turn_store.get_turn_record("$relay-research:localhost") is None
-    assert harness.turn_store.get_turn_record("$human-research:localhost") is None
+    relay_record = harness.turn_store.get_turn_record("$relay-research:localhost")
+    assert relay_record is not None
+    assert relay_record.completed is True
+    assert harness.turn_store.get_turn_record("$human-research:localhost") == relay_record
 
 
 @pytest.mark.asyncio
@@ -769,12 +771,8 @@ async def test_sender_outside_reply_allowlist_is_dropped_at_precheck(tmp_path: P
 
 
 @pytest.mark.asyncio
-async def test_policy_ignore_sends_nothing_and_leaves_turn_unhandled(config: Config, tmp_path: Path) -> None:
-    """An ignore plan produces no response and no terminal record for a plain agent.
-
-    Leaving the turn unrecorded is the contract: another agent in the room still
-    owns the response, so this agent must not claim the turn in its ledger.
-    """
+async def test_policy_ignore_sends_nothing_and_records_terminal_turn(config: Config, tmp_path: Path) -> None:
+    """An ignore plan records local terminal truth without sending a response."""
     harness = _build_harness(config, tmp_path)
     room = _room_with_members(config, "general", "research")
     event = _text_event("untagged message with multiple visible responders")
@@ -784,7 +782,7 @@ async def test_policy_ignore_sends_nothing_and_leaves_turn_unhandled(config: Con
     assert harness.policy.plan_turn_calls == 1
     assert harness.runner.requests == []
     assert harness.gateway.sent == []
-    assert harness.turn_store.is_handled(event.event_id) is False
+    assert harness.turn_store.is_handled(event.event_id) is True
 
 
 @pytest.mark.asyncio
@@ -1516,6 +1514,25 @@ async def test_command_turn_records_terminal_outcome_through_turn_store(config: 
 
 
 @pytest.mark.asyncio
+async def test_command_dispatch_failure_propagates_without_recording_terminal_outcome(
+    config: Config,
+    tmp_path: Path,
+) -> None:
+    """A failed owner command must remain retryable at the durable callback boundary."""
+    harness = _build_harness(config, tmp_path, agent_name=ROUTER_AGENT_NAME)
+    room = _room_with_members(config, ROUTER_AGENT_NAME, "general", "research")
+    event = _text_event("!help", event_id="$failed-command:localhost")
+
+    with (
+        patch("mindroom.turn_controller.handle_command", side_effect=RuntimeError("command failed")),
+        pytest.raises(RuntimeError, match="command failed"),
+    ):
+        await harness.deliver(room, event)
+
+    assert harness.turn_store.get_turn_record(event.event_id) is None
+
+
+@pytest.mark.asyncio
 async def test_non_router_agent_consumes_command_without_responding(config: Config, tmp_path: Path) -> None:
     """Plain agents stay silent on command turns; the router owns command replies."""
     harness = _build_harness(config, tmp_path, agent_name="general")
@@ -1529,9 +1546,9 @@ async def test_non_router_agent_consumes_command_without_responding(config: Conf
     assert harness.gateway.sent == []
     # Commands are control inputs: even a silently consumed one never enters the gate.
     assert harness.gate_batches == []
-    # The non-router agent does not claim the command turn; the router owns its
-    # terminal record, so this agent's ledger must stay untouched.
-    assert harness.turn_store.is_handled(event.event_id) is False
+    # Each entity records its own terminal callback truth even when only the
+    # router owns the visible command response.
+    assert harness.turn_store.is_handled(event.event_id) is True
 
 
 @pytest.mark.asyncio
@@ -1665,6 +1682,89 @@ async def test_interactive_selection_persistence_failure_prevents_ack_and_genera
             user_id=_SENDER,
             source_event_id="$selection:localhost",
         )
+
+    assert harness.gateway.sent == []
+    assert harness.runner.requests == []
+
+
+@pytest.mark.asyncio
+async def test_interactive_commit_failure_restores_selection_claim(
+    config: Config,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Commit persistence failure must restore interactive ownership for retry."""
+    harness = _build_harness(config, tmp_path)
+    room = nio.MatrixRoom(_ROOM_ID, _entity_user_id(config, "general"))
+    selection = interactive.InteractiveSelection(
+        question_event_id="$question:localhost",
+        question_text="Which option should I use?",
+        selection_key="1",
+        selected_label="Option 1",
+        selected_value="Option 1",
+        thread_id="$thread-root:localhost",
+    )
+    restored: list[interactive.InteractiveSelection] = []
+
+    async def execute_selection(*_args: object, **_kwargs: object) -> None:
+        return None
+
+    def fail_commit(_selection: interactive.InteractiveSelection) -> None:
+        msg = "selection commit failed"
+        raise OSError(msg)
+
+    monkeypatch.setattr(harness.controller, "_execute_interactive_selection", execute_selection)
+    monkeypatch.setattr(interactive, "commit_selection", fail_commit)
+    monkeypatch.setattr(interactive, "restore_selection", restored.append)
+
+    with pytest.raises(OSError, match="selection commit failed"):
+        await harness.controller.handle_interactive_selection(
+            room,
+            selection=selection,
+            user_id=_SENDER,
+            source_event_id="$selection:localhost",
+        )
+
+    assert restored == [selection]
+
+
+@pytest.mark.asyncio
+async def test_interactive_selection_claim_conflict_accepts_racing_terminal_turn(
+    config: Config,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A completed owner that wins the pending-record race is a clean terminal outcome."""
+    harness = _build_harness(config, tmp_path)
+    room = nio.MatrixRoom(_ROOM_ID, _entity_user_id(config, "general"))
+    selection = interactive.InteractiveSelection(
+        question_event_id="$question:localhost",
+        question_text="Which option should I use?",
+        selection_key="1",
+        selected_label="Option 1",
+        selected_value="Option 1",
+        thread_id="$thread-root:localhost",
+    )
+    real_record_pending = harness.turn_store.record_pending_turn
+
+    def lose_claim_race(_turn_record: TurnRecord) -> None:
+        monkeypatch.setattr(harness.turn_store, "record_pending_turn", real_record_pending)
+        harness.turn_store.record_turn(
+            TurnRecord.create(
+                [selection.question_event_id],
+                response_event_id="$racing-response:localhost",
+            ),
+        )
+        harness.turn_store._ledger.flush()
+
+    monkeypatch.setattr(harness.turn_store, "record_pending_turn", lose_claim_race)
+
+    await harness.controller.handle_interactive_selection(
+        room,
+        selection=selection,
+        user_id=_SENDER,
+        source_event_id="$selection:localhost",
+    )
 
     assert harness.gateway.sent == []
     assert harness.runner.requests == []
@@ -1895,12 +1995,13 @@ async def test_interactive_selection_without_response_stays_retryable(config: Co
         thread_id="$thread-root:localhost",
     )
 
-    await harness.controller.handle_interactive_selection(
-        room,
-        selection=selection,
-        user_id=_SENDER,
-        source_event_id="$selection:localhost",
-    )
+    with pytest.raises(RuntimeError, match="no durable terminal outcome"):
+        await harness.controller.handle_interactive_selection(
+            room,
+            selection=selection,
+            user_id=_SENDER,
+            source_event_id="$selection:localhost",
+        )
 
     assert len(harness.runner.requests) == 1
     assert harness.turn_store.is_handled(selection.question_event_id) is False

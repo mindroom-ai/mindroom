@@ -182,6 +182,44 @@ class TestAgentBot(AgentBotTestBase):
         assert seen == []
 
     @pytest.mark.asyncio
+    async def test_interactive_reaction_failure_restores_question_for_durable_retry(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """A failed selection handoff must leave its question answerable on exact retry."""
+        config = self._config_for_storage(tmp_path)
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
+        room = MagicMock()
+        room.room_id = "!test:localhost"
+        event = self._make_handler_event("reaction", sender="@user:localhost", event_id="$reaction")
+        interactive._active_questions["$question"] = interactive._InteractiveQuestion(
+            room_id=room.room_id,
+            thread_id=None,
+            options={"👍": "approve"},
+            creator_agent=bot.agent_name,
+        )
+
+        try:
+            with (
+                patch.object(
+                    bot._turn_controller,
+                    "_execute_interactive_selection",
+                    new=AsyncMock(side_effect=OSError("pending write failed")),
+                ),
+                pytest.raises(OSError, match="pending write failed"),
+            ):
+                await bot._on_reaction(room, event)
+
+            assert "$question" in interactive._active_questions
+        finally:
+            interactive._active_questions.clear()
+            interactive._dirty_question_ids.clear()
+            interactive._deleted_question_ids.clear()
+            interactive._claimed_question_ids.clear()
+
+    @pytest.mark.asyncio
     async def test_interactive_reaction_selection_reserves_prompt_order(
         self,
         mock_agent_user: AgentMatrixUser,

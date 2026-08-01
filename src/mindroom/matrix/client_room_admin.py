@@ -38,9 +38,7 @@ _MANAGED_ROOM_EVENT_POWER_LEVELS = {
 _TERMINAL_ROOM_JOIN_ERROR_CODES = frozenset(
     {
         "M_BAD_STATE",
-        "M_FORBIDDEN",
         "M_GUEST_ACCESS_FORBIDDEN",
-        "M_NOT_FOUND",
         "M_UNRECOGNIZED",
     },
 )

@@ -24,8 +24,9 @@ def _apt_install_packages(dockerfile_text: str) -> set[str]:
 
 
 def _final_stage(dockerfile_text: str) -> str:
-    _, final_stage = dockerfile_text.split(" AS final", maxsplit=1)
-    return final_stage
+    match = re.search(r"(?m)^FROM .+ AS final$", dockerfile_text)
+    assert match is not None
+    return dockerfile_text[match.start() :]
 
 
 def _assert_command_starts_with_tini(template_text: str, command: str) -> None:
@@ -55,6 +56,15 @@ def test_mindroom_runtime_images_run_under_tini() -> None:
         assert "tini" in _apt_install_packages(_final_stage(text))
         assert 'ENTRYPOINT ["tini", "--"]' in text
         assert 'CMD ["/app/.venv/bin/mindroom", "run"]' in text
+
+
+def test_mindroom_builders_install_git_for_pinned_dependency() -> None:
+    """The temporary repository pin must be installable in each builder stage."""
+    for dockerfile in _MINDROOM_DOCKERFILES:
+        text = dockerfile.read_text(encoding="utf-8")
+        builder_stage = text[: text.index(" AS final")]
+
+        assert "git" in _apt_install_packages(builder_stage)
 
 
 def test_mindroom_runtime_images_opt_into_dashboard_asset_build() -> None:
