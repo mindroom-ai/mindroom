@@ -2061,6 +2061,23 @@ class TurnController:
             current_prompt_is_structured=handoff.current_prompt_is_structured,
         )
 
+    async def _claim_live_text_turn(self, event: nio.RoomMessageText) -> TurnRecord | TurnDispatchOutcome:
+        """Claim one live text source or return its explicit competing-owner outcome."""
+        routed_alias = self.deps.ingress.router_relay_original_event_id(event)
+        claim_aliases = (routed_alias,) if routed_alias else ()
+        turn_claim = TurnRecord.create([event.event_id], discovery_event_ids=claim_aliases, completed=False)
+        if self.deps.turn_store.try_claim_turn(turn_claim):
+            return turn_claim
+
+        await self.deps.turn_store.wait_for_turn_settled(turn_claim.indexed_event_ids)
+        if await asyncio.to_thread(self.deps.turn_store.is_durably_handled, event.event_id):
+            return TurnDispatchOutcome.DEFERRED
+        if self.deps.turn_store.try_claim_turn(turn_claim):
+            return turn_claim
+        # A settled discovery-alias owner or a newer competing claimant owns
+        # this duplicate semantic turn.
+        return TurnDispatchOutcome.INTENTIONALLY_IGNORED
+
     async def handle_text_event(
         self,
         room: nio.MatrixRoom,
@@ -2117,11 +2134,9 @@ class TurnController:
                 await reservation_owner.release()
                 await self._handle_edit_event(room, prechecked_event, event_info, dispatch_timing)
                 return TurnDispatchOutcome.INTENTIONALLY_IGNORED
-            routed_alias = self.deps.ingress.router_relay_original_event_id(event)
-            claim_aliases = (routed_alias,) if routed_alias else ()
-            turn_claim = TurnRecord.create([event.event_id], discovery_event_ids=claim_aliases, completed=False)
-            if not self.deps.turn_store.try_claim_turn(turn_claim):
-                return TurnDispatchOutcome.DEFERRED
+            turn_claim = await self._claim_live_text_turn(event)
+            if isinstance(turn_claim, TurnDispatchOutcome):
+                return turn_claim
             reservation_owner.pending_turn_claim = turn_claim
             outcome = await self._ingest_live_text_event(
                 room,
