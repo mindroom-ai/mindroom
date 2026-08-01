@@ -1999,6 +1999,22 @@ def test_docker_worker_health_rejects_incompatible_protocol(payload: dict[str, o
     assert "Use a worker image built for this MindRoom release" in error
 
 
+@pytest.mark.parametrize(
+    "response",
+    [
+        pytest.param(httpx.Response(200, text="ok"), id="invalid-json"),
+        pytest.param(httpx.Response(200, json=[]), id="non-object-json"),
+    ],
+)
+def test_docker_worker_health_rejects_malformed_payload(response: httpx.Response) -> None:
+    """Malformed worker health responses should be treated as incompatible."""
+    error = _worker_health_compatibility_error(response, image="mindroom:malformed")
+
+    assert error is not None
+    assert "got missing" in error
+    assert "worker MindRoom version unknown" in error
+
+
 def test_docker_worker_readiness_rejects_incompatible_image(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

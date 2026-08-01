@@ -44,4 +44,9 @@ app.include_router(sandbox_runner_router)
 @app.get("/healthz")
 async def healthz() -> dict[str, str | int]:
     """Return readiness plus the worker compatibility contract."""
-    return worker_health_payload(mindroom_version=__version__)
+    payload = worker_health_payload(mindroom_version=__version__)
+    return {
+        "status": payload.status,
+        "mindroom_version": payload.mindroom_version,
+        "worker_protocol": payload.worker_protocol,
+    }

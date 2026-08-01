@@ -55,14 +55,25 @@ def test_build_service_command_pins_mindroom_version(tmp_path: Path) -> None:
     ]
 
 
-def test_build_service_command_pins_source_checkout_to_release(tmp_path: Path) -> None:
-    """A VCS development version should resolve to its published base release."""
+@pytest.mark.parametrize(
+    ("package_version", "expected_requirement"),
+    [
+        ("2026.8.1.post1.dev0+g7b7439571.d20260801", "mindroom==2026.8.1"),
+        ("2026.8.1rc1.post1.dev0+g7b7439571.d20260801", "mindroom==2026.8.1rc1"),
+    ],
+)
+def test_build_service_command_pins_source_checkout_to_published_version(
+    tmp_path: Path,
+    package_version: str,
+    expected_requirement: str,
+) -> None:
+    """A VCS development version should resolve to its published predecessor."""
     command = build_service_command(
         tmp_path / "uv",
-        package_version="2026.8.1.post1.dev0+g7b7439571.d20260801",
+        package_version=package_version,
     )
 
-    assert command[4] == "mindroom==2026.8.1"
+    assert command[4] == expected_requirement
 
 
 def test_find_uv_prefers_extra_paths(tmp_path: Path) -> None:
@@ -504,6 +515,7 @@ def test_service_install_no_confirm(mock_get_manager: MagicMock) -> None:
 
     assert result.exit_code == 0
     assert "Installed and started" in result.output
+    assert "After upgrading, rerun mindroom service install" in result.output
     mock_manager.install_service.assert_called_once_with()
 
 

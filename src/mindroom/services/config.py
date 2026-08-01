@@ -75,11 +75,9 @@ class ServiceManager(NamedTuple):
 def build_service_command(uv_path: Path, *, package_version: str | None = None) -> list[str]:
     """Build a service command pinned to the installing MindRoom version."""
     installed_version = Version(package_version or distribution_version(_PACKAGE_NAME))
-    resolved_version = (
-        ".".join(str(component) for component in installed_version.release)
-        if installed_version.is_devrelease
-        else installed_version.public
-    )
+    resolved_version = installed_version.public
+    if installed_version.is_devrelease:
+        resolved_version = resolved_version.partition(".post")[0].partition(".dev")[0]
     requirement = f"{_PACKAGE_NAME}=={resolved_version}"
     return [str(uv_path), "tool", "run", "--from", requirement, "mindroom", "run"]
 
