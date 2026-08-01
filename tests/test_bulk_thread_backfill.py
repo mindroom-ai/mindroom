@@ -163,6 +163,31 @@ async def test_response_recovery_scan_finds_exact_original_before_source() -> No
 
 
 @pytest.mark.asyncio
+async def test_response_recovery_scan_finds_opaque_encrypted_reply() -> None:
+    """The exposed reply relation recovers a bot response even without its Megolm key."""
+    source_event_id = "$source:localhost"
+    response_event_id = "$response:localhost"
+    response_event = _opaque_reply_event(response_event_id, replies_to=source_event_id, timestamp=2000)
+    response_event.source["sender"] = "@bot:localhost"
+    client = AsyncMock()
+    client.room_messages = AsyncMock(
+        return_value=_messages_response(
+            [response_event, _message_event(source_event_id, "question", timestamp=1000)],
+            end=None,
+        ),
+    )
+
+    response_event_ids = await find_response_event_ids_via_room_messages(
+        client,
+        _ROOM_ID,
+        response_sender="@bot:localhost",
+        source_event_ids=(source_event_id,),
+    )
+
+    assert response_event_ids == frozenset({response_event_id})
+
+
+@pytest.mark.asyncio
 async def test_bulk_refresh_scans_room_once_and_stores_each_thread() -> None:
     """One backward walk should recover and store every requested thread's rows root-first."""
     client = AsyncMock()
