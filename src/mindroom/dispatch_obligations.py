@@ -28,7 +28,7 @@ from mindroom.matrix.media import MATRIX_MEDIA_EVENT_TYPES, MatrixMediaEvent, pa
 
 logger = get_logger(__name__)
 
-_SCHEMA_VERSION = 2
+_SCHEMA_VERSION = 1
 _PENDING_STATE = "pending"
 _DEFERRED_STATE = "deferred"
 _UNSETTLED_STATES = (_PENDING_STATE, _DEFERRED_STATE)
@@ -51,17 +51,6 @@ class DispatchCallbackKind(StrEnum):
     ROOM_LIFECYCLE = "room_lifecycle"
     REDACTION = "redaction"
     DECRYPTION_FAILURE = "decryption_failure"
-
-
-class DispatchSemanticConsumer(StrEnum):
-    """Stable application consumer chosen for one multi-purpose callback."""
-
-    APPROVAL_REPLY = "approval_reply"
-    CONFIG_CONFIRMATION = "config_confirmation"
-    TOOL_APPROVAL_REACTION = "tool_approval_reaction"
-    STOP_REACTION = "stop_reaction"
-    INTERACTIVE_REACTION = "interactive_reaction"
-    REACTION_HOOKS = "reaction_hooks"
 
 
 class _DispatchTerminalOutcome(StrEnum):
@@ -126,7 +115,6 @@ class _DispatchObligation:
     callback_kind: DispatchCallbackKind
     room_id: str
     event_source: Mapping[str, object]
-    semantic_consumer: DispatchSemanticConsumer | None = None
     callback_completed: bool = False
     requires_pending_check: bool = field(default=False, compare=False, repr=False)
 
@@ -143,10 +131,6 @@ class _DispatchObligation:
 
 _ADMITTED_OBLIGATION: ContextVar[_DispatchObligation | None] = ContextVar(
     "admitted_dispatch_obligation",
-    default=None,
-)
-_RUNNING_OBLIGATION: ContextVar[_DispatchObligation | None] = ContextVar(
-    "running_dispatch_obligation",
     default=None,
 )
 
@@ -206,7 +190,7 @@ class DispatchObligationStore:
     @staticmethod
     def _initialize_schema(connection: sqlite3.Connection) -> None:
         current_version = connection.execute("PRAGMA user_version").fetchone()[0]
-        if current_version not in {0, 1, _SCHEMA_VERSION}:
+        if current_version not in {0, _SCHEMA_VERSION}:
             msg = f"Unsupported dispatch obligation schema version {current_version}"
             raise RuntimeError(msg)
         connection.execute(
@@ -218,7 +202,6 @@ class DispatchObligationStore:
                 callback_kind TEXT NOT NULL,
                 room_id TEXT NOT NULL,
                 event_source_json TEXT NOT NULL,
-                semantic_consumer TEXT,
                 state TEXT NOT NULL CHECK (
                     state IN ('pending', 'deferred', 'succeeded', 'intentionally_ignored')
                 ),
@@ -233,8 +216,6 @@ class DispatchObligationStore:
             )
             """,
         )
-        if current_version == 1:
-            connection.execute("ALTER TABLE dispatch_obligations ADD COLUMN semantic_consumer TEXT")
         connection.execute(
             """
             CREATE INDEX IF NOT EXISTS dispatch_obligations_pending_recovery
@@ -291,9 +272,6 @@ class DispatchObligationStore:
         try:
             callback_kind = DispatchCallbackKind(row["callback_kind"])
             event_source = json.loads(row["event_source_json"])
-            semantic_consumer = (
-                DispatchSemanticConsumer(row["semantic_consumer"]) if row["semantic_consumer"] is not None else None
-            )
         except (ValueError, TypeError, json.JSONDecodeError) as exc:
             msg = f"corrupt dispatch obligation {row['source_event_id']!r}/{row['callback_kind']!r}"
             raise _DispatchObligationCorruptionError(msg) from exc
@@ -307,7 +285,6 @@ class DispatchObligationStore:
             callback_kind=callback_kind,
             room_id=row["room_id"],
             event_source=event_source,
-            semantic_consumer=semantic_consumer,
             callback_completed=row["state"] == _DEFERRED_STATE,
             requires_pending_check=True,
         )
@@ -393,7 +370,6 @@ class DispatchObligationStore:
                 UPDATE dispatch_obligations
                 SET room_id = '',
                     event_source_json = '',
-                    semantic_consumer = NULL,
                     state = ?,
                     settled_at_ns = ?
                 WHERE principal_id = ?
@@ -464,63 +440,6 @@ class DispatchObligationStore:
             )
         return cursor.rowcount == 1
 
-    def claim_semantic_consumer(
-        self,
-        key: _DispatchObligationKey,
-        consumer: DispatchSemanticConsumer,
-    ) -> DispatchSemanticConsumer:
-        """Persist the sole application consumer before it performs side effects."""
-        self._validate_bound_key(key)
-        with self._lock, self._connection() as connection:
-            connection.execute("BEGIN IMMEDIATE")
-            row = connection.execute(
-                """
-                SELECT semantic_consumer
-                FROM dispatch_obligations
-                WHERE principal_id = ?
-                  AND entity_name = ?
-                  AND source_event_id = ?
-                  AND callback_kind = ?
-                  AND state IN (?, ?)
-                """,
-                (
-                    key.principal_id,
-                    key.entity_name,
-                    key.source_event_id,
-                    key.callback_kind.value,
-                    _PENDING_STATE,
-                    _DEFERRED_STATE,
-                ),
-            ).fetchone()
-            if row is None:
-                msg = "Cannot claim a semantic consumer for terminal or missing work"
-                raise RuntimeError(msg)
-            existing = row["semantic_consumer"]
-            if existing is not None:
-                return DispatchSemanticConsumer(existing)
-            connection.execute(
-                """
-                UPDATE dispatch_obligations
-                SET semantic_consumer = ?
-                WHERE principal_id = ?
-                  AND entity_name = ?
-                  AND source_event_id = ?
-                  AND callback_kind = ?
-                  AND state IN (?, ?)
-                  AND semantic_consumer IS NULL
-                """,
-                (
-                    consumer.value,
-                    key.principal_id,
-                    key.entity_name,
-                    key.source_event_id,
-                    key.callback_kind.value,
-                    _PENDING_STATE,
-                    _DEFERRED_STATE,
-                ),
-            )
-        return consumer
-
     def mark_callback_deferred(self, key: _DispatchObligationKey) -> None:
         """Record that the callback completed and downstream turn work owns the source."""
         self._validate_bound_key(key)
@@ -582,7 +501,6 @@ class DispatchObligationStore:
                 ) DO UPDATE SET
                     room_id = '',
                     event_source_json = '',
-                    semantic_consumer = NULL,
                     state = excluded.state,
                     settled_at_ns = excluded.settled_at_ns
                 """,
@@ -612,7 +530,6 @@ class DispatchObligationStore:
                 UPDATE dispatch_obligations
                 SET room_id = '',
                     event_source_json = '',
-                    semantic_consumer = NULL,
                     state = ?,
                     settled_at_ns = ?
                 WHERE principal_id = ?
@@ -651,7 +568,6 @@ class DispatchObligationStore:
                 UPDATE dispatch_obligations
                 SET room_id = '',
                     event_source_json = '',
-                    semantic_consumer = NULL,
                     state = ?,
                     settled_at_ns = ?
                 WHERE principal_id = ?
@@ -681,7 +597,7 @@ class DispatchObligationStore:
         with self._lock, self._connection() as connection:
             rows = connection.execute(
                 """
-                SELECT source_event_id, callback_kind, room_id, event_source_json, semantic_consumer, state
+                SELECT source_event_id, callback_kind, room_id, event_source_json, state
                 FROM dispatch_obligations
                 WHERE principal_id = ?
                   AND entity_name = ?
@@ -728,7 +644,7 @@ class DispatchObligationStore:
         with self._lock, self._connection() as connection:
             row = connection.execute(
                 """
-                SELECT source_event_id, callback_kind, room_id, event_source_json, semantic_consumer, state
+                SELECT source_event_id, callback_kind, room_id, event_source_json, state
                 FROM dispatch_obligations
                 WHERE principal_id = ?
                   AND entity_name = ?
@@ -1134,31 +1050,6 @@ class DispatchObligationRunner:
         """Return raw source IDs that post-recovery turn cleanup must retain."""
         return self.store.unsettled_source_event_ids()
 
-    def semantic_consumer(self) -> DispatchSemanticConsumer | None:
-        """Return the durable application consumer for the running callback."""
-        obligation = _RUNNING_OBLIGATION.get()
-        if obligation is None:
-            return None
-        self.store._validate_bound_key(obligation.key)
-        return obligation.semantic_consumer
-
-    async def claim_semantic_consumer(self, consumer: DispatchSemanticConsumer) -> None:
-        """Freeze the running callback's application consumer before side effects."""
-        obligation = _RUNNING_OBLIGATION.get()
-        if obligation is None:
-            # Private callbacks remain directly callable as narrow unit seams;
-            # production callbacks always enter through ``dispatch``.
-            return
-        claimed_consumer = await _run_owned_store_operation(
-            self.store.claim_semantic_consumer,
-            obligation.key,
-            consumer,
-        )
-        if claimed_consumer is not consumer:
-            msg = f"Dispatch callback is already owned by {claimed_consumer.value!r}"
-            raise RuntimeError(msg)
-        _RUNNING_OBLIGATION.set(replace(obligation, semantic_consumer=consumer))
-
     async def settle_intentionally_ignored_turn_source(
         self,
         source_event_id: str,
@@ -1508,33 +1399,19 @@ class DispatchObligationRunner:
             owner=self.background_task_owner,
         )
 
-    async def _drop_settled_retry_keys(self) -> None:
-        """Remove retry keys whose durable obligation is no longer pending."""
-        for key in tuple(self._retry_keys):
-            try:
-                is_pending = await asyncio.to_thread(
-                    self.store.has_pending,
-                    key.source_event_id,
-                    key.callback_kind,
-                )
-            except asyncio.CancelledError:
-                raise
-            except Exception:
-                logger.exception(
-                    "dispatch_obligation_retry_discovery_failed",
-                    source_event_id=key.source_event_id,
-                    callback_kind=key.callback_kind.value,
-                )
-                continue
-            if not is_pending:
-                self._retry_keys.pop(key, None)
-
-    async def _retry_failed_obligations(self) -> None:
+    async def _retry_failed_obligations(self) -> None:  # noqa: C901
         """Retry only callback failures, with one capped-backoff task per runner."""
         retry_delay_seconds = self._retry_initial_delay_seconds
         try:
             while self._retry_keys:
-                await self._drop_settled_retry_keys()
+                for key in tuple(self._retry_keys):
+                    is_pending = await asyncio.to_thread(
+                        self.store.has_pending,
+                        key.source_event_id,
+                        key.callback_kind,
+                    )
+                    if not is_pending:
+                        self._retry_keys.pop(key, None)
                 if not self._retry_keys:
                     break
                 await asyncio.sleep(retry_delay_seconds)
@@ -1609,11 +1486,7 @@ class DispatchObligationRunner:
             if callback is None:
                 msg = f"No callback registered for {obligation.callback_kind.value!r}"
                 raise RuntimeError(msg)
-            running_token = _RUNNING_OBLIGATION.set(obligation)
-            try:
-                callback_result = await callback(room, event)
-            finally:
-                _RUNNING_OBLIGATION.reset(running_token)
+            callback_result = await callback(room, event)
             await self._settle_callback_result(obligation, callback_result)
             return True
         finally:

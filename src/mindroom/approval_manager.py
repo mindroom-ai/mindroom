@@ -420,50 +420,6 @@ class _ApprovalManager:
             resolved_by=sender_id,
         )
 
-    async def can_handle_action(
-        self,
-        *,
-        room_id: str,
-        sender_id: str,
-        card_event_id: str | None,
-        approval_id: str | None,
-    ) -> bool:
-        """Validate whether one action has an approval consumer without mutating it."""
-        if approval_id is not None:
-            live_card_event_id = self._live_card_event_id_for_approval(approval_id)
-            if live_card_event_id is not None:
-                live_waiter = self._live_waiter_for_card(live_card_event_id)
-                if live_waiter is not None:
-                    return await self._live_waiter_accepts_action(live_waiter, room_id, sender_id)
-            if card_event_id is None:
-                return False
-        if card_event_id is None:
-            return False
-        live_waiter = self._live_waiter_for_card(card_event_id)
-        if live_waiter is not None:
-            return await self._live_waiter_accepts_action(live_waiter, room_id, sender_id)
-        if self.knows_in_memory_approval_card(card_event_id):
-            return True
-        pending = await self._cached_trusted_pending_approval_for_card(
-            room_id=room_id,
-            card_event_id=card_event_id,
-        )
-        return pending is not None and pending.approver_user_id == sender_id
-
-    async def _live_waiter_accepts_action(
-        self,
-        live_waiter: _LiveApprovalWaiter,
-        room_id: str,
-        sender_id: str,
-    ) -> bool:
-        if live_waiter.room_id != room_id:
-            return False
-        pending = await self._pending_approval_for_card(
-            room_id=live_waiter.room_id,
-            card_event_id=live_waiter.card_event_id,
-        )
-        return pending is not None and pending.approver_user_id == sender_id
-
     async def handle_live_approval_id_response(
         self,
         *,

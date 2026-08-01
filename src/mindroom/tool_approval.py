@@ -49,7 +49,6 @@ __all__ = [
     "ToolApprovalScriptError",
     "ToolApprovalTransportError",
     "ToolCallWorkflowOrigin",
-    "can_handle_matrix_approval_action",
     "evaluate_tool_approval",
     "expire_orphaned_approval_cards_on_startup",
     "handle_matrix_approval_action",
@@ -320,19 +319,6 @@ async def handle_matrix_approval_action(action: MatrixApprovalAction) -> Approva
         card_event_id=action.card_event_id,
         status=action.status,
         reason=sanitized_reason,
-    )
-
-
-async def can_handle_matrix_approval_action(action: MatrixApprovalAction) -> bool:
-    """Return whether one action has a validated approval consumer."""
-    manager = approval_manager.get_approval_store()
-    if manager is None:
-        return False
-    return await manager.can_handle_action(
-        room_id=action.room_id,
-        sender_id=action.sender_id,
-        card_event_id=action.card_event_id,
-        approval_id=action.approval_id,
     )
 
 

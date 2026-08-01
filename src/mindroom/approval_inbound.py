@@ -10,15 +10,12 @@ from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.visible_body import strip_matrix_rich_reply_fallback
 from mindroom.tool_approval import (
     MatrixApprovalAction,
-    can_handle_matrix_approval_action,
     handle_matrix_approval_action,
     is_process_active_approval_card,
     is_process_approval_card,
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
-
     import nio
     import structlog
 
@@ -83,13 +80,11 @@ async def handle_tool_approval_action(
     status: Literal["approved", "denied"],
     reason: str | None,
     approval_id: str | None = None,
-    before_consume: Callable[[], Awaitable[None]] | None = None,
-    authorization_prevalidated: bool = False,
 ) -> bool:
     """Resolve one approval action only when the sender still has access."""
     if approval_event_id is None and approval_id is None:
         return False
-    if not authorization_prevalidated and not is_authorized_sender(
+    if not is_authorized_sender(
         sender_id,
         config,
         room.room_id,
@@ -97,19 +92,16 @@ async def handle_tool_approval_action(
     ):
         logger.debug("ignoring_tool_approval_action_from_unauthorized_sender", user_id=sender_id)
         return False
-    action = MatrixApprovalAction(
-        room_id=room.room_id,
-        sender_id=sender_id,
-        card_event_id=approval_event_id,
-        approval_id=approval_id,
-        status=status,
-        reason=reason,
+    result = await handle_matrix_approval_action(
+        MatrixApprovalAction(
+            room_id=room.room_id,
+            sender_id=sender_id,
+            card_event_id=approval_event_id,
+            approval_id=approval_id,
+            status=status,
+            reason=reason,
+        ),
     )
-    if not await can_handle_matrix_approval_action(action):
-        return False
-    if before_consume is not None:
-        await before_consume()
-    result = await handle_matrix_approval_action(action)
     notice_event_id = approval_event_id or result.card_event_id
     if notice_event_id is not None and result.error_reason is not None and orchestrator is not None:
         await orchestrator.send_approval_notice(
@@ -129,8 +121,6 @@ async def maybe_handle_tool_approval_reply(
     runtime_paths: RuntimePaths,
     orchestrator: OrchestratorRuntime | None,
     logger: structlog.stdlib.BoundLogger,
-    before_consume: Callable[[], Awaitable[None]] | None = None,
-    authorization_prevalidated: bool = False,
 ) -> bool:
     """Deny live approvals or expire detached approval cards targeted by replies."""
     event_info = EventInfo.from_event(event.source)
@@ -153,6 +143,4 @@ async def maybe_handle_tool_approval_reply(
         approval_event_id=reply_to_event_id,
         status="denied",
         reason=strip_matrix_rich_reply_fallback(event.body),
-        before_consume=before_consume,
-        authorization_prevalidated=authorization_prevalidated,
     )

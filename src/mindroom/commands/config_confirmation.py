@@ -373,7 +373,7 @@ async def _confirmation_response_ids(
     return tuple(response_ids)
 
 
-async def _has_visible_confirmation_response(
+async def has_visible_confirmation_response(
     client: nio.AsyncClient,
     room_id: str,
     event: nio.ReactionEvent,
@@ -557,7 +557,7 @@ async def handle_confirmation_reaction(
         if pending_change.decision_event_id is not None and pending_change.decision_event_id != event.event_id:
             return
 
-        if await _has_visible_confirmation_response(bot.client, room.room_id, event):
+        if await has_visible_confirmation_response(bot.client, room.room_id, event):
             await _remove_pending_change_from_matrix(bot.client, pending_change.room_id, preview_event_id)
             _remove_pending_change(preview_event_id)
             return
