@@ -1767,9 +1767,8 @@ class TurnController:
         if target is None:
             msg = f"User-stopped response {response_event_id!r} has no durable conversation target"
             raise RuntimeError(msg)
-        source_event_id = turn_record.indexed_event_ids[0]
-
-        await self._record_user_stop(response_event_id, stop_receipt_order)
+        stopped_turn = await self._record_user_stop(response_event_id, stop_receipt_order)
+        source_event_id = stopped_turn.indexed_event_ids[0]
         stopped = await self.deps.response_runner.finalize_user_stop(
             response_event_id,
             target,

@@ -1412,6 +1412,84 @@ class TestAgentBot(AgentBotTestBase):
         await asyncio.gather(later_edit_task, return_exceptions=True)
 
     @pytest.mark.asyncio
+    async def test_stop_guard_uses_post_reconciliation_source_identity(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """STOP cancellation must follow the turn after a redacted alias is reassigned."""
+        config = self._config_for_storage(tmp_path)
+        runtime_paths = runtime_paths_for(config)
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
+        bot.client = make_matrix_client_mock()
+        target = MessageTarget.resolve("!test:localhost", None, "$second")
+        bot._turn_store.record_pending_turn(
+            TurnRecord.create(
+                ["$first", "$second"],
+                redacted_source_event_ids=["$first"],
+                response_event_id="$response-a",
+                completed=False,
+                response_owner=bot.agent_name,
+                requester_id="@user:localhost",
+                conversation_target=target,
+            ),
+        )
+        live_task = asyncio.create_task(asyncio.Event().wait())
+        bot.stop_manager.set_current("$response-a", target, live_task)
+        controller = unwrap_extracted_collaborator(bot._turn_controller)
+        turn_store = unwrap_extracted_collaborator(bot._turn_store)
+        original_record_user_stop = controller._record_user_stop
+        alias_claimed = False
+
+        async def record_after_alias_claim(
+            response_event_id: str,
+            stop_receipt_order: int,
+            *,
+            delivery_settled: bool = False,
+        ) -> TurnRecord:
+            nonlocal alias_claimed
+            if not alias_claimed:
+                alias_claimed = True
+                turn_store.record_turn(
+                    TurnRecord.create(
+                        ["$first", "$other"],
+                        response_event_id="$response-b",
+                        latest_edit_receipt_order=3,
+                    ),
+                )
+            return await original_record_user_stop(
+                response_event_id,
+                stop_receipt_order,
+                delivery_settled=delivery_settled,
+            )
+
+        on_current_stop_finalized = AsyncMock()
+        try:
+            with (
+                patch.object(controller, "_record_user_stop", side_effect=record_after_alias_claim),
+                patch(
+                    "mindroom.delivery_gateway.DeliveryGateway.finalize_user_stopped_response",
+                    new=AsyncMock(return_value=True),
+                ),
+            ):
+                assert await controller.finalize_user_stop(
+                    "$response-a",
+                    2,
+                    on_current_stop_finalized,
+                )
+            await asyncio.sleep(0)
+
+            stopped = turn_store.turn_record_for_response_event_id("$response-a")
+            assert stopped is not None
+            assert stopped.source_event_ids == ("$second",)
+            assert turn_store.get_turn_record("$first").response_event_id == "$response-b"
+            assert live_task.cancelled()
+            on_current_stop_finalized.assert_awaited_once()
+        finally:
+            live_task.cancel()
+            await asyncio.gather(live_task, return_exceptions=True)
+
+    @pytest.mark.asyncio
     async def test_interrupted_config_reaction_replays_only_its_durable_consumer(
         self,
         mock_agent_user: AgentMatrixUser,
