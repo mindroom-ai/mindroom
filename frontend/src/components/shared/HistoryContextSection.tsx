@@ -11,7 +11,9 @@ import {
 } from "@/types/config";
 
 type HistoryFieldName =
-  "num_history_runs" | "num_history_messages" | "max_tool_calls_from_history";
+  | "num_history_runs"
+  | "num_history_messages"
+  | "max_tool_calls_from_history";
 
 type HistoryContextFormValues = {
   num_history_runs?: number | null;
