@@ -1818,6 +1818,29 @@ async def test_terminal_turn_settlement_retries_autonomously(tmp_path: Path) -> 
 
 
 @pytest.mark.asyncio
+async def test_terminal_turn_settlement_succeeds_in_persistence_worker_without_retry_task(tmp_path: Path) -> None:
+    """The normal post-persist callback must finish before returning from its worker."""
+
+    async def callback(_room: nio.MatrixRoom, _event: nio.Event) -> DispatchCallbackResult:
+        return DispatchCallbackResult.SUCCEEDED
+
+    owner = object()
+    runner = _runner(
+        _store(tmp_path),
+        callback,
+        background_task_owner=owner,
+    )
+    settle = MagicMock()
+    runner.store.settle_pending_from_turn_store = settle
+
+    await asyncio.to_thread(runner.retry_turn_settlement, ("$message",))
+
+    settle.assert_called_once_with(("$message",))
+    assert runner._turn_settlement_retry_task is None
+    assert await wait_for_background_tasks(timeout=0, owner=owner) is True
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("entrypoint", ["direct", "admission"])
 async def test_persist_failure_notifies_once_for_every_runner_entrypoint(
     tmp_path: Path,

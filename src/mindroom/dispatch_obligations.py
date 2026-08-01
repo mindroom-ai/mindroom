@@ -1187,6 +1187,15 @@ class DispatchObligationRunner:
         except RuntimeError:
             running_loop = None
         if running_loop is None:
+            try:
+                self.store.settle_pending_from_turn_store(source_event_ids)
+            except Exception:
+                logger.exception(
+                    "turn_dispatch_obligation_initial_settlement_failed",
+                    source_event_ids=source_event_ids,
+                )
+            else:
+                return
             event_loop = self._event_loop
             if event_loop is None or event_loop.is_closed():
                 logger.error(
