@@ -1343,6 +1343,7 @@ async def find_response_event_ids_via_room_messages(
     *,
     response_sender: str,
     source_event_ids: Collection[str],
+    response_source_filter: Callable[[Mapping[str, Any]], bool] | None = None,
 ) -> frozenset[str]:
     """Find original responses to exact source events in recent room history."""
     sources = set(source_event_ids)
@@ -1374,6 +1375,7 @@ async def find_response_event_ids_via_room_messages(
                 and not event_info.is_edit
                 and not event_info.is_thread_fallback
                 and event_info.reply_to_event_id in sources
+                and (response_source_filter is None or response_source_filter(event_source))
             ):
                 response_event_ids.add(event.event_id)
         if not response.end:

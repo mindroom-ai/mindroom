@@ -2488,6 +2488,7 @@ depends_on = [
     "mindroom.matrix.visible_body",
 ]
 visibility = [
+    "mindroom.commands.config_confirmation",
     "mindroom.custom_tools.matrix_conversation_operations",
     "mindroom.custom_tools.matrix_room",
     "mindroom.custom_tools.thread_tags",
@@ -2497,6 +2498,7 @@ visibility = [
     "mindroom.matrix.thread_room_scan",
     "mindroom.thread_export.execution",
     "mindroom.turn_controller",
+    "mindroom.visible_voice_echo",
 ]
 
 [[modules]]
@@ -2812,6 +2814,7 @@ depends_on = [
     "mindroom.turn_controller",
     "mindroom.turn_policy",
     "mindroom.turn_store",
+    "mindroom.visible_voice_echo",
 ]
 
 [[modules]]
@@ -3041,8 +3044,10 @@ visibility = [
 path = "mindroom.commands.config_confirmation"
 depends_on = [
     "mindroom.commands.config_commands",
+    "mindroom.constants",
     "mindroom.delivery_gateway",
     "mindroom.logging_config",
+    "mindroom.matrix.client_thread_history",
 ]
 
 [[modules]]
@@ -3437,6 +3442,24 @@ depends_on = [
 visibility = ["mindroom.turn_controller"]
 
 [[modules]]
+path = "mindroom.visible_voice_echo"
+depends_on = [
+    "mindroom.authorization",
+    "mindroom.background_tasks",
+    "mindroom.constants",
+    "mindroom.delivery_gateway",
+    "mindroom.dispatch_handoff",
+    "mindroom.dispatch_recovery_context",
+    "mindroom.dispatch_source",
+    "mindroom.matrix.client_thread_history",
+    "mindroom.turn_origin",
+]
+visibility = [
+    "mindroom.bot",
+    "mindroom.turn_controller",
+]
+
+[[modules]]
 path = "mindroom.turn_controller"
 depends_on = [
     "mindroom.response_admission",
@@ -3469,6 +3492,7 @@ depends_on = [
     "mindroom.timestamp_formatting",
     "mindroom.turn_store",
     "mindroom.turn_policy",
+    "mindroom.visible_voice_echo",
 ]
 
 [[modules]]

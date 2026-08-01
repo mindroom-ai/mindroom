@@ -7,6 +7,7 @@ import enum
 import time
 from collections import deque
 from dataclasses import dataclass, field
+from itertools import chain
 from typing import TYPE_CHECKING
 
 from .coalescing_cleanup import ReadyPendingEvent, close_ready_task_result_metadata
@@ -186,10 +187,21 @@ class IngressLanes:
 
     def has_pending_source_event(self, source_event_id: str) -> bool:
         """Return whether an active lane still owns one exact source before settlement."""
+        return self._has_pending_source_event(source_event_id)
+
+    def _has_pending_source_event(
+        self,
+        source_event_id: str,
+        *,
+        exclude_slot: LaneSlot | None = None,
+    ) -> bool:
+        """Return whether any live lane owner except one optional slot owns a source."""
         return any(
-            slot.delivery is not None and slot.delivery.source_event_id == source_event_id
-            for lane in self._lanes.values()
-            for slot in lane
+            slot is not exclude_slot and slot.delivery is not None and slot.delivery.source_event_id == source_event_id
+            for slot in chain(
+                chain.from_iterable(self._lanes.values()),
+                self._settling_slots.values(),
+            )
         )
 
     def all_settled(self) -> bool:
@@ -317,7 +329,7 @@ class IngressLanes:
             self._notify_undelivered_source(undelivered)
         if intentionally_ignored is not None:
             try:
-                await self._notify_intentionally_ignored_source(intentionally_ignored)
+                await self._notify_intentionally_ignored_source(slot, intentionally_ignored)
             finally:
                 self._settling_slots.pop(id(slot), None)
                 slot.settled.set()
@@ -346,9 +358,11 @@ class IngressLanes:
                 room_id=delivery.key.room_id,
             )
 
-    async def _notify_intentionally_ignored_source(self, delivery: LaneDelivery) -> None:
+    async def _notify_intentionally_ignored_source(self, slot: LaneSlot, delivery: LaneDelivery) -> None:
         callback = self._on_intentionally_ignored_source
         if callback is None or delivery.source_event_id is None:
+            return
+        if self._has_pending_source_event(delivery.source_event_id, exclude_slot=slot):
             return
         try:
             await callback(
@@ -361,6 +375,9 @@ class IngressLanes:
                 source_event_id=delivery.source_event_id,
                 room_id=delivery.key.room_id,
             )
+            # The fallback retry is synchronous, so drop only this owner before
+            # its ordinary duplicate-suppression check runs.
+            self._settling_slots.pop(id(slot), None)
             self._notify_undelivered_source(delivery)
 
     async def _deliver_slot(self, slot: LaneSlot) -> _LaneDeliveryOutcome:

@@ -1367,7 +1367,7 @@ class DispatchObligationRunner:
             owner=self.background_task_owner,
         )
 
-    async def _retry_failed_obligations(self) -> None:
+    async def _retry_failed_obligations(self) -> None:  # noqa: C901
         """Retry only callback failures, with one capped-backoff task per runner."""
         retry_delay_seconds = self._retry_initial_delay_seconds
         try:
@@ -1393,11 +1393,13 @@ class DispatchObligationRunner:
                         with turn_dispatch_recovery_scope(
                             active=obligation.callback_kind in _TURN_BACKED_KINDS,
                         ):
-                            await self._run_obligation(
+                            claimed = await self._run_obligation(
                                 obligation,
                                 room=self.room_for_id(obligation.room_id),
                                 event=event,
                             )
+                            if not claimed:
+                                self._retry_keys.setdefault(key, completed_attempts)
                     except asyncio.CancelledError:
                         raise
                     except _DispatchObligationCorruptionError:
@@ -1429,25 +1431,26 @@ class DispatchObligationRunner:
         *,
         room: nio.MatrixRoom,
         event: _DispatchEvent,
-    ) -> None:
+    ) -> bool:
+        """Run one obligation, returning whether this caller acquired its live claim."""
         if not await self._claim(obligation.key):
-            return
+            return False
         try:
             if obligation.requires_pending_check and not await asyncio.to_thread(
                 self.store.has_pending,
                 obligation.source_event_id,
                 obligation.callback_kind,
             ):
-                return
+                return True
             if obligation.callback_completed:
                 if await self._settle_from_turn_store_if_owned(obligation):
-                    return
+                    return True
                 callback_reclaimed = await _run_owned_store_operation(
                     self.store.mark_callback_pending,
                     obligation.key,
                 )
                 if not callback_reclaimed:
-                    return
+                    return True
                 obligation = replace(obligation, callback_completed=False, requires_pending_check=False)
             callback = self.callbacks.get(obligation.callback_kind)
             if callback is None:
@@ -1455,6 +1458,7 @@ class DispatchObligationRunner:
                 raise RuntimeError(msg)
             callback_result = await callback(room, event)
             await self._settle_callback_result(obligation, callback_result)
+            return True
         finally:
             await self._release(obligation.key)
 

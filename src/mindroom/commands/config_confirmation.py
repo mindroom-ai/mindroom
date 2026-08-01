@@ -8,8 +8,10 @@ from typing import TYPE_CHECKING, Any
 
 import nio
 
+from mindroom.constants import CONFIG_CONFIRMATION_REACTION_KEY
 from mindroom.delivery_gateway import SendTextRequest
 from mindroom.logging_config import get_logger
+from mindroom.matrix.client_thread_history import find_response_event_ids_via_room_messages
 from mindroom.matrix.message_builder import build_reaction_content
 
 if TYPE_CHECKING:
@@ -188,29 +190,71 @@ async def _remove_pending_change_from_matrix(
         event_id: The event ID of the confirmation message
 
     """
-    try:
-        # To remove a state event, set it with empty content
-        response = await client.room_put_state(
-            room_id=room_id,
-            event_type=_PENDING_CONFIG_EVENT_TYPE,
-            content={},
-            state_key=event_id,
-        )
+    response = await client.room_put_state(
+        room_id=room_id,
+        event_type=_PENDING_CONFIG_EVENT_TYPE,
+        content={},
+        state_key=event_id,
+    )
+    if not isinstance(response, nio.RoomPutStateResponse):
+        msg = f"Failed to remove pending config change from Matrix state: {response}"
+        raise RuntimeError(msg)  # noqa: TRY004
+    logger.info(
+        "Removed pending config change from Matrix state",
+        event_id=event_id,
+        room_id=room_id,
+    )
 
-        if isinstance(response, nio.RoomPutStateResponse):
-            logger.info(
-                "Removed pending config change from Matrix state",
-                event_id=event_id,
-                room_id=room_id,
-            )
-        else:
-            logger.error(
-                "Failed to remove pending config change from Matrix state",
-                event_id=event_id,
-                error=str(response),
-            )
-    except Exception:
-        logger.exception("Error removing pending config change from Matrix state")
+
+async def resolve_pending_change(
+    client: nio.AsyncClient,
+    room_id: str,
+    event_id: str,
+) -> _PendingConfigChange | None:
+    """Resolve one pending change from memory or its authoritative Matrix state."""
+    pending_change = get_pending_change(event_id)
+    if pending_change is not None:
+        return pending_change
+
+    response = await client.room_get_state_event(
+        room_id,
+        _PENDING_CONFIG_EVENT_TYPE,
+        event_id,
+    )
+    if isinstance(response, nio.RoomGetStateEventError) and response.status_code == "M_NOT_FOUND":
+        return None
+    if not isinstance(response, nio.RoomGetStateEventResponse):
+        msg = f"Failed to resolve pending config change from Matrix state: {response}"
+        raise RuntimeError(msg)  # noqa: TRY004
+    if not response.content:
+        return None
+    return await _restore_pending_change(client, room_id, event_id, response.content)
+
+
+async def _restore_pending_change(
+    client: nio.AsyncClient,
+    room_id: str,
+    event_id: str,
+    content: dict[str, Any],
+) -> _PendingConfigChange | None:
+    """Restore one unexpired Matrix-backed pending change into memory."""
+    pending_change = _PendingConfigChange.from_dict(content)
+    if pending_change.is_expired():
+        logger.info(
+            "Skipping expired pending config change",
+            event_id=event_id,
+            created_at=pending_change.created_at,
+        )
+        await _remove_pending_change_from_matrix(client, room_id, event_id)
+        return None
+    _pending_changes[event_id] = pending_change
+    logger.info(
+        "Restored pending config change",
+        event_id=event_id,
+        config_path=pending_change.config_path,
+        requester=pending_change.requester,
+    )
+    return pending_change
 
 
 async def restore_pending_changes(client: nio.AsyncClient, room_id: str) -> int:
@@ -249,28 +293,11 @@ async def restore_pending_changes(client: nio.AsyncClient, room_id: str) -> int:
                 continue
 
             try:
-                pending_change = _PendingConfigChange.from_dict(content)
-
-                # Check if expired
-                if pending_change.is_expired():
-                    logger.info(
-                        "Skipping expired pending config change",
-                        event_id=state_key,
-                        created_at=pending_change.created_at,
-                    )
-                    # Remove from Matrix state
-                    await _remove_pending_change_from_matrix(client, room_id, state_key)
+                pending_change = await _restore_pending_change(client, room_id, state_key, content)
+                if pending_change is None:
                     expired_count += 1
                 else:
-                    # Restore to memory
-                    _pending_changes[state_key] = pending_change
                     restored_count += 1
-                    logger.info(
-                        "Restored pending config change",
-                        event_id=state_key,
-                        config_path=pending_change.config_path,
-                        requester=pending_change.requester,
-                    )
             except Exception:
                 logger.exception(
                     "Error restoring pending config change",
@@ -351,6 +378,7 @@ async def handle_confirmation_reaction(
 
     # Don't process our own reactions
     assert bot.client is not None
+    assert bot.client.user_id is not None
     if event.sender == bot.client.user_id:
         return
 
@@ -360,13 +388,27 @@ async def handle_confirmation_reaction(
     if reaction_key not in ["✅", "❌"]:
         return
 
-    # Remove the pending change from memory and Matrix state
-    _remove_pending_change(event.reacts_to)
-    await _remove_pending_change_from_matrix(
+    recovered_response_ids = await find_response_event_ids_via_room_messages(
         bot.client,
-        pending_change.room_id,
-        event.reacts_to,
+        room.room_id,
+        response_sender=bot.client.user_id,
+        source_event_ids=(event.reacts_to,),
+        response_source_filter=lambda source: (
+            isinstance(content := source.get("content"), dict)
+            and content.get(CONFIG_CONFIRMATION_REACTION_KEY) == event.event_id
+        ),
     )
+    if len(recovered_response_ids) > 1:
+        msg = "Config confirmation recovery found multiple visible responses"
+        raise RuntimeError(msg)
+    if recovered_response_ids:
+        _remove_pending_change(event.reacts_to)
+        await _remove_pending_change_from_matrix(
+            bot.client,
+            pending_change.room_id,
+            event.reacts_to,
+        )
+        return
 
     if reaction_key == "✅":
         if not authorization.config_command_enabled:
@@ -413,10 +455,23 @@ async def handle_confirmation_reaction(
         thread_id=pending_change.thread_id,
         reply_to_event_id=event.reacts_to,
     )
-    await bot._delivery_gateway.send_text(
+    response_event_id = await bot._delivery_gateway.send_text(
         SendTextRequest(
             target=target,
             response_text=response_text,
             skip_mentions=True,
+            extra_content={CONFIG_CONFIRMATION_REACTION_KEY: event.event_id},
         ),
+    )
+    if response_event_id is None:
+        msg = "Failed to send config confirmation response"
+        raise RuntimeError(msg)
+
+    # Matrix state is the completion marker for replay. Remove it only after
+    # the requested side effect and its visible response both succeed.
+    _remove_pending_change(event.reacts_to)
+    await _remove_pending_change_from_matrix(
+        bot.client,
+        pending_change.room_id,
+        event.reacts_to,
     )

@@ -32,6 +32,7 @@ from mindroom.constants import (
     STREAM_STATUS_KEY,
     STREAM_STATUS_PENDING,
     STREAM_STATUS_STREAMING,
+    VISIBLE_ROUTER_VOICE_ECHO_KEY,
     VOICE_PREFIX,
     VOICE_RAW_AUDIO_FALLBACK_KEY,
     RuntimePaths,
@@ -122,7 +123,7 @@ from mindroom.turn_policy import IngressHookRunner, PreparedDispatch, ResponseAc
 from mindroom.visible_voice_echo import VisibleVoiceEchoRequest
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Collection, Sequence
+    from collections.abc import Awaitable, Callable, Collection, Mapping, Sequence
 
     import nio
     import structlog
@@ -516,7 +517,35 @@ class TurnController:
         if len(response_event_ids) > 1:
             msg = "Recovered coalesced turn has conflicting visible response event IDs"
             raise RuntimeError(msg)
+
+        def response_source_is_canonical(source: Mapping[str, Any]) -> bool:
+            content = source.get("content")
+            return not isinstance(content, dict) or content.get(VISIBLE_ROUTER_VOICE_ECHO_KEY) is not True
+
+        def response_source_is_terminal(source: Mapping[str, Any]) -> bool:
+            content = source.get("content")
+            return (
+                response_source_is_canonical(source)
+                and isinstance(content, dict)
+                and content.get(STREAM_STATUS_KEY) == STREAM_STATUS_COMPLETED
+            )
+
         if response_event_ids:
+            terminal_response_event_ids = set(
+                await find_response_event_ids_via_room_messages(
+                    self._client(),
+                    room_id,
+                    response_sender=self.deps.matrix_id.full_id,
+                    source_event_ids=handled_turn.source_event_ids,
+                    response_source_filter=response_source_is_terminal,
+                ),
+            )
+            terminal_response_event_ids.difference_update(excluded_event_ids)
+            if len(terminal_response_event_ids) > 1:
+                msg = "Recovered turn has multiple terminal visible Matrix responses"
+                raise RuntimeError(msg)
+            if terminal_response_event_ids:
+                return next(iter(terminal_response_event_ids))
             return next(iter(response_event_ids))
 
         response_event_ids = set(
@@ -525,6 +554,7 @@ class TurnController:
                 room_id,
                 response_sender=self.deps.matrix_id.full_id,
                 source_event_ids=handled_turn.source_event_ids,
+                response_source_filter=response_source_is_canonical,
             ),
         )
         response_event_ids.difference_update(excluded_event_ids)

@@ -2172,8 +2172,14 @@ class AgentBot:
                     )
                     return
 
-            pending_change = config_confirmation.get_pending_change(event.reacts_to)
-            if pending_change and self.agent_name == ROUTER_AGENT_NAME:
+            pending_change = None
+            if self.agent_name == ROUTER_AGENT_NAME and event.key in {"✅", "❌"}:
+                pending_change = await config_confirmation.resolve_pending_change(
+                    self.client,
+                    room.room_id,
+                    event.reacts_to,
+                )
+            if pending_change is not None:
                 await config_confirmation.handle_confirmation_reaction(self, room, event, pending_change)
                 return
 

@@ -1656,6 +1656,89 @@ async def test_get_pending_schedule_thread_ids_raises_on_room_state_error() -> N
 
 
 @pytest.mark.asyncio
+async def test_schedule_command_replay_reuses_persisted_source_checkpoint() -> None:
+    """A relative schedule must not be reparsed or moved when its command replays."""
+    client = AsyncMock()
+    workflow = ScheduledWorkflow(
+        schedule_type="once",
+        execute_at=datetime(2026, 1, 1, 12, 5, tzinfo=UTC),
+        message="Continue work",
+        description="Continue work",
+        room_id="!test:server",
+    )
+    response_text = "✅ Scheduled for the original instant"
+    client.room_get_state_event.return_value = nio.RoomGetStateEventResponse(
+        content={
+            "status": "pending",
+            "workflow": workflow.model_dump_json(),
+            "last_command_event_id": "$schedule-command",
+            "last_command_response_text": response_text,
+        },
+        event_type=_SCHEDULED_TASK_EVENT_TYPE,
+        state_key="stable-id",
+        room_id="!test:server",
+    )
+
+    with (
+        patch("mindroom.scheduling._parse_workflow_schedule", new_callable=AsyncMock) as parse_workflow,
+        patch("mindroom.scheduling._start_scheduled_task") as start_task,
+    ):
+        result = await schedule_task(
+            runtime=_scheduling_runtime(client=client),
+            room_id="!test:server",
+            thread_id=None,
+            scheduled_by="@user:server",
+            full_text="in five minutes continue work",
+            task_id="stable-id",
+            command_event_id="$schedule-command",
+        )
+
+    assert result == ("stable-id", response_text)
+    parse_workflow.assert_not_awaited()
+    start_task.assert_called_once()
+    client.room_put_state.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_edit_schedule_command_replay_reuses_atomic_mutation_checkpoint() -> None:
+    """A relative edit must not be applied twice after its Matrix state write succeeds."""
+    client = AsyncMock()
+    workflow = ScheduledWorkflow(
+        schedule_type="once",
+        execute_at=datetime(2026, 1, 1, 12, 10, tzinfo=UTC),
+        message="Updated work",
+        description="Updated work",
+        room_id="!test:server",
+    )
+    response_text = "✅ Scheduled for the original edited instant"
+    client.room_get_state_event.return_value = nio.RoomGetStateEventResponse(
+        content={
+            "status": "pending",
+            "workflow": workflow.model_dump_json(),
+            "last_command_event_id": "$edit-command",
+            "last_command_response_text": response_text,
+        },
+        event_type=_SCHEDULED_TASK_EVENT_TYPE,
+        state_key="task123",
+        room_id="!test:server",
+    )
+
+    with patch("mindroom.scheduling.schedule_task", new_callable=AsyncMock) as reschedule:
+        result = await edit_scheduled_task(
+            runtime=_scheduling_runtime(client=client),
+            room_id="!test:server",
+            task_id="task123",
+            full_text="move it another five minutes",
+            scheduled_by="@user:server",
+            command_event_id="$edit-command",
+        )
+
+    assert result == f"✅ Updated task `task123`.\n\n{response_text}"
+    reschedule.assert_not_awaited()
+    client.room_put_state.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_cancel_all_scheduled_tasks_no_tasks() -> None:
     """Test cancel_all_scheduled_tasks when no tasks exist."""
     # Create mock client

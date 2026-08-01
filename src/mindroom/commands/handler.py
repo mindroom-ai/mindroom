@@ -343,6 +343,7 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
             full_text=full_text,
             mentioned_agents=mentioned_agents,
             task_id=_scheduled_task_id_for_command(event.event_id),
+            command_event_id=event.event_id,
         )
 
     elif command.type == CommandType.LIST_SCHEDULES:
@@ -383,6 +384,7 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
             full_text=full_text,
             scheduled_by=requester_user_id,
             thread_id=effective_thread_id,
+            command_event_id=event.event_id,
         )
 
     elif command.type == CommandType.CONFIG:

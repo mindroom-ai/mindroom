@@ -140,6 +140,8 @@ class ScheduledTaskRecord:
     status: str
     created_at: datetime | None
     workflow: ScheduledWorkflow
+    last_command_event_id: str | None = None
+    last_command_response_text: str | None = None
 
 
 @dataclass(frozen=True)
@@ -336,6 +338,12 @@ def _parse_scheduled_task_record(
         status=status,
         created_at=created_at,
         workflow=workflow,
+        last_command_event_id=(
+            command_event_id if isinstance(command_event_id := content.get("last_command_event_id"), str) else None
+        ),
+        last_command_response_text=(
+            response_text if isinstance(response_text := content.get("last_command_response_text"), str) else None
+        ),
     )
 
 
@@ -358,6 +366,11 @@ def _cancelled_task_content(
         original_task_id = existing_content.get("task_id")
         if isinstance(original_task_id, str) and original_task_id:
             cancelled_content["task_id"] = original_task_id
+
+        for key in ("last_command_event_id", "last_command_response_text"):
+            value = existing_content.get(key)
+            if isinstance(value, str):
+                cancelled_content[key] = value
 
     cancelled_content["updated_at"] = datetime.now(UTC).isoformat()
     return cancelled_content
@@ -716,24 +729,31 @@ async def _persist_scheduled_task_state(
     status: str = "pending",
     created_at: datetime | str | None = None,
     matrix_admin: HookMatrixAdmin | None = None,
+    last_command_event_id: str | None = None,
+    last_command_response_text: str | None = None,
 ) -> None:
     """Persist scheduled task state to Matrix."""
+    content = {
+        "task_id": task_id,
+        "workflow": workflow.model_dump_json(),
+        "cron_description": (
+            workflow.cron_schedule.to_natural_language()
+            if workflow.schedule_type == "cron" and workflow.cron_schedule is not None
+            else None
+        ),
+        "status": status,
+        "created_at": _serialize_scheduled_task_created_at(created_at),
+        "updated_at": datetime.now(UTC).isoformat(),
+    }
+    if last_command_event_id is not None:
+        content["last_command_event_id"] = last_command_event_id
+    if last_command_response_text is not None:
+        content["last_command_response_text"] = last_command_response_text
     await _put_scheduled_task_state_content(
         client=client,
         room_id=room_id,
         task_id=task_id,
-        content={
-            "task_id": task_id,
-            "workflow": workflow.model_dump_json(),
-            "cron_description": (
-                workflow.cron_schedule.to_natural_language()
-                if workflow.schedule_type == "cron" and workflow.cron_schedule is not None
-                else None
-            ),
-            "status": status,
-            "created_at": _serialize_scheduled_task_created_at(created_at),
-            "updated_at": datetime.now(UTC).isoformat(),
-        },
+        content=content,
         matrix_admin=matrix_admin,
     )
 
@@ -749,6 +769,8 @@ async def _save_pending_scheduled_task(
     conversation_cache: ConversationCacheProtocol,
     created_at: datetime | str | None = None,
     matrix_admin: HookMatrixAdmin | None = None,
+    last_command_event_id: str | None = None,
+    last_command_response_text: str | None = None,
 ) -> None:
     """Persist one pending task and start or replace its in-memory runner."""
     _cancel_running_task(task_id)
@@ -760,6 +782,8 @@ async def _save_pending_scheduled_task(
         status="pending",
         created_at=created_at,
         matrix_admin=matrix_admin,
+        last_command_event_id=last_command_event_id,
+        last_command_response_text=last_command_response_text,
     )
     _start_scheduled_task(
         client,
@@ -788,6 +812,8 @@ async def _save_one_time_task_status(
         status=status,
         created_at=task.created_at,
         matrix_admin=matrix_admin,
+        last_command_event_id=task.last_command_event_id,
+        last_command_response_text=task.last_command_response_text,
     )
 
 
@@ -798,6 +824,8 @@ async def save_edited_scheduled_task(
     workflow: ScheduledWorkflow,
     existing_task: ScheduledTaskRecord,
     matrix_admin: HookMatrixAdmin | None = None,
+    last_command_event_id: str | None = None,
+    last_command_response_text: str | None = None,
 ) -> ScheduledTaskRecord:
     """Persist edits to an existing task without touching runtime task runners."""
     if existing_task.status != "pending":
@@ -815,6 +843,8 @@ async def save_edited_scheduled_task(
         status="pending",
         created_at=existing_task.created_at,
         matrix_admin=matrix_admin,
+        last_command_event_id=last_command_event_id,
+        last_command_response_text=last_command_response_text,
     )
 
     return ScheduledTaskRecord(
@@ -823,6 +853,8 @@ async def save_edited_scheduled_task(
         status="pending",
         created_at=existing_task.created_at,
         workflow=workflow,
+        last_command_event_id=last_command_event_id,
+        last_command_response_text=last_command_response_text,
     )
 
 
@@ -1252,7 +1284,34 @@ def _history_limit_display(history_limit: int) -> str:
     return f"last {history_limit} message{'s' if history_limit != 1 else ''}"
 
 
-async def schedule_task(  # noqa: C901, PLR0912, PLR0915
+def _scheduled_task_response_text(
+    workflow: ScheduledWorkflow,
+    *,
+    task_id: str,
+    new_thread: bool,
+    config: Config,
+) -> str:
+    """Render the stable response persisted with one command-owned mutation."""
+    if workflow.schedule_type == "once" and workflow.execute_at:
+        response_text = f"✅ Scheduled for {_format_scheduled_time(workflow.execute_at, config.timezone)}\n"
+    elif workflow.cron_schedule:
+        natural_desc = workflow.cron_schedule.to_natural_language()
+        cron_str = workflow.cron_schedule.to_cron_string()
+        response_text = f"✅ Scheduled recurring task: **{natural_desc}**\n"
+        response_text += f"   _(Cron: `{cron_str}`)_\n"
+    else:
+        response_text = "✅ Task scheduled\n"
+
+    response_text += f"\n**Task:** {workflow.description}\n"
+    response_text += f"**Will post:** {workflow.message}\n"
+    if workflow.history_limit is not None:
+        response_text += f"**History:** {_history_limit_display(workflow.history_limit)}\n"
+    delivery = "New thread per fire" if new_thread else "Current room/thread scope"
+    response_text += f"**Delivery:** {delivery}\n"
+    return response_text + f"\n**Task ID:** `{task_id}`"
+
+
+async def schedule_task(  # noqa: C901, PLR0911, PLR0912, PLR0915
     runtime: SchedulingRuntime,
     room_id: str,
     thread_id: str | None,
@@ -1263,6 +1322,7 @@ async def schedule_task(  # noqa: C901, PLR0912, PLR0915
     task_id: str | None = None,
     existing_task: ScheduledTaskRecord | None = None,
     history_limit: int | None = None,
+    command_event_id: str | None = None,
 ) -> tuple[str | None, str]:
     """Schedule a workflow from natural language request.
 
@@ -1283,6 +1343,27 @@ async def schedule_task(  # noqa: C901, PLR0912, PLR0915
     room = runtime.room
     conversation_cache = runtime.conversation_cache
     event_cache = runtime.event_cache
+
+    if command_event_id is not None and task_id is not None and existing_task is None:
+        command_task = await get_scheduled_task(client=client, room_id=room_id, task_id=task_id)
+        if command_task is not None:
+            if (
+                command_task.last_command_event_id != command_event_id
+                or command_task.last_command_response_text is None
+            ):
+                return (None, f"❌ Task ID collision for command event `{command_event_id}`.")
+            if command_task.status == "pending":
+                _start_scheduled_task(
+                    client,
+                    task_id,
+                    command_task.workflow,
+                    config,
+                    runtime_paths,
+                    event_cache,
+                    conversation_cache,
+                    runtime.matrix_admin,
+                )
+            return (task_id, command_task.last_command_response_text)
 
     if mentioned_agents is None:
         mentioned_agents = _extract_mentioned_agents_from_text(full_text, config, runtime_paths)
@@ -1382,6 +1463,12 @@ async def schedule_task(  # noqa: C901, PLR0912, PLR0915
 
     # Create task ID for new tasks (or reuse existing ID when editing)
     task_id = task_id or (existing_task.task_id if existing_task else str(uuid.uuid4())[:8])
+    response_text = _scheduled_task_response_text(
+        workflow_result,
+        task_id=task_id,
+        new_thread=new_thread,
+        config=config,
+    )
 
     logger.info(
         "Storing workflow task in Matrix state",
@@ -1401,6 +1488,8 @@ async def schedule_task(  # noqa: C901, PLR0912, PLR0915
                 workflow=workflow_result,
                 existing_task=existing_task,
                 matrix_admin=runtime.matrix_admin,
+                last_command_event_id=command_event_id,
+                last_command_response_text=response_text,
             )
         else:
             await _save_pending_scheduled_task(
@@ -1414,33 +1503,13 @@ async def schedule_task(  # noqa: C901, PLR0912, PLR0915
                 conversation_cache=conversation_cache,
                 created_at=datetime.now(UTC).isoformat(),
                 matrix_admin=runtime.matrix_admin,
+                last_command_event_id=command_event_id,
+                last_command_response_text=response_text,
             )
     except ValueError as e:
         return (None, f"❌ Failed to schedule: {e!s}")
 
-    # Build success message
-    if workflow_result.schedule_type == "once" and workflow_result.execute_at:
-        # Format time with timezone and relative delta
-        formatted_time = _format_scheduled_time(workflow_result.execute_at, config.timezone)
-        success_msg = f"✅ Scheduled for {formatted_time}\n"
-    elif workflow_result.cron_schedule:
-        # Show both natural language and cron syntax
-        natural_desc = workflow_result.cron_schedule.to_natural_language()
-        cron_str = workflow_result.cron_schedule.to_cron_string()
-        success_msg = f"✅ Scheduled recurring task: **{natural_desc}**\n"
-        success_msg += f"   _(Cron: `{cron_str}`)_\n"
-    else:
-        success_msg = "✅ Task scheduled\n"
-
-    success_msg += f"\n**Task:** {workflow_result.description}\n"
-    success_msg += f"**Will post:** {workflow_result.message}\n"
-    if workflow_result.history_limit is not None:
-        success_msg += f"**History:** {_history_limit_display(workflow_result.history_limit)}\n"
-    delivery = "New thread per fire" if new_thread else "Current room/thread scope"
-    success_msg += f"**Delivery:** {delivery}\n"
-    success_msg += f"\n**Task ID:** `{task_id}`"
-
-    return (task_id, success_msg)
+    return (task_id, response_text)
 
 
 async def edit_scheduled_task(
@@ -1451,12 +1520,17 @@ async def edit_scheduled_task(
     scheduled_by: str,
     thread_id: str | None = None,
     history_limit: int | None = None,
+    command_event_id: str | None = None,
 ) -> str:
     """Edit an existing scheduled task by replacing its workflow details."""
     client = runtime.client
     existing_task = await get_scheduled_task(client=client, room_id=room_id, task_id=task_id)
     if not existing_task:
         return f"❌ Task `{task_id}` not found."
+    if command_event_id is not None and existing_task.last_command_event_id == command_event_id:
+        if existing_task.last_command_response_text is None:
+            return f"❌ Task `{task_id}` has an incomplete command checkpoint."
+        return f"✅ Updated task `{task_id}`.\n\n{existing_task.last_command_response_text}"
     if existing_task.status != "pending":
         return f"❌ Task `{task_id}` cannot be edited because it is `{existing_task.status}`."
 
@@ -1473,6 +1547,7 @@ async def edit_scheduled_task(
         task_id=task_id,
         existing_task=existing_task,
         history_limit=history_limit,
+        command_event_id=command_event_id,
     )
 
     if edited_task_id is None:
@@ -1697,6 +1772,8 @@ async def restore_scheduled_tasks(  # noqa: C901
                             status="failed",
                             created_at=task.created_at,
                             matrix_admin=matrix_admin,
+                            last_command_event_id=task.last_command_event_id,
+                            last_command_response_text=task.last_command_response_text,
                         )
                     except Exception:
                         logger.exception("Failed to mark ancient task as failed", task_id=task_id)

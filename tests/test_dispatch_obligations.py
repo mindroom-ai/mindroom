@@ -1229,6 +1229,52 @@ async def test_sequential_media_dispatch_does_not_reenter_deferred_source(tmp_pa
 
 
 @pytest.mark.asyncio
+async def test_retry_survives_contention_with_callback_marking_deferred(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A retry scheduled by downstream failure must survive its callback's live claim."""
+    event_id = "$retry-while-active"
+    obligation = _message_obligation(event_id)
+    store = _store(tmp_path)
+    assert store.create_pending(obligation) is _DispatchCreateResult.CREATED
+    attempts = 0
+    retry_contended = asyncio.Event()
+
+    async def callback(_room: nio.MatrixRoom, _event: nio.Event) -> DispatchCallbackResult:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            runner._schedule_retry(obligation.key)
+            await asyncio.wait_for(retry_contended.wait(), timeout=1)
+            return DispatchCallbackResult.DEFERRED
+        return DispatchCallbackResult.INTENTIONALLY_IGNORED
+
+    runner = _runner(
+        store,
+        callback,
+        retry_initial_delay_seconds=0.0,
+        retry_max_delay_seconds=0.0,
+    )
+    original_claim = runner._claim
+
+    async def track_claim_contention(key: object) -> bool:
+        claimed = await original_claim(cast("Any", key))
+        if not claimed:
+            retry_contended.set()
+        return claimed
+
+    monkeypatch.setattr(runner, "_claim", track_claim_contention)
+    room = nio.MatrixRoom(_ROOM_ID, _PRINCIPAL_ID)
+
+    await runner.run_persisted(obligation, room=room, event=_message_event(event_id))
+    await asyncio.wait_for(wait_for_background_tasks(), timeout=1)
+
+    assert attempts == 2
+    assert not store.has_pending(event_id, DispatchCallbackKind.MESSAGE)
+
+
+@pytest.mark.asyncio
 async def test_admission_persists_once_before_event_callback_execution(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

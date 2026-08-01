@@ -283,7 +283,11 @@ class CoalescingGate:
 
     async def _handle_intentionally_ignored_lane_source(self, source_event_id: str, source_kind: str) -> None:
         """Settle a source whose asynchronous readiness completed with no payload."""
-        if self.has_pending_source_event(source_event_id):
+        if any(
+            queued.source_event_id == source_event_id
+            for gate in self._gates.values()
+            for queued in (*gate.claimed_admissions, *gate.queue)
+        ):
             return
         if self._on_intentionally_ignored_source is not None:
             await self._on_intentionally_ignored_source(source_event_id, source_kind)

@@ -690,11 +690,44 @@ async def test_incomplete_response_intent_reconciles_matrix_without_recovery_sco
     assert len(harness.runner.requests) == 1
     assert harness.runner.requests[0].existing_event_id == response_event_id
     assert harness.runner.requests[0].existing_event_is_placeholder is True
-    find_response_event_ids.assert_awaited_once_with(
-        harness.controller._client(),
-        _ROOM_ID,
-        response_sender=_entity_user_id(config, "general"),
-        source_event_ids=(_EVENT_ID,),
+    find_response_event_ids.assert_awaited_once()
+    assert find_response_event_ids.await_args.args == (harness.controller._client(), _ROOM_ID)
+    assert find_response_event_ids.await_args.kwargs["response_sender"] == _entity_user_id(config, "general")
+    assert find_response_event_ids.await_args.kwargs["source_event_ids"] == (_EVENT_ID,)
+
+
+@pytest.mark.asyncio
+async def test_recovery_prefers_untracked_terminal_fallback_over_persisted_placeholder(
+    config: Config,
+    tmp_path: Path,
+) -> None:
+    """A hard crash after fallback send must adopt that terminal event, not its failed placeholder."""
+    harness = _build_harness(config, tmp_path)
+    pending_turn = TurnRecord.create(
+        [_EVENT_ID],
+        response_event_id="$placeholder:localhost",
+        completed=False,
+    )
+
+    with patch(
+        "mindroom.turn_controller.find_response_event_ids_via_room_messages",
+        return_value=frozenset({"$fallback:localhost"}),
+    ) as find_response_event_ids:
+        recovered = await harness.controller._recovered_response_event_id(
+            pending_turn,
+            room_id=_ROOM_ID,
+        )
+
+    assert recovered == "$fallback:localhost"
+    response_filter = find_response_event_ids.await_args.kwargs["response_source_filter"]
+    assert response_filter({"content": {constants.STREAM_STATUS_KEY: constants.STREAM_STATUS_COMPLETED}})
+    assert not response_filter(
+        {
+            "content": {
+                constants.STREAM_STATUS_KEY: constants.STREAM_STATUS_COMPLETED,
+                constants.VISIBLE_ROUTER_VOICE_ECHO_KEY: True,
+            },
+        },
     )
 
 

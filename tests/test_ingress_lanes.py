@@ -15,7 +15,9 @@ from mindroom.cancellation import SYNC_RESTART_CANCEL_MSG
 from mindroom.coalescing import CoalescingGate, IngressAdmissionClosedError, ReadyPendingEvent
 from mindroom.coalescing_batch import CoalescingKey, PendingEvent
 from mindroom.constants import ORIGINAL_SENDER_KEY, SOURCE_KIND_KEY, VISIBLE_ROUTER_VOICE_ECHO_KEY
+from mindroom.dispatch_callback_outcome import TurnDispatchOutcome
 from mindroom.dispatch_handoff import PendingDispatchMetadata, PreparedTextEvent
+from mindroom.dispatch_obligations import DispatchCallbackKind, DispatchObligationRunner
 from mindroom.dispatch_source import (
     ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
     MEDIA_SOURCE_KIND,
@@ -87,6 +89,7 @@ def _gate(
     dispatch_allowed_now: Callable[[CoalescingKey], bool] | bool | None = None,
     wait_until_dispatch_allowed: Callable[[CoalescingKey], Awaitable[None]] | None = None,
     on_undelivered_source: Callable[[str, str], None] | None = None,
+    on_intentionally_ignored_source: Callable[[str, str], Awaitable[None]] | None = None,
 ) -> tuple[CoalescingGate, list[CoalescedBatch]]:
     batches: list[CoalescedBatch] = []
 
@@ -107,6 +110,7 @@ def _gate(
         ),
         dispatch_allowed_now=dispatch_allowed_now,
         on_undelivered_source=on_undelivered_source,
+        on_intentionally_ignored_source=on_intentionally_ignored_source,
     )
     return gate, batches
 
@@ -530,6 +534,95 @@ async def test_failed_lane_readiness_reports_original_callback_source_kind() -> 
     await _wait_for(lambda: slot.settled.is_set())
 
     assert undelivered_sources == [("$sidecar", MEDIA_SOURCE_KIND)]
+
+
+@pytest.mark.asyncio
+async def test_ignored_source_remains_owned_during_durable_settlement() -> None:
+    """Redelivery must defer while an ignored media source writes its terminal tombstone."""
+    settlement_started = asyncio.Event()
+    release_settlement = asyncio.Event()
+
+    async def settle_source(_event_id: str, _source_kind: str) -> None:
+        settlement_started.set()
+        await release_settlement.wait()
+
+    gate, _batches = _gate(
+        debounce_seconds=0.0,
+        on_intentionally_ignored_source=settle_source,
+    )
+
+    async def ignored_ready() -> None:
+        return None
+
+    source_event_id = "$ignored-media"
+    slot = gate.enter_lane(room_id="!room:localhost", sender_id="@user:localhost")
+    gate.submit_lane_slot(
+        slot,
+        key=CoalescingKey("!room:localhost", "$thread", "@user:localhost"),
+        source_event_id=source_event_id,
+        source_kind=MEDIA_SOURCE_KIND,
+        ready_task=asyncio.create_task(ignored_ready()),
+    )
+    await settlement_started.wait()
+
+    on_media = AsyncMock(return_value=TurnDispatchOutcome.DEFERRED)
+
+    async def noop(_room: nio.MatrixRoom, _event: nio.Event) -> None:
+        pass
+
+    callbacks = DispatchObligationRunner.callbacks_for(
+        on_message=cast("Callable", noop),
+        on_media=on_media,
+        on_reaction=cast("Callable", noop),
+        on_approval=cast("Callable", noop),
+        on_invite=cast("Callable", noop),
+        on_room_lifecycle=cast("Callable", noop),
+        on_redaction=cast("Callable", noop),
+        on_decryption_failure=cast("Callable", noop),
+        source_has_live_owner=gate.has_pending_source_event,
+    )
+    outcome = await callbacks[DispatchCallbackKind.MEDIA](
+        _room(),
+        _image_event(event_id=source_event_id),
+    )
+
+    assert outcome.value == "deferred"
+    on_media.assert_not_awaited()
+
+    release_settlement.set()
+    await slot.settled.wait()
+    assert not gate.has_pending_source_event(source_event_id)
+
+
+@pytest.mark.asyncio
+async def test_failed_ignored_source_settlement_returns_source_to_retry_owner() -> None:
+    """A failed terminal write must not suppress its own durable retry handoff."""
+    undelivered_sources: list[tuple[str, str]] = []
+
+    async def fail_settlement(_event_id: str, _source_kind: str) -> None:
+        msg = "tracking store unavailable"
+        raise RuntimeError(msg)
+
+    gate, _batches = _gate(
+        debounce_seconds=0.0,
+        on_undelivered_source=lambda event_id, source_kind: undelivered_sources.append((event_id, source_kind)),
+        on_intentionally_ignored_source=fail_settlement,
+    )
+
+    async def ignored_ready() -> None:
+        return None
+
+    slot = gate.enter_lane(room_id="!room:localhost", sender_id="@user:localhost")
+    gate.submit_lane_slot(
+        slot,
+        key=CoalescingKey("!room:localhost", "$thread", "@user:localhost"),
+        source_event_id="$ignored-media",
+        source_kind=MEDIA_SOURCE_KIND,
+        ready_task=asyncio.create_task(ignored_ready()),
+    )
+
+    await slot.settled.wait()
+    assert undelivered_sources == [("$ignored-media", MEDIA_SOURCE_KIND)]
 
 
 @pytest.mark.asyncio
