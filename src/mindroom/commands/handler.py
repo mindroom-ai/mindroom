@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol
 
@@ -60,11 +59,6 @@ COMMAND_TYPES_WITH_SIDE_EFFECTS = frozenset(
         CommandType.ENCRYPT,
     },
 )
-
-
-def _scheduled_task_id_for_command(source_event_id: str) -> str:
-    """Return the stable task key owned by one schedule command event."""
-    return hashlib.sha256(source_event_id.encode()).hexdigest()[:8]
 
 
 def _scheduling_runtime(context: CommandHandlerContext, room: nio.MatrixRoom) -> SchedulingRuntime:
@@ -359,8 +353,6 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
             scheduled_by=requester_user_id,
             full_text=full_text,
             mentioned_agents=mentioned_agents,
-            task_id=_scheduled_task_id_for_command(event.event_id),
-            command_event_id=event.event_id,
         )
 
     elif command.type == CommandType.LIST_SCHEDULES:
@@ -380,7 +372,6 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
                 client=context.client,
                 room_id=room.room_id,
                 matrix_admin=context.matrix_admin,
-                command_event_id=event.event_id,
             )
         else:
             # Cancel specific task
@@ -402,7 +393,6 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
             full_text=full_text,
             scheduled_by=requester_user_id,
             thread_id=effective_thread_id,
-            command_event_id=event.event_id,
         )
 
     elif command.type == CommandType.CONFIG:

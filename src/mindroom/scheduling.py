@@ -140,8 +140,6 @@ class ScheduledTaskRecord:
     status: str
     created_at: datetime | None
     workflow: ScheduledWorkflow
-    last_command_event_id: str | None = None
-    last_command_response_text: str | None = None
 
 
 @dataclass(frozen=True)
@@ -338,20 +336,12 @@ def _parse_scheduled_task_record(
         status=status,
         created_at=created_at,
         workflow=workflow,
-        last_command_event_id=(
-            command_event_id if isinstance(command_event_id := content.get("last_command_event_id"), str) else None
-        ),
-        last_command_response_text=(
-            response_text if isinstance(response_text := content.get("last_command_response_text"), str) else None
-        ),
     )
 
 
 def _cancelled_task_content(
     task_id: str,
     existing_content: dict[str, object] | None,
-    *,
-    command_event_id: str | None = None,
 ) -> dict[str, object]:
     """Build cancelled task state while preserving existing metadata where possible."""
     cancelled_content: dict[str, object] = {"status": "cancelled", "task_id": task_id}
@@ -368,15 +358,6 @@ def _cancelled_task_content(
         original_task_id = existing_content.get("task_id")
         if isinstance(original_task_id, str) and original_task_id:
             cancelled_content["task_id"] = original_task_id
-
-        for key in ("last_command_event_id", "last_command_response_text"):
-            value = existing_content.get(key)
-            if isinstance(value, str):
-                cancelled_content[key] = value
-
-    if command_event_id is not None:
-        cancelled_content["last_command_event_id"] = command_event_id
-        cancelled_content.pop("last_command_response_text", None)
 
     cancelled_content["updated_at"] = datetime.now(UTC).isoformat()
     return cancelled_content
@@ -743,8 +724,6 @@ async def _persist_scheduled_task_state(
     status: str = "pending",
     created_at: datetime | str | None = None,
     matrix_admin: HookMatrixAdmin | None = None,
-    last_command_event_id: str | None = None,
-    last_command_response_text: str | None = None,
 ) -> None:
     """Persist scheduled task state to Matrix."""
     content = {
@@ -759,10 +738,6 @@ async def _persist_scheduled_task_state(
         "created_at": _serialize_scheduled_task_created_at(created_at),
         "updated_at": datetime.now(UTC).isoformat(),
     }
-    if last_command_event_id is not None:
-        content["last_command_event_id"] = last_command_event_id
-    if last_command_response_text is not None:
-        content["last_command_response_text"] = last_command_response_text
     await _put_scheduled_task_state_content(
         client=client,
         room_id=room_id,
@@ -783,8 +758,6 @@ async def _save_pending_scheduled_task(
     conversation_cache: ConversationCacheProtocol,
     created_at: datetime | str | None = None,
     matrix_admin: HookMatrixAdmin | None = None,
-    last_command_event_id: str | None = None,
-    last_command_response_text: str | None = None,
 ) -> None:
     """Persist one pending task and start or replace its in-memory runner."""
     _cancel_running_task(task_id)
@@ -796,8 +769,6 @@ async def _save_pending_scheduled_task(
         status="pending",
         created_at=created_at,
         matrix_admin=matrix_admin,
-        last_command_event_id=last_command_event_id,
-        last_command_response_text=last_command_response_text,
     )
     _start_scheduled_task(
         client,
@@ -826,8 +797,6 @@ async def _save_one_time_task_status(
         status=status,
         created_at=task.created_at,
         matrix_admin=matrix_admin,
-        last_command_event_id=task.last_command_event_id,
-        last_command_response_text=task.last_command_response_text,
     )
 
 
@@ -838,8 +807,6 @@ async def save_edited_scheduled_task(
     workflow: ScheduledWorkflow,
     existing_task: ScheduledTaskRecord,
     matrix_admin: HookMatrixAdmin | None = None,
-    last_command_event_id: str | None = None,
-    last_command_response_text: str | None = None,
 ) -> ScheduledTaskRecord:
     """Persist edits to an existing task without touching runtime task runners."""
     if existing_task.status != "pending":
@@ -857,8 +824,6 @@ async def save_edited_scheduled_task(
         status="pending",
         created_at=existing_task.created_at,
         matrix_admin=matrix_admin,
-        last_command_event_id=last_command_event_id,
-        last_command_response_text=last_command_response_text,
     )
 
     return ScheduledTaskRecord(
@@ -867,8 +832,6 @@ async def save_edited_scheduled_task(
         status="pending",
         created_at=existing_task.created_at,
         workflow=workflow,
-        last_command_event_id=last_command_event_id,
-        last_command_response_text=last_command_response_text,
     )
 
 
@@ -1325,7 +1288,7 @@ def _scheduled_task_response_text(
     return response_text + f"\n**Task ID:** `{task_id}`"
 
 
-async def schedule_task(  # noqa: C901, PLR0911, PLR0912, PLR0915
+async def schedule_task(  # noqa: C901, PLR0912, PLR0915
     runtime: SchedulingRuntime,
     room_id: str,
     thread_id: str | None,
@@ -1336,7 +1299,6 @@ async def schedule_task(  # noqa: C901, PLR0911, PLR0912, PLR0915
     task_id: str | None = None,
     existing_task: ScheduledTaskRecord | None = None,
     history_limit: int | None = None,
-    command_event_id: str | None = None,
 ) -> tuple[str | None, str]:
     """Schedule a workflow from natural language request.
 
@@ -1357,27 +1319,6 @@ async def schedule_task(  # noqa: C901, PLR0911, PLR0912, PLR0915
     room = runtime.room
     conversation_cache = runtime.conversation_cache
     event_cache = runtime.event_cache
-
-    if command_event_id is not None and task_id is not None and existing_task is None:
-        command_task = await get_scheduled_task(client=client, room_id=room_id, task_id=task_id)
-        if command_task is not None:
-            if (
-                command_task.last_command_event_id != command_event_id
-                or command_task.last_command_response_text is None
-            ):
-                return (None, f"❌ Task ID collision for command event `{command_event_id}`.")
-            if command_task.status == "pending":
-                _start_scheduled_task(
-                    client,
-                    task_id,
-                    command_task.workflow,
-                    config,
-                    runtime_paths,
-                    event_cache,
-                    conversation_cache,
-                    runtime.matrix_admin,
-                )
-            return (task_id, command_task.last_command_response_text)
 
     if mentioned_agents is None:
         mentioned_agents = _extract_mentioned_agents_from_text(full_text, config, runtime_paths)
@@ -1502,8 +1443,6 @@ async def schedule_task(  # noqa: C901, PLR0911, PLR0912, PLR0915
                 workflow=workflow_result,
                 existing_task=existing_task,
                 matrix_admin=runtime.matrix_admin,
-                last_command_event_id=command_event_id,
-                last_command_response_text=response_text,
             )
         else:
             await _save_pending_scheduled_task(
@@ -1517,8 +1456,6 @@ async def schedule_task(  # noqa: C901, PLR0911, PLR0912, PLR0915
                 conversation_cache=conversation_cache,
                 created_at=datetime.now(UTC).isoformat(),
                 matrix_admin=runtime.matrix_admin,
-                last_command_event_id=command_event_id,
-                last_command_response_text=response_text,
             )
     except ValueError as e:
         return (None, f"❌ Failed to schedule: {e!s}")
@@ -1534,17 +1471,12 @@ async def edit_scheduled_task(
     scheduled_by: str,
     thread_id: str | None = None,
     history_limit: int | None = None,
-    command_event_id: str | None = None,
 ) -> str:
     """Edit an existing scheduled task by replacing its workflow details."""
     client = runtime.client
     existing_task = await get_scheduled_task(client=client, room_id=room_id, task_id=task_id)
     if not existing_task:
         return f"❌ Task `{task_id}` not found."
-    if command_event_id is not None and existing_task.last_command_event_id == command_event_id:
-        if existing_task.last_command_response_text is None:
-            return f"❌ Task `{task_id}` has an incomplete command checkpoint."
-        return f"✅ Updated task `{task_id}`.\n\n{existing_task.last_command_response_text}"
     if existing_task.status != "pending":
         return f"❌ Task `{task_id}` cannot be edited because it is `{existing_task.status}`."
 
@@ -1561,7 +1493,6 @@ async def edit_scheduled_task(
         task_id=task_id,
         existing_task=existing_task,
         history_limit=history_limit,
-        command_event_id=command_event_id,
     )
 
     if edited_task_id is None:
@@ -1698,7 +1629,6 @@ async def cancel_all_scheduled_tasks(
     client: nio.AsyncClient,
     room_id: str,
     matrix_admin: HookMatrixAdmin | None = None,
-    command_event_id: str | None = None,
 ) -> str:
     """Cancel all scheduled tasks in a room."""
     # Get all scheduled tasks
@@ -1727,7 +1657,6 @@ async def cancel_all_scheduled_tasks(
                         content=_cancelled_task_content(
                             task_id,
                             existing_content,
-                            command_event_id=command_event_id,
                         ),
                         matrix_admin=matrix_admin,
                     )
@@ -1737,9 +1666,6 @@ async def cancel_all_scheduled_tasks(
                 except Exception:
                     logger.exception("scheduled_task_cancel_failed", task_id=task_id)
                     failed_count += 1
-            elif command_event_id is not None and content.get("last_command_event_id") == command_event_id:
-                cancelled_count += 1
-
     if cancelled_count == 0:
         if failed_count > 0:
             return f"❌ Failed to cancel {failed_count} scheduled task(s)"
@@ -1799,8 +1725,6 @@ async def restore_scheduled_tasks(  # noqa: C901
                             status="failed",
                             created_at=task.created_at,
                             matrix_admin=matrix_admin,
-                            last_command_event_id=task.last_command_event_id,
-                            last_command_response_text=task.last_command_response_text,
                         )
                     except Exception:
                         logger.exception("Failed to mark ancient task as failed", task_id=task_id)

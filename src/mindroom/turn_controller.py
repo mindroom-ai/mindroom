@@ -152,7 +152,7 @@ if TYPE_CHECKING:
     from mindroom.visible_voice_echo import VisibleVoiceEchoLifecycle
 
 _UNCERTAIN_COMMAND_RESULT = (
-    "⚠️ This command was interrupted after its side effect began, so its outcome is uncertain. "
+    "⚠️ This command was interrupted after execution began, so its outcome is uncertain. "
     "Inspect the current state before retrying it."
 )
 
@@ -1563,7 +1563,7 @@ class TurnController:
         self,
         command_turn: TurnRecord,
         *,
-        command_effect_started: bool | None = None,
+        command_execution_started: bool | None = None,
         command_result_text: str | None = None,
     ) -> TurnRecord:
         """Persist one command journal transition and return its merged authority."""
@@ -1571,8 +1571,10 @@ class TurnController:
             self.deps.turn_store.record_pending_turn,
             replace(
                 command_turn,
-                command_effect_started=(
-                    command_turn.command_effect_started if command_effect_started is None else command_effect_started
+                command_execution_started=(
+                    command_turn.command_execution_started
+                    if command_execution_started is None
+                    else command_execution_started
                 ),
                 command_result_text=command_result_text,
             ),
@@ -1610,7 +1612,7 @@ class TurnController:
         target: MessageTarget,
         recovered_response_event_id: str | None,
     ) -> TurnRecord | None:
-        """Resume a durable result or conservatively begin one mutating command."""
+        """Resume a durable result or admit one mutating command execution attempt."""
         if command_turn.command_result_text is not None:
             await self._deliver_checkpointed_command_result(
                 command_turn,
@@ -1619,7 +1621,7 @@ class TurnController:
                 recovered_response_event_id=recovered_response_event_id,
             )
             return None
-        if command_turn.command_effect_started:
+        if command_turn.command_execution_started:
             command_turn = await self._persist_command_turn_checkpoint(
                 command_turn,
                 command_result_text=_UNCERTAIN_COMMAND_RESULT,
@@ -1634,7 +1636,7 @@ class TurnController:
         if command_type in COMMAND_TYPES_WITH_SIDE_EFFECTS:
             return await self._persist_command_turn_checkpoint(
                 command_turn,
-                command_effect_started=True,
+                command_execution_started=True,
             )
         return command_turn
 

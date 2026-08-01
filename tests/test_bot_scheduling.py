@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import tempfile
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -223,8 +222,6 @@ class TestBotScheduleCommands:
             assert call_kwargs["scheduled_by"] == "@user:server"
             assert call_kwargs["full_text"] == "in 5 minutes Check deployment"
             assert call_kwargs["mentioned_agents"] == []
-            assert call_kwargs["task_id"] == hashlib.sha256(event.event_id.encode()).hexdigest()[:8]
-            assert call_kwargs["command_event_id"] == event.event_id
 
             # Verify response was sent
             send_response_mock.assert_called_once()
@@ -344,7 +341,6 @@ class TestBotScheduleCommands:
                 client=mock_agent_bot.client,
                 room_id="!test:server",
                 matrix_admin=None,
-                command_event_id=event.event_id,
             )
 
         send_response_mock.assert_called_once()
@@ -390,7 +386,6 @@ class TestBotScheduleCommands:
             assert edit_kwargs["full_text"] == "in 30 minutes Check deployment"
             assert edit_kwargs["scheduled_by"] == "@user:server"
             assert edit_kwargs["thread_id"] == "$thread123"
-            assert edit_kwargs["command_event_id"] == event.event_id
 
         send_response_mock.assert_called_once()
         call_args = send_response_mock.call_args

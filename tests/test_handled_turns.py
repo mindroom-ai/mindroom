@@ -493,7 +493,7 @@ def test_command_execution_checkpoint_persists_across_restart(temp_dir: Path) ->
         TurnRecord.create(
             ["$command"],
             completed=False,
-            command_effect_started=True,
+            command_execution_started=True,
             command_result_text="✅ Applied once",
         ),
     )
@@ -502,7 +502,7 @@ def test_command_execution_checkpoint_persists_across_restart(temp_dir: Path) ->
 
     assert recovered is not None
     assert recovered.completed is False
-    assert recovered.command_effect_started
+    assert recovered.command_execution_started
     assert recovered.command_result_text == "✅ Applied once"
 
 

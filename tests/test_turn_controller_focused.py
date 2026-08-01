@@ -2218,7 +2218,7 @@ async def test_mutating_command_retries_checkpointed_result_without_reapplying(c
 
         pending_turn = harness.turn_store.get_turn_record(event.event_id)
         assert pending_turn is not None
-        assert pending_turn.command_effect_started
+        assert pending_turn.command_execution_started
         assert pending_turn.command_result_text == "✅ Model changed"
 
         await harness.controller._execute_command(room, event, _SENDER, command, target=target)
@@ -2229,8 +2229,8 @@ async def test_mutating_command_retries_checkpointed_result_without_reapplying(c
 
 
 @pytest.mark.asyncio
-async def test_mutating_command_with_ambiguous_effect_reports_uncertainty(config: Config, tmp_path: Path) -> None:
-    """A crash after mutation began must not silently rerun the command."""
+async def test_failed_mutating_command_execution_requires_manual_retry(config: Config, tmp_path: Path) -> None:
+    """A failed admitted attempt must report uncertainty instead of rerunning automatically."""
     harness = _build_harness(config, tmp_path, agent_name=ROUTER_AGENT_NAME)
     room = _room_with_members(config, ROUTER_AGENT_NAME, "general")
     event = _text_event("!model default", event_id="$model-ambiguous:localhost")
@@ -2242,14 +2242,25 @@ async def test_mutating_command_with_ambiguous_effect_reports_uncertainty(config
         reply_to_event_id=event.event_id,
         event_source=event.source,
     )
-    harness.turn_store.record_pending_turn(
-        TurnRecord.create([event.event_id], command_effect_started=True),
-    )
-
-    with patch("mindroom.commands.handler.handle_model_command") as mutate:
+    with (
+        patch(
+            "mindroom.commands.handler.handle_model_command",
+            side_effect=RuntimeError("transient failure"),
+        ) as attempt,
+        pytest.raises(RuntimeError, match="transient failure"),
+    ):
         await harness.controller._execute_command(room, event, _SENDER, command, target=target)
 
-    mutate.assert_not_called()
+    pending_turn = harness.turn_store.get_turn_record(event.event_id)
+    assert pending_turn is not None
+    assert pending_turn.command_execution_started
+    assert pending_turn.command_result_text is None
+
+    with patch("mindroom.commands.handler.handle_model_command") as replay:
+        await harness.controller._execute_command(room, event, _SENDER, command, target=target)
+
+    attempt.assert_called_once()
+    replay.assert_not_called()
     assert "outcome is uncertain" in harness.gateway.sent[0].response_text
     assert harness.turn_store.is_handled(event.event_id)
 
