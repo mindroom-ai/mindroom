@@ -27,10 +27,7 @@ from pathlib import Path, PurePosixPath
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Protocol, cast
 
-import yaml
-
 from mindroom import constants
-from mindroom.config.yaml_includes import load_yaml_config_source
 from mindroom.constants import RuntimePaths, resolve_config_relative_path
 from mindroom.runtime_env_policy import (
     CREDENTIALS_ENCRYPTION_KEY_ENV,
@@ -587,30 +584,6 @@ def _deployment_snapshot(payload: object) -> KubernetesDeployment:
     )
 
 
-def _worker_config_data_for_runtime_paths(runtime_paths: RuntimePaths) -> dict[str, object]:
-    try:
-        config_data, _source_files = load_yaml_config_source(runtime_paths.config_path)
-    except OSError:
-        return {}
-    except (yaml.YAMLError, UnicodeError) as exc:
-        msg = f"Failed to parse Kubernetes worker config for scoped storage planning: {exc}"
-        raise WorkerBackendError(msg) from exc
-    if not isinstance(config_data, dict):
-        return {}
-    return cast("dict[str, object]", config_data)
-
-
-def _resolved_agent_policies_for_runtime_paths(
-    runtime_paths: RuntimePaths,
-    *,
-    config_data: dict[str, object] | None = None,
-) -> dict[str, ResolvedAgentPolicy]:
-    loaded_config_data = (
-        config_data if config_data is not None else _worker_config_data_for_runtime_paths(runtime_paths)
-    )
-    return resolved_agent_policies_from_config_data(loaded_config_data)
-
-
 @dataclass(frozen=True, slots=True)
 class _KnowledgeStorageMountPlan:
     relative_path: Path
@@ -703,6 +676,7 @@ class KubernetesResourceManager:
         auth_token: str | None,
         storage_root: Path,
         tool_validation_snapshot: dict[str, dict[str, object]],
+        config_snapshot: dict[str, object],
         worker_grantable_credentials: frozenset[str],
     ) -> None:
         """Initialize one resource manager for a concrete backend configuration."""
@@ -712,11 +686,8 @@ class KubernetesResourceManager:
         self.storage_root = storage_root.expanduser().resolve()
         self.tool_validation_snapshot = tool_validation_snapshot
         self.worker_grantable_credentials = worker_grantable_credentials
-        self.config_data = _worker_config_data_for_runtime_paths(runtime_paths)
-        self.resolved_agent_policies = _resolved_agent_policies_for_runtime_paths(
-            runtime_paths,
-            config_data=self.config_data,
-        )
+        self.config_snapshot = config_snapshot
+        self.resolved_agent_policies = resolved_agent_policies_from_config_data(config_snapshot)
         self.apps_api: _AppsApiProtocol | None = None
         self.core_api: _CoreApiProtocol | None = None
         self.api_exception_cls: type[_ApiStatusError] | None = None
@@ -1763,8 +1734,8 @@ class KubernetesResourceManager:
         ]
 
     def _assigned_knowledge_storage_paths(self, worker_key: str) -> tuple[Path, ...]:
-        raw_agents = self.config_data.get("agents")
-        raw_knowledge_bases = self.config_data.get("knowledge_bases")
+        raw_agents = self.config_snapshot.get("agents")
+        raw_knowledge_bases = self.config_snapshot.get("knowledge_bases")
         if not isinstance(raw_agents, Mapping) or not isinstance(raw_knowledge_bases, Mapping):
             return ()
         agent_configs = cast("Mapping[str, object]", raw_agents)

@@ -94,6 +94,7 @@ def _pod_template(
         auth_token=_TEST_AUTH_TOKEN,
         storage_root=tmp_path / "storage",
         tool_validation_snapshot={},
+        config_snapshot={},
         worker_grantable_credentials=frozenset(),
     )
     return manager._pod_template(

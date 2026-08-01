@@ -142,23 +142,22 @@ def _legacy_kubernetes_backend_config_signature(
 @pytest.mark.parametrize("env", [_MINIMAL_KUBERNETES_ENV, _FULL_KUBERNETES_ENV])
 @pytest.mark.parametrize("auth_token", [None, _TEST_AUTH_TOKEN])
 @pytest.mark.parametrize("with_storage_root", [False, True])
-def test_kubernetes_signature_keeps_legacy_fields_before_config_fingerprint(
+def test_kubernetes_signature_matches_legacy_hand_assembly(
     tmp_path: Path,
     env: dict[str, str],
     auth_token: str | None,
     *,
     with_storage_root: bool,
 ) -> None:
-    """The config fingerprint should extend, not reorder, existing signature fields."""
+    """The refactored Kubernetes assembly must reproduce the pre-refactor tuple values exactly."""
     runtime_paths = _runtime_paths(tmp_path, env)
     storage_root = runtime_paths.storage_root if with_storage_root else None
 
-    signature = kubernetes_backend_config_signature(
+    assert kubernetes_backend_config_signature(
         runtime_paths,
         auth_token=auth_token,
         storage_root=storage_root,
-    )
-    assert signature[:-1] == _legacy_kubernetes_backend_config_signature(
+    ) == _legacy_kubernetes_backend_config_signature(
         runtime_paths,
         auth_token=auth_token,
         storage_root=storage_root,
@@ -178,30 +177,6 @@ def test_kubernetes_signature_is_stable_for_identical_config(tmp_path: Path) -> 
         second,
         auth_token=_TEST_AUTH_TOKEN,
         storage_root=second.storage_root,
-    )
-
-
-def test_kubernetes_signature_changes_with_knowledge_assignment(tmp_path: Path) -> None:
-    """Hot-reloaded knowledge assignments must replace the cached Kubernetes manager."""
-    runtime_paths = _runtime_paths(tmp_path, _MINIMAL_KUBERNETES_ENV)
-    agents_path = tmp_path / "agents.yaml"
-    runtime_paths.config_path.write_text("agents: !include agents.yaml\n", encoding="utf-8")
-    agents_path.write_text("code:\n  knowledge_bases: []\n", encoding="utf-8")
-    initial = kubernetes_backend_config_signature(
-        runtime_paths,
-        auth_token=_TEST_AUTH_TOKEN,
-        storage_root=runtime_paths.storage_root,
-    )
-
-    agents_path.write_text(
-        "code:\n  knowledge_bases: [shared_docs]\n",
-        encoding="utf-8",
-    )
-
-    assert initial != kubernetes_backend_config_signature(
-        runtime_paths,
-        auth_token=_TEST_AUTH_TOKEN,
-        storage_root=runtime_paths.storage_root,
     )
 
 

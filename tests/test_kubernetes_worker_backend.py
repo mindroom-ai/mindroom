@@ -16,6 +16,8 @@ from unittest.mock import patch
 
 import pytest
 
+from mindroom.config.main import load_config
+from mindroom.config.yaml_includes import load_yaml_config_source
 from mindroom.constants import (
     DEFAULT_WORKER_GRANTABLE_CREDENTIALS,
     deserialize_runtime_paths,
@@ -51,7 +53,11 @@ from mindroom.workers.backends.kubernetes_resources import (
     worker_auth_token,
 )
 from mindroom.workers.models import WorkerReadyProgress, WorkerSpec
-from mindroom.workers.runtime import primary_worker_backend_available, primary_worker_backend_name
+from mindroom.workers.runtime import (
+    primary_worker_backend_available,
+    primary_worker_backend_name,
+    serialized_kubernetes_worker_config_snapshot,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -471,6 +477,7 @@ def _backend(
     auth_secret_name: str | None = None,
     reconcile_pod_templates: bool = True,
     agent_vault: KubernetesAgentVaultConfig | None = None,
+    config_snapshot: dict[str, object] | None = None,
 ) -> tuple[KubernetesWorkerBackend, _FakeAppsApi, _FakeCoreApi]:
     config = KubernetesWorkerBackendConfig(
         namespace="chat",
@@ -504,12 +511,19 @@ def _backend(
         config_path=Path("config.yaml"),
         storage_path=Path("mindroom-test-storage").resolve(),
     )
+    if config_snapshot is None:
+        try:
+            loaded_config_snapshot, _source_files = load_yaml_config_source(resolved_runtime_paths.config_path)
+        except OSError:
+            loaded_config_snapshot = {}
+        config_snapshot = loaded_config_snapshot if isinstance(loaded_config_snapshot, dict) else {}
     backend = KubernetesWorkerBackend(
         runtime_paths=resolved_runtime_paths,
         config=config,
         auth_token=_TEST_AUTH_TOKEN,
         storage_root=resolved_runtime_paths.storage_root,
         tool_validation_snapshot=tool_validation_snapshot or deepcopy(_TEST_TOOL_VALIDATION_SNAPSHOT),
+        config_snapshot=config_snapshot,
         worker_grantable_credentials=worker_grantable_credentials,
     )
     apps_api = _FakeAppsApi()
@@ -3948,7 +3962,7 @@ def test_kubernetes_backend_config_from_runtime_reads_agent_vault(tmp_path: Path
 
 
 def test_scoped_storage_policy_planning_resolves_config_includes(tmp_path: Path) -> None:
-    """Scoped-storage planning parses split configs instead of failing on include tags."""
+    """Committed Kubernetes config snapshots preserve resolved include data."""
     config_dir = tmp_path / "conf"
     config_dir.mkdir()
     (config_dir / "agents.yaml").write_text(
@@ -3956,13 +3970,28 @@ def test_scoped_storage_policy_planning_resolves_config_includes(tmp_path: Path)
         encoding="utf-8",
     )
     config_path = config_dir / "config.yaml"
-    config_path.write_text("agents: !include agents.yaml\n", encoding="utf-8")
+    config_path.write_text(
+        """
+agents: !include agents.yaml
+models:
+  default:
+    provider: openai
+    id: gpt-5.6
+router:
+  model: default
+""".lstrip(),
+        encoding="utf-8",
+    )
     runtime_paths = resolve_primary_runtime_paths(
         config_path=config_path,
         storage_path=tmp_path / "storage",
         process_env={},
     )
 
-    policies = kubernetes_resources_module._resolved_agent_policies_for_runtime_paths(runtime_paths)
+    config_snapshot = serialized_kubernetes_worker_config_snapshot(load_config(runtime_paths))
+    backend, _apps_api, _core_api = _backend(
+        runtime_paths=runtime_paths,
+        config_snapshot=config_snapshot,
+    )
 
-    assert policies["code"].effective_execution_scope == "user"
+    assert backend._resources.resolved_agent_policies["code"].effective_execution_scope == "user"
