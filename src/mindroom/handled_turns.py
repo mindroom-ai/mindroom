@@ -1355,6 +1355,11 @@ def _response_group_requires_retention(
         not unsettled_source_event_ids.isdisjoint(group.records)
         or any(record.pending_redaction_cleanup_event_ids for record in group.records.values())
         or any(not record.completed and record.replay_source_event_ids for record in group.records.values())
+        or any(
+            record.user_stop_receipt_order is not None
+            and (record.user_stop_settled_receipt_order or 0) < record.user_stop_receipt_order
+            for record in group.records.values()
+        )
     )
 
 

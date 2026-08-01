@@ -1293,6 +1293,35 @@ def test_cleanup_by_age_retains_terminal_turn_for_unsettled_source(temp_dir: Pat
     assert tracker.get_turn_record("$terminal") is None
 
 
+def test_cleanup_by_age_retains_only_unsettled_user_stop(temp_dir: Path) -> None:
+    """A STOP-owned turn remains until its visible terminal edit is settled."""
+    tracker = HandledTurnLedger("test_unsettled_stop_age_cleanup", base_path=temp_dir)
+    old_timestamp = time.time() - (40 * 24 * 60 * 60)
+    tracker.record_handled_turn(
+        TurnRecord.create(
+            ["$unsettled-stop"],
+            response_event_id="$unsettled-response",
+            user_stop_receipt_order=2,
+            timestamp=old_timestamp,
+        ),
+    )
+    tracker.record_handled_turn(
+        TurnRecord.create(
+            ["$settled-stop"],
+            response_event_id="$settled-response",
+            user_stop_receipt_order=3,
+            user_stop_settled_receipt_order=3,
+            timestamp=old_timestamp,
+        ),
+    )
+    tracker.flush()
+
+    tracker.cleanup()
+
+    assert tracker.get_turn_record("$unsettled-stop") is not None
+    assert tracker.get_turn_record("$settled-stop") is None
+
+
 def test_cleanup_by_age_removes_terminal_redaction_only_turn(temp_dir: Path) -> None:
     """A fully redacted turn without cleanup or dispatch work must not live forever."""
     tracker = HandledTurnLedger("test_redacted_age_cleanup", base_path=temp_dir)
