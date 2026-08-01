@@ -110,17 +110,17 @@ repos:
 
   - repo: local
     hooks:
-      # Each hook must bootstrap a fresh checkout without running Puppeteer's browser download.
+      # Each hook must bootstrap a fresh checkout without downloading Puppeteer's browser.
       - id: check-bun-lock
         name: Check bun.lock is up to date
-        entry: bash -c 'cd frontend && bun install --frozen-lockfile --ignore-scripts'
+        entry: bash -c 'cd frontend && PUPPETEER_SKIP_DOWNLOAD=true bun install --frozen-lockfile'
         language: system
         files: ^frontend/(package\.json|bun\.lock)$
         pass_filenames: false
 
       - id: typescript-check
         name: TypeScript type checking
-        entry: bash -c 'cd frontend && bun install --frozen-lockfile --ignore-scripts && bun run type-check'
+        entry: bash -c 'cd frontend && PUPPETEER_SKIP_DOWNLOAD=true bun install --frozen-lockfile && bun run type-check'
         language: system
         files: ^frontend/.*\.(ts|tsx)$
         pass_filenames: false
