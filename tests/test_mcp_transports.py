@@ -190,6 +190,8 @@ async def test_open_streamable_http_builds_guarded_mcp2_client(
     assert isinstance(timeout, httpx2.Timeout)
     assert timeout.connect == 3.5
     assert timeout.read == 4.5
+    assert timeout.write == 4.5
+    assert timeout.pool == 3.5
     assert captured == {"url": "https://mcp.example/mcp"}
 
 

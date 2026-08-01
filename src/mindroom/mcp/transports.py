@@ -159,7 +159,11 @@ async def _open_streamable_http(
     }
     http_client = _server_fetch_mcp_http_client(
         headers=headers,
-        timeout=httpx2.Timeout(server_config.startup_timeout_seconds, read=server_config.call_timeout_seconds),
+        timeout=httpx2.Timeout(
+            server_config.startup_timeout_seconds,
+            read=server_config.call_timeout_seconds,
+            write=server_config.call_timeout_seconds,
+        ),
     )
     async with (
         http_client,

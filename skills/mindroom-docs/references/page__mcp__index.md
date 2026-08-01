@@ -317,6 +317,7 @@ Inside this repository, `./.venv/bin/python` is usually the right choice.
 The same server can also be run over HTTP transports.
 If you change the script to `server.run(transport="sse")`, the default MCPServer endpoint is `/sse`.
 If you change it to `server.run(transport="streamable-http")`, the default MCPServer endpoint is `/mcp`.
+MCP 2 retains SSE for legacy clients, but new HTTP integrations should use Streamable HTTP.
 
 ## Example: Chrome DevTools MCP
 
