@@ -415,6 +415,8 @@ async def _apply_turn_plan(
             router_outcome = controller._router_handled_turn_outcome(prepared.handled_turn)
             if router_outcome is not None:
                 controller._mark_source_events_responded(router_outcome)
+            else:
+                await controller._settle_source_events_ignored(prepared.handled_turn)
         else:
             await controller._settle_source_events_ignored(prepared.handled_turn)
         return

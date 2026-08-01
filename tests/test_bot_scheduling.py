@@ -1984,6 +1984,7 @@ class TestRouterSkipsSingleAgent:
         bot.logger = MagicMock()
         wrap_extracted_collaborators(bot, "_turn_policy")
         bot._turn_controller._execute_router_relay = AsyncMock()
+        replace_turn_controller_deps(bot, settle_ignored_dispatch_sources=AsyncMock())
         _sync_turn_policy_runtime(bot)
         bot._turn_controller._execute_router_relay = AsyncMock()
 

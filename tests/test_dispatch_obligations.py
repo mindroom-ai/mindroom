@@ -13,6 +13,7 @@ import nio
 import pytest
 
 from mindroom.background_tasks import wait_for_background_tasks
+from mindroom.dispatch_callback_outcome import TurnDispatchOutcome
 from mindroom.dispatch_obligations import (
     DispatchCallbackKind,
     DispatchObligationRunner,
@@ -1144,15 +1145,27 @@ async def test_recovery_readiness_retains_only_blocked_obligations(tmp_path: Pat
 
 
 @pytest.mark.asyncio
-async def test_bound_message_callback_defers_for_persisted_turn_store_record() -> None:
-    """Typed callbacks defer persisted turn truth to the runner's durable settlement gate."""
-    persisted = {"$bound"}
+@pytest.mark.parametrize(
+    ("turn_outcome", "callback_result"),
+    [
+        (TurnDispatchOutcome.DEFERRED, DispatchCallbackResult.DEFERRED),
+        (TurnDispatchOutcome.INTENTIONALLY_IGNORED, DispatchCallbackResult.INTENTIONALLY_IGNORED),
+    ],
+)
+async def test_bound_message_callback_uses_explicit_turn_disposition(
+    turn_outcome: TurnDispatchOutcome,
+    callback_result: DispatchCallbackResult,
+) -> None:
+    """Typed callbacks use the turn controller's explicit ownership disposition."""
+
+    async def on_message(_room: nio.MatrixRoom, _event: nio.RoomMessageText) -> TurnDispatchOutcome:
+        return turn_outcome
 
     async def noop(_room: nio.MatrixRoom, _event: nio.Event) -> None:
         pass
 
     callbacks = DispatchObligationRunner.callbacks_for(
-        on_message=cast("Any", noop),
+        on_message=on_message,
         on_media=cast("Any", noop),
         on_reaction=cast("Any", noop),
         on_approval=cast("Any", noop),
@@ -1160,14 +1173,13 @@ async def test_bound_message_callback_defers_for_persisted_turn_store_record() -
         on_room_lifecycle=cast("Any", noop),
         on_redaction=cast("Any", noop),
         on_decryption_failure=cast("Any", noop),
-        turn_is_persisted=persisted.__contains__,
-        source_is_deferred=lambda _event_id: False,
+        source_has_live_owner=lambda _event_id: False,
     )
     callback = callbacks[DispatchCallbackKind.MESSAGE]
     room = nio.MatrixRoom(_ROOM_ID, _PRINCIPAL_ID)
     event = _message_event("$bound")
 
-    assert await callback(room, event) is DispatchCallbackResult.DEFERRED
+    assert await callback(room, event) is callback_result
 
 
 @pytest.mark.asyncio
@@ -1179,9 +1191,12 @@ async def test_sequential_media_dispatch_does_not_reenter_deferred_source(tmp_pa
     async def noop(_room: nio.MatrixRoom, _event: nio.Event) -> None:
         pass
 
-    async def on_media(_room: nio.MatrixRoom, event: MatrixMediaEvent) -> None:
+    async def on_media(_room: nio.MatrixRoom, event: MatrixMediaEvent) -> TurnDispatchOutcome:
+        if event.event_id in deferred_sources:
+            return TurnDispatchOutcome.DEFERRED
         queued_media_events.append(event)
         deferred_sources.add(event.event_id)
+        return TurnDispatchOutcome.DEFERRED
 
     callbacks = DispatchObligationRunner.callbacks_for(
         on_message=cast("Any", noop),
@@ -1192,8 +1207,7 @@ async def test_sequential_media_dispatch_does_not_reenter_deferred_source(tmp_pa
         on_room_lifecycle=cast("Any", noop),
         on_redaction=cast("Any", noop),
         on_decryption_failure=cast("Any", noop),
-        turn_is_persisted=lambda _event_id: False,
-        source_is_deferred=deferred_sources.__contains__,
+        source_has_live_owner=deferred_sources.__contains__,
     )
     store = _store(tmp_path)
     runner = DispatchObligationRunner(

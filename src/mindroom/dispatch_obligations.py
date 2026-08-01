@@ -20,6 +20,7 @@ import nio
 from typing_extensions import TypeIs
 
 from mindroom.background_tasks import create_background_task
+from mindroom.dispatch_callback_outcome import TurnDispatchOutcome
 from mindroom.dispatch_recovery_context import turn_dispatch_recovery_scope
 from mindroom.dispatch_source import IMAGE_SOURCE_KIND, MEDIA_SOURCE_KIND, VOICE_SOURCE_KIND
 from mindroom.logging_config import get_logger
@@ -674,8 +675,8 @@ class DispatchObligationStore:
 
 _DispatchEvent = nio.Event | nio.InviteEvent
 _DispatchCallback = Callable[[nio.MatrixRoom, _DispatchEvent], Awaitable[_DispatchCallbackResult]]
-_MessageCallback = Callable[[nio.MatrixRoom, nio.RoomMessageText], Awaitable[None]]
-_MediaCallback = Callable[[nio.MatrixRoom, MatrixMediaEvent], Awaitable[None]]
+_MessageCallback = Callable[[nio.MatrixRoom, nio.RoomMessageText], Awaitable[TurnDispatchOutcome]]
+_MediaCallback = Callable[[nio.MatrixRoom, MatrixMediaEvent], Awaitable[TurnDispatchOutcome]]
 _ReactionCallback = Callable[[nio.MatrixRoom, nio.ReactionEvent], Awaitable[None]]
 _ApprovalCallback = Callable[[nio.MatrixRoom, nio.UnknownEvent], Awaitable[None]]
 _InviteCallback = Callable[[nio.MatrixRoom, nio.InviteEvent], Awaitable[None]]
@@ -836,8 +837,7 @@ class _CallbackBindings:
     on_room_lifecycle: _RoomLifecycleCallback
     on_redaction: _RedactionCallback
     on_decryption_failure: _DecryptionFailureCallback
-    turn_is_persisted: Callable[[str], bool]
-    source_is_deferred: Callable[[str], bool]
+    source_has_live_owner: Callable[[str], bool]
 
     def as_mapping(self) -> Mapping[DispatchCallbackKind, _DispatchCallback]:
         return {
@@ -851,10 +851,14 @@ class _CallbackBindings:
             DispatchCallbackKind.DECRYPTION_FAILURE: self.dispatch_decryption_failure,
         }
 
-    def _turn_result(self, source_event_id: str) -> _DispatchCallbackResult:
-        if self.turn_is_persisted(source_event_id) or self.source_is_deferred(source_event_id):
+    @staticmethod
+    def _turn_result(outcome: TurnDispatchOutcome) -> _DispatchCallbackResult:
+        if outcome is TurnDispatchOutcome.DEFERRED:
             return _DispatchCallbackResult.DEFERRED
-        return _DispatchCallbackResult.INTENTIONALLY_IGNORED
+        if outcome is TurnDispatchOutcome.INTENTIONALLY_IGNORED:
+            return _DispatchCallbackResult.INTENTIONALLY_IGNORED
+        msg = f"Turn dispatch callback returned invalid outcome {outcome!r}"
+        raise TypeError(msg)
 
     async def dispatch_message(
         self,
@@ -863,8 +867,7 @@ class _CallbackBindings:
     ) -> _DispatchCallbackResult:
         if not isinstance(event, nio.RoomMessageText):
             return _DispatchCallbackResult.INTENTIONALLY_IGNORED
-        await self.on_message(room, event)
-        return self._turn_result(event.event_id)
+        return self._turn_result(await self.on_message(room, event))
 
     async def dispatch_media(
         self,
@@ -873,10 +876,9 @@ class _CallbackBindings:
     ) -> _DispatchCallbackResult:
         if not isinstance(event, MATRIX_MEDIA_EVENT_TYPES):
             return _DispatchCallbackResult.INTENTIONALLY_IGNORED
-        if self.source_is_deferred(event.event_id):
+        if self.source_has_live_owner(event.event_id):
             return _DispatchCallbackResult.DEFERRED
-        await self.on_media(room, event)
-        return self._turn_result(event.event_id)
+        return self._turn_result(await self.on_media(room, event))
 
     async def dispatch_reaction(
         self,
@@ -972,8 +974,7 @@ class DispatchObligationRunner:
         on_room_lifecycle: _RoomLifecycleCallback,
         on_redaction: _RedactionCallback,
         on_decryption_failure: _DecryptionFailureCallback,
-        turn_is_persisted: Callable[[str], bool],
-        source_is_deferred: Callable[[str], bool],
+        source_has_live_owner: Callable[[str], bool],
     ) -> Mapping[DispatchCallbackKind, _DispatchCallback]:
         """Bind typed Matrix callbacks to explicit durable outcomes."""
         return _CallbackBindings(
@@ -985,8 +986,7 @@ class DispatchObligationRunner:
             on_room_lifecycle=on_room_lifecycle,
             on_redaction=on_redaction,
             on_decryption_failure=on_decryption_failure,
-            turn_is_persisted=turn_is_persisted,
-            source_is_deferred=source_is_deferred,
+            source_has_live_owner=source_has_live_owner,
         ).as_mapping()
 
     def task_wrapper(

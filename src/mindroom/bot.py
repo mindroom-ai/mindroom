@@ -92,6 +92,7 @@ from .delivery_gateway import (
     ResponseHookService,
     SendTextRequest,
 )
+from .dispatch_callback_outcome import TurnDispatchOutcome
 from .dispatch_obligations import (
     DispatchCallbackKind,
     DispatchObligationRunner,
@@ -522,8 +523,7 @@ class AgentBot:
                 on_room_lifecycle=self._on_room_member,
                 on_redaction=self._on_redaction,
                 on_decryption_failure=self._on_decryption_failure,
-                turn_is_persisted=lambda event_id: self._turn_store.get_turn_record(event_id) is not None,
-                source_is_deferred=self._coalescing_gate.has_pending_source_event,
+                source_has_live_owner=self._coalescing_gate.has_pending_source_event,
             ),
             room_for_id=self._room_for_dispatch_obligation,
             turn_is_terminal=self._turn_store.is_durably_handled,
@@ -1945,7 +1945,7 @@ class AgentBot:
             log_context["matrix_event_receive_lag_ms"] = round(receive_timestamp_ms - float(origin_server_ts), 1)
         self.logger.info("matrix_event_callback_started", **log_context)
 
-    async def _on_message(self, room: nio.MatrixRoom, event: nio.RoomMessageText) -> None:
+    async def _on_message(self, room: nio.MatrixRoom, event: nio.RoomMessageText) -> TurnDispatchOutcome:
         """Delegate one inbound text event to the turn engine."""
         receipt_time = time.monotonic()
         self._log_matrix_event_callback_started(room, event, callback_name="message")
@@ -1970,8 +1970,8 @@ class AgentBot:
                 orchestrator=self.orchestrator,
                 logger=self.logger,
             ):
-                return
-            await self._turn_controller.handle_text_event(
+                return TurnDispatchOutcome.INTENTIONALLY_IGNORED
+            return await self._turn_controller.handle_text_event(
                 room,
                 event,
                 receipt_time=receipt_time,
@@ -2209,11 +2209,11 @@ class AgentBot:
         self,
         room: nio.MatrixRoom,
         event: MatrixMediaEvent,
-    ) -> None:
+    ) -> TurnDispatchOutcome:
         """Delegate one inbound media event to the turn engine."""
         receipt_time = time.monotonic()
         self._log_matrix_event_callback_started(room, event, callback_name="media")
-        await self._turn_controller.handle_media_event(room, event, receipt_time=receipt_time)
+        return await self._turn_controller.handle_media_event(room, event, receipt_time=receipt_time)
 
     async def _run_regenerated_response(self, request: ResponseRequest) -> str | None:
         """Run one edit-regenerated turn through this bot's response path."""

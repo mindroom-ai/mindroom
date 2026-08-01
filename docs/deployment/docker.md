@@ -149,7 +149,8 @@ MindRoom stores data in the `mindroom_data` directory:
 - `encryption_keys/` - Matrix E2EE keys (if enabled)
 
 Keep `tracking/` on persistent storage and include it in backups.
-Dispatch-obligation databases retain one compact terminal row per exact callback and have no automatic retention window because deleting rows weakens replay deduplication.
+Dispatch-obligation databases retain one compact terminal row per settled callback except successful invites, whose synthetic obligations are deleted so later re-invites can run.
+The retained terminal rows have no automatic retention window because deleting them weakens replay deduplication.
 Pending rows temporarily retain the full event replay payload and should represent only actively deferred or retry-owned work, not completed ignore paths.
 Checkpoint invalidation can force a no-`since` limited sync that backfills older events, and opaque Matrix tokens provide no safe ordering frontier for pruning those exact keys.
 Size and monitor the volume for lifetime callback growth, and use the inspection and corruption-remediation guidance in [Bot Runtime Architecture](../architecture/bot-runtime.md#durable-dispatch-boundary).

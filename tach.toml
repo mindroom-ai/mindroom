@@ -88,9 +88,19 @@ path = "mindroom.dynamic_workflows"
 depends_on = ["mindroom.durable_write"]
 
 [[modules]]
+path = "mindroom.dispatch_callback_outcome"
+depends_on = []
+visibility = [
+    "mindroom.bot",
+    "mindroom.dispatch_obligations",
+    "mindroom.turn_controller",
+]
+
+[[modules]]
 path = "mindroom.dispatch_obligations"
 depends_on = [
     "mindroom.background_tasks",
+    "mindroom.dispatch_callback_outcome",
     "mindroom.logging_config",
     "mindroom.matrix.media",
 ]
@@ -2763,6 +2773,7 @@ depends_on = [
     "mindroom.conversation_state_writer",
     "mindroom.delivery_gateway",
     "mindroom.desktop.pairing_receiver",
+    "mindroom.dispatch_callback_outcome",
     "mindroom.dispatch_obligations",
     "mindroom.edit_regenerator",
     "mindroom.entity_resolution",
@@ -3432,6 +3443,7 @@ depends_on = [
     "mindroom.commands.parsing",
     "mindroom.constants",
     "mindroom.delivery_gateway",
+    "mindroom.dispatch_callback_outcome",
     "mindroom.dispatch_replay_guard",
     "mindroom.dispatch_source",
     "mindroom.dispatch_thread_context",

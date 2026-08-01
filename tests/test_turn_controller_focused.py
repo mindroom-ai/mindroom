@@ -17,7 +17,7 @@ from __future__ import annotations
 import asyncio
 import threading
 from contextlib import asynccontextmanager
-from dataclasses import dataclass, field, fields
+from dataclasses import dataclass, field, fields, replace
 from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import MagicMock, patch
 
@@ -35,6 +35,7 @@ from mindroom.config.main import Config
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.conversation_resolver import ConversationResolver, ConversationResolverDeps
 from mindroom.conversation_state_writer import ConversationStateWriter, ConversationStateWriterDeps
+from mindroom.dispatch_obligations import DispatchCallbackKind, DispatchObligationRunner, DispatchObligationStore
 from mindroom.dispatch_source import (
     EXTERNAL_TRIGGER_SOURCE_KIND,
     SCHEDULED_SOURCE_KIND,
@@ -490,6 +491,62 @@ def _text_event(
     )
 
 
+def _image_event(*, event_id: str) -> nio.RoomMessageImage:
+    return cast(
+        "nio.RoomMessageImage",
+        nio.RoomMessageImage.from_dict(
+            {
+                "content": {
+                    "body": "photo.jpg",
+                    "info": {"mimetype": "image/jpeg"},
+                    "msgtype": "m.image",
+                    "url": "mxc://localhost/photo",
+                },
+                "event_id": event_id,
+                "sender": _SENDER,
+                "origin_server_ts": 1_000_000,
+                "room_id": _ROOM_ID,
+                "type": "m.room.message",
+            },
+        ),
+    )
+
+
+def _obligation_runner(
+    harness: _Harness,
+    *,
+    tracking_path: Path,
+    principal_id: str,
+    entity_name: str,
+    room: nio.MatrixRoom,
+) -> tuple[DispatchObligationRunner, DispatchObligationStore]:
+    async def noop(_room: nio.MatrixRoom, _event: nio.Event) -> None:
+        pass
+
+    store = DispatchObligationStore(
+        tracking_path=tracking_path,
+        principal_id=principal_id,
+        entity_name=entity_name,
+    )
+    runner = DispatchObligationRunner(
+        store=store,
+        callbacks=DispatchObligationRunner.callbacks_for(
+            on_message=harness.controller.handle_text_event,
+            on_media=harness.controller.handle_media_event,
+            on_reaction=cast("Any", noop),
+            on_approval=cast("Any", noop),
+            on_invite=cast("Any", noop),
+            on_room_lifecycle=cast("Any", noop),
+            on_redaction=cast("Any", noop),
+            on_decryption_failure=cast("Any", noop),
+            source_has_live_owner=harness.gate.has_pending_source_event,
+        ),
+        room_for_id=lambda _room_id: room,
+        turn_is_terminal=harness.turn_store.is_durably_handled,
+    )
+    return runner, store
+
+
 def _router_relay_event(
     config: Config,
     *,
@@ -746,12 +803,83 @@ async def test_failed_gate_admission_releases_ingress_claim_once(
         MagicMock(side_effect=IngressAdmissionClosedError),
     )
 
-    await harness.controller.handle_text_event(room, event)
+    obligation_runner, obligation_store = _obligation_runner(
+        harness,
+        tracking_path=tmp_path / "dispatch-tracking",
+        principal_id=_entity_user_id(config, "general"),
+        entity_name="general",
+        room=room,
+    )
+    obligation = await obligation_runner.persist(room, event, DispatchCallbackKind.MESSAGE)
+    assert obligation is not None
+
+    with pytest.raises(IngressAdmissionClosedError):
+        await obligation_runner.run_persisted(obligation, room=room, event=event)
 
     release_claim.assert_called_once()
+    assert obligation_store.has_pending(event.event_id, DispatchCallbackKind.MESSAGE)
     competing_claim = TurnRecord.create([event.event_id], completed=False)
     assert harness.turn_store.try_claim_turn(competing_claim) is True
     harness.turn_store.release_pending_turn_claim(competing_claim)
+
+
+@pytest.mark.asyncio
+async def test_failed_media_admission_remains_a_pending_exact_callback(
+    config: Config,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A closed media lane must raise through the durable boundary for recovery."""
+    harness = _build_harness(config, tmp_path)
+    room = _room_with_members(config, "general")
+    event = _image_event(event_id="$media-admission-closed:localhost")
+    monkeypatch.setattr(
+        harness.gate,
+        "submit_lane_slot",
+        MagicMock(side_effect=IngressAdmissionClosedError),
+    )
+    obligation_runner, obligation_store = _obligation_runner(
+        harness,
+        tracking_path=tmp_path / "dispatch-tracking",
+        principal_id=_entity_user_id(config, "general"),
+        entity_name="general",
+        room=room,
+    )
+    obligation = await obligation_runner.persist(room, event, DispatchCallbackKind.MEDIA)
+    assert obligation is not None
+
+    with pytest.raises(IngressAdmissionClosedError):
+        await obligation_runner.run_persisted(obligation, room=room, event=event)
+
+    assert obligation_store.has_pending(event.event_id, DispatchCallbackKind.MEDIA)
+
+
+@pytest.mark.asyncio
+async def test_router_silent_ignore_compacts_exact_callback(config: Config, tmp_path: Path) -> None:
+    """A router ignore without a visible voice echo explicitly settles its source."""
+    harness = _build_harness(config, tmp_path, agent_name=ROUTER_AGENT_NAME)
+    room = _room_with_members(config, ROUTER_AGENT_NAME, "general")
+    event = _text_event("hello there", event_id="$router-ignore:localhost")
+
+    obligation_runner, obligation_store = _obligation_runner(
+        harness,
+        tracking_path=tmp_path / "dispatch-tracking",
+        principal_id=_entity_user_id(config, ROUTER_AGENT_NAME),
+        entity_name=ROUTER_AGENT_NAME,
+        room=room,
+    )
+    harness.controller.deps = replace(
+        harness.controller.deps,
+        settle_ignored_dispatch_sources=obligation_runner.settle_intentionally_ignored_turn_sources,
+    )
+
+    await obligation_runner.dispatch(room, event, DispatchCallbackKind.MESSAGE)
+    await harness.gate.drain_all()
+
+    assert harness.policy.plan_turn_calls == 1
+    assert harness.runner.requests == []
+    assert harness.turn_store.get_turn_record(event.event_id) is None
+    assert not obligation_store.has_pending(event.event_id, DispatchCallbackKind.MESSAGE)
 
 
 @pytest.mark.asyncio
