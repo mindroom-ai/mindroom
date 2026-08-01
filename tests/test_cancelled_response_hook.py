@@ -52,6 +52,7 @@ from tests.conftest import (
     install_runtime_cache_support,
     make_matrix_client_mock,
     message_origin,
+    replace_edit_regenerator_deps,
     request_envelope,
     runtime_paths_for,
     test_runtime_paths,
@@ -412,6 +413,7 @@ async def test_team_bot_empty_prompt_emits_cancelled_hook_once(tmp_path: Path) -
 async def test_team_edit_regeneration_empty_prompt_emits_cancelled_hook_once(tmp_path: Path) -> None:
     """Edited team prompts that become blank must still emit one canonical cancelled hook."""
     bot = _team_bot(tmp_path)
+    replace_edit_regenerator_deps(bot)
     turn_store = bot._edit_regenerator.deps.turn_store
     turn_record = TurnRecord(
         anchor_event_id="$original",
@@ -468,6 +470,7 @@ async def test_team_edit_regeneration_empty_prompt_emits_cancelled_hook_once(tmp
         patch.object(turn_store, "build_run_metadata", return_value={}),
         patch.object(turn_store, "record_turn"),
         patch.object(turn_store, "remove_stale_runs_for_edit"),
+        patch.object(turn_store, "prepare_edit_response_source", return_value=False),
         patch.object(bot._ingress_hook_runner, "emit_message_received_hooks", new=AsyncMock(return_value=False)),
     ):
         await bot._edit_regenerator.handle_message_edit(
