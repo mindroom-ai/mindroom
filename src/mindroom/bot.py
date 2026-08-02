@@ -120,7 +120,7 @@ from .matrix.room_member_joins import (
 )
 from .matrix.to_device import AuthenticatedToDeviceEvent
 from .media_inputs import MediaInputs
-from .reaction_dispatch import dispatch_reaction
+from .reaction_dispatch import ReactionDispatcher, ReactionDispatcherDeps
 from .redacted_turn_cleanup import RedactedTurnCleanup, RedactedTurnCleanupDeps
 from .response_payload_preparation import ResponsePayloadPreparer
 from .response_runner import ResponseRequest, ResponseRunner, ResponseRunnerDeps, prepare_memory_and_model_context
@@ -2078,14 +2078,36 @@ class AgentBot:
 
     async def _on_reaction(self, room: nio.MatrixRoom, event: nio.ReactionEvent) -> None:
         """Handle reaction events for interactive questions, stop functionality, and config confirmations."""
-        async with self._conversation_resolver.turn_thread_cache_scope():
-            await dispatch_reaction(
-                self,
-                room,
-                event,
+        assert self.client is not None
+        dispatcher = ReactionDispatcher(
+            ReactionDispatcherDeps(
+                runtime=self._runtime_view,
+                logger=self.logger,
+                runtime_paths=self.runtime_paths,
+                agent_name=self.agent_name,
+                obligation_runner=self._dispatch_obligation_runner,
+                turn_policy=self._turn_policy,
+                turn_store=self._turn_store,
+                stop_manager=self.stop_manager,
+                conversation_cache=self._conversation_cache,
+                user_stop_reconciler=self._user_stop_reconciler,
+                ingress=self._ingress_validator,
+                reserve_prompt_ingress_order=self._turn_controller._reserve_prompt_ingress_order,
+                handle_interactive_selection=self._turn_controller.handle_interactive_selection,
+                emit_reaction_received_hooks=self._emit_reaction_received_hooks,
+                config_confirmation=config_confirmation.ConfigConfirmationContext(
+                    client=self.client,
+                    authorization=self.config.authorization,
+                    runtime_paths=self.runtime_paths,
+                    build_message_target=self._conversation_resolver.build_message_target,
+                    delivery_gateway=self._delivery_gateway,
+                ),
                 handle_approval_action=handle_tool_approval_action,
                 sender_is_authorized=is_authorized_sender,
-            )
+            ),
+        )
+        async with self._conversation_resolver.turn_thread_cache_scope():
+            await dispatcher.dispatch(room, event)
 
     async def _on_room_member(
         self,
