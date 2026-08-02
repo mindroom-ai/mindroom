@@ -1524,10 +1524,6 @@ class AgentBot:
                     first_sync=first_sync_response,
                 )
                 raise
-            cache_result = self._sync_cache_trust.include_unrecovered_rooms(
-                cache_result,
-                response.unrecovered_room_ids,
-            )
             decision = self._plan_sync_response(
                 next_batch=response.next_batch,
                 cache_result=cache_result,

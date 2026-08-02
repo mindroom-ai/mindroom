@@ -165,23 +165,6 @@ class SyncCacheTrust:
         """Settle source failures irrelevant to non-checkpointed transports."""
         self._observed_dispatch_persist_failure_epoch = self._dispatch_persist_failure_epoch
 
-    @staticmethod
-    def include_unrecovered_rooms(
-        cache_result: SyncCacheWriteResult,
-        unrecovered_room_ids: Iterable[str],
-    ) -> SyncCacheWriteResult:
-        """Reject certification for rooms whose transport recovery remains open."""
-        unrecovered = frozenset(unrecovered_room_ids)
-        if not unrecovered:
-            return cache_result
-        return replace(
-            cache_result,
-            complete=False,
-            limited_room_ids=tuple(
-                sorted(set(cache_result.limited_room_ids) | unrecovered),
-            ),
-        )
-
     async def certify_response(
         self,
         *,

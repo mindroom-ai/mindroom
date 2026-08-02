@@ -418,7 +418,12 @@ async def test_classic_unrecovered_gap_rejects_checkpoint(
     with patch.object(
         bot._conversation_cache,
         "cache_sync_timeline_for_certification",
-        new=AsyncMock(return_value=SyncCacheWriteResult(complete=True)),
+        new=AsyncMock(
+            return_value=SyncCacheWriteResult(
+                complete=True,
+                unrecovered_room_ids=("!gap:localhost",),
+            ),
+        ),
     ):
         await bot._on_sync_response(response)
 

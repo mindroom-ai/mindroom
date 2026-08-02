@@ -214,27 +214,6 @@ def test_acknowledged_dispatch_failure_does_not_reject_later_certification(
     assert not trust.consume_dispatch_persist_failure()
 
 
-def test_transport_recovery_gaps_make_cache_result_uncertified(
-    tmp_path: Path,
-) -> None:
-    """Sync trust must own how unrecovered transport rooms reject certification."""
-    trust, _cache, _runtime = _trust(tmp_path)
-
-    result = trust.include_unrecovered_rooms(
-        SyncCacheWriteResult(
-            complete=True,
-            limited_room_ids=("!cache:localhost",),
-        ),
-        {"!transport:localhost", "!cache:localhost"},
-    )
-
-    assert result.complete is False
-    assert result.limited_room_ids == (
-        "!cache:localhost",
-        "!transport:localhost",
-    )
-
-
 @pytest.mark.asyncio
 async def test_cache_scope_invalidation_rejects_stale_certification_plan(tmp_path: Path) -> None:
     """A plan made before cache cleanup cannot restore or persist sync continuity."""
