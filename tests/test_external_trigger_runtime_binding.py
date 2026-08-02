@@ -105,7 +105,7 @@ async def test_runtime_coordinator_is_ready_uses_snapshot_room_and_target(tmp_pa
         "mindroom.orchestration.external_trigger_runtime.get_joined_rooms",
         side_effect=get_joined_room_ids,
     ):
-        assert await coordinator.is_ready(_snapshot(), bots) is True
+        assert await coordinator._is_ready(_snapshot(), bots) is True
 
 
 @pytest.mark.asyncio
@@ -128,7 +128,7 @@ async def test_runtime_coordinator_is_ready_rejects_unjoined_room(tmp_path: Path
         "mindroom.orchestration.external_trigger_runtime.get_joined_rooms",
         side_effect=get_joined_room_ids,
     ):
-        assert await coordinator.is_ready(_snapshot(), bots) is False
+        assert await coordinator._is_ready(_snapshot(), bots) is False
 
 
 @pytest.mark.asyncio
@@ -157,7 +157,7 @@ async def test_runtime_coordinator_is_ready_rejects_inactive_runtime(
     bots = {ROUTER_AGENT_NAME: router_bot, "code": target_bot}
 
     with patch("mindroom.orchestration.external_trigger_runtime.get_joined_rooms") as mock_get_joined_rooms:
-        assert await coordinator.is_ready(snapshot, bots) is False
+        assert await coordinator._is_ready(snapshot, bots) is False
 
     mock_get_joined_rooms.assert_not_called()
 

@@ -12,7 +12,7 @@ import asyncio
 import threading
 from dataclasses import replace
 from typing import TYPE_CHECKING
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 import pytest
 
@@ -170,6 +170,29 @@ async def test_repeated_inbox_drains_keep_failed_recovery_proof_fail_closed() ->
     assert runner.incomplete_inbox_responses_recoverable is False
 
 
+@pytest.mark.asyncio
+async def test_failed_detached_inbox_response_returns_sources_to_retry_owner() -> None:
+    """A post-handoff failure must trigger autonomous dispatch retry immediately."""
+    runner = ResponseRunner(deps=MagicMock())
+    on_failure = MagicMock()
+
+    async def fail_after_handoff() -> None:
+        msg = "delivery failed"
+        raise RuntimeError(msg)
+
+    response_task = runner.track_inbox_response(
+        fail_after_handoff(),
+        name="test_failed_detached_inbox_response",
+        recovery_proof_ready=lambda: False,
+        on_failure=on_failure,
+    )
+
+    await asyncio.gather(response_task, return_exceptions=True)
+    await asyncio.sleep(0)
+
+    on_failure.assert_called_once_with()
+
+
 class RecordingStopManager(StopManager):
     """Real StopManager whose deferred clear is made immediate and observable."""
 
@@ -284,10 +307,10 @@ async def test_concurrent_requests_serialize_and_refresh_history_under_lock(tmp_
         ),
         patch.object(
             coordinator,
-            "run_cancellable_response",
+            "_run_cancellable_response",
             new=AsyncMock(side_effect=fake_run_cancellable_response),
         ),
-        patch.object(coordinator, "process_and_respond", new=AsyncMock(side_effect=fake_process_and_respond)),
+        patch.object(coordinator, "_process_and_respond", new=AsyncMock(side_effect=fake_process_and_respond)),
         patch_response_runner_module(
             should_use_streaming=AsyncMock(return_value=False),
             apply_post_response_effects=AsyncMock(),
@@ -342,6 +365,7 @@ async def test_begin_locked_turn_suppresses_source_redacted_before_response_regi
     )
     response_thread_id = threading.get_ident()
     preparation_thread_ids: list[int] = []
+    on_source_turn_suppressed = AsyncMock()
 
     def prepare_source_turn() -> bool:
         preparation_thread_ids.append(threading.get_ident())
@@ -354,6 +378,7 @@ async def test_begin_locked_turn_suppresses_source_redacted_before_response_regi
         response_envelope=envelope,
         payload_preparation=_preparation(target, envelope),
         prepare_source_turn=prepare_source_turn,
+        on_source_turn_suppressed=on_source_turn_suppressed,
     )
 
     prepared_request = await runner._begin_locked_turn(
@@ -372,6 +397,7 @@ async def test_begin_locked_turn_suppresses_source_redacted_before_response_regi
     assert preparation_thread_ids[0] != response_thread_id
     delivery_gateway.send_text.assert_not_awaited()
     request_preparer.prepare.assert_not_awaited()
+    on_source_turn_suppressed.assert_awaited_once_with()
 
 
 @pytest.mark.asyncio
@@ -421,6 +447,94 @@ async def test_begin_locked_turn_waits_for_cancelled_source_preparation(tmp_path
 
 
 @pytest.mark.asyncio
+async def test_user_stop_cancels_live_response_before_terminalizing_under_its_lock(tmp_path: Path) -> None:
+    """STOP must cancel the lock owner before it records the durable terminal turn."""
+    bot = _bot(tmp_path)
+    runner = unwrap_extracted_collaborator(bot._response_runner)
+    target = _target(thread_id="$thread", reply_to_event_id="$event")
+    lifecycle_lock = runner._lifecycle_coordinator._response_lifecycle_lock(target)
+    await lifecycle_lock.acquire()
+    response_task = asyncio.create_task(asyncio.Event().wait())
+    bot.stop_manager.set_current("$response", target, response_task)
+    finalize = AsyncMock(return_value=True)
+
+    stop_task = asyncio.create_task(
+        runner.finalize_user_stop("$response", target, 7, Mock(return_value=True), finalize),
+    )
+    await asyncio.gather(response_task, return_exceptions=True)
+
+    finalize.assert_not_awaited()
+    lifecycle_lock.release()
+
+    assert await stop_task is True
+    finalize.assert_awaited_once_with()
+
+
+@pytest.mark.asyncio
+async def test_user_stop_guard_and_cancellation_do_not_yield_between_each_other(tmp_path: Path) -> None:
+    """A later tracked edit cannot replace the guarded task before cancellation."""
+    bot = _bot(tmp_path)
+    runner = unwrap_extracted_collaborator(bot._response_runner)
+    target = _target(thread_id="$thread", reply_to_event_id="$event")
+    lifecycle_lock = runner._lifecycle_coordinator._response_lifecycle_lock(target)
+    await lifecycle_lock.acquire()
+    old_response_task = asyncio.create_task(asyncio.Event().wait())
+    later_edit_task = asyncio.create_task(asyncio.Event().wait())
+    bot.stop_manager.set_current("$response", target, old_response_task)
+
+    def should_cancel() -> bool:
+        asyncio.get_running_loop().call_soon(
+            bot.stop_manager.set_current,
+            "$response",
+            target,
+            later_edit_task,
+        )
+        return True
+
+    stop_task = asyncio.create_task(
+        runner.finalize_user_stop("$response", target, 2, should_cancel, AsyncMock(return_value=True)),
+    )
+    await asyncio.gather(old_response_task, return_exceptions=True)
+    await asyncio.sleep(0)
+
+    assert later_edit_task.done() is False
+    assert bot.stop_manager.tracked_messages["$response"].task is later_edit_task
+    lifecycle_lock.release()
+    assert await stop_task is True
+    later_edit_task.cancel()
+    await asyncio.gather(later_edit_task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_settled_stop_retry_does_not_cancel_later_live_response(tmp_path: Path) -> None:
+    """A STOP superseded by a later edit must not cancel that edit while waiting."""
+    bot = _bot(tmp_path)
+    runner = unwrap_extracted_collaborator(bot._response_runner)
+    target = _target(thread_id="$thread", reply_to_event_id="$event")
+    lifecycle_lock = runner._lifecycle_coordinator._response_lifecycle_lock(target)
+    await lifecycle_lock.acquire()
+    response_task = asyncio.create_task(asyncio.Event().wait())
+    bot.stop_manager.set_current("$response", target, response_task)
+    should_cancel = Mock(return_value=False)
+    finalize = AsyncMock(return_value=True)
+
+    stop_task = asyncio.create_task(
+        runner.finalize_user_stop("$response", target, 2, should_cancel, finalize),
+    )
+    await asyncio.sleep(0)
+
+    assert response_task.done() is False
+    lifecycle_lock.release()
+
+    assert await stop_task is True
+    should_cancel.assert_called()
+    finalize.assert_awaited_once_with()
+    assert response_task.done() is False
+    response_task.cancel()
+    await asyncio.gather(response_task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
 async def test_begin_locked_turn_settles_external_placeholder_when_source_is_redacted(tmp_path: Path) -> None:
     """Suppression must not leave an interactive acknowledgement stuck on Processing."""
     bot = _bot(tmp_path)
@@ -436,6 +550,7 @@ async def test_begin_locked_turn_settles_external_placeholder_when_source_is_red
             delivery_gateway=delivery_gateway,
         ),
     )
+    on_source_turn_suppressed = AsyncMock()
     request = ResponseRequest(
         thread_history=[],
         prompt="REDACTED_SECRET",
@@ -444,6 +559,7 @@ async def test_begin_locked_turn_settles_external_placeholder_when_source_is_red
         existing_event_id="$ack",
         existing_event_is_placeholder=True,
         prepare_source_turn=lambda: True,
+        on_source_turn_suppressed=on_source_turn_suppressed,
     )
 
     prepared_request = await runner._begin_locked_turn(
@@ -461,6 +577,7 @@ async def test_begin_locked_turn_settles_external_placeholder_when_source_is_red
     cancellation_request = delivery_gateway.deliver_cancelled_visible_note.await_args.args[0]
     assert cancellation_request.event_id == "$ack"
     assert cancellation_request.existing_event_is_placeholder is True
+    on_source_turn_suppressed.assert_awaited_once_with()
 
 
 @pytest.mark.asyncio
@@ -488,6 +605,7 @@ async def test_begin_locked_turn_excludes_early_placeholder_from_refreshed_histo
     request_preparer.prepare = AsyncMock(side_effect=lambda request: replace(request, payload_preparation=None))
     delivery_gateway = MagicMock(spec=DeliveryGateway)
     delivery_gateway.send_text = AsyncMock(return_value="$placeholder")
+    on_visible_response = AsyncMock()
     runner = ResponseRunner(
         replace(
             unwrap_extracted_collaborator(bot._response_runner).deps,
@@ -502,6 +620,7 @@ async def test_begin_locked_turn_excludes_early_placeholder_from_refreshed_histo
         user_id="@user:localhost",
         response_envelope=envelope,
         payload_preparation=_preparation(target, envelope),
+        on_visible_response=on_visible_response,
     )
 
     prepared_request = await runner._begin_locked_turn(
@@ -522,6 +641,7 @@ async def test_begin_locked_turn_excludes_early_placeholder_from_refreshed_histo
     assert prepared_request.thread_history.diagnostics == {"cache_status": "fresh"}
     assert prepared_request.existing_event_id == "$placeholder"
     assert prepared_request.existing_event_is_placeholder is True
+    on_visible_response.assert_awaited_once_with("$placeholder")
 
 
 @pytest.mark.asyncio
@@ -817,7 +937,7 @@ async def test_user_stop_mid_generation_cancels_task_and_clears_tracking(tmp_pat
     await asyncio.wait_for(started.wait(), timeout=2)
     tracked = stop_manager.tracked_messages["$placeholder"]
 
-    assert await stop_manager.handle_stop_reaction("$placeholder") is True
+    assert stop_manager.request_stop_if("$placeholder", lambda: True) is True
     # The attempt survives the cancellation and still reports its visible event id.
     assert await asyncio.wait_for(run_task, timeout=2) == "$placeholder"
 
@@ -846,7 +966,7 @@ async def test_non_streaming_response_delivers_through_deliver_final(tmp_path: P
             typing_indicator=_noop_typing,
         ),
     ):
-        generation = await coordinator.process_and_respond(_plain_request(_target()))
+        generation = await coordinator._process_and_respond(_plain_request(_target()))
 
     assert generation.delivery.event_id == "$response"
     deliver_final.assert_awaited_once()
@@ -878,7 +998,7 @@ async def test_non_streaming_invisible_delivery_does_not_mark_substantive_reply(
             typing_indicator=_noop_typing,
         ),
     ):
-        generation = await coordinator.process_and_respond(request)
+        generation = await coordinator._process_and_respond(request)
 
     assert generation.delivery is delivery
     assert timing.metadata["first_visible_kind"] == "placeholder"
@@ -913,7 +1033,7 @@ async def test_non_streaming_failed_edit_preserving_old_body_does_not_mark_subst
             typing_indicator=_noop_typing,
         ),
     ):
-        generation = await coordinator.process_and_respond(request)
+        generation = await coordinator._process_and_respond(request)
 
     assert generation.delivery is delivery
     assert "first_substantive_reply" not in timing.marks
@@ -945,7 +1065,7 @@ async def test_streaming_response_streams_then_finalizes_through_gateway(tmp_pat
             typing_indicator=_noop_typing,
         ),
     ):
-        generation = await coordinator.process_and_respond_streaming(_plain_request(_target()))
+        generation = await coordinator._process_and_respond_streaming(_plain_request(_target()))
 
     assert generation.delivery.event_id == "$stream"
     deliver_stream.assert_awaited_once()
@@ -987,7 +1107,7 @@ async def test_streaming_placeholder_only_delivery_does_not_mark_substantive_rep
             typing_indicator=_noop_typing,
         ),
     ):
-        generation = await coordinator.process_and_respond_streaming(request)
+        generation = await coordinator._process_and_respond_streaming(request)
 
     assert generation.delivery is delivery
     assert timing.metadata["first_visible_kind"] == "placeholder"
@@ -1044,7 +1164,7 @@ async def test_streaming_midstream_failure_persists_partial_and_finalizes_error(
             _plain_request(_target()),
             model_prompt="hello\n\n<mindroom_message_context>persist me</mindroom_message_context>",
         )
-        generation = await coordinator.process_and_respond_streaming(request)
+        generation = await coordinator._process_and_respond_streaming(request)
 
     # The failure does not propagate: it is logged and becomes a finalized error outcome.
     assert generation.delivery is error_outcome
@@ -1120,7 +1240,7 @@ async def test_streaming_midstream_failure_persists_partial_off_event_loop(
             typing_indicator=_noop_typing,
         ),
     ):
-        await coordinator.process_and_respond_streaming(_plain_request(_target()))
+        await coordinator._process_and_respond_streaming(_plain_request(_target()))
 
 
 @pytest.mark.asyncio
@@ -1146,12 +1266,12 @@ async def test_agent_streaming_sync_restart_cancelled_outcome_registers_retry(tm
     with (
         patch.object(
             coordinator,
-            "run_cancellable_response",
+            "_run_cancellable_response",
             new=AsyncMock(side_effect=fake_run_cancellable_response),
         ),
         patch.object(
             coordinator,
-            "process_and_respond_streaming",
+            "_process_and_respond_streaming",
             new=AsyncMock(return_value=_ResponseGenerationOutcome(delivery=cancelled_outcome, run_succeeded=False)),
         ),
         patch_response_runner_module(
@@ -1416,7 +1536,7 @@ async def test_terminal_settlement_finalizes_and_runs_post_effects_once(
     with (
         patch.object(
             coordinator,
-            "run_cancellable_response",
+            "_run_cancellable_response",
             new=AsyncMock(side_effect=run_cancellable_response),
         ),
         patch.object(lifecycle, "finalize", new=finalize),
@@ -1474,7 +1594,7 @@ async def test_terminal_settlement_registers_retry_before_rethrowing_cancel(tmp_
     with (
         patch.object(
             coordinator,
-            "run_cancellable_response",
+            "_run_cancellable_response",
             new=AsyncMock(side_effect=asyncio.CancelledError("sync_restart")),
         ),
         patch.object(lifecycle, "finalize", new=finalize),
@@ -1530,7 +1650,7 @@ async def test_uncommitted_interruption_rethrows_cancel_without_marking_source_h
     with (
         patch.object(
             coordinator,
-            "run_cancellable_response",
+            "_run_cancellable_response",
             new=AsyncMock(side_effect=asyncio.CancelledError("sync_restart")),
         ),
         patch_response_runner_module(apply_post_response_effects=post_effects),
@@ -1580,7 +1700,7 @@ async def test_cancel_cleanup_error_does_not_mark_source_handled(tmp_path: Path)
     with (
         patch.object(
             coordinator,
-            "run_cancellable_response",
+            "_run_cancellable_response",
             new=AsyncMock(return_value="$placeholder"),
         ),
         patch_response_runner_module(apply_post_response_effects=AsyncMock()),
@@ -1659,7 +1779,7 @@ async def test_terminal_send_cancellation_preserves_source_replay(
     with (
         patch.object(
             coordinator,
-            "run_cancellable_response",
+            "_run_cancellable_response",
             new=AsyncMock(return_value="$response"),
         ),
         patch_response_runner_module(apply_post_response_effects=AsyncMock()),
@@ -1724,7 +1844,7 @@ async def test_unrecoverable_interruption_remains_unhandled_without_outer_cancel
     with (
         patch.object(
             coordinator,
-            "run_cancellable_response",
+            "_run_cancellable_response",
             new=AsyncMock(return_value="$response"),
         ),
         patch_response_runner_module(apply_post_response_effects=AsyncMock()),
@@ -1748,10 +1868,10 @@ async def test_unrecoverable_interruption_remains_unhandled_without_outer_cancel
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("failure_reason", "final_visible_body", "expected_recoveries"),
+    ("failure_reason", "final_visible_body", "expected_recoveries", "expected_user_stops"),
     [
-        ("interrupted", INTERRUPTED_RESPONSE_NOTE, ["recovery"]),
-        ("cancelled_by_user", "partial answer", []),
+        ("interrupted", INTERRUPTED_RESPONSE_NOTE, ["recovery"], []),
+        ("cancelled_by_user", "partial answer", [], [("$response", 7)]),
     ],
 )
 async def test_terminal_interruption_registers_recovery_unless_user_stopped(
@@ -1759,14 +1879,18 @@ async def test_terminal_interruption_registers_recovery_unless_user_stopped(
     failure_reason: str,
     final_visible_body: str,
     expected_recoveries: list[str],
+    expected_user_stops: list[tuple[str, int]],
 ) -> None:
     """A visible terminal interruption remains recoverable except after an explicit user stop."""
     bot = _bot(tmp_path)
     coordinator = unwrap_extracted_collaborator(bot._response_runner)
     recoveries: list[str] = []
+    user_stops: list[tuple[str, int]] = []
+    coordinator._user_stop_receipt_orders["$response"] = {7}
     request = replace(
         _plain_request(_target(thread_id="$thread")),
         on_interrupted_response_recoverable=lambda: recoveries.append("recovery"),
+        on_user_stop_handled=lambda event_id, receipt_order: user_stops.append((event_id, receipt_order)),
     )
     progress = response_runner._DeliveryProgress()
     progress.settle(
@@ -1787,7 +1911,7 @@ async def test_terminal_interruption_registers_recovery_unless_user_stopped(
     with (
         patch.object(
             coordinator,
-            "run_cancellable_response",
+            "_run_cancellable_response",
             new=AsyncMock(return_value="$response"),
         ),
         patch_response_runner_module(apply_post_response_effects=AsyncMock()),
@@ -1807,6 +1931,7 @@ async def test_terminal_interruption_registers_recovery_unless_user_stopped(
 
     assert result == "$response"
     assert recoveries == expected_recoveries
+    assert user_stops == expected_user_stops
 
 
 @pytest.mark.asyncio
@@ -1849,7 +1974,7 @@ async def test_terminal_settlement_late_cancel_keeps_settled_outcome_canonical(
     with (
         patch.object(
             coordinator,
-            "run_cancellable_response",
+            "_run_cancellable_response",
             new=AsyncMock(side_effect=asyncio.CancelledError("sync_restart")),
         ),
         patch.object(lifecycle, "finalize", new=finalize),
@@ -1893,7 +2018,7 @@ async def test_terminal_settlement_rethrows_generation_error_after_post_effects(
     with (
         patch.object(
             coordinator,
-            "run_cancellable_response",
+            "_run_cancellable_response",
             new=AsyncMock(side_effect=RuntimeError("generation failed")),
         ),
         patch.object(lifecycle, "finalize", new=finalize),

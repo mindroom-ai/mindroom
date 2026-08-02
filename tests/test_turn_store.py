@@ -137,7 +137,7 @@ def _prepare_redaction(
 ) -> bool:
     """Tombstone one source and run the next response's locked cleanup gate."""
     store.mark_source_redacted(redacted_event_id)
-    return store.prepare_response_for_redactions(
+    return store._prepare_response_for_redactions(
         target=target,
         source_event_ids=("$later",),
     )
@@ -160,6 +160,199 @@ def test_only_terminal_turn_notifies_exact_indexed_event_ids(tmp_path: Path) -> 
     store._ledger.flush()
 
     assert notifications == [("$source", "$alias")]
+
+
+def test_user_stop_durably_terminates_the_turn_that_owns_the_response(tmp_path: Path) -> None:
+    """A user stop must become durable turn truth before dispatch settles it."""
+    notifications: list[tuple[str, ...]] = []
+    store = _store(tmp_path, on_terminal_turn_persisted=notifications.append)
+    target = MessageTarget.resolve("!room:example.org", None, "$source")
+    pending = TurnRecord.create(
+        ["$source"],
+        response_event_id="$reply",
+        completed=False,
+        response_owner="agent",
+        requester_id="@user:example.org",
+        conversation_target=target,
+    )
+    store.record_pending_turn(pending)
+
+    stop_receipt_order = 2
+    stopped = store.record_user_stopped_response("$reply", stop_receipt_order)
+
+    assert stopped is not None
+    assert stopped.completed is True
+    assert stopped.user_stop_receipt_order == stop_receipt_order
+    assert stopped.user_stop_settled_receipt_order is None
+    assert store.is_durably_handled("$source") is True
+    assert notifications == [("$source",)]
+    retried = store.record_user_stopped_response("$reply", stop_receipt_order)
+    assert retried is not None
+    assert retried.completed is True
+    assert retried.user_stop_receipt_order == stop_receipt_order
+    assert retried.user_stop_settled_receipt_order is None
+    assert notifications == [("$source",)]
+
+    finalized = store.record_user_stopped_response(
+        "$reply",
+        stop_receipt_order,
+        delivery_settled=True,
+    )
+    assert finalized is not None
+    assert finalized.user_stop_settled_receipt_order == stop_receipt_order
+    assert notifications == [("$source",)]
+
+
+def test_settled_user_stop_retry_reenters_durable_persistence(tmp_path: Path) -> None:
+    """A failed settled-STOP write must not make an in-memory retry look durable."""
+    store = _store(tmp_path)
+    target = MessageTarget.resolve("!room:example.org", None, "$source")
+    store.record_pending_turn(
+        TurnRecord.create(
+            ["$source"],
+            response_event_id="$reply",
+            completed=False,
+            response_owner="agent",
+            requester_id="@user:example.org",
+            conversation_target=target,
+        ),
+    )
+    stop_receipt_order = 2
+    store.record_user_stopped_response("$reply", stop_receipt_order)
+    persist_attempts = 0
+
+    def fail_persist(_records: tuple[TurnRecord, ...]) -> None:
+        nonlocal persist_attempts
+        persist_attempts += 1
+        msg = "disk unavailable"
+        raise OSError(msg)
+
+    with (
+        patch.object(store._ledger, "_persist_records", side_effect=fail_persist),
+        patch.object(store._ledger, "_schedule_persist_retry_locked"),
+    ):
+        with pytest.raises(OSError, match="disk unavailable"):
+            store.record_user_stopped_response(
+                "$reply",
+                stop_receipt_order,
+                delivery_settled=True,
+            )
+        assert persist_attempts == 2
+
+        with pytest.raises(OSError, match="disk unavailable"):
+            store.record_user_stopped_response(
+                "$reply",
+                stop_receipt_order,
+                delivery_settled=True,
+            )
+        assert persist_attempts == 4
+
+
+@pytest.mark.parametrize("invalid_receipt_order", [0, -1, True])
+def test_user_stop_rejects_invalid_receipt_order(tmp_path: Path, invalid_receipt_order: int) -> None:
+    """STOP ordering requires a real positive durable admission sequence."""
+    with pytest.raises(ValueError, match="receipt order must be positive"):
+        _store(tmp_path).record_user_stopped_response("$reply", invalid_receipt_order)
+
+
+def test_locked_pending_response_preparation_suppresses_a_concurrent_user_stop(tmp_path: Path) -> None:
+    """A response queued before STOP must recheck terminal truth after taking its lock."""
+    store = _store(tmp_path)
+    target = MessageTarget.resolve("!room:example.org", None, "$source")
+    pending = TurnRecord.create(
+        ["$source"],
+        response_event_id="$reply",
+        completed=False,
+        response_owner="agent",
+        requester_id="@user:example.org",
+        conversation_target=target,
+    )
+    store.record_pending_turn(pending)
+    assert (
+        store.prepare_pending_response_source(
+            target=target,
+            source_event_ids=("$source",),
+            terminal_source_event_ids=("$source",),
+        )
+        is False
+    )
+
+    store.record_user_stopped_response("$reply", 2)
+
+    assert (
+        store.prepare_pending_response_source(
+            target=target,
+            source_event_ids=("$source",),
+            terminal_source_event_ids=("$source",),
+        )
+        is True
+    )
+
+
+def test_locked_edit_preparation_uses_stop_order_and_settles_superseded_delivery(tmp_path: Path) -> None:
+    """Only later edits run, and they durably supersede an older STOP delivery."""
+    store = _store(tmp_path)
+    target = MessageTarget.resolve("!room:example.org", None, "$source")
+    store.record_turn(
+        TurnRecord.create(
+            ["$source"],
+            response_event_id="$reply",
+            response_owner="agent",
+            requester_id="@user:example.org",
+            conversation_target=target,
+            user_stop_receipt_order=2,
+        ),
+    )
+
+    assert store.prepare_edit_response_source(
+        target=target,
+        source_event_ids=("$source",),
+        response_event_id="$reply",
+        edit_receipt_order=1,
+    )
+    stopped = store.get_turn_record("$source")
+    assert stopped is not None
+    assert stopped.latest_edit_receipt_order is None
+    assert stopped.user_stop_settled_receipt_order is None
+
+    assert not store.prepare_edit_response_source(
+        target=target,
+        source_event_ids=("$source",),
+        response_event_id="$reply",
+        edit_receipt_order=3,
+    )
+    reopened = store.get_turn_record("$source")
+    assert reopened is not None
+    assert reopened.latest_edit_receipt_order == 3
+    assert reopened.user_stop_settled_receipt_order == 2
+
+
+def test_pending_delivery_intent_does_not_require_model_history_scope(tmp_path: Path) -> None:
+    """Response ownership and target distinguish delivery intent from a raw visible echo."""
+    store = _store(tmp_path)
+    source_event_ids = ("$source",)
+    visible_echo = TurnRecord.create(
+        source_event_ids,
+        response_event_id="$echo",
+        completed=False,
+    )
+    store.record_pending_turn(visible_echo)
+    assert store.has_pending_response_intent(source_event_ids) is False
+
+    target = MessageTarget.resolve("!room:example.org", None, "$source")
+    delivery_intent = store.attach_response_context(
+        visible_echo,
+        history_scope=None,
+        conversation_target=target,
+    )
+    store.record_pending_turn(delivery_intent)
+
+    assert store.has_pending_response_intent(source_event_ids) is True
+    record = store.get_turn_record("$source")
+    assert record is not None
+    assert record.response_owner == "agent"
+    assert record.conversation_target == target
+    assert record.history_scope is None
 
 
 def test_terminal_turn_notifies_only_after_durable_write(tmp_path: Path) -> None:
@@ -665,7 +858,7 @@ def test_tombstone_gains_cleanup_context_when_the_source_turn_registers(tmp_path
     assert pending is not None
     assert pending.pending_redaction_cleanup_event_ids == ("$user_msg",)
 
-    should_suppress = store.prepare_response_for_redactions(
+    should_suppress = store._prepare_response_for_redactions(
         target=target,
         source_event_ids=("$user_msg",),
     )
@@ -804,7 +997,7 @@ def test_redaction_cleanup_clears_after_pending_coalesced_turn_splits(tmp_path: 
         ),
     )
 
-    should_suppress = store.prepare_response_for_redactions(
+    should_suppress = store._prepare_response_for_redactions(
         target=target,
         source_event_ids=("$second",),
     )
@@ -876,7 +1069,7 @@ def test_redaction_cleanup_keeps_context_after_colliding_alias_projection(tmp_pa
     assert projected.requester_id_for_source(human_event_id) is None
     assert projected.pending_redaction_cleanup_event_ids == (human_event_id,)
 
-    should_suppress = store.prepare_response_for_redactions(
+    should_suppress = store._prepare_response_for_redactions(
         target=target,
         source_event_ids=("$later",),
     )
@@ -931,7 +1124,7 @@ def test_active_ad_hoc_team_redaction_uses_pending_response_scope(tmp_path: Path
     store.mark_source_redacted("$user_msg")
     store.record_turn(replace(response_record, response_event_id="$reply"))
 
-    should_suppress = store.prepare_response_for_redactions(
+    should_suppress = store._prepare_response_for_redactions(
         target=target,
         source_event_ids=("$later",),
     )
@@ -1044,11 +1237,11 @@ def test_multi_bot_redaction_only_queues_cleanup_for_the_bot_with_context(tmp_pa
     assert unrelated_marked.redacted_source_event_ids == ("$user_msg",)
     assert unrelated_marked.pending_redaction_cleanup_event_ids == ()
 
-    owner_store.prepare_response_for_redactions(
+    owner_store._prepare_response_for_redactions(
         target=target,
         source_event_ids=("$later",),
     )
-    should_suppress = unrelated_store.prepare_response_for_redactions(
+    should_suppress = unrelated_store._prepare_response_for_redactions(
         target=target,
         source_event_ids=("$later",),
     )
@@ -1158,7 +1351,7 @@ def test_warm_preserves_lazy_cleanup_until_next_response(tmp_path: Path) -> None
     assert restarted_record.redacted_source_event_ids == ("$user_msg",)
     assert restarted_record.pending_redaction_cleanup_event_ids == ("$user_msg",)
     assert (
-        restarted_store.prepare_response_for_redactions(
+        restarted_store._prepare_response_for_redactions(
             target=target,
             source_event_ids=("$later",),
         )
@@ -1183,7 +1376,7 @@ def test_locked_response_preparation_sanitizes_and_acknowledges_history_cleanup(
     store.record_turn(_owned_turn_record(target))
     store.mark_source_redacted("$user_msg")
 
-    should_suppress = store.prepare_response_for_redactions(
+    should_suppress = store._prepare_response_for_redactions(
         target=target,
         source_event_ids=("$later",),
     )
@@ -1316,9 +1509,9 @@ def test_turn_record_codecs_preserve_explicit_unknown_source_ownership() -> None
         requester_id="@stale:example.org",
     )
 
-    ledger_recovered = TurnRecordCodec.from_ledger_record(
+    ledger_recovered = TurnRecordCodec._from_ledger_record(
         event_id,
-        TurnRecordCodec.to_ledger_record(turn_record),
+        TurnRecordCodec._to_ledger_record(turn_record),
     )
     run_metadata = TurnRecordCodec.to_run_metadata(turn_record)
     run_metadata[constants.MATRIX_EVENT_ID_METADATA_KEY] = event_id
@@ -1614,7 +1807,7 @@ def test_routed_alias_redaction_marks_owning_relay_under_lock(tmp_path: Path) ->
 
     assert marked is not None
     assert marked.source_event_prompts == {"$anchor": "keep"}
-    assert store.any_source_redacted(("$relay",)) is True
+    assert store._any_source_redacted(("$relay",)) is True
 
 
 def test_same_second_delivered_run_repairs_fractional_ledger_timestamp(tmp_path: Path) -> None:

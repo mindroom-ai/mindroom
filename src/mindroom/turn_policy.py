@@ -324,7 +324,7 @@ class TurnPolicy:
             live_entity_names=live_entity_names,
         )
 
-    def filter_materializable_responders(
+    def _filter_materializable_responders(
         self,
         responder_ids: list[MatrixID],
         availability: _ResponderAvailability,
@@ -352,9 +352,9 @@ class TurnPolicy:
             self.deps.runtime.config,
             self.deps.runtime_paths,
         )
-        return self.filter_materializable_responders(available_responders, availability)
+        return self._filter_materializable_responders(available_responders, availability)
 
-    def response_owner_for_team_resolution(
+    def _response_owner_for_team_resolution(
         self,
         form_team: TeamResolution,
         responder_pool: list[MatrixID],
@@ -440,7 +440,7 @@ class TurnPolicy:
                 shared_responders.append(responder)
         return shared_responders
 
-    def team_response_action(
+    def _team_response_action(
         self,
         form_team: TeamResolution,
         responder_pool: list[MatrixID],
@@ -448,7 +448,7 @@ class TurnPolicy:
         """Return the response action implied by one team resolution."""
         if form_team.outcome is TeamOutcome.NONE:
             return None
-        response_owner = self.response_owner_for_team_resolution(form_team, responder_pool)
+        response_owner = self._response_owner_for_team_resolution(form_team, responder_pool)
         if response_owner is None:
             return ResponseAction(kind="skip")
         if self.deps.matrix_id != response_owner:
@@ -464,7 +464,7 @@ class TurnPolicy:
             rejection_message=form_team.reason,
         )
 
-    def configured_team_response_action(
+    def _configured_team_response_action(
         self,
         availability: _ResponderAvailability,
     ) -> ResponseAction | None:
@@ -497,10 +497,10 @@ class TurnPolicy:
         """Apply configured-team execution behavior before running one response action."""
         if action.kind != "individual":
             return action
-        configured_team_action = self.configured_team_response_action(self.responder_availability())
+        configured_team_action = self._configured_team_response_action(self.responder_availability())
         return configured_team_action or action
 
-    def explicit_configured_team_rejection_action(
+    def _explicit_configured_team_rejection_action(
         self,
         context: MessageContext,
         sender_visible_responders: list[MatrixID],
@@ -520,12 +520,12 @@ class TurnPolicy:
         if team_matrix_id.full_id not in sender_visible_ids:
             return None
 
-        configured_team_action = self.configured_team_response_action(availability)
+        configured_team_action = self._configured_team_response_action(availability)
         if configured_team_action is None or configured_team_action.kind != "reject":
             return None
         return configured_team_action
 
-    async def decide_team_for_sender(
+    async def _decide_team_for_sender(
         self,
         agents_in_thread: list[MatrixID],
         context: MessageContext,
@@ -574,7 +574,7 @@ class TurnPolicy:
             allow_explicit_private_agents=True,
         )
 
-    async def plan_router_dispatch(
+    async def _plan_router_dispatch(
         self,
         room: nio.MatrixRoom,
         event: DispatchEvent,
@@ -652,7 +652,7 @@ class TurnPolicy:
         router_event: DispatchEvent | None = None,
     ) -> _DispatchPlan:
         """Return the explicit policy plan for one prepared inbound turn."""
-        router_plan = await self.plan_router_dispatch(
+        router_plan = await self._plan_router_dispatch(
             room,
             event,
             dispatch,
@@ -664,7 +664,7 @@ class TurnPolicy:
         if router_plan is not None:
             return router_plan
 
-        action = await self.resolve_response_action(
+        action = await self._resolve_response_action(
             dispatch,
             room,
             is_dm,
@@ -674,7 +674,7 @@ class TurnPolicy:
             return _DispatchPlan(kind="ignore")
         return _DispatchPlan(kind="respond", response_action=action)
 
-    async def resolve_response_action(
+    async def _resolve_response_action(
         self,
         dispatch: PreparedDispatch,
         room: nio.MatrixRoom,
@@ -694,7 +694,7 @@ class TurnPolicy:
             self.deps.runtime.config,
             self.deps.runtime_paths,
         )
-        available_responders_in_room = self.filter_materializable_responders(
+        available_responders_in_room = self._filter_materializable_responders(
             sender_visible_responders_in_room,
             availability,
         )
@@ -703,7 +703,7 @@ class TurnPolicy:
         agent_is_responder_candidate = agent_matrix_id.full_id in {
             responder.full_id for responder in available_responders_in_room
         }
-        team_action = self.explicit_configured_team_rejection_action(
+        team_action = self._explicit_configured_team_rejection_action(
             context,
             sender_visible_responders_in_room,
             availability,
@@ -737,7 +737,7 @@ class TurnPolicy:
         if team_action is None:
             # Use sender-visible responders here so explicit team requests can distinguish
             # hidden members from visible-but-not-materializable members.
-            form_team = await self.decide_team_for_sender(
+            form_team = await self._decide_team_for_sender(
                 agents_in_thread,
                 context,
                 room,
@@ -746,7 +746,7 @@ class TurnPolicy:
                 availability=availability,
                 available_responders_in_room=sender_visible_responders_in_room,
             )
-            team_action = self.team_response_action(form_team, available_responders_in_room)
+            team_action = self._team_response_action(form_team, available_responders_in_room)
         if team_action is not None:
             return team_action
 

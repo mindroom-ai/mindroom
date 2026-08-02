@@ -32,6 +32,7 @@ from .coalescing_policy import (
     queue_kind,
     source_or_event_allows_room_scope_batching,
 )
+from .dispatch_recovery_context import turn_dispatch_recovery_scope
 from .dispatch_source import ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND
 from .ingress_lanes import IngressAdmissionClosedError, IngressLanes, LaneSlot
 from .logging_config import get_logger
@@ -194,6 +195,7 @@ class CoalescingGate:
         timestamp_formatter: TimestampFormatter | None = None,
         on_dispatch_failure: Callable[[tuple[PendingEvent, ...]], None] | None = None,
         on_undelivered_source: Callable[[str, str], None] | None = None,
+        on_intentionally_ignored_source: Callable[[str, str], Awaitable[None]] | None = None,
     ) -> None:
         self._dispatch_batch = dispatch_batch
         self._debounce_seconds = debounce_seconds
@@ -204,10 +206,12 @@ class CoalescingGate:
         self._timestamp_formatter = timestamp_formatter
         self._on_dispatch_failure = on_dispatch_failure
         self._on_undelivered_source = on_undelivered_source
+        self._on_intentionally_ignored_source = on_intentionally_ignored_source
         self._gates: dict[CoalescingKey, _GateEntry] = {}
         self._lanes = IngressLanes(
             deliver=self._admit_from_lane,
             on_undelivered_source=self._handle_undelivered_lane_source,
+            on_intentionally_ignored_source=self._handle_intentionally_ignored_lane_source,
         )
         self._active_drain_context: _DrainContext | None = None
 
@@ -218,11 +222,10 @@ class CoalescingGate:
 
     def has_pending_source_event(self, source_event_id: str) -> bool:
         """Return whether a lane or coalescing gate still owns one exact source."""
-        if any(
-            slot.delivery is not None and slot.delivery.source_event_id == source_event_id
-            for slot in self._lanes.unsettled_slots()
-        ):
-            return True
+        return self._lanes.has_pending_source_event(source_event_id) or self._gate_owns_source_event(source_event_id)
+
+    def _gate_owns_source_event(self, source_event_id: str) -> bool:
+        """Return whether one live coalescing gate owns this exact source."""
         return any(
             queued.source_event_id == source_event_id
             for gate in self._gates.values()
@@ -279,6 +282,13 @@ class CoalescingGate:
             return
         if self._on_undelivered_source is not None:
             self._on_undelivered_source(source_event_id, source_kind)
+
+    async def _handle_intentionally_ignored_lane_source(self, source_event_id: str, source_kind: str) -> None:
+        """Settle a source whose asynchronous readiness completed with no payload."""
+        if self._gate_owns_source_event(source_event_id):
+            return
+        if self._on_intentionally_ignored_source is not None:
+            await self._on_intentionally_ignored_source(source_event_id, source_kind)
 
     def _conversation_is_busy(self, key: CoalescingKey) -> bool:
         return self._dispatch_allowed_now is not None and not self._dispatch_allowed_now(key)
@@ -840,7 +850,10 @@ class CoalescingGate:
         segment_owner: ClaimedSegmentOwner,
     ) -> bool:
         try:
-            await self._dispatch_events(key, gate, segment_owner.pending_events)
+            with turn_dispatch_recovery_scope(
+                active=any(event.turn_dispatch_recovery for event in segment_owner.pending_events),
+            ):
+                await self._dispatch_events(key, gate, segment_owner.pending_events)
         except asyncio.CancelledError:
             segment_owner.close_metadata_once()
             if (drain_context := self._current_drain_context(gate)) is not None:

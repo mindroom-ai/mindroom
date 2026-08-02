@@ -279,6 +279,7 @@ class KubernetesWorkerBackend:
         auth_token: str | None,
         storage_root: Path,
         tool_validation_snapshot: dict[str, dict[str, object]],
+        config_snapshot: dict[str, object],
         worker_grantable_credentials: frozenset[str],
     ) -> None:
         unsupported_services = sorted(
@@ -306,6 +307,7 @@ class KubernetesWorkerBackend:
             auth_token=auth_token,
             storage_root=self.storage_root,
             tool_validation_snapshot=tool_validation_snapshot,
+            config_snapshot=config_snapshot,
             worker_grantable_credentials=worker_grantable_credentials,
         )
         self._worker_locks: dict[str, threading.Lock] = {}
@@ -324,6 +326,7 @@ class KubernetesWorkerBackend:
         auth_token: str | None,
         storage_root: Path,
         tool_validation_snapshot: dict[str, dict[str, object]],
+        config_snapshot: dict[str, object],
         worker_grantable_credentials: frozenset[str],
     ) -> KubernetesWorkerBackend:
         """Construct a backend instance from one explicit runtime context."""
@@ -333,6 +336,7 @@ class KubernetesWorkerBackend:
             auth_token=auth_token,
             storage_root=storage_root,
             tool_validation_snapshot=tool_validation_snapshot,
+            config_snapshot=config_snapshot,
             worker_grantable_credentials=worker_grantable_credentials,
         )
 

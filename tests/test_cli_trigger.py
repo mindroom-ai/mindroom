@@ -154,7 +154,7 @@ def test_trigger_send_builds_default_signed_request(monkeypatch: pytest.MonkeyPa
             },
         )
 
-    monkeypatch.setattr("mindroom.cli.trigger.httpx.post", fake_post)
+    monkeypatch.setattr(httpx, "post", fake_post)
     monkeypatch.setattr("mindroom.cli.trigger.time.time", lambda: 1234.9)
     token_values = iter(["generated-event", "nonce-1"])
     monkeypatch.setattr("mindroom.cli.trigger.secrets.token_hex", lambda _size: next(token_values))
@@ -215,7 +215,7 @@ def test_trigger_send_accepts_custom_options(monkeypatch: pytest.MonkeyPatch, tm
         captured.update(url=url, content=content, headers=headers, timeout=timeout, verify=verify)
         return _FakeResponse({"accepted": True})
 
-    monkeypatch.setattr("mindroom.cli.trigger.httpx.post", fake_post)
+    monkeypatch.setattr(httpx, "post", fake_post)
     monkeypatch.setattr("mindroom.cli.trigger.time.time", lambda: 2000)
     monkeypatch.setattr("mindroom.cli.trigger.secrets.token_hex", lambda _size: "nonce-2")
 
@@ -293,7 +293,7 @@ def test_trigger_send_uses_mindroom_url_env(monkeypatch: pytest.MonkeyPatch, tmp
         captured.update(url=url, content=content, headers=headers, timeout=timeout, verify=verify)
         return _FakeResponse({"accepted": True})
 
-    monkeypatch.setattr("mindroom.cli.trigger.httpx.post", fake_post)
+    monkeypatch.setattr(httpx, "post", fake_post)
     monkeypatch.setattr("mindroom.cli.trigger.time.time", lambda: 3000)
     token_values = iter(["event-from-env", "nonce-from-env"])
     monkeypatch.setattr("mindroom.cli.trigger.secrets.token_hex", lambda _size: next(token_values))
@@ -338,7 +338,7 @@ def test_trigger_send_reports_transport_error(monkeypatch: pytest.MonkeyPatch, t
         message = "connection refused"
         raise httpx.ConnectError(message)
 
-    monkeypatch.setattr("mindroom.cli.trigger.httpx.post", fake_post)
+    monkeypatch.setattr(httpx, "post", fake_post)
 
     result = runner.invoke(
         app,
@@ -374,7 +374,7 @@ def test_trigger_send_reports_status_error(monkeypatch: pytest.MonkeyPatch, tmp_
     def fake_post(*_args: object, **_kwargs: object) -> httpx.Response:
         return response
 
-    monkeypatch.setattr("mindroom.cli.trigger.httpx.post", fake_post)
+    monkeypatch.setattr(httpx, "post", fake_post)
 
     result = runner.invoke(
         app,
@@ -411,7 +411,7 @@ def test_trigger_send_escapes_status_error_markup(monkeypatch: pytest.MonkeyPatc
     def fake_post(*_args: object, **_kwargs: object) -> httpx.Response:
         return response
 
-    monkeypatch.setattr("mindroom.cli.trigger.httpx.post", fake_post)
+    monkeypatch.setattr(httpx, "post", fake_post)
 
     result = runner.invoke(
         app,

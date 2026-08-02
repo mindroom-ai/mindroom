@@ -116,7 +116,7 @@ def _envelope() -> MessageEnvelope:
 def _delivery_gateway(tmp_path: Path) -> DeliveryGateway:
     config = _config(tmp_path)
     response_hooks = SimpleNamespace(
-        apply_before_response=AsyncMock(
+        _apply_before_response=AsyncMock(
             return_value=SimpleNamespace(
                 response_text="final answer",
                 response_kind="ai",
@@ -126,7 +126,7 @@ def _delivery_gateway(tmp_path: Path) -> DeliveryGateway:
                 suppress=False,
             ),
         ),
-        apply_final_response_transform=AsyncMock(),
+        _apply_final_response_transform=AsyncMock(),
         emit_after_response=AsyncMock(),
         emit_cancelled_response=AsyncMock(),
     )
@@ -417,8 +417,8 @@ async def test_transport_failed_terminal_update_drops_committed_interactive_meta
         transport_outcome = await streaming.finalize(_client(), restart_interrupted=True)
 
     response_hooks = SimpleNamespace(
-        apply_before_response=AsyncMock(),
-        apply_final_response_transform=AsyncMock(),
+        _apply_before_response=AsyncMock(),
+        _apply_final_response_transform=AsyncMock(),
         emit_after_response=AsyncMock(),
         emit_cancelled_response=AsyncMock(),
     )
@@ -462,8 +462,8 @@ async def test_transport_failed_terminal_update_ignores_hidden_canonical_interac
     """Preserved visible streamed replies must not register interactive metadata from hidden canonical content."""
     config = _config(tmp_path)
     response_hooks = SimpleNamespace(
-        apply_before_response=AsyncMock(),
-        apply_final_response_transform=AsyncMock(),
+        _apply_before_response=AsyncMock(),
+        _apply_final_response_transform=AsyncMock(),
         emit_after_response=AsyncMock(),
         emit_cancelled_response=AsyncMock(),
     )
@@ -644,8 +644,8 @@ async def test_streaming_placeholder_delivery_failure_stays_terminal_when_failur
     """If Matrix rejects the failure update too, finalization still returns a failed visible outcome."""
     config = _config(tmp_path)
     response_hooks = SimpleNamespace(
-        apply_before_response=AsyncMock(),
-        apply_final_response_transform=AsyncMock(),
+        _apply_before_response=AsyncMock(),
+        _apply_final_response_transform=AsyncMock(),
         emit_after_response=AsyncMock(),
         emit_cancelled_response=AsyncMock(),
     )
@@ -818,8 +818,8 @@ async def test_streamed_interactive_final_reply_registers_reactions_on_root_even
 
     envelope = _envelope()
     response_hooks = SimpleNamespace(
-        apply_before_response=AsyncMock(),
-        apply_final_response_transform=AsyncMock(
+        _apply_before_response=AsyncMock(),
+        _apply_final_response_transform=AsyncMock(
             return_value=SimpleNamespace(
                 response_text=raw_interactive,
                 response_kind="ai",
@@ -950,8 +950,8 @@ async def test_streamed_interactive_metadata_survives_unparseable_canonical_fina
     )
 
     response_hooks = SimpleNamespace(
-        apply_before_response=AsyncMock(),
-        apply_final_response_transform=AsyncMock(
+        _apply_before_response=AsyncMock(),
+        _apply_final_response_transform=AsyncMock(
             return_value=SimpleNamespace(
                 response_text=stream_outcome.canonical_final_body_candidate,
                 response_kind="ai",
@@ -1004,7 +1004,7 @@ async def test_final_response_transform_failure_keeps_visible_stream_text(tmp_pa
     config = _config(tmp_path)
     envelope = _envelope()
     response_hooks = SimpleNamespace(
-        apply_before_response=AsyncMock(
+        _apply_before_response=AsyncMock(
             return_value=SimpleNamespace(
                 response_text="chunk",
                 response_kind="ai",
@@ -1014,7 +1014,7 @@ async def test_final_response_transform_failure_keeps_visible_stream_text(tmp_pa
                 suppress=False,
             ),
         ),
-        apply_final_response_transform=AsyncMock(
+        _apply_final_response_transform=AsyncMock(
             return_value=SimpleNamespace(
                 response_text="updated text",
                 response_kind="ai",
@@ -1060,8 +1060,8 @@ async def test_final_response_transform_failure_keeps_visible_stream_text(tmp_pa
     assert outcome.terminal_status == "completed"
     assert outcome.final_visible_event_id == "$streaming"
     assert outcome.final_visible_body == "chunk"
-    response_hooks.apply_before_response.assert_not_awaited()
-    response_hooks.apply_final_response_transform.assert_awaited_once()
+    response_hooks._apply_before_response.assert_not_awaited()
+    response_hooks._apply_final_response_transform.assert_awaited_once()
     gateway.edit_text.assert_awaited_once()
     lifecycle = ResponseLifecycle(
         ResponseLifecycleDeps(
@@ -1096,8 +1096,8 @@ async def test_finalize_streamed_response_restart_interruption_preserves_cancell
     config = _config(tmp_path)
     envelope = _envelope()
     response_hooks = SimpleNamespace(
-        apply_before_response=AsyncMock(),
-        apply_final_response_transform=AsyncMock(),
+        _apply_before_response=AsyncMock(),
+        _apply_final_response_transform=AsyncMock(),
         emit_after_response=AsyncMock(),
         emit_cancelled_response=AsyncMock(),
     )
@@ -1173,7 +1173,7 @@ async def test_failed_cancelled_placeholder_cleanup_preserves_cancel_source(tmp_
 async def test_hook_failure_cleanup_propagates_restart_cancellation(tmp_path: Path) -> None:
     """Cancellation during cleanup of an ordinary hook failure must reach source settlement."""
     gateway = _delivery_gateway(tmp_path)
-    gateway.deps.response_hooks.apply_before_response.side_effect = RuntimeError("hook failed")
+    gateway.deps.response_hooks._apply_before_response.side_effect = RuntimeError("hook failed")
     gateway.deps.redact_message_event.side_effect = asyncio.CancelledError("sync_restart")
 
     with pytest.raises(asyncio.CancelledError, match="sync_restart"):

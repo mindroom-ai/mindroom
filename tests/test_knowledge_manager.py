@@ -919,7 +919,7 @@ async def test_shared_local_watch_index_refreshes_on_access_without_blocking_rea
     await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
     doc.write_text("shared local new", encoding="utf-8")
     monkeypatch.setattr(
-        "mindroom.knowledge.refresh_scheduler.refresh_knowledge_binding_in_subprocess",
+        "mindroom.knowledge.refresh_runner.refresh_knowledge_binding_in_subprocess",
         refresh_knowledge_binding,
     )
     scheduler = KnowledgeRefreshScheduler()
@@ -5284,7 +5284,7 @@ async def test_refresh_scheduler_runs_independent_per_binding_tasks(
             raise RuntimeError(msg)
         return object()
 
-    monkeypatch.setattr("mindroom.knowledge.refresh_scheduler.refresh_knowledge_binding_in_subprocess", _fake_refresh)
+    monkeypatch.setattr("mindroom.knowledge.refresh_runner.refresh_knowledge_binding_in_subprocess", _fake_refresh)
 
     scheduler.schedule_refresh("a", config=config, runtime_paths=runtime_paths)
     scheduler.schedule_refresh("a", config=config, runtime_paths=runtime_paths)
@@ -5330,7 +5330,7 @@ async def test_refresh_scheduler_probes_embedder_after_persisted_refresh_failure
         assert health_recorder is not None
         probe_reasons.append(reason)
 
-    monkeypatch.setattr("mindroom.knowledge.refresh_scheduler.refresh_knowledge_binding_in_subprocess", _fake_refresh)
+    monkeypatch.setattr("mindroom.knowledge.refresh_runner.refresh_knowledge_binding_in_subprocess", _fake_refresh)
     monkeypatch.setattr("mindroom.knowledge.refresh_scheduler.check_embedder_health", _fake_check)
 
     scheduler.schedule_refresh("docs", config=config, runtime_paths=runtime_paths)
@@ -5370,7 +5370,7 @@ async def test_refresh_scheduler_skips_probe_for_non_embedder_subprocess_failure
         del health_recorder
         probe_reasons.append(reason)
 
-    monkeypatch.setattr("mindroom.knowledge.refresh_scheduler.refresh_knowledge_binding_in_subprocess", _fake_refresh)
+    monkeypatch.setattr("mindroom.knowledge.refresh_runner.refresh_knowledge_binding_in_subprocess", _fake_refresh)
     monkeypatch.setattr("mindroom.knowledge.refresh_scheduler.check_embedder_health", _fake_check)
 
     scheduler.schedule_refresh("docs", config=config, runtime_paths=runtime_paths)
@@ -5410,7 +5410,7 @@ async def test_refresh_scheduler_does_not_probe_after_successful_refresh(
         msg = f"unexpected embedder probe: {reason}"
         raise AssertionError(msg)
 
-    monkeypatch.setattr("mindroom.knowledge.refresh_scheduler.refresh_knowledge_binding_in_subprocess", _fake_refresh)
+    monkeypatch.setattr("mindroom.knowledge.refresh_runner.refresh_knowledge_binding_in_subprocess", _fake_refresh)
     monkeypatch.setattr("mindroom.knowledge.refresh_scheduler.check_embedder_health", _fake_check)
 
     scheduler.schedule_refresh("docs", config=config, runtime_paths=runtime_paths)
@@ -5446,7 +5446,7 @@ async def test_successful_subprocess_refresh_probes_to_clear_stale_health(
         assert health_recorder is not None
         probe_reasons.append(reason)
 
-    monkeypatch.setattr("mindroom.knowledge.refresh_scheduler.refresh_knowledge_binding_in_subprocess", _fake_refresh)
+    monkeypatch.setattr("mindroom.knowledge.refresh_runner.refresh_knowledge_binding_in_subprocess", _fake_refresh)
     monkeypatch.setattr("mindroom.knowledge.refresh_scheduler.check_embedder_health", _fake_check)
 
     try:
@@ -5491,7 +5491,7 @@ async def test_refresh_scheduled_before_reload_cannot_probe_old_config(
         del health_recorder
         probe_reasons.append(reason)
 
-    monkeypatch.setattr("mindroom.knowledge.refresh_scheduler.refresh_knowledge_binding_in_subprocess", _fake_refresh)
+    monkeypatch.setattr("mindroom.knowledge.refresh_runner.refresh_knowledge_binding_in_subprocess", _fake_refresh)
     monkeypatch.setattr("mindroom.knowledge.refresh_scheduler.check_embedder_health", _fake_check)
 
     scheduler.schedule_refresh("docs", config=config, runtime_paths=runtime_paths)
@@ -5570,7 +5570,7 @@ async def test_refresh_scheduler_coalesces_duplicate_schedule_while_active(
             second_started.set()
         return object()
 
-    monkeypatch.setattr("mindroom.knowledge.refresh_scheduler.refresh_knowledge_binding_in_subprocess", _fake_refresh)
+    monkeypatch.setattr("mindroom.knowledge.refresh_runner.refresh_knowledge_binding_in_subprocess", _fake_refresh)
 
     scheduler.schedule_refresh("docs", config=config, runtime_paths=runtime_paths)
     await first_started.wait()
@@ -5616,7 +5616,7 @@ async def test_refresh_scheduler_refresh_now_runs_directly_with_force_reindex(
             availability=KnowledgeAvailability.READY,
         )
 
-    monkeypatch.setattr("mindroom.knowledge.refresh_scheduler.refresh_knowledge_binding", _fake_refresh)
+    monkeypatch.setattr("mindroom.knowledge.refresh_runner.refresh_knowledge_binding", _fake_refresh)
 
     result = await scheduler.refresh_now("docs", config=config, runtime_paths=runtime_paths, force_reindex=True)
 
@@ -6134,7 +6134,7 @@ async def test_refresh_scheduler_shutdown_suppresses_completed_refresh_failures(
         msg = "refresh failed"
         raise RuntimeError(msg)
 
-    monkeypatch.setattr("mindroom.knowledge.refresh_scheduler.refresh_knowledge_binding_in_subprocess", _fake_refresh)
+    monkeypatch.setattr("mindroom.knowledge.refresh_runner.refresh_knowledge_binding_in_subprocess", _fake_refresh)
 
     scheduler.schedule_refresh("docs", config=config, runtime_paths=runtime_paths)
     await asyncio.sleep(0)
@@ -6159,7 +6159,7 @@ async def test_refresh_scheduler_does_not_schedule_after_shutdown(
         calls += 1
         return object()
 
-    monkeypatch.setattr("mindroom.knowledge.refresh_scheduler.refresh_knowledge_binding", _fake_refresh)
+    monkeypatch.setattr("mindroom.knowledge.refresh_runner.refresh_knowledge_binding", _fake_refresh)
 
     await scheduler.shutdown()
     scheduler.schedule_refresh("docs", config=config, runtime_paths=runtime_paths)
@@ -6190,7 +6190,7 @@ async def test_refresh_status_is_visible_across_scheduler_instances(
         return object()
 
     monkeypatch.setattr(
-        "mindroom.knowledge.refresh_scheduler.refresh_knowledge_binding_in_subprocess",
+        "mindroom.knowledge.refresh_runner.refresh_knowledge_binding_in_subprocess",
         _blocked_refresh,
     )
 
@@ -6228,7 +6228,7 @@ async def test_refresh_scheduler_claim_is_exclusive_across_instances(
         return object()
 
     monkeypatch.setattr(
-        "mindroom.knowledge.refresh_scheduler.refresh_knowledge_binding_in_subprocess",
+        "mindroom.knowledge.refresh_runner.refresh_knowledge_binding_in_subprocess",
         _blocked_refresh,
     )
 
@@ -6275,7 +6275,7 @@ async def test_refresh_scheduler_retries_request_after_direct_refresh_owner_fini
         return object()
 
     monkeypatch.setattr(
-        "mindroom.knowledge.refresh_scheduler.refresh_knowledge_binding_in_subprocess",
+        "mindroom.knowledge.refresh_runner.refresh_knowledge_binding_in_subprocess",
         _record_refresh,
     )
 
@@ -6334,7 +6334,7 @@ async def test_refresh_scheduler_limits_concurrent_subprocess_refreshes(
             active_refreshes -= 1
 
     monkeypatch.setattr(
-        "mindroom.knowledge.refresh_scheduler.refresh_knowledge_binding_in_subprocess",
+        "mindroom.knowledge.refresh_runner.refresh_knowledge_binding_in_subprocess",
         _blocked_refresh,
     )
 
@@ -8118,8 +8118,8 @@ async def test_refresh_scheduler_manual_reindex_runs_without_background_queue(
             availability=KnowledgeAvailability.READY,
         )
 
-    monkeypatch.setattr("mindroom.knowledge.refresh_scheduler.refresh_knowledge_binding", _fake_refresh)
-    monkeypatch.setattr("mindroom.knowledge.refresh_scheduler.refresh_knowledge_binding_in_subprocess", _fake_refresh)
+    monkeypatch.setattr("mindroom.knowledge.refresh_runner.refresh_knowledge_binding", _fake_refresh)
+    monkeypatch.setattr("mindroom.knowledge.refresh_runner.refresh_knowledge_binding_in_subprocess", _fake_refresh)
 
     scheduler.schedule_refresh("docs", config=old_config, runtime_paths=runtime_paths)
     await first_started.wait()

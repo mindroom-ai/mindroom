@@ -123,7 +123,7 @@ async def test_rapid_requests_coalesce_into_one_reload(
     monkeypatch.setattr("mindroom.orchestration.config_lifecycle._CONFIG_RELOAD_DEBOUNCE_SECONDS", 0.05)
     monkeypatch.setattr("mindroom.orchestration.config_lifecycle._REPLACEMENT_DRAIN_IDLE_POLL_SECONDS", 0.01)
     lifecycle = _make_lifecycle(tmp_path)
-    lifecycle.update_config = AsyncMock(return_value=True)
+    lifecycle._update_config = AsyncMock(return_value=True)
 
     lifecycle.request_reload()
     task = lifecycle._reload_task
@@ -134,7 +134,7 @@ async def test_rapid_requests_coalesce_into_one_reload(
 
     assert lifecycle._reload_task is task
     await asyncio.wait_for(task, timeout=1)
-    lifecycle.update_config.assert_awaited_once()
+    lifecycle._update_config.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -148,18 +148,18 @@ async def test_reload_drains_active_responses_before_applying(
     gate = ResponseAdmissionGate()
     assert gate.admit()
     lifecycle = _make_lifecycle(tmp_path, response_admission_gate=gate)
-    lifecycle.update_config = AsyncMock(return_value=True)
+    lifecycle._update_config = AsyncMock(return_value=True)
 
     lifecycle.request_reload()
     task = lifecycle._reload_task
     assert task is not None
 
     await asyncio.sleep(0.05)
-    lifecycle.update_config.assert_not_awaited()
+    lifecycle._update_config.assert_not_awaited()
 
     gate.release()
     await asyncio.wait_for(task, timeout=1)
-    lifecycle.update_config.assert_awaited_once()
+    lifecycle._update_config.assert_awaited_once()
     assert gate.closed is False
 
 
@@ -292,7 +292,7 @@ async def test_new_request_during_drain_keeps_waiting_for_idle(
     assert gate.admit()
     lifecycle = _make_lifecycle(tmp_path, response_admission_gate=gate)
 
-    lifecycle.update_config = AsyncMock(return_value=True)
+    lifecycle._update_config = AsyncMock(return_value=True)
 
     lifecycle.request_reload()
     await asyncio.sleep(0.06)
@@ -301,12 +301,12 @@ async def test_new_request_during_drain_keeps_waiting_for_idle(
 
     task = lifecycle._reload_task
     assert task is not None
-    lifecycle.update_config.assert_not_awaited()
+    lifecycle._update_config.assert_not_awaited()
 
     gate.release()
     await asyncio.wait_for(task, timeout=1)
 
-    lifecycle.update_config.assert_awaited_once()
+    lifecycle._update_config.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -331,14 +331,14 @@ async def test_failed_update_does_not_strand_queued_reload(
             raise RuntimeError(msg)
         return True
 
-    lifecycle.update_config = AsyncMock(side_effect=failing_then_succeeding_update)
+    lifecycle._update_config = AsyncMock(side_effect=failing_then_succeeding_update)
     lifecycle.request_reload()
     task = lifecycle._reload_task
     assert task is not None
 
     await asyncio.wait_for(task, timeout=2)
 
-    assert lifecycle.update_config.await_count == 2
+    assert lifecycle._update_config.await_count == 2
 
 
 @pytest.mark.asyncio
@@ -360,14 +360,14 @@ async def test_config_change_during_update_triggers_second_reload(
             lifecycle.request_reload()
         return True
 
-    lifecycle.update_config = AsyncMock(side_effect=update_config_with_second_change)
+    lifecycle._update_config = AsyncMock(side_effect=update_config_with_second_change)
     lifecycle.request_reload()
     task = lifecycle._reload_task
     assert task is not None
 
     await asyncio.wait_for(task, timeout=2)
 
-    assert lifecycle.update_config.await_count == 2
+    assert lifecycle._update_config.await_count == 2
 
 
 @pytest.mark.asyncio
@@ -419,7 +419,7 @@ async def test_cancel_clears_queued_reload(
     busy_gate = ResponseAdmissionGate()
     assert busy_gate.admit()
     lifecycle = _make_lifecycle(tmp_path, response_admission_gate=busy_gate)
-    lifecycle.update_config = AsyncMock(return_value=True)
+    lifecycle._update_config = AsyncMock(return_value=True)
 
     lifecycle.request_reload()
     task = lifecycle._reload_task
@@ -431,7 +431,7 @@ async def test_cancel_clears_queued_reload(
     assert lifecycle._reload_task is None
     assert lifecycle._requested_at is None
     assert task.done()
-    lifecycle.update_config.assert_not_awaited()
+    lifecycle._update_config.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -543,14 +543,14 @@ async def test_drain_applies_reload_after_force_timeout(
     # A response that never finishes, so the gate is never idle.
     assert gate.admit()
     lifecycle = _make_lifecycle(tmp_path, response_admission_gate=gate)
-    lifecycle.update_config = AsyncMock(return_value=True)
+    lifecycle._update_config = AsyncMock(return_value=True)
 
     lifecycle.request_reload()
     task = lifecycle._reload_task
     assert task is not None
     await asyncio.wait_for(task, timeout=2)
 
-    lifecycle.update_config.assert_awaited_once()
+    lifecycle._update_config.assert_awaited_once()
     # Admission reopens even though the forced apply ran over a live response.
     assert gate.closed is False
 
@@ -568,7 +568,7 @@ async def test_update_config_delegates_initial_load(
     )
     lifecycle = _make_lifecycle(tmp_path, current_config=None)
 
-    assert await lifecycle.update_config() is False
+    assert await lifecycle._update_config() is False
 
     lifecycle.load_initial_config.assert_awaited_once_with(new_config)
     lifecycle.apply_update_plan.assert_not_awaited()
@@ -596,7 +596,7 @@ async def test_update_config_builds_plan_and_dispatches(
         agent_bots={"router": MagicMock(), "agent1": MagicMock()},
     )
 
-    assert await lifecycle.update_config() is True
+    assert await lifecycle._update_config() is True
 
     lifecycle.load_initial_config.assert_not_awaited()
     lifecycle.apply_update_plan.assert_awaited_once()
@@ -645,7 +645,7 @@ async def test_update_config_plugin_changes_restart_all_bots(
         agent_bots={"router": MagicMock(), "agent1": MagicMock(), "agent2": MagicMock()},
     )
 
-    assert await lifecycle.update_config() is True
+    assert await lifecycle._update_config() is True
 
     _, dispatched_plan, plugin_changes = lifecycle.apply_update_plan.await_args.args
     assert dispatched_plan.entities_to_restart == {"router", "agent1", "agent2"}
@@ -671,7 +671,7 @@ async def test_update_config_loads_config_off_event_loop(
     lifecycle = _make_lifecycle(tmp_path)
     lifecycle.load_initial_config = AsyncMock(return_value=True)
 
-    update_task = asyncio.get_running_loop().create_task(lifecycle.update_config())
+    update_task = asyncio.get_running_loop().create_task(lifecycle._update_config())
     await asyncio.to_thread(load_started.wait, 5.0)
 
     # The loader thread is parked on the gate; the loop must stay live.
@@ -708,7 +708,7 @@ async def test_update_config_waits_for_lock_before_loading(
     lifecycle.config_update_lock = lock
 
     await lock.acquire()
-    update_task = asyncio.create_task(lifecycle.update_config())
+    update_task = asyncio.create_task(lifecycle._update_config())
     await asyncio.sleep(0)
     assert not to_thread_started.is_set()
 

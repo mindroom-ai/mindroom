@@ -82,7 +82,7 @@ class PostResponseEffectsSupport:
             raise RuntimeError(msg)
         return client
 
-    def should_queue_thread_summary(
+    def _should_queue_thread_summary(
         self,
         room_id: str,
         thread_id: str,
@@ -132,7 +132,7 @@ class PostResponseEffectsSupport:
             interactive_metadata.options_as_list(),
         )
 
-    def queue_thread_summary(
+    def _queue_thread_summary(
         self,
         room_id: str,
         thread_id: str,
@@ -184,8 +184,8 @@ class PostResponseEffectsSupport:
             register_interactive=register_interactive,
             queue_memory_persistence=queue_memory_persistence,
             persist_response_event_id=persist_response_event_id,
-            should_queue_thread_summary=self.should_queue_thread_summary,
-            queue_thread_summary=self.queue_thread_summary,
+            should_queue_thread_summary=self._should_queue_thread_summary,
+            queue_thread_summary=self._queue_thread_summary,
         )
 
 

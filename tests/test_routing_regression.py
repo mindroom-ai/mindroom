@@ -428,7 +428,7 @@ def test_team_request_responder_filtering_uses_actual_member_ids(tmp_path: Path)
         ),
     )
 
-    filtered = policy.filter_materializable_responders(
+    filtered = policy._filter_materializable_responders(
         [
             ids["worker"],
             ids["idle"],
@@ -496,7 +496,7 @@ class TestRoutingRegression:
         mock_suggest_responder.assert_awaited_once()
         content = router_bot.client.room_send.await_args.kwargs["content"]
         assert content["body"] == "@mindroom_healthy:localhost could you help with this?"
-        assert not router_bot._dispatch_obligation_store.has_pending(
+        assert not router_bot._dispatch_obligation_store._has_pending(
             event.event_id,
             DispatchCallbackKind.MESSAGE,
         )
@@ -516,7 +516,7 @@ class TestRoutingRegression:
 
         mock_suggest_responder.assert_awaited_once()
         router_bot.client.room_send.assert_not_awaited()
-        assert router_bot._dispatch_obligation_store.has_pending(
+        assert router_bot._dispatch_obligation_store._has_pending(
             blocked_event.event_id,
             DispatchCallbackKind.MESSAGE,
         )
@@ -534,7 +534,7 @@ class TestRoutingRegression:
 
         content = router_bot.client.room_send.await_args.kwargs["content"]
         assert content["body"] == "@mindroom_stuck:localhost could you help with this?"
-        assert not router_bot._dispatch_obligation_store.has_pending(
+        assert not router_bot._dispatch_obligation_store._has_pending(
             blocked_event.event_id,
             DispatchCallbackKind.MESSAGE,
         )
@@ -1359,7 +1359,7 @@ class TestRoutingRegression:
                 return_value=AgentResponseDecision(True),
             ) as mock_decide_agent_response,
         ):
-            action = await alpha_bot._turn_policy.resolve_response_action(
+            action = await alpha_bot._turn_policy._resolve_response_action(
                 _policy_dispatch(
                     agent_name=alpha_bot.agent_name,
                     room_id=room.room_id,
@@ -1440,7 +1440,7 @@ class TestRoutingRegression:
             has_non_agent_mentions=False,
         )
 
-        action = await bot._turn_policy.resolve_response_action(
+        action = await bot._turn_policy._resolve_response_action(
             _policy_dispatch(
                 agent_name=bot.agent_name,
                 room_id=room.room_id,

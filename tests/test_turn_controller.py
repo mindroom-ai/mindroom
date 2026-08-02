@@ -175,11 +175,11 @@ async def test_owner_cancel_ready_task_closes_ready_result_returned_during_cance
     owner.ready_task = asyncio.create_task(ready())
     await asyncio.sleep(0)
 
-    await owner.cancel_ready_task()
+    await owner._cancel_ready_task()
 
     assert cancelled.is_set()
     assert close_count == 1
-    await owner.cancel_ready_task()
+    await owner._cancel_ready_task()
     assert close_count == 1
 
     await owner.release()
@@ -334,7 +334,7 @@ async def test_handle_interactive_selection_threaded_streaming_keeps_reply_targe
     bot._delivery_gateway.send_text.assert_awaited_once()
     ack_request = bot._delivery_gateway.send_text.await_args.args[0]
     assert ack_request.target.resolved_thread_id == selection.thread_id
-    assert ack_request.target.reply_to_event_id is None
+    assert ack_request.target.reply_to_event_id == selection.question_event_id
     generate_response_mock.assert_awaited_once()
     assert captured_envelope is not None
     assert captured_envelope.source_event_id == "$selection:localhost"

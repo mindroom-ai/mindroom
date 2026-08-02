@@ -35,7 +35,7 @@ class _PendingObligations:
     ) -> _PendingObligations:
         return cls(pending=set(keys))
 
-    def has_pending(
+    def _has_pending(
         self,
         source_event_id: str,
         callback_kind: DispatchCallbackKind,
@@ -241,14 +241,14 @@ async def test_history_cannot_create_the_obligation_that_admits_itself(
     room = nio.MatrixRoom("!room:example.org", "@code:example.org")
     event = _message("$history")
 
-    await runner.admission_callback(DispatchCallbackKind.MESSAGE)(
+    await runner._admit_source_event(
         room,
         event,
         nio.TimelineEventProvenance.HISTORY,
     )
 
     assert attempts == 0
-    assert not store.has_pending("$history", DispatchCallbackKind.MESSAGE)
+    assert not store._has_pending("$history", DispatchCallbackKind.MESSAGE)
 
 
 @pytest.mark.asyncio
@@ -273,13 +273,13 @@ async def test_live_admission_persists_before_callback_fanout(
     room = nio.MatrixRoom("!room:example.org", "@code:example.org")
     event = _message("$live")
 
-    await runner.admission_callback(DispatchCallbackKind.MESSAGE)(
+    await runner._admit_source_event(
         room,
         event,
         nio.TimelineEventProvenance.LIVE,
     )
 
-    assert store.has_pending("$live", DispatchCallbackKind.MESSAGE)
+    assert store._has_pending("$live", DispatchCallbackKind.MESSAGE)
 
 
 @pytest.mark.asyncio
@@ -322,8 +322,8 @@ async def test_real_nio_initial_history_is_fenced_and_continuation_is_live(
         await client.close()
 
     assert seen == ["$live"]
-    assert not store.has_pending("$history", DispatchCallbackKind.MESSAGE)
-    assert not store.has_pending("$live", DispatchCallbackKind.MESSAGE)
+    assert not store._has_pending("$history", DispatchCallbackKind.MESSAGE)
+    assert not store._has_pending("$live", DispatchCallbackKind.MESSAGE)
 
 
 @pytest.mark.asyncio
@@ -353,7 +353,7 @@ async def test_direct_recovery_bypasses_timeline_provenance(
             event,
             DispatchCallbackKind.MESSAGE,
         )
-    assert store.has_pending("$failed", DispatchCallbackKind.MESSAGE)
+    assert store._has_pending("$failed", DispatchCallbackKind.MESSAGE)
 
     recovered: list[str] = []
 
@@ -367,4 +367,4 @@ async def test_direct_recovery_bypasses_timeline_provenance(
     await _runner(store, fence, succeeding_callback).recover_pending()
 
     assert recovered == ["$failed"]
-    assert not store.has_pending("$failed", DispatchCallbackKind.MESSAGE)
+    assert not store._has_pending("$failed", DispatchCallbackKind.MESSAGE)

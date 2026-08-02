@@ -87,6 +87,7 @@ class _SyncEnvelope:
     account_data: _EventSection = field(default_factory=_EventSection)
     to_device: _EventSection = field(default_factory=_EventSection)
     device_lists: _DeviceLists = field(default_factory=_DeviceLists)
+    unrecovered_room_ids: frozenset[str] = frozenset()
 
 
 @dataclass(slots=True)

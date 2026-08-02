@@ -375,8 +375,8 @@ async def test_shutdown_persist_without_cache_generation_clears_saved_checkpoint
 
 
 @pytest.mark.asyncio
-async def test_positioned_limited_response_resets_sync_continuity(tmp_path: Path) -> None:
-    """A limited response after a position must force one since-less replay."""
+async def test_positioned_limited_response_preserves_sync_continuity(tmp_path: Path) -> None:
+    """A limited response after a position must retain the last safe checkpoint."""
     trust, _cache, _runtime = _trust(tmp_path)
     trust.state = SyncTrustState.CERTIFIED
     trust.continuity_store.replace_checkpoint(
@@ -392,11 +392,14 @@ async def test_positioned_limited_response_resets_sync_continuity(tmp_path: Path
         first_sync=False,
     )
 
-    assert decision.reset_client_token is True
+    assert decision.reset_client_token is False
     assert decision.reason == "limited_sync_timeline"
     assert trust.state is SyncTrustState.UNCERTAIN
     assert trust.checkpoint is None
-    assert load_sync_checkpoint(tmp_path, "code") is None
+    assert load_sync_checkpoint(tmp_path, "code") == SyncCheckpoint(
+        "s_before_gap",
+        cache_generation=_GENERATION,
+    )
 
 
 @pytest.mark.asyncio
@@ -526,8 +529,8 @@ async def test_clear_transforms_fresh_store_state_when_cached_checkpoint_is_abse
 
 
 @pytest.mark.asyncio
-async def test_limited_recovery_window_is_consumed_once_then_complete_delta_certifies(tmp_path: Path) -> None:
-    """Recovery must avoid reset loops and certify only after a complete delta."""
+async def test_limited_windows_preserve_cursor_until_complete_delta_certifies(tmp_path: Path) -> None:
+    """Cache gaps retain continuity until a complete delta supersedes it."""
     trust, _cache, _runtime = _trust(tmp_path)
     trust.state = SyncTrustState.CERTIFIED
 
@@ -553,7 +556,7 @@ async def test_limited_recovery_window_is_consumed_once_then_complete_delta_cert
         first_sync=False,
     )
 
-    assert positioned.reset_client_token is True
+    assert positioned.reset_client_token is False
     assert initial.reset_client_token is False
     assert initial.state is SyncTrustState.UNCERTAIN
     assert complete.state is SyncTrustState.CERTIFIED
@@ -564,8 +567,8 @@ async def test_limited_recovery_window_is_consumed_once_then_complete_delta_cert
 
 
 @pytest.mark.asyncio
-async def test_sustained_limited_responses_reset_once_until_a_delta_certifies(tmp_path: Path) -> None:
-    """Back-to-back gaps must cost one replay, not one every other response."""
+async def test_sustained_limited_responses_never_reset_live_cursor(tmp_path: Path) -> None:
+    """Back-to-back cache gaps must retain the live cursor."""
     trust, _cache, _runtime = _trust(tmp_path)
     trust.state = SyncTrustState.CERTIFIED
 
@@ -581,7 +584,7 @@ async def test_sustained_limited_responses_reset_once_until_a_delta_certifies(tm
         for index in range(4)
     ]
 
-    assert [decision.reset_client_token for decision in decisions] == [True, False, False, False]
+    assert not any(decision.reset_client_token for decision in decisions)
 
 
 @pytest.mark.asyncio

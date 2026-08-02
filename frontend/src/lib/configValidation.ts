@@ -16,7 +16,8 @@ export interface ValidationConfigDiagnostic {
 }
 
 export type ConfigDiagnostic =
-  GlobalConfigDiagnostic | ValidationConfigDiagnostic;
+  | GlobalConfigDiagnostic
+  | ValidationConfigDiagnostic;
 
 export function getConfigValidationIssues(
   diagnostics: ConfigDiagnostic[],

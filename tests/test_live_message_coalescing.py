@@ -521,9 +521,9 @@ async def test_post_gate_terminal_drop_settles_real_deferred_dispatch_obligation
         plan_turn.assert_awaited_once()
     else:
         plan_turn.assert_not_awaited()
-    assert bot._turn_store.is_durably_handled(event.event_id)
+    assert not bot._turn_store.is_durably_handled(event.event_id)
     await _wait_for(
-        lambda: not runner.store.has_pending(event.event_id, DispatchCallbackKind.MESSAGE),
+        lambda: not runner.store._has_pending(event.event_id, DispatchCallbackKind.MESSAGE),
         deadline_seconds=1,
     )
 
@@ -1621,7 +1621,7 @@ async def test_active_follow_up_owner_includes_later_media_payload(tmp_path: Pat
             patch.object(bot._turn_controller, "_has_newer_unresponded_in_thread", return_value=False),
             patch.object(ResponsePayloadPreparer, "_log_dispatch_latency"),
             patch(
-                "mindroom.response_runner.ResponseRunner.generate_response_locked",
+                "mindroom.response_runner.ResponseRunner._generate_response_locked",
                 new=fake_generate_response_locked,
             ),
         ):
@@ -4297,7 +4297,7 @@ async def test_backlog_replay_skips_older_message_when_newer_exists(tmp_path: Pa
 
     # Older message should be skipped — resolve_dispatch_action never called
     action_mock.assert_not_awaited()
-    assert bot._turn_store.is_handled("$m1")
+    assert not bot._turn_store.is_handled("$m1")
 
 
 _SourceOwnership = Literal["single", "mixed", "absent", "partial", "redacted"]
@@ -4439,8 +4439,8 @@ async def test_backlog_replay_respects_coalesced_source_ownership(
         )
     else:
         bot.event_cache.get_recent_room_events.assert_not_awaited()
-    assert bot._turn_store.is_handled("$alice")
-    assert bot._turn_store.is_handled("$bob")
+    assert not bot._turn_store.is_handled("$alice")
+    assert not bot._turn_store.is_handled("$bob")
 
 
 @pytest.mark.asyncio
@@ -4513,8 +4513,8 @@ async def test_backlog_replay_fails_closed_when_physical_source_collides_with_al
         )
 
     plan_turn.assert_awaited_once()
-    assert bot._turn_store.is_handled(relay_event_id)
-    assert bot._turn_store.is_handled(human_event_id)
+    assert not bot._turn_store.is_handled(relay_event_id)
+    assert not bot._turn_store.is_handled(human_event_id)
 
 
 @pytest.mark.asyncio
@@ -4584,7 +4584,7 @@ async def test_backlog_replay_fails_closed_after_legacy_coalesced_projection(tmp
         )
 
     plan_turn.assert_awaited_once()
-    assert bot._turn_store.is_handled(retained_event_id)
+    assert not bot._turn_store.is_handled(retained_event_id)
 
 
 @pytest.mark.asyncio
@@ -4647,7 +4647,7 @@ async def test_backlog_replay_degraded_thread_history_uses_cached_room_event_pos
         since_ts_ms=1000,
     )
     action_mock.assert_not_awaited()
-    assert bot._turn_store.is_handled("$m1")
+    assert not bot._turn_store.is_handled("$m1")
 
 
 @pytest.mark.asyncio
@@ -4710,7 +4710,7 @@ async def test_backlog_replay_degraded_thread_history_ignores_equal_timestamp_ca
         since_ts_ms=1000,
     )
     action_mock.assert_awaited_once()
-    assert bot._turn_store.is_handled("$m1")
+    assert not bot._turn_store.is_handled("$m1")
 
 
 @pytest.mark.asyncio
@@ -4767,7 +4767,7 @@ async def test_backlog_replay_degraded_thread_history_counts_trusted_voice_comma
         await bot._turn_controller._dispatch_text_message(room, older_event, "@user:localhost")
 
     action_mock.assert_not_awaited()
-    assert bot._turn_store.is_handled("$m1")
+    assert not bot._turn_store.is_handled("$m1")
 
 
 def test_replay_guard_does_not_supersede_non_interactive_origin_turns() -> None:
@@ -4957,7 +4957,7 @@ async def test_backlog_replay_degraded_thread_history_ignores_visible_router_voi
         since_ts_ms=1000,
     )
     action_mock.assert_awaited_once()
-    assert bot._turn_store.is_handled("$voice")
+    assert not bot._turn_store.is_handled("$voice")
 
 
 @pytest.mark.asyncio
@@ -5023,7 +5023,7 @@ async def test_backlog_replay_degraded_thread_history_counts_non_router_visible_
         since_ts_ms=1000,
     )
     action_mock.assert_not_awaited()
-    assert bot._turn_store.is_handled("$voice")
+    assert not bot._turn_store.is_handled("$voice")
 
 
 @pytest.mark.asyncio
@@ -5085,7 +5085,7 @@ async def test_backlog_replay_degraded_thread_history_uses_cache_indexed_plain_r
     history_guard.assert_not_called()
     bot._conversation_cache.get_thread_id_for_event.assert_awaited_once_with(room.room_id, "$m2")
     action_mock.assert_not_awaited()
-    assert bot._turn_store.is_handled("$m1")
+    assert not bot._turn_store.is_handled("$m1")
 
 
 @pytest.mark.asyncio
@@ -5148,7 +5148,7 @@ async def test_backlog_replay_degraded_thread_history_ignores_edit_events(tmp_pa
 
     history_guard.assert_not_called()
     action_mock.assert_awaited_once()
-    assert bot._turn_store.is_handled("$m1")
+    assert not bot._turn_store.is_handled("$m1")
 
 
 @pytest.mark.asyncio
@@ -5202,7 +5202,7 @@ async def test_backlog_replay_degraded_thread_history_fails_open_without_positiv
         since_ts_ms=1000,
     )
     action_mock.assert_awaited_once()
-    assert bot._turn_store.is_handled("$m1")
+    assert not bot._turn_store.is_handled("$m1")
     assert any(
         log.get("event") == "Thread replay guard degraded; proceeding without negative newer-message proof"
         for log in captured_logs
@@ -5258,7 +5258,7 @@ async def test_media_dispatch_uses_replay_snapshot_instead_of_mutated_planning_h
     newer_mock.assert_called_once()
     assert list(newer_mock.call_args.args[2]) == []
     action_mock.assert_awaited_once()
-    assert bot._turn_store.is_handled("$img1")
+    assert not bot._turn_store.is_handled("$img1")
 
 
 @pytest.mark.asyncio
@@ -5861,7 +5861,7 @@ async def test_coalesced_user_batch_suppressed_by_thread_guard(tmp_path: Path) -
 
     # Coalesced user batch MUST be suppressed — not an automation event
     action_mock.assert_not_awaited()
-    assert bot._turn_store.is_handled("$m1")
+    assert not bot._turn_store.is_handled("$m1")
 
 
 @pytest.mark.asyncio
@@ -5909,7 +5909,7 @@ async def test_coalesced_media_batch_suppressed_by_replay_snapshot(tmp_path: Pat
 
     # Media-backed coalesced user batch MUST still be suppressed.
     action_mock.assert_not_awaited()
-    assert bot._turn_store.is_handled("$img1")
+    assert not bot._turn_store.is_handled("$img1")
 
 
 @pytest.mark.asyncio

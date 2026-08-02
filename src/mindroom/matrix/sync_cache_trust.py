@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field, replace
+from functools import partial
 from typing import TYPE_CHECKING, TypeVar
 
+from mindroom.background_tasks import run_blocking_until_complete
 from mindroom.matrix.sync_certification import (
     SyncCacheWriteResult,
     SyncCertificationDecision,
@@ -15,7 +17,6 @@ from mindroom.matrix.sync_certification import (
     handle_unknown_pos,
     sync_cache_write_diagnostics,
 )
-from mindroom.owned_blocking import run_owned_blocking_operation
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Coroutine, Iterable
@@ -38,7 +39,6 @@ class SyncCacheTrust:
     logger: structlog.stdlib.BoundLogger
     state: SyncTrustState = SyncTrustState.COLD
     checkpoint: SyncCheckpoint | None = None
-    _awaiting_initial_window: bool = field(default=False, init=False, repr=False)
     _cache_scope_epoch: int = field(default=0, init=False, repr=False)
     _saved_checkpoint: SyncCheckpoint | None = field(default=None, init=False, repr=False)
     _mutation_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False, repr=False)
@@ -54,7 +54,7 @@ class SyncCacheTrust:
             self.logger.warning("matrix_principal_event_cache_init_failed", error=str(exc))
 
         try:
-            record = await run_owned_blocking_operation(self.continuity_store.load)
+            record = await run_blocking_until_complete(self.continuity_store.load)
         except OSError as exc:
             self.logger.warning("matrix_sync_token_load_failed", error=str(exc))
             record = None
@@ -72,7 +72,6 @@ class SyncCacheTrust:
 
         self.state = SyncTrustState.PENDING if loaded is not None else SyncTrustState.COLD
         self.checkpoint = None
-        self._awaiting_initial_window = loaded is None
         return loaded.token if loaded is not None else None
 
     def _load_valid_checkpoint(self, checkpoint: SyncCheckpoint | None) -> SyncCheckpoint | None:
@@ -105,15 +104,17 @@ class SyncCacheTrust:
             cache_generation=cache_generation,
         )
         if joined_room_ids is None:
-            record = await run_owned_blocking_operation(
+            record = await run_blocking_until_complete(
                 self.continuity_store.replace_checkpoint,
                 durable_checkpoint,
             )
         else:
-            record = await run_owned_blocking_operation(
-                self.continuity_store.accept_classic_response,
+            record = await run_blocking_until_complete(
+                partial(
+                    self.continuity_store.accept_classic_response,
+                    joined_room_ids=joined_room_ids,
+                ),
                 durable_checkpoint,
-                joined_room_ids=joined_room_ids,
             )
         self._saved_checkpoint = record.checkpoint
         return record
@@ -122,7 +123,7 @@ class SyncCacheTrust:
         """Clear durable checkpoint while the mutation lock owns publication order."""
         self._saved_checkpoint = None
         try:
-            await run_owned_blocking_operation(self.continuity_store.clear_checkpoint)
+            await run_blocking_until_complete(self.continuity_store.clear_checkpoint)
         except OSError as exc:
             self.logger.warning("matrix_sync_token_clear_failed", error=str(exc))
             return False
@@ -211,9 +212,6 @@ class SyncCacheTrust:
             cache_result=cache_result,
             first_sync=first_sync,
         )
-        limited_timeline = bool(cache_result.limited_room_ids)
-        if limited_timeline and not self._awaiting_initial_window:
-            decision = replace(decision, reset_client_token=True)
         return replace(decision, cache_scope_epoch=self._cache_scope_epoch)
 
     async def apply_response(
@@ -241,12 +239,6 @@ class SyncCacheTrust:
                     cache_result=cache_result,
                     joined_room_ids=joined_room_ids,
                 )
-                # Re-arm from applied trust so a replaced stale-scope decision cannot
-                # license another since-less replay.
-                if decision.reset_client_token:
-                    self._awaiting_initial_window = True
-                elif self.state is SyncTrustState.CERTIFIED:
-                    self._awaiting_initial_window = False
                 return decision, record
 
         return await self._run_serialized_mutation(apply)
@@ -258,7 +250,6 @@ class SyncCacheTrust:
             async with self._mutation_lock:
                 decision = handle_unknown_pos()
                 await self._apply_decision_locked(decision)
-                self._awaiting_initial_window = True
                 return decision
 
         return await self._run_serialized_mutation(reject)
@@ -286,9 +277,7 @@ class SyncCacheTrust:
             self.state = decision.state
             self.checkpoint = None
             self._saved_checkpoint = None
-            if decision.reset_client_token:
-                self._awaiting_initial_window = True
-            record = await run_owned_blocking_operation(self.continuity_store.clear_checkpoint)
+            record = await run_blocking_until_complete(self.continuity_store.clear_checkpoint)
         else:
             record = None
         self.state = decision.state

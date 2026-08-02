@@ -945,7 +945,7 @@ async def test_failed_startup_cleanup_disables_only_the_affected_principal(
 
     try:
         monkeypatch.setattr(module, "purge_principal_locked", fail_purge)
-        runtime = MagicMock(event_cache=alice, callback_failure_count=0)
+        runtime = MagicMock(event_cache=alice)
         trust = SyncCacheTrust(
             continuity_store=SyncContinuityStore(tmp_path, "alice"),
             runtime=runtime,

@@ -37,7 +37,7 @@ class EmbeddingRetryPolicy:
     max_backoff_seconds: float = 30.0
     jitter_ratio: float = 0.25
 
-    def backoff_seconds(self, attempt: int, *, retry_after_seconds: float | None, jitter_unit: float) -> float:
+    def _backoff_seconds(self, attempt: int, *, retry_after_seconds: float | None, jitter_unit: float) -> float:
         """Return how long to wait before ``attempt`` (1-based) is retried.
 
         A provider ``Retry-After`` hint wins over the computed backoff, but is
@@ -72,7 +72,7 @@ async def run_with_embedding_retry(
         except Exception as exc:
             if attempt >= max_attempts or not embedder_failure_is_transient(exc):
                 raise
-            delay_seconds = policy.backoff_seconds(
+            delay_seconds = policy._backoff_seconds(
                 attempt,
                 retry_after_seconds=embedder_retry_after_seconds(exc),
                 jitter_unit=jitter(),

@@ -21,6 +21,36 @@ _background_tasks: set[asyncio.Task[Any]] = set()
 _background_task_owners: dict[asyncio.Task[Any], object] = {}
 
 
+async def run_blocking_until_complete[Result](
+    operation: Callable[..., Result],
+    *args: object,
+) -> Result:
+    """Finish one blocking operation before propagating cancellation."""
+    worker_task = asyncio.create_task(asyncio.to_thread(operation, *args))
+    try:
+        return await asyncio.shield(worker_task)
+    except asyncio.CancelledError as cancellation:
+        worker_error: BaseException | None = None
+        while not worker_task.done():
+            try:
+                await asyncio.shield(worker_task)
+            except asyncio.CancelledError:
+                continue
+            except Exception as exc:
+                worker_error = exc
+                break
+        if worker_error is None:
+            try:
+                worker_task.result()
+            except asyncio.CancelledError as exc:
+                worker_error = exc
+            except Exception as exc:
+                worker_error = exc
+        if worker_error is not None:
+            raise cancellation from worker_error
+        raise
+
+
 def create_background_task(
     coro: Coroutine[Any, Any, Any],
     name: str | None = None,

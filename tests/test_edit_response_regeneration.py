@@ -50,6 +50,7 @@ from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.response_runner import ResponseRequest, _ResponseGenerationOutcome
 from mindroom.session_ids import create_session_id
+from tests.bot_helpers import dispatch_reaction_durably
 from tests.conftest import (
     bind_runtime_paths,
     delivered_matrix_side_effect,
@@ -200,7 +201,7 @@ def _source_metadata(*source_event_ids: str) -> dict[str, SourceEventMetadata]:
 
 def _source_metadata_records(*source_event_ids: str) -> dict[str, dict[str, object]]:
     return {
-        source_event_id: metadata.to_record()
+        source_event_id: metadata._to_record()
         for source_event_id, metadata in _source_metadata(*source_event_ids).items()
     }
 
@@ -3212,7 +3213,7 @@ async def test_handle_message_edit_recovers_missing_ledger_row_from_persisted_ru
     with (
         patch.object(bot._conversation_state_writer, "create_storage", return_value=storage),
         patch(
-            "mindroom.response_runner.ResponseRunner.process_and_respond",
+            "mindroom.response_runner.ResponseRunner._process_and_respond",
             new=AsyncMock(side_effect=process_and_respond),
         ),
         patch("mindroom.response_runner.reprioritize_auto_flush_sessions"),
@@ -3693,7 +3694,7 @@ async def test_handle_message_edit_recovers_newer_run_response_event_id_after_re
     with (
         patch("mindroom.response_runner.should_use_streaming", new_callable=AsyncMock, return_value=False),
         patch(
-            "mindroom.response_runner.ResponseRunner.process_and_respond",
+            "mindroom.response_runner.ResponseRunner._process_and_respond",
             new=AsyncMock(side_effect=process_and_respond),
         ),
         patch("mindroom.response_runner.reprioritize_auto_flush_sessions"),
@@ -3897,7 +3898,7 @@ async def test_on_reaction_tracks_response_event_id(tmp_path: Path) -> None:
         mock_fetch_history.return_value = thread_history_result([], is_full_history=True)
 
         # Process the reaction event
-        await bot._on_reaction(room, reaction_event)
+        await dispatch_reaction_durably(bot, room, reaction_event)
 
         # Verify that the bot tracked the response correctly
         assert bot._turn_store.is_handled("$question:example.com")
@@ -3996,10 +3997,10 @@ async def test_on_reaction_leaves_question_retryable_when_ack_response_is_suppre
         mock_fetch_history.return_value = thread_history_result([], is_full_history=True)
 
         with pytest.raises(RuntimeError, match="no durable terminal outcome"):
-            await bot._on_reaction(room, reaction_event)
+            await dispatch_reaction_durably(bot, room, reaction_event)
 
         assert bot._turn_store.is_handled("$question:example.com") is False
-        assert _response_event_id(bot, "$question:example.com") is None
+        assert _response_event_id(bot, "$question:example.com") == "$ack_event:example.com"
         request = mock_generate_response.await_args.args[0]
         assert request.existing_event_id == "$ack_event:example.com"
         assert request.existing_event_is_placeholder is True
@@ -4220,18 +4221,17 @@ async def test_on_reaction_respects_agent_reply_permissions(tmp_path: Path) -> N
 
     with (
         patch("mindroom.bot.is_authorized_sender", return_value=True),
-        patch("mindroom.bot.config_confirmation.get_pending_change", return_value=None),
         patch.object(bot._delivery_gateway, "send_text", new_callable=AsyncMock) as mock_send_text,
         patch.object(bot._response_runner, "generate_response", new_callable=AsyncMock) as mock_generate_response,
     ):
         mock_send_text.return_value = "$ack_event:example.com"
         mock_generate_response.return_value = _delivery_resolution("$response_event:example.com")
 
-        await bot._on_reaction(room, disallowed_reaction)
+        await dispatch_reaction_durably(bot, room, disallowed_reaction)
         mock_send_text.assert_not_called()
         mock_generate_response.assert_not_called()
 
-        await bot._on_reaction(room, allowed_reaction)
+        await dispatch_reaction_durably(bot, room, allowed_reaction)
 
     interactive._active_questions.clear()
 
@@ -4312,12 +4312,85 @@ async def test_config_confirmation_blocked_by_reply_permissions(tmp_path: Path) 
         patch("mindroom.bot.is_authorized_sender", return_value=True),
         patch("mindroom.bot.config_confirmation.handle_confirmation_reaction", new_callable=AsyncMock) as mock_confirm,
     ):
-        await bot._on_reaction(room, reaction_event)
+        await dispatch_reaction_durably(bot, room, reaction_event)
 
     config_confirmation._pending_changes.clear()
 
     # Bob is disallowed for the router — the confirmation handler must not run.
     mock_confirm.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_committed_config_confirmation_resumes_before_changed_reply_permissions(tmp_path: Path) -> None:
+    """A frozen config decision must finish after that decision changes authorization."""
+    agent_user = AgentMatrixUser(
+        agent_name=ROUTER_AGENT_NAME,
+        user_id=f"@mindroom_{ROUTER_AGENT_NAME}:example.com",
+        display_name="Router",
+        password="test_password",  # noqa: S106
+    )
+    config = _bind_runtime_paths(
+        Config(
+            agents={"assistant": {"display_name": "Assistant", "rooms": ["!test:example.com"]}},
+            authorization={
+                "default_room_access": True,
+                "agent_reply_permissions": {ROUTER_AGENT_NAME: ["@alice:example.com"]},
+            },
+        ),
+        tmp_path,
+    )
+    bot = AgentBot(
+        agent_user=agent_user,
+        storage_path=tmp_path,
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+        rooms=["!test:example.com"],
+    )
+    bot.client = make_matrix_client_mock(user_id=f"@mindroom_{ROUTER_AGENT_NAME}:example.com")
+    replace_edit_regenerator_deps(bot)
+    bot.logger = MagicMock()
+    room = nio.MatrixRoom(
+        room_id="!test:example.com",
+        own_user_id=f"@mindroom_{ROUTER_AGENT_NAME}:example.com",
+    )
+    preview_event_id = "$config_msg:example.com"
+    reaction_event_id = "$reaction_bob:example.com"
+    config_confirmation._pending_changes[preview_event_id] = config_confirmation._PendingConfigChange(
+        requester="@bob:example.com",
+        room_id=room.room_id,
+        thread_id=None,
+        config_path="authorization.agent_reply_permissions.router",
+        old_value=["@bob:example.com"],
+        new_value=["@alice:example.com"],
+        decision_event_id=reaction_event_id,
+        decision_key="✅",
+    )
+    reaction_event = nio.ReactionEvent.from_dict(
+        {
+            "content": {
+                "m.relates_to": {
+                    "rel_type": "m.annotation",
+                    "event_id": preview_event_id,
+                    "key": "✅",
+                },
+            },
+            "event_id": reaction_event_id,
+            "sender": "@bob:example.com",
+            "origin_server_ts": 1000000,
+            "type": "m.reaction",
+            "room_id": room.room_id,
+        },
+    )
+
+    with patch(
+        "mindroom.bot.config_confirmation.resume_committed_confirmation",
+        new_callable=AsyncMock,
+        return_value=True,
+    ) as resume_confirmation:
+        await dispatch_reaction_durably(bot, room, reaction_event)
+
+    config_confirmation._pending_changes.clear()
+    resume_confirmation.assert_awaited_once()
 
 
 @pytest.mark.asyncio

@@ -461,6 +461,7 @@ async def test_hi_command_lists_ad_hoc_present_responder(tmp_path: Path) -> None
         event_cache=make_event_cache_mock(),
         stable_target=MessageTarget.resolve("!adhoc:localhost", None, "$event"),
         record_handled_turn=MagicMock(),
+        record_command_result=AsyncMock(),
         send_response=send_response,
     )
 
@@ -515,6 +516,7 @@ async def test_hi_command_uses_live_responder_candidates_when_available(tmp_path
         event_cache=make_event_cache_mock(),
         stable_target=MessageTarget.resolve("!room:localhost", None, "$event"),
         record_handled_turn=MagicMock(),
+        record_command_result=AsyncMock(),
         send_response=send_response,
         responder_candidates_for_room=candidate_resolver,
     )
@@ -583,6 +585,7 @@ async def test_desktop_command_resolves_exact_agent_from_router_candidates(
         event_cache=make_event_cache_mock(),
         stable_target=MessageTarget.resolve("!room:localhost", None, "$event"),
         record_handled_turn=MagicMock(),
+        record_command_result=AsyncMock(),
         send_response=send_response,
         responder_candidates_for_room=candidate_resolver,
     )

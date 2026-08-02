@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
 from dataclasses import dataclass, replace
 from functools import cached_property
@@ -10,7 +11,7 @@ from typing import TYPE_CHECKING, Any, cast
 from uuid import uuid4
 
 import nio
-from tenacity import retry, retry_if_not_exception_type, stop_after_attempt, wait_exponential
+from tenacity import before_sleep_log, retry, retry_if_not_exception_type, stop_after_attempt, wait_exponential
 
 from mindroom.approval_inbound import (
     handle_tool_approval_action,
@@ -94,10 +95,12 @@ from .delivery_gateway import (
     ResponseHookService,
     SendTextRequest,
 )
+from .dispatch_callback_outcome import TurnDispatchOutcome
 from .dispatch_admission import DispatchCallbackKind, DispatchSourceAdmission
 from .dispatch_obligations import (
     DispatchObligationRunner,
     DispatchObligationStore,
+    DispatchSemanticConsumer,
     callback_kind_for_source_kind,
 )
 from .edit_regenerator import EditRegenerator, EditRegeneratorDeps
@@ -118,6 +121,7 @@ from .matrix.room_member_joins import (
 )
 from .matrix.to_device import AuthenticatedToDeviceEvent
 from .media_inputs import MediaInputs
+from .reaction_dispatch import dispatch_reaction
 from .redacted_turn_cleanup import RedactedTurnCleanup, RedactedTurnCleanupDeps
 from .response_payload_preparation import ResponsePayloadPreparer
 from .response_runner import ResponseRequest, ResponseRunner, ResponseRunnerDeps, prepare_memory_and_model_context
@@ -446,6 +450,7 @@ class AgentBot:
             ),
             on_dispatch_failure=self._retry_failed_coalesced_dispatch,
             on_undelivered_source=self._retry_pending_dispatch_source,
+            on_intentionally_ignored_source=self._settle_ignored_dispatch_source,
         )
         self._hook_context_support = HookContextSupport(
             runtime=self._runtime_view,
@@ -534,8 +539,7 @@ class AgentBot:
                 on_room_lifecycle=self._on_room_member,
                 on_redaction=self._on_redaction,
                 on_decryption_failure=self._on_decryption_failure,
-                turn_is_persisted=lambda event_id: self._turn_store.get_turn_record(event_id) is not None,
-                source_is_deferred=self._coalescing_gate.has_pending_source_event,
+                source_has_live_owner=self._coalescing_gate.has_pending_source_event,
             ),
             room_for_id=self._room_for_dispatch_obligation,
             turn_is_terminal=self._turn_store.is_durably_handled,
@@ -592,6 +596,7 @@ class AgentBot:
                 ingress_hook_runner=self._ingress_hook_runner,
                 generate_response=lambda request: self._run_regenerated_response(request),
                 wait_for_turn_settled=self._turn_store.wait_for_turn_settled,
+                receipt_order=self._dispatch_obligation_runner.receipt_order,
                 interrupted_turn_rooms=self._interrupted_turn_rooms,
                 timestamp_formatter=lambda timestamp_ms: format_timestamp_ms(
                     timestamp_ms,
@@ -654,7 +659,23 @@ class AgentBot:
                 ingress=self._ingress_validator,
                 interrupted_turn_rooms=self._interrupted_turn_rooms,
                 visible_voice_echo=self._visible_voice_echo,
+                settle_ignored_dispatch_sources=(
+                    self._dispatch_obligation_runner.settle_intentionally_ignored_turn_sources
+                ),
+                retry_dispatch_sources=self._dispatch_obligation_runner.retry_pending_turn_sources,
+                recover_config_confirmation_setup=self._recover_config_confirmation_setup,
             ),
+        )
+
+    async def _recover_config_confirmation_setup(self, room_id: str, preview_event_id: str) -> bool:
+        """Recover Matrix-backed config setup without coupling turn control to commands."""
+        if self.client is None:
+            msg = "Matrix client is not ready for config confirmation recovery"
+            raise RuntimeError(msg)
+        return await config_confirmation.recover_confirmation_setup(
+            self.client,
+            room_id,
+            preview_event_id,
         )
 
     async def _wait_until_coalesced_dispatch_allowed(self, key: CoalescingKey) -> None:
@@ -1417,7 +1438,15 @@ class AgentBot:
             try:
                 cache_result = await self._conversation_cache.cache_sync_timeline_for_certification(response)
             except asyncio.CancelledError as exc:
-                cache_result = SyncCacheWriteResult(complete=False, errors=(exc,))
+                limited_room_ids, validation_errors = self._conversation_cache.limited_sync_timeline_room_ids(
+                    response,
+                )
+                cache_result = SyncCacheWriteResult(
+                    complete=False,
+                    limited_room_ids=limited_room_ids,
+                    unrecovered_room_ids=tuple(sorted(response.unrecovered_room_ids)),
+                    errors=(*validation_errors, exc),
+                )
                 await self._certify_sync_response(
                     next_batch=response.next_batch,
                     cache_result=cache_result,
@@ -1710,7 +1739,6 @@ class AgentBot:
 
     async def start(self) -> None:
         """Start the agent bot with user account setup (but don't join rooms yet)."""
-        self._dispatch_obligation_runner.bind_event_loop()
         self._validate_runtime_support_injection_contract_for_startup()
         await self.ensure_user_account()
         matrix_id_before_login = self.matrix_id
@@ -1721,6 +1749,7 @@ class AgentBot:
         )
         try:
             self._rebuild_runtime_components_after_login_if_identity_changed(matrix_id_before_login)
+            self._dispatch_obligation_runner.bind_event_loop()
             orchestrator = self.orchestrator
             if orchestrator is not None:
                 orchestrator.validate_managed_entity_identities()
@@ -1771,7 +1800,7 @@ class AgentBot:
             self.logger.info("agent_setup_complete", user_id=self.agent_user.user_id)
             await self._emit_agent_lifecycle_event(EVENT_AGENT_STARTED)
             create_background_task(
-                self._dispatch_obligation_runner.recover_pending(turn_backed=False),
+                self._recover_non_turn_dispatch_obligations(),
                 name=f"recover_non_turn_dispatch_obligations_{self.agent_name}",
                 owner=self._runtime_view,
             )
@@ -1786,9 +1815,30 @@ class AgentBot:
                     self.logger.warning("Failed to close Matrix client after startup failure", exc_info=True)
             raise
 
+    async def _recover_non_turn_dispatch_obligations(self) -> None:
+        """Retry non-turn callback discovery until the durable store is readable."""
+
+        @retry(
+            wait=wait_exponential(multiplier=1, min=1, max=30),
+            retry=retry_if_not_exception_type(asyncio.CancelledError),
+            before_sleep=before_sleep_log(self.logger, logging.WARNING),
+            reraise=True,
+        )
+        async def recover() -> None:
+            await self._dispatch_obligation_runner.recover_pending(turn_backed=False)
+
+        await recover()
+
     async def recover_pending_turn_dispatch_obligations(self) -> None:
         """Release fleet-dependent turn replay after the responder startup pass."""
         await self._dispatch_obligation_runner.recover_pending(turn_backed=True)
+        unsettled_source_event_ids = await asyncio.to_thread(
+            self._dispatch_obligation_store.unsettled_source_event_ids,
+        )
+        await asyncio.to_thread(
+            self._turn_store.cleanup,
+            unsettled_source_event_ids=unsettled_source_event_ids,
+        )
 
     async def try_start(self) -> bool:
         """Try to start the agent bot with smart retry logic.
@@ -2076,6 +2126,12 @@ class AgentBot:
             callback_kind_for_source_kind(source_kind),
         )
 
+    async def _settle_ignored_dispatch_source(self, source_event_id: str, _source_kind: str) -> None:
+        """Settle one asynchronously normalized source that produced no dispatch payload."""
+        await self._dispatch_obligation_runner.settle_intentionally_ignored_turn_sources(
+            (source_event_id,),
+        )
+
     def _log_matrix_event_callback_started(
         self,
         room: nio.MatrixRoom,
@@ -2098,10 +2154,20 @@ class AgentBot:
             log_context["matrix_event_receive_lag_ms"] = round(receive_timestamp_ms - float(origin_server_ts), 1)
         self.logger.info("matrix_event_callback_started", **log_context)
 
-    async def _on_message(self, room: nio.MatrixRoom, event: nio.RoomMessageText) -> None:
+    async def _on_message(self, room: nio.MatrixRoom, event: nio.RoomMessageText) -> TurnDispatchOutcome:
         """Delegate one inbound text event to the turn engine."""
         receipt_time = time.monotonic()
         self._log_matrix_event_callback_started(room, event, callback_name="message")
+        semantic_consumer = self._dispatch_obligation_runner.semantic_consumer()
+        approval_reply_claimed = semantic_consumer is DispatchSemanticConsumer.APPROVAL_REPLY
+
+        async def claim_approval_reply() -> None:
+            nonlocal approval_reply_claimed
+            await self._dispatch_obligation_runner.claim_semantic_consumer(
+                DispatchSemanticConsumer.APPROVAL_REPLY,
+            )
+            approval_reply_claimed = True
+
         early_reservation_owner = None
         approval_reply_to_event_id = EventInfo.from_event(event.source).reply_to_event_id
         if approval_reply_to_event_id is not None and is_process_active_approval_card(approval_reply_to_event_id):
@@ -2115,16 +2181,19 @@ class AgentBot:
                 receipt_time=receipt_time,
             )
         try:
-            if await maybe_handle_tool_approval_reply(
+            approval_reply_handled = await maybe_handle_tool_approval_reply(
                 room=room,
                 event=event,
                 config=self.config,
                 runtime_paths=self.runtime_paths,
                 orchestrator=self.orchestrator,
                 logger=self.logger,
-            ):
-                return
-            await self._turn_controller.handle_text_event(
+                before_consume=None if approval_reply_claimed else claim_approval_reply,
+                authorization_prevalidated=approval_reply_claimed,
+            )
+            if approval_reply_claimed or approval_reply_handled:
+                return TurnDispatchOutcome.INTENTIONALLY_IGNORED
+            return await self._turn_controller.handle_text_event(
                 room,
                 event,
                 receipt_time=receipt_time,
@@ -2142,7 +2211,13 @@ class AgentBot:
     async def _on_reaction(self, room: nio.MatrixRoom, event: nio.ReactionEvent) -> None:
         """Handle reaction events for interactive questions, stop functionality, and config confirmations."""
         async with self._conversation_resolver.turn_thread_cache_scope():
-            await self._handle_reaction_inner(room, event)
+            await dispatch_reaction(
+                self,
+                room,
+                event,
+                handle_approval_action=handle_tool_approval_action,
+                sender_is_authorized=is_authorized_sender,
+            )
 
     async def _on_room_member(
         self,
@@ -2282,106 +2357,15 @@ class AgentBot:
             reason=payload.reason,
         )
 
-    async def _handle_reaction_inner(self, room: nio.MatrixRoom, event: nio.ReactionEvent) -> None:
-        """Handle one reaction inside the per-turn thread-history cache scope."""
-        assert self.client is not None
-
-        if not is_authorized_sender(
-            event.sender,
-            self.config,
-            room.room_id,
-            self.runtime_paths,
-        ):
-            self.logger.debug("ignoring_reaction_from_unauthorized_sender", user_id=event.sender)
-            return
-
-        requester_user_id = self._ingress_validator.requester_user_id(
-            sender=event.sender,
-            source=event.source,
-        )
-        reservation_owner = self._turn_controller._reserve_prompt_ingress_order(
-            room,
-            requester_user_id,
-            receipt_time=time.monotonic(),
-        )
-        try:
-            if event.key == "✅" and await handle_tool_approval_action(
-                room=room,
-                sender_id=event.sender,
-                config=self.config,
-                runtime_paths=self.runtime_paths,
-                orchestrator=self.orchestrator,
-                logger=self.logger,
-                approval_event_id=event.reacts_to,
-                status="approved",
-                reason=None,
-            ):
-                return
-
-            if not self._turn_policy.can_reply_to_sender(event.sender):
-                self.logger.debug("Ignoring reaction due to reply permissions", sender=event.sender)
-                return
-
-            if event.key == "🛑":
-                sender_agent_name = entity_identity_registry(
-                    self.config,
-                    self.runtime_paths,
-                ).current_entity_name_for_user_id(event.sender)
-                if not sender_agent_name and await self.stop_manager.handle_stop_reaction(event.reacts_to):
-                    self.logger.info(
-                        "Stop requested for message",
-                        message_id=event.reacts_to,
-                        requested_by=event.sender,
-                    )
-                    await self.stop_manager.remove_stop_button(
-                        self.client,
-                        event.reacts_to,
-                        notify_outbound_redaction=self._conversation_cache.notify_outbound_redaction,
-                    )
-                    return
-
-            pending_change = config_confirmation.get_pending_change(event.reacts_to)
-            if pending_change and self.agent_name == ROUTER_AGENT_NAME:
-                await config_confirmation.handle_confirmation_reaction(self, room, event, pending_change)
-                return
-
-            result = await interactive.handle_reaction(
-                self.client,
-                event,
-                self.agent_name,
-                self.config,
-                self.runtime_paths,
-            )
-            if result:
-                # The selection's response may wait behind this conversation's
-                # active turn; the sender's lane slot must settle now, not at
-                # response completion.
-                await reservation_owner.release()
-                await self._turn_controller.handle_interactive_selection(
-                    room,
-                    selection=result,
-                    user_id=event.sender,
-                    source_event_id=event.event_id,
-                )
-                return
-        finally:
-            await reservation_owner.release()
-
-        await self._emit_reaction_received_hooks(
-            room_id=room.room_id,
-            event=event,
-            correlation_id=event.event_id,
-        )
-
     async def _on_media_message(
         self,
         room: nio.MatrixRoom,
         event: MatrixMediaEvent,
-    ) -> None:
+    ) -> TurnDispatchOutcome:
         """Delegate one inbound media event to the turn engine."""
         receipt_time = time.monotonic()
         self._log_matrix_event_callback_started(room, event, callback_name="media")
-        await self._turn_controller.handle_media_event(room, event, receipt_time=receipt_time)
+        return await self._turn_controller.handle_media_event(room, event, receipt_time=receipt_time)
 
     async def _run_regenerated_response(self, request: ResponseRequest) -> str | None:
         """Run one edit-regenerated turn through this bot's response path."""
