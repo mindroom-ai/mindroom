@@ -1125,7 +1125,10 @@ export function Integrations() {
                 onChange={(value) =>
                   setFilterMode(
                     value as
-                      "all" | "available" | "unconfigured" | "configured",
+                      | "all"
+                      | "available"
+                      | "unconfigured"
+                      | "configured",
                   )
                 }
                 size="sm"

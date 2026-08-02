@@ -13,6 +13,8 @@ import pytest
 from mindroom.background_tasks import create_background_task, wait_for_background_tasks
 from mindroom.bot import AgentBot
 from mindroom.cancellation import SYNC_RESTART_CANCEL_MSG
+from mindroom.dispatch_obligations import DispatchCallbackKind
+from mindroom.dispatch_obligations.runner import _DispatchObligationTaskWrapper
 from mindroom.hooks import EVENT_AGENT_STARTED
 from mindroom.matrix.cache import thread_cache_rejection_reason
 from mindroom.matrix.cache.event_cache import EventCacheBackendUnavailableError
@@ -82,7 +84,8 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
                     for callback in start_client.add_event_callback.call_args_list
                     if callback.args[1] is nio.RedactionEvent
                 )
-                assert redaction_callback == bot._on_redaction
+                assert isinstance(redaction_callback, _DispatchObligationTaskWrapper)
+                assert redaction_callback.callback_kind is DispatchCallbackKind.REDACTION
 
                 await bot.stop()
 
@@ -483,8 +486,8 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         assert checkpoint.token == "s_after_complete"  # noqa: S105
 
     @pytest.mark.asyncio
-    async def test_limited_restored_first_sync_clears_token(self, bot: AgentBot) -> None:
-        """Limited restored-token catch-up must fail closed and force a cold retry token."""
+    async def test_limited_restored_first_sync_preserves_continuity(self, bot: AgentBot) -> None:
+        """Limited catch-up must gap the cache without opening a since-less live window."""
         _save_certified_sync_token(bot, "s_before_limited")
         bot._runtime_view.mark_runtime_started()
         bot._sync_cache_trust.state = SyncTrustState.PENDING
@@ -496,8 +499,8 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         await self._run_sync_response_without_startup_side_effects(bot, sync_response)
 
         assert bot._sync_cache_trust.state is SyncTrustState.UNCERTAIN
-        assert bot.client.next_batch is None
-        assert _load_sync_token_value(bot.storage_path, bot.agent_name) is None
+        assert bot.client.next_batch == "s_after_limited"
+        assert _load_sync_token_value(bot.storage_path, bot.agent_name) == "s_before_limited"
         bot.event_cache.mark_room_threads_gap.assert_awaited_once_with(
             "!test:localhost",
             reason="limited_sync_timeline",
@@ -525,7 +528,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             self._sync_response({room_id: MagicMock(timeline=MagicMock(events=[message_event], limited=True))}),
         )
 
-        assert result.certified is False
+        assert result._certified is False
         assert result.limited_room_ids == (room_id,)
         assert result.errors == ()
         event_cache.mark_room_threads_gap.assert_awaited_once_with(
@@ -550,7 +553,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             self._sync_response({room_id: MagicMock(timeline=MagicMock(events=[], limited=True))}),
         )
 
-        assert result.certified is False
+        assert result._certified is False
         assert result.complete is False
         assert result.errors == (marker_error,)
         assert result.limited_room_ids == (room_id,)
@@ -606,7 +609,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             self._sync_response({room_id: MagicMock(timeline=MagicMock(events=[], limited=True))}),
         )
 
-        assert result.certified is False
+        assert result._certified is False
         assert result.complete is False
         assert result.runtime_available is False
         assert result.limited_room_ids == (room_id,)
@@ -665,7 +668,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         finally:
             await _close_bound_runtime_support(bot, support)
 
-        assert result.certified is False
+        assert result._certified is False
         assert result.limited_room_ids == (room_id,)
         assert result.errors == ()
         assert cached_event is not None
@@ -1636,12 +1639,12 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("failure", [RuntimeError("persist failed"), RuntimeError("cache failed")])
-    async def test_live_redaction_failure_rewinds_to_last_certified_sync(
+    async def test_live_redaction_failure_does_not_rewind_raw_sync_position(
         self,
         bot: AgentBot,
         failure: RuntimeError,
     ) -> None:
-        """A critical redaction failure must replay the sync delta on the same client."""
+        """Durable exact work, not raw token rewind, owns redaction retry."""
         room = nio.MatrixRoom(room_id="!test:localhost", own_user_id="@mindroom_agent:localhost")
         redaction_event = MagicMock(spec=nio.RedactionEvent)
         _save_certified_sync_token(bot, "s_before_redaction")
@@ -1658,7 +1661,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         ):
             await bot._on_redaction(room, redaction_event)
 
-        assert bot.client.next_batch == "s_before_redaction"
+        assert bot.client.next_batch == "s_after_redaction"
         assert _load_sync_token_value(bot.storage_path, bot.agent_name) == "s_before_redaction"
 
     @pytest.mark.asyncio

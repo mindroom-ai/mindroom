@@ -14,6 +14,7 @@ from mindroom.logging_config import get_logger
 from mindroom.matrix import state as matrix_state
 from mindroom.matrix.avatar import check_and_set_avatar
 from mindroom.matrix.client_room_admin import (
+    RoomJoinOutcome,
     add_room_to_space,
     create_room,
     create_space,
@@ -469,7 +470,7 @@ async def _ensure_root_space_exists(
     if isinstance(response, nio.RoomResolveAliasResponse):
         space_room_id = str(response.room_id)
         joined_space = space_room_id in client.rooms or space_room_id in joined_room_ids
-        if not joined_space and not await join_room(client, space_room_id):
+        if not joined_space and await join_room(client, space_room_id) is not RoomJoinOutcome.JOINED:
             logger.warning(
                 "Resolved existing root space but router could not join it; skipping reconciliation",
                 space_room_id=space_room_id,
@@ -578,8 +579,8 @@ async def ensure_user_in_rooms(
         logger.info("matrix_user_logged_in", user_id=user_client.user_id)
 
         for room_key, room_id in room_ids.items():
-            join_success = await join_room(user_client, room_id)
-            if join_success:
+            join_outcome = await join_room(user_client, room_id)
+            if join_outcome is RoomJoinOutcome.JOINED:
                 logger.info("matrix_user_joined_room", user_id=user_client.user_id, room_id=room_id, room_key=room_key)
             else:
                 logger.warning(

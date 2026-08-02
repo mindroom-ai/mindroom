@@ -112,8 +112,13 @@ async def test_response_attempt_sends_pending_placeholder_and_tracks_visible_tas
     target = MessageTarget.resolve("!room:localhost", "$thread", "$reply")
     runner, delivery_gateway, stop_manager = _runner()
     seen_message_ids: list[str | None] = []
+    order: list[str] = []
+
+    async def on_visible_response(message_id: str) -> None:
+        order.append(f"visible:{message_id}")
 
     async def response_function(message_id: str | None) -> None:
+        order.append("response")
         seen_message_ids.append(message_id)
 
     message_id = await runner.run(
@@ -122,11 +127,13 @@ async def test_response_attempt_sends_pending_placeholder_and_tracks_visible_tas
             response_function=response_function,
             thinking_message="Thinking...",
             run_id="run-1",
+            on_visible_response=on_visible_response,
         ),
     )
 
     assert message_id == "$thinking"
     assert seen_message_ids == ["$thinking"]
+    assert order == ["visible:$thinking", "response"]
     assert delivery_gateway.sent_requests[0].target == target
     assert delivery_gateway.sent_requests[0].response_text == "Thinking..."
     assert delivery_gateway.sent_requests[0].extra_content == {STREAM_STATUS_KEY: STREAM_STATUS_PENDING}

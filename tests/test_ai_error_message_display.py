@@ -190,7 +190,7 @@ class TestAIErrorDisplay:
             error_msg = "[test_agent] 🔴 Authentication failed. Please check your API key configuration."
             mock_ai.return_value = error_msg
 
-            await bot._response_runner.process_and_respond(
+            await bot._response_runner._process_and_respond(
                 _response_request(existing_event_id="$thinking_msg"),
             )
 
@@ -241,7 +241,7 @@ class TestAIErrorDisplay:
                 ),
             ) as mock_deliver_stream:
                 # Call the method with an existing_event_id
-                await bot._response_runner.process_and_respond_streaming(
+                await bot._response_runner._process_and_respond_streaming(
                     _response_request(existing_event_id="$thinking_msg"),
                 )
 
@@ -276,7 +276,7 @@ class TestAIErrorDisplay:
             _build_response_runner(bot)
             mock_ai.side_effect = asyncio.CancelledError()
 
-            await bot._response_runner.process_and_respond(
+            await bot._response_runner._process_and_respond(
                 _response_request(existing_event_id="$thinking_msg"),
             )
 
@@ -314,7 +314,7 @@ class TestAIErrorDisplay:
             _build_response_runner(bot)
             mock_ai.side_effect = asyncio.CancelledError(USER_STOP_CANCEL_MSG)
 
-            outcome = await bot._response_runner.process_and_respond(
+            outcome = await bot._response_runner._process_and_respond(
                 _response_request(existing_event_id="$thinking_msg"),
             )
 
@@ -382,7 +382,7 @@ class TestAIErrorDisplay:
         ):
             _build_response_runner(bot)
 
-            outcome = await bot._response_runner.process_and_respond(
+            outcome = await bot._response_runner._process_and_respond(
                 _response_request(existing_event_id="$thinking_msg"),
             )
 
@@ -449,7 +449,7 @@ class TestAIErrorDisplay:
             _build_response_runner(bot)
             mock_agent.arun = MagicMock(return_value=fake_arun_stream())
 
-            outcome = await bot._response_runner.process_and_respond(
+            outcome = await bot._response_runner._process_and_respond(
                 _response_request(existing_event_id="$thinking_msg"),
             )
 
@@ -512,7 +512,7 @@ class TestAIErrorDisplay:
             _build_response_runner(bot)
             mock_agent.arun = MagicMock(return_value=fake_arun_stream())
 
-            outcome = await bot._response_runner.process_and_respond_streaming(
+            outcome = await bot._response_runner._process_and_respond_streaming(
                 _response_request(existing_event_id="$thinking_msg"),
             )
 
@@ -562,7 +562,7 @@ class TestAIErrorDisplay:
                 _build_response_runner(bot)
                 mock_ai.return_value = error_msg
 
-                await bot._response_runner.process_and_respond(
+                await bot._response_runner._process_and_respond(
                     _response_request(
                         prompt="Help me",
                         existing_event_id=f"$thinking_{error_messages.index(error_msg)}",
@@ -614,7 +614,7 @@ class TestAIErrorDisplay:
             _build_response_runner(bot)
             mock_ai.side_effect = asyncio.CancelledError(SYNC_RESTART_CANCEL_MSG)
 
-            await bot._response_runner.process_and_respond(
+            await bot._response_runner._process_and_respond(
                 _response_request(existing_event_id="$thinking_msg"),
             )
 
@@ -645,7 +645,7 @@ class TestAIErrorDisplay:
             _build_response_runner(bot)
             mock_ai.return_value = "Response without knowledge"
 
-            generation = await bot._response_runner.process_and_respond(
+            generation = await bot._response_runner._process_and_respond(
                 _response_request(),
             )
 

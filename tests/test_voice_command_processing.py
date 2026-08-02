@@ -27,6 +27,7 @@ from mindroom.constants import (
     VOICE_RAW_AUDIO_FALLBACK_KEY,
     VOICE_TRANSCRIPT_KEY,
 )
+from mindroom.dispatch_callback_outcome import TurnDispatchOutcome
 from mindroom.dispatch_handoff import PreparedTextEvent
 from mindroom.dispatch_source import TRUSTED_INTERNAL_RELAY_SOURCE_KIND, VOICE_SOURCE_KIND
 from mindroom.handled_turns import TurnRecord
@@ -222,7 +223,11 @@ async def test_router_processes_own_voice_transcriptions(tmp_path) -> None:  # n
     }
 
     with (
-        patch("mindroom.turn_controller.TurnController._execute_command", new_callable=AsyncMock) as mock_handle,
+        patch.object(
+            bot._command_turn_executor,
+            "execute_if_owned",
+            new=AsyncMock(return_value=True),
+        ) as mock_handle,
         patch("mindroom.turn_controller.interactive.handle_text_response", new_callable=AsyncMock, return_value=None),
         patch("mindroom.text_ingress_dispatch.is_dm_room", return_value=False),
     ):
@@ -263,7 +268,11 @@ async def test_router_ignores_non_voice_self_messages(tmp_path) -> None:  # noqa
     event.source = {"content": {"body": "Regular message from router"}}
 
     with (
-        patch("mindroom.turn_controller.TurnController._execute_command", new_callable=AsyncMock) as mock_handle,
+        patch.object(
+            bot._command_turn_executor,
+            "execute_if_owned",
+            new=AsyncMock(return_value=True),
+        ) as mock_handle,
         patch("mindroom.turn_controller.interactive.handle_text_response", new_callable=AsyncMock, return_value=None),
         patch("mindroom.text_ingress_dispatch.is_dm_room", return_value=False),
     ):
@@ -775,9 +784,7 @@ async def test_router_ignores_audio_events_from_internal_agents(tmp_path) -> Non
     mock_voice.assert_not_called()
     mock_download_audio.assert_not_called()
     send_response.assert_not_called()
-    turn_store.record_turn.assert_called_once_with(
-        TurnRecord.create(["$agent_audio_event"]),
-    )
+    turn_store.record_turn.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -1130,7 +1137,7 @@ async def test_concurrent_voice_redelivery_shares_visible_echo_lifecycle(tmp_pat
     ):
         bot._delivery_gateway.send_text.side_effect = send_placeholder
         await bot._turn_controller.handle_media_event(room, event)
-        await bot._turn_controller.handle_media_event(room, event)
+        redelivery = asyncio.create_task(bot._turn_controller.handle_media_event(room, event))
         try:
             await asyncio.wait_for(normalization_started.wait(), timeout=1)
             await asyncio.wait_for(placeholder_send_started.wait(), timeout=1)
@@ -1140,7 +1147,8 @@ async def test_concurrent_voice_redelivery_shares_visible_echo_lifecycle(tmp_pat
         finally:
             allow_normalization.set()
             allow_placeholder_send.set()
-            await drain_coalescing(bot)
+        assert await asyncio.wait_for(redelivery, timeout=1) is TurnDispatchOutcome.DEFERRED
+        await drain_coalescing(bot)
 
     bot._delivery_gateway.send_text.assert_awaited_once()
     bot._delivery_gateway.edit_text.assert_awaited_once()
@@ -1663,6 +1671,11 @@ async def test_router_visible_voice_echo_is_not_duplicated_when_handoff_retries(
         patch("mindroom.voice_handler._handle_voice_message", new_callable=AsyncMock) as mock_voice,
         patch("mindroom.ingress_validation.is_authorized_sender", return_value=True),
         patch("mindroom.turn_controller.suggest_responder_for_message", new_callable=AsyncMock, return_value="home"),
+        patch(
+            "mindroom.visible_response_reconciliation.find_response_event_ids_via_room_messages",
+            new_callable=AsyncMock,
+            return_value=frozenset(),
+        ),
     ):
         mock_download_audio.return_value = Audio(content=b"voice-bytes", mime_type="audio/ogg")
         mock_voice.return_value = f"{VOICE_PREFIX}summarize this audio"
@@ -1726,6 +1739,11 @@ async def test_router_visible_voice_echo_is_not_duplicated_when_handoff_retries_
         patch("mindroom.voice_handler._handle_voice_message", new_callable=AsyncMock) as mock_voice,
         patch("mindroom.ingress_validation.is_authorized_sender", return_value=True),
         patch("mindroom.turn_controller.suggest_responder_for_message", new_callable=AsyncMock, return_value="home"),
+        patch(
+            "mindroom.visible_response_reconciliation.find_response_event_ids_via_room_messages",
+            new_callable=AsyncMock,
+            return_value=frozenset(),
+        ),
     ):
         mock_download_audio.return_value = Audio(content=b"voice-bytes", mime_type="audio/ogg")
         mock_voice.return_value = f"{VOICE_PREFIX}summarize this audio"
@@ -1805,22 +1823,19 @@ async def test_router_routes_transcribed_audio_when_multiple_agents_are_present(
         ATTACHMENT_IDS_KEY: [_attachment_id_for_event("$voice_event")],
         VOICE_TRANSCRIPT_KEY: True,
     }
-    turn_store.record_turn.assert_called_once_with(
-        replace(
-            TurnRecord.create(
-                ["$voice_event"],
-                response_event_id="$response",
-            ),
-            response_owner=ROUTER_AGENT_NAME,
-            requester_id="@alice:example.com",
-            correlation_id="$voice_event",
-            history_scope=None,
-            conversation_target=MessageTarget.resolve(
-                room_id=room.room_id,
-                thread_id="$voice_event",
-                reply_to_event_id="$voice_event",
-            ),
-        ),
+    turn_store.record_turn.assert_called_once()
+    record = turn_store.get_turn_record("$voice_event")
+    assert record is not None
+    assert record.completed is True
+    assert record.response_event_id == "$response"
+    assert record.response_owner == ROUTER_AGENT_NAME
+    assert record.requester_id == "@alice:example.com"
+    assert record.correlation_id == "$voice_event"
+    assert record.history_scope is None
+    assert record.conversation_target == MessageTarget.resolve(
+        room_id=room.room_id,
+        thread_id="$voice_event",
+        reply_to_event_id="$voice_event",
     )
 
 

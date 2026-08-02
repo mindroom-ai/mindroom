@@ -516,7 +516,7 @@ class ConversationResolver:
                 room.room_id,
                 event_info,
                 event_id=event.event_id,
-                access=self.thread_membership_access(
+                access=self._thread_membership_access(
                     mode=ThreadReadMode.DISPATCH_SNAPSHOT,
                     caller_label="coalescing_thread_id",
                 ),
@@ -543,7 +543,7 @@ class ConversationResolver:
         caller_label: str,
     ) -> _ThreadIdLookup:
         """Resolve thread membership and identify unproven dispatch candidates."""
-        access = self.thread_membership_access(
+        access = self._thread_membership_access(
             mode=mode,
             caller_label=caller_label,
         )
@@ -579,13 +579,13 @@ class ConversationResolver:
         return await resolve_related_event_thread_id_best_effort(
             room_id,
             related_event_id,
-            access=self.thread_membership_access(
+            access=self._thread_membership_access(
                 mode=ThreadReadMode.DISPATCH_SNAPSHOT,
                 caller_label=caller_label,
             ),
         )
 
-    def thread_membership_access(
+    def _thread_membership_access(
         self,
         *,
         mode: ThreadReadMode,

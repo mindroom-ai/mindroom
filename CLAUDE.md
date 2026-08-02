@@ -62,6 +62,7 @@ Gemini API docs call `gemini-3.1-flash-image` Nano Banana 2, while Vertex AI doc
 ```text
 Matrix sync callback
   -> bot.py (AgentBot/TeamBot runtime shell)
+  -> dispatch_obligations/                                 (durable exact callback acceptance and restart recovery)
   -> turn_controller.py (owns one turn: precheck -> normalize -> resolve -> coalesce -> decide -> execute -> record)
        -> ingress_validation.py                                  (trust, dedup, echo drop; commands exit before batching)
        -> inbound_turn_normalizer.py + conversation_resolver.py  (canonical turn input, conversation identity)
@@ -95,6 +96,12 @@ Matrix sync callback
 | `text_ingress_dispatch.py` | Text ingress dispatch path used by TurnController |
 | `turn_policy.py` | Pure turn policy: decide ignore, route, or respond for inbound turns |
 | `dispatch_replay_guard.py` | Replay-guard checks for dispatch sequencing |
+| `dispatch_obligations/` | Durable exact Matrix callback storage, admission, execution, and startup recovery |
+| `turn_settlement_retry.py` | Event-loop retry owner for settling callback obligations after terminal TurnStore persistence |
+| `command_turn_executor.py` | Command execution and durable command/config mutation journals |
+| `reaction_dispatch.py` | Durable semantic routing for Matrix reactions |
+| `user_stop_reconciliation.py` | STOP ordering, response cancellation, and terminal turn reconciliation |
+| `visible_response_reconciliation.py` | Visible Matrix response recovery, adoption, and replay reconciliation |
 | `turn_store.py` | Unified durable turn access (wraps the handled-turn ledger) |
 | `handled_turns.py` | Disk-backed handled-turn ledger preventing duplicate responses |
 | `redacted_turn_cleanup.py` | Source-redaction tombstoning and serialized persisted replay cleanup |
@@ -200,7 +207,7 @@ Matrix sync callback
 - `learning/` – Per-agent Agno Learning preference data
 - `chroma/` – ChromaDB storage backing the memory system
 - `knowledge_db/` – Knowledge base vector stores for file-backed RAG
-- `tracking/` – Durable handled-turn ledger to avoid duplicate replies
+- `tracking/` – Durable handled-turn ledger plus exact callback obligations and compact terminal tombstones
 - `credentials/` – JSON secrets synchronized from `.env`
 - `encryption_keys/` – Matrix E2E encryption keys
 - `culture/` – Shared culture state
@@ -350,7 +357,7 @@ Teams (`src/mindroom/teams.py`) let multiple agents work together:
 - **Documentation Line Style**: In Markdown docs, write one sentence per line, and never split a single sentence across multiple lines.
 - Do not wrap things in try-excepts unless it's necessary. Avoid wrapping things that should not fail.
 - NEVER put imports in the function, unless it is to avoid circular imports or to keep a heavy import (for example a provider SDK) out of module import time. Prefer an explicit function-level `from x import Y` with `# noqa: PLC0415` over dynamic `import_module` indirection. Imports should be at the top of the file.
-- `tests/test_import_graph.py` pins which third-party packages the slim entry points (config, tool registry, sandbox runner) may import and bans provider SDKs from the primary runtime. If it fails on your change, defer the new import to first use; extend the allowlist only when the dependency is genuinely needed at import time.
+- `tests/test_import_graph.py` pins the complete third-party import surface of slim CLI, config, tool-registry, and sandbox entry points, and bans heavy optional provider, storage, and ML/data dependencies from the primary runtime. If it fails on your change, defer the new import to first use; extend the allowlist only when the dependency is genuinely needed at import time.
 - Do not use `getattr()` or `hasattr()` to weaken a typed interface or probe for fields that the declared type should guarantee.
 - If mocks or tests break, fix them to use proper typed objects or stricter mocks instead of adding dynamic attribute fallbacks in production code.
 - **Merge and forget**: Code you touch should be polished enough to never revisit. Fix rough edges in code you're already changing.

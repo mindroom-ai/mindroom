@@ -116,6 +116,16 @@ The key question is:
 
 If there is still a prompt gap, the agent should keep working before review.
 
+## Never interrupt an in-flight independent review for a fix
+
+When parallel reviewers are running, let every reviewer finish its full pass even after another reviewer reports a blocker.
+A blocker from one reviewer does not justify restarting or cancelling the other reviewers, because they may still find unrelated problems elsewhere in the PR.
+Apply verified fixes in parallel when useful, but preserve every complete review report before moving reviewers to a new commit.
+After the full passes finish, consolidate their findings into one fix batch.
+Then ask the same reviewers to verify the exact fix delta and final SHA.
+Only require another whole-PR pass when the fix materially changes architecture or when the active review policy explicitly requires it.
+If a whole-PR exact-head rerun is required, start it only after all reviews of the previous SHA have completed and their reports are saved.
+
 ## Review loop
 
 Once the agent has completed the prompt-reread pass, run this loop.

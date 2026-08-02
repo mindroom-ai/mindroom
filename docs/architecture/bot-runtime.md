@@ -57,6 +57,42 @@ Matrix callback
 `TurnStore` owns durable turn truth.
 `DeliveryGateway` owns Matrix transport only.
 
+## Durable Dispatch Boundary
+
+Nio pre-fanout admission callbacks persist each correctness-critical Matrix timeline callback before any ordinary event callback can run.
+Each exact Matrix principal and entity stores pending replay payloads and permanent compact tombstones in its own `tracking/dispatch_obligations-<entity>-<principal-sha256-prefix>.sqlite3` file.
+This file boundary prevents one entity's admission write from waiting on another entity's SQLite write transaction.
+Its exact key combines the Matrix principal, entity, source event, and callback kind, while unsettled rows retain the original room and event source for replay.
+Unsettled rows distinguish callbacks that still need execution from callbacks that completed and deferred their source to downstream turn work.
+Settled rows become permanent exact-key tombstones and atomically scrub that replay payload, keeping terminal truth compact without allowing an old callback to reappear.
+Each entity database therefore grows by one compact row per settled callback except successful invites, whose synthetic obligations are deleted so later re-invites can run.
+Operators can inspect growth by running `SELECT state, COUNT(*) FROM dispatch_obligations GROUP BY state;` against each dispatch-obligation database.
+Terminal rows must not be deleted unless duplicate callback execution after future Matrix redelivery is acceptable.
+Classic Sync tokens are opaque and may be invalidated, forcing a no-`since` sync whose limited timeline backfill can redeliver an older event, so there is no checkpoint-relative pruning frontier that preserves exact de-duplication.
+Successful and intentionally ignored callbacks settle explicitly, while failures and cancellations remain pending for direct startup recovery.
+Callback failures remain autonomously retry-owned with capped exponential backoff until they settle or deterministic corruption parks them for operator repair.
+Visible response paths persist `TurnStore` truth, while pure policy ignores, unmentioned managed senders, blocked deep synthetic relays, and commands owned by another entity compact their exact dispatch-obligation tombstones directly.
+This keeps ignored high-volume traffic out of the handled-turn JSON ledger without weakening exact callback de-duplication.
+An in-memory claim loser waits for the competing owner, then yields to durable terminal truth or retries ingress when that owner exits without a terminal outcome.
+Ingress-lane readiness and delivery failures return the exact source to the existing durable retry owner after the lane releases it.
+A successful empty readiness result explicitly settles the exact source as intentionally ignored instead of repeating download or transcription work forever.
+Router delivery failure raises back into that same retry path instead of completing without terminal truth.
+Recovery parses and invokes pending work without depending on a later Classic Sync token or Sliding Sync position.
+Recovery callbacks may rely on the room ID, while cached membership and state are best-effort because recovery does not wait for a new sync.
+Recovery logs and skips a corrupt pending row so other valid rows can continue, while retaining the corrupt row for repair.
+To repair corruption, stop MindRoom, back up the affected database, and restore a known-good copy before restarting.
+Deleting an unrecoverable pending row is a last resort that accepts losing that callback unless Matrix redelivers it.
+Message and media obligations remain unsettled only while their callback, gate, competing turn claim, retry, or a pending `TurnStore` response owns them, then yield only to an explicit compact outcome.
+Recovery intent travels with queued ingress so pre-existing lane and coalescing workers cannot turn a temporarily unavailable recovered router target into a terminal fallback response.
+Raw sync-cache continuity remains owned separately by `SyncCacheTrust`, so a durable pending dispatch obligation is sufficient to preserve a certified checkpoint.
+Nio persists limited-timeline recovery without owning the sync token, while `SyncCacheTrust` retains the pre-gap checkpoint until nio reports no unresolved room gaps.
+Classic Sync response-owned lifecycle hooks and their durable de-duplication markers complete before `SyncCacheTrust` certifies the response checkpoint.
+Live `room-member-joined` hooks are at-least-once because hook emission happens before the durable seen marker, so a marker write failure replays the hook instead of losing it.
+Invite and response-owned lifecycle paths use the same runner directly because they are outside nio timeline fanout.
+The matching ordinary nio event callbacks only load and execute already-persisted work after every admission callback succeeds, and may then continue in the background.
+Auxiliary call-manager membership and unknown-event callbacks remain best-effort reconciliation wakeups because their standalone event payloads cannot replay the current room call state; the manager reconciles joined rooms after sync and retries transient state fetches directly.
+To-device call inputs and desktop pairing receivers also remain best-effort because they do not share a stable replayable timeline-event identity, so failures in these auxiliary paths are logged without dispatch-obligation ownership.
+
 ## Completed Simplifications
 
 `TurnController` is now the only normal-turn owner.
@@ -68,6 +104,13 @@ It no longer sends messages, runs AI, or writes persistence state.
 `TurnStore` is now the main durable turn boundary for the extracted runtime flows.
 `TurnController` and `EditRegenerator` read and write through `TurnStore` instead of owning their own persistence helpers.
 Command handling now records terminal outcomes through `TurnStore` as well.
+Potentially mutating chat commands use an at-most-once execution-attempt journal: `TurnStore` records that execution is about to begin before the handler runs, then records the exact result before visible delivery.
+Recovery re-delivers a recorded result, while an interrupted execution attempt without a result is not rerun and instead produces an explicit uncertain-outcome response that requires the requester to inspect state before retrying.
+Startup loads turn truth without pruning, recovers turn-backed dispatch obligations, then applies age and count cleanup while retaining pending redaction work, replayable incomplete turns, and every group referenced by a raw unsettled callback row.
+Recovery and its post-recovery ledger cleanup run under one background retry owner, independently of bot startup and Matrix sync lifecycle progress.
+Multi-purpose callbacks durably claim one application consumer before that consumer's side effects, and recovery routes only to the claimed consumer instead of rediscovering intent from mutable runtime state.
+Consumer-owned side effects remain responsible for their own replay semantics; for example, generic reaction hooks are at-least-once.
+`!config set` uses a separate Matrix-backed `preview -> decision -> execution -> result` journal because its mutation begins only after the requester reacts to the preview.
 
 `TurnRecord` is the single immutable schema for turn identity, outcome, and regeneration facts.
 One codec projects that schema into the versioned handled-turn ledger and recoverable Agno run metadata.

@@ -13,10 +13,12 @@ import pytest
 from mindroom.bot import AgentBot
 from mindroom.cancellation import USER_STOP_CANCEL_MSG
 from mindroom.config.main import Config
+from mindroom.handled_turns import TurnRecord
 from mindroom.logging_config import setup_logging
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.stop import StopManager
+from tests.bot_helpers import dispatch_reaction_durably
 from tests.conftest import (
     bind_runtime_paths,
     install_send_response_mock,
@@ -57,6 +59,22 @@ def _stop_test_agent_user(config: Config) -> AgentMatrixUser:
     )
 
 
+def _record_pending_response(bot: AgentBot, message_id: str, target: MessageTarget) -> None:
+    """Mirror the durable response intent that owns every real stop button."""
+    bot._turn_store.record_pending_turn(
+        TurnRecord.create(
+            [f"{message_id}-source"],
+            response_event_id=message_id,
+            completed=False,
+            response_owner=bot.agent_name,
+            requester_id="@user:example.com",
+            conversation_target=target,
+        ),
+    )
+    bot._delivery_gateway.finalize_user_stopped_response = AsyncMock(return_value=True)
+    bot._dispatch_obligation_runner.receipt_order = AsyncMock(return_value=1)
+
+
 @pytest.mark.asyncio
 async def test_stop_emoji_only_stops_during_generation(tmp_path: Path) -> None:
     """Test that 🛑 reaction only acts as stop button during message generation."""
@@ -75,7 +93,6 @@ async def test_stop_emoji_only_stops_during_generation(tmp_path: Path) -> None:
     bot.client = AsyncMock(spec=nio.AsyncClient)
     bot.client.user_id = agent_user.user_id
     bot.logger = MagicMock()
-    bot.stop_manager = StopManager()
     send_response = AsyncMock(return_value="$stopping:example.com")
     install_send_response_mock(bot, send_response)
 
@@ -105,7 +122,7 @@ async def test_stop_emoji_only_stops_during_generation(tmp_path: Path) -> None:
         mock_handle_reaction.return_value = None
 
         # Case 1: Message is NOT being generated - should handle as interactive
-        await bot._on_reaction(room, reaction_event)
+        await dispatch_reaction_durably(bot, room, reaction_event)
 
         # Should have called interactive.handle_reaction since message wasn't being tracked
         mock_handle_reaction.assert_called_once()
@@ -117,14 +134,26 @@ async def test_stop_emoji_only_stops_during_generation(tmp_path: Path) -> None:
         # Track a message as being generated
         task = MagicMock()  # Use MagicMock instead of AsyncMock for the task
         task.done = MagicMock(return_value=False)  # done() is a regular method, not async
+        target = MessageTarget.resolve("!test:example.com", None, "$message:example.com")
         bot.stop_manager.set_current(
             message_id="$message:example.com",
-            target=MessageTarget.resolve("!test:example.com", None, "$message:example.com"),
+            target=target,
             task=task,
         )
+        _record_pending_response(bot, "$message:example.com", target)
 
-        # Process the same reaction again
-        await bot._on_reaction(room, reaction_event)
+        # A second physical reaction reaches the same STOP target.
+        active_reaction_event = nio.ReactionEvent.from_dict(
+            {
+                "content": reaction_event.source["content"],
+                "event_id": "$active-reaction:example.com",
+                "sender": reaction_event.sender,
+                "origin_server_ts": 1000001,
+                "type": "m.reaction",
+                "room_id": room.room_id,
+            },
+        )
+        await dispatch_reaction_durably(bot, room, active_reaction_event)
 
         # Should NOT have called interactive.handle_reaction since it was handled as stop
         mock_handle_reaction.assert_not_called()
@@ -151,7 +180,6 @@ async def test_stop_emoji_hard_cancels_and_schedules_agno_cleanup_when_run_id_pr
     bot.client = AsyncMock(spec=nio.AsyncClient)
     bot.client.user_id = agent_user.user_id
     bot.logger = MagicMock()
-    bot.stop_manager = StopManager()
     send_response = AsyncMock(return_value="$stopping:example.com")
     install_send_response_mock(bot, send_response)
 
@@ -175,15 +203,17 @@ async def test_stop_emoji_hard_cancels_and_schedules_agno_cleanup_when_run_id_pr
 
     task = MagicMock()
     task.done = MagicMock(return_value=False)
+    target = MessageTarget.resolve("!test:example.com", None, "$message:example.com")
     bot.stop_manager.set_current(
         message_id="$message:example.com",
-        target=MessageTarget.resolve("!test:example.com", None, "$message:example.com"),
+        target=target,
         task=task,
         run_id="run-123",
     )
+    _record_pending_response(bot, "$message:example.com", target)
 
     with patch.object(bot.stop_manager, "_schedule_graceful_run_cancel") as mock_schedule_cancel:
-        await bot._on_reaction(room, reaction_event)
+        await dispatch_reaction_durably(bot, room, reaction_event)
 
     mock_schedule_cancel.assert_called_once_with("$message:example.com", "run-123")
     task.cancel.assert_called_once_with(msg=USER_STOP_CANCEL_MSG)
@@ -207,7 +237,6 @@ async def test_stop_emoji_threaded_target_sends_no_acknowledgement(tmp_path: Pat
     bot.client = AsyncMock(spec=nio.AsyncClient)
     bot.client.user_id = agent_user.user_id
     bot.logger = MagicMock()
-    bot.stop_manager = StopManager()
     send_response = AsyncMock(return_value="$stopping:example.com")
     install_send_response_mock(bot, send_response)
 
@@ -231,15 +260,17 @@ async def test_stop_emoji_threaded_target_sends_no_acknowledgement(tmp_path: Pat
 
     task = MagicMock()
     task.done = MagicMock(return_value=False)
+    target = MessageTarget.resolve("!test:example.com", "$thread:example.com", "$message:example.com")
     bot.stop_manager.set_current(
         message_id="$message:example.com",
-        target=MessageTarget.resolve("!test:example.com", "$thread:example.com", "$message:example.com"),
+        target=target,
         task=task,
         run_id="run-123",
     )
+    _record_pending_response(bot, "$message:example.com", target)
 
     with patch.object(bot.stop_manager, "_schedule_graceful_run_cancel") as mock_schedule_cancel:
-        await bot._on_reaction(room, reaction_event)
+        await dispatch_reaction_durably(bot, room, reaction_event)
 
     mock_schedule_cancel.assert_called_once_with("$message:example.com", "run-123")
     task.cancel.assert_called_once_with(msg=USER_STOP_CANCEL_MSG)
@@ -274,7 +305,7 @@ async def test_stop_manager_force_cancels_task_when_run_never_becomes_cancellabl
     )
 
     with patch("mindroom.stop.acancel_run", new=AsyncMock(return_value=False)):
-        assert await stop_manager.handle_stop_reaction("$message:example.com") is True
+        assert stop_manager.request_stop_if("$message:example.com", lambda: True) is True
         await asyncio.wait_for(task_cancelled.wait(), timeout=0.2)
         await _drain_stop_cleanup(stop_manager)
 
@@ -362,7 +393,7 @@ async def test_stop_manager_force_cancels_task_when_graceful_cancel_errors() -> 
     )
 
     with patch("mindroom.stop.acancel_run", new=AsyncMock(side_effect=RuntimeError("redis down"))):
-        assert await stop_manager.handle_stop_reaction("$message:example.com") is True
+        assert stop_manager.request_stop_if("$message:example.com", lambda: True) is True
         await asyncio.wait_for(task_cancelled.wait(), timeout=0.2)
         await _drain_stop_cleanup(stop_manager)
 
@@ -391,7 +422,7 @@ async def test_stop_manager_logs_tracked_thread_context(
         target=target,
         task=task,
     )
-    assert await stop_manager.handle_stop_reaction("$message:example.org") is True
+    assert stop_manager.request_stop_if("$message:example.org", lambda: True) is True
 
     payloads = [json.loads(line) for line in capsys.readouterr().err.strip().splitlines()]
     tracking_payload = next(payload for payload in payloads if payload["event"] == "Tracking message generation")
@@ -437,7 +468,7 @@ async def test_stop_manager_immediately_cancels_task_even_when_acancel_run_succe
         return True
 
     with patch("mindroom.stop.acancel_run", new=graceful_cancel_run):
-        assert await stop_manager.handle_stop_reaction("$message:example.com") is True
+        assert stop_manager.request_stop_if("$message:example.com", lambda: True) is True
         await asyncio.wait_for(task_cancelled.wait(), timeout=0.1)
         await asyncio.wait_for(cleanup_requested.wait(), timeout=0.2)
         await _drain_stop_cleanup(stop_manager)
@@ -480,7 +511,7 @@ async def test_stop_manager_immediately_cancels_task_when_acancel_run_is_slow() 
     )
 
     with patch("mindroom.stop.acancel_run", new=hanging_cancel_run):
-        assert await stop_manager.handle_stop_reaction("$message:example.com") is True
+        assert stop_manager.request_stop_if("$message:example.com", lambda: True) is True
         await asyncio.wait_for(task_cancelled.wait(), timeout=0.1)
         await asyncio.wait_for(cancellation_manager_started.wait(), timeout=0.2)
         await _drain_stop_cleanup(stop_manager)
@@ -529,7 +560,7 @@ async def test_stop_manager_retries_until_run_becomes_cancellable() -> None:
     )
 
     with patch("mindroom.stop.acancel_run", new=fake_acancel_run):
-        assert await stop_manager.handle_stop_reaction("$message:example.com") is True
+        assert stop_manager.request_stop_if("$message:example.com", lambda: True) is True
         await asyncio.wait_for(hard_cancelled.wait(), timeout=0.1)
         await _drain_stop_cleanup(stop_manager)
 
@@ -579,7 +610,7 @@ async def test_stop_manager_reprobes_when_retry_updates_run_id() -> None:
     )
 
     with patch("mindroom.stop.acancel_run", new=fake_acancel_run):
-        assert await stop_manager.handle_stop_reaction("$message:example.com") is True
+        assert stop_manager.request_stop_if("$message:example.com", lambda: True) is True
         await asyncio.wait_for(hard_cancelled.wait(), timeout=0.1)
         await asyncio.wait_for(first_cancel_attempt.wait(), timeout=0.2)
         stop_manager.update_run_id("$message:example.com", "run-456")
@@ -614,7 +645,7 @@ async def test_stop_manager_cleanup_uses_captured_run_id_after_task_finishes() -
 
     cancel_run = AsyncMock(return_value=True)
     with patch("mindroom.stop.acancel_run", new=cancel_run):
-        assert await stop_manager.handle_stop_reaction("$message:example.com") is True
+        assert stop_manager.request_stop_if("$message:example.com", lambda: True) is True
         with pytest.raises(asyncio.CancelledError):
             await task
         await _drain_stop_cleanup(stop_manager)
@@ -657,7 +688,6 @@ async def test_stop_emoji_from_agent_falls_through(tmp_path: Path) -> None:
     bot.client = AsyncMock(spec=nio.AsyncClient)
     bot.client.user_id = agent_user.user_id
     bot.logger = MagicMock()
-    bot.stop_manager = StopManager()
 
     room = nio.MatrixRoom(room_id="!test:localhost", own_user_id=agent_user.user_id)
 
@@ -679,10 +709,7 @@ async def test_stop_emoji_from_agent_falls_through(tmp_path: Path) -> None:
         },
     )
 
-    with (
-        patch("mindroom.bot.interactive.handle_reaction") as mock_handle_reaction,
-        patch("mindroom.bot.config_confirmation.get_pending_change", return_value=None),
-    ):
+    with patch("mindroom.bot.interactive.handle_reaction") as mock_handle_reaction:
         mock_handle_reaction.return_value = None  # No interactive result
 
         # Track a message as being generated
@@ -695,7 +722,7 @@ async def test_stop_emoji_from_agent_falls_through(tmp_path: Path) -> None:
         )
 
         # Process the reaction from an agent
-        await bot._on_reaction(room, reaction_event)
+        await dispatch_reaction_durably(bot, room, reaction_event)
 
         # Should have called interactive.handle_reaction (fell through)
         mock_handle_reaction.assert_called_once()
@@ -735,7 +762,6 @@ async def test_stop_reaction_blocked_by_reply_permissions(tmp_path: Path) -> Non
     bot.client = AsyncMock(spec=nio.AsyncClient)
     bot.client.user_id = agent_user.user_id
     bot.logger = MagicMock()
-    bot.stop_manager = StopManager()
 
     room = nio.MatrixRoom(room_id="!test:example.com", own_user_id=agent_user.user_id)
 
@@ -770,7 +796,7 @@ async def test_stop_reaction_blocked_by_reply_permissions(tmp_path: Path) -> Non
     install_send_response_mock(bot, send_response)
 
     with patch("mindroom.bot.is_authorized_sender", return_value=True):
-        await bot._on_reaction(room, reaction_event)
+        await dispatch_reaction_durably(bot, room, reaction_event)
 
     # Task should NOT have been cancelled — sender is disallowed
     task.cancel.assert_not_called()

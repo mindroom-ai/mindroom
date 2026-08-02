@@ -34,7 +34,9 @@ class SyncCacheTrust:
     logger: structlog.stdlib.BoundLogger
     state: SyncTrustState = SyncTrustState.COLD
     checkpoint: SyncCheckpoint | None = None
-    _awaiting_initial_window: bool = field(default=False, init=False, repr=False)
+    _cache_scope_epoch: int = field(default=0, init=False, repr=False)
+    _dispatch_persist_failure_epoch: int = field(default=0, init=False, repr=False)
+    _observed_dispatch_persist_failure_epoch: int = field(default=0, init=False, repr=False)
 
     async def prepare_startup(self) -> str | None:
         """Initialize cache trust, then restore a valid checkpoint or start cold."""
@@ -54,7 +56,6 @@ class SyncCacheTrust:
 
         self.state = SyncTrustState.PENDING if loaded is not None else SyncTrustState.COLD
         self.checkpoint = None
-        self._awaiting_initial_window = loaded is None
         return loaded.token if loaded is not None else None
 
     def _load_valid_checkpoint(self) -> SyncCheckpoint | None:
@@ -100,19 +101,45 @@ class SyncCacheTrust:
 
     def invalidate_for_cache_scope_cleanup(self) -> bool:
         """Invalidate continuity before principal- or room-owned rows are removed."""
+        self._cache_scope_epoch += 1
         self.state = SyncTrustState.UNCERTAIN
         self.checkpoint = None
         if self._clear_saved():
             return True
-        self.runtime.mark_callback_failed()
         self.runtime.event_cache.disable("sync_checkpoint_clear_failed")
-        self.logger.warning("matrix_cache_scope_cleanup_deferred_until_checkpoint_replay")
+        self.logger.warning("matrix_cache_scope_cleanup_checkpoint_clear_failed")
         return False
 
-    def mark_callback_failed(self) -> None:
-        """Poison sync continuity after a Matrix callback failure."""
-        self.runtime.mark_callback_failed()
-        self.invalidate_for_cache_scope_cleanup()
+    def record_dispatch_persist_failure(self) -> None:
+        """Latch one source callback rejected before durable ownership."""
+        self._dispatch_persist_failure_epoch += 1
+
+    def _consume_dispatch_persist_failure(self) -> bool:
+        """Reject certification once for every newly observed failure epoch."""
+        failure_epoch = self._dispatch_persist_failure_epoch
+        if failure_epoch == self._observed_dispatch_persist_failure_epoch:
+            return False
+        self._observed_dispatch_persist_failure_epoch = failure_epoch
+        self.logger.warning(
+            "matrix_sync_certification_rejected_after_dispatch_persist_failure",
+            dispatch_persist_failure_epoch=failure_epoch,
+        )
+        return True
+
+    def reject_response_before_certification(self) -> None:
+        """Consume any admission failure owned by an aborted sync response."""
+        self._consume_dispatch_persist_failure()
+
+    def apply_response_after_dispatch_acceptance(
+        self,
+        decision: SyncCertificationDecision,
+        *,
+        cache_result: SyncCacheWriteResult,
+    ) -> tuple[SyncCertificationDecision, bool]:
+        """Apply a plan only when its source callbacks all reached durable ownership."""
+        if self._consume_dispatch_persist_failure():
+            return decision, True
+        return self._apply_response(decision, cache_result=cache_result), False
 
     def certify_response(
         self,
@@ -122,29 +149,50 @@ class SyncCacheTrust:
         first_sync: bool,
     ) -> SyncCertificationDecision:
         """Apply the certification decision for one completed sync response."""
+        decision = self.plan_response(
+            next_batch=next_batch,
+            cache_result=cache_result,
+            first_sync=first_sync,
+        )
+        return self._apply_response(decision, cache_result=cache_result)
+
+    def plan_response(
+        self,
+        *,
+        next_batch: str | None,
+        cache_result: SyncCacheWriteResult,
+        first_sync: bool,
+    ) -> SyncCertificationDecision:
+        """Plan certification without advancing runtime or durable continuity."""
         decision = certify_sync_response(
             self.state,
             next_batch=next_batch,
             cache_result=cache_result,
             first_sync=first_sync,
         )
-        limited_timeline = bool(cache_result.limited_room_ids)
-        if limited_timeline and not self._awaiting_initial_window:
-            decision = replace(decision, reset_client_token=True)
+        return replace(decision, cache_scope_epoch=self._cache_scope_epoch)
+
+    def _apply_response(
+        self,
+        decision: SyncCertificationDecision,
+        *,
+        cache_result: SyncCacheWriteResult,
+    ) -> SyncCertificationDecision:
+        """Apply a planned response after its prerequisite durable work completes."""
+        if decision.cache_scope_epoch != self._cache_scope_epoch:
+            decision = SyncCertificationDecision(
+                state=SyncTrustState.UNCERTAIN,
+                clear_saved_token=True,
+                reset_client_token=True,
+                reason="cache_scope_invalidated",
+                cache_scope_epoch=self._cache_scope_epoch,
+            )
         self._apply_decision(decision, cache_result=cache_result)
-        # Re-arm from applied trust, not from the decision: _apply_decision rejects
-        # certification while a callback failure is outstanding, and a rejected
-        # certification must not license another since-less replay.
-        if decision.reset_client_token:
-            self._awaiting_initial_window = True
-        elif self.state is SyncTrustState.CERTIFIED:
-            self._awaiting_initial_window = False
         return decision
 
     def reject_unknown_pos(self) -> SyncCertificationDecision:
         """Invalidate a checkpoint rejected by the homeserver."""
         decision = handle_unknown_pos()
-        self._awaiting_initial_window = True
         self._apply_decision(decision)
         return decision
 
@@ -155,18 +203,6 @@ class SyncCacheTrust:
         cache_result: SyncCacheWriteResult | None = None,
     ) -> None:
         """Apply one certifier decision to trust state and durable storage."""
-        callback_failure_count = self.runtime.callback_failure_count
-        if callback_failure_count:
-            self.state = SyncTrustState.UNCERTAIN
-            self.checkpoint = None
-            self._clear_saved()
-            self.logger.warning(
-                "matrix_sync_certification_uncertain",
-                reason="callback_failed",
-                callback_failure_count=callback_failure_count,
-            )
-            return
-
         self.state = decision.state
         self.checkpoint = decision.checkpoint_to_save
         if decision.clear_saved_token:
@@ -190,7 +226,7 @@ class SyncCacheTrust:
         self._clear_saved()
 
     def retry_token(self) -> str | None:
-        """Select a generation-safe token for replaying a failed sync response."""
+        """Return the generation-safe checkpoint for work rejected before durability."""
         if self.checkpoint is not None:
             return self.checkpoint.token
         try:

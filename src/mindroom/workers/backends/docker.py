@@ -62,6 +62,7 @@ from mindroom.workers.backends.docker_config import (
 )
 from mindroom.workers.backends.docker_projection import PROJECTED_CONFIGS_DIRNAME, DockerProjectionManager
 from mindroom.workers.backends.local import LocalWorkerStatePaths, local_worker_state_paths_for_root
+from mindroom.workers.compatibility import WORKER_PROTOCOL_VERSION
 from mindroom.workers.models import (
     ProgressSink,
     WorkerHandle,
@@ -204,6 +205,34 @@ def _resolved_docker_image_identity(
         docker_errors=docker_errors,
     )
     return resolved_identity
+
+
+def _worker_health_compatibility_error(response: httpx.Response, *, image: str) -> str | None:
+    """Return an actionable error when a ready worker speaks another protocol."""
+    try:
+        payload = response.json()
+    except ValueError:
+        payload = None
+
+    if not isinstance(payload, dict):
+        reported_protocol: object = "missing"
+        reported_version: object = "unknown"
+    else:
+        reported_protocol = payload.get("worker_protocol", "missing")
+        reported_version = payload.get("mindroom_version", "unknown")
+
+    if (
+        isinstance(reported_protocol, int)
+        and not isinstance(reported_protocol, bool)
+        and reported_protocol == WORKER_PROTOCOL_VERSION
+    ):
+        return None
+    return (
+        f"Docker worker image '{image}' is incompatible with this MindRoom runtime: "
+        f"expected worker protocol {WORKER_PROTOCOL_VERSION}, got {reported_protocol} "
+        f"(worker MindRoom version {reported_version}). "
+        "Use a worker image built for this MindRoom release."
+    )
 
 
 def ensure_docker_dependencies(runtime_paths: RuntimePaths | None = None) -> None:
@@ -766,6 +795,12 @@ class DockerWorkerBackend:
                     response = None
 
                 if response is not None and 200 <= response.status_code < 300:
+                    compatibility_error = _worker_health_compatibility_error(
+                        response,
+                        image=self.config.image,
+                    )
+                    if compatibility_error is not None:
+                        raise WorkerBackendError(compatibility_error)
                     return f"{endpoint_root}/api/sandbox-runner/execute"
 
                 if time.time() >= deadline:

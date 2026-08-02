@@ -171,6 +171,57 @@ def _plugin(name: str, callbacks: list[object]) -> object:
 
 
 @pytest.mark.asyncio
+async def test_turn_recovery_cleans_ledger_after_reading_unsettled_sources(tmp_path: Path) -> None:
+    """Startup cleanup must run after recovery and preserve every raw unsettled source."""
+    bot = _agent_bot(tmp_path)
+    call_order: list[str] = []
+    unsettled_source_event_ids = frozenset({"$pending"})
+    bot._dispatch_obligation_runner.recover_pending = AsyncMock(
+        side_effect=lambda **_kwargs: call_order.append("recover"),
+    )
+    bot._dispatch_obligation_store.unsettled_source_event_ids = MagicMock(
+        side_effect=lambda: (call_order.append("unsettled"), unsettled_source_event_ids)[1],
+    )
+    bot._turn_store.cleanup = MagicMock(side_effect=lambda **_kwargs: call_order.append("cleanup"))
+
+    await bot.recover_pending_turn_dispatch_obligations()
+
+    assert call_order == ["recover", "unsettled", "cleanup"]
+    bot._dispatch_obligation_runner.recover_pending.assert_awaited_once_with(turn_backed=True)
+    bot._turn_store.cleanup.assert_called_once_with(
+        unsettled_source_event_ids=unsettled_source_event_ids,
+    )
+
+
+@pytest.mark.asyncio
+async def test_turn_recovery_propagates_post_recovery_cleanup_failure(tmp_path: Path) -> None:
+    """Ledger pruning failure must remain visible to the orchestrator retry owner."""
+    bot = _agent_bot(tmp_path)
+    bot._dispatch_obligation_runner.recover_pending = AsyncMock()
+    bot._dispatch_obligation_store.unsettled_source_event_ids = MagicMock(return_value=frozenset())
+    bot._turn_store.cleanup = MagicMock(side_effect=OSError("disk unavailable"))
+
+    with pytest.raises(OSError, match="disk unavailable"):
+        await bot.recover_pending_turn_dispatch_obligations()
+
+    bot._dispatch_obligation_runner.recover_pending.assert_awaited_once_with(turn_backed=True)
+    bot._turn_store.cleanup.assert_called_once_with(unsettled_source_event_ids=frozenset())
+
+
+@pytest.mark.asyncio
+async def test_non_turn_recovery_retries_store_enumeration_failure(tmp_path: Path) -> None:
+    """A transient discovery failure must not strand accepted non-turn callbacks."""
+    bot = _agent_bot(tmp_path)
+    bot._dispatch_obligation_runner.recover_pending = AsyncMock(side_effect=[OSError("disk unavailable"), None])
+
+    with patch("mindroom.bot.wait_exponential", return_value=lambda _retry_state: 0):
+        await bot._recover_non_turn_dispatch_obligations()
+
+    assert bot._dispatch_obligation_runner.recover_pending.await_count == 2
+    bot._dispatch_obligation_runner.recover_pending.assert_awaited_with(turn_backed=False)
+
+
+@pytest.mark.asyncio
 async def test_bot_ready_fires_on_first_sync_response(tmp_path: Path) -> None:
     """bot:ready should fire when the first sync response is received."""
     bot = _agent_bot(tmp_path)
@@ -480,6 +531,28 @@ async def test_bot_ready_fires_only_once(tmp_path: Path) -> None:
         await bot._on_sync_response(MagicMock())
 
     assert fired_count == 1
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_ready_notification_retries_after_failure(tmp_path: Path) -> None:
+    """A transient readiness failure must retry after the first sync was recorded."""
+    bot = _agent_bot(tmp_path)
+    bot.client = AsyncMock()
+    orchestrator = MagicMock()
+    orchestrator.handle_bot_ready = AsyncMock(side_effect=[RuntimeError("transient recovery failure"), None])
+    bot.orchestrator = orchestrator
+
+    with (
+        patch("mindroom.bot.mark_matrix_sync_success", return_value=datetime.now(UTC)),
+        pytest.raises(RuntimeError, match="transient recovery failure"),
+    ):
+        await bot._on_sync_response(MagicMock())
+
+    with patch("mindroom.bot.mark_matrix_sync_success", return_value=datetime.now(UTC)):
+        await bot._on_sync_response(MagicMock())
+
+    assert bot.first_sync_complete
+    assert orchestrator.handle_bot_ready.await_count == 2
 
 
 @pytest.mark.asyncio

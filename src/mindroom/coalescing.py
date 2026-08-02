@@ -32,6 +32,7 @@ from .coalescing_policy import (
     queue_kind,
     source_or_event_allows_room_scope_batching,
 )
+from .dispatch_recovery_context import turn_dispatch_recovery_scope
 from .dispatch_source import ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND
 from .ingress_lanes import IngressAdmissionClosedError, IngressLanes, LaneSlot
 from .logging_config import get_logger
@@ -192,6 +193,9 @@ class CoalescingGate:
         room_scope_is_single_conversation: Callable[[str], bool] | None = None,
         dispatch_allowed_now: Callable[[CoalescingKey], bool] | None = None,
         timestamp_formatter: TimestampFormatter | None = None,
+        on_dispatch_failure: Callable[[tuple[PendingEvent, ...]], None] | None = None,
+        on_undelivered_source: Callable[[str, str], None] | None = None,
+        on_intentionally_ignored_source: Callable[[str, str], Awaitable[None]] | None = None,
     ) -> None:
         self._dispatch_batch = dispatch_batch
         self._debounce_seconds = debounce_seconds
@@ -200,14 +204,33 @@ class CoalescingGate:
         self._room_scope_is_single_conversation = room_scope_is_single_conversation
         self._dispatch_allowed_now = dispatch_allowed_now
         self._timestamp_formatter = timestamp_formatter
+        self._on_dispatch_failure = on_dispatch_failure
+        self._on_undelivered_source = on_undelivered_source
+        self._on_intentionally_ignored_source = on_intentionally_ignored_source
         self._gates: dict[CoalescingKey, _GateEntry] = {}
-        self._lanes = IngressLanes(deliver=self._admit_from_lane)
+        self._lanes = IngressLanes(
+            deliver=self._admit_from_lane,
+            on_undelivered_source=self._handle_undelivered_lane_source,
+            on_intentionally_ignored_source=self._handle_intentionally_ignored_lane_source,
+        )
         self._active_drain_context: _DrainContext | None = None
 
     @property
     def lanes(self) -> IngressLanes:
         """Return the per-(room, sender) ingress lanes feeding this gate."""
         return self._lanes
+
+    def has_pending_source_event(self, source_event_id: str) -> bool:
+        """Return whether a lane or coalescing gate still owns one exact source."""
+        return self._lanes.has_pending_source_event(source_event_id) or self._gate_owns_source_event(source_event_id)
+
+    def _gate_owns_source_event(self, source_event_id: str) -> bool:
+        """Return whether one live coalescing gate owns this exact source."""
+        return any(
+            queued.source_event_id == source_event_id
+            for gate in self._gates.values()
+            for queued in (*gate.claimed_admissions, *gate.queue)
+        )
 
     def enter_lane(
         self,
@@ -231,6 +254,7 @@ class CoalescingGate:
         key: CoalescingKey,
         source_event_id: str | None,
         source_kind: str,
+        callback_source_kind: str | None = None,
         ready_result: ReadyPendingEvent | None = None,
         ready_task: asyncio.Task[ReadyPendingEvent | None] | None = None,
         received_at: float | None = None,
@@ -241,6 +265,7 @@ class CoalescingGate:
             key=key,
             source_event_id=source_event_id,
             source_kind=source_kind,
+            callback_source_kind=callback_source_kind,
             ready_result=ready_result,
             ready_task=ready_task,
             received_at=received_at,
@@ -250,6 +275,20 @@ class CoalescingGate:
     def release_lane_slot(self, slot: LaneSlot) -> None:
         """Release one lane slot that will not be admitted."""
         self._lanes.release(slot)
+
+    def _handle_undelivered_lane_source(self, source_event_id: str, source_kind: str) -> None:
+        """Return a source that left its lane without another live gate owner."""
+        if self.has_pending_source_event(source_event_id):
+            return
+        if self._on_undelivered_source is not None:
+            self._on_undelivered_source(source_event_id, source_kind)
+
+    async def _handle_intentionally_ignored_lane_source(self, source_event_id: str, source_kind: str) -> None:
+        """Settle a source whose asynchronous readiness completed with no payload."""
+        if self._gate_owns_source_event(source_event_id):
+            return
+        if self._on_intentionally_ignored_source is not None:
+            await self._on_intentionally_ignored_source(source_event_id, source_kind)
 
     def _conversation_is_busy(self, key: CoalescingKey) -> bool:
         return self._dispatch_allowed_now is not None and not self._dispatch_allowed_now(key)
@@ -809,9 +848,12 @@ class CoalescingGate:
         key: CoalescingKey,
         gate: _GateEntry,
         segment_owner: ClaimedSegmentOwner,
-    ) -> None:
+    ) -> bool:
         try:
-            await self._dispatch_events(key, gate, segment_owner.pending_events)
+            with turn_dispatch_recovery_scope(
+                active=any(event.turn_dispatch_recovery for event in segment_owner.pending_events),
+            ):
+                await self._dispatch_events(key, gate, segment_owner.pending_events)
         except asyncio.CancelledError:
             segment_owner.close_metadata_once()
             if (drain_context := self._current_drain_context(gate)) is not None:
@@ -822,6 +864,9 @@ class CoalescingGate:
             if (drain_context := self._current_drain_context(gate)) is not None:
                 drain_context.result.dispatch_failure_count += 1
             self._log_dispatch_failure(key, gate, error)
+            return False
+        else:
+            return True
 
     async def _dispatch_claim(
         self,
@@ -832,9 +877,10 @@ class CoalescingGate:
         """Dispatch one claimed admission set with one cleanup owner."""
         pending_events = [admission.pending_event for admission in admissions]
         segment_owner: ClaimedSegmentOwner | None = None
+        dispatched = False
         try:
             segment_owner = ClaimedSegmentOwner(pending_events=pending_events)
-            await self._dispatch_claimed_events(key, gate, segment_owner)
+            dispatched = await self._dispatch_claimed_events(key, gate, segment_owner)
         except BaseException:
             if segment_owner is not None:
                 closed_before = segment_owner.metadata_closed
@@ -844,6 +890,8 @@ class CoalescingGate:
             raise
         finally:
             self._clear_claimed_admissions(gate, admissions)
+        if not dispatched and self._on_dispatch_failure is not None:
+            self._on_dispatch_failure(tuple(pending_events))
 
     async def _dispatch_front_barrier(
         self,

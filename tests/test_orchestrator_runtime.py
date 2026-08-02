@@ -22,6 +22,7 @@ from mindroom.approval_manager import (
     initialize_approval_store,
 )
 from mindroom.authorization import is_authorized_sender as is_authorized_sender_for_test
+from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.bot import AgentBot
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
@@ -40,6 +41,8 @@ from mindroom.matrix.users import INTERNAL_USER_ACCOUNT_KEY, AgentMatrixUser
 from mindroom.orchestration.config_updates import ConfigUpdatePlan
 from mindroom.orchestration.plugin_watch import _collect_plugin_root_changes
 from mindroom.orchestration.runtime import (
+    STARTUP_RETRY_INITIAL_DELAY_SECONDS,
+    STARTUP_RETRY_MAX_DELAY_SECONDS,
     _matrix_homeserver_startup_timeout_seconds_from_env,
     run_with_retry,
     wait_for_matrix_homeserver,
@@ -74,6 +77,7 @@ from tests.bot_helpers import (
     _approval_reload_config,
     _approval_removal_plan,
     _cleanup_recorder,
+    _configured_team_test_config,
     _live_pending_approval,
     _mock_approval_reload_bot,
     _mock_managed_bot,
@@ -163,7 +167,7 @@ class TestAgentBot(AgentBotTestBase):
             del send
 
         server = _SignalAwareUvicornServer(
-            uvicorn.Config(app, host="0.0.0.0", port=0, lifespan="off"),  # noqa: S104
+            uvicorn.Config(app, host="0.0.0.0", port=0, lifespan="off", ws="websockets-sansio"),  # noqa: S104
             asyncio.Event(),
         )
         server.config.load()
@@ -201,7 +205,7 @@ class TestAgentBot(AgentBotTestBase):
                 set_api_server_address("127.0.0.1", 8765)
 
         with (
-            patch("mindroom.orchestrator.uvicorn.Config", return_value=object()),
+            patch("mindroom.orchestrator.uvicorn.Config", return_value=object()) as mock_uvicorn_config,
             patch("mindroom.orchestrator._SignalAwareUvicornServer", ReturningServer),
             patch("mindroom.api.main.initialize_api_app"),
             patch("mindroom.api.main.bind_orchestrator_knowledge_refresh_scheduler"),
@@ -216,6 +220,13 @@ class TestAgentBot(AgentBotTestBase):
                 shutdown_requested=asyncio.Event(),
             )
 
+        mock_uvicorn_config.assert_called_once_with(
+            ANY,
+            host="127.0.0.1",
+            port=0,
+            log_level="info",
+            ws="websockets-sansio",
+        )
         mock_error.assert_called_once()
         assert mock_error.call_args.args == ("fatal_embedded_api_server_exit",)
         assert get_api_server_address() is None
@@ -1550,6 +1561,7 @@ class TestMultiAgentOrchestrator:
         bot = MagicMock()
         bot.agent_name = "router"
         bot.try_start = AsyncMock(return_value=True)
+        bot.recover_pending_turn_dispatch_obligations = AsyncMock()
         bot.stop = AsyncMock()
         orchestrator.agent_bots = {"router": bot}
 
@@ -1589,6 +1601,7 @@ class TestMultiAgentOrchestrator:
         bot = MagicMock()
         bot.agent_name = "router"
         bot.try_start = AsyncMock(return_value=True)
+        bot.recover_pending_turn_dispatch_obligations = AsyncMock()
         bot.stop = AsyncMock()
         orchestrator.agent_bots = {"router": bot}
 
@@ -1636,6 +1649,7 @@ class TestMultiAgentOrchestrator:
             return True
 
         bot.try_start = AsyncMock(side_effect=_start_bot)
+        bot.recover_pending_turn_dispatch_obligations = AsyncMock()
 
         async def _emit_bot_ready(_response: object) -> None:
             await orchestrator.handle_bot_ready(bot)
@@ -1845,6 +1859,7 @@ class TestMultiAgentOrchestrator:
             bot = MagicMock()
             bot.agent_name = "router"
             bot.try_start = AsyncMock(return_value=True)
+            bot.recover_pending_turn_dispatch_obligations = AsyncMock()
             bot.stop = AsyncMock()
             orchestrator.agent_bots = {"router": bot}
 
@@ -2043,6 +2058,7 @@ class TestMultiAgentOrchestrator:
         router_bot = MagicMock()
         router_bot.agent_name = "router"
         router_bot.try_start = AsyncMock(return_value=True)
+        router_bot.recover_pending_turn_dispatch_obligations = AsyncMock()
         router_bot.stop = AsyncMock()
 
         failing_bot = MagicMock()
@@ -2065,6 +2081,454 @@ class TestMultiAgentOrchestrator:
         mock_schedule_retry.assert_awaited_once_with("general")
 
     @pytest.mark.asyncio
+    async def test_full_startup_does_not_recover_router_before_first_sync(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Initial startup must wait for router and responder generation first syncs."""
+        orchestrator = _MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path))
+        orchestrator.config = MagicMock()
+        responder_started = False
+        runtime_support_bound = False
+
+        router_bot = MagicMock()
+        router_bot.agent_name = ROUTER_AGENT_NAME
+        router_bot.running = True
+        router_bot.first_sync_complete = False
+        router_bot.try_start = AsyncMock(return_value=True)
+        router_bot.stop = AsyncMock()
+
+        async def recover_router_turns() -> None:
+            assert responder_started
+            assert runtime_support_bound
+
+        router_bot.recover_pending_turn_dispatch_obligations = AsyncMock(side_effect=recover_router_turns)
+
+        responder_bot = MagicMock()
+        responder_bot.agent_name = "general"
+        responder_bot.running = False
+        responder_bot.first_sync_complete = False
+
+        async def start_responder() -> bool:
+            nonlocal responder_started
+            responder_started = True
+            responder_bot.running = True
+            return True
+
+        responder_bot.try_start = AsyncMock(side_effect=start_responder)
+        responder_bot.stop = AsyncMock()
+        orchestrator.agent_bots = {ROUTER_AGENT_NAME: router_bot, "general": responder_bot}
+
+        def bind_runtime_support(_bots: list[object]) -> None:
+            nonlocal runtime_support_bound
+            runtime_support_bound = True
+
+        with (
+            patch("mindroom.orchestrator.wait_for_matrix_homeserver", new=AsyncMock()),
+            patch.object(orchestrator, "_setup_rooms_and_memberships", new=AsyncMock()),
+            patch.object(orchestrator, "_sync_runtime_support_services", new=AsyncMock()),
+            patch.object(orchestrator, "_bind_started_runtime_support_services", side_effect=bind_runtime_support),
+            patch("mindroom.orchestrator.sync_forever_with_restart", new=AsyncMock()),
+        ):
+            await _run_orchestrator_start_until_ready(orchestrator)
+
+        router_bot.recover_pending_turn_dispatch_obligations.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_router_turn_recovery_delegates_unready_responder_filtering(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Router replay must filter unready dependencies per durable obligation."""
+        config = _runtime_bound_config(
+            Config(
+                agents={
+                    "general": AgentConfig(
+                        display_name="General",
+                        role="General assistant",
+                    ),
+                },
+            ),
+            tmp_path,
+        )
+        orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths_for(config))
+        orchestrator.config = config
+
+        router_bot = MagicMock()
+        router_bot.agent_name = ROUTER_AGENT_NAME
+        router_bot.running = True
+        router_bot.first_sync_complete = True
+        router_bot.recover_pending_turn_dispatch_obligations = AsyncMock()
+
+        responder_bot = MagicMock()
+        responder_bot.agent_name = "general"
+        responder_bot.running = True
+        responder_bot.first_sync_complete = False
+        responder_bot.recover_pending_turn_dispatch_obligations = AsyncMock()
+
+        orchestrator.agent_bots = {
+            ROUTER_AGENT_NAME: router_bot,
+            "general": responder_bot,
+        }
+
+        await orchestrator._recover_ready_turn_dispatch_obligations()
+        router_bot.recover_pending_turn_dispatch_obligations.assert_awaited_once_with()
+
+        responder_bot.first_sync_complete = True
+        with patch.object(orchestrator._approval_transport, "handle_bot_ready", new=AsyncMock()):
+            await orchestrator.handle_bot_ready(responder_bot)
+        assert await wait_for_background_tasks(
+            timeout=1,
+            owner=orchestrator._dispatch_recovery_task_owner,
+        )
+
+        assert router_bot.recover_pending_turn_dispatch_obligations.await_count == 2
+        responder_bot.recover_pending_turn_dispatch_obligations.assert_awaited_once_with()
+
+    @pytest.mark.asyncio
+    async def test_scheduled_turn_recovery_isolates_and_retries_one_bot_failure(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """One transient store failure must not strand this or any later ready bot."""
+        config = _runtime_bound_config(
+            Config(agents={"general": AgentConfig(display_name="General", role="General assistant")}),
+            tmp_path,
+        )
+        orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths_for(config))
+        orchestrator.config = config
+
+        router_bot = MagicMock()
+        router_bot.running = True
+        router_bot.first_sync_complete = True
+        router_bot.recover_pending_turn_dispatch_obligations = AsyncMock(
+            side_effect=[OSError("store unavailable"), None],
+        )
+        responder_bot = MagicMock()
+        responder_bot.running = True
+        responder_bot.first_sync_complete = True
+        responder_bot.recover_pending_turn_dispatch_obligations = AsyncMock()
+        orchestrator.agent_bots = {ROUTER_AGENT_NAME: router_bot, "general": responder_bot}
+
+        with patch("mindroom.orchestration.runtime.retry_delay_seconds", return_value=0) as retry_delay:
+            orchestrator._schedule_ready_turn_dispatch_recovery()
+            assert await wait_for_background_tasks(
+                timeout=1,
+                owner=orchestrator._dispatch_recovery_task_owner,
+            )
+
+        assert router_bot.recover_pending_turn_dispatch_obligations.await_count == 2
+        assert responder_bot.recover_pending_turn_dispatch_obligations.await_count == 2
+        retry_delay.assert_called_once_with(
+            1,
+            initial_delay_seconds=STARTUP_RETRY_INITIAL_DELAY_SECONDS,
+            max_delay_seconds=STARTUP_RETRY_MAX_DELAY_SECONDS,
+        )
+        assert not orchestrator._dispatch_recovery_requested
+        assert orchestrator._dispatch_recovery_task is None
+
+    @pytest.mark.asyncio
+    async def test_regular_agent_turn_recovery_waits_for_own_first_sync(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """A regular agent must recover turns only after its room state is current."""
+        config = _runtime_bound_config(
+            Config(
+                agents={
+                    "general": AgentConfig(
+                        display_name="General",
+                        role="General assistant",
+                    ),
+                },
+            ),
+            tmp_path,
+        )
+        orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths_for(config))
+        orchestrator.config = config
+
+        bot = MagicMock()
+        bot.running = True
+        bot.first_sync_complete = False
+        bot.recover_pending_turn_dispatch_obligations = AsyncMock()
+        orchestrator.agent_bots = {"general": bot}
+
+        await orchestrator._recover_ready_turn_dispatch_obligations()
+        bot.recover_pending_turn_dispatch_obligations.assert_not_awaited()
+
+        bot.first_sync_complete = True
+        await orchestrator._recover_ready_turn_dispatch_obligations()
+
+        bot.recover_pending_turn_dispatch_obligations.assert_awaited_once_with()
+
+    @pytest.mark.asyncio
+    async def test_router_turn_recovery_ignores_running_unready_unrelated_agent(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """A running stuck responder must not park unrelated durable router work."""
+        config = _runtime_bound_config(
+            Config(
+                agents={
+                    "healthy": AgentConfig(display_name="Healthy", role="Available responder"),
+                    "failed": AgentConfig(display_name="Failed", role="Unavailable responder"),
+                },
+            ),
+            tmp_path,
+        )
+        orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths_for(config))
+        orchestrator.config = config
+
+        router_bot = MagicMock()
+        router_bot.running = True
+        router_bot.first_sync_complete = True
+        router_bot.recover_pending_turn_dispatch_obligations = AsyncMock()
+
+        healthy_bot = MagicMock()
+        healthy_bot.running = True
+        healthy_bot.first_sync_complete = True
+        healthy_bot.recover_pending_turn_dispatch_obligations = AsyncMock()
+
+        stuck_bot = MagicMock()
+        stuck_bot.running = True
+        stuck_bot.first_sync_complete = False
+        stuck_bot.recover_pending_turn_dispatch_obligations = AsyncMock()
+
+        orchestrator.agent_bots = {
+            ROUTER_AGENT_NAME: router_bot,
+            "healthy": healthy_bot,
+            "failed": stuck_bot,
+        }
+
+        await orchestrator._recover_ready_turn_dispatch_obligations()
+
+        router_bot.recover_pending_turn_dispatch_obligations.assert_awaited_once_with()
+        healthy_bot.recover_pending_turn_dispatch_obligations.assert_awaited_once_with()
+        stuck_bot.recover_pending_turn_dispatch_obligations.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_bot_ready_schedules_blocked_turn_recovery_without_blocking_sync(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Ready callbacks must not await full recovered turns on the sync task."""
+        config = _runtime_bound_config(Config(), tmp_path)
+        orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths_for(config))
+        orchestrator.config = config
+        recovery_started = asyncio.Event()
+        release_recovery = asyncio.Event()
+
+        async def recover_turns() -> None:
+            recovery_started.set()
+            await release_recovery.wait()
+
+        router_bot = MagicMock()
+        router_bot.running = True
+        router_bot.first_sync_complete = True
+        router_bot.recover_pending_turn_dispatch_obligations = AsyncMock(side_effect=recover_turns)
+        orchestrator.agent_bots = {ROUTER_AGENT_NAME: router_bot}
+
+        with patch.object(orchestrator._approval_transport, "handle_bot_ready", new=AsyncMock()):
+            ready_task = asyncio.create_task(orchestrator.handle_bot_ready(router_bot))
+            try:
+                await recovery_started.wait()
+                assert ready_task.done()
+                recovery_task = orchestrator._dispatch_recovery_task
+                assert recovery_task is not None
+                assert not recovery_task.done()
+            finally:
+                release_recovery.set()
+                await ready_task
+
+        assert await wait_for_background_tasks(
+            timeout=1,
+            owner=orchestrator._dispatch_recovery_task_owner,
+        )
+        assert recovery_task.done()
+
+    @pytest.mark.asyncio
+    async def test_full_startup_does_not_recover_team_before_member_first_sync(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Team turn replay must wait until a concurrently starting member is available."""
+        config = _configured_team_test_config(tmp_path)
+        orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths_for(config))
+        orchestrator.config = config
+        team_started = asyncio.Event()
+        member_starting = asyncio.Event()
+        release_member = asyncio.Event()
+
+        router_bot = MagicMock()
+        router_bot.agent_name = ROUTER_AGENT_NAME
+        router_bot.running = True
+        router_bot.try_start = AsyncMock(return_value=True)
+        router_bot.recover_pending_turn_dispatch_obligations = AsyncMock()
+        router_bot.stop = AsyncMock()
+
+        team_bot = MagicMock()
+        team_bot.agent_name = "support_team"
+        team_bot.running = False
+        team_bot.first_sync_complete = False
+
+        async def start_team() -> bool:
+            team_bot.running = True
+            team_started.set()
+            return True
+
+        async def recover_team_turns() -> None:
+            assert team_bot.running
+            assert member_bot.running
+
+        team_bot.try_start = AsyncMock(side_effect=start_team)
+        team_bot.recover_pending_turn_dispatch_obligations = AsyncMock(side_effect=recover_team_turns)
+        team_bot.stop = AsyncMock()
+
+        member_bot = MagicMock()
+        member_bot.agent_name = "general"
+        member_bot.running = False
+        member_bot.first_sync_complete = False
+        member_bot.recover_pending_turn_dispatch_obligations = AsyncMock()
+
+        async def start_member() -> bool:
+            member_starting.set()
+            await release_member.wait()
+            member_bot.running = True
+            return True
+
+        member_bot.try_start = AsyncMock(side_effect=start_member)
+        member_bot.stop = AsyncMock()
+        orchestrator.agent_bots = {
+            ROUTER_AGENT_NAME: router_bot,
+            "support_team": team_bot,
+            "general": member_bot,
+        }
+
+        await orchestrator._recover_ready_turn_dispatch_obligations()
+        team_bot.recover_pending_turn_dispatch_obligations.assert_not_awaited()
+
+        with (
+            patch("mindroom.orchestrator.wait_for_matrix_homeserver", new=AsyncMock()),
+            patch.object(orchestrator, "_resolve_bot_room_aliases"),
+            patch.object(orchestrator, "_setup_rooms_and_memberships", new=AsyncMock()),
+            patch.object(orchestrator, "_sync_runtime_support_services", new=AsyncMock()),
+            patch.object(orchestrator, "_bind_started_runtime_support_services"),
+            patch("mindroom.orchestrator.check_embedder_health", new=AsyncMock()),
+            patch("mindroom.orchestrator.sync_forever_with_restart", new=AsyncMock()),
+        ):
+            startup_task = asyncio.create_task(_run_orchestrator_start_until_ready(orchestrator))
+            try:
+                await asyncio.wait_for(asyncio.gather(team_started.wait(), member_starting.wait()), timeout=1.0)
+                team_bot.recover_pending_turn_dispatch_obligations.assert_not_awaited()
+            finally:
+                release_member.set()
+            await startup_task
+
+        team_bot.recover_pending_turn_dispatch_obligations.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_background_member_retry_releases_team_recovery_after_first_sync(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """A background start must wait for the new member generation's first sync."""
+        config = _configured_team_test_config(tmp_path)
+        orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths_for(config))
+        orchestrator.config = config
+
+        router_bot = MagicMock()
+        router_bot.agent_name = ROUTER_AGENT_NAME
+        router_bot.running = True
+        router_bot.recover_pending_turn_dispatch_obligations = AsyncMock()
+
+        team_bot = MagicMock()
+        team_bot.agent_name = "support_team"
+        team_bot.running = True
+        team_bot.first_sync_complete = True
+        team_bot.recover_pending_turn_dispatch_obligations = AsyncMock()
+
+        member_bot = MagicMock()
+        member_bot.agent_name = "general"
+        member_bot.running = False
+        member_bot.first_sync_complete = False
+        member_bot.recover_pending_turn_dispatch_obligations = AsyncMock()
+
+        async def start_member() -> bool:
+            member_bot.running = True
+            return True
+
+        member_bot.try_start = AsyncMock(side_effect=start_member)
+        orchestrator.agent_bots = {
+            ROUTER_AGENT_NAME: router_bot,
+            "support_team": team_bot,
+            "general": member_bot,
+        }
+
+        with (
+            patch.object(orchestrator, "_entities_blocked_by_failed_mcp_servers", return_value=set()),
+            patch.object(orchestrator, "_bind_started_runtime_support_services"),
+            patch.object(orchestrator, "_resolve_bot_room_aliases"),
+            patch.object(orchestrator, "_start_sync_task"),
+            patch.object(orchestrator, "_setup_rooms_and_memberships", new=AsyncMock()),
+            patch.object(orchestrator, "_recover_pending_replacement_rooms", new=AsyncMock()),
+        ):
+            await orchestrator._run_bot_start_retry("general")
+
+        team_bot.recover_pending_turn_dispatch_obligations.assert_not_awaited()
+        member_bot.first_sync_complete = True
+        with patch.object(orchestrator._approval_transport, "handle_bot_ready", new=AsyncMock()):
+            await orchestrator.handle_bot_ready(member_bot)
+        assert await wait_for_background_tasks(
+            timeout=1,
+            owner=orchestrator._dispatch_recovery_task_owner,
+        )
+
+        team_bot.recover_pending_turn_dispatch_obligations.assert_awaited_once_with()
+        member_bot.recover_pending_turn_dispatch_obligations.assert_awaited_once_with()
+
+    @pytest.mark.asyncio
+    async def test_background_bot_start_does_not_wait_for_dispatch_recovery(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Dispatch maintenance must not leave a successfully started bot unsynced."""
+        config = _runtime_bound_config(
+            Config(agents={"general": AgentConfig(display_name="General", role="General assistant")}),
+            tmp_path,
+        )
+        orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths_for(config))
+        orchestrator.config = config
+        bot = MagicMock()
+        bot.running = True
+        bot.try_start = AsyncMock(return_value=True)
+        bot.recover_pending_turn_dispatch_obligations = AsyncMock(side_effect=OSError("store unavailable"))
+        orchestrator.agent_bots = {"general": bot}
+        order: list[str] = []
+
+        with (
+            patch.object(orchestrator, "_entities_blocked_by_failed_mcp_servers", return_value=set()),
+            patch.object(orchestrator, "_bind_started_runtime_support_services"),
+            patch.object(orchestrator, "_resolve_bot_room_aliases"),
+            patch.object(
+                orchestrator,
+                "_schedule_ready_turn_dispatch_recovery",
+                side_effect=lambda: order.append("recovery_scheduled"),
+            ),
+            patch.object(
+                orchestrator,
+                "_start_sync_task",
+                side_effect=lambda *_args: order.append("sync_started"),
+            ),
+            patch.object(orchestrator, "_setup_rooms_and_memberships", new=AsyncMock()),
+            patch.object(orchestrator, "_recover_pending_replacement_rooms", new=AsyncMock()),
+            patch.object(orchestrator._external_trigger_runtime, "bind_if_ready"),
+        ):
+            await orchestrator._run_bot_start_retry("general")
+
+        assert order == ["recovery_scheduled", "sync_started"]
+        bot.recover_pending_turn_dispatch_obligations.assert_not_awaited()
+
+    @pytest.mark.asyncio
     async def test_orchestrator_start_skips_retry_for_permanent_failures(self, tmp_path: Path) -> None:
         """Permanent startup failures should leave bots disabled without retry loops."""
         orchestrator = _MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path))
@@ -2073,6 +2537,7 @@ class TestMultiAgentOrchestrator:
         router_bot = MagicMock()
         router_bot.agent_name = "router"
         router_bot.try_start = AsyncMock(return_value=True)
+        router_bot.recover_pending_turn_dispatch_obligations = AsyncMock()
         router_bot.stop = AsyncMock()
 
         failing_bot = MagicMock()
@@ -2518,7 +2983,7 @@ class TestMultiAgentOrchestrator:
             patch.object(orchestrator._external_trigger_runtime, "sync_api_config_snapshot", new=AsyncMock()),
             patch.object(orchestrator, "_sync_runtime_support_services", new=AsyncMock()) as mock_sync_runtime,
         ):
-            updated = await orchestrator.config_reload.update_config()
+            updated = await orchestrator.config_reload._update_config()
 
         assert updated is False
         mock_sync_runtime.assert_awaited_once_with(
@@ -2649,7 +3114,7 @@ class TestMultiAgentOrchestrator:
                 patch.object(orchestrator, "_emit_config_reloaded", new=AsyncMock()),
                 patch.object(orchestrator, "_sync_memory_auto_flush_worker", new=AsyncMock()),
             ):
-                updated = await orchestrator.config_reload.update_config()
+                updated = await orchestrator.config_reload._update_config()
 
             assert updated is True
             assert task.done() is False
@@ -2862,7 +3327,7 @@ class TestMultiAgentOrchestrator:
             patch.object(orchestrator._external_trigger_runtime, "sync_api_config_snapshot", new=AsyncMock()),
             patch.object(orchestrator, "_sync_runtime_support_services", new=AsyncMock()),
         ):
-            updated = await orchestrator.config_reload.update_config()
+            updated = await orchestrator.config_reload._update_config()
 
         assert updated is False
         mock_load_config.assert_called_once()
@@ -2910,7 +3375,7 @@ class TestMultiAgentOrchestrator:
             ),
             pytest.raises(RuntimeError, match="boom"),
         ):
-            await orchestrator.config_reload.update_config()
+            await orchestrator.config_reload._update_config()
 
         assert orchestrator.config is current_config
         assert orchestrator.hook_registry is old_hook_registry
@@ -2970,7 +3435,7 @@ class TestMultiAgentOrchestrator:
             patch("mindroom.orchestrator.clear_worker_validation_snapshot_cache") as mock_clear_snapshot_cache,
             pytest.raises(RuntimeError, match="broken plugin"),
         ):
-            await orchestrator.config_reload.update_config()
+            await orchestrator.config_reload._update_config()
 
         stop_entities_before_mcp_sync.assert_not_awaited()
         assert bot.running is True
@@ -3070,7 +3535,7 @@ class TestMultiAgentOrchestrator:
                 ),
                 pytest.raises(RuntimeError, match="stop failed"),
             ):
-                await orchestrator.config_reload.update_config()
+                await orchestrator.config_reload._update_config()
 
             assert orchestrator.config is current_config
             assert orchestrator.hook_registry is old_hook_registry
@@ -3152,7 +3617,7 @@ class TestMultiAgentOrchestrator:
                 patch.object(orchestrator, "_sync_runtime_support_services", new=AsyncMock()),
                 patch.object(orchestrator, "_emit_config_reloaded", new=AsyncMock()),
             ):
-                updated = await orchestrator.config_reload.update_config()
+                updated = await orchestrator.config_reload._update_config()
 
             assert updated is False
             loaded_hooks_module = plugin_module._MODULE_IMPORT_CACHE[hooks_path.resolve()].module
@@ -3222,7 +3687,7 @@ class TestMultiAgentOrchestrator:
             patch.object(orchestrator, "_sync_memory_auto_flush_worker", new=AsyncMock()),
         ):
             try:
-                updated = await orchestrator.config_reload.update_config()
+                updated = await orchestrator.config_reload._update_config()
                 assert updated is False
                 assert router_bot.event_cache.principal_id == "@mindroom_router:localhost"
                 assert general_bot.event_cache.principal_id == "@mindroom_general:localhost"
@@ -3293,7 +3758,7 @@ class TestMultiAgentOrchestrator:
             patch.object(orchestrator, "_sync_memory_auto_flush_worker", new=AsyncMock()),
         ):
             try:
-                updated = await orchestrator.config_reload.update_config()
+                updated = await orchestrator.config_reload._update_config()
                 assert updated is False
                 assert orchestrator._runtime_support.event_cache is old_cache
                 assert old_cache.db_path == old_config.cache.resolve_db_path(orchestrator.runtime_paths)
@@ -3360,6 +3825,7 @@ class TestMultiAgentOrchestrator:
         router_bot.config = old_config
         router_bot.enable_streaming = True
         router_bot._set_presence_with_model_info = AsyncMock()
+        router_bot.recover_pending_turn_dispatch_obligations = AsyncMock()
         general_bot = MagicMock()
         general_bot.config = old_config
         general_bot.enable_streaming = True
@@ -3400,7 +3866,7 @@ class TestMultiAgentOrchestrator:
             patch.object(orchestrator, "_ensure_room_invitations", new=AsyncMock()),
         ):
             try:
-                updated = await orchestrator.config_reload.update_config()
+                updated = await orchestrator.config_reload._update_config()
             finally:
                 await orchestrator._close_runtime_support_services()
 
@@ -3456,6 +3922,7 @@ class TestMultiAgentOrchestrator:
         router_bot.config = old_config
         router_bot.enable_streaming = True
         router_bot._set_presence_with_model_info = AsyncMock()
+        router_bot.recover_pending_turn_dispatch_obligations = AsyncMock()
         general_bot = MagicMock()
         general_bot.config = old_config
         general_bot.enable_streaming = True
@@ -3496,7 +3963,7 @@ class TestMultiAgentOrchestrator:
             patch.object(orchestrator, "_ensure_room_invitations", new=AsyncMock()),
         ):
             try:
-                updated = await orchestrator.config_reload.update_config()
+                updated = await orchestrator.config_reload._update_config()
             finally:
                 await orchestrator._close_runtime_support_services()
 

@@ -1266,7 +1266,7 @@ class ThreadSyncWritePolicy:
         """Queue sync timeline persistence through the room-ordered cache barrier."""
         if not self._cache_ops.cache_runtime_available():
             return []
-        limited_room_ids, validation_errors = self._limited_sync_timeline_room_ids(response)
+        limited_room_ids, validation_errors = self.limited_sync_timeline_room_ids(response)
         if validation_errors:
             raise validation_errors[0]
         room_plain_events, room_threaded_events, room_redactions = self._group_sync_timeline_updates(response)
@@ -1296,7 +1296,7 @@ class ThreadSyncWritePolicy:
         return tasks
 
     @staticmethod
-    def _limited_sync_timeline_room_ids(
+    def limited_sync_timeline_room_ids(
         response: nio.SyncResponse,
     ) -> tuple[tuple[str, ...], tuple[BaseException, ...]]:
         """Return limited joined-room IDs or validation errors for one sync response."""
@@ -1345,10 +1345,12 @@ class ThreadSyncWritePolicy:
         response: nio.SyncResponse,
     ) -> SyncCacheWriteResult:
         """Persist sync timeline data and report whether it certifies the sync token."""
-        limited_room_ids, validation_errors = self._limited_sync_timeline_room_ids(response)
+        limited_room_ids, validation_errors = self.limited_sync_timeline_room_ids(response)
+        unrecovered_room_ids = tuple(sorted(response.unrecovered_room_ids))
         if validation_errors:
             return SyncCacheWriteResult(
                 complete=False,
+                unrecovered_room_ids=unrecovered_room_ids,
                 errors=validation_errors,
                 runtime_available=self._cache_ops.cache_runtime_available(),
                 runtime_diagnostics=self._cache_ops.cache_runtime_diagnostics(),
@@ -1357,6 +1359,7 @@ class ThreadSyncWritePolicy:
             return SyncCacheWriteResult(
                 complete=False,
                 limited_room_ids=limited_room_ids,
+                unrecovered_room_ids=unrecovered_room_ids,
                 runtime_available=False,
                 task_count=0,
                 runtime_diagnostics=self._cache_ops.cache_runtime_diagnostics(),
@@ -1373,6 +1376,7 @@ class ThreadSyncWritePolicy:
             return SyncCacheWriteResult(
                 complete=False,
                 limited_room_ids=limited_room_ids,
+                unrecovered_room_ids=unrecovered_room_ids,
                 errors=(exc,),
                 runtime_available=self._cache_ops.cache_runtime_available(),
                 runtime_diagnostics=self._cache_ops.cache_runtime_diagnostics(),
@@ -1388,6 +1392,7 @@ class ThreadSyncWritePolicy:
         return SyncCacheWriteResult(
             complete=complete,
             limited_room_ids=limited_room_ids,
+            unrecovered_room_ids=unrecovered_room_ids,
             errors=errors,
             runtime_available=runtime_available,
             task_count=len(tasks),

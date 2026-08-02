@@ -20,6 +20,7 @@ from mindroom.constants import (
     SOURCE_KIND_KEY,
 )
 from mindroom.conversation_resolver import MessageContext
+from mindroom.dispatch_callback_outcome import TurnDispatchOutcome
 from mindroom.dispatch_handoff import PreparedTextEvent
 from mindroom.dispatch_source import (
     VOICE_SOURCE_KIND,
@@ -30,6 +31,7 @@ from mindroom.hooks import (
     EnrichmentItem,
 )
 from mindroom.inbound_turn_normalizer import DispatchPayload, DispatchPayloadWithAttachmentsRequest
+from mindroom.ingress_validation import IngressValidator
 from mindroom.matrix.cache import ThreadHistoryResult
 from mindroom.message_target import MessageTarget
 from mindroom.teams import TeamResolution
@@ -335,22 +337,53 @@ class TestAgentBot(AgentBotTestBase):
             resolution_started.set()
             await asyncio.Event().wait()
 
-        bot._turn_controller._precheck_dispatch_event = MagicMock(
-            return_value=SimpleNamespace(event=event, requester_user_id="@user:localhost"),
-        )
-        bot._conversation_resolver.coalescing_thread_id = AsyncMock(side_effect=block_thread_resolution)
-        first = asyncio.create_task(bot._turn_controller._handle_media_message_inner(room, event))
+        ingress = MagicMock(spec=IngressValidator, wraps=bot._ingress_validator)
+        ingress.deps = bot._ingress_validator.deps
+        ingress.precheck_event.return_value = "@user:localhost"
+        resolver = MagicMock(wraps=bot._conversation_resolver)
+        resolver.coalescing_thread_id = AsyncMock(side_effect=block_thread_resolution)
+        controller = replace_turn_controller_deps(bot, ingress=ingress, resolver=resolver)
+        first = asyncio.create_task(controller._handle_media_message_inner(room, event))
 
         await resolution_started.wait()
         competing_claim = TurnRecord.create([event.event_id], completed=False)
-        assert bot._turn_store.try_claim_turn(competing_claim) is False
+        assert controller.deps.turn_store.try_claim_turn(competing_claim) is False
 
         first.cancel()
         with pytest.raises(asyncio.CancelledError):
             await first
 
-        assert bot._turn_store.try_claim_turn(competing_claim) is True
-        bot._turn_store.release_pending_turn_claim(competing_claim)
+        assert controller.deps.turn_store.try_claim_turn(competing_claim) is True
+        controller.deps.turn_store.release_pending_turn_claim(competing_claim)
+
+    @pytest.mark.asyncio
+    async def test_media_ingress_defers_after_competing_claim_settles_durably(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """A durable competing owner settles redelivery without repeating media resolution."""
+        config = self._config_for_storage(tmp_path)
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        room = SimpleNamespace(room_id="!test:localhost")
+        event = _room_image_event(sender="@user:localhost", event_id="$image_event", body="photo.jpg")
+
+        ingress = MagicMock(spec=IngressValidator, wraps=bot._ingress_validator)
+        ingress.deps = bot._ingress_validator.deps
+        ingress.precheck_event.return_value = "@user:localhost"
+        resolver = MagicMock(wraps=bot._conversation_resolver)
+        resolver.coalescing_thread_id = AsyncMock()
+        controller = replace_turn_controller_deps(bot, ingress=ingress, resolver=resolver)
+        active_claim = TurnRecord.create([event.event_id], completed=False)
+        assert controller.deps.turn_store.try_claim_turn(active_claim)
+        redelivery = asyncio.create_task(controller._handle_media_message_inner(room, event))
+        await asyncio.sleep(0)
+
+        controller.deps.turn_store.record_turn(TurnRecord.create([event.event_id]))
+        controller.deps.turn_store.release_pending_turn_claim(active_claim)
+
+        assert await redelivery is TurnDispatchOutcome.DEFERRED
+        resolver.coalescing_thread_id.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_audio_dispatch_releases_receive_order_when_target_resolution_is_cancelled(

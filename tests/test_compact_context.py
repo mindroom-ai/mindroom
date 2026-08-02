@@ -524,7 +524,7 @@ async def test_compaction_lifecycle_success_edits_notice_with_html_body(tmp_path
             new=AsyncMock(side_effect=delivered_matrix_side_effect("$notice-edit")),
         ) as mock_edit,
     ):
-        event_id = await bot._delivery_gateway.send_compaction_lifecycle_start(
+        event_id = await bot._delivery_gateway._send_compaction_lifecycle_start(
             target=target,
             reply_to_event_id="$reply",
             event=CompactionLifecycleStart(
@@ -538,7 +538,7 @@ async def test_compaction_lifecycle_success_edits_notice_with_html_body(tmp_path
                 threshold_tokens=80_000,
             ),
         )
-        await bot._delivery_gateway.edit_compaction_lifecycle_success(
+        await bot._delivery_gateway._edit_compaction_lifecycle_success(
             target=target,
             outcome=replace(outcome, lifecycle_notice_event_id=event_id, duration_ms=123),
         )

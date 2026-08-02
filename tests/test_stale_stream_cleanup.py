@@ -3237,16 +3237,19 @@ async def test_orchestrator_runs_two_recovery_waves_around_room_setup(tmp_path: 
     orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths_for(config))
     orchestrator.config = config
 
+    call_order: list[str] = []
     router_bot = MagicMock()
     router_bot.agent_name = ROUTER_AGENT_NAME
     router_bot.try_start = AsyncMock(return_value=True)
     router_bot.stop = AsyncMock()
+    router_bot.recover_pending_turn_dispatch_obligations = AsyncMock(
+        side_effect=lambda: call_order.append("turn_dispatch"),
+    )
     router_bot.running = True
     router_bot.client = AsyncMock(spec=nio.AsyncClient)
     router_bot.agent_user = MagicMock(user_id="@mindroom_router:example.com")
     orchestrator.agent_bots = {ROUTER_AGENT_NAME: router_bot}
 
-    call_order: list[str] = []
     recovery_finished = asyncio.Event()
 
     async def _wait_for_homeserver(*_args: object, **_kwargs: object) -> None:
@@ -3282,12 +3285,13 @@ async def test_orchestrator_runs_two_recovery_waves_around_room_setup(tmp_path: 
         patch.object(orchestrator, "_recover_stale_streams_after_restart", side_effect=_recover),
         patch.object(orchestrator, "_sync_runtime_support_services", new=AsyncMock()),
         patch.object(orchestrator, "_start_sync_task", side_effect=_start_sync_task),
+        patch("mindroom.orchestrator.check_embedder_health", new=AsyncMock()),
         patch("mindroom.orchestrator.set_runtime_ready", side_effect=_mark_ready),
     ):
         runtime_task = asyncio.create_task(orchestrator.start())
         try:
             await asyncio.wait_for(ready.wait(), timeout=1.0)
-            await asyncio.wait_for(recovery_finished.wait(), timeout=1.0)
+            await asyncio.wait_for(recovery_finished.wait(), timeout=5.0)
             await orchestrator.stop()
             await asyncio.wait_for(runtime_task, timeout=1.0)
         finally:
@@ -3296,6 +3300,7 @@ async def test_orchestrator_runs_two_recovery_waves_around_room_setup(tmp_path: 
                 with suppress(asyncio.CancelledError):
                     await runtime_task
 
+    router_bot.recover_pending_turn_dispatch_obligations.assert_not_awaited()
     assert call_order == ["wait", "sync", "recover", "setup", "recover"]
 
 

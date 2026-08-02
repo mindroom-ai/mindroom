@@ -119,12 +119,13 @@ class TestResponseTrackingRegression:
         mock_room.room_id = test_room_id
 
         # Process command first time
-        await bot._turn_controller._execute_command(
+        await bot._command_turn_executor.execute(
             mock_room,
             command_event,
             "@user:localhost",
             command,
             target=MessageTarget.resolve(test_room_id, None, "$command_123", thread_start_root_event_id="$command_123"),
+            handled_turn=TurnRecord.create([command_event.event_id]),
         )
 
         # Verify response was sent
@@ -140,12 +141,15 @@ class TestResponseTrackingRegression:
         bot.client.room_send.reset_mock()
 
         # Process same command again (simulating restart)
-        await bot._turn_controller._execute_command(
+        handled_turn = bot._turn_store.get_turn_record(command_event.event_id)
+        assert handled_turn is not None
+        await bot._command_turn_executor.execute(
             mock_room,
             command_event,
             "@user:localhost",
             command,
             target=MessageTarget.resolve(test_room_id, None, "$command_123", thread_start_root_event_id="$command_123"),
+            handled_turn=handled_turn,
         )
 
         # Should NOT send another response if properly tracked

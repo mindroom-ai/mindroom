@@ -192,6 +192,7 @@ class _SyncEnvelope:
     account_data: _EventSection
     to_device: _EventSection
     device_lists: _DeviceLists
+    unrecovered_room_ids: frozenset[str] = frozenset()
 
 
 @dataclass(slots=True)

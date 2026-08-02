@@ -111,7 +111,7 @@ class TestAgentBot(AgentBotTestBase):
             bot.orchestrator = MagicMock()
             bot.orchestrator.agent_bots = {"calculator": MagicMock()}
 
-            await bot._turn_policy.decide_team_for_sender(
+            await bot._turn_policy._decide_team_for_sender(
                 agents_in_thread=[],
                 context=context,
                 room=room,
@@ -154,7 +154,7 @@ class TestAgentBot(AgentBotTestBase):
 
         with (
             patch(
-                "mindroom.bot.TurnPolicy.decide_team_for_sender",
+                "mindroom.bot.TurnPolicy._decide_team_for_sender",
                 new=AsyncMock(
                     return_value=TeamResolution(
                         intent=TeamIntent.EXPLICIT_MEMBERS,
@@ -177,7 +177,7 @@ class TestAgentBot(AgentBotTestBase):
                 return_value=AgentResponseDecision(True),
             ) as mock_decide_agent_response,
         ):
-            action = await bot._turn_policy.resolve_response_action(
+            action = await bot._turn_policy._resolve_response_action(
                 _policy_dispatch(bot, room, context, "@user:localhost", "help me"),
                 room,
                 False,
@@ -238,7 +238,7 @@ class TestAgentBot(AgentBotTestBase):
             "mindroom.turn_policy.decide_agent_response",
             return_value=AgentResponseDecision(True),
         ) as mock_decide_agent_response:
-            action = await bot._turn_policy.resolve_response_action(
+            action = await bot._turn_policy._resolve_response_action(
                 _policy_dispatch(bot, room, context, "@alice:localhost", "calculator and general, help"),
                 room,
                 False,
@@ -296,7 +296,7 @@ class TestAgentBot(AgentBotTestBase):
             "mindroom.turn_policy.decide_agent_response",
             return_value=AgentResponseDecision(True),
         ) as mock_decide_agent_response:
-            action = await bot._turn_policy.resolve_response_action(
+            action = await bot._turn_policy._resolve_response_action(
                 _policy_dispatch(bot, room, context, "@user:localhost", "general and research, help"),
                 room,
                 False,
@@ -355,7 +355,7 @@ class TestAgentBot(AgentBotTestBase):
             "mindroom.turn_policy.decide_agent_response",
             return_value=AgentResponseDecision(True),
         ) as mock_decide_agent_response:
-            action = await bot._turn_policy.resolve_response_action(
+            action = await bot._turn_policy._resolve_response_action(
                 _policy_dispatch(bot, room, context, "@user:localhost", "alpha and calculator, help"),
                 room,
                 False,
@@ -415,7 +415,7 @@ class TestAgentBot(AgentBotTestBase):
             "mindroom.turn_policy.decide_agent_response",
             return_value=AgentResponseDecision(True),
         ) as mock_decide_agent_response:
-            action = await bot._turn_policy.resolve_response_action(
+            action = await bot._turn_policy._resolve_response_action(
                 _policy_dispatch(bot, room, context, "@alice:localhost", "calculator and general, help"),
                 room,
                 False,
@@ -466,7 +466,7 @@ class TestAgentBot(AgentBotTestBase):
         )
 
         with patch("mindroom.turn_policy.decide_team_formation", new=MagicMock(return_value=TeamResolution.none())):
-            action = await bot._turn_policy.resolve_response_action(
+            action = await bot._turn_policy._resolve_response_action(
                 _policy_dispatch(bot, room, context, "@bob:localhost", "can someone help?"),
                 room,
                 False,
@@ -510,7 +510,7 @@ class TestAgentBot(AgentBotTestBase):
             has_non_agent_mentions=False,
         )
 
-        action = await bot._turn_policy.resolve_response_action(
+        action = await bot._turn_policy._resolve_response_action(
             _policy_dispatch(bot, room, context, "@bob:localhost", "calculator, help"),
             room,
             False,
@@ -554,7 +554,7 @@ class TestAgentBot(AgentBotTestBase):
             has_non_agent_mentions=False,
         )
 
-        action = await bot._turn_policy.resolve_response_action(
+        action = await bot._turn_policy._resolve_response_action(
             _policy_dispatch(
                 bot,
                 room,
@@ -623,7 +623,7 @@ class TestAgentBot(AgentBotTestBase):
             has_non_agent_mentions=False,
         )
 
-        action = await bot._turn_policy.resolve_response_action(
+        action = await bot._turn_policy._resolve_response_action(
             _policy_dispatch(bot, room, context, "@bob:localhost", "ops, help"),
             room,
             False,
@@ -670,7 +670,7 @@ class TestAgentBot(AgentBotTestBase):
 
         with (
             patch(
-                "mindroom.bot.TurnPolicy.decide_team_for_sender",
+                "mindroom.bot.TurnPolicy._decide_team_for_sender",
                 new=AsyncMock(
                     return_value=TeamResolution(
                         intent=TeamIntent.EXPLICIT_MEMBERS,
@@ -701,7 +701,7 @@ class TestAgentBot(AgentBotTestBase):
                 return_value=AgentResponseDecision(True),
             ) as mock_decide_agent_response,
         ):
-            action = await bot._turn_policy.resolve_response_action(
+            action = await bot._turn_policy._resolve_response_action(
                 _policy_dispatch(bot, room, context, "@user:localhost", "alpha and calculator, help"),
                 room,
                 False,
@@ -750,7 +750,7 @@ class TestAgentBot(AgentBotTestBase):
 
         with (
             patch(
-                "mindroom.bot.TurnPolicy.decide_team_for_sender",
+                "mindroom.bot.TurnPolicy._decide_team_for_sender",
                 new=AsyncMock(
                     return_value=TeamResolution(
                         intent=TeamIntent.EXPLICIT_MEMBERS,
@@ -781,7 +781,7 @@ class TestAgentBot(AgentBotTestBase):
                 return_value=AgentResponseDecision(True),
             ) as mock_decide_agent_response,
         ):
-            action = await bot._turn_policy.resolve_response_action(
+            action = await bot._turn_policy._resolve_response_action(
                 _policy_dispatch(bot, room, context, "@user:localhost", "alpha and calculator, help"),
                 room,
                 False,
@@ -841,7 +841,7 @@ class TestAgentBot(AgentBotTestBase):
             "mindroom.turn_policy.decide_agent_response",
             return_value=AgentResponseDecision(True),
         ) as mock_decide_agent_response:
-            action = await bot._turn_policy.resolve_response_action(
+            action = await bot._turn_policy._resolve_response_action(
                 _policy_dispatch(bot, room, context, "@user:localhost", "alpha and calculator, help"),
                 room,
                 False,
@@ -882,7 +882,7 @@ class TestAgentBot(AgentBotTestBase):
 
         with (
             patch(
-                "mindroom.bot.TurnPolicy.decide_team_for_sender",
+                "mindroom.bot.TurnPolicy._decide_team_for_sender",
                 new=AsyncMock(
                     return_value=TeamResolution.individual(
                         intent=TeamIntent.IMPLICIT_THREAD_TEAM,
@@ -897,7 +897,7 @@ class TestAgentBot(AgentBotTestBase):
                 return_value=AgentResponseDecision(False),
             ) as mock_decide_agent_response,
         ):
-            action = await bot._turn_policy.resolve_response_action(
+            action = await bot._turn_policy._resolve_response_action(
                 _policy_dispatch(bot, room, context, "@user:localhost", "help me"),
                 room,
                 True,
@@ -990,7 +990,7 @@ class TestAgentBot(AgentBotTestBase):
                 return_value=True,
             ) as mock_has_active_response,
         ):
-            action = await bot._turn_policy.resolve_response_action(
+            action = await bot._turn_policy._resolve_response_action(
                 PreparedDispatch(
                     requester_user_id="@user:localhost",
                     context=context,
@@ -1070,7 +1070,7 @@ class TestAgentBot(AgentBotTestBase):
             patch("mindroom.turn_policy.decide_team_formation", new=MagicMock(return_value=TeamResolution.none())),
             patch.object(bot._response_runner, "has_active_response_for_target", return_value=True),
         ):
-            action = await bot._turn_policy.resolve_response_action(
+            action = await bot._turn_policy._resolve_response_action(
                 PreparedDispatch(
                     requester_user_id="@user:localhost",
                     context=context,
@@ -1132,7 +1132,7 @@ class TestAgentBot(AgentBotTestBase):
         )
 
         with patch.object(bot._response_runner, "has_active_response_for_target", return_value=True):
-            action = await bot._turn_policy.resolve_response_action(
+            action = await bot._turn_policy._resolve_response_action(
                 PreparedDispatch(
                     requester_user_id="@user:localhost",
                     context=context,
@@ -1213,7 +1213,7 @@ class TestAgentBot(AgentBotTestBase):
                 return_value=False,
             ) as mock_has_active_response,
         ):
-            action = await bot._turn_policy.resolve_response_action(
+            action = await bot._turn_policy._resolve_response_action(
                 PreparedDispatch(
                     requester_user_id="@user:localhost",
                     context=context,
@@ -1296,7 +1296,7 @@ class TestAgentBot(AgentBotTestBase):
                 return_value=False,
             ) as mock_has_active_response,
         ):
-            action = await bot._turn_policy.resolve_response_action(
+            action = await bot._turn_policy._resolve_response_action(
                 PreparedDispatch(
                     requester_user_id="@user:localhost",
                     context=context,
@@ -1389,7 +1389,7 @@ class TestAgentBot(AgentBotTestBase):
             envelope=envelope,
         )
 
-        plan = await bot._turn_policy.plan_router_dispatch(room, event, dispatch)
+        plan = await bot._turn_policy._plan_router_dispatch(room, event, dispatch)
 
         assert plan is not None
         assert plan.kind == "route"
@@ -1555,7 +1555,7 @@ class TestAgentBot(AgentBotTestBase):
                 return_value=AgentResponseDecision(False),
             ) as mock_decide_agent_response,
         ):
-            action = await bot._turn_policy.resolve_response_action(
+            action = await bot._turn_policy._resolve_response_action(
                 _policy_dispatch(bot, room, context, "@bas:localhost", "I fixed two issues"),
                 room,
                 False,
@@ -1620,7 +1620,7 @@ class TestAgentBot(AgentBotTestBase):
             requires_model_history_refresh=True,
         )
 
-        action = await bot._turn_policy.resolve_response_action(
+        action = await bot._turn_policy._resolve_response_action(
             _policy_dispatch(bot, room, context, "@bas:localhost", "Follow-up"),
             room,
             False,
@@ -1688,7 +1688,7 @@ class TestAgentBot(AgentBotTestBase):
             "mindroom.turn_policy.decide_agent_response",
             return_value=AgentResponseDecision(True),
         ) as mock_decide_agent_response:
-            action = await bot._turn_policy.resolve_response_action(
+            action = await bot._turn_policy._resolve_response_action(
                 _policy_dispatch(bot, room, context, "@bas:localhost", "Follow-up"),
                 room,
                 False,
@@ -1755,7 +1755,7 @@ class TestAgentBot(AgentBotTestBase):
             "mindroom.turn_policy.decide_agent_response",
             return_value=AgentResponseDecision(True),
         ) as mock_decide_agent_response:
-            action = await bot._turn_policy.resolve_response_action(
+            action = await bot._turn_policy._resolve_response_action(
                 _policy_dispatch(bot, room, context, "@bas:localhost", "Follow-up"),
                 room,
                 False,
@@ -1831,7 +1831,7 @@ class TestAgentBot(AgentBotTestBase):
             envelope=_hook_envelope(body="Follow-up", source_event_id=event.event_id, target=dispatch_target),
         )
 
-        plan = await bot._turn_policy.plan_router_dispatch(room, event, dispatch)
+        plan = await bot._turn_policy._plan_router_dispatch(room, event, dispatch)
 
         assert plan == _DispatchPlan(kind="ignore", ignore_reason="router")
 
@@ -1901,6 +1901,6 @@ class TestAgentBot(AgentBotTestBase):
             envelope=_hook_envelope(body="Follow-up", source_event_id=event.event_id, target=dispatch_target),
         )
 
-        plan = await bot._turn_policy.plan_router_dispatch(room, event, dispatch)
+        plan = await bot._turn_policy._plan_router_dispatch(room, event, dispatch)
 
         assert plan == _DispatchPlan(kind="ignore", ignore_reason="router")

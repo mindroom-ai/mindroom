@@ -36,6 +36,7 @@ RUNTIME_PROTOCOL_PUBLIC_SYMBOLS = [
 ]
 RUNTIME_PROTOCOL_IMPORTERS = {
     "mindroom.bot_room_lifecycle",
+    "mindroom.commands.config_confirmation",
     "mindroom.conversation_resolver",
     "mindroom.conversation_state_writer",
     "mindroom.delivery_gateway",

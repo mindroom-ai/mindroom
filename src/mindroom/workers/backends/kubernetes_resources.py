@@ -844,7 +844,7 @@ class KubernetesResourceManager:
             raise
         return True
 
-    def delete_deployment(self, deployment_name: str) -> None:
+    def _delete_deployment(self, deployment_name: str) -> None:
         """Delete one worker Deployment, ignoring 404s."""
         self._delete_object(self._apps.delete_namespaced_deployment, deployment_name)
 
@@ -871,7 +871,7 @@ class KubernetesResourceManager:
             return
         self._delete_object(self._core.delete_namespaced_secret, secret_name)
 
-    def agent_vault_vault_name(self, worker_key: str) -> str | None:
+    def _agent_vault_vault_name(self, worker_key: str) -> str | None:
         """Return the Agent Vault vault name backing one worker, or None when disabled."""
         cfg = self.config.agent_vault
         if cfg is None:
@@ -880,7 +880,7 @@ class KubernetesResourceManager:
 
     def _agent_vault_init_container(self, *, worker_key: str) -> dict[str, object]:
         cfg: KubernetesAgentVaultConfig | None = self.config.agent_vault
-        vault = self.agent_vault_vault_name(worker_key)
+        vault = self._agent_vault_vault_name(worker_key)
         if cfg is None or vault is None:
             msg = "Agent Vault init container requested without Agent Vault config."
             raise WorkerBackendError(msg)
@@ -914,7 +914,7 @@ class KubernetesResourceManager:
         cfg = self.config.agent_vault
         if cfg is None:
             return []
-        vault = self.agent_vault_vault_name(worker_key)
+        vault = self._agent_vault_vault_name(worker_key)
         if vault is None:
             msg = f"Agent Vault main env requested without a worker vault name for worker_key={worker_key!r}."
             raise WorkerBackendError(msg)
@@ -968,7 +968,7 @@ class KubernetesResourceManager:
         timeout_seconds: float,
     ) -> None:
         """Replace one Deployment when pod-template drift requires a full recreate."""
-        self.delete_deployment(deployment_name)
+        self._delete_deployment(deployment_name)
         self._wait_for_deployment_absent(deployment_name, timeout_seconds=timeout_seconds)
         deadline = time.time() + timeout_seconds
         while True:

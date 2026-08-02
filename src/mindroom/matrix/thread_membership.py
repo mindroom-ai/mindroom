@@ -28,7 +28,7 @@ Invariants enforced here (every resolver in the repo must go through this module
 
 4. Root proof is three-valued (PROVEN, NOT_A_THREAD_ROOT, PROOF_UNAVAILABLE) and proof failure never
    silently demotes to room level.
-   PROOF_UNAVAILABLE maps to ``ThreadResolution.indeterminate`` with the candidate root preserved so
+   PROOF_UNAVAILABLE maps to ``ThreadResolution._indeterminate`` with the candidate root preserved so
    callers can fail closed (mutation callers invalidate room-wide; dispatch callers coalesce on the
    candidate root and retry).
    Lookup failures and missing related events during the walk are likewise INDETERMINATE, never ROOM_LEVEL.
@@ -141,7 +141,7 @@ class ThreadResolution:
         return cls(ThreadResolutionState.ROOM_LEVEL, thread_history=thread_history)
 
     @classmethod
-    def indeterminate(
+    def _indeterminate(
         cls,
         error: Exception,
         candidate_thread_root_id: str | None = None,
@@ -226,7 +226,7 @@ def _resolution_from_root_proof(
     if proof.state is _ThreadRootProofState.NOT_A_THREAD_ROOT:
         return ThreadResolution.room_level(thread_history=proof.thread_history)
     assert proof.error is not None
-    return ThreadResolution.indeterminate(
+    return ThreadResolution._indeterminate(
         proof.error,
         candidate_thread_root_id=thread_root_id,
         thread_history=proof.thread_history,
@@ -285,11 +285,11 @@ async def resolve_related_event_thread_membership(
             related_event_info = await access.fetch_event_info(room_id, current_event_id)
         except Exception as exc:
             # Keep lookup-failed related events separately scoped for dispatch coalescing and replay checks.
-            resolution = ThreadResolution.indeterminate(exc, candidate_thread_root_id=current_event_id)
+            resolution = ThreadResolution._indeterminate(exc, candidate_thread_root_id=current_event_id)
             break
         if related_event_info is None:
             # Missing related events are still possible thread roots; demote later without losing the candidate.
-            resolution = ThreadResolution.indeterminate(
+            resolution = ThreadResolution._indeterminate(
                 ThreadMembershipLookupError(f"Related event {current_event_id} is unavailable"),
                 candidate_thread_root_id=current_event_id,
             )

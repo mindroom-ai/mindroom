@@ -98,6 +98,9 @@ class EventInfo:
     event_type: str | None = None
     """The Matrix event type carrying these relations, when known."""
 
+    is_thread_fallback: bool = False
+    """Whether a thread relation uses ``m.in_reply_to`` only as legacy fallback."""
+
     @staticmethod
     def from_event(event_source: dict | None) -> EventInfo:
         """Create EventInfo from a raw event source dictionary."""
@@ -191,6 +194,7 @@ def _analyze_event_relations(event_source: dict | None) -> EventInfo:
     # Thread analysis
     is_thread = relation_type == "m.thread"
     thread_id = relates_to_event_id if is_thread else None
+    is_thread_fallback = is_thread and relates_to.get("is_falling_back") is True
 
     # Edit analysis
     is_edit = relation_type == "m.replace"
@@ -231,6 +235,7 @@ def _analyze_event_relations(event_source: dict | None) -> EventInfo:
         relation_type=relation_type,
         relates_to_event_id=relates_to_event_id,
         thread_id_from_edit=thread_id_from_edit,
+        is_thread_fallback=is_thread_fallback,
     )
 
 

@@ -784,11 +784,12 @@ class TestAgentBot(AgentBotTestBase):
             tmp_path,
         )
         bot = AgentBot(agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        _wrap_extracted_collaborators(bot)
         bot.client = AsyncMock()
         _set_turn_store_tracker(bot, MagicMock())
         send_response = AsyncMock(return_value="$handoff")
         install_send_response_mock(bot, send_response)
-        bot._turn_controller._responder_candidates_for_room = AsyncMock(
+        bot._turn_policy.responder_candidates_for_room = AsyncMock(
             return_value=[entity_ids(config, runtime_paths_for(config))["general"]],
         )
 
@@ -813,6 +814,50 @@ class TestAgentBot(AgentBotTestBase):
         call = send_response.await_args.kwargs
         assert call["response_text"] == "@general ⏰ [Automated Task]\nPoll the queue"
         assert call["target"].reply_to_event_id == "$scheduled"
+
+    @pytest.mark.asyncio
+    async def test_router_delivery_without_event_raises_for_durable_retry(self, tmp_path: Path) -> None:
+        """A route without a Matrix event must return the source to durable retry."""
+        agent_user = AgentMatrixUser(
+            agent_name="router",
+            user_id="@mindroom_router:localhost",
+            display_name="Router Agent",
+            password=TEST_PASSWORD,
+            access_token="mock_test_token",  # noqa: S106
+        )
+        config = _runtime_bound_config(
+            Config(
+                agents={"general": AgentConfig(display_name="GeneralAgent", rooms=["!test:localhost"])},
+                authorization={"default_room_access": True},
+            ),
+            tmp_path,
+        )
+        bot = AgentBot(agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        _wrap_extracted_collaborators(bot)
+        bot.client = AsyncMock()
+        install_send_response_mock(bot, AsyncMock(return_value=None))
+        bot._turn_policy.responder_candidates_for_room = AsyncMock(
+            return_value=[entity_ids(config, runtime_paths_for(config))["general"]],
+        )
+        room = nio.MatrixRoom(room_id="!test:localhost", own_user_id=agent_user.user_id)
+        event = nio.RoomMessageText.from_dict(
+            {
+                "event_id": "$route-failed",
+                "sender": "@user:localhost",
+                "origin_server_ts": 1234567890,
+                "content": {"msgtype": "m.text", "body": "Route this"},
+            },
+        )
+
+        with pytest.raises(RuntimeError, match="Failed to route to entity 'general'"):
+            await bot._turn_controller._execute_router_relay(
+                room=room,
+                event=event,
+                thread_history=[],
+                requester_user_id="@user:localhost",
+            )
+
+        assert not bot._turn_store.is_handled(event.event_id)
 
     @pytest.mark.asyncio
     async def test_router_dispatch_parity_text_and_image_skip_under_same_conditions(self, tmp_path: Path) -> None:

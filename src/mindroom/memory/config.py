@@ -6,8 +6,6 @@ import hashlib
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal, Protocol, cast
 
-from mem0 import AsyncMemory
-
 from mindroom.credentials_sync import get_api_key_for_provider, get_ollama_host
 from mindroom.embedding_factory import resolve_embedder_settings
 from mindroom.embeddings import effective_mem0_embedder_signature, ensure_sentence_transformers_dependencies
@@ -17,6 +15,8 @@ from mindroom.timing import timed
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+    from mem0 import AsyncMemory
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
@@ -253,6 +253,8 @@ async def create_memory_instance(
         Configured AsyncMemory instance
 
     """
+    from mem0 import AsyncMemory  # noqa: PLC0415
+
     config_dict = _get_memory_config(storage_path, config, runtime_paths)
     if config.memory.embedder.provider == "sentence_transformers":
         ensure_sentence_transformers_dependencies(runtime_paths)

@@ -23,6 +23,7 @@ from typing import TYPE_CHECKING, Any, ClassVar, Protocol
 import pytest
 from agno.knowledge.document.base import Document
 from agno.knowledge.embedder.base import Embedder
+from agno.vectordb import chroma as agno_chroma
 from chromadb.errors import InternalError, NotFoundError
 from structlog.testing import capture_logs
 
@@ -421,8 +422,7 @@ def fake_vector_store(
     monkeypatch.setattr(knowledge_manager_module, "Knowledge", _FakeKnowledge)
     monkeypatch.setattr(knowledge_collections_module, "Knowledge", _FakeKnowledge)
     monkeypatch.setattr(knowledge_manager_module, "create_configured_embedder", lambda *_a, **_k: embedder)
-    monkeypatch.setattr("mindroom.knowledge.indexing_config.ChromaDb", _FakeVectorDb)
-    monkeypatch.setattr(knowledge_registry, "ChromaDb", _FakeVectorDb)
+    monkeypatch.setattr(agno_chroma, "ChromaDb", _FakeVectorDb)
     monkeypatch.setattr(knowledge_registry, "StrictSearchKnowledge", _FakeKnowledge)
     monkeypatch.setattr(knowledge_registry, "create_configured_embedder", lambda *_a, **_k: embedder)
 
@@ -789,14 +789,14 @@ def test_provider_retry_after_header_survives_error_classification() -> None:
 def test_retry_backoff_honors_retry_after_and_stays_bounded() -> None:
     """Backoff grows, jitters, respects Retry-After, and never exceeds the cap."""
     policy = EmbeddingRetryPolicy(initial_backoff_seconds=1.0, max_backoff_seconds=10.0, jitter_ratio=0.5)
-    assert policy.backoff_seconds(1, retry_after_seconds=None, jitter_unit=0.5) == 1.0
-    assert policy.backoff_seconds(3, retry_after_seconds=None, jitter_unit=0.5) == 4.0
-    assert policy.backoff_seconds(9, retry_after_seconds=None, jitter_unit=0.5) == 10.0
-    assert policy.backoff_seconds(1, retry_after_seconds=6.0, jitter_unit=0.5) == 6.0
-    assert policy.backoff_seconds(1, retry_after_seconds=1000.0, jitter_unit=0.5) == 10.0
-    assert policy.backoff_seconds(1, retry_after_seconds=None, jitter_unit=0.0) == 0.5
-    assert policy.backoff_seconds(1, retry_after_seconds=None, jitter_unit=1.0) == 1.5
-    assert policy.backoff_seconds(9, retry_after_seconds=None, jitter_unit=1.0) == 10.0
+    assert policy._backoff_seconds(1, retry_after_seconds=None, jitter_unit=0.5) == 1.0
+    assert policy._backoff_seconds(3, retry_after_seconds=None, jitter_unit=0.5) == 4.0
+    assert policy._backoff_seconds(9, retry_after_seconds=None, jitter_unit=0.5) == 10.0
+    assert policy._backoff_seconds(1, retry_after_seconds=6.0, jitter_unit=0.5) == 6.0
+    assert policy._backoff_seconds(1, retry_after_seconds=1000.0, jitter_unit=0.5) == 10.0
+    assert policy._backoff_seconds(1, retry_after_seconds=None, jitter_unit=0.0) == 0.5
+    assert policy._backoff_seconds(1, retry_after_seconds=None, jitter_unit=1.0) == 1.5
+    assert policy._backoff_seconds(9, retry_after_seconds=None, jitter_unit=1.0) == 10.0
 
 
 @pytest.mark.asyncio

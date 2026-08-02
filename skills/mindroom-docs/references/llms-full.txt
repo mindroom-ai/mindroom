@@ -12292,8 +12292,8 @@ Use `message:final_response_transform` for one text-only best-effort replacement
 For `compaction:before` and `compaction:after`, `ctx.messages` contains raw `agno.models.message.Message` objects from the compacted session payload.
 MindRoom does not sanitize attachments, media, tool calls, tool args, provider metadata, citations, reasoning fields, metrics, references, or extra Pydantic fields before these hooks run.
 For `message:cancelled`, inspect `ctx.info.failure_reason` to distinguish explicit cancellation, interruption, suppression, and delivery failure recovery.
-`room:member_joined` is emitted once per room/user pair using MindRoom's durable tracking state under `mindroom_data/tracking/`.
-This makes it suitable for lobby-based onboarding hooks that should create or invite a private agent only once.
+`room:member_joined` uses at-least-once delivery because MindRoom records the durable room/user marker only after the hook completes.
+A process interruption or marker-write failure after a handler side effect can replay the same room/user pair, so handlers that create or invite resources must be idempotent.
 
 ### Default timeouts
 
@@ -16119,6 +16119,12 @@ MindRoom's architecture consists of several key components working together.
 | `coalescing.py` | Live message coalescing gate (text dispatches immediately; media waits for attachments and a trailing caption) |
 | `text_ingress_dispatch.py` | Text ingress dispatch path used by TurnController |
 | `turn_policy.py` | Pure turn policy: decide ignore, route, or respond for inbound turns |
+| `dispatch_obligations/` | Durable exact Matrix callback storage, admission, execution, and startup recovery |
+| `turn_settlement_retry.py` | Event-loop retry owner for settling callback obligations after terminal TurnStore persistence |
+| `command_turn_executor.py` | Command execution and durable command/config mutation journals |
+| `reaction_dispatch.py` | Durable semantic routing for Matrix reactions |
+| `user_stop_reconciliation.py` | STOP ordering, response cancellation, and terminal turn reconciliation |
+| `visible_response_reconciliation.py` | Visible Matrix response recovery, adoption, and replay reconciliation |
 | `turn_store.py` | Unified durable turn access (wraps the handled-turn ledger) |
 | `handled_turns.py` | Disk-backed handled-turn ledger preventing duplicate responses |
 | `response_runner.py` | Response lifecycle execution (locking, streaming vs non-streaming, cancellation, detached inbox responses, shutdown drains) |
@@ -17627,11 +17633,18 @@ MindRoom stores data in the `mindroom_data` directory:
 - `chroma/` - ChromaDB vector store for agent/team memories
 - `knowledge_db/` - Knowledge base vector stores
 - `culture/` - Shared culture state
-- `tracking/` - Response tracking to avoid duplicates
+- `tracking/` - Durable response, callback-obligation, and lifecycle-hook state used to prevent duplicate work across restarts
 - `credentials/` - Synchronized secrets from `.env`
 - `logs/` - Application logs
 - `matrix_state.yaml` - Matrix connection state
 - `encryption_keys/` - Matrix E2EE keys (if enabled)
+
+Keep `tracking/` on persistent storage and include it in backups.
+Dispatch-obligation databases retain one compact terminal row per settled callback except successful invites, whose synthetic obligations are deleted so later re-invites can run.
+The retained terminal rows have no automatic retention window because deleting them weakens replay deduplication.
+Pending rows temporarily retain the full event replay payload and should represent only actively deferred or retry-owned work, not completed ignore paths.
+Checkpoint invalidation can force a no-`since` limited sync that backfills older events, and opaque Matrix tokens provide no safe ordering frontier for pruning those exact keys.
+Size and monitor the volume for lifetime callback growth, and use the inspection and corruption-remediation guidance in [Bot Runtime Architecture](https://docs.mindroom.chat/architecture/bot-runtime/#durable-dispatch-boundary).
 
 ## Sandbox Proxy Isolation
 
@@ -17879,6 +17892,8 @@ If you are testing unreleased code from a source checkout, start MindRoom from t
 Use `uv run mindroom run` from the repo root, or `uvx --from /path/to/mindroom mindroom run`.
 Use plain `uvx mindroom run` only after the version you want is published on PyPI.
 When you test unreleased code, build a worker image from the same checkout so the primary runtime and worker containers run the same revision.
+MindRoom checks the worker protocol exposed by `/healthz` and rejects stale or otherwise incompatible images before routing tools to them.
+If the compatibility check fails, rebuild the worker image from the active MindRoom checkout or select the matching published image tag.
 
 ```bash
 docker build -t mindroom:dev -f local/instances/deploy/Dockerfile.mindroom .
@@ -19446,7 +19461,8 @@ mindroom threads export --storage-path mindroom_data --prefer-cache
 ## service
 
 Install and manage MindRoom as a background user service.
-MindRoom runs through `uv tool run` and starts automatically at login.
+MindRoom runs the version installed by this command through `uv tool run` and starts automatically at login.
+Rerun `mindroom service install` after upgrading MindRoom.
 On macOS, MindRoom uses launchd user agents.
 On Linux, MindRoom uses systemd user services.
 
@@ -19467,7 +19483,9 @@ On Linux, MindRoom uses systemd user services.
 
  Install and manage MindRoom as a background user service.
 
- MindRoom runs through `uv tool run` and starts automatically at login.
+ MindRoom runs the version installed by this command through `uv tool run` and starts
+ automatically at login.
+ Rerun `mindroom service install` after upgrading MindRoom.
 
  Supported platforms:
  - macOS: launchd (`~/Library/LaunchAgents/`)

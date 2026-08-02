@@ -5017,11 +5017,9 @@ def test_supabase_cookie_auth_allows_access(
     """Platform requests should authenticate from the mindroom_jwt cookie."""
     valid_cookie_token = "valid-cookie-token"  # noqa: S105
     _set_platform_auth(valid_tokens={valid_cookie_token})
+    test_client.cookies.set("mindroom_jwt", valid_cookie_token)
 
-    response = test_client.post(
-        "/api/config/load",
-        cookies={"mindroom_jwt": valid_cookie_token},
-    )
+    response = test_client.post("/api/config/load")
     assert response.status_code == 200
 
 
@@ -5119,10 +5117,10 @@ def test_platform_frontend_redirects_to_login_when_cookie_invalid(
         valid_tokens={"valid-cookie-token"},
         platform_login_url="https://app.example.com/auth/login",
     )
+    test_client.cookies.set("mindroom_jwt", "definitely-invalid")
 
     response = test_client.get(
         "/agents",
-        cookies={"mindroom_jwt": "definitely-invalid"},
         follow_redirects=False,
     )
     assert response.status_code == 307
@@ -5145,11 +5143,9 @@ def test_platform_frontend_serves_dashboard_with_valid_cookie(
         valid_tokens={valid_cookie_token},
         platform_login_url="https://app.example.com/auth/login",
     )
+    test_client.cookies.set("mindroom_jwt", valid_cookie_token)
 
-    response = test_client.get(
-        "/",
-        cookies={"mindroom_jwt": valid_cookie_token},
-    )
+    response = test_client.get("/")
     assert response.status_code == 200
     assert "MindRoom Dashboard" in response.text
 
@@ -5172,10 +5168,10 @@ def test_platform_frontend_redirects_when_cookie_account_mismatches(
         account_id="account-owner",
         user_id="other-account",
     )
+    test_client.cookies.set("mindroom_jwt", valid_cookie_token)
 
     response = test_client.get(
         "/",
-        cookies={"mindroom_jwt": valid_cookie_token},
         follow_redirects=False,
     )
     assert response.status_code == 307

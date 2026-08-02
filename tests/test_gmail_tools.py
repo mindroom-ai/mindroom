@@ -5,7 +5,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, Mock, patch
 
 import pytest
-from agno.tools.gmail import GmailTools as AgnoGmailTools
+from agno.tools.google.gmail import GmailTools as AgnoGmailTools
 
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.credentials import CredentialsManager, get_runtime_credentials_manager

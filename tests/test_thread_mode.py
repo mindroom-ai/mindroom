@@ -29,6 +29,7 @@ from mindroom.conversation_resolver import MessageContext
 from mindroom.delivery_gateway import SendTextRequest
 from mindroom.dispatch_source import SCHEDULED_SOURCE_KIND
 from mindroom.entity_resolution import entity_identity_registry
+from mindroom.handled_turns import TurnRecord
 from mindroom.matrix.cache import ThreadHistoryResult, thread_history_result
 from mindroom.matrix.cache.thread_reads import ThreadReadMode
 from mindroom.matrix.cache.write_coordinator import EventCacheWriteCoordinator
@@ -1372,12 +1373,13 @@ class TestCommandThreadContextRoomMode:
                 return_value=("task123", "scheduled"),
             ) as mock_schedule,
         ):
-            await bot._turn_controller._execute_command(
+            await bot._command_turn_executor.execute(
                 room=room,
                 event=event,
                 requester_user_id="@user:localhost",
                 command=command,
                 target=MessageTarget.resolve(room.room_id, None, event.event_id, room_mode=True),
+                handled_turn=TurnRecord.create([event.event_id]),
             )
 
         assert mock_schedule.await_args.kwargs["thread_id"] is None
@@ -1431,12 +1433,13 @@ class TestCommandThreadContextRoomMode:
                 return_value=("task123", "scheduled"),
             ) as mock_schedule,
         ):
-            await bot._turn_controller._execute_command(
+            await bot._command_turn_executor.execute(
                 room=room,
                 event=event,
                 requester_user_id="@user:localhost",
                 command=command,
                 target=stable_target,
+                handled_turn=TurnRecord.create([event.event_id]),
             )
 
         assert mock_schedule.await_args.kwargs["thread_id"] == "$stable_thread"

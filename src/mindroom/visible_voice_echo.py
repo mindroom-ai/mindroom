@@ -22,7 +22,9 @@ from mindroom.constants import (
 )
 from mindroom.delivery_gateway import EditTextRequest, SendTextRequest
 from mindroom.dispatch_handoff import PreparedTextEvent, payload_metadata_from_source
+from mindroom.dispatch_recovery_context import turn_dispatch_recovery_active
 from mindroom.dispatch_source import TRUSTED_INTERNAL_RELAY_SOURCE_KIND
+from mindroom.matrix.client_thread_history import find_response_event_ids_via_room_messages
 from mindroom.turn_origin import original_sender_for_router_relay
 
 if TYPE_CHECKING:
@@ -400,6 +402,11 @@ class VisibleVoiceEchoLifecycle:
             if existing_event_id is not None:
                 _publish_echo_barrier(barrier, existing_event_id)
                 return existing_event_id
+            existing_event_id = await self._recover_visible_echo_event_id(request)
+            if existing_event_id is not None:
+                self.deps.turn_store.record_visible_echo(request.source_event_id, existing_event_id)
+                _publish_echo_barrier(barrier, existing_event_id)
+                return existing_event_id
             event_id = await self.deps.delivery_gateway.send_text(
                 SendTextRequest(
                     target=request.target,
@@ -439,6 +446,10 @@ class VisibleVoiceEchoLifecycle:
                 normalized_source=normalized_event.source,
             )
             if event_id is None:
+                event_id = await self._recover_visible_echo_event_id(request)
+                if event_id is not None:
+                    self.deps.turn_store.record_visible_echo(request.source_event_id, event_id)
+            if event_id is None:
                 event_id = await self.deps.delivery_gateway.send_text(
                     SendTextRequest(
                         target=request.target,
@@ -469,6 +480,29 @@ class VisibleVoiceEchoLifecycle:
                 is_fallback=is_fallback,
             )
             return event_id
+
+    async def _recover_visible_echo_event_id(self, request: VisibleVoiceEchoRequest) -> str | None:
+        """Adopt one untracked marked echo before replay can send another."""
+        if not turn_dispatch_recovery_active():
+            return None
+        client = self.deps.runtime.client
+        if client is None or client.user_id is None:
+            msg = "Visible voice echo recovery requires an active Matrix client"
+            raise RuntimeError(msg)
+        response_event_ids = await find_response_event_ids_via_room_messages(
+            client,
+            request.target.room_id,
+            response_sender=client.user_id,
+            source_event_ids=(request.source_event_id,),
+            response_source_filter=lambda source: (
+                isinstance(content := source.get("content"), dict)
+                and content.get(VISIBLE_ROUTER_VOICE_ECHO_KEY) is True
+            ),
+        )
+        if len(response_event_ids) > 1:
+            msg = "Recovered voice source has multiple visible router echoes"
+            raise RuntimeError(msg)
+        return next(iter(response_event_ids), None)
 
     def _update_key(self, request: VisibleVoiceEchoRequest) -> tuple[str, str, str]:
         return (self.deps.agent_name, request.target.room_id, request.source_event_id)

@@ -42,6 +42,7 @@ class PromptIngressReservationOwner:
         *,
         source_event_id: str | None,
         source_kind: str,
+        callback_source_kind: str | None = None,
         ready_result: ReadyPendingEvent | None = None,
         ready_task: asyncio.Task[ReadyPendingEvent | None] | None = None,
     ) -> None:
@@ -57,17 +58,18 @@ class PromptIngressReservationOwner:
                 ready_task=ready_task,
                 source_event_id=source_event_id,
                 source_kind=source_kind,
+                callback_source_kind=callback_source_kind,
             )
             metadata_transferred = True
         except BaseException:
-            await self.cancel_ready_task()
+            await self._cancel_ready_task()
             if ready_result is not None and not metadata_transferred:
                 close_ready_task_result_metadata(ready_result)
             raise
         self.admitted = True
         self.ready_task = None
 
-    async def cancel_ready_task(self) -> None:
+    async def _cancel_ready_task(self) -> None:
         """Cancel or collect the owned ready task once."""
         if self.ready_task is None:
             return
@@ -90,6 +92,6 @@ class PromptIngressReservationOwner:
         if self.admitted:
             return
         try:
-            await self.cancel_ready_task()
+            await self._cancel_ready_task()
         finally:
             self.gate.release_lane_slot(self.slot)

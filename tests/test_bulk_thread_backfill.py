@@ -13,6 +13,7 @@ from mindroom.matrix.client_thread_history import (
     OpaqueEncryptedThreadHistoryError,
     bulk_refresh_room_thread_histories,
     fetch_thread_event_sources_via_room_messages,
+    find_response_event_ids_via_room_messages,
     thread_ids_needing_refill,
 )
 from mindroom.matrix.thread_membership import ThreadRoomScanRootNotFoundError
@@ -30,14 +31,23 @@ def _message_event(
     *,
     timestamp: int,
     thread_root_id: str | None = None,
+    reply_to_event_id: str | None = None,
+    is_falling_back: bool = False,
+    sender: str = "@alice:localhost",
 ) -> nio.RoomMessageText:
     content: dict[str, object] = {"body": body, "msgtype": "m.text"}
     if thread_root_id is not None:
         content["m.relates_to"] = {"rel_type": "m.thread", "event_id": thread_root_id}
+    if reply_to_event_id is not None:
+        relation = content.setdefault("m.relates_to", {})
+        assert isinstance(relation, dict)
+        relation["m.in_reply_to"] = {"event_id": reply_to_event_id}
+        if is_falling_back:
+            relation["is_falling_back"] = True
     return nio.RoomMessageText.from_dict(
         {
             "event_id": event_id,
-            "sender": "@alice:localhost",
+            "sender": sender,
             "origin_server_ts": timestamp,
             "room_id": _ROOM_ID,
             "type": "m.room.message",
@@ -101,6 +111,137 @@ def _opaque_reply_event(event_id: str, *, replies_to: str, timestamp: int) -> ni
             },
         },
     )
+
+
+@pytest.mark.asyncio
+async def test_response_recovery_scan_finds_exact_original_before_source() -> None:
+    """The recovery scan finds the bot's original reply and ignores other senders and edits."""
+    source_event_id = "$source:localhost"
+    response_event_id = "$response:localhost"
+    edit = _edit_event(
+        "$response-edit:localhost",
+        response_event_id,
+        timestamp=4000,
+        thread_root_id=source_event_id,
+    )
+    edit.source["sender"] = "@bot:localhost"
+    client = AsyncMock()
+    client.room_messages = AsyncMock(
+        side_effect=[
+            _messages_response(
+                [
+                    edit,
+                    _message_event(
+                        "$other-reply:localhost",
+                        "other reply",
+                        timestamp=3000,
+                        reply_to_event_id=source_event_id,
+                    ),
+                    _message_event(
+                        response_event_id,
+                        "Thinking...",
+                        timestamp=2000,
+                        reply_to_event_id=source_event_id,
+                        sender="@bot:localhost",
+                    ),
+                ],
+                end="page-2",
+            ),
+            _messages_response(
+                [_message_event(source_event_id, "question", timestamp=1000)],
+                end="unused-page",
+            ),
+        ],
+    )
+
+    response_event_ids = await find_response_event_ids_via_room_messages(
+        client,
+        _ROOM_ID,
+        response_sender="@bot:localhost",
+        source_event_ids=(source_event_id,),
+    )
+
+    assert response_event_ids == frozenset({response_event_id})
+    assert client.room_messages.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_response_recovery_scan_finds_opaque_encrypted_reply() -> None:
+    """The exposed reply relation recovers a bot response even without its Megolm key."""
+    source_event_id = "$source:localhost"
+    response_event_id = "$response:localhost"
+    response_event = _opaque_reply_event(response_event_id, replies_to=source_event_id, timestamp=2000)
+    response_event.source["sender"] = "@bot:localhost"
+    client = AsyncMock()
+    client.room_messages = AsyncMock(
+        return_value=_messages_response(
+            [response_event, _message_event(source_event_id, "question", timestamp=1000)],
+            end=None,
+        ),
+    )
+
+    response_event_ids = await find_response_event_ids_via_room_messages(
+        client,
+        _ROOM_ID,
+        response_sender="@bot:localhost",
+        source_event_ids=(source_event_id,),
+    )
+
+    assert response_event_ids == frozenset({response_event_id})
+
+
+@pytest.mark.asyncio
+async def test_response_recovery_scan_ignores_thread_fallback_relation() -> None:
+    """A thread continuation is not the bot response merely because fallback targets the source."""
+    source_event_id = "$source:localhost"
+    client = AsyncMock()
+    client.room_messages = AsyncMock(
+        return_value=_messages_response(
+            [
+                _message_event(
+                    "$scheduled:localhost",
+                    "scheduled continuation",
+                    timestamp=2000,
+                    thread_root_id="$thread:localhost",
+                    reply_to_event_id=source_event_id,
+                    is_falling_back=True,
+                    sender="@bot:localhost",
+                ),
+                _message_event(source_event_id, "question", timestamp=1000),
+            ],
+            end=None,
+        ),
+    )
+
+    response_event_ids = await find_response_event_ids_via_room_messages(
+        client,
+        _ROOM_ID,
+        response_sender="@bot:localhost",
+        source_event_ids=(source_event_id,),
+    )
+
+    assert response_event_ids == frozenset()
+
+
+@pytest.mark.asyncio
+async def test_response_recovery_scan_rejects_repeated_pagination_token() -> None:
+    """A stuck homeserver cursor must fail recovery instead of looping forever."""
+    client = AsyncMock()
+    page = _messages_response(
+        [_message_event("$unrelated:localhost", "unrelated", timestamp=2000)],
+        end="stuck-token",
+    )
+    client.room_messages = AsyncMock(return_value=page)
+
+    with pytest.raises(RuntimeError, match="repeated pagination token"):
+        await find_response_event_ids_via_room_messages(
+            client,
+            _ROOM_ID,
+            response_sender="@bot:localhost",
+            source_event_ids=("$missing-source:localhost",),
+        )
+
+    assert client.room_messages.await_count == 2
 
 
 @pytest.mark.asyncio

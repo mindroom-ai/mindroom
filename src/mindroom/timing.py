@@ -156,7 +156,7 @@ class DispatchPipelineTiming:
             self.marks["first_substantive_reply"] = now
             self.metadata["first_substantive_kind"] = kind
 
-    def elapsed_ms(self, start_label: str, end_label: str) -> float | None:
+    def _elapsed_ms(self, start_label: str, end_label: str) -> float | None:
         """Return elapsed time between two recorded phase boundaries."""
         start = self.marks.get(start_label)
         end = self.marks.get(end_label)
@@ -179,7 +179,7 @@ class DispatchPipelineTiming:
         }
         duration_pairs = (*_PRIMARY_SEGMENTS, *_PRIMARY_TOTALS, *_DIAGNOSTIC_SPANS)
         for key, start_label, end_label in duration_pairs:
-            elapsed = self.elapsed_ms(start_label, end_label)
+            elapsed = self._elapsed_ms(start_label, end_label)
             if elapsed is not None:
                 summary[key] = elapsed
         logger.debug("Dispatch pipeline timing", **summary)
