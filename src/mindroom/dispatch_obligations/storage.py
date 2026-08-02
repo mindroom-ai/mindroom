@@ -58,14 +58,14 @@ class DispatchSemanticConsumer(StrEnum):
         return DispatchCallbackKind.REACTION
 
 
-class _DispatchTerminalOutcome(StrEnum):
+class DispatchTerminalOutcome(StrEnum):
     """Explicit terminal outcomes for one exact callback obligation."""
 
     SUCCEEDED = "succeeded"
     INTENTIONALLY_IGNORED = "intentionally_ignored"
 
 
-class _DispatchCreateResult(StrEnum):
+class DispatchCreateResult(StrEnum):
     """Result of durably creating one pending obligation."""
 
     CREATED = "created"
@@ -73,7 +73,7 @@ class _DispatchCreateResult(StrEnum):
     ALREADY_TERMINAL = "already_terminal"
 
 
-class _DispatchObligationCorruptionError(RuntimeError):
+class DispatchObligationCorruptionError(RuntimeError):
     """A pending row cannot be recovered without inventing source input."""
 
 
@@ -86,7 +86,7 @@ def _database_name(principal_id: str, entity_name: str) -> str:
 
 
 @dataclass(frozen=True, slots=True)
-class _DispatchObligationKey:
+class DispatchObligationKey:
     """Exact durable callback identity."""
 
     principal_id: str
@@ -96,7 +96,7 @@ class _DispatchObligationKey:
 
 
 @dataclass(frozen=True, slots=True)
-class _DispatchObligation:
+class DispatchObligation:
     """Replayable input for one exact Matrix callback."""
 
     principal_id: str
@@ -110,9 +110,9 @@ class _DispatchObligation:
     requires_pending_check: bool = field(default=False, compare=False, repr=False)
 
     @property
-    def key(self) -> _DispatchObligationKey:
+    def key(self) -> DispatchObligationKey:
         """Return the exact durable identity."""
-        return _DispatchObligationKey(
+        return DispatchObligationKey(
             principal_id=self.principal_id,
             entity_name=self.entity_name,
             source_event_id=self.source_event_id,
@@ -212,7 +212,7 @@ class DispatchObligationStore:
             connection.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
 
     @staticmethod
-    def _event_source_json(obligation: _DispatchObligation) -> str:
+    def _event_source_json(obligation: DispatchObligation) -> str:
         try:
             event_source_json = json.dumps(
                 obligation.event_source,
@@ -224,7 +224,7 @@ class DispatchObligationStore:
             msg = "Dispatch obligation event source must be JSON-safe"
             raise ValueError(msg) from exc
         expected_source_event_id = (
-            _invite_source_event_id(obligation.room_id, event_source_json)
+            invite_source_event_id(obligation.room_id, event_source_json)
             if obligation.callback_kind is DispatchCallbackKind.INVITE
             else obligation.event_source.get("event_id")
         )
@@ -233,7 +233,8 @@ class DispatchObligationStore:
             raise ValueError(msg)
         return event_source_json
 
-    def _validate_bound_key(self, key: _DispatchObligationKey) -> None:
+    def validate_bound_key(self, key: DispatchObligationKey) -> None:
+        """Reject a key bound to another principal or entity."""
         if key.principal_id != self.principal_id or key.entity_name != self.entity_name:
             msg = "Dispatch obligation identity does not match the bound principal and entity"
             raise ValueError(msg)
@@ -248,7 +249,7 @@ class DispatchObligationStore:
             state=row["state"],
         )
 
-    def _pending_obligation_from_row(self, row: sqlite3.Row) -> _DispatchObligation:
+    def _pending_obligation_from_row(self, row: sqlite3.Row) -> DispatchObligation:
         """Decode one exact pending row without inventing source input."""
         try:
             callback_kind = DispatchCallbackKind(row["callback_kind"])
@@ -258,14 +259,14 @@ class DispatchObligationStore:
             )
         except (ValueError, TypeError, json.JSONDecodeError) as exc:
             msg = f"corrupt dispatch obligation {row['source_event_id']!r}/{row['callback_kind']!r}"
-            raise _DispatchObligationCorruptionError(msg) from exc
+            raise DispatchObligationCorruptionError(msg) from exc
         if semantic_consumer is not None and semantic_consumer.callback_kind is not callback_kind:
             msg = f"corrupt dispatch obligation {row['source_event_id']!r}/{row['callback_kind']!r}"
-            raise _DispatchObligationCorruptionError(msg)
+            raise DispatchObligationCorruptionError(msg)
         if not isinstance(event_source, dict):
             msg = f"corrupt dispatch obligation {row['source_event_id']!r}/{row['callback_kind']!r}"
-            raise _DispatchObligationCorruptionError(msg)
-        return _DispatchObligation(
+            raise DispatchObligationCorruptionError(msg)
+        return DispatchObligation(
             principal_id=self.principal_id,
             entity_name=self.entity_name,
             source_event_id=row["source_event_id"],
@@ -277,9 +278,9 @@ class DispatchObligationStore:
             requires_pending_check=True,
         )
 
-    def _create_pending(self, obligation: _DispatchObligation) -> _DispatchCreateResult:
+    def create_pending(self, obligation: DispatchObligation) -> DispatchCreateResult:
         """Durably create pending work before its callback can run."""
-        self._validate_bound_key(obligation.key)
+        self.validate_bound_key(obligation.key)
         if not obligation.source_event_id:
             msg = "Dispatch obligation requires a source event"
             raise ValueError(msg)
@@ -305,7 +306,7 @@ class DispatchObligationStore:
                 ).fetchone(),
             )
             if existing is not None and existing.state not in _UNSETTLED_STATES:
-                return _DispatchCreateResult.ALREADY_TERMINAL
+                return DispatchCreateResult.ALREADY_TERMINAL
             if not obligation.room_id:
                 msg = "Dispatch obligation requires a room"
                 raise ValueError(msg)
@@ -317,7 +318,7 @@ class DispatchObligationStore:
                         source_event_id=key.source_event_id,
                         callback_kind=key.callback_kind.value,
                     )
-                return _DispatchCreateResult.ALREADY_PENDING
+                return DispatchCreateResult.ALREADY_PENDING
             connection.execute(
                 """
                 INSERT INTO dispatch_obligations (
@@ -342,15 +343,15 @@ class DispatchObligationStore:
                     time.time_ns(),
                 ),
             )
-        return _DispatchCreateResult.CREATED
+        return DispatchCreateResult.CREATED
 
     def settle(
         self,
-        key: _DispatchObligationKey,
-        outcome: _DispatchTerminalOutcome,
+        key: DispatchObligationKey,
+        outcome: DispatchTerminalOutcome,
     ) -> None:
         """Durably settle one exact pending callback."""
-        self._validate_bound_key(key)
+        self.validate_bound_key(key)
         with self._lock, self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
             connection.execute(
@@ -379,9 +380,9 @@ class DispatchObligationStore:
                 ),
             )
 
-    def _discard_pending(self, key: _DispatchObligationKey) -> None:
+    def discard_pending(self, key: DispatchObligationKey) -> None:
         """Remove successful work whose source has no permanent Matrix event ID."""
-        self._validate_bound_key(key)
+        self.validate_bound_key(key)
         if key.callback_kind is not DispatchCallbackKind.INVITE:
             msg = "Only successful invite obligations may be deleted"
             raise ValueError(msg)
@@ -406,9 +407,9 @@ class DispatchObligationStore:
                 ),
             )
 
-    def _mark_callback_pending(self, key: _DispatchObligationKey) -> bool:
+    def mark_callback_pending(self, key: DispatchObligationKey) -> bool:
         """Return deferred turn work to callback ownership before retrying it."""
-        self._validate_bound_key(key)
+        self.validate_bound_key(key)
         with self._lock, self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
             cursor = connection.execute(
@@ -434,11 +435,11 @@ class DispatchObligationStore:
 
     def claim_semantic_consumer(
         self,
-        key: _DispatchObligationKey,
+        key: DispatchObligationKey,
         consumer: DispatchSemanticConsumer,
     ) -> DispatchSemanticConsumer:
         """Persist the sole application consumer before it performs side effects."""
-        self._validate_bound_key(key)
+        self.validate_bound_key(key)
         if consumer.callback_kind is not key.callback_kind:
             msg = f"{consumer.value!r} cannot consume a {key.callback_kind.value!r} callback"
             raise ValueError(msg)
@@ -470,12 +471,12 @@ class DispatchObligationStore:
             raise RuntimeError(msg)
         return DispatchSemanticConsumer(row["semantic_consumer"])
 
-    def _receipt_order(self, key: _DispatchObligationKey) -> int:
+    def receipt_order(self, key: DispatchObligationKey) -> int:
         """Return the stable SQLite admission order for one exact callback."""
-        self._validate_bound_key(key)
+        self.validate_bound_key(key)
         with self._lock, self._connection() as connection:
             # SQLite may reuse a deleted maximum rowid, so MESSAGE and REACTION
-            # rows remain permanent and `_discard_pending` enforces INVITE-only deletion.
+            # rows remain permanent and `discard_pending` enforces INVITE-only deletion.
             row = connection.execute(
                 """
                 SELECT rowid
@@ -497,9 +498,9 @@ class DispatchObligationStore:
             raise RuntimeError(msg)
         return int(row["rowid"])
 
-    def _mark_callback_deferred(self, key: _DispatchObligationKey) -> None:
+    def mark_callback_deferred(self, key: DispatchObligationKey) -> None:
         """Record that the callback completed and downstream turn work owns the source."""
-        self._validate_bound_key(key)
+        self.validate_bound_key(key)
         with self._lock, self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
             connection.execute(
@@ -522,7 +523,7 @@ class DispatchObligationStore:
                 ),
             )
 
-    def _settle_from_turn_store(
+    def settle_from_turn_store(
         self,
         source_event_id: str,
         callback_kind: DispatchCallbackKind,
@@ -567,7 +568,7 @@ class DispatchObligationStore:
                     self.entity_name,
                     source_event_id,
                     callback_kind.value,
-                    _DispatchTerminalOutcome.SUCCEEDED.value,
+                    DispatchTerminalOutcome.SUCCEEDED.value,
                     settled_at_ns,
                     settled_at_ns,
                 ),
@@ -577,7 +578,7 @@ class DispatchObligationStore:
         self,
         source_event_ids: tuple[str, ...],
         *,
-        outcome: _DispatchTerminalOutcome,
+        outcome: DispatchTerminalOutcome,
         eligible_states: tuple[str, str],
     ) -> None:
         """Compact matching turn-backed rows under one terminal-settlement invariant."""
@@ -618,11 +619,11 @@ class DispatchObligationStore:
                 ),
             )
 
-    def _settle_pending_from_turn_store(self, source_event_ids: tuple[str, ...]) -> None:
+    def settle_pending_from_turn_store(self, source_event_ids: tuple[str, ...]) -> None:
         """Compact only transient turn-backed rows after TurnStore becomes durable."""
         self._settle_turn_sources(
             source_event_ids,
-            outcome=_DispatchTerminalOutcome.SUCCEEDED,
+            outcome=DispatchTerminalOutcome.SUCCEEDED,
             eligible_states=(_DEFERRED_STATE, _DEFERRED_STATE),
         )
 
@@ -630,11 +631,11 @@ class DispatchObligationStore:
         """Compact message or media callbacks intentionally ignored downstream."""
         self._settle_turn_sources(
             source_event_ids,
-            outcome=_DispatchTerminalOutcome.INTENTIONALLY_IGNORED,
+            outcome=DispatchTerminalOutcome.INTENTIONALLY_IGNORED,
             eligible_states=(_PENDING_STATE, _DEFERRED_STATE),
         )
 
-    def pending(self) -> tuple[_DispatchObligation, ...]:
+    def pending(self) -> tuple[DispatchObligation, ...]:
         """Return valid pending work oldest-first while retaining corrupt rows."""
         with self._lock, self._connection() as connection:
             rows = connection.execute(
@@ -648,11 +649,11 @@ class DispatchObligationStore:
                 """,
                 (self.principal_id, self.entity_name),
             ).fetchall()
-        obligations: list[_DispatchObligation] = []
+        obligations: list[DispatchObligation] = []
         for row in rows:
             try:
                 obligations.append(self._pending_obligation_from_row(row))
-            except _DispatchObligationCorruptionError:
+            except DispatchObligationCorruptionError:
                 logger.error(  # noqa: TRY400
                     "dispatch_obligation_pending_row_corrupt",
                     source_event_id=row["source_event_id"],
@@ -680,9 +681,9 @@ class DispatchObligationStore:
             ).fetchall()
         return frozenset(row["source_event_id"] for row in rows)
 
-    def _pending_for(self, key: _DispatchObligationKey) -> _DispatchObligation | None:
+    def pending_for(self, key: DispatchObligationKey) -> DispatchObligation | None:
         """Reload the first durable payload for one still-pending exact key."""
-        self._validate_bound_key(key)
+        self.validate_bound_key(key)
         with self._lock, self._connection() as connection:
             row = connection.execute(
                 """
@@ -705,7 +706,7 @@ class DispatchObligationStore:
             ).fetchone()
         return None if row is None else self._pending_obligation_from_row(row)
 
-    def _has_pending(
+    def has_pending(
         self,
         source_event_id: str,
         callback_kind: DispatchCallbackKind,
@@ -735,6 +736,7 @@ class DispatchObligationStore:
         return row is not None
 
 
-def _invite_source_event_id(room_id: str, event_source_json: str) -> str:
+def invite_source_event_id(room_id: str, event_source_json: str) -> str:
+    """Return the stable synthetic source identity for one invite."""
     digest = hashlib.sha256(f"{room_id}\0{event_source_json}".encode()).hexdigest()
     return f"invite:{digest}"

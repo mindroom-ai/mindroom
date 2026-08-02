@@ -1225,7 +1225,7 @@ class TestAgentBot(AgentBotTestBase):
         await _cancel_dispatch_retry(bot)
         pending = bot._dispatch_obligation_store.pending()
         assert pending[0].semantic_consumer is DispatchSemanticConsumer.STOP_REACTION
-        stop_receipt_order = bot._dispatch_obligation_store._receipt_order(pending[0].key)
+        stop_receipt_order = bot._dispatch_obligation_store.receipt_order(pending[0].key)
 
         restarted = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
         restarted.client = make_matrix_client_mock()
@@ -1281,7 +1281,7 @@ class TestAgentBot(AgentBotTestBase):
             await bot._dispatch_obligation_runner.dispatch(room, event, DispatchCallbackKind.REACTION)
         await _cancel_dispatch_retry(bot)
         pending = bot._dispatch_obligation_store.pending()
-        stop_receipt_order = bot._dispatch_obligation_store._receipt_order(pending[0].key)
+        stop_receipt_order = bot._dispatch_obligation_store.receipt_order(pending[0].key)
 
         restarted = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
         restarted.client = make_matrix_client_mock()
@@ -1334,7 +1334,7 @@ class TestAgentBot(AgentBotTestBase):
             await bot._dispatch_obligation_runner.dispatch(room, event, DispatchCallbackKind.REACTION)
         await _cancel_dispatch_retry(bot)
         pending = bot._dispatch_obligation_store.pending()
-        stop_receipt_order = bot._dispatch_obligation_store._receipt_order(pending[0].key)
+        stop_receipt_order = bot._dispatch_obligation_store.receipt_order(pending[0].key)
         bot._turn_store.record_turn_durably(
             with_user_stop(
                 pending_turn,
@@ -1395,7 +1395,7 @@ class TestAgentBot(AgentBotTestBase):
         await _cancel_dispatch_retry(bot)
 
         pending = bot._dispatch_obligation_store.pending()
-        stop_receipt_order = bot._dispatch_obligation_store._receipt_order(pending[0].key)
+        stop_receipt_order = bot._dispatch_obligation_store.receipt_order(pending[0].key)
         stopped_record = bot._turn_store.get_turn_record("$source")
         assert stopped_record is not None
         assert stopped_record.completed is True

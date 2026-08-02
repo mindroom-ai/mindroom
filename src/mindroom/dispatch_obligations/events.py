@@ -17,16 +17,16 @@ from mindroom.matrix.media import MATRIX_MEDIA_EVENT_TYPES, MatrixMediaEvent, pa
 
 from .storage import (
     DispatchCallbackKind,
-    _DispatchObligation,
-    _DispatchObligationCorruptionError,
-    _invite_source_event_id,
+    DispatchObligation,
+    DispatchObligationCorruptionError,
+    invite_source_event_id,
 )
 
 _TOOL_APPROVAL_RESPONSE_EVENT_TYPE = "io.mindroom.tool_approval_response"
 _RECOVERY_SECURITY_METADATA_KEY = "io.mindroom.dispatch_recovery_security"
 
 
-class _DispatchCallbackResult(StrEnum):
+class DispatchCallbackResult(StrEnum):
     """One explicit callback outcome visible at the durable boundary."""
 
     SUCCEEDED = "succeeded"
@@ -47,19 +47,20 @@ class _RoomIdEvent(Protocol):
     room_id: str
 
 
-_DispatchEvent = nio.Event | nio.InviteEvent
-_DispatchCallback = Callable[[nio.MatrixRoom, _DispatchEvent], Awaitable[_DispatchCallbackResult]]
-_MessageCallback = Callable[[nio.MatrixRoom, nio.RoomMessageText], Awaitable[TurnDispatchOutcome]]
-_MediaCallback = Callable[[nio.MatrixRoom, MatrixMediaEvent], Awaitable[TurnDispatchOutcome]]
-_ReactionCallback = Callable[[nio.MatrixRoom, nio.ReactionEvent], Awaitable[None]]
-_ApprovalCallback = Callable[[nio.MatrixRoom, nio.UnknownEvent], Awaitable[None]]
-_InviteCallback = Callable[[nio.MatrixRoom, nio.InviteEvent], Awaitable[None]]
-_RoomLifecycleCallback = Callable[[nio.MatrixRoom, nio.RoomMemberEvent], Awaitable[None]]
-_RedactionCallback = Callable[[nio.MatrixRoom, nio.RedactionEvent], Awaitable[None]]
-_DecryptionFailureCallback = Callable[[nio.MatrixRoom, nio.MegolmEvent], Awaitable[None]]
+DispatchEvent = nio.Event | nio.InviteEvent
+DispatchCallback = Callable[[nio.MatrixRoom, DispatchEvent], Awaitable[DispatchCallbackResult]]
+MessageCallback = Callable[[nio.MatrixRoom, nio.RoomMessageText], Awaitable[TurnDispatchOutcome]]
+MediaCallback = Callable[[nio.MatrixRoom, MatrixMediaEvent], Awaitable[TurnDispatchOutcome]]
+ReactionCallback = Callable[[nio.MatrixRoom, nio.ReactionEvent], Awaitable[None]]
+ApprovalCallback = Callable[[nio.MatrixRoom, nio.UnknownEvent], Awaitable[None]]
+InviteCallback = Callable[[nio.MatrixRoom, nio.InviteEvent], Awaitable[None]]
+RoomLifecycleCallback = Callable[[nio.MatrixRoom, nio.RoomMemberEvent], Awaitable[None]]
+RedactionCallback = Callable[[nio.MatrixRoom, nio.RedactionEvent], Awaitable[None]]
+DecryptionFailureCallback = Callable[[nio.MatrixRoom, nio.MegolmEvent], Awaitable[None]]
 
 
-def _dispatch_event_source(event: _DispatchEvent) -> dict[str, object]:
+def dispatch_event_source(event: DispatchEvent) -> dict[str, object]:
+    """Return the stable replay source for one durable callback."""
     source = dict(event.source)
     source.pop(_RECOVERY_SECURITY_METADATA_KEY, None)
     if isinstance(event, nio.Event) and event.decrypted:
@@ -87,7 +88,7 @@ def _apply_recovery_security_metadata(
         return
     if not isinstance(metadata, dict):
         msg = f"corrupt dispatch obligation event {source_event_id!r}/security metadata"
-        raise _DispatchObligationCorruptionError(msg)
+        raise DispatchObligationCorruptionError(msg)
     metadata_dict = cast("dict[str, object]", metadata)
     verified = metadata_dict.get("verified")
     sender_key = metadata_dict.get("sender_key")
@@ -99,7 +100,7 @@ def _apply_recovery_security_metadata(
         or (session_id is not None and not isinstance(session_id, str))
     ):
         msg = f"corrupt dispatch obligation event {source_event_id!r}/security metadata"
-        raise _DispatchObligationCorruptionError(msg)
+        raise DispatchObligationCorruptionError(msg)
     event.decrypted = True
     event.verified = verified
     event.sender_key = sender_key
@@ -109,24 +110,26 @@ def _apply_recovery_security_metadata(
     cast(_RoomIdEvent, event).room_id = room_id  # noqa: TC006
 
 
-def _dispatch_source_event_id(
+def dispatch_source_event_id(
     room_id: str,
-    event: _DispatchEvent,
+    event: DispatchEvent,
     callback_kind: DispatchCallbackKind,
     event_source_json: str,
 ) -> str:
+    """Return the exact durable source identity for one callback."""
     if callback_kind is DispatchCallbackKind.INVITE:
         if not isinstance(event, nio.InviteEvent):
             msg = "Invite dispatch requires an invite event"
             raise TypeError(msg)
-        return _invite_source_event_id(room_id, event_source_json)
+        return invite_source_event_id(room_id, event_source_json)
     if not isinstance(event, nio.Event):
         msg = f"{callback_kind.value} dispatch requires an event with an exact Matrix event ID"
         raise TypeError(msg)
     return event.event_id
 
 
-def _parse_recovery_event(obligation: _DispatchObligation) -> _DispatchEvent:
+def parse_recovery_event(obligation: DispatchObligation) -> DispatchEvent:
+    """Rebuild one typed nio event from its persisted callback source."""
     if obligation.callback_kind is DispatchCallbackKind.INVITE:
         event_source_json = json.dumps(
             obligation.event_source,
@@ -134,13 +137,13 @@ def _parse_recovery_event(obligation: _DispatchObligation) -> _DispatchEvent:
             separators=(",", ":"),
             sort_keys=True,
         )
-        if _invite_source_event_id(obligation.room_id, event_source_json) != obligation.source_event_id:
+        if invite_source_event_id(obligation.room_id, event_source_json) != obligation.source_event_id:
             msg = f"corrupt dispatch obligation event {obligation.source_event_id!r}/'invite'"
-            raise _DispatchObligationCorruptionError(msg)
+            raise DispatchObligationCorruptionError(msg)
         event = nio.InviteEvent.parse_event(dict(obligation.event_source))
         if not isinstance(event, nio.InviteEvent):
             msg = f"corrupt dispatch obligation event {obligation.source_event_id!r}/'invite'"
-            raise _DispatchObligationCorruptionError(msg)
+            raise DispatchObligationCorruptionError(msg)
         return event
     event_source = dict(obligation.event_source)
     security_metadata = event_source.pop(_RECOVERY_SECURITY_METADATA_KEY, None)
@@ -151,7 +154,7 @@ def _parse_recovery_event(obligation: _DispatchObligation) -> _DispatchEvent:
     )
     if not isinstance(event, nio.Event) or event.event_id != obligation.source_event_id:
         msg = f"corrupt dispatch obligation event {obligation.source_event_id!r}/{obligation.callback_kind.value!r}"
-        raise _DispatchObligationCorruptionError(msg)
+        raise DispatchObligationCorruptionError(msg)
     if isinstance(event, nio.MegolmEvent):
         event.room_id = obligation.room_id
     _apply_recovery_security_metadata(
@@ -164,117 +167,120 @@ def _parse_recovery_event(obligation: _DispatchObligation) -> _DispatchEvent:
 
 
 @dataclass(frozen=True, slots=True)
-class _CallbackBindings:
-    on_message: _MessageCallback
-    on_media: _MediaCallback
-    on_reaction: _ReactionCallback
-    on_approval: _ApprovalCallback
-    on_invite: _InviteCallback
-    on_room_lifecycle: _RoomLifecycleCallback
-    on_redaction: _RedactionCallback
-    on_decryption_failure: _DecryptionFailureCallback
+class CallbackBindings:
+    """Bind typed Matrix callbacks to durable callback outcomes."""
+
+    on_message: MessageCallback
+    on_media: MediaCallback
+    on_reaction: ReactionCallback
+    on_approval: ApprovalCallback
+    on_invite: InviteCallback
+    on_room_lifecycle: RoomLifecycleCallback
+    on_redaction: RedactionCallback
+    on_decryption_failure: DecryptionFailureCallback
     source_has_live_owner: Callable[[str], bool]
 
-    def as_mapping(self) -> Mapping[DispatchCallbackKind, _DispatchCallback]:
+    def as_mapping(self) -> Mapping[DispatchCallbackKind, DispatchCallback]:
+        """Return callback bindings keyed by their durable callback kind."""
         return {
-            DispatchCallbackKind.MESSAGE: self.dispatch_message,
-            DispatchCallbackKind.MEDIA: self.dispatch_media,
-            DispatchCallbackKind.REACTION: self.dispatch_reaction,
-            DispatchCallbackKind.APPROVAL: self.dispatch_approval,
-            DispatchCallbackKind.INVITE: self.dispatch_invite,
-            DispatchCallbackKind.ROOM_LIFECYCLE: self.dispatch_room_lifecycle,
-            DispatchCallbackKind.REDACTION: self.dispatch_redaction,
-            DispatchCallbackKind.DECRYPTION_FAILURE: self.dispatch_decryption_failure,
+            DispatchCallbackKind.MESSAGE: self._dispatch_message,
+            DispatchCallbackKind.MEDIA: self._dispatch_media,
+            DispatchCallbackKind.REACTION: self._dispatch_reaction,
+            DispatchCallbackKind.APPROVAL: self._dispatch_approval,
+            DispatchCallbackKind.INVITE: self._dispatch_invite,
+            DispatchCallbackKind.ROOM_LIFECYCLE: self._dispatch_room_lifecycle,
+            DispatchCallbackKind.REDACTION: self._dispatch_redaction,
+            DispatchCallbackKind.DECRYPTION_FAILURE: self._dispatch_decryption_failure,
         }
 
     @staticmethod
-    def _turn_result(outcome: TurnDispatchOutcome) -> _DispatchCallbackResult:
+    def _turn_result(outcome: TurnDispatchOutcome) -> DispatchCallbackResult:
         if outcome is TurnDispatchOutcome.DEFERRED:
-            return _DispatchCallbackResult.DEFERRED
+            return DispatchCallbackResult.DEFERRED
         if outcome is TurnDispatchOutcome.INTENTIONALLY_IGNORED:
-            return _DispatchCallbackResult.INTENTIONALLY_IGNORED
+            return DispatchCallbackResult.INTENTIONALLY_IGNORED
         msg = f"Turn dispatch callback returned invalid outcome {outcome!r}"
         raise TypeError(msg)
 
-    async def dispatch_message(
+    async def _dispatch_message(
         self,
         room: nio.MatrixRoom,
-        event: _DispatchEvent,
-    ) -> _DispatchCallbackResult:
+        event: DispatchEvent,
+    ) -> DispatchCallbackResult:
         if not isinstance(event, nio.RoomMessageText):
-            return _DispatchCallbackResult.INTENTIONALLY_IGNORED
+            return DispatchCallbackResult.INTENTIONALLY_IGNORED
         return self._turn_result(await self.on_message(room, event))
 
-    async def dispatch_media(
+    async def _dispatch_media(
         self,
         room: nio.MatrixRoom,
-        event: _DispatchEvent,
-    ) -> _DispatchCallbackResult:
+        event: DispatchEvent,
+    ) -> DispatchCallbackResult:
         if not isinstance(event, MATRIX_MEDIA_EVENT_TYPES):
-            return _DispatchCallbackResult.INTENTIONALLY_IGNORED
+            return DispatchCallbackResult.INTENTIONALLY_IGNORED
         if self.source_has_live_owner(event.event_id):
-            return _DispatchCallbackResult.DEFERRED
+            return DispatchCallbackResult.DEFERRED
         return self._turn_result(await self.on_media(room, event))
 
-    async def dispatch_reaction(
+    async def _dispatch_reaction(
         self,
         room: nio.MatrixRoom,
-        event: _DispatchEvent,
-    ) -> _DispatchCallbackResult:
+        event: DispatchEvent,
+    ) -> DispatchCallbackResult:
         if not isinstance(event, nio.ReactionEvent):
-            return _DispatchCallbackResult.INTENTIONALLY_IGNORED
+            return DispatchCallbackResult.INTENTIONALLY_IGNORED
         await self.on_reaction(room, event)
-        return _DispatchCallbackResult.SUCCEEDED
+        return DispatchCallbackResult.SUCCEEDED
 
-    async def dispatch_approval(
+    async def _dispatch_approval(
         self,
         room: nio.MatrixRoom,
-        event: _DispatchEvent,
-    ) -> _DispatchCallbackResult:
+        event: DispatchEvent,
+    ) -> DispatchCallbackResult:
         if not isinstance(event, nio.Event) or not _is_tool_approval_response(event):
-            return _DispatchCallbackResult.INTENTIONALLY_IGNORED
+            return DispatchCallbackResult.INTENTIONALLY_IGNORED
         await self.on_approval(room, event)
-        return _DispatchCallbackResult.SUCCEEDED
+        return DispatchCallbackResult.SUCCEEDED
 
-    async def dispatch_invite(
+    async def _dispatch_invite(
         self,
         room: nio.MatrixRoom,
-        event: _DispatchEvent,
-    ) -> _DispatchCallbackResult:
+        event: DispatchEvent,
+    ) -> DispatchCallbackResult:
         if not isinstance(event, nio.InviteEvent):
-            return _DispatchCallbackResult.INTENTIONALLY_IGNORED
+            return DispatchCallbackResult.INTENTIONALLY_IGNORED
         await self.on_invite(room, event)
-        return _DispatchCallbackResult.SUCCEEDED
+        return DispatchCallbackResult.SUCCEEDED
 
-    async def dispatch_room_lifecycle(
+    async def _dispatch_room_lifecycle(
         self,
         room: nio.MatrixRoom,
-        event: _DispatchEvent,
-    ) -> _DispatchCallbackResult:
+        event: DispatchEvent,
+    ) -> DispatchCallbackResult:
         if not isinstance(event, nio.RoomMemberEvent):
-            return _DispatchCallbackResult.INTENTIONALLY_IGNORED
+            return DispatchCallbackResult.INTENTIONALLY_IGNORED
         await self.on_room_lifecycle(room, event)
-        return _DispatchCallbackResult.SUCCEEDED
+        return DispatchCallbackResult.SUCCEEDED
 
-    async def dispatch_redaction(
+    async def _dispatch_redaction(
         self,
         room: nio.MatrixRoom,
-        event: _DispatchEvent,
-    ) -> _DispatchCallbackResult:
+        event: DispatchEvent,
+    ) -> DispatchCallbackResult:
         if not isinstance(event, nio.RedactionEvent):
-            return _DispatchCallbackResult.INTENTIONALLY_IGNORED
+            return DispatchCallbackResult.INTENTIONALLY_IGNORED
         await self.on_redaction(room, event)
-        return _DispatchCallbackResult.SUCCEEDED
+        return DispatchCallbackResult.SUCCEEDED
 
-    async def dispatch_decryption_failure(
+    async def _dispatch_decryption_failure(
         self,
         room: nio.MatrixRoom,
-        event: _DispatchEvent,
-    ) -> _DispatchCallbackResult:
+        event: DispatchEvent,
+    ) -> DispatchCallbackResult:
         if not isinstance(event, nio.MegolmEvent):
-            return _DispatchCallbackResult.INTENTIONALLY_IGNORED
+            return DispatchCallbackResult.INTENTIONALLY_IGNORED
         await self.on_decryption_failure(room, event)
-        return _DispatchCallbackResult.SUCCEEDED
+        return DispatchCallbackResult.SUCCEEDED
 
 
 def _is_tool_approval_response(event: nio.Event) -> TypeIs[nio.UnknownEvent]:
@@ -282,7 +288,7 @@ def _is_tool_approval_response(event: nio.Event) -> TypeIs[nio.UnknownEvent]:
 
 
 @dataclass(frozen=True, slots=True)
-class _SourceCallbackPolicy:
+class SourceCallbackPolicy:
     """One shared timeline admission and callback-registration rule."""
 
     callback_kind: DispatchCallbackKind
@@ -294,15 +300,15 @@ class _SourceCallbackPolicy:
         return isinstance(event, self.event_types) and (self.predicate is None or self.predicate(event))
 
 
-_SOURCE_CALLBACK_POLICIES = (
-    _SourceCallbackPolicy(DispatchCallbackKind.MESSAGE, (nio.RoomMessageText,)),
-    _SourceCallbackPolicy(DispatchCallbackKind.REDACTION, (nio.RedactionEvent,)),
-    _SourceCallbackPolicy(DispatchCallbackKind.REACTION, (nio.ReactionEvent,)),
-    _SourceCallbackPolicy(DispatchCallbackKind.MEDIA, MATRIX_MEDIA_EVENT_TYPES),
-    _SourceCallbackPolicy(
+SOURCE_CALLBACK_POLICIES = (
+    SourceCallbackPolicy(DispatchCallbackKind.MESSAGE, (nio.RoomMessageText,)),
+    SourceCallbackPolicy(DispatchCallbackKind.REDACTION, (nio.RedactionEvent,)),
+    SourceCallbackPolicy(DispatchCallbackKind.REACTION, (nio.ReactionEvent,)),
+    SourceCallbackPolicy(DispatchCallbackKind.MEDIA, MATRIX_MEDIA_EVENT_TYPES),
+    SourceCallbackPolicy(
         DispatchCallbackKind.APPROVAL,
         (nio.UnknownEvent,),
         _is_tool_approval_response,
     ),
-    _SourceCallbackPolicy(DispatchCallbackKind.DECRYPTION_FAILURE, (nio.MegolmEvent,)),
+    SourceCallbackPolicy(DispatchCallbackKind.DECRYPTION_FAILURE, (nio.MegolmEvent,)),
 )
