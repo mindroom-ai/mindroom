@@ -1215,8 +1215,8 @@ class TestAgentBot(AgentBotTestBase):
 
         with (
             patch.object(
-                unwrap_extracted_collaborator(bot._turn_controller),
-                "finalize_user_stop",
+                bot._user_stop_reconciler,
+                "finalize",
                 new=AsyncMock(side_effect=failure),
             ),
             pytest.raises(RuntimeError, match="crash after stop reaction side effect"),
@@ -1272,8 +1272,8 @@ class TestAgentBot(AgentBotTestBase):
         with (
             patch.object(bot.stop_manager, "can_handle_stop_reaction", new=MagicMock(return_value=True)),
             patch.object(
-                unwrap_extracted_collaborator(bot._turn_controller),
-                "finalize_user_stop",
+                bot._user_stop_reconciler,
+                "finalize",
                 new=AsyncMock(side_effect=RuntimeError("crash after stop claim")),
             ),
             pytest.raises(RuntimeError, match="crash after stop claim"),
@@ -1325,8 +1325,8 @@ class TestAgentBot(AgentBotTestBase):
 
         with (
             patch.object(
-                unwrap_extracted_collaborator(bot._turn_controller),
-                "finalize_user_stop",
+                bot._user_stop_reconciler,
+                "finalize",
                 new=AsyncMock(side_effect=RuntimeError("crash after stop claim")),
             ),
             pytest.raises(RuntimeError, match="crash after stop claim"),
@@ -1522,9 +1522,9 @@ class TestAgentBot(AgentBotTestBase):
         )
         live_task = asyncio.create_task(asyncio.Event().wait())
         bot.stop_manager.set_current("$response-a", target, live_task)
-        controller = unwrap_extracted_collaborator(bot._turn_controller)
+        reconciler = bot._user_stop_reconciler
         turn_store = unwrap_extracted_collaborator(bot._turn_store)
-        original_record_user_stop = controller._record_user_stop
+        original_record_user_stop = reconciler._record
         alias_claimed = False
 
         async def record_after_alias_claim(
@@ -1552,13 +1552,13 @@ class TestAgentBot(AgentBotTestBase):
         on_current_stop_finalized = AsyncMock()
         try:
             with (
-                patch.object(controller, "_record_user_stop", side_effect=record_after_alias_claim),
+                patch.object(reconciler, "_record", side_effect=record_after_alias_claim),
                 patch(
                     "mindroom.delivery_gateway.DeliveryGateway.finalize_user_stopped_response",
                     new=AsyncMock(return_value=True),
                 ),
             ):
-                assert await controller.finalize_user_stop(
+                assert await reconciler.finalize(
                     "$response-a",
                     2,
                     on_current_stop_finalized,

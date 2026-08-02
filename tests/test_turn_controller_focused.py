@@ -29,6 +29,7 @@ from mindroom.attachments import register_local_attachment
 from mindroom.bot_runtime_view import BotRuntimeState
 from mindroom.coalescing import CoalescingGate, IngressAdmissionClosedError
 from mindroom.coalescing_batch import CoalescedBatch, CoalescingKey, PendingEvent, build_coalesced_batch
+from mindroom.command_turn_executor import CommandTurnExecutor, CommandTurnExecutorDeps
 from mindroom.commands.parsing import CommandType, command_parser
 from mindroom.config.agent import AgentConfig
 from mindroom.config.auth import AuthorizationConfig
@@ -66,6 +67,7 @@ from mindroom.turn_controller import TurnController, TurnControllerDeps
 from mindroom.turn_origin import TurnIntent
 from mindroom.turn_policy import IngressHookRunner, PreparedDispatch, ResponseAction, TurnPolicy, TurnPolicyDeps
 from mindroom.turn_store import TurnStore, TurnStoreDeps
+from mindroom.visible_response_reconciliation import VisibleResponseReconciler, VisibleResponseReconcilerDeps
 from mindroom.visible_voice_echo import VisibleVoiceEchoDeps, VisibleVoiceEchoLifecycle
 from tests.conftest import (
     bind_runtime_paths,
@@ -402,6 +404,31 @@ def _build_harness(
     async def _recover_config_confirmation_setup(_room_id: str, _preview_event_id: str) -> bool:
         return False
 
+    visible_responses = VisibleResponseReconciler(
+        VisibleResponseReconcilerDeps(
+            runtime=runtime,
+            logger=logger,
+            response_sender=matrix_id.full_id,
+            turn_store=turn_store,
+            delivery_gateway=cast("DeliveryGateway", gateway),
+            settle_ignored_sources=_settle_ignored_dispatch_sources,
+        ),
+    )
+    command_executor = CommandTurnExecutor(
+        CommandTurnExecutorDeps(
+            runtime=runtime,
+            logger=logger,
+            runtime_paths=runtime_paths,
+            agent_name=agent_name,
+            normalizer=normalizer,
+            conversation_cache=conversation_cache,
+            turn_policy=cast("TurnPolicy", policy),
+            turn_store=turn_store,
+            visible_responses=visible_responses,
+            recover_config_confirmation_setup=_recover_config_confirmation_setup,
+        ),
+    )
+
     gate = CoalescingGate(
         dispatch_batch=_dispatch_batch,
         debounce_seconds=lambda: 0.0,
@@ -426,6 +453,7 @@ def _build_harness(
             conversation_cache=conversation_cache,
             resolver=resolver,
             normalizer=normalizer,
+            command_executor=command_executor,
             turn_policy=cast("TurnPolicy", policy),
             ingress_hook_runner=IngressHookRunner(hook_context=hook_context),
             response_runner=cast("ResponseRunner", runner),
@@ -446,9 +474,8 @@ def _build_harness(
                     ingress=ingress_validator,
                 ),
             ),
-            settle_ignored_dispatch_sources=_settle_ignored_dispatch_sources,
+            visible_responses=visible_responses,
             retry_dispatch_sources=_retry_dispatch_sources,
-            recover_config_confirmation_setup=_recover_config_confirmation_setup,
         ),
     )
     controller_ref.append(controller)
@@ -712,7 +739,7 @@ async def test_incomplete_response_intent_reconciles_matrix_without_recovery_sco
     harness.turn_store.record_pending_turn(pending_turn)
 
     with patch(
-        "mindroom.turn_controller.find_response_event_ids_via_room_messages",
+        "mindroom.visible_response_reconciliation.find_response_event_ids_via_room_messages",
         return_value=frozenset({response_event_id}),
     ) as find_response_event_ids:
         await harness.deliver(room, event)
@@ -740,10 +767,10 @@ async def test_recovery_prefers_untracked_terminal_fallback_over_persisted_place
     )
 
     with patch(
-        "mindroom.turn_controller.find_response_event_ids_via_room_messages",
+        "mindroom.visible_response_reconciliation.find_response_event_ids_via_room_messages",
         return_value=frozenset({"$fallback:localhost"}),
     ) as find_response_event_ids:
-        recovered = await harness.controller._recovered_response_event_id(
+        recovered = await harness.controller.deps.visible_responses.recovered_response_event_id(
             pending_turn,
             room_id=_ROOM_ID,
         )
@@ -773,10 +800,10 @@ async def test_recovery_lookup_excludes_visible_voice_echo(config: Config, tmp_p
     harness.turn_store.record_pending_turn(pending_turn)
 
     with patch(
-        "mindroom.turn_controller.find_response_event_ids_via_room_messages",
+        "mindroom.visible_response_reconciliation.find_response_event_ids_via_room_messages",
         return_value=frozenset({"$voice-echo:localhost", "$relay:localhost"}),
     ):
-        recovered = await harness.controller._recovered_response_event_id(
+        recovered = await harness.controller.deps.visible_responses.recovered_response_event_id(
             pending_turn,
             room_id=_ROOM_ID,
             excluded_event_ids=("$voice-echo:localhost",),
@@ -1262,7 +1289,12 @@ async def test_router_silent_ignore_compacts_exact_callback(config: Config, tmp_
     )
     harness.controller.deps = replace(
         harness.controller.deps,
-        settle_ignored_dispatch_sources=obligation_runner.settle_intentionally_ignored_turn_sources,
+        visible_responses=VisibleResponseReconciler(
+            replace(
+                harness.controller.deps.visible_responses.deps,
+                settle_ignored_sources=obligation_runner.settle_intentionally_ignored_turn_sources,
+            ),
+        ),
     )
 
     await obligation_runner.dispatch(room, event, DispatchCallbackKind.MESSAGE)
@@ -2058,12 +2090,12 @@ async def test_command_replay_adopts_durable_response(config: Config, tmp_path: 
     handled_turn = TurnRecord.create([event.event_id])
 
     with patch.object(
-        harness.controller,
-        "_record_pending_visible_response",
-        wraps=harness.controller._record_pending_visible_response,
+        harness.controller.deps.visible_responses,
+        "record_pending_visible_response",
+        wraps=harness.controller.deps.visible_responses.record_pending_visible_response,
     ) as record_visible_response:
-        with patch.object(harness.controller, "_mark_source_events_responded"):
-            await harness.controller._execute_command(
+        with patch.object(harness.controller.deps.command_executor, "_record_responded"):
+            await harness.controller.deps.command_executor.execute(
                 room,
                 event,
                 _SENDER,
@@ -2077,7 +2109,7 @@ async def test_command_replay_adopts_durable_response(config: Config, tmp_path: 
         assert pending_turn.completed is False
         assert pending_turn.response_event_id == "$sent-1:localhost"
 
-        await harness.controller._execute_command(
+        await harness.controller.deps.command_executor.execute(
             room,
             event,
             _SENDER,
@@ -2110,11 +2142,16 @@ async def test_config_command_replay_recovers_confirmation_before_terminal_settl
 
     harness.controller.deps = replace(
         harness.controller.deps,
-        recover_config_confirmation_setup=recover_setup,
+        command_executor=CommandTurnExecutor(
+            replace(
+                harness.controller.deps.command_executor.deps,
+                recover_config_confirmation_setup=recover_setup,
+            ),
+        ),
     )
     command_turn = TurnRecord.create(["$config-command"])
 
-    recovered = await harness.controller._recover_visible_command_response(
+    recovered = await harness.controller.deps.command_executor._recover_visible_response(
         room_id=_ROOM_ID,
         command_type=CommandType.CONFIG,
         command_turn=command_turn,
@@ -2146,7 +2183,7 @@ async def test_command_replay_does_not_repeat_mutation_after_visible_response(co
         patch("mindroom.commands.handler.handle_model_command", return_value="✅ Model changed") as mutate,
         patch.object(harness.controller, "_mark_source_events_responded"),
     ):
-        await harness.controller._execute_command(
+        await harness.controller.deps.command_executor.execute(
             room,
             event,
             _SENDER,
@@ -2155,7 +2192,7 @@ async def test_command_replay_does_not_repeat_mutation_after_visible_response(co
             handled_turn=handled_turn,
         )
 
-    await harness.controller._execute_command(
+    await harness.controller.deps.command_executor.execute(
         room,
         event,
         _SENDER,
@@ -2190,7 +2227,7 @@ async def test_command_send_failure_keeps_turn_pending(config: Config, tmp_path:
         patch.object(harness.gateway, "send_text", new=fail_send),
         pytest.raises(RuntimeError, match="did not return a Matrix event ID"),
     ):
-        await harness.controller._execute_command(
+        await harness.controller.deps.command_executor.execute(
             room,
             event,
             _SENDER,
@@ -2228,7 +2265,7 @@ async def test_mutating_command_retries_checkpointed_result_without_reapplying(c
             patch.object(harness.gateway, "send_text", new=fail_send),
             pytest.raises(RuntimeError, match="did not return a Matrix event ID"),
         ):
-            await harness.controller._execute_command(
+            await harness.controller.deps.command_executor.execute(
                 room,
                 event,
                 _SENDER,
@@ -2242,7 +2279,7 @@ async def test_mutating_command_retries_checkpointed_result_without_reapplying(c
         assert pending_turn.command_execution_started
         assert pending_turn.command_result_text == "✅ Model changed"
 
-        await harness.controller._execute_command(
+        await harness.controller.deps.command_executor.execute(
             room,
             event,
             _SENDER,
@@ -2277,7 +2314,7 @@ async def test_failed_mutating_command_execution_requires_manual_retry(config: C
         ) as attempt,
         pytest.raises(RuntimeError, match="transient failure"),
     ):
-        await harness.controller._execute_command(
+        await harness.controller.deps.command_executor.execute(
             room,
             event,
             _SENDER,
@@ -2292,7 +2329,7 @@ async def test_failed_mutating_command_execution_requires_manual_retry(config: C
     assert pending_turn.command_result_text is None
 
     with patch("mindroom.commands.handler.handle_model_command") as replay:
-        await harness.controller._execute_command(
+        await harness.controller.deps.command_executor.execute(
             room,
             event,
             _SENDER,
@@ -2426,7 +2463,7 @@ async def test_command_dispatch_failure_propagates_without_recording_terminal_ou
     event = _text_event("!help", event_id="$failed-command:localhost")
 
     with (
-        patch("mindroom.turn_controller.handle_command", side_effect=RuntimeError("command failed")),
+        patch("mindroom.command_turn_executor.handle_command", side_effect=RuntimeError("command failed")),
         pytest.raises(RuntimeError, match="command failed"),
     ):
         await harness.deliver(room, event)

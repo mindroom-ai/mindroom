@@ -1662,7 +1662,7 @@ async def test_router_visible_voice_echo_is_not_duplicated_when_handoff_retries(
         patch("mindroom.ingress_validation.is_authorized_sender", return_value=True),
         patch("mindroom.turn_controller.suggest_responder_for_message", new_callable=AsyncMock, return_value="home"),
         patch(
-            "mindroom.turn_controller.find_response_event_ids_via_room_messages",
+            "mindroom.visible_response_reconciliation.find_response_event_ids_via_room_messages",
             new_callable=AsyncMock,
             return_value=frozenset(),
         ),
@@ -1730,7 +1730,7 @@ async def test_router_visible_voice_echo_is_not_duplicated_when_handoff_retries_
         patch("mindroom.ingress_validation.is_authorized_sender", return_value=True),
         patch("mindroom.turn_controller.suggest_responder_for_message", new_callable=AsyncMock, return_value="home"),
         patch(
-            "mindroom.turn_controller.find_response_event_ids_via_room_messages",
+            "mindroom.visible_response_reconciliation.find_response_event_ids_via_room_messages",
             new_callable=AsyncMock,
             return_value=frozenset(),
         ),

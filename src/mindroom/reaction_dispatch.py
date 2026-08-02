@@ -87,7 +87,7 @@ async def _maybe_handle_stop_reaction(
             notify_outbound_redaction=bot._conversation_cache.notify_outbound_redaction,
         )
 
-    stopped = await bot._turn_controller.finalize_user_stop(
+    stopped = await bot._user_stop_reconciler.finalize(
         event.reacts_to,
         await bot._dispatch_obligation_runner.receipt_order(),
         remove_current_stop_button,

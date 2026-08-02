@@ -158,6 +158,7 @@ depends_on = [
     "mindroom.constants",
     "mindroom.dispatch_obligations",
     "mindroom.entity_resolution",
+    "mindroom.user_stop_reconciliation",
 ]
 visibility = ["mindroom.bot"]
 
@@ -2139,6 +2140,7 @@ visibility = [
     "mindroom.response_runner",
     "mindroom.tool_system.runtime_context",
     "mindroom.turn_controller",
+    "mindroom.visible_response_reconciliation",
 ]
 
 [[modules]]
@@ -2552,7 +2554,7 @@ visibility = [
     "mindroom.matrix.conversation_cache",
     "mindroom.matrix.thread_room_scan",
     "mindroom.thread_export.execution",
-    "mindroom.turn_controller",
+    "mindroom.visible_response_reconciliation",
     "mindroom.visible_voice_echo",
 ]
 
@@ -2870,6 +2872,8 @@ depends_on = [
     "mindroom.turn_controller",
     "mindroom.turn_policy",
     "mindroom.turn_store",
+    "mindroom.user_stop_reconciliation",
+    "mindroom.visible_response_reconciliation",
     "mindroom.visible_voice_echo",
 ]
 
@@ -3498,6 +3502,36 @@ depends_on = [
 visibility = ["mindroom.turn_controller"]
 
 [[modules]]
+path = "mindroom.user_stop_reconciliation"
+depends_on = [
+    "mindroom.delivery_gateway",
+    "mindroom.handled_turns",
+    "mindroom.message_target",
+    "mindroom.response_runner",
+    "mindroom.turn_store",
+]
+visibility = [
+    "mindroom.bot",
+    "mindroom.reaction_dispatch",
+]
+
+[[modules]]
+path = "mindroom.visible_response_reconciliation"
+depends_on = [
+    "mindroom.bot_runtime_view",
+    "mindroom.constants",
+    "mindroom.delivery_gateway",
+    "mindroom.handled_turns",
+    "mindroom.matrix.client_thread_history",
+    "mindroom.message_target",
+    "mindroom.turn_store",
+]
+visibility = [
+    "mindroom.bot",
+    "mindroom.turn_controller",
+]
+
+[[modules]]
 path = "mindroom.visible_voice_echo"
 depends_on = [
     "mindroom.authorization",
@@ -3533,7 +3567,6 @@ depends_on = [
     "mindroom.inbound_turn_normalizer",
     "mindroom.matrix.cache",
     "mindroom.matrix.cache.thread_reads",
-    "mindroom.matrix.client_thread_history",
     "mindroom.matrix.event_info",
     "mindroom.matrix.message_content",
     "mindroom.matrix.rooms",
@@ -3549,6 +3582,7 @@ depends_on = [
     "mindroom.timestamp_formatting",
     "mindroom.turn_store",
     "mindroom.turn_policy",
+    "mindroom.visible_response_reconciliation",
     "mindroom.visible_voice_echo",
 ]
 

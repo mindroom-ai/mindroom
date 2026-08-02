@@ -83,6 +83,7 @@ from .authorization import is_authorized_sender
 from .background_tasks import create_background_task, wait_for_background_tasks
 from .coalescing import CoalescingGate
 from .coalescing_batch import CoalescingKey, PendingEvent, is_active_follow_up_coalescing_key
+from .command_turn_executor import CommandTurnExecutor, CommandTurnExecutorDeps
 from .commands import config_confirmation
 from .constants import ROUTER_AGENT_NAME, RuntimePaths, resolve_avatar_path
 from .conversation_resolver import ConversationResolver, ConversationResolverDeps
@@ -135,6 +136,8 @@ from .sync_restart_retry import InterruptedTurnRooms
 from .turn_controller import TurnController, TurnControllerDeps
 from .turn_policy import IngressHookRunner, TurnPolicy, TurnPolicyDeps
 from .turn_store import TurnStore, TurnStoreDeps
+from .user_stop_reconciliation import UserStopReconciler, UserStopReconcilerDeps
+from .visible_response_reconciliation import VisibleResponseReconciler, VisibleResponseReconcilerDeps
 from .visible_voice_echo import VisibleVoiceEchoDeps, VisibleVoiceEchoLifecycle
 
 if TYPE_CHECKING:
@@ -622,6 +625,37 @@ class AgentBot:
                 ingress=self._ingress_validator,
             ),
         )
+        self._visible_responses = VisibleResponseReconciler(
+            VisibleResponseReconcilerDeps(
+                runtime=self._runtime_view,
+                logger=self.logger,
+                response_sender=runtime_matrix_id.full_id,
+                turn_store=self._turn_store,
+                delivery_gateway=self._delivery_gateway,
+                settle_ignored_sources=self._dispatch_obligation_runner.settle_intentionally_ignored_turn_sources,
+            ),
+        )
+        self._command_turn_executor = CommandTurnExecutor(
+            CommandTurnExecutorDeps(
+                runtime=self._runtime_view,
+                logger=self.logger,
+                runtime_paths=self.runtime_paths,
+                agent_name=self.agent_name,
+                normalizer=self._inbound_turn_normalizer,
+                conversation_cache=self._conversation_cache,
+                turn_policy=self._turn_policy,
+                turn_store=self._turn_store,
+                visible_responses=self._visible_responses,
+                recover_config_confirmation_setup=self._recover_config_confirmation_setup,
+            ),
+        )
+        self._user_stop_reconciler = UserStopReconciler(
+            UserStopReconcilerDeps(
+                turn_store=self._turn_store,
+                response_runner=self._response_runner,
+                delivery_gateway=self._delivery_gateway,
+            ),
+        )
         self._turn_controller = TurnController(
             TurnControllerDeps(
                 runtime=self._runtime_view,
@@ -632,6 +666,7 @@ class AgentBot:
                 conversation_cache=self._conversation_cache,
                 resolver=self._conversation_resolver,
                 normalizer=self._inbound_turn_normalizer,
+                command_executor=self._command_turn_executor,
                 turn_policy=self._turn_policy,
                 ingress_hook_runner=self._ingress_hook_runner,
                 response_runner=self._response_runner,
@@ -643,11 +678,8 @@ class AgentBot:
                 ingress=self._ingress_validator,
                 interrupted_turn_rooms=self._interrupted_turn_rooms,
                 visible_voice_echo=self._visible_voice_echo,
-                settle_ignored_dispatch_sources=(
-                    self._dispatch_obligation_runner.settle_intentionally_ignored_turn_sources
-                ),
+                visible_responses=self._visible_responses,
                 retry_dispatch_sources=self._dispatch_obligation_runner.retry_pending_turn_sources,
-                recover_config_confirmation_setup=self._recover_config_confirmation_setup,
             ),
         )
 

@@ -315,7 +315,7 @@ async def _blocked_before_plan(
     requester_user_id: str,
 ) -> bool:
     if prepared.command is not None:
-        command_owned = await controller._execute_command_if_owned(
+        command_owned = await controller.deps.command_executor.execute_if_owned(
             room=room,
             event=prepared.event,
             requester_user_id=requester_user_id,
@@ -324,13 +324,13 @@ async def _blocked_before_plan(
             handled_turn=prepared.handled_turn,
         )
         if not command_owned:
-            await controller._settle_source_events_ignored(prepared.handled_turn)
+            await controller.deps.visible_responses.settle_source_events_ignored(prepared.handled_turn)
         return True
     if controller._should_skip_deep_synthetic_full_dispatch(
         event_id=prepared.event.event_id,
         envelope=prepared.dispatch.envelope,
     ):
-        await controller._settle_source_events_ignored(prepared.handled_turn)
+        await controller.deps.visible_responses.settle_source_events_ignored(prepared.handled_turn)
         return True
 
     may_be_superseded = (
@@ -361,7 +361,7 @@ async def _blocked_before_plan(
             may_be_superseded_by_newer_requester_turn=may_be_superseded,
         )
     if skips_turn:
-        await controller._settle_source_events_ignored(prepared.handled_turn)
+        await controller.deps.visible_responses.settle_source_events_ignored(prepared.handled_turn)
     return skips_turn
 
 
@@ -417,9 +417,9 @@ async def _apply_turn_plan(
             if router_outcome is not None:
                 controller._mark_source_events_responded(router_outcome)
             else:
-                await controller._settle_source_events_ignored(prepared.handled_turn)
+                await controller.deps.visible_responses.settle_source_events_ignored(prepared.handled_turn)
         else:
-            await controller._settle_source_events_ignored(prepared.handled_turn)
+            await controller.deps.visible_responses.settle_source_events_ignored(prepared.handled_turn)
         return
     if plan.kind == "route":
         await _execute_route_plan(controller, room, prepared, plan, media_events=media_events)
@@ -449,7 +449,7 @@ async def _apply_turn_plan(
     if pending_turn is None or pending_turn.completed:
         return
     if pending_turn.redacted_source_event_ids:
-        await controller._settle_source_events_ignored(pending_turn)
+        await controller.deps.visible_responses.settle_source_events_ignored(pending_turn)
         return
     handled_turn = pending_turn
 
