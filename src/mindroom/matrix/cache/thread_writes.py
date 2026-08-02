@@ -1095,6 +1095,43 @@ class ThreadSyncWritePolicy:
         self._resolver = resolver
         self._cache_ops = cache_ops
 
+    async def cache_historical_event(
+        self,
+        room_id: str,
+        event: nio.Event,
+    ) -> None:
+        """Durably cache one historical admission before nio completes recovery."""
+        self._cache_ops.require_cache_runtime_available(operation="historical admission")
+
+        room_threaded_events: dict[str, list[dict[str, object]]] = {}
+        room_plain_events: dict[str, list[dict[str, object]]] = {}
+        room_redactions: dict[str, list[str]] = {}
+        _collect_sync_timeline_cache_updates(
+            room_id,
+            event,
+            room_threaded_events=room_threaded_events,
+            room_plain_events=room_plain_events,
+            room_redactions=room_redactions,
+        )
+        plain_events = room_plain_events.get(room_id, ())
+        threaded_events = room_threaded_events.get(room_id, ())
+        redacted_event_ids = room_redactions.get(room_id, ())
+        if not plain_events and not threaded_events and not redacted_event_ids:
+            return
+        task = self._cache_ops.queue_room_cache_update(
+            room_id,
+            lambda: self._persist_room_sync_timeline_updates(
+                room_id,
+                plain_events,
+                threaded_events,
+                redacted_event_ids,
+                limited_timeline=False,
+                raise_on_cache_write_failure=True,
+            ),
+            name="matrix_cache_historical_event_admission",
+        )
+        await task
+
     async def _persist_threaded_sync_events(
         self,
         room_id: str,

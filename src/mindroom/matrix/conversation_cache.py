@@ -1216,6 +1216,14 @@ class MatrixConversationCache(ConversationCacheProtocol):
             raise_on_cache_write_failure=raise_on_cache_write_failure,
         )
 
+    async def cache_historical_event(
+        self,
+        room: nio.MatrixRoom,
+        event: nio.Event,
+    ) -> None:
+        """Durably cache one historical event before nio accepts it."""
+        await self._sync.cache_historical_event(room.room_id, event)
+
     async def cache_sync_timeline_for_certification(
         self,
         response: nio.SyncResponse,

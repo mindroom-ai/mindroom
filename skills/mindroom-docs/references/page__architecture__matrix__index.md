@@ -89,6 +89,7 @@ Sliding positions remain connection-scoped, while callback admission uses mindro
 Sliding Sync classifies its validated `num_live` tail as live, ordinary continuations without `num_live` as live, and initial or expanded timelines without `num_live` as history.
 Classic Sync classifies initial timelines and `/messages` recovery as history, while `since` continuations are live.
 This provenance remains attached across recovery, restart, and decryption independently of event-cache checkpoint persistence.
+Historical admission writes each event through the room-ordered sync cache mutation path before nio marks it recovered, and a cache failure leaves the event pending for retry.
 Changing `matrix_sync` restarts running entities on config hot reload.
 Sync loops are wrapped with `sync_forever_with_restart()` for automatic restart on connection failures.
 

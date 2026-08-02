@@ -27,6 +27,7 @@ from typing import TYPE_CHECKING, Any
 from mindroom.background_tasks import create_background_task
 from mindroom.matrix.thread_bookkeeping import MutationThreadImpact, MutationThreadImpactState
 
+from .event_cache import EventCacheBackendUnavailableError
 from .thread_cache_gap import mark_room_threads_gap_fail_closed, mark_thread_gap_fail_closed
 from .thread_cache_state import ThreadAppendOutcome
 
@@ -68,6 +69,14 @@ class ThreadMutationCacheOps:
         if self.runtime.event_cache is None:
             return {"cache_backend": "none"}
         return self.runtime.event_cache.runtime_diagnostics()
+
+    def require_cache_runtime_available(self, *, operation: str) -> None:
+        """Reject a fail-closed write when durable cache support is unavailable."""
+        if self.cache_runtime_available():
+            return
+        diagnostics = self.cache_runtime_diagnostics()
+        msg = f"Matrix event cache unavailable during {operation}: {diagnostics}"
+        raise EventCacheBackendUnavailableError(msg)
 
     def cache_principal_id(self) -> str:
         """Return principal namespace owning outbound write reservations."""
