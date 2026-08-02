@@ -5,9 +5,9 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass, field, replace
 from functools import partial
-from typing import TYPE_CHECKING, TypeVar
+from typing import TYPE_CHECKING
 
-from mindroom.background_tasks import run_blocking_until_complete
+from mindroom.background_tasks import run_blocking_until_complete, run_coroutine_until_complete
 from mindroom.matrix.sync_certification import (
     SyncCacheWriteResult,
     SyncCertificationDecision,
@@ -19,15 +19,12 @@ from mindroom.matrix.sync_certification import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Coroutine, Iterable
-    from typing import Any
+    from collections.abc import Iterable
 
     import structlog
 
     from mindroom.bot_runtime_view import BotRuntimeView
     from mindroom.matrix.sync_continuity import SyncContinuityRecord, SyncContinuityStore
-
-_MutationResult = TypeVar("_MutationResult")
 
 
 @dataclass
@@ -143,7 +140,7 @@ class SyncCacheTrust:
                 self.logger.warning("matrix_cache_scope_cleanup_checkpoint_clear_failed")
                 return False
 
-        return await self._run_serialized_mutation(invalidate)
+        return await run_coroutine_until_complete(invalidate())
 
     def record_dispatch_persist_failure(self) -> None:
         """Latch one source callback rejected before durable ownership."""
@@ -224,7 +221,7 @@ class SyncCacheTrust:
                 )
                 return decision, record
 
-        return await self._run_serialized_mutation(apply)
+        return await run_coroutine_until_complete(apply())
 
     async def reject_unknown_pos(self) -> SyncCertificationDecision:
         """Invalidate a checkpoint rejected by the homeserver."""
@@ -235,7 +232,7 @@ class SyncCacheTrust:
                 await self._apply_decision_locked(decision)
                 return decision
 
-        return await self._run_serialized_mutation(reject)
+        return await run_coroutine_until_complete(reject())
 
     async def _apply_decision_locked(
         self,
@@ -287,34 +284,7 @@ class SyncCacheTrust:
                 self.logger.warning("matrix_sync_checkpoint_skipped_without_cache_generation")
                 await self._clear_saved_locked()
 
-        await self._run_serialized_mutation(persist)
-
-    async def _run_serialized_mutation(
-        self,
-        mutation: Callable[[], Coroutine[Any, Any, _MutationResult]],
-    ) -> _MutationResult:
-        """Finish one accepted mutation before caller cancellation escapes."""
-        mutation_task = asyncio.create_task(mutation())
-        try:
-            return await asyncio.shield(mutation_task)
-        except asyncio.CancelledError as cancellation:
-            mutation_error: Exception | None = None
-            while not mutation_task.done():
-                try:
-                    await asyncio.shield(mutation_task)
-                except asyncio.CancelledError:
-                    continue
-                except Exception as exc:
-                    mutation_error = exc
-                    break
-            if mutation_error is None:
-                try:
-                    mutation_task.result()
-                except Exception as exc:
-                    mutation_error = exc
-            if mutation_error is not None:
-                raise cancellation from mutation_error
-            raise
+        await run_coroutine_until_complete(persist())
 
     def retry_token(self) -> str | None:
         """Return the generation-safe checkpoint for work rejected before durability."""
