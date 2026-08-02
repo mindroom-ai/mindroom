@@ -16,10 +16,10 @@ if TYPE_CHECKING:
     import nio
     import structlog
 
-    from mindroom.bot_runtime_view import BotRuntimeView
     from mindroom.delivery_gateway import DeliveryGateway
     from mindroom.handled_turns import TurnRecord
     from mindroom.message_target import MessageTarget
+    from mindroom.runtime_protocols import SupportsClientConfig
     from mindroom.turn_store import TurnStore
 
 
@@ -27,7 +27,7 @@ if TYPE_CHECKING:
 class VisibleResponseReconcilerDeps:
     """Collaborators for durable non-model response delivery."""
 
-    runtime: BotRuntimeView
+    runtime: SupportsClientConfig
     logger: structlog.stdlib.BoundLogger
     response_sender: str
     turn_store: TurnStore

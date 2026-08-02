@@ -23,15 +23,16 @@ if TYPE_CHECKING:
     import nio
     import structlog
 
-    from mindroom.bot_runtime_view import BotRuntimeView
     from mindroom.commands.parsing import Command
     from mindroom.dispatch_handoff import TextDispatchEvent
     from mindroom.handled_turns import TurnRecord
     from mindroom.hooks import HookMatrixAdmin
     from mindroom.inbound_turn_normalizer import InboundTurnNormalizer
+    from mindroom.matrix.cache import ConversationEventCache
     from mindroom.matrix.conversation_cache import MatrixConversationCache
     from mindroom.matrix.identity import MatrixID
     from mindroom.message_target import MessageTarget
+    from mindroom.runtime_protocols import SupportsClientConfigOrchestrator
     from mindroom.turn_policy import TurnPolicy
     from mindroom.turn_store import TurnStore
     from mindroom.visible_response_reconciliation import VisibleResponseReconciler
@@ -46,7 +47,7 @@ _UNCERTAIN_COMMAND_RESULT = (
 class CommandTurnExecutorDeps:
     """Collaborators for command execution and durable recovery."""
 
-    runtime: BotRuntimeView
+    runtime: SupportsClientConfigOrchestrator
     logger: structlog.stdlib.BoundLogger
     runtime_paths: RuntimePaths
     agent_name: str
@@ -55,6 +56,7 @@ class CommandTurnExecutorDeps:
     turn_policy: TurnPolicy
     turn_store: TurnStore
     visible_responses: VisibleResponseReconciler
+    event_cache: Callable[[], ConversationEventCache]
     recover_config_confirmation_setup: Callable[[str, str], Awaitable[bool]]
 
 
@@ -151,7 +153,7 @@ class CommandTurnExecutor:
             runtime_paths=self.deps.runtime_paths,
             logger=self.deps.logger,
             conversation_cache=self.deps.conversation_cache,
-            event_cache=self.deps.runtime.event_cache,
+            event_cache=self.deps.event_cache(),
             matrix_admin=self._matrix_admin(),
             stable_target=target,
             record_handled_turn=record_command_turn,

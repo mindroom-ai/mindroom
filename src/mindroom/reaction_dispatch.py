@@ -18,7 +18,6 @@ if TYPE_CHECKING:
     import nio
     import structlog
 
-    from mindroom.bot_runtime_view import BotRuntimeView
     from mindroom.commands.config_confirmation import ConfigConfirmationContext
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
@@ -26,6 +25,7 @@ if TYPE_CHECKING:
     from mindroom.ingress_validation import IngressValidator
     from mindroom.matrix.conversation_cache import MatrixConversationCache
     from mindroom.prompt_ingress_reservation import PromptIngressReservationOwner
+    from mindroom.runtime_protocols import SupportsClientConfigOrchestrator
     from mindroom.stop import StopManager
     from mindroom.turn_policy import TurnPolicy
     from mindroom.turn_store import TurnStore
@@ -36,7 +36,7 @@ if TYPE_CHECKING:
 class ReactionDispatcherDeps:
     """Explicit runtime boundary for semantic reaction consumers."""
 
-    runtime: BotRuntimeView
+    runtime: SupportsClientConfigOrchestrator
     logger: structlog.stdlib.BoundLogger
     runtime_paths: RuntimePaths
     agent_name: str

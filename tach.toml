@@ -2140,7 +2140,6 @@ visibility = [
     "mindroom.response_runner",
     "mindroom.tool_system.runtime_context",
     "mindroom.turn_controller",
-    "mindroom.visible_response_reconciliation",
 ]
 
 [[modules]]
@@ -2827,6 +2826,7 @@ depends_on = [
     "mindroom.approval_inbound",
     "mindroom.bot_room_lifecycle",
     "mindroom.bot_runtime_view",
+    "mindroom.command_turn_executor",
     "mindroom.commands.config_confirmation",
     "mindroom.constants",
     "mindroom.conversation_resolver",
@@ -3502,6 +3502,28 @@ depends_on = [
 visibility = ["mindroom.turn_controller"]
 
 [[modules]]
+path = "mindroom.command_turn_executor"
+depends_on = [
+    "mindroom.commands.handler",
+    "mindroom.commands.parsing",
+    "mindroom.constants",
+    "mindroom.handled_turns",
+    "mindroom.hooks",
+    "mindroom.inbound_turn_normalizer",
+    "mindroom.matrix.cache",
+    "mindroom.matrix.conversation_cache",
+    "mindroom.matrix.identity",
+    "mindroom.message_target",
+    "mindroom.turn_policy",
+    "mindroom.turn_store",
+    "mindroom.visible_response_reconciliation",
+]
+visibility = [
+    "mindroom.bot",
+    "mindroom.turn_controller",
+]
+
+[[modules]]
 path = "mindroom.user_stop_reconciliation"
 depends_on = [
     "mindroom.delivery_gateway",
@@ -3518,7 +3540,6 @@ visibility = [
 [[modules]]
 path = "mindroom.visible_response_reconciliation"
 depends_on = [
-    "mindroom.bot_runtime_view",
     "mindroom.constants",
     "mindroom.delivery_gateway",
     "mindroom.handled_turns",
@@ -3528,6 +3549,7 @@ depends_on = [
 ]
 visibility = [
     "mindroom.bot",
+    "mindroom.command_turn_executor",
     "mindroom.turn_controller",
 ]
 
@@ -3553,7 +3575,7 @@ visibility = [
 path = "mindroom.turn_controller"
 depends_on = [
     "mindroom.response_admission",
-    "mindroom.commands.handler",
+    "mindroom.command_turn_executor",
     "mindroom.commands.parsing",
     "mindroom.constants",
     "mindroom.delivery_gateway",
