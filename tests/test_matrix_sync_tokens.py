@@ -931,6 +931,7 @@ def test_clear_sync_token_is_idempotent(tmp_path: Path) -> None:
     clear_sync_token(tmp_path, "code")
 
     assert _load_sync_token_value(tmp_path, "code") is None
+    assert not _token_path(tmp_path).exists()
 
 
 @pytest.mark.asyncio

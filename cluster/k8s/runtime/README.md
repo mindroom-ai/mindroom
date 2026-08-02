@@ -107,6 +107,8 @@ The chart mounts the same state PVC at `stateStorage.mountPath` and overlays the
 The optional init container creates the state directories and applies the configured ownership before the runtime starts.
 `initPermissions.runAsUser` and `initPermissions.fsGroup` are the ownership targets used by the init container.
 By default, the init container runs as UID 0 because it performs `chown` and `chmod`, while the main runtime container keeps its own security context.
+Upgrades from chart versions that used `stateStorage.syncTokens` must rename that values block to `stateStorage.syncContinuity` and use the `sync_continuity` subpath.
+The old sync-token data is intentionally not migrated, so the first upgraded start performs a cold sync while the history fence prevents duplicate replies.
 
 Use an existing PVC when another platform layer owns durable storage:
 

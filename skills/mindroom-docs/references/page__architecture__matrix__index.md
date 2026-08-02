@@ -90,6 +90,7 @@ Sliding Sync classifies its validated `num_live` tail as live, ordinary continua
 Classic Sync classifies initial timelines and `/messages` recovery as history, while `since` continuations are live.
 This provenance remains attached across recovery, restart, and decryption independently of event-cache checkpoint persistence.
 Historical admission writes each event through the room-ordered sync cache mutation path before nio marks it recovered, and a cache failure leaves the event pending for retry.
+The cache remains advisory for live processing, but historical recovery is deliberately fail-closed because accepting recovered events without caching them would permanently lose thread context.
 For a limited newly joined world-readable room, MindRoom walks backward from the response cursor and caches the newest readable pre-join window within nio's configured page and event budgets because nio treats the bot's own join as a recovery boundary.
 Reaching either budget is successful bounded hydration, while transport and cache failures remain retryable and keep the durable join fence closed.
 Changing `matrix_sync` restarts running entities on config hot reload.
@@ -221,6 +222,7 @@ Enabling encryption on a Matrix room is irreversible; MindRoom never disables it
 When an agent receives an event it cannot decrypt from an authorized sender, it logs a `matrix_event_decryption_failed` warning, sends a best-effort room-key request once per session (delivered to the bot account's own devices, so recovery normally needs the sender to post a new message), and posts one notice per (room, session) so the user knows to resend.
 All bots share a disk-backed notice ledger, so the first bot that fails on a session posts the only notice and multi-agent rooms never storm.
 After a live room join, decryption-failure callbacks for that exact unfinished join stay fenced across restarts until a trusted sync response confirms joined membership.
+Incomplete cache certification keeps that join fence closed; after cache availability is repaired, the next trusted response atomically advances continuity and clears the fence.
 The room fence runs before durable dispatch persistence, but fenced failures still log diagnostics, update E2EE statistics, and request missing keys without claiming the visible-notice ledger.
 The cold-history fence rejects `HISTORY` callbacks before durable dispatch persistence unless the exact event and callback kind were already pending.
 `LIVE` callbacks remain admissible independently of response-level sync positions, recovery gaps, and cache-certification state.
