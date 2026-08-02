@@ -321,6 +321,7 @@ async def _blocked_before_plan(
             requester_user_id=requester_user_id,
             command=prepared.command,
             target=prepared.dispatch.target,
+            handled_turn=prepared.handled_turn,
         )
         if not command_owned:
             await controller._settle_source_events_ignored(prepared.handled_turn)
@@ -425,6 +426,9 @@ async def _apply_turn_plan(
         return
 
     assert plan.response_action is not None
+    reconcile_visible_response = controller.deps.turn_store.has_pending_response_intent(
+        prepared.handled_turn.source_event_ids,
+    )
     response_history_scope = (
         controller.deps.turn_store.response_history_scope(
             plan.response_action,
@@ -442,7 +446,10 @@ async def _apply_turn_plan(
         controller.deps.turn_store.record_pending_turn,
         handled_turn,
     )
-    if pending_turn is None or pending_turn.completed or pending_turn.redacted_source_event_ids:
+    if pending_turn is None or pending_turn.completed:
+        return
+    if pending_turn.redacted_source_event_ids:
+        await controller._settle_source_events_ignored(pending_turn)
         return
     handled_turn = pending_turn
 
@@ -477,12 +484,16 @@ async def _apply_turn_plan(
                 matrix_run_metadata=controller.deps.turn_store.build_run_metadata(handled_turn),
                 queued_notice_reservation=queued_notice_reservation,
                 on_lifecycle_lock_acquired=response_started.set,
+                reconcile_visible_response=reconcile_visible_response,
             ),
         ),
         name=f"inbox_response:{prepared.event.event_id}",
         recovery_proof_ready=lambda: (
             prepared.dispatch.target.resolved_thread_id is not None
             and controller.deps.interrupted_turn_rooms.contains(prepared.event.event_id)
+        ),
+        on_failure=lambda: (
+            controller.deps.retry_dispatch_sources(handled_turn.source_event_ids) if response_started.is_set() else None
         ),
     )
     # Ownership moves synchronously after task creation. If this dispatch task

@@ -12,6 +12,7 @@ from types import SimpleNamespace
 from typing import TYPE_CHECKING, cast
 from unittest.mock import AsyncMock, patch
 
+import agno.models.vertexai.claude as vertexai_claude_module
 import httpx
 import pytest
 import structlog
@@ -22,6 +23,7 @@ from google.auth.exceptions import DefaultCredentialsError
 from typer.testing import CliRunner
 
 import mindroom.constants as constants_module
+import mindroom.google_adc as google_adc_module
 from mindroom.agents import ensure_default_agent_workspaces
 from mindroom.cli import config as config_cli
 from mindroom.cli import migrate as migrate_cli
@@ -3034,7 +3036,7 @@ class TestDoctor:
             def get_client(self) -> SimpleNamespace:
                 return SimpleNamespace(messages=_FakeMessages())
 
-        monkeypatch.setattr("mindroom.cli.doctor.VertexAIClaude", _FakeVertexModel)
+        monkeypatch.setattr(vertexai_claude_module, "Claude", _FakeVertexModel)
 
         result = _invoke_with_runtime(["doctor"], cfg, storage_path=storage)
         assert result.exit_code == 0
@@ -3092,8 +3094,8 @@ class TestDoctor:
             def get_client(self) -> SimpleNamespace:
                 return SimpleNamespace(messages=_FakeMessages())
 
-        monkeypatch.setattr("mindroom.cli.doctor.load_google_application_credentials", _load_adc)
-        monkeypatch.setattr("mindroom.cli.doctor.VertexAIClaude", _FakeVertexModel)
+        monkeypatch.setattr(google_adc_module, "load_google_application_credentials", _load_adc)
+        monkeypatch.setattr(vertexai_claude_module, "Claude", _FakeVertexModel)
 
         result = _invoke_with_runtime(["doctor"], cfg, storage_path=storage)
 
@@ -3140,7 +3142,7 @@ class TestDoctor:
             def get_client(self) -> SimpleNamespace:
                 return SimpleNamespace(messages=_FakeMessages())
 
-        monkeypatch.setattr("mindroom.cli.doctor.VertexAIClaude", _FakeVertexModel)
+        monkeypatch.setattr(vertexai_claude_module, "Claude", _FakeVertexModel)
 
         result = _invoke_with_runtime(["doctor"], cfg, storage_path=storage)
         assert result.exit_code == 0
@@ -3201,7 +3203,7 @@ class TestDoctor:
             def get_client(self) -> SimpleNamespace:
                 return SimpleNamespace(messages=_MissingCredentialsMessages())
 
-        monkeypatch.setattr("mindroom.cli.doctor.VertexAIClaude", _MissingCredentialsModel)
+        monkeypatch.setattr(vertexai_claude_module, "Claude", _MissingCredentialsModel)
 
         result = _invoke_with_runtime(["doctor"], cfg, storage_path=storage)
         assert result.exit_code == 0
@@ -3286,7 +3288,7 @@ class TestDoctor:
             def get_client(self) -> SimpleNamespace:
                 return SimpleNamespace(messages=_RejectedMessages())
 
-        monkeypatch.setattr("mindroom.cli.doctor.VertexAIClaude", _RejectedModel)
+        monkeypatch.setattr(vertexai_claude_module, "Claude", _RejectedModel)
 
         result = _invoke_with_runtime(["doctor"], cfg, storage_path=storage)
         assert result.exit_code == 1

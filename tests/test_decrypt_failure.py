@@ -217,20 +217,33 @@ async def test_first_failing_bot_claims_notice_for_session(tmp_path: Path) -> No
 
 
 @pytest.mark.asyncio
-async def test_failed_send_releases_claim_for_retry(tmp_path: Path) -> None:
-    """A cleanly failed notice send must not permanently suppress the session's notice."""
+@pytest.mark.parametrize(
+    ("first_outcome", "error_match"),
+    [
+        (False, "Failed to deliver decryption-failure notice"),
+        (RuntimeError("state lookup failed"), "state lookup failed"),
+    ],
+    ids=["false-return", "raised-error"],
+)
+async def test_unsuccessful_send_releases_claim_for_retry(
+    tmp_path: Path,
+    first_outcome: bool | RuntimeError,
+    error_match: str,
+) -> None:
+    """An unsuccessful notice attempt must not suppress its durable retry."""
     runtime_paths = _runtime_paths(tmp_path)
     client = _mock_client()
-    notice = AsyncMock(side_effect=[False, True])
+    notice = AsyncMock(side_effect=[first_outcome, True])
 
     with patch.object(decrypt_failure, "_send_decrypt_failure_notice", new=notice):
-        await handle_decrypt_failure(
-            client,
-            _mock_room(),
-            _megolm_event(),
-            agent_name="assistant",
-            runtime_paths=runtime_paths,
-        )
+        with pytest.raises(RuntimeError, match=error_match):
+            await handle_decrypt_failure(
+                client,
+                _mock_room(),
+                _megolm_event(),
+                agent_name="assistant",
+                runtime_paths=runtime_paths,
+            )
         await handle_decrypt_failure(
             client,
             _mock_room(),

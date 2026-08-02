@@ -13,8 +13,6 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, ParamSpec, Protocol, TypeVar, cast
 
-from agno.vectordb.chroma import ChromaDb
-
 from mindroom.embedding_factory import create_configured_embedder, embedder_client_signature
 from mindroom.knowledge.availability import KnowledgeAvailability
 from mindroom.knowledge.index_metadata import (
@@ -377,6 +375,8 @@ def _build_published_index_vector_db(
     config: Config,
     runtime_paths: RuntimePaths,
 ) -> _PublishedIndexVectorDb:
+    from agno.vectordb.chroma import ChromaDb  # noqa: PLC0415
+
     return cast(
         "_PublishedIndexVectorDb",
         ChromaDb(

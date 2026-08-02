@@ -22,10 +22,6 @@ from mindroom.knowledge.refresh_locks import (
     is_refresh_active,
     mark_scheduled_refresh_inactive,
 )
-from mindroom.knowledge.refresh_runner import (
-    refresh_knowledge_binding,
-    refresh_knowledge_binding_in_subprocess,
-)
 from mindroom.knowledge.registry import (
     KnowledgeRefreshTarget,
     load_published_index_state,
@@ -130,6 +126,8 @@ class KnowledgeRefreshScheduler:
         force_reindex: bool = False,
     ) -> KnowledgeRefreshResult:
         """Run a refresh immediately and wait for it."""
+        from mindroom.knowledge.refresh_runner import refresh_knowledge_binding  # noqa: PLC0415
+
         with suppress(ValueError):
             key = resolve_refresh_target(
                 base_id,
@@ -263,6 +261,8 @@ class KnowledgeRefreshScheduler:
             self._start_task(key, pending_request)
 
     async def _run_refresh(self, key: KnowledgeRefreshTarget, request: _ScheduledRefresh) -> None:
+        from mindroom.knowledge.refresh_runner import refresh_knowledge_binding_in_subprocess  # noqa: PLC0415
+
         async with self._refresh_semaphore():
             try:
                 await refresh_knowledge_binding_in_subprocess(

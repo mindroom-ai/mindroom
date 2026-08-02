@@ -132,13 +132,20 @@ async def _execute_command(
         event.event_id,
         thread_start_root_event_id=None if thread_id else event.event_id,
     )
-    await bot._turn_controller._execute_command(room, event, requester_user_id, command, target=target)
+    await bot._turn_controller._execute_command(
+        room,
+        event,
+        requester_user_id,
+        command,
+        target=target,
+        handled_turn=TurnRecord.create([event.event_id]),
+    )
 
 
 @pytest.fixture
 def send_response_mock() -> AsyncMock:
     """Delivery seam mock installed on mock_agent_bot."""
-    return AsyncMock()
+    return AsyncMock(return_value="$command-response")
 
 
 @pytest.fixture
@@ -453,6 +460,7 @@ class TestBotScheduleCommands:
             "@user:server",
             command,
             target=stable_target,
+            handled_turn=TurnRecord.create([event.event_id]),
         )
 
         send_response_mock.assert_called_once()

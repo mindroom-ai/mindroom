@@ -176,6 +176,24 @@ The hosted instance worker-manager Role does not grant broad Secret API access i
 > With `user`, the worker can see all agents' storage because it shares one runtime across multiple agents for a single user.
 > Use `user_agent` for per-agent filesystem isolation.
 
+### Knowledge Source Visibility
+
+Dedicated Kubernetes workers expose assigned knowledge-base source directories only when the resolved source is inside the shared worker-storage root.
+The worker key and resolved agent policy determine which agent assignments are visible.
+Shared, unscoped, and `user_agent` worker keys select their encoded agent, while a `user` worker key selects every configured agent that resolves to `worker_scope: user` because those agents share that worker.
+Knowledge bases assigned to other agents and configured knowledge bases with no matching assignment are not mounted.
+
+For a source at `<shared-storage-root>/<relative-path>`, the worker-visible path is `<worker-storage-mount>/<relative-path>`.
+The default worker storage mount is `/app/worker`, so a source at `<shared-storage-root>/knowledge/reference` is visible at `/app/worker/knowledge/reference`.
+The worker mounts that directory from the existing worker-storage PVC with `subPath: <relative-path>` and `readOnly: true`.
+The mount exposes the complete source directory, including files excluded from semantic indexing by include patterns, exclude patterns, or extension filters.
+MindRoom does not copy or clone the source per agent.
+
+If the source already lies inside a storage root visible to the worker's existing scope, the existing mount provides access and MindRoom does not add a nested duplicate mount.
+Sources outside the shared worker-storage root are ignored so existing configurations continue to work without granting access to host-only paths.
+Mount plans that would overlap another knowledge source or contain an existing scoped mount fail closed before a Deployment is created.
+The final knowledge mount list is part of the worker pod-template hash, so reconciliation recreates workers whose mounted assignments are stale.
+
 Typical Helm values look like:
 
 ```yaml

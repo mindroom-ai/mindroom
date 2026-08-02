@@ -132,7 +132,7 @@ class ConfigReloadLifecycle:
         self._requested_at = None
         await cancel_logged_task(task)
 
-    async def update_config(self) -> bool:
+    async def _update_config(self) -> bool:
         """Reload configuration from disk and dispatch the resulting update plan."""
         async with self.config_update_lock:
             # Config validation executes plugin modules and walks the filesystem;
@@ -280,7 +280,7 @@ class ConfigReloadLifecycle:
         self._requested_at = None
         logger.info("Configuration file changed, checking for updates...")
         try:
-            updated = await self.update_config()
+            updated = await self._update_config()
         except Exception as exc:
             logger.exception("Configuration update failed; will retry if a new change is queued")
             # Keep watching every file the broken load read so fixing a newly

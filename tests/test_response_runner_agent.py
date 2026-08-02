@@ -169,7 +169,7 @@ class TestAgentBot(AgentBotTestBase):
             typing_indicator=_noop_typing_indicator,
             ai_response=mock_ai,
         ):
-            generation = await bot._response_runner.process_and_respond(
+            generation = await bot._response_runner._process_and_respond(
                 _response_request(
                     room_id="!test:localhost",
                     prompt="Please send an update",
@@ -226,7 +226,7 @@ class TestAgentBot(AgentBotTestBase):
             typing_indicator=_noop_typing_indicator,
             ai_response=mock_ai,
         ):
-            generation = await bot._response_runner.process_and_respond(
+            generation = await bot._response_runner._process_and_respond(
                 _response_request(
                     room_id="!test:localhost",
                     prompt="Please send an update",
@@ -289,7 +289,7 @@ class TestAgentBot(AgentBotTestBase):
                 typing_indicator=_noop_typing_indicator,
                 stream_agent_response=mock_stream_agent_response,
             ):
-                generation = await bot._response_runner.process_and_respond_streaming(
+                generation = await bot._response_runner._process_and_respond_streaming(
                     _response_request(
                         room_id="!test:localhost",
                         prompt="Please reply in thread",
@@ -354,7 +354,7 @@ class TestAgentBot(AgentBotTestBase):
             typing_indicator=_noop_typing_indicator,
             ai_response=mock_ai,
         ):
-            await bot._response_runner.process_and_respond(
+            await bot._response_runner._process_and_respond(
                 _response_request(
                     room_id="!test:localhost",
                     prompt="Continue",
@@ -413,7 +413,7 @@ class TestAgentBot(AgentBotTestBase):
             typing_indicator=_noop_typing_indicator,
             ai_response=mock_ai,
         ):
-            await bot._response_runner.process_and_respond(
+            await bot._response_runner._process_and_respond(
                 _response_request(
                     room_id="!test:localhost",
                     prompt="Continue",
@@ -468,7 +468,7 @@ class TestAgentBot(AgentBotTestBase):
                 typing_indicator=_noop_typing_indicator,
                 stream_agent_response=mock_stream_agent_response,
             ):
-                generation = await bot._response_runner.process_and_respond_streaming(
+                generation = await bot._response_runner._process_and_respond_streaming(
                     _response_request(
                         room_id="!test:localhost",
                         prompt="Hello",
@@ -514,7 +514,7 @@ class TestAgentBot(AgentBotTestBase):
             typing_indicator=_noop_typing_indicator,
             ai_response=mock_ai,
         ):
-            await bot._response_runner.process_and_respond(
+            await bot._response_runner._process_and_respond(
                 _response_request(
                     room_id="!test:localhost",
                     prompt="Please inspect attachments",
@@ -584,7 +584,7 @@ class TestAgentBot(AgentBotTestBase):
                 stream_agent_response=fake_stream_agent_response,
             ),
         ):
-            await bot._response_runner.process_and_respond_streaming(
+            await bot._response_runner._process_and_respond_streaming(
                 _response_request(
                     room_id="!test:localhost",
                     prompt="Please inspect attachments",
@@ -680,7 +680,7 @@ class TestAgentBot(AgentBotTestBase):
                 stream_agent_response=fake_stream_agent_response,
             ),
         ):
-            await bot._response_runner.process_and_respond_streaming(
+            await bot._response_runner._process_and_respond_streaming(
                 _response_request(
                     room_id="!test:localhost",
                     prompt="Hello",
@@ -749,7 +749,7 @@ class TestAgentBot(AgentBotTestBase):
                 stream_agent_response=fake_stream_agent_response,
             ),
         ):
-            await bot._response_runner.process_and_respond_streaming(
+            await bot._response_runner._process_and_respond_streaming(
                 _response_request(
                     room_id="!test:localhost",
                     prompt="Cancel me",
@@ -809,7 +809,7 @@ class TestAgentBot(AgentBotTestBase):
                 stream_agent_response=mock_stream_agent_response,
             ),
         ):
-            generation = await bot._response_runner.process_and_respond_streaming(
+            generation = await bot._response_runner._process_and_respond_streaming(
                 _response_request(
                     room_id="!test:localhost",
                     prompt="Please continue",
@@ -870,7 +870,7 @@ class TestAgentBot(AgentBotTestBase):
             typing_indicator=_noop_typing_indicator,
             ai_response=mock_ai,
         ):
-            generation = await bot._response_runner.process_and_respond(
+            generation = await bot._response_runner._process_and_respond(
                 _response_request(
                     room_id="!test:localhost",
                     prompt="Please send an update",
@@ -924,7 +924,7 @@ class TestAgentBot(AgentBotTestBase):
                 typing_indicator=noop_typing_indicator,
                 ai_response=mock_ai_response,
             ):
-                await bot._response_runner.process_and_respond(
+                await bot._response_runner._process_and_respond(
                     _response_request(
                         room_id="!test:localhost",
                         prompt="Please continue",
@@ -1000,7 +1000,7 @@ class TestAgentBot(AgentBotTestBase):
                 typing_indicator=_noop_typing_indicator,
                 stream_agent_response=mock_stream_agent_response,
             ):
-                generation = await bot._response_runner.process_and_respond_streaming(
+                generation = await bot._response_runner._process_and_respond_streaming(
                     _response_request(
                         room_id="!test:localhost",
                         prompt="Please reply in thread",
@@ -1060,7 +1060,7 @@ class TestAgentBot(AgentBotTestBase):
                     typing_indicator=noop_typing_indicator,
                     stream_agent_response=mock_stream,
                 ):
-                    await bot._response_runner.process_and_respond_streaming(
+                    await bot._response_runner._process_and_respond_streaming(
                         _response_request(
                             room_id="!test:localhost",
                             prompt="Please continue",
@@ -1103,7 +1103,7 @@ class TestAgentBot(AgentBotTestBase):
             bot,
             redact_message_event=redact_message_event,
             response_hooks=SimpleNamespace(
-                apply_before_response=AsyncMock(
+                _apply_before_response=AsyncMock(
                     return_value=SimpleNamespace(
                         response_text="Handled",
                         response_kind="ai",
@@ -1164,7 +1164,7 @@ class TestAgentBot(AgentBotTestBase):
             bot,
             redact_message_event=redact_message_event,
             response_hooks=SimpleNamespace(
-                apply_before_response=AsyncMock(
+                _apply_before_response=AsyncMock(
                     return_value=SimpleNamespace(
                         response_text="Handled",
                         response_kind="ai",
@@ -1221,7 +1221,7 @@ class TestAgentBot(AgentBotTestBase):
             bot,
             redact_message_event=redact_message_event,
             response_hooks=SimpleNamespace(
-                apply_before_response=AsyncMock(
+                _apply_before_response=AsyncMock(
                     return_value=SimpleNamespace(
                         response_text="Handled",
                         response_kind="ai",
@@ -1335,7 +1335,7 @@ class TestAgentBot(AgentBotTestBase):
             bot,
             redact_message_event=AsyncMock(return_value=True),
             response_hooks=SimpleNamespace(
-                apply_before_response=AsyncMock(),
+                _apply_before_response=AsyncMock(),
                 emit_after_response=AsyncMock(),
                 emit_cancelled_response=AsyncMock(),
             ),
@@ -1385,7 +1385,7 @@ class TestAgentBot(AgentBotTestBase):
             bot,
             redact_message_event=AsyncMock(return_value=False),
             response_hooks=SimpleNamespace(
-                apply_before_response=AsyncMock(),
+                _apply_before_response=AsyncMock(),
                 emit_after_response=AsyncMock(),
                 emit_cancelled_response=AsyncMock(),
             ),
@@ -1512,7 +1512,7 @@ class TestAgentBot(AgentBotTestBase):
                 rendered_body=None,
                 visible_body_state="none",
             )
-            generation = await bot._response_runner.process_and_respond_streaming(
+            generation = await bot._response_runner._process_and_respond_streaming(
                 _response_request(
                     room_id="!test:localhost",
                     prompt="Please reply in thread",
@@ -1608,7 +1608,7 @@ class TestAgentBot(AgentBotTestBase):
             typing_indicator=noop_typing_indicator,
             ai_response=mock_ai,
         ):
-            generation = await bot._response_runner.process_and_respond(
+            generation = await bot._response_runner._process_and_respond(
                 _response_request(
                     room_id="!test:localhost",
                     prompt="Summarize README",
@@ -1677,7 +1677,7 @@ class TestAgentBot(AgentBotTestBase):
             typing_indicator=noop_typing_indicator,
             ai_response=AsyncMock(side_effect=fake_ai_response),
         ):
-            generation = await bot._response_runner.process_and_respond(
+            generation = await bot._response_runner._process_and_respond(
                 _response_request(
                     room_id="!test:localhost",
                     prompt="Check status",
@@ -1761,7 +1761,7 @@ class TestAgentBot(AgentBotTestBase):
         with (
             patch.object(
                 ResponseRunner,
-                "process_and_respond",
+                "_process_and_respond",
                 new=AsyncMock(
                     return_value=_ResponseGenerationOutcome(
                         delivery=FinalDeliveryOutcome(
@@ -1776,7 +1776,7 @@ class TestAgentBot(AgentBotTestBase):
             ) as mock_process,
             patch.object(
                 ResponseRunner,
-                "run_cancellable_response",
+                "_run_cancellable_response",
                 new=AsyncMock(side_effect=run_cancellable_response),
             ),
             patch("mindroom.response_runner.should_use_streaming", new_callable=AsyncMock, return_value=False),
@@ -1884,7 +1884,7 @@ class TestAgentBot(AgentBotTestBase):
         with (
             patch.object(
                 ResponseRunner,
-                "process_and_respond",
+                "_process_and_respond",
                 new=AsyncMock(
                     return_value=_ResponseGenerationOutcome(
                         delivery=FinalDeliveryOutcome(
@@ -1899,7 +1899,7 @@ class TestAgentBot(AgentBotTestBase):
             ) as mock_process,
             patch.object(
                 ResponseRunner,
-                "run_cancellable_response",
+                "_run_cancellable_response",
                 new=AsyncMock(side_effect=run_cancellable_response),
             ),
             patch_response_runner_module(
@@ -1985,7 +1985,7 @@ class TestAgentBot(AgentBotTestBase):
         with (
             patch.object(
                 ResponseRunner,
-                "process_and_respond_streaming",
+                "_process_and_respond_streaming",
                 new=AsyncMock(
                     return_value=_ResponseGenerationOutcome(
                         delivery=FinalDeliveryOutcome(
@@ -2001,7 +2001,7 @@ class TestAgentBot(AgentBotTestBase):
             ) as mock_process,
             patch.object(
                 ResponseRunner,
-                "run_cancellable_response",
+                "_run_cancellable_response",
                 new=AsyncMock(side_effect=run_cancellable_response),
             ),
             patch_response_runner_module(
@@ -2092,7 +2092,7 @@ class TestAgentBot(AgentBotTestBase):
         with (
             patch.object(
                 ResponseRunner,
-                "process_and_respond",
+                "_process_and_respond",
                 new=AsyncMock(
                     return_value=_ResponseGenerationOutcome(
                         delivery=FinalDeliveryOutcome(
@@ -2107,7 +2107,7 @@ class TestAgentBot(AgentBotTestBase):
             ) as mock_process,
             patch.object(
                 ResponseRunner,
-                "run_cancellable_response",
+                "_run_cancellable_response",
                 new=AsyncMock(side_effect=run_cancellable_response),
             ),
             patch.object(
@@ -2208,7 +2208,7 @@ class TestAgentBot(AgentBotTestBase):
         with (
             patch.object(
                 ResponseRunner,
-                "process_and_respond",
+                "_process_and_respond",
                 new=AsyncMock(
                     return_value=_ResponseGenerationOutcome(
                         delivery=FinalDeliveryOutcome(
@@ -2448,7 +2448,7 @@ class TestAgentBot(AgentBotTestBase):
                 new_callable=AsyncMock,
             ) as mock_thread_summary,
             patch(
-                "mindroom.delivery_gateway.DeliveryGateway.send_compaction_lifecycle_start",
+                "mindroom.delivery_gateway.DeliveryGateway._send_compaction_lifecycle_start",
                 new=AsyncMock(return_value="$notice"),
             ) as mock_send_compaction_lifecycle_start,
         ):
@@ -2617,7 +2617,7 @@ class TestAgentBot(AgentBotTestBase):
         with (
             patch.object(
                 ResponseRunner,
-                "process_and_respond",
+                "_process_and_respond",
                 new=AsyncMock(
                     return_value=_ResponseGenerationOutcome(
                         delivery=FinalDeliveryOutcome(
@@ -2632,7 +2632,7 @@ class TestAgentBot(AgentBotTestBase):
             ),
             patch.object(
                 ResponseRunner,
-                "run_cancellable_response",
+                "_run_cancellable_response",
                 new=AsyncMock(side_effect=run_cancellable_response),
             ),
             patch("mindroom.response_runner.should_use_streaming", new_callable=AsyncMock, return_value=False),

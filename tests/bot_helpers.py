@@ -30,6 +30,7 @@ from mindroom.constants import (
     resolve_runtime_paths,
 )
 from mindroom.dispatch_handoff import PreparedTextEvent
+from mindroom.dispatch_obligations import DispatchCallbackKind
 from mindroom.dispatch_source import (
     MESSAGE_SOURCE_KIND,
     VOICE_SOURCE_KIND,
@@ -153,6 +154,22 @@ def _visible_response_event_id(outcome: FinalDeliveryOutcome | str | None) -> st
     return outcome.final_visible_event_id
 
 
+async def dispatch_reaction_durably(
+    bot: AgentBot,
+    room: nio.MatrixRoom,
+    event: nio.ReactionEvent,
+) -> None:
+    """Exercise one reaction through its durable production entrypoint."""
+    source = dict(event.source)
+    source.setdefault("event_id", event.event_id)
+    source.setdefault("sender", event.sender)
+    source.setdefault("origin_server_ts", 1)
+    source.setdefault("type", "m.reaction")
+    event.source = source
+    event.decrypted = False
+    await bot._dispatch_obligation_runner.dispatch(room, event, DispatchCallbackKind.REACTION)
+
+
 def _handled_response_event_id(outcome: FinalDeliveryOutcome | str | None) -> str | None:
     if isinstance(outcome, str) or outcome is None:
         return outcome
@@ -241,6 +258,7 @@ def _set_turn_store_tracker(bot: AgentBot | TeamBot, tracker: MagicMock) -> Magi
     """Swap the private handled-turn ledger behind one turn store for test assertions."""
     stored_records: dict[str, TurnRecord] = {}
     tracker.get_turn_record.return_value = None
+    tracker.has_responded.return_value = False
 
     def update_handled_turn(
         lookup_event_ids: Sequence[str],
@@ -1021,7 +1039,7 @@ class AgentBotTestBase:
             await bot._on_media_message(room, event)
             await drain_coalescing(bot)
         elif handler_name == "reaction":
-            await bot._on_reaction(room, event)
+            await dispatch_reaction_durably(bot, room, event)
         else:  # pragma: no cover - defensive guard for test helper misuse
             msg = f"Unsupported handler: {handler_name}"
             raise ValueError(msg)

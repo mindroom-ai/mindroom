@@ -51,6 +51,7 @@ from mindroom.workers.runtime import (
     get_primary_worker_manager,
     primary_worker_backend_available,
     primary_worker_backend_name,
+    serialized_kubernetes_worker_config_snapshot,
     serialized_kubernetes_worker_validation_snapshot,
 )
 
@@ -208,11 +209,13 @@ def _cleanup_workers_once(
         return 0
 
     kubernetes_tool_validation_snapshot: dict[str, dict[str, object]] | None = None
+    kubernetes_config_snapshot: dict[str, object] | None = None
     if runtime_config is not None and primary_worker_backend_name(runtime_paths) == "kubernetes":
         kubernetes_tool_validation_snapshot = serialized_kubernetes_worker_validation_snapshot(
             runtime_paths,
             runtime_config=runtime_config,
         )
+        kubernetes_config_snapshot = serialized_kubernetes_worker_config_snapshot(runtime_config)
         if worker_grantable_credentials is None:
             worker_grantable_credentials = runtime_config.get_worker_grantable_credentials()
     worker_manager = get_primary_worker_manager(
@@ -221,6 +224,7 @@ def _cleanup_workers_once(
         proxy_token=proxy_config.proxy_token,
         storage_root=runtime_paths.storage_root,
         kubernetes_tool_validation_snapshot=kubernetes_tool_validation_snapshot,
+        kubernetes_config_snapshot=kubernetes_config_snapshot,
         worker_grantable_credentials=worker_grantable_credentials,
     )
     maintenance = maintain_workers(worker_manager)

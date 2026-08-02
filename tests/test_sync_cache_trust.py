@@ -123,7 +123,7 @@ def test_planned_response_does_not_advance_checkpoint_until_applied(tmp_path: Pa
     assert trust.checkpoint is None
     assert load_sync_checkpoint(tmp_path, "code") is None
 
-    trust.apply_response(decision, cache_result=SyncCacheWriteResult(complete=True))
+    trust._apply_response(decision, cache_result=SyncCacheWriteResult(complete=True))
 
     assert trust.state is SyncTrustState.CERTIFIED
     assert trust.checkpoint == SyncCheckpoint("s_planned")
@@ -133,17 +133,17 @@ def test_dispatch_persist_failure_is_consumed_once_per_epoch(tmp_path: Path) -> 
     """Each new admission failure rejects certification exactly once."""
     trust, _cache, _runtime = _trust(tmp_path)
 
-    assert not trust.consume_dispatch_persist_failure()
+    assert not trust._consume_dispatch_persist_failure()
 
     trust.record_dispatch_persist_failure()
     trust.record_dispatch_persist_failure()
 
-    assert trust.consume_dispatch_persist_failure()
-    assert not trust.consume_dispatch_persist_failure()
+    assert trust._consume_dispatch_persist_failure()
+    assert not trust._consume_dispatch_persist_failure()
 
     trust.record_dispatch_persist_failure()
 
-    assert trust.consume_dispatch_persist_failure()
+    assert trust._consume_dispatch_persist_failure()
 
 
 def test_dispatch_acceptance_policy_rejects_failed_response_then_applies_next(tmp_path: Path) -> None:
@@ -193,7 +193,7 @@ def test_cache_scope_invalidation_rejects_stale_certification_plan(tmp_path: Pat
     )
 
     assert trust.invalidate_for_cache_scope_cleanup()
-    applied = trust.apply_response(decision, cache_result=cache_result)
+    applied = trust._apply_response(decision, cache_result=cache_result)
 
     assert applied.state is SyncTrustState.UNCERTAIN
     assert applied.reset_client_token is True
@@ -204,8 +204,8 @@ def test_cache_scope_invalidation_rejects_stale_certification_plan(tmp_path: Pat
     assert load_sync_checkpoint(tmp_path, "code") is None
 
 
-def test_positioned_limited_response_resets_sync_continuity(tmp_path: Path) -> None:
-    """A limited response after a position must force one since-less replay."""
+def test_positioned_limited_response_resets_live_cursor_and_preserves_checkpoint(tmp_path: Path) -> None:
+    """A limited response must replay from the last durable checkpoint."""
     trust, _cache, _runtime = _trust(tmp_path)
     trust.state = SyncTrustState.CERTIFIED
     trust.save(SyncCheckpoint("s_before_gap"))
@@ -223,7 +223,10 @@ def test_positioned_limited_response_resets_sync_continuity(tmp_path: Path) -> N
     assert decision.reason == "limited_sync_timeline"
     assert trust.state is SyncTrustState.UNCERTAIN
     assert trust.checkpoint is None
-    assert load_sync_checkpoint(tmp_path, "code") is None
+    assert load_sync_checkpoint(tmp_path, "code") == SyncCheckpoint(
+        token="s_before_gap",  # noqa: S106
+        cache_generation=_GENERATION,
+    )
 
 
 def test_consecutive_cache_failures_keep_rewinding_until_certified(tmp_path: Path) -> None:
@@ -272,6 +275,7 @@ def test_limited_recovery_keeps_rewinding_until_complete_delta_certifies(tmp_pat
     """Each unresolved recovery window must replay until a complete delta certifies."""
     trust, _cache, _runtime = _trust(tmp_path)
     trust.state = SyncTrustState.CERTIFIED
+    trust.save(SyncCheckpoint("s_before_gap"))
 
     positioned = trust.certify_response(
         next_batch="s_partial",

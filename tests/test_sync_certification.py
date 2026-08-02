@@ -67,8 +67,8 @@ def test_recovered_limited_room_certifies_after_nio_callback_success() -> None:
         recovered_room_ids=frozenset({room_id}),
     )
 
-    assert cache_result.unclassified_limited_room_ids == ()
-    assert cache_result.has_recovery_obligation is False
+    assert cache_result._unclassified_limited_room_ids == ()
+    assert cache_result._has_recovery_obligation is False
     assert cache_result.certified is True
 
 
@@ -84,21 +84,29 @@ def test_recovery_outcomes_fail_closed_for_unrecovered_and_unclassified_rooms() 
         unrecovered_room_ids=frozenset({unrecovered_room}),
     )
 
-    assert cache_result.unclassified_limited_room_ids == (unclassified_room,)
-    assert cache_result.has_recovery_obligation is True
+    assert cache_result._unclassified_limited_room_ids == (unclassified_room,)
+    assert cache_result._has_recovery_obligation is True
     assert cache_result.certified is False
 
 
 @pytest.mark.parametrize(
-    ("cache_result", "reason"),
+    ("cache_result", "reason", "clear_saved_token"),
     [
-        (SyncCacheWriteResult(complete=False), "cache_write_incomplete"),
-        (SyncCacheWriteResult(complete=True, limited_room_ids=("!room:localhost",)), "limited_sync_timeline"),
-        (SyncCacheWriteResult(complete=True, errors=(RuntimeError("boom"),)), "cache_write_failed"),
-        (SyncCacheWriteResult(complete=True, errors=(asyncio.CancelledError(),)), "cache_write_failed"),
+        (SyncCacheWriteResult(complete=False), "cache_write_incomplete", True),
+        (
+            SyncCacheWriteResult(complete=True, limited_room_ids=("!room:localhost",)),
+            "limited_sync_timeline",
+            False,
+        ),
+        (SyncCacheWriteResult(complete=True, errors=(RuntimeError("boom"),)), "cache_write_failed", True),
+        (SyncCacheWriteResult(complete=True, errors=(asyncio.CancelledError(),)), "cache_write_failed", True),
     ],
 )
-def test_uncertain_sync_fails_closed(cache_result: SyncCacheWriteResult, reason: str) -> None:
+def test_uncertain_sync_fails_closed(
+    cache_result: SyncCacheWriteResult,
+    reason: str,
+    clear_saved_token: bool,
+) -> None:
     """Limited, failed, incomplete, or cancelled cache writes must not save a token."""
     decision = certify_sync_response(
         SyncTrustState.CERTIFIED,
@@ -109,7 +117,7 @@ def test_uncertain_sync_fails_closed(cache_result: SyncCacheWriteResult, reason:
 
     assert decision.state is SyncTrustState.UNCERTAIN
     assert decision.checkpoint_to_save is None
-    assert decision.clear_saved_token is True
+    assert decision.clear_saved_token is clear_saved_token
     assert decision.reset_client_token is False
     assert decision.reason == reason
 
@@ -136,6 +144,7 @@ def test_sync_cache_write_diagnostics_explains_uncertainty() -> None:
         SyncCacheWriteResult(
             complete=False,
             limited_room_ids=("!room:localhost",),
+            unrecovered_room_ids=frozenset({"!other:localhost"}),
             errors=(RuntimeError("cache failed"),),
             runtime_available=False,
             task_count=3,
@@ -151,7 +160,7 @@ def test_sync_cache_write_diagnostics_explains_uncertainty() -> None:
         "cache_write_certified": False,
         "cache_limited_room_count": 1,
         "cache_recovered_room_count": 0,
-        "cache_unrecovered_room_count": 0,
+        "cache_unrecovered_room_count": 1,
         "cache_unclassified_limited_room_count": 1,
         "cache_error_count": 1,
         "cache_runtime_available": False,
@@ -159,6 +168,7 @@ def test_sync_cache_write_diagnostics_explains_uncertainty() -> None:
         "cache_backend": "postgres",
         "cache_postgres_unavailable_reason": "connection closed",
         "cache_limited_room_ids": ("!room:localhost",),
+        "cache_unrecovered_room_ids": ("!other:localhost",),
         "cache_unclassified_limited_room_ids": ("!room:localhost",),
         "cache_error_types": ("RuntimeError",),
         "cache_error_messages": ("cache failed",),
@@ -177,6 +187,44 @@ def test_pending_first_sync_uncertainty_resets_client_token() -> None:
     assert decision.state is SyncTrustState.UNCERTAIN
     assert decision.clear_saved_token is True
     assert decision.reset_client_token is True
+
+
+def test_limited_cache_failure_preserves_positioned_continuity() -> None:
+    """A cache error must not hide the limited window's continuity requirement."""
+    decision = certify_sync_response(
+        SyncTrustState.PENDING,
+        next_batch="s_next",
+        cache_result=SyncCacheWriteResult(
+            complete=False,
+            limited_room_ids=("!room:localhost",),
+            errors=(RuntimeError("cache failed"),),
+        ),
+        first_sync=True,
+    )
+
+    assert decision.state is SyncTrustState.UNCERTAIN
+    assert decision.reason == "cache_write_failed"
+    assert decision.clear_saved_token is False
+    assert decision.reset_client_token is False
+
+
+def test_unrecovered_gap_preserves_positioned_continuity() -> None:
+    """A prior nio recovery gap must block a later response checkpoint."""
+    decision = certify_sync_response(
+        SyncTrustState.CERTIFIED,
+        next_batch="s_next",
+        cache_result=SyncCacheWriteResult(
+            complete=True,
+            unrecovered_room_ids=frozenset({"!room:localhost"}),
+        ),
+        first_sync=False,
+    )
+
+    assert decision.state is SyncTrustState.UNCERTAIN
+    assert decision.reason == "sync_recovery_incomplete"
+    assert decision.checkpoint_to_save is None
+    assert decision.clear_saved_token is False
+    assert decision.reset_client_token is False
 
 
 def test_missing_next_batch_fails_closed() -> None:

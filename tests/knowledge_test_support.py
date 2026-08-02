@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any, ClassVar, cast
 import pytest
 from agno.knowledge.document.base import Document
 from agno.knowledge.embedder.base import Embedder
+from agno.vectordb import chroma as agno_chroma
 
 import mindroom.knowledge.refresh_locks as knowledge_refresh_locks
 import mindroom.knowledge.registry as knowledge_registry
@@ -289,8 +290,7 @@ def patch_vector_store(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
         "mindroom.knowledge.manager.create_configured_embedder",
         lambda *_args, **_kwargs: _FakeEmbedder(),
     )
-    monkeypatch.setattr("mindroom.knowledge.indexing_config.ChromaDb", _VectorDb)
-    monkeypatch.setattr("mindroom.knowledge.registry.ChromaDb", _VectorDb)
+    monkeypatch.setattr(agno_chroma, "ChromaDb", _VectorDb)
     monkeypatch.setattr("mindroom.knowledge.registry.StrictSearchKnowledge", _Knowledge)
     monkeypatch.setattr("mindroom.knowledge.registry.create_configured_embedder", lambda *_args, **_kwargs: object())
     knowledge_registry._published_indexes.clear()

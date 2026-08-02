@@ -244,7 +244,7 @@ async def test_admission_failure_rearms_baseline_when_no_checkpoint_can_retry(tm
     assert first_baseline.reset_client_token is False
 
     trust.record_dispatch_persist_failure()
-    assert trust.consume_dispatch_persist_failure() is True
+    trust.reject_response_before_certification()
     retry_baseline = trust.certify_response(
         next_batch="s_retry",
         cache_result=_cache_result(

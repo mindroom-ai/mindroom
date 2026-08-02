@@ -802,16 +802,30 @@ async def test_handle_live_approval_id_response_resolves_same_room_waiter(tmp_pa
     )
     pending = await _wait_for_pending(store, sender=sender, room_id="!room-a:localhost")
 
+    before_consume = AsyncMock()
+    wrong_room_result = await store.handle_live_approval_id_response(
+        room_id="!room-b:localhost",
+        sender_id="@user:localhost",
+        approval_id=pending.approval_id,
+        status="approved",
+        reason=None,
+        before_consume=before_consume,
+    )
+    assert wrong_room_result.consumed is False
+    before_consume.assert_not_awaited()
+
     result = await store.handle_live_approval_id_response(
         room_id="!room-a:localhost",
         sender_id="@user:localhost",
         approval_id=pending.approval_id,
         status="approved",
         reason=None,
+        before_consume=before_consume,
     )
     decision = await task
 
     assert result.resolved is True
+    before_consume.assert_awaited_once_with()
     assert decision.status == "approved"
     assert editor.await_args.args[:2] == ("!room-a:localhost", "$approval")
 

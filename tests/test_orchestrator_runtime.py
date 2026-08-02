@@ -41,6 +41,8 @@ from mindroom.matrix.users import INTERNAL_USER_ACCOUNT_KEY, AgentMatrixUser
 from mindroom.orchestration.config_updates import ConfigUpdatePlan
 from mindroom.orchestration.plugin_watch import _collect_plugin_root_changes
 from mindroom.orchestration.runtime import (
+    STARTUP_RETRY_INITIAL_DELAY_SECONDS,
+    STARTUP_RETRY_MAX_DELAY_SECONDS,
     _matrix_homeserver_startup_timeout_seconds_from_env,
     run_with_retry,
     wait_for_matrix_homeserver,
@@ -2177,6 +2179,48 @@ class TestMultiAgentOrchestrator:
         responder_bot.recover_pending_turn_dispatch_obligations.assert_awaited_once_with()
 
     @pytest.mark.asyncio
+    async def test_scheduled_turn_recovery_isolates_and_retries_one_bot_failure(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """One transient store failure must not strand this or any later ready bot."""
+        config = _runtime_bound_config(
+            Config(agents={"general": AgentConfig(display_name="General", role="General assistant")}),
+            tmp_path,
+        )
+        orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths_for(config))
+        orchestrator.config = config
+
+        router_bot = MagicMock()
+        router_bot.running = True
+        router_bot.first_sync_complete = True
+        router_bot.recover_pending_turn_dispatch_obligations = AsyncMock(
+            side_effect=[OSError("store unavailable"), None],
+        )
+        responder_bot = MagicMock()
+        responder_bot.running = True
+        responder_bot.first_sync_complete = True
+        responder_bot.recover_pending_turn_dispatch_obligations = AsyncMock()
+        orchestrator.agent_bots = {ROUTER_AGENT_NAME: router_bot, "general": responder_bot}
+
+        with patch("mindroom.orchestration.runtime.retry_delay_seconds", return_value=0) as retry_delay:
+            orchestrator._schedule_ready_turn_dispatch_recovery()
+            assert await wait_for_background_tasks(
+                timeout=1,
+                owner=orchestrator._dispatch_recovery_task_owner,
+            )
+
+        assert router_bot.recover_pending_turn_dispatch_obligations.await_count == 2
+        assert responder_bot.recover_pending_turn_dispatch_obligations.await_count == 2
+        retry_delay.assert_called_once_with(
+            1,
+            initial_delay_seconds=STARTUP_RETRY_INITIAL_DELAY_SECONDS,
+            max_delay_seconds=STARTUP_RETRY_MAX_DELAY_SECONDS,
+        )
+        assert not orchestrator._dispatch_recovery_requested
+        assert orchestrator._dispatch_recovery_task is None
+
+    @pytest.mark.asyncio
     async def test_regular_agent_turn_recovery_waits_for_own_first_sync(
         self,
         tmp_path: Path,
@@ -2434,6 +2478,48 @@ class TestMultiAgentOrchestrator:
 
         team_bot.recover_pending_turn_dispatch_obligations.assert_awaited_once_with()
         member_bot.recover_pending_turn_dispatch_obligations.assert_awaited_once_with()
+
+    @pytest.mark.asyncio
+    async def test_background_bot_start_does_not_wait_for_dispatch_recovery(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Dispatch maintenance must not leave a successfully started bot unsynced."""
+        config = _runtime_bound_config(
+            Config(agents={"general": AgentConfig(display_name="General", role="General assistant")}),
+            tmp_path,
+        )
+        orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths_for(config))
+        orchestrator.config = config
+        bot = MagicMock()
+        bot.running = True
+        bot.try_start = AsyncMock(return_value=True)
+        bot.recover_pending_turn_dispatch_obligations = AsyncMock(side_effect=OSError("store unavailable"))
+        orchestrator.agent_bots = {"general": bot}
+        order: list[str] = []
+
+        with (
+            patch.object(orchestrator, "_entities_blocked_by_failed_mcp_servers", return_value=set()),
+            patch.object(orchestrator, "_bind_started_runtime_support_services"),
+            patch.object(orchestrator, "_resolve_bot_room_aliases"),
+            patch.object(
+                orchestrator,
+                "_schedule_ready_turn_dispatch_recovery",
+                side_effect=lambda: order.append("recovery_scheduled"),
+            ),
+            patch.object(
+                orchestrator,
+                "_start_sync_task",
+                side_effect=lambda *_args: order.append("sync_started"),
+            ),
+            patch.object(orchestrator, "_setup_rooms_and_memberships", new=AsyncMock()),
+            patch.object(orchestrator, "_recover_pending_replacement_rooms", new=AsyncMock()),
+            patch.object(orchestrator._external_trigger_runtime, "bind_if_ready"),
+        ):
+            await orchestrator._run_bot_start_retry("general")
+
+        assert order == ["recovery_scheduled", "sync_started"]
+        bot.recover_pending_turn_dispatch_obligations.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_orchestrator_start_skips_retry_for_permanent_failures(self, tmp_path: Path) -> None:
@@ -2890,7 +2976,7 @@ class TestMultiAgentOrchestrator:
             patch.object(orchestrator._external_trigger_runtime, "sync_api_config_snapshot", new=AsyncMock()),
             patch.object(orchestrator, "_sync_runtime_support_services", new=AsyncMock()) as mock_sync_runtime,
         ):
-            updated = await orchestrator.config_reload.update_config()
+            updated = await orchestrator.config_reload._update_config()
 
         assert updated is False
         mock_sync_runtime.assert_awaited_once_with(
@@ -3021,7 +3107,7 @@ class TestMultiAgentOrchestrator:
                 patch.object(orchestrator, "_emit_config_reloaded", new=AsyncMock()),
                 patch.object(orchestrator, "_sync_memory_auto_flush_worker", new=AsyncMock()),
             ):
-                updated = await orchestrator.config_reload.update_config()
+                updated = await orchestrator.config_reload._update_config()
 
             assert updated is True
             assert task.done() is False
@@ -3234,7 +3320,7 @@ class TestMultiAgentOrchestrator:
             patch.object(orchestrator._external_trigger_runtime, "sync_api_config_snapshot", new=AsyncMock()),
             patch.object(orchestrator, "_sync_runtime_support_services", new=AsyncMock()),
         ):
-            updated = await orchestrator.config_reload.update_config()
+            updated = await orchestrator.config_reload._update_config()
 
         assert updated is False
         mock_load_config.assert_called_once()
@@ -3282,7 +3368,7 @@ class TestMultiAgentOrchestrator:
             ),
             pytest.raises(RuntimeError, match="boom"),
         ):
-            await orchestrator.config_reload.update_config()
+            await orchestrator.config_reload._update_config()
 
         assert orchestrator.config is current_config
         assert orchestrator.hook_registry is old_hook_registry
@@ -3342,7 +3428,7 @@ class TestMultiAgentOrchestrator:
             patch("mindroom.orchestrator.clear_worker_validation_snapshot_cache") as mock_clear_snapshot_cache,
             pytest.raises(RuntimeError, match="broken plugin"),
         ):
-            await orchestrator.config_reload.update_config()
+            await orchestrator.config_reload._update_config()
 
         stop_entities_before_mcp_sync.assert_not_awaited()
         assert bot.running is True
@@ -3442,7 +3528,7 @@ class TestMultiAgentOrchestrator:
                 ),
                 pytest.raises(RuntimeError, match="stop failed"),
             ):
-                await orchestrator.config_reload.update_config()
+                await orchestrator.config_reload._update_config()
 
             assert orchestrator.config is current_config
             assert orchestrator.hook_registry is old_hook_registry
@@ -3524,7 +3610,7 @@ class TestMultiAgentOrchestrator:
                 patch.object(orchestrator, "_sync_runtime_support_services", new=AsyncMock()),
                 patch.object(orchestrator, "_emit_config_reloaded", new=AsyncMock()),
             ):
-                updated = await orchestrator.config_reload.update_config()
+                updated = await orchestrator.config_reload._update_config()
 
             assert updated is False
             loaded_hooks_module = plugin_module._MODULE_IMPORT_CACHE[hooks_path.resolve()].module
@@ -3594,7 +3680,7 @@ class TestMultiAgentOrchestrator:
             patch.object(orchestrator, "_sync_memory_auto_flush_worker", new=AsyncMock()),
         ):
             try:
-                updated = await orchestrator.config_reload.update_config()
+                updated = await orchestrator.config_reload._update_config()
                 assert updated is False
                 assert router_bot.event_cache.principal_id == "@mindroom_router:localhost"
                 assert general_bot.event_cache.principal_id == "@mindroom_general:localhost"
@@ -3665,7 +3751,7 @@ class TestMultiAgentOrchestrator:
             patch.object(orchestrator, "_sync_memory_auto_flush_worker", new=AsyncMock()),
         ):
             try:
-                updated = await orchestrator.config_reload.update_config()
+                updated = await orchestrator.config_reload._update_config()
                 assert updated is False
                 assert orchestrator._runtime_support.event_cache is old_cache
                 assert old_cache.db_path == old_config.cache.resolve_db_path(orchestrator.runtime_paths)
@@ -3773,7 +3859,7 @@ class TestMultiAgentOrchestrator:
             patch.object(orchestrator, "_ensure_room_invitations", new=AsyncMock()),
         ):
             try:
-                updated = await orchestrator.config_reload.update_config()
+                updated = await orchestrator.config_reload._update_config()
             finally:
                 await orchestrator._close_runtime_support_services()
 
@@ -3870,7 +3956,7 @@ class TestMultiAgentOrchestrator:
             patch.object(orchestrator, "_ensure_room_invitations", new=AsyncMock()),
         ):
             try:
-                updated = await orchestrator.config_reload.update_config()
+                updated = await orchestrator.config_reload._update_config()
             finally:
                 await orchestrator._close_runtime_support_services()
 

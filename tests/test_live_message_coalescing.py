@@ -523,7 +523,7 @@ async def test_post_gate_terminal_drop_settles_real_deferred_dispatch_obligation
         plan_turn.assert_not_awaited()
     assert not bot._turn_store.is_durably_handled(event.event_id)
     await _wait_for(
-        lambda: not runner.store.has_pending(event.event_id, DispatchCallbackKind.MESSAGE),
+        lambda: not runner.store._has_pending(event.event_id, DispatchCallbackKind.MESSAGE),
         deadline_seconds=1,
     )
 
@@ -1621,7 +1621,7 @@ async def test_active_follow_up_owner_includes_later_media_payload(tmp_path: Pat
             patch.object(bot._turn_controller, "_has_newer_unresponded_in_thread", return_value=False),
             patch.object(ResponsePayloadPreparer, "_log_dispatch_latency"),
             patch(
-                "mindroom.response_runner.ResponseRunner.generate_response_locked",
+                "mindroom.response_runner.ResponseRunner._generate_response_locked",
                 new=fake_generate_response_locked,
             ),
         ):

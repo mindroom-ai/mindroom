@@ -416,7 +416,7 @@ class TestUserIdPassthrough:
 
             mock_ai.side_effect = fake_ai_response
 
-            await coordinator.process_and_respond(
+            await coordinator._process_and_respond(
                 _response_request(prompt="Hello", user_id="@alice:localhost"),
             )
 
@@ -470,7 +470,7 @@ class TestUserIdPassthrough:
 
             mock_stream.side_effect = fake_stream_agent_response
 
-            await coordinator.process_and_respond_streaming(
+            await coordinator._process_and_respond_streaming(
                 _response_request(prompt="Hello", user_id="@bob:localhost"),
             )
 

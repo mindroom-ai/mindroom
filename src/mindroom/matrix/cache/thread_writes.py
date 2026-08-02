@@ -1267,7 +1267,7 @@ class ThreadSyncWritePolicy:
         """Queue sync timeline persistence through the room-ordered cache barrier."""
         if not self._cache_ops.cache_runtime_available():
             return []
-        limited_room_ids, validation_errors = self._limited_sync_timeline_room_ids(response)
+        limited_room_ids, validation_errors = self.limited_sync_timeline_room_ids(response)
         if validation_errors:
             raise validation_errors[0]
         room_plain_events, room_threaded_events, room_redactions = self._group_sync_timeline_updates(response)
@@ -1297,7 +1297,7 @@ class ThreadSyncWritePolicy:
         return tasks
 
     @staticmethod
-    def _limited_sync_timeline_room_ids(
+    def limited_sync_timeline_room_ids(
         response: nio.SyncResponse,
     ) -> tuple[tuple[str, ...], tuple[BaseException, ...]]:
         """Return limited joined-room IDs or validation errors for one sync response."""
@@ -1346,7 +1346,7 @@ class ThreadSyncWritePolicy:
         response: nio.SyncResponse,
     ) -> SyncCacheWriteResult:
         """Persist sync timeline data and report whether it certifies the sync token."""
-        limited_room_ids, validation_errors = self._limited_sync_timeline_room_ids(response)
+        limited_room_ids, validation_errors = self.limited_sync_timeline_room_ids(response)
         if validation_errors:
             return SyncCacheWriteResult.from_sync_response(
                 response,

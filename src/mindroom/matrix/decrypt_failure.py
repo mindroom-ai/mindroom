@@ -224,9 +224,16 @@ async def handle_decrypt_failure(
     # the first bot that fails on a session posts the only notice.
     if _notice_already_sent(runtime_paths, room.room_id, session_id):
         return
-    # Record before sending so a delivery crash cannot cause a notice loop.
+    # Record before sending so a process crash cannot cause a notice loop.
+    # An unsuccessful in-process attempt releases the claim for durable retry.
     _record_notice_sent(runtime_paths, room.room_id, session_id)
-    if await _send_decrypt_failure_notice(client, room.room_id):
+    delivered = False
+    try:
+        delivered = await _send_decrypt_failure_notice(client, room.room_id)
+    finally:
+        if not delivered:
+            _forget_notice_sent(runtime_paths, room.room_id, session_id)
+    if delivered:
         _stats.notices_sent += 1
         logger.info(
             "e2ee_decrypt_failure_notice_sent",
@@ -235,9 +242,8 @@ async def handle_decrypt_failure(
             agent=agent_name,
         )
     else:
-        # A cleanly failed send left no notice in the room; release the claim
-        # so the next undecryptable event in this session can retry.
-        _forget_notice_sent(runtime_paths, room.room_id, session_id)
+        msg = f"Failed to deliver decryption-failure notice in room {room.room_id}"
+        raise RuntimeError(msg)
 
 
 __all__ = ["E2EEStats", "e2ee_stats", "handle_decrypt_failure", "raise_notice_floor"]

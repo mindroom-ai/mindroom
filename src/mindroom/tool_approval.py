@@ -295,7 +295,11 @@ def is_process_active_approval_card(card_event_id: str) -> bool:
     return manager is not None and manager.has_active_in_memory_approval_card(card_event_id)
 
 
-async def handle_matrix_approval_action(action: MatrixApprovalAction) -> ApprovalActionResult:
+async def handle_matrix_approval_action(
+    action: MatrixApprovalAction,
+    *,
+    before_consume: Callable[[], Awaitable[None]] | None = None,
+) -> ApprovalActionResult:
     """Resolve a live approval or expire a validated detached Matrix card."""
     manager = approval_manager.get_approval_store()
     if manager is None:
@@ -308,6 +312,7 @@ async def handle_matrix_approval_action(action: MatrixApprovalAction) -> Approva
             approval_id=action.approval_id,
             status=action.status,
             reason=sanitized_reason,
+            before_consume=before_consume,
         )
         if result.consumed or action.card_event_id is None:
             return result
@@ -319,6 +324,7 @@ async def handle_matrix_approval_action(action: MatrixApprovalAction) -> Approva
         card_event_id=action.card_event_id,
         status=action.status,
         reason=sanitized_reason,
+        before_consume=before_consume,
     )
 
 

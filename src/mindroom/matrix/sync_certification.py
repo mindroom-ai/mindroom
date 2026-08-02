@@ -67,20 +67,20 @@ class SyncCacheWriteResult:
         )
 
     @property
-    def unclassified_limited_room_ids(self) -> tuple[str, ...]:
+    def _unclassified_limited_room_ids(self) -> tuple[str, ...]:
         """Return current limited rooms missing an authoritative recovery outcome."""
         classified_room_ids = self.recovered_room_ids | self.unrecovered_room_ids
         return tuple(room_id for room_id in self.limited_room_ids if room_id not in classified_room_ids)
 
     @property
-    def has_recovery_obligation(self) -> bool:
+    def _has_recovery_obligation(self) -> bool:
         """Return whether nio reports unresolved recovery or misses a current limited-room classification."""
-        return bool(self.unclassified_limited_room_ids or self.unrecovered_room_ids)
+        return bool(self._unclassified_limited_room_ids or self.unrecovered_room_ids)
 
     @property
     def certified(self) -> bool:
         """Return whether local cache work completed without errors or recovery obligations."""
-        return self.complete and not self.errors and not self.has_recovery_obligation
+        return self.complete and not self.errors and not self._has_recovery_obligation
 
 
 @dataclass(frozen=True)
@@ -98,12 +98,13 @@ class SyncCertificationDecision:
 def _uncertain_decision(
     *,
     reason: str,
+    clear_saved_token: bool = True,
     reset_client_token: bool = False,
 ) -> SyncCertificationDecision:
     """Return a fail-closed uncertainty decision."""
     return SyncCertificationDecision(
         state=SyncTrustState.UNCERTAIN,
-        clear_saved_token=True,
+        clear_saved_token=clear_saved_token,
         reset_client_token=reset_client_token,
         reason=reason,
     )
@@ -115,7 +116,7 @@ def _uncertain_reason(cache_result: SyncCacheWriteResult, *, next_batch: str | N
         return "missing_next_batch"
     if cache_result.errors:
         return "cache_write_failed"
-    if cache_result.unclassified_limited_room_ids:
+    if cache_result._unclassified_limited_room_ids:
         return "limited_sync_timeline"
     if cache_result.unrecovered_room_ids:
         return "sync_recovery_incomplete"
@@ -134,9 +135,11 @@ def certify_sync_response(
     """Return the certifier decision for one sync response."""
     reason = _uncertain_reason(cache_result, next_batch=next_batch)
     if reason is not None:
+        timeline_gap = bool(cache_result.limited_room_ids or cache_result.unrecovered_room_ids)
         return _uncertain_decision(
             reason=reason,
-            reset_client_token=state is SyncTrustState.PENDING and first_sync,
+            clear_saved_token=not timeline_gap,
+            reset_client_token=not timeline_gap and state is SyncTrustState.PENDING and first_sync,
         )
 
     token = normalize_sync_token(next_batch)
@@ -184,7 +187,7 @@ def _recovery_diagnostics(cache_result: SyncCacheWriteResult) -> dict[str, Any]:
         "cache_limited_room_count": len(cache_result.limited_room_ids),
         "cache_recovered_room_count": len(cache_result.recovered_room_ids),
         "cache_unrecovered_room_count": len(cache_result.unrecovered_room_ids),
-        "cache_unclassified_limited_room_count": len(cache_result.unclassified_limited_room_ids),
+        "cache_unclassified_limited_room_count": len(cache_result._unclassified_limited_room_ids),
     }
     if cache_result.limited_room_ids:
         diagnostics["cache_limited_room_ids"] = cache_result.limited_room_ids[:5]
@@ -192,6 +195,6 @@ def _recovery_diagnostics(cache_result: SyncCacheWriteResult) -> dict[str, Any]:
         diagnostics["cache_recovered_room_ids"] = tuple(sorted(cache_result.recovered_room_ids))[:5]
     if cache_result.unrecovered_room_ids:
         diagnostics["cache_unrecovered_room_ids"] = tuple(sorted(cache_result.unrecovered_room_ids))[:5]
-    if cache_result.unclassified_limited_room_ids:
-        diagnostics["cache_unclassified_limited_room_ids"] = cache_result.unclassified_limited_room_ids[:5]
+    if cache_result._unclassified_limited_room_ids:
+        diagnostics["cache_unclassified_limited_room_ids"] = cache_result._unclassified_limited_room_ids[:5]
     return diagnostics

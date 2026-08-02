@@ -87,6 +87,7 @@ Recovery intent travels with queued ingress so pre-existing lane and coalescing 
 The registered `DispatchObligationRunner` source callback durably accepts each relevant event before background execution.
 The pinned nio recovery contract publishes a recovered-room outcome only after every non-live callback succeeds, so `SyncCacheTrust` can certify a complete recovered response while unrecovered and unclassified limited rooms still fail closed.
 Raw sync-cache continuity remains owned separately by `SyncCacheTrust`, so a durable pending dispatch obligation is sufficient to preserve a certified checkpoint.
+Nio persists limited-timeline recovery without owning the sync token, while `SyncCacheTrust` retains the pre-gap checkpoint until nio reports no unresolved room gaps.
 Classic Sync response-owned lifecycle hooks and their durable de-duplication markers complete before `SyncCacheTrust` certifies the response checkpoint.
 Live `room-member-joined` hooks are at-least-once because hook emission happens before the durable seen marker, so a marker write failure replays the hook instead of losing it.
 Invite and response-owned lifecycle paths use the same runner directly because they are outside nio timeline fanout.
@@ -105,6 +106,13 @@ It no longer sends messages, runs AI, or writes persistence state.
 `TurnStore` is now the main durable turn boundary for the extracted runtime flows.
 `TurnController` and `EditRegenerator` read and write through `TurnStore` instead of owning their own persistence helpers.
 Command handling now records terminal outcomes through `TurnStore` as well.
+Potentially mutating chat commands use an at-most-once execution-attempt journal: `TurnStore` records that execution is about to begin before the handler runs, then records the exact result before visible delivery.
+Recovery re-delivers a recorded result, while an interrupted execution attempt without a result is not rerun and instead produces an explicit uncertain-outcome response that requires the requester to inspect state before retrying.
+Startup loads turn truth without pruning, recovers turn-backed dispatch obligations, then applies age and count cleanup while retaining pending redaction work, replayable incomplete turns, and every group referenced by a raw unsettled callback row.
+Recovery and its post-recovery ledger cleanup run under one background retry owner, independently of bot startup and Matrix sync lifecycle progress.
+Multi-purpose callbacks durably claim one application consumer before that consumer's side effects, and recovery routes only to the claimed consumer instead of rediscovering intent from mutable runtime state.
+Consumer-owned side effects remain responsible for their own replay semantics; for example, generic reaction hooks are at-least-once.
+`!config set` uses a separate Matrix-backed `preview -> decision -> execution -> result` journal because its mutation begins only after the requester reacts to the preview.
 
 `TurnRecord` is the single immutable schema for turn identity, outcome, and regeneration facts.
 One codec projects that schema into the versioned handled-turn ledger and recoverable Agno run metadata.

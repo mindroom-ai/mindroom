@@ -90,6 +90,11 @@ _TEST_KUBERNETES_VALIDATION_SNAPSHOT = {
         "runtime_loadable": True,
     },
 }
+_TEST_KUBERNETES_CONFIG_SNAPSHOT: dict[str, object] = {
+    "defaults": {"worker_scope": None},
+    "agents": {},
+    "knowledge_bases": {},
+}
 _TEST_RUNTIME_PATHS = resolve_runtime_paths(config_path=Path("config.yaml"), process_env={})
 
 
@@ -2443,6 +2448,7 @@ def test_get_worker_manager_falls_back_to_runtime_storage_root_without_tool_cont
         proxy_token: str | None,
         storage_root: Path | None = None,
         kubernetes_tool_validation_snapshot: dict[str, dict[str, object]] | None = None,
+        kubernetes_config_snapshot: dict[str, object] | None = None,
         worker_grantable_credentials: frozenset[str] | None = None,
     ) -> str:
         captured["runtime_paths"] = runtime_paths_arg
@@ -2450,6 +2456,7 @@ def test_get_worker_manager_falls_back_to_runtime_storage_root_without_tool_cont
         captured["proxy_token"] = proxy_token
         captured["storage_root"] = storage_root
         captured["kubernetes_tool_validation_snapshot"] = kubernetes_tool_validation_snapshot
+        captured["kubernetes_config_snapshot"] = kubernetes_config_snapshot
         captured["worker_grantable_credentials"] = worker_grantable_credentials
         return "manager"
 
@@ -2473,6 +2480,8 @@ def test_get_worker_manager_falls_back_to_runtime_storage_root_without_tool_cont
     assert manager == "manager"
     assert captured["runtime_paths"] == runtime_paths
     assert captured["storage_root"] == (tmp_path / "storage").resolve()
+    assert captured["kubernetes_tool_validation_snapshot"] is None
+    assert captured["kubernetes_config_snapshot"] is None
     assert captured["worker_grantable_credentials"] is None
 
 
@@ -4086,11 +4095,11 @@ def test_docker_worker_manager_rebuilds_when_committed_runtime_env_changes(
     workers_runtime_module._reset_primary_worker_manager()
 
 
-def test_get_worker_manager_rebuilds_kubernetes_backend_when_validation_snapshot_changes(
+def test_get_worker_manager_rebuilds_kubernetes_backend_when_committed_snapshot_changes(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Kubernetes worker-manager caching should track the authoritative validation snapshot."""
+    """Kubernetes worker-manager caching should track authoritative committed snapshots."""
     monkeypatch.setenv("MINDROOM_WORKER_BACKEND", "kubernetes")
     monkeypatch.setenv("MINDROOM_KUBERNETES_WORKER_IMAGE", "ghcr.io/mindroom-ai/mindroom:latest")
     monkeypatch.setenv("MINDROOM_KUBERNETES_WORKER_STORAGE_PVC_NAME", "mindroom-storage")
@@ -4110,7 +4119,13 @@ def test_get_worker_manager_rebuilds_kubernetes_backend_when_validation_snapshot
             "runtime_loadable": False,
         },
     }
+    second_config_snapshot = {
+        **_TEST_KUBERNETES_CONFIG_SNAPSHOT,
+        "agents": {"code": {"knowledge_bases": ["shared_docs"]}},
+        "knowledge_bases": {"shared_docs": {"path": "./knowledge/shared-docs"}},
+    }
     captured_snapshots: list[dict[str, dict[str, object]]] = []
+    captured_config_snapshots: list[dict[str, object]] = []
 
     class FakeKubernetesBackend:
         backend_name = "kubernetes"
@@ -4124,10 +4139,12 @@ def test_get_worker_manager_rebuilds_kubernetes_backend_when_validation_snapshot
             auth_token: str | None,
             storage_root: Path,
             tool_validation_snapshot: dict[str, dict[str, object]],
+            config_snapshot: dict[str, object],
             worker_grantable_credentials: frozenset[str],
         ) -> Self:
             del runtime_paths, auth_token, storage_root, worker_grantable_credentials
             captured_snapshots.append(tool_validation_snapshot)
+            captured_config_snapshots.append(config_snapshot)
             return cls()
 
         def ensure_worker(self, spec: WorkerSpec, *, now: float | None = None, progress_sink: object = None) -> object:
@@ -4157,6 +4174,7 @@ def test_get_worker_manager_rebuilds_kubernetes_backend_when_validation_snapshot
         proxy_token=_TEST_AUTH_TOKEN,
         storage_root=tmp_path,
         kubernetes_tool_validation_snapshot=first_snapshot,
+        kubernetes_config_snapshot=_TEST_KUBERNETES_CONFIG_SNAPSHOT,
     )
     second_manager = workers_runtime_module.get_primary_worker_manager(
         runtime_paths,
@@ -4164,10 +4182,25 @@ def test_get_worker_manager_rebuilds_kubernetes_backend_when_validation_snapshot
         proxy_token=_TEST_AUTH_TOKEN,
         storage_root=tmp_path,
         kubernetes_tool_validation_snapshot=second_snapshot,
+        kubernetes_config_snapshot=_TEST_KUBERNETES_CONFIG_SNAPSHOT,
+    )
+    third_manager = workers_runtime_module.get_primary_worker_manager(
+        runtime_paths,
+        proxy_url=None,
+        proxy_token=_TEST_AUTH_TOKEN,
+        storage_root=tmp_path,
+        kubernetes_tool_validation_snapshot=second_snapshot,
+        kubernetes_config_snapshot=second_config_snapshot,
     )
 
     assert first_manager is not second_manager
-    assert captured_snapshots == [first_snapshot, second_snapshot]
+    assert second_manager is not third_manager
+    assert captured_snapshots == [first_snapshot, second_snapshot, second_snapshot]
+    assert captured_config_snapshots == [
+        _TEST_KUBERNETES_CONFIG_SNAPSHOT,
+        _TEST_KUBERNETES_CONFIG_SNAPSHOT,
+        second_config_snapshot,
+    ]
 
 
 def test_get_primary_worker_manager_requires_explicit_snapshot_for_kubernetes(
@@ -4196,6 +4229,18 @@ def test_get_primary_worker_manager_requires_explicit_snapshot_for_kubernetes(
             storage_root=tmp_path,
         )
 
+    with pytest.raises(
+        WorkerBackendError,
+        match="requires an explicit committed config snapshot",
+    ):
+        workers_runtime_module.get_primary_worker_manager(
+            runtime_paths,
+            proxy_url=None,
+            proxy_token=_TEST_AUTH_TOKEN,
+            storage_root=tmp_path,
+            kubernetes_tool_validation_snapshot=_TEST_KUBERNETES_VALIDATION_SNAPSHOT,
+        )
+
 
 def test_get_primary_worker_manager_reuses_cached_manager_without_rereading_disk_when_snapshot_is_explicit(
     monkeypatch: pytest.MonkeyPatch,
@@ -4219,6 +4264,7 @@ def test_get_primary_worker_manager_reuses_cached_manager_without_rereading_disk
     tool_validation_snapshot = serialize_tool_validation_snapshot(
         resolved_tool_validation_snapshot_for_runtime(runtime_paths, runtime_config),
     )
+    config_snapshot = workers_runtime_module.serialized_kubernetes_worker_config_snapshot(runtime_config)
 
     class FakeKubernetesBackend:
         backend_name = "kubernetes"
@@ -4232,9 +4278,17 @@ def test_get_primary_worker_manager_reuses_cached_manager_without_rereading_disk
             auth_token: str | None,
             storage_root: Path,
             tool_validation_snapshot: dict[str, dict[str, object]],
+            config_snapshot: dict[str, object],
             worker_grantable_credentials: frozenset[str],
         ) -> Self:
-            del runtime_paths, auth_token, storage_root, tool_validation_snapshot, worker_grantable_credentials
+            del (
+                runtime_paths,
+                auth_token,
+                storage_root,
+                tool_validation_snapshot,
+                config_snapshot,
+                worker_grantable_credentials,
+            )
             return cls()
 
         def ensure_worker(self, spec: WorkerSpec, *, now: float | None = None, progress_sink: object = None) -> object:
@@ -4264,6 +4318,7 @@ def test_get_primary_worker_manager_reuses_cached_manager_without_rereading_disk
         proxy_token=_TEST_AUTH_TOKEN,
         storage_root=tmp_path,
         kubernetes_tool_validation_snapshot=tool_validation_snapshot,
+        kubernetes_config_snapshot=config_snapshot,
     )
     config_path.write_text("models: [\n", encoding="utf-8")
     second_manager = workers_runtime_module.get_primary_worker_manager(
@@ -4272,6 +4327,7 @@ def test_get_primary_worker_manager_reuses_cached_manager_without_rereading_disk
         proxy_token=_TEST_AUTH_TOKEN,
         storage_root=tmp_path,
         kubernetes_tool_validation_snapshot=tool_validation_snapshot,
+        kubernetes_config_snapshot=config_snapshot,
     )
 
     assert first_manager is second_manager
@@ -4318,6 +4374,9 @@ def test_get_worker_manager_passes_committed_snapshot_from_tool_runtime_context(
         sandbox_proxy_module._get_worker_manager(runtime_paths, proxy_config)
 
     assert captured_kwargs["kubernetes_tool_validation_snapshot"] is not None
+    assert captured_kwargs["kubernetes_config_snapshot"] == (
+        workers_runtime_module.serialized_kubernetes_worker_config_snapshot(runtime_config)
+    )
 
 
 def test_get_worker_manager_reuses_cached_kubernetes_validation_snapshot(
