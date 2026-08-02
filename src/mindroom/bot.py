@@ -1335,6 +1335,7 @@ class AgentBot:
                     cache_result = SyncCacheWriteResult(
                         complete=False,
                         limited_room_ids=limited_room_ids,
+                        unrecovered_room_ids=tuple(sorted(_response.unrecovered_room_ids)),
                         errors=(*validation_errors, exc),
                     )
                     self._certify_sync_response(

@@ -97,6 +97,7 @@ def test_sync_cache_write_diagnostics_explains_uncertainty() -> None:
         SyncCacheWriteResult(
             complete=False,
             limited_room_ids=("!room:localhost",),
+            unrecovered_room_ids=("!other:localhost",),
             errors=(RuntimeError("cache failed"),),
             runtime_available=False,
             task_count=3,
@@ -111,12 +112,14 @@ def test_sync_cache_write_diagnostics_explains_uncertainty() -> None:
         "cache_write_complete": False,
         "cache_write_certified": False,
         "cache_limited_room_count": 1,
+        "cache_unrecovered_room_count": 1,
         "cache_error_count": 1,
         "cache_runtime_available": False,
         "cache_task_count": 3,
         "cache_backend": "postgres",
         "cache_postgres_unavailable_reason": "connection closed",
         "cache_limited_room_ids": ("!room:localhost",),
+        "cache_unrecovered_room_ids": ("!other:localhost",),
         "cache_error_types": ("RuntimeError",),
         "cache_error_messages": ("cache failed",),
     }
@@ -151,6 +154,25 @@ def test_limited_cache_failure_preserves_positioned_continuity() -> None:
 
     assert decision.state is SyncTrustState.UNCERTAIN
     assert decision.reason == "cache_write_failed"
+    assert decision.clear_saved_token is False
+    assert decision.reset_client_token is False
+
+
+def test_unrecovered_gap_preserves_positioned_continuity() -> None:
+    """A prior nio recovery gap must block a later response checkpoint."""
+    decision = certify_sync_response(
+        SyncTrustState.CERTIFIED,
+        next_batch="s_next",
+        cache_result=SyncCacheWriteResult(
+            complete=True,
+            unrecovered_room_ids=("!room:localhost",),
+        ),
+        first_sync=False,
+    )
+
+    assert decision.state is SyncTrustState.UNCERTAIN
+    assert decision.reason == "unrecovered_sync_timeline"
+    assert decision.checkpoint_to_save is None
     assert decision.clear_saved_token is False
     assert decision.reset_client_token is False
 

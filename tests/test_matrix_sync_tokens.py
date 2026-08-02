@@ -1203,6 +1203,34 @@ async def test_limited_cache_failure_keeps_live_cursor_and_last_checkpoint(tmp_p
     assert _load_sync_token_value(tmp_path, bot.agent_name) == "s_before_gap"
 
 
+@pytest.mark.asyncio
+async def test_unrecovered_gap_keeps_device_independent_checkpoint(tmp_path: Path) -> None:
+    """A fresh Matrix device must restart from before any store-local recovery gap."""
+    bot = _agent_bot(tmp_path)
+    bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
+    bot.client.next_batch = "s_after_gap"
+    bot._first_sync_done = True
+    bot._sync_cache_trust.state = SyncTrustState.CERTIFIED
+    save_sync_token(
+        tmp_path,
+        bot.agent_name,
+        "s_before_gap",
+        cache_generation=_CACHE_GENERATION,
+    )
+    response = MagicMock(spec=nio.SyncResponse)
+    response.next_batch = "s_after_gap"
+    response.unrecovered_room_ids = frozenset({"!room:localhost"})
+    response.rooms = MagicMock(join={})
+
+    with patch("mindroom.bot.mark_matrix_sync_success", return_value=datetime.now(UTC)):
+        await bot._on_sync_response(response)
+
+    restarted = _agent_bot(tmp_path)
+    assert bot.client.next_batch == "s_after_gap"
+    assert bot._sync_cache_trust.state is SyncTrustState.UNCERTAIN
+    assert await restarted._sync_cache_trust.prepare_startup() == "s_before_gap"
+
+
 def test_cache_scope_cleanup_between_plan_and_apply_forces_tokenless_recovery(tmp_path: Path) -> None:
     """Bot wiring must apply the invalidation epoch before advancing nio's cursor."""
     bot = _agent_bot(tmp_path)
