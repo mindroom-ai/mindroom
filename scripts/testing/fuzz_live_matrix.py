@@ -90,7 +90,7 @@ class LiveOperationKind(StrEnum):
     RESTART_MINDROOM = "restart_mindroom"
 
 
-def restart_failure(
+def _restart_failure(
     invariant: str,
     *,
     event_category: str,
@@ -100,6 +100,11 @@ def restart_failure(
 ) -> str:
     """Format content-free restart failure coordinates."""
     return f"invariant={invariant} step={step} event_category={event_category} phase={phase} observed={observed}"
+
+
+def _raise_restart_failures(failures: Collection[str]) -> None:
+    """Raise one consistently headed restart-regression report."""
+    raise AssertionError("restart regression invariant failures:\n" + "\n".join(failures))
 
 
 def _require_restart_invariant(
@@ -114,14 +119,14 @@ def _require_restart_invariant(
     """Raise one consistently formatted restart-boundary failure."""
     if passed:
         return
-    failure = restart_failure(
+    failure = _restart_failure(
         invariant,
         event_category=event_category,
         phase=phase,
         observed=observed,
         step=step,
     )
-    raise AssertionError("restart regression invariant failures:\n" + failure)
+    _raise_restart_failures((failure,))
 
 
 @dataclass(frozen=True, slots=True)
@@ -289,7 +294,7 @@ def _positive_restart_evidence_ready(observation: RestartRegressionObservation) 
 def evaluate_restart_regression(observation: RestartRegressionObservation) -> tuple[str, ...]:
     """Return every violated restart invariant from one settled observation."""
     return tuple(
-        restart_failure(
+        _restart_failure(
             check.invariant,
             event_category=check.event_category,
             phase=check.phase,
@@ -735,7 +740,7 @@ class _ModelHandler(BaseHTTPRequestHandler):
     call_ids = itertools.count(1)
     stream_segments = 4
     stream_delay = 0.001
-    blocked_request_timeout = 60.0
+    blocked_request_timeout: float
     blocked_request_started = threading.Event()
     blocked_request_release = threading.Event()
 
@@ -789,25 +794,28 @@ class _ModelHandler(BaseHTTPRequestHandler):
             ORIGINAL_RUNTIME_GENERATION_MARKER,
         )
         content = self._response_text(call_id, generation_marker)
-        if payload.get("stream") is True:
-            self._send_stream(call_id, content, str(model_id))
-            return
-        self._send_json(
-            {
-                "id": f"live-fuzz-response-{call_id}",
-                "object": "chat.completion",
-                "created": int(time.time()),
-                "model": model_id,
-                "choices": [
-                    {
-                        "index": 0,
-                        "message": {"role": "assistant", "content": content},
-                        "finish_reason": "stop",
-                    },
-                ],
-                "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
-            },
-        )
+        try:
+            if payload.get("stream") is True:
+                self._send_stream(call_id, content, str(model_id))
+                return
+            self._send_json(
+                {
+                    "id": f"live-fuzz-response-{call_id}",
+                    "object": "chat.completion",
+                    "created": int(time.time()),
+                    "model": model_id,
+                    "choices": [
+                        {
+                            "index": 0,
+                            "message": {"role": "assistant", "content": content},
+                            "finish_reason": "stop",
+                        },
+                    ],
+                    "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+                },
+            )
+        except (BrokenPipeError, ConnectionResetError):
+            self.close_connection = True
 
     @classmethod
     def _response_text(cls, call_id: int, generation_marker: str) -> str:
@@ -945,7 +953,7 @@ class ManagedTuwunelStack:
 
     def _mindroom_environment(self) -> dict[str, str]:
         """Build the deterministic managed-child environment."""
-        return {
+        environment = {
             **os.environ,
             "MATRIX_HOMESERVER": self.homeserver,
             "MATRIX_SERVER_NAME": self.server_name,
@@ -958,6 +966,8 @@ class ManagedTuwunelStack:
             "MINDROOM_LOGGER_LEVELS": "",
             "OPENAI_API_KEY": "sk-live-fuzz",
         }
+        environment.pop("UV_PYTHON", None)
+        return environment
 
     def restart_mindroom(self) -> None:
         """Restart only MindRoom while preserving its cache and Matrix account."""
@@ -1822,7 +1832,7 @@ class LiveFuzzRunner:
         )
         failures = evaluate_restart_regression(observation)
         if failures:
-            raise AssertionError("restart regression invariant failures:\n" + "\n".join(failures))
+            _raise_restart_failures(failures)
         return {
             "historical_event_pairs_cached": observation.cached_event_pair_count,
             "historical_outputs": sum(observation.historical_output_counts),
@@ -2421,7 +2431,8 @@ def main() -> None:
     stack = ManagedTuwunelStack(
         stream_segments=96 if scenario.profile == "saturation" else 4,
         stream_delay=0.012 if scenario.profile == "saturation" else 0.001,
-        model_latch_timeout=reply_timeout,
+        # The hard-restart latch spans the later checkpoint wait plus process scheduling.
+        model_latch_timeout=reply_timeout * 3,
     )
     try:
         stack.start()
