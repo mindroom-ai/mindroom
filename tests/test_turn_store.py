@@ -2179,7 +2179,7 @@ def test_record_turn_preserves_existing_optional_facts_at_the_owner_boundary(tmp
         ),
     )
 
-    store.record_turn(TurnRecord.create(["$event"], response_event_id="$second-response"))
+    store.record_turn(TurnRecord(source_event_ids=("$event",), response_event_id="$second-response"))
 
     record = store.get_turn_record("$event")
     assert record is not None

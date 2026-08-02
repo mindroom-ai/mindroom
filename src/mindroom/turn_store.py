@@ -120,6 +120,7 @@ class TurnStore:
 
     def _record_terminal_turn(self, turn_record: TurnRecord, *, wait_for_persist: bool) -> None:
         """Apply the canonical terminal merge with optional exact durability."""
+        turn_record = canonicalize_turn_record(turn_record)
         if not turn_record.source_event_ids:
             return
 
