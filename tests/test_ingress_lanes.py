@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-from dataclasses import replace
 from typing import TYPE_CHECKING, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -27,10 +26,14 @@ from mindroom.dispatch_source import (
 )
 from mindroom.matrix.thread_membership import ThreadMembershipLookupError
 from mindroom.message_target import MessageTarget
-from mindroom.reaction_dispatch import ReactionDispatcher
 from mindroom.runtime_shutdown import SYNC_RESTART_SHUTDOWN
 from tests.bot_helpers import dispatch_reaction_durably
-from tests.conftest import prepared_dispatch_result, replace_turn_controller_deps, unwrap_extracted_collaborator
+from tests.conftest import (
+    prepared_dispatch_result,
+    replace_reaction_dispatcher_deps,
+    replace_turn_controller_deps,
+    unwrap_extracted_collaborator,
+)
 from tests.test_live_message_coalescing import (
     _enqueue_for_dispatch,
     _image_event,
@@ -1077,11 +1080,9 @@ async def test_edit_and_reaction_slots_settle_before_their_execution_finishes(tm
     edit_task: asyncio.Task[None] | None = None
     reaction_task: asyncio.Task[None] | None = None
     try:
-        bot._reaction_dispatcher = ReactionDispatcher(
-            replace(
-                bot._reaction_dispatcher.deps,
-                handle_interactive_selection=blocked_selection,
-            ),
+        replace_reaction_dispatcher_deps(
+            bot,
+            handle_interactive_selection=blocked_selection,
         )
         with (
             patch.object(bot._edit_regenerator, "handle_message_edit", new=AsyncMock(side_effect=blocked_edit)),

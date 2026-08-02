@@ -84,7 +84,12 @@ class TurnSettlementRetry:
                         self.store.settle_pending_from_turn_store,
                         source_event_ids,
                     )
-                except asyncio.CancelledError:
+                except asyncio.CancelledError as error:
+                    logger.info(
+                        "turn_dispatch_obligation_settlement_retry_cancelled",
+                        source_event_ids=tuple(self._source_event_ids),
+                        cancellation_message=str(error) or None,
+                    )
                     raise
                 except Exception:
                     logger.exception(

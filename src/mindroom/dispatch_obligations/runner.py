@@ -277,7 +277,6 @@ class DispatchObligationRunner:
         callback_kind: DispatchCallbackKind,
     ) -> DispatchObligation | None:
         """Persist exact work before its background task may be created."""
-        self._event_loop = asyncio.get_running_loop()
         try:
             obligation = self._obligation_for_event(room, event, callback_kind)
             create_result = await run_blocking_until_complete(self.store.create_pending, obligation)
@@ -392,7 +391,6 @@ class DispatchObligationRunner:
 
     async def recover_pending(self, *, turn_backed: bool | None = None) -> None:
         """Retry every valid pending callback without waiting for another sync response."""
-        self._event_loop = asyncio.get_running_loop()
         failed_keys: list[DispatchObligationKey] = []
         for obligation in await asyncio.to_thread(self.store.pending):
             if turn_backed is not None and (obligation.callback_kind in _TURN_BACKED_KINDS) != turn_backed:

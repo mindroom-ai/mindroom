@@ -32,7 +32,6 @@ from mindroom.hooks import (
     hook,
 )
 from mindroom.message_target import MessageTarget
-from mindroom.reaction_dispatch import ReactionDispatcher
 from mindroom.tool_approval import ApprovalActionResult, MatrixApprovalAction, _shutdown_approval_store
 from tests.bot_helpers import (
     AgentBotTestBase,
@@ -46,6 +45,7 @@ from tests.bot_helpers import (
 )
 from tests.conftest import (
     make_matrix_client_mock,
+    replace_reaction_dispatcher_deps,
     runtime_paths_for,
     unwrap_extracted_collaborator,
 )
@@ -90,10 +90,6 @@ async def _cancel_dispatch_retry(bot: AgentBot) -> None:
     retry_task.cancel()
     with suppress(asyncio.CancelledError):
         await retry_task
-
-
-def _replace_reaction_dispatcher_deps(bot: AgentBot, **changes: object) -> None:
-    bot._reaction_dispatcher = ReactionDispatcher(replace(bot._reaction_dispatcher.deps, **changes))
 
 
 def _approval_reply_event(event_id: str = "$approval-reply") -> nio.RoomMessageText:
@@ -261,7 +257,7 @@ class TestAgentBot(AgentBotTestBase):
         room.room_id = "!test:localhost"
         room.canonical_alias = None
         event = self._make_handler_event("reaction", sender="@user:localhost", event_id="$reaction")
-        _replace_reaction_dispatcher_deps(bot, handle_interactive_selection=AsyncMock())
+        replace_reaction_dispatcher_deps(bot, handle_interactive_selection=AsyncMock())
 
         with patch(
             "mindroom.bot.interactive.handle_reaction",
@@ -425,7 +421,7 @@ class TestAgentBot(AgentBotTestBase):
             selection_started.set()
             assert bot._coalescing_gate.lanes.unsettled_slots()
 
-        _replace_reaction_dispatcher_deps(bot, handle_interactive_selection=handle_selection)
+        replace_reaction_dispatcher_deps(bot, handle_interactive_selection=handle_selection)
         with patch("mindroom.bot.interactive.handle_reaction", new=AsyncMock(return_value=selection)):
             await _dispatch_reaction(bot, room, event)
 
@@ -465,7 +461,7 @@ class TestAgentBot(AgentBotTestBase):
             await release_approval.wait()
             return False
 
-        _replace_reaction_dispatcher_deps(bot, handle_interactive_selection=AsyncMock())
+        replace_reaction_dispatcher_deps(bot, handle_interactive_selection=AsyncMock())
         with (
             patch("mindroom.reaction_dispatch.handle_tool_approval_action", side_effect=delayed_approval),
             patch("mindroom.bot.interactive.handle_reaction", new=AsyncMock(return_value=selection)),
@@ -1651,7 +1647,7 @@ class TestAgentBot(AgentBotTestBase):
             thread_id=None,
         )
         failure = RuntimeError("crash after interactive reaction claim")
-        _replace_reaction_dispatcher_deps(
+        replace_reaction_dispatcher_deps(
             bot,
             handle_interactive_selection=AsyncMock(side_effect=failure),
         )
