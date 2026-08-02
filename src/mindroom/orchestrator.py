@@ -2034,7 +2034,13 @@ async def _run_api_server(
     api_main.initialize_api_app(api_main.app, runtime_paths)
     if knowledge_refresh_scheduler is not None:
         api_main.bind_orchestrator_knowledge_refresh_scheduler(api_main.app, knowledge_refresh_scheduler)
-    config = uvicorn.Config(api_main.app, host=host, port=port, log_level=log_level.lower())
+    config = uvicorn.Config(
+        api_main.app,
+        host=host,
+        port=port,
+        log_level=log_level.lower(),
+        ws="websockets-sansio",
+    )
     server = _SignalAwareUvicornServer(config, shutdown_requested)
     logger.info("embedded_api_server_starting", **api_server.log_context())
     try:
