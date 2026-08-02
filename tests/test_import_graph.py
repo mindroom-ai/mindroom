@@ -88,7 +88,23 @@ _TOOLS_ROOTS = _REGISTRY_ROOTS | frozenset(
         "zipp",
     },
 )
+# Top-level CLI help only needs command metadata and presentation libraries.
+# Command implementations must defer networking, crypto, config validation,
+# and provider imports until the selected command runs.
+_CLI_ROOTS = frozenset(
+    {
+        "annotated_doc",
+        "attr",
+        "click",
+        "dotenv",
+        "pygments",
+        "rich",
+        "shellingham",
+        "typer",
+    },
+)
 _ALLOWED_THIRD_PARTY_ROOTS: dict[str, frozenset[str]] = {
+    "mindroom.cli.main": _CLI_ROOTS,
     "mindroom.config.main": _CONFIG_LAYER_ROOTS,
     "mindroom.model_loading": _CONFIG_LAYER_ROOTS | frozenset({"agno"}),
     "mindroom.tool_system.declarations": frozenset({"dotenv"}),
@@ -207,6 +223,19 @@ def test_slim_entry_point_import_contract(module: str) -> None:
 def test_primary_runtime_does_not_import_provider_sdks() -> None:
     """The orchestrator import (mindroom run) loads no provider SDK; only configured ones load later."""
     _assert_probe_clean("mindroom.orchestrator", _PROVIDER_SDK_ROOTS)
+
+
+def test_primary_runtime_defers_optional_storage_engines() -> None:
+    """MindRoom startup must defer storage engines until memory or knowledge uses them."""
+    _assert_probe_clean("mindroom.orchestrator", ("mem0", "chromadb", "agno.vectordb.chroma"))
+
+
+def test_doctor_import_does_not_import_optional_provider_sdks() -> None:
+    """Doctor must defer provider-specific diagnostics until that provider is configured."""
+    _assert_probe_clean(
+        "mindroom.cli.doctor",
+        (*_PROVIDER_SDK_ROOTS, "agno.models.vertexai.claude", "google.auth"),
+    )
 
 
 def test_openai_wire_models_import_only_the_openai_sdk() -> None:

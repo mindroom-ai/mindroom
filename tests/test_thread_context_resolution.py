@@ -1820,13 +1820,13 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         with (
             patch.object(
                 resolver,
-                "thread_membership_access",
+                "_thread_membership_access",
                 MagicMock(return_value=access),
             ) as mock_access,
             patch(
                 "mindroom.conversation_resolver.resolve_event_thread_membership",
                 new=AsyncMock(
-                    return_value=ThreadResolution.indeterminate(
+                    return_value=ThreadResolution._indeterminate(
                         RuntimeError("proof unavailable"),
                         candidate_thread_root_id="$thread_root:localhost",
                     ),

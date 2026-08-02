@@ -640,7 +640,8 @@ mindroom threads export --storage-path mindroom_data --prefer-cache
 ## service
 
 Install and manage MindRoom as a background user service.
-MindRoom runs through `uv tool run` and starts automatically at login.
+MindRoom runs the version installed by this command through `uv tool run` and starts automatically at login.
+Rerun `mindroom service install` after upgrading MindRoom.
 On macOS, MindRoom uses launchd user agents.
 On Linux, MindRoom uses systemd user services.
 
@@ -661,7 +662,9 @@ On Linux, MindRoom uses systemd user services.
 
  Install and manage MindRoom as a background user service.
 
- MindRoom runs through `uv tool run` and starts automatically at login.
+ MindRoom runs the version installed by this command through `uv tool run` and starts
+ automatically at login.
+ Rerun `mindroom service install` after upgrading MindRoom.
 
  Supported platforms:
  - macOS: launchd (`~/Library/LaunchAgents/`)

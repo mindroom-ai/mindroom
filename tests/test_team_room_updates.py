@@ -104,7 +104,7 @@ class TestTeamRoomUpdates:
                             mock_load_config.return_value = config2
 
                             # Update config
-                            updated = await orchestrator.config_reload.update_config()
+                            updated = await orchestrator.config_reload._update_config()
 
                             # Verify the team was restarted
                             assert updated is True
@@ -205,7 +205,7 @@ class TestTeamRoomUpdates:
                             }
 
                             # Update config
-                            updated = await orchestrator.config_reload.update_config()
+                            updated = await orchestrator.config_reload._update_config()
 
                             # Verify the new team was created
                             assert updated is True
@@ -299,7 +299,7 @@ class TestTeamRoomUpdates:
                             mock_create_bot.reset_mock()
 
                             # Update with same config
-                            updated = await orchestrator.config_reload.update_config()
+                            updated = await orchestrator.config_reload._update_config()
 
                             # Verify nothing was restarted
                             assert updated is False

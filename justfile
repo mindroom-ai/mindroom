@@ -227,7 +227,7 @@ test-standard:
 
 # Check for public symbols that should be private
 check-module-privacy:
-    uv run privata .
+    uv run privata --methods .
 
 #############################
 # Developer-friendly aliases

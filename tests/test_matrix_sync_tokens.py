@@ -8,7 +8,7 @@ import sqlite3
 import threading
 import uuid
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import aiosqlite
@@ -17,18 +17,21 @@ import pytest
 from structlog.testing import capture_logs
 
 from mindroom.background_tasks import wait_for_background_tasks
-from mindroom.bot import AgentBot, TeamBot, _create_best_effort_task_wrapper
+from mindroom.bot import AgentBot, TeamBot, _create_best_effort_task_wrapper, _RoomMemberJoinSyncHookPlan
 from mindroom.coalescing import CoalescingDrainResult, CoalescingGate, IngressAdmissionClosedError, ReadyPendingEvent
 from mindroom.coalescing_batch import CoalescedBatch, CoalescingKey, PendingEvent
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
-from mindroom.config.matrix import MatrixSyncConfig
 from mindroom.config.models import ModelConfig
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.delivery_gateway import FinalizeStreamedResponseRequest, ResponseIdentity
 from mindroom.dispatch_handoff import PendingDispatchMetadata
-from mindroom.dispatch_obligations import DispatchCallbackKind
-from mindroom.dispatch_source import VOICE_SOURCE_KIND
+from mindroom.dispatch_obligations import (
+    DispatchCallbackKind,
+    _DispatchCallbackResult,
+    _DispatchObligationCorruptionError,
+)
+from mindroom.dispatch_source import IMAGE_SOURCE_KIND, MEDIA_SOURCE_KIND, VOICE_SOURCE_KIND
 from mindroom.handled_turns import TurnRecord
 from mindroom.matrix.cache.event_cache import EventCacheBackendUnavailableError
 from mindroom.matrix.cache.postgres_event_cache import PostgresEventCache
@@ -63,7 +66,6 @@ from tests.conftest import (
 
 if TYPE_CHECKING:
     from pathlib import Path
-    from typing import Literal
 
     from mindroom.coalescing import LaneSlot, _GateEntry
     from mindroom.final_delivery import FinalDeliveryOutcome
@@ -100,6 +102,39 @@ def _agent_bot(tmp_path: Path, *, agent_name: str = "code") -> AgentBot:
     return bot
 
 
+def test_dispatch_recovery_room_contract_prefers_cache_and_guarantees_room_id(tmp_path: Path) -> None:
+    """Recovery room state is best-effort, but its exact room ID is always available."""
+    bot = _agent_bot(tmp_path)
+    cached_room = nio.MatrixRoom("!cached:localhost", bot.agent_user.user_id)
+    bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
+    bot.client.rooms = {cached_room.room_id: cached_room}
+
+    assert bot._room_for_dispatch_obligation(cached_room.room_id) is cached_room
+    assert bot._room_for_dispatch_obligation("!missing:localhost").room_id == "!missing:localhost"
+
+
+def test_terminal_turn_settlement_hands_sqlite_work_to_event_loop_owner(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Handled-turn persistence callbacks must not run obligation SQLite inline."""
+    bot = _agent_bot(tmp_path)
+    retry_turn_settlement = MagicMock()
+    monkeypatch.setattr(
+        bot._dispatch_obligation_runner,
+        "retry_turn_settlement",
+        retry_turn_settlement,
+        raising=False,
+    )
+    settle_pending = MagicMock()
+    monkeypatch.setattr(bot._dispatch_obligation_store, "_settle_pending_from_turn_store", settle_pending)
+
+    bot._settle_turn_dispatch_obligations(("$message",))
+
+    settle_pending.assert_not_called()
+    retry_turn_settlement.assert_called_once_with(("$message",))
+
+
 def _install_fast_response_drain(bot: AgentBot) -> None:
     """Keep real response draining while shortening its bounded waits."""
     drain_inbox_responses = bot._response_runner.drain_inbox_responses
@@ -132,372 +167,6 @@ def _load_sync_token_value(tmp_path: Path, agent_name: str) -> str | None:
     return checkpoint.token
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("mode", "saved_token", "expected_cold"),
-    [
-        ("classic", None, True),
-        ("classic", "s_restored", False),
-        ("sliding", None, True),
-        ("sliding", "s_classic_only", True),
-    ],
-)
-async def test_sync_transport_startup_sets_cold_history_admission(
-    tmp_path: Path,
-    mode: Literal["classic", "sliding"],
-    saved_token: str | None,
-    expected_cold: bool,
-) -> None:
-    """Classic since is reusable while a restarted Sliding connection has no pos."""
-    bot = _agent_bot(tmp_path)
-    bot.config.matrix_sync = MatrixSyncConfig(mode=mode)
-    bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
-    if saved_token is not None:
-        save_sync_token(
-            tmp_path,
-            bot.agent_name,
-            saved_token,
-            cache_generation=_CACHE_GENERATION,
-        )
-
-    await bot._prepare_matrix_sync_continuity()
-
-    assert bot._cold_history_fence.is_cold is expected_cold
-
-
-@pytest.mark.asyncio
-async def test_classic_response_continuation_opens_fence_and_unknown_pos_rearms(
-    tmp_path: Path,
-) -> None:
-    """Classic next_batch opens admission and M_UNKNOWN_POS closes it."""
-    bot = _agent_bot(tmp_path)
-    bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
-    await bot._prepare_matrix_sync_continuity()
-    bot._first_sync_done = True
-    response = MagicMock(spec=nio.SyncResponse)
-    response.next_batch = "s_after_cold"
-    response.rooms = MagicMock(join={}, leave={})
-
-    await bot._on_sync_response(response)
-
-    assert not bot._cold_history_fence.is_cold
-    sync_error = MagicMock(spec=nio.SyncError)
-    sync_error.status_code = "M_UNKNOWN_POS"
-
-    await bot._on_sync_error(sync_error)
-
-    assert bot._cold_history_fence.is_cold
-
-
-@pytest.mark.asyncio
-async def test_classic_response_without_continuation_keeps_fence_cold(
-    tmp_path: Path,
-) -> None:
-    """Classic response without next_batch cannot establish continuity."""
-    bot = _agent_bot(tmp_path)
-    bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
-    await bot._prepare_matrix_sync_continuity()
-    bot._first_sync_done = True
-    response = MagicMock(spec=nio.SyncResponse)
-    response.next_batch = None
-    response.rooms = MagicMock(join={}, leave={})
-
-    await bot._on_sync_response(response)
-
-    assert bot._cold_history_fence.is_cold
-
-
-@pytest.mark.asyncio
-async def test_warm_join_decrypt_notice_waits_for_trusted_sync_containing_room(
-    tmp_path: Path,
-) -> None:
-    """Pre-join Megolm sessions stay unclaimed until this room reaches trusted sync."""
-    room_id = "!room:localhost"
-    bot = _agent_bot(tmp_path)
-    bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
-    bot.client.outgoing_key_requests = {}
-    bot._first_sync_done = True
-    bot._cold_history_fence.start(trusted_continuation="s_warm")
-    room = nio.MatrixRoom(room_id, bot.agent_user.user_id)
-
-    def megolm_event(event_id: str) -> nio.MegolmEvent:
-        event = nio.MegolmEvent.from_dict(
-            {
-                "event_id": event_id,
-                "sender": "@user:localhost",
-                "origin_server_ts": 1,
-                "type": "m.room.encrypted",
-                "room_id": room_id,
-                "content": {
-                    "algorithm": "m.megolm.v1.aes-sha2",
-                    "ciphertext": "cipher",
-                    "sender_key": "sender-key",
-                    "session_id": "pre-join-session",
-                    "device_id": "DEVICE",
-                },
-            },
-        )
-        assert isinstance(event, nio.MegolmEvent)
-        return event
-
-    def sync_response(*, joined_room_id: str, next_batch: str) -> nio.SyncResponse:
-        response = MagicMock(spec=nio.SyncResponse)
-        response.next_batch = next_batch
-        response.rooms = MagicMock(
-            join={
-                joined_room_id: MagicMock(
-                    state=[],
-                    timeline=MagicMock(events=[], limited=False),
-                ),
-            },
-            leave={},
-        )
-        return response
-
-    notice = AsyncMock(return_value=True)
-    decrypt_callback = bot._dispatch_obligation_runner.task_wrapper(
-        DispatchCallbackKind.DECRYPTION_FAILURE,
-        owner=bot._runtime_view,
-    )
-    cache_result = AsyncMock(
-        side_effect=[
-            SyncCacheWriteResult(complete=False),
-            SyncCacheWriteResult(complete=True),
-            SyncCacheWriteResult(complete=True),
-        ],
-    )
-    admitted_during_join: list[bool] = []
-
-    async def join_while_sync_is_live(_client: object, joining_room_id: str) -> bool:
-        admitted_during_join.append(
-            await bot._admit_dispatch_source(
-                joining_room_id,
-                "$during-join",
-                DispatchCallbackKind.DECRYPTION_FAILURE,
-            ),
-        )
-        return True
-
-    with (
-        patch("mindroom.bot_room_lifecycle.get_joined_rooms", AsyncMock(return_value=[])),
-        patch("mindroom.bot_room_lifecycle.join_room", new=join_while_sync_is_live),
-        patch("mindroom.bot.is_authorized_sender", return_value=True),
-        patch("mindroom.matrix.decrypt_failure._send_decrypt_failure_notice", new=notice),
-        patch.object(
-            bot._conversation_cache,
-            "cache_sync_timeline_for_certification",
-            new=cache_result,
-        ),
-    ):
-        await bot.join_configured_rooms()
-        assert admitted_during_join == [False]
-        assert await bot._admit_dispatch_source(
-            room_id,
-            "$ordinary-message",
-            DispatchCallbackKind.MESSAGE,
-        )
-        assert not await bot._admit_dispatch_source(
-            room_id,
-            "$pre-join",
-            DispatchCallbackKind.DECRYPTION_FAILURE,
-        )
-        await decrypt_callback(room, megolm_event("$pre-join"))
-        assert not bot._dispatch_obligation_store.has_pending(
-            "$pre-join",
-            DispatchCallbackKind.DECRYPTION_FAILURE,
-        )
-        notice.assert_not_awaited()
-
-        await bot._on_sync_response(
-            sync_response(
-                joined_room_id=room_id,
-                next_batch="s_uncertified_room",
-            ),
-        )
-        await decrypt_callback(room, megolm_event("$after-uncertified-room"))
-        assert not bot._dispatch_obligation_store.has_pending(
-            "$after-uncertified-room",
-            DispatchCallbackKind.DECRYPTION_FAILURE,
-        )
-        notice.assert_not_awaited()
-
-        await bot._on_sync_response(
-            sync_response(
-                joined_room_id="!other:localhost",
-                next_batch="s_certified_other",
-            ),
-        )
-        await decrypt_callback(room, megolm_event("$after-certified-other"))
-        assert not bot._dispatch_obligation_store.has_pending(
-            "$after-certified-other",
-            DispatchCallbackKind.DECRYPTION_FAILURE,
-        )
-        notice.assert_not_awaited()
-
-        await bot._on_sync_response(
-            sync_response(
-                joined_room_id=room_id,
-                next_batch="s_certified_room",
-            ),
-        )
-        await decrypt_callback(room, megolm_event("$after-certified-room"))
-        assert await wait_for_background_tasks(timeout=0.5, owner=bot._runtime_view)
-
-    notice.assert_awaited_once()
-
-
-@pytest.mark.asyncio
-async def test_sliding_response_pos_opens_fence_and_missing_or_unknown_pos_rearms(
-    tmp_path: Path,
-) -> None:
-    """Sliding pos opens admission while missing or rejected pos closes it."""
-    bot = _agent_bot(tmp_path)
-    bot.config.matrix_sync = MatrixSyncConfig(mode="sliding")
-    bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
-    await bot._prepare_matrix_sync_continuity()
-    bot._first_sync_done = True
-
-    await bot._on_sync_response(nio.SlidingSyncResponse("pos_after_cold"))
-
-    assert not bot._cold_history_fence.is_cold
-
-    await bot._on_sync_response(nio.SlidingSyncResponse(""))
-
-    assert bot._cold_history_fence.is_cold
-
-    await bot._on_sync_response(nio.SlidingSyncResponse("pos_after_missing"))
-
-    await bot._on_sync_error(
-        nio.SlidingSyncError("connection expired", "M_UNKNOWN_POS"),
-    )
-
-    assert bot._cold_history_fence.is_cold
-
-
-@pytest.mark.asyncio
-async def test_sliding_transport_restart_rearms_cold_history_fence(
-    tmp_path: Path,
-) -> None:
-    """Each fresh Sliding transport starts without a connection position."""
-    bot = _agent_bot(tmp_path)
-    bot.config.matrix_sync = MatrixSyncConfig(mode="sliding")
-    bot._cold_history_fence.observe_continuation("pos_from_previous_loop")
-    assert not bot._cold_history_fence.is_cold
-
-    bot.mark_sync_loop_started()
-
-    assert bot._cold_history_fence.is_cold
-    assert not await bot._admit_dispatch_source(
-        "!room:localhost",
-        "$initial-history",
-        DispatchCallbackKind.MESSAGE,
-    )
-
-
-@pytest.mark.asyncio
-async def test_sliding_trusted_sync_clears_joined_room_decrypt_notice_fence(
-    tmp_path: Path,
-) -> None:
-    """A Sliding invite keeps the fence until membership becomes joined."""
-    bot = _agent_bot(tmp_path)
-    bot.config.matrix_sync = MatrixSyncConfig(mode="sliding")
-    bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
-    bot._first_sync_done = True
-
-    with (
-        patch("mindroom.bot_room_lifecycle.get_joined_rooms", AsyncMock(return_value=[])),
-        patch("mindroom.bot_room_lifecycle.join_room", AsyncMock(return_value=True)),
-    ):
-        await bot.join_configured_rooms()
-
-    assert bot._room_lifecycle.decrypt_notice_is_fenced("!room:localhost")
-
-    await bot._on_sync_response(
-        nio.SlidingSyncResponse(
-            "pos_after_invite",
-            rooms={"!room:localhost": nio.SlidingSyncRoom(membership="invite")},
-        ),
-    )
-
-    assert bot._room_lifecycle.decrypt_notice_is_fenced("!room:localhost")
-
-    await bot._on_sync_response(
-        nio.SlidingSyncResponse(
-            "pos_after_join",
-            rooms={"!room:localhost": nio.SlidingSyncRoom(membership="join")},
-        ),
-    )
-
-    assert not bot._room_lifecycle.decrypt_notice_is_fenced("!room:localhost")
-
-
-@pytest.mark.asyncio
-async def test_restart_loads_only_exact_unfinished_join_decrypt_fence(
-    tmp_path: Path,
-) -> None:
-    """Restart must distinguish an unfinished join from a long-trusted room."""
-    room_id = "!room:localhost"
-    trusted_room_id = "!trusted:localhost"
-    first_bot = _agent_bot(tmp_path)
-    first_bot.client = make_matrix_client_mock(user_id=first_bot.agent_user.user_id)
-
-    with (
-        patch("mindroom.bot_room_lifecycle.get_joined_rooms", AsyncMock(return_value=[])),
-        patch("mindroom.bot_room_lifecycle.join_room", AsyncMock(return_value=True)),
-    ):
-        await first_bot.join_configured_rooms()
-
-    assert first_bot._room_lifecycle.decrypt_notice_is_fenced(room_id)
-
-    restarted_bot = _agent_bot(tmp_path)
-    restarted_client = make_matrix_client_mock(user_id=restarted_bot.agent_user.user_id)
-    with (
-        patch.object(restarted_bot, "ensure_user_account", AsyncMock()),
-        patch(
-            "mindroom.bot.login_agent_user",
-            AsyncMock(return_value=restarted_client),
-        ),
-        patch.object(restarted_bot, "_set_avatar_if_available", AsyncMock()),
-        patch.object(restarted_bot, "_set_presence_with_model_info", AsyncMock()),
-        patch("mindroom.bot.interactive.init_persistence"),
-        patch(
-            "mindroom.bot_room_lifecycle.get_joined_rooms",
-            AsyncMock(return_value=[room_id, trusted_room_id]),
-        ),
-    ):
-        await restarted_bot.start()
-
-    assert restarted_bot._room_lifecycle.decrypt_notice_is_fenced(room_id)
-    assert not restarted_bot._room_lifecycle.decrypt_notice_is_fenced(trusted_room_id)
-
-
-@pytest.mark.asyncio
-async def test_join_cancellation_after_server_side_effect_retains_decrypt_notice_fence(
-    tmp_path: Path,
-) -> None:
-    """An ambiguous cancelled join must remain fenced for later sync confirmation."""
-    room_id = "!room:localhost"
-    bot = _agent_bot(tmp_path)
-    bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
-
-    async def join_then_cancel(client: nio.AsyncClient, joining_room_id: str) -> bool:
-        client.rooms[joining_room_id] = nio.MatrixRoom(
-            room_id=joining_room_id,
-            own_user_id=bot.agent_user.user_id,
-        )
-        raise asyncio.CancelledError
-
-    with (
-        patch("mindroom.bot_room_lifecycle.get_joined_rooms", AsyncMock(return_value=[])),
-        patch("mindroom.bot_room_lifecycle.join_room", new=join_then_cancel),
-        pytest.raises(asyncio.CancelledError),
-    ):
-        await bot.join_configured_rooms()
-
-    assert room_id in bot.client.rooms
-    assert bot._room_lifecycle.decrypt_notice_is_fenced(room_id)
-
-
 def _text_event(event_id: str, body: str, origin_server_ts: int) -> nio.RoomMessageText:
     return nio.RoomMessageText.from_dict(
         {
@@ -509,6 +178,55 @@ def _text_event(event_id: str, body: str, origin_server_ts: int) -> nio.RoomMess
             "type": "m.room.message",
         },
     )
+
+
+def _timeline_response(
+    transport: str,
+    room_id: str,
+    event: nio.Event,
+) -> nio.SyncResponse | nio.SlidingSyncResponse:
+    if transport == "classic":
+        response = nio.SyncResponse.from_dict(
+            {
+                "next_batch": "s_after_failure",
+                "device_one_time_keys_count": {},
+                "device_lists": {"changed": [], "left": []},
+                "rooms": {
+                    "invite": {},
+                    "leave": {},
+                    "join": {
+                        room_id: {
+                            "timeline": {
+                                "events": [event.source],
+                                "limited": False,
+                                "prev_batch": "p0",
+                            },
+                            "state": {"events": []},
+                            "ephemeral": {"events": []},
+                            "account_data": {"events": []},
+                        },
+                    },
+                },
+                "to_device": {"events": []},
+                "presence": {"events": []},
+                "account_data": {"events": []},
+            },
+        )
+        assert isinstance(response, nio.SyncResponse)
+        return response
+    response = nio.SlidingSyncResponse.from_dict(
+        {
+            "pos": "s_after_failure",
+            "rooms": {
+                room_id: {
+                    "membership": "join",
+                    "timeline": [event.source],
+                },
+            },
+        },
+    )
+    assert isinstance(response, nio.SlidingSyncResponse)
+    return response
 
 
 def _room_member_event(event_id: str = "$member-join") -> nio.RoomMemberEvent:
@@ -622,102 +340,13 @@ async def test_bot_start_restores_saved_sync_token(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_bot_start_leaves_trusted_joined_room_unfenced_for_catch_up(
+@pytest.mark.parametrize("agent_name", [ROUTER_AGENT_NAME, "code"])
+async def test_orchestrated_entity_start_defers_turn_recovery_to_coordinator(
     tmp_path: Path,
+    agent_name: str,
 ) -> None:
-    """A joined room without unfinished join state may report real Megolm loss."""
-    room_id = "!room:localhost"
-    bot = _agent_bot(tmp_path)
-    save_sync_token(
-        tmp_path,
-        bot.agent_name,
-        "s_saved",
-        cache_generation=bot.event_cache.cache_generation,
-    )
-    client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
-    client.next_batch = None
-    get_joined_rooms = AsyncMock(return_value=[room_id])
-
-    with (
-        patch.object(bot, "ensure_user_account", AsyncMock()),
-        patch("mindroom.bot.login_agent_user", AsyncMock(return_value=client)),
-        patch.object(bot, "_set_avatar_if_available", AsyncMock()),
-        patch.object(bot, "_set_presence_with_model_info", AsyncMock()),
-        patch("mindroom.bot.interactive.init_persistence"),
-        patch("mindroom.bot_room_lifecycle.get_joined_rooms", get_joined_rooms),
-    ):
-        await bot.start()
-
-    get_joined_rooms.assert_not_awaited()
-    assert client.next_batch == "s_saved"
-    assert await bot._admit_dispatch_source(
-        room_id,
-        "$trusted-catch-up",
-        DispatchCallbackKind.DECRYPTION_FAILURE,
-    )
-
-
-@pytest.mark.asyncio
-async def test_bot_start_fails_when_joined_rooms_query_cannot_verify_fences(
-    tmp_path: Path,
-) -> None:
-    """Startup cannot silently unfence pending joins when membership is unknown."""
-    bot = _agent_bot(tmp_path)
-    bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
-    with (
-        patch("mindroom.bot_room_lifecycle.get_joined_rooms", AsyncMock(return_value=[])),
-        patch("mindroom.bot_room_lifecycle.join_room", AsyncMock(return_value=True)),
-    ):
-        await bot.join_configured_rooms()
-    assert bot._room_lifecycle.decrypt_notice_is_fenced("!room:localhost")
-
-    client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
-    get_joined_rooms = AsyncMock(return_value=None)
-
-    with (
-        patch.object(bot, "ensure_user_account", AsyncMock()),
-        patch("mindroom.bot.login_agent_user", AsyncMock(return_value=client)),
-        patch.object(bot, "_set_avatar_if_available", AsyncMock()),
-        patch.object(bot, "_set_presence_with_model_info", AsyncMock()),
-        patch("mindroom.bot.interactive.init_persistence"),
-        patch("mindroom.bot_room_lifecycle.get_joined_rooms", get_joined_rooms),
-        pytest.raises(RuntimeError, match="joined rooms"),
-    ):
-        await bot.start()
-
-    get_joined_rooms.assert_awaited_once_with(client)
-    client.close.assert_awaited_once_with()
-    assert bot.client is None
-    assert not bot.running
-
-
-@pytest.mark.asyncio
-async def test_bot_start_skips_joined_rooms_query_without_pending_join_fences(
-    tmp_path: Path,
-) -> None:
-    """No durable unfinished joins means no membership reconciliation is needed."""
-    bot = _agent_bot(tmp_path)
-    client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
-    get_joined_rooms = AsyncMock(side_effect=AssertionError("unexpected joined_rooms query"))
-
-    with (
-        patch.object(bot, "ensure_user_account", AsyncMock()),
-        patch("mindroom.bot.login_agent_user", AsyncMock(return_value=client)),
-        patch.object(bot, "_set_avatar_if_available", AsyncMock()),
-        patch.object(bot, "_set_presence_with_model_info", AsyncMock()),
-        patch("mindroom.bot.interactive.init_persistence"),
-        patch("mindroom.bot_room_lifecycle.get_joined_rooms", get_joined_rooms),
-    ):
-        await bot.start()
-
-    get_joined_rooms.assert_not_awaited()
-    assert bot.running
-
-
-@pytest.mark.asyncio
-async def test_orchestrated_router_start_defers_turn_recovery_to_coordinator(tmp_path: Path) -> None:
-    """Router startup must leave turn-backed replay to orchestrator readiness."""
-    bot = _agent_bot(tmp_path, agent_name=ROUTER_AGENT_NAME)
+    """Orchestrated entity startup must leave turn-backed replay to fleet readiness."""
+    bot = _agent_bot(tmp_path, agent_name=agent_name)
     bot.orchestrator = MagicMock()
     client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
     recover_pending = AsyncMock()
@@ -731,8 +360,44 @@ async def test_orchestrated_router_start_defers_turn_recovery_to_coordinator(tmp
         patch("mindroom.bot.interactive.init_persistence"),
     ):
         await bot.start()
+        await wait_for_background_tasks(timeout=1, owner=bot._runtime_view)
 
     recover_pending.assert_awaited_once_with(turn_backed=False)
+
+
+@pytest.mark.asyncio
+async def test_start_runs_pending_invite_recovery_after_callbacks_and_running(
+    tmp_path: Path,
+) -> None:
+    """A blocked invite retry must not block bot or fleet startup."""
+    bot = _agent_bot(tmp_path)
+    bot.orchestrator = MagicMock()
+    client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
+    recovery_started = asyncio.Event()
+    release_recovery = asyncio.Event()
+
+    async def recover_pending(*, turn_backed: bool | None = None) -> None:
+        assert turn_backed is False
+        recovery_started.set()
+        await release_recovery.wait()
+
+    bot._dispatch_obligation_runner.recover_pending = recover_pending
+
+    with (
+        patch.object(bot, "ensure_user_account", AsyncMock()),
+        patch("mindroom.bot.login_agent_user", AsyncMock(return_value=client)),
+        patch.object(bot, "_set_avatar_if_available", AsyncMock()),
+        patch.object(bot, "_set_presence_with_model_info", AsyncMock()),
+        patch("mindroom.bot.interactive.init_persistence"),
+    ):
+        start_task = asyncio.create_task(bot.start())
+        try:
+            await asyncio.wait_for(recovery_started.wait(), timeout=1)
+            assert bot.running
+            assert client.add_response_callback.call_count == 2
+        finally:
+            release_recovery.set()
+            await start_task
 
 
 @pytest.mark.asyncio
@@ -763,6 +428,7 @@ async def test_orchestrated_team_start_gates_turn_recovery_on_responder_fleet(
         patch("mindroom.bot.interactive.init_persistence"),
     ):
         await bot.start()
+        await wait_for_background_tasks(timeout=1, owner=bot._runtime_view)
 
     recover_pending.assert_awaited_once_with(turn_backed=False)
 
@@ -1500,20 +1166,89 @@ async def test_on_sync_response_persists_latest_sync_token(tmp_path: Path) -> No
     assert checkpoint.token == "s_latest"  # noqa: S105
 
 
+@pytest.mark.asyncio
+async def test_limited_cache_failure_keeps_live_cursor_and_last_checkpoint(tmp_path: Path) -> None:
+    """Limited status must preserve continuity even when cache persistence also fails."""
+    bot = _agent_bot(tmp_path)
+    bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
+    bot.client.next_batch = "s_partial"
+    bot._sync_cache_trust.state = SyncTrustState.PENDING
+    save_sync_token(
+        tmp_path,
+        bot.agent_name,
+        "s_before_gap",
+        cache_generation=_CACHE_GENERATION,
+    )
+    response = MagicMock(spec=nio.SyncResponse)
+    response.next_batch = "s_partial"
+    response.rooms = MagicMock(join={})
+    cache_result = SyncCacheWriteResult(
+        complete=False,
+        limited_room_ids=("!room:localhost",),
+        errors=(RuntimeError("cache failed"),),
+    )
+
+    with (
+        patch.object(
+            bot._conversation_cache,
+            "cache_sync_timeline_for_certification",
+            AsyncMock(return_value=cache_result),
+        ),
+        patch("mindroom.bot.mark_matrix_sync_success", return_value=datetime.now(UTC)),
+    ):
+        await bot._on_sync_response(response)
+
+    assert bot.client.next_batch == "s_partial"
+    assert bot._sync_cache_trust.state is SyncTrustState.UNCERTAIN
+    assert _load_sync_token_value(tmp_path, bot.agent_name) == "s_before_gap"
+
+
+@pytest.mark.asyncio
+async def test_unrecovered_gap_keeps_device_independent_checkpoint(tmp_path: Path) -> None:
+    """A fresh Matrix device must restart from before any store-local recovery gap."""
+    bot = _agent_bot(tmp_path)
+    bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
+    bot.client.next_batch = "s_after_gap"
+    bot._first_sync_done = True
+    bot._sync_cache_trust.state = SyncTrustState.CERTIFIED
+    save_sync_token(
+        tmp_path,
+        bot.agent_name,
+        "s_before_gap",
+        cache_generation=_CACHE_GENERATION,
+    )
+    response = MagicMock(spec=nio.SyncResponse)
+    response.next_batch = "s_after_gap"
+    response.unrecovered_room_ids = frozenset({"!room:localhost"})
+    response.rooms = MagicMock(join={})
+
+    with patch("mindroom.bot.mark_matrix_sync_success", return_value=datetime.now(UTC)):
+        await bot._on_sync_response(response)
+
+    restarted = _agent_bot(tmp_path)
+    assert bot.client.next_batch == "s_after_gap"
+    assert bot._sync_cache_trust.state is SyncTrustState.UNCERTAIN
+    assert await restarted._sync_cache_trust.prepare_startup() == "s_before_gap"
+
+
 def test_cache_scope_cleanup_between_plan_and_apply_forces_tokenless_recovery(tmp_path: Path) -> None:
     """Bot wiring must apply the invalidation epoch before advancing nio's cursor."""
     bot = _agent_bot(tmp_path)
     bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
     bot.client.next_batch = "s_stale_after_cleanup"
     cache_result = SyncCacheWriteResult(complete=True)
-    decision = bot._plan_sync_response(
+    decision = bot._sync_cache_trust.plan_response(
         next_batch="s_stale_after_cleanup",
         cache_result=cache_result,
         first_sync=False,
     )
 
     assert bot._sync_cache_trust.invalidate_for_cache_scope_cleanup()
-    bot._apply_sync_response_decision(decision, cache_result=cache_result)
+    bot._apply_sync_response_after_dispatch_acceptance(
+        decision,
+        cache_result=cache_result,
+        room_member_join_hook_plan=_RoomMemberJoinSyncHookPlan(),
+    )
 
     assert bot.client.next_batch is None
     assert bot._sync_cache_trust.state is SyncTrustState.UNCERTAIN
@@ -1541,6 +1276,70 @@ async def test_sync_response_side_effect_failure_preserves_raw_cache_checkpoint(
     assert bot._sync_cache_trust.state is SyncTrustState.CERTIFIED
     assert bot._sync_cache_trust.checkpoint == SyncCheckpoint("s_after_side_effect_failure")
     assert _load_sync_token_value(tmp_path, bot.agent_name) == "s_after_side_effect_failure"
+
+
+@pytest.mark.asyncio
+async def test_membership_cancellation_rewinds_uncertified_classic_cursor(tmp_path: Path) -> None:
+    """Cancellation before membership effects finish must replay the uncertified response."""
+    bot = _agent_bot(tmp_path)
+    bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
+    bot.client.next_batch = "s_after_membership"
+    bot._first_sync_done = True
+    bot._sync_cache_trust.state = SyncTrustState.CERTIFIED
+    bot._sync_cache_trust.checkpoint = SyncCheckpoint("s_before_membership")
+    response = MagicMock(spec=nio.SyncResponse)
+    response.next_batch = "s_after_membership"
+    response.rooms = MagicMock(join={})
+    bot._apply_own_room_membership_from_sync = AsyncMock(  # type: ignore[method-assign]
+        side_effect=asyncio.CancelledError("watchdog restart"),
+    )
+
+    with (
+        patch("mindroom.bot.mark_matrix_sync_success", return_value=datetime.now(UTC)),
+        pytest.raises(asyncio.CancelledError, match="watchdog restart"),
+    ):
+        await bot._on_sync_response(response)
+
+    assert bot.client.next_batch == "s_before_membership"
+
+
+@pytest.mark.asyncio
+async def test_limited_cache_cancellation_preserves_positioned_continuity(tmp_path: Path) -> None:
+    """Cancellation must retain limited status when certifying the interrupted cache write."""
+    bot = _agent_bot(tmp_path)
+    bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
+    bot.client.next_batch = "s_partial"
+    bot._sync_cache_trust.state = SyncTrustState.PENDING
+    save_sync_token(
+        tmp_path,
+        bot.agent_name,
+        "s_before_gap",
+        cache_generation=_CACHE_GENERATION,
+    )
+    response = MagicMock(spec=nio.SyncResponse)
+    response.next_batch = "s_partial"
+    response.rooms = MagicMock(
+        join={
+            "!room:localhost": MagicMock(
+                timeline=MagicMock(events=[], limited=True),
+            ),
+        },
+    )
+
+    with (
+        patch.object(
+            bot._conversation_cache,
+            "cache_sync_timeline_for_certification",
+            AsyncMock(side_effect=asyncio.CancelledError("watchdog restart")),
+        ),
+        patch("mindroom.bot.mark_matrix_sync_success", return_value=datetime.now(UTC)),
+        pytest.raises(asyncio.CancelledError, match="watchdog restart"),
+    ):
+        await bot._on_sync_response(response)
+
+    assert bot.client.next_batch == "s_partial"
+    assert bot._sync_cache_trust.state is SyncTrustState.UNCERTAIN
+    assert _load_sync_token_value(tmp_path, bot.agent_name) == "s_before_gap"
 
 
 @pytest.mark.asyncio
@@ -1639,6 +1438,15 @@ async def test_shutdown_recovery_warning_logs_exact_drain_predicates(
     assert warnings[0]["responses_drained"] is responses_drained
     assert warnings[0]["response_recovery_complete"] is response_recovery_complete
     assert not {"body", "content", "formatted_body", "message_content"} & warnings[0].keys()
+    response_warnings = [entry for entry in logs if entry["event"] == "matrix_agent_response_drain_incomplete"]
+    if responses_drained:
+        assert response_warnings == []
+    else:
+        assert len(response_warnings) == 1
+        assert response_warnings[0]["active_response_count"] == 0
+        assert response_warnings[0]["pending_response_count"] == 0
+        assert response_warnings[0]["response_recovery_complete"] is response_recovery_complete
+        assert response_warnings[0]["restart_reason_category"] == "agent_shutdown"
 
 
 @pytest.mark.asyncio
@@ -1754,14 +1562,16 @@ async def test_callback_failure_preserves_saved_checkpoint_immediately(tmp_path:
 
 
 @pytest.mark.asyncio
-async def test_invite_failure_rewinds_classic_cursor_before_response_certification(tmp_path: Path) -> None:
-    """An invite failure must leave exact durable work before replaying the sync."""
+async def test_durably_accepted_invite_failure_does_not_rewind_classic_cursor(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Accepted invite work must retry independently of raw sync continuity."""
     bot = _agent_bot(tmp_path)
     bot.client = make_matrix_client_mock(user_id=bot.matrix_id.full_id)
     bot.client.next_batch = "s_after_invite"
     bot._sync_cache_trust.state = SyncTrustState.CERTIFIED
     bot._sync_cache_trust.checkpoint = SyncCheckpoint("s_before_invite")
-    bot._cold_history_fence.start(trusted_continuation="s_before_invite")
     bot._room_lifecycle.on_invite = AsyncMock(side_effect=RuntimeError("join failed"))
     room = nio.MatrixRoom("!invited:localhost", bot.matrix_id.full_id)
     event = nio.InviteEvent.parse_event(
@@ -1773,11 +1583,13 @@ async def test_invite_failure_rewinds_classic_cursor_before_response_certificati
         },
     )
     assert isinstance(event, nio.InviteEvent)
+    schedule_retry = MagicMock()
+    monkeypatch.setattr(bot._dispatch_obligation_runner, "_schedule_retry", schedule_retry)
 
-    with pytest.raises(RuntimeError, match="join failed"):
-        await bot._on_invite_before_sync_certification(room, event)
+    await bot._on_invite_before_sync_certification(room, event)
+    assert await wait_for_background_tasks(timeout=1, owner=bot._runtime_view)
 
-    assert bot.client.next_batch == "s_before_invite"
+    assert bot.client.next_batch == "s_after_invite"
     pending = bot._dispatch_obligation_store.pending()
     assert len(pending) == 1
     assert pending[0].room_id == room.room_id
@@ -1785,6 +1597,7 @@ async def test_invite_failure_rewinds_classic_cursor_before_response_certificati
         **event.source,
         "content": event.content,
     }
+    schedule_retry.assert_called_once_with(pending[0].key)
 
     recovered_invite = AsyncMock()
     bot._room_lifecycle.on_invite = recovered_invite
@@ -1808,25 +1621,200 @@ async def test_dispatch_persistence_failure_rewinds_classic_cursor(
     bot.client.next_batch = "s_after_failure"
     bot._sync_cache_trust.state = SyncTrustState.CERTIFIED
     bot._sync_cache_trust.checkpoint = SyncCheckpoint("s_before_failure")
-    bot._cold_history_fence.start(trusted_continuation="s_before_failure")
 
     def fail_persist(*_args: object, **_kwargs: object) -> None:
         message = "dispatch database unavailable"
         raise OSError(message)
 
-    monkeypatch.setattr(bot._dispatch_obligation_store, "create_pending", fail_persist)
-    wrapper = bot._dispatch_obligation_runner.task_wrapper(
-        DispatchCallbackKind.MESSAGE,
-        owner=bot._runtime_view,
-    )
+    monkeypatch.setattr(bot._dispatch_obligation_store, "_create_pending", fail_persist)
+    admission = bot._dispatch_obligation_runner._admit_source_event
 
-    with pytest.raises(OSError, match="dispatch database unavailable"):
-        await wrapper(
+    with pytest.raises(
+        nio.CallbackNotAcceptedError,
+        match="dispatch database unavailable",
+    ) as exc_info:
+        await admission(
             nio.MatrixRoom("!room:localhost", bot.matrix_id.full_id),
             _text_event("$unpersisted", "hello", 1),
         )
 
+    assert isinstance(exc_info.value.__cause__, OSError)
     assert bot.client.next_batch == "s_before_failure"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("transport", ["classic", "sliding"])
+async def test_nio_replays_event_rejected_before_durable_dispatch_acceptance(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    transport: str,
+) -> None:
+    """Nio must not deduplicate an event whose durable admission failed."""
+    bot = _agent_bot(tmp_path)
+    client = nio.AsyncClient(
+        "https://example.org",
+        bot.matrix_id.full_id,
+        config=nio.AsyncClientConfig(
+            encryption_enabled=False,
+            backfill_limited_timelines=True,
+        ),
+    )
+    bot.client = client
+    room_id = "!room:localhost"
+    event = _text_event(f"$lost-{transport}", "hello", 1)
+    response = _timeline_response(transport, room_id, event)
+
+    create_attempts = 0
+    create_pending = bot._dispatch_obligation_store._create_pending
+
+    def fail_first_create(obligation: object) -> object:
+        nonlocal create_attempts
+        create_attempts += 1
+        if create_attempts == 1:
+            message = "dispatch database unavailable"
+            error_type = OSError if transport == "classic" else sqlite3.OperationalError
+            raise error_type(message)
+        return create_pending(cast("Any", obligation))
+
+    monkeypatch.setattr(bot._dispatch_obligation_store, "_create_pending", fail_first_create)
+    monkeypatch.setattr(bot._dispatch_obligation_runner, "_run_persisted", AsyncMock())
+    client.add_event_admission_callback(bot._dispatch_obligation_runner._admit_source_event, nio.RoomMessageText)
+    client.add_event_callback(
+        bot._dispatch_obligation_runner.task_wrapper(
+            DispatchCallbackKind.MESSAGE,
+            owner=bot._runtime_view,
+        ),
+        nio.RoomMessageText,
+    )
+
+    with pytest.raises(
+        nio.CallbackNotAcceptedError,
+        match="dispatch database unavailable",
+    ) as exc_info:
+        await client.receive_response(response)
+
+    expected_cause = OSError if transport == "classic" else sqlite3.OperationalError
+    assert isinstance(exc_info.value.__cause__, expected_cause)
+    recovery = cast("Any", client)._recovery
+    assert event.event_id not in recovery.completed.get(room_id, {})
+
+    await client.receive_response(response)
+    await wait_for_background_tasks(timeout=1, owner=bot._runtime_view)
+
+    assert create_attempts == 2
+    assert bot._dispatch_obligation_store._has_pending(
+        event.event_id,
+        DispatchCallbackKind.MESSAGE,
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("transport", ["classic", "sliding"])
+async def test_nio_rejects_event_when_existing_dispatch_payload_is_corrupt(
+    tmp_path: Path,
+    transport: str,
+) -> None:
+    """Corrupt pending work must remain visible to nio as rejected admission."""
+    bot = _agent_bot(tmp_path)
+    client = nio.AsyncClient(
+        "https://example.org",
+        bot.matrix_id.full_id,
+        config=nio.AsyncClientConfig(
+            encryption_enabled=False,
+            backfill_limited_timelines=True,
+        ),
+    )
+    room_id = "!room:localhost"
+    room = nio.MatrixRoom(room_id, bot.matrix_id.full_id)
+    event = _text_event(f"$corrupt-{transport}", "hello", 1)
+    response = _timeline_response(transport, room_id, event)
+    await bot._dispatch_obligation_runner.persist(
+        room,
+        event,
+        DispatchCallbackKind.MESSAGE,
+    )
+    with sqlite3.connect(bot._dispatch_obligation_store._database_path) as connection:
+        connection.execute(
+            "UPDATE dispatch_obligations SET event_source_json = ? WHERE source_event_id = ?",
+            ("{", event.event_id),
+        )
+    client.add_event_admission_callback(bot._dispatch_obligation_runner._admit_source_event, nio.RoomMessageText)
+
+    with pytest.raises(nio.CallbackNotAcceptedError) as exc_info:
+        await client.receive_response(response)
+
+    assert isinstance(exc_info.value.__cause__, _DispatchObligationCorruptionError)
+    recovery = cast("Any", client)._recovery
+    assert event.event_id not in recovery.completed.get(room_id, {})
+    assert bot._dispatch_obligation_store._has_pending(
+        event.event_id,
+        DispatchCallbackKind.MESSAGE,
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("transport", ["classic", "sliding"])
+async def test_nio_accepts_late_non_acceptance_without_live_replay(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    transport: str,
+) -> None:
+    """The rejection signal is too late once ordinary event fanout begins."""
+    bot = _agent_bot(tmp_path)
+    client = nio.AsyncClient(
+        "https://example.org",
+        bot.matrix_id.full_id,
+        config=nio.AsyncClientConfig(
+            encryption_enabled=False,
+            backfill_limited_timelines=True,
+        ),
+    )
+    bot.client = client
+    room_id = "!room:localhost"
+    event = _text_event(f"$late-{transport}", "hello", 1)
+    response = _timeline_response(transport, room_id, event)
+    callback_attempts = 0
+
+    async def reject_too_late(
+        _room: nio.MatrixRoom,
+        _event: nio.Event,
+    ) -> object:
+        nonlocal callback_attempts
+        callback_attempts += 1
+        message = "ordinary callback rejection"
+        raise nio.CallbackNotAcceptedError(message)
+
+    callbacks = cast("dict[DispatchCallbackKind, Any]", bot._dispatch_obligation_runner.callbacks)
+    callbacks[DispatchCallbackKind.MESSAGE] = reject_too_late
+    schedule_retry = MagicMock()
+    monkeypatch.setattr(bot._dispatch_obligation_runner, "_schedule_retry", schedule_retry)
+    client.add_event_admission_callback(bot._dispatch_obligation_runner._admit_source_event, nio.RoomMessageText)
+
+    async def run_admitted(
+        room: nio.MatrixRoom,
+        callback_event: nio.Event,
+    ) -> None:
+        await bot._dispatch_obligation_runner._run_admitted(
+            room,
+            callback_event,
+            DispatchCallbackKind.MESSAGE,
+        )
+
+    client.add_event_callback(run_admitted, nio.RoomMessageText)
+
+    with pytest.raises(
+        nio.CallbackNotAcceptedError,
+        match="ordinary callback rejection",
+    ):
+        await client.receive_response(response)
+    await client.receive_response(response)
+
+    assert callback_attempts == 1
+    assert bot._dispatch_obligation_store._has_pending(
+        event.event_id,
+        DispatchCallbackKind.MESSAGE,
+    )
+    schedule_retry.assert_called_once()
 
 
 @pytest.mark.asyncio
@@ -1834,16 +1822,13 @@ async def test_swallowed_dispatch_persistence_failure_cannot_certify_response(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A rejected response cannot certify its token or clear its joined-room fence."""
+    """A response callback must reject the token whose source callback failed acceptance."""
     bot = _agent_bot(tmp_path)
     bot.client = make_matrix_client_mock(user_id=bot.matrix_id.full_id)
     bot.client.next_batch = "s_after_failure"
     bot._first_sync_done = True
     bot._sync_cache_trust.state = SyncTrustState.CERTIFIED
     bot._sync_cache_trust.checkpoint = SyncCheckpoint("s_before_failure")
-    bot._cold_history_fence.start(trusted_continuation="s_before_failure")
-    room_id = "!room:localhost"
-    bot._room_lifecycle._replace_decrypt_notice_fences({room_id})
     cache_generation = bot.event_cache.cache_generation
     assert cache_generation is not None
     save_sync_token(
@@ -1857,25 +1842,25 @@ async def test_swallowed_dispatch_persistence_failure_cannot_certify_response(
         message = "dispatch database unavailable"
         raise OSError(message)
 
-    monkeypatch.setattr(bot._dispatch_obligation_store, "create_pending", fail_persist)
-    wrapper = bot._dispatch_obligation_runner.task_wrapper(
-        DispatchCallbackKind.MESSAGE,
-        owner=bot._runtime_view,
-    )
-    with pytest.raises(OSError, match="dispatch database unavailable"):
-        await wrapper(
+    monkeypatch.setattr(bot._dispatch_obligation_store, "_create_pending", fail_persist)
+    admission = bot._dispatch_obligation_runner._admit_source_event
+    with pytest.raises(
+        nio.CallbackNotAcceptedError,
+        match="dispatch database unavailable",
+    ) as exc_info:
+        await admission(
             nio.MatrixRoom("!room:localhost", bot.matrix_id.full_id),
             _text_event("$unpersisted-response", "hello", 1),
         )
+    assert isinstance(exc_info.value.__cause__, OSError)
     assert bot.client.next_batch == "s_before_failure"
 
     response = MagicMock(spec=nio.SyncResponse)
     response.next_batch = "s_after_failure"
-    response.rooms = MagicMock(join={room_id: MagicMock()})
+    response.rooms = MagicMock(join={})
     with patch("mindroom.bot.mark_matrix_sync_success", return_value=datetime.now(UTC)):
         await bot._on_sync_response(response)
 
-    assert bot._room_lifecycle.decrypt_notice_is_fenced(room_id)
     checkpoint = load_sync_checkpoint(tmp_path, bot.agent_name)
     assert checkpoint is not None
     assert checkpoint.token == "s_before_failure"  # noqa: S105
@@ -1895,26 +1880,22 @@ async def test_dispatch_creation_drains_repeated_cancellation_before_rewind(
     bot.client.next_batch = "s_after_cancel"
     bot._sync_cache_trust.state = SyncTrustState.CERTIFIED
     bot._sync_cache_trust.checkpoint = SyncCheckpoint("s_before_cancel")
-    bot._cold_history_fence.start(trusted_continuation="s_before_cancel")
     create_started = threading.Event()
     release_create = threading.Event()
-    original_create = bot._dispatch_obligation_store.create_pending
+    original_create = bot._dispatch_obligation_store._create_pending
 
     def blocking_create(obligation: object) -> object:
         create_started.set()
         assert release_create.wait(timeout=2)
         return original_create(obligation)  # type: ignore[arg-type]
 
-    monkeypatch.setattr(bot._dispatch_obligation_store, "create_pending", blocking_create)
+    monkeypatch.setattr(bot._dispatch_obligation_store, "_create_pending", blocking_create)
     run_persisted = AsyncMock()
-    monkeypatch.setattr(bot._dispatch_obligation_runner, "run_persisted", run_persisted)
-    wrapper = bot._dispatch_obligation_runner.task_wrapper(
-        DispatchCallbackKind.MESSAGE,
-        owner=bot._runtime_view,
-    )
+    monkeypatch.setattr(bot._dispatch_obligation_runner, "_run_persisted", run_persisted)
+    admission = bot._dispatch_obligation_runner._admit_source_event
     event = _text_event("$cancelled-create", "hello", 1)
     task = asyncio.create_task(
-        wrapper(nio.MatrixRoom("!room:localhost", bot.matrix_id.full_id), event),
+        admission(nio.MatrixRoom("!room:localhost", bot.matrix_id.full_id), event),
     )
 
     assert await asyncio.to_thread(create_started.wait, 2)
@@ -1929,7 +1910,7 @@ async def test_dispatch_creation_drains_repeated_cancellation_before_rewind(
         await task
 
     assert not escaped_before_worker
-    assert bot._dispatch_obligation_store.has_pending(event.event_id, DispatchCallbackKind.MESSAGE)
+    assert bot._dispatch_obligation_store._has_pending(event.event_id, DispatchCallbackKind.MESSAGE)
     assert bot.client.next_batch == "s_before_cancel"
     run_persisted.assert_not_awaited()
 
@@ -1940,7 +1921,6 @@ async def test_dispatch_obligation_waits_for_terminal_turn_durability(tmp_path: 
     bot = _agent_bot(tmp_path)
     room = nio.MatrixRoom("!room:localhost", bot.matrix_id.full_id)
     event = _text_event("$write-behind", "hello", 1)
-    bot._cold_history_fence.start(trusted_continuation="s_live")
     obligation = await bot._dispatch_obligation_runner.persist(
         room,
         event,
@@ -1961,7 +1941,7 @@ async def test_dispatch_obligation_waits_for_terminal_turn_durability(tmp_path: 
         bot._turn_store.record_turn(TurnRecord.create([event.event_id], response_event_id="$response"))
         assert await asyncio.to_thread(persist_started.wait, 2)
         run_task = asyncio.create_task(
-            bot._dispatch_obligation_runner.run_persisted(
+            bot._dispatch_obligation_runner._run_persisted(
                 obligation,
                 room=room,
                 event=event,
@@ -1969,7 +1949,7 @@ async def test_dispatch_obligation_waits_for_terminal_turn_durability(tmp_path: 
         )
         try:
             await asyncio.sleep(0.05)
-            pending_before_durable_turn = bot._dispatch_obligation_store.has_pending(
+            pending_before_durable_turn = bot._dispatch_obligation_store._has_pending(
                 event.event_id,
                 DispatchCallbackKind.MESSAGE,
             )
@@ -1980,11 +1960,11 @@ async def test_dispatch_obligation_waits_for_terminal_turn_durability(tmp_path: 
 
     assert pending_before_durable_turn
     assert not task_done_before_durable_turn
-    assert not bot._dispatch_obligation_store.has_pending(
+    assert not bot._dispatch_obligation_store._has_pending(
         event.event_id,
         DispatchCallbackKind.MESSAGE,
     )
-    with sqlite3.connect(tmp_path / "tracking" / "dispatch_obligations.sqlite3") as connection:
+    with sqlite3.connect(bot._dispatch_obligation_store._database_path) as connection:
         terminal_kinds = connection.execute(
             """
             SELECT callback_kind
@@ -2039,6 +2019,149 @@ async def test_prepare_for_sync_shutdown_skips_precallback_uncertified_token(tmp
     await bot.prepare_for_sync_shutdown()
 
     assert _load_sync_token_value(tmp_path, bot.agent_name) == "s_before_precallback"
+
+
+@pytest.mark.asyncio
+async def test_failed_coalesced_dispatch_returns_exact_source_to_durable_retry(tmp_path: Path) -> None:
+    """Gate failure must retry its durable source without restart or another ready signal."""
+    bot = _agent_bot(tmp_path)
+    room = nio.MatrixRoom("!room:localhost", bot.agent_user.user_id)
+    event = _text_event("$deferred-retry", "retry me", 1_000)
+    retried = asyncio.Event()
+
+    async def recovered_callback(_room: nio.MatrixRoom, recovered_event: nio.Event) -> _DispatchCallbackResult:
+        assert recovered_event.event_id == event.event_id
+        retried.set()
+        return _DispatchCallbackResult.SUCCEEDED
+
+    async def failing_dispatch(_batch: CoalescedBatch) -> None:
+        msg = "coalesced dispatch failed"
+        raise RuntimeError(msg)
+
+    bot._dispatch_obligation_runner.callbacks = {DispatchCallbackKind.MESSAGE: recovered_callback}
+    bot._dispatch_obligation_runner.room_for_id = lambda _room_id: room
+    bot._dispatch_obligation_runner._retry_initial_delay_seconds = 0
+    bot._dispatch_obligation_runner._retry_max_delay_seconds = 0
+    bot._coalescing_gate._dispatch_batch = failing_dispatch
+    await bot._dispatch_obligation_runner.persist(room, event, DispatchCallbackKind.MESSAGE)
+
+    await bot._coalescing_gate.admit(
+        CoalescingKey(room.room_id, None, event.sender),
+        ready_result=ReadyPendingEvent(
+            pending_event=PendingEvent(event=event, room=room, source_kind="message"),
+        ),
+        source_event_id=event.event_id,
+        source_kind="message",
+    )
+    await asyncio.wait_for(retried.wait(), timeout=1)
+    await wait_for_background_tasks(timeout=1, owner=bot._runtime_view)
+
+    assert not bot._dispatch_obligation_store._has_pending(event.event_id, DispatchCallbackKind.MESSAGE)
+
+
+@pytest.mark.parametrize(
+    ("source_kind", "callback_kind"),
+    [
+        ("message", DispatchCallbackKind.MESSAGE),
+        (IMAGE_SOURCE_KIND, DispatchCallbackKind.MEDIA),
+        (MEDIA_SOURCE_KIND, DispatchCallbackKind.MEDIA),
+        (VOICE_SOURCE_KIND, DispatchCallbackKind.MEDIA),
+    ],
+)
+def test_failed_coalesced_dispatch_retries_exact_source_kind(
+    tmp_path: Path,
+    source_kind: str,
+    callback_kind: DispatchCallbackKind,
+) -> None:
+    """Gate failure must return each source to its actual durable callback key."""
+    bot = _agent_bot(tmp_path)
+    event = _text_event("$retry-kind", "retry me", 1_000)
+    bot._dispatch_obligation_runner.retry_pending_turn_source = MagicMock()
+
+    bot._retry_failed_coalesced_dispatch(
+        (
+            PendingEvent(
+                event=event,
+                room=nio.MatrixRoom("!room:localhost", bot.agent_user.user_id),
+                source_kind=source_kind,
+            ),
+        ),
+    )
+
+    bot._dispatch_obligation_runner.retry_pending_turn_source.assert_called_once_with(
+        event.event_id,
+        callback_kind,
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "failure_mode",
+    ["readiness_exception", "readiness_self_cancel", "readiness_none", "lane_delivery_failure"],
+)
+async def test_lane_terminal_drop_returns_deferred_source_to_retry_owner(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure_mode: str,
+) -> None:
+    """A lane must either retry failed readiness or settle a successful empty result."""
+    bot = _agent_bot(tmp_path)
+    room = nio.MatrixRoom("!room:localhost", bot.agent_user.user_id)
+    event = _text_event("$lane-retry", "retry me", 1_000)
+    runner = bot._dispatch_obligation_runner
+    runner._retry_initial_delay_seconds = 60
+    runner._retry_max_delay_seconds = 60
+    await runner.persist(room, event, DispatchCallbackKind.MESSAGE)
+
+    async def resolve_readiness() -> ReadyPendingEvent | None:
+        if failure_mode == "readiness_exception":
+            msg = "readiness failed"
+            raise RuntimeError(msg)
+        if failure_mode == "readiness_self_cancel":
+            current_task = asyncio.current_task()
+            assert current_task is not None
+            current_task.cancel()
+            await asyncio.sleep(0)
+        if failure_mode == "readiness_none":
+            return None
+        return ReadyPendingEvent(
+            pending_event=PendingEvent(event=event, room=room, source_kind="message"),
+        )
+
+    if failure_mode == "lane_delivery_failure":
+        monkeypatch.setattr(
+            bot._coalescing_gate,
+            "admit",
+            AsyncMock(side_effect=RuntimeError("lane delivery failed")),
+        )
+
+    slot = bot._coalescing_gate.enter_lane(room_id=room.room_id, sender_id=event.sender)
+    bot._coalescing_gate.submit_lane_slot(
+        slot,
+        key=CoalescingKey(room.room_id, None, event.sender),
+        source_event_id=event.event_id,
+        source_kind="message",
+        ready_task=asyncio.create_task(resolve_readiness()),
+    )
+    await asyncio.wait_for(slot.settled.wait(), timeout=1)
+
+    if failure_mode == "readiness_none":
+        assert not runner.store._has_pending(event.event_id, DispatchCallbackKind.MESSAGE)
+        assert not bot._coalescing_gate.has_pending_source_event(event.event_id)
+        assert not runner._retry_keys
+        assert runner._retry_task is None
+        return
+
+    assert runner.store._has_pending(event.event_id, DispatchCallbackKind.MESSAGE)
+    assert not bot._coalescing_gate.has_pending_source_event(event.event_id)
+    assert len(runner._retry_keys) == 1
+    retry_key = next(iter(runner._retry_keys))
+    assert retry_key.source_event_id == event.event_id
+    assert retry_key.callback_kind is DispatchCallbackKind.MESSAGE
+    assert runner._retry_task is not None
+
+    runner._retry_task.cancel()
+    await asyncio.gather(runner._retry_task, return_exceptions=True)
 
 
 @pytest.mark.asyncio

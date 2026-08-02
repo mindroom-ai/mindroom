@@ -775,9 +775,7 @@ async def test_router_ignores_audio_events_from_internal_agents(tmp_path) -> Non
     mock_voice.assert_not_called()
     mock_download_audio.assert_not_called()
     send_response.assert_not_called()
-    turn_store.record_turn.assert_called_once_with(
-        TurnRecord.create(["$agent_audio_event"]),
-    )
+    turn_store.record_turn.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -1663,6 +1661,11 @@ async def test_router_visible_voice_echo_is_not_duplicated_when_handoff_retries(
         patch("mindroom.voice_handler._handle_voice_message", new_callable=AsyncMock) as mock_voice,
         patch("mindroom.ingress_validation.is_authorized_sender", return_value=True),
         patch("mindroom.turn_controller.suggest_responder_for_message", new_callable=AsyncMock, return_value="home"),
+        patch(
+            "mindroom.turn_controller.find_response_event_ids_via_room_messages",
+            new_callable=AsyncMock,
+            return_value=frozenset(),
+        ),
     ):
         mock_download_audio.return_value = Audio(content=b"voice-bytes", mime_type="audio/ogg")
         mock_voice.return_value = f"{VOICE_PREFIX}summarize this audio"
@@ -1726,6 +1729,11 @@ async def test_router_visible_voice_echo_is_not_duplicated_when_handoff_retries_
         patch("mindroom.voice_handler._handle_voice_message", new_callable=AsyncMock) as mock_voice,
         patch("mindroom.ingress_validation.is_authorized_sender", return_value=True),
         patch("mindroom.turn_controller.suggest_responder_for_message", new_callable=AsyncMock, return_value="home"),
+        patch(
+            "mindroom.turn_controller.find_response_event_ids_via_room_messages",
+            new_callable=AsyncMock,
+            return_value=frozenset(),
+        ),
     ):
         mock_download_audio.return_value = Audio(content=b"voice-bytes", mime_type="audio/ogg")
         mock_voice.return_value = f"{VOICE_PREFIX}summarize this audio"
@@ -1805,22 +1813,19 @@ async def test_router_routes_transcribed_audio_when_multiple_agents_are_present(
         ATTACHMENT_IDS_KEY: [_attachment_id_for_event("$voice_event")],
         VOICE_TRANSCRIPT_KEY: True,
     }
-    turn_store.record_turn.assert_called_once_with(
-        replace(
-            TurnRecord.create(
-                ["$voice_event"],
-                response_event_id="$response",
-            ),
-            response_owner=ROUTER_AGENT_NAME,
-            requester_id="@alice:example.com",
-            correlation_id="$voice_event",
-            history_scope=None,
-            conversation_target=MessageTarget.resolve(
-                room_id=room.room_id,
-                thread_id="$voice_event",
-                reply_to_event_id="$voice_event",
-            ),
-        ),
+    turn_store.record_turn.assert_called_once()
+    record = turn_store.get_turn_record("$voice_event")
+    assert record is not None
+    assert record.completed is True
+    assert record.response_event_id == "$response"
+    assert record.response_owner == ROUTER_AGENT_NAME
+    assert record.requester_id == "@alice:example.com"
+    assert record.correlation_id == "$voice_event"
+    assert record.history_scope is None
+    assert record.conversation_target == MessageTarget.resolve(
+        room_id=room.room_id,
+        thread_id="$voice_event",
+        reply_to_event_id="$voice_event",
     )
 
 

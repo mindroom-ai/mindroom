@@ -231,6 +231,8 @@ If you are testing unreleased code from a source checkout, start MindRoom from t
 Use `uv run mindroom run` from the repo root, or `uvx --from /path/to/mindroom mindroom run`.
 Use plain `uvx mindroom run` only after the version you want is published on PyPI.
 When you test unreleased code, build a worker image from the same checkout so the primary runtime and worker containers run the same revision.
+MindRoom checks the worker protocol exposed by `/healthz` and rejects stale or otherwise incompatible images before routing tools to them.
+If the compatibility check fails, rebuild the worker image from the active MindRoom checkout or select the matching published image tag.
 
 ```bash
 docker build -t mindroom:dev -f local/instances/deploy/Dockerfile.mindroom .

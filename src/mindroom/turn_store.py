@@ -15,12 +15,19 @@ from agno.run.team import TeamRunOutput
 
 from mindroom.agent_storage import get_agent_session, get_team_session
 from mindroom.agents import remove_run_by_event_id
-from mindroom.handled_turns import HandledTurnLedger, TurnRecord, TurnRecordCodec, merge_edit_facts, same_turn_identity
+from mindroom.handled_turns import (
+    HandledTurnLedger,
+    TurnRecord,
+    TurnRecordCodec,
+    merge_edit_facts,
+    same_turn_identity,
+    with_user_stop,
+)
 from mindroom.history.storage import invalidate_compacted_replay, read_scope_seen_event_ids
 from mindroom.session_ids import create_session_id
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping
+    from collections.abc import Callable, Collection, Mapping
 
     import nio
 
@@ -88,11 +95,23 @@ class TurnStore:
         )
 
     def warm(self) -> None:
-        """Load the ledger before asynchronous startup recovery begins."""
-        self._ledger.warm()
+        """Load the ledger without pruning truth needed by startup recovery."""
+        self._ledger.load()
+
+    def cleanup(self, *, unsettled_source_event_ids: Collection[str] = ()) -> None:
+        """Compact terminal history after startup recovery identifies live sources."""
+        self._ledger.cleanup(unsettled_source_event_ids=unsettled_source_event_ids)
 
     def record_turn(self, turn_record: TurnRecord) -> None:
         """Persist one terminal turn, preserving any previously recorded optional facts."""
+        self._record_terminal_turn(turn_record, wait_for_persist=False)
+
+    def record_turn_durably(self, turn_record: TurnRecord) -> None:
+        """Persist one terminal turn and wait until its exact ledger write lands."""
+        self._record_terminal_turn(turn_record, wait_for_persist=True)
+
+    def _record_terminal_turn(self, turn_record: TurnRecord, *, wait_for_persist: bool) -> None:
+        """Apply the canonical terminal merge with optional exact durability."""
         if not turn_record.source_event_ids:
             return
 
@@ -133,9 +152,8 @@ class TurnStore:
         self._ledger.update_handled_turn(
             turn_record.indexed_event_ids,
             terminal_record,
-            on_persisted=(
-                self._notify_terminal_turn_persisted if self.deps.on_terminal_turn_persisted is not None else None
-            ),
+            wait_for_persist=wait_for_persist,
+            on_persisted=self._notify_terminal_turn_persisted,
         )
 
     def is_handled(self, event_id: str) -> bool:
@@ -211,6 +229,79 @@ class TurnStore:
     def get_turn_record(self, source_event_id: str) -> TurnRecord | None:
         """Return the ledger-backed canonical record for one source event."""
         return self._ledger.get_turn_record(source_event_id)
+
+    def turn_record_for_response_event_id(self, response_event_id: str) -> TurnRecord | None:
+        """Return the durable turn that owns one visible response event."""
+        return self._ledger.turn_record_for_response_event_id(response_event_id)
+
+    def _update_response_turn(
+        self,
+        response_event_id: str,
+        update: Callable[[TurnRecord], TurnRecord],
+        *,
+        notify_terminal: bool = False,
+    ) -> TurnRecord | None:
+        """Durably update the sole turn that owns one visible response."""
+        turn_record = self.turn_record_for_response_event_id(response_event_id)
+        if turn_record is None:
+            return None
+
+        def updated_record(existing_records: Mapping[str, TurnRecord]) -> TurnRecord:
+            matching_records = {
+                record.indexed_event_ids: record
+                for record in existing_records.values()
+                if response_event_id in {record.response_event_id, record.visible_echo_event_id}
+            }
+            if len(matching_records) != 1:
+                msg = f"Response {response_event_id!r} lost its sole turn owner"
+                raise RuntimeError(msg)
+            return update(next(iter(matching_records.values())))
+
+        return self._ledger.update_handled_turn(
+            turn_record.indexed_event_ids,
+            updated_record,
+            wait_for_persist=True,
+            on_persisted=self._notify_terminal_turn_persisted if notify_terminal else None,
+        )
+
+    def record_user_stopped_response(
+        self,
+        response_event_id: str,
+        stop_receipt_order: int,
+        *,
+        delivery_settled: bool = False,
+    ) -> TurnRecord | None:
+        """Durably terminate the turn that owns a user-stopped response."""
+        if isinstance(stop_receipt_order, bool) or stop_receipt_order <= 0:
+            msg = "User-stop receipt order must be positive"
+            raise ValueError(msg)
+        turn_record = self.turn_record_for_response_event_id(response_event_id)
+        if turn_record is None:
+            return turn_record
+
+        def stopped_record(current: TurnRecord) -> TurnRecord:
+            return with_user_stop(
+                current,
+                response_event_id,
+                stop_receipt_order,
+                delivery_settled=delivery_settled,
+            )
+
+        return self._update_response_turn(
+            response_event_id,
+            stopped_record,
+            notify_terminal=not turn_record.completed,
+        )
+
+    def has_pending_response_intent(self, source_event_ids: tuple[str, ...]) -> bool:
+        """Return whether these sources already own an incomplete response attempt."""
+        return any(
+            (record := self.get_turn_record(source_event_id)) is not None
+            and not record.completed
+            and record.response_owner is not None
+            and record.conversation_target is not None
+            for source_event_id in source_event_ids
+        )
 
     def record_pending_turn(self, turn_record: TurnRecord) -> TurnRecord | None:
         """Persist exact response context before generation reaches session storage."""
@@ -327,7 +418,7 @@ class TurnStore:
             wait_for_persist=True,
         )
 
-    def any_source_redacted(self, source_event_ids: tuple[str, ...]) -> bool:
+    def _any_source_redacted(self, source_event_ids: tuple[str, ...]) -> bool:
         """Return whether durable state tombstones any source in one pending response."""
         return any(
             (record := self._ledger.get_turn_record(source_event_id)) is not None
@@ -338,7 +429,7 @@ class TurnStore:
             for source_event_id in source_event_ids
         )
 
-    def prepare_response_for_redactions(
+    def _prepare_response_for_redactions(
         self,
         *,
         target: MessageTarget,
@@ -364,7 +455,60 @@ class TurnStore:
                 redacted_event_id=redacted_event_id,
             )
             self._clear_pending_redaction_cleanup(redacted_event_id)
-        return self.any_source_redacted(source_event_ids)
+        return self._any_source_redacted(source_event_ids)
+
+    def prepare_pending_response_source(
+        self,
+        *,
+        target: MessageTarget,
+        source_event_ids: tuple[str, ...],
+        terminal_source_event_ids: tuple[str, ...],
+    ) -> bool:
+        """Finish cleanup, then suppress a pending response whose source became terminal."""
+        return self._prepare_response_for_redactions(
+            target=target,
+            source_event_ids=source_event_ids,
+        ) or any(self.is_handled(source_event_id) for source_event_id in terminal_source_event_ids)
+
+    def prepare_edit_response_source(
+        self,
+        *,
+        target: MessageTarget,
+        source_event_ids: tuple[str, ...],
+        response_event_id: str | None,
+        edit_receipt_order: int,
+    ) -> bool:
+        """Suppress pre-STOP edits or durably open later edits for visible delivery."""
+        if isinstance(edit_receipt_order, bool) or edit_receipt_order <= 0:
+            msg = "Edit receipt order must be positive"
+            raise ValueError(msg)
+        if self._prepare_response_for_redactions(target=target, source_event_ids=source_event_ids):
+            return True
+        if response_event_id is None:
+            return False
+
+        def prepared_record(current: TurnRecord) -> TurnRecord:
+            cutoff = current.user_stop_receipt_order
+            if cutoff is not None and edit_receipt_order <= cutoff:
+                return current
+            return replace(
+                current,
+                latest_edit_receipt_order=max(
+                    current.latest_edit_receipt_order or 0,
+                    edit_receipt_order,
+                ),
+                user_stop_settled_receipt_order=max(
+                    current.user_stop_settled_receipt_order or 0,
+                    cutoff or 0,
+                )
+                or None,
+                timestamp=0.0,
+            )
+
+        prepared = self._update_response_turn(response_event_id, prepared_record)
+        return prepared is None or (
+            prepared.user_stop_receipt_order is not None and edit_receipt_order <= prepared.user_stop_receipt_order
+        )
 
     def response_history_scope(
         self,
@@ -768,6 +912,9 @@ def _backfill_missing_turn_facts(authority: TurnRecord, recovery: TurnRecord) ->
             else recovery.source_event_prompts
         ),
         source_event_revisions=authority.source_event_revisions or recovery.source_event_revisions,
+        latest_edit_receipt_order=_latest_edit_receipt_order(authority, recovery),
+        user_stop_receipt_order=_latest_user_stop_receipt_order(authority, recovery),
+        user_stop_settled_receipt_order=_latest_user_stop_settled_receipt_order(authority, recovery),
         source_event_metadata=(
             authority.source_event_metadata
             if authority.source_event_metadata is not None
@@ -776,6 +923,8 @@ def _backfill_missing_turn_facts(authority: TurnRecord, recovery: TurnRecord) ->
         response_owner=authority.response_owner or recovery.response_owner,
         requester_id=authority.requester_id or recovery.requester_id,
         correlation_id=authority.correlation_id or recovery.correlation_id,
+        command_execution_started=authority.command_execution_started or recovery.command_execution_started,
+        command_result_text=authority.command_result_text or recovery.command_result_text,
         history_scope=authority.history_scope or recovery.history_scope,
         conversation_target=authority.conversation_target or recovery.conversation_target,
     )
@@ -816,6 +965,12 @@ def _reconcile_ledger_and_recovery(
         completed=recovery_record.completed,
         source_event_prompts=source_event_prompts,
         source_event_revisions=source_event_revisions,
+        latest_edit_receipt_order=_latest_edit_receipt_order(ledger_record, recovery_record),
+        user_stop_receipt_order=_latest_user_stop_receipt_order(ledger_record, recovery_record),
+        user_stop_settled_receipt_order=_latest_user_stop_settled_receipt_order(
+            ledger_record,
+            recovery_record,
+        ),
         source_event_metadata=(
             recovery_record.source_event_metadata
             if recovery_record.source_event_metadata is not None
@@ -834,4 +989,32 @@ def _reconcile_ledger_and_recovery(
         )
         if recovered_record != ledger_record
         else ledger_record
+    )
+
+
+def _latest_user_stop_receipt_order(*records: TurnRecord) -> int | None:
+    """Return the latest durable STOP receipt order on these same-turn records."""
+    return max(
+        (record.user_stop_receipt_order for record in records if record.user_stop_receipt_order is not None),
+        default=None,
+    )
+
+
+def _latest_edit_receipt_order(*records: TurnRecord) -> int | None:
+    """Return the latest edit admitted for these same-turn records."""
+    return max(
+        (record.latest_edit_receipt_order for record in records if record.latest_edit_receipt_order is not None),
+        default=None,
+    )
+
+
+def _latest_user_stop_settled_receipt_order(*records: TurnRecord) -> int | None:
+    """Return the latest STOP whose visible obligation is delivered or superseded."""
+    return max(
+        (
+            record.user_stop_settled_receipt_order
+            for record in records
+            if record.user_stop_settled_receipt_order is not None
+        ),
+        default=None,
     )

@@ -152,7 +152,7 @@ class CallSession:
         )
 
     @property
-    def local_identity(self) -> str:
+    def _local_identity(self) -> str:
         """Our LiveKit participant identity (``user_id:device_id``)."""
         client = self.deps.client
         return f"{client.user_id}:{required_device_id(client)}"
@@ -189,7 +189,7 @@ class CallSession:
         except BaseException:
             await self.stop()
             raise
-        logger.info("call_joined", room_id=self.room_id, identity=self.local_identity)
+        logger.info("call_joined", room_id=self.room_id, identity=self._local_identity)
 
     async def on_members_changed(self, members: list[CallMember]) -> None:
         """React to remote membership changes (key rotation/sharing)."""
@@ -293,7 +293,7 @@ class CallSession:
             finally:
                 if self.deps.on_stopped is not None:
                     await self.deps.on_stopped()
-        logger.info("call_left", room_id=self.room_id, identity=self.local_identity)
+        logger.info("call_left", room_id=self.room_id, identity=self._local_identity)
 
     async def _distribute_keys(self) -> None:
         async with self._key_distribution_lock:
@@ -400,7 +400,7 @@ class CallSession:
         self._spawn(self.deps.on_failure(message))
 
     def _apply_own_key(self, key: bytes, key_index: int) -> None:
-        self.deps.bridge.set_frame_key(self.local_identity, key, key_index)
+        self.deps.bridge.set_frame_key(self._local_identity, key, key_index)
 
     def _sync_bridge_participants(self) -> None:
         """Apply the authoritative Matrix call roster to the SFU bridge."""

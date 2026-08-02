@@ -42,7 +42,7 @@ from tests.identity_helpers import persist_entity_accounts
 
 
 def _trusted_entity_sender_ids(config: Config, runtime_paths: RuntimePaths) -> frozenset[str]:
-    return entity_identity_registry(config, runtime_paths).internal_sender_ids
+    return entity_identity_registry(config, runtime_paths)._internal_sender_ids
 
 
 def _make_message_event(

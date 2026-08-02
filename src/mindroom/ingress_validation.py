@@ -98,7 +98,7 @@ class IngressValidator:
                     self.deps.runtime_paths,
                 ),
                 source_kind=source_kind,
-                sender_trusts_original_sender=self.should_trust_original_sender_metadata(
+                sender_trusts_original_sender=self._should_trust_original_sender_metadata(
                     sender=sender,
                     source_kind=source_kind,
                 ),
@@ -122,7 +122,7 @@ class IngressValidator:
         registry = entity_identity_registry(self.deps.runtime.config, self.deps.runtime_paths)
         return registry.current_entity_name_for_user_id(sender_id, include_router=include_router)
 
-    def should_trust_original_sender_metadata(
+    def _should_trust_original_sender_metadata(
         self,
         *,
         sender: str,
@@ -151,13 +151,13 @@ class IngressValidator:
         if not isinstance(content, dict):
             return None
         source_kind = self.event_source_kind(event, content)
-        return self.trusted_human_original_sender(
+        return self._trusted_human_original_sender(
             sender=event.sender,
             content=content,
             source_kind=source_kind,
         )
 
-    def trusted_human_original_sender(
+    def _trusted_human_original_sender(
         self,
         *,
         sender: str,
@@ -174,7 +174,7 @@ class IngressValidator:
             self.deps.runtime_paths,
         ):
             return None
-        if not self.should_trust_original_sender_metadata(
+        if not self._should_trust_original_sender_metadata(
             sender=sender,
             source_kind=source_kind,
         ):
@@ -196,7 +196,7 @@ class IngressValidator:
             return False
         return self.trusted_human_original_sender_for_event(event) is not None
 
-    def is_trusted_router_relay_event(self, event: DispatchEvent) -> bool:
+    def _is_trusted_router_relay_event(self, event: DispatchEvent) -> bool:
         """Return whether one trusted internal relay originated from the router."""
         if not self.is_trusted_internal_relay_event(event):
             return False
@@ -205,7 +205,7 @@ class IngressValidator:
 
     def router_relay_original_event_id(self, event: DispatchEvent) -> str | None:
         """Return the routed human event one trusted router relay explicitly replies to."""
-        if not self.is_trusted_router_relay_event(event):
+        if not self._is_trusted_router_relay_event(event):
             return None
         content = event.source.get("content") if isinstance(event.source, dict) else None
         if not isinstance(content, dict):
@@ -225,7 +225,7 @@ class IngressValidator:
             return False
         content_dict = cast("dict[str, Any]", content)
         return (
-            self.trusted_human_original_sender(
+            self._trusted_human_original_sender(
                 sender=sender,
                 content=content_dict,
                 source_kind=source_kind_from_content(content_dict),
@@ -236,7 +236,7 @@ class IngressValidator:
     def is_display_only_router_voice_echo(self, event: DispatchEvent) -> bool:
         """Return whether one ingress event is the router's display-only voice transcript echo."""
         content = event.source.get("content") if isinstance(event.source, dict) else None
-        return is_visible_router_voice_echo_content(content) and self.is_trusted_router_relay_event(event)
+        return is_visible_router_voice_echo_content(content) and self._is_trusted_router_relay_event(event)
 
     def should_use_trusted_router_relay_context(
         self,
@@ -247,7 +247,7 @@ class IngressValidator:
     ) -> bool:
         """Return whether dispatch context should use trusted router relay semantics."""
         if ingress_metadata is None:
-            return self.is_trusted_router_relay_event(event)
+            return self._is_trusted_router_relay_event(event)
         if ingress_metadata.source_kind != TRUSTED_INTERNAL_RELAY_SOURCE_KIND:
             return False
         sender_agent_name = self.managed_entity_name_for_sender(event.sender)

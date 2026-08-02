@@ -32,15 +32,16 @@ class SyncCacheWriteResult:
 
     complete: bool
     limited_room_ids: tuple[str, ...] = ()
+    unrecovered_room_ids: tuple[str, ...] = ()
     errors: tuple[BaseException, ...] = ()
     runtime_available: bool | None = None
     task_count: int | None = None
     runtime_diagnostics: dict[str, object] | None = None
 
     @property
-    def certified(self) -> bool:
+    def _certified(self) -> bool:
         """Return whether this result proves the sync delta reached durable cache."""
-        return self.complete and not self.limited_room_ids and not self.errors
+        return self.complete and not self.limited_room_ids and not self.unrecovered_room_ids and not self.errors
 
 
 @dataclass(frozen=True)
@@ -58,12 +59,13 @@ class SyncCertificationDecision:
 def _uncertain_decision(
     *,
     reason: str,
+    clear_saved_token: bool = True,
     reset_client_token: bool = False,
 ) -> SyncCertificationDecision:
     """Return a fail-closed uncertainty decision."""
     return SyncCertificationDecision(
         state=SyncTrustState.UNCERTAIN,
-        clear_saved_token=True,
+        clear_saved_token=clear_saved_token,
         reset_client_token=reset_client_token,
         reason=reason,
     )
@@ -77,6 +79,8 @@ def _uncertain_reason(cache_result: SyncCacheWriteResult, *, next_batch: str | N
         return "cache_write_failed"
     if cache_result.limited_room_ids:
         return "limited_sync_timeline"
+    if cache_result.unrecovered_room_ids:
+        return "unrecovered_sync_timeline"
     if not cache_result.complete:
         return "cache_write_incomplete"
     return None
@@ -92,9 +96,11 @@ def certify_sync_response(
     """Return the certifier decision for one sync response."""
     reason = _uncertain_reason(cache_result, next_batch=next_batch)
     if reason is not None:
+        timeline_gap = bool(cache_result.limited_room_ids or cache_result.unrecovered_room_ids)
         return _uncertain_decision(
             reason=reason,
-            reset_client_token=state is SyncTrustState.PENDING and first_sync,
+            clear_saved_token=not timeline_gap,
+            reset_client_token=not timeline_gap and state is SyncTrustState.PENDING and first_sync,
         )
 
     token = normalize_sync_token(next_batch)
@@ -120,8 +126,9 @@ def sync_cache_write_diagnostics(cache_result: SyncCacheWriteResult) -> dict[str
     """Return structured log fields explaining one sync cache-write result."""
     diagnostics: dict[str, Any] = {
         "cache_write_complete": cache_result.complete,
-        "cache_write_certified": cache_result.certified,
+        "cache_write_certified": cache_result._certified,
         "cache_limited_room_count": len(cache_result.limited_room_ids),
+        "cache_unrecovered_room_count": len(cache_result.unrecovered_room_ids),
         "cache_error_count": len(cache_result.errors),
     }
     if cache_result.runtime_available is not None:
@@ -132,6 +139,8 @@ def sync_cache_write_diagnostics(cache_result: SyncCacheWriteResult) -> dict[str
         diagnostics.update(cache_result.runtime_diagnostics)
     if cache_result.limited_room_ids:
         diagnostics["cache_limited_room_ids"] = cache_result.limited_room_ids[:5]
+    if cache_result.unrecovered_room_ids:
+        diagnostics["cache_unrecovered_room_ids"] = cache_result.unrecovered_room_ids[:5]
     if cache_result.errors:
         diagnostics["cache_error_types"] = tuple(type(error).__name__ for error in cache_result.errors[:5])
         diagnostics["cache_error_messages"] = tuple(str(error)[:200] for error in cache_result.errors[:5])

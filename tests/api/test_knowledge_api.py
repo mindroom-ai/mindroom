@@ -313,8 +313,7 @@ def test_status_reports_persisted_count_without_loading_collection(tmp_path: Pat
     # construction to mindroom.knowledge.collections.
     with (
         patch("mindroom.knowledge.collections.ChromaDb", _BrokenVectorDb),
-        patch("mindroom.knowledge.registry.ChromaDb", _BrokenVectorDb),
-        patch("mindroom.knowledge.indexing_config.ChromaDb", _BrokenVectorDb),
+        patch("agno.vectordb.chroma.ChromaDb", _BrokenVectorDb),
         patch(
             "mindroom.knowledge.manager.create_configured_embedder",
             side_effect=AssertionError("embedder should not load"),

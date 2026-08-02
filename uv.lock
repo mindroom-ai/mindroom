@@ -4511,11 +4511,11 @@ requires-dist = [
     { name = "lxml-html-clean", marker = "extra == 'newspaper'" },
     { name = "markdown-it-py", specifier = ">=4" },
     { name = "matplotlib", marker = "extra == 'visualization'" },
-    { name = "mcp", extras = ["cli"], specifier = ">=1.12.4" },
+    { name = "mcp", extras = ["cli"], specifier = ">=1.12.4,<2" },
     { name = "mdit-py-plugins", specifier = ">=0.5" },
     { name = "mem0ai", specifier = ">=0.1.115" },
     { name = "mem0ai", marker = "extra == 'mem0'", specifier = ">=0.1.115" },
-    { name = "mindroom-nio", extras = ["e2e"], specifier = "==0.31" },
+    { name = "mindroom-nio", extras = ["e2e"], specifier = "==0.33.0" },
     { name = "moviepy", marker = "extra == 'moviepy-video-tools'" },
     { name = "neo4j", marker = "extra == 'neo4j'" },
     { name = "newspaper4k", marker = "extra == 'newspaper'" },
@@ -4608,7 +4608,7 @@ dev = [
     { name = "markdown-gfm-admonition" },
     { name = "pre-commit", specifier = ">=4.2" },
     { name = "pre-commit-uv", specifier = ">=4.1.4" },
-    { name = "privata", specifier = ">=0.2.1" },
+    { name = "privata", specifier = ">=0.8.0" },
     { name = "pytest", specifier = ">=8.4.1" },
     { name = "pytest-asyncio", specifier = ">=1.1" },
     { name = "pytest-cov", specifier = ">=6.2.1" },
@@ -4625,7 +4625,7 @@ dev = [
 
 [[package]]
 name = "mindroom-nio"
-version = "0.31.0"
+version = "0.33.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "aiofiles" },
@@ -4637,9 +4637,9 @@ dependencies = [
     { name = "pycryptodome" },
     { name = "unpaddedbase64" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/f0/88/ff684847de83744240387dd2fa345feabc103cbde140c81ef770b6040fd7/mindroom_nio-0.31.0.tar.gz", hash = "sha256:972f43a6e3b6390ba7123f250162898ad8c35f525efb970e5f1d10c6bc18095c", size = 185977, upload-time = "2026-07-25T18:38:23.624Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/9f/36/90c59e8db1ec3bff7da979687f62bd985f1ec8c7870d27424e1004bac441/mindroom_nio-0.33.0.tar.gz", hash = "sha256:f3abb390d47f5ea81ae7d90eef45c6e639d889f3ad9f60a77213e1344ed89f90", size = 201528, upload-time = "2026-07-31T15:51:37.414Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/83/66/c62a1cb25f217f118e67f5437420bdd3005964a21e3a5182b5ee4d51943f/mindroom_nio-0.31.0-py3-none-any.whl", hash = "sha256:9f7a160db13dc4f90f37e0c0cf88d3c008ac47ac2e61b88672e1cf7130fed939", size = 214365, upload-time = "2026-07-25T18:38:22.069Z" },
+    { url = "https://files.pythonhosted.org/packages/fa/95/e33eecec18c04983567ef253227d341e8e2566d9cfafabd0fbddc379f81f/mindroom_nio-0.33.0-py3-none-any.whl", hash = "sha256:36bd49c98f358fcbbc75af74e00cf98d7b91d634225482119f8c579a6df4b355", size = 230642, upload-time = "2026-07-31T15:51:36.095Z" },
 ]
 
 [package.optional-dependencies]
@@ -6446,11 +6446,11 @@ wheels = [
 
 [[package]]
 name = "privata"
-version = "0.2.1"
+version = "0.8.0"
 source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/96/0f/4b51384e1f52f28d12717e7c883f6e27e8efaaaaf51dad1c1f9b5404be44/privata-0.2.1.tar.gz", hash = "sha256:9ed2a3e22a5ef13e90913927294368557727500d86cdec9db1a0742ea02f1e4c", size = 64697, upload-time = "2026-05-06T15:05:09.91Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/66/3b/f6e6a5309f448548f215f0c3000ffd1113eb0c2c4c72292d47940b77e202/privata-0.8.0.tar.gz", hash = "sha256:55b4736441757c2c7ead185782265e47b17b0ccafeec4b3f96bf66599d260081", size = 100790, upload-time = "2026-07-25T20:49:04.873Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/10/e3/05980e34d742f93c34b5b0a1cf425c25325c90354c2bb79dbc58059758cb/privata-0.2.1-py3-none-any.whl", hash = "sha256:57b94a6aec887a45b707dbf14a24d5743c08ba67cbac5c34a3f2e5c34afa2f38", size = 16327, upload-time = "2026-05-06T15:05:08.789Z" },
+    { url = "https://files.pythonhosted.org/packages/73/17/3f45184d52f4e52d5e17d323b93a2a044ef4b8b4fd8eedd844a49ad9201e/privata-0.8.0-py3-none-any.whl", hash = "sha256:b1a488bcd066c80967ea2ca0947e854a1639a0c3aae1319499e52e242b722825", size = 30058, upload-time = "2026-07-25T20:49:03.442Z" },
 ]
 
 [[package]]

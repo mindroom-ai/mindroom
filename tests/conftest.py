@@ -675,7 +675,7 @@ def _outcome(
         suppressed=resolved_suppressed,
         tool_trace=tool_trace,
         extra_content=dict(extra_content or {}),
-        interactive_metadata=InteractiveMetadata.from_parts(option_map, options_list),
+        interactive_metadata=InteractiveMetadata._from_parts(option_map, options_list),
     )
 
 
@@ -725,7 +725,6 @@ def make_matrix_client_mock(*, user_id: str = "@mindroom_test:example.com") -> A
     client.room_get_event = AsyncMock(side_effect=lambda _room_id, event_id: _make_room_get_event_response(event_id))
     client.room_get_event_relations = MagicMock(return_value=_empty_async_iterator())
     client.room_messages = AsyncMock(return_value=room_messages_response)
-    client.joined_rooms = AsyncMock(return_value=nio.JoinedRoomsResponse(rooms=[]))
     return client
 
 
@@ -1319,6 +1318,13 @@ def replace_edit_regenerator_deps(bot: RuntimeBot, **changes: object) -> EditReg
     if "logger" in rebuilt_changes:
         logger = rebuilt_changes.pop("logger")
         rebuilt_changes["get_logger"] = lambda logger=logger: logger
+    if "receipt_order" not in rebuilt_changes:
+        receipt_orders = count(1)
+
+        async def next_receipt_order() -> int:
+            return next(receipt_orders)
+
+        rebuilt_changes["receipt_order"] = next_receipt_order
     store_field_names = set(unwrap_extracted_collaborator(bot._turn_store).deps.__dataclass_fields__)
     store_changes = {name: value for name, value in changes.items() if name in store_field_names}
     if store_changes:

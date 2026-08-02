@@ -11,19 +11,17 @@ import secrets
 import stat
 import time
 from pathlib import Path  # noqa: TC003
-from typing import cast
+from typing import TYPE_CHECKING, cast
 from urllib.parse import urlsplit, urlunsplit
 
-import httpx
 import typer
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
-from cryptography.hazmat.primitives.serialization import Encoding, NoEncryption, PrivateFormat, PublicFormat
-from rich.markup import escape
 
 from mindroom.cli.config import console
 from mindroom.constants import DEFAULT_MINDROOM_URL
-from mindroom.external_triggers.auth import sign_trigger_request
-from mindroom.external_triggers.store import public_key_fingerprint
+
+if TYPE_CHECKING:
+    import httpx
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 _DEFAULT_KEY_ID = "default"
 _DEFAULT_TIMEOUT = 10.0
@@ -46,6 +44,16 @@ def keygen(
     ),
 ) -> None:
     """Generate an Ed25519 trigger signing key."""
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey  # noqa: PLC0415
+    from cryptography.hazmat.primitives.serialization import (  # noqa: PLC0415
+        Encoding,
+        NoEncryption,
+        PrivateFormat,
+        PublicFormat,
+    )
+
+    from mindroom.external_triggers.store import public_key_fingerprint  # noqa: PLC0415
+
     private_key = Ed25519PrivateKey.generate()
     private_key_bytes = private_key.private_bytes(Encoding.Raw, PrivateFormat.Raw, NoEncryption())
     public_key_bytes = private_key.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
@@ -109,6 +117,11 @@ def send(
     key_id: str = typer.Option(_DEFAULT_KEY_ID, "--key-id", help="Trigger signing key id."),
 ) -> None:
     """Send a signed external trigger request."""
+    import httpx  # noqa: PLC0415
+    from rich.markup import escape  # noqa: PLC0415
+
+    from mindroom.external_triggers.auth import sign_trigger_request  # noqa: PLC0415
+
     request_url, path = _trigger_request_url_and_path(url, trigger_id)
     body = _trigger_body_bytes(
         kind=kind,
@@ -209,6 +222,8 @@ def _decode_data_json(data_json: str | None) -> dict[str, object]:
 
 
 def _load_private_key(key_file: Path) -> Ed25519PrivateKey:
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey  # noqa: PLC0415
+
     try:
         key_bytes = base64.b64decode(key_file.read_text(encoding="utf-8").strip(), validate=True)
     except (binascii.Error, ValueError) as exc:

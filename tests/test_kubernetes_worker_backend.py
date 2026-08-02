@@ -16,6 +16,8 @@ from unittest.mock import patch
 
 import pytest
 
+from mindroom.config.main import load_config
+from mindroom.config.yaml_includes import load_yaml_config_source
 from mindroom.constants import (
     DEFAULT_WORKER_GRANTABLE_CREDENTIALS,
     deserialize_runtime_paths,
@@ -51,7 +53,11 @@ from mindroom.workers.backends.kubernetes_resources import (
     worker_auth_token,
 )
 from mindroom.workers.models import WorkerReadyProgress, WorkerSpec
-from mindroom.workers.runtime import primary_worker_backend_available, primary_worker_backend_name
+from mindroom.workers.runtime import (
+    primary_worker_backend_available,
+    primary_worker_backend_name,
+    serialized_kubernetes_worker_config_snapshot,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -471,6 +477,7 @@ def _backend(
     auth_secret_name: str | None = None,
     reconcile_pod_templates: bool = True,
     agent_vault: KubernetesAgentVaultConfig | None = None,
+    config_snapshot: dict[str, object] | None = None,
 ) -> tuple[KubernetesWorkerBackend, _FakeAppsApi, _FakeCoreApi]:
     config = KubernetesWorkerBackendConfig(
         namespace="chat",
@@ -504,12 +511,19 @@ def _backend(
         config_path=Path("config.yaml"),
         storage_path=Path("mindroom-test-storage").resolve(),
     )
+    if config_snapshot is None:
+        try:
+            loaded_config_snapshot, _source_files = load_yaml_config_source(resolved_runtime_paths.config_path)
+        except OSError:
+            loaded_config_snapshot = {}
+        config_snapshot = loaded_config_snapshot if isinstance(loaded_config_snapshot, dict) else {}
     backend = KubernetesWorkerBackend(
         runtime_paths=resolved_runtime_paths,
         config=config,
         auth_token=_TEST_AUTH_TOKEN,
         storage_root=resolved_runtime_paths.storage_root,
         tool_validation_snapshot=tool_validation_snapshot or deepcopy(_TEST_TOOL_VALIDATION_SNAPSHOT),
+        config_snapshot=config_snapshot,
         worker_grantable_credentials=worker_grantable_credentials,
     )
     apps_api = _FakeAppsApi()
@@ -1728,6 +1742,496 @@ def test_kubernetes_backend_mounts_only_scoped_agent_root_for_shared_workers() -
     env_values = {env["name"]: env.get("value") for env in container["env"]}
     assert env_values["MINDROOM_STORAGE_PATH"] == expected_worker_root
     assert env_values["MINDROOM_SHARED_CREDENTIALS_PATH"] == f"{expected_worker_root}/.shared_credentials"
+
+
+def test_kubernetes_backend_mounts_assigned_knowledge_outside_shared_agent_root_read_only(tmp_path: Path) -> None:
+    """Assigned knowledge under shared storage should be visible without widening agent storage."""
+    storage_root = tmp_path / "storage"
+    knowledge_root = storage_root / "knowledge" / "shared-docs"
+    knowledge_root.mkdir(parents=True)
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        """
+agents:
+  code:
+    display_name: Code
+    role: Code test
+    model: default
+    worker_scope: shared
+    knowledge_bases: [shared_docs]
+knowledge_bases:
+  shared_docs:
+    path: ./storage/knowledge/shared-docs
+    include_patterns: [docs/**/*.md]
+models:
+  default:
+    provider: openai
+    id: gpt-5.6
+router:
+  model: default
+""".lstrip(),
+        encoding="utf-8",
+    )
+    runtime_paths = resolve_primary_runtime_paths(config_path=config_path, storage_path=storage_root)
+    backend, apps_api, _core_api = _backend(runtime_paths=runtime_paths)
+
+    backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=10.0)
+
+    deployment = apps_api.created_bodies[0]
+    volume_mounts = deployment["spec"]["template"]["spec"]["containers"][0]["volumeMounts"]
+    knowledge_mount = next(
+        mount for mount in volume_mounts if mount["mountPath"] == "/app/worker/knowledge/shared-docs"
+    )
+    assert knowledge_mount == {
+        "name": "worker-storage",
+        "mountPath": "/app/worker/knowledge/shared-docs",
+        "subPath": "knowledge/shared-docs",
+        "readOnly": True,
+    }
+
+
+def test_kubernetes_backend_matches_normalized_agent_name_for_knowledge_mount(tmp_path: Path) -> None:
+    """Knowledge selection should match the normalized agent name encoded in a worker key."""
+    storage_root = tmp_path / "storage"
+    knowledge_root = storage_root / "knowledge" / "shared-docs"
+    knowledge_root.mkdir(parents=True)
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        f"""
+agents:
+  My Agent:
+    display_name: Code
+    role: Code test
+    model: default
+    worker_scope: shared
+    knowledge_bases: [shared_docs]
+knowledge_bases:
+  shared_docs:
+    path: {knowledge_root}
+models:
+  default:
+    provider: openai
+    id: gpt-5.6
+router:
+  model: default
+""".lstrip(),
+        encoding="utf-8",
+    )
+    runtime_paths = resolve_primary_runtime_paths(config_path=config_path, storage_path=storage_root)
+    backend, apps_api, _core_api = _backend(runtime_paths=runtime_paths)
+    worker_key = "v1:tenant-123:shared:My_Agent"
+
+    backend.ensure_worker(WorkerSpec(worker_key), now=10.0)
+
+    deployment = apps_api.created_bodies[0]
+    volume_mounts = deployment["spec"]["template"]["spec"]["containers"][0]["volumeMounts"]
+    assert any(mount.get("subPath") == "knowledge/shared-docs" for mount in volume_mounts)
+
+
+def test_kubernetes_backend_does_not_duplicate_knowledge_already_visible_in_agent_root(tmp_path: Path) -> None:
+    """Knowledge below an existing scoped mount should use that mount without a nested duplicate."""
+    storage_root = tmp_path / "storage"
+    knowledge_root = storage_root / "agents" / "code" / "workspace" / "knowledge"
+    knowledge_root.mkdir(parents=True)
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        f"""
+agents:
+  code:
+    display_name: Code
+    role: Code test
+    model: default
+    worker_scope: shared
+    knowledge_bases: [workspace_docs, workspace_docs_child]
+knowledge_bases:
+  workspace_docs:
+    path: {knowledge_root}
+  workspace_docs_child:
+    path: {knowledge_root / "docs"}
+models:
+  default:
+    provider: openai
+    id: gpt-5.6
+router:
+  model: default
+""".lstrip(),
+        encoding="utf-8",
+    )
+    runtime_paths = resolve_primary_runtime_paths(config_path=config_path, storage_path=storage_root)
+    backend, apps_api, _core_api = _backend(runtime_paths=runtime_paths)
+
+    backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=10.0)
+
+    deployment = apps_api.created_bodies[0]
+    volume_mounts = deployment["spec"]["template"]["spec"]["containers"][0]["volumeMounts"]
+    mount_paths = [mount["mountPath"] for mount in volume_mounts]
+    assert "/app/worker/agents/code" in mount_paths
+    assert "/app/worker/agents/code/workspace/knowledge" not in mount_paths
+    assert "/app/worker/agents/code/workspace/knowledge/docs" not in mount_paths
+
+
+def test_kubernetes_backend_rejects_knowledge_mount_containing_scoped_storage(tmp_path: Path) -> None:
+    """A broad knowledge mount must not shadow scoped mounts or expose sibling storage."""
+    storage_root = tmp_path / "storage"
+    storage_root.mkdir()
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        f"""
+agents:
+  code:
+    display_name: Code
+    role: Code test
+    model: default
+    worker_scope: shared
+    knowledge_bases: [unsafe_root]
+knowledge_bases:
+  unsafe_root:
+    path: {storage_root}
+models:
+  default:
+    provider: openai
+    id: gpt-5.6
+router:
+  model: default
+""".lstrip(),
+        encoding="utf-8",
+    )
+    runtime_paths = resolve_primary_runtime_paths(config_path=config_path, storage_path=storage_root)
+    backend, apps_api, _core_api = _backend(runtime_paths=runtime_paths)
+
+    with pytest.raises(WorkerBackendError, match="knowledge mount overlaps existing mountPath"):
+        backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=10.0)
+
+    assert apps_api.created_bodies == []
+
+
+def test_kubernetes_backend_rejects_overlapping_assigned_knowledge_mounts(tmp_path: Path) -> None:
+    """Nested assigned sources should fail closed even if raw config bypassed typed validation."""
+    storage_root = tmp_path / "storage"
+    parent_root = storage_root / "knowledge" / "project"
+    child_root = parent_root / "docs"
+    child_root.mkdir(parents=True)
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        f"""
+agents:
+  code:
+    display_name: Code
+    role: Code test
+    model: default
+    worker_scope: shared
+    knowledge_bases: [project, project_docs]
+knowledge_bases:
+  project:
+    path: {parent_root}
+  project_docs:
+    path: {child_root}
+models:
+  default:
+    provider: openai
+    id: gpt-5.6
+router:
+  model: default
+""".lstrip(),
+        encoding="utf-8",
+    )
+    runtime_paths = resolve_primary_runtime_paths(config_path=config_path, storage_path=storage_root)
+    backend, apps_api, _core_api = _backend(runtime_paths=runtime_paths)
+
+    with pytest.raises(WorkerBackendError, match="knowledge mount paths overlap") as exc_info:
+        backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=10.0)
+
+    assert "/app/worker/knowledge/project" in str(exc_info.value)
+    assert "/app/worker/knowledge/project/docs" in str(exc_info.value)
+    assert apps_api.created_bodies == []
+
+
+def test_kubernetes_backend_rejects_knowledge_mount_containing_agent_vault_mount(tmp_path: Path) -> None:
+    """Knowledge mounts must not contain fixed runner mounts added later in the plan."""
+    storage_root = tmp_path / "storage"
+    knowledge_root = storage_root / "etc"
+    knowledge_root.mkdir(parents=True)
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        f"""
+agents:
+  code:
+    display_name: Code
+    role: Code test
+    model: default
+    worker_scope: shared
+    knowledge_bases: [unsafe_docs]
+knowledge_bases:
+  unsafe_docs:
+    path: {knowledge_root}
+models:
+  default:
+    provider: openai
+    id: gpt-5.6
+router:
+  model: default
+""".lstrip(),
+        encoding="utf-8",
+    )
+    runtime_paths = resolve_primary_runtime_paths(config_path=config_path, storage_path=storage_root)
+    backend, apps_api, _core_api = _backend(
+        runtime_paths=runtime_paths,
+        storage_mount_path="/",
+        agent_vault=_test_agent_vault_config(worker_ca_configmap_name="agent-vault-ca"),
+    )
+
+    with pytest.raises(WorkerBackendError, match="knowledge mount overlaps existing mountPath"):
+        backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=10.0)
+
+    assert apps_api.created_bodies == []
+
+
+def test_kubernetes_backend_rejects_knowledge_mount_inside_agent_vault_mount(tmp_path: Path) -> None:
+    """Only same-PVC storage ancestors may suppress a redundant knowledge mount."""
+    storage_root = tmp_path / "storage"
+    knowledge_root = storage_root / "agent-vault" / "docs"
+    knowledge_root.mkdir(parents=True)
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        f"""
+agents:
+  code:
+    display_name: Code
+    role: Code test
+    model: default
+    worker_scope: shared
+    knowledge_bases: [unsafe_docs]
+knowledge_bases:
+  unsafe_docs:
+    path: {knowledge_root}
+models:
+  default:
+    provider: openai
+    id: gpt-5.6
+router:
+  model: default
+""".lstrip(),
+        encoding="utf-8",
+    )
+    runtime_paths = resolve_primary_runtime_paths(config_path=config_path, storage_path=storage_root)
+    backend, apps_api, _core_api = _backend(
+        runtime_paths=runtime_paths,
+        storage_mount_path="/",
+        agent_vault=_test_agent_vault_config(),
+    )
+
+    with pytest.raises(WorkerBackendError, match="knowledge mount overlaps existing mountPath"):
+        backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=10.0)
+
+    assert apps_api.created_bodies == []
+
+
+def test_kubernetes_backend_does_not_mount_unassigned_knowledge(tmp_path: Path) -> None:
+    """Configured knowledge must stay hidden unless assigned to an agent addressed by the worker."""
+    storage_root = tmp_path / "storage"
+    assigned_root = storage_root / "knowledge" / "assigned"
+    unassigned_root = storage_root / "knowledge" / "unassigned"
+    assigned_root.mkdir(parents=True)
+    unassigned_root.mkdir(parents=True)
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        f"""
+agents:
+  code:
+    display_name: Code
+    role: Code test
+    model: default
+    worker_scope: shared
+    knowledge_bases: [assigned_docs]
+knowledge_bases:
+  assigned_docs:
+    path: {assigned_root}
+  unassigned_docs:
+    path: {unassigned_root}
+models:
+  default:
+    provider: openai
+    id: gpt-5.6
+router:
+  model: default
+""".lstrip(),
+        encoding="utf-8",
+    )
+    runtime_paths = resolve_primary_runtime_paths(config_path=config_path, storage_path=storage_root)
+    backend, apps_api, _core_api = _backend(runtime_paths=runtime_paths)
+
+    backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=10.0)
+
+    deployment = apps_api.created_bodies[0]
+    mount_paths = {
+        mount["mountPath"] for mount in deployment["spec"]["template"]["spec"]["containers"][0]["volumeMounts"]
+    }
+    assert "/app/worker/knowledge/assigned" in mount_paths
+    assert "/app/worker/knowledge/unassigned" not in mount_paths
+
+
+def test_kubernetes_backend_ignores_assigned_knowledge_outside_worker_storage(tmp_path: Path) -> None:
+    """Unsupported sources outside the shared PVC should not change existing scoped mounts."""
+    storage_root = tmp_path / "storage"
+    external_root = tmp_path / "external-docs"
+    external_root.mkdir()
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        f"""
+agents:
+  code:
+    display_name: Code
+    role: Code test
+    model: default
+    worker_scope: shared
+    knowledge_bases: [external_docs]
+knowledge_bases:
+  external_docs:
+    path: {external_root}
+models:
+  default:
+    provider: openai
+    id: gpt-5.6
+router:
+  model: default
+""".lstrip(),
+        encoding="utf-8",
+    )
+    runtime_paths = resolve_primary_runtime_paths(config_path=config_path, storage_path=storage_root)
+    backend, apps_api, _core_api = _backend(runtime_paths=runtime_paths)
+
+    backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=10.0)
+
+    deployment = apps_api.created_bodies[0]
+    volume_mounts = deployment["spec"]["template"]["spec"]["containers"][0]["volumeMounts"]
+    mount_paths = {mount["mountPath"] for mount in volume_mounts}
+    expected_worker_root = f"/app/worker/workers/{worker_dir_name(_TEST_SCOPED_WORKER_KEY_A)}"
+    assert mount_paths == {"/app/worker/agents/code", expected_worker_root, "/app/config.yaml"}
+
+
+def test_kubernetes_backend_user_worker_mounts_knowledge_for_all_addressed_agents(tmp_path: Path) -> None:
+    """One user-scoped worker should see assignments from user-scoped agents, not other scopes."""
+    storage_root = tmp_path / "storage"
+    for dirname in ("alpha", "beta", "gamma"):
+        (storage_root / "knowledge" / dirname).mkdir(parents=True)
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        f"""
+agents:
+  alpha:
+    display_name: Alpha
+    role: Alpha test
+    model: default
+    worker_scope: user
+    knowledge_bases: [alpha_docs]
+  beta:
+    display_name: Beta
+    role: Beta test
+    model: default
+    worker_scope: user
+    knowledge_bases: [beta_docs]
+  gamma:
+    display_name: Gamma
+    role: Gamma test
+    model: default
+    worker_scope: shared
+    knowledge_bases: [gamma_docs]
+knowledge_bases:
+  alpha_docs:
+    path: {storage_root / "knowledge" / "alpha"}
+  beta_docs:
+    path: {storage_root / "knowledge" / "beta"}
+  gamma_docs:
+    path: {storage_root / "knowledge" / "gamma"}
+models:
+  default:
+    provider: openai
+    id: gpt-5.6
+router:
+  model: default
+""".lstrip(),
+        encoding="utf-8",
+    )
+    runtime_paths = resolve_primary_runtime_paths(config_path=config_path, storage_path=storage_root)
+    backend, apps_api, _core_api = _backend(runtime_paths=runtime_paths)
+    worker_key = "v1:tenant-123:user:@alice:example.org"
+
+    backend.ensure_worker(WorkerSpec(worker_key), now=10.0)
+
+    deployment = apps_api.created_bodies[0]
+    mount_paths = {
+        mount["mountPath"] for mount in deployment["spec"]["template"]["spec"]["containers"][0]["volumeMounts"]
+    }
+    assert "/app/worker/knowledge/alpha" in mount_paths
+    assert "/app/worker/knowledge/beta" in mount_paths
+    assert "/app/worker/knowledge/gamma" not in mount_paths
+
+
+def test_kubernetes_backend_recreates_worker_when_knowledge_mounts_change(tmp_path: Path) -> None:
+    """Knowledge mount changes must alter the pod-template hash and recreate a stale Deployment."""
+    storage_root = tmp_path / "storage"
+    knowledge_root = storage_root / "knowledge" / "shared-docs"
+    knowledge_root.mkdir(parents=True)
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        f"""
+agents:
+  code:
+    display_name: Code
+    role: Code test
+    model: default
+    worker_scope: shared
+knowledge_bases:
+  shared_docs:
+    path: {knowledge_root}
+models:
+  default:
+    provider: openai
+    id: gpt-5.6
+router:
+  model: default
+""".lstrip(),
+        encoding="utf-8",
+    )
+    runtime_paths = resolve_primary_runtime_paths(config_path=config_path, storage_path=storage_root)
+    backend, apps_api, core_api = _backend(runtime_paths=runtime_paths)
+    backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=10.0)
+    initial_hash = apps_api.created_bodies[0]["metadata"]["annotations"][_ANNOTATION_TEMPLATE_HASH]
+
+    config_path.write_text(
+        f"""
+agents:
+  code:
+    display_name: Code
+    role: Code test
+    model: default
+    worker_scope: shared
+    knowledge_bases: [shared_docs]
+knowledge_bases:
+  shared_docs:
+    path: {knowledge_root}
+models:
+  default:
+    provider: openai
+    id: gpt-5.6
+router:
+  model: default
+""".lstrip(),
+        encoding="utf-8",
+    )
+    updated_backend, _updated_apps_api, _updated_core_api = _backend(runtime_paths=runtime_paths)
+    updated_backend._resources.apps_api = apps_api
+    updated_backend._resources.core_api = core_api
+    updated_backend._resources.api_exception_cls = _FakeApiError
+
+    updated_backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=20.0)
+
+    recreated = apps_api.created_bodies[-1]
+    updated_hash = recreated["metadata"]["annotations"][_ANNOTATION_TEMPLATE_HASH]
+    assert apps_api.deleted_names == [recreated["metadata"]["name"]]
+    assert updated_hash != initial_hash
+    volume_mounts = recreated["spec"]["template"]["spec"]["containers"][0]["volumeMounts"]
+    assert any(mount["subPath"] == "knowledge/shared-docs" for mount in volume_mounts)
 
 
 def test_kubernetes_backend_uses_custom_worker_prefix_for_storage_path() -> None:
@@ -3355,7 +3859,7 @@ def test_kubernetes_backend_adds_agent_vault_mint_init_container(tmp_path: Path)
     assert {"agent-vault-token", "agent-vault-bootstrap", "agent-vault-ca"} <= volume_names
 
     # No bridge/NetworkPolicy resources exist in this model.
-    assert backend._resources.agent_vault_vault_name(worker_key) == expected_vault
+    assert backend._resources._agent_vault_vault_name(worker_key) == expected_vault
 
 
 def test_agent_vault_main_env_error_names_worker_key_when_vault_name_missing(tmp_path: Path) -> None:
@@ -3373,7 +3877,7 @@ def test_agent_vault_main_env_error_names_worker_key_when_vault_name_missing(tmp
     def _missing_vault_name(_self: object, requested_worker_key: str) -> None:
         assert requested_worker_key == worker_key
 
-    backend._resources.agent_vault_vault_name = MethodType(_missing_vault_name, backend._resources)
+    backend._resources._agent_vault_vault_name = MethodType(_missing_vault_name, backend._resources)
 
     with pytest.raises(WorkerBackendError) as exc_info:
         backend._resources._agent_vault_main_env(worker_key=worker_key)
@@ -3397,7 +3901,7 @@ def test_kubernetes_backend_omits_agent_vault_when_disabled(tmp_path: Path) -> N
     assert all(v["name"] != "agent-vault-token" for v in template_spec["volumes"])
     main_env = {e["name"] for e in template_spec["containers"][0]["env"]}
     assert "MINDROOM_WORKER_EGRESS_PROXY_URL" not in main_env
-    assert backend._resources.agent_vault_vault_name(_TEST_SCOPED_WORKER_KEY_A) is None
+    assert backend._resources._agent_vault_vault_name(_TEST_SCOPED_WORKER_KEY_A) is None
 
 
 def test_agent_vault_config_from_env_defaults_and_requirements() -> None:
@@ -3458,7 +3962,7 @@ def test_kubernetes_backend_config_from_runtime_reads_agent_vault(tmp_path: Path
 
 
 def test_scoped_storage_policy_planning_resolves_config_includes(tmp_path: Path) -> None:
-    """Scoped-storage planning parses split configs instead of failing on include tags."""
+    """Committed Kubernetes config snapshots preserve resolved include data."""
     config_dir = tmp_path / "conf"
     config_dir.mkdir()
     (config_dir / "agents.yaml").write_text(
@@ -3466,13 +3970,28 @@ def test_scoped_storage_policy_planning_resolves_config_includes(tmp_path: Path)
         encoding="utf-8",
     )
     config_path = config_dir / "config.yaml"
-    config_path.write_text("agents: !include agents.yaml\n", encoding="utf-8")
+    config_path.write_text(
+        """
+agents: !include agents.yaml
+models:
+  default:
+    provider: openai
+    id: gpt-5.6
+router:
+  model: default
+""".lstrip(),
+        encoding="utf-8",
+    )
     runtime_paths = resolve_primary_runtime_paths(
         config_path=config_path,
         storage_path=tmp_path / "storage",
         process_env={},
     )
 
-    policies = kubernetes_resources_module._resolved_agent_policies_for_runtime_paths(runtime_paths)
+    config_snapshot = serialized_kubernetes_worker_config_snapshot(load_config(runtime_paths))
+    backend, _apps_api, _core_api = _backend(
+        runtime_paths=runtime_paths,
+        config_snapshot=config_snapshot,
+    )
 
-    assert policies["code"].effective_execution_scope == "user"
+    assert backend._resources.resolved_agent_policies["code"].effective_execution_scope == "user"

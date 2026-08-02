@@ -1337,6 +1337,59 @@ async def fetch_thread_event_sources_via_room_messages(
     )
 
 
+async def find_response_event_ids_via_room_messages(
+    client: nio.AsyncClient,
+    room_id: str,
+    *,
+    response_sender: str,
+    source_event_ids: Collection[str],
+    response_source_filter: Callable[[Mapping[str, Any]], bool] | None = None,
+) -> frozenset[str]:
+    """Find original responses to exact source events in recent room history."""
+    sources = set(source_event_ids)
+    remaining_sources = set(sources)
+    response_event_ids: set[str] = set()
+    from_token: str | None = None
+    seen_pagination_tokens: set[str] = set()
+
+    while remaining_sources:
+        response = await client.room_messages(
+            room_id,
+            start=from_token,
+            limit=100,
+            message_filter={"types": list(_ROOM_HISTORY_MESSAGE_TYPES)},
+            direction=nio.MessageDirection.back,
+        )
+        if not isinstance(response, nio.RoomMessagesResponse):
+            msg = f"response recovery room scan failed for {room_id}: {response}"
+            raise RuntimeError(msg)  # noqa: TRY004
+        if not response.chunk:
+            break
+        for event in response.chunk:
+            if not isinstance(event, nio.Event):
+                continue
+            remaining_sources.discard(event.event_id)
+            event_source = event.source if isinstance(event.source, dict) else {}
+            event_info = EventInfo.from_event(event_source)
+            if (
+                event_source.get("sender") == response_sender
+                and not event_info.is_edit
+                and not event_info.is_thread_fallback
+                and event_info.reply_to_event_id in sources
+                and (response_source_filter is None or response_source_filter(event_source))
+            ):
+                response_event_ids.add(event.event_id)
+        if not response.end:
+            break
+        if response.end in seen_pagination_tokens:
+            msg = f"response recovery room scan repeated pagination token for {room_id}"
+            raise RuntimeError(msg)
+        seen_pagination_tokens.add(response.end)
+        from_token = response.end
+
+    return frozenset(response_event_ids)
+
+
 @dataclass(frozen=True)
 class _BulkThreadScanResult:
     """Per-thread event sources recovered by one backward room scan."""
@@ -1814,6 +1867,7 @@ __all__ = [
     "fetch_dispatch_thread_snapshot",
     "fetch_thread_event_sources_via_room_messages",
     "fetch_thread_history",
+    "find_response_event_ids_via_room_messages",
     "get_room_threads_page",
     "log_thread_history_refresh",
     "refresh_thread_history_from_source",

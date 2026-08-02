@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import tempfile
+from dataclasses import replace
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -14,6 +17,7 @@ import yaml
 
 from mindroom import constants as constants_mod
 from mindroom.api import config_lifecycle
+from mindroom.commands import config_confirmation
 from mindroom.commands.config_commands import (
     _format_value,
     _get_nested_value,
@@ -23,7 +27,7 @@ from mindroom.commands.config_commands import (
     apply_config_change,
     handle_config_command,
 )
-from mindroom.commands.config_confirmation import add_confirmation_reactions, handle_confirmation_reaction
+from mindroom.commands.config_confirmation import _add_confirmation_reactions, handle_confirmation_reaction
 from mindroom.commands.handler import CommandHandlerContext, handle_command
 from mindroom.commands.parsing import Command, CommandType, _CommandParser
 from mindroom.config.auth import AuthorizationConfig
@@ -55,9 +59,37 @@ def _handler_authorization(
     )
 
 
+def _pending_config_change(
+    *,
+    room_id: str = "!room:example.org",
+    requester: str = "@admin:example.org",
+) -> config_confirmation._PendingConfigChange:
+    """Return one typed pending config change for reaction tests."""
+    return config_confirmation._PendingConfigChange(
+        room_id=room_id,
+        thread_id=None,
+        config_path="defaults.markdown",
+        old_value=True,
+        new_value=False,
+        requester=requester,
+    )
+
+
 def test_authorization_config_disables_config_command_by_default() -> None:
     """Chat config commands should be disabled unless explicitly enabled."""
     assert AuthorizationConfig().config_command_enabled is False
+
+
+def test_committed_config_decision_does_not_expire_with_its_preview() -> None:
+    """A frozen user decision remains retry-owned beyond abandoned-preview expiry."""
+    pending_change = replace(
+        _pending_config_change(),
+        created_at=datetime.now(UTC) - timedelta(days=2),
+        decision_event_id="$reaction",
+        decision_key="✅",
+    )
+
+    assert pending_change.is_expired() is False
 
 
 def test_validate_and_persist_config_payload_validates_and_writes_authored_payload(tmp_path: Path) -> None:
@@ -110,7 +142,7 @@ async def test_add_confirmation_reactions_sends_confirm_and_cancel_annotations()
     client = AsyncMock()
     response = MagicMock(spec=nio.RoomSendResponse)
     client.room_send.return_value = response
-    await add_confirmation_reactions(client, "!room:example.org", "$preview")
+    await _add_confirmation_reactions(client, "!room:example.org", "$preview")
 
     assert [call.kwargs["content"] for call in client.room_send.await_args_list] == [
         {
@@ -130,6 +162,42 @@ async def test_add_confirmation_reactions_sends_confirm_and_cancel_annotations()
     ]
     # Reactions must reach encrypted rooms; bots deliver to unverified devices.
     assert all(call.kwargs["ignore_unverified_devices"] is True for call in client.room_send.await_args_list)
+    transaction_ids = [call.kwargs["tx_id"] for call in client.room_send.await_args_list]
+    assert len(set(transaction_ids)) == 2
+    assert all(transaction_id.startswith("mindroom-config-reaction-") for transaction_id in transaction_ids)
+
+
+@pytest.mark.asyncio
+async def test_confirmation_setup_errors_remain_retryable() -> None:
+    """Matrix state and reaction failures must propagate to the command owner."""
+    pending_change = _pending_config_change()
+    state_client = AsyncMock()
+    state_client.room_put_state.return_value = nio.RoomPutStateError("forbidden", "M_FORBIDDEN")
+
+    with pytest.raises(RuntimeError, match="Failed to store pending config change"):
+        await config_confirmation._store_pending_change_in_matrix(state_client, "$preview", pending_change)
+
+    reaction_client = AsyncMock()
+    reaction_client.room_send.return_value = nio.RoomSendError.from_dict(
+        {"errcode": "M_LIMIT_EXCEEDED", "error": "Slow down"},
+        "!room:example.org",
+    )
+    with pytest.raises(RuntimeError, match="Failed to add confirm"):
+        await _add_confirmation_reactions(reaction_client, "!room:example.org", "$preview")
+
+
+@pytest.mark.asyncio
+async def test_confirmation_setup_adopts_existing_duplicate_reaction() -> None:
+    """A replayed setup should accept the homeserver's duplicate-annotation proof."""
+    client = AsyncMock()
+    client.room_send.side_effect = [
+        nio.RoomSendError("already exists", "M_DUPLICATE_ANNOTATION"),
+        nio.RoomSendResponse("$cancel-reaction", "!room:example.org"),
+    ]
+
+    await _add_confirmation_reactions(client, "!room:example.org", "$preview")
+
+    assert client.room_send.await_count == 2
 
 
 class TestCommandParser:
@@ -348,7 +416,8 @@ async def test_handle_command_threads_config_path_to_config_commands(tmp_path: P
         event_cache=make_event_cache_mock(),
         stable_target=MessageTarget.resolve("!room:example.org", None, "$event"),
         record_handled_turn=MagicMock(),
-        send_response=AsyncMock(return_value=None),
+        record_command_result=AsyncMock(),
+        send_response=AsyncMock(return_value="$response"),
     )
     room = SimpleNamespace(room_id="!room:example.org")
     event = SimpleNamespace(
@@ -390,6 +459,7 @@ async def test_handle_command_config_disabled_by_default(tmp_path: Path) -> None
         event_cache=make_event_cache_mock(),
         stable_target=MessageTarget.resolve("!room:example.org", None, "$event"),
         record_handled_turn=MagicMock(),
+        record_command_result=AsyncMock(),
         send_response=AsyncMock(return_value="$reply"),
     )
     room = SimpleNamespace(room_id="!room:example.org")
@@ -433,6 +503,7 @@ async def test_handle_command_config_enabled_requires_admin(tmp_path: Path) -> N
         event_cache=make_event_cache_mock(),
         stable_target=MessageTarget.resolve("!room:example.org", None, "$event"),
         record_handled_turn=MagicMock(),
+        record_command_result=AsyncMock(),
         send_response=AsyncMock(return_value="$reply"),
     )
     room = SimpleNamespace(room_id="!room:example.org")
@@ -471,6 +542,7 @@ async def test_handle_command_records_response_event_id_for_standard_reply(tmp_p
         event_cache=make_event_cache_mock(),
         stable_target=MessageTarget.resolve("!room:example.org", None, "$event"),
         record_handled_turn=MagicMock(),
+        record_command_result=AsyncMock(),
         send_response=AsyncMock(return_value="$reply"),
     )
     room = SimpleNamespace(room_id="!room:example.org")
@@ -520,6 +592,7 @@ async def test_handle_command_reload_plugins_requires_admin_and_uses_callback(tm
         event_cache=make_event_cache_mock(),
         stable_target=MessageTarget.resolve("!room:example.org", None, "$event"),
         record_handled_turn=MagicMock(),
+        record_command_result=AsyncMock(),
         send_response=AsyncMock(return_value="$reply"),
         reload_plugins=reload_plugins,
     )
@@ -576,6 +649,7 @@ async def test_handle_command_reload_plugins_allows_alias_mapped_admin(tmp_path:
         event_cache=make_event_cache_mock(),
         stable_target=MessageTarget.resolve("!room:example.org", None, "$event"),
         record_handled_turn=MagicMock(),
+        record_command_result=AsyncMock(),
         send_response=AsyncMock(return_value="$reply"),
         reload_plugins=reload_plugins,
     )
@@ -612,6 +686,7 @@ async def test_handle_command_reload_plugins_surfaces_reload_failure(tmp_path: P
         event_cache=make_event_cache_mock(),
         stable_target=MessageTarget.resolve("!room:example.org", None, "$event"),
         record_handled_turn=MagicMock(),
+        record_command_result=AsyncMock(),
         send_response=AsyncMock(return_value="$reply"),
         reload_plugins=reload_plugins,
     )
@@ -648,6 +723,7 @@ async def test_handle_command_config_set_confirmation_records_preview_event_id(t
         event_cache=make_event_cache_mock(),
         stable_target=MessageTarget.resolve("!room:example.org", None, "$event"),
         record_handled_turn=MagicMock(),
+        record_command_result=AsyncMock(),
         send_response=AsyncMock(return_value="$preview"),
     )
     room = SimpleNamespace(room_id="!room:example.org")
@@ -666,26 +742,15 @@ async def test_handle_command_config_set_confirmation_records_preview_event_id(t
         "old_value": True,
         "new_value": False,
     }
-    pending_change = SimpleNamespace()
-
     with (
         patch(
             "mindroom.commands.handler.handle_config_command",
             AsyncMock(return_value=("preview", change_info)),
         ),
-        patch("mindroom.commands.handler.config_confirmation.register_pending_change") as mock_register,
         patch(
-            "mindroom.commands.handler.config_confirmation.get_pending_change",
-            return_value=pending_change,
-        ) as mock_get_pending,
-        patch(
-            "mindroom.commands.handler.config_confirmation.store_pending_change_in_matrix",
+            "mindroom.commands.handler.config_confirmation.ensure_pending_change",
             new_callable=AsyncMock,
-        ) as mock_store_pending,
-        patch(
-            "mindroom.commands.handler.config_confirmation.add_confirmation_reactions",
-            new_callable=AsyncMock,
-        ) as mock_add_reactions,
+        ) as mock_ensure_pending,
     ):
         await handle_command(
             context=context,
@@ -695,7 +760,8 @@ async def test_handle_command_config_set_confirmation_records_preview_event_id(t
             requester_user_id="@telegram_alice:example.org",
         )
 
-    mock_register.assert_called_once_with(
+    mock_ensure_pending.assert_awaited_once_with(
+        context.client,
         event_id="$preview",
         room_id="!room:example.org",
         thread_id=None,
@@ -703,13 +769,6 @@ async def test_handle_command_config_set_confirmation_records_preview_event_id(t
         old_value=True,
         new_value=False,
         requester="@alice:example.org",
-    )
-    mock_get_pending.assert_called_once_with("$preview")
-    mock_store_pending.assert_awaited_once_with(context.client, "$preview", pending_change)
-    mock_add_reactions.assert_awaited_once_with(
-        context.client,
-        "!room:example.org",
-        "$preview",
     )
     context.record_handled_turn.assert_called_once_with(
         TurnRecord.create(
@@ -720,8 +779,8 @@ async def test_handle_command_config_set_confirmation_records_preview_event_id(t
 
 
 @pytest.mark.asyncio
-async def test_handle_command_config_set_records_preview_before_post_send_failure(tmp_path: Path) -> None:
-    """Preview sends should still be recorded if later confirmation setup fails."""
+async def test_handle_command_config_set_stays_retryable_after_post_send_failure(tmp_path: Path) -> None:
+    """Confirmation setup failures should leave the command retryable."""
     context = CommandHandlerContext(
         client=AsyncMock(),
         config=SimpleNamespace(
@@ -736,6 +795,7 @@ async def test_handle_command_config_set_records_preview_before_post_send_failur
         event_cache=make_event_cache_mock(),
         stable_target=MessageTarget.resolve("!room:example.org", None, "$event"),
         record_handled_turn=MagicMock(),
+        record_command_result=AsyncMock(),
         send_response=AsyncMock(return_value="$preview"),
     )
     room = SimpleNamespace(room_id="!room:example.org")
@@ -760,17 +820,8 @@ async def test_handle_command_config_set_records_preview_before_post_send_failur
             "mindroom.commands.handler.handle_config_command",
             AsyncMock(return_value=("preview", change_info)),
         ),
-        patch("mindroom.commands.handler.config_confirmation.register_pending_change"),
         patch(
-            "mindroom.commands.handler.config_confirmation.get_pending_change",
-            return_value=SimpleNamespace(),
-        ),
-        patch(
-            "mindroom.commands.handler.config_confirmation.store_pending_change_in_matrix",
-            new_callable=AsyncMock,
-        ),
-        patch(
-            "mindroom.commands.handler.config_confirmation.add_confirmation_reactions",
+            "mindroom.commands.handler.config_confirmation.ensure_pending_change",
             new_callable=AsyncMock,
             side_effect=RuntimeError("reaction failure"),
         ),
@@ -784,12 +835,7 @@ async def test_handle_command_config_set_records_preview_before_post_send_failur
             requester_user_id="@alice:example.org",
         )
 
-    context.record_handled_turn.assert_called_once_with(
-        TurnRecord.create(
-            ["$event"],
-            response_event_id="$preview",
-        ),
-    )
+    context.record_handled_turn.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -811,23 +857,27 @@ async def test_handle_confirmation_reaction_respects_disabled_config_command(tmp
         _delivery_gateway=MagicMock(send_text=AsyncMock(return_value="$event")),
     )
     room = SimpleNamespace(room_id="!room:example.org")
-    event = SimpleNamespace(sender="@admin:example.org", key="✅", reacts_to="$preview")
-    pending_change = SimpleNamespace(
-        room_id="!room:example.org",
-        thread_id=None,
-        config_path="defaults.markdown",
-        new_value=False,
-        requester="@admin:example.org",
-    )
+    event = SimpleNamespace(event_id="$reaction", sender="@admin:example.org", key="✅", reacts_to="$preview")
+    pending_change = _pending_config_change()
 
     with (
+        patch.dict(config_confirmation._pending_changes, {"$preview": pending_change}, clear=True),
+        patch(
+            "mindroom.commands.config_confirmation._store_pending_change_in_matrix",
+            new_callable=AsyncMock,
+        ),
         patch(
             "mindroom.commands.config_confirmation._remove_pending_change_from_matrix",
             new_callable=AsyncMock,
         ),
+        patch(
+            "mindroom.commands.config_confirmation.find_response_event_ids_via_room_messages",
+            new_callable=AsyncMock,
+            return_value=frozenset(),
+        ),
         patch("mindroom.commands.config_commands.apply_config_change", new_callable=AsyncMock) as mock_apply,
     ):
-        await handle_confirmation_reaction(bot, room, event, pending_change)
+        await handle_confirmation_reaction(bot, room, event)
 
     mock_apply.assert_not_awaited()
     bot._delivery_gateway.send_text.assert_awaited_once_with(
@@ -835,6 +885,7 @@ async def test_handle_confirmation_reaction_respects_disabled_config_command(tmp
             target=target,
             response_text="❌ Config command disabled.",
             skip_mentions=True,
+            extra_content={constants_mod.CONFIG_CONFIRMATION_REACTION_KEY: "$reaction"},
         ),
     )
 
@@ -858,23 +909,27 @@ async def test_handle_confirmation_reaction_requires_current_admin(tmp_path: Pat
         _delivery_gateway=MagicMock(send_text=AsyncMock(return_value="$event")),
     )
     room = SimpleNamespace(room_id="!room:example.org")
-    event = SimpleNamespace(sender="@admin:example.org", key="✅", reacts_to="$preview")
-    pending_change = SimpleNamespace(
-        room_id="!room:example.org",
-        thread_id=None,
-        config_path="defaults.markdown",
-        new_value=False,
-        requester="@admin:example.org",
-    )
+    event = SimpleNamespace(event_id="$reaction", sender="@admin:example.org", key="✅", reacts_to="$preview")
+    pending_change = _pending_config_change()
 
     with (
+        patch.dict(config_confirmation._pending_changes, {"$preview": pending_change}, clear=True),
+        patch(
+            "mindroom.commands.config_confirmation._store_pending_change_in_matrix",
+            new_callable=AsyncMock,
+        ),
         patch(
             "mindroom.commands.config_confirmation._remove_pending_change_from_matrix",
             new_callable=AsyncMock,
         ),
+        patch(
+            "mindroom.commands.config_confirmation.find_response_event_ids_via_room_messages",
+            new_callable=AsyncMock,
+            return_value=frozenset(),
+        ),
         patch("mindroom.commands.config_commands.apply_config_change", new_callable=AsyncMock) as mock_apply,
     ):
-        await handle_confirmation_reaction(bot, room, event, pending_change)
+        await handle_confirmation_reaction(bot, room, event)
 
     mock_apply.assert_not_awaited()
     bot._delivery_gateway.send_text.assert_awaited_once_with(
@@ -882,6 +937,7 @@ async def test_handle_confirmation_reaction_requires_current_admin(tmp_path: Pat
             target=target,
             response_text="❌ Admin only.",
             skip_mentions=True,
+            extra_content={constants_mod.CONFIG_CONFIRMATION_REACTION_KEY: "$reaction"},
         ),
     )
 
@@ -906,19 +962,28 @@ async def test_handle_confirmation_reaction_accepts_alias_backed_requester(tmp_p
         _delivery_gateway=MagicMock(send_text=AsyncMock(return_value="$event")),
     )
     room = SimpleNamespace(room_id="!room:example.org")
-    event = SimpleNamespace(sender="@telegram_admin:example.org", key="✅", reacts_to="$preview")
-    pending_change = SimpleNamespace(
-        room_id="!room:example.org",
-        thread_id=None,
-        config_path="defaults.markdown",
-        new_value=False,
-        requester="@admin:example.org",
+    event = SimpleNamespace(
+        event_id="$reaction",
+        sender="@telegram_admin:example.org",
+        key="✅",
+        reacts_to="$preview",
     )
+    pending_change = _pending_config_change()
 
     with (
+        patch.dict(config_confirmation._pending_changes, {"$preview": pending_change}, clear=True),
+        patch(
+            "mindroom.commands.config_confirmation._store_pending_change_in_matrix",
+            new_callable=AsyncMock,
+        ),
         patch(
             "mindroom.commands.config_confirmation._remove_pending_change_from_matrix",
             new_callable=AsyncMock,
+        ),
+        patch(
+            "mindroom.commands.config_confirmation.find_response_event_ids_via_room_messages",
+            new_callable=AsyncMock,
+            return_value=frozenset(),
         ),
         patch(
             "mindroom.commands.config_commands.apply_config_change",
@@ -926,7 +991,7 @@ async def test_handle_confirmation_reaction_accepts_alias_backed_requester(tmp_p
             return_value="✅ Configuration updated successfully.",
         ) as mock_apply,
     ):
-        await handle_confirmation_reaction(bot, room, event, pending_change)
+        await handle_confirmation_reaction(bot, room, event)
 
     mock_apply.assert_awaited_once_with(
         "defaults.markdown",
@@ -938,7 +1003,411 @@ async def test_handle_confirmation_reaction_accepts_alias_backed_requester(tmp_p
             target=target,
             response_text="✅ Configuration updated successfully.",
             skip_mentions=True,
+            extra_content={constants_mod.CONFIG_CONFIRMATION_REACTION_KEY: "$reaction"},
         ),
+    )
+
+
+@pytest.mark.asyncio
+async def test_confirmation_reactions_serialize_one_decision(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Competing confirm/cancel reactions must produce one side effect and response."""
+    preview_event_id = "$preview"
+    pending_change = _pending_config_change()
+    monkeypatch.setattr(config_confirmation, "_pending_changes", {preview_event_id: pending_change})
+    monkeypatch.setattr(config_confirmation, "_pending_change_locks", {})
+    bot = SimpleNamespace(
+        client=SimpleNamespace(user_id="@router:example.org"),
+        config=SimpleNamespace(
+            authorization=_handler_authorization(
+                config_command_enabled=True,
+                global_users=["@admin:example.org"],
+            ),
+        ),
+        runtime_paths=resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path),
+        _conversation_resolver=SimpleNamespace(
+            build_message_target=MagicMock(return_value=MessageTarget.resolve("!room:example.org", None, "$preview")),
+        ),
+        _delivery_gateway=MagicMock(send_text=AsyncMock(return_value="$decision-response")),
+    )
+    room = SimpleNamespace(room_id="!room:example.org")
+    confirm = SimpleNamespace(
+        event_id="$confirm",
+        sender="@admin:example.org",
+        key="✅",
+        reacts_to=preview_event_id,
+    )
+    cancel = SimpleNamespace(
+        event_id="$cancel",
+        sender="@admin:example.org",
+        key="❌",
+        reacts_to=preview_event_id,
+    )
+
+    async def current_pending(*_args: object) -> config_confirmation._PendingConfigChange | None:
+        return config_confirmation._get_pending_change(preview_event_id)
+
+    with (
+        patch(
+            "mindroom.commands.config_confirmation._resolve_pending_change",
+            new=AsyncMock(side_effect=current_pending),
+        ),
+        patch(
+            "mindroom.commands.config_confirmation._store_pending_change_in_matrix",
+            new_callable=AsyncMock,
+        ),
+        patch(
+            "mindroom.commands.config_confirmation._remove_pending_change_from_matrix",
+            new_callable=AsyncMock,
+        ),
+        patch(
+            "mindroom.commands.config_confirmation.find_response_event_ids_via_room_messages",
+            new_callable=AsyncMock,
+            return_value=frozenset(),
+        ),
+        patch(
+            "mindroom.commands.config_commands.apply_config_change",
+            new_callable=AsyncMock,
+            return_value="✅ Configuration updated successfully.",
+        ) as apply_change,
+    ):
+        await asyncio.gather(
+            handle_confirmation_reaction(bot, room, confirm),
+            handle_confirmation_reaction(bot, room, cancel),
+        )
+
+    apply_change.assert_awaited_once()
+    bot._delivery_gateway.send_text.assert_awaited_once()
+    assert config_confirmation._get_pending_change(preview_event_id) is None
+    assert not config_confirmation._pending_change_locks
+
+
+@pytest.mark.asyncio
+async def test_checkpointed_confirmation_ignores_changed_authorization(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Replay must honor the authorization frozen before an applied config change."""
+    preview_event_id = "$preview"
+    reaction_event_id = "$reaction"
+    pending_change = replace(
+        _pending_config_change(),
+        decision_event_id=reaction_event_id,
+        decision_key="✅",
+    )
+    monkeypatch.setattr(config_confirmation, "_pending_changes", {preview_event_id: pending_change})
+    monkeypatch.setattr(config_confirmation, "_pending_change_locks", {})
+    bot = SimpleNamespace(
+        client=SimpleNamespace(user_id="@router:example.org"),
+        config=SimpleNamespace(
+            authorization=_handler_authorization(
+                config_command_enabled=False,
+                global_users=[],
+            ),
+        ),
+        runtime_paths=resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path),
+        _conversation_resolver=SimpleNamespace(
+            build_message_target=MagicMock(
+                return_value=MessageTarget.resolve("!room:example.org", None, preview_event_id),
+            ),
+        ),
+        _delivery_gateway=MagicMock(send_text=AsyncMock(return_value="$response")),
+    )
+    room = SimpleNamespace(room_id="!room:example.org")
+    event = SimpleNamespace(
+        event_id=reaction_event_id,
+        sender="@admin:example.org",
+        key="✅",
+        reacts_to=preview_event_id,
+    )
+
+    with (
+        patch(
+            "mindroom.commands.config_confirmation._store_pending_change_in_matrix",
+            new_callable=AsyncMock,
+        ),
+        patch(
+            "mindroom.commands.config_confirmation._remove_pending_change_from_matrix",
+            new_callable=AsyncMock,
+        ),
+        patch(
+            "mindroom.commands.config_confirmation.find_response_event_ids_via_room_messages",
+            new_callable=AsyncMock,
+            return_value=frozenset(),
+        ),
+        patch(
+            "mindroom.commands.config_commands.apply_config_change",
+            new_callable=AsyncMock,
+            return_value="✅ Configuration updated successfully.",
+        ) as apply_change,
+    ):
+        await handle_confirmation_reaction(bot, room, event)
+
+    apply_change.assert_awaited_once()
+    request = bot._delivery_gateway.send_text.await_args.args[0]
+    assert request.response_text == "✅ Configuration updated successfully."
+
+
+@pytest.mark.asyncio
+async def test_resolve_pending_change_loads_exact_matrix_state_before_room_restore(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reaction recovery must not depend on asynchronous room-startup restoration."""
+    event_id = "$preview"
+    room_id = "!room:example.org"
+    pending_change = config_confirmation._PendingConfigChange(
+        room_id=room_id,
+        thread_id="$thread",
+        config_path="defaults.markdown",
+        old_value=True,
+        new_value=False,
+        requester="@admin:example.org",
+    )
+    client = AsyncMock(spec=nio.AsyncClient)
+    client.room_get_state_event.return_value = nio.RoomGetStateEventResponse(
+        content=pending_change.to_dict(),
+        event_type=config_confirmation._PENDING_CONFIG_EVENT_TYPE,
+        state_key=event_id,
+        room_id=room_id,
+    )
+    monkeypatch.setattr(config_confirmation, "_pending_changes", {})
+
+    resolved = await config_confirmation._resolve_pending_change(client, room_id, event_id)
+
+    assert resolved == pending_change
+    assert config_confirmation._get_pending_change(event_id) == pending_change
+    client.room_get_state_event.assert_awaited_once_with(
+        room_id,
+        config_confirmation._PENDING_CONFIG_EVENT_TYPE,
+        event_id,
+    )
+
+
+@pytest.mark.asyncio
+async def test_confirmation_send_failure_keeps_replay_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A confirmed config side effect stays retryable until its response is visible."""
+    event_id = "$preview"
+    room_id = "!room:example.org"
+    target = MessageTarget.resolve(room_id, None, event_id)
+    pending_change = config_confirmation._PendingConfigChange(
+        room_id=room_id,
+        thread_id=None,
+        config_path="defaults.markdown",
+        old_value=True,
+        new_value=False,
+        requester="@admin:example.org",
+    )
+    monkeypatch.setattr(config_confirmation, "_pending_changes", {event_id: pending_change})
+    monkeypatch.setattr(config_confirmation, "_pending_change_locks", {})
+    bot = SimpleNamespace(
+        client=SimpleNamespace(user_id="@router:example.org"),
+        config=SimpleNamespace(
+            authorization=_handler_authorization(
+                config_command_enabled=True,
+                global_users=["@admin:example.org"],
+            ),
+        ),
+        runtime_paths=resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path),
+        _conversation_resolver=SimpleNamespace(build_message_target=MagicMock(return_value=target)),
+        _delivery_gateway=MagicMock(send_text=AsyncMock(return_value=None)),
+    )
+    room = SimpleNamespace(room_id=room_id)
+    event = SimpleNamespace(event_id="$reaction", sender="@admin:example.org", key="✅", reacts_to=event_id)
+
+    with (
+        patch(
+            "mindroom.commands.config_confirmation._remove_pending_change_from_matrix",
+            new_callable=AsyncMock,
+        ) as remove_matrix,
+        patch(
+            "mindroom.commands.config_confirmation.find_response_event_ids_via_room_messages",
+            new_callable=AsyncMock,
+            return_value=frozenset(),
+        ),
+        patch(
+            "mindroom.commands.config_confirmation._store_pending_change_in_matrix",
+            new_callable=AsyncMock,
+        ),
+        patch(
+            "mindroom.commands.config_commands.apply_config_change",
+            new_callable=AsyncMock,
+            return_value="✅ Configuration updated successfully.",
+        ) as apply_change,
+    ):
+        with pytest.raises(RuntimeError, match="Failed to send config confirmation response"):
+            await handle_confirmation_reaction(bot, room, event)
+        assert not config_confirmation._pending_change_locks
+
+        bot._delivery_gateway.send_text = AsyncMock(return_value="$response")
+        await handle_confirmation_reaction(bot, room, event)
+
+    apply_change.assert_awaited_once()
+    remove_matrix.assert_awaited_once_with(bot.client, room_id, event_id)
+    assert config_confirmation._get_pending_change(event_id) is None
+    assert not config_confirmation._pending_change_locks
+
+
+@pytest.mark.asyncio
+async def test_ambiguous_config_execution_reports_uncertainty_without_reapplying(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A crash after the config-write boundary must not overwrite newer state."""
+    preview_event_id = "$preview"
+    reaction_event_id = "$reaction"
+    pending_change = replace(
+        _pending_config_change(),
+        decision_event_id=reaction_event_id,
+        decision_key="✅",
+        decision_execution_started=True,
+    )
+    monkeypatch.setattr(config_confirmation, "_pending_changes", {preview_event_id: pending_change})
+    monkeypatch.setattr(config_confirmation, "_pending_change_locks", {})
+    bot = SimpleNamespace(
+        client=SimpleNamespace(user_id="@router:example.org"),
+        config=SimpleNamespace(authorization=_handler_authorization(config_command_enabled=True)),
+        runtime_paths=resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path),
+        _conversation_resolver=SimpleNamespace(
+            build_message_target=MagicMock(
+                return_value=MessageTarget.resolve("!room:example.org", None, preview_event_id),
+            ),
+        ),
+        _delivery_gateway=MagicMock(send_text=AsyncMock(return_value="$response")),
+    )
+    room = SimpleNamespace(room_id="!room:example.org")
+    event = SimpleNamespace(
+        event_id=reaction_event_id,
+        sender="@admin:example.org",
+        key="✅",
+        reacts_to=preview_event_id,
+    )
+
+    with (
+        patch(
+            "mindroom.commands.config_confirmation.find_response_event_ids_via_room_messages",
+            new_callable=AsyncMock,
+            return_value=frozenset(),
+        ),
+        patch(
+            "mindroom.commands.config_confirmation._store_pending_change_in_matrix",
+            new_callable=AsyncMock,
+        ),
+        patch(
+            "mindroom.commands.config_confirmation._remove_pending_change_from_matrix",
+            new_callable=AsyncMock,
+        ),
+        patch("mindroom.commands.config_commands.apply_config_change", new_callable=AsyncMock) as apply_change,
+    ):
+        await handle_confirmation_reaction(bot, room, event)
+
+    apply_change.assert_not_awaited()
+    request = bot._delivery_gateway.send_text.await_args.args[0]
+    assert "outcome is uncertain" in request.response_text
+
+
+@pytest.mark.asyncio
+async def test_config_preview_recovery_preserves_committed_decision(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Command replay must adopt committed confirmation state without reopening it."""
+    preview_event_id = "$preview"
+    pending_change = replace(
+        _pending_config_change(),
+        decision_event_id="$reaction",
+        decision_key="✅",
+        decision_execution_started=True,
+    )
+    monkeypatch.setattr(config_confirmation, "_pending_changes", {preview_event_id: pending_change})
+    monkeypatch.setattr(config_confirmation, "_pending_change_locks", {})
+    client = AsyncMock(spec=nio.AsyncClient)
+    client.user_id = "@router:example.org"
+
+    with patch(
+        "mindroom.commands.config_confirmation._add_confirmation_reactions",
+        new_callable=AsyncMock,
+    ) as add_reactions:
+        recovered = await config_confirmation.recover_confirmation_setup(
+            client,
+            pending_change.room_id,
+            preview_event_id,
+        )
+        await config_confirmation.ensure_pending_change(
+            client,
+            event_id=preview_event_id,
+            room_id=pending_change.room_id,
+            thread_id=None,
+            config_path="defaults.markdown",
+            old_value=False,
+            new_value=True,
+            requester="@other:example.org",
+        )
+
+    assert recovered is True
+    assert config_confirmation._get_pending_change(preview_event_id) == pending_change
+    add_reactions.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_confirmation_recovery_adopts_untracked_visible_response(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A replay after send must settle state without applying or responding twice."""
+    event_id = "$preview"
+    room_id = "!room:example.org"
+    pending_change = config_confirmation._PendingConfigChange(
+        room_id=room_id,
+        thread_id=None,
+        config_path="defaults.markdown",
+        old_value=True,
+        new_value=False,
+        requester="@admin:example.org",
+    )
+    monkeypatch.setattr(config_confirmation, "_pending_changes", {event_id: pending_change})
+    bot = SimpleNamespace(
+        client=SimpleNamespace(user_id="@router:example.org"),
+        config=SimpleNamespace(
+            authorization=_handler_authorization(
+                config_command_enabled=True,
+                global_users=["@admin:example.org"],
+            ),
+        ),
+        runtime_paths=resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path),
+        _conversation_resolver=SimpleNamespace(build_message_target=MagicMock()),
+        _delivery_gateway=MagicMock(send_text=AsyncMock()),
+    )
+    room = SimpleNamespace(room_id=room_id)
+    event = SimpleNamespace(event_id="$reaction", sender="@admin:example.org", key="✅", reacts_to=event_id)
+
+    with (
+        patch(
+            "mindroom.commands.config_confirmation.find_response_event_ids_via_room_messages",
+            new_callable=AsyncMock,
+            return_value=frozenset({"$response"}),
+        ) as find_response,
+        patch(
+            "mindroom.commands.config_confirmation._remove_pending_change_from_matrix",
+            new_callable=AsyncMock,
+        ) as remove_matrix,
+        patch("mindroom.commands.config_commands.apply_config_change", new_callable=AsyncMock) as apply_change,
+    ):
+        await handle_confirmation_reaction(bot, room, event)
+
+    apply_change.assert_not_awaited()
+    bot._delivery_gateway.send_text.assert_not_awaited()
+    remove_matrix.assert_awaited_once_with(bot.client, room_id, event_id)
+    assert config_confirmation._get_pending_change(event_id) is None
+    response_filter = find_response.await_args.kwargs["response_source_filter"]
+    assert response_filter(
+        {"content": {constants_mod.CONFIG_CONFIRMATION_REACTION_KEY: "$reaction"}},
+    )
+    assert not response_filter(
+        {"content": {constants_mod.CONFIG_CONFIRMATION_REACTION_KEY: "$different"}},
     )
 
 

@@ -39,11 +39,11 @@ dependencies = [
   "jinja2>=3.1",
   "json5>=0.13",
   "markdown-it-py>=4",
-  "mcp[cli]>=1.12.4",
+  "mcp[cli]>=1.12.4,<2",
   "mdit-py-plugins>=0.5",
   "mem0ai>=0.1.115",
   # Arbitrary Olm to-device encryption uses the fork's tested internal API; update only with its round-trip tests.
-  "mindroom-nio[e2e]==0.31",
+  "mindroom-nio[e2e]==0.33",
   "openai",
   "packaging>=24",
   "pydantic>=2",
@@ -457,7 +457,7 @@ dev = [
   "markdown-gfm-admonition",
   "pre-commit>=4.2",
   "pre-commit-uv>=4.1.4",
-  "privata>=0.2.1",
+  "privata>=0.8",
   "pytest>=8.4.1",
   "pytest-asyncio>=1.1",
   "pytest-cov>=6.2.1",
@@ -544,6 +544,11 @@ per-file-ignores."src/mindroom/tools/*" = [
   "PLC0415", # `import` should be at the top-level of a file"
 ]
 
+[tool.vulture]
+paths = [ "src/mindroom", "vulture_whitelist.py" ]
+min_confidence = 60
+sort_by_size = true
+
 [tool.ty.environment]
 python-version = "3.13"
 [[tool.ty.overrides]]
@@ -578,6 +583,7 @@ addopts = """
     -p no:tach
     -q
     -n auto
+    --dist worksteal
     --asyncio-mode=strict
     --timeout 60
     --durations 20
@@ -595,8 +601,3 @@ exclude_lines = [
   "if TYPE_CHECKING",
   "if __name__ == .__main__.:",
 ]
-
-[tool.vulture]
-paths = [ "src/mindroom", "vulture_whitelist.py" ]
-min_confidence = 60
-sort_by_size = true

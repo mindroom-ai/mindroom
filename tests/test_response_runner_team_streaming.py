@@ -775,7 +775,7 @@ async def test_generate_team_response_helper_persists_minimal_interrupted_histor
     with (
         patch.object(
             ResponseRunner,
-            "run_cancellable_response",
+            "_run_cancellable_response",
             new=AsyncMock(side_effect=fake_run_cancellable_response),
         ),
         patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=False)),
@@ -1238,7 +1238,7 @@ async def test_generate_team_response_helper_persists_original_user_message_for_
     with (
         patch.object(
             ResponseRunner,
-            "run_cancellable_response",
+            "_run_cancellable_response",
             new=AsyncMock(side_effect=fake_run_cancellable_response),
         ),
         patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=False)),
@@ -1336,7 +1336,7 @@ async def test_generate_team_response_helper_emits_session_started_after_persist
     with (
         patch.object(
             ResponseRunner,
-            "run_cancellable_response",
+            "_run_cancellable_response",
             new=AsyncMock(side_effect=fake_run_cancellable_response),
         ),
         patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=False)),
@@ -1423,7 +1423,7 @@ async def test_generate_team_response_helper_streaming_emits_session_started_aft
     with (
         patch.object(
             ResponseRunner,
-            "run_cancellable_response",
+            "_run_cancellable_response",
             new=AsyncMock(side_effect=fake_run_cancellable_response),
         ),
         patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=True)),

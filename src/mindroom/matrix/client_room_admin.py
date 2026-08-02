@@ -38,9 +38,7 @@ _MANAGED_ROOM_EVENT_POWER_LEVELS = {
 _TERMINAL_ROOM_JOIN_ERROR_CODES = frozenset(
     {
         "M_BAD_STATE",
-        "M_FORBIDDEN",
         "M_GUEST_ACCESS_FORBIDDEN",
-        "M_NOT_FOUND",
         "M_UNRECOGNIZED",
     },
 )
@@ -52,10 +50,6 @@ class RoomJoinOutcome(StrEnum):
     JOINED = "joined"
     RETRYABLE_FAILURE = "retryable_failure"
     TERMINAL_FAILURE = "terminal_failure"
-
-    def __bool__(self) -> bool:
-        """Preserve boolean join checks for callers that do not classify errors."""
-        return self is RoomJoinOutcome.JOINED
 
 
 async def invite_to_room(

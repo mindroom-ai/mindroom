@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
+from mem0 import AsyncMemory
 from mem0.configs.embeddings.base import BaseEmbedderConfig
 from mem0.embeddings.openai import OpenAIEmbedding
 
@@ -544,7 +545,7 @@ class TestMemoryConfig:
 
     @pytest.mark.asyncio
     @patch("mindroom.memory.config.ensure_sentence_transformers_dependencies")
-    @patch("mindroom.memory.config.AsyncMemory.from_config")
+    @patch.object(AsyncMemory, "from_config")
     async def test_create_memory_instance_auto_installs_sentence_transformers(
         self,
         mock_from_config: MagicMock,
@@ -595,7 +596,7 @@ class TestMemoryConfig:
         memory = SimpleNamespace(vector_store=object(), embedding_model=object())
 
         with (
-            patch("mindroom.memory.config.AsyncMemory.from_config", return_value=memory),
+            patch.object(AsyncMemory, "from_config", return_value=memory),
             patch("mindroom.embedding_factory.create_configured_embedder", return_value=strict_embedder),
         ):
             result = await create_memory_instance(tmp_path / "memory", config, _runtime_paths(tmp_path))

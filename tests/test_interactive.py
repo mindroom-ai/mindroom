@@ -35,6 +35,7 @@ class TestInteractiveFunctions:
         interactive._active_questions.clear()
         interactive._dirty_question_ids.clear()
         interactive._deleted_question_ids.clear()
+        interactive._claimed_question_ids.clear()
         interactive._persistence_file = None
         interactive._persistence_lock_file = None
         runtime_paths = test_runtime_paths(Path(tempfile.mkdtemp()))
@@ -60,6 +61,7 @@ class TestInteractiveFunctions:
         interactive._active_questions.clear()
         interactive._dirty_question_ids.clear()
         interactive._deleted_question_ids.clear()
+        interactive._claimed_question_ids.clear()
         interactive._persistence_file = None
         interactive._persistence_lock_file = None
 
@@ -1335,6 +1337,7 @@ Just let me know your preference!"""
             thread_id="$thread123",
         )
         assert interactive._active_questions == {}
+        interactive.commit_selection(result)
         assert json.loads(persistence_file.read_text()) == {}
 
     def test_clear_interactive_question_persists_removal_across_reload(self, tmp_path: Path) -> None:
@@ -1358,6 +1361,91 @@ Just let me know your preference!"""
         interactive.init_persistence(tmp_path)
 
         assert interactive._active_questions == {}
+
+    @pytest.mark.asyncio
+    async def test_committing_one_claim_preserves_another_retryable_question(
+        self,
+        mock_client: AsyncMock,
+        tmp_path: Path,
+    ) -> None:
+        """One terminal selection must not durably consume another in-flight claim."""
+        interactive.init_persistence(tmp_path)
+        persistence_file = tmp_path / "tracking" / "interactive_questions.json"
+        for event_id in ("$question-one", "$question-two"):
+            interactive.register_interactive_question(
+                event_id,
+                "!room:localhost",
+                None,
+                {"✅": "yes"},
+                "test_agent",
+            )
+
+        async def claim(event_id: str) -> interactive.InteractiveSelection:
+            event = MagicMock(spec=nio.ReactionEvent)
+            event.sender = "@user:localhost"
+            event.reacts_to = event_id
+            event.key = "✅"
+            selection = await interactive.handle_reaction(
+                mock_client,
+                event,
+                "test_agent",
+                self.config,
+                runtime_paths_for(self.config),
+            )
+            assert selection is not None
+            return selection
+
+        first = await claim("$question-one")
+        second = await claim("$question-two")
+
+        interactive.commit_selection(first)
+
+        assert set(json.loads(persistence_file.read_text())) == {"$question-two"}
+        assert "$question-two" not in interactive._active_questions
+
+        interactive.restore_selection(second)
+
+        assert "$question-two" in interactive._active_questions
+        assert set(json.loads(persistence_file.read_text())) == {"$question-two"}
+
+    @pytest.mark.asyncio
+    async def test_claim_persists_dirty_question_before_hiding_it(
+        self,
+        mock_client: AsyncMock,
+        tmp_path: Path,
+    ) -> None:
+        """A prior failed save must not let a later claim erase retry state."""
+        interactive.init_persistence(tmp_path)
+        persistence_file = tmp_path / "tracking" / "interactive_questions.json"
+        with patch(
+            "mindroom.interactive._write_active_questions_atomically_locked",
+            side_effect=OSError("disk unavailable"),
+        ):
+            interactive.register_interactive_question(
+                "$question",
+                "!room:localhost",
+                None,
+                {"✅": "yes"},
+                "test_agent",
+            )
+        assert "$question" in interactive._dirty_question_ids
+
+        event = MagicMock(spec=nio.ReactionEvent)
+        event.sender = "@user:localhost"
+        event.reacts_to = "$question"
+        event.key = "✅"
+
+        selection = await interactive.handle_reaction(
+            mock_client,
+            event,
+            "test_agent",
+            self.config,
+            runtime_paths_for(self.config),
+        )
+
+        assert selection is not None
+        assert set(json.loads(persistence_file.read_text())) == {"$question"}
+        assert "$question" not in interactive._dirty_question_ids
 
     def test_init_persistence_keeps_old_questions(self, tmp_path: Path) -> None:
         """Old persisted questions should still load on startup."""

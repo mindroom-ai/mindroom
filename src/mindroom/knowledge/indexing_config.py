@@ -12,7 +12,6 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, NamedTuple, cast
 
 from agno.knowledge.embedder.base import Embedder
-from agno.vectordb.chroma import ChromaDb
 
 from mindroom.embeddings import effective_knowledge_embedder_signature
 from mindroom.knowledge.redaction import credential_free_url_identity
@@ -256,6 +255,8 @@ class _CollectionExistenceEmbedder(Embedder):
 
 def chroma_collection_exists(storage_path: Path, collection_name: str) -> bool:
     """Check collection existence without constructing Agno Knowledge."""
+    from agno.vectordb.chroma import ChromaDb  # noqa: PLC0415
+
     vector_db = ChromaDb(
         collection=collection_name,
         path=str(storage_path),

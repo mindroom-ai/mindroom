@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from typing import TYPE_CHECKING
-from unittest.mock import AsyncMock, MagicMock, call, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
 import pytest
@@ -1179,14 +1180,12 @@ async def test_dispatch_text_message_runs_message_received_before_command_parsin
 
     assert hook_calls == ["called"]
     bot._turn_controller._execute_command.assert_not_awaited()
-    turn_store.record_turn.assert_called_once_with(
-        TurnRecord.create([event.event_id]),
-    )
+    turn_store.record_turn.assert_not_called()
 
 
 @pytest.mark.asyncio
-async def test_prepare_dispatch_marks_all_source_events_when_hooks_suppress_batch(tmp_path: Path) -> None:
-    """Hook suppression should mark every source event in a coalesced batch as handled."""
+async def test_prepare_dispatch_compacts_all_source_events_when_hooks_suppress_batch(tmp_path: Path) -> None:
+    """Hook suppression should compact every source event in a coalesced batch."""
     bot = _agent_bot(tmp_path, agent_name="router")
     room = nio.MatrixRoom(room_id="!room:localhost", own_user_id="@mindroom_router:localhost")
     event = nio.RoomMessageText.from_dict(
@@ -1211,6 +1210,11 @@ async def test_prepare_dispatch_marks_all_source_events_when_hooks_suppress_batc
     )
     turn_store = unwrap_extracted_collaborator(bot._turn_store)
     turn_store.record_turn = MagicMock()
+    settle_ignored = AsyncMock()
+    bot._turn_controller.deps = replace(
+        bot._turn_controller.deps,
+        settle_ignored_dispatch_sources=settle_ignored,
+    )
 
     dispatch = await bot._turn_controller._prepare_dispatch(
         room,
@@ -1221,9 +1225,8 @@ async def test_prepare_dispatch_marks_all_source_events_when_hooks_suppress_batc
     )
 
     assert dispatch is None
-    assert turn_store.record_turn.call_args_list == [
-        call(TurnRecord.create(["$m1", "$m2"])),
-    ]
+    turn_store.record_turn.assert_not_called()
+    settle_ignored.assert_awaited_once_with(("$m1", "$m2"))
 
 
 @pytest.mark.asyncio

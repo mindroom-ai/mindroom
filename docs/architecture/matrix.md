@@ -218,10 +218,7 @@ Enabling encryption on a Matrix room is irreversible; MindRoom never disables it
 
 When an agent receives an event it cannot decrypt from an authorized sender, it logs a `matrix_event_decryption_failed` warning, sends a best-effort room-key request once per session (delivered to the bot account's own devices, so recovery normally needs the sender to post a new message), and posts one notice per (room, session) so the user knows to resend.
 All bots share a disk-backed notice ledger, so the first bot that fails on a session posts the only notice and multi-agent rooms never storm.
-After a live room join, decryption-failure callbacks for that exact unfinished join stay fenced across restarts until a trusted sync response confirms joined membership.
-The room fence runs before durable dispatch persistence, so pre-join failures cannot claim the notice ledger while ordinary message callbacks continue normally.
-During a start without sync continuity, the cold-history fence rejects ordinary callbacks before durable dispatch persistence and admits only exact previously pending obligations until the server establishes a trusted continuation.
-Neither fence compares federated event timestamps with the local wall clock.
+Notices are suppressed for events that predate a bot's room join or a start without sync continuity, since pre-join and already-replayed history is expected to be undecryptable.
 Decryption-failure counters are exposed on `/api/health` under `e2ee`.
 
 Each agent bootstraps a self-managed cross-signing identity at login (master and self-signing keys persisted next to its encryption store) and signs its own device, so clients that exclude non-cross-signed devices (MSC4153) keep sharing room keys with agents.
