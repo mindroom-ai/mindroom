@@ -1223,7 +1223,7 @@ async def test_aggregate_admission_persistence_gates_recovered_checkpoint(
             message = "dispatch database unavailable"
             raise OSError(message)
 
-        monkeypatch.setattr(bot._dispatch_obligation_store, "_create_pending", fail_persist)
+        monkeypatch.setattr(bot._dispatch_obligation_store, "create_pending", fail_persist)
 
     with (
         patch.object(bot._dispatch_obligation_runner, "_run_persisted", AsyncMock()) as run_persisted,
@@ -1242,7 +1242,7 @@ async def test_aggregate_admission_persistence_gates_recovered_checkpoint(
             assert isinstance(exc_info.value.__cause__, OSError)
         else:
             await aggregate_admission(room, event)
-            assert bot._dispatch_obligation_store._has_pending(
+            assert bot._dispatch_obligation_store.has_pending(
                 event.event_id,
                 DispatchCallbackKind.MESSAGE,
             )
