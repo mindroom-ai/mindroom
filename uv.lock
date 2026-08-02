@@ -4049,6 +4049,7 @@ dependencies = [
     { name = "typer" },
     { name = "uvicorn" },
     { name = "watchfiles" },
+    { name = "websockets" },
 ]
 
 [package.optional-dependencies]
@@ -4592,6 +4593,7 @@ requires-dist = [
     { name = "uvicorn", specifier = ">=0.35" },
     { name = "watchfiles", specifier = ">=1" },
     { name = "webexpythonsdk", marker = "extra == 'webex'" },
+    { name = "websockets", specifier = ">=14" },
     { name = "wikipedia", marker = "extra == 'wikipedia'" },
     { name = "yfinance", marker = "extra == 'yfinance'" },
     { name = "youtube-transcript-api", marker = "extra == 'youtube'" },

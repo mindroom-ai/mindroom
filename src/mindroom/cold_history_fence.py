@@ -15,7 +15,7 @@ from mindroom.dispatch_admission import DispatchCallbackKind, DispatchSourceAdmi
 class _PendingDispatchObligations(Protocol):
     """Exact durable read used to admit failed work while continuity is absent."""
 
-    def _has_pending(
+    def has_pending(
         self,
         source_event_id: str,
         callback_kind: DispatchCallbackKind,
@@ -82,7 +82,7 @@ class ColdHistoryFence:
         if provenance is not nio.TimelineEventProvenance.HISTORY:
             return DispatchSourceAdmission.ACCEPTED
         if await asyncio.to_thread(
-            self.obligations._has_pending,
+            self.obligations.has_pending,
             source_event_id,
             callback_kind,
         ):

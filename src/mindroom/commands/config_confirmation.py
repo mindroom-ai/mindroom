@@ -16,12 +16,15 @@ from mindroom.delivery_gateway import SendTextRequest
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_thread_history import find_response_event_ids_via_room_messages
 from mindroom.matrix.message_builder import build_reaction_content
+from mindroom.runtime_protocols import SupportsClientConfig  # noqa: TC001
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
+    from collections.abc import AsyncIterator, Callable
 
-    from mindroom.bot import AgentBot
-
+    from mindroom.config.auth import AuthorizationConfig
+    from mindroom.constants import RuntimePaths
+    from mindroom.delivery_gateway import DeliveryGateway
+    from mindroom.message_target import MessageTarget
 logger = get_logger(__name__)
 
 # Event type for pending config changes in Matrix state
@@ -29,6 +32,30 @@ _PENDING_CONFIG_EVENT_TYPE = "com.mindroom.pending.config"
 
 # Maximum age for pending confirmations (24 hours)
 _MAX_PENDING_AGE_HOURS = 24
+
+
+@dataclass(frozen=True)
+class ConfigConfirmationContext:
+    """Narrow runtime boundary for one config-confirmation decision."""
+
+    runtime: SupportsClientConfig
+    runtime_paths: RuntimePaths
+    build_message_target: Callable[..., MessageTarget]
+    delivery_gateway: DeliveryGateway
+
+    @property
+    def client(self) -> nio.AsyncClient:
+        """Return the current Matrix client for this runtime."""
+        client = self.runtime.client
+        if client is None:
+            msg = "Matrix client is not ready for config confirmation"
+            raise RuntimeError(msg)
+        return client
+
+    @property
+    def authorization(self) -> AuthorizationConfig:
+        """Return authorization from the current runtime config."""
+        return self.runtime.config.authorization
 
 
 @dataclass
@@ -479,7 +506,7 @@ async def ensure_pending_change(
 
 
 async def _ensure_decision_checkpoint(
-    bot: AgentBot,
+    context: ConfigConfirmationContext,
     event: nio.ReactionEvent,
     pending_change: _PendingConfigChange,
 ) -> _PendingConfigChange | None:
@@ -487,8 +514,7 @@ async def _ensure_decision_checkpoint(
     if pending_change.decision_event_id is not None:
         return pending_change if pending_change.decision_event_id == event.event_id else None
 
-    assert bot.client is not None
-    authorization = bot.config.authorization
+    authorization = context.authorization
     resolved_sender = authorization.resolve_alias(event.sender)
     if resolved_sender != pending_change.requester:
         logger.debug(
@@ -498,7 +524,7 @@ async def _ensure_decision_checkpoint(
             resolved_sender=resolved_sender,
         )
         return None
-    if event.sender == bot.client.user_id or event.key not in {"✅", "❌"}:
+    if event.sender == context.client.user_id or event.key not in {"✅", "❌"}:
         return None
 
     response_text = None
@@ -515,11 +541,11 @@ async def _ensure_decision_checkpoint(
         decision_key=event.key,
         decision_response_text=response_text,
     )
-    return await _commit_checkpoint(bot.client, event.reacts_to, checkpoint)
+    return await _commit_checkpoint(context.client, event.reacts_to, checkpoint)
 
 
 async def _response_for_checkpointed_decision(
-    bot: AgentBot,
+    context: ConfigConfirmationContext,
     preview_event_id: str,
     pending_change: _PendingConfigChange,
 ) -> tuple[_PendingConfigChange, str]:
@@ -529,21 +555,20 @@ async def _response_for_checkpointed_decision(
     if pending_change.decision_key != "✅":
         msg = "Config confirmation decision checkpoint is incomplete"
         raise RuntimeError(msg)
-    assert bot.client is not None
     if pending_change.decision_execution_started:
         response_text = (
             "⚠️ The configuration change was interrupted after application began, so its outcome is uncertain. "
             "Inspect the current configuration before making another change."
         )
         checkpoint = await _commit_checkpoint(
-            bot.client,
+            context.client,
             preview_event_id,
             replace(pending_change, decision_response_text=response_text),
         )
         return checkpoint, response_text
 
     started_checkpoint = await _commit_checkpoint(
-        bot.client,
+        context.client,
         preview_event_id,
         replace(pending_change, decision_execution_started=True),
     )
@@ -552,10 +577,10 @@ async def _response_for_checkpointed_decision(
     response_text = await apply_config_change(
         pending_change.config_path,
         pending_change.new_value,
-        runtime_paths=bot.runtime_paths,
+        runtime_paths=context.runtime_paths,
     )
     completed_checkpoint = await _commit_checkpoint(
-        bot.client,
+        context.client,
         preview_event_id,
         replace(started_checkpoint, decision_response_text=response_text),
     )
@@ -563,52 +588,51 @@ async def _response_for_checkpointed_decision(
 
 
 async def resume_committed_confirmation(
-    bot: AgentBot,
+    context: ConfigConfirmationContext,
     room: nio.MatrixRoom,
     event: nio.ReactionEvent,
     pending_change: _PendingConfigChange,
 ) -> None:
     """Resume only a decision already committed before current authorization changed."""
     if pending_change.decision_event_id == event.event_id:
-        await handle_confirmation_reaction(bot, room, event)
+        await handle_confirmation_reaction(context, room, event)
 
 
 async def handle_confirmation_reaction(
-    bot: AgentBot,
+    context: ConfigConfirmationContext,
     room: nio.MatrixRoom,
     event: nio.ReactionEvent,
 ) -> None:
     """Serialize and durably complete one config-confirmation decision."""
-    assert bot.client is not None
-    assert bot.client.user_id is not None
+    assert context.client.user_id is not None
     preview_event_id = event.reacts_to
     async with _pending_change_lock(preview_event_id):
-        pending_change = await _resolve_pending_change(bot.client, room.room_id, preview_event_id)
+        pending_change = await _resolve_pending_change(context.client, room.room_id, preview_event_id)
         if pending_change is None:
             return
         if pending_change.decision_event_id is not None and pending_change.decision_event_id != event.event_id:
             return
 
-        if await _has_visible_confirmation_response(bot.client, room.room_id, event):
-            await _remove_pending_change_from_matrix(bot.client, pending_change.room_id, preview_event_id)
+        if await _has_visible_confirmation_response(context.client, room.room_id, event):
+            await _remove_pending_change_from_matrix(context.client, pending_change.room_id, preview_event_id)
             _remove_pending_change(preview_event_id)
             return
 
-        pending_change = await _ensure_decision_checkpoint(bot, event, pending_change)
+        pending_change = await _ensure_decision_checkpoint(context, event, pending_change)
         if pending_change is None:
             return
         pending_change, response_text = await _response_for_checkpointed_decision(
-            bot,
+            context,
             preview_event_id,
             pending_change,
         )
 
-        target = bot._conversation_resolver.build_message_target(
+        target = context.build_message_target(
             room_id=room.room_id,
             thread_id=pending_change.thread_id,
             reply_to_event_id=preview_event_id,
         )
-        response_event_id = await bot._delivery_gateway.send_text(
+        response_event_id = await context.delivery_gateway.send_text(
             SendTextRequest(
                 target=target,
                 response_text=response_text,
@@ -620,5 +644,5 @@ async def handle_confirmation_reaction(
             msg = "Failed to send config confirmation response"
             raise RuntimeError(msg)
 
-        await _remove_pending_change_from_matrix(bot.client, pending_change.room_id, preview_event_id)
+        await _remove_pending_change_from_matrix(context.client, pending_change.room_id, preview_event_id)
         _remove_pending_change(preview_event_id)

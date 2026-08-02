@@ -27,13 +27,11 @@ from mindroom.config.matrix import MatrixSyncConfig
 from mindroom.config.models import ModelConfig
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.delivery_gateway import FinalizeStreamedResponseRequest, ResponseIdentity
+from mindroom.dispatch_admission import DispatchSourceAdmission
 from mindroom.dispatch_handoff import PendingDispatchMetadata
-from mindroom.dispatch_obligations import (
-    DispatchCallbackKind,
-    DispatchSourceAdmission,
-    _DispatchCallbackResult,
-    _DispatchObligationCorruptionError,
-)
+from mindroom.dispatch_obligations import DispatchCallbackKind
+from mindroom.dispatch_obligations.events import DispatchCallbackResult
+from mindroom.dispatch_obligations.storage import DispatchObligationCorruptionError
 from mindroom.dispatch_source import IMAGE_SOURCE_KIND, MEDIA_SOURCE_KIND, VOICE_SOURCE_KIND
 from mindroom.handled_turns import TurnRecord
 from mindroom.matrix.cache.event_cache import EventCacheBackendUnavailableError
@@ -133,7 +131,7 @@ def test_terminal_turn_settlement_hands_sqlite_work_to_event_loop_owner(
         raising=False,
     )
     settle_pending = MagicMock()
-    monkeypatch.setattr(bot._dispatch_obligation_store, "_settle_pending_from_turn_store", settle_pending)
+    monkeypatch.setattr(bot._dispatch_obligation_store, "settle_pending_from_turn_store", settle_pending)
 
     bot._settle_turn_dispatch_obligations(("$message",))
 
@@ -294,7 +292,7 @@ async def test_warm_join_decrypt_notice_waits_for_trusted_sync_containing_room(
         )
         pre_join_event = megolm_event("$pre-join")
         await _admit_and_dispatch_decrypt(bot, room, pre_join_event)
-        assert not bot._dispatch_obligation_store._has_pending(
+        assert not bot._dispatch_obligation_store.has_pending(
             "$pre-join",
             DispatchCallbackKind.DECRYPTION_FAILURE,
         )
@@ -316,7 +314,7 @@ async def test_warm_join_decrypt_notice_waits_for_trusted_sync_containing_room(
         )
         uncertified_event = megolm_event("$after-uncertified-room")
         await _admit_and_dispatch_decrypt(bot, room, uncertified_event)
-        assert not bot._dispatch_obligation_store._has_pending(
+        assert not bot._dispatch_obligation_store.has_pending(
             "$after-uncertified-room",
             DispatchCallbackKind.DECRYPTION_FAILURE,
         )
@@ -330,7 +328,7 @@ async def test_warm_join_decrypt_notice_waits_for_trusted_sync_containing_room(
         )
         certified_other_event = megolm_event("$after-certified-other")
         await _admit_and_dispatch_decrypt(bot, room, certified_other_event)
-        assert not bot._dispatch_obligation_store._has_pending(
+        assert not bot._dispatch_obligation_store.has_pending(
             "$after-certified-other",
             DispatchCallbackKind.DECRYPTION_FAILURE,
         )
@@ -517,7 +515,7 @@ async def test_cold_history_drop_emits_operator_telemetry(tmp_path: Path) -> Non
             nio.TimelineEventProvenance.HISTORY,
         )
 
-    assert not bot._dispatch_obligation_store._has_pending(
+    assert not bot._dispatch_obligation_store.has_pending(
         event.event_id,
         DispatchCallbackKind.MESSAGE,
     )
@@ -2285,7 +2283,7 @@ async def test_dispatch_persistence_failure_rewinds_classic_cursor(
         message = "dispatch database unavailable"
         raise OSError(message)
 
-    monkeypatch.setattr(bot._dispatch_obligation_store, "_create_pending", fail_persist)
+    monkeypatch.setattr(bot._dispatch_obligation_store, "create_pending", fail_persist)
     admission = bot._dispatch_obligation_runner._admit_source_event
 
     with pytest.raises(
@@ -2316,7 +2314,7 @@ async def test_tokenless_dispatch_persistence_failure_rewinds_cursor(
         message = "dispatch database unavailable"
         raise OSError(message)
 
-    monkeypatch.setattr(bot._dispatch_obligation_store, "_create_pending", fail_persist)
+    monkeypatch.setattr(bot._dispatch_obligation_store, "create_pending", fail_persist)
     admission = bot._dispatch_obligation_runner._admit_source_event
 
     with pytest.raises(nio.CallbackNotAcceptedError, match="dispatch database unavailable"):
@@ -2357,7 +2355,7 @@ async def test_nio_replays_event_rejected_before_durable_dispatch_acceptance(
     response = _timeline_response(transport, room_id, event)
 
     create_attempts = 0
-    create_pending = bot._dispatch_obligation_store._create_pending
+    create_pending = bot._dispatch_obligation_store.create_pending
 
     def fail_first_create(obligation: object) -> object:
         nonlocal create_attempts
@@ -2368,7 +2366,7 @@ async def test_nio_replays_event_rejected_before_durable_dispatch_acceptance(
             raise error_type(message)
         return create_pending(cast("Any", obligation))
 
-    monkeypatch.setattr(bot._dispatch_obligation_store, "_create_pending", fail_first_create)
+    monkeypatch.setattr(bot._dispatch_obligation_store, "create_pending", fail_first_create)
     monkeypatch.setattr(bot._dispatch_obligation_runner, "_run_persisted", AsyncMock())
     client.add_event_admission_callback(bot._dispatch_obligation_runner._admit_source_event, nio.RoomMessageText)
     client.add_event_callback(
@@ -2394,7 +2392,7 @@ async def test_nio_replays_event_rejected_before_durable_dispatch_acceptance(
     await wait_for_background_tasks(timeout=1, owner=bot._runtime_view)
 
     assert create_attempts == 2
-    assert bot._dispatch_obligation_store._has_pending(
+    assert bot._dispatch_obligation_store.has_pending(
         event.event_id,
         DispatchCallbackKind.MESSAGE,
     )
@@ -2429,7 +2427,7 @@ async def test_nio_limited_recovery_caches_history_before_cold_fence(tmp_path: P
             end="p_gap_start",
         ),
     )
-    turn_callback = AsyncMock(return_value=_DispatchCallbackResult.SUCCEEDED)
+    turn_callback = AsyncMock(return_value=DispatchCallbackResult.SUCCEEDED)
     callbacks = cast("dict[DispatchCallbackKind, Any]", bot._dispatch_obligation_runner.callbacks)
     callbacks[DispatchCallbackKind.MESSAGE] = turn_callback
     callbacks[DispatchCallbackKind.MEDIA] = turn_callback
@@ -2574,10 +2572,10 @@ async def test_nio_rejects_event_when_existing_dispatch_payload_is_corrupt(
     with pytest.raises(nio.CallbackNotAcceptedError) as exc_info:
         await client.receive_response(response)
 
-    assert isinstance(exc_info.value.__cause__, _DispatchObligationCorruptionError)
+    assert isinstance(exc_info.value.__cause__, DispatchObligationCorruptionError)
     recovery = cast("Any", client)._recovery
     assert event.event_id not in recovery.completed.get(room_id, {})
-    assert bot._dispatch_obligation_store._has_pending(
+    assert bot._dispatch_obligation_store.has_pending(
         event.event_id,
         DispatchCallbackKind.MESSAGE,
     )
@@ -2643,7 +2641,7 @@ async def test_nio_accepts_late_non_acceptance_without_live_replay(
     await client.receive_response(response)
 
     assert callback_attempts == 1
-    assert bot._dispatch_obligation_store._has_pending(
+    assert bot._dispatch_obligation_store.has_pending(
         event.event_id,
         DispatchCallbackKind.MESSAGE,
     )
@@ -2677,7 +2675,7 @@ async def test_swallowed_dispatch_persistence_failure_cannot_certify_response(
         message = "dispatch database unavailable"
         raise OSError(message)
 
-    monkeypatch.setattr(bot._dispatch_obligation_store, "_create_pending", fail_persist)
+    monkeypatch.setattr(bot._dispatch_obligation_store, "create_pending", fail_persist)
     admission = bot._dispatch_obligation_runner._admit_source_event
     with pytest.raises(
         nio.CallbackNotAcceptedError,
@@ -2853,14 +2851,14 @@ async def test_dispatch_creation_drains_repeated_cancellation_before_rewind(
     bot._sync_cache_trust.checkpoint = SyncCheckpoint("s_before_cancel")
     create_started = threading.Event()
     release_create = threading.Event()
-    original_create = bot._dispatch_obligation_store._create_pending
+    original_create = bot._dispatch_obligation_store.create_pending
 
     def blocking_create(obligation: object) -> object:
         create_started.set()
         assert release_create.wait(timeout=2)
         return original_create(obligation)  # type: ignore[arg-type]
 
-    monkeypatch.setattr(bot._dispatch_obligation_store, "_create_pending", blocking_create)
+    monkeypatch.setattr(bot._dispatch_obligation_store, "create_pending", blocking_create)
     run_persisted = AsyncMock()
     monkeypatch.setattr(bot._dispatch_obligation_runner, "_run_persisted", run_persisted)
     admission = bot._dispatch_obligation_runner._admit_source_event
@@ -2885,7 +2883,7 @@ async def test_dispatch_creation_drains_repeated_cancellation_before_rewind(
         await task
 
     assert not escaped_before_worker
-    assert bot._dispatch_obligation_store._has_pending(event.event_id, DispatchCallbackKind.MESSAGE)
+    assert bot._dispatch_obligation_store.has_pending(event.event_id, DispatchCallbackKind.MESSAGE)
     assert bot.client.next_batch == "s_before_cancel"
     run_persisted.assert_not_awaited()
 
@@ -2924,7 +2922,7 @@ async def test_dispatch_obligation_waits_for_terminal_turn_durability(tmp_path: 
         )
         try:
             await asyncio.sleep(0.05)
-            pending_before_durable_turn = bot._dispatch_obligation_store._has_pending(
+            pending_before_durable_turn = bot._dispatch_obligation_store.has_pending(
                 event.event_id,
                 DispatchCallbackKind.MESSAGE,
             )
@@ -2935,7 +2933,7 @@ async def test_dispatch_obligation_waits_for_terminal_turn_durability(tmp_path: 
 
     assert pending_before_durable_turn
     assert not task_done_before_durable_turn
-    assert not bot._dispatch_obligation_store._has_pending(
+    assert not bot._dispatch_obligation_store.has_pending(
         event.event_id,
         DispatchCallbackKind.MESSAGE,
     )
@@ -3004,10 +3002,10 @@ async def test_failed_coalesced_dispatch_returns_exact_source_to_durable_retry(t
     event = _text_event("$deferred-retry", "retry me", 1_000)
     retried = asyncio.Event()
 
-    async def recovered_callback(_room: nio.MatrixRoom, recovered_event: nio.Event) -> _DispatchCallbackResult:
+    async def recovered_callback(_room: nio.MatrixRoom, recovered_event: nio.Event) -> DispatchCallbackResult:
         assert recovered_event.event_id == event.event_id
         retried.set()
-        return _DispatchCallbackResult.SUCCEEDED
+        return DispatchCallbackResult.SUCCEEDED
 
     async def failing_dispatch(_batch: CoalescedBatch) -> None:
         msg = "coalesced dispatch failed"
@@ -3031,7 +3029,7 @@ async def test_failed_coalesced_dispatch_returns_exact_source_to_durable_retry(t
     await asyncio.wait_for(retried.wait(), timeout=1)
     await wait_for_background_tasks(timeout=1, owner=bot._runtime_view)
 
-    assert not bot._dispatch_obligation_store._has_pending(event.event_id, DispatchCallbackKind.MESSAGE)
+    assert not bot._dispatch_obligation_store.has_pending(event.event_id, DispatchCallbackKind.MESSAGE)
 
 
 @pytest.mark.parametrize(
@@ -3121,13 +3119,13 @@ async def test_lane_terminal_drop_returns_deferred_source_to_retry_owner(
     await asyncio.wait_for(slot.settled.wait(), timeout=1)
 
     if failure_mode == "readiness_none":
-        assert not runner.store._has_pending(event.event_id, DispatchCallbackKind.MESSAGE)
+        assert not runner.store.has_pending(event.event_id, DispatchCallbackKind.MESSAGE)
         assert not bot._coalescing_gate.has_pending_source_event(event.event_id)
         assert not runner._retry_keys
         assert runner._retry_task is None
         return
 
-    assert runner.store._has_pending(event.event_id, DispatchCallbackKind.MESSAGE)
+    assert runner.store.has_pending(event.event_id, DispatchCallbackKind.MESSAGE)
     assert not bot._coalescing_gate.has_pending_source_event(event.event_id)
     assert len(runner._retry_keys) == 1
     retry_key = next(iter(runner._retry_keys))

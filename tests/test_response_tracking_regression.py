@@ -119,7 +119,7 @@ class TestResponseTrackingRegression:
         mock_room.room_id = test_room_id
 
         # Process command first time
-        await bot._turn_controller._execute_command(
+        await bot._command_turn_executor.execute(
             mock_room,
             command_event,
             "@user:localhost",
@@ -143,7 +143,7 @@ class TestResponseTrackingRegression:
         # Process same command again (simulating restart)
         handled_turn = bot._turn_store.get_turn_record(command_event.event_id)
         assert handled_turn is not None
-        await bot._turn_controller._execute_command(
+        await bot._command_turn_executor.execute(
             mock_room,
             command_event,
             "@user:localhost",
