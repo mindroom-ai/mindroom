@@ -999,7 +999,7 @@ async def test_voice_and_text_followups_during_streaming_coalesce_in_receive_ord
             patch("mindroom.turn_controller.interactive.handle_text_response", new=AsyncMock(return_value=None)),
             patch("mindroom.ingress_validation.is_authorized_sender", return_value=True),
         ):
-            reservation_owner = bot._turn_controller._reserve_prompt_ingress_order(room, "@user:example.com")
+            reservation_owner = bot._turn_controller.reserve_prompt_ingress_order(room, "@user:example.com")
             await bot._turn_controller._enqueue_for_dispatch(
                 streaming_event,
                 room,
@@ -1424,7 +1424,7 @@ async def test_trusted_router_visible_voice_echo_is_display_only(mock_home_bot: 
         patch.object(bot._turn_controller, "_dispatch_text_message", new=AsyncMock()) as mock_dispatch,
         patch("mindroom.turn_controller.interactive.handle_text_response", new=AsyncMock(return_value=None)),
     ):
-        reservation_owner = bot._turn_controller._reserve_prompt_ingress_order(room, "@user:example.com")
+        reservation_owner = bot._turn_controller.reserve_prompt_ingress_order(room, "@user:example.com")
         await bot._turn_controller._dispatch_prepared_text_like_ingress(
             room=room,
             prepared_event=echo_event,
@@ -1464,7 +1464,7 @@ async def test_forged_visible_voice_echo_marker_still_dispatches(mock_home_bot: 
         patch.object(bot._turn_controller, "_dispatch_text_message", new=AsyncMock()) as mock_dispatch,
         patch("mindroom.turn_controller.interactive.handle_text_response", new=AsyncMock(return_value=None)),
     ):
-        reservation_owner = bot._turn_controller._reserve_prompt_ingress_order(room, "@user:example.com")
+        reservation_owner = bot._turn_controller.reserve_prompt_ingress_order(room, "@user:example.com")
         await bot._turn_controller._dispatch_prepared_text_like_ingress(
             room=room,
             prepared_event=forged_event,

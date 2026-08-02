@@ -19,10 +19,8 @@ from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.config.plugin import PluginEntryConfig
 from mindroom.constants import SOURCE_KIND_KEY
-from mindroom.dispatch_obligations import (
-    DispatchCallbackKind,
-    _DispatchObligation,
-)
+from mindroom.dispatch_obligations import DispatchCallbackKind
+from mindroom.dispatch_obligations.storage import DispatchObligation
 from mindroom.hooks import (
     EVENT_AGENT_STARTED,
     EVENT_AGENT_STOPPED,
@@ -411,8 +409,8 @@ async def test_pending_room_lifecycle_does_not_admit_call_manager_mutation(tmp_p
         },
     )
     assert isinstance(membership_event, nio.RoomMemberEvent)
-    bot._dispatch_obligation_store._create_pending(
-        _DispatchObligation(
+    bot._dispatch_obligation_store.create_pending(
+        DispatchObligation(
             principal_id=bot._dispatch_obligation_store.principal_id,
             entity_name=bot._dispatch_obligation_store.entity_name,
             source_event_id=membership_event.event_id,

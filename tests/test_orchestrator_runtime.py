@@ -167,7 +167,7 @@ class TestAgentBot(AgentBotTestBase):
             del send
 
         server = _SignalAwareUvicornServer(
-            uvicorn.Config(app, host="0.0.0.0", port=0, lifespan="off"),  # noqa: S104
+            uvicorn.Config(app, host="0.0.0.0", port=0, lifespan="off", ws="websockets-sansio"),  # noqa: S104
             asyncio.Event(),
         )
         server.config.load()
@@ -205,7 +205,7 @@ class TestAgentBot(AgentBotTestBase):
                 set_api_server_address("127.0.0.1", 8765)
 
         with (
-            patch("mindroom.orchestrator.uvicorn.Config", return_value=object()),
+            patch("mindroom.orchestrator.uvicorn.Config", return_value=object()) as mock_uvicorn_config,
             patch("mindroom.orchestrator._SignalAwareUvicornServer", ReturningServer),
             patch("mindroom.api.main.initialize_api_app"),
             patch("mindroom.api.main.bind_orchestrator_knowledge_refresh_scheduler"),
@@ -220,6 +220,13 @@ class TestAgentBot(AgentBotTestBase):
                 shutdown_requested=asyncio.Event(),
             )
 
+        mock_uvicorn_config.assert_called_once_with(
+            ANY,
+            host="127.0.0.1",
+            port=0,
+            log_level="info",
+            ws="websockets-sansio",
+        )
         mock_error.assert_called_once()
         assert mock_error.call_args.args == ("fatal_embedded_api_server_exit",)
         assert get_api_server_address() is None

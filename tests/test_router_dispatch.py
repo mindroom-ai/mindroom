@@ -784,11 +784,12 @@ class TestAgentBot(AgentBotTestBase):
             tmp_path,
         )
         bot = AgentBot(agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        _wrap_extracted_collaborators(bot)
         bot.client = AsyncMock()
         _set_turn_store_tracker(bot, MagicMock())
         send_response = AsyncMock(return_value="$handoff")
         install_send_response_mock(bot, send_response)
-        bot._turn_controller._responder_candidates_for_room = AsyncMock(
+        bot._turn_policy.responder_candidates_for_room = AsyncMock(
             return_value=[entity_ids(config, runtime_paths_for(config))["general"]],
         )
 
@@ -832,9 +833,10 @@ class TestAgentBot(AgentBotTestBase):
             tmp_path,
         )
         bot = AgentBot(agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        _wrap_extracted_collaborators(bot)
         bot.client = AsyncMock()
         install_send_response_mock(bot, AsyncMock(return_value=None))
-        bot._turn_controller._responder_candidates_for_room = AsyncMock(
+        bot._turn_policy.responder_candidates_for_room = AsyncMock(
             return_value=[entity_ids(config, runtime_paths_for(config))["general"]],
         )
         room = nio.MatrixRoom(room_id="!test:localhost", own_user_id=agent_user.user_id)

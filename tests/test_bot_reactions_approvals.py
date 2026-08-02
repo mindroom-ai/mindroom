@@ -474,7 +474,7 @@ class TestAgentBot(AgentBotTestBase):
             try:
                 reaction_slots = bot._coalescing_gate.lanes.unsettled_slots()
                 assert reaction_slots
-                later_owner = bot._turn_controller._reserve_prompt_ingress_order(room, "@user:localhost")
+                later_owner = bot._turn_controller.reserve_prompt_ingress_order(room, "@user:localhost")
                 try:
                     assert reaction_slots[0].receipt_time < later_owner.slot.receipt_time
                 finally:
@@ -1215,8 +1215,8 @@ class TestAgentBot(AgentBotTestBase):
 
         with (
             patch.object(
-                unwrap_extracted_collaborator(bot._turn_controller),
-                "finalize_user_stop",
+                bot._user_stop_reconciler,
+                "finalize",
                 new=AsyncMock(side_effect=failure),
             ),
             pytest.raises(RuntimeError, match="crash after stop reaction side effect"),
@@ -1225,7 +1225,7 @@ class TestAgentBot(AgentBotTestBase):
         await _cancel_dispatch_retry(bot)
         pending = bot._dispatch_obligation_store.pending()
         assert pending[0].semantic_consumer is DispatchSemanticConsumer.STOP_REACTION
-        stop_receipt_order = bot._dispatch_obligation_store._receipt_order(pending[0].key)
+        stop_receipt_order = bot._dispatch_obligation_store.receipt_order(pending[0].key)
 
         restarted = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
         restarted.client = make_matrix_client_mock()
@@ -1272,8 +1272,8 @@ class TestAgentBot(AgentBotTestBase):
         with (
             patch.object(bot.stop_manager, "can_handle_stop_reaction", new=MagicMock(return_value=True)),
             patch.object(
-                unwrap_extracted_collaborator(bot._turn_controller),
-                "finalize_user_stop",
+                bot._user_stop_reconciler,
+                "finalize",
                 new=AsyncMock(side_effect=RuntimeError("crash after stop claim")),
             ),
             pytest.raises(RuntimeError, match="crash after stop claim"),
@@ -1281,7 +1281,7 @@ class TestAgentBot(AgentBotTestBase):
             await bot._dispatch_obligation_runner.dispatch(room, event, DispatchCallbackKind.REACTION)
         await _cancel_dispatch_retry(bot)
         pending = bot._dispatch_obligation_store.pending()
-        stop_receipt_order = bot._dispatch_obligation_store._receipt_order(pending[0].key)
+        stop_receipt_order = bot._dispatch_obligation_store.receipt_order(pending[0].key)
 
         restarted = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
         restarted.client = make_matrix_client_mock()
@@ -1325,8 +1325,8 @@ class TestAgentBot(AgentBotTestBase):
 
         with (
             patch.object(
-                unwrap_extracted_collaborator(bot._turn_controller),
-                "finalize_user_stop",
+                bot._user_stop_reconciler,
+                "finalize",
                 new=AsyncMock(side_effect=RuntimeError("crash after stop claim")),
             ),
             pytest.raises(RuntimeError, match="crash after stop claim"),
@@ -1334,7 +1334,7 @@ class TestAgentBot(AgentBotTestBase):
             await bot._dispatch_obligation_runner.dispatch(room, event, DispatchCallbackKind.REACTION)
         await _cancel_dispatch_retry(bot)
         pending = bot._dispatch_obligation_store.pending()
-        stop_receipt_order = bot._dispatch_obligation_store._receipt_order(pending[0].key)
+        stop_receipt_order = bot._dispatch_obligation_store.receipt_order(pending[0].key)
         bot._turn_store.record_turn_durably(
             with_user_stop(
                 pending_turn,
@@ -1395,7 +1395,7 @@ class TestAgentBot(AgentBotTestBase):
         await _cancel_dispatch_retry(bot)
 
         pending = bot._dispatch_obligation_store.pending()
-        stop_receipt_order = bot._dispatch_obligation_store._receipt_order(pending[0].key)
+        stop_receipt_order = bot._dispatch_obligation_store.receipt_order(pending[0].key)
         stopped_record = bot._turn_store.get_turn_record("$source")
         assert stopped_record is not None
         assert stopped_record.completed is True
@@ -1522,9 +1522,9 @@ class TestAgentBot(AgentBotTestBase):
         )
         live_task = asyncio.create_task(asyncio.Event().wait())
         bot.stop_manager.set_current("$response-a", target, live_task)
-        controller = unwrap_extracted_collaborator(bot._turn_controller)
+        reconciler = bot._user_stop_reconciler
         turn_store = unwrap_extracted_collaborator(bot._turn_store)
-        original_record_user_stop = controller._record_user_stop
+        original_record_user_stop = reconciler._record
         alias_claimed = False
 
         async def record_after_alias_claim(
@@ -1552,13 +1552,13 @@ class TestAgentBot(AgentBotTestBase):
         on_current_stop_finalized = AsyncMock()
         try:
             with (
-                patch.object(controller, "_record_user_stop", side_effect=record_after_alias_claim),
+                patch.object(reconciler, "_record", side_effect=record_after_alias_claim),
                 patch(
                     "mindroom.delivery_gateway.DeliveryGateway.finalize_user_stopped_response",
                     new=AsyncMock(return_value=True),
                 ),
             ):
-                assert await controller.finalize_user_stop(
+                assert await reconciler.finalize(
                     "$response-a",
                     2,
                     on_current_stop_finalized,

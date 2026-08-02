@@ -27,7 +27,11 @@ from mindroom.commands.config_commands import (
     apply_config_change,
     handle_config_command,
 )
-from mindroom.commands.config_confirmation import _add_confirmation_reactions, handle_confirmation_reaction
+from mindroom.commands.config_confirmation import (
+    ConfigConfirmationContext,
+    _add_confirmation_reactions,
+    handle_confirmation_reaction,
+)
 from mindroom.commands.handler import CommandHandlerContext, handle_command
 from mindroom.commands.parsing import Command, CommandType, _CommandParser
 from mindroom.config.auth import AuthorizationConfig
@@ -72,6 +76,16 @@ def _pending_config_change(
         old_value=True,
         new_value=False,
         requester=requester,
+    )
+
+
+def _confirmation_context(bot: SimpleNamespace) -> ConfigConfirmationContext:
+    """Build the narrow confirmation boundary used by production reaction dispatch."""
+    return ConfigConfirmationContext(
+        runtime=bot,
+        runtime_paths=bot.runtime_paths,
+        build_message_target=bot._conversation_resolver.build_message_target,
+        delivery_gateway=bot._delivery_gateway,
     )
 
 
@@ -877,7 +891,7 @@ async def test_handle_confirmation_reaction_respects_disabled_config_command(tmp
         ),
         patch("mindroom.commands.config_commands.apply_config_change", new_callable=AsyncMock) as mock_apply,
     ):
-        await handle_confirmation_reaction(bot, room, event)
+        await handle_confirmation_reaction(_confirmation_context(bot), room, event)
 
     mock_apply.assert_not_awaited()
     bot._delivery_gateway.send_text.assert_awaited_once_with(
@@ -899,7 +913,7 @@ async def test_handle_confirmation_reaction_requires_current_admin(tmp_path: Pat
         config=SimpleNamespace(
             authorization=_handler_authorization(
                 config_command_enabled=True,
-                global_users=["@other-admin:example.org"],
+                global_users=["@admin:example.org"],
             ),
         ),
         runtime_paths=resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path),
@@ -911,6 +925,11 @@ async def test_handle_confirmation_reaction_requires_current_admin(tmp_path: Pat
     room = SimpleNamespace(room_id="!room:example.org")
     event = SimpleNamespace(event_id="$reaction", sender="@admin:example.org", key="✅", reacts_to="$preview")
     pending_change = _pending_config_change()
+    confirmation_context = _confirmation_context(bot)
+    bot.config.authorization = _handler_authorization(
+        config_command_enabled=True,
+        global_users=["@other-admin:example.org"],
+    )
 
     with (
         patch.dict(config_confirmation._pending_changes, {"$preview": pending_change}, clear=True),
@@ -929,7 +948,7 @@ async def test_handle_confirmation_reaction_requires_current_admin(tmp_path: Pat
         ),
         patch("mindroom.commands.config_commands.apply_config_change", new_callable=AsyncMock) as mock_apply,
     ):
-        await handle_confirmation_reaction(bot, room, event)
+        await handle_confirmation_reaction(confirmation_context, room, event)
 
     mock_apply.assert_not_awaited()
     bot._delivery_gateway.send_text.assert_awaited_once_with(
@@ -991,7 +1010,7 @@ async def test_handle_confirmation_reaction_accepts_alias_backed_requester(tmp_p
             return_value="✅ Configuration updated successfully.",
         ) as mock_apply,
     ):
-        await handle_confirmation_reaction(bot, room, event)
+        await handle_confirmation_reaction(_confirmation_context(bot), room, event)
 
     mock_apply.assert_awaited_once_with(
         "defaults.markdown",
@@ -1074,8 +1093,8 @@ async def test_confirmation_reactions_serialize_one_decision(
         ) as apply_change,
     ):
         await asyncio.gather(
-            handle_confirmation_reaction(bot, room, confirm),
-            handle_confirmation_reaction(bot, room, cancel),
+            handle_confirmation_reaction(_confirmation_context(bot), room, confirm),
+            handle_confirmation_reaction(_confirmation_context(bot), room, cancel),
         )
 
     apply_change.assert_awaited_once()
@@ -1143,7 +1162,7 @@ async def test_checkpointed_confirmation_ignores_changed_authorization(
             return_value="✅ Configuration updated successfully.",
         ) as apply_change,
     ):
-        await handle_confirmation_reaction(bot, room, event)
+        await handle_confirmation_reaction(_confirmation_context(bot), room, event)
 
     apply_change.assert_awaited_once()
     request = bot._delivery_gateway.send_text.await_args.args[0]
@@ -1240,11 +1259,11 @@ async def test_confirmation_send_failure_keeps_replay_state(
         ) as apply_change,
     ):
         with pytest.raises(RuntimeError, match="Failed to send config confirmation response"):
-            await handle_confirmation_reaction(bot, room, event)
+            await handle_confirmation_reaction(_confirmation_context(bot), room, event)
         assert not config_confirmation._pending_change_locks
 
         bot._delivery_gateway.send_text = AsyncMock(return_value="$response")
-        await handle_confirmation_reaction(bot, room, event)
+        await handle_confirmation_reaction(_confirmation_context(bot), room, event)
 
     apply_change.assert_awaited_once()
     remove_matrix.assert_awaited_once_with(bot.client, room_id, event_id)
@@ -1303,7 +1322,7 @@ async def test_ambiguous_config_execution_reports_uncertainty_without_reapplying
         ),
         patch("mindroom.commands.config_commands.apply_config_change", new_callable=AsyncMock) as apply_change,
     ):
-        await handle_confirmation_reaction(bot, room, event)
+        await handle_confirmation_reaction(_confirmation_context(bot), room, event)
 
     apply_change.assert_not_awaited()
     request = bot._delivery_gateway.send_text.await_args.args[0]
@@ -1396,7 +1415,7 @@ async def test_confirmation_recovery_adopts_untracked_visible_response(
         ) as remove_matrix,
         patch("mindroom.commands.config_commands.apply_config_change", new_callable=AsyncMock) as apply_change,
     ):
-        await handle_confirmation_reaction(bot, room, event)
+        await handle_confirmation_reaction(_confirmation_context(bot), room, event)
 
     apply_change.assert_not_awaited()
     bot._delivery_gateway.send_text.assert_not_awaited()

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-from dataclasses import replace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -1169,7 +1168,7 @@ async def test_dispatch_text_message_runs_message_received_before_command_parsin
     bot._conversation_resolver.extract_dispatch_context = AsyncMock(
         return_value=dispatch_context_result(_dispatch_context(bot)),
     )
-    bot._turn_controller._execute_command = AsyncMock()
+    bot._command_turn_executor.execute_if_owned = AsyncMock(return_value=True)
     turn_store = unwrap_extracted_collaborator(bot._turn_store)
     turn_store.record_turn = MagicMock()
 
@@ -1179,7 +1178,7 @@ async def test_dispatch_text_message_runs_message_received_before_command_parsin
     )
 
     assert hook_calls == ["called"]
-    bot._turn_controller._execute_command.assert_not_awaited()
+    bot._command_turn_executor.execute_if_owned.assert_not_awaited()
     turn_store.record_turn.assert_not_called()
 
 
@@ -1211,10 +1210,7 @@ async def test_prepare_dispatch_compacts_all_source_events_when_hooks_suppress_b
     turn_store = unwrap_extracted_collaborator(bot._turn_store)
     turn_store.record_turn = MagicMock()
     settle_ignored = AsyncMock()
-    bot._turn_controller.deps = replace(
-        bot._turn_controller.deps,
-        settle_ignored_dispatch_sources=settle_ignored,
-    )
+    replace_turn_controller_deps(bot, settle_ignored_sources=settle_ignored)
 
     dispatch = await bot._turn_controller._prepare_dispatch(
         room,
@@ -1852,7 +1848,7 @@ async def test_first_hop_hook_dispatch_sidecar_preview_skips_interactive_answer_
             new=AsyncMock(return_value=None),
         ) as mock_handle_text_response:
             assert isinstance(sidecar_event, nio.RoomMessageFile)
-            reservation_owner = bot._turn_controller._reserve_prompt_ingress_order(
+            reservation_owner = bot._turn_controller.reserve_prompt_ingress_order(
                 room,
                 "@mindroom_router:localhost",
             )
@@ -1925,7 +1921,7 @@ async def test_deep_hook_dispatch_sidecar_preview_stops_before_interactive_or_di
         new=AsyncMock(return_value=None),
     ) as mock_handle_text_response:
         assert isinstance(sidecar_event, nio.RoomMessageFile)
-        reservation_owner = bot._turn_controller._reserve_prompt_ingress_order(
+        reservation_owner = bot._turn_controller.reserve_prompt_ingress_order(
             room,
             "@mindroom_router:localhost",
         )

@@ -496,7 +496,7 @@ class TestRoutingRegression:
         mock_suggest_responder.assert_awaited_once()
         content = router_bot.client.room_send.await_args.kwargs["content"]
         assert content["body"] == "@mindroom_healthy:localhost could you help with this?"
-        assert not router_bot._dispatch_obligation_store._has_pending(
+        assert not router_bot._dispatch_obligation_store.has_pending(
             event.event_id,
             DispatchCallbackKind.MESSAGE,
         )
@@ -516,7 +516,7 @@ class TestRoutingRegression:
 
         mock_suggest_responder.assert_awaited_once()
         router_bot.client.room_send.assert_not_awaited()
-        assert router_bot._dispatch_obligation_store._has_pending(
+        assert router_bot._dispatch_obligation_store.has_pending(
             blocked_event.event_id,
             DispatchCallbackKind.MESSAGE,
         )
@@ -534,7 +534,7 @@ class TestRoutingRegression:
 
         content = router_bot.client.room_send.await_args.kwargs["content"]
         assert content["body"] == "@mindroom_stuck:localhost could you help with this?"
-        assert not router_bot._dispatch_obligation_store._has_pending(
+        assert not router_bot._dispatch_obligation_store.has_pending(
             blocked_event.event_id,
             DispatchCallbackKind.MESSAGE,
         )

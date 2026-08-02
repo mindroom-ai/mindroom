@@ -1373,7 +1373,7 @@ class TestCommandThreadContextRoomMode:
                 return_value=("task123", "scheduled"),
             ) as mock_schedule,
         ):
-            await bot._turn_controller._execute_command(
+            await bot._command_turn_executor.execute(
                 room=room,
                 event=event,
                 requester_user_id="@user:localhost",
@@ -1433,7 +1433,7 @@ class TestCommandThreadContextRoomMode:
                 return_value=("task123", "scheduled"),
             ) as mock_schedule,
         ):
-            await bot._turn_controller._execute_command(
+            await bot._command_turn_executor.execute(
                 room=room,
                 event=event,
                 requester_user_id="@user:localhost",
