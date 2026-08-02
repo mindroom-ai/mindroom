@@ -16,7 +16,7 @@ Every commit must preserve the focused behavior under change, and the completed 
 The inbound turn pipeline is the hardest part of MindRoom to understand because one logical turn crosses callback durability, trust validation, requester resolution, receipt-order lanes, conversation resolution, coalescing, policy, response locking, provider attempts, Matrix delivery, and durable settlement.
 The local modules are generally well-factored, but the handoffs between them are difficult to reconstruct.
 
-The highest-cost ambiguities are:
+The highest-cost ambiguities are the following.
 
 1. Receipt ordering, coalescing, and response serialization use different identities and provide different guarantees.
 2. Ordinary text is normalized before coalescing and then normalized again during dispatch because the queue retains the raw event rather than the prepared result.
@@ -77,8 +77,8 @@ Absolute file lengths are tracking metrics rather than merge gates.
 ### Ordering identities
 
 Introduce a frozen `ReceiptLaneKey(room_id, physical_sender_id)` in place of the private bare tuple.
-Continue using `CoalescingKey(room_id, thread_id, requester_id)` for ordinary requester-scoped batching.
-Replace the `__mindroom_active_follow_up__` requester-string prefix with an explicit batching-owner variant inside or beside `CoalescingKey`.
+Replace the requester string in `CoalescingKey` with a discriminated `CoalescingOwner` union containing `RequesterCoalescingOwner(requester_user_id)` and `ActiveFollowUpCoalescingOwner`.
+Construct every coalescing key through one `derive_coalescing_key(room_id, thread_id, owner)` function so requester and active-follow-up owners cannot compare equal even when a requester ID resembles the old reserved prefix.
 Continue using `MessageTarget` as the delivery identity and derive the response-lifecycle lock key through one method on that type or its owner.
 
 These identities remain separate because they protect different invariants.
@@ -86,11 +86,13 @@ The refactor names and centralizes their derivation but does not merge their mec
 
 ### Prepared ingress
 
-Evolve `PreparedTextEvent`, `PendingEvent`, and `DispatchHandoff` into one authoritative prepared-ingress path rather than adding a parallel family of stage objects.
-The source-level prepared value must retain the raw Matrix protocol reference where replies, edits, encryption, or cache operations require it.
+Rename and evolve the source-level `PreparedTextEvent` into one frozen `PreparedIngress` type that is the sole owner of the canonical prepared value.
+`PreparedIngress` must retain the raw Matrix protocol reference where replies, edits, encryption, or cache operations require it.
 It must also retain physical sender, effective requester, trusted original sender, source event ID, normalized prompt, trust evidence, callback settlement source kind, policy source kind, hook source, recovery flags, and opaque claim metadata as named nested values.
 
-Coalescing must retain a tuple of per-source prepared values.
+`PendingEvent` must reference one `PreparedIngress` plus queue-local mutable lifecycle state without copying canonical fields.
+`CoalescedBatch` must retain a tuple of `PreparedIngress` values plus only derived batch presentation and ownership state.
+`DispatchHandoff` must transport those canonical values and derived batch facts without duplicating normalized or attribution fields.
 The merged prompt is a presentation derived from those sources, not a replacement for their identities.
 Fail-closed requester attribution and persisted replay reconstruction must continue to use per-source evidence.
 
@@ -105,7 +107,7 @@ The delivery contract must continue to distinguish physical event existence, pla
 
 ### Durable ordinary-turn sequence
 
-The ordinary message and media path is:
+The ordinary message and media path follows this sequence.
 
 ```text
 dispatch obligation pending
@@ -114,8 +116,9 @@ dispatch obligation pending
   -> normalization and ingress admission under that claim
   -> callback obligation deferred while downstream owns work
   -> durable pending TurnStore record when response ownership begins
-  -> durable terminal TurnStore record
-  -> TurnSettlementRetry settles or tombstones the deferred obligation
+  -> durable terminal TurnStore record notifies TurnSettlementRetry
+  -> TurnSettlementRetry queues source IDs and calls obligation-storage settlement
+  -> obligation storage verifies terminal truth and writes the tombstone
 ```
 
 The pending claim must be acquired before normalization and released on every non-admission or failure path.
@@ -168,15 +171,16 @@ Do not require command journal milestones or other mid-turn durable records to f
 
 The current implementation passes every characterization test.
 The LOC manifest, terminal-writer inventory, and method-ownership ledger are reviewed before numeric reduction goals are used.
-`tach check --dependencies --interfaces` passes.
+`uv run tach check --dependencies --interfaces` passes.
 
 ## Phase 1: Re-ground the Ingress Types and Ordering Keys
 
 ### Changes
 
 - Replace the private lane tuple with `ReceiptLaneKey`.
-- Replace the active-follow-up requester prefix with an explicit batching-owner variant.
-- Define the authoritative prepared-ingress shape by evolving `PreparedTextEvent`, `PendingEvent`, `CoalescedBatch`, and `DispatchHandoff`.
+- Replace the active-follow-up requester prefix with the discriminated `CoalescingOwner` union and the sole `derive_coalescing_key` constructor.
+- Rename and evolve `PreparedTextEvent` into the sole canonical `PreparedIngress` value.
+- Reduce `PendingEvent`, `CoalescedBatch`, and `DispatchHandoff` to wrappers that carry `PreparedIngress` values plus only their own queue, batch, or handoff state.
 - Preserve mutable claim-closing and busy-rerouting behavior until explicit functional replacements exist.
 - Map each changed type to its predecessor and identify the later commit in the same pull request that deletes any temporary predecessor.
 - Preserve `CoalescingKey`, `MessageTarget`, `DispatchObligation`, `FinalDeliveryOutcome`, and `TurnRecord` as existing authorities.
@@ -257,7 +261,7 @@ Remove 300 to 700 lines.
 - Same sender across two rooms uses two receipt lanes.
 - Two requesters in one conversation batch independently and serialize delivery through one target.
 - Room-level and threaded targets derive the same lifecycle identity used by cancellation and queued notices.
-- Active follow-up ownership cannot collide with a real requester ID.
+- `ActiveFollowUpCoalescingOwner` cannot equal `RequesterCoalescingOwner`, including when the requester ID contains the old reserved prefix.
 
 ### Exit gate
 
@@ -424,9 +428,9 @@ Between 100 lines added and 150 lines removed.
 ### Exit gate
 
 Focused and full tests pass.
-`tach check --dependencies --interfaces` passes.
+`uv run tach check --dependencies --interfaces` passes.
 The import-graph test passes without broadening heavy dependency allowlists merely for the refactor.
-`pre-commit run --all-files` passes in a fully synchronized environment.
+`uv run pre-commit run --all-files` passes in a fully synchronized environment.
 The architecture document describes the code that exists.
 
 ## Single Pull Request Execution Sequence
