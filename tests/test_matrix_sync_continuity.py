@@ -409,6 +409,7 @@ async def test_classic_unrecovered_gap_rejects_checkpoint(
     """Classic next_batch cannot certify while nio reports an open recovery gap."""
     bot = _agent_bot(tmp_path)
     bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
+    bot.client.next_batch = "s_with_gap"
     bot._first_sync_done = True
     response = MagicMock(spec=nio.SyncResponse)
     response.next_batch = "s_with_gap"
@@ -428,7 +429,7 @@ async def test_classic_unrecovered_gap_rejects_checkpoint(
         await bot._on_sync_response(response)
 
     assert load_sync_checkpoint(tmp_path, bot.agent_name) is None
-    assert bot.client.next_batch is None
+    assert bot.client.next_batch == "s_with_gap"
 
 
 @pytest.mark.asyncio
@@ -1982,14 +1983,13 @@ async def test_cancelled_cache_write_rewinds_established_cursor(tmp_path: Path) 
     bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
     bot.client.next_batch = "s_after"
     bot._first_sync_done = True
-    bot._sync_cache_trust.state = SyncTrustState.CERTIFIED
-    bot._sync_cache_trust.checkpoint = SyncCheckpoint("s_before")
     save_sync_token(
         tmp_path,
         bot.agent_name,
         "s_before",
         cache_generation=_CACHE_GENERATION,
     )
+    assert await bot._sync_cache_trust.prepare_startup() == "s_before"
     response = _sync_response("s_after")
 
     with (
@@ -2002,8 +2002,8 @@ async def test_cancelled_cache_write_rewinds_established_cursor(tmp_path: Path) 
     ):
         await bot._on_sync_response(response)
 
-    assert bot.client.next_batch is None
-    assert _load_sync_token_value(tmp_path, bot.agent_name) is None
+    assert bot.client.next_batch == "s_before"
+    assert _load_sync_token_value(tmp_path, bot.agent_name) == "s_before"
 
 
 @pytest.mark.asyncio

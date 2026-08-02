@@ -507,6 +507,69 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         )
 
     @pytest.mark.asyncio
+    async def test_limited_own_join_advances_then_next_delta_certifies(self, bot: AgentBot) -> None:
+        """NIO's own-join boundary must advance without licensing its limited checkpoint."""
+        room_id = "!test:localhost"
+        _save_certified_sync_token(bot, "s_before_join")
+        bot._runtime_view.mark_runtime_started()
+        assert await bot._sync_cache_trust.prepare_startup() == "s_before_join"
+        bot.client.next_batch = "s_after_join"
+        own_join = nio.RoomMemberEvent.from_dict(
+            {
+                "type": "m.room.member",
+                "event_id": "$own-join",
+                "sender": bot.agent_user.user_id,
+                "state_key": bot.agent_user.user_id,
+                "origin_server_ts": 1,
+                "content": {"membership": "join"},
+                "unsigned": {"prev_content": {"membership": "leave"}},
+            },
+        )
+        assert isinstance(own_join, nio.RoomMemberEvent)
+        response = self._sync_response(
+            {
+                room_id: nio.RoomInfo(
+                    timeline=nio.Timeline(
+                        events=[own_join],
+                        limited=True,
+                        prev_batch="p_before_join",
+                    ),
+                    state=[],
+                    ephemeral=[],
+                    account_data=[],
+                ),
+            },
+        )
+        response.next_batch = "s_after_join"
+
+        with patch.object(
+            bot._conversation_cache,
+            "cache_sync_timeline_for_certification",
+            AsyncMock(
+                return_value=SyncCacheWriteResult(
+                    complete=True,
+                    limited_room_ids=(room_id,),
+                ),
+            ),
+        ):
+            await self._run_sync_response_without_startup_side_effects(bot, response)
+
+        assert bot._sync_cache_trust.state is SyncTrustState.UNCERTAIN
+        assert bot.client.next_batch == "s_after_join"
+        assert _load_sync_token_value(bot.storage_path, bot.agent_name) == "s_before_join"
+
+        bot.client.next_batch = "s_after_open"
+        with patch.object(
+            bot._conversation_cache,
+            "cache_sync_timeline_for_certification",
+            AsyncMock(return_value=SyncCacheWriteResult(complete=True)),
+        ):
+            await self._run_sync_response_without_startup_side_effects(bot, self._sync_response({}))
+
+        assert bot._sync_cache_trust.state is SyncTrustState.CERTIFIED
+        assert _load_sync_token_value(bot.storage_path, bot.agent_name) == "s_after_open"
+
+    @pytest.mark.asyncio
     async def test_limited_sync_marks_room_stale_before_admitting_partial_events(self, bot: AgentBot) -> None:
         """The durable room stale marker must land before any partial timeline event is admitted."""
         room_id = "!room:localhost"
@@ -528,7 +591,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             self._sync_response({room_id: MagicMock(timeline=MagicMock(events=[message_event], limited=True))}),
         )
 
-        assert result.certified is False
+        assert result._certified is False
         assert result.limited_room_ids == (room_id,)
         assert result.errors == ()
         event_cache.mark_room_threads_gap.assert_awaited_once_with(
@@ -553,7 +616,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             self._sync_response({room_id: MagicMock(timeline=MagicMock(events=[], limited=True))}),
         )
 
-        assert result.certified is False
+        assert result._certified is False
         assert result.complete is False
         assert result.errors == (marker_error,)
         assert result.limited_room_ids == (room_id,)
@@ -609,7 +672,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             self._sync_response({room_id: MagicMock(timeline=MagicMock(events=[], limited=True))}),
         )
 
-        assert result.certified is False
+        assert result._certified is False
         assert result.complete is False
         assert result.runtime_available is False
         assert result.limited_room_ids == (room_id,)
@@ -668,7 +731,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         finally:
             await _close_bound_runtime_support(bot, support)
 
-        assert result.certified is False
+        assert result._certified is False
         assert result.limited_room_ids == (room_id,)
         assert result.errors == ()
         assert cached_event is not None
@@ -679,14 +742,14 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         assert thread_cache_rejection_reason(state_after) is not None
 
     @pytest.mark.asyncio
-    async def test_cache_failure_clears_token_then_later_success_saves_checkpoint(
+    async def test_cache_failure_preserves_retry_then_later_success_saves_checkpoint(
         self,
         bot: AgentBot,
     ) -> None:
-        """After cache uncertainty, later successful sync responses can save a checkpoint."""
+        """Cache uncertainty retains its retry cursor before a later successful response."""
         _save_certified_sync_token(bot, "s_before_failure")
         bot._runtime_view.mark_runtime_started()
-        bot._sync_cache_trust.state = SyncTrustState.PENDING
+        assert await bot._sync_cache_trust.prepare_startup() == "s_before_failure"
         bot._first_sync_done = True
         bot.client.next_batch = "s_after_failure"
         failed_result = SyncCacheWriteResult(complete=True, errors=(RuntimeError("cache failed"),))
@@ -698,7 +761,8 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         ):
             await self._run_sync_response_without_startup_side_effects(bot, self._sync_response({}))
 
-        assert _load_sync_token_value(bot.storage_path, bot.agent_name) is None
+        assert bot.client.next_batch == "s_before_failure"
+        assert _load_sync_token_value(bot.storage_path, bot.agent_name) == "s_before_failure"
 
         bot.client.next_batch = "s_after_recovery"
         with patch.object(

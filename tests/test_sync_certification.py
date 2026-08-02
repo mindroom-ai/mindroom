@@ -56,7 +56,27 @@ def test_recovered_limited_room_certifies_after_nio_callback_success() -> None:
 
     assert cache_result._unclassified_limited_room_ids == ()
     assert cache_result._has_recovery_obligation is False
-    assert cache_result.certified is True
+    assert cache_result._certified is True
+
+
+def test_own_join_boundary_advances_without_certifying_limited_checkpoint() -> None:
+    """NIO's own-join classification permits progress but waits for a clean delta."""
+    room_id = "!joined:localhost"
+    cache_result = SyncCacheWriteResult(
+        complete=True,
+        limited_room_ids=(room_id,),
+        no_recovery_needed_room_ids=frozenset({room_id}),
+    )
+
+    decision = certify_sync_response(
+        next_batch="s_after_join",
+        cache_result=cache_result,
+    )
+
+    assert cache_result._unclassified_limited_room_ids == ()
+    assert decision.state is SyncTrustState.UNCERTAIN
+    assert decision.reason == "limited_sync_join_boundary"
+    assert decision.reset_client_token is False
 
 
 def test_recovery_outcomes_fail_closed_for_unrecovered_and_unclassified_rooms() -> None:
@@ -73,28 +93,26 @@ def test_recovery_outcomes_fail_closed_for_unrecovered_and_unclassified_rooms() 
 
     assert cache_result._unclassified_limited_room_ids == (unclassified_room,)
     assert cache_result._has_recovery_obligation is True
-    assert cache_result.certified is False
+    assert cache_result._certified is False
 
 
 @pytest.mark.parametrize(
-    ("cache_result", "reason", "clear_saved_token"),
+    ("cache_result", "reason"),
     [
-        (SyncCacheWriteResult(complete=False), "cache_write_incomplete", True),
+        (SyncCacheWriteResult(complete=False), "cache_write_incomplete"),
         (
             SyncCacheWriteResult(complete=True, limited_room_ids=("!room:localhost",)),
             "limited_sync_timeline",
-            False,
         ),
-        (SyncCacheWriteResult(complete=True, errors=(RuntimeError("boom"),)), "cache_write_failed", True),
-        (SyncCacheWriteResult(complete=True, errors=(asyncio.CancelledError(),)), "cache_write_failed", True),
+        (SyncCacheWriteResult(complete=True, errors=(RuntimeError("boom"),)), "cache_write_failed"),
+        (SyncCacheWriteResult(complete=True, errors=(asyncio.CancelledError(),)), "cache_write_failed"),
     ],
 )
 def test_uncertain_sync_fails_closed(
     cache_result: SyncCacheWriteResult,
     reason: str,
-    clear_saved_token: bool,
 ) -> None:
-    """Limited, failed, incomplete, or cancelled cache writes must not save a token."""
+    """Local uncertainty must rewind without discarding the durable retry token."""
     decision = certify_sync_response(
         next_batch="s_next",
         cache_result=cache_result,
@@ -102,7 +120,7 @@ def test_uncertain_sync_fails_closed(
 
     assert decision.state is SyncTrustState.UNCERTAIN
     assert decision.checkpoint_to_save is None
-    assert decision.clear_saved_token is clear_saved_token
+    assert decision.clear_saved_token is False
     assert decision.reset_client_token is True
     assert decision.reason == reason
 
@@ -144,6 +162,7 @@ def test_sync_cache_write_diagnostics_explains_uncertainty() -> None:
         "cache_limited_room_count": 1,
         "cache_recovered_room_count": 0,
         "cache_unrecovered_room_count": 1,
+        "cache_no_recovery_needed_room_count": 0,
         "cache_unclassified_limited_room_count": 1,
         "cache_error_count": 1,
         "cache_runtime_available": False,
@@ -158,15 +177,15 @@ def test_sync_cache_write_diagnostics_explains_uncertainty() -> None:
     }
 
 
-def test_uncertainty_resets_client_token() -> None:
-    """An uncertified response should force nio off the ambiguous token."""
+def test_uncertainty_resets_client_token_without_clearing_retry() -> None:
+    """An uncertified response should rewind nio to the retained durable token."""
     decision = certify_sync_response(
         next_batch="s_next",
         cache_result=SyncCacheWriteResult(complete=False),
     )
 
     assert decision.state is SyncTrustState.UNCERTAIN
-    assert decision.clear_saved_token is True
+    assert decision.clear_saved_token is False
     assert decision.reset_client_token is True
 
 
@@ -201,7 +220,7 @@ def test_unrecovered_gap_preserves_positioned_continuity() -> None:
     assert decision.reason == "sync_recovery_incomplete"
     assert decision.checkpoint_to_save is None
     assert decision.clear_saved_token is False
-    assert decision.reset_client_token is True
+    assert decision.reset_client_token is False
 
 
 def test_missing_next_batch_fails_closed() -> None:
@@ -213,7 +232,8 @@ def test_missing_next_batch_fails_closed() -> None:
 
     assert decision.state is SyncTrustState.UNCERTAIN
     assert decision.reason == "missing_next_batch"
-    assert decision.clear_saved_token is True
+    assert decision.clear_saved_token is False
+    assert decision.reset_client_token is True
 
 
 def test_unknown_pos_clears_saved_and_client_token() -> None:

@@ -60,6 +60,7 @@ from mindroom.matrix.sync_certification import (
 )
 from mindroom.matrix.sync_continuity import SyncContinuityStore
 from mindroom.matrix.sync_loop import run_matrix_sync_forever, sliding_own_membership_sets
+from mindroom.matrix.sync_recovery_classification import classic_no_recovery_needed_room_ids
 from mindroom.matrix.users import AgentMatrixUser, login_agent_user
 from mindroom.matrix_rtc.call_manager import CallManager, maybe_build_call_manager
 from mindroom.memory import store_conversation_memory
@@ -1259,36 +1260,38 @@ class AgentBot:
         """Apply one cache-certification rewind to the Matrix client cursor."""
         if not decision.reset_client_token:
             return
-        if self.client is not None:
-            cast("Any", self.client).next_batch = self._sync_cache_trust.retry_token()
+        self._rewind_client_to_retry_token()
+
+    def _rewind_client_to_retry_token(self) -> tuple[bool, bool]:
+        """Move the Matrix client to the exact generation-safe retry cursor."""
+        client = self.client
+        retry_token = self._sync_cache_trust.retry_token()
+        if client is None or cast("Any", client).next_batch == retry_token:
+            return False, retry_token is not None
+        cast("Any", client).next_batch = retry_token
+        return True, retry_token is not None
 
     def _reconcile_classic_sync_cursor_after_loop_exit(self) -> None:
         """Rewind a response nio applied but never delivered for certification."""
-        client = self.client
-        if client is None or self.config.matrix_sync.mode != "classic":
+        if self.config.matrix_sync.mode != "classic":
             return
-        retry_token = self._sync_cache_trust.retry_token()
-        if cast("Any", client).next_batch == retry_token:
+        rewound, has_retry_token = self._rewind_client_to_retry_token()
+        if not rewound:
             return
         self._sync_cache_trust.reject_response_before_certification()
-        cast("Any", client).next_batch = retry_token
         self.logger.warning(
             "matrix_sync_receive_loop_exit_rewound_uncertified_cursor",
-            has_retry_token=retry_token is not None,
+            has_retry_token=has_retry_token,
         )
 
     def _rewind_sync_after_pre_certification_failure(self) -> None:
         """Replay a classic sync that failed before its position was certified."""
-        client = self.client
-        if client is None:
+        rewound, has_retry_token = self._rewind_client_to_retry_token()
+        if not rewound:
             return
-        retry_token = self._sync_cache_trust.retry_token()
-        if cast("Any", client).next_batch == retry_token:
-            return
-        cast("Any", client).next_batch = retry_token
         self.logger.warning(
             "pre_certification_sync_side_effect_failed_replaying_sync",
-            has_retry_token=retry_token is not None,
+            has_retry_token=has_retry_token,
         )
 
     async def _handle_rejected_dispatch_source(
@@ -1470,6 +1473,10 @@ class AgentBot:
             unrecovered_room_ids=response.unrecovered_room_ids,
             transport="classic",
         )
+        no_recovery_needed_room_ids = classic_no_recovery_needed_room_ids(
+            response,
+            user_id=self.matrix_id.full_id,
+        )
         with track_matrix_sync_cache_write(self.agent_name):
             try:
                 await self._apply_own_room_membership_from_sync(response)
@@ -1502,6 +1509,10 @@ class AgentBot:
                     cache_result=cache_result,
                 )
                 raise
+            cache_result = replace(
+                cache_result,
+                no_recovery_needed_room_ids=no_recovery_needed_room_ids,
+            )
             decision = self._sync_cache_trust.plan_response(
                 next_batch=response.next_batch,
                 cache_result=cache_result,

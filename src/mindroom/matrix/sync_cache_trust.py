@@ -37,6 +37,7 @@ class SyncCacheTrust:
     state: SyncTrustState = SyncTrustState.COLD
     checkpoint: SyncCheckpoint | None = None
     _tokenless_baseline_pending: bool = field(default=False, init=False, repr=False)
+    _unsettled_recovery_room_ids: frozenset[str] = field(default=frozenset(), init=False, repr=False)
     _cache_scope_epoch: int = field(default=0, init=False, repr=False)
     _saved_checkpoint: SyncCheckpoint | None = field(default=None, init=False, repr=False)
     _mutation_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False, repr=False)
@@ -70,6 +71,7 @@ class SyncCacheTrust:
 
         self.state = SyncTrustState.PENDING if loaded is not None else SyncTrustState.COLD
         self.checkpoint = None
+        self._unsettled_recovery_room_ids = frozenset()
         self._tokenless_baseline_pending = loaded is None
         return loaded.token if loaded is not None else None
 
@@ -136,6 +138,7 @@ class SyncCacheTrust:
                 self._cache_scope_epoch += 1
                 self.state = SyncTrustState.UNCERTAIN
                 self.checkpoint = None
+                self._unsettled_recovery_room_ids = frozenset()
                 if await self._clear_saved_locked():
                     return True
                 self.runtime.event_cache.disable("sync_checkpoint_clear_failed")
@@ -147,8 +150,7 @@ class SyncCacheTrust:
     def record_dispatch_persist_failure(self) -> None:
         """Latch one source callback rejected before durable ownership."""
         self._dispatch_persist_failure_epoch += 1
-        if self.state in {SyncTrustState.COLD, SyncTrustState.UNCERTAIN}:
-            self._refresh_tokenless_baseline_pending()
+        self._refresh_tokenless_baseline_pending()
 
     def consume_dispatch_persist_failure(self) -> bool:
         """Reject certification once for every newly observed failure epoch."""
@@ -196,16 +198,11 @@ class SyncCacheTrust:
         cache_result: SyncCacheWriteResult,
     ) -> SyncCertificationDecision:
         """Plan certification without advancing runtime or durable continuity."""
-        allow_tokenless_baseline = (
-            self._tokenless_baseline_pending
-            and cache_result.complete
-            and not cache_result.errors
-            and not cache_result.unrecovered_room_ids
-        )
         decision = certify_sync_response(
             next_batch=next_batch,
             cache_result=cache_result,
-            allow_tokenless_baseline=allow_tokenless_baseline,
+            tokenless_baseline_pending=self._tokenless_baseline_pending,
+            unsettled_recovery_room_ids=self._unsettled_recovery_room_ids,
         )
         return replace(decision, cache_scope_epoch=self._cache_scope_epoch)
 
@@ -236,7 +233,7 @@ class SyncCacheTrust:
                 )
                 if decision.reset_client_token:
                     self._refresh_tokenless_baseline_pending()
-                elif decision.reason == "limited_sync_timeline" or self.state is SyncTrustState.CERTIFIED:
+                elif decision.advanced_tokenless_baseline or decision.state is SyncTrustState.CERTIFIED:
                     self._tokenless_baseline_pending = False
                 return decision, record
 
@@ -284,6 +281,7 @@ class SyncCacheTrust:
             record = None
         self.state = decision.state
         self.checkpoint = decision.checkpoint_to_save
+        self._unsettled_recovery_room_ids = decision.unsettled_recovery_room_ids
         if decision.reason is not None:
             diagnostics = sync_cache_write_diagnostics(cache_result) if cache_result is not None else {}
             self.logger.warning("matrix_sync_certification_uncertain", reason=decision.reason, **diagnostics)

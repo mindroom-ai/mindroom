@@ -12,7 +12,7 @@ import pytest
 
 from mindroom.logging_config import get_logger
 from mindroom.matrix.sync_cache_trust import SyncCacheTrust
-from mindroom.matrix.sync_certification import SyncCacheWriteResult, SyncTrustState
+from mindroom.matrix.sync_certification import SyncCacheWriteResult, SyncCheckpoint, SyncTrustState
 from mindroom.matrix.sync_continuity import SyncContinuityStore
 from tests.sync_continuity_helpers import load_sync_checkpoint, save_sync_token
 
@@ -170,6 +170,7 @@ async def test_cold_limited_baseline_advances_once_then_real_nio_recovery_certif
     assert responses[0].unrecovered_room_ids == frozenset()
     assert decisions[0].state is SyncTrustState.UNCERTAIN
     assert decisions[0].reset_client_token is False
+    assert decisions[0].advanced_tokenless_baseline is True
     assert responses[1].recovered_room_ids == frozenset({_RECOVERED_ROOM})
     assert responses[1].unrecovered_room_ids == frozenset()
     assert decisions[1].state is SyncTrustState.CERTIFIED
@@ -180,8 +181,8 @@ async def test_cold_limited_baseline_advances_once_then_real_nio_recovery_certif
 
 
 @pytest.mark.asyncio
-async def test_unknown_position_baseline_advances_once_then_unrecovered_gap_rewinds(tmp_path: Path) -> None:
-    """Unknown-position replay may establish a baseline but may not advance an unrecovered gap."""
+async def test_unknown_position_baseline_advances_then_unrecovered_gap_blocks_checkpoint(tmp_path: Path) -> None:
+    """Unknown-position replay may advance live sync but not persist past an unrecovered gap."""
     trust = _trust(tmp_path, state=SyncTrustState.CERTIFIED)
     unknown = await trust.reject_unknown_pos()
     baseline_response = _sync_response(
@@ -216,7 +217,7 @@ async def test_unknown_position_baseline_advances_once_then_unrecovered_gap_rewi
     assert baseline.state is SyncTrustState.UNCERTAIN
     assert baseline.reset_client_token is False
     assert positioned.state is SyncTrustState.UNCERTAIN
-    assert positioned.reset_client_token is True
+    assert positioned.reset_client_token is False
 
 
 @pytest.mark.asyncio
@@ -311,7 +312,10 @@ async def test_earlier_recovered_gap_with_failed_cache_write_rewinds_continuity(
     assert decision.state is SyncTrustState.UNCERTAIN
     assert decision.checkpoint_to_save is None
     assert decision.reset_client_token is True
-    assert load_sync_checkpoint(tmp_path, "code") is None
+    assert load_sync_checkpoint(tmp_path, "code") == SyncCheckpoint(
+        "s_before",
+        cache_generation=_CACHE_GENERATION,
+    )
 
 
 @pytest.mark.asyncio
@@ -379,7 +383,7 @@ async def test_recovered_gap_fails_closed_when_local_cache_work_does_not_complet
 
 
 @pytest.mark.asyncio
-async def test_mixed_recovered_and_unrecovered_rooms_reset_continuity(tmp_path: Path) -> None:
+async def test_mixed_recovered_and_unrecovered_rooms_withhold_continuity(tmp_path: Path) -> None:
     """One authoritative unrecovered room must outweigh another room's recovery."""
     limited_room_ids = (_RECOVERED_ROOM, _UNRECOVERED_ROOM)
     response = _sync_response(
@@ -401,7 +405,7 @@ async def test_mixed_recovered_and_unrecovered_rooms_reset_continuity(tmp_path: 
 
     assert decision.state is SyncTrustState.UNCERTAIN
     assert decision.checkpoint_to_save is None
-    assert decision.reset_client_token is True
+    assert decision.reset_client_token is False
 
 
 @pytest.mark.asyncio
@@ -426,7 +430,7 @@ async def test_unrecovered_outcome_is_not_inferred_from_current_limited_rooms(tm
 
     assert decision.state is SyncTrustState.UNCERTAIN
     assert decision.checkpoint_to_save is None
-    assert decision.reset_client_token is True
+    assert decision.reset_client_token is False
 
 
 @pytest.mark.asyncio
