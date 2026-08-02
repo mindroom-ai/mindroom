@@ -45,6 +45,7 @@ from tests.bot_helpers import (
 )
 from tests.conftest import (
     make_matrix_client_mock,
+    replace_reaction_dispatcher_deps,
     runtime_paths_for,
     unwrap_extracted_collaborator,
 )
@@ -256,22 +257,20 @@ class TestAgentBot(AgentBotTestBase):
         room.room_id = "!test:localhost"
         room.canonical_alias = None
         event = self._make_handler_event("reaction", sender="@user:localhost", event_id="$reaction")
+        replace_reaction_dispatcher_deps(bot, handle_interactive_selection=AsyncMock())
 
-        with (
-            patch(
-                "mindroom.bot.interactive.handle_reaction",
-                new=AsyncMock(
-                    return_value=interactive.InteractiveSelection(
-                        question_event_id="$question",
-                        question_text="Choose one",
-                        selection_key="1",
-                        selected_label="Selected",
-                        selected_value="Selected",
-                        thread_id=None,
-                    ),
+        with patch(
+            "mindroom.bot.interactive.handle_reaction",
+            new=AsyncMock(
+                return_value=interactive.InteractiveSelection(
+                    question_event_id="$question",
+                    question_text="Choose one",
+                    selection_key="1",
+                    selected_label="Selected",
+                    selected_value="Selected",
+                    thread_id=None,
                 ),
             ),
-            patch.object(bot._turn_controller, "handle_interactive_selection", new=AsyncMock()),
         ):
             await _dispatch_reaction(bot, room, event)
 
@@ -422,10 +421,8 @@ class TestAgentBot(AgentBotTestBase):
             selection_started.set()
             assert bot._coalescing_gate.lanes.unsettled_slots()
 
-        with (
-            patch("mindroom.bot.interactive.handle_reaction", new=AsyncMock(return_value=selection)),
-            patch.object(bot._turn_controller, "handle_interactive_selection", side_effect=handle_selection),
-        ):
+        replace_reaction_dispatcher_deps(bot, handle_interactive_selection=handle_selection)
+        with patch("mindroom.bot.interactive.handle_reaction", new=AsyncMock(return_value=selection)):
             await _dispatch_reaction(bot, room, event)
 
         await asyncio.wait_for(selection_started.wait(), timeout=0.5)
@@ -464,10 +461,10 @@ class TestAgentBot(AgentBotTestBase):
             await release_approval.wait()
             return False
 
+        replace_reaction_dispatcher_deps(bot, handle_interactive_selection=AsyncMock())
         with (
-            patch("mindroom.bot.handle_tool_approval_action", side_effect=delayed_approval),
+            patch("mindroom.reaction_dispatch.handle_tool_approval_action", side_effect=delayed_approval),
             patch("mindroom.bot.interactive.handle_reaction", new=AsyncMock(return_value=selection)),
-            patch.object(bot._turn_controller, "handle_interactive_selection", new=AsyncMock()),
         ):
             reaction_task = asyncio.create_task(_dispatch_reaction(bot, room, event))
             await asyncio.wait_for(approval_started.wait(), timeout=0.5)
@@ -507,7 +504,7 @@ class TestAgentBot(AgentBotTestBase):
         approval_handler = AsyncMock(return_value=True)
         with (
             patch("mindroom.turn_policy.is_sender_allowed_for_agent_reply", return_value=False),
-            patch("mindroom.bot.handle_tool_approval_action", approval_handler),
+            patch("mindroom.reaction_dispatch.handle_tool_approval_action", approval_handler),
             patch("mindroom.bot.interactive.handle_reaction", new=AsyncMock()) as interactive_handler,
         ):
             await _dispatch_reaction(bot, room, event)
@@ -1650,14 +1647,13 @@ class TestAgentBot(AgentBotTestBase):
             thread_id=None,
         )
         failure = RuntimeError("crash after interactive reaction claim")
+        replace_reaction_dispatcher_deps(
+            bot,
+            handle_interactive_selection=AsyncMock(side_effect=failure),
+        )
 
         with (
             patch("mindroom.bot.interactive.handle_reaction", new=AsyncMock(return_value=selection)),
-            patch.object(
-                bot._turn_controller,
-                "handle_interactive_selection",
-                new=AsyncMock(side_effect=failure),
-            ),
             pytest.raises(RuntimeError, match="crash after interactive reaction claim"),
         ):
             await bot._dispatch_obligation_runner.dispatch(room, event, DispatchCallbackKind.REACTION)

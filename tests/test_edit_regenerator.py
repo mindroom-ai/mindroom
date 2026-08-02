@@ -189,6 +189,7 @@ def _harness(tmp_path: Path, *, turn_record: TurnRecord | None, receipt_order: i
         current_turn_record[0] = record
 
     turn_store.record_turn.side_effect = record_turn
+    turn_store.record_responded_turn.side_effect = record_turn
     turn_store.record_turn_durably.side_effect = record_turn
     turn_store.build_run_metadata.return_value = dict(RUN_METADATA)
     turn_store.prepare_edit_response_source.return_value = False
@@ -274,8 +275,8 @@ async def test_simple_edit_regenerates_and_records_new_response(tmp_path: Path) 
     metadata_kwargs = harness.turn_store.build_run_metadata.call_args.kwargs
     assert metadata_kwargs["additional_discovery_event_ids"] == ()
 
-    harness.turn_store.record_turn.assert_called_once()
-    recorded = harness.turn_store.record_turn.call_args.args[0]
+    harness.turn_store.record_responded_turn.assert_called_once()
+    recorded = harness.turn_store.record_responded_turn.call_args.args[0]
     assert recorded.response_event_id == NEW_RESPONSE_EVENT_ID
     assert recorded.source_event_ids == (ORIGINAL_EVENT_ID,)
     assert recorded.anchor_event_id == ORIGINAL_EVENT_ID
@@ -344,7 +345,7 @@ async def test_newer_same_source_edit_rejects_older_callback_during_generation(t
 
     harness.generate_response.assert_awaited_once()
     assert harness.generate_response.await_args.args[0].prompt == "newest body"
-    recorded = harness.turn_store.record_turn.call_args.args[0]
+    recorded = harness.turn_store.record_responded_turn.call_args.args[0]
     assert recorded.source_event_prompts == {ORIGINAL_EVENT_ID: "newest body"}
     assert recorded.source_event_revisions == {
         ORIGINAL_EVENT_ID: (1_000_010, "$edit-z:example.org"),
@@ -465,7 +466,7 @@ async def test_concurrent_coalesced_sibling_edits_are_both_retained(tmp_path: Pa
             {first_event_id: "first edited", second_event_id: "second edited"},
         ),
     ]
-    recorded = harness.turn_store.record_turn.call_args.args[0]
+    recorded = harness.turn_store.record_responded_turn.call_args.args[0]
     assert recorded.source_event_prompts == {
         first_event_id: "first edited",
         second_event_id: "second edited",
@@ -627,7 +628,7 @@ async def test_newer_edit_arriving_under_response_lock_is_drained(tmp_path: Path
         "older body",
         "newest body",
     ]
-    recorded = harness.turn_store.record_turn.call_args.args[0]
+    recorded = harness.turn_store.record_responded_turn.call_args.args[0]
     assert recorded.source_event_prompts == {ORIGINAL_EVENT_ID: "newest body"}
     assert recorded.source_event_revisions == {
         ORIGINAL_EVENT_ID: (1_000_020, "$edit-new:example.org"),
@@ -683,7 +684,7 @@ async def test_cancelled_drain_is_retried_by_waiting_newer_edit(tmp_path: Path) 
     await retry_task
 
     assert generation_count == 2
-    recorded = harness.turn_store.record_turn.call_args.args[0]
+    recorded = harness.turn_store.record_responded_turn.call_args.args[0]
     assert recorded.source_event_revisions == {
         ORIGINAL_EVENT_ID: (1_000_020, "$edit-retry:example.org"),
     }
@@ -720,7 +721,7 @@ async def test_persisted_revision_rejects_stale_edit_after_regenerator_restart(t
         server_timestamp=1_000_020,
     )
     await _handle_edit(first_harness, newer, newer_info)
-    persisted_record = first_harness.turn_store.record_turn.call_args.args[0]
+    persisted_record = first_harness.turn_store.record_responded_turn.call_args.args[0]
 
     restarted_harness = _harness(tmp_path, turn_record=persisted_record)
     older, older_info = _edit_event(
@@ -1072,7 +1073,7 @@ async def test_coalesced_edit_rebuilds_combined_prompt(tmp_path: Path) -> None:
     }
     assert metadata_call.kwargs["additional_discovery_event_ids"] == ()
 
-    recorded = harness.turn_store.record_turn.call_args.args[0]
+    recorded = harness.turn_store.record_responded_turn.call_args.args[0]
     assert recorded.response_event_id == NEW_RESPONSE_EVENT_ID
     assert recorded.source_event_prompts == {
         first_event_id: "edited first message",
@@ -1252,7 +1253,7 @@ async def test_coalesced_edit_preserves_tagged_source_metadata(tmp_path: Path) -
 
     handled_turn = harness.turn_store.build_run_metadata.call_args.args[0]
     assert handled_turn.source_event_metadata == record.source_event_metadata
-    recorded = harness.turn_store.record_turn.call_args.args[0]
+    recorded = harness.turn_store.record_responded_turn.call_args.args[0]
     assert recorded.source_event_metadata == record.source_event_metadata
 
 
@@ -1308,7 +1309,7 @@ async def test_multi_sender_coalesced_source_allows_only_its_sender_to_edit(
     request = harness.generate_response.await_args.args[0]
     assert request.user_id == sender
     assert "what is 3+3?" in request.prompt
-    assert harness.turn_store.record_turn.call_args.args[0].source_event_revisions == {
+    assert harness.turn_store.record_responded_turn.call_args.args[0].source_event_revisions == {
         original_event_id: (event.server_timestamp, event.event_id),
     }
 
@@ -1354,7 +1355,7 @@ async def test_physical_source_edit_outranks_colliding_discovery_alias(tmp_path:
     assert "human edited" in request.prompt
     assert "human base" not in request.prompt
     assert "relay base" in request.prompt
-    recorded = harness.turn_store.record_turn.call_args.args[0]
+    recorded = harness.turn_store.record_responded_turn.call_args.args[0]
     assert recorded.source_event_prompts == {
         relay_event_id: "relay base",
         human_event_id: "human edited",
@@ -1414,7 +1415,7 @@ async def test_coalesced_routed_alias_edit_updates_owned_relay_prompt(tmp_path: 
     request = harness.generate_response.await_args.args[0]
     assert "first edited" in request.prompt
     assert "first base" not in request.prompt
-    recorded = harness.turn_store.record_turn.call_args.args[0]
+    recorded = harness.turn_store.record_responded_turn.call_args.args[0]
     assert recorded.source_event_prompts == {first_relay: "first edited", second_relay: "second base"}
     assert recorded.source_event_revisions == {first_human: (event.server_timestamp, event.event_id)}
 
@@ -1674,7 +1675,7 @@ async def test_edit_after_durable_user_stop_can_regenerate(tmp_path: Path) -> No
     await _handle_edit(harness, event, event_info)
 
     harness.generate_response.assert_awaited_once()
-    recorded = harness.turn_store.record_turn.call_args.args[0]
+    recorded = harness.turn_store.record_responded_turn.call_args.args[0]
     assert recorded.user_stop_settled_receipt_order == 2
 
 
@@ -1697,7 +1698,7 @@ async def test_restart_replays_durably_committed_interrupted_edit(tmp_path: Path
     request = harness.generate_response.await_args.args[0]
     assert request.prompt == "latest after process restart"
     assert request.sync_restart_retry_source_event_id == ORIGINAL_EVENT_ID
-    recorded = harness.turn_store.record_turn.call_args.args[0]
+    recorded = harness.turn_store.record_responded_turn.call_args.args[0]
     assert recorded.source_event_revisions == {ORIGINAL_EVENT_ID: revision}
 
 
