@@ -186,7 +186,11 @@ def test_user_stop_durably_terminates_the_turn_that_owns_the_response(tmp_path: 
     assert stopped.user_stop_settled_receipt_order is None
     assert store.is_durably_handled("$source") is True
     assert notifications == [("$source",)]
-    assert store.record_user_stopped_response("$reply", stop_receipt_order) == stopped
+    retried = store.record_user_stopped_response("$reply", stop_receipt_order)
+    assert retried is not None
+    assert retried.completed is True
+    assert retried.user_stop_receipt_order == stop_receipt_order
+    assert retried.user_stop_settled_receipt_order is None
     assert notifications == [("$source",)]
 
     finalized = store.record_user_stopped_response(
@@ -197,6 +201,51 @@ def test_user_stop_durably_terminates_the_turn_that_owns_the_response(tmp_path: 
     assert finalized is not None
     assert finalized.user_stop_settled_receipt_order == stop_receipt_order
     assert notifications == [("$source",)]
+
+
+def test_settled_user_stop_retry_reenters_durable_persistence(tmp_path: Path) -> None:
+    """A failed settled-STOP write must not make an in-memory retry look durable."""
+    store = _store(tmp_path)
+    target = MessageTarget.resolve("!room:example.org", None, "$source")
+    store.record_pending_turn(
+        TurnRecord.create(
+            ["$source"],
+            response_event_id="$reply",
+            completed=False,
+            response_owner="agent",
+            requester_id="@user:example.org",
+            conversation_target=target,
+        ),
+    )
+    stop_receipt_order = 2
+    store.record_user_stopped_response("$reply", stop_receipt_order)
+    persist_attempts = 0
+
+    def fail_persist(_records: tuple[TurnRecord, ...]) -> None:
+        nonlocal persist_attempts
+        persist_attempts += 1
+        msg = "disk unavailable"
+        raise OSError(msg)
+
+    with (
+        patch.object(store._ledger, "_persist_records", side_effect=fail_persist),
+        patch.object(store._ledger, "_schedule_persist_retry_locked"),
+    ):
+        with pytest.raises(OSError, match="disk unavailable"):
+            store.record_user_stopped_response(
+                "$reply",
+                stop_receipt_order,
+                delivery_settled=True,
+            )
+        assert persist_attempts == 2
+
+        with pytest.raises(OSError, match="disk unavailable"):
+            store.record_user_stopped_response(
+                "$reply",
+                stop_receipt_order,
+                delivery_settled=True,
+            )
+        assert persist_attempts == 4
 
 
 @pytest.mark.parametrize("invalid_receipt_order", [0, -1, True])

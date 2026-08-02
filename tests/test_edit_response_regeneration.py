@@ -50,6 +50,7 @@ from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.response_runner import ResponseRequest, _ResponseGenerationOutcome
 from mindroom.session_ids import create_session_id
+from tests.bot_helpers import dispatch_reaction_durably
 from tests.conftest import (
     bind_runtime_paths,
     delivered_matrix_side_effect,
@@ -3897,7 +3898,7 @@ async def test_on_reaction_tracks_response_event_id(tmp_path: Path) -> None:
         mock_fetch_history.return_value = thread_history_result([], is_full_history=True)
 
         # Process the reaction event
-        await bot._on_reaction(room, reaction_event)
+        await dispatch_reaction_durably(bot, room, reaction_event)
 
         # Verify that the bot tracked the response correctly
         assert bot._turn_store.is_handled("$question:example.com")
@@ -3996,7 +3997,7 @@ async def test_on_reaction_leaves_question_retryable_when_ack_response_is_suppre
         mock_fetch_history.return_value = thread_history_result([], is_full_history=True)
 
         with pytest.raises(RuntimeError, match="no durable terminal outcome"):
-            await bot._on_reaction(room, reaction_event)
+            await dispatch_reaction_durably(bot, room, reaction_event)
 
         assert bot._turn_store.is_handled("$question:example.com") is False
         assert _response_event_id(bot, "$question:example.com") == "$ack_event:example.com"
@@ -4226,11 +4227,11 @@ async def test_on_reaction_respects_agent_reply_permissions(tmp_path: Path) -> N
         mock_send_text.return_value = "$ack_event:example.com"
         mock_generate_response.return_value = _delivery_resolution("$response_event:example.com")
 
-        await bot._on_reaction(room, disallowed_reaction)
+        await dispatch_reaction_durably(bot, room, disallowed_reaction)
         mock_send_text.assert_not_called()
         mock_generate_response.assert_not_called()
 
-        await bot._on_reaction(room, allowed_reaction)
+        await dispatch_reaction_durably(bot, room, allowed_reaction)
 
     interactive._active_questions.clear()
 
@@ -4311,7 +4312,7 @@ async def test_config_confirmation_blocked_by_reply_permissions(tmp_path: Path) 
         patch("mindroom.bot.is_authorized_sender", return_value=True),
         patch("mindroom.bot.config_confirmation.handle_confirmation_reaction", new_callable=AsyncMock) as mock_confirm,
     ):
-        await bot._on_reaction(room, reaction_event)
+        await dispatch_reaction_durably(bot, room, reaction_event)
 
     config_confirmation._pending_changes.clear()
 
@@ -4386,7 +4387,7 @@ async def test_committed_config_confirmation_resumes_before_changed_reply_permis
         new_callable=AsyncMock,
         return_value=True,
     ) as resume_confirmation:
-        await bot._on_reaction(room, reaction_event)
+        await dispatch_reaction_durably(bot, room, reaction_event)
 
     config_confirmation._pending_changes.clear()
     resume_confirmation.assert_awaited_once()

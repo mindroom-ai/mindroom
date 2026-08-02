@@ -18,6 +18,7 @@ from mindroom.logging_config import setup_logging
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.stop import StopManager
+from tests.bot_helpers import dispatch_reaction_durably
 from tests.conftest import (
     bind_runtime_paths,
     install_send_response_mock,
@@ -121,7 +122,7 @@ async def test_stop_emoji_only_stops_during_generation(tmp_path: Path) -> None:
         mock_handle_reaction.return_value = None
 
         # Case 1: Message is NOT being generated - should handle as interactive
-        await bot._on_reaction(room, reaction_event)
+        await dispatch_reaction_durably(bot, room, reaction_event)
 
         # Should have called interactive.handle_reaction since message wasn't being tracked
         mock_handle_reaction.assert_called_once()
@@ -141,8 +142,18 @@ async def test_stop_emoji_only_stops_during_generation(tmp_path: Path) -> None:
         )
         _record_pending_response(bot, "$message:example.com", target)
 
-        # Process the same reaction again
-        await bot._on_reaction(room, reaction_event)
+        # A second physical reaction reaches the same STOP target.
+        active_reaction_event = nio.ReactionEvent.from_dict(
+            {
+                "content": reaction_event.source["content"],
+                "event_id": "$active-reaction:example.com",
+                "sender": reaction_event.sender,
+                "origin_server_ts": 1000001,
+                "type": "m.reaction",
+                "room_id": room.room_id,
+            },
+        )
+        await dispatch_reaction_durably(bot, room, active_reaction_event)
 
         # Should NOT have called interactive.handle_reaction since it was handled as stop
         mock_handle_reaction.assert_not_called()
@@ -202,7 +213,7 @@ async def test_stop_emoji_hard_cancels_and_schedules_agno_cleanup_when_run_id_pr
     _record_pending_response(bot, "$message:example.com", target)
 
     with patch.object(bot.stop_manager, "_schedule_graceful_run_cancel") as mock_schedule_cancel:
-        await bot._on_reaction(room, reaction_event)
+        await dispatch_reaction_durably(bot, room, reaction_event)
 
     mock_schedule_cancel.assert_called_once_with("$message:example.com", "run-123")
     task.cancel.assert_called_once_with(msg=USER_STOP_CANCEL_MSG)
@@ -259,7 +270,7 @@ async def test_stop_emoji_threaded_target_sends_no_acknowledgement(tmp_path: Pat
     _record_pending_response(bot, "$message:example.com", target)
 
     with patch.object(bot.stop_manager, "_schedule_graceful_run_cancel") as mock_schedule_cancel:
-        await bot._on_reaction(room, reaction_event)
+        await dispatch_reaction_durably(bot, room, reaction_event)
 
     mock_schedule_cancel.assert_called_once_with("$message:example.com", "run-123")
     task.cancel.assert_called_once_with(msg=USER_STOP_CANCEL_MSG)
@@ -711,7 +722,7 @@ async def test_stop_emoji_from_agent_falls_through(tmp_path: Path) -> None:
         )
 
         # Process the reaction from an agent
-        await bot._on_reaction(room, reaction_event)
+        await dispatch_reaction_durably(bot, room, reaction_event)
 
         # Should have called interactive.handle_reaction (fell through)
         mock_handle_reaction.assert_called_once()
@@ -785,7 +796,7 @@ async def test_stop_reaction_blocked_by_reply_permissions(tmp_path: Path) -> Non
     install_send_response_mock(bot, send_response)
 
     with patch("mindroom.bot.is_authorized_sender", return_value=True):
-        await bot._on_reaction(room, reaction_event)
+        await dispatch_reaction_durably(bot, room, reaction_event)
 
     # Task should NOT have been cancelled — sender is disallowed
     task.cancel.assert_not_called()

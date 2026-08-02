@@ -179,7 +179,7 @@ async def test_turn_recovery_cleans_ledger_after_reading_unsettled_sources(tmp_p
     bot._dispatch_obligation_runner.recover_pending = AsyncMock(
         side_effect=lambda **_kwargs: call_order.append("recover"),
     )
-    bot._dispatch_obligation_runner.unsettled_source_event_ids = MagicMock(
+    bot._dispatch_obligation_store.unsettled_source_event_ids = MagicMock(
         side_effect=lambda: (call_order.append("unsettled"), unsettled_source_event_ids)[1],
     )
     bot._turn_store.cleanup = MagicMock(side_effect=lambda **_kwargs: call_order.append("cleanup"))
@@ -198,7 +198,7 @@ async def test_turn_recovery_propagates_post_recovery_cleanup_failure(tmp_path: 
     """Ledger pruning failure must remain visible to the orchestrator retry owner."""
     bot = _agent_bot(tmp_path)
     bot._dispatch_obligation_runner.recover_pending = AsyncMock()
-    bot._dispatch_obligation_runner.unsettled_source_event_ids = MagicMock(return_value=frozenset())
+    bot._dispatch_obligation_store.unsettled_source_event_ids = MagicMock(return_value=frozenset())
     bot._turn_store.cleanup = MagicMock(side_effect=OSError("disk unavailable"))
 
     with pytest.raises(OSError, match="disk unavailable"):

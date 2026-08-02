@@ -40,6 +40,9 @@ from tests.bot_helpers import (
     _start_live_approval,
     make_mock_agent_user,
 )
+from tests.bot_helpers import (
+    dispatch_reaction_durably as _dispatch_reaction,
+)
 from tests.conftest import (
     make_matrix_client_mock,
     runtime_paths_for,
@@ -124,18 +127,6 @@ def _reaction_event(key: str, event_id: str) -> nio.ReactionEvent:
     )
     assert isinstance(event, nio.ReactionEvent)
     return event
-
-
-async def _dispatch_reaction(bot: AgentBot, room: nio.MatrixRoom, event: nio.ReactionEvent) -> None:
-    """Exercise one reaction through its durable production entrypoint."""
-    source = dict(event.source)
-    source.setdefault("event_id", event.event_id)
-    source.setdefault("sender", event.sender)
-    source.setdefault("origin_server_ts", 1)
-    source.setdefault("type", "m.reaction")
-    event.source = source
-    event.decrypted = False
-    await bot._dispatch_obligation_runner.dispatch(room, event, DispatchCallbackKind.REACTION)
 
 
 async def _dispatch_message(bot: AgentBot, room: nio.MatrixRoom, event: nio.RoomMessageText) -> None:

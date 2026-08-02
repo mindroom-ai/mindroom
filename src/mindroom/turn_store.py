@@ -278,19 +278,6 @@ class TurnStore:
         turn_record = self.turn_record_for_response_event_id(response_event_id)
         if turn_record is None:
             return turn_record
-        if (
-            turn_record.completed
-            and turn_record.user_stop_receipt_order is not None
-            and turn_record.user_stop_receipt_order >= stop_receipt_order
-            and (
-                not delivery_settled
-                or (
-                    turn_record.user_stop_settled_receipt_order is not None
-                    and turn_record.user_stop_settled_receipt_order >= stop_receipt_order
-                )
-            )
-        ):
-            return turn_record
 
         def stopped_record(current: TurnRecord) -> TurnRecord:
             return with_user_stop(

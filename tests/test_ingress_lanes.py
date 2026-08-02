@@ -27,6 +27,7 @@ from mindroom.dispatch_source import (
 from mindroom.matrix.thread_membership import ThreadMembershipLookupError
 from mindroom.message_target import MessageTarget
 from mindroom.runtime_shutdown import SYNC_RESTART_SHUTDOWN
+from tests.bot_helpers import dispatch_reaction_durably
 from tests.conftest import prepared_dispatch_result, replace_turn_controller_deps, unwrap_extracted_collaborator
 from tests.test_live_message_coalescing import (
     _enqueue_for_dispatch,
@@ -1084,7 +1085,7 @@ async def test_edit_and_reaction_slots_settle_before_their_execution_finishes(tm
         ):
             edit_task = asyncio.create_task(bot._turn_controller.handle_text_event(room, edit_event))
             await asyncio.wait_for(edit_started.wait(), timeout=1.0)
-            reaction_task = asyncio.create_task(bot._on_reaction(room, reaction_event))
+            reaction_task = asyncio.create_task(dispatch_reaction_durably(bot, room, reaction_event))
             await asyncio.wait_for(selection_started.wait(), timeout=1.0)
 
             assert bot._coalescing_gate.lanes.all_settled()
