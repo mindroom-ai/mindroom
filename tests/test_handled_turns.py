@@ -232,6 +232,23 @@ def test_turn_record_has_no_post_init_normalization_hook() -> None:
     assert "__post_init__" not in TurnRecord.__dict__
 
 
+def test_ledger_canonicalizes_record_before_identity_resolution(temp_dir: Path) -> None:
+    """The persistence boundary should compare canonical turn identities."""
+    tracker = HandledTurnLedger("test_canonical_identity_boundary", base_path=temp_dir)
+    tracker.record_handled_turn(
+        TurnRecord.create(["$source"], response_event_id="$old", timestamp=1.0),
+    )
+
+    tracker.record_handled_turn(
+        TurnRecord(source_event_ids=("$source",), response_event_id="$new", timestamp=2.0),
+    )
+
+    record = tracker.get_turn_record("$source")
+    assert record is not None
+    assert record.anchor_event_id == "$source"
+    assert record.response_event_id == "$new"
+
+
 def test_turn_record_create_normalizes_coupled_source_state() -> None:
     """The explicit factory should canonicalize interdependent source facts."""
     record = TurnRecord.create(

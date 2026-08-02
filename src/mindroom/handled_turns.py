@@ -440,14 +440,13 @@ class HandledTurnLedger:
                     if (record := self._responses.get(event_id)) is not None
                 },
             )
-            turn_record = update(existing_records)
-            if not turn_record.source_event_ids:
-                return None
-            candidate_record = (
-                turn_record
-                if turn_record.timestamp != 0.0
-                else canonicalize_turn_record(turn_record, timestamp=time.time())
+            updated_record = update(existing_records)
+            candidate_record = canonicalize_turn_record(
+                updated_record,
+                timestamp=(updated_record.timestamp if updated_record.timestamp != 0.0 else time.time()),
             )
+            if not candidate_record.source_event_ids:
+                return None
             persisted_record = _resolve_turn_record(candidate_record, self._responses)
             if persisted_record is None:
                 return None
